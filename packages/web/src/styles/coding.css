@@ -631,6 +631,58 @@
 }
 .approval-plan-md th { background: var(--surface-2); font-weight: 600; }
 .approval-plan--resolved { opacity: 0.7; }
+.approval-plan--drawer {
+  /* In the 4th-level drawer the parent already gives us padding + the
+   * preview-body scrolls — drop the inline-card chrome and let the markdown
+   * fill the column. */
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  max-height: none;
+  overflow: visible;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Plan chip — persistent entry point above the composer for the latest
+   exit_plan_mode approval. Click → opens the plan markdown in the 4th-level
+   FilePreviewDrawer.
+   ───────────────────────────────────────────────────────────────────────── */
+.plan-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  margin: 4px 12px 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--hairline-1);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms, color 120ms;
+}
+.plan-chip:hover {
+  background: var(--surface-2);
+  border-color: var(--hairline-2, var(--hairline-1));
+  color: var(--text);
+}
+.plan-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.plan-chip-label { letter-spacing: 0.02em; }
+.plan-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--text-3);
+}
+.plan-chip-dot--pending { background: var(--warn, #f5a524); }
+.plan-chip-dot--accepted { background: var(--ok, #22c55e); }
+.plan-chip-dot--declined { background: var(--err, #ef4444); }
 
 .approval-actions {
   display: flex; align-items: center; gap: 4px;

@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { loadFile } from '../api.js';
 import type { DiffItem } from '../types.js';
+
+export type PlanStatus = 'pending' | 'accepted' | 'rejected';
 
 export type PreviewTarget =
   | {
@@ -13,6 +17,17 @@ export type PreviewTarget =
   | {
       kind: 'diff';
       diff: DiffItem;
+    }
+  | {
+      kind: 'plan';
+      /** Stable id of the approval so swapping plans doesn't reuse stale
+       *  scroll state etc. */
+      approvalId: string;
+      /** Markdown body Claude produced via ExitPlanMode. */
+      plan: string;
+      /** Whether the user has acted on the plan yet — controls the status
+       *  pill in the drawer header. */
+      status: PlanStatus;
     };
 
 /**
@@ -97,6 +112,18 @@ export function FilePreviewDrawer({
         <span className="hi">{filename}</span>
       </div>
     );
+  } else if (target?.kind === 'plan') {
+    const statusLabel: Record<PlanStatus, string> = {
+      pending: 'awaiting review',
+      accepted: 'accepted',
+      rejected: 'kept planning',
+    };
+    header = (
+      <div className="preview-path">
+        <span className="hi">Plan</span>
+        <span style={{ color: 'var(--text-3)', marginLeft: 8 }}>{statusLabel[target.status]}</span>
+      </div>
+    );
   } else if (target?.kind === 'diff') {
     const totalAdd = target.diff.files.reduce((s, f) => s + f.add, 0);
     const totalDel = target.diff.files.reduce((s, f) => s + f.del, 0);
@@ -123,7 +150,17 @@ export function FilePreviewDrawer({
 
   // ─── Body ───────────────────────────────────────────────────────────────
   let body: React.ReactNode = null;
-  if (target?.kind === 'file') {
+  if (target?.kind === 'plan') {
+    // Reuse the transcript approval-plan markdown styling so the drawer
+    // matches the inline plan card the user already saw.
+    body = (
+      <div className="approval-plan approval-plan--drawer">
+        <div className="approval-plan-md">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{target.plan}</ReactMarkdown>
+        </div>
+      </div>
+    );
+  } else if (target?.kind === 'file') {
     body = content !== null
       ? content.split('\n').map((line, i) => (
           <div key={i} className={`code-ln${target.line === i + 1 ? ' active' : ''}`}>

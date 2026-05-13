@@ -451,7 +451,7 @@ export class SessionManager {
   async respondApproval(
     sessionId: string,
     approvalId: string,
-    decision: 'allow_once' | 'allow_session' | 'decline',
+    decision: import('@gian/shared').ApprovalDecision,
     answers?: Record<string, string | string[]>,
   ): Promise<void> {
     const proxySessionId = this.proxySessionIds.get(sessionId);
@@ -463,7 +463,13 @@ export class SessionManager {
     // for plan-mode-exit ceremony below.
     const pending = this.approvals.getPending(approvalId);
 
-    if (decision === 'decline') {
+    // Plan-mode-exit decisions get mapped to plain allow/deny on the proxy
+    // wire; the auto/ask flip happens in the ceremony below. `keep_planning`
+    // is a denial — the agent stays in plan mode.
+    const isAcceptPlan = decision === 'accept_with_auto' || decision === 'accept_with_ask';
+    const isDeny = decision === 'decline' || decision === 'keep_planning';
+
+    if (isDeny) {
       await client.respondApproval({
         sessionId: proxySessionId,
         approvalId,
@@ -474,6 +480,8 @@ export class SessionManager {
         sessionId: proxySessionId,
         approvalId,
         decision: 'accept',
+        // Plan-mode acceptances are inherently one-shot. Session scope only
+        // makes sense for repeatable tool approvals (Bash, network, etc.).
         scope: decision === 'allow_session' ? 'session' : 'once',
         ...(answers ? { answers } : {}),
       });
@@ -481,19 +489,23 @@ export class SessionManager {
 
     this.approvals.resolve(approvalId, decision, 'web');
 
-    // Plan-mode exit ceremony: when user accepts an ExitPlanMode approval,
-    // flip session.approval_mode out of 'plan' so subsequent turns run with
-    // workspace-write semantics. Default landing mode is 'ask' (user reviews
-    // each subsequent action); user can switch to auto in the UI afterward.
-    if (
-      pending?.category === 'exit_plan_mode'
-      && (decision === 'allow_once' || decision === 'allow_session')
-    ) {
+    // Plan-mode exit ceremony: flip session.approval_mode based on which of
+    // the three plan-mode-exit actions the user chose. Skip for non-plan
+    // approvals or when keep_planning leaves the session in plan mode.
+    if (pending?.category === 'exit_plan_mode') {
       const session = this.db
         .prepare('SELECT approval_mode FROM sessions WHERE id = ?')
         .get(sessionId) as { approval_mode: ApprovalMode } | undefined;
       if (session?.approval_mode === 'plan') {
-        this.setApprovalMode(sessionId, 'ask');
+        if (decision === 'accept_with_auto') {
+          this.setApprovalMode(sessionId, 'auto');
+        } else if (decision === 'accept_with_ask' || decision === 'allow_once' || decision === 'allow_session') {
+          // Default behaviour for legacy `allow_once` / `allow_session` is
+          // 'ask' — preserves the prior contract for any caller that hasn't
+          // adopted the three-way decisions yet.
+          this.setApprovalMode(sessionId, 'ask');
+        }
+        // decline / keep_planning → no flip, agent stays in plan mode.
       }
     }
   }

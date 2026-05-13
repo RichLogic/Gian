@@ -198,7 +198,30 @@ export interface MessageSendMessage {
   oneShotBypass?: boolean;
 }
 
-export type ApprovalDecision = 'allow_once' | 'allow_session' | 'decline';
+/**
+ * User's response to an approval request.
+ *
+ * Standard tool approvals use `allow_once | allow_session | decline`. The
+ * three `*_plan_*` variants are specific to `category === 'exit_plan_mode'`
+ * approvals (Claude's "I'm done planning, may I proceed?" prompt):
+ *
+ *   accept_with_auto — accept the plan + flip session.approval_mode to 'auto'
+ *                      (Claude runs tools autonomously on subsequent turns).
+ *   accept_with_ask  — accept the plan + flip session.approval_mode to 'ask'
+ *                      (each write tool prompts the user from now on).
+ *   keep_planning    — reject the plan and stay in plan mode for further
+ *                      discussion. Mapped to `behavior=deny` on the proxy.
+ *
+ * The plan-mode-exit ceremony in SessionManager.respondApproval consumes
+ * these to set the correct downstream behavior.
+ */
+export type ApprovalDecision =
+  | 'allow_once'
+  | 'allow_session'
+  | 'decline'
+  | 'accept_with_auto'
+  | 'accept_with_ask'
+  | 'keep_planning';
 
 export interface ApprovalResolveMessage {
   type: 'approval:resolve';

@@ -203,6 +203,10 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
           try { return JSON.stringify(input); }
           catch { return ''; }
         })();
+        // Log toolName up front so host.out shows the canonical name the
+        // CLI is using — needed for diagnosing things like AskUserQuestion
+        // getting renamed/namespaced across SDK versions.
+        this.emit('debug', `[runtime] permissionRequest sessionId=${sessionId} toolName=${toolName} inputKeys=${Object.keys(input ?? {}).join(',')}`);
         const description = `Tool ${toolName} requires permission.`;
         this.emit('permissionRequest', sessionId, callId, toolName, description, inputPreview);
       },
@@ -451,13 +455,11 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
                 ? b.input as Record<string, unknown>
                 : {};
 
-              // ExitPlanMode is Claude's signal "I've finished planning, may
-              // I proceed with implementation?". Surface it as a special
-              // event so host can show an Approve-and-switch-mode card.
-              if (toolName === 'ExitPlanMode') {
-                const plan = typeof toolInput['plan'] === 'string' ? toolInput['plan'] as string : '';
-                this.emit('exitPlanMode', sessionId, plan);
-              }
+              // ExitPlanMode permission request flows through the approval
+              // MCP bridge (Claude SDK calls canUseTool before invoking the
+              // tool). Host detects toolName='ExitPlanMode' on the approval
+              // event and tags it as exit_plan_mode for special UI rendering.
+              // No synthesized event needed here.
 
               this.emit('toolUse', sessionId, toolName, toolInput);
             }

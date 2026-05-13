@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import type { ApprovalDecision } from '@gian/shared';
 import type { AgentSpawnItem, ApprovalItem, CommandItem, DiffItem, FileReadItem, FileSearchItem, MsgItem, ToolItem, WebSearchItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
 
@@ -17,6 +18,13 @@ export const FileLinkOpenContext = createContext<
  *  handler on DiffCard fires this instead of expanding inline — the card
  *  itself stays compact (just file path + +/- stats). */
 export const DiffOpenContext = createContext<((item: DiffItem) => void) | null>(null);
+
+/** Provided by App.tsx to push the latest exit_plan_mode approval into the
+ *  4th-level inspector. PlanChip (above the composer) and the inline plan
+ *  approval card both fire this when clicked. */
+export const PlanOpenContext = createContext<
+  ((approval: ApprovalItem) => void) | null
+>(null);
 
 /**
  * Renders a file path as a clickable link. By default routes clicks into
@@ -121,17 +129,19 @@ export function ApprovalCard({
   item: ApprovalItem;
   onApprove: (
     approvalId: string,
-    decision: 'allow_once' | 'allow_session' | 'decline',
+    decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
   ) => void;
 }) {
   const isQuestion = item.category === 'question' && item.questions && item.questions.length > 0;
+  const isPlanExit = item.category === 'exit_plan_mode' && item.planActions && item.planActions.length > 0;
   const sessionScopeAllowed = (item.scopeOptions ?? ['once']).includes('session');
 
   // Keyboard shortcut wiring (A / Shift+A / D) while pending — only for
-  // ordinary approvals; AskUserQuestion uses option pickers, not allow/deny.
+  // ordinary approvals; AskUserQuestion uses option pickers, and the plan
+  // exit card uses semantic three-way buttons rather than allow/deny.
   useEffect(() => {
-    if (item.status !== 'pending' || isQuestion) return;
+    if (item.status !== 'pending' || isQuestion || isPlanExit) return;
     function handleKey(e: KeyboardEvent) {
       // Ignore if focus is in an input/textarea/contenteditable
       const tag = (e.target as HTMLElement | null)?.tagName ?? '';
@@ -149,7 +159,7 @@ export function ApprovalCard({
     }
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [item.status, item.approvalId, onApprove, isQuestion, sessionScopeAllowed]);
+  }, [item.status, item.approvalId, onApprove, isQuestion, isPlanExit, sessionScopeAllowed]);
 
   if (item.status === 'pending' && isQuestion) {
     return <QuestionCard item={item} onApprove={onApprove} />;
@@ -239,19 +249,42 @@ export function ApprovalCard({
             </div>
           )
       )}
-      <div className="approval-actions">
-        <button className="btn primary sm" onClick={() => onApprove(item.approvalId, 'allow_once')}>Allow once</button>
-        {allowSession && (
-          <button className="btn secondary sm" onClick={() => onApprove(item.approvalId, 'allow_session')}>Allow session</button>
-        )}
-        <button className="btn danger-ghost sm" onClick={() => onApprove(item.approvalId, 'decline')}>Decline</button>
-        <span className="spacer" />
-        <span className="approval-tip">
-          <kbd className="kc">A</kbd>{' '}once
-          {allowSession && <> · <kbd className="kc">⇧A</kbd>{' '}session</>}
-          {' '}· <kbd className="kc">D</kbd>{' '}decline
-        </span>
-      </div>
+      {isPlanExit ? (
+        <div className="approval-actions approval-actions--plan">
+          <button
+            className="btn primary sm"
+            onClick={() => onApprove(item.approvalId, 'accept_with_auto')}
+          >
+            Yes, auto-accept edits
+          </button>
+          <button
+            className="btn secondary sm"
+            onClick={() => onApprove(item.approvalId, 'accept_with_ask')}
+          >
+            Yes, manually approve edits
+          </button>
+          <button
+            className="btn danger-ghost sm"
+            onClick={() => onApprove(item.approvalId, 'keep_planning')}
+          >
+            No, keep planning
+          </button>
+        </div>
+      ) : (
+        <div className="approval-actions">
+          <button className="btn primary sm" onClick={() => onApprove(item.approvalId, 'allow_once')}>Allow once</button>
+          {allowSession && (
+            <button className="btn secondary sm" onClick={() => onApprove(item.approvalId, 'allow_session')}>Allow session</button>
+          )}
+          <button className="btn danger-ghost sm" onClick={() => onApprove(item.approvalId, 'decline')}>Decline</button>
+          <span className="spacer" />
+          <span className="approval-tip">
+            <kbd className="kc">A</kbd>{' '}once
+            {allowSession && <> · <kbd className="kc">⇧A</kbd>{' '}session</>}
+            {' '}· <kbd className="kc">D</kbd>{' '}decline
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -274,7 +307,7 @@ function QuestionCard({
   item: ApprovalItem;
   onApprove: (
     approvalId: string,
-    decision: 'allow_once' | 'allow_session' | 'decline',
+    decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
   ) => void;
 }) {

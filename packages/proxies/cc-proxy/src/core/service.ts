@@ -85,10 +85,6 @@ export class CcProxyService {
       this.handleToolUse(sessionId, toolName, input);
     });
 
-    this.runtime.on('exitPlanMode', (sessionId, plan) => {
-      this.handleExitPlanMode(sessionId, plan);
-    });
-
     this.runtime.on('autoClassifierDenied', (sessionId, action, reason, consecutive, total) => {
       this.handleAutoClassifierDenied(sessionId, action, reason, consecutive, total);
     });
@@ -280,18 +276,17 @@ export class CcProxyService {
       throw createAppError(404, 'APPROVAL_NOT_FOUND', 'Approval not found.');
     }
 
-    // ExitPlanMode is a Gian-synthesized approval — there is no live MCP
-    // CallTool to respond to. The actual mode switch happens on the next
-    // turn by the host changing permissionMode. Don't forward to runtime.
-    if (approval.requestId !== 'exit_plan_mode') {
-      // When the user answered an AskUserQuestion-flavored approval, hand
-      // the structured answers back to the agent via Claude SDK's
-      // `updatedInput` channel. Plain allow/deny otherwise.
-      const extra = params.answers
-        ? { updatedInput: { answers: params.answers } }
-        : undefined;
-      await this.runtime.respondPermission(session.id, approval.requestId, params.behavior, extra);
-    }
+    // Every approval — including ExitPlanMode — routes through the approval
+    // MCP bridge. The Claude SDK has a live canUseTool callId waiting for a
+    // response; without it the process would hang forever.
+    //
+    // When the user answered an AskUserQuestion-flavored approval, hand the
+    // structured answers back to the agent via Claude SDK's `updatedInput`
+    // channel. Plain allow/deny otherwise.
+    const extra = params.answers
+      ? { updatedInput: { answers: params.answers } }
+      : undefined;
+    await this.runtime.respondPermission(session.id, approval.requestId, params.behavior, extra);
 
     this.removeApproval(approval);
     const updatedSession = this.updateSession(session, {
@@ -469,39 +464,6 @@ export class CcProxyService {
   }
 
   /**
-   * Claude called the ExitPlanMode tool, signaling "I've finished planning,
-   * may I proceed with implementation?". Surface as a special approval-style
-   * event with category=exit_plan_mode and the full plan in `inputPreview`.
-   * Host's normalizer maps this to a unified `approval_requested` event with
-   * category=exit_plan_mode so the UI can render an approve-and-switch card.
-   */
-  private handleExitPlanMode(sessionId: string, plan: string) {
-    const session = this.sessionsById.get(sessionId);
-    if (!session) return;
-
-    const context = this.activeTurns.get(sessionId);
-    const approval: PendingApproval = {
-      approvalId: randomId('appr'),
-      sessionId: session.id,
-      requestId: 'exit_plan_mode',
-      toolName: 'ExitPlanMode',
-      description: 'Claude has finished planning. Approve to switch out of plan mode and continue with execution.',
-      inputPreview: plan,
-      createdAt: nowIso(),
-    };
-
-    this.addApproval(approval);
-    this.updateSession(session, { status: 'needs-approval' });
-
-    this.emitEvent('approval.requested', {
-      requestId: context?.requestId,
-      sessionId: session.id,
-      turnId: context?.turnId ?? session.activeTurnId,
-      data: { ...approval, category: 'exit_plan_mode' },
-    });
-  }
-
-  /**
    * Auto-mode classifier blocked an action. Forward to host as a non-blocking
    * notification so the UI can show the user what was blocked. Per Anthropic
    * docs, the agent receives the deny reason and tries an alternative — this
@@ -602,15 +564,24 @@ export class CcProxyService {
     const session = this.sessionsById.get(sessionId);
     if (!session) return;
 
+    // ExitPlanMode gets a category tag so the host can pick a specialized UI
+    // (plan card + 3-way decision) without re-deriving from toolName. Plain
+    // permission requests carry no category.
+    const isExitPlanMode = toolName === 'ExitPlanMode';
+    const finalDescription = isExitPlanMode
+      ? 'Claude has finished planning. Choose how to proceed.'
+      : description;
+
     const context = this.activeTurns.get(sessionId);
     const approval: PendingApproval = {
       approvalId: randomId('appr'),
       sessionId: session.id,
       requestId,
       toolName,
-      description,
+      description: finalDescription,
       inputPreview,
       createdAt: nowIso(),
+      ...(isExitPlanMode ? { category: 'exit_plan_mode' } : {}),
     };
 
     this.addApproval(approval);
@@ -631,18 +602,15 @@ export class CcProxyService {
     const context = this.activeTurns.get(sessionId);
     this.activeTurns.delete(sessionId);
 
-    // Clear runtime-bound pending approvals (an MCP CallTool waiting on the
-    // dead process can never be answered). Keep `exit_plan_mode` approvals —
-    // those are Gian-synthesized and survive process death by design: the
-    // user approves *after* the planning turn ends to switch modes.
+    // Clear all pending approvals (an MCP CallTool waiting on the dead
+    // process can never be answered). ExitPlanMode also routes through the
+    // MCP bridge now, so it's no exception.
     const approvals = this.approvalsBySessionId.get(sessionId);
     if (approvals) {
-      for (const [id, approval] of approvals) {
-        if (approval.requestId === 'exit_plan_mode') continue;
+      for (const id of approvals.keys()) {
         this.approvalsById.delete(id);
-        approvals.delete(id);
       }
-      if (approvals.size === 0) this.approvalsBySessionId.delete(sessionId);
+      this.approvalsBySessionId.delete(sessionId);
     }
 
     const hadActiveTurn = session.activeTurnId !== null;

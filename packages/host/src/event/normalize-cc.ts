@@ -208,8 +208,25 @@ export function normalizeCcNotification(
       // struct out of inputPreview, and tag category='question' so the UI
       // renders a structured QuestionCard. Answers are fed back via
       // approval:resolve.answers → cc-proxy's updatedInput channel.
-      if (toolName === 'AskUserQuestion') {
-        const questions = parseAskUserQuestionInput(data.inputPreview);
+      //
+      // We detect by *either* the canonical toolName OR by input shape
+      // (`{questions: [...]}`). Claude SDK has been known to namespace or
+      // rename built-in tool names across versions; structural detection
+      // keeps the question card working regardless of what the CLI calls it.
+      const parsedQuestions = parseAskUserQuestionInput(data.inputPreview);
+      const matchedByName = toolName === 'AskUserQuestion';
+      const matchedByShape = parsedQuestions.length > 0;
+      if (matchedByName || matchedByShape) {
+        if (!matchedByName && matchedByShape) {
+          // Heads-up: SDK is sending question events under an unexpected
+          // toolName. The structural match catches it; logging here helps
+          // us update the canonical list when this becomes the common case.
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[normalize-cc] AskUserQuestion detected by input shape, not toolName. toolName=${JSON.stringify(toolName)} — add to matcher if seen repeatedly.`,
+          );
+        }
+        const firstQuestion = parsedQuestions[0]?.question?.trim();
         return [
           {
             session_id: sessionId,
@@ -221,19 +238,19 @@ export function normalizeCcNotification(
               approvalId,
               category: 'question',
               risk: 'low',
-              title: questions[0]?.question ?? 'Question',
+              title: firstQuestion || 'Claude is asking you a question',
               description: '',
               scopeOptions: ['once'],
               toolName,
-              questions,
+              questions: parsedQuestions,
             } satisfies ApprovalRequestedData,
           },
         ];
       }
 
       // ExitPlanMode arrives with explicit category='exit_plan_mode' set by
-      // cc-proxy's handleExitPlanMode; fall back to tool-name mapping for
-      // regular tool approvals.
+      // cc-proxy when toolName === 'ExitPlanMode' on the permission MCP path;
+      // fall back to tool-name mapping for regular tool approvals.
       const category = typeof data.category === 'string' && data.category
         ? data.category as ApprovalRequestedData['category']
         : mapCcToolNameToCategory(toolName);
@@ -271,6 +288,13 @@ export function normalizeCcNotification(
             scopeOptions: category === 'command' || category === 'file_write_outside_ws' || category === 'network'
               ? ['once', 'session']
               : ['once'],
+            // For exit_plan_mode, advertise the three-way action set so the
+            // UI renders Claude Code's native "auto / ask / keep planning"
+            // buttons. scopeOptions stays ['once'] but the UI ignores it
+            // when planActions is present.
+            ...(category === 'exit_plan_mode'
+              ? { planActions: ['accept_with_auto', 'accept_with_ask', 'keep_planning'] as const }
+              : {}),
             toolName: toolName || undefined,
           } satisfies ApprovalRequestedData,
         },
@@ -448,7 +472,14 @@ function parseAskUserQuestionInput(raw: unknown): AskQuestion[] {
             }))
           : [],
       }));
-  } catch {
+  } catch (err) {
+    // Silently returning [] here used to make it hard to diagnose why a
+    // question card came up empty. Surface the failure so it's visible in
+    // host.err if Claude SDK ever changes the input shape.
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[normalize-cc] parseAskUserQuestionInput: JSON parse failed (${err instanceof Error ? err.message : String(err)})`,
+    );
     return [];
   }
 }
@@ -488,6 +519,13 @@ function ccApprovalSubject(toolName: string, parsed: Record<string, unknown> | n
   if (!parsed) return undefined;
   const s = (k: string) => typeof parsed[k] === 'string' ? parsed[k] as string : '';
   switch (toolName) {
+    case 'ExitPlanMode': {
+      // cc-proxy now routes ExitPlanMode through the regular permission MCP
+      // bridge; inputPreview is the SDK's JSON dump `{"plan": "<markdown>"}`.
+      // Pull the plan body out so the UI can render markdown directly.
+      const plan = s('plan').trim();
+      return plan || undefined;
+    }
     case 'Bash': {
       const cmd = s('command').trim();
       return cmd || undefined;

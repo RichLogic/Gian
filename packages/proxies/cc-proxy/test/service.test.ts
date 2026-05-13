@@ -234,7 +234,7 @@ test('service relays approval requests and process failures', async () => {
   });
 });
 
-test('ExitPlanMode approval survives processExited and is resolvable without runtime call', async () => {
+test('ExitPlanMode permission request is tagged category=exit_plan_mode and resolves through MCP', async () => {
   await withService(async ({ runtime, service, events }) => {
     const created = await service.createSession({ cwd: '/tmp' });
 
@@ -243,20 +243,30 @@ test('ExitPlanMode approval survives processExited and is resolvable without run
       input: [{ type: 'text', text: 'plan something' }],
     }, 'req-plan');
 
-    // Claude emits ExitPlanMode tool_use, then the planning turn finishes
-    // and the per-turn process exits. The approval must survive that exit.
-    runtime.emit('exitPlanMode', created.session.id, 'Step 1: do X\nStep 2: do Y');
-    runtime.emit('channelReply', created.session.id, "Here's the plan");
-    runtime.emit('processExited', created.session.id, 0, null);
+    // Claude's SDK fires canUseTool for ExitPlanMode → cc-proxy's permission
+    // MCP bridge emits permissionRequest. The approval must carry the
+    // category tag so the host renders the plan card.
+    const planJson = JSON.stringify({ plan: 'Step 1: do X\nStep 2: do Y' });
+    runtime.emit(
+      'permissionRequest',
+      created.session.id,
+      'callid-exit-plan',
+      'ExitPlanMode',
+      'Tool ExitPlanMode requires permission.',
+      planJson,
+    );
 
     const approvalEvent = events.find((event) => event.method === 'approval.requested');
     assert.ok(approvalEvent, 'approval.requested should have been emitted');
     const data = approvalEvent!.params.data as Record<string, unknown>;
     assert.equal(data.category, 'exit_plan_mode');
     assert.equal(data.toolName, 'ExitPlanMode');
+    assert.equal(data.inputPreview, planJson);
     const approvalId = data.approvalId as string;
 
-    // Resolve after process death — must not throw APPROVAL_NOT_FOUND.
+    // Accept the plan — must forward to runtime so Claude's blocked MCP
+    // CallTool gets a response (the bug we just fixed: skipping this hung
+    // the agent until SESSION_BUSY surfaced on the next message).
     const approved = await service.respondApproval({
       sessionId: created.session.id,
       approvalId,
@@ -264,11 +274,45 @@ test('ExitPlanMode approval survives processExited and is resolvable without run
     });
     assert.equal(approved.ok, true);
 
-    // ExitPlanMode is Gian-synthesized; no MCP CallTool to answer, so the
-    // runtime must NOT receive a respondPermission call for it.
-    assert.equal(runtime.permissionResponses.length, 0);
+    assert.deepEqual(runtime.permissionResponses, [
+      { sessionId: created.session.id, requestId: 'callid-exit-plan', behavior: 'allow' },
+    ]);
 
     assert.ok(events.some((event) => event.method === 'approval.resolved'));
+  });
+});
+
+test('ExitPlanMode approval is cleared when the planning process exits', async () => {
+  await withService(async ({ runtime, service, events }) => {
+    const created = await service.createSession({ cwd: '/tmp' });
+    await service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'plan something' }],
+    }, 'req-plan');
+
+    runtime.emit(
+      'permissionRequest',
+      created.session.id,
+      'callid-exit-plan',
+      'ExitPlanMode',
+      'Tool ExitPlanMode requires permission.',
+      JSON.stringify({ plan: 'do thing' }),
+    );
+
+    const approvalEvent = events.find((event) => event.method === 'approval.requested');
+    const approvalId = (approvalEvent!.params.data as Record<string, unknown>).approvalId as string;
+
+    runtime.emit('processExited', created.session.id, 1, null);
+
+    // The MCP CallTool died with the process; responding now should 404.
+    await assert.rejects(
+      service.respondApproval({
+        sessionId: created.session.id,
+        approvalId,
+        behavior: 'allow',
+      }),
+      (error: unknown) => error instanceof AppError && error.code === 'APPROVAL_NOT_FOUND',
+    );
   });
 });
 

@@ -33,8 +33,14 @@
   <key>StandardErrorPath</key>
   <string>{{HOME}}/.config/gian/logs/host.err</string>
 
-  <!-- Empty dict — user can add GIAN_DATA_DIR, GIAN_AUTH_REQUIRED, etc. here. -->
+  <!-- install.sh fills PATH with the dirs of claude/codex/node + standard
+       system locations. Empty PATH = launchd's default `/usr/bin:/bin:/usr/sbin:/sbin`,
+       under which cc-proxy/codex-proxy fail to spawn `claude` / `codex` (ENOENT).
+       Add GIAN_DATA_DIR, GIAN_AUTH_REQUIRED, etc. here too if needed. -->
   <key>EnvironmentVariables</key>
-  <dict/>
+  <dict>
+    <key>PATH</key>
+    <string>{{LAUNCHD_PATH}}</string>
+  </dict>
 </dict>
 </plist>

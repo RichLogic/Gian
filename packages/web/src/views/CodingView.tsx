@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ApprovalMode, Session, Workspace } from '@gian/shared';
+import type { ApprovalDecision, ApprovalMode, Session, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { createWorkspace } from '../api.js';
 import { Composer } from '../components/Composer.js';
 import { FilePreviewDrawer } from '../components/FilePreviewDrawer.js';
 import { GitBadge } from '../components/GitBadge.js';
 import { JobProgress } from '../components/JobProgress.js';
+import { PlanChip } from '../components/PlanChip.js';
 import { QueueList } from '../components/QueueList.js';
 import { StatusPill, UsageChip } from '../components/Chips.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
@@ -72,7 +73,7 @@ export interface CodingViewProps {
   onApprove: (
     sessionId: string,
     approvalId: string,
-    decision: 'allow_once' | 'allow_session' | 'decline',
+    decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
   ) => void;
   onQueueAdd: (sessionId: string, text: string) => void;
@@ -942,7 +943,7 @@ function SessionMain({
   onStop: () => void;
   onApprove: (
     approvalId: string,
-    decision: 'allow_once' | 'allow_session' | 'decline',
+    decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
   ) => void;
   onQueueAdd: (text: string) => void;
@@ -1062,6 +1063,7 @@ function SessionMain({
       <JobProgress session={session} items={items} />
       <Transcript items={items} pending={pending} executor={session.executor} onApprove={onApprove} />
       <QueueList queue={queue} onRemove={onQueueRemove} onReorder={onQueueReorder} onClear={onQueueClear} onSendNow={onQueueSendNow} />
+      <PlanChip items={items} />
       <Composer
         session={session}
         onSend={onSend}

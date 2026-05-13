@@ -6,7 +6,7 @@ import { GianWs } from './ws.js';
 import { makeWsUrl, loadWorkspaces, loadSessions, loadEvents, loadSettings, loadWorkingTrees, whoAmI, loadBots, reconnectComponent, fetchWsToken } from './api.js';
 import type { WorkingTree } from './api.js';
 import { applyEnvelope, parseTokenUsage } from './transcript/apply.js';
-import { DiffOpenContext, FileLinkOpenContext } from './transcript/items.js';
+import { DiffOpenContext, FileLinkOpenContext, PlanOpenContext } from './transcript/items.js';
 import type { PreviewTarget } from './components/FilePreviewDrawer.js';
 import { Topbar } from './components/Topbar.js';
 import { MainNav, pendingCount } from './components/MainNav.js';
@@ -421,6 +421,16 @@ export function App() {
           {view === 'coding' && (
           <FileLinkOpenContext.Provider value={openFileInPreview}>
           <DiffOpenContext.Provider value={(diff) => setPreviewTarget({ kind: 'diff', diff })}>
+          <PlanOpenContext.Provider value={(approval) => setPreviewTarget({
+            kind: 'plan',
+            approvalId: approval.approvalId,
+            plan: approval.cmd,
+            status: approval.status === 'pending'
+              ? 'pending'
+              : approval.status === 'declined'
+                ? 'rejected'
+                : 'accepted',
+          })}>
             <CodingView
               workspaces={workspaces}
               sessions={sessions}
@@ -530,6 +540,7 @@ export function App() {
               previewTarget={previewTarget}
               onClosePreview={() => setPreviewTarget(null)}
             />
+          </PlanOpenContext.Provider>
           </DiffOpenContext.Provider>
           </FileLinkOpenContext.Provider>
           )}

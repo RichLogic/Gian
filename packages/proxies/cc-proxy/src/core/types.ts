@@ -49,6 +49,10 @@ export interface PendingApproval {
   description: string;
   inputPreview: string;
   createdAt: string;
+  /** Optional discriminator surfaced to the host so it can pick a specialized
+   *  UI without re-deriving from toolName. Currently used for
+   *  `'exit_plan_mode'` — set when toolName === 'ExitPlanMode'. */
+  category?: string;
 }
 
 export interface InitializePayload {

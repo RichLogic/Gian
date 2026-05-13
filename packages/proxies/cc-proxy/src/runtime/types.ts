@@ -7,7 +7,7 @@ import type { EffortLevel, ModelCapabilities, PermissionMode } from '../core/typ
  *
  *   'channelReply'         – Claude Code called the reply tool
  *   'permissionRequest'    – Claude Code needs user approval for a tool
- *   'exitPlanMode'         – Claude Code called the ExitPlanMode tool (plan ready)
+ *                            (ExitPlanMode routes here too — host detects via toolName)
  *   'autoClassifierDenied' – auto-mode classifier blocked an action
  *   'autoCircuitBreaker'   – process aborted by auto-mode circuit breaker
  *   'processExited'        – A Claude Code process exited
@@ -23,7 +23,6 @@ export interface ClaudeRuntimeEvents {
    *  block so the renderer can update in place. */
   assistantText: [sessionId: string, text: string, itemId: string];
   permissionRequest: [sessionId: string, requestId: string, toolName: string, description: string, inputPreview: string];
-  exitPlanMode: [sessionId: string, plan: string];
   autoClassifierDenied: [sessionId: string, action: string, reason: string, consecutive: number, total: number];
   autoCircuitBreaker: [sessionId: string, trigger: 'consecutive' | 'total', consecutive: number, total: number];
   toolUse: [sessionId: string, toolName: string, input: Record<string, unknown>];

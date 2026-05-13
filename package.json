@@ -5,9 +5,10 @@
   "description": "Self-hosted single-user AI coding agent web frontend",
   "packageManager": "pnpm@10.33.2",
   "engines": {
-    "node": ">=20"
+    "node": ">=22 <25"
   },
   "scripts": {
+    "preinstall": "node scripts/check-node.js",
     "build": "pnpm -r build",
     "dev": "pnpm -r --parallel dev",
     "typecheck": "pnpm -r typecheck",

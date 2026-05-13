@@ -177,6 +177,17 @@ export interface ApprovalRequestedData {
    * QuestionCard with these options instead of generic allow/decline.
    */
   questions?: AskQuestion[];
+  /**
+   * Three-way action set for `category === 'exit_plan_mode'`. When present,
+   * the UI replaces the standard once/session/decline buttons with one
+   * button per listed action, matching Claude Code's native plan-mode-exit
+   * prompt. Decisions map back via {@link ApprovalDecision}:
+   *
+   *   'accept_with_auto'  → accept the plan, future turns run in auto mode
+   *   'accept_with_ask'   → accept the plan, future turns prompt per write
+   *   'keep_planning'     → reject; agent stays in plan mode for more input
+   */
+  planActions?: ('accept_with_auto' | 'accept_with_ask' | 'keep_planning')[];
 }
 
 export interface AskQuestionOption {

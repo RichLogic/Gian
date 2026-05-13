@@ -24,5 +24,11 @@ gian.db-wal
 
 .rvc-attachments/
 .obsidian/
-.claude/
-.pnpm-store/
+.claude/settings.local.json
+.claude/*.lock
+
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/
+.DS_Store

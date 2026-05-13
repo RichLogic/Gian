@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ApprovalDecision } from '@gian/shared';
 import type { TranscriptItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
 import { AgentSpawnRow, ApprovalCard, AssistantMessage, Avatar, Caret, CommandCard, DiffCard, FileReadCard, FileSearchCard, ToolEvent, UserMessage, WebSearchRow } from './items.js';
@@ -68,7 +69,7 @@ export function renderItem(
   item: TranscriptItem,
   onApprove: (
     approvalId: string,
-    decision: 'allow_once' | 'allow_session' | 'decline',
+    decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
   ) => void,
   currentUserRef?: React.RefObject<HTMLDivElement | null>,
@@ -142,7 +143,7 @@ function TurnActionsBlock({
   block: { id: string; items: TranscriptItem[]; isTrailing: boolean };
   onApprove: (
     approvalId: string,
-    decision: 'allow_once' | 'allow_session' | 'decline',
+    decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
   ) => void;
 }) {
@@ -210,7 +211,7 @@ export function Transcript({
   executor: 'claude' | 'codex';
   onApprove: (
     approvalId: string,
-    decision: 'allow_once' | 'allow_session' | 'decline',
+    decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
   ) => void;
 }) {

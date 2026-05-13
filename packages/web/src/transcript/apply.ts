@@ -270,6 +270,16 @@ export function parseApprovalRequested(env: EventEnvelope): ApprovalItem | null 
       (s): s is 'once' | 'session' => s === 'once' || s === 'session',
     )
     : undefined;
+  // exit_plan_mode approvals advertise a three-way action set instead of the
+  // generic once/session/decline scopes. Pass it through so ApprovalCard can
+  // pick the right button layout.
+  const PLAN_ACTIONS = ['accept_with_auto', 'accept_with_ask', 'keep_planning'] as const;
+  type PlanAction = typeof PLAN_ACTIONS[number];
+  const isPlanAction = (s: unknown): s is PlanAction =>
+    (PLAN_ACTIONS as readonly string[]).includes(s as string);
+  const planActions = Array.isArray(data.planActions)
+    ? (data.planActions as unknown[]).filter(isPlanAction)
+    : undefined;
   return {
     kind: 'approval',
     id: env.call_id,
@@ -282,6 +292,7 @@ export function parseApprovalRequested(env: EventEnvelope): ApprovalItem | null 
     ...(category ? { category } : {}),
     ...(questions ? { questions } : {}),
     ...(scopeOptions ? { scopeOptions } : {}),
+    ...(planActions && planActions.length > 0 ? { planActions } : {}),
     ts: env.ts,
     turn: env.turn,
   };

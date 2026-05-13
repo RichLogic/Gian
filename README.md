@@ -58,6 +58,9 @@ Proxy (subprocess) ◁── stdio JSON-RPC ──▷ Host ◁── WebSocket �
 - Host is the sole state owner; Web and IM are stateless consumers
 - Persistence: SQLite at `$GIAN_DATA_DIR/gian.db`
 
+See [`doc/architecture.md`](doc/architecture.md) for full details including
+the proxy protocol and data model.
+
 ## Installation
 
 ### Prerequisites
@@ -161,8 +164,8 @@ daemon.
 
 ## Status
 
-Pre-1.0 — usable end-to-end, but the API, database schema, and config keys
-may change without migration guarantees until v1.0.
+**Phase 2 vertical slice** — all 6 milestones complete (M0 → M5 + M6 polish).
+Not yet released; API and config schema may change before v1.0.
 
 ## License
 

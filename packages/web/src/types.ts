@@ -93,6 +93,10 @@ export interface ApprovalItem {
   /** Which scope buttons to surface — drives whether `Allow session` appears.
    *  Defaults to `['once']` (only "Allow once"). */
   scopeOptions?: ('once' | 'session')[];
+  /** When `category === 'exit_plan_mode'`, the three-way action set to show
+   *  in place of the generic Allow once / Allow session / Decline. Maps to
+   *  ApprovalDecision variants 1:1. */
+  planActions?: ('accept_with_auto' | 'accept_with_ask' | 'keep_planning')[];
   ts: number;
   turn: number;
 }
