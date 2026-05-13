@@ -1,0 +1,231 @@
+/* ============================================================
+   Gian — Design Tokens
+   Three themes (light / warm / dark) + accent system
+   ============================================================ */
+
+:root {
+  /* Type scale */
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --fz-11: 11px;
+  --fz-12: 12px;
+  --fz-13: 13px;
+  --fz-14: 14px;
+  --fz-16: 16px;
+  --fz-20: 20px;
+  --fz-28: 28px;
+
+  /* Radii — soft but restrained */
+  --r-1: 4px;
+  --r-2: 7px;
+  --r-3: 10px;
+  --r-4: 14px;
+  --r-pill: 999px;
+
+  /* Spacing (IDE-dense baseline) */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 10px;
+  --sp-6: 12px;
+  --sp-7: 16px;
+  --sp-8: 20px;
+  --sp-9: 24px;
+
+  --gutter: 3px;
+
+
+  /* Chrome dimensions */
+  --topbar-h: 42px;
+  --nav-w: 56px;
+  --rail-w: 272px;
+
+  /* Motion */
+  --ease: cubic-bezier(.2,.7,.2,1);
+
+  /* Executor brand (same across themes) */
+  --codex-h: 270;
+  --codex: oklch(0.62 0.14 var(--codex-h));
+  --codex-soft: oklch(0.62 0.14 var(--codex-h) / 0.12);
+  --claude-h: 36;
+  --claude: oklch(0.70 0.15 var(--claude-h));
+  --claude-soft: oklch(0.70 0.15 var(--claude-h) / 0.14);
+
+  /* Platform */
+  --discord:      oklch(0.58 0.16 280);
+  --discord-soft: oklch(0.58 0.16 280 / 0.14);
+  --slack:        oklch(0.62 0.14 105);
+  --slack-soft:   oklch(0.62 0.14 105 / 0.14);
+}
+
+/* ---------- Accent presets (default = plum) ----------
+   Body-level fallback so unset / unknown accent values still resolve
+   to a valid color. Specific presets override below. */
+body                       { --accent-h: 310; --accent-c: 0.13; }
+body[data-accent="plum"]   { --accent-h: 310; --accent-c: 0.13; }
+body[data-accent="moss"]   { --accent-h: 150; --accent-c: 0.10; }
+body[data-accent="ink"]    { --accent-h: 255; --accent-c: 0.11; }
+body[data-accent="ember"]  { --accent-h:  30; --accent-c: 0.13; }
+
+/* ============================================================
+   THEME — LIGHT (cool cream, high softness, low contrast chrome)
+   ============================================================ */
+body[data-theme="light"] {
+  --bg:            oklch(0.955 0.004 280);
+  --surface:       oklch(1.000 0.000 0);
+  --surface-2:    oklch(0.970 0.003 280);
+  --surface-3:    oklch(0.935 0.005 280);
+  --surface-inset: oklch(0.945 0.004 280);
+
+  --text:          oklch(0.22 0.02 280);
+  --text-2:        oklch(0.45 0.015 280);
+  --text-3:        oklch(0.62 0.012 280);
+  --text-inv:      oklch(0.98 0 0);
+
+  --hairline:      oklch(0.22 0.02 280 / 0.08);
+  --hairline-2:    oklch(0.22 0.02 280 / 0.04);
+
+  --accent:        oklch(0.55 var(--accent-c) var(--accent-h));
+  --accent-text:   oklch(0.42 var(--accent-c) var(--accent-h));
+  --accent-soft:   oklch(0.55 var(--accent-c) var(--accent-h) / 0.12);
+  --accent-ring:   oklch(0.55 var(--accent-c) var(--accent-h) / 0.30);
+
+  --ok:    oklch(0.58 0.13 150);
+  --ok-soft: oklch(0.58 0.13 150 / 0.13);
+  --warn:  oklch(0.70 0.14 75);
+  --warn-soft: oklch(0.70 0.14 75 / 0.15);
+  --danger: oklch(0.58 0.18 25);
+  --danger-soft: oklch(0.58 0.18 25 / 0.13);
+
+  --shadow-1: 0 0 0 1px oklch(0.22 0.02 280 / 0.06), 0 1px 2px oklch(0.22 0.02 280 / 0.04);
+  --shadow-2: 0 0 0 1px oklch(0.22 0.02 280 / 0.06), 0 6px 24px -8px oklch(0.22 0.02 280 / 0.18);
+
+  /* — ported from design/tokens.css — --border alias for mp-think / inline borders */
+  --border: oklch(0.22 0.02 280 / 0.12);
+
+  color-scheme: light;
+}
+
+/* ============================================================
+   THEME — WARM (cream paper, toasted walnut text)
+   ============================================================ */
+body[data-theme="warm"] {
+  --bg:            oklch(0.955 0.020 80);
+  --surface:       oklch(0.990 0.012 82);
+  --surface-2:    oklch(0.965 0.018 80);
+  --surface-3:    oklch(0.925 0.022 78);
+  --surface-inset: oklch(0.940 0.020 80);
+
+  --text:          oklch(0.30 0.04 55);
+  --text-2:        oklch(0.48 0.035 60);
+  --text-3:        oklch(0.62 0.025 65);
+  --text-inv:      oklch(0.98 0.01 80);
+
+  --hairline:      oklch(0.30 0.04 55 / 0.10);
+  --hairline-2:    oklch(0.30 0.04 55 / 0.05);
+
+  --accent:        oklch(0.52 var(--accent-c) var(--accent-h));
+  --accent-text:   oklch(0.40 var(--accent-c) var(--accent-h));
+  --accent-soft:   oklch(0.52 var(--accent-c) var(--accent-h) / 0.14);
+  --accent-ring:   oklch(0.52 var(--accent-c) var(--accent-h) / 0.32);
+
+  --ok:    oklch(0.55 0.13 150);
+  --ok-soft: oklch(0.55 0.13 150 / 0.14);
+  --warn:  oklch(0.65 0.14 65);
+  --warn-soft: oklch(0.65 0.14 65 / 0.16);
+  --danger: oklch(0.55 0.18 30);
+  --danger-soft: oklch(0.55 0.18 30 / 0.14);
+
+  --shadow-1: 0 0 0 1px oklch(0.30 0.04 55 / 0.07), 0 1px 2px oklch(0.30 0.04 55 / 0.05);
+  --shadow-2: 0 0 0 1px oklch(0.30 0.04 55 / 0.08), 0 6px 24px -8px oklch(0.30 0.04 55 / 0.20);
+
+  /* — ported from design/tokens.css — */
+  --border: oklch(0.30 0.04 55 / 0.14);
+
+  color-scheme: light;
+}
+
+/* ============================================================
+   THEME — DARK (deep teal-ink, never pure black)
+   ============================================================ */
+body[data-theme="dark"] {
+  --bg:            oklch(0.165 0.012 250);
+  --surface:       oklch(0.210 0.014 250);
+  --surface-2:    oklch(0.240 0.016 250);
+  --surface-3:    oklch(0.285 0.018 250);
+  --surface-inset: oklch(0.190 0.012 250);
+
+  --text:          oklch(0.93 0.01 250);
+  --text-2:        oklch(0.74 0.012 250);
+  --text-3:        oklch(0.58 0.012 250);
+  --text-inv:      oklch(0.18 0.01 250);
+
+  --hairline:      oklch(0.93 0.01 250 / 0.08);
+  --hairline-2:    oklch(0.93 0.01 250 / 0.04);
+
+  --accent:        oklch(0.72 var(--accent-c) var(--accent-h));
+  --accent-text:   oklch(0.80 var(--accent-c) var(--accent-h));
+  --accent-soft:   oklch(0.72 var(--accent-c) var(--accent-h) / 0.18);
+  --accent-ring:   oklch(0.72 var(--accent-c) var(--accent-h) / 0.40);
+
+  --ok:    oklch(0.75 0.14 150);
+  --ok-soft: oklch(0.75 0.14 150 / 0.16);
+  --warn:  oklch(0.80 0.14 80);
+  --warn-soft: oklch(0.80 0.14 80 / 0.18);
+  --danger: oklch(0.72 0.17 25);
+  --danger-soft: oklch(0.72 0.17 25 / 0.18);
+
+  --shadow-1: 0 0 0 1px oklch(0.93 0.01 250 / 0.06);
+  --shadow-2: 0 0 0 1px oklch(0.93 0.01 250 / 0.08), 0 10px 32px -8px oklch(0 0 0 / 0.55);
+
+  /* — ported from design/tokens.css — */
+  --border: oklch(0.93 0.01 250 / 0.12);
+
+  color-scheme: dark;
+}
+
+/* ---------- Density ---------- */
+body[data-density="compact"] { --rail-w: 250px; --topbar-h: 38px; --nav-w: 52px; }
+body[data-density="cozy"]    { --rail-w: 272px; --topbar-h: 42px; --nav-w: 56px; }
+body[data-density="roomy"]   { --rail-w: 300px; --topbar-h: 48px; --nav-w: 64px; }
+
+/* ---------- Base ---------- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: var(--font-sans);
+  font-size: var(--fz-13);
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; background: none; border: none; color: inherit; cursor: pointer; }
+input, textarea, select { font: inherit; color: inherit; }
+::selection { background: var(--accent-soft); color: var(--accent-text); }
+
+/* Keycap */
+kbd.kc {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 500;
+  color: var(--text-3);
+  background: var(--surface-2);
+  border-radius: var(--r-1);
+  box-shadow: inset 0 -1px 0 var(--hairline), 0 0 0 1px var(--hairline);
+}
+
+/* Hairline separator using gradient — soft fade instead of hard line */
+.hairline {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--hairline), transparent);
+}
+.hairline-v {
+  width: 1px;
+  background: linear-gradient(180deg, transparent, var(--hairline), transparent);
+}

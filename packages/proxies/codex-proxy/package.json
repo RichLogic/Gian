@@ -1,0 +1,22 @@
+{
+  "name": "@gian/codex-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/cli/spawn.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "node dist/src/cli/spawn.js",
+    "test": "npm run build && node --test dist/test/**/*.test.js",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@gian/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

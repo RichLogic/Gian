@@ -1,0 +1,29 @@
+# Gian host daemon — user-level systemd unit.
+# Installed to ~/.config/systemd/user/ by install.sh.
+# Enable/start with: systemctl --user enable --now gian.service
+
+[Unit]
+Description=Gian Host Daemon
+# Wait for the network stack to be up (relevant for tunnel / IM adapter startup).
+After=network.target
+
+[Service]
+Type=simple
+
+# Full path to node + entry point; cwd mirrors the macOS launchd config.
+ExecStart={{NODE_BIN}} {{INSTALL_DIR}}/packages/host/dist/index.js
+WorkingDirectory={{INSTALL_DIR}}/packages/host
+
+# Restart on non-zero exit (crash). Does NOT restart on clean exit (code 0)
+# so a deliberate `systemctl --user stop gian` stays stopped.
+Restart=on-failure
+RestartSec=5
+
+# Append keeps logs across restarts in a single file, matching launchd behaviour.
+StandardOutput=append:{{HOME}}/.config/gian/logs/host.out
+StandardError=append:{{HOME}}/.config/gian/logs/host.err
+
+[Install]
+# default.target is the user-session equivalent of multi-user.target;
+# this ensures the service starts at graphical login or ssh session start.
+WantedBy=default.target

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- User-level LaunchAgent: runs as the logged-in user, not root. -->
+  <!-- Installed to ~/Library/LaunchAgents/ by install.sh.            -->
+
+  <key>Label</key>
+  <string>com.gian.host</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <!-- Full path to node avoids $PATH issues in launchd's env. -->
+    <string>{{NODE_BIN}}</string>
+    <string>{{INSTALL_DIR}}/packages/host/dist/index.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>{{INSTALL_DIR}}/packages/host</string>
+
+  <!-- Start immediately when loaded (at login / launchctl bootstrap). -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- launchd restarts the process if it exits for any reason. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>{{HOME}}/.config/gian/logs/host.out</string>
+
+  <key>StandardErrorPath</key>
+  <string>{{HOME}}/.config/gian/logs/host.err</string>
+
+  <!-- Empty dict — user can add GIAN_DATA_DIR, GIAN_AUTH_REQUIRED, etc. here. -->
+  <key>EnvironmentVariables</key>
+  <dict/>
+</dict>
+</plist>

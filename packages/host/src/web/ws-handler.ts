@@ -1,0 +1,254 @@
+import type { ClientToServerMessage, StateSyncMessage } from '@gian/shared';
+import type { WSContext, WSMessageReceive } from 'hono/ws';
+import type { SessionManager } from '../session/manager.js';
+import type { WsBroadcaster } from './ws-broadcast.js';
+// IMRouter is removed during the IM transplant — ws-handler no longer
+// notifies it on web message:send. Takeover state will be revisited when
+// the rvc-shaped managers land.
+import type { ApprovalManager } from '../approval/index.js';
+import type { Db } from '../storage/db.js';
+import { getUsernameForToken } from '../auth/tokens.js';
+import { AUTH_REQUIRED } from '../auth/middleware.js';
+import { loadConfig } from '../storage/config.js';
+import { listBots } from '../storage/bots.js';
+
+interface WsMessageEvent {
+  data: WSMessageReceive;
+}
+
+interface WsCloseEvent {
+  code: number;
+  reason: string;
+  wasClean: boolean;
+}
+
+export interface WsHandlerDeps {
+  sessions: SessionManager;
+  broadcaster: WsBroadcaster;
+  approvals?: ApprovalManager;
+  db?: Db;
+}
+
+interface ClientState {
+  authed: boolean;
+}
+
+export function makeWsHandlers({ sessions, broadcaster, approvals, db }: WsHandlerDeps) {
+  const states = new WeakMap<WSContext, ClientState>();
+
+  function sendStateSync(ws: WSContext): void {
+    if (!db) return;
+    const config = loadConfig(db);
+    const sync: StateSyncMessage = {
+      type: 'state_sync',
+      runner: {
+        host: config.host || '127.0.0.1',
+        latency: 0,
+        started_ago: '0s',
+        agents: 0,
+        disk: '?',
+        codex_version: '?',
+        cc_version: '?',
+        ws_root: config.workspace_root,
+      },
+      sessions: sessions.listSessions(),
+      workspaces: db.prepare('SELECT * FROM workspaces ORDER BY sort_order, name').all() as StateSyncMessage['workspaces'],
+      bots: listBots(db),
+      approvals: (approvals?.listPending() ?? []).map(r => ({
+        id: r.id,
+        session_id: r.sessionId,
+        turn_id: r.turnId,
+        category: r.category,
+        title: r.description,
+        command: typeof r.subject === 'string' ? r.subject : '',
+        reason: null,
+        status: r.status,
+        resolved_by: r.resolvedBy ?? null,
+        resolved_at: r.resolvedAt ? new Date(r.resolvedAt).toISOString() : null,
+        created_at: new Date(r.createdAt).toISOString(),
+      })),
+      config,
+    };
+    broadcaster.send(ws, sync);
+  }
+
+  return {
+    onOpen(_evt: Event, ws: WSContext) {
+      states.set(ws, { authed: false });
+      broadcaster.add(ws);
+    },
+
+    onClose(_evt: WsCloseEvent, ws: WSContext) {
+      broadcaster.remove(ws);
+      states.delete(ws);
+    },
+
+    async onMessage(evt: WsMessageEvent, ws: WSContext) {
+      const state = states.get(ws);
+      if (!state) return;
+
+      let parsed: ClientToServerMessage;
+      try {
+        const raw = typeof evt.data === 'string' ? evt.data : evt.data.toString();
+        parsed = JSON.parse(raw) as ClientToServerMessage;
+      } catch {
+        ws.close(4002, 'invalid_json');
+        return;
+      }
+
+      if (!state.authed) {
+        if (parsed.type !== 'auth') {
+          ws.close(4001, 'auth_required');
+          return;
+        }
+        if (!parsed.token || parsed.token.length === 0) {
+          ws.close(4001, 'auth_failed');
+          return;
+        }
+        if (AUTH_REQUIRED) {
+          const username = getUsernameForToken(parsed.token);
+          if (!username) {
+            ws.close(4001, 'auth_failed');
+            return;
+          }
+          state.authed = true;
+          broadcaster.send(ws, { type: 'auth_ok', user: username });
+        } else {
+          state.authed = true;
+          broadcaster.send(ws, { type: 'auth_ok', user: 'dev' });
+        }
+        // Send authoritative state immediately after auth so the client can
+        // skip REST fetches and re-sync after reconnect.
+        sendStateSync(ws);
+        return;
+      }
+
+      try {
+        await dispatch(parsed, sessions, broadcaster, ws);
+      } catch (err) {
+        console.error('[ws] dispatch error', err);
+        // Surface the failure to the client. Without this, errors inside
+        // sendMessage / respondApproval / etc. are invisible — the user sees
+        // "no reply" with no clue why.
+        const sessionIdField = (parsed as { session_id?: unknown }).session_id;
+        broadcaster.send(ws, {
+          type: 'error',
+          ...(typeof sessionIdField === 'string' ? { session_id: sessionIdField } : {}),
+          code: dispatchErrorCode(parsed.type),
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  };
+}
+
+function dispatchErrorCode(messageType: string): string {
+  switch (messageType) {
+    case 'message:send':
+      return 'MESSAGE_SEND_FAILED';
+    case 'approval:resolve':
+      return 'APPROVAL_RESOLVE_FAILED';
+    case 'session:create':
+      return 'SESSION_CREATE_FAILED';
+    case 'session:stop':
+      return 'SESSION_STOP_FAILED';
+    case 'queue:send_now':
+      return 'QUEUE_SEND_NOW_FAILED';
+    default:
+      return 'DISPATCH_FAILED';
+  }
+}
+
+async function dispatch(
+  msg: ClientToServerMessage,
+  sessions: SessionManager,
+  broadcaster: WsBroadcaster,
+  ws: WSContext,
+): Promise<void> {
+  switch (msg.type) {
+    case 'session:create': {
+      const session = await sessions.createSession({
+        workspace_id: msg.workspace_id,
+        executor: msg.executor,
+        model: msg.model,
+        approval_mode: msg.approval_mode,
+        ...(msg.name !== undefined ? { name: msg.name } : {}),
+        ...(msg.mode !== undefined ? { mode: msg.mode } : {}),
+        ...(msg.base_branch !== undefined ? { base_branch: msg.base_branch } : {}),
+        ...(msg.branch !== undefined ? { branch: msg.branch } : {}),
+      });
+      broadcaster.send(ws, { type: 'session:created', session });
+      return;
+    }
+    case 'session:rename': {
+      sessions.renameSession(msg.session_id, msg.name);
+      return;
+    }
+    case 'session:archive': {
+      sessions.archiveSession(msg.session_id, msg.archived);
+      return;
+    }
+    case 'session:delete': {
+      await sessions.deleteSession(msg.session_id);
+      return;
+    }
+    case 'message:send': {
+      await sessions.sendMessage(msg.session_id, msg.text, msg.items, msg.oneShotBypass);
+      return;
+    }
+    case 'approval:resolve': {
+      await sessions.respondApproval(msg.session_id, msg.approval_id, msg.decision, msg.answers);
+      return;
+    }
+    case 'session:stop': {
+      await sessions.stopTurn(msg.session_id);
+      return;
+    }
+    case 'session:recover': {
+      await sessions.forceRecover(msg.session_id);
+      return;
+    }
+    case 'session:set_mode': {
+      sessions.setApprovalMode(msg.session_id, msg.approval_mode, msg.turns);
+      return;
+    }
+    case 'session:set_effort': {
+      sessions.setEffort(msg.session_id, msg.effort);
+      return;
+    }
+    case 'session:set_model': {
+      sessions.setModel(msg.session_id, msg.model);
+      return;
+    }
+    case 'queue:add': {
+      sessions.enqueueMessage(msg.session_id, msg.text);
+      return;
+    }
+    case 'queue:remove': {
+      sessions.removeFromQueue(msg.session_id, msg.queue_id);
+      return;
+    }
+    case 'queue:reorder': {
+      sessions.reorderQueue(msg.session_id, msg.order);
+      return;
+    }
+    case 'queue:clear': {
+      sessions.clearQueue(msg.session_id);
+      return;
+    }
+    case 'queue:send_now': {
+      await sessions.sendQueuedNow(msg.session_id);
+      return;
+    }
+    case 'auth':
+      // already handled
+      return;
+    default:
+      console.log('[ws] ignoring message type', (msg as { type: string }).type);
+  }
+}
+// Note: session:reset/takeover, slash:execute, transcript:load_more are
+// intentionally not yet handled — added by M2 (slash + load_more).
+//
+// `_broadcaster` parameter and `_ws` retained on dispatch for future use by
+// per-client responses; treat as the WS sender for ack/error replies.
