@@ -19,6 +19,87 @@ import type { RepoInfo, WorkspaceTree } from '../api.js';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 
+// ── V2 icon set ─────────────────────────────────────────────────────────────
+// Paths copied verbatim from design/gian-design-v2/js/data.jsx (`I`). Only the
+// ones used by Spaces / Bots views are inlined here — keep this list narrow.
+const I = {
+  folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+  kebabV: 'M12 5.01v-.02 M12 12.01v-.02 M12 19.01v-.02',
+  plus: 'M12 5v14 M5 12h14',
+  github: 'M9 19c-4.5 1.5-4.5-2.5-6-3 m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.3 4.3 0 0 0-.1-3.2s-1.1-.3-3.5 1.3a12 12 0 0 0-6 0C6.7 2.8 5.6 3.1 5.6 3.1a4.3 4.3 0 0 0-.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21',
+  check: 'M5 12l5 5L20 7',
+  info: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 8v.01 M11 12h1v5h1',
+  copy: 'M9 9h10v10H9z M5 15V5h10',
+  trash: 'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13',
+  edit: 'M4 20h4l10-10-4-4L4 16z M14 6l4 4',
+  eye: 'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z',
+};
+
+export function Icon({
+  d,
+  size = 16,
+  stroke = 1.6,
+  className,
+}: {
+  d: string;
+  size?: number;
+  stroke?: number;
+  className?: string;
+}) {
+  // V2's icon paths are space-separated `M…` subpaths intended to be rendered
+  // as one `<path>`. The browser parses them correctly when joined; splitting
+  // would lose the chain. So we just emit a single <path d=...>.
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={stroke}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d={d} />
+    </svg>
+  );
+}
+
+export function BranchIcon({ size = 11 }: { size?: number }) {
+  return (
+    <svg
+      className="branch-ico"
+      viewBox="0 0 16 16"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="4" cy="3.5" r="1.6" />
+      <circle cx="4" cy="12.5" r="1.6" />
+      <circle cx="12" cy="6" r="1.6" />
+      <path d="M4 5v6 M4 11c0-3 8-2 8-4.5" />
+    </svg>
+  );
+}
+
+// Hover-anchored "?" hint used to inline-explain jargon — copied verbatim
+// from V2's HelpHint.
+function HelpHint({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="help-hint" tabIndex={0}>
+      <span className="help-hint-trigger" aria-label="More info">
+        <Icon d={I.info} size={12} stroke={1.8} />
+      </span>
+      <span className="help-hint-pop" role="tooltip">{children}</span>
+    </span>
+  );
+}
+
 type WsTab = 'config' | 'native';
 
 type NewWorkspaceSource = 'new' | 'adopt';
@@ -209,7 +290,7 @@ function SpacesList({
       <div className="spaces-list-head">
         <div className="spaces-list-head-row">
           <span className="sidebar-title">{t('spaces.title')}</span>
-          <button className="btn sm primary" onClick={onNewClick}>{t('spaces.new')}</button>
+          <button className="btn sm primary" aria-label="New workspace" onClick={onNewClick}>{t('spaces.new')}</button>
         </div>
         <div className="spaces-list-head-sub">root: <span className="spaces-list-head-sub-val">{workspaceRoot}</span></div>
       </div>
@@ -221,7 +302,16 @@ function SpacesList({
             <div
               key={ws.id}
               className={`spaces-list-row${selectedId === ws.id ? ' active' : ''}`}
+              data-testid={`workspace-row-${ws.id}`}
+              role="button"
+              tabIndex={0}
               onClick={() => onSelect(ws.id)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onSelect(ws.id);
+                }
+              }}
             >
               <div className="spaces-list-row-info">
                 <span className="spaces-ws-name">{ws.name}</span>
@@ -325,6 +415,7 @@ function NewWorkspaceForm({
         <div className="spaces-new-path-row">
           <input
             className="input"
+            aria-label="Workspace path"
             placeholder="/Users/you/Code/some-project or ~/Code/some-project"
             value={form.path}
             onChange={e => changePath(e.target.value)}
@@ -339,6 +430,7 @@ function NewWorkspaceForm({
       )}
       <input
         className="input"
+        aria-label="Workspace name"
         placeholder="Name (a-z A-Z 0-9 . _ -)"
         value={form.name}
         onChange={e => onChange({ name: e.target.value, nameTouched: true })}
@@ -347,6 +439,7 @@ function NewWorkspaceForm({
       {!isAdopt && (
         <input
           className="input"
+          aria-label="Git remote URL"
           placeholder="Git remote URL (optional)"
           value={form.gitRemote}
           onChange={e => onChange({ gitRemote: e.target.value })}
@@ -429,7 +522,19 @@ function SpaceDetail({
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [saving, setSaving] = useState<string | null>(null);
+  const [tab, setTab] = useState<WsTab>('config');
+  const [nativeCount, setNativeCount] = useState<number | null>(null);
   void saving;
+
+  // Refresh native-session badge count when workspace changes.
+  useEffect(() => {
+    if (!workspace) { setNativeCount(null); return; }
+    let cancelled = false;
+    void loadNativeSessions(workspace.id).then(list => {
+      if (!cancelled) setNativeCount(list.length);
+    });
+    return () => { cancelled = true; };
+  }, [workspace?.id]);
 
   if (!workspace) {
     return (
@@ -474,47 +579,59 @@ function SpaceDetail({
 
   return (
     <main className="main">
-      <div className="spaces-detail-head">
-        <div className="spaces-detail-head-l">
-          {nameEdit !== null ? (
-            <input
-              className="input spaces-name-input"
-              value={nameEdit}
-              autoFocus
-              onChange={e => setNameEdit(e.target.value)}
-              onBlur={() => void commitNameEdit()}
-              onKeyDown={e => { if (e.key === 'Enter') void commitNameEdit(); if (e.key === 'Escape') setNameEdit(null); }}
+      <div className="main-scroll">
+        <div className="detail">
+          <div className="detail-head-row">
+            {nameEdit !== null ? (
+              <input
+                className="input spaces-name-input"
+                value={nameEdit}
+                autoFocus
+                onChange={e => setNameEdit(e.target.value)}
+                onBlur={() => void commitNameEdit()}
+                onKeyDown={e => { if (e.key === 'Enter') void commitNameEdit(); if (e.key === 'Escape') setNameEdit(null); }}
+              />
+            ) : (
+              <h1 onClick={() => setNameEdit(workspace.name)}>{workspace.name}</h1>
+            )}
+            <div className="detail-head-actions">
+              {deleteError && <span className="spaces-error">{deleteError}</span>}
+              <WorkspaceKebab
+                onRename={() => setNameEdit(workspace.name)}
+                onDelete={() => void handleDelete()}
+                deleting={deleting}
+              />
+            </div>
+          </div>
+          <div className="detail-sub">{workspace.path}</div>
+          <div className="detail-tabs">
+            <button
+              className={`detail-tab ${tab === 'config' ? 'active' : ''}`}
+              onClick={() => setTab('config')}
+            >
+              Config
+            </button>
+            <button
+              className={`detail-tab ${tab === 'native' ? 'active' : ''}`}
+              onClick={() => setTab('native')}
+            >
+              Native sessions {nativeCount !== null && <span className="count">{nativeCount}</span>}
+            </button>
+          </div>
+          {tab === 'config' ? (
+            <ConfigPane
+              workspace={workspace}
+              relatedSessions={relatedSessions}
+              onOpenClaudeMd={onOpenClaudeMd}
+              onChange={onChange}
+              onCreateWorktreeSession={onCreateWorktreeSession}
+              t={t}
             />
           ) : (
-            <h2 className="spaces-detail-name" onClick={() => setNameEdit(workspace.name)}>
-              {workspace.name}
-            </h2>
+            <NativeSessionsPane workspace={workspace} onChange={onChange} />
           )}
         </div>
-        <div className="spaces-detail-head-r">
-          {deleteError && <span className="spaces-error">{deleteError}</span>}
-          <WorkspaceKebab
-            onRename={() => setNameEdit(workspace.name)}
-            onDelete={() => void handleDelete()}
-            deleting={deleting}
-          />
-        </div>
       </div>
-
-      <WorkspaceTabs workspace={workspace} sessionCount={relatedSessions.length}>
-        {(activeTab) => activeTab === 'config' ? (
-          <ConfigPane
-            workspace={workspace}
-            relatedSessions={relatedSessions}
-            onOpenClaudeMd={onOpenClaudeMd}
-            onChange={onChange}
-            onCreateWorktreeSession={onCreateWorktreeSession}
-            t={t}
-          />
-        ) : (
-          <NativeSessionsPane workspace={workspace} onChange={onChange} />
-        )}
-      </WorkspaceTabs>
     </main>
   );
 }
@@ -558,55 +675,6 @@ function WorkspaceKebab({
         </div>
       )}
     </div>
-  );
-}
-
-function WorkspaceTabs({
-  workspace,
-  sessionCount,
-  children,
-}: {
-  workspace: Workspace;
-  sessionCount: number;
-  children: (active: WsTab) => React.ReactNode;
-}) {
-  const [active, setActive] = useState<WsTab>('config');
-  const [nativeCount, setNativeCount] = useState<number | null>(null);
-
-  // Lightweight count fetch for the tab badge — same endpoint the tab body
-  // uses, just for the number. Refreshed when workspace changes.
-  useEffect(() => {
-    let cancelled = false;
-    void loadNativeSessions(workspace.id).then(list => {
-      if (!cancelled) setNativeCount(list.length);
-    });
-    return () => { cancelled = true; };
-  }, [workspace.id]);
-
-  void sessionCount; // available if we ever want to display Gian session count too
-  return (
-    <>
-      <nav className="ws-tabs" role="tablist">
-        <button
-          role="tab"
-          aria-selected={active === 'config'}
-          className={`ws-tab${active === 'config' ? ' active' : ''}`}
-          onClick={() => setActive('config')}
-        >
-          Config
-        </button>
-        <button
-          role="tab"
-          aria-selected={active === 'native'}
-          className={`ws-tab${active === 'native' ? ' active' : ''}`}
-          onClick={() => setActive('native')}
-        >
-          Native Sessions
-          {nativeCount !== null && <span className="ws-tab-count">{nativeCount}</span>}
-        </button>
-      </nav>
-      {children(active)}
-    </>
   );
 }
 
@@ -666,139 +734,128 @@ function ConfigPane({
   const createdMonth = created.toLocaleString(undefined, { month: 'short', day: 'numeric' });
   const createdRel = relTime(workspace.created_at);
 
+  const dirtyCount = trees.filter(tr => tr.isDirty).length;
+  const remoteHref = repo?.git.remote
+    ? (repo.git.remote.startsWith('http') ? repo.git.remote : `https://${repo.git.remote}`)
+    : null;
+
   void relatedSessions;
 
   return (
-    <div className="spaces-detail-body">
-      <div className="cfg-stats">
-        <div className="cfg-stat">
-          <span className="cfg-stat-label">Native sessions</span>
-          <span className="cfg-stat-value">{native.length}</span>
-          <span className="cfg-stat-sub">{ccCount} claude · {codexCount} codex</span>
+    <>
+      <div className="stat-grid">
+        <div className="stat-card">
+          <div className="k">Native sessions</div>
+          <div className="v">{native.length}<span className="sub">{ccCount}cc · {codexCount}cx</span></div>
         </div>
-        <div className="cfg-stat">
-          <span className="cfg-stat-label">Adopted</span>
-          <span className="cfg-stat-value">{adoptedCount}</span>
-          <span className="cfg-stat-sub">linked to Gian sessions</span>
+        <div className="stat-card">
+          <div className="k">Adopted</div>
+          <div className="v">{adoptedCount}<span className="sub">/ {native.length}</span></div>
         </div>
-        <div className="cfg-stat">
-          <span className="cfg-stat-label">Last activity</span>
-          <span className="cfg-stat-value-mono">{lastNativeRel}</span>
-          <span className="cfg-stat-sub">
-            {lastNativeAdopted ? `via ${lastNativeAdopted}` : (lastNative ? `${lastNative.executor}` : 'no sessions yet')}
+        <div className="stat-card">
+          <div className="k">Last activity</div>
+          <div className="v">{lastNativeRel}{lastNativeAdopted && <span className="sub">via {lastNativeAdopted}</span>}</div>
+        </div>
+        <div className="stat-card">
+          <div className="k">Created</div>
+          <div className="v">{createdMonth}<span className="sub">{createdRel}</span></div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          <h3>Repository</h3>
+          <span className="aside">git remote · default branch · last commit</span>
+          {remoteHref && (
+            <div className="right">
+              <a className="btn ghost sm" href={remoteHref} target="_blank" rel="noreferrer">
+                <Icon d={I.github} size={13} />View on GitHub
+              </a>
+            </div>
+          )}
+        </div>
+        <div className="card-body">
+          <dl className="kv-grid">
+            <dt>Local path</dt><dd>{workspace.path}</dd>
+            <dt>Remote</dt><dd>{repo?.git.remote || '—'}</dd>
+            <dt>Default branch</dt><dd>{repo?.git.defaultBranch || 'main'}</dd>
+            {repo?.git.lastCommit && (
+              <>
+                <dt>Last commit</dt>
+                <dd style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                  <span>{repo.git.lastCommit.hash}</span>
+                  <span style={{ color: 'var(--text-3)', fontFamily: 'var(--font-sans)' }}>
+                    {repo.git.lastCommit.message} · {repo.git.lastCommit.age}
+                  </span>
+                </dd>
+              </>
+            )}
+          </dl>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          <h3>
+            Worktrees
+            <HelpHint>
+              A <b>worktree</b> is a separate checkout of the repo on disk —
+              each sits in its own folder with one branch checked out. Gian
+              spins up one worktree per session so agents can work on
+              different branches without colliding.
+            </HelpHint>
+          </h3>
+          <span className="aside">{trees.length} on disk · {dirtyCount} dirty</span>
+          {repo?.git.isRepo && (
+            <div className="right">
+              <button className="btn primary sm" onClick={() => setNewWorktreeOpen(true)}>
+                <Icon d={I.plus} size={11} stroke={2.4} />New worktree
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="card-body compact">
+          {trees.map(tree => (
+            <WorkspaceTreeRow
+              key={tree.id}
+              tree={tree}
+              onOpenClaudeMd={tree.kind === 'main' ? onOpenClaudeMd : undefined}
+              onRefresh={() => { void refreshTrees(); onChange(); }}
+            />
+          ))}
+          {trees.length === 0 && !treesLoaded && (
+            <div className="wt-row" style={{ color: 'var(--text-3)' }}>
+              <span className="spinner" aria-hidden="true" />
+              <span>Loading worktrees…</span>
+            </div>
+          )}
+          {trees.length === 0 && treesLoaded && (
+            <div className="wt-row" style={{ color: 'var(--text-3)' }}>
+              No worktrees yet.
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* TODO Phase 5 backend — list local branches not in any worktree. */}
+      <div className="card">
+        <div className="card-head">
+          <h3>
+            Other local branches
+            <HelpHint>
+              Branches that exist locally but aren't checked out in any
+              worktree. Spin one up to start a session on it.
+            </HelpHint>
+          </h3>
+          <span className="aside">— branches · not in any worktree</span>
+        </div>
+        <div className="card-body compact">
+          <span style={{ padding: '6px 12px', color: 'var(--text-3)', fontSize: 11, fontStyle: 'italic' }}>
+            Backend support coming soon
           </span>
         </div>
-        <div className="cfg-stat">
-          <span className="cfg-stat-label">Created</span>
-          <span className="cfg-stat-value-mono">{createdMonth}</span>
-          <span className="cfg-stat-sub">{createdRel}</span>
-        </div>
       </div>
 
-      <div className="cfg-grid">
-        <div className="cfg-card full">
-          <div className="cfg-card-head">
-            <span className="cfg-card-title">Repository</span>
-            {repo?.git.remote && (
-              <a
-                className="cfg-card-action"
-                href={repo.git.remote.startsWith('http') ? repo.git.remote : `https://${repo.git.remote}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                View on GitHub
-              </a>
-            )}
-          </div>
-          <div className="cfg-card-body">
-            <div className="cfg-kv">
-              <span className="cfg-kv-key">Local path</span>
-              <span className="cfg-kv-val mono">{workspace.path}</span>
-            </div>
-            {repo?.git.isRepo ? (
-              <>
-                {repo.git.remote && (
-                  <div className="cfg-kv">
-                    <span className="cfg-kv-key">Remote</span>
-                    <span className="cfg-kv-val mono">
-                      <a
-                        className="cfg-kv-link"
-                        href={`https://${repo.git.remote}`}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        {repo.git.remote}
-                      </a>
-                    </span>
-                  </div>
-                )}
-                {repo.git.defaultBranch && (
-                  <div className="cfg-kv">
-                    <span className="cfg-kv-key">Default branch</span>
-                    <span className="cfg-kv-val">
-                      <span className="cfg-branch-pill">{repo.git.defaultBranch}</span>
-                    </span>
-                  </div>
-                )}
-                {repo.git.lastCommit && (
-                  <div className="cfg-kv">
-                    <span className="cfg-kv-key">Last commit</span>
-                    <span className="cfg-kv-val">
-                      <span className="cfg-commit-mono">{repo.git.lastCommit.hash}</span>
-                      <span style={{ color: 'var(--text-3)', fontSize: '11px' }}>
-                        {repo.git.lastCommit.message} · {repo.git.lastCommit.age}
-                      </span>
-                    </span>
-                  </div>
-                )}
-              </>
-            ) : repo ? (
-              <div className="cfg-kv">
-                <span className="cfg-kv-key">Status</span>
-                <span className="cfg-kv-val" style={{ color: 'var(--text-3)' }}>not a git repository</span>
-              </div>
-            ) : null}
-          </div>
-        </div>
-
-        <div className="cfg-card full">
-          <div className="cfg-card-head">
-            <span className="cfg-card-title">
-              Workspace Trees · {trees.length}
-            </span>
-            {repo?.git.isRepo && (
-              <button
-                className="cfg-card-action"
-                onClick={() => setNewWorktreeOpen(true)}
-                title="Create a new git worktree + session"
-              >
-                + New worktree
-              </button>
-            )}
-          </div>
-          <div className="cfg-card-body compact">
-            {trees.map(tree => (
-              <WorkspaceTreeRow
-                key={tree.id}
-                tree={tree}
-                onOpenClaudeMd={tree.kind === 'main' ? onOpenClaudeMd : undefined}
-                onRefresh={() => { void refreshTrees(); onChange(); }}
-              />
-            ))}
-            {trees.length === 0 && !treesLoaded && (
-              <div className="cfg-wt-row cfg-wt-loading">
-                <span className="spinner" aria-hidden="true" />
-                <span>Loading worktrees…</span>
-              </div>
-            )}
-            {trees.length === 0 && treesLoaded && (
-              <div className="cfg-wt-row" style={{ color: 'var(--text-3)' }}>
-                No worktrees yet.
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
       {newWorktreeOpen && (
         <NewWorktreeDialog
           workspace={workspace}
@@ -819,7 +876,7 @@ function ConfigPane({
           }}
         />
       )}
-    </div>
+    </>
   );
 }
 
@@ -833,51 +890,37 @@ function WorkspaceTreeRow({
   onRefresh: () => void;
 }) {
   const isMain = tree.kind === 'main';
+  const state = tree.isDirty ? 'dirty' : 'clean';
+  const branchLabel = tree.branch ?? tree.label;
+  const sessionLabel = tree.session
+    ? (tree.session.name ?? tree.session.id.slice(0, 6))
+    : null;
   return (
-    <div className={`cfg-wt-row${isMain ? ' main-tree' : ''}`}>
-      <svg className="cfg-wt-icon" viewBox="0 0 16 16" fill="none">
-        {isMain ? (
-          <path
-            d="M2 4a1 1 0 011-1h3l2 2h5a1 1 0 011 1v6a1 1 0 01-1 1H3a1 1 0 01-1-1z"
-            stroke="currentColor"
-            strokeWidth="1.4"
-            strokeLinejoin="round"
-          />
-        ) : (
-          <>
-            <circle cx="4" cy="4" r="1.5" stroke="currentColor" strokeWidth="1.4" />
-            <circle cx="12" cy="12" r="1.5" stroke="currentColor" strokeWidth="1.4" />
-            <circle cx="4" cy="12" r="1.5" stroke="currentColor" strokeWidth="1.4" />
-            <path d="M4 5.5v5M5.5 12h5M5 5l5 7" stroke="currentColor" strokeWidth="1.2" />
-          </>
-        )}
-      </svg>
-      <div className="cfg-wt-info">
-        <span className="cfg-wt-branch">{tree.branch ?? tree.label}</span>
-        {isMain ? <span className="cfg-wt-tag">main tree</span> : null}
+    <div className="wt-row">
+      <span className="wt-ico">
+        {isMain ? <Icon d={I.folder} size={15} /> : <BranchIcon size={14} />}
+      </span>
+      <div className="wt-branch">
+        {branchLabel}
+        {isMain && <span className="main-tag">main tree</span>}
       </div>
       <button
-        className={`cfg-wt-claude${tree.claudeMd.exists ? '' : ' empty'}`}
+        className={`wt-claude ${tree.claudeMd.exists ? '' : 'empty'}`}
         title={tree.claudeMd.exists ? 'Edit CLAUDE.md' : 'Create CLAUDE.md'}
         onClick={onOpenClaudeMd}
         disabled={!onOpenClaudeMd}
+        style={{ background: 'none', border: 0, padding: 0, cursor: onOpenClaudeMd ? 'pointer' : 'default', font: 'inherit', color: 'inherit', textAlign: 'left' }}
       >
-        <svg viewBox="0 0 16 16" fill="none">
-          <path d="M3 2h6l3 3v9H3z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
-          <path d="M9 2v3h3" stroke="currentColor" strokeWidth="1.4" />
-        </svg>
-        {tree.claudeMd.exists ? 'CLAUDE.md' : '+ CLAUDE.md'}
-        {tree.claudeMd.exists && <span className="lines">{tree.claudeMd.lines}L</span>}
+        {tree.claudeMd.exists ? `CLAUDE.md · ${tree.claudeMd.lines} lines` : '+ CLAUDE.md'}
       </button>
-      <span className={`cfg-wt-state ${tree.isDirty ? 'dirty' : 'clean'}`}>
-        {tree.isDirty ? `${tree.modifiedCount} modified` : 'clean'}
-      </span>
-      {tree.session ? (
-        <span className="cfg-wt-session" title={`Linked to ${tree.session.name ?? tree.session.id}`}>
-          {tree.session.name ?? tree.session.id.slice(0, 6)}
-        </span>
+      <div className={`wt-state ${state}`}>
+        <span className="dot" />
+        {state === 'clean' ? 'clean' : `${tree.modifiedCount} changed`}
+      </div>
+      {sessionLabel ? (
+        <a className="wt-session" href="#" onClick={e => e.preventDefault()}>{sessionLabel}</a>
       ) : (
-        <span className="cfg-wt-session muted" title="Not bound to a Gian session">no session</span>
+        <span className="wt-session none">—</span>
       )}
       <WorkspaceTreeRowKebab tree={tree} onRefresh={onRefresh} />
     </div>
@@ -948,12 +991,12 @@ function WorkspaceTreeRowKebab({
   return (
     <div className="ws-kebab-anchor" ref={ref}>
       <button
-        className="ws-kebab-btn"
+        className="wt-kebab"
         onClick={() => setOpen(o => !o)}
         title="More"
         aria-label="More actions"
       >
-        ⋯
+        <Icon d={I.kebabV} size={14} />
       </button>
       {open && (
         <div className="ws-kebab-pop">
@@ -1035,43 +1078,54 @@ function NativeSessionsPane({
   }
 
   return (
-    <div className="ns-pane">
-      <p className="ns-pane-sub">
-        All claude code and codex sessions that ran inside this workspace's path. Adopt one to continue inside Gian.
-      </p>
-
-      <div className="ns-filterbar">
-        <div className="ns-filter-group">
-          <span className="ns-filter-label">Executor</span>
-          <button className={`ns-chip${executor === 'all' ? ' active' : ''}`} onClick={() => setExecutor('all')}>All</button>
-          <button className={`ns-chip ns-chip-claude${executor === 'claude' ? ' active' : ''}`} onClick={() => setExecutor('claude')}>Claude</button>
-          <button className={`ns-chip ns-chip-codex${executor === 'codex' ? ' active' : ''}`} onClick={() => setExecutor('codex')}>Codex</button>
+    <>
+      <div style={{ font: 'var(--fz-12)/1.5 var(--font-sans)', color: 'var(--text-2)', marginTop: -4, marginBottom: 14, display: 'inline-flex', alignItems: 'flex-start', gap: 4, flexWrap: 'wrap' }}>
+        <span>
+          Sessions discovered on disk under <span className="mono">~/.claude</span> / <span className="mono">~/.codex</span>. <b>Adopt</b> a session to manage it from Gian.
+        </span>
+        <HelpHint>
+          The Claude / Codex CLIs each keep their own session history. Gian
+          can <b>adopt</b> them — import the transcript and start tracking
+          new turns — without changing where the CLI writes them.
+        </HelpHint>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+        <div className="segm">
+          <button className={`segm-item${executor === 'all' ? ' active' : ''}`} onClick={() => setExecutor('all')}>All</button>
+          <button className={`segm-item${executor === 'claude' ? ' active' : ''}`} onClick={() => setExecutor('claude')}>Claude</button>
+          <button className={`segm-item${executor === 'codex' ? ' active' : ''}`} onClick={() => setExecutor('codex')}>Codex</button>
         </div>
-        <div className="ns-filter-group">
-          <span className="ns-filter-label">Status</span>
-          <button className={`ns-chip${status === 'all' ? ' active' : ''}`} onClick={() => setStatus('all')}>All</button>
-          <button className={`ns-chip${status === 'adopted' ? ' active' : ''}`} onClick={() => setStatus('adopted')}>Adopted</button>
-          <button className={`ns-chip${status === 'available' ? ' active' : ''}`} onClick={() => setStatus('available')}>Available</button>
+        <div className="segm">
+          <button className={`segm-item${status === 'all' ? ' active' : ''}`} onClick={() => setStatus('all')}>All</button>
+          <button className={`segm-item${status === 'adopted' ? ' active' : ''}`} onClick={() => setStatus('adopted')}>Adopted</button>
+          <button className={`segm-item${status === 'available' ? ' active' : ''}`} onClick={() => setStatus('available')}>Available</button>
         </div>
-        <div className="ns-filterbar-spacer" />
-        <span className="ns-count"><strong>{filtered.length}</strong> sessions</span>
+        <span style={{ marginLeft: 'auto', font: '500 10.5px/1 var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-3)' }}>
+          {filtered.length} sessions
+        </span>
       </div>
 
       {error && <p className="spaces-error">{error}</p>}
 
-      <div className="ns-list">
-        {loading && <p className="ns-empty">Loading…</p>}
-        {!loading && filtered.length === 0 && (
-          <p className="ns-empty">No native sessions in this workspace.</p>
-        )}
-        {filtered.map(s => (
-          <NativeSessionRow
-            key={`${s.executor}:${s.id}`}
-            session={s}
-            onAdopt={() => setAdoptingFor(s)}
-            onDelete={() => void handleDelete(s)}
-          />
-        ))}
+      <div className="card">
+        <div className="card-body compact">
+          {loading && (
+            <div style={{ padding: '12px 12px', color: 'var(--text-3)' }}>Loading…</div>
+          )}
+          {!loading && filtered.length === 0 && (
+            <div style={{ padding: '12px 12px', color: 'var(--text-3)' }}>
+              No native sessions in this workspace.
+            </div>
+          )}
+          {filtered.map(s => (
+            <NativeSessionRow
+              key={`${s.executor}:${s.id}`}
+              session={s}
+              onAdopt={() => setAdoptingFor(s)}
+              onDelete={() => void handleDelete(s)}
+            />
+          ))}
+        </div>
       </div>
 
       {adoptingFor && (
@@ -1086,7 +1140,7 @@ function NativeSessionsPane({
           workspaceId={workspace.id}
         />
       )}
-    </div>
+    </>
   );
 }
 
@@ -1123,50 +1177,60 @@ function NativeSessionRow({
     }
   }
   const adopted = !!session.adoptedBy;
-  const wtName = session.cwd ? session.cwd.split('/').filter(Boolean).slice(-1)[0] : '';
+  const adoptedName = session.adoptedBy?.gianSessionName ?? session.adoptedBy?.gianSessionId.slice(0, 8);
   return (
-    <div className={`ns-row${adopted ? ' adopted' : ''}`}>
-      <div className="ns-executor">
-        <span className={`ns-exec-dot ${session.executor}`} />
-        <span className="ns-exec-name">{session.executor}</span>
-      </div>
-      <div className="ns-meta">
-        <span className="ns-meta-time">{relTime(session.updatedAt)}</span>
-        <span className="ns-meta-sep">·</span>
-        <span className="ns-meta-turns">{session.turnCount} turns</span>
-        <span className="ns-meta-sep">·</span>
-        <span className="ns-meta-size" title={`JSONL ${session.fileSize.toLocaleString()} bytes`}>{fmtBytes(session.fileSize)}</span>
-        {wtName && (
-          <>
-            <span className="ns-meta-sep">·</span>
-            <span className="ns-meta-wt" title={session.cwd}>{wtName}</span>
-          </>
-        )}
-      </div>
-      <div className="ns-preview-row">
-        {session.gitBranch && (
-          <span className="ns-branch-chip" title={session.gitBranch}>{session.gitBranch}</span>
-        )}
-        <div className="ns-preview" title={session.firstUserMessage}>
+    <div
+      className="wt-row"
+      style={{ gridTemplateColumns: '18px 1fr auto 110px 22px', alignItems: 'start' }}
+    >
+      <span className="wt-ico" style={{ paddingTop: 2 }}>
+        <span
+          style={{
+            display: 'inline-block',
+            width: 8,
+            height: 8,
+            borderRadius: '50%',
+            background: session.executor === 'claude' ? 'var(--claude)' : 'var(--codex)',
+          }}
+        />
+      </span>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ font: 'var(--fz-13)/1.3 var(--font-sans)', fontWeight: 500, color: 'var(--text)' }}>
+            {adopted ? adoptedName : (
+              <span style={{ color: 'var(--text-3)', fontStyle: 'italic' }}>unadopted session</span>
+            )}
+          </span>
+          {session.gitBranch && (
+            <span className="mono" style={{ color: 'var(--text-3)', fontSize: 11 }}>{session.gitBranch}</span>
+          )}
+          <span className="mono" style={{ color: 'var(--text-3)', fontSize: 11 }}>
+            · {relTime(session.updatedAt)} · {session.turnCount} turns · {fmtBytes(session.fileSize)}
+          </span>
+        </div>
+        <div style={{ color: 'var(--text-2)', fontSize: 12, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {session.firstUserMessage || '(no user message)'}
         </div>
       </div>
-      <div className="ns-actions" ref={ref}>
-        {adopted ? (
-          <span className="ns-adopted-chip" title="Open the linked Gian session">
-            ✓ Adopted as <span className="ns-adopted-chip-name">{session.adoptedBy!.gianSessionName ?? session.adoptedBy!.gianSessionId.slice(0, 8)}</span>
-          </span>
-        ) : (
-          <button className="ns-adopt-btn" onClick={onAdopt}>Adopt</button>
-        )}
+      <span />
+      {adopted ? (
+        <span style={{ font: '500 12px/1.4 var(--font-sans)', color: 'var(--ok)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <Icon d={I.check} size={12} stroke={2.4} /> Adopted
+        </span>
+      ) : (
+        <button className="btn primary sm" onClick={onAdopt}>Adopt</button>
+      )}
+      <div className="ws-kebab-anchor" ref={ref}>
         <button
-          className="ns-row-kebab"
+          className="wt-kebab"
           onClick={() => setMenuOpen(o => !o)}
           title="More"
           aria-label="More actions"
-        >⋯</button>
+        >
+          <Icon d={I.kebabV} size={14} />
+        </button>
         {menuOpen && (
-          <div className="ns-row-kebab-pop">
+          <div className="ws-kebab-pop">
             <button
               className="ws-kebab-item"
               onClick={() => void copyId()}

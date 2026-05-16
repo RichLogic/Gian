@@ -41,11 +41,12 @@ export function GitBadge({
   }, [workingTreeId, refreshKey]);
 
   if (!workingTreeId) return null;
+  // Per design decision §B2: main-head chip shows ONLY the +N/-M diff stats,
+  // not the branch name (that's already in PathBreadcrumb). Hide entirely
+  // when the tree is clean — there's nothing to flag.
+  if (!stats || stats.count === 0) return null;
 
-  const tooltip = stats
-    ? `${stats.count} file${stats.count === 1 ? '' : 's'} changed · click to view diff`
-    : 'View diff';
-
+  const tooltip = `${stats.count} file${stats.count === 1 ? '' : 's'} changed${branch ? ` on ${branch}` : ''} · open Changes inspector`;
   return (
     <button
       type="button"
@@ -53,22 +54,8 @@ export function GitBadge({
       onClick={onClick}
       title={tooltip}
     >
-      <svg className="ghb-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-        {/* simple branch glyph: two dots joined by a forked line */}
-        <circle cx="4" cy="3.5" r="1.5" stroke="currentColor" strokeWidth="1.4" />
-        <circle cx="4" cy="12.5" r="1.5" stroke="currentColor" strokeWidth="1.4" />
-        <circle cx="12" cy="6" r="1.5" stroke="currentColor" strokeWidth="1.4" />
-        <path d="M4 5v6M4 8c0-2 2-2 4-2h2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-      </svg>
-      <span className="ghb-branch">{branch ?? 'no branch'}</span>
-      {isWorktree && <span className="ghb-wt">wt</span>}
-      {stats && stats.count > 0 && (
-        <>
-          <span className="scr-plus">+{fmtCount(stats.added)}</span>
-          <span className="scr-minus">−{fmtCount(stats.removed)}</span>
-        </>
-      )}
-      {stats && stats.count === 0 && <span className="ghb-clean">clean</span>}
+      <span className="scr-plus">+{fmtCount(stats.added)}</span>
+      <span className="scr-minus">−{fmtCount(stats.removed)}</span>
     </button>
   );
 }

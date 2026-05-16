@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalDecision } from '@gian/shared';
 import type { TranscriptItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
@@ -164,7 +164,7 @@ function TurnActionsBlock({
   const tally = countActions(block.items);
   return (
     <div className={`evt actions ${open ? 'open' : ''}`}>
-      <div className="evt-head" onClick={() => setOpen(o => !o)}>
+      <div className="evt-head" onClick={() => setOpen((o: boolean) => !o)}>
         <Caret />
         <span className="evt-verb">{block.isTrailing ? 'Working' : 'Steps'}</span>
         <span className="evt-subject">
@@ -217,15 +217,27 @@ export function Transcript({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const currentUserRef = useRef<HTMLDivElement | null>(null);
-  const [pinVisible, setPinVisible] = useState(false);
 
   // Track the trailing assistant bubble's text length too — codex streams
   // deltas into the last bubble, so items.length alone misses growth.
   const tailLen = items.length > 0 && 'text' in items[items.length - 1]!
     ? (items[items.length - 1] as { text: string }).text.length
     : 0;
-  useEffect(() => {
-    ref.current?.scrollTo({ top: ref.current.scrollHeight, behavior: 'smooth' });
+  // Scroll to bottom on every items change. The actual scroll container is
+  // CodingView's `.main-scroll` wrapper (V2-style island), not our local
+  // `.transcript-wrap`, so we walk up via closest(). Jam scrollTop twice —
+  // synchronously and on next rAF — to absorb async layout shifts from
+  // ReactMarkdown / syntax highlight that grow the transcript after the
+  // initial measurement.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const scroller = (el.closest('.main-scroll') as HTMLElement | null) ?? el;
+    scroller.scrollTop = scroller.scrollHeight;
+    const id = window.requestAnimationFrame(() => {
+      scroller.scrollTop = scroller.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(id);
   }, [items.length, tailLen, pending]);
 
   // Find the most recent user message — that's the "current" turn's user input.
@@ -237,33 +249,6 @@ export function Transcript({
     return null;
   }, [items]);
 
-  // Pin sticky bar when the current user message is fully scrolled above the viewport.
-  useEffect(() => {
-    setPinVisible(false);
-    const el = currentUserRef.current;
-    const root = ref.current;
-    if (!el || !root || !currentUser) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const entry = entries[0];
-        if (!entry) return;
-        const rootBounds = entry.rootBounds;
-        if (!rootBounds) return;
-        // Show pin only when the user message has been scrolled fully above
-        // the viewport top — i.e. its bottom is above the scroll root's top.
-        const isAboveViewport = entry.boundingClientRect.bottom <= rootBounds.top;
-        setPinVisible(!entry.isIntersecting && isAboveViewport);
-      },
-      { root, threshold: 0 },
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [currentUser?.id]);
-
-  function scrollToCurrentUser() {
-    currentUserRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }
-
   // Hide the "thinking…" ticker once an assistant bubble exists for this
   // turn — codex streams text into it, so the ticker becomes redundant.
   // Approvals also count as content (we're waiting on the user, not codex).
@@ -271,35 +256,20 @@ export function Transcript({
   const showTicker = pending && lastItem?.kind !== 'assistant' && lastItem?.kind !== 'approval';
 
   return (
-    <div className="transcript-wrap" ref={ref}>
-      {pinVisible && currentUser && currentUser.kind === 'user' && (
-        <div
-          className="transcript-pin"
-          onClick={scrollToCurrentUser}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); scrollToCurrentUser(); } }}
-          aria-label="Scroll back to current user message"
-        >
-          <svg className="pin-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-            <path d="M8 13V3M8 3L4 7M8 3l4 4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-          <span className="pin-text">{truncate(currentUser.text, 80)}</span>
-        </div>
-      )}
-      <div className="transcript">
+    <div className="transcript" ref={ref}>
         {items.length === 0 && !pending && (
           <div className="transcript-empty">say hi to start the conversation</div>
         )}
         {(() => {
-          // Track the last visible sender so consecutive user/assistant
-          // messages from the same side collapse to a single avatar. Turn-
-          // actions blocks (the "WORKING N actions" wrapper) don't change
-          // the sender — when the agent emits multiple text blocks
-          // separated only by tool runs, we still treat them as one stretch.
+          // Track the last visible sender. The author header (Claude · time)
+          // hides for an *immediately consecutive* same-sender bubble (streaming
+          // chunks within a single text block). Any intervening item — user
+          // message, turn-actions block, approval, error, or diff — counts as
+          // a sender break, so the next text gets a fresh header.
           let prevSender: 'user' | 'claude' | 'codex' | null = null;
           return groupIntoBlocks(items).map((item) => {
             if (item.kind === 'turn-actions') {
+              prevSender = null;
               return <TurnActionsBlock key={item.id} block={item} onApprove={onApprove} />;
             }
             let hideAvatar = false;
@@ -310,7 +280,7 @@ export function Transcript({
               hideAvatar = prevSender === item.exec;
               prevSender = item.exec;
             } else if (item.kind === 'approval' || item.kind === 'error' || item.kind === 'diff') {
-              // Hard break — the next text message gets a fresh avatar.
+              // Hard break — the next text message gets a fresh header.
               prevSender = null;
             }
             return renderItem(
@@ -338,7 +308,6 @@ export function Transcript({
             </div>
           </div>
         )}
-      </div>
     </div>
   );
 }

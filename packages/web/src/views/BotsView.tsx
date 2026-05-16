@@ -1,8 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { Bot, BotExtra, BotMode, BotStatus, DiscordBotExtra, IMPlatform, Session, SlackBotExtra } from '@gian/shared';
+import type { Bot, BotExtra, BotMode, DiscordBotExtra, IMPlatform, Session, SlackBotExtra } from '@gian/shared';
 import { createBot, deleteBot, toggleBot, updateBot } from '../api.js';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
+import { Icon } from './SpacesView.js';
+
+// ── V2 icon paths used in BotsView (copied verbatim from
+//    design/gian-design-v2/js/data.jsx). ──
+const I = {
+  eye: 'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z',
+  check: 'M5 12l5 5L20 7',
+  copy: 'M9 9h10v10H9z M5 15V5h10',
+  trash: 'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13',
+};
 
 function relTime(iso: string): string {
   const ms = Date.now() - Date.parse(iso);
@@ -184,180 +194,194 @@ function NewBotForm({
   const se = form.extra as SlackBotExtra;
 
   return (
-    <main className="main bot-new-main">
-      <div className="bot-new-frame">
-        <header className="bot-new-head">
-          <div className="bot-new-head-l">
-            <h1 className="bot-new-title">Create a bot</h1>
-            <p className="bot-new-sub">Pair a Discord or Slack bot to a workspace.</p>
-          </div>
-          <button className="btn ghost sm" onClick={onCancel} disabled={saving}>
-            {t('bots.form.cancel')}
-          </button>
-        </header>
-
-        <div className="bot-new-platform-row">
-          <span className="bot-new-platform-lbl">Platform</span>
-          <div className="segm">
-            {(['discord', 'slack'] as IMPlatform[]).map(p => (
-              <button
-                key={p}
-                type="button"
-                className={`segm-item${form.platform === p ? ' active' : ''}`}
-                onClick={() => setPlatform(p)}
-              >
-                {p === 'discord' ? 'Discord' : 'Slack'}
+    <main className="main">
+      <div className="main-scroll">
+        <div className="detail">
+          <div className="bot-detail-head">
+            <span className="pmark" style={{ background: 'var(--surface-3)', color: 'var(--text-3)' }}>+</span>
+            <div className="info">
+              <div className="name">New bot</div>
+              <div className="sub" style={{ color: 'var(--text-3)', fontFamily: 'var(--font-sans)' }}>
+                Wire an IM channel into a Gian workspace
+              </div>
+            </div>
+            <div className="actions">
+              <button className="btn ghost" onClick={onCancel} disabled={saving}>
+                {t('bots.form.cancel')}
               </button>
-            ))}
-          </div>
-        </div>
-
-        <section className="fcard bot-new-card">
-          <div className="fcard-head">
-            <span className="bot-new-card-num">01</span>
-            <span className="bot-new-card-title">Identity</span>
-            <span className="bot-new-card-hint">how you'll recognize this bot</span>
-          </div>
-          <div className="fcard-body">
-            <div className="field">
-              <div className="field-lbl">{t('bots.form.label.label')}</div>
-              <input
-                className="input"
-                value={form.label}
-                placeholder="My Discord Bot"
-                onChange={e => patchForm({ label: e.target.value })}
-                autoFocus
-              />
-            </div>
-            <div className="field">
-              <div className="field-lbl">
-                <span>{t('bots.form.workspace.label')}</span>
-                <span className="field-hint">optional · bind later</span>
-              </div>
-              <select
-                className="select"
-                value={form.workspace_id}
-                onChange={e => patchForm({ workspace_id: e.target.value })}
-              >
-                <option value="">{t('bots.workspace.none')}</option>
-                {workspaces.map(w => (
-                  <option key={w.id} value={w.id}>{w.name}</option>
-                ))}
-              </select>
+              <button className="btn primary" onClick={() => void submit()} disabled={saving}>
+                {saving ? t('bots.form.creating') : t('bots.form.create')}
+              </button>
             </div>
           </div>
-        </section>
 
-        <section className="fcard bot-new-card">
-          <div className="fcard-head">
-            <span className="bot-new-card-num">02</span>
-            <span className="bot-new-card-title">Connection</span>
-            <span className="bot-new-card-hint">
-              {isDiscord ? 'credentials from Discord Developer Portal' : 'credentials from Slack app config'}
-            </span>
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ font: '600 10.5px/1 var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-3)', marginBottom: 8 }}>
+              Platform
+            </div>
+            <div className="segm">
+              {(['discord', 'slack'] as IMPlatform[]).map(p => (
+                <button
+                  key={p}
+                  type="button"
+                  className={`segm-item${form.platform === p ? ' active' : ''}`}
+                  onClick={() => setPlatform(p)}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                >
+                  <span style={{ width: 8, height: 8, borderRadius: 2, background: p === 'discord' ? 'var(--discord)' : 'var(--slack)' }} />
+                  {p === 'discord' ? 'Discord' : 'Slack'}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="fcard-body">
-            {isDiscord ? (
-              <>
-                <TokenField
-                  label="Bot Token"
-                  value={de.token ?? ''}
-                  onChange={v => patchExtra({ token: v })}
-                  placeholder="MTQyMDE2MjM2NDc4OTY..."
-                />
-                <div className="field">
-                  <div className="field-lbl">Application ID</div>
-                  <CopyableInput
-                    value={de.application_id ?? ''}
-                    placeholder="142016236478..."
-                    onChange={v => patchExtra({ application_id: v })}
-                  />
-                </div>
-              </>
-            ) : (
-              <>
-                <TokenField
-                  label="Bot Token"
-                  value={se.bot_token ?? ''}
-                  onChange={v => patchExtra({ bot_token: v })}
-                  placeholder="xoxb-…"
-                />
-                <TokenField
-                  label="App-level Token"
-                  value={se.app_token ?? ''}
-                  onChange={v => patchExtra({ app_token: v })}
-                  placeholder="xapp-…"
-                />
-                <div className="field">
-                  <div className="field-lbl">
-                    <span>Command Prefix</span>
-                    <span className="field-hint">how users invoke this bot</span>
-                  </div>
+
+          <div className="card">
+            <div className="card-head"><h3>01 · Identity</h3></div>
+            <div className="card-body">
+              <dl className="kv-grid" style={{ gridTemplateColumns: '120px 1fr' }}>
+                <dt>{t('bots.form.label.label')}</dt>
+                <dd>
                   <input
-                    className="input bot-mono-input"
-                    value={se.command_prefix ?? '/gian'}
-                    placeholder="/gian"
-                    onChange={e => patchExtra({ command_prefix: e.target.value })}
+                    className="input"
+                    style={{ width: '60%' }}
+                    placeholder={`my-${form.platform}-bot`}
+                    value={form.label}
+                    onChange={e => patchForm({ label: e.target.value })}
+                    autoFocus
                   />
-                </div>
-              </>
-            )}
-          </div>
-        </section>
-
-        <section className="fcard bot-new-card">
-          <div className="fcard-head">
-            <span className="bot-new-card-num">03</span>
-            <span className="bot-new-card-title">Permissions</span>
-            <span className="bot-new-card-hint">who can talk to this bot, what it can do</span>
-          </div>
-          <div className="fcard-body">
-            <div className="field">
-              <div className="field-lbl">{t('bots.form.mode.label')}</div>
-              <div className="segm">
-                {(['read-only', 'full-control'] as BotMode[]).map(m => (
-                  <button
-                    key={m}
-                    type="button"
-                    className={`segm-item${form.mode === m ? ' active' : ''}`}
-                    onClick={() => patchForm({ mode: m })}
+                </dd>
+                <dt>{t('bots.form.workspace.label')}</dt>
+                <dd>
+                  <select
+                    className="select"
+                    style={{ width: '60%' }}
+                    value={form.workspace_id}
+                    onChange={e => patchForm({ workspace_id: e.target.value })}
                   >
-                    {m === 'read-only' ? t('bots.mode.readonly') : t('bots.mode.fullcontrol')}
-                  </button>
-                ))}
-              </div>
-              <p className="field-hint bot-new-mode-hint">
-                {form.mode === 'read-only'
-                  ? t('bots.perm.mode.readonly.desc')
-                  : t('bots.perm.mode.fullcontrol.desc')}
-              </p>
-            </div>
-            <div className="field">
-              <div className="field-lbl">
-                <span>{t('bots.form.allowedusers.label')}</span>
-                <span className="field-hint">comma-separated</span>
-              </div>
-              <input
-                className="input bot-mono-input"
-                value={form.allowed_user_id}
-                placeholder="123456789, 987654321"
-                onChange={e => patchForm({ allowed_user_id: e.target.value })}
-              />
-              <p className="field-hint">{t('bots.perm.allowedusers.hint')}</p>
+                    <option value="">{t('bots.workspace.none')}</option>
+                    {workspaces.map(w => (
+                      <option key={w.id} value={w.id}>{w.name}</option>
+                    ))}
+                  </select>
+                </dd>
+              </dl>
             </div>
           </div>
-        </section>
 
-        {error && <p className="bot-error bot-new-error">{error}</p>}
+          <div className="card">
+            <div className="card-head">
+              <h3>02 · Connection</h3>
+              <span className="aside">
+                {isDiscord ? 'credentials from Discord Developer Portal' : 'credentials from Slack App Manifest'}
+              </span>
+            </div>
+            <div className="card-body">
+              <dl className="kv-grid" style={{ gridTemplateColumns: '120px 1fr' }}>
+                <dt>Bot token</dt>
+                <dd>
+                  {isDiscord ? (
+                    <TokenField
+                      label=""
+                      value={de.token ?? ''}
+                      onChange={v => patchExtra({ token: v })}
+                      placeholder="MTQyMDE2MjM2NDc4OTY..."
+                    />
+                  ) : (
+                    <TokenField
+                      label=""
+                      value={se.bot_token ?? ''}
+                      onChange={v => patchExtra({ bot_token: v })}
+                      placeholder="xoxb-…"
+                    />
+                  )}
+                </dd>
+                {isDiscord ? (
+                  <>
+                    <dt>Application ID</dt>
+                    <dd>
+                      <CopyableInput
+                        value={de.application_id ?? ''}
+                        placeholder="1148927316082212864"
+                        onChange={v => patchExtra({ application_id: v })}
+                      />
+                    </dd>
+                  </>
+                ) : (
+                  <>
+                    <dt>App-level token</dt>
+                    <dd>
+                      <TokenField
+                        label=""
+                        value={se.app_token ?? ''}
+                        onChange={v => patchExtra({ app_token: v })}
+                        placeholder="xapp-1-…"
+                      />
+                    </dd>
+                    <dt>Command Prefix</dt>
+                    <dd>
+                      <input
+                        className="input bot-mono-input"
+                        style={{ width: '60%' }}
+                        value={se.command_prefix ?? '/gian'}
+                        placeholder="/gian"
+                        onChange={e => patchExtra({ command_prefix: e.target.value })}
+                      />
+                    </dd>
+                  </>
+                )}
+              </dl>
+            </div>
+          </div>
 
-        <footer className="bot-new-foot">
-          <button className="btn ghost sm" onClick={onCancel} disabled={saving}>
-            {t('bots.form.cancel')}
-          </button>
-          <button className="btn primary sm" onClick={() => void submit()} disabled={saving}>
-            {saving ? t('bots.form.creating') : t('bots.form.create')}
-          </button>
-        </footer>
+          <div className="card">
+            <div className="card-head"><h3>03 · Permissions</h3></div>
+            <div className="card-body">
+              <div className="mode-cards">
+                <button
+                  type="button"
+                  className={`mode-card${form.mode === 'read-only' ? ' active' : ''}`}
+                  onClick={() => patchForm({ mode: 'read-only' })}
+                >
+                  <div className="head">
+                    <Icon d={I.eye} size={15} />
+                    <span className="title">{t('bots.mode.readonly')}</span>
+                    {form.mode === 'read-only' && <span className="pill-active">Active</span>}
+                  </div>
+                  <div className="desc">{t('bots.perm.mode.readonly.desc')}</div>
+                </button>
+                <button
+                  type="button"
+                  className={`mode-card${form.mode === 'full-control' ? ' active' : ''}`}
+                  onClick={() => patchForm({ mode: 'full-control' })}
+                >
+                  <div className="head">
+                    <Icon d={I.check} size={15} />
+                    <span className="title">{t('bots.mode.fullcontrol')}</span>
+                    {form.mode === 'full-control' && <span className="pill-active">Active</span>}
+                  </div>
+                  <div className="desc">
+                    Allow prompts to originate from {form.platform} chat. {t('bots.perm.mode.fullcontrol.desc')}
+                  </div>
+                </button>
+              </div>
+              <div style={{ marginTop: 14 }}>
+                <div style={{ font: '600 10.5px/1 var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-3)', marginBottom: 6 }}>
+                  {t('bots.form.allowedusers.label')}
+                </div>
+                <input
+                  className="input"
+                  style={{ width: '100%' }}
+                  placeholder={`comma-separated ${form.platform} user IDs (leave empty to allow all)`}
+                  value={form.allowed_user_id}
+                  onChange={e => patchForm({ allowed_user_id: e.target.value })}
+                />
+                <p className="field-hint" style={{ marginTop: 6 }}>{t('bots.perm.allowedusers.hint')}</p>
+              </div>
+            </div>
+          </div>
+
+          {error && <p className="bot-error bot-new-error">{error}</p>}
+        </div>
       </div>
     </main>
   );
@@ -541,294 +565,259 @@ function BotDetail({
   const se = form.extra as SlackBotExtra;
 
   return (
-    <main className="main bot-detail">
-      {/* ===== Header ===== */}
-      <header className="detail-head">
-        <div className="detail-head-l">
-          <span className={`detail-bot-mark ${bot.platform}`}>{initial}</span>
-          <div className="detail-bot-info">
-            <h1 className="detail-bot-name">{bot.label}</h1>
-            <div className="detail-bot-sub">
-              <span className={`platform-chip ${bot.platform}`}>{isDiscord ? 'Discord' : 'Slack'}</span>
-              <span className="detail-bot-sub-sep">·</span>
-              {workspaceName ? (
-                <span>bound to <b>{workspaceName}</b></span>
-              ) : (
-                <span className="detail-bot-sub-dim">no workspace</span>
-              )}
-              <span className="detail-bot-sub-sep">·</span>
-              <span>created {formatCreated(bot.created_at)}</span>
-            </div>
-          </div>
-        </div>
-        <div className="detail-head-r">
-          <button
-            type="button"
-            className="enable-switch"
-            data-on={bot.enabled === 1 ? 'true' : undefined}
-            disabled={togglingEnabled}
-            onClick={() => void toggleEnabled()}
-            title={bot.enabled ? t('bots.toggle.disable') : t('bots.toggle.enable')}
-          >
-            <span className="enable-switch-lbl">{bot.enabled ? 'Enabled' : 'Disabled'}</span>
-            <span className={`enable-switch-knob${bot.enabled ? ' on' : ''}`} />
-          </button>
-          <button
-            className="btn sm primary"
-            disabled={!dirty || saving}
-            onClick={() => void save()}
-            title={dirty ? 'Save changes' : 'No changes'}
-          >
-            {saving ? t('bots.config.saving') : t('bots.config.save')}
-          </button>
-        </div>
-      </header>
-
-      {/* ===== Body ===== */}
-      <div className="detail-body">
-        {/* Stats strip — only render cards we actually have data for. */}
-        <div className="cfg-stats bot-detail-stats">
-          <div className="cfg-stat">
-            <span className="cfg-stat-label">Status</span>
-            <span className={`cfg-stat-value bot-detail-status bot-detail-status-${status}`}>
-              <span className="bot-detail-status-dot" />
-              {status}
-            </span>
-            <span className="cfg-stat-sub">
-              {bot.last_error
-                ? <span className="bot-detail-status-err" title={bot.last_error}>{bot.last_error}</span>
-                : status === 'connected' ? 'gateway open' : status === 'disabled' ? 'forwarding paused' : '—'}
-            </span>
-          </div>
-          {sessionsLinked > 0 && (
-            <div className="cfg-stat">
-              <span className="cfg-stat-label">Sessions linked</span>
-              <span className="cfg-stat-value">{sessionsLinked}</span>
-              <span className="cfg-stat-sub">in {workspaceName ?? 'workspace'}</span>
-            </div>
-          )}
-          {bot.last_connected_at && (
-            <div className="cfg-stat">
-              <span className="cfg-stat-label">Last connected</span>
-              <span className="cfg-stat-value-mono">{relTime(bot.last_connected_at)}</span>
-              <span className="cfg-stat-sub">{new Date(bot.last_connected_at).toLocaleString()}</span>
-            </div>
-          )}
-        </div>
-
-        {saveError && <p className="bot-error bot-new-error">{saveError}</p>}
-
-        {/* Connection + Routing — two-column on wide viewports. */}
-        <div className="bot-detail-grid">
-
-          <section className="cfg-card">
-            <div className="cfg-card-head">
-              <span className="cfg-card-title">Connection</span>
-              <span className="bot-new-card-hint">
-                {isDiscord ? 'credentials from Discord Developer Portal' : 'credentials from Slack app config'}
-              </span>
-            </div>
-            <div className="cfg-card-body">
-              <div className="field">
-                <div className="field-lbl">{t('bots.form.label.label')}</div>
-                <input
-                  className="input"
-                  value={form.label}
-                  onChange={e => setForm(p => ({ ...p, label: e.target.value }))}
-                />
+    <main className="main">
+      <div className="main-scroll">
+        <div className="detail">
+          {/* ===== Header ===== */}
+          <div className="bot-detail-head">
+            <span className={`pmark ${bot.platform}`}>{initial}</span>
+            <div className="info">
+              <div className="name">{bot.label}</div>
+              <div className="sub">
+                <span className={`pchip ${bot.platform}`}>{bot.platform}</span>
+                <span>workspace · {workspaceName ?? 'unbound'}</span>
+                <span>created {formatCreated(bot.created_at)}</span>
               </div>
-              {isDiscord ? (
-                <>
-                  <TokenField
-                    label="Bot Token"
-                    value={de.token ?? ''}
-                    onChange={v => patchExtra({ token: v })}
-                  />
-                  <div className="field">
-                    <div className="field-lbl">Application ID</div>
-                    <CopyableInput
-                      value={de.application_id ?? ''}
-                      onChange={v => patchExtra({ application_id: v })}
+            </div>
+            <div className="actions">
+              <button
+                type="button"
+                className={`toggle ${bot.enabled ? 'on' : ''}`}
+                disabled={togglingEnabled}
+                onClick={() => void toggleEnabled()}
+                title={bot.enabled ? t('bots.toggle.disable') : t('bots.toggle.enable')}
+              >
+                {bot.enabled ? 'Enabled' : 'Disabled'}
+                <span className="track"><span className="knob" /></span>
+              </button>
+              <button
+                className="btn primary"
+                disabled={!dirty || saving}
+                onClick={() => void save()}
+                title={dirty ? 'Save changes' : 'No changes'}
+              >
+                {saving ? t('bots.config.saving') : t('bots.config.save')}
+              </button>
+            </div>
+          </div>
+
+          {saveError && <p className="bot-error bot-new-error">{saveError}</p>}
+
+          {/* ===== Connection + Routing — two-column ===== */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div className="card">
+              <div className="card-head">
+                <h3>Connection</h3>
+                <span className="aside">
+                  credentials from {bot.platform[0]!.toUpperCase() + bot.platform.slice(1)} Developer Portal
+                </span>
+              </div>
+              <div className="card-body">
+                <dl className="kv-grid" style={{ gridTemplateColumns: '120px 1fr' }}>
+                  <dt>Label</dt>
+                  <dd style={{ fontFamily: 'var(--font-sans)' }}>
+                    <input
+                      className="input"
+                      value={form.label}
+                      onChange={e => setForm(p => ({ ...p, label: e.target.value }))}
+                      style={{ width: '100%' }}
                     />
-                  </div>
-                </>
-              ) : (
-                <>
-                  <TokenField
-                    label="Bot Token"
-                    value={se.bot_token ?? ''}
-                    onChange={v => patchExtra({ bot_token: v })}
-                    placeholder="xoxb-…"
-                  />
-                  <TokenField
-                    label="App-level Token"
-                    value={se.app_token ?? ''}
-                    onChange={v => patchExtra({ app_token: v })}
-                    placeholder="xapp-…"
-                  />
-                  <div className="field">
-                    <div className="field-lbl">
-                      <span>Command Prefix</span>
-                      <span className="field-hint">how users invoke this bot</span>
-                    </div>
+                  </dd>
+
+                  <dt>Bot token</dt>
+                  <dd style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    {isDiscord ? (
+                      <TokenField
+                        label=""
+                        value={de.token ?? ''}
+                        onChange={v => patchExtra({ token: v })}
+                      />
+                    ) : (
+                      <TokenField
+                        label=""
+                        value={se.bot_token ?? ''}
+                        onChange={v => patchExtra({ bot_token: v })}
+                        placeholder="xoxb-…"
+                      />
+                    )}
+                  </dd>
+
+                  {isDiscord ? (
+                    <>
+                      <dt>Application ID</dt>
+                      <dd style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <CopyableInput
+                          value={de.application_id ?? ''}
+                          onChange={v => patchExtra({ application_id: v })}
+                        />
+                      </dd>
+                    </>
+                  ) : (
+                    <>
+                      <dt>App-level token</dt>
+                      <dd>
+                        <TokenField
+                          label=""
+                          value={se.app_token ?? ''}
+                          onChange={v => patchExtra({ app_token: v })}
+                          placeholder="xapp-…"
+                        />
+                      </dd>
+                      <dt>Command Prefix</dt>
+                      <dd>
+                        <input
+                          className="input bot-mono-input"
+                          value={se.command_prefix ?? '/gian'}
+                          onChange={e => patchExtra({ command_prefix: e.target.value })}
+                          style={{ width: '60%' }}
+                        />
+                      </dd>
+                    </>
+                  )}
+                </dl>
+              </div>
+            </div>
+
+            <div className="card">
+              <div className="card-head">
+                <h3>Routing</h3>
+                <span className="aside">where new sessions land · who can talk</span>
+              </div>
+              <div className="card-body">
+                <dl className="kv-grid" style={{ gridTemplateColumns: '140px 1fr' }}>
+                  <dt>Workspace</dt>
+                  <dd>
+                    <select
+                      className="select"
+                      value={form.workspace_id}
+                      onChange={e => setForm(p => ({ ...p, workspace_id: e.target.value }))}
+                    >
+                      <option value="">{t('bots.workspace.none')}</option>
+                      {workspaces.map(w => (
+                        <option key={w.id} value={w.id}>{w.name}</option>
+                      ))}
+                    </select>
+                  </dd>
+                  <dt>{t('bots.perm.allowedusers.label')}</dt>
+                  <dd>
                     <input
                       className="input bot-mono-input"
-                      value={se.command_prefix ?? '/gian'}
-                      onChange={e => patchExtra({ command_prefix: e.target.value })}
+                      value={form.allowed_user_id}
+                      placeholder="123456789, 987654321"
+                      onChange={e => setForm(p => ({ ...p, allowed_user_id: e.target.value }))}
+                      style={{ width: '100%' }}
                     />
-                  </div>
-                </>
-              )}
-            </div>
-          </section>
-
-          <section className="cfg-card">
-            <div className="cfg-card-head">
-              <span className="cfg-card-title">Routing</span>
-              <span className="bot-new-card-hint">where new sessions land · who can talk</span>
-            </div>
-            <div className="cfg-card-body">
-              <div className="field">
-                <div className="field-lbl">
-                  <span>{t('bots.form.workspace.label')}</span>
-                  <span className="field-hint">sessions in this workspace are reachable via the bot</span>
-                </div>
-                <select
-                  className="select"
-                  value={form.workspace_id}
-                  onChange={e => setForm(p => ({ ...p, workspace_id: e.target.value }))}
-                >
-                  <option value="">{t('bots.workspace.none')}</option>
-                  {workspaces.map(w => (
-                    <option key={w.id} value={w.id}>{w.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="field">
-                <div className="field-lbl">
-                  <span>{t('bots.perm.allowedusers.label')}</span>
-                  <span className="field-hint">comma-separated</span>
-                </div>
-                <input
-                  className="input bot-mono-input"
-                  value={form.allowed_user_id}
-                  placeholder="123456789, 987654321"
-                  onChange={e => setForm(p => ({ ...p, allowed_user_id: e.target.value }))}
-                />
-                <p className="field-hint">{t('bots.perm.allowedusers.hint')}</p>
+                    <div style={{ marginTop: 6, color: 'var(--text-3)', fontSize: 11, fontFamily: 'var(--font-sans)' }}>
+                      {t('bots.perm.allowedusers.hint')}
+                    </div>
+                  </dd>
+                </dl>
               </div>
             </div>
-          </section>
-
-        </div>
-
-        {/* Mode behavior — clickable Read-only / Full-control cards. */}
-        <section className="mode-behavior">
-          <div className="mode-behavior-head">
-            <span className="mode-behavior-title">Mode behavior</span>
           </div>
-          <div className="mode-behavior-cards">
-            <button
-              type="button"
-              className={`mode-card${form.mode === 'read-only' ? ' active' : ''}`}
-              onClick={() => setForm(p => ({ ...p, mode: 'read-only' }))}
-            >
-              <div className="mode-card-head">
-                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" className="mode-card-icon">
-                  <path d="M2 8s2-4.5 6-4.5S14 8 14 8s-2 4.5-6 4.5S2 8 2 8z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
-                  <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.4" />
-                </svg>
-                <span className="mode-card-title">Read-only</span>
-                {form.mode === 'read-only' && <span className="mode-card-active">· active</span>}
-              </div>
-              <p className="mode-card-desc">{t('bots.perm.mode.readonly.desc')}</p>
-            </button>
-            <button
-              type="button"
-              className={`mode-card${form.mode === 'full-control' ? ' active' : ''}`}
-              onClick={() => setForm(p => ({ ...p, mode: 'full-control' }))}
-            >
-              <div className="mode-card-head">
-                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" className="mode-card-icon">
-                  <path d="M3 8l3.5 3.5L13 5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-                <span className="mode-card-title">Full control</span>
-                {form.mode === 'full-control' && <span className="mode-card-active">· active</span>}
-              </div>
-              <p className="mode-card-desc">{t('bots.perm.mode.fullcontrol.desc')}</p>
-            </button>
-          </div>
-        </section>
 
-        {/* Activity log — for now just a snapshot of connection state. A
-            historical log table is a future feature; the design's per-event
-            timeline is aspirational. */}
-        <section className="cfg-card activity-log">
-          <div className="cfg-card-head">
-            <span className="cfg-card-title">Activity</span>
-            <span className="bot-new-card-hint">connection state · last events</span>
-          </div>
-          <div className="cfg-card-body activity-log-body">
-            <div className="activity-log-row">
-              <span className="al-key">Status</span>
-              <span className={`bot-detail-status bot-detail-status-${status}`}>
-                <span className="bot-detail-status-dot" />
-                {status}
-              </span>
+          {/* ===== Mode behavior ===== */}
+          <div style={{ marginTop: 14 }}>
+            <div style={{ font: '600 10.5px/1 var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-3)', marginBottom: 8 }}>
+              Mode behavior
             </div>
-            <div className="activity-log-row">
-              <span className="al-key">Last connected</span>
-              <span className="al-val">
-                {bot.last_connected_at
-                  ? <span title={new Date(bot.last_connected_at).toLocaleString()}>{relTime(bot.last_connected_at)}</span>
-                  : <span className="al-dim">never</span>
-                }
-              </span>
-            </div>
-            {bot.last_error && (
-              <div className="activity-log-error">
-                <span className="al-error-tag">last error</span>
-                <span className="al-error-text">{bot.last_error}</span>
-              </div>
-            )}
-          </div>
-        </section>
-
-        {/* Danger zone — irreversible removal only. Disable lives in header. */}
-        <section className="danger-zone">
-          <div className="danger-zone-info">
-            <span className="danger-zone-title">Danger zone</span>
-            <span className="danger-zone-desc">
-              Removes the bot row, credentials, and all activity history. To stop forwarding
-              without losing config, use the toggle in the header instead.
-            </span>
-          </div>
-          <div className="danger-zone-actions">
-            {deleteError && <span className="bot-error">{deleteError}</span>}
-            {confirmDelete && !deleting && (
-              <span className="bot-delete-confirm-text">Are you sure?</span>
-            )}
-            {confirmDelete && (
+            <div className="mode-cards">
               <button
-                className="btn sm ghost"
-                onClick={() => setConfirmDelete(false)}
-                disabled={deleting}
+                type="button"
+                className={`mode-card${form.mode === 'read-only' ? ' active' : ''}`}
+                onClick={() => setForm(p => ({ ...p, mode: 'read-only' }))}
               >
-                {t('bots.delete.cancel')}
+                <div className="head">
+                  <Icon d={I.eye} size={15} />
+                  <span className="title">{t('bots.mode.readonly')}</span>
+                  {form.mode === 'read-only' && <span className="pill-active">Active</span>}
+                </div>
+                <div className="desc">{t('bots.perm.mode.readonly.desc')}</div>
               </button>
-            )}
-            <button
-              className="btn sm danger-ghost"
-              disabled={deleting}
-              onClick={() => void handleDelete()}
-            >
-              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M3 4h10M6 4V2.5a.5.5 0 01.5-.5h3a.5.5 0 01.5.5V4M5 4l.6 9.1a1 1 0 001 .9h2.8a1 1 0 001-.9L11 4M7 7v5M9 7v5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              {deleting ? t('bots.delete.deleting') : confirmDelete ? t('bots.delete.confirm') : t('bots.delete.button')}
-            </button>
+              <button
+                type="button"
+                className={`mode-card${form.mode === 'full-control' ? ' active' : ''}`}
+                onClick={() => setForm(p => ({ ...p, mode: 'full-control' }))}
+              >
+                <div className="head">
+                  <Icon d={I.check} size={15} />
+                  <span className="title">{t('bots.mode.fullcontrol')}</span>
+                  {form.mode === 'full-control' && <span className="pill-active">Active</span>}
+                </div>
+                <div className="desc">
+                  Bot can send prompts and receive full event stream. Anyone on the allowlist can drive sessions from {bot.platform}.
+                </div>
+              </button>
+            </div>
           </div>
-        </section>
+
+          {/* ===== Activity ===== */}
+          <div className="card" style={{ marginTop: 14 }}>
+            <div className="card-head">
+              <h3>Activity</h3>
+              <span className="aside">connection state · last events</span>
+            </div>
+            <div className="card-body">
+              <dl className="kv-grid" style={{ gridTemplateColumns: '160px 1fr' }}>
+                <dt>Status</dt>
+                <dd style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span className={`pill ${bot.enabled && status === 'connected' ? 'run' : 'idle'}`}>{status}</span>
+                  {bot.last_error
+                    ? <span style={{ color: 'var(--danger)', fontFamily: 'var(--font-sans)' }} title={bot.last_error}>{bot.last_error}</span>
+                    : <span style={{ color: 'var(--text-3)', fontFamily: 'var(--font-sans)' }}>
+                        {status === 'connected' ? 'gateway open' : status === 'disabled' ? 'forwarding paused' : '—'}
+                      </span>}
+                </dd>
+                <dt>Last connected</dt>
+                <dd style={{ fontFamily: 'var(--font-sans)' }}>
+                  {bot.last_connected_at
+                    ? <span title={new Date(bot.last_connected_at).toLocaleString()}>{relTime(bot.last_connected_at)}</span>
+                    : <span style={{ color: 'var(--text-3)' }}>never</span>}
+                </dd>
+                {sessionsLinked > 0 && (
+                  <>
+                    <dt>Sessions linked</dt>
+                    <dd style={{ fontFamily: 'var(--font-sans)' }}>{sessionsLinked} in {workspaceName ?? 'workspace'}</dd>
+                  </>
+                )}
+              </dl>
+            </div>
+          </div>
+
+          {/* ===== Danger zone ===== */}
+          <div className="danger-zone">
+            <div style={{ flex: 1 }}>
+              <h4>Danger zone</h4>
+              <p>
+                Removes the bot row, credentials, and all activity history. To stop forwarding
+                without losing config, use the toggle in the header instead.
+              </p>
+            </div>
+            <div className="right" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {deleteError && <span className="bot-error">{deleteError}</span>}
+              {confirmDelete && !deleting && (
+                <span className="bot-delete-confirm-text">Are you sure?</span>
+              )}
+              {confirmDelete && (
+                <button
+                  className="btn sm ghost"
+                  onClick={() => setConfirmDelete(false)}
+                  disabled={deleting}
+                >
+                  {t('bots.delete.cancel')}
+                </button>
+              )}
+              <button
+                className="btn danger-ghost sm"
+                disabled={deleting}
+                onClick={() => void handleDelete()}
+              >
+                <Icon d={I.trash} size={12} />
+                {deleting ? t('bots.delete.deleting') : confirmDelete ? t('bots.delete.confirm') : t('bots.delete.button')}
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </main>
   );

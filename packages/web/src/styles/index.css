@@ -4,6 +4,9 @@
 @import url('./coding.css');
 @import url('./events.css');
 @import url('./session.css');
+/* Phase 1+ — V2 shell + inner overrides; loaded LAST so V2 rules win. */
+@import url('./gian-v2.css');
+@import url('./shell-v2.css');
 
 * {
   box-sizing: border-box;

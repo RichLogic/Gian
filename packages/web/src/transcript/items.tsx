@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ApprovalDecision } from '@gian/shared';
@@ -527,45 +527,87 @@ function formatVal(v: unknown): string {
   return s.length > 120 ? s.slice(0, 120) + '…' : s;
 }
 
-export function UserMessage({ item, hideAvatar }: { item: MsgItem; hideAvatar?: boolean }) {
+function CopyButton({ text, title = 'Copy message' }: { text: string; title?: string }) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => { if (timerRef.current) window.clearTimeout(timerRef.current); };
+  }, []);
+  const onClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => setCopied(false), 1200);
+    }).catch(() => {});
+  };
   return (
-    <div className={`msg user${hideAvatar ? ' continuation' : ''}`}>
-      {hideAvatar ? <div className="msg-av-spacer" /> : <Avatar exec="user" />}
-      <div className="msg-body">
-        {!hideAvatar && (
-          <div className="msg-meta">
-            <span className="msg-time">{formatTime(item.ts)}</span>
-          </div>
-        )}
-        <div className="msg-text user-text">{item.text}</div>
-      </div>
-    </div>
+    <button
+      type="button"
+      className={`msg-copy${copied ? ' copied' : ''}`}
+      title={copied ? 'Copied' : title}
+      aria-label={title}
+      onClick={onClick}
+    >
+      {copied ? (
+        <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
+          <path d="M3 8l3 3 7-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
+          <rect x="5" y="3" width="8" height="10" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+          <path d="M3 5v7.5A1.5 1.5 0 0 0 4.5 14H10" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+        </svg>
+      )}
+    </button>
   );
 }
 
-export function AssistantMessage({ item, hideAvatar }: { item: MsgItem; hideAvatar?: boolean }) {
-  const name = item.exec === 'codex' ? 'Codex' : 'Claude';
+// V2 Msg (design/gian-design-v2/js/components.jsx::Msg) renders just
+// `.msg > .msg-body > .msg-text + .msg-time` — no avatar, no author label.
+// User messages flow `row-reverse` so the bubble + time align right.
+// hideAvatar is kept in the prop signature for caller compat but is a no-op.
+export function UserMessage({ item }: { item: MsgItem; hideAvatar?: boolean }) {
   return (
-    <div className={`msg${hideAvatar ? ' continuation' : ''}`}>
-      {hideAvatar ? <div className="msg-av-spacer" /> : <Avatar exec={item.exec} />}
+    <div className="msg user">
       <div className="msg-body">
-        {!hideAvatar && (
-          <div className="msg-meta">
-            <span className={`msg-author ${item.exec}`}>{name}</span>
-            <span className="msg-time">{formatTime(item.ts)}</span>
-          </div>
-        )}
-        <div className="msg-text md">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
+        <div className="msg-text user-text">{item.text}</div>
+        <div className="msg-foot user">
+          <CopyButton text={item.text} />
+          <span className="msg-time user">{formatTime(item.ts)}</span>
         </div>
       </div>
     </div>
   );
 }
 
+export function AssistantMessage({ item, hideAvatar }: { item: MsgItem; hideAvatar?: boolean }) {
+  // V2 design: no author label, time sits below the message body. Continuation
+  // chunks (consecutive same-sender bubbles from streaming) suppress the time
+  // so a streamed turn doesn't print a stack of timestamps.
+  return (
+    <div className={`msg${hideAvatar ? ' continuation' : ''}`}>
+      <div className="msg-body">
+        <div className="msg-text md">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
+        </div>
+        {!hideAvatar && (
+          <div className="msg-foot">
+            <span className="msg-time">{formatTime(item.ts)}</span>
+            <CopyButton text={item.text} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Kept as an unused export to avoid breaking external imports. V2 design
+// doesn't render avatars in the transcript; this is left as a stub.
 export function Avatar({ exec }: { exec: 'user' | 'claude' | 'codex' }) {
-  const label = exec === 'user' ? 'R' : exec === 'codex' ? 'C' : 'C';
-  return <div className={`msg-av ${exec}`}>{label}</div>;
+  const label = exec === 'user' ? 'R' : 'C';
+  return <div className={`msg-av ${exec}`} aria-hidden>{label}</div>;
 }
 
 export function CommandCard({ item }: { item: CommandItem }) {

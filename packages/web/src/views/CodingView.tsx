@@ -5,13 +5,44 @@ import { createWorkspace } from '../api.js';
 import { Composer } from '../components/Composer.js';
 import { FilePreviewDrawer } from '../components/FilePreviewDrawer.js';
 import { GitBadge } from '../components/GitBadge.js';
-import { JobProgress } from '../components/JobProgress.js';
 import { PlanChip } from '../components/PlanChip.js';
 import { QueueList } from '../components/QueueList.js';
-import { StatusPill, UsageChip } from '../components/Chips.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import { Transcript } from '../transcript/Transcript.js';
 import type { QueueEntry, TokenUsage, TranscriptItem } from '../types.js';
+
+// ─── V2 inline icons (copied verbatim from design/gian-design-v2/js/data.jsx) ─
+function BranchIcon({ size = 11 }: { size?: number }) {
+  return (
+    <svg className="branch-ico" viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor"
+         strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="4" cy="3.5" r="1.6" />
+      <circle cx="4" cy="12.5" r="1.6" />
+      <circle cx="12" cy="6" r="1.6" />
+      <path d="M4 5v6 M4 11c0-3 8-2 8-4.5" />
+    </svg>
+  );
+}
+
+function SvgIcon({ d, size = 16, stroke = 1.6 }: { d: string; size?: number; stroke?: number }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor"
+         strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">
+      {d.split(' M').map((seg, i) => (
+        <path key={i} d={i === 0 ? seg : `M${seg}`} />
+      ))}
+    </svg>
+  );
+}
+
+const ICON = {
+  search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-4.3-4.3',
+  group:  'M3 7h18 M6 12h12 M9 17h6',
+  filter: 'M4 5h16l-6 8v6l-4-2v-4z',
+  plus:   'M12 5v14 M5 12h14',
+  x:      'M5 5l14 14 M5 19L19 5',
+  kebabV: 'M12 5.01v-.02 M12 12.01v-.02 M12 19.01v-.02',
+};
 
 function relTime(iso: string): string {
   const ms = Date.now() - Date.parse(iso);
@@ -188,104 +219,6 @@ export function CodingView(p: CodingViewProps) {
   );
 }
 
-function FilterBar({
-  workspaces,
-  wsFilter, groupBy,
-  onSetWs, onSetGroup,
-}: {
-  workspaces: Workspace[];
-  wsFilter: string;
-  groupBy: GroupBy;
-  onSetWs: (v: string) => void;
-  onSetGroup: (v: GroupBy) => void;
-}) {
-  const [open, setOpen] = useState<'ws' | 'group' | null>(null);
-
-  // Close on click outside or Escape.
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => {
-      const target = e.target as Element | null;
-      if (!target?.closest('.rail-fchip-wrap')) setOpen(null);
-    };
-    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(null); };
-    document.addEventListener('mousedown', close);
-    document.addEventListener('keydown', esc);
-    return () => {
-      document.removeEventListener('mousedown', close);
-      document.removeEventListener('keydown', esc);
-    };
-  }, [open]);
-
-  const wsLabel = wsFilter === 'all' ? 'All' : workspaces.find(w => w.id === wsFilter)?.name ?? wsFilter;
-  const groupLabel = groupBy === 'time' ? 'Time' : groupBy === 'workspace' ? 'Space' : 'Status';
-
-  return (
-    <div className="rail-filterbar">
-      <div className="rail-filterbar-row">
-        <FilterChip
-          label="Group by"
-          value={groupLabel}
-          isOpen={open === 'group'}
-          onToggle={() => setOpen(open === 'group' ? null : 'group')}
-          options={[
-            { value: 'time', label: 'Time' },
-            { value: 'workspace', label: 'Space' },
-            { value: 'status', label: 'Status' },
-          ]}
-          current={groupBy}
-          onPick={v => { onSetGroup(v as GroupBy); setOpen(null); }}
-        />
-        <FilterChip
-          label="Workspace"
-          value={wsLabel}
-          isOpen={open === 'ws'}
-          onToggle={() => setOpen(open === 'ws' ? null : 'ws')}
-          options={[{ value: 'all', label: 'All' }, ...workspaces.map(w => ({ value: w.id, label: w.name }))]}
-          current={wsFilter}
-          onPick={v => { onSetWs(v); setOpen(null); }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function FilterChip({
-  label, value, isOpen, onToggle, options, current, onPick,
-}: {
-  label: string;
-  value: string;
-  isOpen: boolean;
-  onToggle: () => void;
-  options: Array<{ value: string; label: string }>;
-  current: string;
-  onPick: (v: string) => void;
-}) {
-  return (
-    <div className="rail-fchip-wrap">
-      <button className="rail-fchip" type="button" onClick={onToggle} title={`Filter by ${label.toLowerCase()}`}>
-        <span className="rfc-lbl">{label}</span>
-        <span className="rfc-val">{value}</span>
-        <span className="rfc-car">▾</span>
-      </button>
-      {isOpen && (
-        <div className="rail-fchip-pop">
-          {options.map(o => (
-            <button
-              key={o.value}
-              type="button"
-              className={`rail-fchip-opt${current === o.value ? ' active' : ''}`}
-              onClick={() => onPick(o.value)}
-            >
-              {o.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function CodingViewEmpty() {
   const t = useT();
   return (
@@ -310,7 +243,6 @@ function Sidebar({
   archivedSessions,
   archivedLoaded,
   activeSessionId,
-  showNew,
   onToggleNew,
   onSelect,
   onLoadArchived,
@@ -325,10 +257,35 @@ function Sidebar({
   onSelect: (id: string) => void;
   onLoadArchived: () => void | Promise<void>;
 }) {
-  const t = useT();
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [wsFilter, setWsFilter] = useState('all');
   const [groupBy, setGroupBy] = useState<GroupBy>('time');
+  // V2 sidebar state — search box + popovers.
+  const [search, setSearch] = useState('');
+  const [filterExec, setFilterExec] = useState<null | 'claude' | 'codex'>(null);
+  const [groupOpen, setGroupOpen] = useState(false);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const headRef = useRef<HTMLDivElement>(null);
+
+  // Close popovers on outside click / Escape.
+  useEffect(() => {
+    if (!groupOpen && !filterOpen) return;
+    function onDown(e: MouseEvent) {
+      const target = e.target as Element | null;
+      if (target?.closest('.sb-search-row')) return;
+      setGroupOpen(false);
+      setFilterOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') { setGroupOpen(false); setFilterOpen(false); }
+    }
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [groupOpen, filterOpen]);
 
   function toggleArchived() {
     void onLoadArchived();
@@ -346,9 +303,22 @@ function Sidebar({
 
   const active = sessions.filter(s => s.archived === 0);
 
-  const filtered = wsFilter === 'all'
-    ? active
-    : active.filter(s => s.workspace_id === wsFilter);
+  function matchesSearch(s: Session, wsName: string): boolean {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    return (
+      (s.name ?? '').toLowerCase().includes(q) ||
+      (s.branch ?? '').toLowerCase().includes(q) ||
+      wsName.toLowerCase().includes(q)
+    );
+  }
+
+  const filtered = active.filter(s => {
+    if (wsFilter !== 'all' && s.workspace_id !== wsFilter) return false;
+    if (filterExec && s.executor !== filterExec) return false;
+    const wsName = wsById.get(s.workspace_id)?.name ?? '';
+    return matchesSearch(s, wsName);
+  });
 
   const needsYou = groupBy === 'status'
     ? []
@@ -383,11 +353,9 @@ function Sidebar({
         const name = ws?.name ?? wsId;
         const sorted = list.slice().sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
         return (
-          <div key={wsId} className="sb2-group">
-            <div className="sb2-group-header">{name}</div>
-            <div className="session-list">
-              {sorted.map(s => renderRow(s, name))}
-            </div>
+          <div key={wsId}>
+            <div className="sb-group"><span>{name}</span></div>
+            {sorted.map(s => renderRow(s, name))}
           </div>
         );
       });
@@ -409,11 +377,9 @@ function Sidebar({
         );
         const label = status.charAt(0).toUpperCase() + status.slice(1);
         return (
-          <div key={status} className="sb2-group">
-            <div className="sb2-group-header">{label}</div>
-            <div className="session-list">
-              {list.map(s => renderRow(s, wsById.get(s.workspace_id)?.name ?? ''))}
-            </div>
+          <div key={status}>
+            <div className="sb-group"><span>{label}</span></div>
+            {list.map(s => renderRow(s, wsById.get(s.workspace_id)?.name ?? ''))}
           </div>
         );
       });
@@ -431,54 +397,168 @@ function Sidebar({
         (a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at),
       );
       return (
-        <div key={bucket} className="sb2-group">
-          <div className="sb2-group-header">{bucket}</div>
-          <div className="session-list">
-            {list.map(s => renderRow(s, wsById.get(s.workspace_id)?.name ?? ''))}
-          </div>
+        <div key={bucket}>
+          <div className="sb-group"><span>{bucket}</span></div>
+          {list.map(s => renderRow(s, wsById.get(s.workspace_id)?.name ?? ''))}
         </div>
       );
     });
   }
 
+  const hasFilter = wsFilter !== 'all' || filterExec !== null;
+
   return (
     <aside className="sidebar">
-      <div className="sidebar-head">
-        <span className="sidebar-title">{t('coding.sidebar.title')}</span>
-        <button className="sidebar-action" onClick={onToggleNew}>
-          {showNew ? t('coding.sidebar.cancel') : t('coding.sidebar.new')}
-        </button>
+      <div className="sb-head" ref={headRef}>
+        <div className="sb-search-row">
+          <div className="sb-search">
+            <SvgIcon d={ICON.search} />
+            <input
+              aria-label="Search sessions"
+              placeholder="Search"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+            />
+          </div>
+          <button
+            type="button"
+            className="sb-iconbtn"
+            aria-label="Group sessions"
+            title={`Group by · ${groupBy}`}
+            onClick={() => { setGroupOpen(o => !o); setFilterOpen(false); }}
+          >
+            <SvgIcon d={ICON.group} />
+          </button>
+          <button
+            type="button"
+            className={`sb-iconbtn${hasFilter ? ' has-active' : ''}`}
+            aria-label="Filter sessions"
+            title="Filter"
+            onClick={() => { setFilterOpen(o => !o); setGroupOpen(false); }}
+          >
+            <SvgIcon d={ICON.filter} />
+          </button>
+          <span className="sb-sep" />
+          <button
+            type="button"
+            className="sb-iconbtn"
+            aria-label="New session"
+            title="New session"
+            onClick={onToggleNew}
+          >
+            <SvgIcon d={ICON.plus} />
+          </button>
+
+          {groupOpen && (
+            <div className="group-pop">
+              <div className="head">Group by</div>
+              {(['time', 'status', 'workspace'] as const).map(g => (
+                <button
+                  key={g}
+                  type="button"
+                  className={`item${groupBy === g ? ' active' : ''}`}
+                  onClick={() => { setGroupBy(g); setGroupOpen(false); }}
+                >
+                  <span className="check">{groupBy === g ? '✓' : ''}</span>
+                  {g === 'time' ? 'Time' : g === 'status' ? 'Status' : 'Workspace'}
+                </button>
+              ))}
+            </div>
+          )}
+          {filterOpen && (
+            <div className="filter-pop">
+              <div>
+                <div className="lbl">Workspace</div>
+                <select
+                  className="select"
+                  style={{ width: '100%' }}
+                  value={wsFilter === 'all' ? '' : wsFilter}
+                  onChange={e => setWsFilter(e.target.value || 'all')}
+                >
+                  <option value="">All workspaces</option>
+                  {workspaces.map(w => (
+                    <option key={w.id} value={w.id}>{w.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <div className="lbl">Executor</div>
+                <div className="segm" style={{ width: '100%' }}>
+                  {([['', 'All'], ['claude', 'Claude'], ['codex', 'Codex']] as const).map(([v, lbl]) => (
+                    <button
+                      key={v || 'all'}
+                      type="button"
+                      className={`segm-item${(filterExec ?? '') === v ? ' active' : ''}`}
+                      style={{ flex: 1 }}
+                      onClick={() => setFilterExec(v === '' ? null : (v as 'claude' | 'codex'))}
+                    >
+                      {lbl}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn ghost sm"
+                style={{ alignSelf: 'flex-start' }}
+                onClick={() => { setWsFilter('all'); setFilterExec(null); }}
+              >
+                Reset
+              </button>
+            </div>
+          )}
+        </div>
+
+        {hasFilter && (
+          <div className="sb-chips">
+            {wsFilter !== 'all' && (
+              <span className="sb-chip">
+                <span className="dot" />{wsById.get(wsFilter)?.name ?? wsFilter}
+                <button
+                  type="button"
+                  className="x"
+                  onClick={() => setWsFilter('all')}
+                >
+                  <SvgIcon d={ICON.x} size={9} stroke={2.4} />
+                </button>
+              </span>
+            )}
+            {filterExec && (
+              <span className={`sb-chip ${filterExec}`}>
+                <span className="dot" />{filterExec === 'claude' ? 'Claude' : 'Codex'}
+                <button
+                  type="button"
+                  className="x"
+                  onClick={() => setFilterExec(null)}
+                >
+                  <SvgIcon d={ICON.x} size={9} stroke={2.4} />
+                </button>
+              </span>
+            )}
+            <button
+              type="button"
+              className="sb-chip clear"
+              onClick={() => { setWsFilter('all'); setFilterExec(null); }}
+            >
+              clear
+            </button>
+          </div>
+        )}
       </div>
 
-      <FilterBar
-        workspaces={workspaces}
-        wsFilter={wsFilter}
-        groupBy={groupBy}
-        onSetWs={setWsFilter}
-        onSetGroup={setGroupBy}
-      />
-
-      <div className="sidebar-scroll">
-        {workspaces.length === 0 && (
-          <p style={{ padding: 'var(--sp-7)', color: 'var(--text-3)', fontSize: 'var(--fz-12)' }}>
-            {t('coding.sidebar.noworkspaces')}
-          </p>
-        )}
-
+      <div className="sb-scroll">
         {needsYou.length > 0 && (
-          <div className="sb2-needs-you">
-            <div className="sb2-needs-you-header">
-              <span className="sb2-needs-dot" />
-              <span className="sb2-needs-label">NEEDS YOU</span>
-              <span className="sb2-needs-count">{needsYou.length}</span>
+          <>
+            <div className="sb-group needs-you">
+              <span className="dot" />
+              <span>Needs you</span>
+              <span className="count">{needsYou.length}</span>
             </div>
-            <div className="session-list">
-              {needsYou
-                .slice()
-                .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
-                .map(s => renderRow(s, wsById.get(s.workspace_id)?.name ?? ''))}
-            </div>
-          </div>
+            {needsYou
+              .slice()
+              .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
+              .map(s => renderRow(s, wsById.get(s.workspace_id)?.name ?? ''))}
+          </>
         )}
 
         {renderGroups()}
@@ -486,24 +566,26 @@ function Sidebar({
         {(() => {
           const visible = archivedSessions
             .filter(s => wsFilter === 'all' || s.workspace_id === wsFilter)
+            .filter(s => !filterExec || s.executor === filterExec)
+            .filter(s => matchesSearch(s, wsById.get(s.workspace_id)?.name ?? ''))
             .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
           return (
-            <div className="archived-section">
-              <button className="archived-toggle" onClick={toggleArchived}>
-                <span className="archived-toggle-caret">{archivedOpen ? '▾' : '▸'}</span>
-                Archived {archivedLoaded ? `(${visible.length})` : ''}
+            <>
+              <button className="sb-archived" onClick={toggleArchived}>
+                <span className="caret">{archivedOpen ? '▾' : '▸'}</span> Archived
+                {archivedLoaded && <span className="count">{visible.length}</span>}
               </button>
               {archivedOpen && (
-                <div className="session-list">
+                <>
                   {visible.map(s => renderRow(s, wsById.get(s.workspace_id)?.name ?? '', true))}
                   {archivedLoaded && visible.length === 0 && (
                     <span style={{ padding: '4px 10px', color: 'var(--text-3)', fontSize: 11 }}>
                       no archived sessions
                     </span>
                   )}
-                </div>
+                </>
               )}
-            </div>
+            </>
           );
         })()}
       </div>
@@ -521,47 +603,78 @@ function SessionRow({
   archived?: boolean;
   onSelect: () => void;
 }) {
-  const isWorktree = session.branch !== null;
-  const terminal = session.worktree_outcome !== null;
-  const badgeCls = terminal
-    ? (session.worktree_outcome === 'merged' ? 'wt-badge merged' : 'wt-badge discarded')
-    : 'wt-badge active';
-  const showTurnBadge = session.status === 'running' && session.turns > 1;
+  // V2 markup: rail-item only carries `.active`. We retain workspaceName for
+  // search-only purposes (handled in Sidebar) — it's no longer rendered per
+  // design decision §3.13. If the session has no branch, fall back to the
+  // workspace name in the branch slot so the row still surfaces context.
+  const branchLabel = session.branch ?? workspaceName;
   return (
-    <div className={`session-row-wrap${active ? ' active' : ''}${archived ? ' archived' : ''}`}>
-      <button
-        className={`session-row rail-item${active ? ' active' : ''}`}
-        data-status={session.status}
-        onClick={onSelect}
-      >
-        <span className="ri-body">
-          <span className="ri-row1">
-            <span className="ri-title">{session.name || `session ${session.id.slice(0, 6)}`}</span>
-            <StatusPill status={session.status} />
+    <div
+      className={`rail-item${active ? ' active' : ''}${archived ? ' archived' : ''}`}
+      data-testid={`session-row-${session.id}`}
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+    >
+      <div className="ri-body">
+        <div className="ri-row1">
+          <span className="ri-title">{session.name || `session ${session.id.slice(0, 6)}`}</span>
+        </div>
+        <div className="ri-row2">
+          <span className={`ri-exec ${session.executor}`}>
+            {session.executor === 'claude' ? 'Claude' : 'Codex'}
           </span>
-          <span className="ri-row2">
-            {showTurnBadge && (
-              <>
-                <span className="ri-turn">T·/{session.turns}</span>
-                <span className="ri-dot-sep">·</span>
-              </>
-            )}
-            <span className={`ri-exec-name ${session.executor}`}>{session.executor}</span>
-            <span className="ri-dot-sep">·</span>
-            <span className="ri-sub">{workspaceName}</span>
-            {isWorktree && (
-              <>
-                <span className="ri-dot-sep">·</span>
-                <span className={badgeCls} title={`${session.branch} → ${session.base_branch}${terminal ? ` · ${session.worktree_outcome}` : ''}`}>
-                  {session.branch}
-                </span>
-              </>
-            )}
+          <span className="ri-dot-sep">·</span>
+          <span className="ri-sub" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+            <BranchIcon size={9} />{branchLabel}
           </span>
-        </span>
-        <span className="ri-age">{relTime(session.updated_at)}</span>
-      </button>
+        </div>
+      </div>
+      <span className="ri-age" title="Last activity">{relTime(session.updated_at)}</span>
+      <StatusIcon status={session.status} />
     </div>
+  );
+}
+
+/** §#7 status indicator: replaces the per-row kebab + the main-head status
+ *  pill. Renders nothing for 'new', a spinner for running/pending, a red ⚠
+ *  for errors, and a green ✓ for done. */
+function StatusIcon({ status }: { status: import('@gian/shared').SessionStatus }) {
+  if (status === 'new') return null;
+  if (status === 'running' || status === 'pending') {
+    return (
+      <span className="ri-status running" title={status === 'running' ? 'Running' : 'Awaiting approval'} aria-label={status}>
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+          <circle cx="8" cy="8" r="6" stroke="var(--accent-soft)" strokeWidth="2" />
+          <path d="M14 8a6 6 0 0 0-6-6" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      </span>
+    );
+  }
+  if (status === 'error') {
+    return (
+      <span className="ri-status err" title="Error" aria-label="error">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+          <circle cx="8" cy="8" r="7" fill="var(--danger-soft)" stroke="var(--danger)" strokeWidth="1" />
+          <path d="M8 4.5v4 M8 10.6v.4" stroke="var(--danger)" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      </span>
+    );
+  }
+  // done
+  return (
+    <span className="ri-status done" title="Done" aria-label="done">
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+        <circle cx="8" cy="8" r="7" fill="var(--ok-soft)" stroke="var(--ok)" strokeWidth="1" />
+        <path d="M5 8l2 2 4-4" stroke="var(--ok)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </span>
   );
 }
 
@@ -737,6 +850,7 @@ function NewSessionView({
               {workspaces.length > 0 && (
                 <select
                   className="select"
+                  aria-label="Workspace"
                   value={selectedWs}
                   onChange={e => setSelectedWs(e.target.value)}
                 >
@@ -750,12 +864,14 @@ function NewSessionView({
                 <div className="ns-inline-ws">
                   <input
                     className="input"
+                    aria-label="New workspace name"
                     placeholder={t('coding.form.ws.name.placeholder')}
                     value={wsName}
                     onChange={e => setWsName(e.target.value)}
                   />
                   <input
                     className="input"
+                    aria-label="New workspace git remote"
                     placeholder="Git remote (optional)"
                     value={wsRemote}
                     onChange={e => setWsRemote(e.target.value)}
@@ -872,6 +988,7 @@ function NewSessionView({
               </div>
               <input
                 className="input"
+                aria-label="Session name"
                 placeholder={t('coding.new.name.placeholder')}
                 value={sessionName}
                 onChange={e => setSessionName(e.target.value)}
@@ -884,6 +1001,7 @@ function NewSessionView({
               </div>
               <textarea
                 className="input"
+                aria-label="First message"
                 rows={4}
                 placeholder={t('coding.new.first.placeholder')}
                 value={firstMessage}
@@ -966,11 +1084,9 @@ function SessionMain({
 }) {
   const isWorktree = session.branch !== null;
   const terminal = session.worktree_outcome !== null;
-  const archived = session.archived === 1;
-  const [editing, setEditing] = useState(false);
-  const [draftName, setDraftName] = useState('');
-  const [menuOpen, setMenuOpen] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  // V2 chat/cli toggle — local-only state. CLI tab is a no-op for now
+  // (Phase 7 wires it). Switching the tab does not change render yet.
+  const [chatMode, setChatMode] = useState<'chat' | 'cli'>('chat');
 
   // Bump on pending → idle transition so GitBadge refetches at turn end.
   const [gitRefreshKey, setGitRefreshKey] = useState(0);
@@ -980,63 +1096,38 @@ function SessionMain({
     prevPendingRef.current = pending;
   }, [pending]);
 
-  function startEdit() {
-    setDraftName(session.name || `session ${session.id.slice(0, 8)}`);
-    setEditing(true);
-  }
-
-  // Focus the input after it mounts.
-  useEffect(() => {
-    if (editing) inputRef.current?.focus();
-  }, [editing]);
-
-  function commitEdit() {
-    const trimmed = draftName.trim();
-    if (trimmed) onRename(trimmed);
-    setEditing(false);
-  }
-
-  function cancelEdit() {
-    setEditing(false);
-  }
+  // Map our session.status → V2 status label + dot variant.
+  const statusLabel =
+    session.status === 'running' ? 'RUNNING'
+    : session.status === 'pending' ? 'WAITING'
+    : session.status === 'error' ? 'ERROR'
+    : 'DONE';
+  const statusDotCls = session.status === 'running' ? 'status-dot run' : 'status-dot';
 
   return (
     <main className="main">
       <div className="main-head">
         <div className="main-head-l">
-          {editing ? (
-            <input
-              ref={inputRef}
-              className="main-title-input"
-              value={draftName}
-              onChange={e => setDraftName(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
-                if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
-              }}
-              onBlur={commitEdit}
-            />
-          ) : (
-            <span className="main-title-wrap">
-              <span className="main-title">{session.name || `session ${session.id.slice(0, 8)}`}</span>
-              {!terminal && (
-                <button
-                  type="button"
-                  className="main-title-edit-btn"
-                  title="Rename session"
-                  onClick={startEdit}
-                  aria-label="Rename session"
-                >
-                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                    <path d="M8.5 1.5a1.414 1.414 0 0 1 2 2L3.5 10.5l-3 .5.5-3L8.5 1.5z" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
-                  </svg>
-                </button>
-              )}
-            </span>
-          )}
-          <StatusPill status={session.status} />
+          <div className="chat-toggle">
+            <button
+              type="button"
+              className={chatMode === 'chat' ? 'active' : ''}
+              onClick={() => setChatMode('chat')}
+            >
+              Chat
+            </button>
+            <button
+              type="button"
+              className={chatMode === 'cli' ? 'active' : ''}
+              onClick={() => setChatMode('cli')}
+            >
+              CLI
+            </button>
+          </div>
         </div>
         <div className="main-head-r">
+          {/* §B2 — only +N/−M (no branch, hidden when clean). Status indicator
+              now lives in the sidebar row (§#7), not the main header. */}
           <GitBadge
             workingTreeId={workingTreeId}
             branch={branch}
@@ -1060,8 +1151,9 @@ function SessionMain({
           <button className="btn xs danger-ghost" onClick={onDelete}>Delete</button>
         </div>
       )}
-      <JobProgress session={session} items={items} />
-      <Transcript items={items} pending={pending} executor={session.executor} onApprove={onApprove} />
+      <div className="main-scroll">
+        <Transcript items={items} pending={pending} executor={session.executor} onApprove={onApprove} />
+      </div>
       <QueueList queue={queue} onRemove={onQueueRemove} onReorder={onQueueReorder} onClear={onQueueClear} onSendNow={onQueueSendNow} />
       <PlanChip items={items} />
       <Composer
@@ -1076,20 +1168,6 @@ function SessionMain({
         disabled={pending || terminal}
         executor={session.executor}
         workspaceId={workspace?.id}
-        footer={
-          <TokStrip
-            usage={usage}
-            isWorktree={isWorktree}
-            terminal={terminal}
-            archived={archived}
-            onResetContext={() => onSend('/clear')}
-            onArchive={() => onArchive(!archived)}
-            onDelete={onDelete}
-            onRecover={onRecover}
-            onMergeToBase={() => { void onMerge(); }}
-            onDropWorktree={() => { void onDrop(); }}
-          />
-        }
       />
     </main>
   );

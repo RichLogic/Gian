@@ -439,9 +439,9 @@ export function Composer({
   }
 
   return (
-    <div className="composer-wrap">
+    <div className={`composer-wrap${oneShotBypass ? ' is-bypass' : ''}`}>
       <div
-        className={`composer${oneShotBypass ? ' is-bypass-pending' : ''}`}
+        className="composer"
         style={{ position: 'relative' }}
       >
         {/* Hidden file input — triggered by the paperclip button */}
@@ -454,6 +454,18 @@ export function Composer({
           aria-hidden="true"
           tabIndex={-1}
         />
+
+        {oneShotBypass && (
+          <div className="composer-bypass-banner">
+            <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor"
+                 strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M12 2L1 22h22z" />
+              <path d="M12 9v6" />
+              <path d="M12 18v.01" />
+            </svg>
+            <span>Bypass mode — all actions auto-approved</span>
+          </div>
+        )}
 
         <div className="composer-input-wrap">
           <textarea
@@ -534,7 +546,7 @@ export function Composer({
 
         <div className="composer-bar">
           {/* Model picker — opens custom model+thinking popover */}
-          <div className="cmp-model-anchor">
+          <div className="composer-model">
           <button
             ref={modelBtnRef}
             type="button"
@@ -542,13 +554,16 @@ export function Composer({
             title={t('composer.model.title')}
             onClick={() => setModelPopOpen(v => !v)}
           >
-            <span className="cmp-model">{modelLabel(models, activeModel) || activeModel}</span>
-            <span className="cmp-think" aria-hidden="true">
+            <span
+              style={{ width: 7, height: 7, borderRadius: 2, display: 'inline-block',
+                       background: executor === 'codex' ? 'var(--codex)' : 'var(--claude)' }}
+              aria-hidden="true"
+            />
+            <span className="name cmp-model">{modelLabel(models, activeModel) || activeModel}</span>
+            <span className="caret cmp-caret" aria-hidden="true">▾</span>
+            <span className="think cmp-think" aria-hidden="true">
               <ThinkBars level={thinkLevel} />
             </span>
-            <svg className="cmp-caret" viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
           </button>
           </div>
           {modelPopOpen && modelPopPos && createPortal(
@@ -608,8 +623,13 @@ export function Composer({
             document.body
           )}
 
-          {/* Approval mode — three-segment */}
-          <div className="composer-mode" title={t('composer.mode.title')}>
+          {/* Approval mode — V2 segmented control */}
+          <div
+            className="composer-mode"
+            role="tablist"
+            aria-label="Approval mode"
+            title={t('composer.mode.title')}
+          >
             <button
               type="button"
               className={`cmode-item${approvalMode === 'plan' ? ' active' : ''}`}
@@ -645,6 +665,7 @@ export function Composer({
               aria-pressed={oneShotBypass}
               onClick={() => setOneShotBypass(v => !v)}
             >
+              <span className="cmode-warn" aria-hidden="true">⚠</span>
               Bypass
             </button>
           </div>
@@ -682,7 +703,7 @@ export function Composer({
               ref.current?.focus();
             }}
           >
-            <span className="composer-slash-glyph">/</span>
+            <span className="glyph composer-slash-glyph">/</span>
           </button>
 
           {/* Attach files — plus glyph (VS Code style) */}
