@@ -5,6 +5,10 @@ export interface MsgItem {
   exec: 'claude' | 'codex';
   ts: number;
   turn: number;
+  /** Local-only user echo awaiting the server's `user_message` event. */
+  pending?: boolean;
+  /** Server rejected the send (e.g. `MESSAGE_SEND_FAILED`). */
+  failed?: boolean;
 }
 
 export interface ToolItem {

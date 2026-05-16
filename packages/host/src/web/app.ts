@@ -54,6 +54,7 @@ import {
 // rvc-shaped per-platform tables.
 import { initWorkspace, expandHome } from '../workspace/index.js';
 import { TtyManager } from '../tty/manager.js';
+import { WorkbenchTerminalManager } from '../term/manager.js';
 import { CcProxyClient } from '../proxy/cc-proxy-client.js';
 import { writeFile } from 'node:fs/promises';
 import { ensureEventsRebuilt } from '../events/lazy-rebuild.js';
@@ -98,6 +99,11 @@ export function createApp(ctx: AppContext): AppHandle {
   const hookBaseUrl = `http://127.0.0.1:${hookPort}`;
   const tty = new TtyManager(ctx.db, proxy, broadcaster, hookBaseUrl);
   sessions.setTtyManager(tty);
+
+  // Workbench terminal manager — standalone shell PTYs, independent of
+  // any Gian session. The xterm tabs in the workbench pane are bound to
+  // client-minted `term_id`s and routed through `term:*` WS messages.
+  const term = new WorkbenchTerminalManager(broadcaster);
 
   // Live Sync v2: on host boot, attach a watcher to every active session so
   // we resume picking up external CLI appends after a host restart. New
@@ -176,7 +182,7 @@ export function createApp(ctx: AppContext): AppHandle {
     })));
   });
 
-  const handlers = makeWsHandlers({ sessions, broadcaster, approvals, tty, db: ctx.db });
+  const handlers = makeWsHandlers({ sessions, broadcaster, approvals, tty, term, db: ctx.db });
 
   if (AUTH_REQUIRED) {
     ensurePasswordHash(ctx.db);
@@ -665,16 +671,7 @@ export function createApp(ctx: AppContext): AppHandle {
     // stays inside the workspace is what we care about; git operates on
     // ws.path directly.
     void resolved;
-    try {
-      const diff = execFileSync('git', ['-C', ws.path, 'diff', '--', rel], {
-        timeout: 5000,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-      return c.json({ diff });
-    } catch {
-      return c.json({ diff: '' });
-    }
+    return c.json({ diff: computeFileDiff(ws.path, rel) });
   });
 
   // -------------------------------------------------------------------------
@@ -965,6 +962,49 @@ export function createApp(ctx: AppContext): AppHandle {
     } catch { return null; }
   }
 
+  /**
+   * Detect "I'm in the middle of an operation" states that leave the index in
+   * a half-baked spot — typically because a merge/rebase/cherry-pick hit
+   * conflicts. We surface this in the UI so the user knows why their tools
+   * are stuck instead of silently working on a poisoned tree.
+   */
+  function gitPendingOpAt(path: string):
+    | { kind: 'merge'; mergeHead: string }
+    | { kind: 'rebase' }
+    | { kind: 'cherry-pick'; head: string }
+    | { kind: 'revert'; head: string }
+    | null {
+    function tryRevParse(ref: string): string | null {
+      try {
+        const out = execFileSync('git', ['-C', path, 'rev-parse', '--verify', '--quiet', ref], {
+          timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim();
+        return out || null;
+      } catch { return null; }
+    }
+    const merge = tryRevParse('MERGE_HEAD');
+    if (merge) return { kind: 'merge', mergeHead: merge };
+    // `rebase-merge` (interactive / merge backend) and `rebase-apply` (am)
+    // are directories under .git, not refs. Easiest probe is `git status
+    // --porcelain=v2` header lines, but checking the filesystem is faster.
+    try {
+      const gitDir = execFileSync('git', ['-C', path, 'rev-parse', '--git-dir'], {
+        timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      if (gitDir) {
+        const dir = isAbsolute(gitDir) ? gitDir : resolve(path, gitDir);
+        if (existsSync(resolve(dir, 'rebase-merge')) || existsSync(resolve(dir, 'rebase-apply'))) {
+          return { kind: 'rebase' };
+        }
+      }
+    } catch { /* swallow — non-rebase path falls through */ }
+    const cherry = tryRevParse('CHERRY_PICK_HEAD');
+    if (cherry) return { kind: 'cherry-pick', head: cherry };
+    const revert = tryRevParse('REVERT_HEAD');
+    if (revert) return { kind: 'revert', head: revert };
+    return null;
+  }
+
   function gitInfoAt(path: string): {
     isRepo: boolean;
     remote: string | null;
@@ -972,6 +1012,7 @@ export function createApp(ctx: AppContext): AppHandle {
     currentBranch: string | null;
     lastCommit: { hash: string; message: string; age: string } | null;
     modifiedCount: number;
+    pendingOp: ReturnType<typeof gitPendingOpAt>;
   } {
     function safe(args: string[]): string | null {
       try {
@@ -984,7 +1025,7 @@ export function createApp(ctx: AppContext): AppHandle {
     if (inside !== 'true') {
       return {
         isRepo: false, remote: null, defaultBranch: null,
-        currentBranch: null, lastCommit: null, modifiedCount: 0,
+        currentBranch: null, lastCommit: null, modifiedCount: 0, pendingOp: null,
       };
     }
     const remote = safe(['remote', 'get-url', 'origin']);
@@ -1008,7 +1049,8 @@ export function createApp(ctx: AppContext): AppHandle {
     }
     const status = safe(['status', '--porcelain']);
     const modifiedCount = status ? status.split('\n').filter(l => l.trim()).length : 0;
-    return { isRepo: true, remote: remoteHuman, defaultBranch, currentBranch, lastCommit, modifiedCount };
+    const pendingOp = gitPendingOpAt(path);
+    return { isRepo: true, remote: remoteHuman, defaultBranch, currentBranch, lastCommit, modifiedCount, pendingOp };
   }
 
   function claudeMdInfoAt(path: string): { exists: boolean; lines: number; mtime: string | null } {
@@ -1094,6 +1136,233 @@ export function createApp(ctx: AppContext): AppHandle {
     return c.json(out);
   });
 
+  // ── Branches / remote-branches / fetch ─────────────────────────────────────
+  // Powering the workspace-level Git panel (IDE-style branch management).
+  // All three endpoints are thin wrappers around `git for-each-ref` and
+  // `git fetch`. The sessions table is joined in `listLocalBranches` purely
+  // for "which Gian session's worktree has this branch checked out" linkage.
+
+  interface LocalBranchOut {
+    name: string;
+    upstream: string | null;
+    ahead: number;
+    behind: number;
+    gone: boolean;
+    lastCommit: { hash: string; subject: string; age: string } | null;
+    worktreePath: string | null;
+    isGianBranch: boolean;
+    session: { id: string; name: string | null } | null;
+  }
+
+  function parseTrack(track: string): { ahead: number; behind: number; gone: boolean } {
+    if (!track) return { ahead: 0, behind: 0, gone: false };
+    if (/\[gone\]/.test(track)) return { ahead: 0, behind: 0, gone: true };
+    const aheadM = track.match(/ahead (\d+)/);
+    const behindM = track.match(/behind (\d+)/);
+    return {
+      ahead: aheadM ? parseInt(aheadM[1]!, 10) : 0,
+      behind: behindM ? parseInt(behindM[1]!, 10) : 0,
+      gone: false,
+    };
+  }
+
+  function listLocalBranches(repoPath: string): LocalBranchOut[] {
+    const SEP = '\x1f';
+    const fmt = [
+      '%(refname:short)',
+      '%(upstream:short)',
+      '%(upstream:track)',
+      '%(objectname:short)',
+      '%(contents:subject)',
+      '%(committerdate:relative)',
+      '%(worktreepath)',
+    ].join(SEP);
+    let raw: string;
+    try {
+      raw = execFileSync('git', ['-C', repoPath, 'for-each-ref', '--format=' + fmt, 'refs/heads'], {
+        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      return [];
+    }
+    const lines = raw.split('\n').filter(l => l.length > 0);
+    return lines.map(line => {
+      const [name, upstream, track, sha, subject, age, worktreePath] = line.split(SEP);
+      const { ahead, behind, gone } = parseTrack(track ?? '');
+      return {
+        name: name ?? '',
+        upstream: upstream || null,
+        ahead,
+        behind,
+        gone,
+        lastCommit: sha ? { hash: sha, subject: subject ?? '', age: age ?? '' } : null,
+        worktreePath: worktreePath || null,
+        isGianBranch: (name ?? '').startsWith('gian/'),
+        session: null,
+      };
+    });
+  }
+
+  app.get('/api/workspaces/:id/branches', c => {
+    const id = c.req.param('id');
+    const ws = ctx.db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
+      | { path: string } | undefined;
+    if (!ws) return c.json({ error: 'workspace not found' }, 404);
+    const branches = listLocalBranches(ws.path);
+    const sessRows = ctx.db.prepare(`
+      SELECT id, name, branch FROM sessions
+      WHERE workspace_id = ? AND branch IS NOT NULL AND archived = 0
+    `).all(id) as Array<{ id: string; name: string | null; branch: string }>;
+    const byBranch = new Map(sessRows.map(s => [s.branch, { id: s.id, name: s.name }]));
+    for (const b of branches) {
+      const s = byBranch.get(b.name);
+      if (s) b.session = s;
+    }
+    return c.json(branches);
+  });
+
+  app.get('/api/workspaces/:id/remote-branches', c => {
+    const id = c.req.param('id');
+    const search = (c.req.query('search') ?? '').trim().toLowerCase();
+    const ws = ctx.db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
+      | { path: string } | undefined;
+    if (!ws) return c.json({ error: 'workspace not found' }, 404);
+    const SEP = '\x1f';
+    const fmt = [
+      '%(refname:short)',
+      '%(objectname:short)',
+      '%(contents:subject)',
+      '%(committerdate:relative)',
+    ].join(SEP);
+    let raw: string;
+    try {
+      raw = execFileSync('git', ['-C', ws.path, 'for-each-ref', '--format=' + fmt, 'refs/remotes'], {
+        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      return c.json([]);
+    }
+    const lines = raw.split('\n').filter(l => l.length > 0);
+    const localNames = new Set(listLocalBranches(ws.path).map(b => b.name));
+    const out = lines
+      .map(line => {
+        const [name, sha, subject, age] = line.split(SEP);
+        return { name: name ?? '', sha: sha ?? '', subject: subject ?? '', age: age ?? '' };
+      })
+      .filter(r => r.name && !r.name.endsWith('/HEAD'))
+      .map(r => {
+        const slash = r.name.indexOf('/');
+        const remote = slash > 0 ? r.name.slice(0, slash) : '';
+        const branch = slash > 0 ? r.name.slice(slash + 1) : r.name;
+        return {
+          fullName: r.name,
+          remote,
+          branch,
+          lastCommit: { hash: r.sha, subject: r.subject, age: r.age },
+          hasLocalTracking: localNames.has(branch),
+        };
+      })
+      .filter(r => !search || r.fullName.toLowerCase().includes(search) || r.branch.toLowerCase().includes(search));
+    return c.json(out);
+  });
+
+  app.post('/api/workspaces/:id/branches', async c => {
+    const id = c.req.param('id');
+    const ws = ctx.db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
+      | { path: string } | undefined;
+    if (!ws) return c.json({ error: 'workspace not found' }, 404);
+    const body = await c.req.json<{ name?: string; base?: string }>().catch(() => ({} as { name?: string; base?: string }));
+    const name = (body.name ?? '').trim();
+    const base = (body.base ?? '').trim();
+    if (!name) return c.json({ error: 'name is required' }, 400);
+    // `git check-ref-format --branch <name>` validates the proposed branch
+    // name without creating anything. Cheaper than letting `git branch` blow
+    // up with a vague error.
+    try {
+      execFileSync('git', ['-C', ws.path, 'check-ref-format', '--branch', name], {
+        timeout: 2000, stdio: ['ignore', 'ignore', 'ignore'],
+      });
+    } catch {
+      return c.json({ error: `invalid branch name: ${name}` }, 400);
+    }
+    // When base is a remote-tracking ref (origin/foo), --track makes the new
+    // local branch follow it for ahead/behind. Probe with rev-parse against
+    // refs/remotes/<base> — `feature/x` happens to look like `origin/foo` by
+    // shape, so a regex isn't enough.
+    let isRemote = false;
+    if (base) {
+      try {
+        execFileSync('git', ['-C', ws.path, 'rev-parse', '--verify', '--quiet', `refs/remotes/${base}`], {
+          timeout: 2000, stdio: ['ignore', 'ignore', 'ignore'],
+        });
+        isRemote = true;
+      } catch {
+        isRemote = false;
+      }
+    }
+    const args = ['-C', ws.path, 'branch'];
+    if (isRemote) args.push('--track');
+    args.push(name);
+    if (base) args.push(base);
+    try {
+      execFileSync('git', args, {
+        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      const e = err as { stderr?: Buffer | string; message?: string };
+      const stderr = typeof e.stderr === 'string' ? e.stderr : e.stderr?.toString('utf8') ?? '';
+      return c.json({ ok: false, error: stderr.trim() || e.message || 'branch create failed' }, 400);
+    }
+    broadcaster.broadcast({ type: 'workspace:git-updated', workspace_id: id, reason: 'branch-created' });
+    return c.json({ ok: true });
+  });
+
+  app.post('/api/workspaces/:id/abort-merge', c => {
+    const id = c.req.param('id');
+    const ws = ctx.db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
+      | { path: string } | undefined;
+    if (!ws) return c.json({ error: 'workspace not found' }, 404);
+    const pending = gitPendingOpAt(ws.path);
+    if (!pending) return c.json({ ok: false, error: 'no merge in progress' }, 400);
+    // `git <op> --abort` is the canonical way to back out each state. The
+    // command matches the pending op kind we detected.
+    const args: Record<typeof pending.kind, string[]> = {
+      'merge':       ['merge', '--abort'],
+      'rebase':      ['rebase', '--abort'],
+      'cherry-pick': ['cherry-pick', '--abort'],
+      'revert':      ['revert', '--abort'],
+    };
+    try {
+      execFileSync('git', ['-C', ws.path, ...args[pending.kind]], {
+        timeout: 10_000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      const e = err as { stderr?: Buffer | string; message?: string };
+      const stderr = typeof e.stderr === 'string' ? e.stderr : e.stderr?.toString('utf8') ?? '';
+      return c.json({ ok: false, error: stderr.trim() || e.message || 'abort failed' }, 500);
+    }
+    broadcaster.broadcast({ type: 'workspace:git-updated', workspace_id: id, reason: 'merge' });
+    return c.json({ ok: true });
+  });
+
+  app.post('/api/workspaces/:id/fetch', c => {
+    const id = c.req.param('id');
+    const ws = ctx.db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
+      | { path: string } | undefined;
+    if (!ws) return c.json({ error: 'workspace not found' }, 404);
+    try {
+      execFileSync('git', ['-C', ws.path, 'fetch', '--prune', '--all'], {
+        timeout: 60_000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      const e = err as { stderr?: Buffer | string; message?: string };
+      const stderr = typeof e.stderr === 'string' ? e.stderr : e.stderr?.toString('utf8') ?? '';
+      return c.json({ ok: false, error: stderr || e.message || 'fetch failed' }, 500);
+    }
+    broadcaster.broadcast({ type: 'workspace:git-updated', workspace_id: id, reason: 'fetch' });
+    return c.json({ ok: true, fetchedAt: new Date().toISOString() });
+  });
+
   function resolveWorkingTree(id: string): { path: string; workspace_id: string; session_id: string | null } | null {
     if (id.startsWith('ws:')) {
       const wsId = id.slice(3);
@@ -1110,6 +1379,46 @@ export function createApp(ctx: AppContext): AppHandle {
       return { path: s.worktree_path, workspace_id: s.workspace_id, session_id: s.id };
     }
     return null;
+  }
+
+  // Per-file diff aligned with what Files Changed surfaces: includes both
+  // staged and unstaged edits on tracked files (via `diff HEAD`), and
+  // synthesizes a new-file diff for untracked paths (via `diff --no-index`
+  // against /dev/null). Bare `git diff -- <path>` would miss anything
+  // already `git add`-ed and every untracked file.
+  function computeFileDiff(cwd: string, rel: string): string {
+    try {
+      const out = execFileSync('git', ['-C', cwd, 'diff', 'HEAD', '--', rel], {
+        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      if (out) return out;
+    } catch {
+      // Not a repo, or some other git failure — nothing more we can do.
+      return '';
+    }
+    // Empty result so far means either tracked-but-clean or untracked. Probe
+    // tracked-ness; only fall through to --no-index for untracked.
+    try {
+      execFileSync('git', ['-C', cwd, 'ls-files', '--error-unmatch', '--', rel], {
+        stdio: ['ignore', 'ignore', 'ignore'],
+      });
+      return '';
+    } catch {
+      // Untracked: synthesize a "new file" diff. `--no-index` exits 1 when
+      // the two paths differ, so stdout is on the thrown error object.
+      try {
+        execFileSync('git', ['-C', cwd, 'diff', '--no-index', '--', '/dev/null', rel], {
+          timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        return '';
+      } catch (err) {
+        const e = err as { stdout?: Buffer | string; status?: number };
+        if (e.status === 1 && e.stdout != null) {
+          return typeof e.stdout === 'string' ? e.stdout : e.stdout.toString('utf8');
+        }
+        return '';
+      }
+    }
   }
 
   app.get('/api/working_trees', c => {
@@ -1278,14 +1587,7 @@ export function createApp(ctx: AppContext): AppHandle {
     const resolved = await resolveWithinWorkspace(wt.path, rel);
     if (!resolved) return c.json({ error: 'path escapes working tree' }, 400);
     void resolved;
-    try {
-      const diff = execFileSync('git', ['-C', wt.path, 'diff', '--', rel], {
-        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      });
-      return c.json({ diff });
-    } catch {
-      return c.json({ diff: '' });
-    }
+    return c.json({ diff: computeFileDiff(wt.path, rel) });
   });
 
   app.get('/api/working_trees/:id/file_meta', async c => {
@@ -1568,6 +1870,7 @@ export function createApp(ctx: AppContext): AppHandle {
     injectWebSocket,
     shutdown: async () => {
       watcher.stopAll();
+      await term.closeAll();
       await Promise.all(platforms.map(p => p.shutdown().catch(err => {
         console.error(`[im] ${p.platformId} shutdown failed`, err);
       })));

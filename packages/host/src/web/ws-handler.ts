@@ -7,6 +7,7 @@ import type { WsBroadcaster } from './ws-broadcast.js';
 // the rvc-shaped managers land.
 import type { ApprovalManager } from '../approval/index.js';
 import type { TtyManager } from '../tty/manager.js';
+import type { WorkbenchTerminalManager } from '../term/manager.js';
 import type { Db } from '../storage/db.js';
 import { getUsernameForToken } from '../auth/tokens.js';
 import { AUTH_REQUIRED } from '../auth/middleware.js';
@@ -28,6 +29,7 @@ export interface WsHandlerDeps {
   broadcaster: WsBroadcaster;
   approvals?: ApprovalManager;
   tty?: TtyManager;
+  term?: WorkbenchTerminalManager;
   db?: Db;
 }
 
@@ -35,7 +37,7 @@ interface ClientState {
   authed: boolean;
 }
 
-export function makeWsHandlers({ sessions, broadcaster, approvals, tty, db }: WsHandlerDeps) {
+export function makeWsHandlers({ sessions, broadcaster, approvals, tty, term, db }: WsHandlerDeps) {
   const states = new WeakMap<WSContext, ClientState>();
 
   function sendStateSync(ws: WSContext): void {
@@ -126,7 +128,7 @@ export function makeWsHandlers({ sessions, broadcaster, approvals, tty, db }: Ws
       }
 
       try {
-        await dispatch(parsed, sessions, broadcaster, ws, tty);
+        await dispatch(parsed, sessions, broadcaster, ws, tty, term);
       } catch (err) {
         console.error('[ws] dispatch error', err);
         // Surface the failure to the client. Without this, errors inside
@@ -167,6 +169,7 @@ async function dispatch(
   broadcaster: WsBroadcaster,
   ws: WSContext,
   tty?: TtyManager,
+  term?: WorkbenchTerminalManager,
 ): Promise<void> {
   switch (msg.type) {
     case 'session:create': {
@@ -268,6 +271,50 @@ async function dispatch(
         chunks: result.chunks,
         alive: result.alive,
       });
+      return;
+    }
+    case 'term:spawn': {
+      if (!term) return;
+      const spawnOpts: import('../term/manager.js').SpawnOptions = {
+        termId: msg.term_id,
+        cols: msg.cols,
+        rows: msg.rows,
+      };
+      if (msg.cwd !== undefined) spawnOpts.cwd = msg.cwd;
+      if (msg.shell !== undefined) spawnOpts.shell = msg.shell;
+      const result = await term.spawn(spawnOpts);
+      broadcaster.send(ws, {
+        type: 'term:replay',
+        term_id: msg.term_id,
+        chunks: result.replay,
+        alive: result.alive,
+      });
+      return;
+    }
+    case 'term:input': {
+      if (!term) return;
+      term.input(msg.term_id, msg.data);
+      return;
+    }
+    case 'term:resize': {
+      if (!term) return;
+      term.resize(msg.term_id, msg.cols, msg.rows);
+      return;
+    }
+    case 'term:replay-request': {
+      if (!term) return;
+      const result = term.replay(msg.term_id);
+      broadcaster.send(ws, {
+        type: 'term:replay',
+        term_id: msg.term_id,
+        chunks: result.chunks,
+        alive: result.alive,
+      });
+      return;
+    }
+    case 'term:close': {
+      if (!term) return;
+      await term.kill(msg.term_id);
       return;
     }
     case 'auth':

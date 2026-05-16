@@ -173,6 +173,51 @@ export interface SessionRuntimeSwitchedMessage {
   runtime_mode: RuntimeMode;
 }
 
+/**
+ * Coarse-grained "the workspace's git state may have changed" ping. Sent
+ * after fetch / branch create / merge / drop / worktree teardown — anything
+ * that could shift the branches table, ahead-behind counts, or worktree
+ * occupancy. Receivers (Workspace → Git tab) re-pull `loadBranches` /
+ * `loadRemoteBranches` / `loadWorkspaceTrees` rather than diff-applying.
+ *
+ * Coarse is intentional: granular events (branch:created, branch:deleted)
+ * would couple host event taxonomy to UI concerns that may change as the
+ * panel evolves. The payload is small, refreshes are cheap.
+ */
+export interface WorkspaceGitUpdatedMessage {
+  type: 'workspace:git-updated';
+  workspace_id: string;
+  /** Free-form reason — shown in dev console when debugging refresh storms. */
+  reason: 'fetch' | 'branch-created' | 'merge' | 'drop' | 'session-deleted' | 'worktree-created';
+}
+
+/**
+ * Workbench-terminal channel — independent of any Gian session. Each tab
+ * in the workbench terminal pane has a client-minted `term_id` that
+ * scopes its PTY. Shape is intentionally close to `pty:*` so the xterm
+ * component on the client can share most of its plumbing.
+ */
+export interface TermOutputMessage {
+  type: 'term:output';
+  term_id: string;
+  /** Base64-encoded raw bytes. */
+  data: string;
+}
+
+export interface TermReplayMessage {
+  type: 'term:replay';
+  term_id: string;
+  chunks: string[];
+  alive: boolean;
+}
+
+export interface TermExitedMessage {
+  type: 'term:exited';
+  term_id: string;
+  code: number | null;
+  signal: string | null;
+}
+
 export type ServerToClientMessage =
   | AuthOkMessage
   | StateSyncMessage
@@ -188,7 +233,11 @@ export type ServerToClientMessage =
   | TranscriptHistoryMessage
   | PtyOutputMessage
   | PtyReplayMessage
+  | TermOutputMessage
+  | TermReplayMessage
+  | TermExitedMessage
   | SessionRuntimeSwitchedMessage
+  | WorkspaceGitUpdatedMessage
   | ErrorMessage;
 
 export interface SessionCreateMessage {
@@ -420,6 +469,45 @@ export interface PtyReplayRequestMessage {
   session_id: string;
 }
 
+/**
+ * Workbench terminal — client → server messages. Mirror of the
+ * session-side `pty:*` shapes, keyed by `term_id` instead of session id
+ * and routed to the host's WorkbenchTerminalManager (not cc-proxy).
+ */
+export interface TermSpawnMessage {
+  type: 'term:spawn';
+  term_id: string;
+  /** Optional cwd; falls back to $HOME server-side. */
+  cwd?: string;
+  cols: number;
+  rows: number;
+  /** Optional override of the shell binary (default = $SHELL). */
+  shell?: string;
+}
+
+export interface TermInputMessage {
+  type: 'term:input';
+  term_id: string;
+  data: string;
+}
+
+export interface TermResizeMessage {
+  type: 'term:resize';
+  term_id: string;
+  cols: number;
+  rows: number;
+}
+
+export interface TermReplayRequestMessage {
+  type: 'term:replay-request';
+  term_id: string;
+}
+
+export interface TermCloseMessage {
+  type: 'term:close';
+  term_id: string;
+}
+
 export type ClientToServerMessage =
   | AuthMessage
   | SessionCreateMessage
@@ -446,4 +534,9 @@ export type ClientToServerMessage =
   | SessionSwitchRuntimeMessage
   | PtyInputMessage
   | PtyResizeMessage
-  | PtyReplayRequestMessage;
+  | PtyReplayRequestMessage
+  | TermSpawnMessage
+  | TermInputMessage
+  | TermResizeMessage
+  | TermReplayRequestMessage
+  | TermCloseMessage;

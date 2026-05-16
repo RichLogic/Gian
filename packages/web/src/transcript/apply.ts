@@ -201,7 +201,22 @@ export function applyEnvelope(
 
   // ── remaining legacy events ──
   const item = legacyEnvelopeToItem(env, executor);
-  return item ? [...items, item] : items;
+  if (!item) return items;
+  // Optimistic-echo reconciliation: if the user typed something while waiting
+  // on the server, we already appended a pending MsgItem. The real
+  // `user_message` arrives with the canonical id+turn; swap it in place rather
+  // than appending a duplicate. Match by text on the most recent pending echo.
+  if (item.kind === 'user') {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const cand = items[i]!;
+      if (cand.kind === 'user' && cand.pending && cand.text === item.text) {
+        const next = items.slice();
+        next[i] = { ...item };
+        return next;
+      }
+    }
+  }
+  return [...items, item];
 }
 
 /**
@@ -212,6 +227,8 @@ function legacyEnvelopeToItem(env: EventEnvelope, executor: 'claude' | 'codex'):
   const data = (env.data ?? {}) as Record<string, unknown>;
   switch (env.event) {
     case 'user_message':
+      // Reconciliation lives in `applyEnvelope`; this branch is reached only
+      // when there's no optimistic echo to swap in. Caller appends the result.
       return {
         kind: 'user', id: env.call_id,
         text: String(data.text ?? ''), exec: executor,

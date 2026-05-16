@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ApprovalDecision, ApprovalMode, RuntimeMode, Session, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
-import { createWorkspace } from '../api.js';
+import { createWorkspace, loadBranches, loadRemoteBranches, loadRepoInfo } from '../api.js';
+import type { LocalBranch, RemoteBranch } from '../api.js';
 import { Composer } from '../components/Composer.js';
 import { FilePreviewDrawer } from '../components/FilePreviewDrawer.js';
 import { GitBadge } from '../components/GitBadge.js';
 import { PlanChip } from '../components/PlanChip.js';
 import { QueueList } from '../components/QueueList.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
-import { Terminal } from '../components/Terminal.js';
+import { Terminal, makeSessionWire } from '../components/Terminal.js';
 import { Transcript } from '../transcript/Transcript.js';
 import type { QueueEntry, TokenUsage, TranscriptItem } from '../types.js';
 import type { GianWs } from '../ws.js';
@@ -88,6 +89,9 @@ export interface CodingViewProps {
   onSelectSession: (id: string) => void;
   onWorkspaceCreated: (ws: Workspace) => void;
   onCreateSession: (input: CreateSessionInput) => void;
+  /** True from `session:create` dispatch until `session:created` lands. Drives
+   *  the busy state in NewSessionView's submit button. */
+  creatingSession: boolean;
   onSend: (sessionId: string, text: string, opts?: { oneShotBypass?: boolean }) => void;
   onSendSkill: (sessionId: string, name: string, path: string) => void;
   onStop: (sessionId: string) => void;
@@ -132,6 +136,17 @@ export function CodingView(p: CodingViewProps) {
   const [showNew, setShowNew] = useState(false);
   const rail = useResizableWidth('coding.rail.w', 272, 200, 480, 'left');
 
+  // Once the session lands (creatingSession flips back to false), close the
+  // new-session form. Kept here — not on submit — so the form stays visible
+  // with a "Creating…" indicator instead of flashing to an empty pane.
+  const wasCreatingRef = useRef(false);
+  useEffect(() => {
+    if (wasCreatingRef.current && !p.creatingSession) {
+      setShowNew(false);
+    }
+    wasCreatingRef.current = p.creatingSession;
+  }, [p.creatingSession]);
+
   // Topbar's brand burger emits this event — primary discoverable affordance
   // for hiding/showing the rail. The in-sidebar collapse button is the
   // secondary path. Listening at the window level keeps Topbar decoupled.
@@ -167,9 +182,9 @@ export function CodingView(p: CodingViewProps) {
           workspaces={p.workspaces}
           onCancel={() => setShowNew(false)}
           onWorkspaceCreated={p.onWorkspaceCreated}
+          creating={p.creatingSession}
           onCreate={input => {
             p.onCreateSession(input);
-            setShowNew(false);
           }}
         />
       ) : p.activeSession ? (
@@ -760,11 +775,13 @@ function NewSessionView({
   onWorkspaceCreated,
   onCreate,
   onCancel,
+  creating,
 }: {
   workspaces: Workspace[];
   onWorkspaceCreated: (ws: Workspace) => void;
   onCreate: (input: CreateSessionInput) => void;
   onCancel: () => void;
+  creating: boolean;
 }) {
   const t = useT();
   const [selectedWs, setSelectedWs] = useState(workspaces[0]?.id ?? '');
@@ -774,6 +791,14 @@ function NewSessionView({
   const [mode, setMode] = useState<'regular' | 'worktree'>('regular');
   const [baseBranch, setBaseBranch] = useState('');
   const [firstMessage, setFirstMessage] = useState('');
+  // Branch picker data — loaded lazily once worktree mode is selected. The
+  // dropdown options mirror NewWorktreeDialog in SpacesView: occupied
+  // branches are filtered out (a branch can only live in one worktree at a
+  // time) and remote refs without a local tracking branch are surfaced as
+  // standalone options.
+  const [branches, setBranches] = useState<LocalBranch[]>([]);
+  const [remoteBranches, setRemoteBranches] = useState<RemoteBranch[]>([]);
+  const [branchesLoaded, setBranchesLoaded] = useState(false);
 
   // Inline workspace create (used when there are no workspaces, or the user
   // picks "+ create new workspace" from the select).
@@ -800,6 +825,51 @@ function NewSessionView({
 
   const showInlineCreate = workspaces.length === 0 || selectedWs === '__new__';
   const canCreate = !!selectedWs && selectedWs !== '__new__';
+
+  // Fetch branch lists once worktree mode is selected for a real workspace.
+  // Inline-create selections (__new__) have no repo on disk yet. Re-run if
+  // the user switches workspaces while still in worktree mode.
+  useEffect(() => {
+    if (mode !== 'worktree' || !canCreate) {
+      setBranches([]);
+      setRemoteBranches([]);
+      setBranchesLoaded(false);
+      return;
+    }
+    let cancelled = false;
+    setBranchesLoaded(false);
+    void Promise.all([
+      loadBranches(selectedWs),
+      loadRemoteBranches(selectedWs),
+      loadRepoInfo(selectedWs),
+    ]).then(([b, rb, info]) => {
+      if (cancelled) return;
+      setBranches(b);
+      setRemoteBranches(rb);
+      setBranchesLoaded(true);
+      // Pre-pick the workspace's default branch if it shows up in the list
+      // and the user hasn't already chosen anything else.
+      const def = info?.git.defaultBranch;
+      if (def && !baseBranch && b.some(x => x.name === def && !x.worktreePath)) {
+        setBaseBranch(def);
+      }
+    });
+    return () => { cancelled = true; };
+    // baseBranch intentionally omitted: we only want to seed it once per
+    // workspace selection, not re-run when the user picks a different option.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, selectedWs, canCreate]);
+
+  const baseBranchOptions = (() => {
+    const localNames = new Set(branches.map(b => b.name));
+    const localOpts = branches
+      .filter(b => !b.worktreePath)
+      .map(b => ({ value: b.name, label: b.name, kind: 'local' as const }));
+    const remoteOpts = remoteBranches
+      .filter(rb => !localNames.has(rb.branch))
+      .map(rb => ({ value: rb.fullName, label: `${rb.fullName} (remote)`, kind: 'remote' as const }));
+    return [...localOpts, ...remoteOpts];
+  })();
 
   function submit() {
     if (!canCreate) return;
@@ -872,7 +942,9 @@ function NewSessionView({
                     onClick={() => void createWs()}
                     disabled={wsBusy || !wsName}
                   >
-                    {t('coding.form.ws.create')}
+                    {wsBusy ? (
+                      <span className="ns-busy"><span className="ns-spinner" aria-hidden="true" />Creating…</span>
+                    ) : t('coding.form.ws.create')}
                   </button>
                 </div>
               )}
@@ -962,12 +1034,27 @@ function NewSessionView({
                 </button>
               </div>
               {mode === 'worktree' && (
-                <input
-                  className="input"
-                  placeholder="Base branch (auto if blank)"
-                  value={baseBranch}
-                  onChange={e => setBaseBranch(e.target.value)}
-                />
+                baseBranchOptions.length > 0 ? (
+                  <select
+                    className="select"
+                    aria-label="Base branch"
+                    value={baseBranch}
+                    onChange={e => setBaseBranch(e.target.value)}
+                  >
+                    <option value="">Auto (workspace default)</option>
+                    {baseBranchOptions.map(o => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    className="input"
+                    placeholder={branchesLoaded ? 'Base branch (auto if blank)' : 'Loading branches…'}
+                    value={baseBranch}
+                    onChange={e => setBaseBranch(e.target.value)}
+                    disabled={!branchesLoaded}
+                  />
+                )
               )}
             </div>
 
@@ -1000,9 +1087,13 @@ function NewSessionView({
             </div>
           </div>
           <div className="ns-foot">
-            <button className="btn ghost sm" onClick={onCancel}>{t('coding.new.cancel')}</button>
-            <button className="btn primary sm" disabled={!canCreate} onClick={submit}>
-              {t('coding.new.create')}
+            <button className="btn ghost sm" onClick={onCancel} disabled={creating}>
+              {t('coding.new.cancel')}
+            </button>
+            <button className="btn primary sm" disabled={!canCreate || creating} onClick={submit}>
+              {creating ? (
+                <span className="ns-busy"><span className="ns-spinner" aria-hidden="true" />Creating…</span>
+              ) : t('coding.new.create')}
             </button>
           </div>
         </div>
@@ -1167,7 +1258,10 @@ function SessionMain({
       )}
       {isTty ? (
         <div className="main-scroll tty-pane">
-          <Terminal sessionId={session.id} ws={ws} />
+          <Terminal
+            instanceKey={`session:${session.id}`}
+            wire={makeSessionWire(ws, session.id)}
+          />
         </div>
       ) : (
         <>

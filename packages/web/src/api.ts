@@ -442,6 +442,12 @@ export async function deleteNativeSession(
 // Workspace Config tab — repository info + worktrees
 // ---------------------------------------------------------------------------
 
+export type PendingGitOp =
+  | { kind: 'merge'; mergeHead: string }
+  | { kind: 'rebase' }
+  | { kind: 'cherry-pick'; head: string }
+  | { kind: 'revert'; head: string };
+
 export interface RepoInfo {
   git: {
     isRepo: boolean;
@@ -450,6 +456,9 @@ export interface RepoInfo {
     currentBranch: string | null;
     lastCommit: { hash: string; message: string; age: string } | null;
     modifiedCount: number;
+    /** Set when the workspace tree is mid-merge / mid-rebase / etc. — surfaces
+     *  in the Git tab so the user knows why git operations are stuck. */
+    pendingOp: PendingGitOp | null;
   };
   claudeMd: { exists: boolean; lines: number; mtime: string | null };
 }
@@ -477,3 +486,76 @@ export async function loadWorkspaceTrees(workspaceId: string): Promise<Workspace
   if (!res.ok) return [];
   return (await res.json()) as WorkspaceTree[];
 }
+
+// ---------------------------------------------------------------------------
+// Workspace Git tab — branches, remote branches, fetch
+// ---------------------------------------------------------------------------
+
+export interface LocalBranch {
+  name: string;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  gone: boolean;
+  lastCommit: { hash: string; subject: string; age: string } | null;
+  /** Absolute path of the worktree that has this branch checked out, or null. */
+  worktreePath: string | null;
+  isGianBranch: boolean;
+  /** Set when worktreePath corresponds to a Gian session's worktree. */
+  session: { id: string; name: string | null } | null;
+}
+
+export interface RemoteBranch {
+  fullName: string;       // e.g. "origin/main"
+  remote: string;         // e.g. "origin"
+  branch: string;         // e.g. "main"
+  lastCommit: { hash: string; subject: string; age: string };
+  hasLocalTracking: boolean;
+}
+
+export async function loadBranches(workspaceId: string): Promise<LocalBranch[]> {
+  const res = await fetch(`/api/workspaces/${workspaceId}/branches`);
+  if (!res.ok) return [];
+  return (await res.json()) as LocalBranch[];
+}
+
+export async function loadRemoteBranches(workspaceId: string, search?: string): Promise<RemoteBranch[]> {
+  const qs = search ? `?search=${encodeURIComponent(search)}` : '';
+  const res = await fetch(`/api/workspaces/${workspaceId}/remote-branches${qs}`);
+  if (!res.ok) return [];
+  return (await res.json()) as RemoteBranch[];
+}
+
+export async function fetchRemotes(workspaceId: string): Promise<{ ok: boolean; fetchedAt?: string; error?: string }> {
+  const res = await fetch(`/api/workspaces/${workspaceId}/fetch`, { method: 'POST' });
+  const body = await res.json().catch(() => ({} as Record<string, unknown>));
+  if (!res.ok) {
+    const err = (body as { error?: string }).error;
+    return { ok: false, error: err ?? `Fetch failed (${res.status})` };
+  }
+  return body as { ok: boolean; fetchedAt: string };
+}
+
+export async function abortPendingGitOp(workspaceId: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/workspaces/${workspaceId}/abort-merge`, { method: 'POST' });
+  const body = await res.json().catch(() => ({} as Record<string, unknown>));
+  if (!res.ok) return { ok: false, error: (body as { error?: string }).error ?? `Abort failed (${res.status})` };
+  return { ok: true };
+}
+
+export async function createLocalBranch(
+  workspaceId: string,
+  input: { name: string; base?: string },
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/workspaces/${workspaceId}/branches`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const body = await res.json().catch(() => ({} as Record<string, unknown>));
+  if (!res.ok) {
+    return { ok: false, error: (body as { error?: string }).error ?? `Create failed (${res.status})` };
+  }
+  return { ok: true };
+}
+

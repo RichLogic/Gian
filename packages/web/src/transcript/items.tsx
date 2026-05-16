@@ -569,11 +569,15 @@ function CopyButton({ text, title = 'Copy message' }: { text: string; title?: st
 // User messages flow `row-reverse` so the bubble + time align right.
 // hideAvatar is kept in the prop signature for caller compat but is a no-op.
 export function UserMessage({ item }: { item: MsgItem; hideAvatar?: boolean }) {
+  // Optimistic echo: `pending` until the server emits its `user_message`,
+  // `failed` when an `error` envelope marks it rejected.
+  const stateCls = item.pending ? ' pending' : item.failed ? ' failed' : '';
   return (
-    <div className="msg user">
+    <div className={`msg user${stateCls}`}>
       <div className="msg-body">
         <div className="msg-text user-text">{item.text}</div>
         <div className="msg-foot user">
+          {item.failed && <span className="msg-state-failed">failed to send</span>}
           <CopyButton text={item.text} />
           <span className="msg-time user">{formatTime(item.ts)}</span>
         </div>

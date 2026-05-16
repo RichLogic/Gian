@@ -17,6 +17,7 @@ import { Splitter } from './components/Splitter.js';
 import { Inspector } from './components/Inspector.js';
 import type { InspectorTab } from './components/Inspector.js';
 import { SettingsBody } from './components/SettingsBody.js';
+import { Terminal, makeWorkbenchWire } from './components/Terminal.js';
 import { CodingView } from './views/CodingView.js';
 import { SpacesView } from './views/SpacesView.js';
 import { BotsView } from './views/BotsView.js';
@@ -67,6 +68,10 @@ export function App() {
   const [pathRenameActive, setPathRenameActive] = useState(false);
   const [runner, setRunner] = useState<RunnerInfo | null>(null);
   const pendingFirstMessageRef = useRef<string | null>(null);
+  // True from `session:create` dispatch until `session:created` arrives. Drives
+  // the "Creating…" busy state in NewSessionView so the form doesn't look dead
+  // while the host spins up a session + worktree.
+  const [creatingSession, setCreatingSession] = useState(false);
 
   useEffect(() => {
     if (!systemConfig) return;
@@ -165,11 +170,27 @@ export function App() {
         case 'session:created': {
           setSessions(prev => [msg.session, ...prev.filter(s => s.id !== msg.session.id)]);
           setActiveSessionId(msg.session.id);
-          setItemsBySession(prev => ({ ...prev, [msg.session.id]: [] }));
+          setCreatingSession(false);
           const pendingMsg = pendingFirstMessageRef.current;
           if (pendingMsg) {
             pendingFirstMessageRef.current = null;
+            // Seed the transcript with an optimistic echo of the first message
+            // so the user sees it immediately — the real `user_message` event
+            // reconciles it via applyEnvelope.
+            const optimistic: TranscriptItem = {
+              kind: 'user',
+              id: `optimistic:${msg.session.id}:${Date.now()}`,
+              text: pendingMsg,
+              exec: msg.session.executor,
+              ts: Date.now(),
+              turn: 0,
+              pending: true,
+            };
+            setItemsBySession(prev => ({ ...prev, [msg.session.id]: [optimistic] }));
+            setPendingBySession(p => ({ ...p, [msg.session.id]: true }));
             ws.send({ type: 'message:send', session_id: msg.session.id, text: pendingMsg });
+          } else {
+            setItemsBySession(prev => ({ ...prev, [msg.session.id]: [] }));
           }
           return;
         }
@@ -236,7 +257,29 @@ export function App() {
           return;
         case 'error':
           // Server-side dispatch failure (e.g. message:send threw before any
-          // turn was persisted). Alert the user so the failure isn't silent.
+          // turn was persisted). Alert the user so the failure isn't silent,
+          // and mark any optimistic user echo for this session as failed so
+          // the transcript reflects the reject state.
+          if (msg.session_id) {
+            setItemsBySession(prev => {
+              const list = prev[msg.session_id!];
+              if (!list) return prev;
+              let changed = false;
+              const next = list.slice();
+              for (let i = next.length - 1; i >= 0; i--) {
+                const it = next[i]!;
+                if (it.kind === 'user' && it.pending) {
+                  next[i] = { ...it, pending: false, failed: true };
+                  changed = true;
+                  break;
+                }
+              }
+              if (!changed) return prev;
+              return { ...prev, [msg.session_id!]: next };
+            });
+            setPendingBySession(p => ({ ...p, [msg.session_id!]: false }));
+          }
+          if (msg.code === 'SESSION_CREATE_FAILED') setCreatingSession(false);
           alert(`${msg.code}: ${msg.message}`);
           return;
       }
@@ -520,7 +563,7 @@ export function App() {
       // Add singleton — terminal in pane 1, settings in pane 0.
       const id = kind === 'term' ? 'tab-term-' + Date.now() : 'tab-settings';
       const tab: SheetTab = kind === 'term'
-        ? { id, pane: 1, name: 'zsh · ~/gian', kind: 'term', icoKind: 'term', ico: '$' }
+        ? { id, pane: 1, name: terminalTabName(), kind: 'term', icoKind: 'term', ico: '$' }
         : { id, pane: 0, name: 'Settings', kind: 'settings', icoKind: 'gear', ico: '⚙' };
       const next = [...prev, tab];
       setWbActive(a => ({ ...a, [tab.pane]: tab.id }));
@@ -536,12 +579,37 @@ export function App() {
     setWbTabs(prev => {
       const existingTerms = prev.filter(t => t.kind === 'term').length;
       const id = 'tab-term-' + Date.now();
-      const name = existingTerms === 0 ? 'zsh · ~/gian' : `zsh #${existingTerms + 1}`;
+      const base = terminalTabName();
+      const name = existingTerms === 0 ? base : `${base} #${existingTerms + 1}`;
       const tab: SheetTab = { id, pane: 1, name, kind: 'term', icoKind: 'term', ico: '$' };
       setWbActive(a => ({ ...a, 1: id }));
       setViewState(v => v === 'main' ? 'both' : v);
       return [...prev, tab];
     });
+  }
+
+  /**
+   * Compute a tab label for a new terminal. Picks the most-specific
+   * known cwd (worktree path → workspace path → first workspace) and
+   * shows its basename, falling back to the shell name when nothing is
+   * known. Stays parallel to the actual cwd we send to the server in
+   * the `term:spawn` payload below.
+   */
+  function terminalTabName(): string {
+    const wtId = defaultWorkingTreeIdFor(activeSession);
+    const wtPath = wtId ? workingTrees.find(w => w.id === wtId)?.path : null;
+    const cwd = wtPath ?? activeWorkspace?.path ?? workspaces[0]?.path ?? null;
+    if (!cwd) return 'zsh';
+    // Tilde-collapse $HOME for prettier display (heuristic — server is
+    // the authority on the actual env, but for the tab label this is
+    // a reasonable best-effort).
+    const home = '/Users/';
+    const idx = cwd.indexOf(home);
+    const display = idx === 0
+      ? cwd.replace(/^\/Users\/[^/]+/, '~')
+      : cwd;
+    const seg = display.split('/').filter(Boolean).pop() ?? display;
+    return `zsh · ${seg}`;
   }
 
   function toggleInspector(kind: InspectorTab): void {
@@ -696,6 +764,7 @@ export function App() {
               onWorkspaceCreated={w => setWorkspaces(prev => [...prev, w])}
               onCreateSession={(input) => {
                 pendingFirstMessageRef.current = input.firstMessage?.trim() || null;
+                setCreatingSession(true);
                 ws.send({
                   type: 'session:create',
                   workspace_id: input.workspaceId,
@@ -706,6 +775,7 @@ export function App() {
                   ...(input.baseBranch ? { base_branch: input.baseBranch } : {}),
                 });
               }}
+              creatingSession={creatingSession}
               onArchive={(id, archived) => ws.send({ type: 'session:archive', session_id: id, archived })}
               onDelete={id => ws.send({ type: 'session:delete', session_id: id })}
               onRecover={id => ws.send({ type: 'session:recover', session_id: id })}
@@ -719,14 +789,32 @@ export function App() {
                 const r = await dropSession(id);
                 if (!r.ok) alert(r.error ?? 'drop failed');
               }}
-              onSend={(sessionId, text, opts) =>
+              onSend={(sessionId, text, opts) => {
+                // Optimistic echo: append a pending user msg to the transcript
+                // and arm the thinking ticker before the server confirms. The
+                // real `user_message` event reconciles in applyEnvelope.
+                const exec = sessionsRef.current.find(s => s.id === sessionId)?.executor ?? 'claude';
+                const optimistic: TranscriptItem = {
+                  kind: 'user',
+                  id: `optimistic:${sessionId}:${Date.now()}`,
+                  text,
+                  exec,
+                  ts: Date.now(),
+                  turn: 0,
+                  pending: true,
+                };
+                setItemsBySession(prev => ({
+                  ...prev,
+                  [sessionId]: [...(prev[sessionId] ?? []), optimistic],
+                }));
+                setPendingBySession(p => ({ ...p, [sessionId]: true }));
                 ws.send({
                   type: 'message:send',
                   session_id: sessionId,
                   text,
                   ...(opts?.oneShotBypass ? { oneShotBypass: true } : {}),
-                })
-              }
+                });
+              }}
               onSendSkill={(sessionId, name, path) =>
                 ws.send({
                   type: 'message:send',
@@ -795,6 +883,7 @@ export function App() {
             <SpacesView
               workspaces={workspaces}
               systemConfig={systemConfig}
+              ws={ws}
               onChange={() => void loadWorkspaces().then(setWorkspaces)}
               onCreateWorktreeSession={(input) => {
                 ws.send({
@@ -832,11 +921,22 @@ export function App() {
                   return <SettingsBody config={systemConfig} onChange={cfg => setSystemConfig(cfg)} />;
                 }
                 if (t.kind === 'term') {
+                  // Pick the most-specific cwd we can: worktree path
+                  // when the active session has one, otherwise the
+                  // session's workspace, otherwise the first known
+                  // workspace. This matches what GitBadge / Files /
+                  // /raw all already use as the "current" tree. The
+                  // server falls back to $HOME if everything is null.
+                  // Each tab is a distinct PTY keyed by t.id.
+                  const wtId = defaultWorkingTreeIdFor(activeSession);
+                  const wtPath = wtId ? workingTrees.find(w => w.id === wtId)?.path : null;
+                  const wbCwd = wtPath ?? activeWorkspace?.path ?? workspaces[0]?.path ?? null;
                   return (
                     <div className="sheet-term">
-                      <div><span className="prompt">~/Coding/gian</span> <span className="dim">git:(main)</span> <span className="ok">✓</span></div>
-                      <div><span className="dim">$</span> <span className="cursor" /></div>
-                      <div className="dim" style={{ marginTop: 8 }}>Terminal backend not yet wired (Phase 6).</div>
+                      <Terminal
+                        instanceKey={`term:${t.id}`}
+                        wire={makeWorkbenchWire(ws, t.id, wbCwd ? { cwd: wbCwd } : {})}
+                      />
                     </div>
                   );
                 }

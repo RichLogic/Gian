@@ -268,6 +268,10 @@ export class SessionManager {
         now,
       });
 
+    if (worktreePath) {
+      this.broadcastWorkspaceGitUpdated(input.workspace_id, 'worktree-created');
+    }
+
     return this.getSession(id);
   }
 
@@ -885,6 +889,7 @@ export class SessionManager {
       removeWorktree(workspace.path, session.worktree_path, session.branch);
     }
     this.finalizeWorktree(sessionId, 'merged');
+    this.broadcastWorkspaceGitUpdated(session.workspace_id, 'merge');
   }
 
   async dropWorktree(sessionId: string): Promise<void> {
@@ -903,6 +908,7 @@ export class SessionManager {
       removeWorktree(workspace.path, session.worktree_path, session.branch);
     }
     this.finalizeWorktree(sessionId, 'discarded');
+    this.broadcastWorkspaceGitUpdated(session.workspace_id, 'drop');
   }
 
   private finalizeWorktree(sessionId: string, outcome: WorktreeOutcome): void {
@@ -967,6 +973,11 @@ export class SessionManager {
     this.approvals.clearSession(sessionId);
     this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
     this.broadcaster.broadcast({ type: 'session:deleted', session_id: sessionId });
+    // If the session owned a worktree branch, removal above changed git
+    // state — let the Workspace Git panel pick that up live.
+    if (session.branch) {
+      this.broadcastWorkspaceGitUpdated(session.workspace_id, 'session-deleted');
+    }
   }
 
   listEvents(sessionId: string): EventEnvelope[] {
@@ -1361,6 +1372,17 @@ export class SessionManager {
       type: 'queue:updated',
       session_id: sessionId,
       queue: this.queue.list(sessionId).map(e => ({ id: e.id, text: e.text })),
+    });
+  }
+
+  private broadcastWorkspaceGitUpdated(
+    workspaceId: string,
+    reason: 'merge' | 'drop' | 'session-deleted' | 'worktree-created',
+  ): void {
+    this.broadcaster.broadcast({
+      type: 'workspace:git-updated',
+      workspace_id: workspaceId,
+      reason,
     });
   }
 }

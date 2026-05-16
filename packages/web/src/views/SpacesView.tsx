@@ -1,23 +1,31 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalMode, NativeSession, Session, SystemConfig, Workspace } from '@gian/shared';
 import {
+  abortPendingGitOp,
   adoptNativeSession,
+  createLocalBranch,
   createWorkspace,
   deleteNativeSession,
   deleteWorkspace,
+  dropSession,
+  fetchRemotes,
+  loadBranches,
   loadClaudeMd,
   loadNativeSessions,
+  loadRemoteBranches,
   loadRepoInfo,
   loadSessions,
   loadWorkspaceTrees,
+  mergeSession,
   pickWorkspaceFolder,
   reorderWorkspaces,
   saveClaudeMd,
   updateWorkspace,
 } from '../api.js';
-import type { RepoInfo, WorkspaceTree } from '../api.js';
+import type { LocalBranch, PendingGitOp, RemoteBranch, RepoInfo, WorkspaceTree } from '../api.js';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
+import type { GianWs } from '../ws.js';
 
 // ── V2 icon set ─────────────────────────────────────────────────────────────
 // Paths copied verbatim from design/gian-design-v2/js/data.jsx (`I`). Only the
@@ -100,7 +108,7 @@ function HelpHint({ children }: { children: React.ReactNode }) {
   );
 }
 
-type WsTab = 'config' | 'native';
+type WsTab = 'overview' | 'git' | 'native';
 
 type NewWorkspaceSource = 'new' | 'adopt';
 
@@ -166,11 +174,13 @@ export interface CreateWorktreeSessionInput {
 export function SpacesView({
   workspaces,
   systemConfig,
+  ws,
   onChange,
   onCreateWorktreeSession,
 }: {
   workspaces: Workspace[];
   systemConfig: SystemConfig | null;
+  ws: GianWs;
   onChange: () => void;
   onCreateWorktreeSession: (input: CreateWorktreeSessionInput) => void;
 }) {
@@ -247,6 +257,7 @@ export function SpacesView({
       <SpaceDetail
         workspace={selected}
         allSessions={sessions}
+        ws={ws}
         onChange={onChange}
         onDeleted={() => setSelectedId(workspaces.find(w => w.id !== selectedId)?.id ?? null)}
         onOpenClaudeMd={() => setClaudeMdOpen(true)}
@@ -505,6 +516,7 @@ function BrowseFolderButton({
 function SpaceDetail({
   workspace,
   allSessions,
+  ws,
   onChange,
   onDeleted,
   onOpenClaudeMd,
@@ -512,6 +524,7 @@ function SpaceDetail({
 }: {
   workspace: Workspace | null;
   allSessions: Session[];
+  ws: GianWs;
   onChange: () => void;
   onDeleted: () => void;
   onOpenClaudeMd: () => void;
@@ -522,7 +535,7 @@ function SpaceDetail({
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [saving, setSaving] = useState<string | null>(null);
-  const [tab, setTab] = useState<WsTab>('config');
+  const [tab, setTab] = useState<WsTab>('overview');
   const [nativeCount, setNativeCount] = useState<number | null>(null);
   void saving;
 
@@ -606,10 +619,16 @@ function SpaceDetail({
           <div className="detail-sub">{workspace.path}</div>
           <div className="detail-tabs">
             <button
-              className={`detail-tab ${tab === 'config' ? 'active' : ''}`}
-              onClick={() => setTab('config')}
+              className={`detail-tab ${tab === 'overview' ? 'active' : ''}`}
+              onClick={() => setTab('overview')}
             >
-              Config
+              Overview
+            </button>
+            <button
+              className={`detail-tab ${tab === 'git' ? 'active' : ''}`}
+              onClick={() => setTab('git')}
+            >
+              Git
             </button>
             <button
               className={`detail-tab ${tab === 'native' ? 'active' : ''}`}
@@ -618,16 +637,24 @@ function SpaceDetail({
               Native sessions {nativeCount !== null && <span className="count">{nativeCount}</span>}
             </button>
           </div>
-          {tab === 'config' ? (
-            <ConfigPane
+          {tab === 'overview' && (
+            <OverviewPane
               workspace={workspace}
               relatedSessions={relatedSessions}
               onOpenClaudeMd={onOpenClaudeMd}
-              onChange={onChange}
-              onCreateWorktreeSession={onCreateWorktreeSession}
               t={t}
             />
-          ) : (
+          )}
+          {tab === 'git' && (
+            <GitPane
+              workspace={workspace}
+              ws={ws}
+              onOpenClaudeMd={onOpenClaudeMd}
+              onChange={onChange}
+              onCreateWorktreeSession={onCreateWorktreeSession}
+            />
+          )}
+          {tab === 'native' && (
             <NativeSessionsPane workspace={workspace} onChange={onChange} />
           )}
         </div>
@@ -678,47 +705,31 @@ function WorkspaceKebab({
   );
 }
 
-function ConfigPane({
+function OverviewPane({
   workspace,
   relatedSessions,
   onOpenClaudeMd,
-  onChange,
-  onCreateWorktreeSession,
   t,
 }: {
   workspace: Workspace;
   relatedSessions: Session[];
   onOpenClaudeMd: () => void;
-  onChange: () => void;
-  onCreateWorktreeSession: (input: CreateWorktreeSessionInput) => void;
   t: ReturnType<typeof useT>;
 }) {
   void t;
+  void relatedSessions;
   const [native, setNative] = useState<NativeSession[]>([]);
   const [repo, setRepo] = useState<RepoInfo | null>(null);
-  const [trees, setTrees] = useState<WorkspaceTree[]>([]);
-  const [treesLoaded, setTreesLoaded] = useState(false);
-  const [newWorktreeOpen, setNewWorktreeOpen] = useState(false);
-
-  const refreshTrees = useCallback(async () => {
-    const tr = await loadWorkspaceTrees(workspace.id);
-    setTrees(tr);
-    setTreesLoaded(true);
-  }, [workspace.id]);
 
   useEffect(() => {
     let cancelled = false;
-    setTreesLoaded(false);
     void Promise.all([
       loadNativeSessions(workspace.id),
       loadRepoInfo(workspace.id),
-      loadWorkspaceTrees(workspace.id),
-    ]).then(([n, r, tr]) => {
+    ]).then(([n, r]) => {
       if (cancelled) return;
       setNative(n);
       setRepo(r);
-      setTrees(tr);
-      setTreesLoaded(true);
     });
     return () => { cancelled = true; };
   }, [workspace.id]);
@@ -726,20 +737,13 @@ function ConfigPane({
   const ccCount = native.filter(n => n.executor === 'claude').length;
   const codexCount = native.filter(n => n.executor === 'codex').length;
   const adoptedCount = native.filter(n => n.adoptedBy).length;
-  const lastNative = native[0]; // already sorted by updatedAt desc
+  const lastNative = native[0];
   const lastNativeRel = lastNative ? relTime(lastNative.updatedAt) : '—';
   const lastNativeAdopted = lastNative?.adoptedBy?.gianSessionName
     || (lastNative?.adoptedBy ? lastNative.adoptedBy.gianSessionId.slice(0, 6) : null);
   const created = new Date(workspace.created_at);
   const createdMonth = created.toLocaleString(undefined, { month: 'short', day: 'numeric' });
   const createdRel = relTime(workspace.created_at);
-
-  const dirtyCount = trees.filter(tr => tr.isDirty).length;
-  const remoteHref = repo?.git.remote
-    ? (repo.git.remote.startsWith('http') ? repo.git.remote : `https://${repo.git.remote}`)
-    : null;
-
-  void relatedSessions;
 
   return (
     <>
@@ -764,48 +768,206 @@ function ConfigPane({
 
       <div className="card">
         <div className="card-head">
-          <h3>Repository</h3>
-          <span className="aside">git remote · default branch · last commit</span>
-          {remoteHref && (
-            <div className="right">
-              <a className="btn ghost sm" href={remoteHref} target="_blank" rel="noreferrer">
-                <Icon d={I.github} size={13} />View on GitHub
-              </a>
-            </div>
-          )}
+          <h3>About this workspace</h3>
+          <span className="aside">path · agent notes</span>
         </div>
         <div className="card-body">
           <dl className="kv-grid">
             <dt>Local path</dt><dd>{workspace.path}</dd>
             <dt>Remote</dt><dd>{repo?.git.remote || '—'}</dd>
             <dt>Default branch</dt><dd>{repo?.git.defaultBranch || 'main'}</dd>
-            {repo?.git.lastCommit && (
-              <>
-                <dt>Last commit</dt>
-                <dd style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-                  <span>{repo.git.lastCommit.hash}</span>
-                  <span style={{ color: 'var(--text-3)', fontFamily: 'var(--font-sans)' }}>
-                    {repo.git.lastCommit.message} · {repo.git.lastCommit.age}
-                  </span>
-                </dd>
-              </>
-            )}
+            <dt>CLAUDE.md</dt>
+            <dd style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+              <button
+                className="wt-claude"
+                onClick={onOpenClaudeMd}
+                style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', font: 'inherit', color: 'inherit', textAlign: 'left' }}
+              >
+                Edit CLAUDE.md
+              </button>
+            </dd>
           </dl>
         </div>
+      </div>
+    </>
+  );
+}
+
+function GitPane({
+  workspace,
+  ws,
+  onOpenClaudeMd,
+  onChange,
+  onCreateWorktreeSession,
+}: {
+  workspace: Workspace;
+  ws: GianWs;
+  onOpenClaudeMd: () => void;
+  onChange: () => void;
+  onCreateWorktreeSession: (input: CreateWorktreeSessionInput) => void;
+}) {
+  const [repo, setRepo] = useState<RepoInfo | null>(null);
+  const [branches, setBranches] = useState<LocalBranch[]>([]);
+  const [trees, setTrees] = useState<WorkspaceTree[]>([]);
+  const [branchesLoaded, setBranchesLoaded] = useState(false);
+  const [fetching, setFetching] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [fetchedAt, setFetchedAt] = useState<string | null>(null);
+  const [newWorktreeOpen, setNewWorktreeOpen] = useState(false);
+  const [branchFilter, setBranchFilter] = useState<'all' | 'on-worktree' | 'off-worktree' | 'gian'>('all');
+  const [remoteSearch, setRemoteSearch] = useState('');
+  const [remoteBranches, setRemoteBranches] = useState<RemoteBranch[]>([]);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    const [r, b, tr] = await Promise.all([
+      loadRepoInfo(workspace.id),
+      loadBranches(workspace.id),
+      loadWorkspaceTrees(workspace.id),
+    ]);
+    setRepo(r);
+    setBranches(b);
+    setTrees(tr);
+    setBranchesLoaded(true);
+  }, [workspace.id]);
+
+  useEffect(() => {
+    setBranchesLoaded(false);
+    void refresh();
+  }, [refresh]);
+
+  const doRemoteSearch = useCallback(async (q: string) => {
+    setRemoteLoading(true);
+    const list = await loadRemoteBranches(workspace.id, q || undefined);
+    setRemoteBranches(list);
+    setRemoteLoading(false);
+  }, [workspace.id]);
+
+  // Live refresh: host pushes `workspace:git-updated` after fetch / branch /
+  // merge / drop / session-delete. Filter by workspace_id so other workspaces'
+  // events don't trigger re-fetches in this pane.
+  useEffect(() => {
+    const off = ws.onMessage(msg => {
+      if (msg.type === 'workspace:git-updated' && msg.workspace_id === workspace.id) {
+        void refresh();
+        // Keep the remote-branches panel in sync only if it's been populated —
+        // otherwise wait for the user to open it.
+        if (remoteBranches.length > 0 || remoteSearch) {
+          void doRemoteSearch(remoteSearch);
+        }
+      }
+    });
+    return off;
+  }, [ws, workspace.id, refresh, doRemoteSearch, remoteBranches.length, remoteSearch]);
+
+  // Worktree-side info (dirty count, CLAUDE.md) lives in `trees`; key by path.
+  const treesByPath = useMemo(() => {
+    const m = new Map<string, WorkspaceTree>();
+    for (const t of trees) m.set(t.path, t);
+    return m;
+  }, [trees]);
+
+  // Filter chips drive what shows up in the unified branches list.
+  const filtered = useMemo(() => {
+    return branches.filter(b => {
+      switch (branchFilter) {
+        case 'on-worktree': return !!b.worktreePath;
+        case 'off-worktree': return !b.worktreePath;
+        case 'gian': return b.isGianBranch;
+        default: return true;
+      }
+    }).sort((a, b) => {
+      // Main worktree first, then other worktrees, then bare branches.
+      const aIsMain = a.worktreePath === workspace.path ? 0 : 1;
+      const bIsMain = b.worktreePath === workspace.path ? 0 : 1;
+      if (aIsMain !== bIsMain) return aIsMain - bIsMain;
+      const aHasTree = a.worktreePath ? 0 : 1;
+      const bHasTree = b.worktreePath ? 0 : 1;
+      if (aHasTree !== bHasTree) return aHasTree - bHasTree;
+      return a.name.localeCompare(b.name);
+    });
+  }, [branches, branchFilter, workspace.path]);
+
+  async function handleFetch() {
+    setFetching(true);
+    setFetchError(null);
+    const result = await fetchRemotes(workspace.id);
+    setFetching(false);
+    if (!result.ok) {
+      setFetchError(result.error ?? 'Fetch failed');
+      return;
+    }
+    setFetchedAt(result.fetchedAt ?? new Date().toISOString());
+    void refresh();
+    // If the user has the remote panel open, refresh it too.
+    if (remoteSearch || remoteBranches.length > 0) void doRemoteSearch(remoteSearch);
+  }
+
+  // Debounce remote-branch search so we don't hammer git on each keystroke.
+  useEffect(() => {
+    const handle = setTimeout(() => { void doRemoteSearch(remoteSearch); }, 220);
+    return () => clearTimeout(handle);
+  }, [remoteSearch, doRemoteSearch]);
+
+  const remoteHref = repo?.git.remote
+    ? (repo.git.remote.startsWith('http') ? repo.git.remote : `https://${repo.git.remote}`)
+    : null;
+
+  const onWorktreeCount = branches.filter(b => b.worktreePath).length;
+  const dirtyCount = trees.filter(tr => tr.isDirty).length;
+
+  return (
+    <>
+      {repo?.git.pendingOp && (
+        <PendingOpBanner
+          op={repo.git.pendingOp}
+          workspaceId={workspace.id}
+          workspacePath={workspace.path}
+        />
+      )}
+      <div className="card">
+        <div className="card-head">
+          <h3>Remote</h3>
+          <span className="aside">{repo?.git.remote || 'no remote'}</span>
+          <div className="right" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {fetchedAt && (
+              <span style={{ font: 'var(--fz-12)/1 var(--font-sans)', color: 'var(--text-3)' }}>
+                fetched {relTime(fetchedAt)}
+              </span>
+            )}
+            {remoteHref && (
+              <a className="btn ghost sm" href={remoteHref} target="_blank" rel="noreferrer">
+                <Icon d={I.github} size={13} />View on GitHub
+              </a>
+            )}
+            <button
+              className="btn sm"
+              disabled={fetching || !repo?.git.isRepo}
+              onClick={() => void handleFetch()}
+              title="git fetch --prune --all"
+            >
+              {fetching ? 'Fetching…' : 'Fetch'}
+            </button>
+          </div>
+        </div>
+        {fetchError && (
+          <div className="card-body" style={{ color: 'var(--danger)', fontSize: 12 }}>{fetchError}</div>
+        )}
       </div>
 
       <div className="card">
         <div className="card-head">
           <h3>
-            Worktrees
+            Branches
             <HelpHint>
-              A <b>worktree</b> is a separate checkout of the repo on disk —
-              each sits in its own folder with one branch checked out. Gian
-              spins up one worktree per session so agents can work on
-              different branches without colliding.
+              All local branches in this repo. Branches checked out in a
+              worktree are marked — Gian spins up one worktree per session
+              so multiple agents can work on different branches in parallel.
             </HelpHint>
           </h3>
-          <span className="aside">{trees.length} on disk · {dirtyCount} dirty</span>
+          <span className="aside">
+            {branches.length} local · {onWorktreeCount} on worktree{dirtyCount > 0 ? ` · ${dirtyCount} dirty` : ''}
+          </span>
           {repo?.git.isRepo && (
             <div className="right">
               <button className="btn primary sm" onClick={() => setNewWorktreeOpen(true)}>
@@ -814,45 +976,88 @@ function ConfigPane({
             </div>
           )}
         </div>
+        <div style={{ display: 'flex', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--hairline-2)' }}>
+          <div className="segm sm">
+            <button className={`segm-item${branchFilter === 'all' ? ' active' : ''}`} onClick={() => setBranchFilter('all')}>All</button>
+            <button className={`segm-item${branchFilter === 'on-worktree' ? ' active' : ''}`} onClick={() => setBranchFilter('on-worktree')}>On worktree</button>
+            <button className={`segm-item${branchFilter === 'off-worktree' ? ' active' : ''}`} onClick={() => setBranchFilter('off-worktree')}>Off worktree</button>
+            <button className={`segm-item${branchFilter === 'gian' ? ' active' : ''}`} onClick={() => setBranchFilter('gian')}>Gian sessions</button>
+          </div>
+        </div>
         <div className="card-body compact">
-          {trees.map(tree => (
-            <WorkspaceTreeRow
-              key={tree.id}
-              tree={tree}
-              onOpenClaudeMd={tree.kind === 'main' ? onOpenClaudeMd : undefined}
-              onRefresh={() => { void refreshTrees(); onChange(); }}
+          {filtered.map(b => (
+            <BranchRow
+              key={b.name}
+              branch={b}
+              tree={b.worktreePath ? treesByPath.get(b.worktreePath) ?? null : null}
+              isMainTree={b.worktreePath === workspace.path}
+              workspaceId={workspace.id}
+              workspacePath={workspace.path}
+              onOpenClaudeMd={b.worktreePath === workspace.path ? onOpenClaudeMd : undefined}
+              onRefresh={() => { void refresh(); onChange(); }}
+              onCreateWorktreeSession={onCreateWorktreeSession}
             />
           ))}
-          {trees.length === 0 && !treesLoaded && (
+          {branches.length === 0 && !branchesLoaded && (
             <div className="wt-row" style={{ color: 'var(--text-3)' }}>
               <span className="spinner" aria-hidden="true" />
-              <span>Loading worktrees…</span>
+              <span>Loading branches…</span>
             </div>
           )}
-          {trees.length === 0 && treesLoaded && (
+          {branches.length === 0 && branchesLoaded && (
             <div className="wt-row" style={{ color: 'var(--text-3)' }}>
-              No worktrees yet.
+              No local branches.
+            </div>
+          )}
+          {branches.length > 0 && filtered.length === 0 && (
+            <div className="wt-row" style={{ color: 'var(--text-3)' }}>
+              No branches match this filter.
             </div>
           )}
         </div>
       </div>
 
-      {/* TODO Phase 5 backend — list local branches not in any worktree. */}
       <div className="card">
         <div className="card-head">
           <h3>
-            Other local branches
+            Remote branches
             <HelpHint>
-              Branches that exist locally but aren't checked out in any
-              worktree. Spin one up to start a session on it.
+              Branches that exist on a remote (origin/...). Create a local
+              tracking branch to start working on one, or spin up a worktree
+              session directly from a remote ref.
             </HelpHint>
           </h3>
-          <span className="aside">— branches · not in any worktree</span>
+          <span className="aside">{remoteBranches.length} match{remoteLoading ? ' · loading…' : ''}</span>
+        </div>
+        <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--hairline-2)' }}>
+          <input
+            className="input"
+            placeholder="Search remote branches…"
+            value={remoteSearch}
+            onChange={e => setRemoteSearch(e.target.value)}
+            spellCheck={false}
+          />
         </div>
         <div className="card-body compact">
-          <span style={{ padding: '6px 12px', color: 'var(--text-3)', fontSize: 11, fontStyle: 'italic' }}>
-            Backend support coming soon
-          </span>
+          {remoteBranches.map(rb => (
+            <RemoteBranchRow
+              key={rb.fullName}
+              branch={rb}
+              workspaceId={workspace.id}
+              onRefresh={() => { void refresh(); void doRemoteSearch(remoteSearch); }}
+              onCreateWorktreeSession={() => onCreateWorktreeSession({
+                workspaceId: workspace.id,
+                executor: 'codex',
+                baseBranch: rb.fullName,
+                branch: `gian/${shortId()}`,
+              })}
+            />
+          ))}
+          {remoteBranches.length === 0 && !remoteLoading && (
+            <div className="wt-row" style={{ color: 'var(--text-3)' }}>
+              {remoteSearch ? 'No remote branches match.' : 'No remote branches. Try Fetch.'}
+            </div>
+          )}
         </div>
       </div>
 
@@ -860,6 +1065,8 @@ function ConfigPane({
         <NewWorktreeDialog
           workspace={workspace}
           defaultBranch={repo?.git.defaultBranch ?? null}
+          branches={branches}
+          remoteBranches={remoteBranches}
           onCancel={() => setNewWorktreeOpen(false)}
           onCreate={(input) => {
             onCreateWorktreeSession({
@@ -869,10 +1076,11 @@ function ConfigPane({
               ...(input.branch ? { branch: input.branch } : {}),
             });
             setNewWorktreeOpen(false);
-            // Optimistic refresh after a short delay to let the proxy/git
-            // pipeline finish. session:created will also push a new session
-            // through; this just brings the trees list back in sync.
-            setTimeout(() => { void refreshTrees(); onChange(); }, 800);
+            // Host broadcasts workspace:git-updated once the worktree is
+            // wired up — the useEffect above re-pulls. The onChange() ping
+            // refreshes the outer workspaces list so the session count tick
+            // updates in the sidebar.
+            onChange();
           }}
         />
       )}
@@ -880,62 +1088,178 @@ function ConfigPane({
   );
 }
 
-function WorkspaceTreeRow({
-  tree,
-  onOpenClaudeMd,
-  onRefresh,
+function PendingOpBanner({
+  op,
+  workspaceId,
+  workspacePath,
 }: {
-  tree: WorkspaceTree;
-  onOpenClaudeMd?: () => void;
-  onRefresh: () => void;
+  op: PendingGitOp;
+  workspaceId: string;
+  workspacePath: string;
 }) {
-  const isMain = tree.kind === 'main';
-  const state = tree.isDirty ? 'dirty' : 'clean';
-  const branchLabel = tree.branch ?? tree.label;
-  const sessionLabel = tree.session
-    ? (tree.session.name ?? tree.session.id.slice(0, 6))
-    : null;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const verb: Record<PendingGitOp['kind'], string> = {
+    'merge': 'Merge',
+    'rebase': 'Rebase',
+    'cherry-pick': 'Cherry-pick',
+    'revert': 'Revert',
+  };
+  const opName = verb[op.kind];
+
+  async function handleAbort() {
+    if (!confirm(`Run "git ${op.kind} --abort" in ${workspacePath}?\nThis discards conflict resolution work in progress and rewinds the index.`)) return;
+    setBusy(true);
+    setError(null);
+    const res = await abortPendingGitOp(workspaceId);
+    setBusy(false);
+    if (!res.ok) { setError(res.error ?? 'Abort failed'); return; }
+    // Host broadcasts workspace:git-updated → GitPane refreshes; banner
+    // disappears once `repo.git.pendingOp` flips to null.
+  }
+
   return (
-    <div className="wt-row">
-      <span className="wt-ico">
-        {isMain ? <Icon d={I.folder} size={15} /> : <BranchIcon size={14} />}
-      </span>
-      <div className="wt-branch">
-        {branchLabel}
-        {isMain && <span className="main-tag">main tree</span>}
+    <div
+      role="alert"
+      style={{
+        background: 'color-mix(in oklab, var(--warn) 12%, transparent)',
+        border: '1px solid color-mix(in oklab, var(--warn) 45%, transparent)',
+        borderRadius: 'var(--r-2)',
+        padding: '12px 14px',
+        marginBottom: 12,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        flexWrap: 'wrap',
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ font: '600 var(--fz-13)/1.3 var(--font-sans)', color: 'var(--warn)' }}>
+          {opName} in progress
+        </div>
+        <div style={{ font: 'var(--fz-12)/1.4 var(--font-sans)', color: 'var(--text-2)', marginTop: 2 }}>
+          The workspace tree is in the middle of a <span className="mono">git {op.kind}</span> that
+          hit conflicts. Resolve the conflicts in your editor and commit, or abort to rewind.
+          {' '}New Gian sessions on this workspace will see the half-merged state.
+        </div>
+        {error && (
+          <div style={{ font: 'var(--fz-12)/1.3 var(--font-sans)', color: 'var(--danger)', marginTop: 6 }}>
+            {error}
+          </div>
+        )}
       </div>
       <button
-        className={`wt-claude ${tree.claudeMd.exists ? '' : 'empty'}`}
-        title={tree.claudeMd.exists ? 'Edit CLAUDE.md' : 'Create CLAUDE.md'}
-        onClick={onOpenClaudeMd}
-        disabled={!onOpenClaudeMd}
-        style={{ background: 'none', border: 0, padding: 0, cursor: onOpenClaudeMd ? 'pointer' : 'default', font: 'inherit', color: 'inherit', textAlign: 'left' }}
+        className="btn sm"
+        onClick={() => void handleAbort()}
+        disabled={busy}
+        title={`git ${op.kind} --abort`}
       >
-        {tree.claudeMd.exists ? `CLAUDE.md · ${tree.claudeMd.lines} lines` : '+ CLAUDE.md'}
+        {busy ? 'Aborting…' : `Abort ${op.kind}`}
       </button>
-      <div className={`wt-state ${state}`}>
-        <span className="dot" />
-        {state === 'clean' ? 'clean' : `${tree.modifiedCount} changed`}
-      </div>
-      {sessionLabel ? (
-        <a className="wt-session" href="#" onClick={e => e.preventDefault()}>{sessionLabel}</a>
-      ) : (
-        <span className="wt-session none">—</span>
-      )}
-      <WorkspaceTreeRowKebab tree={tree} onRefresh={onRefresh} />
     </div>
   );
 }
 
-function WorkspaceTreeRowKebab({
+function BranchRow({
+  branch,
   tree,
+  isMainTree,
+  workspacePath,
+  onOpenClaudeMd,
+  onRefresh,
+  onCreateWorktreeSession,
+  workspaceId,
+}: {
+  branch: LocalBranch;
+  tree: WorkspaceTree | null;
+  isMainTree: boolean;
+  workspaceId: string;
+  workspacePath: string;
+  onOpenClaudeMd?: () => void;
+  onRefresh: () => void;
+  onCreateWorktreeSession: (input: CreateWorktreeSessionInput) => void;
+}) {
+  void workspacePath;
+  const onWorktree = !!branch.worktreePath;
+  const isDirty = tree?.isDirty ?? false;
+  const state = isDirty ? 'dirty' : 'clean';
+  const modifiedCount = tree?.modifiedCount ?? 0;
+  const sessionLabel = branch.session
+    ? (branch.session.name ?? branch.session.id.slice(0, 6))
+    : null;
+  const trackingLabel = branch.upstream
+    ? (branch.gone ? `${branch.upstream} · gone` : branch.upstream)
+    : 'no upstream';
+  const aheadBehind = branch.ahead || branch.behind
+    ? `${branch.ahead ? '↑' + branch.ahead : ''}${branch.behind ? '↓' + branch.behind : ''}`
+    : '';
+  return (
+    <div className="wt-row">
+      <span className="wt-ico">
+        {isMainTree ? <Icon d={I.folder} size={15} /> : <BranchIcon size={14} />}
+      </span>
+      <div className="wt-branch">
+        {branch.name}
+        {isMainTree && <span className="main-tag">main tree</span>}
+        {onWorktree && !isMainTree && <span className="main-tag">worktree</span>}
+      </div>
+      <span style={{ font: 'var(--fz-12)/1.3 var(--font-mono)', color: 'var(--text-3)' }} title={trackingLabel}>
+        {trackingLabel}{aheadBehind && <span style={{ marginLeft: 6, color: branch.gone ? 'var(--danger)' : 'var(--text-2)' }}>{aheadBehind}</span>}
+      </span>
+      {onWorktree ? (
+        <div className={`wt-state ${state}`}>
+          <span className="dot" />
+          {state === 'clean' ? 'clean' : `${modifiedCount} changed`}
+        </div>
+      ) : (
+        <span style={{ font: 'var(--fz-12)/1.3 var(--font-sans)', color: 'var(--text-3)' }}>
+          {branch.lastCommit?.age || '—'}
+        </span>
+      )}
+      {sessionLabel ? (
+        <a className="wt-session" href="#" onClick={e => e.preventDefault()}>{sessionLabel}</a>
+      ) : !onWorktree ? (
+        <button
+          className="btn xs ghost"
+          onClick={() => onCreateWorktreeSession({
+            workspaceId,
+            executor: 'codex',
+            baseBranch: branch.name,
+            branch: `gian/${shortId()}`,
+          })}
+          title={`Open new worktree session from ${branch.name}`}
+        >
+          Open
+        </button>
+      ) : (
+        <span className="wt-session none">—</span>
+      )}
+      <BranchRowKebab
+        branch={branch}
+        tree={tree}
+        isMainTree={isMainTree}
+        onOpenClaudeMd={onOpenClaudeMd}
+        onRefresh={onRefresh}
+      />
+    </div>
+  );
+}
+
+function BranchRowKebab({
+  branch,
+  tree,
+  isMainTree,
+  onOpenClaudeMd,
   onRefresh,
 }: {
-  tree: WorkspaceTree;
+  branch: LocalBranch;
+  tree: WorkspaceTree | null;
+  isMainTree: boolean;
+  onOpenClaudeMd?: () => void;
   onRefresh: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState<'reveal' | 'delete' | null>(null);
+  const [busy, setBusy] = useState<'reveal' | 'merge' | 'drop' | 'delete' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -948,6 +1272,7 @@ function WorkspaceTreeRowKebab({
   }, [open]);
 
   async function handleReveal() {
+    if (!tree) return;
     setBusy('reveal');
     setError(null);
     try {
@@ -963,10 +1288,36 @@ function WorkspaceTreeRowKebab({
     }
   }
 
+  async function handleMerge() {
+    if (!branch.session) return;
+    const sid = branch.session.id;
+    if (!confirm(`Merge "${branch.name}" into its base branch?\nRuns git checkout base && git merge --no-ff. The worktree is removed after a successful merge; conflicts leave it intact for you to resolve.`)) return;
+    setBusy('merge');
+    setError(null);
+    const res = await mergeSession(sid);
+    setBusy(null);
+    if (!res.ok) { setError(res.error ?? 'Merge failed'); return; }
+    setOpen(false);
+    onRefresh();
+  }
+
+  async function handleDrop() {
+    if (!branch.session) return;
+    const sid = branch.session.id;
+    if (!confirm(`Discard worktree "${branch.name}"?\nThe worktree directory and its branch are removed; the session row stays in history marked as 'discarded'.`)) return;
+    setBusy('drop');
+    setError(null);
+    const res = await dropSession(sid);
+    setBusy(null);
+    if (!res.ok) { setError(res.error ?? 'Discard failed'); return; }
+    setOpen(false);
+    onRefresh();
+  }
+
   async function handleDelete() {
-    if (!tree.session) return;
-    const sid = tree.session.id;
-    const label = tree.branch ?? tree.label;
+    if (!branch.session) return;
+    const sid = branch.session.id;
+    const label = branch.name;
     if (!confirm(`Delete worktree "${label}"?\nThis removes the linked Gian session (${sid.slice(0, 8)}…) and the worktree directory.`)) return;
     setBusy('delete');
     setError(null);
@@ -986,7 +1337,8 @@ function WorkspaceTreeRowKebab({
     }
   }
 
-  const isWorktree = tree.kind === 'worktree' && !!tree.session;
+  const hasTree = !!tree;
+  const isGianSession = !!branch.session;
 
   return (
     <div className="ws-kebab-anchor" ref={ref}>
@@ -1000,33 +1352,120 @@ function WorkspaceTreeRowKebab({
       </button>
       {open && (
         <div className="ws-kebab-pop">
-          <button
-            className="ws-kebab-item"
-            disabled={busy !== null}
-            onClick={() => { setOpen(false); void handleReveal(); }}
-          >
-            {busy === 'reveal' ? 'Opening…' : 'Open in Finder'}
-          </button>
-          {isWorktree && (
+          {hasTree && (
+            <button
+              className="ws-kebab-item"
+              disabled={busy !== null}
+              onClick={() => { setOpen(false); void handleReveal(); }}
+            >
+              {busy === 'reveal' ? 'Opening…' : 'Open in Finder'}
+            </button>
+          )}
+          {isMainTree && onOpenClaudeMd && (
+            <button
+              className="ws-kebab-item"
+              onClick={() => { setOpen(false); onOpenClaudeMd(); }}
+            >
+              Edit CLAUDE.md
+            </button>
+          )}
+          {isGianSession && (
             <>
+              <div className="ws-kebab-divider" />
+              <button
+                className="ws-kebab-item"
+                disabled={busy !== null}
+                onClick={() => { void handleMerge(); }}
+                title="git checkout base && git merge --no-ff"
+              >
+                {busy === 'merge' ? 'Merging…' : 'Merge to base'}
+              </button>
+              <button
+                className="ws-kebab-item"
+                disabled={busy !== null}
+                onClick={() => { void handleDrop(); }}
+                title="Throw away the branch + worktree; keep session as history"
+              >
+                {busy === 'drop' ? 'Discarding…' : 'Discard worktree'}
+              </button>
               <div className="ws-kebab-divider" />
               <button
                 className="ws-kebab-item danger"
                 disabled={busy !== null}
                 onClick={() => { void handleDelete(); }}
+                title="Remove session row + worktree dir entirely"
               >
-                {busy === 'delete' ? 'Deleting…' : 'Delete worktree'}
+                {busy === 'delete' ? 'Deleting…' : 'Delete worktree + session'}
               </button>
             </>
           )}
           {error && (
             <>
               <div className="ws-kebab-divider" />
-              <div className="ws-kebab-item" style={{ color: 'var(--danger)', cursor: 'default' }}>
+              <div className="ws-kebab-item" style={{ color: 'var(--danger)', cursor: 'default', whiteSpace: 'normal' }}>
                 {error}
               </div>
             </>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RemoteBranchRow({
+  branch,
+  workspaceId,
+  onCreateWorktreeSession,
+  onRefresh,
+}: {
+  branch: RemoteBranch;
+  workspaceId: string;
+  onCreateWorktreeSession: () => void;
+  onRefresh: () => void;
+}) {
+  const [busy, setBusy] = useState<'track' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleTrack() {
+    setBusy('track');
+    setError(null);
+    const res = await createLocalBranch(workspaceId, { name: branch.branch, base: branch.fullName });
+    setBusy(null);
+    if (!res.ok) { setError(res.error ?? 'Create failed'); return; }
+    onRefresh();
+  }
+
+  return (
+    <div className="wt-row" style={{ gridTemplateColumns: '18px 1fr 1fr auto auto', gap: 8 }}>
+      <span className="wt-ico"><BranchIcon size={14} /></span>
+      <div className="wt-branch">
+        {branch.fullName}
+        {branch.hasLocalTracking && <span className="main-tag">tracked</span>}
+      </div>
+      <span style={{ font: 'var(--fz-12)/1.3 var(--font-sans)', color: 'var(--text-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {branch.lastCommit.subject} · {branch.lastCommit.age}
+      </span>
+      {!branch.hasLocalTracking ? (
+        <button
+          className="btn xs ghost"
+          onClick={() => void handleTrack()}
+          disabled={busy !== null}
+          title={`git branch --track ${branch.branch} ${branch.fullName}`}
+        >
+          {busy === 'track' ? 'Adding…' : 'Add tracking'}
+        </button>
+      ) : <span />}
+      <button
+        className="btn xs ghost"
+        onClick={onCreateWorktreeSession}
+        title={`Open new worktree session from ${branch.fullName}`}
+      >
+        Open in new worktree
+      </button>
+      {error && (
+        <div style={{ gridColumn: '1 / -1', color: 'var(--danger)', font: 'var(--fz-12)/1.3 var(--font-sans)', paddingLeft: 30 }}>
+          {error}
         </div>
       )}
     </div>
@@ -1352,11 +1791,15 @@ function AdoptDialog({
 function NewWorktreeDialog({
   workspace,
   defaultBranch,
+  branches,
+  remoteBranches,
   onCancel,
   onCreate,
 }: {
   workspace: Workspace;
   defaultBranch: string | null;
+  branches: LocalBranch[];
+  remoteBranches: RemoteBranch[];
   onCancel: () => void;
   onCreate: (input: {
     executor: 'claude' | 'codex';
@@ -1365,7 +1808,24 @@ function NewWorktreeDialog({
   }) => void;
 }) {
   const [executor, setExecutor] = useState<'claude' | 'codex'>('codex');
-  const [baseBranch, setBaseBranch] = useState(defaultBranch ?? '');
+  // Compose a single options list: local branches first, then remote-only
+  // refs (those without a matching local tracking branch yet). Worktree-
+  // occupied branches are excluded — git refuses to checkout the same branch
+  // in two worktrees.
+  const options = useMemo(() => {
+    const localNames = new Set(branches.map(b => b.name));
+    const localOpts = branches
+      .filter(b => !b.worktreePath)
+      .map(b => ({ value: b.name, label: b.name, kind: 'local' as const }));
+    const remoteOpts = remoteBranches
+      .filter(rb => !localNames.has(rb.branch))
+      .map(rb => ({ value: rb.fullName, label: `${rb.fullName} (remote)`, kind: 'remote' as const }));
+    return [...localOpts, ...remoteOpts];
+  }, [branches, remoteBranches]);
+  const initialBase = defaultBranch && options.some(o => o.value === defaultBranch)
+    ? defaultBranch
+    : options[0]?.value ?? defaultBranch ?? '';
+  const [baseBranch, setBaseBranch] = useState(initialBase);
   const [branch, setBranch] = useState(() => `gian/${shortId()}`);
   const [submitting, setSubmitting] = useState(false);
 
@@ -1391,12 +1851,24 @@ function NewWorktreeDialog({
         <div className="adopt-dialog-body">
           <div className="adopt-field">
             <label className="adopt-label">Base branch</label>
-            <input
-              className="input"
-              placeholder={defaultBranch ?? 'main'}
-              value={baseBranch}
-              onChange={e => setBaseBranch(e.target.value)}
-            />
+            {options.length > 0 ? (
+              <select
+                className="input"
+                value={baseBranch}
+                onChange={e => setBaseBranch(e.target.value)}
+              >
+                {options.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                className="input"
+                placeholder={defaultBranch ?? 'main'}
+                value={baseBranch}
+                onChange={e => setBaseBranch(e.target.value)}
+              />
+            )}
           </div>
 
           <div className="adopt-field">

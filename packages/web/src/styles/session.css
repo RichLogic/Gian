@@ -197,6 +197,18 @@
   display: flex; justify-content: flex-end; gap: 6px;
 }
 
+/* Busy state — used by Create-session and inline workspace-create buttons
+   while the host call is in flight. Keeps the button width stable. */
+.ns-busy { display: inline-flex; align-items: center; gap: 6px; }
+.ns-spinner {
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: ns-spin 0.8s linear infinite;
+  display: inline-block;
+}
+@keyframes ns-spin { to { transform: rotate(360deg); } }
+
 /* Inline workspace creation block inside the workspace field. */
 .ns-inline-ws {
   display: flex; flex-direction: column; gap: 6px;

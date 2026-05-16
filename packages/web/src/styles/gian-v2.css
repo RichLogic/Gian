@@ -805,7 +805,7 @@
 .main-scroll.tty-pane {
   overflow: hidden;
   padding: 8px 8px 8px;
-  background: #0c0c0e;
+  background: var(--surface);
 }
 .gian-terminal {
   width: 100%;
@@ -1508,14 +1508,20 @@
 .md-preview strong { font-weight: 600; color: var(--text); }
 
 .sheet-term {
-  font: 11.5px/1.6 var(--font-mono);
-  padding: 12px 14px;
+  /* Real-terminal mode: xterm owns the inside. No padding/overflow on
+     the wrapper or xterm's renderer will compute the wrong cell grid
+     and you get jagged text. The background is set by xterm itself
+     using our theme tokens (see readThemeFromCss in Terminal.tsx) so
+     the panel matches the rest of the app instead of being pure black. */
   flex: 1; min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
   background: var(--surface);
-  color: var(--text);
-  display: flex; flex-direction: column;
-  gap: 1px;
+  display: flex;
+}
+.sheet-term .gian-terminal {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
 }
 .sheet-term .prompt { color: var(--accent-text); }
 .sheet-term .ok { color: var(--ok); }

@@ -1,49 +1,73 @@
 import { useEffect, useRef } from 'react';
 import { Terminal as Xterm } from '@xterm/xterm';
+import type { ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { GianWs } from '../ws.js';
 
+/**
+ * Adapter that lets the Terminal component send/receive PTY bytes
+ * without caring about which channel they're routed through. Two
+ * concrete wires today:
+ *
+ *   - sessionWire(ws, sessionId)   — `pty:*` family, cc-proxy backed
+ *   - workbenchWire(ws, termId)    — `term:*` family, host-backed shell
+ *
+ * Each `subscribe()` is called once on mount and returns an
+ * unsubscribe function; the component does not assume anything about
+ * how chunks are framed past "raw bytes."
+ */
+export interface TerminalWire {
+  sendInput(bytes: Uint8Array): void;
+  sendResize(cols: number, rows: number): void;
+  requestReplay(): void;
+  /**
+   * Optional spawn step — workbench wire uses this to ask the host to
+   * actually start a shell on mount. Session wire spawns elsewhere
+   * (via the runtime-mode switch), so this is a no-op there.
+   */
+  spawn?(cols: number, rows: number): void;
+  /** Hand back unsubscribe. Implementations decide which WS messages
+   *  to listen for; both onChunk and onReplay receive raw bytes. */
+  subscribe(handlers: {
+    onChunk: (bytes: Uint8Array) => void;
+    onReplay: (chunks: Uint8Array[]) => void;
+  }): () => void;
+  /** Optional: tear down the server-side resource. Workbench wire
+   *  uses this to kill the shell when the tab closes; session wire
+   *  doesn't (the user keeps the PTY across the mount). */
+  dispose?(): void;
+}
+
 export interface TerminalProps {
-  sessionId: string;
-  ws: GianWs;
+  wire: TerminalWire;
+  /** Stable key so React unmounts the xterm when the bound resource
+   *  changes (different sessionId / termId). */
+  instanceKey: string;
 }
 
 /**
- * xterm.js panel for the TTY runtime mode.
- *
- * Wiring:
- *   1. On mount: spin up an xterm instance, attach FitAddon + WebLinksAddon,
- *      ask the server for the ring-buffer replay so we can prime the
- *      screen with whatever the PTY has already printed.
- *   2. Subscribe to `pty:output` / `pty:replay` messages for this session.
- *   3. xterm input → `pty:input` (base64-encoded raw bytes).
- *   4. ResizeObserver → `pty:resize` (cols/rows after FitAddon recomputes).
- *
- * The component is mounted lazily by CodingView when
- * `session.runtime_mode === 'tty'`, so the xterm CSS / bundle cost is
- * only paid when the user actually switches modes.
+ * xterm.js panel — channel-agnostic. The owner picks the wire.
  */
-export function Terminal({ sessionId, ws }: TerminalProps) {
+export function Terminal({ wire, instanceKey }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const termRef = useRef<Xterm | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
 
+    // Stay in step with the rest of the app's mono surfaces — same
+    // JetBrains Mono stack as `--font-mono`, slightly smaller than
+    // xterm's stock 15px so it sits beside transcript / file viewers
+    // without feeling bolted on. Line height a touch over 1.0 keeps
+    // descenders from kissing the cell above.
     const term = new Xterm({
       cursorBlink: true,
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-      fontSize: 13,
-      // Lean towards the project's dark/warm palette. xterm's default is
-      // pure black on white which looks alien against the app shell.
-      theme: {
-        background: '#0c0c0e',
-        foreground: '#e6e6e6',
-        cursor: '#f5c95a',
-      },
+      fontFamily: '"JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace',
+      fontSize: 12.5,
+      lineHeight: 1.25,
+      letterSpacing: 0,
+      theme: readThemeFromCss(containerRef.current),
       allowProposedApi: true,
     });
     const fit = new FitAddon();
@@ -51,69 +75,126 @@ export function Terminal({ sessionId, ws }: TerminalProps) {
     term.loadAddon(fit);
     term.loadAddon(links);
     term.open(containerRef.current);
-    fit.fit();
-    termRef.current = term;
-    fitRef.current = fit;
+    try { fit.fit(); } catch { /* before layout settles */ }
 
-    // Forward keystrokes / paste to the server as base64.
-    const dataDisp = term.onData(data => {
-      const bytes = new TextEncoder().encode(data);
-      ws.send({ type: 'pty:input', session_id: sessionId, data: bytesToBase64(bytes) });
-    });
-
-    // Push initial size, then fit-on-resize.
-    const pushResize = () => {
-      try {
-        fit.fit();
-      } catch { /* before layout settles */ }
-      const cols = term.cols;
-      const rows = term.rows;
-      if (cols > 0 && rows > 0) {
-        ws.send({ type: 'pty:resize', session_id: sessionId, cols, rows });
-      }
+    // Re-paint when the user flips the app theme (light / warm / dark)
+    // or accent. Cheap — xterm exposes `options.theme` as a settable
+    // hook; we hand it the freshly-resolved RGB values from the host
+    // element each time.
+    const repaintTheme = () => {
+      if (!containerRef.current) return;
+      term.options.theme = readThemeFromCss(containerRef.current);
     };
-    pushResize();
-    const resizeObserver = new ResizeObserver(() => {
-      pushResize();
+    const themeObserver = new MutationObserver(repaintTheme);
+    themeObserver.observe(document.body, {
+      attributes: true,
+      attributeFilter: ['data-theme', 'data-accent'],
     });
+
+    const dataDisp = term.onData(data => {
+      wire.sendInput(new TextEncoder().encode(data));
+    });
+
+    const pushResize = () => {
+      try { fit.fit(); } catch { /* before layout settles */ }
+      const { cols, rows } = term;
+      if (cols > 0 && rows > 0) wire.sendResize(cols, rows);
+    };
+
+    const resizeObserver = new ResizeObserver(() => { pushResize(); });
     resizeObserver.observe(containerRef.current);
 
-    // Subscribe to server output for this session.
-    const offMsg = ws.onMessage(msg => {
-      if (msg.type === 'pty:output' && msg.session_id === sessionId) {
-        const bytes = base64ToBytes(msg.data);
-        term.write(bytes);
-      } else if (msg.type === 'pty:replay' && msg.session_id === sessionId) {
-        // Clear before replay so we don't double-print on refresh.
+    // Listener first, then spawn (if applicable), then replay request —
+    // ordering matters: replay-request response races with the first
+    // few bytes from a freshly-spawned PTY, so we want our subscriber
+    // attached before either arrives.
+    const off = wire.subscribe({
+      onChunk: bytes => term.write(bytes),
+      onReplay: chunks => {
         term.reset();
-        for (const chunk of msg.chunks) {
-          term.write(base64ToBytes(chunk));
-        }
-      }
+        for (const c of chunks) term.write(c);
+      },
     });
 
-    // Ask server for the ring-buffer replay so a freshly-mounted Terminal
-    // shows the in-progress screen (boot banner, in-flight output) rather
-    // than an empty void until the next byte arrives.
-    ws.send({ type: 'pty:replay-request', session_id: sessionId });
+    // Push initial size up so the spawn (if any) starts at the right
+    // geometry, then either spawn or request replay.
+    pushResize();
+    if (wire.spawn) {
+      wire.spawn(term.cols, term.rows);
+    } else {
+      wire.requestReplay();
+    }
 
     return () => {
       dataDisp.dispose();
       resizeObserver.disconnect();
-      offMsg();
+      themeObserver.disconnect();
+      off();
       term.dispose();
-      termRef.current = null;
-      fitRef.current = null;
+      wire.dispose?.();
     };
-  }, [sessionId, ws]);
+    // `wire` is recreated on every parent render, so we deliberately
+    // ignore it in deps — the parent passes a stable `instanceKey` to
+    // signal genuine resource changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instanceKey]);
 
   return <div className="gian-terminal" ref={containerRef} />;
 }
 
+// ---------------------------------------------------------------------------
+// Theme bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve an xterm theme from the active CSS theme tokens.
+ *
+ * xterm needs concrete RGB / hex; our token palette is `oklch(...)`.
+ * We can't just hand xterm the var name, but `getComputedStyle()` on
+ * a real element resolves to an rgb string we can pass through.
+ *
+ * Re-runs on every theme/accent flip via the MutationObserver above.
+ */
+function readThemeFromCss(host: HTMLElement): ITheme {
+  const probe = document.createElement('span');
+  probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;';
+  host.appendChild(probe);
+  const get = (cssVar: string) => {
+    probe.style.color = `var(${cssVar})`;
+    return getComputedStyle(probe).color;
+  };
+
+  const fg = get('--text');
+  const bg = get('--surface');
+  const cursor = get('--accent');
+  const muted = get('--text-3');
+  // Selection alpha — xterm wants an rgb(a) string here. Pull --accent
+  // and lower opacity so highlighted regions don't drown the cell.
+  const accentRgb = cursor.startsWith('rgb(') ? cursor.replace('rgb(', 'rgba(').replace(')', ', 0.30)') : cursor;
+
+  host.removeChild(probe);
+
+  // For ANSI colors we lean on xterm's defaults; they're already well
+  // tuned and overriding them theme-by-theme is a rabbit hole. The
+  // foreground/background/cursor swap is what actually makes the panel
+  // feel like part of the app.
+  return {
+    background: bg,
+    foreground: fg,
+    cursor,
+    cursorAccent: bg,
+    selectionBackground: accentRgb,
+    // Dim variants used by xterm's "faint" attribute. Falling back to
+    // --text-3 keeps low-priority output legible against the surface.
+    brightBlack: muted,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Wire factories
+// ---------------------------------------------------------------------------
+
 function bytesToBase64(bytes: Uint8Array): string {
-  // Avoid String.fromCharCode chunking issues on very large buffers — for
-  // typical keystroke input this is fine, but be defensive in case the
-  // user pastes a megabyte. btoa wants a latin1 string; map byte-wise.
   let binary = '';
   const chunkSize = 0x8000;
   for (let i = 0; i < bytes.length; i += chunkSize) {
@@ -128,4 +209,69 @@ function base64ToBytes(b64: string): Uint8Array {
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
   return out;
+}
+
+/** Wire for the per-session TTY mode (cc-proxy backed). */
+export function makeSessionWire(ws: GianWs, sessionId: string): TerminalWire {
+  return {
+    sendInput(bytes) {
+      ws.send({ type: 'pty:input', session_id: sessionId, data: bytesToBase64(bytes) });
+    },
+    sendResize(cols, rows) {
+      ws.send({ type: 'pty:resize', session_id: sessionId, cols, rows });
+    },
+    requestReplay() {
+      ws.send({ type: 'pty:replay-request', session_id: sessionId });
+    },
+    subscribe(handlers) {
+      return ws.onMessage(msg => {
+        if (msg.type === 'pty:output' && msg.session_id === sessionId) {
+          handlers.onChunk(base64ToBytes(msg.data));
+        } else if (msg.type === 'pty:replay' && msg.session_id === sessionId) {
+          handlers.onReplay(msg.chunks.map(base64ToBytes));
+        }
+      });
+    },
+  };
+}
+
+/** Wire for a workbench shell terminal (host-backed). */
+export function makeWorkbenchWire(
+  ws: GianWs,
+  termId: string,
+  opts: { cwd?: string; shell?: string } = {},
+): TerminalWire {
+  return {
+    sendInput(bytes) {
+      ws.send({ type: 'term:input', term_id: termId, data: bytesToBase64(bytes) });
+    },
+    sendResize(cols, rows) {
+      ws.send({ type: 'term:resize', term_id: termId, cols, rows });
+    },
+    requestReplay() {
+      ws.send({ type: 'term:replay-request', term_id: termId });
+    },
+    spawn(cols, rows) {
+      ws.send({
+        type: 'term:spawn',
+        term_id: termId,
+        cols,
+        rows,
+        ...(opts.cwd ? { cwd: opts.cwd } : {}),
+        ...(opts.shell ? { shell: opts.shell } : {}),
+      });
+    },
+    dispose() {
+      ws.send({ type: 'term:close', term_id: termId });
+    },
+    subscribe(handlers) {
+      return ws.onMessage(msg => {
+        if (msg.type === 'term:output' && msg.term_id === termId) {
+          handlers.onChunk(base64ToBytes(msg.data));
+        } else if (msg.type === 'term:replay' && msg.term_id === termId) {
+          handlers.onReplay(msg.chunks.map(base64ToBytes));
+        }
+      });
+    },
+  };
 }
