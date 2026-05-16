@@ -1178,6 +1178,66 @@ export function createApp(ctx: AppContext): AppHandle {
     }
   });
 
+  // Serve a file's raw bytes with a real Content-Type so the browser can
+  // render html / display pdf / show images directly. Used by the Files
+  // view's "Open in new tab" for previewable types. Path-traversal check
+  // mirrors /file. Security headers mirror remote-vibe-coding's preview
+  // endpoint: Content-Disposition:inline, X-Frame-Options:DENY, strict
+  // CSP for html/svg so a user-authored html file can't pivot into the
+  // host origin.
+  app.get('/api/working_trees/:id/raw', async c => {
+    const id = c.req.param('id');
+    const rel = c.req.query('path') ?? '';
+    if (!rel) return c.json({ error: 'path required' }, 400);
+    const wt = resolveWorkingTree(id);
+    if (!wt) return c.json({ error: 'working tree not found' }, 404);
+    const resolved = await resolveWithinWorkspace(wt.path, rel);
+    if (!resolved) return c.json({ error: 'path escapes working tree' }, 400);
+    try {
+      const info = await stat(resolved);
+      if (!info.isFile()) return c.json({ error: 'not a file' }, 400);
+      if (info.size > 20 * 1024 * 1024) return c.json({ error: 'file too large' }, 413);
+      const ext = rel.toLowerCase().split('.').pop() ?? '';
+      const mime: Record<string, string> = {
+        html: 'text/html; charset=utf-8',
+        htm: 'text/html; charset=utf-8',
+        pdf: 'application/pdf',
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        gif: 'image/gif',
+        webp: 'image/webp',
+        svg: 'image/svg+xml',
+        txt: 'text/plain; charset=utf-8',
+        json: 'application/json',
+        css: 'text/css; charset=utf-8',
+        js: 'application/javascript',
+      };
+      const ctype = mime[ext] ?? 'application/octet-stream';
+      const filename = rel.split('/').pop()?.replace(/"/g, '') ?? 'file';
+      const headers: Record<string, string> = {
+        'Content-Type': ctype,
+        'Content-Length': String(info.size),
+        'Content-Disposition': `inline; filename="${filename}"`,
+        'Cache-Control': 'private, max-age=60',
+        'Referrer-Policy': 'no-referrer',
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'DENY',
+      };
+      if (ctype.includes('html')) {
+        headers['Content-Security-Policy'] =
+          "default-src 'self' data: blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+      } else if (ctype === 'image/svg+xml') {
+        headers['Content-Security-Policy'] =
+          "default-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'; script-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+      }
+      const bytes = await readFile(resolved);
+      return new Response(new Uint8Array(bytes), { status: 200, headers });
+    } catch (err) {
+      return c.json({ error: String(err) }, 500);
+    }
+  });
+
   app.get('/api/working_trees/:id/diff', async c => {
     const id = c.req.param('id');
     const rel = c.req.query('path') ?? '';

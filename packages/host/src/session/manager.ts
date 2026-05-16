@@ -520,6 +520,14 @@ export class SessionManager {
     if (session.worktree_outcome) {
       throw new Error(`session is ${session.worktree_outcome}; create a new session to continue`);
     }
+    // Reject before any optimistic writes if a turn is already in flight.
+    // The downstream `startTurn` would return SESSION_BUSY, and the catch
+    // path used to overwrite session.status to 'error' even though the
+    // prior turn is still legitimately running on the proxy side.
+    // Callers (WS handler) should route to enqueueMessage when this throws.
+    if (this.activeTurns.has(sessionId)) {
+      throw new Error(`turn already in flight for session ${sessionId}; enqueue instead`);
+    }
     const proxySessionId = await this.ensureProxySession(session);
     const client = this.proxy.get(sessionId);
     if (!client) throw new Error(`no proxy for session: ${sessionId}`);
@@ -592,12 +600,25 @@ export class SessionManager {
         ...policyParams,
       });
     } catch (err) {
-      // startTurn rejected (proxy busy, bad params, runtime crash). The host
-      // already optimistically wrote turn=running / session=running and
-      // paused the watcher above; roll all of that back so the UI doesn't
-      // sit on a phantom spinner. The error then bubbles to ws-handler,
-      // which forwards it as an `error` WS message.
-      this.completeTurn(sessionId, 'error');
+      // startTurn rejected. The host already optimistically wrote
+      // turn=running / session=running and paused the watcher above; roll
+      // it back so the UI doesn't sit on a phantom spinner. The error
+      // then bubbles to ws-handler, which forwards it as an `error` WS
+      // message.
+      //
+      // SESSION_BUSY is special: cc-proxy is telling us a prior turn is
+      // still alive even though host's activeTurns was empty when this
+      // send began (desync — e.g. host restart with orphan proxy). The
+      // session and the prior turn aren't broken; only this attempt is.
+      // Drop the phantom turn row + user_message event without calling
+      // completeTurn, so session.status stays 'running' (the real turn).
+      if (err instanceof Error && err.message.includes('[SESSION_BUSY]')) {
+        this.db.prepare(`DELETE FROM events WHERE turn_id = ?`).run(turnId);
+        this.db.prepare(`DELETE FROM turns WHERE id = ?`).run(turnId);
+        this.activeTurns.delete(sessionId);
+      } else {
+        this.completeTurn(sessionId, 'error');
+      }
       this.watcher?.resume(sessionId);
       this.jobs.delete(sessionId);
       throw err;
@@ -1185,13 +1206,16 @@ export class SessionManager {
     // Pending approvals that were in flight against this proxy will never
     // resolve now — drop them so the UI's approval list stays accurate.
     this.approvals.clearSession(sessionId);
+    // Drop the cached proxy session id regardless of turn state. If we skip
+    // this when no turn is active (proxy killed externally, idle exit, …),
+    // the next sendMessage hits a stale cache → `no proxy for session`.
+    this.proxySessionIds.delete(sessionId);
+    this.jobs.delete(sessionId);
+    this.watcher?.resume(sessionId);
     const active = this.activeTurns.get(sessionId);
     if (!active) return;
     console.error(`[session] proxy exited mid-turn session=${sessionId} code=${code} turn=${active.id}`);
     this.completeTurn(sessionId, 'error');
-    this.proxySessionIds.delete(sessionId);
-    this.jobs.delete(sessionId);
-    this.watcher?.resume(sessionId);
   }
 
   private completeTurn(sessionId: string, status: 'completed' | 'error' | 'stopped'): void {

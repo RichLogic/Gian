@@ -439,11 +439,18 @@ export function FilesView({
     }
   }
 
-  function openInNewTab(): void {
-    if (!openFile || !workingTreeId) return;
-    const url = `/?wt=${encodeURIComponent(workingTreeId)}&path=${encodeURIComponent(openFile.path)}&view=files`;
-    window.open(url, '_blank');
-  }
+  // For browser-renderable types (html / pdf / images), point at the raw
+  // file endpoint so the new tab actually previews it. For everything else,
+  // fall back to the in-app Files view (syntax-highlighted).
+  const openInNewTabHref = (() => {
+    if (!openFile || !workingTreeId) return null;
+    const ext = openFile.path.toLowerCase().split('.').pop() ?? '';
+    const renderable = new Set(['html', 'htm', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg']);
+    if (renderable.has(ext)) {
+      return `/api/working_trees/${encodeURIComponent(workingTreeId)}/raw?path=${encodeURIComponent(openFile.path)}`;
+    }
+    return `/?wt=${encodeURIComponent(workingTreeId)}&path=${encodeURIComponent(openFile.path)}&view=files`;
+  })();
 
   const parsedDiff = diffText ? parseUnifiedDiff(diffText) : null;
 
@@ -639,14 +646,18 @@ export function FilesView({
                   {lang !== 'plain' && <span className="files-lang-badge">{lang}</span>}
                   {openFile.size.toLocaleString()} bytes
                 </span>
-                <button
-                  className="btn btn-ghost"
-                  onClick={openInNewTab}
-                  style={{ fontSize: 11, padding: '3px 8px' }}
-                  title={t('files.openintab.title')}
-                >
-                  ↗ {t('files.openintab.title')}
-                </button>
+                {openInNewTabHref && (
+                  <a
+                    className="btn btn-ghost"
+                    href={openInNewTabHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ fontSize: 11, padding: '3px 8px', textDecoration: 'none' }}
+                    title={t('files.openintab.title')}
+                  >
+                    ↗ {t('files.openintab.title')}
+                  </a>
+                )}
               </div>
             </div>
 

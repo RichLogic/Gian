@@ -27,6 +27,9 @@ gian.db-wal
 .claude/settings.local.json
 .claude/*.lock
 
+CLAUDE.md
+AGENTS.md
+
 # Playwright
 test-results/
 playwright-report/
