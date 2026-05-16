@@ -782,6 +782,10 @@ export function App() {
               }
               previewTarget={null}
               onClosePreview={() => { /* no-op — replaced by Sheet */ }}
+              ws={ws}
+              onSwitchRuntime={(sessionId, target) =>
+                ws.send({ type: 'session:switch-runtime', session_id: sessionId, target })
+              }
             />
           </PlanOpenContext.Provider>
           </DiffOpenContext.Provider>

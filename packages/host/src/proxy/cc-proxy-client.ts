@@ -145,6 +145,56 @@ export class CcProxyClient implements ProxyClient {
     await this.request<unknown>('session.close', { sessionId });
   }
 
+  // ---------------------------------------------------------------------------
+  // TTY runtime — these are cc-proxy-specific and have no equivalent on
+  // codex-proxy. The host calls them when `session.runtime_mode === 'tty'`.
+  // They live on the concrete `CcProxyClient` (not the `ProxyClient`
+  // interface) so codex code paths don't accidentally route TTY messages
+  // through a backend that doesn't have a PTY.
+  // ---------------------------------------------------------------------------
+
+  async ttyStart(params: {
+    sessionId: string;
+    claudeSessionId: string;
+    cwd: string;
+    isResume: boolean;
+    cols: number;
+    rows: number;
+    model?: string | null;
+    hookSettings?: Record<string, unknown> | null;
+  }): Promise<{ ok: true; replay: string[]; alive: boolean }> {
+    return this.request<{ ok: true; replay: string[]; alive: boolean }>(
+      'tty.start',
+      params,
+    );
+  }
+
+  async ttyInput(params: {
+    sessionId: string;
+    data?: string;
+    text?: string;
+  }): Promise<void> {
+    await this.request<unknown>('tty.input', params);
+  }
+
+  async ttyResize(params: {
+    sessionId: string;
+    cols: number;
+    rows: number;
+  }): Promise<void> {
+    await this.request<unknown>('tty.resize', params);
+  }
+
+  async ttyReplay(sessionId: string): Promise<{ chunks: string[]; alive: boolean }> {
+    return this.request<{ chunks: string[]; alive: boolean }>('tty.replay', {
+      sessionId,
+    });
+  }
+
+  async ttyKill(sessionId: string): Promise<void> {
+    await this.request<unknown>('tty.kill', { sessionId });
+  }
+
   async shutdown(): Promise<void> {
     if (this.exited) return;
     try {

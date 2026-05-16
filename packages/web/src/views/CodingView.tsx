@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ApprovalDecision, ApprovalMode, Session, Workspace } from '@gian/shared';
+import type { ApprovalDecision, ApprovalMode, RuntimeMode, Session, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { createWorkspace } from '../api.js';
 import { Composer } from '../components/Composer.js';
@@ -8,22 +8,12 @@ import { GitBadge } from '../components/GitBadge.js';
 import { PlanChip } from '../components/PlanChip.js';
 import { QueueList } from '../components/QueueList.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
+import { Terminal } from '../components/Terminal.js';
 import { Transcript } from '../transcript/Transcript.js';
 import type { QueueEntry, TokenUsage, TranscriptItem } from '../types.js';
+import type { GianWs } from '../ws.js';
 
 // ─── V2 inline icons (copied verbatim from design/gian-design-v2/js/data.jsx) ─
-function BranchIcon({ size = 11 }: { size?: number }) {
-  return (
-    <svg className="branch-ico" viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor"
-         strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="4" cy="3.5" r="1.6" />
-      <circle cx="4" cy="12.5" r="1.6" />
-      <circle cx="12" cy="6" r="1.6" />
-      <path d="M4 5v6 M4 11c0-3 8-2 8-4.5" />
-    </svg>
-  );
-}
-
 function SvgIcon({ d, size = 16, stroke = 1.6 }: { d: string; size?: number; stroke?: number }) {
   return (
     <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor"
@@ -131,6 +121,11 @@ export interface CodingViewProps {
    *  FileLink. Null = drawer closed. */
   previewTarget?: import('../components/FilePreviewDrawer.js').PreviewTarget | null;
   onClosePreview?: () => void;
+  /** Live WS handle — passed to <Terminal /> for TTY-mode I/O. */
+  ws: GianWs;
+  /** Flip the active runtime for a session. Caller forwards to
+   *  `session:switch-runtime` WS message. */
+  onSwitchRuntime: (sessionId: string, target: RuntimeMode) => void;
 }
 
 export function CodingView(p: CodingViewProps) {
@@ -206,6 +201,8 @@ export function CodingView(p: CodingViewProps) {
           onShowChanges={() => p.onShowChanges(p.activeSession!)}
           workingTreeId={p.activeWorkingTreeId}
           branch={p.activeBranch}
+          ws={p.ws}
+          onSwitchRuntime={target => p.onSwitchRuntime(p.activeSession!.id, target)}
         />
       ) : (
         <CodingViewEmpty />
@@ -603,11 +600,6 @@ function SessionRow({
   archived?: boolean;
   onSelect: () => void;
 }) {
-  // V2 markup: rail-item only carries `.active`. We retain workspaceName for
-  // search-only purposes (handled in Sidebar) — it's no longer rendered per
-  // design decision §3.13. If the session has no branch, fall back to the
-  // workspace name in the branch slot so the row still surfaces context.
-  const branchLabel = session.branch ?? workspaceName;
   return (
     <div
       className={`rail-item${active ? ' active' : ''}${archived ? ' archived' : ''}`}
@@ -631,9 +623,7 @@ function SessionRow({
             {session.executor === 'claude' ? 'Claude' : 'Codex'}
           </span>
           <span className="ri-dot-sep">·</span>
-          <span className="ri-sub" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-            <BranchIcon size={9} />{branchLabel}
-          </span>
+          <span className="ri-sub">{workspaceName}</span>
         </div>
       </div>
       <span className="ri-age" title="Last activity">{relTime(session.updated_at)}</span>
@@ -1049,6 +1039,8 @@ function SessionMain({
   onShowChanges,
   workingTreeId,
   branch,
+  ws,
+  onSwitchRuntime,
 }: {
   session: Session;
   workspace: Workspace | null;
@@ -1056,6 +1048,8 @@ function SessionMain({
   pending: boolean;
   usage: TokenUsage | null;
   queue: QueueEntry[];
+  ws: GianWs;
+  onSwitchRuntime: (target: RuntimeMode) => void;
   onSend: (text: string, opts?: { oneShotBypass?: boolean }) => void;
   onSendSkill: (name: string, path: string) => void;
   onStop: () => void;
@@ -1084,9 +1078,14 @@ function SessionMain({
 }) {
   const isWorktree = session.branch !== null;
   const terminal = session.worktree_outcome !== null;
-  // V2 chat/cli toggle — local-only state. CLI tab is a no-op for now
-  // (Phase 7 wires it). Switching the tab does not change render yet.
-  const [chatMode, setChatMode] = useState<'chat' | 'cli'>('chat');
+  // V2 chat/cli toggle — now wired to the runtime-mode switch.
+  // `chat` = structured (today's transcript + composer)
+  // `cli`  = pure TTY (xterm panel, no composer)
+  // We read from session.runtime_mode so the active state survives
+  // refreshes (and updates when the server confirms a switch).
+  const chatMode: 'chat' | 'cli' = session.runtime_mode === 'tty' ? 'cli' : 'chat';
+  const isTty = chatMode === 'cli';
+  const ttySupported = session.executor === 'claude';
 
   // Bump on pending → idle transition so GitBadge refetches at turn end.
   const [gitRefreshKey, setGitRefreshKey] = useState(0);
@@ -1108,18 +1107,33 @@ function SessionMain({
     <main className="main">
       <div className="main-head">
         <div className="main-head-l">
-          <div className="chat-toggle">
+          <div className="chat-toggle" role="tablist" aria-label="Runtime mode">
             <button
               type="button"
+              role="tab"
+              aria-selected={chatMode === 'chat'}
               className={chatMode === 'chat' ? 'active' : ''}
-              onClick={() => setChatMode('chat')}
+              onClick={() => {
+                if (chatMode !== 'chat') onSwitchRuntime('structured');
+              }}
+              disabled={pending || terminal}
+              title="Structured mode — transcript cards + composer"
             >
               Chat
             </button>
             <button
               type="button"
+              role="tab"
+              aria-selected={chatMode === 'cli'}
               className={chatMode === 'cli' ? 'active' : ''}
-              onClick={() => setChatMode('cli')}
+              onClick={() => {
+                if (!ttySupported) return;
+                if (chatMode !== 'cli') onSwitchRuntime('tty');
+              }}
+              disabled={pending || terminal || !ttySupported}
+              title={ttySupported
+                ? 'Pure TTY mode — interactive CLI inside xterm'
+                : 'TTY mode is currently only available for claude sessions'}
             >
               CLI
             </button>
@@ -1151,24 +1165,32 @@ function SessionMain({
           <button className="btn xs danger-ghost" onClick={onDelete}>Delete</button>
         </div>
       )}
-      <div className="main-scroll">
-        <Transcript items={items} pending={pending} executor={session.executor} onApprove={onApprove} />
-      </div>
-      <QueueList queue={queue} onRemove={onQueueRemove} onReorder={onQueueReorder} onClear={onQueueClear} onSendNow={onQueueSendNow} />
-      <PlanChip items={items} />
-      <Composer
-        session={session}
-        onSend={onSend}
-        onSendSkill={onSendSkill}
-        onStop={onStop}
-        onQueueAdd={onQueueAdd}
-        onSetMode={onSetMode}
-        onSetModel={onSetModel}
-        onSetEffort={onSetEffort}
-        disabled={pending || terminal}
-        executor={session.executor}
-        workspaceId={workspace?.id}
-      />
+      {isTty ? (
+        <div className="main-scroll tty-pane">
+          <Terminal sessionId={session.id} ws={ws} />
+        </div>
+      ) : (
+        <>
+          <div className="main-scroll">
+            <Transcript items={items} pending={pending} executor={session.executor} onApprove={onApprove} />
+          </div>
+          <QueueList queue={queue} onRemove={onQueueRemove} onReorder={onQueueReorder} onClear={onQueueClear} onSendNow={onQueueSendNow} />
+          <PlanChip items={items} />
+          <Composer
+            session={session}
+            onSend={onSend}
+            onSendSkill={onSendSkill}
+            onStop={onStop}
+            onQueueAdd={onQueueAdd}
+            onSetMode={onSetMode}
+            onSetModel={onSetModel}
+            onSetEffort={onSetEffort}
+            disabled={pending || terminal}
+            executor={session.executor}
+            workspaceId={workspace?.id}
+          />
+        </>
+      )}
     </main>
   );
 }

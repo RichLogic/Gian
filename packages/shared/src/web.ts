@@ -7,6 +7,7 @@ import type {
   Bot,
   Executor,
   QueueEntry,
+  RuntimeMode,
   Session,
   SystemConfig,
   Workspace,
@@ -134,6 +135,44 @@ export interface ErrorMessage {
   message: string;
 }
 
+/**
+ * Server-pushed PTY output chunk. Sent every time the underlying CLI writes
+ * to stdout/stderr while the session is in `tty` runtime mode. `data` is
+ * base64-encoded raw bytes — the xterm side decodes and writes(uint8).
+ *
+ * Base64 (not binary frames) so this rides the same JSON broadcast pipe as
+ * every other ws message — no separate binary plumbing through
+ * `WsBroadcaster`. The overhead is ~33%, acceptable for human-typing TTY.
+ */
+export interface PtyOutputMessage {
+  type: 'pty:output';
+  session_id: string;
+  /** Base64-encoded chunk. */
+  data: string;
+}
+
+/**
+ * Replay buffer for a session that just connected (or just switched to TTY).
+ * `chunks` are appended in order, each base64-encoded. The client writes
+ * them to xterm before subscribing to live `pty:output`. Truncated to the
+ * runtime ring buffer cap (default ~1MB).
+ */
+export interface PtyReplayMessage {
+  type: 'pty:replay';
+  session_id: string;
+  chunks: string[];
+  /** True when the live PTY process is actually running. False means the
+   *  buffer is historical (e.g. process died) so the UI can show a
+   *  reconnect hint. */
+  alive: boolean;
+}
+
+export interface SessionRuntimeSwitchedMessage {
+  type: 'session:runtime-switched';
+  session_id: string;
+  runtime_mode: RuntimeMode;
+}
+
 export type ServerToClientMessage =
   | AuthOkMessage
   | StateSyncMessage
@@ -147,6 +186,9 @@ export type ServerToClientMessage =
   | BotUpdatedMessage
   | RunnerUpdatedMessage
   | TranscriptHistoryMessage
+  | PtyOutputMessage
+  | PtyReplayMessage
+  | SessionRuntimeSwitchedMessage
   | ErrorMessage;
 
 export interface SessionCreateMessage {
@@ -334,6 +376,50 @@ export interface QueueClearMessage {
   session_id: string;
 }
 
+/**
+ * Request a runtime-mode switch for a session (Structured ↔ TTY). Allowed
+ * only while the session is idle (no in-flight turn, no pending approval,
+ * no TTY-side permission prompt). On success the host emits
+ * `session:runtime-switched` and a follow-up `session:updated`.
+ *
+ * Failure cases (busy / closed / unsupported) come back as a regular
+ * `ErrorMessage` with `code = 'SWITCH_BLOCKED'`.
+ */
+export interface SessionSwitchRuntimeMessage {
+  type: 'session:switch-runtime';
+  session_id: string;
+  target: RuntimeMode;
+}
+
+/**
+ * Keystroke (or paste) headed for the PTY stdin. `data` is base64-encoded
+ * raw bytes. Ignored when the session is not currently in `tty` mode.
+ */
+export interface PtyInputMessage {
+  type: 'pty:input';
+  session_id: string;
+  data: string;
+}
+
+/**
+ * Terminal size change. Cols and rows in character cells.
+ */
+export interface PtyResizeMessage {
+  type: 'pty:resize';
+  session_id: string;
+  cols: number;
+  rows: number;
+}
+
+/**
+ * Replay-buffer request. Sent after a fresh socket connects or the user
+ * navigates back to a TTY session. Server replies with `PtyReplayMessage`.
+ */
+export interface PtyReplayRequestMessage {
+  type: 'pty:replay-request';
+  session_id: string;
+}
+
 export type ClientToServerMessage =
   | AuthMessage
   | SessionCreateMessage
@@ -356,4 +442,8 @@ export type ClientToServerMessage =
   | QueueRemoveMessage
   | QueueReorderMessage
   | QueueSendNowMessage
-  | QueueClearMessage;
+  | QueueClearMessage
+  | SessionSwitchRuntimeMessage
+  | PtyInputMessage
+  | PtyResizeMessage
+  | PtyReplayRequestMessage;

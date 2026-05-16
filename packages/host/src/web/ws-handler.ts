@@ -6,6 +6,7 @@ import type { WsBroadcaster } from './ws-broadcast.js';
 // notifies it on web message:send. Takeover state will be revisited when
 // the rvc-shaped managers land.
 import type { ApprovalManager } from '../approval/index.js';
+import type { TtyManager } from '../tty/manager.js';
 import type { Db } from '../storage/db.js';
 import { getUsernameForToken } from '../auth/tokens.js';
 import { AUTH_REQUIRED } from '../auth/middleware.js';
@@ -26,6 +27,7 @@ export interface WsHandlerDeps {
   sessions: SessionManager;
   broadcaster: WsBroadcaster;
   approvals?: ApprovalManager;
+  tty?: TtyManager;
   db?: Db;
 }
 
@@ -33,7 +35,7 @@ interface ClientState {
   authed: boolean;
 }
 
-export function makeWsHandlers({ sessions, broadcaster, approvals, db }: WsHandlerDeps) {
+export function makeWsHandlers({ sessions, broadcaster, approvals, tty, db }: WsHandlerDeps) {
   const states = new WeakMap<WSContext, ClientState>();
 
   function sendStateSync(ws: WSContext): void {
@@ -124,7 +126,7 @@ export function makeWsHandlers({ sessions, broadcaster, approvals, db }: WsHandl
       }
 
       try {
-        await dispatch(parsed, sessions, broadcaster, ws);
+        await dispatch(parsed, sessions, broadcaster, ws, tty);
       } catch (err) {
         console.error('[ws] dispatch error', err);
         // Surface the failure to the client. Without this, errors inside
@@ -164,6 +166,7 @@ async function dispatch(
   sessions: SessionManager,
   broadcaster: WsBroadcaster,
   ws: WSContext,
+  tty?: TtyManager,
 ): Promise<void> {
   switch (msg.type) {
     case 'session:create': {
@@ -238,6 +241,33 @@ async function dispatch(
     }
     case 'queue:send_now': {
       await sessions.sendQueuedNow(msg.session_id);
+      return;
+    }
+    case 'session:switch-runtime': {
+      await sessions.switchRuntime(msg.session_id, msg.target);
+      return;
+    }
+    case 'pty:input': {
+      if (!tty) return;
+      const payload: { data?: string; text?: string } = {};
+      if (typeof msg.data === 'string') payload.data = msg.data;
+      await tty.input(msg.session_id, payload);
+      return;
+    }
+    case 'pty:resize': {
+      if (!tty) return;
+      await tty.resize(msg.session_id, msg.cols, msg.rows);
+      return;
+    }
+    case 'pty:replay-request': {
+      if (!tty) return;
+      const result = await tty.replay(msg.session_id);
+      broadcaster.send(ws, {
+        type: 'pty:replay',
+        session_id: msg.session_id,
+        chunks: result.chunks,
+        alive: result.alive,
+      });
       return;
     }
     case 'auth':

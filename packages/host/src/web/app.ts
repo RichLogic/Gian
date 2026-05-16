@@ -53,6 +53,8 @@ import {
 // shot at startup) — REST endpoints now go through `im/bots-api` against the
 // rvc-shaped per-platform tables.
 import { initWorkspace, expandHome } from '../workspace/index.js';
+import { TtyManager } from '../tty/manager.js';
+import { CcProxyClient } from '../proxy/cc-proxy-client.js';
 import { writeFile } from 'node:fs/promises';
 import { ensureEventsRebuilt } from '../events/lazy-rebuild.js';
 import { markAccessed } from '../events/lifecycle.js';
@@ -87,6 +89,15 @@ export function createApp(ctx: AppContext): AppHandle {
   const queue = new QueueManager(ctx.db);
   const watcher = new NativeJsonlWatcher(ctx.db, broadcaster);
   const sessions = new SessionManager(ctx.db, proxy, broadcaster, approvals, queue, ctx.dataDir, watcher);
+
+  // TTY runtime coordinator. The hook base URL must match what the
+  // in-PTY `claude` can actually reach — for now this is hard-locked to
+  // 127.0.0.1:<port>. The per-session `settings.json` allowlists exactly
+  // this prefix via `allowedHttpHookUrls`.
+  const hookPort = ctx.config.port || 8990;
+  const hookBaseUrl = `http://127.0.0.1:${hookPort}`;
+  const tty = new TtyManager(ctx.db, proxy, broadcaster, hookBaseUrl);
+  sessions.setTtyManager(tty);
 
   // Live Sync v2: on host boot, attach a watcher to every active session so
   // we resume picking up external CLI appends after a host restart. New
@@ -165,7 +176,7 @@ export function createApp(ctx: AppContext): AppHandle {
     })));
   });
 
-  const handlers = makeWsHandlers({ sessions, broadcaster, approvals, db: ctx.db });
+  const handlers = makeWsHandlers({ sessions, broadcaster, approvals, tty, db: ctx.db });
 
   if (AUTH_REQUIRED) {
     ensurePasswordHash(ctx.db);
@@ -179,6 +190,26 @@ export function createApp(ctx: AppContext): AppHandle {
   if (webDist) {
     app.use('*', staticFiles(webDist));
   }
+
+  // Hook receivers — registered BEFORE requireAuth() because the in-PTY
+  // `claude` carries no web session cookie. Auth here is:
+  //   1. server binds to 127.0.0.1 (loopback only) — see scripts/install
+  //   2. per-spawn token in `?t=` (one-shot, rotated on every mode flip)
+  // The token namespace is the TTY registry — see packages/host/src/tty.
+  app.post('/internal/hooks/claude/:sessionId/:event', async c => {
+    const sessionIdParam = c.req.param('sessionId');
+    const event = c.req.param('event');
+    const token = c.req.query('t') ?? '';
+    if (!token) return c.json({ error: 'missing token' }, 401);
+    const resolvedSession = tty.registry.resolve(token);
+    if (!resolvedSession || resolvedSession !== sessionIdParam) {
+      return c.json({ error: 'invalid token' }, 401);
+    }
+    let body: unknown = null;
+    try { body = await c.req.json(); } catch { /* empty body is fine */ }
+    const result = await tty.handleHook(sessionIdParam, event, body);
+    return c.json({ ok: true }, result.status === 200 ? 200 : (result.status as 200));
+  });
 
   app.use('*', requireAuth());
 

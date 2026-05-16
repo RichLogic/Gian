@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalDecision } from '@gian/shared';
 import type { TranscriptItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
-import { AgentSpawnRow, ApprovalCard, AssistantMessage, Avatar, Caret, CommandCard, DiffCard, FileReadCard, FileSearchCard, ToolEvent, UserMessage, WebSearchRow } from './items.js';
+import { AgentSpawnRow, ApprovalCard, AssistantMessage, Caret, CommandCard, DiffCard, FileReadCard, FileSearchCard, ToolEvent, UserMessage, WebSearchRow } from './items.js';
 
 /**
  * Render-time grouping: walk items[] and fold consecutive action items
@@ -293,19 +293,11 @@ export function Transcript({
           });
         })()}
         {showTicker && (
-          <div className="msg">
-            <Avatar exec={executor} />
-            <div className="msg-body">
-              <div className="msg-meta">
-                <span className={`msg-author ${executor}`}>{executor === 'codex' ? 'Codex' : 'Claude'}</span>
-              </div>
-              <div className="msg-text">
-                <span className="ticker">
-                  <span className="dots"><span /><span /><span /></span>
-                  thinking…
-                </span>
-              </div>
-            </div>
+          <div className="msg-thinking">
+            <span className="ticker">
+              <span className="dots"><span /><span /><span /></span>
+              thinking…
+            </span>
           </div>
         )}
     </div>

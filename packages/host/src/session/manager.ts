@@ -3,6 +3,7 @@ import type {
   EventEnvelope,
   Executor,
   ProxyNotification,
+  RuntimeMode,
   Session,
   ThinkingEffort,
   UnifiedEvent,
@@ -15,6 +16,7 @@ import type { WsBroadcaster } from '../web/ws-broadcast.js';
 import type { ApprovalManager } from '../approval/index.js';
 import type { QueueManager } from '../queue/index.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
+import type { TtyManager } from '../tty/manager.js';
 import { locateNativeJsonl } from '../native/locate-jsonl.js';
 import {
   normalizeCcNotification,
@@ -160,7 +162,15 @@ export class SessionManager {
     /** Live Sync v2 — when present, host mirrors external CLI appends into
      *  events + WS for each active session. Optional so tests can omit. */
     private watcher: NativeJsonlWatcher | null = null,
+    /** TTY runtime coordinator. Injected after construction (circular —
+     *  TtyManager doesn't actually depend on SessionManager). Null when
+     *  TTY mode isn't wired (older tests, mocked envs). */
+    private ttyMgr: TtyManager | null = null,
   ) {}
+
+  setTtyManager(mgr: TtyManager): void {
+    this.ttyMgr = mgr;
+  }
 
   async createSession(input: CreateSessionInput): Promise<Session> {
     const workspace = this.db
@@ -240,8 +250,8 @@ export class SessionManager {
 
     this.db
       .prepare(
-        `INSERT INTO sessions (id, name, type, workspace_id, executor, model, approval_mode, thinking_effort, turns, active_channel, status, archived, worktree_path, branch, base_branch, worktree_outcome, native_session_id, created_at, updated_at)
-         VALUES (@id, @name, 'coding', @workspace_id, @executor, @model, @approval_mode, @thinking_effort, 1, 'web', 'new', 0, @worktree_path, @branch, @base_branch, NULL, @native_session_id, @now, @now)`,
+        `INSERT INTO sessions (id, name, type, workspace_id, executor, model, approval_mode, thinking_effort, turns, active_channel, status, archived, worktree_path, branch, base_branch, worktree_outcome, native_session_id, runtime_mode, created_at, updated_at)
+         VALUES (@id, @name, 'coding', @workspace_id, @executor, @model, @approval_mode, @thinking_effort, 1, 'web', 'new', 0, @worktree_path, @branch, @base_branch, NULL, @native_session_id, 'structured', @now, @now)`,
       )
       .run({
         id,
@@ -446,6 +456,63 @@ export class SessionManager {
 
     const client = this.proxy.get(sessionId);
     if (client) client.forceKill();
+  }
+
+  /**
+   * Flip the active runtime for a session between `structured` and `tty`.
+   * Preconditions:
+   *   - session exists, is `claude` (only executor with TTY support today)
+   *   - no active turn, no pending approval
+   *
+   * On success the underlying Claude session uuid is preserved
+   * (`--session-id` for first ever spawn, `--resume` on every subsequent
+   * spawn in either mode), so conversation history survives the toggle.
+   */
+  async switchRuntime(sessionId: string, target: RuntimeMode): Promise<void> {
+    if (!this.ttyMgr) {
+      throw Object.assign(new Error('TTY runtime not configured'), { code: 'SWITCH_BLOCKED' });
+    }
+    const session = this.getSession(sessionId);
+    if (session.executor !== 'claude') {
+      throw Object.assign(
+        new Error(`runtime switch is only available for claude sessions (got ${session.executor})`),
+        { code: 'SWITCH_BLOCKED' },
+      );
+    }
+    if (session.runtime_mode === target) {
+      // No-op; do not error — the toggle button may double-fire.
+      return;
+    }
+    if (this.activeTurns.has(sessionId)) {
+      throw Object.assign(
+        new Error('finish the current turn before switching runtime'),
+        { code: 'SWITCH_BLOCKED' },
+      );
+    }
+    if (this.approvals.listPending().some(p => p.sessionId === sessionId)) {
+      throw Object.assign(
+        new Error('resolve the pending approval before switching runtime'),
+        { code: 'SWITCH_BLOCKED' },
+      );
+    }
+
+    // Ensure the cc-proxy client is alive — TtyManager talks to it. We
+    // reuse the same proxy process for both modes so the Claude session
+    // uuid is shared without round-tripping through DB.
+    await this.ensureProxySession(session);
+
+    if (target === 'tty') {
+      // Resolve cwd: worktree path if present, else workspace root.
+      const workspace = this.db
+        .prepare('SELECT path FROM workspaces WHERE id = ?')
+        .get(session.workspace_id) as { path: string } | undefined;
+      if (!workspace) throw new Error(`workspace missing for session ${sessionId}`);
+      const cwd = session.worktree_path ?? workspace.path;
+      // Pick a conservative default geometry — the UI resizes on mount.
+      await this.ttyMgr.start(session, cwd, { cols: 120, rows: 30 });
+    } else {
+      await this.ttyMgr.stop(session);
+    }
   }
 
   async respondApproval(
@@ -956,6 +1023,19 @@ export class SessionManager {
     // broadcast session:updated. Don't surface as a transcript event.
     if (notification.method === 'session.rotated') {
       this.handleSessionRotated(sessionId, notification);
+      return;
+    }
+
+    // TTY runtime notifications get re-broadcast as binary-ish ws messages
+    // (`pty:output`) instead of structured transcript events. Hand them
+    // straight to TtyManager and stop — running them through the
+    // structured normalizer would either drop them silently or, worse,
+    // synthesize bogus turn events that confuse the UI.
+    if (
+      notification.method === 'tty.output' ||
+      notification.method === 'tty.exited'
+    ) {
+      this.ttyMgr?.handleProxyNotification(notification as { method?: string; params?: unknown });
       return;
     }
 

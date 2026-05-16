@@ -23,6 +23,24 @@ export type ApprovalMode = 'plan' | 'ask' | 'auto';
 
 export type ActiveChannel = 'web' | 'im';
 
+/**
+ * Which CLI runtime drives a session right now.
+ *
+ * - `structured` — `claude -p --output-format stream-json` (cc) or `codex
+ *                  proto` (codex). Today's default — emits structured events
+ *                  the host renders as transcript cards. Counts against the
+ *                  Agent SDK monthly credit on/after 2026-06-15.
+ * - `tty`        — interactive CLI inside a PTY, surfaced to the user as
+ *                  xterm.js. Continues to count against the Claude/Codex
+ *                  subscription quota. Lifecycle events arrive via HTTP
+ *                  hooks (cc) or session JSONL tail + fs.watch (codex);
+ *                  cards are not rendered.
+ *
+ * Mode is session-scoped and mutable — the user toggles in the header
+ * (precondition: session idle). New sessions default to `structured`.
+ */
+export type RuntimeMode = 'structured' | 'tty';
+
 export type SessionStatus = 'new' | 'running' | 'pending' | 'error' | 'done';
 
 export type TurnStatus = 'running' | 'completed' | 'error' | 'stopped';
@@ -99,6 +117,10 @@ export interface Session {
    *  cc / codex session, the native session UUID. The proxy then uses it
    *  as the resume id so the on-disk JSONL stays the source of truth. */
   native_session_id: string | null;
+  /** Active CLI runtime — `structured` (today's `claude -p` / `codex proto`
+   *  path) or `tty` (interactive CLI in a PTY). Mutable at runtime via the
+   *  session header toggle. */
+  runtime_mode: RuntimeMode;
   created_at: string;
   updated_at: string;
 }

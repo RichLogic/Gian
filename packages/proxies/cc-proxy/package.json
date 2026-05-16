@@ -12,7 +12,8 @@
     "test": "npm run build && node --test dist/test/*.test.js dist/test/unit/**/*.test.js",
     "test:smoke": "npm run build && node --test dist/test/smoke.test.js",
     "test:unit": "npm run build && node --test dist/test/service.test.js dist/test/unit/**/*.test.js",
-    "clean": "rm -rf dist *.tsbuildinfo"
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "postinstall": "node scripts/fix-node-pty-permissions.cjs"
   },
   "devDependencies": {
     "@types/node": "^24.12.2",
@@ -21,6 +22,7 @@
   "dependencies": {
     "@gian/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "node-pty": "^1.1.0-beta40",
     "zod": "^4.3.6"
   }
 }

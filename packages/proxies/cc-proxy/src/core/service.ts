@@ -132,6 +132,15 @@ export class CcProxyService {
         'approval.respond',
         'session.snapshot',
         'session.close',
+        // TTY runtime — parallel to the structured methods above. Host
+        // calls these when `sessions.runtime_mode === 'tty'`. The PTY
+        // shares the same Claude session uuid via --session-id /
+        // --resume so cross-mode history is preserved.
+        'tty.start',
+        'tty.input',
+        'tty.resize',
+        'tty.replay',
+        'tty.kill',
         'shutdown',
       ],
     };

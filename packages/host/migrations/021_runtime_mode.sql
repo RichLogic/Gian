@@ -1,0 +1,11 @@
+-- Adds the runtime_mode column to sessions so each row tracks which CLI
+-- driver is currently bound:
+--   structured (default) — `claude -p` / `codex proto`, today's behavior
+--   tty                   — interactive `claude` / `codex` in a PTY, with
+--                            HTTP hooks for lifecycle events
+--
+-- The value is mutable at runtime (header toggle) — the schema stores the
+-- last-set mode so reconnects after a host restart land the session in the
+-- same mode the user left it in. Default 'structured' keeps every existing
+-- row pointing at the legacy path.
+ALTER TABLE sessions ADD COLUMN runtime_mode TEXT NOT NULL DEFAULT 'structured';

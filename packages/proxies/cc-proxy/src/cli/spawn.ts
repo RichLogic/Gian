@@ -1,6 +1,14 @@
 import { createInterface } from 'node:readline';
 
 import { CcProxyService } from '../core/service.js';
+import { TtyClaudeService } from '../core/tty-service.js';
+import type {
+  TtyInputParams,
+  TtyKillParams,
+  TtyReplayParams,
+  TtyResizeParams,
+  TtyStartParams,
+} from '../core/tty-service.js';
 import type {
   ApprovalResponseParams,
   CloseSessionParams,
@@ -61,8 +69,17 @@ async function main() {
   });
   await service.initialize();
 
+  // TTY service shares the same notification sink so `tty.output` and
+  // `tty.exited` ride the same JSON-RPC stream as structured events.
+  const ttyService = new TtyClaudeService({
+    emitEvent(method, params) {
+      writer.notification(method, params);
+    },
+  });
+
   const shutdown = async (code = 0) => {
     await service.close();
+    await ttyService.close();
     process.exit(code);
   };
 
@@ -140,6 +157,21 @@ async function main() {
           break;
         case 'session.close':
           writer.result(message.id, await service.closeSession((message.params ?? {}) as CloseSessionParams));
+          break;
+        case 'tty.start':
+          writer.result(message.id, await ttyService.start((message.params ?? {}) as TtyStartParams));
+          break;
+        case 'tty.input':
+          writer.result(message.id, ttyService.input((message.params ?? {}) as TtyInputParams));
+          break;
+        case 'tty.resize':
+          writer.result(message.id, ttyService.resize((message.params ?? {}) as TtyResizeParams));
+          break;
+        case 'tty.replay':
+          writer.result(message.id, ttyService.replay((message.params ?? {}) as TtyReplayParams));
+          break;
+        case 'tty.kill':
+          writer.result(message.id, await ttyService.kill((message.params ?? {}) as TtyKillParams));
           break;
         case 'shutdown':
           writer.result(message.id, { ok: true });

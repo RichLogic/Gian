@@ -260,6 +260,10 @@
   background: var(--surface-2);
 }
 
+/* Thinking row: rendered without avatar/author so only the ticker shows.
+   Indent to match the .msg-body column (24px avatar + 10px gap from .msg). */
+.msg-thinking { padding-left: 34px; }
+
 /* Live ticker for "thinking…" while a turn runs.
    Overrides coding.css .ticker with session-specific sizing.
    Uses the same dot animation keyframe from coding.css. */
