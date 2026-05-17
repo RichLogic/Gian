@@ -220,6 +220,159 @@
 .ns-inline-ws .input { width: 100%; }
 .ns-inline-ws .btn { align-self: flex-start; }
 
+/* Worktree sub-form — base branch combobox + new branch name input,
+   stacked below the regular/worktree segm. Tighter than ns-body's 16px
+   gap so the two related fields read as one control group. */
+.ns-worktree-fields {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 8px;
+  padding: 10px;
+  background: var(--surface-2);
+  border-radius: var(--r-2);
+}
+.ns-worktree-fields .input { width: 100%; }
+.ns-sublabel {
+  font: 500 11px/1.4 var(--font-sans);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 2px;
+}
+.ns-sublabel + .input { margin-bottom: 2px; }
+.ns-sublabel:not(:first-child) { margin-top: 6px; }
+
+/* Branch name field — fixed prefix label ("worktree/") + editable suffix input
+   in one bordered shell so the prefix reads as part of the value rather than
+   a separate label. Pattern mirrors VS Code's input-with-prefix-decoration. */
+.branch-name-field {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  overflow: hidden;
+}
+.branch-name-field:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-ring);
+}
+.branch-name-field .prefix {
+  display: inline-flex; align-items: center;
+  padding: 0 10px;
+  font: 500 var(--fz-12)/1 var(--font-mono);
+  color: var(--text-3);
+  background: var(--surface-2);
+  border-right: 1px solid var(--hairline);
+  user-select: none;
+}
+.branch-name-field input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  font: var(--fz-13)/1.4 var(--font-mono);
+  color: var(--text);
+  outline: none;
+}
+.branch-name-field input::placeholder { color: var(--text-3); }
+
+/* ============================================================
+   BranchPicker — popover combobox modeled after VS Code QuickPick /
+   GitHub Desktop branch chooser. Trigger looks like an input; clicking
+   opens a search + grouped list (Local / Remote) below.
+   ============================================================ */
+.branch-picker {
+  position: relative;
+  width: 100%;
+}
+.branch-picker-trigger {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  font: var(--fz-13)/1.4 var(--font-mono);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.branch-picker-trigger:hover:not(:disabled) { border-color: var(--text-3); }
+.branch-picker-trigger[aria-expanded="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-ring);
+}
+.branch-picker-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+.branch-picker-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.branch-picker-value.placeholder { color: var(--text-3); font-family: var(--font-sans); font-style: italic; }
+.branch-picker-chevron { color: var(--text-3); margin-left: 8px; flex: none; }
+
+.branch-picker-pop {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+  z-index: 40;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+  max-height: 320px;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.branch-picker-search {
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface-2);
+  font: var(--fz-13)/1.4 var(--font-sans);
+  color: var(--text);
+  outline: none;
+}
+.branch-picker-search::placeholder { color: var(--text-3); }
+.branch-picker-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.branch-picker-sec {
+  padding: 6px 12px 4px;
+  font: 600 10.5px/1.2 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+}
+.branch-picker-row {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  border: 0;
+  background: transparent;
+  font: var(--fz-13)/1.3 var(--font-mono);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.branch-picker-row:hover { background: var(--surface-2); }
+.branch-picker-row.active { background: var(--accent-soft); color: var(--accent-text); }
+.branch-picker-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.branch-picker-tag {
+  font: 500 9.5px/1 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+  background: var(--surface-3);
+  border-radius: 3px;
+  padding: 2px 5px;
+  flex: none;
+}
+.branch-picker-tag.remote { color: var(--accent-text); background: var(--accent-soft); }
+.branch-picker-empty {
+  padding: 12px 14px;
+  font: italic var(--fz-12)/1.4 var(--font-sans);
+  color: var(--text-3);
+}
+
 /* Executor picker cards */
 .exec-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .exec-card {

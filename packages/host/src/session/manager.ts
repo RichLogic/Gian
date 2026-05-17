@@ -42,7 +42,7 @@ export interface CreateSessionInput {
   mode?: 'regular' | 'worktree';
   /** Override for worktree mode (auto-detected from workspace if absent). */
   base_branch?: string;
-  /** Override for worktree mode (defaults to gian/<short-id>). */
+  /** Override for worktree mode (defaults to worktree/<short-id>). */
   branch?: string;
 }
 
@@ -128,10 +128,10 @@ function translateItemsForExecutor(
  * events; subscribes to proxy notifications and broadcasts them to the web
  * client.
  *
- * M1 transition state — the notification pipeline runs the unified
- * normalizer first; if it returns events those are persisted + broadcast as
- * UnifiedEvents. Otherwise we fall back to the legacy raw passthrough so the
- * frontend keeps working until normalize-{cc,codex} cover every notification.
+ * Every proxy notification flows through normalize-{cc,codex} and exits as a
+ * UnifiedEvent. Anything the normalizer doesn't recognize is logged as a
+ * warning and dropped — proxy-specific event shapes never leak past this
+ * boundary, so DB rows and WS frames stay on the unified taxonomy.
  */
 interface JobState {
   totalTurns: number;
@@ -214,7 +214,7 @@ export class SessionManager {
         throw new Error(`workspace is not a git repo: ${workspace.path}`);
       }
       baseBranch = input.base_branch ?? detectDefaultBranch(workspace.path);
-      branch = input.branch ?? `gian/${id.slice(0, 8)}`;
+      branch = input.branch ?? `worktree/${id.slice(0, 8)}`;
       worktreePath = join(this.dataDir, 'worktrees', input.workspace_id, id);
       try {
         createWorktree(workspace.path, worktreePath, branch, baseBranch);
@@ -1056,10 +1056,13 @@ export class SessionManager {
     // with a fresh random turn_id that doesn't exist in `turns` and trip the
     // FK constraint.
     const unified = this.runNormalizer(sessionId, notification);
-    if (unified.length > 0) {
-      for (const e of unified) this.dispatchUnified(e);
-    } else {
-      this.legacyRawDispatch(sessionId, notification);
+    for (const e of unified) this.dispatchUnified(e);
+    if (unified.length === 0 && notification.method !== 'debug' && notification.method !== 'token_usage.updated') {
+      // Anything the normalizer doesn't recognize is a signal that a new
+      // proxy event was added without a unified mapping. Log loudly so we
+      // notice — but don't persist or broadcast the raw shape, which would
+      // leak proxy-specific names through to the WS/DB layer.
+      console.warn(`[session] no unified mapping for proxy event: ${notification.method}`);
     }
 
     this.handleLifecycle(sessionId, notification);
@@ -1275,18 +1278,6 @@ export class SessionManager {
     } catch {
       return false;
     }
-  }
-
-  private legacyRawDispatch(sessionId: string, notification: ProxyNotification): void {
-    const turnId = this.activeTurnId(sessionId);
-    const turnNumber = this.activeTurns.get(sessionId)?.number ?? 0;
-    const callId = randomUUID();
-    const data = (notification.params?.data ?? {}) as Record<string, unknown>;
-
-    if (notification.method !== 'debug') {
-      this.persistEvent(sessionId, turnId, callId, notification.method, data);
-    }
-    this.broadcastEvent(sessionId, turnNumber, callId, notification.method, data);
   }
 
   private activeTurnId(sessionId: string): string {

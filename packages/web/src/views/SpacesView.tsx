@@ -25,6 +25,7 @@ import {
 import type { LocalBranch, PendingGitOp, RemoteBranch, RepoInfo, WorkspaceTree } from '../api.js';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
+import { BranchPicker } from '../components/BranchPicker.js';
 import type { GianWs } from '../ws.js';
 
 // ── V2 icon set ─────────────────────────────────────────────────────────────
@@ -814,7 +815,7 @@ function GitPane({
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [newWorktreeOpen, setNewWorktreeOpen] = useState(false);
-  const [branchFilter, setBranchFilter] = useState<'all' | 'on-worktree' | 'off-worktree' | 'gian'>('all');
+  const [branchFilter, setBranchFilter] = useState<'all' | 'on-worktree' | 'off-worktree' | 'worktree-sessions'>('all');
   const [remoteSearch, setRemoteSearch] = useState('');
   const [remoteBranches, setRemoteBranches] = useState<RemoteBranch[]>([]);
   const [remoteLoading, setRemoteLoading] = useState(false);
@@ -873,7 +874,7 @@ function GitPane({
       switch (branchFilter) {
         case 'on-worktree': return !!b.worktreePath;
         case 'off-worktree': return !b.worktreePath;
-        case 'gian': return b.isGianBranch;
+        case 'worktree-sessions': return b.isWorktreeBranch;
         default: return true;
       }
     }).sort((a, b) => {
@@ -981,7 +982,7 @@ function GitPane({
             <button className={`segm-item${branchFilter === 'all' ? ' active' : ''}`} onClick={() => setBranchFilter('all')}>All</button>
             <button className={`segm-item${branchFilter === 'on-worktree' ? ' active' : ''}`} onClick={() => setBranchFilter('on-worktree')}>On worktree</button>
             <button className={`segm-item${branchFilter === 'off-worktree' ? ' active' : ''}`} onClick={() => setBranchFilter('off-worktree')}>Off worktree</button>
-            <button className={`segm-item${branchFilter === 'gian' ? ' active' : ''}`} onClick={() => setBranchFilter('gian')}>Gian sessions</button>
+            <button className={`segm-item${branchFilter === 'worktree-sessions' ? ' active' : ''}`} onClick={() => setBranchFilter('worktree-sessions')}>Worktree sessions</button>
           </div>
         </div>
         <div className="card-body compact">
@@ -1049,7 +1050,7 @@ function GitPane({
                 workspaceId: workspace.id,
                 executor: 'codex',
                 baseBranch: rb.fullName,
-                branch: `gian/${shortId()}`,
+                branch: `worktree/${shortId()}`,
               })}
             />
           ))}
@@ -1225,7 +1226,7 @@ function BranchRow({
             workspaceId,
             executor: 'codex',
             baseBranch: branch.name,
-            branch: `gian/${shortId()}`,
+            branch: `worktree/${shortId()}`,
           })}
           title={`Open new worktree session from ${branch.name}`}
         >
@@ -1808,33 +1809,38 @@ function NewWorktreeDialog({
   }) => void;
 }) {
   const [executor, setExecutor] = useState<'claude' | 'codex'>('codex');
-  // Compose a single options list: local branches first, then remote-only
-  // refs (those without a matching local tracking branch yet). Worktree-
-  // occupied branches are excluded — git refuses to checkout the same branch
-  // in two worktrees.
-  const options = useMemo(() => {
-    const localNames = new Set(branches.map(b => b.name));
-    const localOpts = branches
-      .filter(b => !b.worktreePath)
-      .map(b => ({ value: b.name, label: b.name, kind: 'local' as const }));
-    const remoteOpts = remoteBranches
-      .filter(rb => !localNames.has(rb.branch))
-      .map(rb => ({ value: rb.fullName, label: `${rb.fullName} (remote)`, kind: 'remote' as const }));
-    return [...localOpts, ...remoteOpts];
-  }, [branches, remoteBranches]);
-  const initialBase = defaultBranch && options.some(o => o.value === defaultBranch)
-    ? defaultBranch
-    : options[0]?.value ?? defaultBranch ?? '';
+  const existingLocalNames = useMemo(() => new Set(branches.map(b => b.name)), [branches]);
+  // Seed base branch with the workspace default if it exists locally and
+  // isn't already checked out elsewhere; otherwise fall back to the first
+  // pickable branch, or just leave the field for the user.
+  const initialBase = (() => {
+    if (defaultBranch && branches.some(b => b.name === defaultBranch && !b.worktreePath)) {
+      return defaultBranch;
+    }
+    const firstFree = branches.find(b => !b.worktreePath);
+    return firstFree?.name ?? defaultBranch ?? '';
+  })();
   const [baseBranch, setBaseBranch] = useState(initialBase);
-  const [branch, setBranch] = useState(() => `gian/${shortId()}`);
+  const [branchSuffix, setBranchSuffix] = useState<string>(() => shortId());
   const [submitting, setSubmitting] = useState(false);
+
+  const trimmedSuffix = branchSuffix.trim();
+  const composedBranch = trimmedSuffix ? `worktree/${trimmedSuffix}` : '';
+  // Collision check on the composed name. The host also validates via
+  // `git check-ref-format` for syntactic issues — we cover the common case
+  // "name already exists" here.
+  const branchNameError: string | null = !composedBranch
+    ? null
+    : existingLocalNames.has(composedBranch)
+      ? `Branch "${composedBranch}" already exists locally`
+      : null;
 
   function submit() {
     setSubmitting(true);
     onCreate({
       executor,
       ...(baseBranch.trim() ? { baseBranch: baseBranch.trim() } : {}),
-      ...(branch.trim() ? { branch: branch.trim() } : {}),
+      ...(composedBranch ? { branch: composedBranch } : {}),
     });
     // Parent closes the dialog optimistically; nothing else to do here.
   }
@@ -1851,34 +1857,32 @@ function NewWorktreeDialog({
         <div className="adopt-dialog-body">
           <div className="adopt-field">
             <label className="adopt-label">Base branch</label>
-            {options.length > 0 ? (
-              <select
-                className="input"
-                value={baseBranch}
-                onChange={e => setBaseBranch(e.target.value)}
-              >
-                {options.map(o => (
-                  <option key={o.value} value={o.value}>{o.label}</option>
-                ))}
-              </select>
-            ) : (
-              <input
-                className="input"
-                placeholder={defaultBranch ?? 'main'}
-                value={baseBranch}
-                onChange={e => setBaseBranch(e.target.value)}
-              />
-            )}
+            <BranchPicker
+              branches={branches}
+              remoteBranches={remoteBranches}
+              value={baseBranch}
+              defaultBranch={defaultBranch}
+              placeholder="Pick a base branch…"
+              onChange={setBaseBranch}
+              ariaLabel="Base branch"
+            />
           </div>
 
           <div className="adopt-field">
-            <label className="adopt-label">Branch name</label>
-            <input
-              className="input"
-              placeholder="gian/<short-id>"
-              value={branch}
-              onChange={e => setBranch(e.target.value)}
-            />
+            <label className="adopt-label">New branch name</label>
+            <div className="branch-name-field">
+              <span className="prefix">worktree/</span>
+              <input
+                aria-label="New branch suffix"
+                placeholder="short-id"
+                value={branchSuffix}
+                onChange={e => setBranchSuffix(e.target.value)}
+                spellCheck={false}
+              />
+            </div>
+            {branchNameError && (
+              <p className="spaces-error" style={{ marginTop: 4 }}>{branchNameError}</p>
+            )}
           </div>
 
           <div className="adopt-field">
@@ -1902,7 +1906,7 @@ function NewWorktreeDialog({
           <button
             className="btn primary"
             onClick={submit}
-            disabled={submitting || !branch.trim()}
+            disabled={submitting || !composedBranch || !!branchNameError}
           >
             {submitting ? 'Creating…' : 'Create'}
           </button>

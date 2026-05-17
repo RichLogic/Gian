@@ -106,8 +106,9 @@ export interface Session {
   /** Absolute path to the live worktree dir. Null when not in worktree mode
    *  OR when the worktree was removed (merged/discarded). */
   worktree_path: string | null;
-  /** Branch name, e.g. 'gian/abc123'. Set on worktree creation; survives
-   *  merge/discard for history. Null for regular sessions. */
+  /** Branch name, e.g. 'worktree/abc123' (or legacy 'gian/abc123' from
+   *  earlier versions). Set on worktree creation; survives merge/discard
+   *  for history. Null for regular sessions. */
   branch: string | null;
   /** Branch the worktree was forked from (e.g. 'main'). Null for regular. */
   base_branch: string | null;

@@ -3,6 +3,7 @@ import type { ApprovalDecision, ApprovalMode, RuntimeMode, Session, Workspace } 
 import { useT } from '../i18n/index.js';
 import { createWorkspace, loadBranches, loadRemoteBranches, loadRepoInfo } from '../api.js';
 import type { LocalBranch, RemoteBranch } from '../api.js';
+import { BranchPicker } from '../components/BranchPicker.js';
 import { Composer } from '../components/Composer.js';
 import { FilePreviewDrawer } from '../components/FilePreviewDrawer.js';
 import { GitBadge } from '../components/GitBadge.js';
@@ -34,6 +35,11 @@ const ICON = {
   x:      'M5 5l14 14 M5 19L19 5',
   kebabV: 'M12 5.01v-.02 M12 12.01v-.02 M12 19.01v-.02',
 };
+
+// 8 hex chars, matches the host's `worktree/<8-char-uuid>` default convention.
+function shortHexId(): string {
+  return Math.random().toString(16).slice(2, 10).padEnd(8, '0');
+}
 
 function relTime(iso: string): string {
   const ms = Date.now() - Date.parse(iso);
@@ -69,6 +75,10 @@ export interface CreateSessionInput {
   approvalMode: ApprovalMode;
   mode?: 'regular' | 'worktree';
   baseBranch?: string;
+  /** User-chosen name for the branch the worktree will create. Optional —
+   *  when omitted the host falls back to `worktree/<short-uuid>`. The web
+   *  form pre-fills with that pattern but lets the user override. */
+  branch?: string;
   /** Optional first message to send right after the session is created. */
   firstMessage?: string;
 }
@@ -790,15 +800,21 @@ function NewSessionView({
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask');
   const [mode, setMode] = useState<'regular' | 'worktree'>('regular');
   const [baseBranch, setBaseBranch] = useState('');
+  // Suffix-only — the `worktree/` prefix is fixed and rendered as a
+  // non-editable decoration. An auto-generated hex id is the default;
+  // user can clear and type their own.
+  const [branchSuffix, setBranchSuffix] = useState<string>(() => shortHexId());
   const [firstMessage, setFirstMessage] = useState('');
-  // Branch picker data — loaded lazily once worktree mode is selected. The
-  // dropdown options mirror NewWorktreeDialog in SpacesView: occupied
-  // branches are filtered out (a branch can only live in one worktree at a
-  // time) and remote refs without a local tracking branch are surfaced as
-  // standalone options.
+  // Branch picker data — loaded lazily once worktree mode is selected.
+  // Occupied branches are filtered out (a branch can only live in one
+  // worktree at a time) and remote refs without a local tracking branch
+  // are surfaced separately in the picker's Remote section.
   const [branches, setBranches] = useState<LocalBranch[]>([]);
   const [remoteBranches, setRemoteBranches] = useState<RemoteBranch[]>([]);
   const [branchesLoaded, setBranchesLoaded] = useState(false);
+  // Resolved workspace default branch (e.g. `main`) — surfaced in the
+  // BranchPicker so it floats to the top with a `default` tag.
+  const [defaultBranchHint, setDefaultBranchHint] = useState<string | null>(null);
 
   // Inline workspace create (used when there are no workspaces, or the user
   // picks "+ create new workspace" from the select).
@@ -847,9 +863,10 @@ function NewSessionView({
       setBranches(b);
       setRemoteBranches(rb);
       setBranchesLoaded(true);
+      const def = info?.git.defaultBranch ?? null;
+      setDefaultBranchHint(def);
       // Pre-pick the workspace's default branch if it shows up in the list
       // and the user hasn't already chosen anything else.
-      const def = info?.git.defaultBranch;
       if (def && !baseBranch && b.some(x => x.name === def && !x.worktreePath)) {
         setBaseBranch(def);
       }
@@ -860,19 +877,28 @@ function NewSessionView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, selectedWs, canCreate]);
 
-  const baseBranchOptions = (() => {
-    const localNames = new Set(branches.map(b => b.name));
-    const localOpts = branches
-      .filter(b => !b.worktreePath)
-      .map(b => ({ value: b.name, label: b.name, kind: 'local' as const }));
-    const remoteOpts = remoteBranches
-      .filter(rb => !localNames.has(rb.branch))
-      .map(rb => ({ value: rb.fullName, label: `${rb.fullName} (remote)`, kind: 'remote' as const }));
-    return [...localOpts, ...remoteOpts];
-  })();
+  // Suffix → full branch name. An empty suffix falls back to the host's
+  // auto-id behavior (omit `branch` from the payload).
+  const trimmedSuffix = branchSuffix.trim();
+  const composedBranch = trimmedSuffix ? `worktree/${trimmedSuffix}` : '';
+
+  // Collisions are checked against the composed `worktree/<suffix>` name.
+  // The host runs `git check-ref-format` on POST for syntactic issues, so
+  // we only handle the common-case "name already exists" here.
+  const existingLocalNames = new Set(branches.map(b => b.name));
+  const branchNameError: string | null =
+    mode !== 'worktree' || !branchesLoaded || !composedBranch
+      ? null
+      : existingLocalNames.has(composedBranch)
+        ? `Branch "${composedBranch}" already exists locally`
+        : null;
+
+  const canSubmit = canCreate
+    && !creating
+    && (mode === 'regular' || (!!composedBranch && !branchNameError));
 
   function submit() {
-    if (!canCreate) return;
+    if (!canSubmit) return;
     const trimmedFirst = firstMessage.trim();
     onCreate({
       workspaceId: selectedWs,
@@ -881,6 +907,7 @@ function NewSessionView({
       approvalMode,
       mode,
       ...(mode === 'worktree' && baseBranch.trim() ? { baseBranch: baseBranch.trim() } : {}),
+      ...(mode === 'worktree' && composedBranch ? { branch: composedBranch } : {}),
       ...(trimmedFirst ? { firstMessage: trimmedFirst } : {}),
     });
   }
@@ -1034,27 +1061,42 @@ function NewSessionView({
                 </button>
               </div>
               {mode === 'worktree' && (
-                baseBranchOptions.length > 0 ? (
-                  <select
-                    className="select"
-                    aria-label="Base branch"
+                <div className="ns-worktree-fields">
+                  {/* Base branch — popover picker with search + grouped
+                     local/remote sections. Workspace default branch (when
+                     known) auto-seeds the value in the useEffect above. */}
+                  <label className="ns-sublabel">Base branch</label>
+                  <BranchPicker
+                    branches={branches}
+                    remoteBranches={remoteBranches}
                     value={baseBranch}
-                    onChange={e => setBaseBranch(e.target.value)}
-                  >
-                    <option value="">Auto (workspace default)</option>
-                    {baseBranchOptions.map(o => (
-                      <option key={o.value} value={o.value}>{o.label}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    className="input"
-                    placeholder={branchesLoaded ? 'Base branch (auto if blank)' : 'Loading branches…'}
-                    value={baseBranch}
-                    onChange={e => setBaseBranch(e.target.value)}
+                    defaultBranch={defaultBranchHint}
                     disabled={!branchesLoaded}
+                    placeholder={branchesLoaded ? 'Pick a base branch…' : 'Loading branches…'}
+                    onChange={setBaseBranch}
+                    ariaLabel="Base branch"
                   />
-                )
+
+                  {/* New branch name — fixed `worktree/` prefix + suffix
+                     input. Suffix is pre-filled with an 8-char hex id so a
+                     one-click create still works; user can replace it with
+                     a meaningful slug. Collisions with existing local refs
+                     block submit. */}
+                  <label className="ns-sublabel">New branch name</label>
+                  <div className="branch-name-field">
+                    <span className="prefix">worktree/</span>
+                    <input
+                      aria-label="New branch suffix"
+                      placeholder="short-id"
+                      value={branchSuffix}
+                      onChange={e => setBranchSuffix(e.target.value)}
+                      spellCheck={false}
+                    />
+                  </div>
+                  {branchNameError && (
+                    <p className="spaces-error" style={{ marginTop: 4 }}>{branchNameError}</p>
+                  )}
+                </div>
               )}
             </div>
 
@@ -1090,7 +1132,7 @@ function NewSessionView({
             <button className="btn ghost sm" onClick={onCancel} disabled={creating}>
               {t('coding.new.cancel')}
             </button>
-            <button className="btn primary sm" disabled={!canCreate || creating} onClick={submit}>
+            <button className="btn primary sm" disabled={!canSubmit} onClick={submit}>
               {creating ? (
                 <span className="ns-busy"><span className="ns-spinner" aria-hidden="true" />Creating…</span>
               ) : t('coding.new.create')}

@@ -500,7 +500,9 @@ export interface LocalBranch {
   lastCommit: { hash: string; subject: string; age: string } | null;
   /** Absolute path of the worktree that has this branch checked out, or null. */
   worktreePath: string | null;
-  isGianBranch: boolean;
+  /** True for branches auto-created by Gian worktree sessions — currently
+   *  `worktree/*` (and legacy `gian/*` from older sessions). */
+  isWorktreeBranch: boolean;
   /** Set when worktreePath corresponds to a Gian session's worktree. */
   session: { id: string; name: string | null } | null;
 }

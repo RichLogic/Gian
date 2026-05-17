@@ -17,9 +17,10 @@ import { loadConfig, saveConfig, loadPasswordHash, savePasswordHash } from '../s
 import { hashPassword, verifyPassword } from '../auth/passwords.js';
 import { createSessionToken, getUsernameForToken, deleteToken } from '../auth/tokens.js';
 import { requireAuth, AUTH_REQUIRED } from '../auth/middleware.js';
-import { readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, resolve, sep } from 'node:path';
+import { isAbsolute, resolve, sep } from 'node:path';
+import { resolveWithinWorkspace } from '../workspace/safe-path.js';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 // IM layer transplanted from remote-vibe-coding (rvc). Per-platform
@@ -1150,7 +1151,11 @@ export function createApp(ctx: AppContext): AppHandle {
     gone: boolean;
     lastCommit: { hash: string; subject: string; age: string } | null;
     worktreePath: string | null;
-    isGianBranch: boolean;
+    /** True when the branch was auto-created by a Gian session worktree.
+     *  Matches both the new `worktree/*` prefix and the legacy `gian/*`
+     *  prefix used in older versions, so historical branches still flag
+     *  correctly in the Git panel filter. */
+    isWorktreeBranch: boolean;
     session: { id: string; name: string | null } | null;
   }
 
@@ -1197,7 +1202,8 @@ export function createApp(ctx: AppContext): AppHandle {
         gone,
         lastCommit: sha ? { hash: sha, subject: subject ?? '', age: age ?? '' } : null,
         worktreePath: worktreePath || null,
-        isGianBranch: (name ?? '').startsWith('gian/'),
+        isWorktreeBranch:
+          (name ?? '').startsWith('worktree/') || (name ?? '').startsWith('gian/'),
         session: null,
       };
     });
@@ -1233,6 +1239,11 @@ export function createApp(ctx: AppContext): AppHandle {
       '%(objectname:short)',
       '%(contents:subject)',
       '%(committerdate:relative)',
+      // Non-empty when the ref is a symbolic ref (origin/HEAD → origin/main).
+      // We exclude symrefs because (a) `:short` strips the `/HEAD` suffix so
+      // they show up as just `origin`, (b) users want to base worktrees on
+      // the underlying branch, not a moving alias.
+      '%(symref)',
     ].join(SEP);
     let raw: string;
     try {
@@ -1246,10 +1257,10 @@ export function createApp(ctx: AppContext): AppHandle {
     const localNames = new Set(listLocalBranches(ws.path).map(b => b.name));
     const out = lines
       .map(line => {
-        const [name, sha, subject, age] = line.split(SEP);
-        return { name: name ?? '', sha: sha ?? '', subject: subject ?? '', age: age ?? '' };
+        const [name, sha, subject, age, symref] = line.split(SEP);
+        return { name: name ?? '', sha: sha ?? '', subject: subject ?? '', age: age ?? '', symref: symref ?? '' };
       })
-      .filter(r => r.name && !r.name.endsWith('/HEAD'))
+      .filter(r => r.name && !r.symref && !r.name.endsWith('/HEAD'))
       .map(r => {
         const slash = r.name.indexOf('/');
         const remote = slash > 0 ? r.name.slice(0, slash) : '';
@@ -2103,45 +2114,3 @@ function contentTypeFor(path: string): Record<string, string> {
   return { 'Content-Type': map[ext] ?? 'application/octet-stream' };
 }
 
-/**
- * Resolve `rel` against `wsRoot` and verify the result physically stays
- * inside `wsRoot` after symlink resolution. Plain `resolve()` only catches
- * `..` traversal and absolute paths — a symlink at any depth inside the
- * workspace can still point at /etc, /home, etc.
- *
- * Strategy: realpath both ends. If the target doesn't exist yet (e.g. a new
- * file path passed to /diff or /file_meta), walk up to the deepest existing
- * ancestor, realpath that, then re-attach the remaining tail. The tail
- * components don't exist so they can't be symlinks.
- *
- * Returns the verified absolute path on success, null on escape attempt or
- * if the workspace root itself can't be resolved.
- */
-async function resolveWithinWorkspace(wsRoot: string, rel: string): Promise<string | null> {
-  let rootReal: string;
-  try {
-    rootReal = await realpath(resolve(wsRoot));
-  } catch {
-    return null;
-  }
-  const target = resolve(rootReal, rel);
-  if (target === rootReal) return rootReal;
-  if (!target.startsWith(rootReal + sep)) return null;
-
-  let probe = target;
-  while (probe !== rootReal && probe !== dirname(probe)) {
-    try {
-      const probeReal = await realpath(probe);
-      if (probeReal !== rootReal && !probeReal.startsWith(rootReal + sep)) {
-        return null;
-      }
-      const tail = target.slice(probe.length);
-      return probeReal + tail;
-    } catch {
-      probe = dirname(probe);
-    }
-  }
-  // Walked all the way up to root: every intermediate component is missing,
-  // so the path is rooted under the verified real root and safe.
-  return target;
-}

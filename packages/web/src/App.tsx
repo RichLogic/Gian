@@ -773,6 +773,7 @@ export function App() {
                   ...(input.name ? { name: input.name } : {}),
                   ...(input.mode ? { mode: input.mode } : {}),
                   ...(input.baseBranch ? { base_branch: input.baseBranch } : {}),
+                  ...(input.branch ? { branch: input.branch } : {}),
                 });
               }}
               creatingSession={creatingSession}
