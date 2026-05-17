@@ -1874,10 +1874,35 @@
   margin: 0 0 4px;
   letter-spacing: -0.02em;
 }
+/* Title row keeps the workspace name on the left and the kebab + any inline
+   error pinned to the right, on a single line. Title (or the rename input
+   that replaces it) takes the remaining space and truncates / wraps inside
+   its own slot rather than pushing the kebab onto a second row. */
+.detail-head-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.detail-head-row > h1,
+.detail-head-row > .spaces-name-input {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.detail-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
 .detail-sub {
   font: var(--fz-12)/1.5 var(--font-mono);
   color: var(--text-3);
   margin-bottom: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .detail-tabs {
   display: flex; gap: 18px;
