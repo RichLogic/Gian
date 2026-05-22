@@ -195,17 +195,29 @@ export const PROXY_METHODS = [
 export type ProxyMethod = (typeof PROXY_METHODS)[number];
 
 export const PROXY_NOTIFICATION_METHODS = [
+  // Turn lifecycle (both proxies)
   'turn.started',
   'turn.completed',
   'turn.failed',
+  // Approval routing (both proxies)
   'approval.requested',
   'approval.resolved',
+  // Diagnostic stream (both proxies, dropped at host edge)
   'debug',
+  // cc-proxy event stream
   'output.text',
   'tool.use',
+  'auto.classifier_denied',
+  'auto.circuit_breaker',
+  'session.rotated',
+  // codex-proxy event stream
   'output.text.delta',
   'output.command.delta',
+  'output.reasoning.delta',
+  'output.plan.delta',
+  'output.plan.final',
   'diff.updated',
+  // Stats and runtime (both proxies)
   'token_usage.updated',
   'runtime.error',
 ] as const;

@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { createAppError } from './errors.js';
 import type { InputItem } from './types.js';
 
@@ -21,7 +22,14 @@ export function normalizeInputItems(input: unknown, cwd: string): InputItem[] {
     }
 
     if (record.type === 'localImage') {
-      throw createAppError(400, 'INVALID_REQUEST', 'localImage input items are not supported yet.');
+      const path = typeof record.path === 'string' ? record.path.trim() : '';
+      if (!path) {
+        throw createAppError(400, 'INVALID_REQUEST', 'localImage items require a path.');
+      }
+      return {
+        type: 'localImage',
+        path: resolve(cwd, path),
+      } satisfies InputItem;
     }
 
     throw createAppError(400, 'INVALID_REQUEST', `Unsupported input item type "${String(record.type)}".`);

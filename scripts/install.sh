@@ -4,6 +4,7 @@
 # Usage:
 #   ./scripts/install.sh           # install (refuses to overwrite existing)
 #   ./scripts/install.sh --force   # overwrite an existing install
+#   ./scripts/install.sh --check   # render/validate unit only; do not install
 #
 # Supports: macOS (launchd LaunchAgent) and Linux (systemd --user).
 # Requires: Node v22+ on $PATH, pre-built packages/host/dist/.
@@ -19,9 +20,11 @@ info() { echo "[gian] $*"; }
 # ── args ─────────────────────────────────────────────────────────────────────
 
 FORCE=false
+CHECK=false
 for arg in "$@"; do
   case "$arg" in
     --force) FORCE=true ;;
+    --check|--dry-run) CHECK=true ;;
     *) die "unknown argument: $arg" ;;
   esac
 done
@@ -105,15 +108,19 @@ fi
 
 # ── overwrite guard ───────────────────────────────────────────────────────────
 
-if [[ -f "${UNIT_DEST}" ]] && [[ "${FORCE}" != true ]]; then
+if [[ "${CHECK}" != true && -f "${UNIT_DEST}" ]] && [[ "${FORCE}" != true ]]; then
   die "Gian is already installed at ${UNIT_DEST}. Use --force to overwrite."
 fi
 
 # ── create log directory ──────────────────────────────────────────────────────
 
 LOG_DIR="${HOME}/.config/gian/logs"
-mkdir -p "${LOG_DIR}"
-info "Log directory: ${LOG_DIR}"
+if [[ "${CHECK}" == true ]]; then
+  info "Check mode: no unit files will be installed and no daemon will be started."
+else
+  mkdir -p "${LOG_DIR}"
+  info "Log directory: ${LOG_DIR}"
+fi
 
 # ── substitute template variables ────────────────────────────────────────────
 #
@@ -130,6 +137,23 @@ substitute() {
     -e "s|{{LAUNCHD_PATH}}|${LAUNCHD_PATH}|g" \
     "${src}" > "${dst}"
 }
+
+if [[ "${CHECK}" == true ]]; then
+  [[ -f "${TEMPLATE}" ]] || die "template not found: ${TEMPLATE}"
+  TMP_UNIT="$(mktemp "${TMPDIR:-/tmp}/gian-unit.XXXXXX")"
+  substitute "${TEMPLATE}" "${TMP_UNIT}"
+  if grep -q '{{' "${TMP_UNIT}"; then
+    cat "${TMP_UNIT}" >&2
+    rm -f "${TMP_UNIT}"
+    die "template substitution left unresolved placeholders"
+  fi
+  info "Rendered ${PLATFORM} unit successfully → ${TMP_UNIT}"
+  info "Install dir : ${INSTALL_DIR}"
+  info "Node        : ${NODE_BIN} (${NODE_VERSION})"
+  info "Launch PATH : ${LAUNCHD_PATH}"
+  rm -f "${TMP_UNIT}"
+  exit 0
+fi
 
 # ── install unit file ─────────────────────────────────────────────────────────
 

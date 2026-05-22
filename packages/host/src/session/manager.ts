@@ -11,12 +11,14 @@ import type {
 } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 import { loadConfig } from '../storage/config.js';
+import { purgeSessionAttachments } from '../storage/attachments.js';
 import type { ProxyManager } from '../proxy/manager.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
 import type { ApprovalManager } from '../approval/index.js';
 import type { QueueManager } from '../queue/index.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import type { TtyManager } from '../tty/manager.js';
+import type { CodexTtyManager } from '../tty/codex-manager.js';
 import { locateNativeJsonl } from '../native/locate-jsonl.js';
 import {
   normalizeCcNotification,
@@ -166,10 +168,17 @@ export class SessionManager {
      *  TtyManager doesn't actually depend on SessionManager). Null when
      *  TTY mode isn't wired (older tests, mocked envs). */
     private ttyMgr: TtyManager | null = null,
+    /** Codex TTY runtime coordinator — same lazy-injection pattern as
+     *  `ttyMgr`. Null when codex CLI mode isn't wired. */
+    private codexTtyMgr: CodexTtyManager | null = null,
   ) {}
 
   setTtyManager(mgr: TtyManager): void {
     this.ttyMgr = mgr;
+  }
+
+  setCodexTtyManager(mgr: CodexTtyManager): void {
+    this.codexTtyMgr = mgr;
   }
 
   async createSession(input: CreateSessionInput): Promise<Session> {
@@ -436,6 +445,19 @@ export class SessionManager {
     }
     this.approvals.clearSession(sessionId);
     this.watcher?.resume(sessionId);
+    // If the session is wedged in CLI mode, kill the PTY too — otherwise
+    // we drop the cached proxy session id but the PTY keeps running in
+    // codex-proxy (or cc-proxy) memory, orphaned from any host state.
+    // stop() also persists runtime_mode back to 'structured' so the next
+    // session open lands the user in Chat instead of a dead xterm.
+    let session: Session | null = null;
+    try { session = this.getSession(sessionId); } catch { /* row gone */ }
+    if (session?.runtime_mode === 'tty') {
+      try {
+        if (session.executor === 'codex') await this.codexTtyMgr?.stop(session);
+        else if (session.executor === 'claude') await this.ttyMgr?.stop(session);
+      } catch { /* best-effort */ }
+    }
     this.proxySessionIds.delete(sessionId);
 
     const now = new Date().toISOString();
@@ -465,27 +487,39 @@ export class SessionManager {
   /**
    * Flip the active runtime for a session between `structured` and `tty`.
    * Preconditions:
-   *   - session exists, is `claude` (only executor with TTY support today)
+   *   - session exists, executor is `claude` OR `codex`
+   *   - the per-executor TTY manager is wired
    *   - no active turn, no pending approval
+   *   - worktree not finalized (merged/discarded)
    *
-   * On success the underlying Claude session uuid is preserved
-   * (`--session-id` for first ever spawn, `--resume` on every subsequent
-   * spawn in either mode), so conversation history survives the toggle.
+   * On success the underlying native session uuid is preserved (Claude:
+   * `--session-id` first / `--resume` after; Codex: `codex resume <uuid>`
+   * against the same threadId that codex-proxy's `thread/start` minted),
+   * so conversation history survives the toggle in either direction.
    */
   async switchRuntime(sessionId: string, target: RuntimeMode): Promise<void> {
-    if (!this.ttyMgr) {
-      throw Object.assign(new Error('TTY runtime not configured'), { code: 'SWITCH_BLOCKED' });
-    }
     const session = this.getSession(sessionId);
-    if (session.executor !== 'claude') {
+    if (session.executor !== 'claude' && session.executor !== 'codex') {
       throw Object.assign(
-        new Error(`runtime switch is only available for claude sessions (got ${session.executor})`),
+        new Error(`runtime switch is not available for executor "${session.executor}"`),
         { code: 'SWITCH_BLOCKED' },
       );
+    }
+    if (session.executor === 'claude' && !this.ttyMgr) {
+      throw Object.assign(new Error('claude TTY runtime not configured'), { code: 'SWITCH_BLOCKED' });
+    }
+    if (session.executor === 'codex' && !this.codexTtyMgr) {
+      throw Object.assign(new Error('codex TTY runtime not configured'), { code: 'SWITCH_BLOCKED' });
     }
     if (session.runtime_mode === target) {
       // No-op; do not error — the toggle button may double-fire.
       return;
+    }
+    if (session.worktree_outcome !== null) {
+      throw Object.assign(
+        new Error('cannot switch runtime — session worktree is already finalized (merged or discarded)'),
+        { code: 'SWITCH_BLOCKED' },
+      );
     }
     if (this.activeTurns.has(sessionId)) {
       throw Object.assign(
@@ -500,22 +534,35 @@ export class SessionManager {
       );
     }
 
-    // Ensure the cc-proxy client is alive — TtyManager talks to it. We
-    // reuse the same proxy process for both modes so the Claude session
-    // uuid is shared without round-tripping through DB.
+    // Ensure the per-executor proxy client is alive — both TTY managers
+    // talk through it. For codex, this is also where `native_session_id`
+    // gets minted (via `thread/start` inside `bringUpProxySession`) on
+    // sessions that have never run a CHAT turn. Side effect: the in-memory
+    // `session` variable above is now stale w.r.t. native_session_id.
     await this.ensureProxySession(session);
 
     if (target === 'tty') {
+      // Re-read the session row so `native_session_id` reflects any
+      // freshly-minted codex threadId from ensureProxySession.
+      const fresh = this.getSession(sessionId);
       // Resolve cwd: worktree path if present, else workspace root.
       const workspace = this.db
         .prepare('SELECT path FROM workspaces WHERE id = ?')
-        .get(session.workspace_id) as { path: string } | undefined;
+        .get(fresh.workspace_id) as { path: string } | undefined;
       if (!workspace) throw new Error(`workspace missing for session ${sessionId}`);
-      const cwd = session.worktree_path ?? workspace.path;
+      const cwd = fresh.worktree_path ?? workspace.path;
       // Pick a conservative default geometry — the UI resizes on mount.
-      await this.ttyMgr.start(session, cwd, { cols: 120, rows: 30 });
+      if (fresh.executor === 'claude') {
+        await this.ttyMgr!.start(fresh, cwd, { cols: 120, rows: 30 });
+      } else {
+        await this.codexTtyMgr!.start(fresh, cwd, { cols: 120, rows: 30 });
+      }
     } else {
-      await this.ttyMgr.stop(session);
+      if (session.executor === 'claude') {
+        await this.ttyMgr!.stop(session);
+      } else {
+        await this.codexTtyMgr!.stop(session);
+      }
     }
   }
 
@@ -590,6 +637,15 @@ export class SessionManager {
     const session = this.getSession(sessionId);
     if (session.worktree_outcome) {
       throw new Error(`session is ${session.worktree_outcome}; create a new session to continue`);
+    }
+    // CLI runtime guard: in `runtime_mode='tty'` the user is typing directly
+    // into the in-PTY claude/codex process. A structured `message:send`
+    // would create a ghost turn with no backend (and for codex, also race
+    // the TUI for the same on-disk thread). Reject early — caller (web / IM
+    // bot / queue) is expected to switch the session back to structured
+    // first. See spec §3.4.
+    if (session.runtime_mode === 'tty') {
+      throw new Error(`session is in CLI mode; switch to Chat before sending structured messages`);
     }
     // Reject before any optimistic writes if a turn is already in flight.
     // The downstream `startTurn` would return SESSION_BUSY, and the catch
@@ -806,6 +862,14 @@ export class SessionManager {
   }
 
   async sendQueuedNow(sessionId: string): Promise<void> {
+    // CLI runtime guard: don't pop the head if the session is in TTY mode.
+    // Popping first would lose the queued text on the inevitable
+    // sendMessage rejection; check runtime BEFORE popNext so the head
+    // survives for when the user flips back to Chat.
+    const session = this.getSession(sessionId);
+    if (session.runtime_mode === 'tty') {
+      throw new Error(`session is in CLI mode; switch to Chat before draining the queue`);
+    }
     // Pop only the head entry. Awaiting sendMessage just unblocks the proxy's
     // startTurn (the turn itself is async); kicking off the next entry from
     // here would race with turn 1 still running and trip SESSION_BUSY,
@@ -931,6 +995,24 @@ export class SessionManager {
   }
 
   private async teardownProxy(sessionId: string): Promise<void> {
+    // Kill the CLI-mode PTY before closing the structured session.
+    // `closeSession` only tears down the structured wire; without an
+    // explicit `ttyKill` the codex-proxy (shared across all codex
+    // sessions) keeps `codex resume` running against an already-
+    // removed worktree. cc-proxy is per-session so the PTY dies when
+    // the subprocess does, but a structured closeSession alone doesn't
+    // trigger that — we want the leak closed promptly on both
+    // executors. The per-executor `stop()` methods are no-ops when
+    // there is no live PTY, so this is safe to call unconditionally
+    // for runtime_mode='tty' sessions.
+    let session: Session | null = null;
+    try { session = this.getSession(sessionId); } catch { /* row may already be gone */ }
+    if (session?.runtime_mode === 'tty') {
+      try {
+        if (session.executor === 'codex') await this.codexTtyMgr?.stop(session);
+        else if (session.executor === 'claude') await this.ttyMgr?.stop(session);
+      } catch { /* best-effort cleanup */ }
+    }
     const proxyClient = this.proxy.get(sessionId);
     const proxySessionId = this.proxySessionIds.get(sessionId);
     if (proxyClient && proxySessionId) {
@@ -972,6 +1054,7 @@ export class SessionManager {
     // they linger in approvals.pending and re-surface on next state_sync.
     this.approvals.clearSession(sessionId);
     this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+    await purgeSessionAttachments(sessionId);
     this.broadcaster.broadcast({ type: 'session:deleted', session_id: sessionId });
     // If the session owned a worktree branch, removal above changed git
     // state — let the Workspace Git panel pick that up live.
@@ -1046,7 +1129,19 @@ export class SessionManager {
       notification.method === 'tty.output' ||
       notification.method === 'tty.exited'
     ) {
-      this.ttyMgr?.handleProxyNotification(notification as { method?: string; params?: unknown });
+      // Dispatch by executor: claude TtyManager reads `params.sessionId`
+      // as the gianSessionId (cc-proxy is per-session), codex
+      // CodexTtyManager reads `params.gianSessionId` separately (codex-proxy
+      // is shared and uses `sessionId` as the proxy-side routing key).
+      // Routing the wrong notification to the wrong manager would either
+      // drop it silently or broadcast with a stale session_id.
+      let session: Session | null = null;
+      try { session = this.getSession(sessionId); } catch { /* notification can outlive close */ }
+      if (session?.executor === 'codex') {
+        this.codexTtyMgr?.handleProxyNotification(notification as { method?: string; params?: unknown });
+      } else {
+        this.ttyMgr?.handleProxyNotification(notification as { method?: string; params?: unknown });
+      }
       return;
     }
 
@@ -1192,6 +1287,13 @@ export class SessionManager {
 
   /** Pop the next queued message and re-enter sendMessage. Returns true if sent. */
   private maybeAutoSendNext(sessionId: string): boolean {
+    // CLI runtime guard: don't drain the queue into a session that's now
+    // in TTY mode — the message would be rejected by sendMessage anyway,
+    // and popNext would burn the head. Leave the queue intact for when
+    // the user flips back to Chat.
+    let session;
+    try { session = this.getSession(sessionId); } catch { return false; }
+    if (session.runtime_mode === 'tty') return false;
     const next = this.queue.popNext(sessionId);
     if (!next) return false;
     this.broadcastQueueUpdated(sessionId);

@@ -10,10 +10,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "start": "node dist/src/cli/spawn.js",
     "test": "npm run build && node --test dist/test/**/*.test.js",
-    "clean": "rm -rf dist *.tsbuildinfo"
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "postinstall": "node ../cc-proxy/scripts/fix-node-pty-permissions.cjs"
   },
   "dependencies": {
-    "@gian/shared": "workspace:*"
+    "@gian/shared": "workspace:*",
+    "node-pty": "^1.1.0-beta40"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

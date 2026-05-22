@@ -2,7 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalDecision } from '@gian/shared';
 import type { TranscriptItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
-import { AgentSpawnRow, ApprovalCard, AssistantMessage, Caret, CommandCard, DiffCard, FileReadCard, FileSearchCard, ToolEvent, UserMessage, WebSearchRow } from './items.js';
+import { AgentSpawnRow, ApprovalCard, AssistantMessage, AutoNoticeCard, Caret, CommandCard, DiffCard, FileReadCard, FileSearchCard, ReasoningCard, ToolEvent, UserMessage, WebSearchRow } from './items.js';
+import { GianMascot } from '../components/GianMascot.js';
 
 /**
  * Render-time grouping: walk items[] and fold consecutive action items
@@ -26,6 +27,10 @@ function isActionItem(item: TranscriptItem): boolean {
     case 'turn-start':
     case 'turn-end':
       return false;
+    case 'auto-notice':
+      // Inline classifier-denials fold into turn-actions; the circuit-breaker
+      // is session-stopping and breaks the group so the card stands out.
+      return item.variant === 'classifier-denied';
     default:
       return true;
   }
@@ -88,6 +93,8 @@ export function renderItem(
       return <UserMessage key={item.id} item={item} hideAvatar={hideAvatar} />;
     case 'assistant':
       return <AssistantMessage key={item.id} item={item} hideAvatar={hideAvatar} />;
+    case 'reasoning':
+      return <ReasoningCard key={item.id} item={item} />;
     case 'tool':
       return <ToolEvent key={item.id} item={item} />;
     case 'approval':
@@ -127,6 +134,8 @@ export function renderItem(
       return <WebSearchRow key={item.id} item={item} />;
     case 'agent-spawn':
       return <AgentSpawnRow key={item.id} item={item} />;
+    case 'auto-notice':
+      return <AutoNoticeCard key={item.id} item={item} />;
   }
 }
 
@@ -204,11 +213,10 @@ function countActions(items: TranscriptItem[]): string {
 }
 
 export function Transcript({
-  items, pending, executor, onApprove,
+  items, pending, onApprove,
 }: {
   items: TranscriptItem[];
   pending: boolean;
-  executor: 'claude' | 'codex';
   onApprove: (
     approvalId: string,
     decision: ApprovalDecision,
@@ -249,11 +257,11 @@ export function Transcript({
     return null;
   }, [items]);
 
-  // Hide the "thinking…" ticker once an assistant bubble exists for this
-  // turn — codex streams text into it, so the ticker becomes redundant.
-  // Approvals also count as content (we're waiting on the user, not codex).
+  // Show the Gian "working" mascot whenever a turn is pending, except when the
+  // last item is an approval card — in that case we're waiting on the *user*,
+  // not the model, so an activity indicator would be misleading.
   const lastItem = items[items.length - 1];
-  const showTicker = pending && lastItem?.kind !== 'assistant' && lastItem?.kind !== 'approval';
+  const showMascot = pending && lastItem?.kind !== 'approval';
 
   return (
     <div className="transcript" ref={ref}>
@@ -282,6 +290,8 @@ export function Transcript({
             } else if (item.kind === 'approval' || item.kind === 'error' || item.kind === 'diff') {
               // Hard break — the next text message gets a fresh header.
               prevSender = null;
+            } else if (item.kind === 'auto-notice' && item.variant === 'circuit-breaker') {
+              prevSender = null;
             }
             return renderItem(
               item,
@@ -292,12 +302,9 @@ export function Transcript({
             );
           });
         })()}
-        {showTicker && (
-          <div className="msg-thinking">
-            <span className="ticker">
-              <span className="dots"><span /><span /><span /></span>
-              thinking…
-            </span>
+        {showMascot && (
+          <div className="msg-mascot">
+            <GianMascot size={36} state="working" title="Working…" />
           </div>
         )}
     </div>

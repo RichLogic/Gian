@@ -34,9 +34,11 @@ const ICON = {
   plus:   'M12 5v14 M5 12h14',
   x:      'M5 5l14 14 M5 19L19 5',
   kebabV: 'M12 5.01v-.02 M12 12.01v-.02 M12 19.01v-.02',
+  branch: 'M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
+  eyeOff: 'M2 2l12 12M6.5 6.5a2 2 0 0 0 2.8 2.8M3.5 4.5a8 8 0 0 0-1.5 3.5C3 11.5 5.5 13 8 13a8 8 0 0 0 4-1.1M9 3a8 8 0 0 1 5 5 8 8 0 0 1-1 2',
 };
 
-// 8 hex chars, matches the host's `worktree/<8-char-uuid>` default convention.
+// 8 hex chars, matches the host's `gian/<8-char-uuid>` default convention.
 function shortHexId(): string {
   return Math.random().toString(16).slice(2, 10).padEnd(8, '0');
 }
@@ -76,15 +78,56 @@ export interface CreateSessionInput {
   mode?: 'regular' | 'worktree';
   baseBranch?: string;
   /** User-chosen name for the branch the worktree will create. Optional —
-   *  when omitted the host falls back to `worktree/<short-uuid>`. The web
-   *  form pre-fills with that pattern but lets the user override. */
+   *  when omitted the host falls back to `gian/<short-uuid>`. The web form
+   *  pre-fills with that pattern but lets the user override. */
   branch?: string;
   /** Optional first message to send right after the session is created. */
   firstMessage?: string;
 }
 
+/**
+ * Inputs the form has visible to it. Extracted from the inline submit()
+ * closure so SES-001 / WT-001 can be exercised as a pure function.
+ */
+export interface SessionCreateFormState {
+  workspaceId: string;
+  sessionName: string;
+  executor: 'claude' | 'codex';
+  approvalMode: ApprovalMode;
+  mode: 'regular' | 'worktree';
+  baseBranch: string;
+  /** Already-composed full branch name (e.g. `worktree/feature-x`).
+   *  Empty string means "let the host auto-generate". */
+  composedBranch: string;
+  firstMessage: string;
+}
+
+/**
+ * Map the new-session form state to the payload sent to the host. WT-001
+ * + SES-001 contract: regular mode omits `baseBranch` / `branch`;
+ * worktree mode includes them only when the user supplied non-empty
+ * trimmed values; `firstMessage` is included only when non-empty.
+ */
+export function buildSessionCreatePayload(form: SessionCreateFormState): CreateSessionInput {
+  const trimmedFirst = form.firstMessage.trim();
+  return {
+    workspaceId: form.workspaceId,
+    name: form.sessionName.trim(),
+    executor: form.executor,
+    approvalMode: form.approvalMode,
+    mode: form.mode,
+    ...(form.mode === 'worktree' && form.baseBranch.trim() ? { baseBranch: form.baseBranch.trim() } : {}),
+    ...(form.mode === 'worktree' && form.composedBranch ? { branch: form.composedBranch } : {}),
+    ...(trimmedFirst ? { firstMessage: trimmedFirst } : {}),
+  };
+}
+
 export interface CodingViewProps {
   workspaces: Workspace[];
+  /** Map of workspace_id → current HEAD branch name. Used as a fallback
+   *  by SessionRow when session.branch itself is null (non-worktree
+   *  sessions ride on the workspace's HEAD). Populated by App. */
+  workspaceBranches: Record<string, string | null>;
   sessions: Session[];
   archivedSessions: Session[];
   archivedLoaded: boolean;
@@ -95,6 +138,8 @@ export interface CodingViewProps {
   pendingBySession: Record<string, boolean>;
   usageBySession: Record<string, TokenUsage>;
   queueBySession: Record<string, QueueEntry[]>;
+  /** Codex plan-mode plan markdown per session, populated by plan_update. */
+  planBySession: Record<string, string>;
   onLoadArchived: () => void | Promise<void>;
   onSelectSession: (id: string) => void;
   onWorkspaceCreated: (ws: Workspace) => void;
@@ -102,7 +147,7 @@ export interface CodingViewProps {
   /** True from `session:create` dispatch until `session:created` lands. Drives
    *  the busy state in NewSessionView's submit button. */
   creatingSession: boolean;
-  onSend: (sessionId: string, text: string, opts?: { oneShotBypass?: boolean }) => void;
+  onSend: (sessionId: string, text: string, opts?: { oneShotBypass?: boolean; imagePaths?: string[] }) => void;
   onSendSkill: (sessionId: string, name: string, path: string) => void;
   onStop: (sessionId: string) => void;
   onApprove: (
@@ -140,6 +185,9 @@ export interface CodingViewProps {
   /** Flip the active runtime for a session. Caller forwards to
    *  `session:switch-runtime` WS message. */
   onSwitchRuntime: (sessionId: string, target: RuntimeMode) => void;
+  /** Switch app mode to Spaces (workspace management). Triggered from
+   *  the sidebar's "N hidden workspaces · manage" footer link. */
+  onOpenSpaces: () => void;
 }
 
 export function CodingView(p: CodingViewProps) {
@@ -175,6 +223,7 @@ export function CodingView(p: CodingViewProps) {
         <>
           <Sidebar
             workspaces={p.workspaces}
+            workspaceBranches={p.workspaceBranches}
             sessions={p.sessions}
             archivedSessions={p.archivedSessions}
             archivedLoaded={p.archivedLoaded}
@@ -183,6 +232,7 @@ export function CodingView(p: CodingViewProps) {
             onToggleNew={() => setShowNew(v => !v)}
             onSelect={id => { setShowNew(false); p.onSelectSession(id); }}
             onLoadArchived={p.onLoadArchived}
+            onOpenSpaces={p.onOpenSpaces}
           />
           <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize sidebar" />
         </>
@@ -205,6 +255,7 @@ export function CodingView(p: CodingViewProps) {
           pending={p.pendingBySession[p.activeSession.id] ?? false}
           usage={p.usageBySession[p.activeSession.id] ?? null}
           queue={p.queueBySession[p.activeSession.id] ?? []}
+          codexPlanText={p.planBySession[p.activeSession.id]}
           onSend={(text, opts) => p.onSend(p.activeSession!.id, text, opts)}
           onSendSkill={(name, path) => p.onSendSkill(p.activeSession!.id, name, path)}
           onStop={() => p.onStop(p.activeSession!.id)}
@@ -261,6 +312,7 @@ function CodingViewEmpty() {
 
 function Sidebar({
   workspaces,
+  workspaceBranches,
   sessions,
   archivedSessions,
   archivedLoaded,
@@ -268,8 +320,10 @@ function Sidebar({
   onToggleNew,
   onSelect,
   onLoadArchived,
+  onOpenSpaces,
 }: {
   workspaces: Workspace[];
+  workspaceBranches: Record<string, string | null>;
   sessions: Session[];
   archivedSessions: Session[];
   archivedLoaded: boolean;
@@ -278,16 +332,46 @@ function Sidebar({
   onToggleNew: () => void;
   onSelect: (id: string) => void;
   onLoadArchived: () => void | Promise<void>;
+  onOpenSpaces: () => void;
 }) {
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [wsFilter, setWsFilter] = useState('all');
-  const [groupBy, setGroupBy] = useState<GroupBy>('time');
+  const [groupBy, setGroupBy] = useState<GroupBy>('workspace');
   // V2 sidebar state — search box + popovers.
   const [search, setSearch] = useState('');
   const [filterExec, setFilterExec] = useState<null | 'claude' | 'codex'>(null);
   const [groupOpen, setGroupOpen] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const headRef = useRef<HTMLDivElement>(null);
+
+  const collapsedKey = `gian.sidebar.collapsed.${groupBy}`;
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(`gian.sidebar.collapsed.${groupBy}`);
+      return new Set<string>(raw ? JSON.parse(raw) : []);
+    } catch { return new Set(); }
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem(collapsedKey, JSON.stringify(Array.from(collapsed))); }
+    catch { /* localStorage full / disabled — non-essential */ }
+  }, [collapsed, collapsedKey]);
+
+  // Switching groupBy mode → re-read collapse state for the new mode key.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(`gian.sidebar.collapsed.${groupBy}`);
+      setCollapsed(new Set<string>(raw ? JSON.parse(raw) : []));
+    } catch { setCollapsed(new Set()); }
+  }, [groupBy]);
+
+  function toggleGroup(key: string) {
+    setCollapsed(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
 
   // Close popovers on outside click / Escape.
   useEffect(() => {
@@ -338,8 +422,12 @@ function Sidebar({
   const filtered = active.filter(s => {
     if (wsFilter !== 'all' && s.workspace_id !== wsFilter) return false;
     if (filterExec && s.executor !== filterExec) return false;
-    const wsName = wsById.get(s.workspace_id)?.name ?? '';
-    return matchesSearch(s, wsName);
+    const ws = wsById.get(s.workspace_id);
+    // Sessions whose workspace is hidden disappear from the list — UNLESS
+    // they're the currently active session, in which case we keep the row
+    // visible with a "wsHidden" badge so the user has a route back.
+    if (ws?.hidden && s.id !== activeSessionId) return false;
+    return matchesSearch(s, ws?.name ?? '');
   });
 
   const needsYou = groupBy === 'status'
@@ -348,13 +436,14 @@ function Sidebar({
   const needsYouIds = new Set(needsYou.map(s => s.id));
   const rest = groupBy === 'status' ? filtered : filtered.filter(s => !needsYouIds.has(s.id));
 
-  function renderRow(s: Session, wsName: string, isArchived = false) {
+  function renderRow(s: Session, isArchived = false) {
     return (
       <SessionRow
         key={s.id}
         session={s}
-        workspaceName={wsName}
         archived={isArchived}
+        wsHidden={wsById.get(s.workspace_id)?.hidden === 1}
+        branchFallback={workspaceBranches[s.workspace_id] ?? null}
         {...makeRowHandlers(s)}
       />
     );
@@ -374,10 +463,15 @@ function Sidebar({
         const ws = wsById.get(wsId);
         const name = ws?.name ?? wsId;
         const sorted = list.slice().sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
+        const isCollapsed = collapsed.has(wsId);
         return (
           <div key={wsId}>
-            <div className="sb-group"><span>{name}</span></div>
-            {sorted.map(s => renderRow(s, name))}
+            <div className="sb-group" onClick={() => toggleGroup(wsId)}>
+              <span className="caret">{isCollapsed ? '▸' : '▾'}</span>
+              <span>{name}</span>
+              <span className="count">{list.length}</span>
+            </div>
+            {!isCollapsed && sorted.map(s => renderRow(s))}
           </div>
         );
       });
@@ -398,10 +492,15 @@ function Sidebar({
           (a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at),
         );
         const label = status.charAt(0).toUpperCase() + status.slice(1);
+        const isCollapsed = collapsed.has(status);
         return (
           <div key={status}>
-            <div className="sb-group"><span>{label}</span></div>
-            {list.map(s => renderRow(s, wsById.get(s.workspace_id)?.name ?? ''))}
+            <div className="sb-group" onClick={() => toggleGroup(status)}>
+              <span className="caret">{isCollapsed ? '▸' : '▾'}</span>
+              <span>{label}</span>
+              <span className="count">{list.length}</span>
+            </div>
+            {!isCollapsed && list.map(s => renderRow(s))}
           </div>
         );
       });
@@ -418,10 +517,15 @@ function Sidebar({
       const list = (grouped.get(bucket) ?? []).slice().sort(
         (a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at),
       );
+      const isCollapsed = collapsed.has(bucket);
       return (
         <div key={bucket}>
-          <div className="sb-group"><span>{bucket}</span></div>
-          {list.map(s => renderRow(s, wsById.get(s.workspace_id)?.name ?? ''))}
+          <div className="sb-group" onClick={() => toggleGroup(bucket)}>
+            <span className="caret">{isCollapsed ? '▸' : '▾'}</span>
+            <span>{bucket}</span>
+            <span className="count">{list.length}</span>
+          </div>
+          {!isCollapsed && list.map(s => renderRow(s))}
         </div>
       );
     });
@@ -579,7 +683,7 @@ function Sidebar({
             {needsYou
               .slice()
               .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
-              .map(s => renderRow(s, wsById.get(s.workspace_id)?.name ?? ''))}
+              .map(s => renderRow(s))}
           </>
         )}
 
@@ -589,6 +693,10 @@ function Sidebar({
           const visible = archivedSessions
             .filter(s => wsFilter === 'all' || s.workspace_id === wsFilter)
             .filter(s => !filterExec || s.executor === filterExec)
+            .filter(s => {
+              const ws = wsById.get(s.workspace_id);
+              return !ws?.hidden || s.id === activeSessionId;
+            })
             .filter(s => matchesSearch(s, wsById.get(s.workspace_id)?.name ?? ''))
             .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
           return (
@@ -599,7 +707,7 @@ function Sidebar({
               </button>
               {archivedOpen && (
                 <>
-                  {visible.map(s => renderRow(s, wsById.get(s.workspace_id)?.name ?? '', true))}
+                  {visible.map(s => renderRow(s, true))}
                   {archivedLoaded && visible.length === 0 && (
                     <span style={{ padding: '4px 10px', color: 'var(--text-3)', fontSize: 11 }}>
                       no archived sessions
@@ -610,21 +718,38 @@ function Sidebar({
             </>
           );
         })()}
+
+        {(() => {
+          const hiddenCount = workspaces.filter(w => w.hidden === 1).length;
+          if (hiddenCount === 0) return null;
+          return (
+            <button
+              type="button"
+              className="sb-hidden-link"
+              onClick={onOpenSpaces}
+            >
+              ↳ {hiddenCount} hidden workspace{hiddenCount === 1 ? '' : 's'} · manage
+            </button>
+          );
+        })()}
       </div>
     </aside>
   );
 }
 
 function SessionRow({
-  session, workspaceName, active, archived,
-  onSelect,
+  session, active, archived, wsHidden, branchFallback, onSelect,
 }: {
   session: Session;
-  workspaceName: string;
   active: boolean;
   archived?: boolean;
+  wsHidden?: boolean;
+  /** Workspace HEAD branch — shown when the session itself doesn't own a
+   *  worktree branch (regular sessions ride the workspace's checkout). */
+  branchFallback?: string | null;
   onSelect: () => void;
 }) {
+  const branch = session.branch ?? branchFallback ?? null;
   return (
     <div
       className={`rail-item${active ? ' active' : ''}${archived ? ' archived' : ''}`}
@@ -633,10 +758,7 @@ function SessionRow({
       tabIndex={0}
       onClick={onSelect}
       onKeyDown={e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          onSelect();
-        }
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); }
       }}
     >
       <div className="ri-body">
@@ -647,12 +769,28 @@ function SessionRow({
           <span className={`ri-exec ${session.executor}`}>
             {session.executor === 'claude' ? 'Claude' : 'Codex'}
           </span>
-          <span className="ri-dot-sep">·</span>
-          <span className="ri-sub">{workspaceName}</span>
+          {branch && (
+            <>
+              <span className="ri-dot-sep">·</span>
+              <span className="ri-branch">
+                <SvgIcon d={ICON.branch} size={9} />
+                <span className="ri-branch-name">{branch}</span>
+              </span>
+            </>
+          )}
         </div>
       </div>
       <span className="ri-age" title="Last activity">{relTime(session.updated_at)}</span>
       <StatusIcon status={session.status} />
+      {wsHidden && (
+        <span
+          className="ri-hidden-badge"
+          title="Workspace 已隐藏 — 在 Settings 里管理"
+          aria-label="workspace hidden"
+        >
+          <SvgIcon d={ICON.eyeOff} size={11} />
+        </span>
+      )}
     </div>
   );
 }
@@ -794,7 +932,9 @@ function NewSessionView({
   creating: boolean;
 }) {
   const t = useT();
-  const [selectedWs, setSelectedWs] = useState(workspaces[0]?.id ?? '');
+  const [selectedWs, setSelectedWs] = useState(
+    workspaces.find(w => w.hidden !== 1)?.id ?? workspaces[0]?.id ?? ''
+  );
   const [sessionName, setSessionName] = useState('');
   const [executor, setExecutor] = useState<'claude' | 'codex'>('codex');
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask');
@@ -805,10 +945,11 @@ function NewSessionView({
   // user can clear and type their own.
   const [branchSuffix, setBranchSuffix] = useState<string>(() => shortHexId());
   const [firstMessage, setFirstMessage] = useState('');
-  // Branch picker data — loaded lazily once worktree mode is selected.
-  // Occupied branches are filtered out (a branch can only live in one
-  // worktree at a time) and remote refs without a local tracking branch
-  // are surfaced separately in the picker's Remote section.
+  // Branch picker data — loaded lazily once worktree mode is selected. The
+  // dropdown options mirror NewWorktreeDialog in SpacesView: occupied
+  // branches are filtered out (a branch can only live in one worktree at a
+  // time) and remote refs without a local tracking branch are surfaced as
+  // standalone options.
   const [branches, setBranches] = useState<LocalBranch[]>([]);
   const [remoteBranches, setRemoteBranches] = useState<RemoteBranch[]>([]);
   const [branchesLoaded, setBranchesLoaded] = useState(false);
@@ -878,7 +1019,9 @@ function NewSessionView({
   }, [mode, selectedWs, canCreate]);
 
   // Suffix → full branch name. An empty suffix falls back to the host's
-  // auto-id behavior (omit `branch` from the payload).
+  // own auto-id behavior (omit `branch` from the payload), but we always
+  // prefer the form's pre-filled suggestion so the user can see what name
+  // is being committed before they hit Create.
   const trimmedSuffix = branchSuffix.trim();
   const composedBranch = trimmedSuffix ? `worktree/${trimmedSuffix}` : '';
 
@@ -899,17 +1042,16 @@ function NewSessionView({
 
   function submit() {
     if (!canSubmit) return;
-    const trimmedFirst = firstMessage.trim();
-    onCreate({
+    onCreate(buildSessionCreatePayload({
       workspaceId: selectedWs,
-      name: sessionName.trim(),
+      sessionName,
       executor,
       approvalMode,
       mode,
-      ...(mode === 'worktree' && baseBranch.trim() ? { baseBranch: baseBranch.trim() } : {}),
-      ...(mode === 'worktree' && composedBranch ? { branch: composedBranch } : {}),
-      ...(trimmedFirst ? { firstMessage: trimmedFirst } : {}),
-    });
+      baseBranch,
+      composedBranch,
+      firstMessage,
+    }));
   }
 
   return (
@@ -942,7 +1084,9 @@ function NewSessionView({
                   onChange={e => setSelectedWs(e.target.value)}
                 >
                   {workspaces.map(w => (
-                    <option key={w.id} value={w.id}>{w.name}</option>
+                    <option key={w.id} value={w.id} disabled={w.hidden === 1}>
+                      {w.name}{w.hidden === 1 ? ' (隐藏)' : ''}
+                    </option>
                   ))}
                   <option value="__new__">{t('coding.form.ws.createnew')}</option>
                 </select>
@@ -1151,6 +1295,7 @@ function SessionMain({
   pending,
   usage,
   queue,
+  codexPlanText,
   onSend,
   onSendSkill,
   onStop,
@@ -1181,6 +1326,7 @@ function SessionMain({
   pending: boolean;
   usage: TokenUsage | null;
   queue: QueueEntry[];
+  codexPlanText?: string;
   ws: GianWs;
   onSwitchRuntime: (target: RuntimeMode) => void;
   onSend: (text: string, opts?: { oneShotBypass?: boolean }) => void;
@@ -1218,7 +1364,7 @@ function SessionMain({
   // refreshes (and updates when the server confirms a switch).
   const chatMode: 'chat' | 'cli' = session.runtime_mode === 'tty' ? 'cli' : 'chat';
   const isTty = chatMode === 'cli';
-  const ttySupported = session.executor === 'claude';
+  const ttySupported = session.executor === 'claude' || session.executor === 'codex';
 
   // Bump on pending → idle transition so GitBadge refetches at turn end.
   const [gitRefreshKey, setGitRefreshKey] = useState(0);
@@ -1308,10 +1454,14 @@ function SessionMain({
       ) : (
         <>
           <div className="main-scroll">
-            <Transcript items={items} pending={pending} executor={session.executor} onApprove={onApprove} />
+            <Transcript
+              items={items}
+              pending={pending || session.status === 'running' || session.status === 'pending'}
+              onApprove={onApprove}
+            />
           </div>
           <QueueList queue={queue} onRemove={onQueueRemove} onReorder={onQueueReorder} onClear={onQueueClear} onSendNow={onQueueSendNow} />
-          <PlanChip items={items} />
+          <PlanChip items={items} codexPlanText={codexPlanText} sessionId={session.id} />
           <Composer
             session={session}
             onSend={onSend}

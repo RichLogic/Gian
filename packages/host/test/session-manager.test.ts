@@ -311,7 +311,11 @@ test('listEvents returns persisted events ordered chronologically with turn numb
   }
 });
 
-test('debug notifications are broadcast but not persisted', async () => {
+test('debug notifications are dropped — neither persisted nor broadcast', async () => {
+  // Previously these flowed through `legacyRawDispatch` so the UI could see
+  // them in the wire log. That escape hatch was removed when the normalizer
+  // pipeline became the sole event boundary; anything without a unified
+  // mapping is now dropped at the host edge.
   const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
   try {
     const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
@@ -328,7 +332,7 @@ test('debug notifications are broadcast but not persisted', async () => {
     assert.equal(eventsAfter, eventsBefore, 'debug event must not be persisted');
 
     const broadcasted = broadcaster.messages.filter(m => m.type === 'event') as Array<{ event: string }>;
-    assert.ok(broadcasted.some(e => e.event === 'debug'), 'debug must still be broadcast');
+    assert.ok(!broadcasted.some(e => e.event === 'debug'), 'debug must not be broadcast');
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

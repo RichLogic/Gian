@@ -35,11 +35,17 @@ function normalizeNonEmptyString(value: unknown, field: string) {
   return value.trim();
 }
 
-function buildPrompt(input: InputItem[]): string {
-  return input
-    .filter((item): item is { type: 'text'; text: string } => item.type === 'text' && typeof item.text === 'string')
-    .map((item) => item.text)
-    .join('\n\n');
+// exported for tests
+export function buildPrompt(input: InputItem[]): string {
+  const parts: string[] = [];
+  for (const item of input) {
+    if (item.type === 'text' && typeof item.text === 'string' && item.text.length > 0) {
+      parts.push(item.text);
+    } else if (item.type === 'localImage' && typeof item.path === 'string' && item.path.length > 0) {
+      parts.push(`[Attached image: ${item.path}]`);
+    }
+  }
+  return parts.join('\n\n');
 }
 
 /** Best-guess context window for a Claude model ID. Claude CLI doesn't

@@ -13,6 +13,7 @@ export interface SessionMenuActions {
   onRename: () => void;
   onCopyName: () => void;
   onForceRecover: () => void;
+  onFork: (executor: 'claude' | 'codex') => void;
   onArchive: () => void;
   onDelete: () => void;
 }
@@ -75,6 +76,7 @@ const ICON = {
   refresh: 'M3 12a9 9 0 0 1 15.5-6.3L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15.5 6.3L3 16 M3 21v-5h5',
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   trash: 'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13',
+  fork: 'M6 3v6 M6 21v-3a4 4 0 0 1 4-4h4a4 4 0 0 0 4-4V3 M6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M6 21a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
 };
 
 export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessionMenu }: Props) {
@@ -172,6 +174,13 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                     </button>
                     <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onForceRecover(); }}>
                       <MenuIcon d={ICON.refresh} /> Force recover
+                    </button>
+                    <div className="rule" />
+                    <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onFork('claude'); }}>
+                      <MenuIcon d={ICON.fork} /> Fork as Claude
+                    </button>
+                    <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onFork('codex'); }}>
+                      <MenuIcon d={ICON.fork} /> Fork as Codex
                     </button>
                     <div className="rule" />
                     <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onArchive(); }}>

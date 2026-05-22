@@ -542,23 +542,33 @@
   padding: 0 6px 10px;
 }
 .sb-group {
-  font: 600 10px/1 var(--font-mono);
-  color: var(--text-3);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  padding: 12px 8px 4px;
   display: flex; align-items: center; gap: 6px;
+  padding: 8px 8px 4px;
+  font: 600 11px/1 var(--font-mono);
+  color: var(--text-2);
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+  user-select: none;
+}
+.sb-group .caret {
+  width: 9px;
+  color: var(--text-3);
+  font-size: 9px;
+  flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
 }
 .sb-group .count {
+  margin-left: auto;
   font-family: var(--font-mono);
   font-size: 10px;
-  font-weight: 600;
   color: var(--text-3);
   background: var(--surface-2);
   border-radius: 3px;
   padding: 1px 5px;
-  margin-left: 2px;
 }
+.sb-group.needs-you { cursor: default; }
+.sb-group.needs-you .caret { display: none; }
 .sb-group.needs-you {
   color: var(--warn);
 }
@@ -597,7 +607,7 @@
 .rail-item {
   position: relative;
   display: block;
-  padding: 7px 8px 8px;
+  padding: 7px 8px 8px 8px;
   border-radius: var(--r-2);
   width: 100%;
   text-align: left;
@@ -634,11 +644,22 @@
 }
 .ri-exec.claude { color: var(--claude); }
 .ri-exec.codex  { color: var(--codex); }
-.ri-sub {
-  color: var(--text-3);
-  flex: 1; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis;
+.ri-branch {
+  display: inline-flex; align-items: center; gap: 3px;
+  color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; min-width: 0; max-width: 120px;
 }
+.ri-branch svg { width: 9px; height: 9px; flex: none; opacity: 0.7; }
+.ri-branch-name { overflow: hidden; text-overflow: ellipsis; }
+.ri-hidden-badge {
+  position: absolute; top: 7px; right: 28px;
+  width: 14px; height: 14px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text-3);
+  opacity: 0.7;
+  pointer-events: none;
+}
+.ri-hidden-badge svg { width: 11px; height: 11px; }
 .ri-dot-sep { color: var(--text-3); opacity: 0.5; }
 .ri-age {
   position: absolute;
@@ -1436,6 +1457,14 @@
 .sheet-mode-toggle button svg { width: 11px; height: 11px; }
 .sheet-content {
   flex: 1; min-height: 0;
+  /* Flex column so children with `flex: 1` (e.g. .sheet-term) actually
+   * fill the available height. Without this `.sheet-term` was content-
+   * sized and the xterm canvas froze at whatever rows fit() saw on first
+   * paint — visible as the terminal not extending to the bottom of the
+   * island. `.sheet-content-actions` is `position: absolute`, so giving
+   * the parent a flex layout doesn't disturb it. */
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   background: var(--surface);
 }
@@ -1661,8 +1690,8 @@
   font: 11.5px/1 var(--font-mono);
   color: var(--text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  direction: rtl;
   text-align: left;
+  min-width: 0;
 }
 .changes-row .path .dir { color: var(--text-3); }
 .changes-row .stat {
@@ -2525,6 +2554,21 @@
 .switch input[type="checkbox"]:checked { background: var(--accent); }
 .switch input[type="checkbox"]:checked::after { transform: translateX(12px); }
 
+/* ---------- Sidebar bottom — hidden workspaces recovery link ---------- */
+.sb-hidden-link {
+  display: flex; align-items: center;
+  margin: 4px 6px 0;
+  padding: 6px 8px;
+  border-radius: var(--r-1);
+  background: transparent; border: 0;
+  font: 500 11px/1 var(--font-sans);
+  color: var(--text-3);
+  cursor: pointer;
+  width: calc(100% - 12px);
+  text-align: left;
+}
+.sb-hidden-link:hover { background: var(--surface-2); color: var(--text); }
+
 /* Executor rows inside settings */
 .exec-row + .exec-row {
   margin-top: 14px;
@@ -2985,3 +3029,35 @@
   padding: 0 2px;
 }
 .composer-model .think:hover { background: var(--surface-3); }
+
+/* ---------- Gian mascot ---------- */
+.gian-mascot {
+  display: inline-block;
+  vertical-align: middle;
+  color: var(--text);
+}
+/* Color helpers — the mascot SVG paths use these classes. */
+.gian-mascot .ink      { fill: currentColor; }
+.gian-mascot .paper    { fill: var(--surface); }
+.gian-mascot .paper-s  { stroke: var(--surface); fill: none; }
+.gian-mascot .acc      { fill: var(--accent); }
+.gian-mascot .acc-s    { stroke: var(--accent); fill: none; }
+.gian-mascot * { transform-box: view-box; }
+
+/* Working state animation — bob the body, pulse the mouth, emit sound rings. */
+.gian-mascot.working .g-body  { transform-origin: 32px 36px; animation: gian-bob   1.6s var(--ease) infinite; }
+.gian-mascot.working .g-mouth { transform-origin: 42px 36px; transform-box: fill-box; animation: gian-mouth 0.7s ease-in-out infinite; }
+.gian-mascot.working .g-ring  { transform-origin: 49px 22px; animation: gian-ring  1.4s var(--ease) infinite; }
+.gian-mascot.working .g-ring.r2 { animation-delay: 0.45s; }
+.gian-mascot.working .g-ring.r3 { animation-delay: 0.9s; }
+.gian-mascot.working .g-note  { transform-origin: 52px 22px; animation: gian-note 1.4s ease-out infinite; }
+.gian-mascot.working .g-note.n2 { animation-delay: 0.7s; }
+
+@keyframes gian-bob   { 0%,100% { transform: translateY(0) rotate(-1.5deg); } 50% { transform: translateY(-1px) rotate(1.5deg); } }
+@keyframes gian-mouth { 0%,100% { transform: scale(1, 1); } 50% { transform: scale(0.85, 1.3); } }
+@keyframes gian-ring  { 0% { transform: scale(0.4); opacity: 0.9; } 100% { transform: scale(2.2); opacity: 0; } }
+@keyframes gian-note  { 0% { transform: translate(0, 0) rotate(-8deg); opacity: 0; } 20% { opacity: 1; } 100% { transform: translate(10px, -18px) rotate(12deg); opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .gian-mascot *, .gian-mascot { animation: none !important; }
+}

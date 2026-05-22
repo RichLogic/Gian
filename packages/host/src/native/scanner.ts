@@ -29,19 +29,37 @@ export function clearNativeSessionsCache(): void {
   CACHE.clear();
 }
 
-export async function scanNativeSessions(workspacePath: string): Promise<NativeSession[]> {
-  const cached = CACHE.get(workspacePath);
-  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.sessions;
+export interface ScanNativeSessionsOptions {
+  /** Override the user home dir the scanner reads from. Used by tests to
+   *  isolate fixtures from the developer's real `~/.claude` /
+   *  `~/.codex`. When omitted, falls back to `os.homedir()`. */
+  homeDir?: string;
+  /** Skip the 30s result cache. Tests that rewrite the fixture between
+   *  scans need this; production calls leave it false. */
+  noCache?: boolean;
+}
+
+export async function scanNativeSessions(
+  workspacePath: string,
+  options: ScanNativeSessionsOptions = {},
+): Promise<NativeSession[]> {
+  const home = options.homeDir ?? homedir();
+  if (!options.noCache) {
+    const cached = CACHE.get(workspacePath);
+    if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.sessions;
+  }
 
   const [cc, codex] = await Promise.all([
-    scanClaudeCode(workspacePath).catch(() => [] as NativeSession[]),
-    scanCodex(workspacePath).catch(() => [] as NativeSession[]),
+    scanClaudeCode(workspacePath, home).catch(() => [] as NativeSession[]),
+    scanCodex(workspacePath, home).catch(() => [] as NativeSession[]),
   ]);
 
   const merged = [...cc, ...codex].sort((a, b) =>
     Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
   );
-  CACHE.set(workspacePath, { ts: Date.now(), sessions: merged });
+  if (!options.noCache) {
+    CACHE.set(workspacePath, { ts: Date.now(), sessions: merged });
+  }
   return merged;
 }
 
@@ -55,8 +73,8 @@ function encodeCcProjectDir(absPath: string): string {
   return absPath.replaceAll('/', '-');
 }
 
-async function scanClaudeCode(workspacePath: string): Promise<NativeSession[]> {
-  const projectDir = join(homedir(), '.claude', 'projects', encodeCcProjectDir(workspacePath));
+async function scanClaudeCode(workspacePath: string, homeDir: string): Promise<NativeSession[]> {
+  const projectDir = join(homeDir, '.claude', 'projects', encodeCcProjectDir(workspacePath));
   if (!existsSync(projectDir)) return [];
 
   let entries: string[];
@@ -163,8 +181,8 @@ function stripSystemTags(text: string): string {
 // Codex
 // ---------------------------------------------------------------------------
 
-async function scanCodex(workspacePath: string): Promise<NativeSession[]> {
-  const sessionsRoot = join(homedir(), '.codex', 'sessions');
+async function scanCodex(workspacePath: string, homeDir: string): Promise<NativeSession[]> {
+  const sessionsRoot = join(homeDir, '.codex', 'sessions');
   if (!existsSync(sessionsRoot)) return [];
 
   // Codex's sessions are nested by date: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl

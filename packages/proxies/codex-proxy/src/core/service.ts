@@ -2,7 +2,7 @@ import { isAbsolute, relative, resolve } from 'node:path';
 
 import { buildCapabilitiesPayload } from './capabilities.js';
 import { createAppError } from './errors.js';
-import { mapSkillsResponse } from './slash.js';
+import { isCodexNativeCommandName, listCodexSlashCommands } from './slash.js';
 import { normalizeInputItems } from './input.js';
 import type {
   ApprovalResponseParams,
@@ -14,6 +14,7 @@ import type {
   FileChangeSummary,
   GetSessionParams,
   InitializePayload,
+  InputItem,
   PendingApproval,
   SessionRecord,
   SessionSnapshotParams,
@@ -97,7 +98,7 @@ function approvalTitle(method: string) {
   }
 }
 
-function approvalRisk(method: string, params: Record<string, unknown>) {
+function approvalReason(method: string, params: Record<string, unknown>) {
   if (method === 'item/commandExecution/requestApproval') {
     return String(params.reason ?? params.command ?? 'Codex requested command approval.');
   }
@@ -108,6 +109,40 @@ function approvalRisk(method: string, params: Record<string, unknown>) {
     return String(params.reason ?? 'Codex requested additional permissions.');
   }
   return 'Codex requested a user decision.';
+}
+
+function approvalSeverity(method: string, params: Record<string, unknown>): 'low' | 'medium' | 'high' {
+  // Codex's app-server doesn't tag approvals with severity yet. Default
+  // everything to medium so the host always surfaces a card; the only
+  // downgrade is permission requests that are *purely* network — those
+  // are explicitly safe enough to skip the prompt when host mode allows it.
+  if (method === 'item/permissions/requestApproval') {
+    return classifyPermissionsKind(requestedPermissionsFromParams(params)) === 'network'
+      ? 'low'
+      : 'medium';
+  }
+  return 'medium';
+}
+
+function classifyPermissionsKind(
+  permissions: Record<string, unknown>,
+): 'network' | 'file' | 'mixed' | 'other' {
+  const keys = Object.keys(permissions);
+  if (keys.length === 0) return 'other';
+  const networkKeys = new Set(['web', 'network', 'internet']);
+  const fileKeys = new Set(['fileWrite', 'file_write', 'workspaceWrite', 'workspace_write', 'fs', 'files']);
+  let hasNetwork = false;
+  let hasFile = false;
+  for (const [key, value] of Object.entries(permissions)) {
+    if (!isTruthyPermissionValue(value)) continue;
+    if (networkKeys.has(key)) hasNetwork = true;
+    else if (fileKeys.has(key)) hasFile = true;
+    else return 'other';
+  }
+  if (hasNetwork && hasFile) return 'mixed';
+  if (hasNetwork) return 'network';
+  if (hasFile) return 'file';
+  return 'other';
 }
 
 function isTruthyPermissionValue(value: unknown) {
@@ -212,6 +247,32 @@ function currentTurnStatus(params: unknown) {
   return 'completed';
 }
 
+function singleTextInput(input: InputItem[]): string | null {
+  return input.length === 1 && input[0]?.type === 'text' ? input[0].text.trim() : null;
+}
+
+function firstSlashToken(text: string): string | null {
+  if (!text.startsWith('/')) return null;
+  const first = text.split(/\s+/, 1)[0];
+  return first ? first.toLowerCase() : null;
+}
+
+function unsupportedNativeCommandMessage(command: string) {
+  switch (command) {
+    case '/model':
+      return 'Codex native /model is a CLI picker. In Gian Chat mode, use the model selector in the composer header, or switch the session to CLI mode.';
+    case '/permissions':
+      return 'Codex native /permissions is a CLI picker. In Gian Chat mode, use the PLAN / ASK / AUTO controls, or switch the session to CLI mode.';
+    case '/plan':
+      return 'Codex native /plan is handled by Gian mode controls in Chat mode. Select PLAN in the composer, or switch the session to CLI mode for the native picker.';
+    case '/quit':
+    case '/exit':
+      return 'This command exits the native Codex CLI. The Gian Chat session is already managed by the host; switch to CLI mode if you need native /quit behavior.';
+    default:
+      return `Codex native ${command} is only available in the interactive CLI today. Switch this session to CLI mode to run it.`;
+  }
+}
+
 export class CodexProxyService {
   private readonly runtime: CodexRuntime;
   private emitEvent: ProxyEventSink;
@@ -274,23 +335,35 @@ export class CodexProxyService {
         'approval.respond',
         'session.snapshot',
         'session.close',
+        // TTY family — codex CLI runtime mode. Routed through
+        // TtyCodexService (separate from this structured service); kept
+        // in DEFERRED_PROXY_METHODS on the host side because they don't
+        // belong in the structured shared PROXY_METHODS registry.
+        'tty.start',
+        'tty.input',
+        'tty.resize',
+        'tty.replay',
+        'tty.kill',
         'shutdown',
       ],
     };
   }
 
   async listCapabilities(): Promise<CapabilitiesPayload> {
-    return buildCapabilitiesPayload(await this.runtime.listAllModels());
+    return {
+      ...buildCapabilitiesPayload(await this.runtime.listAllModels()),
+      slashCommands: listCodexSlashCommands({ data: [] }),
+    };
   }
 
   async listSlashCommands(cwd?: string): Promise<{ commands: import('@gian/shared').SlashCommand[] }> {
     try {
       const response = await this.runtime.listSkills(cwd);
-      return { commands: mapSkillsResponse(response) };
+      return { commands: listCodexSlashCommands(response) };
     } catch {
       // skills/list can fail before a thread exists or when codex is older;
-      // surface an empty list instead of crashing the whole RPC.
-      return { commands: [] };
+      // still surface the built-ins instead of crashing the whole RPC.
+      return { commands: listCodexSlashCommands({ data: [] }) };
     }
   }
 
@@ -356,6 +429,18 @@ export class CodexProxyService {
     }
 
     const input = normalizeInputItems(params.input, session.cwd);
+    const text = singleTextInput(input);
+    const nativeCommand = text ? firstSlashToken(text) : null;
+    if (nativeCommand && isCodexNativeCommandName(nativeCommand)) {
+      if (nativeCommand === '/compact') {
+        return this.handleCompactIntercept(session, requestId);
+      }
+      if (nativeCommand === '/clear' || nativeCommand === '/new') {
+        return this.handleClearIntercept(session, nativeCommand, requestId);
+      }
+      return this.handleUnsupportedNativeCommand(session, nativeCommand, requestId);
+    }
+
     const thinking = params.thinking === undefined ? session.thinking : normalizeThinking(params.thinking);
     if (params.thinking !== undefined && !thinking) {
       throw createAppError(400, 'INVALID_REQUEST', 'Unsupported thinking value.');
@@ -485,6 +570,149 @@ export class CodexProxyService {
     return { ok: true };
   }
 
+  /**
+   * Structured equivalent of Codex CLI `/compact`.
+   *
+   * `thread/compact/start` returns immediately and streams real progress via
+   * normal turn/item notifications. We create the active-turn context before
+   * issuing the RPC so those notifications carry the original request id and
+   * get tied back to the host's already-open turn.
+   */
+  private async handleCompactIntercept(
+    session: SessionRecord,
+    requestId?: number | string,
+  ) {
+    const turnId = randomId('turn');
+    const updatedSession = this.updateSession(session, {
+      activeTurnId: turnId,
+      status: 'running',
+      lastError: null,
+    });
+    this.activeTurnsByThreadId.set(updatedSession.threadId, {
+      sessionId: updatedSession.id,
+      ...(requestId === undefined ? {} : { requestId }),
+      turnId,
+      outputText: '',
+    });
+
+    this.emitEvent('turn.started', {
+      requestId,
+      sessionId: updatedSession.id,
+      turnId,
+      data: { turnId, status: 'running', command: '/compact' },
+    });
+
+    try {
+      await this.runtime.compactThread(updatedSession.threadId);
+    } catch (error) {
+      this.activeTurnsByThreadId.delete(updatedSession.threadId);
+      this.updateSession(updatedSession, {
+        activeTurnId: null,
+        status: 'error',
+        lastError: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+
+    return {
+      session: this.serializeSession(updatedSession),
+      turn: { id: turnId, status: 'running' },
+    };
+  }
+
+  /**
+   * Structured equivalent of Codex CLI `/clear` and `/new`: keep the Gian
+   * session stable but rotate the underlying Codex thread id.
+   */
+  private async handleClearIntercept(
+    session: SessionRecord,
+    command: '/clear' | '/new',
+    requestId?: number | string,
+  ) {
+    const oldThreadId = session.threadId;
+    const thread = await this.runtime.startThread({
+      cwd: session.cwd,
+      model: session.model,
+      ephemeral: false,
+    });
+    const newThreadId = thread.thread.id;
+    const updated = this.updateSession(session, {
+      threadId: newThreadId,
+      activeTurnId: null,
+      status: 'idle',
+      lastError: null,
+    });
+    this.activeTurnsByThreadId.delete(oldThreadId);
+
+    this.emitEvent('session.rotated', {
+      sessionId: updated.id,
+      data: {
+        oldNativeSessionId: oldThreadId,
+        newNativeSessionId: newThreadId,
+      },
+    });
+
+    const ackText = command === '/clear'
+      ? 'Conversation cleared. Next message starts a fresh Codex context.'
+      : 'Started a fresh Codex conversation for this Gian session.';
+    return this.emitSyntheticCompletedTurn(updated, requestId, ackText, command);
+  }
+
+  private handleUnsupportedNativeCommand(
+    session: SessionRecord,
+    command: string,
+    requestId?: number | string,
+  ) {
+    return this.emitSyntheticCompletedTurn(
+      session,
+      requestId,
+      unsupportedNativeCommandMessage(command),
+      command,
+    );
+  }
+
+  private emitSyntheticCompletedTurn(
+    session: SessionRecord,
+    requestId: number | string | undefined,
+    text: string,
+    command: string,
+  ) {
+    const turnId = randomId('turn');
+    const running = this.updateSession(session, {
+      activeTurnId: turnId,
+      status: 'running',
+      lastError: null,
+    });
+    this.emitEvent('turn.started', {
+      requestId,
+      sessionId: running.id,
+      turnId,
+      data: { turnId, status: 'running', command },
+    });
+    this.emitEvent('output.text.delta', {
+      requestId,
+      sessionId: running.id,
+      turnId,
+      data: { delta: text, itemId: turnId },
+    });
+    const completed = this.updateSession(running, {
+      activeTurnId: null,
+      status: 'idle',
+      lastError: null,
+    });
+    this.emitEvent('turn.completed', {
+      requestId,
+      sessionId: completed.id,
+      turnId,
+      data: { status: 'completed', result: text, command },
+    });
+
+    return {
+      session: this.serializeSession(completed),
+      turn: { id: turnId, status: 'completed' },
+    };
+  }
+
   private addSession(session: SessionRecord) {
     this.sessionsById.set(session.id, session);
     this.sessionsByThreadId.set(session.threadId, session);
@@ -509,6 +737,12 @@ export class CodexProxyService {
       updatedAt: nowIso(),
     };
     this.sessionsById.set(next.id, next);
+    if (
+      next.threadId !== session.threadId &&
+      this.sessionsByThreadId.get(session.threadId)?.id === session.id
+    ) {
+      this.sessionsByThreadId.delete(session.threadId);
+    }
     this.sessionsByThreadId.set(next.threadId, next);
     return next;
   }
@@ -587,6 +821,13 @@ export class CodexProxyService {
   }
 
   private async handleRuntimeNotification(message: RuntimeNotification) {
+    if (process.env.GIAN_CODEX_DEBUG) {
+      // Permanent debug hatch: every runtime notification logs its method
+      // exactly once, env-gated so production stays quiet. Useful when new
+      // codex versions add notifications we haven't routed yet — flip the env
+      // var on, exercise the session, then check what comes through.
+      process.stderr.write(`[codex-proxy:notif] ${message.method}\n`);
+    }
     const threadId = extractThreadId(message.params);
     if (!threadId) {
       return;
@@ -630,6 +871,84 @@ export class CodexProxyService {
           delta: (message.params as { delta?: unknown } | undefined)?.delta ?? '',
           itemId: (message.params as { itemId?: unknown } | undefined)?.itemId ?? null,
         },
+        rawRuntimeEvent: message,
+      });
+      return;
+    }
+
+    // Reasoning streams — `textDelta` is the full reasoning trace, while
+    // `summaryTextDelta` is the model's condensed "what I'm thinking" recap.
+    // Both arrive as deltas keyed by itemId; `summaryPartAdded` delimits
+    // section boundaries via a new itemId on subsequent deltas, so we don't
+    // need to forward it separately. The `kind` field steers normalize-codex
+    // toward one or the other reasoning slot.
+    if (
+      (message.method === 'item/reasoning/textDelta' ||
+        message.method === 'item/reasoning/summaryTextDelta') &&
+      context
+    ) {
+      const params = message.params as { delta?: unknown; itemId?: unknown; item_id?: unknown } | undefined;
+      const delta = typeof params?.delta === 'string' ? params.delta : '';
+      if (!delta) return;
+      this.emitEvent('output.reasoning.delta', {
+        requestId,
+        sessionId: session.id,
+        turnId,
+        data: {
+          delta,
+          itemId: params?.itemId ?? params?.item_id ?? null,
+          kind: message.method === 'item/reasoning/summaryTextDelta' ? 'summary' : 'full',
+        },
+        rawRuntimeEvent: message,
+      });
+      return;
+    }
+
+    // Plan content stream. `item/plan/delta` is intra-turn streaming; the
+    // accompanying `turn/plan/updated` carries the cumulative final plan
+    // markdown when the model commits to it. We emit two distinct events so
+    // the consumer can choose to render incremental vs. final.
+    if (message.method === 'item/plan/delta' && context) {
+      const params = message.params as { delta?: unknown; itemId?: unknown } | undefined;
+      const delta = typeof params?.delta === 'string' ? params.delta : '';
+      if (!delta) return;
+      this.emitEvent('output.plan.delta', {
+        requestId,
+        sessionId: session.id,
+        turnId,
+        data: { delta, itemId: params?.itemId ?? null },
+        rawRuntimeEvent: message,
+      });
+      return;
+    }
+
+    if (message.method === 'turn/plan/updated') {
+      const params = message.params as { plan?: unknown; text?: unknown } | undefined;
+      const text = typeof params?.plan === 'string'
+        ? params.plan
+        : typeof params?.text === 'string'
+          ? params.text
+          : '';
+      this.emitEvent('output.plan.final', {
+        requestId,
+        sessionId: session.id,
+        turnId,
+        data: { text },
+        rawRuntimeEvent: message,
+      });
+      return;
+    }
+
+    // Turn lifecycle. Codex's runtime emits `turn/started` but the proxy was
+    // previously silent on it; surfacing it lets the host drive the pending /
+    // thinking-ticker state from real signals instead of the client-side
+    // optimistic flag alone.
+    if (message.method === 'turn/started') {
+      this.emitEvent('turn.started', {
+        requestId,
+        sessionId: session.id,
+        turnId,
+        data: { params: message.params ?? {} },
         rawRuntimeEvent: message,
       });
       return;
@@ -680,7 +999,37 @@ export class CodexProxyService {
       return;
     }
 
+    if (message.method === 'thread/compacted') {
+      if (!context && !session.activeTurnId) {
+        return;
+      }
+      const completedTurnId = turnId ?? context?.turnId ?? session.activeTurnId;
+      const summary = await this.buildCompletedTurnSummary(session, completedTurnId);
+      this.activeTurnsByThreadId.delete(threadId);
+      const updatedSession = this.updateSession(session, {
+        activeTurnId: null,
+        status: 'idle',
+        lastError: null,
+      });
+      this.emitEvent('turn.completed', {
+        requestId,
+        sessionId: updatedSession.id,
+        turnId: completedTurnId ?? undefined,
+        data: {
+          status: 'completed',
+          summary,
+          compacted: true,
+        },
+        rawRuntimeEvent: message,
+      });
+      return;
+    }
+
     if (message.method !== 'turn/completed') {
+      return;
+    }
+
+    if (!context && !session.activeTurnId) {
       return;
     }
 
@@ -743,15 +1092,25 @@ export class CodexProxyService {
     // network-only permission grants) was removed — that lived in the
     // `safe-agent` mode which is gone. Host's ApprovalManager now owns all
     // policy decisions for relayed approvals.
+    const params = (message.params ?? {}) as Record<string, unknown>;
+    const reason = approvalReason(message.method, params);
+    const permissionsKind = message.method === 'item/permissions/requestApproval'
+      ? classifyPermissionsKind(requestedPermissionsFromParams(params))
+      : undefined;
     const approval: PendingApproval = {
       approvalId: String(message.id),
       sessionId: session.id,
       rpcRequestId: message.id,
       method: message.method,
       title: approvalTitle(message.method),
-      risk: approvalRisk(message.method, (message.params ?? {}) as Record<string, unknown>),
+      reason,
+      severity: approvalSeverity(message.method, params),
+      ...(permissionsKind !== undefined ? { permissionsKind } : {}),
+      // Mirror reason into the legacy `risk` field so older consumers don't
+      // regress while the host migrates to `reason` + `severity`.
+      risk: reason,
       scopeOptions: ['once', 'session'],
-      payload: message.params ?? {},
+      payload: params,
       createdAt: nowIso(),
     };
 

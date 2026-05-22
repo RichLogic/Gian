@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { loadTree, loadChanged } from '../api.js';
-import type { TreeEntry, ChangedEntry } from '../api.js';
+import type { TreeEntry, ChangedEntry, WorkingTree } from '../api.js';
 
 export type InspectorTab = 'files' | 'changes';
 
@@ -15,37 +15,46 @@ function Icon({ d, size = 13, stroke = 1.6 }: { d: string; size?: number; stroke
 
 const I = {
   refresh: 'M3 12a9 9 0 0 1 15.5-6.3L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15.5 6.3L3 16 M3 21v-5h5',
-  search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-4.3-4.3',
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
 };
 
 interface Props {
   tab: InspectorTab;
   workingTreeId: string | null;
+  /** Used to resolve the root folder's display name (basename of the
+   *  working tree's path). Without this the root would have to fall back
+   *  to its UUID, which reads as noise. */
+  workingTrees: WorkingTree[];
   /** Files tab: open file source in Sheet. permanent=true for double-click. */
   onOpenFile: (path: string, permanent: boolean) => void;
   /** Changes tab: open the file's diff in Sheet. */
   onOpenDiff: (path: string, permanent: boolean) => void;
 }
 
-export function Inspector({ tab, workingTreeId, onOpenFile, onOpenDiff }: Props) {
-  if (tab === 'files') return <FilesInspector workingTreeId={workingTreeId} onOpenFile={onOpenFile} />;
+export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, onOpenDiff }: Props) {
+  if (tab === 'files') return <FilesInspector workingTreeId={workingTreeId} workingTrees={workingTrees} onOpenFile={onOpenFile} />;
   return <ChangesInspector workingTreeId={workingTreeId} onOpenDiff={onOpenDiff} />;
 }
 
 // ─── Files Inspector ────────────────────────────────────────────────────────
-function FilesInspector({ workingTreeId, onOpenFile }: { workingTreeId: string | null; onOpenFile: (p: string, perm: boolean) => void }) {
+function FilesInspector({
+  workingTreeId,
+  workingTrees,
+  onOpenFile,
+}: {
+  workingTreeId: string | null;
+  workingTrees: WorkingTree[];
+  onOpenFile: (p: string, perm: boolean) => void;
+}) {
   const [reloadKey, setReloadKey] = useState(0);
+  const wt = workingTreeId ? workingTrees.find(w => w.id === workingTreeId) : null;
+  const rootName = wt ? (wt.path.split('/').pop() || wt.path) : 'Root';
   return (
     <aside className="inspector">
       <div className="insp-head">
-        <span className="insp-eyebrow">Panel</span>
         <span className="label">Files</span>
         <button className="iconbtn" title="Refresh" onClick={() => setReloadKey(k => k + 1)}>
           <Icon d={I.refresh} />
-        </button>
-        <button className="iconbtn" title="Search" disabled>
-          <Icon d={I.search} />
         </button>
       </div>
       <div className="insp-scroll">
@@ -55,7 +64,7 @@ function FilesInspector({ workingTreeId, onOpenFile }: { workingTreeId: string |
                 key={reloadKey}
                 workingTreeId={workingTreeId}
                 relPath=""
-                name={workingTreeId.replace(/^[wt|ws]+:/, '')}
+                name={rootName}
                 depth={0}
                 openInitial
                 onOpenFile={onOpenFile}
@@ -199,7 +208,6 @@ function ChangesInspector({
   return (
     <aside className="inspector">
       <div className="insp-head">
-        <span className="insp-eyebrow">Panel</span>
         <span className="label">Changes</span>
         <button className="iconbtn" title="Refresh" onClick={() => setReloadKey(k => k + 1)}>
           <Icon d={I.refresh} />

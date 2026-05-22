@@ -21,7 +21,17 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, resolve, sep } from 'node:path';
 import { resolveWithinWorkspace } from '../workspace/safe-path.js';
+import {
+  listLocalBranches,
+  buildRemoteBranchList,
+  REMOTE_BRANCHES_FOR_EACH_REF_FMT,
+} from '../workspace/git-branches.js';
+import {
+  buildRawPreviewHeaders,
+  rawPreviewOversize,
+} from '../workspace/preview-headers.js';
 import { execFileSync, spawn } from 'node:child_process';
+import { buildEditorArgs, defaultOpenerArgs, runOpen, type OpenCommand } from './open-with.js';
 import { randomBytes } from 'node:crypto';
 // IM layer transplanted from remote-vibe-coding (rvc). Per-platform
 // managers own their bot lifecycle + event routing; build-options.ts
@@ -55,11 +65,17 @@ import {
 // rvc-shaped per-platform tables.
 import { initWorkspace, expandHome } from '../workspace/index.js';
 import { TtyManager } from '../tty/manager.js';
+import { CodexTtyManager } from '../tty/codex-manager.js';
 import { WorkbenchTerminalManager } from '../term/manager.js';
 import { CcProxyClient } from '../proxy/cc-proxy-client.js';
 import { writeFile } from 'node:fs/promises';
 import { ensureEventsRebuilt } from '../events/lazy-rebuild.js';
 import { markAccessed } from '../events/lifecycle.js';
+import {
+  ALLOWED_MIME,
+  MAX_ATTACHMENT_BYTES,
+  writeAttachment,
+} from '../storage/attachments.js';
 
 export interface AppContext {
   db: Db;
@@ -100,6 +116,12 @@ export function createApp(ctx: AppContext): AppHandle {
   const hookBaseUrl = `http://127.0.0.1:${hookPort}`;
   const tty = new TtyManager(ctx.db, proxy, broadcaster, hookBaseUrl);
   sessions.setTtyManager(tty);
+
+  // Codex CLI runtime coordinator. No hooks (codex has no `--settings`
+  // hook surface), so no token registry / settings.json / HTTP route —
+  // just PTY lifecycle + pty:output broadcast keyed on gianSessionId.
+  const codexTty = new CodexTtyManager(ctx.db, proxy, broadcaster);
+  sessions.setCodexTtyManager(codexTty);
 
   // Workbench terminal manager — standalone shell PTYs, independent of
   // any Gian session. The xterm tabs in the workbench pane are bound to
@@ -152,14 +174,21 @@ export function createApp(ctx: AppContext): AppHandle {
   // synchronously via `sessions.getCapabilities`) sees a populated cache
   // even before any web session has spun up. Async, non-blocking — failures
   // are tolerated (warmCapabilities itself catches inside).
-  void Promise.all([
-    sessions.warmCapabilities('claude').catch(err => {
-      console.warn('[im] warmCapabilities(claude) failed:', err instanceof Error ? err.message : err);
-    }),
-    sessions.warmCapabilities('codex').catch(err => {
-      console.warn('[im] warmCapabilities(codex) failed:', err instanceof Error ? err.message : err);
-    }),
-  ]);
+  //
+  // Skipped when `GIAN_SKIP_PROXY_WARMUP=1` so tests can `createApp` an
+  // in-memory Hono harness without spawning a real cc-proxy / codex-proxy
+  // child. The fire-and-forget warmup would otherwise leak subprocesses
+  // and a fixture tmp dir gets polluted with daemon logs.
+  if (process.env['GIAN_SKIP_PROXY_WARMUP'] !== '1') {
+    void Promise.all([
+      sessions.warmCapabilities('claude').catch(err => {
+        console.warn('[im] warmCapabilities(claude) failed:', err instanceof Error ? err.message : err);
+      }),
+      sessions.warmCapabilities('codex').catch(err => {
+        console.warn('[im] warmCapabilities(codex) failed:', err instanceof Error ? err.message : err);
+      }),
+    ]);
+  }
 
   // One-shot migration of legacy `bots` rows into rvc-shaped tables. Idempotent:
   // re-runs are no-ops once a bot id is present in the new tables. Runs before
@@ -183,7 +212,7 @@ export function createApp(ctx: AppContext): AppHandle {
     })));
   });
 
-  const handlers = makeWsHandlers({ sessions, broadcaster, approvals, tty, term, db: ctx.db });
+  const handlers = makeWsHandlers({ sessions, broadcaster, approvals, tty, codexTty, term, db: ctx.db });
 
   if (AUTH_REQUIRED) {
     ensurePasswordHash(ctx.db);
@@ -400,13 +429,19 @@ export function createApp(ctx: AppContext): AppHandle {
     if (!ws) return c.json({ error: 'workspace not found' }, 404);
 
     const body = await c.req.json<Record<string, unknown>>();
-    const allowed = ['name'] as const;
+
+    // Validate hidden explicitly before the loop (boolean → 0/1 coercion)
+    if ('hidden' in body && typeof body.hidden !== 'boolean') {
+      return c.json({ error: 'hidden must be boolean' }, 400);
+    }
+
+    const allowed = ['name', 'hidden'] as const;
     const sets: string[] = [];
     const vals: unknown[] = [];
     for (const key of allowed) {
       if (key in body) {
         sets.push(`${key} = ?`);
-        vals.push(body[key]);
+        vals.push(key === 'hidden' ? (body.hidden ? 1 : 0) : body[key]);
       }
     }
     if (sets.length === 0) return c.json({ error: 'no updatable fields' }, 400);
@@ -563,6 +598,28 @@ export function createApp(ctx: AppContext): AppHandle {
     } catch (err) {
       return c.json({ error: (err as Error).message }, 400);
     }
+  });
+
+  app.post('/api/sessions/:id/attachments', async c => {
+    const sessionId = c.req.param('id');
+    // 404 if no such session in DB — checked before parsing the body (cheaper).
+    const row = ctx.db.prepare('SELECT id FROM sessions WHERE id = ?').get(sessionId);
+    if (!row) return c.json({ error: 'session not found' }, 404);
+
+    const body = await c.req.parseBody();
+    const file = body['file'];
+    if (!(file instanceof File)) {
+      return c.json({ error: 'file field required' }, 400);
+    }
+    if (!ALLOWED_MIME.has(file.type)) {
+      return c.json({ error: `unsupported mime: ${file.type}` }, 415);
+    }
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      return c.json({ error: `file too large: ${file.size} bytes` }, 413);
+    }
+    const bytes = Buffer.from(await file.arrayBuffer());
+    const path = await writeAttachment(sessionId, bytes, file.type);
+    return c.json({ path, name: file.name, size: file.size, mime: file.type });
   });
 
   app.post('/api/sessions/:id/archive', async c => {
@@ -1159,62 +1216,12 @@ export function createApp(ctx: AppContext): AppHandle {
     session: { id: string; name: string | null } | null;
   }
 
-  function parseTrack(track: string): { ahead: number; behind: number; gone: boolean } {
-    if (!track) return { ahead: 0, behind: 0, gone: false };
-    if (/\[gone\]/.test(track)) return { ahead: 0, behind: 0, gone: true };
-    const aheadM = track.match(/ahead (\d+)/);
-    const behindM = track.match(/behind (\d+)/);
-    return {
-      ahead: aheadM ? parseInt(aheadM[1]!, 10) : 0,
-      behind: behindM ? parseInt(behindM[1]!, 10) : 0,
-      gone: false,
-    };
-  }
-
-  function listLocalBranches(repoPath: string): LocalBranchOut[] {
-    const SEP = '\x1f';
-    const fmt = [
-      '%(refname:short)',
-      '%(upstream:short)',
-      '%(upstream:track)',
-      '%(objectname:short)',
-      '%(contents:subject)',
-      '%(committerdate:relative)',
-      '%(worktreepath)',
-    ].join(SEP);
-    let raw: string;
-    try {
-      raw = execFileSync('git', ['-C', repoPath, 'for-each-ref', '--format=' + fmt, 'refs/heads'], {
-        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      });
-    } catch {
-      return [];
-    }
-    const lines = raw.split('\n').filter(l => l.length > 0);
-    return lines.map(line => {
-      const [name, upstream, track, sha, subject, age, worktreePath] = line.split(SEP);
-      const { ahead, behind, gone } = parseTrack(track ?? '');
-      return {
-        name: name ?? '',
-        upstream: upstream || null,
-        ahead,
-        behind,
-        gone,
-        lastCommit: sha ? { hash: sha, subject: subject ?? '', age: age ?? '' } : null,
-        worktreePath: worktreePath || null,
-        isWorktreeBranch:
-          (name ?? '').startsWith('worktree/') || (name ?? '').startsWith('gian/'),
-        session: null,
-      };
-    });
-  }
-
   app.get('/api/workspaces/:id/branches', c => {
     const id = c.req.param('id');
     const ws = ctx.db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
       | { path: string } | undefined;
     if (!ws) return c.json({ error: 'workspace not found' }, 404);
-    const branches = listLocalBranches(ws.path);
+    const branches: LocalBranchOut[] = listLocalBranches(ws.path).map(b => ({ ...b, session: null }));
     const sessRows = ctx.db.prepare(`
       SELECT id, name, branch FROM sessions
       WHERE workspace_id = ? AND branch IS NOT NULL AND archived = 0
@@ -1233,47 +1240,18 @@ export function createApp(ctx: AppContext): AppHandle {
     const ws = ctx.db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
       | { path: string } | undefined;
     if (!ws) return c.json({ error: 'workspace not found' }, 404);
-    const SEP = '\x1f';
-    const fmt = [
-      '%(refname:short)',
-      '%(objectname:short)',
-      '%(contents:subject)',
-      '%(committerdate:relative)',
-      // Non-empty when the ref is a symbolic ref (origin/HEAD → origin/main).
-      // We exclude symrefs because (a) `:short` strips the `/HEAD` suffix so
-      // they show up as just `origin`, (b) users want to base worktrees on
-      // the underlying branch, not a moving alias.
-      '%(symref)',
-    ].join(SEP);
     let raw: string;
     try {
-      raw = execFileSync('git', ['-C', ws.path, 'for-each-ref', '--format=' + fmt, 'refs/remotes'], {
-        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      });
+      raw = execFileSync(
+        'git',
+        ['-C', ws.path, 'for-each-ref', '--format=' + REMOTE_BRANCHES_FOR_EACH_REF_FMT, 'refs/remotes'],
+        { timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+      );
     } catch {
       return c.json([]);
     }
-    const lines = raw.split('\n').filter(l => l.length > 0);
     const localNames = new Set(listLocalBranches(ws.path).map(b => b.name));
-    const out = lines
-      .map(line => {
-        const [name, sha, subject, age, symref] = line.split(SEP);
-        return { name: name ?? '', sha: sha ?? '', subject: subject ?? '', age: age ?? '', symref: symref ?? '' };
-      })
-      .filter(r => r.name && !r.symref && !r.name.endsWith('/HEAD'))
-      .map(r => {
-        const slash = r.name.indexOf('/');
-        const remote = slash > 0 ? r.name.slice(0, slash) : '';
-        const branch = slash > 0 ? r.name.slice(slash + 1) : r.name;
-        return {
-          fullName: r.name,
-          remote,
-          branch,
-          lastCommit: { hash: r.sha, subject: r.subject, age: r.age },
-          hasLocalTracking: localNames.has(branch),
-        };
-      })
-      .filter(r => !search || r.fullName.toLowerCase().includes(search) || r.branch.toLowerCase().includes(search));
+    const out = buildRemoteBranchList({ rawForEachRef: raw, localBranchNames: localNames, search });
     return c.json(out);
   });
 
@@ -1547,41 +1525,8 @@ export function createApp(ctx: AppContext): AppHandle {
     try {
       const info = await stat(resolved);
       if (!info.isFile()) return c.json({ error: 'not a file' }, 400);
-      if (info.size > 20 * 1024 * 1024) return c.json({ error: 'file too large' }, 413);
-      const ext = rel.toLowerCase().split('.').pop() ?? '';
-      const mime: Record<string, string> = {
-        html: 'text/html; charset=utf-8',
-        htm: 'text/html; charset=utf-8',
-        pdf: 'application/pdf',
-        png: 'image/png',
-        jpg: 'image/jpeg',
-        jpeg: 'image/jpeg',
-        gif: 'image/gif',
-        webp: 'image/webp',
-        svg: 'image/svg+xml',
-        txt: 'text/plain; charset=utf-8',
-        json: 'application/json',
-        css: 'text/css; charset=utf-8',
-        js: 'application/javascript',
-      };
-      const ctype = mime[ext] ?? 'application/octet-stream';
-      const filename = rel.split('/').pop()?.replace(/"/g, '') ?? 'file';
-      const headers: Record<string, string> = {
-        'Content-Type': ctype,
-        'Content-Length': String(info.size),
-        'Content-Disposition': `inline; filename="${filename}"`,
-        'Cache-Control': 'private, max-age=60',
-        'Referrer-Policy': 'no-referrer',
-        'X-Content-Type-Options': 'nosniff',
-        'X-Frame-Options': 'DENY',
-      };
-      if (ctype.includes('html')) {
-        headers['Content-Security-Policy'] =
-          "default-src 'self' data: blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
-      } else if (ctype === 'image/svg+xml') {
-        headers['Content-Security-Policy'] =
-          "default-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'; script-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
-      }
+      if (rawPreviewOversize(info.size)) return c.json({ error: 'file too large' }, 413);
+      const { headers } = buildRawPreviewHeaders({ rel, size: info.size });
       const bytes = await readFile(resolved);
       return new Response(new Uint8Array(bytes), { status: 200, headers });
     } catch (err) {
@@ -1732,6 +1677,61 @@ export function createApp(ctx: AppContext): AppHandle {
     } catch (err) {
       return c.json({ error: String(err) }, 500);
     }
+  });
+
+  // Open a file via the system default opener or a configured external
+  // editor. Path resolution mirrors /raw and /reveal — id must be a known
+  // ws:/wt: handle and the relative path is bounded to the working tree.
+  app.post('/api/working_trees/:id/open', async c => {
+    const id = c.req.param('id');
+    const wt = resolveWorkingTree(id);
+    if (!wt) return c.json({ error: 'working tree not found' }, 404);
+
+    let body: { path?: string; editor_id?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid json body' }, 400);
+    }
+    if (!body.path || typeof body.path !== 'string') {
+      return c.json({ error: 'path required' }, 400);
+    }
+
+    const absPath = await resolveWithinWorkspace(wt.path, body.path);
+    if (!absPath) {
+      return c.json({ error: 'path escapes working tree' }, 400);
+    }
+
+    try {
+      statSync(absPath);
+    } catch {
+      return c.json({ error: 'file not found' }, 404);
+    }
+
+    let cmd: OpenCommand;
+    if (body.editor_id) {
+      const cfg = loadConfig(ctx.db);
+      const editor = cfg.external_editors.find(e => e.id === body.editor_id);
+      if (!editor) return c.json({ error: 'editor not found' }, 404);
+      cmd = buildEditorArgs(editor, absPath);
+    } else {
+      try {
+        cmd = defaultOpenerArgs(process.platform, absPath);
+      } catch (err) {
+        return c.json({ error: String((err as Error).message) }, 500);
+      }
+    }
+
+    return new Promise<Response>(resolve => {
+      const timer = setTimeout(
+        () => resolve(c.json({ ok: true }) as unknown as Response),
+        50,
+      );
+      runOpen(cmd, err => {
+        clearTimeout(timer);
+        resolve(c.json({ error: String(err.message) }, 500) as unknown as Response);
+      });
+    });
   });
 
   // -------------------------------------------------------------------------

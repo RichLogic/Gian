@@ -145,6 +145,44 @@ export class CodexProxyHost {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // TTY runtime (codex CLI mode)
+  //
+  // These methods route to codex-proxy's `TtyCodexService` (separate from
+  // the structured `CodexProxyService`). Notifications come back as
+  // `tty.output` / `tty.exited` and follow the same `params.sessionId`
+  // routing the host already does in `dispatch()` — each facade only
+  // receives the events for its own session.
+  // ---------------------------------------------------------------------------
+
+  ttyStart(params: {
+    gianSessionId: string;
+    proxySessionId: string;
+    codexThreadId: string;
+    cwd: string;
+    cols: number;
+    rows: number;
+    model?: string | null;
+  }): Promise<{ ok: true; replay: string[]; alive: boolean }> {
+    return this.request<{ ok: true; replay: string[]; alive: boolean }>('tty.start', params);
+  }
+
+  ttyInput(params: { gianSessionId: string; data?: string; text?: string }): Promise<{ ok: true }> {
+    return this.request<{ ok: true }>('tty.input', params);
+  }
+
+  ttyResize(params: { gianSessionId: string; cols: number; rows: number }): Promise<{ ok: true }> {
+    return this.request<{ ok: true }>('tty.resize', params);
+  }
+
+  ttyReplay(params: { gianSessionId: string }): Promise<{ chunks: string[]; alive: boolean }> {
+    return this.request<{ chunks: string[]; alive: boolean }>('tty.replay', params);
+  }
+
+  ttyKill(params: { gianSessionId: string }): Promise<{ ok: true }> {
+    return this.request<{ ok: true }>('tty.kill', params);
+  }
+
   onHostExit(handler: (code: number | null) => void): () => void {
     this.exitHandlers.add(handler);
     return () => this.exitHandlers.delete(handler);
@@ -298,6 +336,52 @@ export class CodexProxySessionClient implements ProxyClient {
     // result already carries nativeSessionId (extracted from session.threadId
     // by CodexProxyHost.createSession).
     return result;
+  }
+
+  /** Codex-proxy-side session id (== codex threadId today). The TTY
+   *  family needs this on the wire as the notification routing key
+   *  (`params.sessionId`). Returns null before `createSession` runs. */
+  getProxySessionId(): string | null {
+    return this.proxySessionId;
+  }
+
+  // ---------------------------------------------------------------------------
+  // TTY runtime passthrough — wraps CodexProxyHost.tty* with the per-session
+  // proxySessionId discipline. The host doesn't auto-fill `proxySessionId`
+  // from the facade because it's a generic wrapper; callers (the host's
+  // CodexTtyManager) are expected to read it via `getProxySessionId()` and
+  // pass it explicitly so the dual-id contract is visible at the call site.
+  // ---------------------------------------------------------------------------
+
+  ttyStart(params: {
+    gianSessionId: string;
+    proxySessionId: string;
+    codexThreadId: string;
+    cwd: string;
+    cols: number;
+    rows: number;
+    model?: string | null;
+  }): Promise<{ ok: true; replay: string[]; alive: boolean }> {
+    if (!this.proxySessionId) {
+      throw new Error('CodexProxySessionClient.ttyStart called before createSession populated proxySessionId');
+    }
+    return this.host.ttyStart(params);
+  }
+
+  ttyInput(params: { gianSessionId: string; data?: string; text?: string }): Promise<{ ok: true }> {
+    return this.host.ttyInput(params);
+  }
+
+  ttyResize(params: { gianSessionId: string; cols: number; rows: number }): Promise<{ ok: true }> {
+    return this.host.ttyResize(params);
+  }
+
+  ttyReplay(params: { gianSessionId: string }): Promise<{ chunks: string[]; alive: boolean }> {
+    return this.host.ttyReplay(params);
+  }
+
+  ttyKill(params: { gianSessionId: string }): Promise<{ ok: true }> {
+    return this.host.ttyKill(params);
   }
 
   startTurn(

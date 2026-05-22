@@ -1,6 +1,32 @@
 import { useEffect, useState } from 'react';
-import type { CcModelCapabilities, CodexModelCapabilities, SystemConfig } from '@gian/shared';
+import type { CcModelCapabilities, CodexModelCapabilities, ExternalEditor, SystemConfig } from '@gian/shared';
+import { THEME_DEFAULT_ACCENT } from '@gian/shared';
 import { loadProxyModels, saveSettings } from '../api.js';
+import {
+  browserNotificationPermission,
+  loadNotificationPrefs,
+  requestDesktopNotificationPermission,
+  saveNotificationPrefs,
+  type BrowserNotificationPermission,
+  type NotificationPrefs,
+} from '../notifications.js';
+
+function newEditorId(): string {
+  return (globalThis.crypto?.randomUUID?.() ?? `ed-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+}
+
+function editorsEqual(a: ExternalEditor[], b: ExternalEditor[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!, y = b[i]!;
+    if (x.id !== y.id || x.name !== y.name || x.command !== y.command) return false;
+    if (x.args.length !== y.args.length) return false;
+    for (let j = 0; j < x.args.length; j++) {
+      if (x.args[j] !== y.args[j]) return false;
+    }
+  }
+  return true;
+}
 
 interface Props {
   config: SystemConfig | null;
@@ -12,9 +38,38 @@ interface Props {
  *  Account/Auth/Public access/Language are intentionally hidden (§3.11). */
 export function SettingsBody({ config, onChange }: Props) {
   if (!config) return <div style={{ padding: 20, color: 'var(--text-3)' }}>Loading…</div>;
+  return <SettingsBodyInner config={config} onChange={onChange} />;
+}
+
+function SettingsBodyInner({
+  config, onChange,
+}: {
+  config: SystemConfig;
+  onChange: (cfg: SystemConfig) => void;
+}) {
+  const [editors, setEditors] = useState<ExternalEditor[]>(config.external_editors);
+
+  // Sync local editor state when config is replaced from outside (e.g. initial load).
+  useEffect(() => {
+    setEditors(config.external_editors);
+  }, [config.external_editors]);
+
+  // Debounced auto-save: schedule a patch 500ms after the user stops typing.
+  // Skip when local matches prop (initial mount, post-sync).
+  useEffect(() => {
+    if (editorsEqual(editors, config.external_editors)) return;
+    const handle = setTimeout(() => {
+      void saveSettings({ external_editors: editors }).then(cfg => { if (cfg) onChange(cfg); });
+    }, 500);
+    return () => clearTimeout(handle);
+  }, [editors, config.external_editors, onChange]);
 
   function patch(partial: Partial<SystemConfig>) {
     void saveSettings(partial).then(cfg => { if (cfg) onChange(cfg); });
+  }
+
+  function patchEditors(next: ExternalEditor[]) {
+    setEditors(next);
   }
 
   return (
@@ -36,7 +91,7 @@ export function SettingsBody({ config, onChange }: Props) {
                 ['dark', 'Dark', ['oklch(0.165 0.012 250)', 'oklch(0.240 0.016 250)', 'oklch(0.93 0.01 250)']],
               ] as const).map(([key, name, swatches]) => (
                 <button key={key} className={`theme-chip ${config.theme === key ? 'active' : ''}`}
-                        onClick={() => patch({ theme: key })}>
+                        onClick={() => patch({ theme: key, accent: THEME_DEFAULT_ACCENT[key] })}>
                   <div className="swatches">{swatches.map((c, i) => <i key={i} style={{ background: c }} />)}</div>
                   <div className="name">{name}</div>
                 </button>
@@ -47,10 +102,14 @@ export function SettingsBody({ config, onChange }: Props) {
           <dd>
             <div className="accent-row">
               {([
-                ['plum', 'Plum', 'oklch(0.55 0.13 310)'],
-                ['moss', 'Moss', 'oklch(0.55 0.10 150)'],
-                ['ink', 'Ink', 'oklch(0.55 0.11 255)'],
-                ['ember', 'Ember', 'oklch(0.55 0.13 30)'],
+                ['rose',   'Rose',   'oklch(0.55 0.15   5)'],
+                ['ember',  'Ember',  'oklch(0.55 0.14  35)'],
+                ['citron', 'Citron', 'oklch(0.55 0.13  95)'],
+                ['moss',   'Moss',   'oklch(0.55 0.11 150)'],
+                ['teal',   'Teal',   'oklch(0.55 0.11 195)'],
+                ['azure',  'Azure',  'oklch(0.55 0.13 230)'],
+                ['ink',    'Ink',    'oklch(0.55 0.13 270)'],
+                ['plum',   'Plum',   'oklch(0.55 0.14 320)'],
               ] as const).map(([k, name, c]) => (
                 <button key={k} className={`accent-swatch ${config.accent === k ? 'active' : ''}`}
                         style={{ background: c }}
@@ -68,6 +127,39 @@ export function SettingsBody({ config, onChange }: Props) {
                 <button key={d} className={`segm-item ${config.density === d ? 'active' : ''}`}
                         onClick={() => patch({ density: d })}>
                   {d[0]!.toUpperCase() + d.slice(1)}
+                </button>
+              ))}
+            </div>
+          </dd>
+          <dt>Font · Interface</dt>
+          <dd>
+            <div className="segm">
+              {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
+                <button key={s} className={`segm-item ${config.font_scale_chrome === s ? 'active' : ''}`}
+                        onClick={() => patch({ font_scale_chrome: s })}>
+                  {s.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          </dd>
+          <dt>Font · Transcript</dt>
+          <dd>
+            <div className="segm">
+              {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
+                <button key={s} className={`segm-item ${config.font_scale_chat === s ? 'active' : ''}`}
+                        onClick={() => patch({ font_scale_chat: s })}>
+                  {s.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          </dd>
+          <dt>Font · Code</dt>
+          <dd>
+            <div className="segm">
+              {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
+                <button key={s} className={`segm-item ${config.font_scale_code === s ? 'active' : ''}`}
+                        onClick={() => patch({ font_scale_code: s })}>
+                  {s.toUpperCase()}
                 </button>
               ))}
             </div>
@@ -129,6 +221,87 @@ export function SettingsBody({ config, onChange }: Props) {
           <dt>Version</dt><dd className="mono">Gian (dev)</dd>
           <dt>Channel</dt><dd>local</dd>
         </dl>
+      </div>
+
+      <div className="settings-eyebrow">External editors</div>
+      <div className="settings-section">
+        <p className="settings-section-help">
+          Programs in the Files view's Open menu. <code>{'{path}'}</code> in Args is
+          replaced with the file path; otherwise the path is appended. Args are split
+          on whitespace — arguments containing spaces aren't supported.
+        </p>
+        {editors.length === 0 && (
+          <p className="settings-empty">No editors configured. Add one to use it from the Files view.</p>
+        )}
+        {editors.map((ed, i) => (
+          <div key={ed.id} className="external-editor-row">
+            <label>
+              <span className="ee-label">Name</span>
+              <input
+                type="text"
+                value={ed.name}
+                maxLength={64}
+                onChange={e => {
+                  const next = [...editors];
+                  next[i] = { ...ed, name: e.target.value };
+                  patchEditors(next);
+                }}
+              />
+            </label>
+            <label>
+              <span className="ee-label">Command</span>
+              <input
+                type="text"
+                value={ed.command}
+                onChange={e => {
+                  const next = [...editors];
+                  next[i] = { ...ed, command: e.target.value };
+                  patchEditors(next);
+                }}
+              />
+            </label>
+            <label>
+              <span className="ee-label">Args</span>
+              <input
+                type="text"
+                aria-label="Args"
+                defaultValue={ed.args.join(' ')}
+                onBlur={e => {
+                  const tokens = e.target.value.trim().length === 0
+                    ? []
+                    : e.target.value.trim().split(/\s+/);
+                  const next = [...editors];
+                  next[i] = { ...ed, args: tokens };
+                  patchEditors(next);
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              aria-label="Remove editor"
+              className="ee-remove"
+              onClick={() => {
+                const next = editors.filter(x => x.id !== ed.id);
+                patchEditors(next);
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => {
+            const next = [
+              ...editors,
+              { id: newEditorId(), name: '', command: '', args: [] },
+            ];
+            patchEditors(next);
+          }}
+        >
+          + Add editor
+        </button>
       </div>
     </div>
   );
@@ -245,31 +418,99 @@ function ExecutorRow({
   );
 }
 
-/** Phase 3 placeholder — V2 layout, no persistence yet. */
 function NotificationsBlock() {
-  const [desktop, setDesktop] = useState(true);
-  const [sound, setSound] = useState(false);
-  const [badge, setBadge] = useState(true);
+  const [prefs, setPrefs] = useState<NotificationPrefs>(() => loadNotificationPrefs());
+  const [permission, setPermission] = useState<BrowserNotificationPermission>(() => browserNotificationPermission());
+  const desktopEnabled = prefs.desktop && permission === 'granted';
+  const unavailable = permission === 'unsupported' || permission === 'denied';
+
+  function patch(partial: Partial<NotificationPrefs>) {
+    setPrefs(prev => saveNotificationPrefs({ ...prev, ...partial }));
+  }
+
+  async function setDesktop(enabled: boolean) {
+    if (!enabled) {
+      patch({ desktop: false });
+      return;
+    }
+    const nextPermission = await requestDesktopNotificationPermission();
+    setPermission(nextPermission);
+    patch({ desktop: nextPermission === 'granted' });
+  }
+
+  const statusText =
+    permission === 'granted'
+      ? 'Session done · approval needed · error'
+      : permission === 'denied'
+        ? 'Blocked in browser'
+        : permission === 'unsupported'
+          ? 'Unsupported in this browser'
+          : 'Click to allow desktop alerts';
+
   return (
     <dl className="kv-grid">
       <dt>Desktop</dt>
       <dd>
         <label className="switch">
-          <input type="checkbox" checked={desktop} onChange={e => setDesktop(e.target.checked)} />
-          <span>Approval needed · session done · error</span>
+          <input
+            type="checkbox"
+            checked={desktopEnabled}
+            disabled={unavailable}
+            onChange={e => { void setDesktop(e.target.checked); }}
+          />
+          <span>{statusText}</span>
+        </label>
+      </dd>
+      <dt>Events</dt>
+      <dd>
+        <label className="switch">
+          <input
+            type="checkbox"
+            checked={prefs.sessionDone}
+            disabled={!desktopEnabled}
+            onChange={e => patch({ sessionDone: e.target.checked })}
+          />
+          <span>Session done</span>
+        </label>
+        <label className="switch">
+          <input
+            type="checkbox"
+            checked={prefs.approvalNeeded}
+            disabled={!desktopEnabled}
+            onChange={e => patch({ approvalNeeded: e.target.checked })}
+          />
+          <span>Approval needed</span>
+        </label>
+        <label className="switch">
+          <input
+            type="checkbox"
+            checked={prefs.errors}
+            disabled={!desktopEnabled}
+            onChange={e => patch({ errors: e.target.checked })}
+          />
+          <span>Error</span>
         </label>
       </dd>
       <dt>Sound</dt>
       <dd>
         <label className="switch">
-          <input type="checkbox" checked={sound} onChange={e => setSound(e.target.checked)} />
+          <input
+            type="checkbox"
+            checked={prefs.sound}
+            disabled={!desktopEnabled}
+            onChange={e => patch({ sound: e.target.checked })}
+          />
           <span>Soft chime on approval</span>
         </label>
       </dd>
       <dt>Dock badge</dt>
       <dd>
         <label className="switch">
-          <input type="checkbox" checked={badge} onChange={e => setBadge(e.target.checked)} />
+          <input
+            type="checkbox"
+            checked={prefs.badge}
+            onChange={e => patch({ badge: e.target.checked })}
+          />
           <span>Show pending approval count</span>
         </label>
       </dd>

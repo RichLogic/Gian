@@ -35,6 +35,7 @@ export interface CodexRuntime extends RuntimeEventSource {
   }): Promise<{ thread: { id: string } }>;
   resumeThread(threadId: string): Promise<unknown>;
   readThread(threadId: string): Promise<{ thread: unknown }>;
+  compactThread(threadId: string): Promise<unknown>;
   startTurn(
     threadId: string,
     input: InputItem[],

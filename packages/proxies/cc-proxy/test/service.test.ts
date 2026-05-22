@@ -108,11 +108,11 @@ test('service rejects unsupported input types', async () => {
     await assert.rejects(
       service.startTurn({
         sessionId: created.session.id,
-        input: [{ type: 'localImage', path: './image.png' }],
+        input: [{ type: 'unknown', data: 'invalid' } as unknown as import('../src/core/types.js').InputItem],
       }),
       (error: unknown) => error instanceof AppError
         && error.code === 'INVALID_REQUEST'
-        && error.message.includes('localImage input items are not supported yet.'),
+        && error.message.includes('Unsupported input item type'),
     );
   });
 });

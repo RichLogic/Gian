@@ -429,6 +429,15 @@
    Indent to match the .msg-body column (24px avatar + 10px gap from .msg). */
 .msg-thinking { padding-left: 34px; }
 
+/* Mascot variant — same indentation, more breathing room above/below
+   since the SVG itself is larger than the ticker text. */
+.msg-mascot {
+  padding-left: 34px;
+  padding-top: 4px;
+  display: flex; align-items: center;
+}
+.msg-mascot .gian-mascot { color: var(--text-2); }
+
 /* Live ticker for "thinking…" while a turn runs.
    Overrides coding.css .ticker with session-specific sizing.
    Uses the same dot animation keyframe from coding.css. */
@@ -447,3 +456,125 @@
 .ticker .dots span:nth-child(1) { animation-delay: -0.32s; }
 .ticker .dots span:nth-child(2) { animation-delay: -0.16s; }
 .ticker .dots span:nth-child(3) { animation-delay: 0s; }
+
+/* Files view: Open split button + dropdown menu */
+.files-open-group {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  gap: 0;
+}
+.files-open-primary {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-right: 1px solid var(--border-1);
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.files-open-caret {
+  font-size: 11px;
+  padding: 3px 6px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.files-open-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border-1);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+  min-width: 180px;
+  padding: 4px 0;
+  z-index: 20;
+}
+.files-open-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 12px;
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  color: var(--text-1);
+  cursor: pointer;
+}
+.files-open-menu-item:hover {
+  background: var(--surface-2);
+}
+.files-open-menu-config {
+  color: var(--text-3);
+}
+.files-open-menu-sep {
+  height: 1px;
+  background: var(--border-1);
+  margin: 4px 0;
+}
+.files-open-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-1);
+  background: oklch(0.92 0.06 30);
+  border-bottom: 1px solid var(--border-1);
+}
+.files-open-error button {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text-3);
+}
+
+/* Settings: External editors section */
+.external-editor-row {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr 1.4fr auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+.external-editor-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ee-label {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.external-editor-row input {
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border-1);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-1);
+}
+.ee-remove {
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: 1px solid var(--border-1);
+  border-radius: 4px;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.ee-remove:hover {
+  background: var(--surface-2);
+  color: var(--text-1);
+}
+.settings-section-help {
+  font-size: 11px;
+  color: var(--text-3);
+  margin: 0 0 12px 0;
+}
+.settings-empty {
+  font-size: 12px;
+  color: var(--text-3);
+  font-style: italic;
+}

@@ -75,6 +75,7 @@ export interface Workspace {
   name: string;
   path: string;
   sort_order: number;
+  hidden: 0 | 1;
   created_at: string;
   updated_at: string;
 }
@@ -206,6 +207,30 @@ export interface Bot {
   updated_at: string;
 }
 
+export interface ExternalEditor {
+  /** Stable handle (uuid) used by the open API. */
+  id: string;
+  /** Display label, e.g. "VS Code". */
+  name: string;
+  /** Executable name (PATH-resolved) or absolute path. */
+  command: string;
+  /** argv template. Tokens equal to "{path}" are replaced with the absolute
+   *  file path; if no token matches, the path is appended at the end. */
+  args: string[];
+}
+
+export type Accent =
+  | 'rose' | 'ember' | 'citron' | 'moss'
+  | 'teal' | 'azure' | 'ink' | 'plum';
+
+export type FontScale = 'sm' | 'md' | 'lg' | 'xl';
+
+export const THEME_DEFAULT_ACCENT: Record<'light' | 'warm' | 'dark', Accent> = {
+  light: 'azure',
+  warm: 'ember',
+  dark: 'plum',
+};
+
 export interface SystemConfig {
   host: string;
   port: number;
@@ -215,8 +240,11 @@ export interface SystemConfig {
   tunnel_id: string;
   force_https: boolean;
   theme: 'light' | 'warm' | 'dark';
-  accent: string;
+  accent: Accent;
   density: 'compact' | 'cozy' | 'roomy';
+  font_scale_chrome: FontScale;
+  font_scale_chat: FontScale;
+  font_scale_code: FontScale;
   locale: 'zh-CN' | 'en';
   /** Default model for new claude (cc) sessions. Empty = use proxy default. */
   default_claude_model: string;
@@ -227,4 +255,6 @@ export interface SystemConfig {
   /** Default reasoning effort for new codex sessions. Empty = use model default. */
   default_codex_effort: string;
   auth_username: string;
+  /** Programs surfaced in the Files view's "Open with…" menu. */
+  external_editors: ExternalEditor[];
 }

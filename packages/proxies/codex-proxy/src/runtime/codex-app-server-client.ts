@@ -250,6 +250,10 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
     }) as Promise<{ thread: unknown }>;
   }
 
+  async compactThread(threadId: string) {
+    return this.request('thread/compact/start', { threadId });
+  }
+
   async startTurn(
     threadId: string,
     input: InputItem[],

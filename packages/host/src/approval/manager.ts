@@ -68,10 +68,20 @@ export class ApprovalManager {
   async request(req: ApprovalRequest): Promise<ApprovalDecision> {
     const mode = this.getModeFn?.(req.sessionId) ?? 'ask';
 
+    // Interaction-shaped approvals (AskUserQuestion, ExitPlanMode) ride the
+    // same MCP bridge as permission approvals but need a real user choice —
+    // an auto allow_once would short-circuit the question and ship an empty
+    // `answers` payload to cc-proxy, dropping the user's selection on the
+    // floor. Always register these as pending regardless of mode/risk.
+    const requiresUser = req.category === 'question' || req.category === 'exit_plan_mode';
+
     if (
-      mode === 'auto' ||
-      this.wasAllowedForSession(req.sessionId, req.category) ||
-      req.risk === 'low'
+      !requiresUser
+      && (
+        mode === 'auto'
+        || this.wasAllowedForSession(req.sessionId, req.category)
+        || req.risk === 'low'
+      )
     ) {
       return this.autoApprove(req);
     }

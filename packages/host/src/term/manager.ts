@@ -77,11 +77,33 @@ export interface SpawnOptions {
   shell?: string;
 }
 
+/**
+ * Indirection over `node-pty.spawn` so TERM-001 tests can inject a fake
+ * PTY without needing a real shell. Production callers pass the real
+ * node-pty loader (default).
+ */
+export interface PtyFactory {
+  spawn(shell: string, args: string[], opts: {
+    name?: string; cols: number; rows: number; cwd: string;
+    env: NodeJS.ProcessEnv;
+  }): IPty;
+}
+
+async function defaultPtyFactory(): Promise<PtyFactory> {
+  const m = await loadNodePty();
+  return { spawn: (shell, args, opts) => m.spawn(shell, args, opts) };
+}
+
 export class WorkbenchTerminalManager extends EventEmitter<WorkbenchTerminalEvents> {
   private readonly terms = new Map<string, WorkbenchTerminalRec>();
+  private readonly ptyFactory: () => Promise<PtyFactory>;
 
-  constructor(private readonly broadcaster: WsBroadcaster) {
+  constructor(
+    private readonly broadcaster: WsBroadcaster,
+    ptyFactory?: () => Promise<PtyFactory>,
+  ) {
     super();
+    this.ptyFactory = ptyFactory ?? defaultPtyFactory;
     this.on('output', (termId, chunk) => {
       this.broadcaster.broadcast({
         type: 'term:output',
@@ -108,7 +130,7 @@ export class WorkbenchTerminalManager extends EventEmitter<WorkbenchTerminalEven
     const cwd = resolveCwd(opts.cwd);
     const shell = resolveShell(opts.shell);
 
-    const pty = await loadNodePty();
+    const pty = await this.ptyFactory();
     const proc = pty.spawn(shell, [], {
       name: 'xterm-256color',
       cols: Math.max(1, Math.floor(opts.cols)),

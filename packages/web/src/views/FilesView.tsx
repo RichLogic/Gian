@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { loadFile, loadTree, loadChanged, loadDiff, loadFileMeta } from '../api.js';
+import { loadFile, loadTree, loadChanged, loadDiff, loadFileMeta, openFileWith } from '../api.js';
 import type { TreeEntry, ChangedEntry, FileMeta, WorkingTree } from '../api.js';
+import type { ExternalEditor } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 
@@ -283,6 +284,8 @@ export function FilesView({
   onPickWorkingTree,
   initialPath,
   initialMode,
+  externalEditors,
+  onOpenSettings,
 }: {
   workingTrees: WorkingTree[];
   workingTreeId: string | null;
@@ -292,6 +295,8 @@ export function FilesView({
   /** Force the initial Tree/Changed tab. Updates whenever it changes (so an
    *  external "show changes" trigger from the Coding view can flip the tab). */
   initialMode?: ViewMode | null;
+  externalEditors: ExternalEditor[];
+  onOpenSettings: () => void;
 }) {
   const t = useT();
   const rail = useResizableWidth('files.rail.w', 280, 200, 480, 'left');
@@ -311,6 +316,8 @@ export function FilesView({
   const [diffText, setDiffText] = useState<string>('');
   const [previewPane, setPreviewPane] = useState<PreviewPane>('content');
   const [diffLoading, setDiffLoading] = useState(false);
+  const [openMenuOpen, setOpenMenuOpen] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
 
   // Reset cached tree/changed state when the working tree changes — cached
   // children and status belong to the previously selected one.
@@ -399,6 +406,7 @@ export function FilesView({
   }
 
   function openFileContent(path: string): void {
+    setOpenError(null);
     void loadFile(workingTreeId!, path).then(f => {
       if (f) {
         setOpenFile({ path, content: f.content, size: f.size });
@@ -410,6 +418,7 @@ export function FilesView({
 
   function pickChangedEntry(e: ChangedEntry): void {
     if (!workingTreeId) return;
+    setOpenError(null);
     // Changed-list entries default to the diff pane (most likely intent).
     // Tree picks default to content (handled by openFileContent).
     setPreviewPane('diff');
@@ -437,6 +446,14 @@ export function FilesView({
         setDiffLoading(false);
       });
     }
+  }
+
+  function tryOpen(editorId?: string): void {
+    if (!workingTreeId || !openFile) return;
+    setOpenError(null);
+    void openFileWith(workingTreeId, openFile.path, editorId).then(res => {
+      if ('error' in res) setOpenError(res.error);
+    });
   }
 
   // For browser-renderable types (html / pdf / images), point at the raw
@@ -646,6 +663,55 @@ export function FilesView({
                   {lang !== 'plain' && <span className="files-lang-badge">{lang}</span>}
                   {openFile.size.toLocaleString()} bytes
                 </span>
+                <div className="files-open-group">
+                  <button
+                    type="button"
+                    className="btn btn-ghost files-open-primary"
+                    onClick={() => tryOpen()}
+                  >
+                    Open
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost files-open-caret"
+                    aria-label="Open with menu"
+                    aria-haspopup="menu"
+                    aria-expanded={openMenuOpen}
+                    onClick={() => setOpenMenuOpen(v => !v)}
+                  >
+                    ▾
+                  </button>
+                  {openMenuOpen && (
+                    <div className="files-open-menu" role="menu" onMouseLeave={() => setOpenMenuOpen(false)}>
+                      {externalEditors.map(ed => (
+                        <button
+                          key={ed.id}
+                          type="button"
+                          className="files-open-menu-item"
+                          role="menuitem"
+                          onClick={() => {
+                            setOpenMenuOpen(false);
+                            tryOpen(ed.id);
+                          }}
+                        >
+                          {ed.name}
+                        </button>
+                      ))}
+                      {externalEditors.length > 0 && <div className="files-open-menu-sep" />}
+                      <button
+                        type="button"
+                        className="files-open-menu-item files-open-menu-config"
+                        role="menuitem"
+                        onClick={() => {
+                          setOpenMenuOpen(false);
+                          onOpenSettings();
+                        }}
+                      >
+                        Configure editors…
+                      </button>
+                    </div>
+                  )}
+                </div>
                 {openInNewTabHref && (
                   <a
                     className="btn btn-ghost"
@@ -678,6 +744,13 @@ export function FilesView({
                 </>
               )}
             </div>
+
+            {openError && (
+              <div className="files-open-error" role="alert">
+                Failed to open: {openError}
+                <button type="button" aria-label="dismiss" onClick={() => setOpenError(null)}>✕</button>
+              </div>
+            )}
 
             {previewPane === 'content' && (
               <div

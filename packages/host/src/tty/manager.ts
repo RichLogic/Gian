@@ -27,7 +27,7 @@ export class TtyManager {
     private readonly proxy: ProxyManager,
     private readonly broadcaster: WsBroadcaster,
     /** Public URL the in-PTY claude reaches the host on. Per docs
-     *  (`doc/runtime-modes/findings.md`) we lock hooks to 127.0.0.1 via
+     *  (`docs/runtime-modes/findings.md`) we lock hooks to 127.0.0.1 via
      *  `allowedHttpHookUrls`. */
     private readonly hookBaseUrl: string,
   ) {}

@@ -123,6 +123,61 @@ test('CodexProxySessionClient.shutdown closes the session without killing the ho
   }
 });
 
+test('tty.start fires tty.output to ONLY the matching facade with both ids preserved', async () => {
+  const { host, dir } = makeHost();
+  try {
+    await host.initialize();
+
+    const sessionA = new CodexProxySessionClient(host);
+    const sessionB = new CodexProxySessionClient(host);
+
+    const receivedA: ProxyNotification[] = [];
+    const receivedB: ProxyNotification[] = [];
+    sessionA.onNotification(n => receivedA.push(n));
+    sessionB.onNotification(n => receivedB.push(n));
+
+    const a = await sessionA.createSession({ cwd: '/tmp' });
+    const b = await sessionB.createSession({ cwd: '/tmp' });
+
+    // Only start a TTY for session A — session B must NOT see the tty.output.
+    await sessionA.ttyStart({
+      gianSessionId: 'gian-A',
+      proxySessionId: a.session.id,
+      codexThreadId: a.nativeSessionId,
+      cwd: '/tmp',
+      cols: 80,
+      rows: 24,
+    });
+    await new Promise(r => setTimeout(r, 30));
+
+    const ttyA = receivedA.filter(n => n.method === 'tty.output');
+    const ttyB = receivedB.filter(n => n.method === 'tty.output');
+    assert.equal(ttyA.length, 1, 'session A facade must receive its tty.output');
+    assert.equal(ttyB.length, 0, 'session B facade must NOT receive session A\'s tty.output');
+
+    const params = ttyA[0]!.params as { sessionId: string; gianSessionId: string; data: string };
+    assert.equal(params.sessionId, a.session.id,
+      'routing key params.sessionId must equal proxySessionId');
+    assert.equal(params.gianSessionId, 'gian-A',
+      'gianSessionId must round-trip through to the facade for WS broadcast');
+    assert.equal(Buffer.from(params.data, 'base64').toString('utf8'), `hello from ${a.session.id}`);
+
+    // Sanity: ttyStart errors out if createSession hasn't populated proxySessionId.
+    const orphan = new CodexProxySessionClient(host);
+    assert.throws(
+      () => orphan.ttyStart({
+        gianSessionId: 'g', proxySessionId: 'p', codexThreadId: 't',
+        cwd: '/tmp', cols: 80, rows: 24,
+      }),
+      /before createSession/);
+
+    void b;  // silence unused-var; we keep it for the routing isolation assertion.
+  } finally {
+    await host.shutdown();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('host process exit notifies all session facades', async () => {
   const { host, dir } = makeHost();
   try {

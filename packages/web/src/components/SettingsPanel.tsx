@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import type { CcModelCapabilities, CodexModelCapabilities, SystemConfig } from '@gian/shared';
+import type { Accent, CcModelCapabilities, CodexModelCapabilities, SystemConfig } from '@gian/shared';
 import { loadProxyModels, saveSettings, changePassword, logout } from '../api.js';
 import { useT } from '../i18n/index.js';
 
 const SAVE_DEBOUNCE_MS = 500;
 
-const ACCENT_PRESETS: { key: string; bg: string }[] = [
+const ACCENT_PRESETS: { key: Accent; bg: string }[] = [
   { key: 'plum',  bg: 'oklch(0.55 0.13 310)' },
   { key: 'moss',  bg: 'oklch(0.58 0.10 150)' },
   { key: 'ink',   bg: 'oklch(0.55 0.11 255)' },

@@ -62,6 +62,34 @@ export interface PendingApproval {
   rpcRequestId: number | string;
   method: string;
   title: string;
+  /**
+   * Human-readable reason describing what codex is asking for (e.g. the
+   * shell command, the file change reason, or the permission rationale).
+   * Was historically stuffed into `risk`; kept separate so downstream
+   * normalizers can use it as a description without confusing it with
+   * severity.
+   */
+  reason: string;
+  /**
+   * True severity bucket. Codex's app-server protocol doesn't currently emit
+   * a severity field of its own; this is heuristic — command/file-change
+   * approvals default to `medium`, network-only permission grants stay
+   * `low`. Downstream maps this to the unified `risk` field.
+   */
+  severity: 'low' | 'medium' | 'high';
+  /**
+   * For `item/permissions/requestApproval`, the kind of permission codex
+   * wants. `network` when the request is purely web/network access; `file`
+   * when only filesystem paths are involved; `mixed` / `other` otherwise.
+   * Downstream uses this to map permission requests to the correct unified
+   * category (`network` vs `file_write_outside_ws`) instead of `other`.
+   */
+  permissionsKind?: 'network' | 'file' | 'mixed' | 'other';
+  /**
+   * @deprecated kept for binary-compat with existing event payload consumers;
+   * mirrors `reason`. Will be dropped once host/web stop reading
+   * `data.risk` as prose. New code should read `reason` + `severity`.
+   */
   risk: string;
   scopeOptions: ApprovalScope[];
   payload: unknown;

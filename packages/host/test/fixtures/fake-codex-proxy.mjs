@@ -110,6 +110,35 @@ for await (const line of rl) {
       write({ id: req.id, result: { ok: true } });
       break;
     }
+    case 'tty.start': {
+      // Fire a tty.output notification immediately so the test can verify
+      // both ids reach the matching facade. Routing on the host side keys
+      // off `params.sessionId` (= proxySessionId); `gianSessionId` is
+      // carried alongside for the broadcast layer to use.
+      const gianSessionId = req.params?.gianSessionId;
+      const proxySessionId = req.params?.proxySessionId;
+      write({
+        method: 'tty.output',
+        params: {
+          sessionId: proxySessionId,
+          gianSessionId,
+          data: Buffer.from(`hello from ${proxySessionId}`, 'utf8').toString('base64'),
+        },
+      });
+      write({
+        id: req.id,
+        result: { ok: true, replay: [], alive: true },
+      });
+      break;
+    }
+    case 'tty.input':
+    case 'tty.resize':
+    case 'tty.kill':
+      write({ id: req.id, result: { ok: true } });
+      break;
+    case 'tty.replay':
+      write({ id: req.id, result: { chunks: [], alive: false } });
+      break;
     case 'shutdown':
       write({ id: req.id, result: { ok: true } });
       process.exit(0);

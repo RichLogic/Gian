@@ -5,13 +5,7 @@
  * of these discriminated types before the event reaches any subscriber.
  * Normalization happens in `packages/host/src/event/normalize-{cc,codex}.ts`.
  *
- * Keep this file in sync with PRD §一 and `doc/protocol-proxy.md`.
- *
- * Note: PRD §一 lists `thinking` as event #2, but no proxy currently emits it
- * (codex doesn't support it; cc exposes only an `effort` model setting, not
- * thinking content via the proxy boundary). Per the project rule "skip events
- * no proxy emits", `thinking` is omitted here. Re-add if cc-proxy starts
- * surfacing thinking blocks as a notification.
+ * Keep this file in sync with PRD §一 and `docs/protocol-proxy.md`.
  */
 
 // ---------------------------------------------------------------------------
@@ -20,6 +14,8 @@
 
 export type EventType =
   | 'assistant_text'
+  | 'reasoning'
+  | 'plan_update'
   | 'command_execution'
   | 'file_change'
   | 'file_read'
@@ -30,6 +26,7 @@ export type EventType =
   | 'approval_resolved'
   | 'auto_classifier_denied'
   | 'auto_circuit_breaker'
+  | 'turn_started'
   | 'turn_completed'
   | 'session_error';
 
@@ -52,6 +49,49 @@ export interface AssistantTextData {
    * For cc (non-streaming) this is the call_id of the output.text notification.
    */
   itemId: string;
+}
+
+/**
+ * Model reasoning content — the "thinking" that precedes/intersperses
+ * assistant text. Both full reasoning text and summary forms flow through
+ * here; the `kind` field distinguishes them.
+ *
+ * from: codex (item/reasoning/textDelta and item/reasoning/summaryTextDelta;
+ *              parts are delimited by item/reasoning/summaryPartAdded).
+ * cc:   not emitted today — Claude exposes only an effort setting, not the
+ *       reasoning content stream.
+ */
+export interface ReasoningData {
+  /** Accumulated text for a completed item, or the chunk for a delta. */
+  text: string;
+  /** True when this event is a streaming fragment rather than a final value. */
+  delta: boolean;
+  /** Stable ID that groups streaming deltas. */
+  itemId: string;
+  /**
+   * 'summary' = condensed reasoning (item/reasoning/summary*), shown to the
+   * user as a high-level "what I'm thinking" recap.
+   * 'full'    = raw reasoning trace (item/reasoning/textDelta), much longer.
+   * The two streams are distinct items; the UI renders both as ReasoningCard
+   * with different headers.
+   */
+  kind: 'summary' | 'full';
+}
+
+/**
+ * Plan content update — codex's plan-mode output. Streams in over the turn
+ * and finalizes on `turn/plan/updated`. Replaces the previous value each time
+ * (cumulative `text`, not delta).
+ *
+ * from: codex (item/plan/delta + turn/plan/updated)
+ * cc:   exit_plan_mode is a tool-call approval flow, not a discrete event —
+ *       still routed through `approval_requested` with category=exit_plan_mode.
+ */
+export interface PlanUpdateData {
+  /** Full plan markdown so far. UI replaces in place. */
+  text: string;
+  /** True while the plan is still streaming, false on turn/plan/updated. */
+  delta: boolean;
 }
 
 /**
@@ -252,6 +292,17 @@ export interface AutoCircuitBreakerData {
 }
 
 /**
+ * Turn started — a signal for UI to flip the "thinking" / pending state.
+ * Carries no transcript content; frontend `applyEnvelope` ignores it for
+ * folding purposes but App-level listeners use it to drive pendingBySession.
+ *
+ * from: codex (turn.started) · cc (turn.started)
+ */
+export interface TurnStartedData {
+  turnId: string;
+}
+
+/**
  * Turn finished normally.
  *
  * from: codex (turn.completed) · cc (turn.completed)
@@ -281,6 +332,8 @@ export interface SessionErrorData {
 
 export type EventDataByType = {
   assistant_text: AssistantTextData;
+  reasoning: ReasoningData;
+  plan_update: PlanUpdateData;
   command_execution: CommandExecutionData;
   file_change: FileChangeData;
   file_read: FileReadData;
@@ -291,6 +344,7 @@ export type EventDataByType = {
   approval_resolved: ApprovalResolvedData;
   auto_classifier_denied: AutoClassifierDeniedData;
   auto_circuit_breaker: AutoCircuitBreakerData;
+  turn_started: TurnStartedData;
   turn_completed: TurnCompletedData;
   session_error: SessionErrorData;
 };

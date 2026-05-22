@@ -1,6 +1,7 @@
 import { createInterface } from 'node:readline';
 
 import { CodexProxyService } from '../core/service.js';
+import { TtyCodexService } from '../core/tty-service.js';
 import type {
   ApprovalResponseParams,
   CloseSessionParams,
@@ -11,6 +12,13 @@ import type {
   SessionSnapshotParams,
   StartTurnParams,
 } from '../core/types.js';
+import type {
+  TtyInputParams,
+  TtyKillParams,
+  TtyReplayParams,
+  TtyResizeParams,
+  TtyStartParams,
+} from '../core/tty-service.js';
 import { CodexAppServerClient } from '../runtime/codex-app-server-client.js';
 import { createProtocolWriter, protocolError } from '../transport/protocol.js';
 
@@ -67,10 +75,23 @@ async function main() {
       writer.notification(method, params);
     },
   });
+  // Parallel TTY service for codex CLI runtime mode (see
+  // `packages/proxies/codex-proxy/src/core/tty-service.ts`). Shares the
+  // same JSON-RPC notification channel; method namespace is `tty.*` so
+  // it can't collide with the structured family. Honors the same
+  // `--codex-bin` override as the structured runtime — otherwise a
+  // session's CHAT mode could resolve one binary while its CLI mode
+  // silently spawns another.
+  const ttyService = new TtyCodexService({
+    ...(options.codexBin ? { codexBin: options.codexBin } : {}),
+    emitEvent(method, params) {
+      writer.notification(method, params);
+    },
+  });
   await service.initialize();
 
   const shutdown = async (code = 0) => {
-    await service.close();
+    await Promise.allSettled([service.close(), ttyService.close()]);
     process.exit(code);
   };
 
@@ -148,6 +169,21 @@ async function main() {
           break;
         case 'session.close':
           writer.result(message.id, await service.closeSession((message.params ?? {}) as CloseSessionParams));
+          break;
+        case 'tty.start':
+          writer.result(message.id, await ttyService.start((message.params ?? {}) as TtyStartParams));
+          break;
+        case 'tty.input':
+          writer.result(message.id, ttyService.input((message.params ?? {}) as TtyInputParams));
+          break;
+        case 'tty.resize':
+          writer.result(message.id, ttyService.resize((message.params ?? {}) as TtyResizeParams));
+          break;
+        case 'tty.replay':
+          writer.result(message.id, ttyService.replay((message.params ?? {}) as TtyReplayParams));
+          break;
+        case 'tty.kill':
+          writer.result(message.id, await ttyService.kill((message.params ?? {}) as TtyKillParams));
           break;
         case 'shutdown':
           writer.result(message.id, { ok: true });

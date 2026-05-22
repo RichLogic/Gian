@@ -9,22 +9,26 @@ import type {
 /**
  * Translate a raw codex-proxy notification into 0..N unified events.
  *
- * Mapping coverage (M1 complete):
- *   output.text.delta   → assistant_text  (delta:true)
- *   output.command.delta → command_execution (stdoutDelta stream)
- *   diff.updated        → file_change     (unified diff parsed)
- *   approval.requested  → approval_requested
- *   approval.resolved   → approval_resolved
- *   turn.completed      → turn_completed
- *   turn.failed         → session_error
- *   runtime.error       → session_error
- *   token_usage.updated → (no unified event — M2 session stats layer)
- *   turn.started        → (no unified event — session status update only)
- *   debug               → (discard)
+ * Mapping coverage:
+ *   output.text.delta       → assistant_text  (delta:true)
+ *   output.reasoning.delta  → reasoning       (kind: 'summary' | 'full')
+ *   output.plan.delta       → plan_update     (delta:true)
+ *   output.plan.final       → plan_update     (delta:false)
+ *   output.command.delta    → command_execution (stdoutDelta stream)
+ *   diff.updated            → file_change     (unified diff parsed)
+ *   approval.requested      → approval_requested
+ *   approval.resolved       → approval_resolved
+ *   turn.started            → (no transcript event — only flips pending UI state
+ *                              via the WS broadcast layer)
+ *   turn.completed          → turn_completed
+ *   turn.failed             → session_error
+ *   runtime.error           → session_error
+ *   token_usage.updated     → (no unified event — M2 session stats layer)
+ *   debug                   → (discard)
  *
- * Codex does NOT emit: thinking, file_read, file_search, agent_spawn.
- * web_search is in thread history snapshots only (session.snapshot), not live
- * notifications — remains unimplemented until codex-proxy adds it.
+ * Per-tool slots (`file_read`, `file_search`, `web_search`, `agent_spawn`) stay
+ * cc-only for now — codex emits a generic `item/tool/call` that would need a
+ * unified `tool_call` slot to map cleanly. Deferred.
  */
 export function normalizeCodexNotification(
   raw: ProxyNotification,
@@ -48,6 +52,53 @@ export function normalizeCodexNotification(
           ts: Date.now(),
           type: 'assistant_text',
           data: { text, delta: true, itemId },
+        },
+      ];
+    }
+
+    case 'output.reasoning.delta': {
+      const itemId = String(data.itemId ?? crypto.randomUUID());
+      const text = String(data.delta ?? data.text ?? '');
+      if (!text) return [];
+      const kind = data.kind === 'summary' ? 'summary' : 'full';
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: itemId,
+          ts: Date.now(),
+          type: 'reasoning',
+          data: { text, delta: true, itemId, kind },
+        },
+      ];
+    }
+
+    case 'output.plan.delta': {
+      const itemId = String(data.itemId ?? 'plan');
+      const text = String(data.delta ?? '');
+      if (!text) return [];
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: itemId,
+          ts: Date.now(),
+          type: 'plan_update',
+          data: { text, delta: true },
+        },
+      ];
+    }
+
+    case 'output.plan.final': {
+      const text = String(data.text ?? '');
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: 'plan',
+          ts: Date.now(),
+          type: 'plan_update',
+          data: { text, delta: false },
         },
       ];
     }
@@ -96,6 +147,20 @@ export function normalizeCodexNotification(
       const approvalId = String(data.approvalId ?? crypto.randomUUID());
       const method = String(data.method ?? '');
       const payload = (data.payload ?? {}) as Record<string, unknown>;
+      const permissionsKind = typeof data.permissionsKind === 'string'
+        ? data.permissionsKind as 'network' | 'file' | 'mixed' | 'other'
+        : undefined;
+      // Prefer the proxy's explicit `reason` (added 2026-05-17); fall back to
+      // `description` for older proxy builds and finally to the legacy `risk`
+      // field which used to carry the prose. Empty string is a real signal
+      // (proxy had nothing to say) — don't synthesize boilerplate here.
+      const description = typeof data.reason === 'string' && data.reason
+        ? data.reason
+        : typeof data.description === 'string' && data.description
+          ? data.description
+          : typeof data.risk === 'string' && data.risk
+            ? data.risk
+            : '';
       return [
         {
           session_id: sessionId,
@@ -105,10 +170,12 @@ export function normalizeCodexNotification(
           type: 'approval_requested',
           data: {
             approvalId,
-            category: mapCodexMethodToCategory(method),
-            risk: mapCodexRisk(data.risk),
+            category: mapCodexMethodToCategory(method, permissionsKind),
+            // Prefer the proxy's explicit `severity` over the legacy `risk`
+            // field (which carried prose, not severity).
+            risk: mapCodexRisk(data.severity ?? data.risk),
             title: String(data.title ?? 'Review request'),
-            description: String(data.description ?? data.reason ?? ''),
+            description,
             subject: extractCodexSubject(payload),
             scopeOptions: mapScopeOptions(data.scopeOptions),
           } satisfies ApprovalRequestedData,
@@ -189,9 +256,21 @@ export function normalizeCodexNotification(
       ];
     }
 
+    case 'turn.started': {
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: 'turn-start',
+          ts: Date.now(),
+          type: 'turn_started',
+          data: { turnId: String((raw.params as { turnId?: unknown }).turnId ?? '') },
+        },
+      ];
+    }
+
     // Intentionally dropped — no unified slot yet:
     case 'token_usage.updated': // M2 session stats layer
-    case 'turn.started':        // session status update only
     case 'debug':               // discard
     default:
       return [];
@@ -204,9 +283,19 @@ export function normalizeCodexNotification(
 
 function mapCodexMethodToCategory(
   method: string,
+  permissionsKind?: 'network' | 'file' | 'mixed' | 'other',
 ): 'command' | 'network' | 'file_write_outside_ws' | 'other' {
   if (method === 'shell' || method === 'exec' || method.includes('command')) return 'command';
   if (method === 'network' || method.includes('http') || method.includes('fetch')) return 'network';
+  // Permissions requests carry permissionsKind from the proxy. Route
+  // network-only grants to `network` and file-only to `file_write_outside_ws`
+  // so the UI shows the right card; mixed/other stay generic. Without this
+  // the old fallthrough mapped every permissions request to `other`.
+  if (method === 'item/permissions/requestApproval' || method.includes('permission')) {
+    if (permissionsKind === 'network') return 'network';
+    if (permissionsKind === 'file') return 'file_write_outside_ws';
+    return 'other';
+  }
   if (method === 'write' || method.includes('file')) return 'file_write_outside_ws';
   return 'other';
 }

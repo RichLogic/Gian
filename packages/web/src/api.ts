@@ -102,6 +102,7 @@ export async function loadDiff(workingTreeId: string, path: string): Promise<str
 
 export interface WorkspacePatch {
   name?: string;
+  hidden?: boolean;
 }
 
 export interface CreateWorkspaceResult {
@@ -559,5 +560,51 @@ export async function createLocalBranch(
     return { ok: false, error: (body as { error?: string }).error ?? `Create failed (${res.status})` };
   }
   return { ok: true };
+}
+
+export interface UploadedAttachment {
+  path: string;
+  name: string;
+  size: number;
+  mime: string;
+}
+
+export async function uploadAttachment(
+  sessionId: string,
+  blob: Blob,
+  filename: string,
+): Promise<UploadedAttachment> {
+  const form = new FormData();
+  form.set('file', blob, filename);
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+    method: 'POST',
+    body: form,
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`upload failed (${res.status}): ${detail || res.statusText}`);
+  }
+  return (await res.json()) as UploadedAttachment;
+}
+
+export async function openFileWith(
+  workingTreeId: string,
+  path: string,
+  editorId?: string,
+): Promise<{ ok: true } | { error: string }> {
+  const res = await fetch(
+    `/api/working_trees/${encodeURIComponent(workingTreeId)}/open`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path, ...(editorId ? { editor_id: editorId } : {}) }),
+    },
+  );
+  if (res.ok) return { ok: true };
+  try {
+    return await res.json() as { error: string };
+  } catch {
+    return { error: `HTTP ${res.status}` };
+  }
 }
 

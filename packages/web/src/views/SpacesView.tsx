@@ -611,7 +611,9 @@ function SpaceDetail({
             <div className="detail-head-actions">
               {deleteError && <span className="spaces-error">{deleteError}</span>}
               <WorkspaceKebab
+                hidden={workspace.hidden === 1}
                 onRename={() => setNameEdit(workspace.name)}
+                onToggleHidden={() => void patchField('hidden', workspace.hidden !== 1)}
                 onDelete={() => void handleDelete()}
                 deleting={deleting}
               />
@@ -665,8 +667,14 @@ function SpaceDetail({
 }
 
 function WorkspaceKebab({
-  onRename, onDelete, deleting,
-}: { onRename: () => void; onDelete: () => void; deleting: boolean }) {
+  hidden, onRename, onToggleHidden, onDelete, deleting,
+}: {
+  hidden: boolean;
+  onRename: () => void;
+  onToggleHidden: () => void;
+  onDelete: () => void;
+  deleting: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -691,6 +699,9 @@ function WorkspaceKebab({
         <div className="ws-kebab-pop">
           <button className="ws-kebab-item" onClick={() => { setOpen(false); onRename(); }}>
             Rename workspace
+          </button>
+          <button className="ws-kebab-item" onClick={() => { setOpen(false); onToggleHidden(); }}>
+            {hidden ? 'Show in sidebar' : 'Hide from sidebar'}
           </button>
           <div className="ws-kebab-divider" />
           <button

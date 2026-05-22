@@ -1,4 +1,4 @@
--- Initial schema for Gian. See doc/data-model.md.
+-- Initial schema for Gian. See docs/data-model.md.
 
 CREATE TABLE workspaces (
   id          TEXT PRIMARY KEY,

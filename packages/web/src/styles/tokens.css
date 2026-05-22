@@ -9,13 +9,13 @@
   --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
-  --fz-11: 11px;
-  --fz-12: 12px;
-  --fz-13: 13px;
-  --fz-14: 14px;
-  --fz-16: 16px;
-  --fz-20: 20px;
-  --fz-28: 28px;
+  /* --fz-* tokens are declared on body + each zone container below.
+   * They CANNOT live here on :root — Chrome substitutes the inner
+   * var(--zone-scale) eagerly at :root (where --zone-scale is unset →
+   * fallback 1), bakes the calc into `calc(13px * 1)`, and that
+   * already-resolved value inherits down regardless of what
+   * descendants set --zone-scale to. Declared per-zone, each rule
+   * re-evaluates with that zone's --zone-scale. */
 
   /* Radii — soft but restrained */
   --r-1: 4px;
@@ -61,14 +61,94 @@
   --slack-soft:   oklch(0.62 0.14 105 / 0.14);
 }
 
-/* ---------- Accent presets (default = plum) ----------
-   Body-level fallback so unset / unknown accent values still resolve
-   to a valid color. Specific presets override below. */
-body                       { --accent-h: 310; --accent-c: 0.13; }
-body[data-accent="plum"]   { --accent-h: 310; --accent-c: 0.13; }
-body[data-accent="moss"]   { --accent-h: 150; --accent-c: 0.10; }
-body[data-accent="ink"]    { --accent-h: 255; --accent-c: 0.11; }
-body[data-accent="ember"]  { --accent-h:  30; --accent-c: 0.13; }
+/* ---------- Accent presets ----------
+   8 evenly-spaced hues so any two are visually distinguishable. Each
+   theme's default is set on theme switch by SettingsBody; the
+   declarations live in one place so any preset is usable under any theme. */
+body                        { --accent-h: 230; --accent-c: 0.13; }  /* fallback = azure */
+body[data-accent="rose"]    { --accent-h:   5; --accent-c: 0.15; }
+body[data-accent="ember"]   { --accent-h:  35; --accent-c: 0.14; }
+body[data-accent="citron"]  { --accent-h:  95; --accent-c: 0.13; }
+body[data-accent="moss"]    { --accent-h: 150; --accent-c: 0.11; }
+body[data-accent="teal"]    { --accent-h: 195; --accent-c: 0.11; }
+body[data-accent="azure"]   { --accent-h: 230; --accent-c: 0.13; }
+body[data-accent="ink"]     { --accent-h: 270; --accent-c: 0.13; }
+body[data-accent="plum"]    { --accent-h: 320; --accent-c: 0.14; }
+
+/* ---------- Font scale per zone ----------
+   Each zone container redeclares --fz-* with its own --zone-scale,
+   so each rule re-evaluates the calc() at the matching element. The
+   shared declaration block below applies to body AND every zone
+   container — putting them in one selector list keeps the token list
+   defined once, while the per-element matching ensures each location
+   gets its own resolved --zone-scale baked into the result. */
+
+body,
+.sidebar, .topbar, .inspector, .settings-tab-body,
+.transcript, .composer, .composer-wrap, .approval, .evt,
+.sheet, .tty, .gian-terminal, .sheet-file, .md-preview {
+  --fz-11: calc(11px * var(--zone-scale, 1));
+  --fz-12: calc(12px * var(--zone-scale, 1));
+  --fz-13: calc(13px * var(--zone-scale, 1));
+  --fz-14: calc(14px * var(--zone-scale, 1));
+  --fz-16: calc(16px * var(--zone-scale, 1));
+  --fz-20: calc(20px * var(--zone-scale, 1));
+  --fz-28: calc(28px * var(--zone-scale, 1));
+}
+
+/* Default --zone-scale per element (body + each zone). When the body
+   carries the data-scale-X="Y" attribute, the more-specific rules
+   below override the zone's --zone-scale, which then re-feeds into
+   the per-zone --fz-* recalculation above. */
+body { --zone-scale: 1; }
+
+.sidebar, .topbar, .inspector, .settings-tab-body                  { --zone-scale: 1; }
+body[data-scale-chrome="sm"] .sidebar,
+body[data-scale-chrome="sm"] .topbar,
+body[data-scale-chrome="sm"] .inspector,
+body[data-scale-chrome="sm"] .settings-tab-body                    { --zone-scale: 0.875; }
+body[data-scale-chrome="lg"] .sidebar,
+body[data-scale-chrome="lg"] .topbar,
+body[data-scale-chrome="lg"] .inspector,
+body[data-scale-chrome="lg"] .settings-tab-body                    { --zone-scale: 1.125; }
+body[data-scale-chrome="xl"] .sidebar,
+body[data-scale-chrome="xl"] .topbar,
+body[data-scale-chrome="xl"] .inspector,
+body[data-scale-chrome="xl"] .settings-tab-body                    { --zone-scale: 1.25;  }
+
+.transcript, .composer, .composer-wrap, .approval, .evt            { --zone-scale: 1; }
+body[data-scale-chat="sm"] .transcript,
+body[data-scale-chat="sm"] .composer,
+body[data-scale-chat="sm"] .composer-wrap,
+body[data-scale-chat="sm"] .approval,
+body[data-scale-chat="sm"] .evt                                    { --zone-scale: 0.875; }
+body[data-scale-chat="lg"] .transcript,
+body[data-scale-chat="lg"] .composer,
+body[data-scale-chat="lg"] .composer-wrap,
+body[data-scale-chat="lg"] .approval,
+body[data-scale-chat="lg"] .evt                                    { --zone-scale: 1.125; }
+body[data-scale-chat="xl"] .transcript,
+body[data-scale-chat="xl"] .composer,
+body[data-scale-chat="xl"] .composer-wrap,
+body[data-scale-chat="xl"] .approval,
+body[data-scale-chat="xl"] .evt                                    { --zone-scale: 1.25;  }
+
+.sheet, .tty, .gian-terminal, .sheet-file, .md-preview             { --zone-scale: 1; }
+body[data-scale-code="sm"] .sheet,
+body[data-scale-code="sm"] .tty,
+body[data-scale-code="sm"] .gian-terminal,
+body[data-scale-code="sm"] .sheet-file,
+body[data-scale-code="sm"] .md-preview                             { --zone-scale: 0.875; }
+body[data-scale-code="lg"] .sheet,
+body[data-scale-code="lg"] .tty,
+body[data-scale-code="lg"] .gian-terminal,
+body[data-scale-code="lg"] .sheet-file,
+body[data-scale-code="lg"] .md-preview                             { --zone-scale: 1.125; }
+body[data-scale-code="xl"] .sheet,
+body[data-scale-code="xl"] .tty,
+body[data-scale-code="xl"] .gian-terminal,
+body[data-scale-code="xl"] .sheet-file,
+body[data-scale-code="xl"] .md-preview                             { --zone-scale: 1.25;  }
 
 /* ============================================================
    THEME — LIGHT (cool cream, high softness, low contrast chrome)

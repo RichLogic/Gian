@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ApprovalDecision } from '@gian/shared';
-import type { AgentSpawnItem, ApprovalItem, CommandItem, DiffItem, FileReadItem, FileSearchItem, MsgItem, ToolItem, WebSearchItem } from '../types.js';
+import type { AgentSpawnItem, ApprovalItem, AutoNoticeItem, CommandItem, DiffItem, FileReadItem, FileSearchItem, MsgItem, ReasoningItem, ToolItem, WebSearchItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
 
 /**
@@ -19,11 +19,20 @@ export const FileLinkOpenContext = createContext<
  *  itself stays compact (just file path + +/- stats). */
 export const DiffOpenContext = createContext<((item: DiffItem) => void) | null>(null);
 
-/** Provided by App.tsx to push the latest exit_plan_mode approval into the
- *  4th-level inspector. PlanChip (above the composer) and the inline plan
- *  approval card both fire this when clicked. */
+/** Provided by App.tsx to push plan markdown into the 4th-level inspector.
+ *  Fires from two places:
+ *   - cc's `exit_plan_mode` approval card / PlanChip (plan markdown lives on
+ *     the approval payload as `cmd`).
+ *   - codex's plan-mode plan_update stream (plan markdown lives in App-level
+ *     `planBySession` state). PlanChip wraps either source into this shape. */
+export interface PlanOpenPayload {
+  /** Stable id used as the Sheet tab key. */
+  id: string;
+  title: string;
+  markdown: string;
+}
 export const PlanOpenContext = createContext<
-  ((approval: ApprovalItem) => void) | null
+  ((payload: PlanOpenPayload) => void) | null
 >(null);
 
 /**
@@ -607,6 +616,28 @@ export function AssistantMessage({ item, hideAvatar }: { item: MsgItem; hideAvat
   );
 }
 
+/**
+ * Reasoning content from codex (full trace or summary). Default-collapsed
+ * card with a `<details>` toggle — clicking expands it to show the markdown
+ * body. Both `variant: 'summary'` and `variant: 'full'` use the same shell,
+ * differentiated only by the header label.
+ */
+export function ReasoningCard({ item }: { item: ReasoningItem }) {
+  const lineCount = item.text ? item.text.split('\n').length : 0;
+  const label = item.variant === 'summary' ? 'Reasoning summary' : 'Reasoning';
+  return (
+    <details className="reasoning-card" data-variant={item.variant}>
+      <summary className="reasoning-card-head">
+        <span className="reasoning-card-label">{label}</span>
+        <span className="reasoning-card-meta">{lineCount} {lineCount === 1 ? 'line' : 'lines'}</span>
+      </summary>
+      <div className="reasoning-card-body md">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
+      </div>
+    </details>
+  );
+}
+
 // Kept as an unused export to avoid breaking external imports. V2 design
 // doesn't render avatars in the transcript; this is left as a stub.
 export function Avatar({ exec }: { exec: 'user' | 'claude' | 'codex' }) {
@@ -706,6 +737,69 @@ export function WebSearchRow({ item }: { item: WebSearchItem }) {
         <span className="evt-subject">{item.query}</span>
         <span className="evt-meta">
           {item.resultCount !== undefined && <span>{item.resultCount} results</span>}
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Renders cc auto-mode notices: per-action classifier denials (info) and the
+ * 3-in-a-row / 20-total circuit-breaker trip (alert). The recovery action set
+ * sketched in the schema (retry / switch to ask / abort) isn't wired yet —
+ * host has no control channel for it — so the card is presentational. Once
+ * those controls exist, the buttons drop in below `.auto-notice-body`.
+ */
+export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
+  if (item.variant === 'circuit-breaker') {
+    const triggerLabel = item.trigger === 'total'
+      ? `${item.total} total denials`
+      : `${item.consecutive} consecutive denials`;
+    return (
+      <div className="approval declined auto-notice auto-notice--breaker">
+        <div className="approval-top">
+          <div className="approval-ico">
+            <SeverityIcon risk="high" />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="approval-title">
+              <span>Auto-mode circuit breaker tripped</span>
+              <span className="approval-risk">stopped</span>
+            </div>
+            <div className="approval-sub">
+              {triggerLabel} — Claude paused auto-mode for this session.
+            </div>
+          </div>
+          <span className="evt-meta" style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
+        </div>
+        <div className="approval-resolved-note">
+          <span className="dot" />
+          <span>
+            Switch the session to <strong>ask</strong> mode and retry, or start a fresh turn.
+          </span>
+        </div>
+      </div>
+    );
+  }
+  // classifier-denied: lightweight inline notice, mirrors the FileSearch / Run
+  // row look so it folds naturally into a turn-actions block.
+  return (
+    <div className="evt inline auto-notice auto-notice--classifier">
+      <div className="evt-head">
+        <span className="evt-verb">Auto-block</span>
+        <span className="evt-subject">
+          <span style={{ color: 'var(--text-2)' }}>{item.action || 'action'}</span>
+          {item.reason && (
+            <span style={{ marginLeft: 8, color: 'var(--text-3)', fontSize: 11.5 }}>
+              {item.reason}
+            </span>
+          )}
+        </span>
+        <span className="evt-meta">
+          <span style={{ color: 'var(--text-3)' }}>
+            {item.consecutive}/3 · {item.total} total
+          </span>
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
         </span>
       </div>

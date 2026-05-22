@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { mapSkillsResponse } from '../src/core/slash.js';
+import { CODEX_NATIVE_COMMANDS, listCodexSlashCommands, mapSkillsResponse } from '../src/core/slash.js';
 import type { SkillsListResponse } from '../src/runtime/types.js';
 
 test('mapSkillsResponse maps user/repo/system/admin scopes to wire sources', () => {
@@ -97,4 +97,44 @@ test('mapSkillsResponse dedupes by name across multiple cwd entries', () => {
 test('mapSkillsResponse handles empty / missing data gracefully', () => {
   assert.deepEqual(mapSkillsResponse({ data: [] }), []);
   assert.deepEqual(mapSkillsResponse({ data: [{ cwd: '/x', errors: [], skills: [] }] }), []);
+});
+
+test('listCodexSlashCommands includes documented Codex built-ins', () => {
+  const commands = listCodexSlashCommands({ data: [] });
+  const byName = Object.fromEntries(commands.map((c) => [c.name, c]));
+
+  assert.ok(byName['/compact'], 'expected /compact native command');
+  assert.ok(byName['/clear'], 'expected /clear native command');
+  assert.ok(byName['/model'], 'expected /model native command');
+  assert.equal(byName['/compact']?.source, 'builtin');
+  assert.equal(byName['/compact']?.filePath, undefined);
+  assert.ok(
+    commands.length >= CODEX_NATIVE_COMMANDS.length,
+    'native command list should be present even when skills/list is empty',
+  );
+});
+
+test('listCodexSlashCommands lets repo/user skills override native names', () => {
+  const commands = listCodexSlashCommands({
+    data: [
+      {
+        cwd: '/repo',
+        errors: [],
+        skills: [
+          {
+            name: 'compact',
+            description: 'project compact skill',
+            enabled: true,
+            path: '/repo/.codex/skills/compact',
+            scope: 'repo',
+          },
+        ],
+      },
+    ],
+  });
+  const compact = commands.find((c) => c.name === '/compact');
+
+  assert.equal(compact?.source, 'project');
+  assert.equal(compact?.description, 'project compact skill');
+  assert.equal(compact?.filePath, '/repo/.codex/skills/compact');
 });

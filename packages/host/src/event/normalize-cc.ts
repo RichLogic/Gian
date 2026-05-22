@@ -430,8 +430,20 @@ export function normalizeCcNotification(
       ];
     }
 
+    case 'turn.started': {
+      return [
+        {
+          session_id: sessionId,
+          turn,
+          call_id: 'turn-start',
+          ts: Date.now(),
+          type: 'turn_started',
+          data: { turnId: String((raw.params as { turnId?: unknown }).turnId ?? '') },
+        },
+      ];
+    }
+
     // Intentionally dropped:
-    case 'turn.started':        // session status update only
     case 'token_usage.updated': // M2 session stats layer
     case 'debug':               // discard
     default:

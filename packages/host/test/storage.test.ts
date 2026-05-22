@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../src/storage/db.js';
-import { loadConfig } from '../src/storage/config.js';
+import { loadConfig, saveConfig } from '../src/storage/config.js';
 
 function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), 'gian-test-'));
@@ -82,6 +82,64 @@ test('loadConfig reads overridden values', () => {
     assert.equal(cfg.host, '0.0.0.0');
     assert.equal(cfg.port, 9999);
     assert.equal(cfg.force_https, true);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('config: external_editors round-trips as JSON', () => {
+  const dir = makeTempDir();
+  try {
+    const db = openDatabase(dir);
+    saveConfig(db, {
+      external_editors: [
+        { id: 'a', name: 'VS Code', command: 'code', args: ['--new-window', '{path}'] },
+        { id: 'b', name: 'Sublime', command: 'subl', args: [] },
+      ],
+    });
+    const cfg = loadConfig(db);
+    assert.equal(cfg.external_editors.length, 2);
+    assert.equal(cfg.external_editors[0]!.name, 'VS Code');
+    assert.deepEqual(cfg.external_editors[0]!.args, ['--new-window', '{path}']);
+    assert.equal(cfg.external_editors[1]!.command, 'subl');
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('config: external_editors defaults to [] when unset', () => {
+  const dir = makeTempDir();
+  try {
+    const db = openDatabase(dir);
+    const cfg = loadConfig(db);
+    assert.deepEqual(cfg.external_editors, []);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('config: external_editors drops invalid entries (silent filter)', () => {
+  const dir = makeTempDir();
+  try {
+    const db = openDatabase(dir);
+    saveConfig(db, {
+      external_editors: [
+        { id: 'a', name: 'OK', command: 'code', args: [] },
+        // Empty name — drop.
+        { id: 'b', name: '', command: 'code', args: [] } as any,
+        // Missing command — drop.
+        { id: 'c', name: 'NoCmd', command: '', args: [] } as any,
+        // Duplicate id — second one dropped.
+        { id: 'a', name: 'Dup', command: 'code', args: [] },
+        // Non-string in args — drop.
+        { id: 'd', name: 'BadArgs', command: 'code', args: [42 as unknown as string] },
+      ],
+    });
+    const cfg = loadConfig(db);
+    assert.deepEqual(cfg.external_editors.map(e => e.id), ['a']);
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

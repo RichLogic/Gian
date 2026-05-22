@@ -3,9 +3,10 @@ import type { ApprovalCategory, ApprovalStatus, Bot, EventEnvelope, RunnerInfo, 
 import { LocaleProvider } from './i18n/index.js';
 import type { WsState } from './ws.js';
 import { GianWs } from './ws.js';
-import { makeWsUrl, loadWorkspaces, loadSessions, loadEvents, loadSettings, loadWorkingTrees, loadBots, loadFile, loadDiff, fetchWsToken } from './api.js';
+import { makeWsUrl, loadWorkspaces, loadSessions, loadEvents, loadSettings, loadWorkingTrees, loadBots, loadFile, loadDiff, fetchWsToken, loadRepoInfo } from './api.js';
 import type { WorkingTree } from './api.js';
-import { applyEnvelope, parseTokenUsage } from './transcript/apply.js';
+import { applyEnvelope, applyErrorEnvelopeToSession, applyPlanUpdate, createOptimisticEcho, nextPendingFromEnvelope, parseTokenUsage } from './transcript/apply.js';
+import { maybeNotifyForEnvelope } from './notifications.js';
 import { DiffOpenContext, FileLinkOpenContext, PlanOpenContext } from './transcript/items.js';
 import { Topbar } from './components/Topbar.js';
 import type { Mode, ViewState } from './components/Topbar.js';
@@ -21,6 +22,7 @@ import { Terminal, makeWorkbenchWire } from './components/Terminal.js';
 import { CodingView } from './views/CodingView.js';
 import { SpacesView } from './views/SpacesView.js';
 import { BotsView } from './views/BotsView.js';
+import { FilesView } from './views/FilesView.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import type { SystemConfig } from '@gian/shared';
 import type { QueueEntry, TokenUsage, TranscriptItem } from './types.js';
@@ -45,6 +47,11 @@ export function App() {
   const [wsAttempt, setWsAttempt] = useState(0);
   const [authed, setAuthed] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  // Maps workspace_id → current HEAD branch name, populated lazily for each
+  // workspace. Regular (non-worktree) sessions ride on the workspace's HEAD,
+  // so SessionRow falls through to this when session.branch itself is null.
+  // Refreshed on `workspace:git-updated` so external branch switches show up.
+  const [workspaceBranches, setWorkspaceBranches] = useState<Record<string, string | null>>({});
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [itemsBySession, setItemsBySession] = useState<Record<string, TranscriptItem[]>>({});
@@ -72,14 +79,23 @@ export function App() {
   // the "Creating…" busy state in NewSessionView so the form doesn't look dead
   // while the host spins up a session + worktree.
   const [creatingSession, setCreatingSession] = useState(false);
+  // Codex plan-mode plan markdown per session — populated by plan_update
+  // events. PlanChip reads from here when there's no exit_plan_mode approval
+  // to surface (the codex flow doesn't go through approval cards).
+  const [planBySession, setPlanBySession] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (!systemConfig) return;
     document.body.setAttribute('data-theme', systemConfig.theme);
     document.body.setAttribute('data-accent', systemConfig.accent);
     document.body.setAttribute('data-density', systemConfig.density);
+    document.body.setAttribute('data-scale-chrome', systemConfig.font_scale_chrome);
+    document.body.setAttribute('data-scale-chat', systemConfig.font_scale_chat);
+    document.body.setAttribute('data-scale-code', systemConfig.font_scale_code);
     document.documentElement.setAttribute('lang', systemConfig.locale);
-  }, [systemConfig?.theme, systemConfig?.accent, systemConfig?.density, systemConfig?.locale]);
+  }, [systemConfig?.theme, systemConfig?.accent, systemConfig?.density,
+      systemConfig?.font_scale_chrome, systemConfig?.font_scale_chat,
+      systemConfig?.font_scale_code, systemConfig?.locale]);
 
   useEffect(() => {
     void loadSettings().then(cfg => { if (cfg) setSystemConfig(cfg); });
@@ -107,24 +123,27 @@ export function App() {
   }, [paletteOpen]);
 
   const handleEnvelope = useCallback((env: EventEnvelope, executor: 'claude' | 'codex') => {
-    // turn.started comes through the legacy raw passthrough (the unified
-    // normalizers drop it). turn_completed / session_error come through the
-    // unified pipeline; legacy turn.completed / turn.failed remain for any
-    // notification the normalizer hasn't covered yet.
-    if (env.event === 'turn.started') {
-      setPendingBySession(p => ({ ...p, [env.session_id]: true }));
-    }
-    if (
-      env.event === 'turn_completed' ||
-      env.event === 'session_error' ||
-      env.event === 'turn.completed' ||
-      env.event === 'turn.failed'
-    ) {
-      setPendingBySession(p => ({ ...p, [env.session_id]: false }));
+    const notifyingSession = sessionsRef.current.find(s => s.id === env.session_id) ?? null;
+    maybeNotifyForEnvelope(env, {
+      session: notifyingSession,
+      onClick: () => setActiveSessionId(env.session_id),
+    });
+
+    const nextPending = nextPendingFromEnvelope(env);
+    if (nextPending !== null) {
+      setPendingBySession(p => ({ ...p, [env.session_id]: nextPending }));
     }
     if (env.event === 'token_usage.updated') {
       const usage = parseTokenUsage(env.data);
       if (usage) setUsageBySession(prev => ({ ...prev, [env.session_id]: usage }));
+    }
+    // Codex plan-mode: plan_update either streams (delta:true → append) or
+    // finalizes (delta:false → replace). PlanChip subscribes to this state.
+    if (env.event === 'plan_update') {
+      setPlanBySession(prev => ({
+        ...prev,
+        [env.session_id]: applyPlanUpdate(prev[env.session_id], env),
+      }));
     }
     setItemsBySession(prev => {
       const list = prev[env.session_id] ?? [];
@@ -177,15 +196,11 @@ export function App() {
             // Seed the transcript with an optimistic echo of the first message
             // so the user sees it immediately — the real `user_message` event
             // reconciles it via applyEnvelope.
-            const optimistic: TranscriptItem = {
-              kind: 'user',
-              id: `optimistic:${msg.session.id}:${Date.now()}`,
+            const optimistic = createOptimisticEcho({
+              sessionId: msg.session.id,
               text: pendingMsg,
               exec: msg.session.executor,
-              ts: Date.now(),
-              turn: 0,
-              pending: true,
-            };
+            });
             setItemsBySession(prev => ({ ...prev, [msg.session.id]: [optimistic] }));
             setPendingBySession(p => ({ ...p, [msg.session.id]: true }));
             ws.send({ type: 'message:send', session_id: msg.session.id, text: pendingMsg });
@@ -261,23 +276,13 @@ export function App() {
           // and mark any optimistic user echo for this session as failed so
           // the transcript reflects the reject state.
           if (msg.session_id) {
+            const sid = msg.session_id;
             setItemsBySession(prev => {
-              const list = prev[msg.session_id!];
-              if (!list) return prev;
-              let changed = false;
-              const next = list.slice();
-              for (let i = next.length - 1; i >= 0; i--) {
-                const it = next[i]!;
-                if (it.kind === 'user' && it.pending) {
-                  next[i] = { ...it, pending: false, failed: true };
-                  changed = true;
-                  break;
-                }
-              }
-              if (!changed) return prev;
-              return { ...prev, [msg.session_id!]: next };
+              const delta = applyErrorEnvelopeToSession(prev[sid], sid);
+              if (!delta || delta.items === prev[sid]) return prev;
+              return { ...prev, [sid]: delta.items };
             });
-            setPendingBySession(p => ({ ...p, [msg.session_id!]: false }));
+            setPendingBySession(p => ({ ...p, [sid]: false }));
           }
           if (msg.code === 'SESSION_CREATE_FAILED') setCreatingSession(false);
           alert(`${msg.code}: ${msg.message}`);
@@ -291,6 +296,31 @@ export function App() {
     });
     return () => { off(); offState(); };
   }, [ws, handleEnvelope]);
+
+  // Workspace current_branch fetcher — hits /repo-info for each workspace and
+  // caches into workspaceBranches. Used by SessionRow as a fallback when the
+  // session itself isn't a worktree.
+  const fetchWorkspaceBranch = useCallback(async (wsId: string) => {
+    const info = await loadRepoInfo(wsId);
+    setWorkspaceBranches(prev => ({ ...prev, [wsId]: info?.git?.currentBranch ?? null }));
+  }, []);
+
+  // Backfill branches for every known workspace whenever the list changes.
+  // The fetcher itself deduplicates by overwriting, so re-runs are cheap.
+  useEffect(() => {
+    for (const w of workspaces) void fetchWorkspaceBranch(w.id);
+  }, [workspaces, fetchWorkspaceBranch]);
+
+  // Refresh on `workspace:git-updated` (fetch / branch-created / merge / drop /
+  // session-deleted / worktree-created). Any of those can change HEAD.
+  useEffect(() => {
+    const off = ws.onMessage(msg => {
+      if (msg.type === 'workspace:git-updated') {
+        void fetchWorkspaceBranch(msg.workspace_id);
+      }
+    });
+    return off;
+  }, [ws, fetchWorkspaceBranch]);
 
   // We need the latest sessions list when handling events (to look up executor).
   const sessionsRef = useRef<Session[]>([]);
@@ -683,6 +713,31 @@ export function App() {
       onForceRecover: () => {
         ws.send({ type: 'session:recover', session_id: activeSession.id });
       },
+      onFork: (executor) => {
+        // Clone every property the host accepts on session:create except
+        // `branch` (worktrees must own a unique branch — let the host
+        // auto-generate). Name = original + " copy". Executor is the
+        // user's choice from the menu.
+        const baseName = activeSession.name && activeSession.name.length > 0
+          ? activeSession.name
+          : `session ${activeSession.id.slice(0, 6)}`;
+        const isWorktree = activeSession.worktree_path !== null;
+        setCreatingSession(true);
+        ws.send({
+          type: 'session:create',
+          workspace_id: activeSession.workspace_id,
+          executor,
+          approval_mode: activeSession.approval_mode,
+          name: `${baseName} copy`,
+          ...(isWorktree
+            ? {
+                mode: 'worktree',
+                ...(activeSession.base_branch ? { base_branch: activeSession.base_branch } : {}),
+              }
+            : { mode: 'regular' }
+          ),
+        });
+      },
       onArchive: () => {
         const next = activeSession.archived !== 1;
         ws.send({ type: 'session:archive', session_id: activeSession.id, archived: next });
@@ -710,6 +765,26 @@ export function App() {
     setActiveSessionId(sid);
     setMode('sessions');
   };
+
+  // URL-param driven Files view: /?view=files&wt=<id>&path=<rel>
+  // Opened by FilesView's "Open in new tab" href for non-renderable file types.
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.get('view') === 'files') {
+    const filesWtId = urlParams.get('wt');
+    const filesPath = urlParams.get('path');
+    return (
+      <LocaleProvider locale={locale}>
+        <FilesView
+          workingTrees={workingTrees}
+          workingTreeId={filesWtId}
+          onPickWorkingTree={id => { window.location.search = `?view=files&wt=${encodeURIComponent(id)}`; }}
+          initialPath={filesPath}
+          externalEditors={systemConfig?.external_editors ?? []}
+          onOpenSettings={() => toggleWbTabKind('settings')}
+        />
+      </LocaleProvider>
+    );
+  }
 
   return (
     <LocaleProvider locale={locale}>
@@ -741,9 +816,10 @@ export function App() {
           {mode === 'sessions' && (
           <FileLinkOpenContext.Provider value={(absPath) => { void openFileInSheet(absPath, false); }}>
           <DiffOpenContext.Provider value={() => { /* §C — diff not clickable */ }}>
-          <PlanOpenContext.Provider value={(approval) => openPlanInSheet(approval.approvalId, approval.cmd)}>
+          <PlanOpenContext.Provider value={(payload) => openPlanInSheet(payload.id, payload.markdown)}>
             <CodingView
               workspaces={workspaces}
+              workspaceBranches={workspaceBranches}
               sessions={sessions}
               archivedSessions={archivedSessions}
               archivedLoaded={archivedLoaded}
@@ -754,6 +830,7 @@ export function App() {
               pendingBySession={pendingBySession}
               usageBySession={usageBySession}
               queueBySession={queueBySession}
+              planBySession={planBySession}
               onLoadArchived={async () => {
                 if (archivedLoaded) return;
                 const list = await import('./api.js').then(m => m.loadArchivedSessions());
@@ -795,24 +872,24 @@ export function App() {
                 // and arm the thinking ticker before the server confirms. The
                 // real `user_message` event reconciles in applyEnvelope.
                 const exec = sessionsRef.current.find(s => s.id === sessionId)?.executor ?? 'claude';
-                const optimistic: TranscriptItem = {
-                  kind: 'user',
-                  id: `optimistic:${sessionId}:${Date.now()}`,
-                  text,
-                  exec,
-                  ts: Date.now(),
-                  turn: 0,
-                  pending: true,
-                };
+                const optimistic = createOptimisticEcho({ sessionId, text, exec });
                 setItemsBySession(prev => ({
                   ...prev,
                   [sessionId]: [...(prev[sessionId] ?? []), optimistic],
                 }));
                 setPendingBySession(p => ({ ...p, [sessionId]: true }));
+
+                const items: Array<{ type: 'text'; text: string } | { type: 'localImage'; path: string }> = [];
+                if (text.trim()) items.push({ type: 'text', text });
+                for (const path of opts?.imagePaths ?? []) {
+                  items.push({ type: 'localImage', path });
+                }
+
                 ws.send({
                   type: 'message:send',
                   session_id: sessionId,
                   text,
+                  ...(items.length > 0 ? { items } : {}),
                   ...(opts?.oneShotBypass ? { oneShotBypass: true } : {}),
                 });
               }}
@@ -875,6 +952,7 @@ export function App() {
               onSwitchRuntime={(sessionId, target) =>
                 ws.send({ type: 'session:switch-runtime', session_id: sessionId, target })
               }
+              onOpenSpaces={() => setMode('spaces')}
             />
           </PlanOpenContext.Provider>
           </DiffOpenContext.Provider>
@@ -919,7 +997,12 @@ export function App() {
               onAddTab={() => addTerminalTab()}
               renderTab={(t) => {
                 if (t.kind === 'settings') {
-                  return <SettingsBody config={systemConfig} onChange={cfg => setSystemConfig(cfg)} />;
+                  return (
+                    <SettingsBody
+                      config={systemConfig}
+                      onChange={cfg => setSystemConfig(cfg)}
+                    />
+                  );
                 }
                 if (t.kind === 'term') {
                   // Pick the most-specific cwd we can: worktree path
@@ -952,6 +1035,7 @@ export function App() {
             <Inspector
               tab={inspectorTab}
               workingTreeId={defaultWorkingTreeIdFor(activeSession)}
+              workingTrees={workingTrees}
               onOpenFile={(rel, perm) => {
                 const sess = activeSession;
                 const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;

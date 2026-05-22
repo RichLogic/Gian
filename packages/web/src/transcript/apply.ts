@@ -2,17 +2,18 @@ import type { EventEnvelope } from '@gian/shared';
 import type {
   AgentSpawnItem,
   ApprovalItem,
+  AutoNoticeItem,
   CommandItem,
   DiffFile,
   DiffItem,
   FileReadItem,
   FileSearchItem,
   MsgItem,
+  ReasoningItem,
   TokenUsage,
   TranscriptItem,
   WebSearchItem,
 } from '../types.js';
-import { truncate } from '../utils/format.js';
 
 /**
  * Folds one envelope into the transcript. Unified type names are the primary
@@ -59,6 +60,41 @@ export function applyEnvelope(
     };
     return [...items, created];
   }
+
+  // ── reasoning (unified) — codex's "thinking" content. summary and full
+  // forms each get their own ReasoningItem, keyed by itemId. Deltas append
+  // into the existing card; non-delta full snapshots replace text.
+  if (ev === 'reasoning') {
+    const itemId = String(data.itemId ?? env.call_id);
+    const chunk = String(data.text ?? '');
+    if (!chunk) return items;
+    const variant = data.kind === 'summary' ? 'summary' : 'full';
+    const idx = items.findIndex(i => i.kind === 'reasoning' && i.id === itemId);
+    if (idx >= 0) {
+      const existing = items[idx] as ReasoningItem;
+      const next = items.slice();
+      next[idx] = {
+        ...existing,
+        text: data.delta === false ? chunk : existing.text + chunk,
+      };
+      return next;
+    }
+    const created: ReasoningItem = {
+      kind: 'reasoning', id: itemId,
+      text: chunk, variant,
+      ts: env.ts, turn: env.turn,
+    };
+    return [...items, created];
+  }
+
+  // ── plan_update (unified) — codex plan-mode output. We don't fold this
+  // into the transcript; PlanChip subscribes separately and renders the
+  // current plan markdown in a popover. Drop from transcript here.
+  if (ev === 'plan_update') return items;
+
+  // ── turn_started (unified) — signal only, not a transcript entry. App.tsx
+  // listens for this to flip pendingBySession=true.
+  if (ev === 'turn_started') return items;
 
   // ── command_execution (unified) ──
   if (ev === 'command_execution') {
@@ -182,6 +218,33 @@ export function applyEnvelope(
     return item ? [...items, item] : items;
   }
 
+  // ── auto_classifier_denied (cc auto-mode) ──
+  if (ev === 'auto_classifier_denied') {
+    const item: AutoNoticeItem = {
+      kind: 'auto-notice', id: env.call_id,
+      variant: 'classifier-denied',
+      action: String(data.action ?? ''),
+      reason: String(data.reason ?? ''),
+      consecutive: Number(data.consecutive ?? 0),
+      total: Number(data.total ?? 0),
+      ts: env.ts, turn: env.turn,
+    };
+    return [...items, item];
+  }
+
+  // ── auto_circuit_breaker (cc auto-mode trip) ──
+  if (ev === 'auto_circuit_breaker') {
+    const item: AutoNoticeItem = {
+      kind: 'auto-notice', id: env.call_id,
+      variant: 'circuit-breaker',
+      trigger: data.trigger === 'total' ? 'total' : 'consecutive',
+      consecutive: Number(data.consecutive ?? 0),
+      total: Number(data.total ?? 0),
+      ts: env.ts, turn: env.turn,
+    };
+    return [...items, item];
+  }
+
   // ── session_error (unified) / turn.failed (legacy) ──
   if (ev === 'session_error' || ev === 'turn.failed') {
     return [
@@ -199,14 +262,15 @@ export function applyEnvelope(
     return [...items, { kind: 'turn-end', id: env.call_id, text: `Turn ${env.turn} · complete`, ts: env.ts, turn: env.turn }];
   }
 
-  // ── remaining legacy events ──
-  const item = legacyEnvelopeToItem(env, executor);
-  if (!item) return items;
-  // Optimistic-echo reconciliation: if the user typed something while waiting
-  // on the server, we already appended a pending MsgItem. The real
-  // `user_message` arrives with the canonical id+turn; swap it in place rather
-  // than appending a duplicate. Match by text on the most recent pending echo.
-  if (item.kind === 'user') {
+  // ── user_message — host-side event (not a proxy event, so no normalizer);
+  // SessionManager persists/broadcasts it directly when message:send arrives.
+  // Reconciles with the client-side optimistic echo if present.
+  if (env.event === 'user_message') {
+    const text = String(data.text ?? '');
+    const item: MsgItem = {
+      kind: 'user', id: env.call_id, text, exec: executor,
+      ts: env.ts, turn: env.turn,
+    };
     for (let i = items.length - 1; i >= 0; i--) {
       const cand = items[i]!;
       if (cand.kind === 'user' && cand.pending && cand.text === item.text) {
@@ -215,44 +279,115 @@ export function applyEnvelope(
         return next;
       }
     }
+    return [...items, item];
   }
-  return [...items, item];
+
+  return items;
 }
 
 /**
- * Handles legacy raw event names that don't yet have a unified counterpart
- * routed above.
+ * Build the optimistic user echo that App.tsx seeds onSend / on first
+ * message after `session:created`. Pure over its inputs so tests can
+ * exercise the SES-003 contract without mounting App.
+ *
+ * `now()` is injectable for deterministic ts and id generation in
+ * tests; production callers pass `Date.now`.
  */
-function legacyEnvelopeToItem(env: EventEnvelope, executor: 'claude' | 'codex'): TranscriptItem | null {
+export function createOptimisticEcho(params: {
+  sessionId: string;
+  text: string;
+  exec: 'claude' | 'codex';
+  /** Defaults to `Date.now`. Tests pass a frozen value for stable ids. */
+  now?: () => number;
+}): MsgItem {
+  const now = (params.now ?? Date.now)();
+  return {
+    kind: 'user',
+    id: `optimistic:${params.sessionId}:${now}`,
+    text: params.text,
+    exec: params.exec,
+    ts: now,
+    turn: 0,
+    pending: true,
+  };
+}
+
+/**
+ * Apply an `error` envelope to the App's per-session state. Returns the
+ * new `items` + `pending` snapshots (only mutated entries; callers
+ * spread back into the master record). Returns `null` to mean "no
+ * change needed" so React identity stays stable when the session has
+ * no in-flight echo.
+ *
+ * Encodes ERR-007 / WS-003 / SES-003's error path: flip pending to
+ * false AND mark the latest pending echo as failed, atomically per
+ * session.
+ */
+export interface ErrorEnvelopeDelta {
+  items: TranscriptItem[];
+  pending: boolean;
+}
+
+export function applyErrorEnvelopeToSession(
+  prevItems: TranscriptItem[] | undefined,
+  sessionId: string,
+): ErrorEnvelopeDelta | null {
+  void sessionId; // session id is the caller's index key; not used inside the delta
+  if (!prevItems) return null;
+  const nextItems = markLatestPendingEchoFailed(prevItems);
+  // `pending: false` is unconditional — the contract is "clear pending
+  // even when there's no echo to fail" so a spinner from a non-echo
+  // source (e.g. queue-driven turn_started) is also cleared.
+  return { items: nextItems, pending: false };
+}
+
+/**
+ * Decide the next per-session pending-state for an incoming envelope.
+ * Centralizes the EVT-008 contract (turn_started → true, turn_completed
+ * / session_error → false) and the SES-003 / ERR-007 / WS-003 contract
+ * (any failure surface clears the pending spinner).
+ *
+ * Returns `true` / `false` for an explicit flip, or `null` when the
+ * envelope doesn't change pending state.
+ */
+export function nextPendingFromEnvelope(env: EventEnvelope): boolean | null {
+  if (env.event === 'turn_started') return true;
+  if (env.event === 'turn_completed' || env.event === 'session_error') return false;
+  return null;
+}
+
+/**
+ * Apply a `plan_update` envelope to the per-session plan accumulator
+ * that PlanChip / PlanSheet subscribe to. `data.delta === true` means an
+ * append; anything else replaces.
+ *
+ * Pure over its inputs — App.tsx uses this inside a `setPlanBySession`
+ * functional updater so EVT-007 can be exercised without mounting the
+ * full App.
+ */
+export function applyPlanUpdate(prev: string | undefined, env: EventEnvelope): string {
   const data = (env.data ?? {}) as Record<string, unknown>;
-  switch (env.event) {
-    case 'user_message':
-      // Reconciliation lives in `applyEnvelope`; this branch is reached only
-      // when there's no optimistic echo to swap in. Caller appends the result.
-      return {
-        kind: 'user', id: env.call_id,
-        text: String(data.text ?? ''), exec: executor,
-        ts: env.ts, turn: env.turn,
-      };
-    case 'output.text':
-      return {
-        kind: 'assistant', id: env.call_id,
-        text: String(data.text ?? ''), exec: executor,
-        ts: env.ts, turn: env.turn,
-      };
-    case 'tool.use': {
-      const name = String(data.toolName ?? data.name ?? 'tool');
-      const summary = data.input ? truncate(JSON.stringify(data.input), 200) : '';
-      return { kind: 'tool', id: env.call_id, name, summary, ts: env.ts, turn: env.turn };
+  const text = String(data.text ?? '');
+  const isDelta = data.delta === true;
+  return isDelta ? (prev ?? '') + text : text;
+}
+
+/**
+ * Walk the transcript backwards and mark the most recent pending user-echo
+ * item as failed. Used by the App when an `error` envelope arrives with a
+ * session_id — see ERR-007. Returns the original array if no pending echo
+ * was found so React identity stays stable.
+ */
+export function markLatestPendingEchoFailed(items: TranscriptItem[]): TranscriptItem[] {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i]!;
+    if (it.kind === 'user' && it.pending) {
+      const next = items.slice();
+      next[i] = { ...it, pending: false, failed: true };
+      return next;
     }
-    case 'turn.started':
-      return { kind: 'turn-start', id: env.call_id, text: `Turn ${env.turn}`, ts: env.ts, turn: env.turn };
-    // token_usage.updated never becomes a transcript item
-    case 'token_usage.updated':
-      return null;
-    default:
-      return null;
   }
+  return items;
 }
 
 /**

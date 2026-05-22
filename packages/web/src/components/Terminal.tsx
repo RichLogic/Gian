@@ -77,6 +77,13 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
     term.open(containerRef.current);
     try { fit.fit(); } catch { /* before layout settles */ }
 
+    // Apply current code-zone scale once at startup (config-driven).
+    const initialRaw = getComputedStyle(document.body).getPropertyValue('--fz-13').trim();
+    const initialPx = parseFloat(initialRaw);
+    if (initialPx > 0 && Number.isFinite(initialPx)) {
+      term.options.fontSize = initialPx;
+    }
+
     // Re-paint when the user flips the app theme (light / warm / dark)
     // or accent. Cheap — xterm exposes `options.theme` as a settable
     // hook; we hand it the freshly-resolved RGB values from the host
@@ -85,20 +92,49 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
       if (!containerRef.current) return;
       term.options.theme = readThemeFromCss(containerRef.current);
     };
-    const themeObserver = new MutationObserver(repaintTheme);
+
+    // Code-zone font scale is a CSS-only mechanism for the rest of the
+    // app (--fz-* tokens multiply by --zone-scale), but xterm uses a
+    // JS-driven fontSize. Read the resolved --fz-13 px value and apply
+    // it, then refit so the cell grid matches the new metric.
+    const applyCodeScale = () => {
+      const raw = getComputedStyle(document.body).getPropertyValue('--fz-13').trim();
+      const px = parseFloat(raw);
+      if (px > 0 && Number.isFinite(px)) {
+        term.options.fontSize = px;
+        pushResize();
+      }
+    };
+
+    const themeObserver = new MutationObserver(records => {
+      for (const r of records) {
+        if (r.attributeName === 'data-scale-code') applyCodeScale();
+        else repaintTheme();
+      }
+    });
     themeObserver.observe(document.body, {
       attributes: true,
-      attributeFilter: ['data-theme', 'data-accent'],
+      attributeFilter: ['data-theme', 'data-accent', 'data-scale-code'],
     });
 
     const dataDisp = term.onData(data => {
       wire.sendInput(new TextEncoder().encode(data));
     });
 
+    // De-dup resize events: ResizeObserver fires many times during initial
+    // layout settle, and every duplicate {cols,rows} we forward becomes a
+    // SIGWINCH that zsh redraws its prompt for — visible as a stack of
+    // repeated prompts at the top of the viewport.
+    let lastCols = 0;
+    let lastRows = 0;
     const pushResize = () => {
       try { fit.fit(); } catch { /* before layout settles */ }
       const { cols, rows } = term;
-      if (cols > 0 && rows > 0) wire.sendResize(cols, rows);
+      if (cols > 0 && rows > 0 && (cols !== lastCols || rows !== lastRows)) {
+        lastCols = cols;
+        lastRows = rows;
+        wire.sendResize(cols, rows);
+      }
     };
 
     const resizeObserver = new ResizeObserver(() => { pushResize(); });
@@ -125,7 +161,20 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
       wire.requestReplay();
     }
 
+    // Layout often hasn't finalized by the time the initial fit() runs —
+    // the parent island can still be growing into its flex slot. Force a
+    // re-fit a few frames later; pushResize() is idempotent on unchanged
+    // {cols,rows} so this is a no-op when the first fit was already right.
+    const lateFitTimers: number[] = [];
+    const scheduleRefit = (ms: number) => {
+      lateFitTimers.push(window.setTimeout(() => pushResize(), ms));
+    };
+    requestAnimationFrame(() => requestAnimationFrame(() => pushResize()));
+    scheduleRefit(100);
+    scheduleRefit(500);
+
     return () => {
+      for (const id of lateFitTimers) clearTimeout(id);
       dataDisp.dispose();
       resizeObserver.disconnect();
       themeObserver.disconnect();

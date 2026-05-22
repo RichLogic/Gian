@@ -7,6 +7,7 @@ import type { WsBroadcaster } from './ws-broadcast.js';
 // the rvc-shaped managers land.
 import type { ApprovalManager } from '../approval/index.js';
 import type { TtyManager } from '../tty/manager.js';
+import type { CodexTtyManager } from '../tty/codex-manager.js';
 import type { WorkbenchTerminalManager } from '../term/manager.js';
 import type { Db } from '../storage/db.js';
 import { getUsernameForToken } from '../auth/tokens.js';
@@ -29,6 +30,7 @@ export interface WsHandlerDeps {
   broadcaster: WsBroadcaster;
   approvals?: ApprovalManager;
   tty?: TtyManager;
+  codexTty?: CodexTtyManager;
   term?: WorkbenchTerminalManager;
   db?: Db;
 }
@@ -37,7 +39,7 @@ interface ClientState {
   authed: boolean;
 }
 
-export function makeWsHandlers({ sessions, broadcaster, approvals, tty, term, db }: WsHandlerDeps) {
+export function makeWsHandlers({ sessions, broadcaster, approvals, tty, codexTty, term, db }: WsHandlerDeps) {
   const states = new WeakMap<WSContext, ClientState>();
 
   function sendStateSync(ws: WSContext): void {
@@ -128,17 +130,26 @@ export function makeWsHandlers({ sessions, broadcaster, approvals, tty, term, db
       }
 
       try {
-        await dispatch(parsed, sessions, broadcaster, ws, tty, term);
+        await dispatch(parsed, sessions, broadcaster, ws, tty, codexTty, term);
       } catch (err) {
         console.error('[ws] dispatch error', err);
         // Surface the failure to the client. Without this, errors inside
         // sendMessage / respondApproval / etc. are invisible — the user sees
         // "no reply" with no clue why.
         const sessionIdField = (parsed as { session_id?: unknown }).session_id;
+        // Prefer an explicit `code` on the thrown error (e.g.
+        // SessionManager.switchRuntime throws { code: 'SWITCH_BLOCKED' }
+        // for idle / approval / finalized-worktree refusals). The
+        // per-message-type fallback below is only for legacy throws
+        // that don't tag a code.
+        const explicitCode = (err && typeof err === 'object'
+          && typeof (err as { code?: unknown }).code === 'string')
+          ? (err as { code: string }).code
+          : null;
         broadcaster.send(ws, {
           type: 'error',
           ...(typeof sessionIdField === 'string' ? { session_id: sessionIdField } : {}),
-          code: dispatchErrorCode(parsed.type),
+          code: explicitCode ?? dispatchErrorCode(parsed.type),
           message: err instanceof Error ? err.message : String(err),
         });
       }
@@ -169,8 +180,16 @@ async function dispatch(
   broadcaster: WsBroadcaster,
   ws: WSContext,
   tty?: TtyManager,
+  codexTty?: CodexTtyManager,
   term?: WorkbenchTerminalManager,
 ): Promise<void> {
+  // Resolve TTY routing target for `pty:*` messages by session executor.
+  // Centralized so each pty:* case stays terse.
+  const ttyManagerFor = (sessionId: string): TtyManager | CodexTtyManager | undefined => {
+    let session;
+    try { session = sessions.getSession(sessionId); } catch { return undefined; }
+    return session.executor === 'codex' ? codexTty : tty;
+  };
   switch (msg.type) {
     case 'session:create': {
       const session = await sessions.createSession({
@@ -251,20 +270,23 @@ async function dispatch(
       return;
     }
     case 'pty:input': {
-      if (!tty) return;
+      const mgr = ttyManagerFor(msg.session_id);
+      if (!mgr) return;
       const payload: { data?: string; text?: string } = {};
       if (typeof msg.data === 'string') payload.data = msg.data;
-      await tty.input(msg.session_id, payload);
+      await mgr.input(msg.session_id, payload);
       return;
     }
     case 'pty:resize': {
-      if (!tty) return;
-      await tty.resize(msg.session_id, msg.cols, msg.rows);
+      const mgr = ttyManagerFor(msg.session_id);
+      if (!mgr) return;
+      await mgr.resize(msg.session_id, msg.cols, msg.rows);
       return;
     }
     case 'pty:replay-request': {
-      if (!tty) return;
-      const result = await tty.replay(msg.session_id);
+      const mgr = ttyManagerFor(msg.session_id);
+      if (!mgr) return;
+      const result = await mgr.replay(msg.session_id);
       broadcaster.send(ws, {
         type: 'pty:replay',
         session_id: msg.session_id,

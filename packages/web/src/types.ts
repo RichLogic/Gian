@@ -20,6 +20,22 @@ export interface ToolItem {
   turn: number;
 }
 
+/**
+ * Model reasoning content — separate from assistant text. Streams in via
+ * `reasoning` unified events. Codex emits two flavors:
+ *   - 'summary' — condensed "what I'm about to do" recap
+ *   - 'full'    — raw reasoning trace
+ * Rendered as a collapsible ReasoningCard.
+ */
+export interface ReasoningItem {
+  kind: 'reasoning';
+  id: string;
+  text: string;
+  variant: 'summary' | 'full';
+  ts: number;
+  turn: number;
+}
+
 export interface CommandItem {
   kind: 'command';
   id: string;
@@ -68,6 +84,34 @@ export interface AgentSpawnItem {
   id: string;
   description: string;
   status: 'running' | 'done' | 'error';
+  ts: number;
+  turn: number;
+}
+
+/**
+ * cc-only auto-mode notices. Two variants share one shape:
+ *
+ *   classifier-denied — informational: the classifier blocked one action,
+ *                       the agent will retry a different approach.
+ *   circuit-breaker   — terminal-ish: 3 consecutive or 20 total denials
+ *                       tripped; in `claude -p` mode the session aborts.
+ *
+ * Schema (shared/events.ts) hints at a recovery card with retry / switch
+ * to ask / abort actions; we render the notice now and leave the action
+ * wiring for when host gains the corresponding control channel.
+ */
+export interface AutoNoticeItem {
+  kind: 'auto-notice';
+  id: string;
+  variant: 'classifier-denied' | 'circuit-breaker';
+  /** What the classifier blocked (classifier-denied only). */
+  action?: string;
+  /** Classifier rule text (classifier-denied only). */
+  reason?: string;
+  /** Which threshold tripped (circuit-breaker only). */
+  trigger?: 'consecutive' | 'total';
+  consecutive: number;
+  total: number;
   ts: number;
   turn: number;
 }
@@ -122,6 +166,7 @@ export interface DiffItem {
 
 export type TranscriptItem =
   | MsgItem
+  | ReasoningItem
   | ToolItem
   | StatusItem
   | ApprovalItem
@@ -130,7 +175,8 @@ export type TranscriptItem =
   | FileReadItem
   | FileSearchItem
   | WebSearchItem
-  | AgentSpawnItem;
+  | AgentSpawnItem
+  | AutoNoticeItem;
 
 export interface TokenUsage {
   total: number;

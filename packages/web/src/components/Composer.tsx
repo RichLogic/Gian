@@ -27,10 +27,20 @@ function writeDraft(sessionId: string, text: string): void {
 }
 
 interface PendingFile {
+  /** Local id so React keys are stable even when name is duplicated. */
+  id: string;
+  /** Display filename (paste auto-generates `paste-{timestamp}.png`). */
   name: string;
   size: number;
-  /** Human-readable size, e.g. "3.2 MB" */
   sizeLabel: string;
+  /** Object URL for thumbnail preview. Revoke when removed/sent. */
+  previewUrl: string;
+  /** Absolute path returned by the upload endpoint, or null while uploading. */
+  path: string | null;
+  /** True while the POST is in flight. */
+  uploading: boolean;
+  /** Set when the upload fails so the chip can show the error state. */
+  error?: string;
 }
 
 function fmtBytes(n: number): string {
@@ -158,7 +168,14 @@ export function Composer({
   footer,
 }: {
   session: Session;
-  onSend: (text: string, opts?: { oneShotBypass?: boolean }) => void;
+  onSend: (
+    text: string,
+    opts?: {
+      oneShotBypass?: boolean;
+      /** Absolute paths of uploaded images for this turn. */
+      imagePaths?: string[];
+    },
+  ) => void;
   /** Dispatch a skill invocation directly (used for codex user/project skills
    *  — bypasses the input box so the skill runs as a structured input item
    *  rather than being sent as text). */
@@ -370,15 +387,25 @@ export function Composer({
 
   function submit() {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    // Wait for in-flight uploads to land before sending. We allow the send if
+    // there's any text OR at least one ready attachment.
+    const ready = pendingFiles.filter(f => !f.uploading && !f.error && f.path);
+    if (!trimmed && ready.length === 0) return;
+    if (pendingFiles.some(f => f.uploading)) return; // chip spinner indicates wait
+
+    const imagePaths = ready.map(f => f.path!);
     if (disabled) {
-      onQueueAdd(trimmed);
+      onQueueAdd(trimmed); // queue ignores images for now (out of scope)
     } else {
-      onSend(trimmed, oneShotBypass ? { oneShotBypass: true } : undefined);
-      // Bypass is single-turn: clear immediately after dispatch so the next
-      // send falls back to the session's stored approval_mode.
+      onSend(trimmed, {
+        ...(oneShotBypass ? { oneShotBypass: true } : {}),
+        ...(imagePaths.length > 0 ? { imagePaths } : {}),
+      });
       if (oneShotBypass) setOneShotBypass(false);
     }
+    // Revoke object URLs and clear chips.
+    for (const f of pendingFiles) URL.revokeObjectURL(f.previewUrl);
+    setPendingFiles([]);
     setText('');
   }
 
@@ -391,6 +418,9 @@ export function Composer({
     onSetMode('auto', next);
   }
 
+  // Check if there are ready attachments (uploaded, no errors).
+  const canSendAttachmentOnly = pendingFiles.some(f => !f.uploading && !f.error && f.path);
+
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const chosen = Array.from(e.target.files ?? []);
     const valid = chosen.filter(f => f.size <= MAX_FILE_BYTES);
@@ -398,15 +428,70 @@ export function Composer({
       const existing = new Set(prev.map(p => p.name));
       const added = valid
         .filter(f => !existing.has(f.name))
-        .map(f => ({ name: f.name, size: f.size, sizeLabel: fmtBytes(f.size) }));
+        .map(f => ({
+          id: crypto.randomUUID(),
+          name: f.name,
+          size: f.size,
+          sizeLabel: fmtBytes(f.size),
+          previewUrl: URL.createObjectURL(f),
+          path: null,
+          uploading: false,
+          error: undefined,
+        }));
       return [...prev, ...added];
     });
     // Reset input so the same file can be re-selected
     e.target.value = '';
   }
 
-  function removeFile(name: string) {
-    setPendingFiles(prev => prev.filter(f => f.name !== name));
+  function removeFile(id: string) {
+    setPendingFiles(prev => {
+      const target = prev.find(f => f.id === id);
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter(f => f.id !== id);
+    });
+  }
+
+  async function uploadOne(file: File): Promise<void> {
+    const id = crypto.randomUUID();
+    const previewUrl = URL.createObjectURL(file);
+    const entry: PendingFile = {
+      id,
+      name: file.name,
+      size: file.size,
+      sizeLabel: fmtBytes(file.size),
+      previewUrl,
+      path: null,
+      uploading: true,
+    };
+    setPendingFiles(prev => [...prev, entry]);
+
+    try {
+      const { uploadAttachment } = await import('../api.js');
+      const result = await uploadAttachment(session.id, file, file.name);
+      setPendingFiles(prev =>
+        prev.map(f => f.id === id ? { ...f, path: result.path, uploading: false } : f),
+      );
+    } catch (err) {
+      setPendingFiles(prev =>
+        prev.map(f => f.id === id ? { ...f, uploading: false, error: String(err) } : f),
+      );
+    }
+  }
+
+  function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const items = Array.from(e.clipboardData?.items ?? []);
+    const images = items.filter(it => it.kind === 'file' && it.type.startsWith('image/'));
+    if (images.length === 0) return; // let normal text paste through
+    e.preventDefault();
+    for (const it of images) {
+      const file = it.getAsFile();
+      if (!file) continue;
+      if (file.size > MAX_FILE_BYTES) continue; // silently drop; chip would be useless
+      // Screenshots have empty name — fabricate one.
+      const named = file.name ? file : new File([file], `paste-${Date.now()}.png`, { type: file.type });
+      void uploadOne(named);
+    }
   }
 
   function handleTextareaKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -475,27 +560,21 @@ export function Composer({
             value={text}
             onChange={e => setText(e.target.value)}
             onKeyDown={handleTextareaKeyDown}
+            onPaste={handlePaste}
             placeholder={disabled ? t('composer.placeholder.busy') : t('composer.placeholder.idle')}
           />
         </div>
 
         {/* Pending attachment chips */}
         {pendingFiles.length > 0 && (
-          <div className="cmp-attach-chips">
+          <div className="composer-attachments">
             {pendingFiles.map(f => (
-              <span key={f.name} className="cmp-attach-chip">
-                <svg className="cmp-attach-chip-ico" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" aria-hidden="true">
-                  <path d="M10 5.5L5.5 10A3 3 0 012 6.5L7 1.5a2 2 0 013 3L4.5 10A1 1 0 013 8.5l5-5" />
-                </svg>
-                <span className="cmp-attach-chip-name" title={f.name}>{f.name}</span>
-                <span className="cmp-attach-chip-size">{f.sizeLabel}</span>
-                <button
-                  type="button"
-                  className="cmp-attach-chip-rm"
-                  aria-label={`Remove ${f.name}`}
-                  onClick={() => removeFile(f.name)}
-                >×</button>
-              </span>
+              <div key={f.id} className={`att-chip${f.error ? ' is-error' : ''}${f.uploading ? ' is-uploading' : ''}`}>
+                <img className="att-thumb" src={f.previewUrl} alt="" />
+                <span className="att-name" title={f.error ?? f.name}>{f.name}</span>
+                <span className="att-size">{f.sizeLabel}</span>
+                <button className="att-remove" type="button" onClick={() => removeFile(f.id)} aria-label="Remove attachment">✕</button>
+              </div>
             ))}
           </div>
         )}
@@ -706,14 +785,14 @@ export function Composer({
             <span className="glyph composer-slash-glyph">/</span>
           </button>
 
-          {/* Attach files — plus glyph (VS Code style) */}
+          {/* Attach files — plus glyph (VS Code style) — picker not supported in v1 */}
           <button
             type="button"
             className={`composer-act${pendingFiles.length > 0 ? ' active' : ''}`}
-            title="Attach files (Cmd+V to paste)"
-            disabled={disabled}
+            title="Paste images with ⌘V (file picker coming in v1.1)"
+            disabled
             onClick={() => fileInputRef.current?.click()}
-            aria-label="Attach files"
+            aria-label="Paste images with ⌘V"
           >
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -737,7 +816,7 @@ export function Composer({
             <button
               type="button"
               className="composer-act primary"
-              disabled={!text.trim()}
+              disabled={!text.trim() && !canSendAttachmentOnly}
               onClick={submit}
               title={t('composer.send.button')}
               aria-label={t('composer.send.button')}

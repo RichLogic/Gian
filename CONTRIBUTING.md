@@ -50,7 +50,7 @@ packages/shared/   shared TypeScript types — no business logic
 packages/host/     Hono API + WebSocket server + all backend subsystems
 packages/web/      React SPA (Vite)
 scripts/           daemon install/uninstall scripts
-doc/               architecture, protocol, and roadmap docs
+docs/              architecture, protocol, roadmap, AI/quality/ADR docs
 ```
 
 Changes to `packages/shared/src/` affect all three packages — rebuild shared
@@ -63,7 +63,7 @@ pnpm -F @gian/shared build
 ## Agent-assisted development
 
 This repo was built using a team-of-agents pattern. See
-[`doc/roadmap.md`](doc/roadmap.md) for the milestone history, per-track file
+[`docs/roadmap.md`](docs/roadmap.md) for the milestone history, per-track file
 ownership rules, and parallel constraint protocol used to coordinate multiple
 agents without conflicts. If you are using an AI agent to contribute, follow
 the same rules: each agent owns only the files listed in its brief, types flow

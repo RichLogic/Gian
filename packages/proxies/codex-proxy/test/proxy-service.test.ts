@@ -9,6 +9,8 @@ import type { CodexRuntime, RuntimeNotification, RuntimeServerRequest } from '..
 class FakeRuntime extends EventEmitter implements CodexRuntime {
   nextThreadId = 1;
   nextTurnId = 1;
+  compactCalls: string[] = [];
+  startTurnCalls: Array<{ threadId: string; input: InputItem[] }> = [];
   readonly responses: Array<{ id: number | string; payload: unknown }> = [];
   readonly threads = new Map<string, unknown>();
 
@@ -16,8 +18,8 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
 
   async startThread(options: {
     cwd: string;
-    sandboxProfile: 'read-only' | 'workspace-write' | 'danger-full-access';
     model?: string | null;
+    ephemeral?: boolean;
   }) {
     const threadId = `thread-${this.nextThreadId++}`;
     this.threads.set(threadId, {
@@ -42,6 +44,7 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
   }
 
   async startTurn(threadId: string, _input: InputItem[]) {
+    this.startTurnCalls.push({ threadId, input: _input });
     const turnId = `turn-${this.nextTurnId++}`;
     const thread = this.threads.get(threadId) as { turns: unknown[] };
     thread.turns.push({
@@ -50,6 +53,18 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
       items: [],
     });
     return { turn: { id: turnId, status: 'running' } };
+  }
+
+  async compactThread(threadId: string) {
+    this.compactCalls.push(threadId);
+    const turnId = `compact-${this.nextTurnId++}`;
+    const thread = this.threads.get(threadId) as { turns: unknown[] };
+    thread.turns.push({
+      id: turnId,
+      status: 'running',
+      items: [],
+    });
+    return {};
   }
 
   async interruptTurn(_threadId: string, _turnId: string) {
@@ -210,6 +225,116 @@ test('session.create with threadId resumes the existing codex thread', async () 
   }
 });
 
+test('Codex native /compact uses app-server thread/compact/start', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({
+      cwd: '/tmp/work',
+    });
+
+    const started = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: '/compact' }],
+    }, 41);
+
+    assert.equal(harness.runtime.compactCalls.length, 1);
+    assert.equal(harness.runtime.compactCalls[0], created.session.threadId);
+    assert.equal(harness.runtime.startTurnCalls.length, 0, '/compact must not leak as prompt text');
+    assert.equal(started.turn.status, 'running');
+
+    const startedEvent = harness.events.find((entry) => entry.method === 'turn.started');
+    assert.equal((startedEvent?.params.data as { command?: string } | undefined)?.command, '/compact');
+    assert.equal(harness.service.getSession({ sessionId: created.session.id }).session.status, 'running');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('Codex thread/compacted notification completes intercepted /compact turn', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({
+      cwd: '/tmp/work',
+    });
+
+    await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: '/compact' }],
+    }, 44);
+
+    const compactTurnId = 'compact-1';
+    harness.runtime.setCompletedTurn(created.session.threadId, compactTurnId);
+    harness.runtime.emitNotification({
+      method: 'thread/compacted',
+      params: {
+        threadId: created.session.threadId,
+        turnId: compactTurnId,
+      },
+    });
+
+    await waitFor(() => harness.events.some((entry) => entry.method === 'turn.completed'));
+
+    const completedEvent = harness.events.find((entry) => entry.method === 'turn.completed');
+    assert.equal(completedEvent?.params.turnId, compactTurnId);
+    assert.equal((completedEvent?.params.data as { compacted?: boolean } | undefined)?.compacted, true);
+    assert.equal(harness.service.getSession({ sessionId: created.session.id }).session.status, 'idle');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('Codex native /clear rotates the underlying thread id and completes locally', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({
+      cwd: '/tmp/work',
+    });
+    const oldThreadId = created.session.threadId;
+
+    const result = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: '/clear' }],
+    }, 42);
+
+    assert.equal(result.turn.status, 'completed');
+    assert.equal(harness.runtime.startTurnCalls.length, 0, '/clear must not leak as prompt text');
+
+    const current = harness.service.getSession({ sessionId: created.session.id }).session;
+    assert.notEqual(current.threadId, oldThreadId);
+    const rotated = harness.events.find((entry) => entry.method === 'session.rotated');
+    assert.deepEqual(rotated?.params.data, {
+      oldNativeSessionId: oldThreadId,
+      newNativeSessionId: current.threadId,
+    });
+    assert.ok(harness.events.some((entry) => entry.method === 'output.text.delta'));
+    assert.ok(harness.events.some((entry) => entry.method === 'turn.completed'));
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('TUI-only Codex native commands complete with a local explanation', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({
+      cwd: '/tmp/work',
+    });
+
+    const result = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: '/model gpt-5.4' }],
+    }, 43);
+
+    assert.equal(result.turn.status, 'completed');
+    assert.equal(harness.runtime.startTurnCalls.length, 0, '/model must not leak as prompt text');
+    const output = harness.events.find((entry) => entry.method === 'output.text.delta');
+    assert.match(String((output?.params.data as { delta?: unknown } | undefined)?.delta ?? ''), /model selector/);
+    assert.equal(harness.service.getSession({ sessionId: created.session.id }).session.status, 'idle');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('after restart (in-memory only), session is unknown until recreated via threadId', async () => {
   // Proxy is now process-memory only. If the proxy restarts, the in-memory
   // sessionsById map is empty and any RPC referencing the prior sessionId
@@ -278,7 +403,16 @@ test('unsafe-agent relays approvals upstream and translates approval responses',
 
     const approvalEvent = harness.events.find((entry) => entry.method === 'approval.requested');
     assert.ok(approvalEvent);
-    assert.equal((approvalEvent?.params.data as { approvalId: string }).approvalId, '99');
+    const approvalData = approvalEvent?.params.data as {
+      approvalId: string;
+      reason: string;
+      severity: string;
+      risk: string;
+    };
+    assert.equal(approvalData.approvalId, '99');
+    assert.equal(approvalData.reason, 'ls');
+    assert.equal(approvalData.severity, 'medium');
+    assert.equal(approvalData.risk, 'ls');
 
     await harness.service.respondApproval({
       sessionId: created.session.id,
@@ -319,11 +453,23 @@ test('approvals are always relayed upstream (mode-driven auto-approval was remov
       params: {
         threadId: created.session.threadId,
         permissions: { network: true },
+        reason: 'Need docs',
       },
     });
 
     await waitFor(() => harness.events.some((entry) => entry.method === 'approval.requested'));
-    assert.equal(harness.events.some((entry) => entry.method === 'approval.requested'), true);
+    const approvalEvent = harness.events.find((entry) => entry.method === 'approval.requested');
+    assert.ok(approvalEvent);
+    const data = approvalEvent.params.data as {
+      reason: string;
+      severity: string;
+      permissionsKind?: string;
+      risk: string;
+    };
+    assert.equal(data.reason, 'Need docs');
+    assert.equal(data.severity, 'low');
+    assert.equal(data.permissionsKind, 'network');
+    assert.equal(data.risk, 'Need docs');
   } finally {
     await harness.cleanup();
   }

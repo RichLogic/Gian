@@ -228,6 +228,56 @@
   word-break: break-word;
 }
 
+/* Reasoning card — codex "thinking" content. Default-collapsed via the
+   native <details> element; muted styling so reasoning recedes visually
+   compared to assistant text. */
+.reasoning-card {
+  margin: 4px 0;
+  padding: 6px 10px;
+  border-left: 2px solid var(--hairline);
+  background: transparent;
+  font-size: var(--fz-12);
+  color: var(--text-3);
+}
+.reasoning-card[open] { background: var(--surface-2); border-radius: var(--r-1); }
+.reasoning-card-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.reasoning-card-head::-webkit-details-marker { display: none; }
+.reasoning-card-head::before {
+  content: '▸';
+  font-size: 9px;
+  color: var(--text-3);
+  transition: transform 80ms;
+}
+.reasoning-card[open] .reasoning-card-head::before { transform: rotate(90deg); }
+.reasoning-card-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.reasoning-card[data-variant="summary"] .reasoning-card-label { color: var(--accent-text); }
+.reasoning-card-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-3);
+}
+.reasoning-card-body {
+  margin-top: 6px;
+  padding-left: 0;
+  font-style: italic;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
 /* Optimistic echo: muted until the server confirms with `user_message`. */
 .msg.user.pending .msg-text { opacity: 0.6; }
 .msg.user.failed .msg-text {
@@ -1287,6 +1337,52 @@
 }
 .composer-hint { display: none; }
 
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px 0;
+}
+.att-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px 3px 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  font-size: 11px;
+  max-width: 240px;
+}
+.att-chip.is-uploading { opacity: 0.6; }
+.att-chip.is-error { border-color: var(--warn); color: var(--warn); }
+.att-thumb {
+  width: 28px; height: 28px;
+  object-fit: cover;
+  border-radius: var(--r-1);
+  flex-shrink: 0;
+}
+.att-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.att-size {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.att-remove {
+  background: none;
+  border: none;
+  color: var(--text-3);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+}
+.att-remove:hover { color: var(--text); }
+
 /* ============================================================
    Job Mode progress bar
    ============================================================ */
@@ -1504,15 +1600,20 @@
   pointer-events: none;
 }
 
-/* Files — expandable tree (mirrors design/other-views.css .tree) */
+/* Files — expandable tree (mirrors design/other-views.css .tree)
+   Indentation is applied per-row as inline padding-left (depth * 10px + 6px)
+   so deep paths add width linearly. The tree itself grows to its widest row
+   (min-width: max-content) and overflow is exposed via horizontal scroll on
+   .sidebar-scroll, so long names are never truncated. */
 .tree {
   padding: 4px 2px;
   font-family: var(--font-mono);
   font-size: var(--fz-11);
+  min-width: max-content;
 }
 .tree-item {
   display: grid;
-  grid-template-columns: 12px 14px 1fr auto;
+  grid-template-columns: 12px 14px auto;
   gap: 5px;
   align-items: center;
   padding: 3px 6px;
@@ -1542,11 +1643,8 @@
 .tree-item.folder .tree-ico { color: var(--accent-text); opacity: 0.7; }
 .tree-item.active .tree-ico { color: var(--accent-text); }
 .tree-item .tree-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.tree-children { padding-left: 14px; }
 
 .files-mode-toggle {
   display: flex;
@@ -1672,8 +1770,8 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  direction: rtl;       /* keep the file name visible when path is long */
   text-align: left;
+  min-width: 0;
 }
 .files-changed-row.active .fcr-path { color: var(--accent-text); }
 .files-changed-row .fcr-stat {
