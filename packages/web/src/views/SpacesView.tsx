@@ -603,7 +603,11 @@ function SpaceDetail({
                 autoFocus
                 onChange={e => setNameEdit(e.target.value)}
                 onBlur={() => void commitNameEdit()}
-                onKeyDown={e => { if (e.key === 'Enter') void commitNameEdit(); if (e.key === 'Escape') setNameEdit(null); }}
+                onKeyDown={e => {
+                  if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                  if (e.key === 'Enter') void commitNameEdit();
+                  if (e.key === 'Escape') setNameEdit(null);
+                }}
               />
             ) : (
               <h1 onClick={() => setNameEdit(workspace.name)}>{workspace.name}</h1>

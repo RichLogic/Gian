@@ -21,6 +21,9 @@ export interface TtyStartParams {
    *  use (hooks block + allowedHttpHookUrls). The proxy writes it to a
    *  tmp file and passes `--settings <path>` to claude. */
   hookSettings?: Record<string, unknown> | null;
+  /** Extra CLI args appended after the standard ones. Host owns this
+   *  list; current use is `['--remote-control']`. */
+  extraArgs?: string[];
 }
 
 export interface TtyInputParams {
@@ -88,6 +91,9 @@ export class TtyClaudeService {
     if (!Number.isFinite(params.cols) || !Number.isFinite(params.rows)) {
       throw new Error('cols and rows are required');
     }
+    const extraArgs = Array.isArray(params.extraArgs)
+      ? params.extraArgs.filter(a => typeof a === 'string')
+      : null;
     await this.runtime.spawnSession({
       sessionId: params.sessionId,
       claudeSessionId: params.claudeSessionId,
@@ -97,6 +103,7 @@ export class TtyClaudeService {
       cols: Math.max(1, Math.floor(params.cols)),
       rows: Math.max(1, Math.floor(params.rows)),
       hookSettings: params.hookSettings ?? null,
+      ...(extraArgs && extraArgs.length > 0 ? { extraArgs } : {}),
     });
     return {
       ok: true,

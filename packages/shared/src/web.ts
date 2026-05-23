@@ -438,6 +438,12 @@ export interface SessionSwitchRuntimeMessage {
   type: 'session:switch-runtime';
   session_id: string;
   target: RuntimeMode;
+  /** When true and target='tty' and executor='claude', spawn the PTY
+   *  with Claude Code's `--remote-control` flag so the session can also
+   *  be driven from claude.ai / Claude app. Requires Claude Code ≥
+   *  2.1.52; older binaries will surface a spawn error. Ignored for
+   *  non-claude / non-tty switches. */
+  remote_control?: boolean;
 }
 
 /**

@@ -23,17 +23,24 @@ const MIME: Record<string, string> = {
 /** 20 MiB cap on the raw preview endpoint — anything larger gets 413. */
 export const RAW_PREVIEW_MAX_BYTES = 20 * 1024 * 1024;
 
-/** Strict CSP for HTML previews. Forbids framing, plugins, and base/form
- *  redirection while allowing inline styles + scripts so static-rendered
- *  HTML still works. */
+/** Strict CSP for HTML previews. Forbids framing, plugins, base/form
+ *  redirection, and same-origin network calls. Inline styles + scripts are
+ *  allowed so static-rendered HTML still works, but `script-src` and
+ *  `connect-src` deliberately exclude `'self'` — workspace HTML is served
+ *  on the host's own origin, so allowing `'self'` would let a malicious
+ *  preview fetch the Gian host API (SEC pivot).
+ */
 const HTML_CSP =
-  "default-src 'self' data: blob:; " +
+  "default-src 'none'; " +
   "img-src 'self' data: blob:; " +
-  "style-src 'self' 'unsafe-inline'; " +
-  "script-src 'self' 'unsafe-inline'; " +
+  "style-src 'unsafe-inline'; " +
+  "script-src 'unsafe-inline'; " +
   "font-src 'self' data:; " +
-  "connect-src 'self'; " +
+  "connect-src 'none'; " +
+  "media-src 'self' data: blob:; " +
   "object-src 'none'; " +
+  "frame-src 'none'; " +
+  "child-src 'none'; " +
   "frame-ancestors 'none'; " +
   "base-uri 'none'; " +
   "form-action 'none'";

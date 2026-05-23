@@ -162,6 +162,7 @@ export class CcProxyClient implements ProxyClient {
     rows: number;
     model?: string | null;
     hookSettings?: Record<string, unknown> | null;
+    extraArgs?: string[];
   }): Promise<{ ok: true; replay: string[]; alive: boolean }> {
     return this.request<{ ok: true; replay: string[]; alive: boolean }>(
       'tty.start',

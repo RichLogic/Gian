@@ -74,6 +74,11 @@ export interface SpawnPtyOptions {
   /** Optional env overrides — primarily PATH so launchd-spawned host can
    *  find `claude` even when its env is minimal. */
   env?: NodeJS.ProcessEnv;
+  /** Optional extra CLI args appended after the standard ones. Used by
+   *  the host to inject `--remote-control` when the caller wants TTY +
+   *  Claude Code remote control. The proxy treats them as opaque — it's
+   *  the host's job to keep this list trustworthy. */
+  extraArgs?: string[];
 }
 
 interface TtySession {
@@ -307,6 +312,9 @@ export class TtyClaudeRuntime extends EventEmitter<TtyRuntimeEvents> {
     }
     if (options.model) {
       args.push('--model', options.model);
+    }
+    if (options.extraArgs && options.extraArgs.length > 0) {
+      args.push(...options.extraArgs);
     }
     return args;
   }

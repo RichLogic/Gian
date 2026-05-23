@@ -2844,6 +2844,31 @@
 }
 .composer-bypass-banner svg { flex: none; }
 
+.composer-remote-banner {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px;
+  font: 500 11px/1.3 var(--font-sans);
+  color: var(--text-1);
+  background: oklch(from var(--accent) l c h / 0.08);
+  border-bottom: 1px solid oklch(from var(--accent) l c h / 0.20);
+}
+.composer-remote-banner .spinner { flex: none; }
+.composer-remote-cancel {
+  margin-left: auto;
+  padding: 2px 8px;
+  font: 600 10px/1.4 var(--font-mono);
+  color: var(--text-2);
+  background: transparent;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  letter-spacing: 0.04em;
+}
+.composer-remote-cancel:hover {
+  color: var(--text-1);
+  border-color: var(--text-2);
+}
+
 .cmode-warn {
   display: inline-block;
   margin-right: 3px;

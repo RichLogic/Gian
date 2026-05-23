@@ -266,7 +266,9 @@ async function dispatch(
       return;
     }
     case 'session:switch-runtime': {
-      await sessions.switchRuntime(msg.session_id, msg.target);
+      await sessions.switchRuntime(msg.session_id, msg.target, {
+        remoteControl: msg.remote_control === true,
+      });
       return;
     }
     case 'pty:input': {

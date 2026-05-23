@@ -128,7 +128,7 @@ test('SEC-009: /raw on a .html file attaches a strict CSP that forbids framing, 
       "object-src 'none'",
       "base-uri 'none'",
       "form-action 'none'",
-      "connect-src 'self'",
+      "connect-src 'none'",
     ]) {
       assert.ok(csp!.includes(needle),
         `HTML CSP must include "${needle}" — sandboxing the preview`);

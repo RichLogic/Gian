@@ -79,6 +79,16 @@ export function App() {
   // the "Creating…" busy state in NewSessionView so the form doesn't look dead
   // while the host spins up a session + worktree.
   const [creatingSession, setCreatingSession] = useState(false);
+  // Same lifecycle as creatingSession but only set during a fork. Drives a
+  // global "Forking session…" toast — the user is mid-session when they
+  // fork, so without feedback the click looks like a no-op.
+  const [forkingSession, setForkingSession] = useState(false);
+  // Sessions for which the user clicked "Remote" while a turn was still
+  // running. The Composer locks input + shows a banner while the id is
+  // here; an effect listens to session:updated and fires the actual
+  // switch-runtime dispatch when status leaves 'running'. Keyed on
+  // session id so two sessions can be armed independently.
+  const [armedRemoteSwitch, setArmedRemoteSwitch] = useState<Set<string>>(() => new Set());
   // Codex plan-mode plan markdown per session — populated by plan_update
   // events. PlanChip reads from here when there's no exit_plan_mode approval
   // to surface (the codex flow doesn't go through approval cards).
@@ -190,6 +200,7 @@ export function App() {
           setSessions(prev => [msg.session, ...prev.filter(s => s.id !== msg.session.id)]);
           setActiveSessionId(msg.session.id);
           setCreatingSession(false);
+          setForkingSession(false);
           const pendingMsg = pendingFirstMessageRef.current;
           if (pendingMsg) {
             pendingFirstMessageRef.current = null;
@@ -284,7 +295,10 @@ export function App() {
             });
             setPendingBySession(p => ({ ...p, [sid]: false }));
           }
-          if (msg.code === 'SESSION_CREATE_FAILED') setCreatingSession(false);
+          if (msg.code === 'SESSION_CREATE_FAILED') {
+            setCreatingSession(false);
+            setForkingSession(false);
+          }
           alert(`${msg.code}: ${msg.message}`);
           return;
       }
@@ -327,6 +341,35 @@ export function App() {
   useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
   const archivedSessionsRef = useRef<Session[]>([]);
   useEffect(() => { archivedSessionsRef.current = archivedSessions; }, [archivedSessions]);
+
+  // Fire queued remote-control switches once their turn lands. Watches the
+  // `sessions` list — when an armed session's status leaves 'running' /
+  // 'pending', dispatch session:switch-runtime with remote_control=true and
+  // drop the armed flag. SWITCH_BLOCKED errors come back through the normal
+  // 'error' message channel; we don't silence them.
+  useEffect(() => {
+    if (armedRemoteSwitch.size === 0) return;
+    const toFire: string[] = [];
+    for (const id of armedRemoteSwitch) {
+      const s = sessions.find(x => x.id === id);
+      if (!s) { toFire.push(id); continue; } // session vanished — clear
+      if (s.status === 'running' || s.status === 'pending') continue;
+      toFire.push(id);
+      ws.send({
+        type: 'session:switch-runtime',
+        session_id: id,
+        target: 'tty',
+        remote_control: true,
+      });
+    }
+    if (toFire.length > 0) {
+      setArmedRemoteSwitch(prev => {
+        const next = new Set(prev);
+        for (const id of toFire) next.delete(id);
+        return next;
+      });
+    }
+  }, [sessions, armedRemoteSwitch, ws]);
 
   // Hydrate transcript on first session view.
   useEffect(() => {
@@ -723,6 +766,7 @@ export function App() {
           : `session ${activeSession.id.slice(0, 6)}`;
         const isWorktree = activeSession.worktree_path !== null;
         setCreatingSession(true);
+        setForkingSession(true);
         ws.send({
           type: 'session:create',
           workspace_id: activeSession.workspace_id,
@@ -952,6 +996,34 @@ export function App() {
               onSwitchRuntime={(sessionId, target) =>
                 ws.send({ type: 'session:switch-runtime', session_id: sessionId, target })
               }
+              armedRemoteSwitch={armedRemoteSwitch}
+              onRequestRemote={(sessionId) => {
+                const s = sessionsRef.current.find(x => x.id === sessionId);
+                const busy = s?.status === 'running' || s?.status === 'pending';
+                if (busy) {
+                  // Arm; the effect above fires the switch when status flips.
+                  setArmedRemoteSwitch(prev => {
+                    const next = new Set(prev);
+                    next.add(sessionId);
+                    return next;
+                  });
+                  return;
+                }
+                ws.send({
+                  type: 'session:switch-runtime',
+                  session_id: sessionId,
+                  target: 'tty',
+                  remote_control: true,
+                });
+              }}
+              onCancelRemote={(sessionId) => {
+                setArmedRemoteSwitch(prev => {
+                  if (!prev.has(sessionId)) return prev;
+                  const next = new Set(prev);
+                  next.delete(sessionId);
+                  return next;
+                });
+              }}
               onOpenSpaces={() => setMode('spaces')}
             />
           </PlanOpenContext.Provider>
@@ -1065,6 +1137,12 @@ export function App() {
           runner={runner}
         />
       </div>
+      {forkingSession && (
+        <div className="fork-toast" role="status" aria-live="polite">
+          <span className="spinner" />
+          <span>Forking session…</span>
+        </div>
+      )}
     </div>
     </LocaleProvider>
   );

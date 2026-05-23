@@ -183,15 +183,19 @@ test('SEC-009: every active-content CSP includes frame-ancestors none (defense-i
   }
 });
 
-test('SEC-009: HTML CSP allows inline styles+scripts (required for static HTML preview) but blocks navigation', () => {
+test('SEC-009: HTML CSP allows inline styles+scripts (required for static HTML preview) but blocks all network egress and same-origin pivots', () => {
   const { headers } = buildRawPreviewHeaders({ rel: 'a.html', size: 1 });
   const csp = headers['Content-Security-Policy']!;
   // Inline allowed (the HTML files Gian previews are static, often dev artifacts).
-  assert.ok(csp.includes("script-src 'self' 'unsafe-inline'"));
-  assert.ok(csp.includes("style-src 'self' 'unsafe-inline'"));
-  // But navigation/exfiltration is locked down.
-  assert.ok(csp.includes("connect-src 'self'"),
-    'fetch/xhr/websocket must be restricted to same-origin so previews can\'t exfiltrate');
+  assert.ok(csp.includes("script-src 'unsafe-inline'"));
+  assert.ok(csp.includes("style-src 'unsafe-inline'"));
+  // Critical: `'self'` must NOT appear in script-src / connect-src. The raw
+  // preview is served from the host's own origin, so allowing `'self'` would
+  // let a malicious preview fetch the Gian host API (cross-feature pivot).
+  assert.ok(!csp.includes("script-src 'self'"),
+    "script-src MUST NOT include 'self' — the host origin serves the Gian API");
+  assert.ok(csp.includes("connect-src 'none'"),
+    'fetch/xhr/websocket must be fully denied — `self` would expose the host API');
   assert.ok(csp.includes("form-action 'none'"),
     'form submissions blocked — a preview must not be able to drive POST/GET to anywhere');
 });

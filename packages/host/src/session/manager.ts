@@ -497,7 +497,11 @@ export class SessionManager {
    * against the same threadId that codex-proxy's `thread/start` minted),
    * so conversation history survives the toggle in either direction.
    */
-  async switchRuntime(sessionId: string, target: RuntimeMode): Promise<void> {
+  async switchRuntime(
+    sessionId: string,
+    target: RuntimeMode,
+    opts: { remoteControl?: boolean } = {},
+  ): Promise<void> {
     const session = this.getSession(sessionId);
     if (session.executor !== 'claude' && session.executor !== 'codex') {
       throw Object.assign(
@@ -553,7 +557,11 @@ export class SessionManager {
       const cwd = fresh.worktree_path ?? workspace.path;
       // Pick a conservative default geometry — the UI resizes on mount.
       if (fresh.executor === 'claude') {
-        await this.ttyMgr!.start(fresh, cwd, { cols: 120, rows: 30 });
+        // `remote_control` from the WS message becomes a `--remote-control`
+        // CLI flag. Codex has no equivalent so we silently drop the bit
+        // for codex sessions.
+        const extraArgs = opts.remoteControl ? ['--remote-control'] : undefined;
+        await this.ttyMgr!.start(fresh, cwd, { cols: 120, rows: 30, ...(extraArgs ? { extraArgs } : {}) });
       } else {
         await this.codexTtyMgr!.start(fresh, cwd, { cols: 120, rows: 30 });
       }

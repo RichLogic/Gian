@@ -574,6 +574,11 @@ export class SlackCodingManager implements MessagingPlatform {
     }
 
     // -- Normal message (not a reply) — send as prompt to agent -------------
+    if (input.attachmentCount > 0) {
+      await input.reply('Slack attachments are not supported in coding mode yet.');
+      return;
+    }
+
     const context = await this.loadCurrentWorkspaceContext(bot);
     if (!context.owner) {
       await input.reply('This bot owner no longer exists locally.');

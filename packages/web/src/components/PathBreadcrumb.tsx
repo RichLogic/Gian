@@ -138,6 +138,10 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                 defaultValue={seg.label}
                 onBlur={e => onRenameSubmit?.(e.currentTarget.value)}
                 onKeyDown={e => {
+                  // Skip while an IME composition is in flight — Chinese/
+                  // Japanese/Korean input methods use Enter to commit the
+                  // candidate, not to submit the rename.
+                  if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                   if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                   if (e.key === 'Escape') onRenameCancel?.();
                 }}

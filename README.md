@@ -13,10 +13,11 @@ underlying CLI tools.
 
 ## Features
 
-- **12 unified event types** rendered as structured cards in the Transcript:
-  `assistant_text`, `command_execution`, `file_change`, `file_read`,
-  `file_search`, `web_search`, `agent_spawn`, `approval_requested`,
-  `approval_resolved`, `turn_completed`, `session_error`, `thinking`
+- **16 unified event types** rendered as structured cards in the Transcript:
+  `assistant_text`, `reasoning`, `plan_update`, `command_execution`,
+  `file_change`, `file_read`, `file_search`, `web_search`, `agent_spawn`,
+  `approval_requested`, `approval_resolved`, `auto_classifier_denied`,
+  `auto_circuit_breaker`, `turn_started`, `turn_completed`, `session_error`
 - **Approval workflow** — default (risk-level gated) and auto modes; `Allow
   Once`, `Allow Session`, `Decline`; keyboard shortcuts A / ⇧A / D
 - **Job Mode** — set turns > 1 to run multi-turn autonomous tasks; global

@@ -166,6 +166,9 @@ export function Composer({
   disabled, executor,
   workspaceId,
   footer,
+  armedRemote = false,
+  onRequestRemote,
+  onCancelRemote,
 }: {
   session: Session;
   onSend: (
@@ -189,6 +192,16 @@ export function Composer({
   executor: 'claude' | 'codex';
   workspaceId?: string;
   footer?: import('react').ReactNode;
+  /** True when user clicked Remote while a turn was still running. The
+   *  composer locks the textarea + send + queue-add and shows a banner.
+   *  Only meaningful for claude sessions in structured mode. */
+  armedRemote?: boolean;
+  /** Called when the Remote icon button is clicked. Parent decides
+   *  whether to fire the switch immediately or arm-for-later. */
+  onRequestRemote?: () => void;
+  /** Called when user clicks Cancel on the armed banner — or clicks the
+   *  Remote button again while armed. */
+  onCancelRemote?: () => void;
 }) {
   const t = useT();
   const [text, setText] = useState(() => readDraft(session.id));
@@ -386,6 +399,9 @@ export function Composer({
   }
 
   function submit() {
+    // Hard block while armed for Remote — the input is locked and the
+    // banner is showing. User must Cancel before sending.
+    if (armedRemote) return;
     const trimmed = text.trim();
     // Wait for in-flight uploads to land before sending. We allow the send if
     // there's any text OR at least one ready attachment.
@@ -397,10 +413,10 @@ export function Composer({
     if (disabled) {
       onQueueAdd(trimmed); // queue ignores images for now (out of scope)
     } else {
-      onSend(trimmed, {
-        ...(oneShotBypass ? { oneShotBypass: true } : {}),
-        ...(imagePaths.length > 0 ? { imagePaths } : {}),
-      });
+      const opts: { oneShotBypass?: true; imagePaths?: string[] } = {};
+      if (oneShotBypass) opts.oneShotBypass = true;
+      if (imagePaths.length > 0) opts.imagePaths = imagePaths;
+      onSend(trimmed, Object.keys(opts).length > 0 ? opts : undefined);
       if (oneShotBypass) setOneShotBypass(false);
     }
     // Revoke object URLs and clear chips.
@@ -552,6 +568,20 @@ export function Composer({
           </div>
         )}
 
+        {armedRemote && (
+          <div className="composer-remote-banner" role="status" aria-live="polite">
+            <span className="spinner" />
+            <span>当前 turn 结束后进入 Remote 模式 · 输入已锁</span>
+            <button
+              type="button"
+              className="composer-remote-cancel"
+              onClick={() => onCancelRemote?.()}
+            >
+              取消
+            </button>
+          </div>
+        )}
+
         <div className="composer-input-wrap">
           <textarea
             ref={ref}
@@ -561,7 +591,14 @@ export function Composer({
             onChange={e => setText(e.target.value)}
             onKeyDown={handleTextareaKeyDown}
             onPaste={handlePaste}
-            placeholder={disabled ? t('composer.placeholder.busy') : t('composer.placeholder.idle')}
+            disabled={armedRemote}
+            placeholder={
+              armedRemote
+                ? '等待当前 turn 结束后进入 Remote 模式…'
+                : disabled
+                  ? t('composer.placeholder.busy')
+                  : t('composer.placeholder.idle')
+            }
           />
         </div>
 
@@ -770,6 +807,33 @@ export function Composer({
 
           <span className="spacer" />
 
+          {/* Remote control — Claude only, hidden once already in TTY.
+              Click while idle → switch to TTY w/ --remote-control. Click
+              while a turn is running → arm; banner appears, input locks,
+              effect in App.tsx fires the switch when the turn finishes. */}
+          {executor === 'claude' && session.runtime_mode !== 'tty' && onRequestRemote && (
+            <button
+              type="button"
+              className={`composer-act${armedRemote ? ' active' : ''}`}
+              title={armedRemote
+                ? 'Cancel queued Remote switch'
+                : 'Open Claude Code in Remote Control mode'}
+              aria-label="Remote control"
+              aria-pressed={armedRemote}
+              onClick={() => {
+                if (armedRemote) onCancelRemote?.();
+                else onRequestRemote();
+              }}
+            >
+              <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor"
+                   strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M5 12a7 7 0 0 1 14 0" />
+                <path d="M2 12a10 10 0 0 1 20 0" />
+                <circle cx="12" cy="18" r="1.6" fill="currentColor" />
+              </svg>
+            </button>
+          )}
+
           {/* Slash command — framed [/] glyph */}
           <button
             ref={slashBtnRef}
@@ -816,7 +880,7 @@ export function Composer({
             <button
               type="button"
               className="composer-act primary"
-              disabled={!text.trim() && !canSendAttachmentOnly}
+              disabled={armedRemote || (!text.trim() && !canSendAttachmentOnly)}
               onClick={submit}
               title={t('composer.send.button')}
               aria-label={t('composer.send.button')}

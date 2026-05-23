@@ -29,7 +29,6 @@ function SvgIcon({ d, size = 16, stroke = 1.6 }: { d: string; size?: number; str
 
 const ICON = {
   search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-4.3-4.3',
-  group:  'M3 7h18 M6 12h12 M9 17h6',
   filter: 'M4 5h16l-6 8v6l-4-2v-4z',
   plus:   'M12 5v14 M5 12h14',
   x:      'M5 5l14 14 M5 19L19 5',
@@ -53,22 +52,6 @@ function relTime(iso: string): string {
   const d = Math.floor(h / 24);
   return `${d}d`;
 }
-
-type GroupBy = 'time' | 'workspace' | 'status';
-
-function timeBucket(iso: string): 'TODAY' | 'YESTERDAY' | 'THIS WEEK' | 'EARLIER' {
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const ts = Date.parse(iso);
-  const diff = todayStart - ts;
-  if (ts >= todayStart) return 'TODAY';
-  if (diff < 86400000) return 'YESTERDAY';
-  if (diff < 6 * 86400000) return 'THIS WEEK';
-  return 'EARLIER';
-}
-
-const STATUS_ORDER: Record<string, number> = { running: 0, pending: 1, error: 2, done: 3, new: 4 };
-const BUCKET_ORDER = ['TODAY', 'YESTERDAY', 'THIS WEEK', 'EARLIER'] as const;
 
 export interface CreateSessionInput {
   workspaceId: string;
@@ -185,6 +168,15 @@ export interface CodingViewProps {
   /** Flip the active runtime for a session. Caller forwards to
    *  `session:switch-runtime` WS message. */
   onSwitchRuntime: (sessionId: string, target: RuntimeMode) => void;
+  /** Sessions that have been "armed" for a remote-control switch — i.e.
+   *  the user clicked Remote while a turn was running. Composer reads
+   *  this to lock the input + show a banner. */
+  armedRemoteSwitch: Set<string>;
+  /** User clicked Remote. App decides whether to fire immediately or
+   *  arm for after the current turn. */
+  onRequestRemote: (sessionId: string) => void;
+  /** User clicked Cancel on the armed banner. */
+  onCancelRemote: (sessionId: string) => void;
   /** Switch app mode to Spaces (workspace management). Triggered from
    *  the sidebar's "N hidden workspaces · manage" footer link. */
   onOpenSpaces: () => void;
@@ -279,6 +271,9 @@ export function CodingView(p: CodingViewProps) {
           branch={p.activeBranch}
           ws={p.ws}
           onSwitchRuntime={target => p.onSwitchRuntime(p.activeSession!.id, target)}
+          armedRemote={p.armedRemoteSwitch.has(p.activeSession.id)}
+          onRequestRemote={() => p.onRequestRemote(p.activeSession!.id)}
+          onCancelRemote={() => p.onCancelRemote(p.activeSession!.id)}
         />
       ) : (
         <CodingViewEmpty />
@@ -336,18 +331,16 @@ function Sidebar({
 }) {
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [wsFilter, setWsFilter] = useState('all');
-  const [groupBy, setGroupBy] = useState<GroupBy>('workspace');
-  // V2 sidebar state — search box + popovers.
+  // V2 sidebar state — search box + popover.
   const [search, setSearch] = useState('');
   const [filterExec, setFilterExec] = useState<null | 'claude' | 'codex'>(null);
-  const [groupOpen, setGroupOpen] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const headRef = useRef<HTMLDivElement>(null);
 
-  const collapsedKey = `gian.sidebar.collapsed.${groupBy}`;
+  const collapsedKey = 'gian.sidebar.collapsed.workspace';
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
     try {
-      const raw = localStorage.getItem(`gian.sidebar.collapsed.${groupBy}`);
+      const raw = localStorage.getItem(collapsedKey);
       return new Set<string>(raw ? JSON.parse(raw) : []);
     } catch { return new Set(); }
   });
@@ -357,14 +350,6 @@ function Sidebar({
     catch { /* localStorage full / disabled — non-essential */ }
   }, [collapsed, collapsedKey]);
 
-  // Switching groupBy mode → re-read collapse state for the new mode key.
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(`gian.sidebar.collapsed.${groupBy}`);
-      setCollapsed(new Set<string>(raw ? JSON.parse(raw) : []));
-    } catch { setCollapsed(new Set()); }
-  }, [groupBy]);
-
   function toggleGroup(key: string) {
     setCollapsed(prev => {
       const next = new Set(prev);
@@ -373,17 +358,16 @@ function Sidebar({
     });
   }
 
-  // Close popovers on outside click / Escape.
+  // Close filter popover on outside click / Escape.
   useEffect(() => {
-    if (!groupOpen && !filterOpen) return;
+    if (!filterOpen) return;
     function onDown(e: MouseEvent) {
       const target = e.target as Element | null;
       if (target?.closest('.sb-search-row')) return;
-      setGroupOpen(false);
       setFilterOpen(false);
     }
     function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') { setGroupOpen(false); setFilterOpen(false); }
+      if (e.key === 'Escape') setFilterOpen(false);
     }
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
@@ -391,7 +375,7 @@ function Sidebar({
       document.removeEventListener('mousedown', onDown);
       document.removeEventListener('keydown', onKey);
     };
-  }, [groupOpen, filterOpen]);
+  }, [filterOpen]);
 
   function toggleArchived() {
     void onLoadArchived();
@@ -430,11 +414,9 @@ function Sidebar({
     return matchesSearch(s, ws?.name ?? '');
   });
 
-  const needsYou = groupBy === 'status'
-    ? []
-    : filtered.filter(s => s.status === 'pending' || s.status === 'error');
+  const needsYou = filtered.filter(s => s.status === 'pending' || s.status === 'error');
   const needsYouIds = new Set(needsYou.map(s => s.id));
-  const rest = groupBy === 'status' ? filtered : filtered.filter(s => !needsYouIds.has(s.id));
+  const rest = filtered.filter(s => !needsYouIds.has(s.id));
 
   function renderRow(s: Session, isArchived = false) {
     return (
@@ -451,81 +433,37 @@ function Sidebar({
 
   function renderGroups() {
     if (rest.length === 0) return null;
-
-    if (groupBy === 'workspace') {
-      const grouped = new Map<string, Session[]>();
-      for (const s of rest) {
-        const list = grouped.get(s.workspace_id) ?? [];
-        list.push(s);
-        grouped.set(s.workspace_id, list);
-      }
-      return Array.from(grouped.entries()).map(([wsId, list]) => {
-        const ws = wsById.get(wsId);
-        const name = ws?.name ?? wsId;
-        const sorted = list.slice().sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
-        const isCollapsed = collapsed.has(wsId);
-        return (
-          <div key={wsId}>
-            <div className="sb-group" onClick={() => toggleGroup(wsId)}>
-              <span className="caret">{isCollapsed ? '▸' : '▾'}</span>
-              <span>{name}</span>
-              <span className="count">{list.length}</span>
-            </div>
-            {!isCollapsed && sorted.map(s => renderRow(s))}
-          </div>
-        );
-      });
-    }
-
-    if (groupBy === 'status') {
-      const grouped = new Map<string, Session[]>();
-      for (const s of rest) {
-        const list = grouped.get(s.status) ?? [];
-        list.push(s);
-        grouped.set(s.status, list);
-      }
-      const statusKeys = Array.from(grouped.keys()).sort(
-        (a, b) => (STATUS_ORDER[a] ?? 99) - (STATUS_ORDER[b] ?? 99),
-      );
-      return statusKeys.map(status => {
-        const list = (grouped.get(status) ?? []).slice().sort(
-          (a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at),
-        );
-        const label = status.charAt(0).toUpperCase() + status.slice(1);
-        const isCollapsed = collapsed.has(status);
-        return (
-          <div key={status}>
-            <div className="sb-group" onClick={() => toggleGroup(status)}>
-              <span className="caret">{isCollapsed ? '▸' : '▾'}</span>
-              <span>{label}</span>
-              <span className="count">{list.length}</span>
-            </div>
-            {!isCollapsed && list.map(s => renderRow(s))}
-          </div>
-        );
-      });
-    }
-
-    const grouped = new Map<string, Session[]>();
+    const byWs = new Map<string, Session[]>();
     for (const s of rest) {
-      const bucket = timeBucket(s.updated_at);
-      const list = grouped.get(bucket) ?? [];
+      const list = byWs.get(s.workspace_id) ?? [];
       list.push(s);
-      grouped.set(bucket, list);
+      byWs.set(s.workspace_id, list);
     }
-    return BUCKET_ORDER.filter(b => grouped.has(b)).map(bucket => {
-      const list = (grouped.get(bucket) ?? []).slice().sort(
-        (a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at),
-      );
-      const isCollapsed = collapsed.has(bucket);
+    // Iterate workspaces in the order they arrive from the host (sort_order).
+    // Append any orphan workspace_ids (e.g. sessions whose ws isn't in the
+    // workspaces prop yet) at the end so they stay visible.
+    const orderedIds: string[] = [];
+    const seen = new Set<string>();
+    for (const w of workspaces) {
+      if (byWs.has(w.id)) { orderedIds.push(w.id); seen.add(w.id); }
+    }
+    for (const wsId of byWs.keys()) {
+      if (!seen.has(wsId)) orderedIds.push(wsId);
+    }
+    return orderedIds.map(wsId => {
+      const list = byWs.get(wsId)!;
+      const ws = wsById.get(wsId);
+      const name = ws?.name ?? wsId;
+      const sorted = list.slice().sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
+      const isCollapsed = collapsed.has(wsId);
       return (
-        <div key={bucket}>
-          <div className="sb-group" onClick={() => toggleGroup(bucket)}>
+        <div key={wsId}>
+          <div className="sb-group" onClick={() => toggleGroup(wsId)}>
             <span className="caret">{isCollapsed ? '▸' : '▾'}</span>
-            <span>{bucket}</span>
+            <span>{name}</span>
             <span className="count">{list.length}</span>
           </div>
-          {!isCollapsed && list.map(s => renderRow(s))}
+          {!isCollapsed && sorted.map(s => renderRow(s))}
         </div>
       );
     });
@@ -548,19 +486,10 @@ function Sidebar({
           </div>
           <button
             type="button"
-            className="sb-iconbtn"
-            aria-label="Group sessions"
-            title={`Group by · ${groupBy}`}
-            onClick={() => { setGroupOpen(o => !o); setFilterOpen(false); }}
-          >
-            <SvgIcon d={ICON.group} />
-          </button>
-          <button
-            type="button"
             className={`sb-iconbtn${hasFilter ? ' has-active' : ''}`}
             aria-label="Filter sessions"
             title="Filter"
-            onClick={() => { setFilterOpen(o => !o); setGroupOpen(false); }}
+            onClick={() => setFilterOpen(o => !o)}
           >
             <SvgIcon d={ICON.filter} />
           </button>
@@ -575,22 +504,6 @@ function Sidebar({
             <SvgIcon d={ICON.plus} />
           </button>
 
-          {groupOpen && (
-            <div className="group-pop">
-              <div className="head">Group by</div>
-              {(['time', 'status', 'workspace'] as const).map(g => (
-                <button
-                  key={g}
-                  type="button"
-                  className={`item${groupBy === g ? ' active' : ''}`}
-                  onClick={() => { setGroupBy(g); setGroupOpen(false); }}
-                >
-                  <span className="check">{groupBy === g ? '✓' : ''}</span>
-                  {g === 'time' ? 'Time' : g === 'status' ? 'Status' : 'Workspace'}
-                </button>
-              ))}
-            </div>
-          )}
           {filterOpen && (
             <div className="filter-pop">
               <div>
@@ -1319,6 +1232,9 @@ function SessionMain({
   branch,
   ws,
   onSwitchRuntime,
+  armedRemote,
+  onRequestRemote,
+  onCancelRemote,
 }: {
   session: Session;
   workspace: Workspace | null;
@@ -1329,6 +1245,9 @@ function SessionMain({
   codexPlanText?: string;
   ws: GianWs;
   onSwitchRuntime: (target: RuntimeMode) => void;
+  armedRemote: boolean;
+  onRequestRemote: () => void;
+  onCancelRemote: () => void;
   onSend: (text: string, opts?: { oneShotBypass?: boolean }) => void;
   onSendSkill: (name: string, path: string) => void;
   onStop: () => void;
@@ -1474,6 +1393,9 @@ function SessionMain({
             disabled={pending || terminal}
             executor={session.executor}
             workspaceId={workspace?.id}
+            armedRemote={armedRemote}
+            onRequestRemote={onRequestRemote}
+            onCancelRemote={onCancelRemote}
           />
         </>
       )}

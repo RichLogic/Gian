@@ -39,7 +39,11 @@ export class TtyManager {
    * Returns the replay buffer so the client can prime xterm with the
    * boot output of the freshly-spawned `claude`.
    */
-  async start(session: Session, cwd: string, opts: { cols: number; rows: number }): Promise<{ replay: string[]; alive: boolean }> {
+  async start(
+    session: Session,
+    cwd: string,
+    opts: { cols: number; rows: number; extraArgs?: string[] },
+  ): Promise<{ replay: string[]; alive: boolean }> {
     if (session.executor !== 'claude') {
       throw new Error(`TTY mode is only available for claude sessions (got ${session.executor})`);
     }
@@ -60,6 +64,7 @@ export class TtyManager {
       rows: opts.rows,
       model: session.model,
       hookSettings,
+      ...(opts.extraArgs && opts.extraArgs.length > 0 ? { extraArgs: opts.extraArgs } : {}),
     });
 
     this.persistMode(session.id, 'tty');

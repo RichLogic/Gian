@@ -35,6 +35,13 @@ export async function makeTestApp(): Promise<TestAppCtx> {
   // bots are enabled; the test DB starts empty so this is automatic.
 
   const dataDir = mkdtempSync(join(tmpdir(), 'gian-test-app-'));
+  // `writeAttachment` (and anything else still calling `resolveDataDir()`
+  // directly) reads `GIAN_DATA_DIR` first. Without this, the attachment
+  // HTTP route writes into the real `~/.config/gian/attachments` during
+  // tests. Restore the prior value on cleanup so test files that didn't
+  // set it don't inherit our temp dir after teardown.
+  const prevDataDirEnv = process.env['GIAN_DATA_DIR'];
+  process.env['GIAN_DATA_DIR'] = dataDir;
   const db = openDatabase(dataDir);
   const config = loadConfig(db);
 
@@ -64,6 +71,11 @@ export async function makeTestApp(): Promise<TestAppCtx> {
       await app.shutdown().catch(() => undefined);
       db.close();
       rmSync(dataDir, { recursive: true, force: true });
+      if (prevDataDirEnv === undefined) {
+        delete process.env['GIAN_DATA_DIR'];
+      } else {
+        process.env['GIAN_DATA_DIR'] = prevDataDirEnv;
+      }
     },
   };
 }

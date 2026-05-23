@@ -104,6 +104,33 @@
 }
 @keyframes spinner-rot { to { transform: rotate(360deg); } }
 
+/* Global fork-in-progress toast. Floats above the main view so the click
+ * isn't silent while the host spins up the new worktree. */
+.fork-toast {
+  position: fixed;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  background: var(--surface-2);
+  color: var(--text-1);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-pill);
+  box-shadow: var(--shadow-2, 0 4px 16px rgba(0, 0, 0, 0.18));
+  font-size: 12px;
+  font-weight: 500;
+  z-index: 1000;
+  pointer-events: none;
+  animation: fork-toast-in 140ms var(--ease);
+}
+@keyframes fork-toast-in {
+  from { opacity: 0; transform: translate(-50%, -6px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
 .cfg-wt-loading {
   display: flex; align-items: center; gap: 8px;
   color: var(--text-3);
