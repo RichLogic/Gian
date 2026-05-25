@@ -48,6 +48,30 @@ export function buildPrompt(input: InputItem[]): string {
   return parts.join('\n\n');
 }
 
+/** Serialize the user's AskUserQuestion answers into the deny-message body
+ *  the model sees when claude CLI relays the permission-prompt-tool denial.
+ *  Single-select values come through as `string`, multi-select as `string[]`,
+ *  free-text comes in as a string (caller is responsible for that). */
+export function formatQuestionAnswers(answers: Record<string, string | string[]>): string {
+  const lines: string[] = [
+    'The user answered your AskUserQuestion via the Gian web UI rather than letting the tool run. Use these answers and continue as if AskUserQuestion had returned them.',
+    '',
+  ];
+  for (const [question, value] of Object.entries(answers)) {
+    lines.push(`Q: ${question}`);
+    if (Array.isArray(value)) {
+      lines.push(`A: ${value.join('; ')}`);
+    } else {
+      lines.push(`A: ${value}`);
+    }
+    lines.push('');
+  }
+  // Drop the trailing blank line for a tidy payload — the model is happier
+  // when the deny message doesn't end with stray whitespace.
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  return lines.join('\n');
+}
+
 /** Best-guess context window for a Claude model ID. Claude CLI doesn't
  *  expose this via stream-json, so we go off the model name. `[1m]` suffix =
  *  1M token variant; everything else falls back to 200k (the standard ceiling
@@ -295,13 +319,20 @@ export class CcProxyService {
     // MCP bridge. The Claude SDK has a live canUseTool callId waiting for a
     // response; without it the process would hang forever.
     //
-    // When the user answered an AskUserQuestion-flavored approval, hand the
-    // structured answers back to the agent via Claude SDK's `updatedInput`
-    // channel. Plain allow/deny otherwise.
-    const extra = params.answers
-      ? { updatedInput: { answers: params.answers } }
-      : undefined;
-    await this.runtime.respondPermission(session.id, approval.requestId, params.behavior, extra);
+    // AskUserQuestion bridge: the previous implementation returned `allow`
+    // with `updatedInput: { answers }` and hoped claude CLI would short-
+    // circuit AskUserQuestion using the supplied answers. claude CLI 1.0.90
+    // no longer honors that — it executes the real tool, which has no UI in
+    // `-p` mode and errors out. We now force a `deny` and tunnel the answers
+    // through the deny `message`. The model reads "tool denied: <message>"
+    // and treats the embedded Q/A pairs as the user's response.
+    let effectiveBehavior: 'allow' | 'deny' = params.behavior;
+    let extra: { updatedInput?: Record<string, unknown>; message?: string } | undefined;
+    if (params.answers) {
+      effectiveBehavior = 'deny';
+      extra = { message: formatQuestionAnswers(params.answers) };
+    }
+    await this.runtime.respondPermission(session.id, approval.requestId, effectiveBehavior, extra);
 
     this.removeApproval(approval);
     const updatedSession = this.updateSession(session, {

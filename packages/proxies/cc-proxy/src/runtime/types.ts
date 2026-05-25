@@ -66,16 +66,23 @@ export interface ClaudeRuntime extends EventEmitter<ClaudeRuntimeEvents> {
    *  session). */
   resetClaudeSessionId(sessionId: string, newClaudeSessionId: string): void;
 
-  /** Respond to a permission request (allow / deny). */
-  /** `extra.updatedInput` is forwarded into the Claude Code SDK
+  /** Respond to a permission request (allow / deny).
+   *
+   *  `extra.updatedInput` is forwarded into the Claude Code SDK
    *  approval_prompt response so the agent re-invokes the tool with the
-   *  modified input. Used by the AskUserQuestion bridge to pre-supply
-   *  `answers`. */
+   *  modified input.
+   *
+   *  `extra.message` is forwarded as the SDK-shaped `message` on a deny
+   *  payload. Used by the AskUserQuestion bridge: claude CLI 1.0.90 doesn't
+   *  honor the `updatedInput.answers` short-circuit anymore, so the bridge
+   *  routes structured answers through deny+message instead. The model
+   *  reads the message as the tool's denial reason and treats the embedded
+   *  answers as the user's response. */
   respondPermission(
     sessionId: string,
     requestId: string,
     behavior: 'allow' | 'deny',
-    extra?: { updatedInput?: Record<string, unknown> },
+    extra?: { updatedInput?: Record<string, unknown>; message?: string },
   ): Promise<void>;
 
   /** Kill the Claude Code process for a session. */

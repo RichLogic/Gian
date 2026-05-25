@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 
-import { CcProxyService } from '../src/core/service.js';
+import { CcProxyService, formatQuestionAnswers } from '../src/core/service.js';
 import { AppError } from '../src/core/errors.js';
 import type { ClaudeRuntime, ClaudeRuntimeEvents } from '../src/runtime/types.js';
 
@@ -15,7 +15,12 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
     isResume: boolean;
   }> = [];
   readonly messages: Array<{ sessionId: string; content: string }> = [];
-  readonly permissionResponses: Array<{ sessionId: string; requestId: string; behavior: 'allow' | 'deny' }> = [];
+  readonly permissionResponses: Array<{
+    sessionId: string;
+    requestId: string;
+    behavior: 'allow' | 'deny';
+    extra?: { updatedInput?: Record<string, unknown>; message?: string };
+  }> = [];
   readonly resetCalls: Array<{ sessionId: string; newClaudeSessionId: string }> = [];
   private readonly aliveSessions = new Set<string>();
   started = false;
@@ -45,8 +50,23 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
     this.resetCalls.push({ sessionId, newClaudeSessionId });
   }
 
-  async respondPermission(sessionId: string, requestId: string, behavior: 'allow' | 'deny'): Promise<void> {
-    this.permissionResponses.push({ sessionId, requestId, behavior });
+  async respondPermission(
+    sessionId: string,
+    requestId: string,
+    behavior: 'allow' | 'deny',
+    extra?: { updatedInput?: Record<string, unknown>; message?: string },
+  ): Promise<void> {
+    // Only include `extra` on the recorded row when present so existing
+    // tests that deepEqual against `{sessionId, requestId, behavior}` keep
+    // matching unchanged.
+    const entry: {
+      sessionId: string;
+      requestId: string;
+      behavior: 'allow' | 'deny';
+      extra?: { updatedInput?: Record<string, unknown>; message?: string };
+    } = { sessionId, requestId, behavior };
+    if (extra !== undefined) entry.extra = extra;
+    this.permissionResponses.push(entry);
   }
 
   killSession(sessionId: string): void {
@@ -380,4 +400,71 @@ test('/clear intercept rotates claudeSessionId and emits session.rotated notific
     assert.ok(methods.includes('output.text'));
     assert.ok(methods.includes('turn.completed'));
   });
+});
+
+test('respondApproval with `answers` routes to deny+message (AskUserQuestion bridge)', async () => {
+  await withService(async ({ runtime, service, events }) => {
+    const created = await service.createSession({ cwd: '/tmp' });
+
+    await service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'pls ask me' }],
+    }, 'req-q');
+
+    runtime.emit(
+      'permissionRequest',
+      created.session.id,
+      'perm-q',
+      'AskUserQuestion',
+      'Question from agent',
+      JSON.stringify({ questions: [{ question: 'Which color?', options: [{ label: 'red' }] }] }),
+    );
+
+    const reqEvent = events.find((e) => e.method === 'approval.requested');
+    assert.ok(reqEvent);
+    const approvalId = (reqEvent!.params.data as { approvalId: string }).approvalId;
+
+    // Web sends `allow_once` (host translates to behavior='allow') plus the
+    // structured answers. Bridge must rewrite the SDK call to deny+message.
+    await service.respondApproval({
+      sessionId: created.session.id,
+      approvalId,
+      behavior: 'allow',
+      answers: { 'Which color?': 'red' },
+    });
+
+    assert.equal(runtime.permissionResponses.length, 1);
+    const recorded = runtime.permissionResponses[0]!;
+    assert.equal(recorded.behavior, 'deny', 'SDK call must be deny when answers present');
+    assert.equal(recorded.extra?.updatedInput, undefined, 'no updatedInput on the deny path');
+    const msg = recorded.extra?.message ?? '';
+    assert.match(msg, /Which color\?/, 'message contains the question');
+    assert.match(msg, /A: red/, 'message contains the user answer');
+    assert.match(msg, /AskUserQuestion/, 'message explains the bridge to the model');
+
+    // The emitted `approval.resolved` still reflects the user's original
+    // intent (allow), not the SDK-level deny — UI rendering depends on this.
+    const resolved = events.find((e) => e.method === 'approval.resolved');
+    assert.ok(resolved);
+    assert.equal((resolved!.params.data as { behavior: string }).behavior, 'allow');
+  });
+});
+
+test('formatQuestionAnswers serializes single, multi, and multi-question payloads', () => {
+  // Single-select answer.
+  const single = formatQuestionAnswers({ 'Pick one?': 'A' });
+  assert.match(single, /^The user answered your AskUserQuestion/);
+  assert.match(single, /Q: Pick one\?\nA: A$/);
+
+  // Multi-select serializes with `; ` separator so the model sees one line.
+  const multi = formatQuestionAnswers({ 'Pick many?': ['X', 'Y', 'Z'] });
+  assert.match(multi, /A: X; Y; Z/);
+
+  // Two questions in one payload — blank line between, no trailing whitespace.
+  const both = formatQuestionAnswers({ 'Q1?': 'a1', 'Q2?': ['b1', 'b2'] });
+  const lines = both.split('\n');
+  assert.equal(lines[lines.length - 1], 'A: b1; b2', 'no trailing blank line');
+  assert.ok(lines.includes('Q: Q1?'));
+  assert.ok(lines.includes('A: a1'));
+  assert.ok(lines.includes('Q: Q2?'));
 });

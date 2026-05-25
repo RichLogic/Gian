@@ -534,14 +534,19 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     sessionId: string,
     requestId: string,
     behavior: 'allow' | 'deny',
-    extra?: { updatedInput?: Record<string, unknown> },
+    extra?: { updatedInput?: Record<string, unknown>; message?: string },
   ): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.emit('debug', `[runtime] respondPermission: no session ${sessionId}`);
       return;
     }
-    const ok = this.approvalServer.resolve(requestId, behavior, undefined, extra);
+    const ok = this.approvalServer.resolve(
+      requestId,
+      behavior,
+      extra?.message,
+      extra?.updatedInput !== undefined ? { updatedInput: extra.updatedInput } : undefined,
+    );
     if (ok) {
       session.pendingCallIds.delete(requestId);
     } else {
