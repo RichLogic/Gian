@@ -581,13 +581,31 @@ export function UserMessage({ item }: { item: MsgItem; hideAvatar?: boolean }) {
   // Optimistic echo: `pending` until the server emits its `user_message`,
   // `failed` when an `error` envelope marks it rejected.
   const stateCls = item.pending ? ' pending' : item.failed ? ' failed' : '';
+  const hasText = item.text.length > 0;
+  const attachments = item.attachments ?? [];
   return (
     <div className={`msg user${stateCls}`}>
       <div className="msg-body">
-        <div className="msg-text user-text">{item.text}</div>
+        {attachments.length > 0 && (
+          <div className="msg-attachments user-attachments">
+            {attachments.map((a, i) => (
+              <a
+                key={`${a.url}-${i}`}
+                className="msg-att"
+                href={a.url}
+                target="_blank"
+                rel="noreferrer"
+                title={a.name}
+              >
+                <img src={a.url} alt={a.name} />
+              </a>
+            ))}
+          </div>
+        )}
+        {hasText && <div className="msg-text user-text">{item.text}</div>}
         <div className="msg-foot user">
           {item.failed && <span className="msg-state-failed">failed to send</span>}
-          <CopyButton text={item.text} />
+          {hasText && <CopyButton text={item.text} />}
           <span className="msg-time user">{formatTime(item.ts)}</span>
         </div>
       </div>

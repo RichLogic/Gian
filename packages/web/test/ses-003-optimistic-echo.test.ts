@@ -107,6 +107,44 @@ describe('SES-003: optimistic user echo reconciliation', () => {
     expect(after).toHaveLength(2);
     expect((after[0] as MsgItem).id).toBe('real-1');
   });
+
+  it('SES-003: reconciles an image-only (empty text) optimistic echo and swaps in server attachment URLs', () => {
+    // Worst case the user reported: paste-then-send with no text. The echo
+    // carries a blob URL; the server's user_message replaces it with the
+    // permanent `/api/sessions/.../attachments/<file>` URL. Reconciliation
+    // matches on (empty text, same attachment count) — not on attachment
+    // URL identity, since those URLs are intentionally different.
+    const echo: MsgItem = {
+      kind: 'user',
+      id: 'optimistic:sess-1:1',
+      text: '',
+      exec: 'claude',
+      ts: 1_700_000_000_000,
+      turn: 1,
+      pending: true,
+      attachments: [{ name: 'paste-1.png', mime: 'image/png', url: 'blob:fake-uuid' }],
+    };
+    const env: EventEnvelope = {
+      session_id: 'sess-1',
+      turn: 1,
+      call_id: 'real-empty',
+      event: 'user_message',
+      ts: 1_700_000_000_500,
+      data: {
+        text: '',
+        attachments: [
+          { name: 'paste-1.png', mime: 'image/png', url: '/api/sessions/sess-1/attachments/uuid.png' },
+        ],
+      },
+    };
+    const after = applyEnvelope([echo], env, 'claude');
+    expect(after).toHaveLength(1);
+    const it = after[0] as MsgItem;
+    expect(it.pending).toBeUndefined();
+    expect(it.attachments).toEqual([
+      { name: 'paste-1.png', mime: 'image/png', url: '/api/sessions/sess-1/attachments/uuid.png' },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------

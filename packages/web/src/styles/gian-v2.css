@@ -945,6 +945,34 @@
   border-radius: var(--r-2);
 }
 
+/* Inline image attachments in a user bubble. Sit above .msg-text so a
+ * combined text+image message keeps a sensible reading order; for an
+ * image-only send (text empty) this is the entire bubble. Pending echo's
+ * opacity dim is inherited from `.msg.user.pending` further down. */
+.msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 88%;
+}
+.msg.user .msg-attachments { justify-content: flex-end; margin-bottom: 4px; }
+.msg-att {
+  display: block;
+  border-radius: var(--r-2);
+  overflow: hidden;
+  background: var(--surface-2);
+  line-height: 0;
+  border: 1px solid var(--border-1, transparent);
+}
+.msg-att img {
+  display: block;
+  max-width: 220px;
+  max-height: 220px;
+  width: auto;
+  height: auto;
+  object-fit: cover;
+}
+
 /* event card */
 .evt {
   margin: 0;

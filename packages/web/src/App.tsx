@@ -916,17 +916,32 @@ export function App() {
                 // and arm the thinking ticker before the server confirms. The
                 // real `user_message` event reconciles in applyEnvelope.
                 const exec = sessionsRef.current.find(s => s.id === sessionId)?.executor ?? 'claude';
-                const optimistic = createOptimisticEcho({ sessionId, text, exec });
+                const attachments = opts?.attachments ?? [];
+                const optimistic = createOptimisticEcho({
+                  sessionId,
+                  text,
+                  exec,
+                  // Reuse the composer's blob URL as the <img src> for the
+                  // pending bubble — ownership transferred on send; the
+                  // user_message reconciler revokes it after swapping in
+                  // the server URL.
+                  attachments: attachments.length > 0
+                    ? attachments.map(a => ({ name: a.name, mime: a.mime, url: a.previewUrl }))
+                    : undefined,
+                });
                 setItemsBySession(prev => ({
                   ...prev,
                   [sessionId]: [...(prev[sessionId] ?? []), optimistic],
                 }));
                 setPendingBySession(p => ({ ...p, [sessionId]: true }));
 
-                const items: Array<{ type: 'text'; text: string } | { type: 'localImage'; path: string }> = [];
+                const items: Array<
+                  | { type: 'text'; text: string }
+                  | { type: 'localImage'; path: string; name?: string; mime?: string }
+                > = [];
                 if (text.trim()) items.push({ type: 'text', text });
-                for (const path of opts?.imagePaths ?? []) {
-                  items.push({ type: 'localImage', path });
+                for (const a of attachments) {
+                  items.push({ type: 'localImage', path: a.path, name: a.name, mime: a.mime });
                 }
 
                 ws.send({

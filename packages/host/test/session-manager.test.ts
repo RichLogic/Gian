@@ -201,6 +201,42 @@ test('createSession rejects unknown workspace', async () => {
   }
 });
 
+test('sendMessage with localImage items echoes attachments in user_message payload', async () => {
+  const { dir, db, wsId, sessions, broadcaster } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    broadcaster.messages.length = 0;
+
+    await sessions.sendMessage(session.id, 'see this', [
+      { type: 'text', text: 'see this' },
+      { type: 'localImage', path: '/abs/whatever/abc123.png', name: 'screenshot.png', mime: 'image/png' },
+    ]);
+
+    const userRow = db.prepare(
+      "SELECT data FROM events WHERE session_id = ? AND type = 'user_message'",
+    ).get(session.id) as { data: string };
+    const payload = JSON.parse(userRow.data) as {
+      text: string;
+      attachments?: Array<{ name: string; mime: string; url: string }>;
+    };
+    assert.equal(payload.text, 'see this');
+    assert.ok(payload.attachments, 'attachments persisted');
+    assert.equal(payload.attachments!.length, 1);
+    assert.equal(payload.attachments![0]!.name, 'screenshot.png');
+    assert.equal(payload.attachments![0]!.mime, 'image/png');
+    assert.equal(payload.attachments![0]!.url, `/api/sessions/${session.id}/attachments/abc123.png`);
+
+    const broadcastUser = broadcaster.messages.find(
+      m => m.type === 'event' && (m as { event: string }).event === 'user_message',
+    ) as { data: { attachments?: unknown[] } } | undefined;
+    assert.ok(broadcastUser, 'broadcast user_message present');
+    assert.equal((broadcastUser!.data.attachments ?? []).length, 1);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('sendMessage creates turn, persists user_message, broadcasts envelope', async () => {
   const { dir, db, wsId, sessions, broadcaster } = setup();
   try {

@@ -2,6 +2,7 @@ import type {
   ApprovalMode,
   EventEnvelope,
   Executor,
+  MessageAttachment,
   ProxyNotification,
   RuntimeMode,
   Session,
@@ -9,6 +10,8 @@ import type {
   UnifiedEvent,
   WorktreeOutcome,
 } from '@gian/shared';
+import { basename } from 'node:path';
+import { mimeForAttachment } from '../storage/attachments.js';
 import type { Db } from '../storage/db.js';
 import { loadConfig } from '../storage/config.js';
 import { purgeSessionAttachments } from '../storage/attachments.js';
@@ -123,6 +126,31 @@ function translateItemsForExecutor(
     if (it.type === 'skill') return { type: 'text' as const, text: `/${it.name}` };
     return it;
   });
+}
+
+/** Build the attachments payload echoed back in `user_message` events from
+ *  the `localImage` items the client supplied. Filenames stored under
+ *  `~/.gian/attachments/<sid>/` are UUIDs assigned by writeAttachment, so the
+ *  basename of the absolute path is the URL-safe identifier. Falls back to
+ *  the on-disk extension when the client doesn't echo a name/mime. */
+function buildAttachmentsFromItems(
+  sessionId: string,
+  items: import('@gian/shared').InputItem[] | undefined,
+): MessageAttachment[] {
+  if (!items) return [];
+  const out: MessageAttachment[] = [];
+  for (const it of items) {
+    if (it.type !== 'localImage') continue;
+    const filename = basename(it.path);
+    const mime = it.mime ?? mimeForAttachment(filename);
+    if (!mime) continue; // unknown extension — skip rather than serve an unreadable URL
+    out.push({
+      name: it.name ?? filename,
+      mime,
+      url: `/api/sessions/${sessionId}/attachments/${filename}`,
+    });
+  }
+  return out;
 }
 
 /**
@@ -689,8 +717,11 @@ export class SessionManager {
       .run(now, sessionId);
     this.broadcastSessionUpdated(sessionId, { status: 'running', updated_at: now });
 
-    this.persistEvent(sessionId, turnId, randomUUID(), 'user_message', { text });
-    this.broadcastEvent(sessionId, turnNumber, randomUUID(), 'user_message', { text });
+    const attachments = buildAttachmentsFromItems(sessionId, items);
+    const userMessagePayload: Record<string, unknown> = { text };
+    if (attachments.length > 0) userMessagePayload.attachments = attachments;
+    this.persistEvent(sessionId, turnId, randomUUID(), 'user_message', userMessagePayload);
+    this.broadcastEvent(sessionId, turnNumber, randomUUID(), 'user_message', userMessagePayload);
 
     // Initialise Job state on the first user-initiated turn of a job. We only
     // start a job when the queue is empty (this is a direct user send, not a

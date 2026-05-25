@@ -74,6 +74,8 @@ import { markAccessed } from '../events/lifecycle.js';
 import {
   ALLOWED_MIME,
   MAX_ATTACHMENT_BYTES,
+  mimeForAttachment,
+  readAttachment,
   writeAttachment,
 } from '../storage/attachments.js';
 
@@ -620,6 +622,21 @@ export function createApp(ctx: AppContext): AppHandle {
     const bytes = Buffer.from(await file.arrayBuffer());
     const path = await writeAttachment(sessionId, bytes, file.type);
     return c.json({ path, name: file.name, size: file.size, mime: file.type });
+  });
+
+  app.get('/api/sessions/:id/attachments/:filename', async c => {
+    const sessionId = c.req.param('id');
+    const filename = c.req.param('filename');
+    const row = ctx.db.prepare('SELECT id FROM sessions WHERE id = ?').get(sessionId);
+    if (!row) return c.json({ error: 'session not found' }, 404);
+    const mime = mimeForAttachment(filename);
+    if (!mime) return c.json({ error: 'unsupported filename' }, 415);
+    const bytes = await readAttachment(sessionId, filename);
+    if (!bytes) return c.json({ error: 'attachment not found' }, 404);
+    return c.body(new Uint8Array(bytes), 200, {
+      'content-type': mime,
+      'cache-control': 'private, max-age=31536000, immutable',
+    });
   });
 
   app.post('/api/sessions/:id/archive', async c => {

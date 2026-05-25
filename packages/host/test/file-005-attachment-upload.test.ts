@@ -113,3 +113,48 @@ test('POST /api/sessions/:id/attachments rejects unknown session_id with 404', a
     assert.equal(res.status, 404);
   } finally { await ctx.cleanup(); }
 });
+
+test('GET /api/sessions/:id/attachments/:filename serves the upload back with its mime', async () => {
+  const { ctx, sessionId } = await withApp();
+  try {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const form = new FormData();
+    form.set('file', new Blob([png], { type: 'image/png' }), 'screenshot.png');
+    const upload = await ctx.fetch(`/api/sessions/${sessionId}/attachments`, { method: 'POST', body: form });
+    const body = await upload.json() as { path: string };
+    const filename = body.path.split('/').pop()!;
+
+    const res = await ctx.fetch(`/api/sessions/${sessionId}/attachments/${filename}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'image/png');
+    const bytes = Buffer.from(await res.arrayBuffer());
+    assert.deepEqual(bytes, png);
+  } finally { await ctx.cleanup(); }
+});
+
+test('GET /api/sessions/:id/attachments/:filename refuses path traversal', async () => {
+  const { ctx, sessionId } = await withApp();
+  try {
+    const res = await ctx.fetch(`/api/sessions/${sessionId}/attachments/..%2F..%2Fetc%2Fpasswd`);
+    // 415 because the synthesized filename ends with `passwd` (no known ext)
+    // → mime guess returns null and we short-circuit before touching disk.
+    // Either 4xx is acceptable; what matters is "not 200 + not the secret".
+    assert.ok(res.status === 415 || res.status === 404);
+  } finally { await ctx.cleanup(); }
+});
+
+test('GET /api/sessions/:id/attachments/:filename rejects unknown extension with 415', async () => {
+  const { ctx, sessionId } = await withApp();
+  try {
+    const res = await ctx.fetch(`/api/sessions/${sessionId}/attachments/whatever.txt`);
+    assert.equal(res.status, 415);
+  } finally { await ctx.cleanup(); }
+});
+
+test('GET /api/sessions/:id/attachments/:filename returns 404 when the file is missing', async () => {
+  const { ctx, sessionId } = await withApp();
+  try {
+    const res = await ctx.fetch(`/api/sessions/${sessionId}/attachments/00000000-0000-0000-0000-000000000000.png`);
+    assert.equal(res.status, 404);
+  } finally { await ctx.cleanup(); }
+});

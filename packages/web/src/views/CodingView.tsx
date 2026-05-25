@@ -130,7 +130,14 @@ export interface CodingViewProps {
   /** True from `session:create` dispatch until `session:created` lands. Drives
    *  the busy state in NewSessionView's submit button. */
   creatingSession: boolean;
-  onSend: (sessionId: string, text: string, opts?: { oneShotBypass?: boolean; imagePaths?: string[] }) => void;
+  onSend: (
+    sessionId: string,
+    text: string,
+    opts?: {
+      oneShotBypass?: boolean;
+      attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
+    },
+  ) => void;
   onSendSkill: (sessionId: string, name: string, path: string) => void;
   onStop: (sessionId: string) => void;
   onApprove: (
@@ -1248,7 +1255,13 @@ function SessionMain({
   armedRemote: boolean;
   onRequestRemote: () => void;
   onCancelRemote: () => void;
-  onSend: (text: string, opts?: { oneShotBypass?: boolean }) => void;
+  onSend: (
+    text: string,
+    opts?: {
+      oneShotBypass?: boolean;
+      attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
+    },
+  ) => void;
   onSendSkill: (name: string, path: string) => void;
   onStop: () => void;
   onApprove: (

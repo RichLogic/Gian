@@ -9,6 +9,12 @@ export interface MsgItem {
   pending?: boolean;
   /** Server rejected the send (e.g. `MESSAGE_SEND_FAILED`). */
   failed?: boolean;
+  /** Image attachments to render inline in the bubble. For pending echoes
+   *  the `url` is an `URL.createObjectURL` blob URL the composer handed off
+   *  (App owns it from that point and revokes when the server confirms); for
+   *  confirmed messages it's a `/api/sessions/:id/attachments/:filename` URL
+   *  that the host serves. */
+  attachments?: import('@gian/shared').MessageAttachment[];
 }
 
 export interface ToolItem {

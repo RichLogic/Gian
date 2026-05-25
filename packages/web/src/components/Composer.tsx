@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ApprovalMode, CcModelCapabilities, CodexModelCapabilities, Session, SlashCommand, SlashCommandSource, ThinkingEffort } from '@gian/shared';
+import type { ApprovalMode, CcModelCapabilities, CodexModelCapabilities, MessageAttachment, Session, SlashCommand, SlashCommandSource, ThinkingEffort } from '@gian/shared';
 import { loadProxyModels, loadSlashCommands } from '../api.js';
 import { useT } from '../i18n/index.js';
 
@@ -31,9 +31,14 @@ interface PendingFile {
   id: string;
   /** Display filename (paste auto-generates `paste-{timestamp}.png`). */
   name: string;
+  /** MIME from the source File — echoed up to App so the user_message item
+   *  can carry it alongside the path. */
+  mime: string;
   size: number;
   sizeLabel: string;
-  /** Object URL for thumbnail preview. Revoke when removed/sent. */
+  /** Object URL for thumbnail preview. Composer revokes when the user
+   *  removes the chip; on send, ownership transfers to App which revokes
+   *  during user_message reconciliation. */
   previewUrl: string;
   /** Absolute path returned by the upload endpoint, or null while uploading. */
   path: string | null;
@@ -175,8 +180,16 @@ export function Composer({
     text: string,
     opts?: {
       oneShotBypass?: boolean;
-      /** Absolute paths of uploaded images for this turn. */
-      imagePaths?: string[];
+      /** Uploaded images for this turn. App owns the `previewUrl`s from
+       *  this point — Composer must NOT revoke them; the optimistic echo
+       *  reuses them as the `<img src>` until the server confirms with
+       *  permanent URLs. */
+      attachments?: Array<{
+        path: string;
+        name: string;
+        mime: string;
+        previewUrl: string;
+      }>;
     },
   ) => void;
   /** Dispatch a skill invocation directly (used for codex user/project skills
@@ -409,18 +422,33 @@ export function Composer({
     if (!trimmed && ready.length === 0) return;
     if (pendingFiles.some(f => f.uploading)) return; // chip spinner indicates wait
 
-    const imagePaths = ready.map(f => f.path!);
+    const attachments = ready.map(f => ({
+      path: f.path!,
+      name: f.name,
+      mime: f.mime,
+      previewUrl: f.previewUrl,
+    }));
     if (disabled) {
       onQueueAdd(trimmed); // queue ignores images for now (out of scope)
+      // Queue path doesn't transfer ownership — revoke previews now.
+      for (const f of pendingFiles) URL.revokeObjectURL(f.previewUrl);
     } else {
-      const opts: { oneShotBypass?: true; imagePaths?: string[] } = {};
+      const opts: {
+        oneShotBypass?: true;
+        attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
+      } = {};
       if (oneShotBypass) opts.oneShotBypass = true;
-      if (imagePaths.length > 0) opts.imagePaths = imagePaths;
+      if (attachments.length > 0) opts.attachments = attachments;
       onSend(trimmed, Object.keys(opts).length > 0 ? opts : undefined);
       if (oneShotBypass) setOneShotBypass(false);
+      // App owns the sent attachments' previewUrls now — revoke only the
+      // unsent ones (failed uploads / still in flight when user pressed
+      // send was blocked above, so this is the failed-upload subset).
+      const sentIds = new Set(ready.map(f => f.id));
+      for (const f of pendingFiles) {
+        if (!sentIds.has(f.id)) URL.revokeObjectURL(f.previewUrl);
+      }
     }
-    // Revoke object URLs and clear chips.
-    for (const f of pendingFiles) URL.revokeObjectURL(f.previewUrl);
     setPendingFiles([]);
     setText('');
   }
@@ -447,6 +475,7 @@ export function Composer({
         .map(f => ({
           id: crypto.randomUUID(),
           name: f.name,
+          mime: f.type,
           size: f.size,
           sizeLabel: fmtBytes(f.size),
           previewUrl: URL.createObjectURL(f),
@@ -474,6 +503,7 @@ export function Composer({
     const entry: PendingFile = {
       id,
       name: file.name,
+      mime: file.type,
       size: file.size,
       sizeLabel: fmtBytes(file.size),
       previewUrl,

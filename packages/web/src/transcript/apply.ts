@@ -267,13 +267,35 @@ export function applyEnvelope(
   // Reconciles with the client-side optimistic echo if present.
   if (env.event === 'user_message') {
     const text = String(data.text ?? '');
+    const rawAttachments = Array.isArray(data.attachments) ? data.attachments : [];
+    const attachments = rawAttachments
+      .filter((a): a is { name: string; mime: string; url: string } =>
+        typeof a === 'object' && a !== null
+        && typeof (a as Record<string, unknown>).name === 'string'
+        && typeof (a as Record<string, unknown>).mime === 'string'
+        && typeof (a as Record<string, unknown>).url === 'string',
+      )
+      .map(a => ({ name: a.name, mime: a.mime, url: a.url }));
     const item: MsgItem = {
       kind: 'user', id: env.call_id, text, exec: executor,
       ts: env.ts, turn: env.turn,
+      ...(attachments.length > 0 ? { attachments } : {}),
     };
     for (let i = items.length - 1; i >= 0; i--) {
       const cand = items[i]!;
-      if (cand.kind === 'user' && cand.pending && cand.text === item.text) {
+      if (
+        cand.kind === 'user' && cand.pending && cand.text === item.text
+        && (cand.attachments?.length ?? 0) === attachments.length
+      ) {
+        // Reconciled — release the optimistic blob URLs before we swap the
+        // server item in. Object URLs created via createObjectURL leak the
+        // underlying Blob until revoked. Wrapped because some unit tests
+        // run under jsdom where URL.revokeObjectURL is a no-op stub.
+        if (cand.attachments) {
+          for (const a of cand.attachments) {
+            try { URL.revokeObjectURL(a.url); } catch { /* noop in test envs */ }
+          }
+        }
         const next = items.slice();
         next[i] = { ...item };
         return next;
@@ -299,9 +321,13 @@ export function createOptimisticEcho(params: {
   exec: 'claude' | 'codex';
   /** Defaults to `Date.now`. Tests pass a frozen value for stable ids. */
   now?: () => number;
+  /** Attachments to render in the pending bubble. `url` should be a blob
+   *  URL the caller still owns — reconciliation revokes it when the server
+   *  user_message arrives. */
+  attachments?: import('@gian/shared').MessageAttachment[];
 }): MsgItem {
   const now = (params.now ?? Date.now)();
-  return {
+  const item: MsgItem = {
     kind: 'user',
     id: `optimistic:${params.sessionId}:${now}`,
     text: params.text,
@@ -310,6 +336,10 @@ export function createOptimisticEcho(params: {
     turn: 0,
     pending: true,
   };
+  if (params.attachments && params.attachments.length > 0) {
+    item.attachments = params.attachments;
+  }
+  return item;
 }
 
 /**

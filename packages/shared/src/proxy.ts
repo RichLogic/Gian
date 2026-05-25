@@ -100,6 +100,21 @@ export interface TextInputItem {
 export interface LocalImageInputItem {
   type: 'localImage';
   path: string;
+  /** User-facing filename (e.g. `paste-1700000000000.png`). Optional —
+   *  proxies treat this opaquely; host echoes it back in user_message
+   *  events so the web can label the attachment chip. */
+  name?: string;
+  /** MIME type (e.g. `image/png`). Same rationale as `name`. */
+  mime?: string;
+}
+
+/** Per-attachment metadata echoed back in `user_message` event payloads.
+ *  `url` is a GET-able path on the host (`/api/sessions/:id/attachments/:filename`)
+ *  the web can drop straight into an `<img src>`. */
+export interface MessageAttachment {
+  name: string;
+  mime: string;
+  url: string;
 }
 
 /**
