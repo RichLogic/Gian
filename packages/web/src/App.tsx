@@ -64,6 +64,10 @@ export function App() {
   const [wbTabs, setWbTabs] = useState<SheetTab[]>([]);
   const [wbActive, setWbActive] = useState<{ 0: string | null; 1: string | null }>({ 0: null, 1: null });
   const [viewState, setViewState] = useState<ViewState>('main');
+  // Dock's terminal button toggles this; existing terminals stay mounted
+  // (ttys keep running) while hidden. Reset to false when no term tabs
+  // remain so the next dock click creates a fresh, visible terminal.
+  const [termHidden, setTermHidden] = useState(false);
   // ─── V2 Inspector state ─────────────────────────────────────────────────
   const [inspectorTab, setInspectorTab] = useState<InspectorTab | null>(null);
   const [bots, setBots] = useState<Bot[]>([]);
@@ -434,6 +438,14 @@ export function App() {
     }
   }, [viewState, wbTabs.length]);
 
+  // Drop the hide flag once the last terminal is gone — otherwise the
+  // next dock click would create a terminal that's immediately hidden.
+  useEffect(() => {
+    if (termHidden && !wbTabs.some(t => t.kind === 'term')) {
+      setTermHidden(false);
+    }
+  }, [termHidden, wbTabs]);
+
   const sheetActions = useMemo(() => ({
     activateTab: (pane: 0 | 1, id: string) =>
       setWbActive(a => ({ ...a, [pane]: id })),
@@ -609,16 +621,36 @@ export function App() {
   }
 
   /** Dock workbench buttons.
-   *  - 'term': toggles the terminal pane's *visibility*. If any terminal
-   *    already exists, all are closed; otherwise the first one is created.
-   *    Adding *more* terminals while the pane is open is done from the
-   *    `+` button on the tab strip, not from the dock.
+   *  - 'term': lifecycle is split from visibility. With no terminals,
+   *    creates the first one. With terminals present, toggles a hide
+   *    flag so the xterm stays mounted (tty keeps running) across
+   *    show/hide cycles. The only paths that destroy a tty are the
+   *    per-tab `×` button and closing the last tab.
    *  - 'settings': singleton toggle (open / close the one settings tab). */
   function toggleWbTabKind(kind: 'term' | 'settings'): void {
+    if (kind === 'term') {
+      const hasTerm = wbTabs.some(t => t.kind === 'term');
+      if (hasTerm) {
+        const nextHidden = !termHidden;
+        setTermHidden(nextHidden);
+        // Un-hiding while view is collapsed to main-only should surface
+        // the workbench again.
+        if (!nextHidden) setViewState(v => v === 'main' ? 'both' : v);
+        return;
+      }
+      setTermHidden(false);
+      setWbTabs(prev => {
+        const id = 'tab-term-' + Date.now();
+        const tab: SheetTab = { id, pane: 1, name: terminalTabName(), kind: 'term', icoKind: 'term', ico: '$' };
+        setWbActive(a => ({ ...a, 1: id }));
+        setViewState(v => v === 'main' ? 'both' : v);
+        return [...prev, tab];
+      });
+      return;
+    }
     setWbTabs(prev => {
       const existing = prev.filter(t => t.kind === kind);
       if (existing.length > 0) {
-        // Toggle off — remove all of this kind.
         const next = prev.filter(t => t.kind !== kind);
         setWbActive(a => {
           const newA = { ...a };
@@ -633,11 +665,8 @@ export function App() {
         });
         return next;
       }
-      // Add singleton — terminal in pane 1, settings in pane 0.
-      const id = kind === 'term' ? 'tab-term-' + Date.now() : 'tab-settings';
-      const tab: SheetTab = kind === 'term'
-        ? { id, pane: 1, name: terminalTabName(), kind: 'term', icoKind: 'term', ico: '$' }
-        : { id, pane: 0, name: 'Settings', kind: 'settings', icoKind: 'gear', ico: '⚙' };
+      const id = 'tab-settings';
+      const tab: SheetTab = { id, pane: 0, name: 'Settings', kind: 'settings', icoKind: 'gear', ico: '⚙' };
       const next = [...prev, tab];
       setWbActive(a => ({ ...a, [tab.pane]: tab.id }));
       setViewState(v => v === 'main' ? 'both' : v);
@@ -647,8 +676,10 @@ export function App() {
 
   /** Add a new terminal tab to the terminal pane (pane 1). Called by the
    *  `+` button at the right end of the terminal tabs strip. Always
-   *  additive — does not toggle off existing terminals. */
+   *  additive — does not toggle off existing terminals, and always
+   *  surfaces the pane (un-hiding if the dock had collapsed it). */
   function addTerminalTab(): void {
+    setTermHidden(false);
     setWbTabs(prev => {
       const existingTerms = prev.filter(t => t.kind === 'term').length;
       const id = 'tab-term-' + Date.now();
@@ -1072,9 +1103,16 @@ export function App() {
               onChange={() => void loadBots().then(setBots)}
             />
           )}
-        {mode === 'sessions' && wbTabs.length > 0 && viewState !== 'main' && (
+        {mode === 'sessions' && wbTabs.length > 0 && viewState !== 'main' && (() => {
+          const hasNonTerm = wbTabs.some(t => t.kind !== 'term');
+          const hasTerm = wbTabs.some(t => t.kind === 'term');
+          // Sheet visible when there's anything non-term, or when terms
+          // are present and not currently hidden. When only-hidden-terms,
+          // the Sheet stays mounted but display:none so xterm survives.
+          const sheetVisible = hasNonTerm || (hasTerm && !termHidden);
+          return (
           <>
-            {viewState !== 'workbench' && (
+            {sheetVisible && viewState !== 'workbench' && (
               <Splitter side="right" varName="--sheet-w" base={440} min={300} max={800} invert />
             )}
             <Sheet
@@ -1082,6 +1120,8 @@ export function App() {
               active={wbActive}
               actions={sheetActions}
               onAddTab={() => addTerminalTab()}
+              hideTerm={termHidden}
+              hidden={!sheetVisible}
               renderTab={(t) => {
                 if (t.kind === 'settings') {
                   return (
@@ -1115,7 +1155,8 @@ export function App() {
               }}
             />
           </>
-        )}
+          );
+        })()}
         {mode === 'sessions' && inspectorTab !== null && (
           <>
             <Splitter side="right" varName="--inspector-w" base={280} min={220} max={500} invert />
@@ -1139,7 +1180,7 @@ export function App() {
           inspectorTab={inspectorTab}
           onToggleInspector={toggleInspector}
           inspectorDisabled={mode !== 'sessions'}
-          hasTerminal={wbTabs.some(t => t.kind === 'term')}
+          hasTerminal={wbTabs.some(t => t.kind === 'term') && !termHidden}
           hasSettings={wbTabs.some(t => t.kind === 'settings')}
           onToggleWbTab={toggleWbTabKind}
           wbDisabled={mode !== 'sessions'}

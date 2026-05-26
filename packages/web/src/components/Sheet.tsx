@@ -83,6 +83,13 @@ interface Props {
   /** Called when the user clicks the trailing "+" in the tab strip. App
    *  decides what to add (currently a new terminal — see toggleWbTabKind). */
   onAddTab?: (pane: 0 | 1) => void;
+  /** Visually hide panes whose tabs are all terminals — the dock's
+   *  terminal show/hide toggle relies on this so xterm stays mounted
+   *  (tty keeps running) across hide cycles. */
+  hideTerm?: boolean;
+  /** Whole-sheet display:none — element stays in the DOM so child
+   *  terminals stay mounted across visibility flips. */
+  hidden?: boolean;
 }
 
 function Icon({ d, size = 16, stroke = 1.6 }: { d: string; size?: number; stroke?: number }) {
@@ -245,7 +252,7 @@ function DiffBody({ diffText, path }: { diffText: string; path?: string }) {
   );
 }
 
-export function Sheet({ tabs, active, actions, renderTab, onAddTab }: Props) {
+export function Sheet({ tabs, active, actions, renderTab, onAddTab, hideTerm, hidden }: Props) {
   const byPane: Record<0 | 1, SheetTab[]> = { 0: [], 1: [] };
   tabs.forEach(t => byPane[t.pane].push(t));
   const panes: Array<{ idx: 0 | 1; tabs: SheetTab[] }> = [];
@@ -254,16 +261,24 @@ export function Sheet({ tabs, active, actions, renderTab, onAddTab }: Props) {
   if (panes.length === 0) return null;
 
   return (
-    <section className="sheet" data-testid="workbench-sheet">
+    <section className="sheet" data-testid="workbench-sheet" style={hidden ? { display: 'none' } : undefined}>
       {panes.map((p, i) => {
         const activeId = active[p.idx] || p.tabs[0]?.id || null;
         const tab = p.tabs.find(t => t.id === activeId) || p.tabs[0]!;
         const caps = fileCapabilities(tab);
         const showActions = caps.canPreviewInApp || caps.canOpenInBrowser;
+        const paneOnlyTerm = p.tabs.every(t => t.kind === 'term');
+        const paneHidden = !!hideTerm && paneOnlyTerm;
+        const sizingStyle = i === 0 && panes.length === 2
+          ? { flex: 'none', height: 'var(--sheet-top-h, 320px)' }
+          : undefined;
+        const paneStyle = paneHidden
+          ? { ...(sizingStyle ?? {}), display: 'none' as const }
+          : sizingStyle;
         return (
           <Fragment key={p.idx}>
-            {i > 0 && <Splitter axis="y" varName="--sheet-top-h" base={320} min={120} max={700} />}
-            <div className="sheet-pane" style={i === 0 && panes.length === 2 ? { flex: 'none', height: 'var(--sheet-top-h, 320px)' } : undefined}>
+            {i > 0 && !paneHidden && <Splitter axis="y" varName="--sheet-top-h" base={320} min={120} max={700} />}
+            <div className="sheet-pane" style={paneStyle}>
               <div className="sheet-tabs">
                 {p.tabs.map(t => (
                   <button

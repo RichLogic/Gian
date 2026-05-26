@@ -184,6 +184,16 @@
   content: "$ ";
   color: var(--text-3);
 }
+/* When the user expands the card to see output, also unwrap the command
+ * line itself — long pasted scripts otherwise stay ellipsis-truncated even
+ * when the body is open. `align-items: flex-start` keeps the verb/meta
+ * aligned to the top of the now-multiline subject. */
+.evt.command.open .evt-head { align-items: flex-start; }
+.evt.command.open .evt-subject.cmd {
+  white-space: pre-wrap;
+  overflow: visible;
+  word-break: break-word;
+}
 .evt.command .evt-body {
   padding: 8px 12px;
   color: var(--text-2);

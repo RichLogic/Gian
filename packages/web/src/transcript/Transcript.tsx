@@ -287,10 +287,14 @@ export function Transcript({
             } else if (item.kind === 'assistant') {
               hideAvatar = prevSender === item.exec;
               prevSender = item.exec;
-            } else if (item.kind === 'approval' || item.kind === 'error' || item.kind === 'diff') {
-              // Hard break — the next text message gets a fresh header.
-              prevSender = null;
-            } else if (item.kind === 'auto-notice' && item.variant === 'circuit-breaker') {
+            } else {
+              // Anything else rendered between two text bubbles — reasoning,
+              // approval, error, diff, auto-notice, status, turn markers —
+              // counts as a sender break. The next assistant text must get a
+              // fresh header (time + copy), even when the bubbles are from
+              // the same exec. Codex in particular interleaves reasoning
+              // cards between assistant_text chunks; without this the
+              // post-reasoning bubble would lose its footer.
               prevSender = null;
             }
             return renderItem(

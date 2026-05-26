@@ -489,7 +489,7 @@ export function ToolEvent({ item }: { item: ToolItem }) {
       <div className="evt-head" onClick={() => setOpen(o => !o)}>
         <Caret />
         <span className="evt-verb">Tool</span>
-        <span className="evt-subject">{item.name}</span>
+        <span className="evt-subject" title={item.name}>{item.name}</span>
         <span className="evt-meta" />{/* Tool default state is success — only render an evt-status when failed (TODO when we surface tool errors) */}
       </div>
       {item.summary && (
@@ -672,9 +672,9 @@ export function CommandCard({ item }: { item: CommandItem }) {
       <div className="evt-head" onClick={() => hasOutput && setOpen(o => !o)}>
         {hasOutput && <Caret />}
         <span className="evt-verb">Run</span>
-        <span className="evt-subject cmd">{item.command}</span>
+        <span className="evt-subject cmd" title={item.command}>{item.command}</span>
         <span className="evt-meta">
-          {item.cwd && <span style={{ color: 'var(--text-3)' }}>{item.cwd}</span>}
+          {item.cwd && <span style={{ color: 'var(--text-3)' }} title={item.cwd}>{item.cwd}</span>}
           {item.status !== 'success' && (
             <span className={`evt-status ${statusClass}`}>{item.status}</span>
           )}
@@ -702,12 +702,13 @@ export function FileReadCard({ item }: { item: FileReadItem }) {
   const lineRange = item.startLine !== undefined
     ? ` :${item.startLine}${item.endLine !== undefined ? `–${item.endLine}` : ''}`
     : '';
+  const fullLabel = `${item.path}${lineRange}`;
   return (
     <div className="evt inline">
       <div className="evt-head">
         <span className="evt-verb">Read</span>
-        <span className="evt-subject path">
-          <FileLink path={item.path} line={item.startLine}>{item.path}{lineRange}</FileLink>
+        <span className="evt-subject path" title={fullLabel}>
+          <FileLink path={item.path} line={item.startLine}>{fullLabel}</FileLink>
         </span>
         <span className="evt-meta">
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
@@ -726,7 +727,7 @@ export function FileSearchCard({ item }: { item: FileSearchItem }) {
       <div className="evt-head" onClick={() => hasMatches && setOpen(o => !o)}>
         {hasMatches && <Caret />}
         <span className="evt-verb">{item.searchKind === 'glob' ? 'Glob' : 'Grep'}</span>
-        <span className="evt-subject">
+        <span className="evt-subject" title={item.pattern}>
           <span className="search-pattern">{item.pattern}</span>
         </span>
         <span className="evt-meta">
@@ -752,7 +753,7 @@ export function WebSearchRow({ item }: { item: WebSearchItem }) {
     <div className="evt web inline">
       <div className="evt-head">
         <span className="evt-verb">Search</span>
-        <span className="evt-subject">{item.query}</span>
+        <span className="evt-subject" title={item.query}>{item.query}</span>
         <span className="evt-meta">
           {item.resultCount !== undefined && <span>{item.resultCount} results</span>}
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
@@ -831,7 +832,7 @@ export function AgentSpawnRow({ item }: { item: AgentSpawnItem }) {
     <div className="evt agent">
       <div className="evt-head">
         <span className="evt-verb">Agent</span>
-        <span className="evt-subject">{item.description}</span>
+        <span className="evt-subject" title={item.description}>{item.description}</span>
         <span className="evt-meta">
           {item.status !== 'done' && (
             <span className={`evt-status ${statusClass}`}>{item.status}</span>
