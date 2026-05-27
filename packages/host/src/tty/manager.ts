@@ -5,6 +5,8 @@ import { CcProxyClient } from '../proxy/cc-proxy-client.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
 import { TtyHookRegistry } from './registry.js';
 
+type ClaudePermissionMode = 'plan' | 'default' | 'auto' | 'bypassPermissions';
+
 /**
  * Coordinator for the TTY runtime mode on the cc executor.
  *
@@ -42,7 +44,7 @@ export class TtyManager {
   async start(
     session: Session,
     cwd: string,
-    opts: { cols: number; rows: number; extraArgs?: string[] },
+    opts: { cols: number; rows: number; permissionMode?: ClaudePermissionMode; extraArgs?: string[] },
   ): Promise<{ replay: string[]; alive: boolean }> {
     if (session.executor !== 'claude') {
       throw new Error(`TTY mode is only available for claude sessions (got ${session.executor})`);
@@ -64,6 +66,7 @@ export class TtyManager {
       rows: opts.rows,
       model: session.model,
       hookSettings,
+      ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
       ...(opts.extraArgs && opts.extraArgs.length > 0 ? { extraArgs: opts.extraArgs } : {}),
     });
 

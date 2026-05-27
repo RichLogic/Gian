@@ -101,7 +101,7 @@ class CapturingBroadcaster {
 }
 
 interface ManagerSpy {
-  start: Array<{ sessionId: string; cwd: string; cols: number; rows: number }>;
+  start: Array<{ sessionId: string; cwd: string; cols: number; rows: number; permissionMode?: string }>;
   stop: Array<{ sessionId: string }>;
 }
 
@@ -114,8 +114,14 @@ function makeFakeTtyManager(spy: ManagerSpy, db: ReturnType<typeof openDatabase>
     db.prepare('UPDATE sessions SET runtime_mode = ? WHERE id = ?').run(mode, sessionId);
   };
   return {
-    async start(session: Session, cwd: string, opts: { cols: number; rows: number }) {
-      spy.start.push({ sessionId: session.id, cwd, cols: opts.cols, rows: opts.rows });
+    async start(session: Session, cwd: string, opts: { cols: number; rows: number; permissionMode?: string }) {
+      spy.start.push({
+        sessionId: session.id,
+        cwd,
+        cols: opts.cols,
+        rows: opts.rows,
+        ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
+      });
       persist(session.id, 'tty');
       return { replay: [], alive: true };
     },
@@ -175,6 +181,26 @@ test('CODEX-TTY-001: switchRuntime(target=tty) on a CLAUDE session calls claude 
       'codex manager must NOT see a claude session switch');
     assert.equal(ctx.claudeSpy.start[0]!.sessionId, session.id);
   } finally { teardown(ctx); }
+});
+
+test('CODEX-TTY-001: switchRuntime(target=tty) carries Claude approval mode into TTY permissionMode', async () => {
+  for (const [approvalMode, expectedPermissionMode] of [
+    ['plan', 'plan'],
+    ['ask', 'default'],
+    ['auto', 'auto'],
+  ] as const) {
+    const ctx = setup();
+    try {
+      const session = await ctx.sessions.createSession({
+        workspace_id: ctx.wsId,
+        executor: 'claude',
+        approval_mode: approvalMode,
+      });
+      await ctx.sessions.switchRuntime(session.id, 'tty');
+      assert.equal(ctx.claudeSpy.start.length, 1);
+      assert.equal(ctx.claudeSpy.start[0]!.permissionMode, expectedPermissionMode);
+    } finally { teardown(ctx); }
+  }
 });
 
 test('CODEX-TTY-001: switchRuntime(target=tty) on a CODEX session calls codex CodexTtyManager.start', async () => {

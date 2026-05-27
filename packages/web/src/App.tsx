@@ -449,24 +449,29 @@ export function App() {
   const sheetActions = useMemo(() => ({
     activateTab: (pane: 0 | 1, id: string) =>
       setWbActive(a => ({ ...a, [pane]: id })),
-    closeTab: (id: string) =>
+    closeTab: (id: string) => {
+      const tab = wbTabs.find(t => t.id === id);
+      if (tab?.kind === 'term') {
+        ws.send({ type: 'term:close', term_id: id });
+      }
       setWbTabs(prev => {
-        const tab = prev.find(t => t.id === id);
+        const closing = prev.find(t => t.id === id);
         const next = prev.filter(t => t.id !== id);
-        if (tab) {
+        if (closing) {
           setWbActive(a => {
-            if (a[tab.pane] !== id) return a;
-            const sib = next.find(t => t.pane === tab.pane);
-            return { ...a, [tab.pane]: sib ? sib.id : null };
+            if (a[closing.pane] !== id) return a;
+            const sib = next.find(t => t.pane === closing.pane);
+            return { ...a, [closing.pane]: sib ? sib.id : null };
           });
         }
         return next;
-      }),
+      });
+    },
     pinTab: (id: string) =>
       setWbTabs(prev => prev.map(t => t.id === id ? { ...t, preview: false } : t)),
     setTabViewMode: (id: string, viewMode: FileViewMode) =>
       setWbTabs(prev => prev.map(t => t.id === id ? { ...t, viewMode } : t)),
-  }), []);
+  }), [wbTabs, ws]);
 
   function fileToLines(content: string): Array<[string, string]> {
     return content.split('\n').map((line, i) => [String(i + 1), line]);
@@ -631,11 +636,14 @@ export function App() {
     if (kind === 'term') {
       const hasTerm = wbTabs.some(t => t.kind === 'term');
       if (hasTerm) {
-        const nextHidden = !termHidden;
-        setTermHidden(nextHidden);
-        // Un-hiding while view is collapsed to main-only should surface
-        // the workbench again.
-        if (!nextHidden) setViewState(v => v === 'main' ? 'both' : v);
+        const terminalVisible = mode === 'sessions' && viewState !== 'main' && !termHidden;
+        if (terminalVisible) {
+          setTermHidden(true);
+        } else {
+          setMode('sessions');
+          setTermHidden(false);
+          setViewState(v => v === 'main' ? 'both' : v);
+        }
         return;
       }
       setTermHidden(false);
@@ -860,6 +868,17 @@ export function App() {
       </LocaleProvider>
     );
   }
+
+  const hasWbTermTabs = wbTabs.some(t => t.kind === 'term');
+  const hasWbNonTermTabs = wbTabs.some(t => t.kind !== 'term');
+  // Keep terminal tabs mounted even when the workbench is hidden by the
+  // main/session view toggle or by switching to another top-level section.
+  // The PTY is closed only by the tab close action above.
+  const sheetMounted = wbTabs.length > 0 && (hasWbTermTabs || (mode === 'sessions' && viewState !== 'main'));
+  const sheetVisible = mode === 'sessions'
+    && viewState !== 'main'
+    && (hasWbNonTermTabs || (hasWbTermTabs && !termHidden));
+  const terminalDockActive = hasWbTermTabs && mode === 'sessions' && viewState !== 'main' && !termHidden;
 
   return (
     <LocaleProvider locale={locale}>
@@ -1103,13 +1122,7 @@ export function App() {
               onChange={() => void loadBots().then(setBots)}
             />
           )}
-        {mode === 'sessions' && wbTabs.length > 0 && viewState !== 'main' && (() => {
-          const hasNonTerm = wbTabs.some(t => t.kind !== 'term');
-          const hasTerm = wbTabs.some(t => t.kind === 'term');
-          // Sheet visible when there's anything non-term, or when terms
-          // are present and not currently hidden. When only-hidden-terms,
-          // the Sheet stays mounted but display:none so xterm survives.
-          const sheetVisible = hasNonTerm || (hasTerm && !termHidden);
+        {sheetMounted && (() => {
           return (
           <>
             {sheetVisible && viewState !== 'workbench' && (
@@ -1180,7 +1193,7 @@ export function App() {
           inspectorTab={inspectorTab}
           onToggleInspector={toggleInspector}
           inspectorDisabled={mode !== 'sessions'}
-          hasTerminal={wbTabs.some(t => t.kind === 'term') && !termHidden}
+          hasTerminal={terminalDockActive}
           hasSettings={wbTabs.some(t => t.kind === 'settings')}
           onToggleWbTab={toggleWbTabKind}
           wbDisabled={mode !== 'sessions'}

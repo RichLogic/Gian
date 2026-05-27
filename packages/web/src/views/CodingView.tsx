@@ -1381,6 +1381,7 @@ function SessionMain({
           <Terminal
             instanceKey={`session:${session.id}`}
             wire={makeSessionWire(ws, session.id)}
+            shiftEnterNewline={session.executor === 'claude'}
           />
         </div>
       ) : (

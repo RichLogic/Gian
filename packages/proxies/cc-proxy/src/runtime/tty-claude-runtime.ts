@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { IPty } from 'node-pty';
+import type { PermissionMode } from '../core/types.js';
 // Pulled in lazily so `import.meta`/native-binding cost is only paid when
 // a session actually flips to TTY. cc-proxy boots cold for every Gian
 // session, even structured-only ones — no reason to load node-pty when
@@ -60,6 +61,8 @@ export interface SpawnPtyOptions {
   cwd: string;
   /** Optional `--model` value (alias or full id). */
   model?: string | null;
+  /** Claude CLI `--permission-mode` value for interactive TTY. */
+  permissionMode?: PermissionMode | null;
   /** True on the *first* spawn of a re-adopted session (initial
    *  `--resume`); false for a brand-new session where we mint the uuid
    *  via `--session-id`. After the first spawn we always resume. */
@@ -312,6 +315,12 @@ export class TtyClaudeRuntime extends EventEmitter<TtyRuntimeEvents> {
     }
     if (options.model) {
       args.push('--model', options.model);
+    }
+    const mode = options.permissionMode ?? 'default';
+    if (mode === 'bypassPermissions') {
+      args.push('--dangerously-skip-permissions');
+    } else {
+      args.push('--permission-mode', mode);
     }
     if (options.extraArgs && options.extraArgs.length > 0) {
       args.push(...options.extraArgs);

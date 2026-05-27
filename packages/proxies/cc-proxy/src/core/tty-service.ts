@@ -1,4 +1,5 @@
 import { TtyClaudeRuntime } from '../runtime/tty-claude-runtime.js';
+import type { PermissionMode } from './types.js';
 
 /** Sink used to forward runtime events as JSON-RPC notifications back to
  *  the host. Same shape as the structured service's emitEvent. */
@@ -17,6 +18,9 @@ export interface TtyStartParams {
   cols: number;
   rows: number;
   model?: string | null;
+  /** Claude CLI `--permission-mode` value. Passed through verbatim after
+   *  validation; null/undefined keeps Claude's default. */
+  permissionMode?: PermissionMode | null;
   /** Pre-rendered `settings.json` content the host wants this spawn to
    *  use (hooks block + allowedHttpHookUrls). The proxy writes it to a
    *  tmp file and passes `--settings <path>` to claude. */
@@ -94,6 +98,7 @@ export class TtyClaudeService {
     const extraArgs = Array.isArray(params.extraArgs)
       ? params.extraArgs.filter(a => typeof a === 'string')
       : null;
+    const permissionMode = normalizePermissionMode(params.permissionMode);
     await this.runtime.spawnSession({
       sessionId: params.sessionId,
       claudeSessionId: params.claudeSessionId,
@@ -103,6 +108,7 @@ export class TtyClaudeService {
       cols: Math.max(1, Math.floor(params.cols)),
       rows: Math.max(1, Math.floor(params.rows)),
       hookSettings: params.hookSettings ?? null,
+      ...(permissionMode ? { permissionMode } : {}),
       ...(extraArgs && extraArgs.length > 0 ? { extraArgs } : {}),
     });
     return {
@@ -151,4 +157,16 @@ function requireString(value: unknown, field: string): asserts value is string {
   if (typeof value !== 'string' || value.length === 0) {
     throw new Error(`${field} is required`);
   }
+}
+
+function normalizePermissionMode(value: unknown): PermissionMode | null {
+  if (
+    value === 'plan'
+    || value === 'default'
+    || value === 'auto'
+    || value === 'bypassPermissions'
+  ) {
+    return value;
+  }
+  return null;
 }

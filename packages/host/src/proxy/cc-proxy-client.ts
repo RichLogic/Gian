@@ -15,6 +15,8 @@ import type {
   StartTurnParams,
 } from './types.js';
 
+type ClaudePermissionMode = NonNullable<StartTurnParams['permissionMode']>;
+
 export interface CcProxyClientOptions {
   /** Absolute path to cc-proxy spawn.js entry. */
   entry: string;
@@ -161,6 +163,7 @@ export class CcProxyClient implements ProxyClient {
     cols: number;
     rows: number;
     model?: string | null;
+    permissionMode?: ClaudePermissionMode | null;
     hookSettings?: Record<string, unknown> | null;
     extraArgs?: string[];
   }): Promise<{ ok: true; replay: string[]; alive: boolean }> {

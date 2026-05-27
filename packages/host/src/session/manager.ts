@@ -589,7 +589,13 @@ export class SessionManager {
         // CLI flag. Codex has no equivalent so we silently drop the bit
         // for codex sessions.
         const extraArgs = opts.remoteControl ? ['--remote-control'] : undefined;
-        await this.ttyMgr!.start(fresh, cwd, { cols: 120, rows: 30, ...(extraArgs ? { extraArgs } : {}) });
+        const { permissionMode } = proxyTurnParamsFor(fresh.executor, fresh.approval_mode);
+        await this.ttyMgr!.start(fresh, cwd, {
+          cols: 120,
+          rows: 30,
+          ...(permissionMode ? { permissionMode } : {}),
+          ...(extraArgs ? { extraArgs } : {}),
+        });
       } else {
         await this.codexTtyMgr!.start(fresh, cwd, { cols: 120, rows: 30 });
       }

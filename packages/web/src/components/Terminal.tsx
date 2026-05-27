@@ -34,9 +34,9 @@ export interface TerminalWire {
     onChunk: (bytes: Uint8Array) => void;
     onReplay: (chunks: Uint8Array[]) => void;
   }): () => void;
-  /** Optional: tear down the server-side resource. Workbench wire
-   *  uses this to kill the shell when the tab closes; session wire
-   *  doesn't (the user keeps the PTY across the mount). */
+  /** Optional: tear down the server-side resource. Owners that want
+   *  unmount to kill the PTY can provide this; workbench terminals
+   *  close explicitly from the tab action instead. */
   dispose?(): void;
 }
 
@@ -45,12 +45,16 @@ export interface TerminalProps {
   /** Stable key so React unmounts the xterm when the bound resource
    *  changes (different sessionId / termId). */
   instanceKey: string;
+  /** Claude Code terminal-setup maps Shift+Enter to backslash+Return
+   *  in VS Code/Cursor-style terminals. Browser xterm does not do that
+   *  by default, so session TTY can opt into the same sequence. */
+  shiftEnterNewline?: boolean;
 }
 
 /**
  * xterm.js panel — channel-agnostic. The owner picks the wire.
  */
-export function Terminal({ wire, instanceKey }: TerminalProps) {
+export function Terminal({ wire, instanceKey, shiftEnterNewline = false }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -117,8 +121,31 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
       attributeFilter: ['data-theme', 'data-accent', 'data-scale-code'],
     });
 
+    const encoder = new TextEncoder();
+    const sendInput = (data: string) => {
+      wire.sendInput(encoder.encode(data));
+    };
+
+    if (shiftEnterNewline) {
+      term.attachCustomKeyEventHandler(event => {
+        if (
+          event.type === 'keydown'
+          && event.key === 'Enter'
+          && event.shiftKey
+          && !event.altKey
+          && !event.ctrlKey
+          && !event.metaKey
+        ) {
+          event.preventDefault();
+          sendInput('\\\r');
+          return false;
+        }
+        return true;
+      });
+    }
+
     const dataDisp = term.onData(data => {
-      wire.sendInput(new TextEncoder().encode(data));
+      sendInput(data);
     });
 
     // De-dup resize events: ResizeObserver fires many times during initial
@@ -184,9 +211,10 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
     };
     // `wire` is recreated on every parent render, so we deliberately
     // ignore it in deps — the parent passes a stable `instanceKey` to
-    // signal genuine resource changes.
+    // signal genuine resource changes. `shiftEnterNewline` is part of
+    // the terminal keymap, so it does remount when that policy changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instanceKey]);
+  }, [instanceKey, shiftEnterNewline]);
 
   return <div className="gian-terminal" ref={containerRef} />;
 }
@@ -309,9 +337,6 @@ export function makeWorkbenchWire(
         ...(opts.cwd ? { cwd: opts.cwd } : {}),
         ...(opts.shell ? { shell: opts.shell } : {}),
       });
-    },
-    dispose() {
-      ws.send({ type: 'term:close', term_id: termId });
     },
     subscribe(handlers) {
       return ws.onMessage(msg => {
