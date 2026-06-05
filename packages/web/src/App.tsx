@@ -1,18 +1,41 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ApprovalCategory, ApprovalStatus, Bot, EventEnvelope, RunnerInfo, ServerToClientMessage, Session, Workspace } from '@gian/shared';
+import type { Bot, EventEnvelope, RemoteControlState, RunnerInfo, ServerToClientMessage, Session, Workspace } from '@gian/shared';
 import { LocaleProvider } from './i18n/index.js';
+import { EN } from './i18n/en.js';
+import { ZH } from './i18n/zh.js';
 import type { WsState } from './ws.js';
 import { GianWs } from './ws.js';
-import { makeWsUrl, loadWorkspaces, loadSessions, loadEvents, loadSettings, loadWorkingTrees, loadBots, loadFile, loadDiff, fetchWsToken, loadRepoInfo } from './api.js';
+import { makeWsUrl, loadWorkspaces, loadSessions, loadEvents, loadSettings, loadWorkingTrees, loadBots, loadFile, loadDiff, fetchWsToken, loadRepoInfo, loadApps, loadAllFiles, openFileWith, openFileWithApp, openFileBuiltin } from './api.js';
+import type { ChangeScope } from './api.js';
+import { injectComposerDraft } from './components/Composer.js';
 import type { WorkingTree } from './api.js';
+import type { SheetOpenWith } from './components/Sheet.js';
+import { buildFileRefIndex, makeFileLinkifyRehype } from './transcript/linkify-files.js';
+import { FileRefRehypeContext } from './transcript/items.js';
+import { isWithinRoot, longestRootMatch } from './utils/paths.js';
 import { applyEnvelope, applyErrorEnvelopeToSession, applyPlanUpdate, createOptimisticEcho, nextPendingFromEnvelope, parseTokenUsage } from './transcript/apply.js';
-import { maybeNotifyForEnvelope } from './notifications.js';
+import { loadNotificationPrefs, maybeNotifyForEnvelope } from './notifications.js';
+import {
+  applyApprovalCreated,
+  clearSessionError,
+  ingestEnvelope,
+  markAllRead,
+  markSessionRead,
+  reconcileFromSync,
+  removeApproval,
+  removeSession as removeInboxSession,
+  clearFyi as clearInboxFyi,
+  type InboxItem,
+} from './inbox.js';
+import { PendingTtySwitch } from './tty-switch.js';
 import { DiffOpenContext, FileLinkOpenContext, PlanOpenContext } from './transcript/items.js';
 import { Topbar } from './components/Topbar.js';
 import type { Mode, ViewState } from './components/Topbar.js';
 import type { PathSegment, SessionMenuActions } from './components/PathBreadcrumb.js';
 import { Dock } from './components/Dock.js';
-import { Sheet } from './components/Sheet.js';
+import { Toaster } from './components/Toaster.js';
+import { confirm as confirmDialog, toast } from './feedback.js';
+import { Sheet, IMAGE_EXTS, openCategoryFor, resolveOpenTarget } from './components/Sheet.js';
 import type { SheetTab, FileViewMode } from './components/Sheet.js';
 import { Splitter } from './components/Splitter.js';
 import { Inspector } from './components/Inspector.js';
@@ -26,14 +49,7 @@ import { FilesView } from './views/FilesView.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import type { SystemConfig } from '@gian/shared';
 import type { QueueEntry, TokenUsage, TranscriptItem } from './types.js';
-
-export interface PendingApproval {
-  id: string;
-  session_id: string;
-  category: ApprovalCategory;
-  description: string;
-  status: ApprovalStatus;
-}
+import { planBetaComposerSend, planCreatedSessionFirstMessage } from './session-routing.js';
 
 export function App() {
   // The token getter runs every reconnect. With Auth dropped in Phase 1, this
@@ -58,8 +74,13 @@ export function App() {
   const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
   const [usageBySession, setUsageBySession] = useState<Record<string, TokenUsage>>({});
   const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
+  const [ttyLockBySession, setTtyLockBySession] = useState<Record<string, { owner: boolean; reason?: string }>>({});
+  const [remoteControlBySession, setRemoteControlBySession] = useState<Record<string, RemoteControlState>>({});
   const [mode, setMode] = useState<Mode>('sessions');
   const [workingTrees, setWorkingTrees] = useState<WorkingTree[]>([]);
+  // Installed apps for the Sheet's "Open with…" menu (macOS; [] elsewhere).
+  // Fetched once — the list is stable for a session.
+  const [apps, setApps] = useState<string[]>([]);
   // ─── V2 Workbench (Sheet) state ─────────────────────────────────────────
   const [wbTabs, setWbTabs] = useState<SheetTab[]>([]);
   const [wbActive, setWbActive] = useState<{ 0: string | null; 1: string | null }>({ 0: null, 1: null });
@@ -79,6 +100,10 @@ export function App() {
   const [pathRenameActive, setPathRenameActive] = useState(false);
   const [runner, setRunner] = useState<RunnerInfo | null>(null);
   const pendingFirstMessageRef = useRef<string | null>(null);
+  // Tracks the "switch to TTY + flush staged first message" dance for the Beta
+  // surface. Lifecycle methods make the stale-ref leak that broke post-recover
+  // sends impossible — see PendingTtySwitch.
+  const ttySwitchRef = useRef<PendingTtySwitch>(new PendingTtySwitch());
   // True from `session:create` dispatch until `session:created` arrives. Drives
   // the "Creating…" busy state in NewSessionView so the form doesn't look dead
   // while the host spins up a session + worktree.
@@ -119,7 +144,7 @@ export function App() {
     void loadBots().then(setBots);
   }, []);
 
-  const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
+  const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -142,6 +167,13 @@ export function App() {
       session: notifyingSession,
       onClick: () => setActiveSessionId(env.session_id),
     });
+    // Persistent in-app mirror of the same taxonomy: approval / error / done.
+    // Reads live prefs so Settings toggles take effect immediately; skips
+    // `done` for the session you're already looking at.
+    setInboxItems(prev => ingestEnvelope(prev, env, {
+      prefs: loadNotificationPrefs(),
+      activeSessionId: activeSessionIdRef.current,
+    }));
 
     const nextPending = nextPendingFromEnvelope(env);
     if (nextPending !== null) {
@@ -188,17 +220,9 @@ export function App() {
           setBots(msg.bots);
           setSystemConfig(msg.config);
           setRunner(msg.runner);
-          setPendingApprovals(
-            msg.approvals
-              .filter(a => a.status === 'pending')
-              .map(a => ({
-                id: a.id,
-                session_id: a.session_id,
-                category: a.category,
-                description: a.title,
-                status: a.status,
-              })),
-          );
+          // Rebuild actionable inbox items (pending approvals + errored
+          // sessions) from the snapshot. `done` is FYI and not reconstructed.
+          setInboxItems(reconcileFromSync(msg.approvals, msg.sessions));
           return;
         case 'session:created': {
           setSessions(prev => [msg.session, ...prev.filter(s => s.id !== msg.session.id)]);
@@ -206,19 +230,27 @@ export function App() {
           setCreatingSession(false);
           setForkingSession(false);
           const pendingMsg = pendingFirstMessageRef.current;
-          if (pendingMsg) {
-            pendingFirstMessageRef.current = null;
+          pendingFirstMessageRef.current = null;
+          const firstMessagePlan = planCreatedSessionFirstMessage(msg.session.executor, pendingMsg);
+          if (firstMessagePlan.switchToTty) {
+            setItemsBySession(prev => ({ ...prev, [msg.session.id]: [] }));
+            setPendingBySession(p => ({ ...p, [msg.session.id]: false }));
+            ttySwitchRef.current.stage(msg.session.id, firstMessagePlan.ttyText);
+            ws.send({ type: 'session:switch-runtime', session_id: msg.session.id, target: 'tty', surface: 'beta' });
+            return;
+          }
+          if (firstMessagePlan.structuredText) {
             // Seed the transcript with an optimistic echo of the first message
             // so the user sees it immediately — the real `user_message` event
             // reconciles it via applyEnvelope.
             const optimistic = createOptimisticEcho({
               sessionId: msg.session.id,
-              text: pendingMsg,
+              text: firstMessagePlan.structuredText,
               exec: msg.session.executor,
             });
             setItemsBySession(prev => ({ ...prev, [msg.session.id]: [optimistic] }));
             setPendingBySession(p => ({ ...p, [msg.session.id]: true }));
-            ws.send({ type: 'message:send', session_id: msg.session.id, text: pendingMsg });
+            ws.send({ type: 'message:send', session_id: msg.session.id, text: firstMessagePlan.structuredText });
           } else {
             setItemsBySession(prev => ({ ...prev, [msg.session.id]: [] }));
           }
@@ -226,6 +258,27 @@ export function App() {
         }
         case 'session:updated': {
           const partial = msg.session;
+          if (partial.status === 'running' || partial.status === 'pending') {
+            setPendingBySession(p => ({ ...p, [partial.id]: true }));
+            // Recovered out of the error state — drop its inbox error row.
+            setInboxItems(prev => clearSessionError(prev, partial.id));
+          } else if (partial.status === 'done' || partial.status === 'error') {
+            setPendingBySession(p => ({ ...p, [partial.id]: false }));
+            if (partial.status === 'done') setInboxItems(prev => clearSessionError(prev, partial.id));
+          }
+          if (partial.runtime_mode === 'tty') {
+            const { flush } = ttySwitchRef.current.onTty(partial.id);
+            if (flush !== null) {
+              setPendingBySession(p => ({ ...p, [partial.id]: true }));
+              ws.send({ type: 'pty:input', session_id: partial.id, text: flush });
+            }
+          } else if (partial.runtime_mode === 'structured') {
+            // Back to structured (force-recover, or manual switch to Chat).
+            // Any pending switch-to-TTY for this session is now moot — drop the
+            // bookkeeping so the next Beta send re-initiates a fresh switch
+            // instead of being silently suppressed by a stale in-flight flag.
+            ttySwitchRef.current.clear(partial.id);
+          }
           // archive flag flipping moves the row between active and archived
           // lists. We don't have the full session shape on partial updates,
           // so when archived flips we re-fetch the list it's joining.
@@ -255,27 +308,35 @@ export function App() {
           }
           return;
         }
+        case 'tty:lock':
+          setTtyLockBySession(prev => ({
+            ...prev,
+            [msg.session_id]: {
+              owner: msg.owner,
+              ...(msg.reason ? { reason: msg.reason } : {}),
+            },
+          }));
+          return;
+        case 'tty:remote-control':
+          setRemoteControlBySession(prev => ({ ...prev, [msg.session_id]: msg.state }));
+          return;
         case 'session:deleted':
           setSessions(prev => prev.filter(s => s.id !== msg.session_id));
           setArchivedSessions(prev => prev.filter(s => s.id !== msg.session_id));
           setActiveSessionId(prev => (prev === msg.session_id ? null : prev));
+          setInboxItems(prev => removeInboxSession(prev, msg.session_id));
           return;
         case 'queue:updated':
           setQueueBySession(prev => ({ ...prev, [msg.session_id]: msg.queue }));
           return;
         case 'approval:created':
-          setPendingApprovals(prev => {
-            const next = prev.filter(a => a.id !== msg.approval.id);
-            if (msg.approval.status === 'pending') {
-              next.push(msg.approval as PendingApproval);
-            }
-            return next;
-          });
+          // Structured approvals also flow as `approval_requested` envelopes;
+          // both converge on the same approvalId so this self-dedups. Carries
+          // the authoritative status so auto-approved ones don't linger.
+          setInboxItems(prev => applyApprovalCreated(prev, msg.approval, loadNotificationPrefs(), Date.now()));
           return;
         case 'approval:updated':
-          setPendingApprovals(prev =>
-            prev.filter(a => a.id !== msg.approval.id),
-          );
+          setInboxItems(prev => removeApproval(prev, msg.approval.id));
           return;
         case 'event': {
           const sess = sessionsRef.current.find(s => s.id === msg.session_id);
@@ -292,6 +353,7 @@ export function App() {
           // the transcript reflects the reject state.
           if (msg.session_id) {
             const sid = msg.session_id;
+            ttySwitchRef.current.clear(sid);
             setItemsBySession(prev => {
               const delta = applyErrorEnvelopeToSession(prev[sid], sid);
               if (!delta || delta.items === prev[sid]) return prev;
@@ -303,7 +365,7 @@ export function App() {
             setCreatingSession(false);
             setForkingSession(false);
           }
-          alert(`${msg.code}: ${msg.message}`);
+          toast({ kind: 'error', title: msg.code, message: msg.message });
           return;
       }
     });
@@ -345,6 +407,10 @@ export function App() {
   useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
   const archivedSessionsRef = useRef<Session[]>([]);
   useEffect(() => { archivedSessionsRef.current = archivedSessions; }, [archivedSessions]);
+  // Latest active session id for the inbox's "don't ping the session you're
+  // watching" rule — read inside the stable handleEnvelope callback.
+  const activeSessionIdRef = useRef<string | null>(activeSessionId);
+  useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);
 
   // Fire queued remote-control switches once their turn lands. Watches the
   // `sessions` list — when an armed session's status leaves 'running' /
@@ -426,6 +492,63 @@ export function App() {
     return null;
   }
 
+  // Load the installed-apps list once for the Sheet "Open with…" menu.
+  useEffect(() => { void loadApps().then(setApps); }, []);
+
+  // Resolve a Sheet file tab's absolute path back to a (working tree, rel)
+  // pair, then route it to the host's open endpoint. Falls back to the
+  // `vscode://` handler for paths outside any known tree (mirrors
+  // openFileInSheet's own fallback).
+  // Dispatch a resolved open target for a known (wt, rel).
+  function dispatchOpen(wt: { id: string }, rel: string, target: SheetOpenWith): void {
+    if (target.kind === 'editor') { void openFileWith(wt.id, rel, target.id); return; }
+    if (target.kind === 'app') { void openFileWithApp(wt.id, rel, target.app); return; }
+    if (target.name === 'browser') {
+      window.open(`/api/working_trees/${encodeURIComponent(wt.id)}/raw?path=${encodeURIComponent(rel)}`, '_blank', 'noopener');
+      return;
+    }
+    void openFileBuiltin(wt.id, rel, target.name); // 'default' | 'finder' | 'terminal'
+  }
+
+  function handleOpenWith(tab: SheetTab, target: SheetOpenWith): void {
+    const abs = tab.fullPath;
+    if (!abs) return;
+    // Authoritative: the tab's own working tree id. Fallback: the longest root
+    // that actually contains `abs` (boundary-aware, longest wins) so a sibling
+    // root can never shadow the real one.
+    const wt = (tab.workingTreeId ? workingTrees.find(w => w.id === tab.workingTreeId) : undefined)
+      ?? longestRootMatch(workingTrees, abs);
+    if (!wt) {
+      window.open(`vscode://file/${encodeURI(abs)}`, '_blank', 'noopener');
+      return;
+    }
+    const rel = abs.slice(wt.path.replace(/\/+$/, '').length).replace(/^\/+/, '');
+    dispatchOpen(wt, rel, target);
+  }
+
+  // File index for the active working tree — powers auto-linkification of file
+  // mentions in transcript prose. Loaded once per working tree (the list is
+  // stable enough within a session; created/deleted files refresh on switch).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [fileIndexAbs, setFileIndexAbs] = useState<{ wtId: string; rehype: () => (tree: any) => void } | null>(null);
+  const fileIndexWtRef = useRef<string | null>(null);
+  useEffect(() => {
+    const wtId = defaultWorkingTreeIdFor(activeSession);
+    const wt = wtId ? workingTrees.find(w => w.id === wtId) : null;
+    if (!wtId || !wt) { fileIndexWtRef.current = null; setFileIndexAbs(null); return; }
+    if (fileIndexWtRef.current === wtId) return;
+    fileIndexWtRef.current = wtId;
+    const base = wt.path.replace(/\/+$/, '');
+    let cancelled = false;
+    void loadAllFiles(wtId).then(files => {
+      if (cancelled || fileIndexWtRef.current !== wtId) return;
+      const index = buildFileRefIndex(files, base);
+      setFileIndexAbs({ wtId, rehype: makeFileLinkifyRehype(index, rel => `${base}/${rel}`) });
+    });
+    return () => { cancelled = true; };
+  }, [activeSessionId, workingTrees]);
+  const fileRehype = fileIndexAbs?.rehype ?? null;
+
   // ─── Sheet (Workbench) actions ──────────────────────────────────────────
   // V2's openFileInSheet from design/gian-design-v2/js/app.jsx: single-click
   // a file = preview tab (one at a time, italic name); double-click or pin =
@@ -493,37 +616,60 @@ export function App() {
    *  preview drawer). Single click = preview tab; double click / context
    *  promote = permanent. Falls back to `vscode://` for paths outside any
    *  known working tree. */
-  async function openFileInSheet(absPath: string, permanent: boolean = false): Promise<void> {
+  async function openFileInSheet(absPath: string, permanent: boolean = false, line?: number): Promise<void> {
     const sess = activeSessionId
       ? sessions.find(s => s.id === activeSessionId) ?? null
       : null;
     const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
     const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
-    if (!wt || !absPath.startsWith(wt.path)) {
+    if (!wt || !isWithinRoot(wt.path, absPath)) {
       const enc = encodeURI(absPath);
-      window.open(`vscode://file/${enc}`, '_blank', 'noopener');
+      window.open(`vscode://file/${enc}${line ? ':' + line : ''}`, '_blank', 'noopener');
       return;
     }
-    const rel = absPath.slice(wt.path.length).replace(/^\/+/, '');
+    const rel = absPath.slice(wt.path.replace(/\/+$/, '').length).replace(/^\/+/, '');
     const name = rel.split('/').pop() || rel;
     const fullPath = absPath;
     const icoKind = extOf(name);
     const ico = icoTextOf(name);
+    const ext = (name.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase();
+    const rawUrl = `/api/working_trees/${encodeURIComponent(wt.id)}/raw?path=${encodeURIComponent(rel)}`;
+    const isImage = IMAGE_EXTS.has(ext);
 
-    // Try to promote existing tab.
+    // Files we can't view in-app (pdf, binaries, unknown) open externally via
+    // their category's configured target (Settings → Default apps). Code/web are
+    // viewed as source in-app here; the Open button still uses the category.
+    if (!isImage) {
+      const cat = openCategoryFor(name);
+      if (cat !== 'code' && cat !== 'web') {
+        dispatchOpen(wt, rel, resolveOpenTarget(cat, systemConfig?.open_apps));
+        return;
+      }
+    }
+
+    // Try to promote existing tab. Re-set scrollLine so a fresh click on a
+    // file-link (possibly a different line) re-jumps in the already-open tab.
     const existingPerm = wbTabs.find(t => t.kind === 'file' && t.fullPath === fullPath && !t.preview);
     if (existingPerm) {
+      setWbTabs(prev => prev.map(t => t.id === existingPerm.id ? { ...t, scrollLine: line } : t));
       setWbActive(a => ({ ...a, [existingPerm.pane]: existingPerm.id }));
       setViewState(v => v === 'main' ? 'both' : v);
       return;
     }
 
-    const file = await loadFile(wt.id, rel);
-    const lines = fileToLines(file?.content ?? '');
-    // Preview-capable files (md) open with the rendered view by default;
-    // source-only formats stay on 'source'.
-    const initialViewMode: FileViewMode = icoKind === 'md' ? 'preview' : 'source';
-    const tabContent = { name, kind: 'file' as const, icoKind, ico, lines, viewMode: initialViewMode, fullPath };
+    // Images render straight from `/raw` via an <img> (no text load); everything
+    // else loads its source lines.
+    let tabContent;
+    if (isImage) {
+      tabContent = { name, kind: 'file' as const, icoKind: 'img' as const, ico: '', rawSrc: rawUrl, fullPath, workingTreeId: wt.id };
+    } else {
+      const file = await loadFile(wt.id, rel);
+      const lines = fileToLines(file?.content ?? '');
+      // Preview-capable files (md) open with the rendered view by default —
+      // but a line jump forces source view so the target line is visible.
+      const initialViewMode: FileViewMode = line != null ? 'source' : icoKind === 'md' ? 'preview' : 'source';
+      tabContent = { name, kind: 'file' as const, icoKind, ico, lines, viewMode: initialViewMode, fullPath, scrollLine: line, workingTreeId: wt.id };
+    }
 
     setWbTabs(prev => {
       const existingPrev = prev.find(t => t.kind === 'file' && t.preview);
@@ -531,13 +677,16 @@ export function App() {
       // Replace preview tab in place.
       if (existingPrev) {
         if (permanent && existingPrev.fullPath === fullPath) {
-          tabs = tabs.map(t => t.id === existingPrev.id ? { ...t, preview: false } : t);
+          tabs = tabs.map(t => t.id === existingPrev.id ? { ...t, preview: false, scrollLine: line } : t);
           setWbActive(a => ({ ...a, [existingPrev.pane]: existingPrev.id }));
           setViewState(v => v === 'main' ? 'both' : v);
           return tabs;
         }
         if (!permanent) {
-          tabs = tabs.map(t => t.id === existingPrev.id ? { ...t, ...tabContent, preview: true } : t);
+          // Replace the preview tab's content WITHOUT spreading the old tab —
+          // otherwise stale fields (e.g. an image tab's `rawSrc` or a text
+          // tab's `lines`) leak into the new content and the body mis-renders.
+          tabs = tabs.map(t => t.id === existingPrev.id ? { ...tabContent, id: t.id, pane: t.pane, preview: true } : t);
           setWbActive(a => ({ ...a, [existingPrev.pane]: existingPrev.id }));
           setViewState(v => v === 'main' ? 'both' : v);
           return tabs;
@@ -565,14 +714,14 @@ export function App() {
   /** Open a unified diff for a changed file in the Sheet workbench. The
    *  Changes inspector routes row clicks here so the diff lands in the
    *  workbench (full width) rather than crammed into the narrow inspector. */
-  async function openDiffInSheet(rel: string, permanent: boolean = false): Promise<void> {
+  async function openDiffInSheet(rel: string, permanent: boolean = false, scope: ChangeScope = 'all'): Promise<void> {
     const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
     const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
     const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
     if (!wt) return;
     const name = rel.split('/').pop() || rel;
     const fullPath = `${wt.path}/${rel}`;
-    const diffText = await loadDiff(wt.id, rel);
+    const diffText = await loadDiff(wt.id, rel, scope);
 
     setWbTabs(prev => {
       let tabs = [...prev];
@@ -598,6 +747,7 @@ export function App() {
         ico: '±',
         diffText,
         fullPath,
+        workingTreeId: wt.id,
         preview: !permanent,
       };
       tabs.push(tab);
@@ -618,7 +768,7 @@ export function App() {
         return next;
       }
       const id = 'plan-' + approvalId;
-      const tab: SheetTab = { id, pane: 0, name: 'Plan', kind: 'plan', icoKind: 'plan', ico: '✓', planBody: planMarkdown };
+      const tab: SheetTab = { id, pane: 0, name: appT('sheet.tab.plan'), kind: 'plan', icoKind: 'plan', ico: '✓', planBody: planMarkdown };
       setWbActive(a => ({ ...a, 0: id }));
       setViewState(v => v === 'main' ? 'both' : v);
       return [...prev, tab];
@@ -674,7 +824,7 @@ export function App() {
         return next;
       }
       const id = 'tab-settings';
-      const tab: SheetTab = { id, pane: 0, name: 'Settings', kind: 'settings', icoKind: 'gear', ico: '⚙' };
+      const tab: SheetTab = { id, pane: 0, name: appT('sheet.tab.settings'), kind: 'settings', icoKind: 'gear', ico: '⚙' };
       const next = [...prev, tab];
       setWbActive(a => ({ ...a, [tab.pane]: tab.id }));
       setViewState(v => v === 'main' ? 'both' : v);
@@ -729,6 +879,18 @@ export function App() {
   }
 
   const locale = systemConfig?.locale ?? 'en';
+  const appT = useCallback((key: string) => {
+    const messages = locale === 'zh-CN' ? ZH : EN;
+    return messages[key] ?? EN[key] ?? key;
+  }, [locale]);
+
+  useEffect(() => {
+    setWbTabs(prev => prev.map(tab => {
+      if (tab.kind === 'settings') return { ...tab, name: appT('sheet.tab.settings') };
+      if (tab.kind === 'plan') return { ...tab, name: appT('sheet.tab.plan') };
+      return tab;
+    }));
+  }, [appT]);
 
   // ─── Path breadcrumb (V2 topbar) ─────────────────────────────────────────
   const activeWtForSession = activeSession
@@ -748,19 +910,19 @@ export function App() {
       segs.push({
         kind: 'workspace',
         label: activeWorkspace?.name ?? activeSession.workspace_id,
-        copyHint: `Copy "${activeWorkspace?.name ?? activeSession.workspace_id}"`,
+        copyHint: `${appT('common.copy')} "${activeWorkspace?.name ?? activeSession.workspace_id}"`,
       });
       if (activeBranch) {
         segs.push({
           kind: 'branch',
           label: activeBranch,
-          copyHint: `Copy "${activeBranch}"`,
+          copyHint: `${appT('common.copy')} "${activeBranch}"`,
         });
       }
       segs.push({
         kind: 'session',
-        label: activeSession.name || 'Untitled',
-        copyHint: 'Click for session actions',
+        label: activeSession.name || appT('coding.session.untitled'),
+        copyHint: appT('coding.session.actions'),
         editing: pathRenameActive,
       });
       return segs;
@@ -770,7 +932,7 @@ export function App() {
       return [{
         kind: 'workspace',
         label: activeListedWs.name,
-        copyHint: `Copy "${activeListedWs.name}"`,
+        copyHint: `${appT('common.copy')} "${activeListedWs.name}"`,
       }];
     }
     if (mode === 'bots') {
@@ -778,11 +940,11 @@ export function App() {
       return [{
         kind: 'session',
         label: activeBot.label,
-        copyHint: `Copy "${activeBot.label}"`,
+        copyHint: `${appT('common.copy')} "${activeBot.label}"`,
       }];
     }
     return [];
-  }, [mode, activeSession, activeWorkspace, activeBranch, activeListedWs, activeBot, pathRenameActive]);
+  }, [mode, activeSession, activeWorkspace, activeBranch, activeListedWs, activeBot, pathRenameActive, appT]);
 
   // Session-menu actions (Rename / Copy / Recover / Archive / Delete)
   const sessionMenu: SessionMenuActions | null = useMemo(() => {
@@ -793,6 +955,10 @@ export function App() {
         try { void navigator.clipboard?.writeText(activeSession.name || ''); } catch (_) { /* ignore */ }
       },
       onForceRecover: () => {
+        // Recover is the unwedge path — a TTY switch that hung is the common
+        // reason to reach for it. Clear stale switch/staged-message bookkeeping
+        // so the next send isn't suppressed (see PendingTtySwitch).
+        ttySwitchRef.current.clear(activeSession.id);
         ws.send({ type: 'session:recover', session_id: activeSession.id });
       },
       onFork: (executor) => {
@@ -825,13 +991,16 @@ export function App() {
         const next = activeSession.archived !== 1;
         ws.send({ type: 'session:archive', session_id: activeSession.id, archived: next });
       },
-      onDelete: () => {
-        if (window.confirm(`Delete session "${activeSession.name || 'Untitled'}"? This cannot be undone.`)) {
-          ws.send({ type: 'session:delete', session_id: activeSession.id });
-        }
+      onDelete: async () => {
+        const ok = await confirmDialog({
+          message: `${appT('coding.session.deleteConfirmPrefix')} "${activeSession.name || appT('coding.session.untitled')}"? ${appT('coding.session.deleteConfirmSuffix')}`,
+          danger: true,
+          confirmLabel: appT('common.delete'),
+        });
+        if (ok) ws.send({ type: 'session:delete', session_id: activeSession.id });
       },
     };
-  }, [mode, activeSession, ws]);
+  }, [mode, activeSession, ws, appT]);
 
   const handleRenameSubmit = useCallback((value: string) => {
     setPathRenameActive(false);
@@ -847,6 +1016,7 @@ export function App() {
   const onJumpToSessionFromInbox = (sid: string) => {
     setActiveSessionId(sid);
     setMode('sessions');
+    setInboxItems(prev => markSessionRead(prev, sid));
   };
 
   // URL-param driven Files view: /?view=files&wt=<id>&path=<rel>
@@ -908,7 +1078,8 @@ export function App() {
       />
       <div className={`body ${viewState === 'workbench' ? 'wb-only' : ''}`}>
           {mode === 'sessions' && (
-          <FileLinkOpenContext.Provider value={(absPath) => { void openFileInSheet(absPath, false); }}>
+          <FileLinkOpenContext.Provider value={(absPath, line) => { void openFileInSheet(absPath, false, line); }}>
+          <FileRefRehypeContext.Provider value={fileRehype}>
           <DiffOpenContext.Provider value={() => { /* §C — diff not clickable */ }}>
           <PlanOpenContext.Provider value={(payload) => openPlanInSheet(payload.id, payload.markdown)}>
             <CodingView
@@ -922,6 +1093,8 @@ export function App() {
               activeSessionId={activeSessionId}
               itemsBySession={itemsBySession}
               pendingBySession={pendingBySession}
+              ttyLockBySession={ttyLockBySession}
+              remoteControlBySession={remoteControlBySession}
               usageBySession={usageBySession}
               queueBySession={queueBySession}
               planBySession={planBySession}
@@ -950,16 +1123,16 @@ export function App() {
               creatingSession={creatingSession}
               onArchive={(id, archived) => ws.send({ type: 'session:archive', session_id: id, archived })}
               onDelete={id => ws.send({ type: 'session:delete', session_id: id })}
-              onRecover={id => ws.send({ type: 'session:recover', session_id: id })}
+              onRecover={id => { ttySwitchRef.current.clear(id); ws.send({ type: 'session:recover', session_id: id }); }}
               onMerge={async id => {
                 const { mergeSession } = await import('./api.js');
                 const r = await mergeSession(id);
-                if (!r.ok) alert(r.error ?? 'merge failed');
+                if (!r.ok) toast({ kind: 'error', message: r.error ?? 'merge failed' });
               }}
               onDrop={async id => {
                 const { dropSession } = await import('./api.js');
                 const r = await dropSession(id);
-                if (!r.ok) alert(r.error ?? 'drop failed');
+                if (!r.ok) toast({ kind: 'error', message: r.error ?? 'drop failed' });
               }}
               onSend={(sessionId, text, opts) => {
                 // Optimistic echo: append a pending user msg to the transcript
@@ -1002,6 +1175,21 @@ export function App() {
                   ...(opts?.oneShotBypass ? { oneShotBypass: true } : {}),
                 });
               }}
+              onBetaSend={(sessionId, text, opts) => {
+                const attachments = opts?.attachments ?? [];
+                const session = sessionsRef.current.find(s => s.id === sessionId);
+                const plan = planBetaComposerSend(session?.runtime_mode ?? 'structured', text, attachments);
+                if (plan.channel === 'noop') return;
+                setPendingBySession(p => ({ ...p, [sessionId]: true }));
+                if (plan.channel === 'stage_for_tty') {
+                  const { sendSwitch } = ttySwitchRef.current.stage(sessionId, plan.text);
+                  if (sendSwitch) {
+                    ws.send({ type: 'session:switch-runtime', session_id: sessionId, target: 'tty', surface: 'beta' });
+                  }
+                  return;
+                }
+                ws.send({ type: 'pty:input', session_id: sessionId, text: plan.text });
+              }}
               onSendSkill={(sessionId, name, path) =>
                 ws.send({
                   type: 'message:send',
@@ -1021,6 +1209,27 @@ export function App() {
                   decision,
                   ...(answers ? { answers } : {}),
                 })
+              }
+              onLocalApprovalResolve={(sessionId, approvalId, decision, answers) => {
+                // TTY-mode AskUserQuestion answers are pasted into the PTY
+                // rather than resolved over the structured approval bridge —
+                // the bridge isn't wired in TTY (cc-proxy would 404). Synthesize
+                // an approval_resolved envelope so the QuestionCard transitions
+                // out of `pending` immediately. Carry the picked answers so the
+                // resolved card can show "answered with …". Any later duplicate
+                // from the JSONL watcher is harmless: apply.ts dedupes by
+                // approvalId, preserves status, and won't blank answeredWith.
+                const session = sessionsRef.current.find(s => s.id === sessionId);
+                const executor = session?.executor === 'codex' ? 'codex' : 'claude';
+                handleEnvelope({
+                  session_id: sessionId,
+                  turn: 0,
+                  call_id: approvalId,
+                  event: 'approval_resolved',
+                  ts: Date.now(),
+                  data: { approvalId, decision, auto: false, ...(answers ? { answers } : {}) },
+                }, executor);
+              }
               }
               onQueueAdd={(sessionId, text) =>
                 ws.send({ type: 'queue:add', session_id: sessionId, text })
@@ -1058,8 +1267,21 @@ export function App() {
               previewTarget={null}
               onClosePreview={() => { /* no-op — replaced by Sheet */ }}
               ws={ws}
-              onSwitchRuntime={(sessionId, target) =>
-                ws.send({ type: 'session:switch-runtime', session_id: sessionId, target })
+              onSwitchRuntime={(sessionId, target, surface) =>
+                ws.send({
+                  type: 'session:switch-runtime',
+                  session_id: sessionId,
+                  target,
+                  ...(surface ? { surface } : {}),
+                })
+              }
+              onClaimTty={(sessionId, surface, takeover) =>
+                ws.send({
+                  type: 'tty:claim',
+                  session_id: sessionId,
+                  surface,
+                  ...(takeover ? { takeover: true } : {}),
+                })
               }
               armedRemoteSwitch={armedRemoteSwitch}
               onRequestRemote={(sessionId) => {
@@ -1089,10 +1311,14 @@ export function App() {
                   return next;
                 });
               }}
+              onToggleRemoteControl={(sessionId) => {
+                ws.send({ type: 'session:remote-control', session_id: sessionId });
+              }}
               onOpenSpaces={() => setMode('spaces')}
             />
           </PlanOpenContext.Provider>
           </DiffOpenContext.Provider>
+          </FileRefRehypeContext.Provider>
           </FileLinkOpenContext.Provider>
           )}
           {mode === 'spaces' && (
@@ -1135,11 +1361,16 @@ export function App() {
               onAddTab={() => addTerminalTab()}
               hideTerm={termHidden}
               hidden={!sheetVisible}
+              externalEditors={systemConfig?.external_editors ?? []}
+              openApps={systemConfig?.open_apps}
+              onOpenWith={handleOpenWith}
+              onConfigureEditors={() => toggleWbTabKind('settings')}
               renderTab={(t) => {
                 if (t.kind === 'settings') {
                   return (
                     <SettingsBody
                       config={systemConfig}
+                      apps={apps}
                       onChange={cfg => setSystemConfig(cfg)}
                     />
                   );
@@ -1185,7 +1416,9 @@ export function App() {
                 const abs = `${wt.path}/${rel}`;
                 void openFileInSheet(abs, perm);
               }}
-              onOpenDiff={(rel, perm) => { void openDiffInSheet(rel, perm); }}
+              onOpenDiff={(rel, perm, scope) => { void openDiffInSheet(rel, perm, scope); }}
+              canCommit={!!activeSession}
+              onComposePrompt={text => { if (activeSessionId) injectComposerDraft(activeSessionId, text); }}
             />
           </>
         )}
@@ -1198,8 +1431,14 @@ export function App() {
           onToggleWbTab={toggleWbTabKind}
           wbDisabled={mode !== 'sessions'}
           onOpenSearch={() => setPaletteOpen(true)}
-          pendingApprovals={pendingApprovals}
+          inboxItems={inboxItems}
+          sessionName={sid => {
+            const s = sessions.find(x => x.id === sid) ?? archivedSessions.find(x => x.id === sid);
+            return s?.name?.trim() || `session ${sid.slice(0, 6)}`;
+          }}
           onJumpToSession={onJumpToSessionFromInbox}
+          onMarkInboxRead={() => setInboxItems(prev => markAllRead(prev))}
+          onClearInboxDone={() => setInboxItems(prev => clearInboxFyi(prev))}
           wsState={wsState}
           wsAttempt={wsAttempt}
           authed={authed}
@@ -1209,9 +1448,10 @@ export function App() {
       {forkingSession && (
         <div className="fork-toast" role="status" aria-live="polite">
           <span className="spinner" />
-          <span>Forking session…</span>
+          <span>{appT('coding.forking')}</span>
         </div>
       )}
+      <Toaster />
     </div>
     </LocaleProvider>
   );

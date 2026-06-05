@@ -3,6 +3,7 @@ import { THEME_DEFAULT_ACCENT } from '@gian/shared';
 import type { Db } from './db.js';
 
 const EXTERNAL_EDITORS_KEY = 'external_editors';
+const OPEN_APPS_KEY = 'open_apps';
 
 const VALID_ACCENTS: ReadonlySet<Accent> = new Set([
   'rose', 'ember', 'citron', 'moss', 'teal', 'azure', 'ink', 'plum',
@@ -83,6 +84,24 @@ export function loadConfig(db: Db): SystemConfig {
     }
   }
 
+  let openApps: SystemConfig['open_apps'] = {};
+  const rawOpenApps = map.get(OPEN_APPS_KEY);
+  if (rawOpenApps) {
+    try {
+      const parsed = JSON.parse(rawOpenApps);
+      if (parsed && typeof parsed === 'object') {
+        const out: Record<string, string> = {};
+        for (const k of ['code', 'web', 'images', 'pdf', 'other']) {
+          const v = (parsed as Record<string, unknown>)[k];
+          if (typeof v === 'string' && v) out[k] = v;
+        }
+        openApps = out;
+      }
+    } catch {
+      openApps = {};
+    }
+  }
+
   const rawTheme = map.get('theme') ?? '';
   const theme: SystemConfig['theme'] = VALID_THEMES.has(rawTheme as SystemConfig['theme'])
     ? (rawTheme as SystemConfig['theme'])
@@ -113,5 +132,6 @@ export function loadConfig(db: Db): SystemConfig {
     default_codex_effort: map.get('default_codex_effort') ?? '',
     auth_username: map.get('auth_username') ?? '',
     external_editors: externalEditors,
+    open_apps: openApps,
   };
 }

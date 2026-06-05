@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../storage/db.js';
+import { normalizeCcNotification } from '../event/normalize-cc.js';
 
 /**
  * Replay a native (claude / codex) JSONL session into Gian's `turns` and
@@ -62,6 +63,15 @@ export function replayNativeJsonl(
   const baseTime = Date.now() - turns.length * 1000;
 
   const insertAll = db.transaction(() => {
+    // Rebuild — not append. Drop any existing rows for this session first so a
+    // replay can never layer a second copy on top of live/structured events
+    // (the root cause of the "every turn duplicated" bug). Children (events)
+    // before parents (turns) to respect the FK. Idempotent: a no-op when the
+    // session is already empty (adoption / cold-rebuild). The JSONL is the
+    // authoritative source for a native session, so a clean normalized rebuild
+    // is always correct.
+    db.prepare('DELETE FROM events WHERE session_id = ?').run(sessionId);
+    db.prepare('DELETE FROM turns WHERE session_id = ?').run(sessionId);
     for (let i = 0; i < turns.length; i++) {
       const turn = turns[i]!;
       const turnId = randomUUID();
@@ -159,16 +169,52 @@ export function parseCcLine(line: string): ParsedLine | null {
 
   if (parsed.type === 'user') {
     const msg = parsed.message as { content?: unknown } | undefined;
-    const text = typeof msg?.content === 'string' ? msg.content : '';
-    if (!text || isSystemNoise(text)) return null;
-    return {
-      boundary: 'turn-start',
-      events: [{
-        callId: randomUUID(),
-        type: 'user_message',
-        data: { text: stripSystemTags(text) },
-      }],
-    };
+    if (typeof msg?.content === 'string') {
+      const text = msg.content;
+      if (!text || isSystemNoise(text)) return null;
+      return {
+        boundary: 'turn-start',
+        events: [{
+          callId: randomUUID(),
+          type: 'user_message',
+          data: { text: stripSystemTags(text) },
+        }],
+      };
+    }
+
+    const blocks = Array.isArray(msg?.content) ? msg.content : [];
+    const events: NormalizedEvent[] = [];
+    for (const block of blocks) {
+      if (!block || typeof block !== 'object') continue;
+      const b = block as Record<string, unknown>;
+      if (b.type !== 'tool_result' || !isAskUserQuestionToolResult(b, parsed)) continue;
+      const approvalId = typeof b.tool_use_id === 'string' ? b.tool_use_id : '';
+      if (!approvalId) continue;
+      // Distinguish "user actually answered" from "tool was cancelled or
+      // errored out". A normal answer carries `toolUseResult.answers`; a
+      // selector-cancel (e.g. Beta paste-back, user hit Esc, PTY died) leaves
+      // is_error=true or just the echoed questions with no answers. Treat both
+      // as a deny so the QuestionCard doesn't show a green check on something
+      // that was effectively aborted.
+      const result = (b.toolUseResult ?? parsed.toolUseResult) as Record<string, unknown> | undefined;
+      const hasAnswers = !!result
+        && typeof result.answers === 'object'
+        && result.answers !== null
+        && !Array.isArray(result.answers)
+        && Object.keys(result.answers as Record<string, unknown>).length > 0;
+      const isError = b.is_error === true;
+      const behavior = (!isError && hasAnswers) ? 'allow' : 'deny';
+      events.push(...normalizeNativeCcEvent('approval.resolved', {
+        approvalId,
+        behavior,
+        // Carry the picked answers so a transcript rebuilt from persisted
+        // events (page reload) can still show "answered with …" — the live
+        // synthetic resolve has them, the watcher must too.
+        ...(behavior === 'allow' && hasAnswers ? { answers: (result as { answers: unknown }).answers } : {}),
+      }));
+    }
+    if (events.length === 0) return null;
+    return { boundary: 'continue', events };
   }
 
   if (parsed.type === 'assistant') {
@@ -179,20 +225,27 @@ export function parseCcLine(line: string): ParsedLine | null {
       if (!block || typeof block !== 'object') continue;
       const b = block as Record<string, unknown>;
       if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
-        events.push({
-          callId: randomUUID(),
-          type: 'output.text',
-          data: { text: b.text, itemId: randomUUID() },
-        });
+        const itemId = typeof b.id === 'string' ? b.id : randomUUID();
+        events.push(...normalizeNativeCcEvent('output.text', {
+          itemId,
+          text: b.text,
+        }));
       } else if (b.type === 'tool_use' && typeof b.name === 'string') {
-        events.push({
-          callId: randomUUID(),
-          type: 'tool.use',
-          data: {
+        const callId = typeof b.id === 'string' ? b.id : randomUUID();
+        const input = typeof b.input === 'object' && b.input ? b.input : {};
+        if (isAskUserQuestionToolUse(b.name, input)) {
+          events.push(...normalizeNativeCcEvent('approval.requested', {
+            approvalId: callId,
             toolName: b.name,
-            input: typeof b.input === 'object' && b.input ? b.input : {},
-          },
-        });
+            inputPreview: JSON.stringify(input),
+          }));
+        } else {
+          events.push(...normalizeNativeCcEvent('tool.use', {
+            callId,
+            toolName: b.name,
+            input,
+          }));
+        }
       }
     }
     if (events.length === 0) return null;
@@ -200,6 +253,18 @@ export function parseCcLine(line: string): ParsedLine | null {
   }
 
   return null;
+}
+
+function normalizeNativeCcEvent(method: string, data: Record<string, unknown>): NormalizedEvent[] {
+  return normalizeCcNotification(
+    { method, params: { sessionId: 'native-jsonl', data } },
+    'native-jsonl',
+    0,
+  ).map(ev => ({
+    callId: ev.call_id,
+    type: ev.type,
+    data: ev.data as unknown as Record<string, unknown>,
+  }));
 }
 
 function isSystemNoise(text: string): boolean {
@@ -218,6 +283,24 @@ function stripSystemTags(text: string): string {
     .replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g, '')
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
     .trim();
+}
+
+function isAskUserQuestionToolUse(toolName: string, input: unknown): boolean {
+  if (toolName === 'AskUserQuestion') return true;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
+  return Array.isArray((input as { questions?: unknown }).questions);
+}
+
+function isAskUserQuestionToolResult(
+  block: Record<string, unknown>,
+  line: Record<string, unknown>,
+): boolean {
+  const result = block.toolUseResult ?? line.toolUseResult;
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
+  const r = result as Record<string, unknown>;
+  return Array.isArray(r.questions) || (
+    !!r.answers && typeof r.answers === 'object' && !Array.isArray(r.answers)
+  );
 }
 
 // ---------------------------------------------------------------------------

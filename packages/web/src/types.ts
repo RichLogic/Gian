@@ -144,6 +144,11 @@ export interface ApprovalItem {
   category?: import('@gian/shared').ApprovalCategory;
   /** Structured questions when `category === 'question'`. */
   questions?: import('@gian/shared').AskQuestion[];
+  /** Human-readable summary of what the user picked, set when a `question`
+   *  approval resolves. Drives the resolved card's "answered with …" line.
+   *  TTY-mode answers arrive via the synthetic local resolve; the later JSONL
+   *  watcher resolve has no answers and must not clobber this. */
+  answeredWith?: string;
   /** Which scope buttons to surface — drives whether `Allow session` appears.
    *  Defaults to `['once']` (only "Allow once"). */
   scopeOptions?: ('once' | 'session')[];
@@ -153,6 +158,10 @@ export interface ApprovalItem {
   planActions?: ('accept_with_auto' | 'accept_with_ask' | 'keep_planning')[];
   ts: number;
   turn: number;
+}
+
+export interface ApprovalActionContext {
+  category?: import('@gian/shared').ApprovalCategory;
 }
 
 export interface DiffFile {

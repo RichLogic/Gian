@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalDecision } from '@gian/shared';
-import type { TranscriptItem } from '../types.js';
+import { useT } from '../i18n/index.js';
+import type { ApprovalActionContext, StatusItem, TranscriptItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
 import { AgentSpawnRow, ApprovalCard, AssistantMessage, AutoNoticeCard, Caret, CommandCard, DiffCard, FileReadCard, FileSearchCard, ReasoningCard, ToolEvent, UserMessage, WebSearchRow } from './items.js';
 import { GianMascot } from '../components/GianMascot.js';
@@ -76,6 +77,7 @@ export function renderItem(
     approvalId: string,
     decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
+    context?: ApprovalActionContext,
   ) => void,
   currentUserRef?: React.RefObject<HTMLDivElement | null>,
   isCurrentUser?: boolean,
@@ -108,20 +110,7 @@ export function renderItem(
     case 'turn-end':
       return null; // Skip, separator already shown by next turn-start
     case 'error':
-      return (
-        <div key={item.id} className="approval declined" style={{ maxWidth: 820 }}>
-          <div className="approval-top">
-            <div style={{ flex: 1 }}>
-              <div className="approval-title">
-                <span>Turn failed</span>
-                <span className="approval-risk">error</span>
-              </div>
-              <div className="approval-sub">{item.text}</div>
-            </div>
-            <span className="evt-meta" style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
-          </div>
-        </div>
-      );
+      return <ErrorCard key={item.id} item={item} />;
     case 'status':
       return <div key={item.id} className="transcript-empty">{item.text}</div>;
     case 'command':
@@ -139,6 +128,24 @@ export function renderItem(
   }
 }
 
+function ErrorCard({ item }: { item: StatusItem }) {
+  const t = useT();
+  return (
+    <div className="approval declined" style={{ maxWidth: 820 }}>
+      <div className="approval-top">
+        <div style={{ flex: 1 }}>
+          <div className="approval-title">
+            <span>{t('transcript.turnFailed')}</span>
+            <span className="approval-risk">{t('coding.status.error')}</span>
+          </div>
+          <div className="approval-sub">{item.text}</div>
+        </div>
+        <span className="evt-meta" style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Wraps a stretch of consecutive action items so the user can collapse the
  * "what the agent did" between two text replies. Single-item blocks fall
@@ -154,8 +161,10 @@ function TurnActionsBlock({
     approvalId: string,
     decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
+    context?: ApprovalActionContext,
   ) => void;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(block.isTrailing);
   // Auto-fold once the agent stops acting (a reply / approval comes after).
   // If the user manually toggled while trailing, this still collapses on
@@ -170,14 +179,14 @@ function TurnActionsBlock({
   }
 
   // Tiny tally: count by major kinds for the summary line.
-  const tally = countActions(block.items);
+  const tally = countActions(block.items, t);
   return (
     <div className={`evt actions ${open ? 'open' : ''}`}>
       <div className="evt-head" onClick={() => setOpen((o: boolean) => !o)}>
         <Caret />
-        <span className="evt-verb">{block.isTrailing ? 'Working' : 'Steps'}</span>
+        <span className="evt-verb">{block.isTrailing ? t('transcript.working') : t('transcript.steps')}</span>
         <span className="evt-subject">
-          <span style={{ color: 'var(--text-2)' }}>{block.items.length} actions</span>
+          <span style={{ color: 'var(--text-2)' }}>{block.items.length} {t('transcript.actions')}</span>
           {tally && (
             <span style={{ marginLeft: 8, color: 'var(--text-3)', fontSize: 11.5 }}>
               {tally}
@@ -194,7 +203,7 @@ function TurnActionsBlock({
   );
 }
 
-function countActions(items: TranscriptItem[]): string {
+function countActions(items: TranscriptItem[], t: (key: string) => string): string {
   let run = 0, edit = 0, explore = 0, agent = 0, other = 0;
   for (const it of items) {
     if (it.kind === 'command') run++;
@@ -204,16 +213,16 @@ function countActions(items: TranscriptItem[]): string {
     else other++;
   }
   return [
-    explore && `Explored ${explore}`,
-    run && `Ran ${run}`,
-    edit && `Edited ${edit}`,
-    agent && `Agent ${agent}`,
-    other && `Other ${other}`,
+    explore && `${t('transcript.actions.explored')} ${explore}`,
+    run && `${t('transcript.actions.ran')} ${run}`,
+    edit && `${t('transcript.actions.edited')} ${edit}`,
+    agent && `${t('transcript.agent')} ${agent}`,
+    other && `${t('transcript.actions.other')} ${other}`,
   ].filter(Boolean).join(' · ');
 }
 
 export function Transcript({
-  items, pending, onApprove,
+  items, pending, onApprove, hiddenApprovalId,
 }: {
   items: TranscriptItem[];
   pending: boolean;
@@ -221,8 +230,13 @@ export function Transcript({
     approvalId: string,
     decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
+    context?: ApprovalActionContext,
   ) => void;
+  /** Approval id pinned elsewhere (e.g. the Beta question dock). Suppress its
+   *  inline transcript card so a pending question isn't shown twice. */
+  hiddenApprovalId?: string;
 }) {
+  const t = useT();
   const ref = useRef<HTMLDivElement>(null);
   const currentUserRef = useRef<HTMLDivElement | null>(null);
 
@@ -266,7 +280,7 @@ export function Transcript({
   return (
     <div className="transcript" ref={ref}>
         {items.length === 0 && !pending && (
-          <div className="transcript-empty">say hi to start the conversation</div>
+          <div className="transcript-empty">{t('transcript.empty')}</div>
         )}
         {(() => {
           // Track the last visible sender. The author header (Claude · time)
@@ -275,7 +289,14 @@ export function Transcript({
           // message, turn-actions block, approval, error, or diff — counts as
           // a sender break, so the next text gets a fresh header.
           let prevSender: 'user' | 'claude' | 'codex' | null = null;
-          return groupIntoBlocks(items).map((item) => {
+          // Drop the approval card pinned in the dock so it doesn't render
+          // twice. Only the *pending* card is docked; once resolved the dock
+          // releases it (hiddenApprovalId clears) and the resolved card shows
+          // inline here as normal.
+          const visibleItems = hiddenApprovalId
+            ? items.filter(it => !(it.kind === 'approval' && it.approvalId === hiddenApprovalId))
+            : items;
+          return groupIntoBlocks(visibleItems).map((item) => {
             if (item.kind === 'turn-actions') {
               prevSender = null;
               return <TurnActionsBlock key={item.id} block={item} onApprove={onApprove} />;
@@ -308,7 +329,7 @@ export function Transcript({
         })()}
         {showMascot && (
           <div className="msg-mascot">
-            <GianMascot size={36} state="working" title="Working…" />
+            <GianMascot size={36} state="working" title={t('transcript.workingEllipsis')} />
           </div>
         )}
     </div>

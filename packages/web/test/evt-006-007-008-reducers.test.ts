@@ -199,3 +199,65 @@ describe('EVT-008: turn_started / turn_completed do not produce transcript rows'
     expect(sep.text).toBe('Turn 1 · complete');
   });
 });
+
+// ---------------------------------------------------------------------------
+// CLAUDE-TTY-002 — approval_requested dedupe by approvalId
+//
+// In TTY mode a single AskUserQuestion surfaces twice: the live PreToolUse
+// hook broadcasts it while the tool is pending, and the JSONL watcher
+// re-emits the same approvalId once the tool_use lands in the transcript.
+// Both carry the same approvalId, so the reducer must render ONE card.
+// ---------------------------------------------------------------------------
+
+function approvalRequested(
+  approvalId: string,
+  opts: { ts?: number; turn?: number } = {},
+): EventEnvelope {
+  return {
+    session_id: 'sess-1',
+    turn: opts.turn ?? 1,
+    call_id: approvalId,
+    event: 'approval_requested',
+    ts: opts.ts ?? 1_700_000_000_000,
+    data: {
+      approvalId,
+      category: 'question',
+      title: '这个周末你想怎么过?',
+      questions: [
+        { question: '这个周末你想怎么过?', options: [{ label: '户外探险' }, { label: '宅家充电' }] },
+      ],
+      scopeOptions: ['once'],
+      risk: 'low',
+    },
+  };
+}
+
+describe('CLAUDE-TTY-002: approval_requested dedupe by approvalId', () => {
+  it('renders a single card when the same approvalId arrives twice (live PreToolUse + JSONL watcher)', () => {
+    let items: TranscriptItem[] = [];
+    items = applyEnvelope(items, approvalRequested('toolu_q1', { ts: 1 }), 'claude');
+    items = applyEnvelope(items, approvalRequested('toolu_q1', { ts: 2 }), 'claude');
+    expect(items.filter(i => i.kind === 'approval')).toHaveLength(1);
+  });
+
+  it('preserves a resolved status when a duplicate request arrives after resolution', () => {
+    let items: TranscriptItem[] = [];
+    items = applyEnvelope(items, approvalRequested('toolu_q1', { ts: 1 }), 'claude');
+    items = applyEnvelope(items, {
+      session_id: 'sess-1', turn: 1, call_id: 'toolu_q1', event: 'approval_resolved',
+      ts: 2, data: { approvalId: 'toolu_q1', decision: 'allow_once' },
+    }, 'claude');
+    // late duplicate request (JSONL watcher replay) must not resurrect a pending card
+    items = applyEnvelope(items, approvalRequested('toolu_q1', { ts: 3 }), 'claude');
+    const approvals = items.filter(i => i.kind === 'approval') as { status: string }[];
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]!.status).not.toBe('pending');
+  });
+
+  it('still renders distinct cards for different approvalIds', () => {
+    let items: TranscriptItem[] = [];
+    items = applyEnvelope(items, approvalRequested('toolu_a'), 'claude');
+    items = applyEnvelope(items, approvalRequested('toolu_b'), 'claude');
+    expect(items.filter(i => i.kind === 'approval')).toHaveLength(2);
+  });
+});

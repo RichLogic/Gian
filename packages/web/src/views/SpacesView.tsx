@@ -24,6 +24,7 @@ import {
 } from '../api.js';
 import type { LocalBranch, PendingGitOp, RemoteBranch, RepoInfo, WorkspaceTree } from '../api.js';
 import { useT } from '../i18n/index.js';
+import { confirm } from '../feedback.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import { BranchPicker } from '../components/BranchPicker.js';
 import type { GianWs } from '../ws.js';
@@ -834,6 +835,7 @@ function GitPane({
   const [remoteSearch, setRemoteSearch] = useState('');
   const [remoteBranches, setRemoteBranches] = useState<RemoteBranch[]>([]);
   const [remoteLoading, setRemoteLoading] = useState(false);
+  const t = useT();
 
   const refresh = useCallback(async () => {
     const [r, b, tr] = await Promise.all([
@@ -910,7 +912,7 @@ function GitPane({
     const result = await fetchRemotes(workspace.id);
     setFetching(false);
     if (!result.ok) {
-      setFetchError(result.error ?? 'Fetch failed');
+      setFetchError(result.error ?? t('spaces.git.fetchFailed'));
       return;
     }
     setFetchedAt(result.fetchedAt ?? new Date().toISOString());
@@ -943,17 +945,17 @@ function GitPane({
       )}
       <div className="card">
         <div className="card-head">
-          <h3>Remote</h3>
-          <span className="aside">{repo?.git.remote || 'no remote'}</span>
+          <h3>{t('spaces.git.remote')}</h3>
+          <span className="aside">{repo?.git.remote || t('spaces.git.noRemote')}</span>
           <div className="right" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             {fetchedAt && (
               <span style={{ font: 'var(--fz-12)/1 var(--font-sans)', color: 'var(--text-3)' }}>
-                fetched {relTime(fetchedAt)}
+                {t('spaces.git.fetched')} {relTime(fetchedAt)}
               </span>
             )}
             {remoteHref && (
               <a className="btn ghost sm" href={remoteHref} target="_blank" rel="noreferrer">
-                <Icon d={I.github} size={13} />View on GitHub
+                <Icon d={I.github} size={13} />{t('spaces.git.viewGitHub')}
               </a>
             )}
             <button
@@ -962,7 +964,7 @@ function GitPane({
               onClick={() => void handleFetch()}
               title="git fetch --prune --all"
             >
-              {fetching ? 'Fetching…' : 'Fetch'}
+              {fetching ? t('spaces.git.fetching') : t('spaces.git.fetch')}
             </button>
           </div>
         </div>
@@ -974,30 +976,28 @@ function GitPane({
       <div className="card">
         <div className="card-head">
           <h3>
-            Branches
+            {t('spaces.git.branches')}
             <HelpHint>
-              All local branches in this repo. Branches checked out in a
-              worktree are marked — Gian spins up one worktree per session
-              so multiple agents can work on different branches in parallel.
+              {t('spaces.git.branches.help')}
             </HelpHint>
           </h3>
           <span className="aside">
-            {branches.length} local · {onWorktreeCount} on worktree{dirtyCount > 0 ? ` · ${dirtyCount} dirty` : ''}
+            {branches.length} {t('spaces.git.local')} · {onWorktreeCount} {t('spaces.git.onWorktree')}{dirtyCount > 0 ? ` · ${dirtyCount} ${t('spaces.git.dirty')}` : ''}
           </span>
           {repo?.git.isRepo && (
             <div className="right">
               <button className="btn primary sm" onClick={() => setNewWorktreeOpen(true)}>
-                <Icon d={I.plus} size={11} stroke={2.4} />New worktree
+                <Icon d={I.plus} size={11} stroke={2.4} />{t('spaces.git.newWorktree')}
               </button>
             </div>
           )}
         </div>
         <div style={{ display: 'flex', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--hairline-2)' }}>
           <div className="segm sm">
-            <button className={`segm-item${branchFilter === 'all' ? ' active' : ''}`} onClick={() => setBranchFilter('all')}>All</button>
-            <button className={`segm-item${branchFilter === 'on-worktree' ? ' active' : ''}`} onClick={() => setBranchFilter('on-worktree')}>On worktree</button>
-            <button className={`segm-item${branchFilter === 'off-worktree' ? ' active' : ''}`} onClick={() => setBranchFilter('off-worktree')}>Off worktree</button>
-            <button className={`segm-item${branchFilter === 'worktree-sessions' ? ' active' : ''}`} onClick={() => setBranchFilter('worktree-sessions')}>Worktree sessions</button>
+            <button className={`segm-item${branchFilter === 'all' ? ' active' : ''}`} onClick={() => setBranchFilter('all')}>{t('spaces.git.filter.all')}</button>
+            <button className={`segm-item${branchFilter === 'on-worktree' ? ' active' : ''}`} onClick={() => setBranchFilter('on-worktree')}>{t('spaces.git.filter.onWorktree')}</button>
+            <button className={`segm-item${branchFilter === 'off-worktree' ? ' active' : ''}`} onClick={() => setBranchFilter('off-worktree')}>{t('spaces.git.filter.offWorktree')}</button>
+            <button className={`segm-item${branchFilter === 'worktree-sessions' ? ' active' : ''}`} onClick={() => setBranchFilter('worktree-sessions')}>{t('spaces.git.filter.worktreeSessions')}</button>
           </div>
         </div>
         <div className="card-body compact">
@@ -1017,17 +1017,17 @@ function GitPane({
           {branches.length === 0 && !branchesLoaded && (
             <div className="wt-row" style={{ color: 'var(--text-3)' }}>
               <span className="spinner" aria-hidden="true" />
-              <span>Loading branches…</span>
+              <span>{t('spaces.git.loadingBranches')}</span>
             </div>
           )}
           {branches.length === 0 && branchesLoaded && (
             <div className="wt-row" style={{ color: 'var(--text-3)' }}>
-              No local branches.
+              {t('spaces.git.noLocalBranches')}
             </div>
           )}
           {branches.length > 0 && filtered.length === 0 && (
             <div className="wt-row" style={{ color: 'var(--text-3)' }}>
-              No branches match this filter.
+              {t('spaces.git.noBranchMatches')}
             </div>
           )}
         </div>
@@ -1036,19 +1036,17 @@ function GitPane({
       <div className="card">
         <div className="card-head">
           <h3>
-            Remote branches
+            {t('spaces.git.remoteBranches')}
             <HelpHint>
-              Branches that exist on a remote (origin/...). Create a local
-              tracking branch to start working on one, or spin up a worktree
-              session directly from a remote ref.
+              {t('spaces.git.remoteBranches.help')}
             </HelpHint>
           </h3>
-          <span className="aside">{remoteBranches.length} match{remoteLoading ? ' · loading…' : ''}</span>
+          <span className="aside">{remoteBranches.length} {t('spaces.git.match')}{remoteLoading ? ` · ${t('spaces.git.loading')}` : ''}</span>
         </div>
         <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--hairline-2)' }}>
           <input
             className="input"
-            placeholder="Search remote branches…"
+            placeholder={t('spaces.git.searchRemoteBranches')}
             value={remoteSearch}
             onChange={e => setRemoteSearch(e.target.value)}
             spellCheck={false}
@@ -1071,7 +1069,7 @@ function GitPane({
           ))}
           {remoteBranches.length === 0 && !remoteLoading && (
             <div className="wt-row" style={{ color: 'var(--text-3)' }}>
-              {remoteSearch ? 'No remote branches match.' : 'No remote branches. Try Fetch.'}
+              {remoteSearch ? t('spaces.git.noRemoteBranchMatches') : t('spaces.git.noRemoteBranches')}
             </div>
           )}
         </div>
@@ -1124,7 +1122,10 @@ function PendingOpBanner({
   const opName = verb[op.kind];
 
   async function handleAbort() {
-    if (!confirm(`Run "git ${op.kind} --abort" in ${workspacePath}?\nThis discards conflict resolution work in progress and rewinds the index.`)) return;
+    if (!(await confirm({
+      message: `Run "git ${op.kind} --abort" in ${workspacePath}?\nThis discards conflict resolution work in progress and rewinds the index.`,
+      danger: true,
+    }))) return;
     setBusy(true);
     setError(null);
     const res = await abortPendingGitOp(workspaceId);
@@ -1196,6 +1197,7 @@ function BranchRow({
   onCreateWorktreeSession: (input: CreateWorktreeSessionInput) => void;
 }) {
   void workspacePath;
+  const t = useT();
   const onWorktree = !!branch.worktreePath;
   const isDirty = tree?.isDirty ?? false;
   const state = isDirty ? 'dirty' : 'clean';
@@ -1204,8 +1206,8 @@ function BranchRow({
     ? (branch.session.name ?? branch.session.id.slice(0, 6))
     : null;
   const trackingLabel = branch.upstream
-    ? (branch.gone ? `${branch.upstream} · gone` : branch.upstream)
-    : 'no upstream';
+    ? (branch.gone ? `${branch.upstream} · ${t('spaces.git.gone')}` : branch.upstream)
+    : t('spaces.git.noUpstream');
   const aheadBehind = branch.ahead || branch.behind
     ? `${branch.ahead ? '↑' + branch.ahead : ''}${branch.behind ? '↓' + branch.behind : ''}`
     : '';
@@ -1216,8 +1218,8 @@ function BranchRow({
       </span>
       <div className="wt-branch">
         {branch.name}
-        {isMainTree && <span className="main-tag">main tree</span>}
-        {onWorktree && !isMainTree && <span className="main-tag">worktree</span>}
+        {isMainTree && <span className="main-tag">{t('spaces.git.mainTree')}</span>}
+        {onWorktree && !isMainTree && <span className="main-tag">{t('spaces.git.worktree')}</span>}
       </div>
       <span style={{ font: 'var(--fz-12)/1.3 var(--font-mono)', color: 'var(--text-3)' }} title={trackingLabel}>
         {trackingLabel}{aheadBehind && <span style={{ marginLeft: 6, color: branch.gone ? 'var(--danger)' : 'var(--text-2)' }}>{aheadBehind}</span>}
@@ -1225,7 +1227,7 @@ function BranchRow({
       {onWorktree ? (
         <div className={`wt-state ${state}`}>
           <span className="dot" />
-          {state === 'clean' ? 'clean' : `${modifiedCount} changed`}
+          {state === 'clean' ? t('spaces.git.clean') : `${modifiedCount} ${t('spaces.git.changed')}`}
         </div>
       ) : (
         <span style={{ font: 'var(--fz-12)/1.3 var(--font-sans)', color: 'var(--text-3)' }}>
@@ -1243,9 +1245,9 @@ function BranchRow({
             baseBranch: branch.name,
             branch: `worktree/${shortId()}`,
           })}
-          title={`Open new worktree session from ${branch.name}`}
+          title={`${t('spaces.git.openWorktreeFrom')} ${branch.name}`}
         >
-          Open
+          {t('spaces.git.open')}
         </button>
       ) : (
         <span className="wt-session none">—</span>
@@ -1278,6 +1280,7 @@ function BranchRowKebab({
   const [busy, setBusy] = useState<'reveal' | 'merge' | 'drop' | 'delete' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const t = useT();
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (e: PointerEvent) => {
@@ -1295,7 +1298,7 @@ function BranchRowKebab({
       const res = await fetch(`/api/working_trees/${tree.id}/reveal`, { method: 'POST' });
       if (!res.ok) {
         const body = await res.json().catch(() => ({} as { error?: string }));
-        setError(body.error ?? `Reveal failed (${res.status})`);
+        setError(body.error ?? `${t('spaces.git.revealFailed')} (${res.status})`);
       }
     } catch (err) {
       setError(String(err));
@@ -1307,12 +1310,15 @@ function BranchRowKebab({
   async function handleMerge() {
     if (!branch.session) return;
     const sid = branch.session.id;
-    if (!confirm(`Merge "${branch.name}" into its base branch?\nRuns git checkout base && git merge --no-ff. The worktree is removed after a successful merge; conflicts leave it intact for you to resolve.`)) return;
+    if (!(await confirm({
+      message: `${t('spaces.git.confirmMerge')} "${branch.name}"?\n${t('spaces.git.confirmMergeHelp')}`,
+      confirmLabel: t('spaces.git.confirmMerge'),
+    }))) return;
     setBusy('merge');
     setError(null);
     const res = await mergeSession(sid);
     setBusy(null);
-    if (!res.ok) { setError(res.error ?? 'Merge failed'); return; }
+    if (!res.ok) { setError(res.error ?? t('spaces.git.mergeFailed')); return; }
     setOpen(false);
     onRefresh();
   }
@@ -1320,12 +1326,16 @@ function BranchRowKebab({
   async function handleDrop() {
     if (!branch.session) return;
     const sid = branch.session.id;
-    if (!confirm(`Discard worktree "${branch.name}"?\nThe worktree directory and its branch are removed; the session row stays in history marked as 'discarded'.`)) return;
+    if (!(await confirm({
+      message: `${t('spaces.git.confirmDiscard')} "${branch.name}"?\n${t('spaces.git.confirmDiscardHelp')}`,
+      danger: true,
+      confirmLabel: t('spaces.git.confirmDiscard'),
+    }))) return;
     setBusy('drop');
     setError(null);
     const res = await dropSession(sid);
     setBusy(null);
-    if (!res.ok) { setError(res.error ?? 'Discard failed'); return; }
+    if (!res.ok) { setError(res.error ?? t('spaces.git.discardFailed')); return; }
     setOpen(false);
     onRefresh();
   }
@@ -1334,14 +1344,18 @@ function BranchRowKebab({
     if (!branch.session) return;
     const sid = branch.session.id;
     const label = branch.name;
-    if (!confirm(`Delete worktree "${label}"?\nThis removes the linked Gian session (${sid.slice(0, 8)}…) and the worktree directory.`)) return;
+    if (!(await confirm({
+      message: `${t('spaces.git.confirmDelete')} "${label}"?\n${t('spaces.git.confirmDeleteHelp')} (${sid.slice(0, 8)}…)`,
+      danger: true,
+      confirmLabel: t('spaces.git.confirmDelete'),
+    }))) return;
     setBusy('delete');
     setError(null);
     try {
       const res = await fetch(`/api/sessions/${sid}`, { method: 'DELETE' });
       if (!res.ok) {
         const body = await res.json().catch(() => ({} as { error?: string }));
-        setError(body.error ?? `Delete failed (${res.status})`);
+        setError(body.error ?? `${t('spaces.git.deleteFailed')} (${res.status})`);
         return;
       }
       setOpen(false);
@@ -1361,8 +1375,8 @@ function BranchRowKebab({
       <button
         className="wt-kebab"
         onClick={() => setOpen(o => !o)}
-        title="More"
-        aria-label="More actions"
+        title={t('spaces.git.more')}
+        aria-label={t('spaces.git.moreActions')}
       >
         <Icon d={I.kebabV} size={14} />
       </button>
@@ -1374,7 +1388,7 @@ function BranchRowKebab({
               disabled={busy !== null}
               onClick={() => { setOpen(false); void handleReveal(); }}
             >
-              {busy === 'reveal' ? 'Opening…' : 'Open in Finder'}
+              {busy === 'reveal' ? t('spaces.git.opening') : t('spaces.git.openInFinder')}
             </button>
           )}
           {isMainTree && onOpenClaudeMd && (
@@ -1382,7 +1396,7 @@ function BranchRowKebab({
               className="ws-kebab-item"
               onClick={() => { setOpen(false); onOpenClaudeMd(); }}
             >
-              Edit CLAUDE.md
+              {t('spaces.git.editClaudeMd')}
             </button>
           )}
           {isGianSession && (
@@ -1394,24 +1408,24 @@ function BranchRowKebab({
                 onClick={() => { void handleMerge(); }}
                 title="git checkout base && git merge --no-ff"
               >
-                {busy === 'merge' ? 'Merging…' : 'Merge to base'}
+                {busy === 'merge' ? t('spaces.git.merging') : t('spaces.git.mergeToBase')}
               </button>
               <button
                 className="ws-kebab-item"
                 disabled={busy !== null}
                 onClick={() => { void handleDrop(); }}
-                title="Throw away the branch + worktree; keep session as history"
+                title={t('spaces.git.discardWorktreeTitle')}
               >
-                {busy === 'drop' ? 'Discarding…' : 'Discard worktree'}
+                {busy === 'drop' ? t('spaces.git.discarding') : t('spaces.git.discardWorktree')}
               </button>
               <div className="ws-kebab-divider" />
               <button
                 className="ws-kebab-item danger"
                 disabled={busy !== null}
                 onClick={() => { void handleDelete(); }}
-                title="Remove session row + worktree dir entirely"
+                title={t('spaces.git.deleteWorktreeTitle')}
               >
-                {busy === 'delete' ? 'Deleting…' : 'Delete worktree + session'}
+                {busy === 'delete' ? t('common.deleting') : t('spaces.git.deleteWorktreeSession')}
               </button>
             </>
           )}
@@ -1442,13 +1456,14 @@ function RemoteBranchRow({
 }) {
   const [busy, setBusy] = useState<'track' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const t = useT();
 
   async function handleTrack() {
     setBusy('track');
     setError(null);
     const res = await createLocalBranch(workspaceId, { name: branch.branch, base: branch.fullName });
     setBusy(null);
-    if (!res.ok) { setError(res.error ?? 'Create failed'); return; }
+    if (!res.ok) { setError(res.error ?? t('spaces.git.createFailed')); return; }
     onRefresh();
   }
 
@@ -1457,7 +1472,7 @@ function RemoteBranchRow({
       <span className="wt-ico"><BranchIcon size={14} /></span>
       <div className="wt-branch">
         {branch.fullName}
-        {branch.hasLocalTracking && <span className="main-tag">tracked</span>}
+        {branch.hasLocalTracking && <span className="main-tag">{t('spaces.git.tracked')}</span>}
       </div>
       <span style={{ font: 'var(--fz-12)/1.3 var(--font-sans)', color: 'var(--text-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {branch.lastCommit.subject} · {branch.lastCommit.age}
@@ -1469,15 +1484,15 @@ function RemoteBranchRow({
           disabled={busy !== null}
           title={`git branch --track ${branch.branch} ${branch.fullName}`}
         >
-          {busy === 'track' ? 'Adding…' : 'Add tracking'}
+          {busy === 'track' ? t('spaces.git.adding') : t('spaces.git.addTracking')}
         </button>
       ) : <span />}
       <button
         className="btn xs ghost"
         onClick={onCreateWorktreeSession}
-        title={`Open new worktree session from ${branch.fullName}`}
+        title={`${t('spaces.git.openWorktreeFrom')} ${branch.fullName}`}
       >
-        Open in new worktree
+        {t('spaces.git.openInNewWorktree')}
       </button>
       {error && (
         <div style={{ gridColumn: '1 / -1', color: 'var(--danger)', font: 'var(--fz-12)/1.3 var(--font-sans)', paddingLeft: 30 }}>
@@ -1522,7 +1537,10 @@ function NativeSessionsPane({
   });
 
   async function handleDelete(s: NativeSession) {
-    if (!confirm(`Delete native ${s.executor} session ${s.id.slice(0, 8)}…?\nThis removes the .jsonl file from disk and cannot be undone.`)) return;
+    if (!(await confirm({
+      message: `Delete native ${s.executor} session ${s.id.slice(0, 8)}…?\nThis removes the .jsonl file from disk and cannot be undone.`,
+      danger: true,
+    }))) return;
     const r = await deleteNativeSession(workspace.id, s.executor, s.id);
     if (!r.ok) {
       setError(r.error ?? 'Delete failed');
@@ -1824,6 +1842,7 @@ function NewWorktreeDialog({
   }) => void;
 }) {
   const [executor, setExecutor] = useState<'claude' | 'codex'>('codex');
+  const t = useT();
   const existingLocalNames = useMemo(() => new Set(branches.map(b => b.name)), [branches]);
   // Seed base branch with the workspace default if it exists locally and
   // isn't already checked out elsewhere; otherwise fall back to the first
@@ -1847,7 +1866,7 @@ function NewWorktreeDialog({
   const branchNameError: string | null = !composedBranch
     ? null
     : existingLocalNames.has(composedBranch)
-      ? `Branch "${composedBranch}" already exists locally`
+      ? `${t('spaces.git.branch')} "${composedBranch}" ${t('coding.form.branchExists')}`
       : null;
 
   function submit() {
@@ -1864,31 +1883,31 @@ function NewWorktreeDialog({
     <div className="adopt-dialog-backdrop" onClick={onCancel}>
       <div className="adopt-dialog" onClick={e => e.stopPropagation()}>
         <header className="adopt-dialog-head">
-          <h2 className="adopt-dialog-title">New worktree</h2>
+          <h2 className="adopt-dialog-title">{t('spaces.git.newWorktree')}</h2>
           <p className="adopt-dialog-sub">
-            Create a dedicated git worktree + Gian session in <strong>{workspace.name}</strong>. The worktree lives under the data dir; the branch is created from the base.
+            {t('spaces.git.newWorktreeSubPrefix')} <strong>{workspace.name}</strong>{t('spaces.git.newWorktreeSubSuffix')}
           </p>
         </header>
         <div className="adopt-dialog-body">
           <div className="adopt-field">
-            <label className="adopt-label">Base branch</label>
+            <label className="adopt-label">{t('coding.form.baseBranch')}</label>
             <BranchPicker
               branches={branches}
               remoteBranches={remoteBranches}
               value={baseBranch}
               defaultBranch={defaultBranch}
-              placeholder="Pick a base branch…"
+              placeholder={t('coding.form.baseBranch.pick')}
               onChange={setBaseBranch}
-              ariaLabel="Base branch"
+              ariaLabel={t('coding.form.baseBranch')}
             />
           </div>
 
           <div className="adopt-field">
-            <label className="adopt-label">New branch name</label>
+            <label className="adopt-label">{t('coding.form.newBranch')}</label>
             <div className="branch-name-field">
               <span className="prefix">worktree/</span>
               <input
-                aria-label="New branch suffix"
+                aria-label={t('coding.form.newBranchSuffix')}
                 placeholder="short-id"
                 value={branchSuffix}
                 onChange={e => setBranchSuffix(e.target.value)}
@@ -1901,7 +1920,7 @@ function NewWorktreeDialog({
           </div>
 
           <div className="adopt-field">
-            <label className="adopt-label">Executor</label>
+            <label className="adopt-label">{t('coding.new.executor')}</label>
             <div className="segm" style={{ width: 'fit-content' }}>
               {(['claude', 'codex'] as const).map(x => (
                 <button
@@ -1917,13 +1936,13 @@ function NewWorktreeDialog({
           </div>
         </div>
         <footer className="adopt-dialog-foot">
-          <button className="btn ghost" onClick={onCancel} disabled={submitting}>Cancel</button>
+          <button className="btn ghost" onClick={onCancel} disabled={submitting}>{t('common.cancel')}</button>
           <button
             className="btn primary"
             onClick={submit}
             disabled={submitting || !composedBranch || !!branchNameError}
           >
-            {submitting ? 'Creating…' : 'Create'}
+            {submitting ? t('common.creating') : t('common.create')}
           </button>
         </footer>
       </div>

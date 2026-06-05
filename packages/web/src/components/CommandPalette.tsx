@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
 import type { Session, Workspace } from '@gian/shared';
+import { useT } from '../i18n/index.js';
 import type { TranscriptItem } from '../types.js';
 import { loadChanged } from '../api.js';
 import type { ChangedEntry } from '../api.js';
@@ -23,7 +24,7 @@ const SLASH_COMMANDS = {
   ],
 } as const;
 
-type Section = 'Sessions' | 'Files' | 'Commands';
+type Section = 'sessions' | 'files' | 'commands';
 
 interface ResultItem {
   section: Section;
@@ -60,6 +61,7 @@ export function CommandPalette({
   onOpenFile: (workingTreeId: string, path: string) => void;
   initialQuery?: string;
 }) {
+  const t = useT();
   const [query, setQuery] = useState('');
   const [idx, setIdx] = useState(0);
   const [changedFiles, setChangedFiles] = useState<ChangedEntry[]>([]);
@@ -95,9 +97,9 @@ export function CommandPalette({
     for (const s of sessionResults) {
       const ws = workspaces.find(w => w.id === s.workspace_id);
       out.push({
-        section: 'Sessions',
+        section: 'sessions',
         key: `session:${s.id}`,
-        label: s.name ?? `Session ${s.id.slice(0, 8)}`,
+        label: s.name ?? `${t('topbar.mode.sessions')} ${s.id.slice(0, 8)}`,
         sublabel: ws?.name,
       });
     }
@@ -124,7 +126,7 @@ export function CommandPalette({
     }
     for (const path of fileSet) {
       out.push({
-        section: 'Files',
+        section: 'files',
         key: `file:${path}`,
         label: path.split('/').pop() ?? path,
         sublabel: path,
@@ -135,7 +137,7 @@ export function CommandPalette({
     for (const c of cmds) {
       if (!query || match(c.cmd, query) || match(c.desc, query)) {
         out.push({
-          section: 'Commands',
+        section: 'commands',
           key: `cmd:${c.cmd}`,
           label: c.cmd,
           sublabel: c.desc,
@@ -144,7 +146,7 @@ export function CommandPalette({
     }
 
     return out;
-  }, [query, sessions, workspaces, changedFiles, transcriptItems, executor]);
+  }, [query, sessions, workspaces, changedFiles, transcriptItems, executor, t]);
 
   useEffect(() => {
     setIdx(0);
@@ -157,10 +159,10 @@ export function CommandPalette({
   }, [idx]);
 
   function pick(item: ResultItem) {
-    if (item.section === 'Sessions') {
+    if (item.section === 'sessions') {
       const id = item.key.slice('session:'.length);
       onJumpToSession(id);
-    } else if (item.section === 'Files') {
+    } else if (item.section === 'files') {
       const path = item.sublabel ?? item.key.slice('file:'.length);
       if (activeWorkingTreeId) onOpenFile(activeWorkingTreeId, path);
     } else {
@@ -192,7 +194,7 @@ export function CommandPalette({
 
   return (
     <div className="pal-overlay" onPointerDown={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="pal-modal" role="dialog" aria-modal="true" aria-label="Command Palette">
+      <div className="pal-modal" role="dialog" aria-modal="true" aria-label={t('palette.dialog')}>
         <div className="pal-search-row">
           <svg className="pal-search-ico" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <circle cx="6.5" cy="6.5" r="4" stroke="currentColor" strokeWidth="1.5" />
@@ -202,7 +204,7 @@ export function CommandPalette({
             ref={inputRef}
             className="pal-input"
             type="text"
-            placeholder="Search sessions, files, commands…"
+            placeholder={t('palette.placeholder')}
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -214,7 +216,7 @@ export function CommandPalette({
 
         <div ref={listRef} className="pal-list">
           {results.length === 0 && (
-            <div className="pal-empty">No results for "{query}"</div>
+            <div className="pal-empty">{t('palette.noResults')} "{query}"</div>
           )}
           {results.map((item, i) => {
             const showHeader = item.section !== lastSection;
@@ -222,7 +224,7 @@ export function CommandPalette({
             return (
               <div key={item.key}>
                 {showHeader && (
-                  <div className="pal-section-head">{item.section}</div>
+                  <div className="pal-section-head">{t(`palette.section.${item.section}`)}</div>
                 )}
                 <button
                   type="button"
@@ -235,14 +237,14 @@ export function CommandPalette({
                   {item.sublabel && (
                     <span className="pal-row-sub">{item.sublabel}</span>
                   )}
-                  {item.section === 'Sessions' && (
-                    <span className="pal-row-tag">session</span>
+                  {item.section === 'sessions' && (
+                    <span className="pal-row-tag">{t('palette.tag.session')}</span>
                   )}
-                  {item.section === 'Files' && (
-                    <span className="pal-row-tag files">file</span>
+                  {item.section === 'files' && (
+                    <span className="pal-row-tag files">{t('palette.tag.file')}</span>
                   )}
-                  {item.section === 'Commands' && (
-                    <span className="pal-row-tag cmd">cmd</span>
+                  {item.section === 'commands' && (
+                    <span className="pal-row-tag cmd">{t('palette.tag.command')}</span>
                   )}
                 </button>
               </div>
@@ -251,9 +253,9 @@ export function CommandPalette({
         </div>
 
         <div className="pal-footer">
-          <span><kbd className="kc">↑↓</kbd> navigate</span>
-          <span><kbd className="kc">↵</kbd> select</span>
-          <span><kbd className="kc">Esc</kbd> close</span>
+          <span><kbd className="kc">↑↓</kbd> {t('palette.navigate')}</span>
+          <span><kbd className="kc">↵</kbd> {t('palette.select')}</span>
+          <span><kbd className="kc">Esc</kbd> {t('palette.close')}</span>
         </div>
       </div>
     </div>

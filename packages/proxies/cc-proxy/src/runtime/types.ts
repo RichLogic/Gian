@@ -57,7 +57,7 @@ export interface ClaudeRuntime extends EventEmitter<ClaudeRuntimeEvents> {
     /** Per-turn `--permission-mode` value. Pass-through to the spawned
      *  `claude -p` subprocess; null/undefined keeps Claude's default. */
     permissionMode?: PermissionMode | null;
-    /** Per-turn `--effort` value (low/medium/high/xhigh/max). */
+    /** Per-turn `--effort` value, validated against Claude CLI discovery. */
     effort?: EffortLevel | null;
   }): Promise<void>;
 
@@ -100,10 +100,12 @@ export interface ClaudeRuntime extends EventEmitter<ClaudeRuntimeEvents> {
   /** Shut down everything – kill all processes. */
   stop(): Promise<void>;
 
-  /** Return discovered models (populated after start). */
+  /** Return discovered model choices (populated after start). For Claude this
+   *  may be a billing-safe "default/no --model override" option rather than
+   *  a concrete resolved model id. */
   getModels(): ModelCapabilities[];
 
-  /** Resolve once the initial discovery probe finishes. Lets callers (like
+  /** Resolve once the initial capability discovery finishes. Lets callers (like
    *  capabilities.list) avoid returning an empty models array when the
    *  proxy was just spawned. */
   awaitModelDiscovery(): Promise<void>;

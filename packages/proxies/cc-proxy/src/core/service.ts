@@ -177,9 +177,10 @@ export class CcProxyService {
   }
 
   async listCapabilities(): Promise<CapabilitiesPayload> {
-    // start() kicks off model discovery in the background so it doesn't
-    // block initialize; wait for it here so the first capabilities.list
-    // doesn't return an empty models list.
+    // start() kicks off billing-safe capability discovery in the background
+    // (Claude help + local command files only). Do not run `claude -p` from
+    // capabilities: the user may be trying to stay on subscription-backed
+    // TTY mode and avoid Agent SDK credit.
     await this.runtime.awaitModelDiscovery();
     return {
       protocolVersion: '0.1.0',
@@ -258,12 +259,19 @@ export class CcProxyService {
     this.activeTurns.set(session.id, { turnId, requestId });
 
     // Send the user message. `thinking` is the host-side abstraction; Claude
-    // CLI calls it `--effort` and only accepts the 5 levels — drop anything
-    // else (e.g. 'off' / 'minimal' from the broader shared union).
-    const validEfforts = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
-    const effort = params.thinking && validEfforts.has(params.thinking)
-      ? params.thinking
-      : null;
+    // CLI calls it `--effort`. Validate against the levels discovered from
+    // Claude Code itself instead of carrying a Gian-side enum.
+    let effort: import('./types.js').EffortLevel | null = null;
+    if (typeof params.thinking === 'string' && params.thinking.trim()) {
+      await this.runtime.awaitModelDiscovery();
+      const requestedEffort = params.thinking.trim();
+      const discoveredModels = this.runtime.getModels();
+      const modelForEffort = requestedModel ?? session.model;
+      const modelCapabilities = discoveredModels.find(model => model.model === modelForEffort)
+        ?? (discoveredModels.length === 1 ? discoveredModels[0] : null);
+      const supportedEfforts = new Set(modelCapabilities?.supportedEfforts ?? []);
+      effort = supportedEfforts.has(requestedEffort) ? requestedEffort : null;
+    }
     await this.runtime.sendMessage(session.id, prompt, {
       permissionMode: params.permissionMode ?? null,
       effort,
@@ -557,10 +565,9 @@ export class CcProxyService {
 
     const context = this.activeTurns.get(sessionId);
     const totalTokens = usage.inputTokens + usage.outputTokens;
-    // Prefer the model id claude CLI reported on `system init` — when the
-    // CLI auto-promoted the alias to a 1M variant (or any other suffix), the
-    // probed alias id won't reflect it. Falls back to the stored session
-    // model for first-turn / pre-init paths.
+    // Prefer the model id claude CLI reported on `system init` — this is the
+    // first billing-honest moment when cc-proxy can know the concrete model.
+    // Falls back to the stored session model for first-turn / pre-init paths.
     const effectiveModelId = this.runtime.getDetectedModelId(sessionId) ?? session.model;
     const modelContextWindow = inferContextWindow(effectiveModelId);
 

@@ -648,23 +648,41 @@
   background: oklch(from var(--text) l c h / 0.02) !important;
 }
 
-/* Float the file action buttons (md source/preview toggle + open-in-browser)
-   over the top-right of the file content area — out of the tab strip so long
-   filenames don't collide with them, and visually attached to the content
-   they affect. */
 .sheet-content { position: relative; }
+
+/* Path row: full path on the left + the file action buttons (md toggle /
+   Open with / copy+wrap menu) on the right. It's the first child of the
+   scrolling `.sheet-content` and `position: sticky` so it rides the top of the
+   viewport — the path and actions stay visible while the file scrolls. Shown
+   only for tabs that have a path (file/diff). */
+.sheet-path-row {
+  position: sticky; top: 0; z-index: 5;
+  flex: none;
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 6px 4px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
+}
+.sheet-path {
+  flex: 1 1 auto; min-width: 0;
+  display: inline-flex; align-items: baseline;
+  overflow: hidden;
+  font: var(--fz-11)/1.5 var(--font-mono);
+  color: var(--text-3);
+}
+.sheet-path .sheet-path-dir {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; flex: 0 1 auto;
+}
+.sheet-path .sheet-path-file { flex: none; white-space: nowrap; color: var(--text-2); }
+/* The action group now lives inside the path row — inline, no float/shadow.
+   `.sheet-act-wrap` keeps its own positioning for the dropdown menus. */
 .sheet-content-actions {
-  position: absolute;
-  top: 6px;
-  right: 10px;
-  z-index: 4;
+  position: relative;
+  flex: none;
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  background: var(--surface);
-  border-radius: var(--r-2);
-  padding: 2px 3px;
-  box-shadow: 0 0 0 1px var(--hairline), var(--shadow-1);
 }
 
 /* ---------- Executors section status pills ----------
@@ -678,6 +696,31 @@
   background: oklch(from var(--danger) l c h / 0.12);
   color: var(--danger);
 }
+
+/* ---------- Image tab body (renders straight from /raw) ---------- */
+.sheet-image {
+  flex: 1; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px; overflow: auto;
+  background: var(--surface-inset, var(--surface-2));
+}
+.sheet-image img {
+  max-width: 100%; max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--r-1);
+  box-shadow: 0 0 0 1px var(--hairline);
+}
+
+/* Notice for non-previewable files (PDF, …) — centered card + open buttons. */
+.sheet-binary {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; padding: 24px;
+  text-align: center;
+}
+.sheet-binary-ico { color: var(--text-3); }
+.sheet-binary-msg { color: var(--text-2); font: var(--fz-13)/1.4 var(--font-sans); margin: 0; }
+.sheet-binary-acts { display: inline-flex; gap: 8px; }
 
 /* ---------- Diff tab body (Changes inspector → Sheet) ---------- */
 .sheet-tab .ext-ico.diff { background: oklch(0.55 0.12 145); }
@@ -728,6 +771,37 @@
 .sheet-diff-ln.add .sig { color: oklch(0.55 0.16 145); }
 .sheet-diff-ln.del { background: oklch(from oklch(0.62 0.18 28) l c h / 0.08); }
 .sheet-diff-ln.del .sig { color: oklch(0.58 0.18 28); }
+
+/* ---------- Split (side-by-side) diff view ---------- */
+/* Each row is two equal columns (old | new). A column is itself a
+   [num-gutter | text] grid so line numbers align independently per side.
+   Colors are reused from the unified `.add` / `.del` rules above. */
+.sheet-diff.split .sheet-diff-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.sheet-diff.split .sheet-diff-side {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  min-width: 0;
+}
+.sheet-diff.split .sheet-diff-side.old { border-right: 1px solid var(--border, oklch(from var(--text) l c h / 0.08)); }
+.sheet-diff.split .sheet-diff-side .num {
+  padding: 0 8px;
+  text-align: right;
+  color: var(--text-3);
+  user-select: none;
+}
+.sheet-diff.split .sheet-diff-side .txt {
+  padding: 0 8px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.sheet-diff.split .sheet-diff-side.add { background: oklch(from oklch(0.72 0.16 152) l c h / 0.09); }
+.sheet-diff.split .sheet-diff-side.del { background: oklch(from oklch(0.62 0.18 28) l c h / 0.08); }
+.sheet-diff.split .sheet-diff-side.empty { background: oklch(from var(--text) l c h / 0.02); }
+/* Word-wrap off → match the unified `pre` behavior so long lines scroll. */
+.sheet-diff.split.nowrap .sheet-diff-side .txt { white-space: pre; }
 
 /* §#7 — session-row status indicator (replaces the legacy kebab). */
 .ri-status {

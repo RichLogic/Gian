@@ -163,6 +163,7 @@ export class CcProxyClient implements ProxyClient {
     cols: number;
     rows: number;
     model?: string | null;
+    effort?: import('@gian/shared').ThinkingEffort | null;
     permissionMode?: ClaudePermissionMode | null;
     hookSettings?: Record<string, unknown> | null;
     extraArgs?: string[];

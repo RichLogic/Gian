@@ -11,7 +11,7 @@ interface LocaleCtx {
 
 const Ctx = createContext<LocaleCtx>({
   locale: 'en',
-  t: (k) => k,
+  t: (k) => EN[k] ?? k,
 });
 
 export function LocaleProvider({

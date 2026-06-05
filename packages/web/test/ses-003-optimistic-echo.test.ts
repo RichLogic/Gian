@@ -239,3 +239,74 @@ describe('WS-003: error-envelope reducer surface (App-level wiring is a remainin
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Beta/TTY image previews — recover `[Attached image: …]` framing into
+// structured attachments so the bubble renders a thumbnail like Chat.
+// ---------------------------------------------------------------------------
+
+function userMsgWithData(data: Record<string, unknown>, call_id = 'u-img'): EventEnvelope {
+  return { session_id: 'sess-1', turn: 1, call_id, event: 'user_message', ts: 1, data };
+}
+
+describe('Beta image attachment recovery', () => {
+  it('recovers an inline [Attached image: …] reference into a thumbnail attachment and strips the framing', () => {
+    const text = 'look at this\n\n[Attached image: /Users/me/.config/gian/attachments/sess-1/shot.png]';
+    const after = applyEnvelope([], userMsgWithData({ text }), 'claude');
+    const it = after[0] as MsgItem;
+    expect(it.text).toBe('look at this');
+    expect(it.attachments).toEqual([
+      { name: 'shot.png', mime: 'image/png', url: '/api/sessions/sess-1/attachments/shot.png' },
+    ]);
+  });
+
+  it('does not touch messages that already carry structured attachments', () => {
+    const env = userMsgWithData({
+      text: 'hi',
+      attachments: [{ name: 'a.png', mime: 'image/png', url: '/api/sessions/sess-1/attachments/a.png' }],
+    });
+    const it = applyEnvelope([], env, 'claude')[0] as MsgItem;
+    expect(it.text).toBe('hi');
+    expect(it.attachments).toHaveLength(1);
+  });
+
+  it('leaves non-attachment / non-image paths alone for the linkify path', () => {
+    const text = 'see [Attached image: /repo/src/foo.txt] and [Attached image: /tmp/elsewhere.png]';
+    const it = applyEnvelope([], userMsgWithData({ text }), 'claude')[0] as MsgItem;
+    // .txt is not an image; /tmp/… is not under an /attachments/<sid>/ dir → both stay as text.
+    expect(it.attachments).toBeUndefined();
+    expect(it.text).toContain('foo.txt');
+    expect(it.text).toContain('elsewhere.png');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Orphaned pending question cleanup — a cancelled question whose resolution was
+// never recorded must not re-surface as actionable once the chat moved on.
+// ---------------------------------------------------------------------------
+
+function questionEnv(approvalId: string, call_id = approvalId): EventEnvelope {
+  return {
+    session_id: 'sess-1', turn: 1, call_id, event: 'approval_requested', ts: 1,
+    data: {
+      approvalId, category: 'question', title: 'Pick',
+      questions: [{ question: 'A or B', header: '', options: [{ label: 'A' }, { label: 'B' }], multiSelect: false }],
+    },
+  };
+}
+const statusOf = (items: TranscriptItem[]) =>
+  (items.find(i => i.kind === 'approval') as { status?: string } | undefined)?.status;
+
+describe('stale pending question dismissal', () => {
+  it('dismisses an orphaned pending question once a new user turn arrives', () => {
+    const afterQ = applyEnvelope([], questionEnv('q1'), 'claude');
+    expect(statusOf(afterQ)).toBe('pending');
+    const afterUser = applyEnvelope(afterQ, userMessageEnvelope('moved on', 'u2'), 'claude');
+    expect(statusOf(afterUser)).toBe('declined');
+  });
+
+  it('keeps a tail pending question pending (no later user turn)', () => {
+    const afterQ = applyEnvelope([], questionEnv('q1'), 'claude');
+    expect(statusOf(afterQ)).toBe('pending');
+  });
+});

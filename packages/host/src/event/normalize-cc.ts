@@ -358,6 +358,11 @@ export function normalizeCcNotification(
         else decision = 'allow_once';
       }
 
+      // AskUserQuestion answers (when present) ride along so a resolved
+      // question card can show what was picked even after a page reload.
+      const answers = data.answers && typeof data.answers === 'object' && !Array.isArray(data.answers)
+        ? data.answers as Record<string, string | string[]>
+        : undefined;
       return [
         {
           session_id: sessionId,
@@ -370,6 +375,7 @@ export function normalizeCcNotification(
             decision,
             // cc relay mode: the user explicitly clicked; never auto-resolved
             auto: false,
+            ...(answers ? { answers } : {}),
           } satisfies ApprovalResolvedData,
         },
       ];

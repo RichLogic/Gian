@@ -107,6 +107,55 @@ function ccAssistantTextLine(text: string): string {
   }) + '\n';
 }
 
+function ccAssistantQuestionLine(toolUseId = 'toolu-question'): string {
+  return JSON.stringify({
+    type: 'assistant',
+    message: {
+      content: [{
+        type: 'tool_use',
+        id: toolUseId,
+        name: 'AskUserQuestion',
+        input: {
+          questions: [{
+            question: '晚饭想吃什么？',
+            header: '晚饭',
+            multiSelect: false,
+            options: [
+              { label: '中餐', description: '米饭、面条、炒菜之类。' },
+              { label: '西餐', description: '意面、牛排、披萨之类。' },
+            ],
+          }],
+        },
+      }],
+    },
+  }) + '\n';
+}
+
+function ccQuestionResultLine(toolUseId = 'toolu-question'): string {
+  return JSON.stringify({
+    type: 'user',
+    message: {
+      content: [{
+        type: 'tool_result',
+        tool_use_id: toolUseId,
+        content: 'Your questions have been answered: "晚饭想吃什么？"="中餐".',
+      }],
+    },
+    toolUseResult: {
+      questions: [{
+        question: '晚饭想吃什么？',
+        header: '晚饭',
+        multiSelect: false,
+        options: [
+          { label: '中餐', description: '米饭、面条、炒菜之类。' },
+          { label: '西餐', description: '意面、牛排、披萨之类。' },
+        ],
+      }],
+      answers: { '晚饭想吃什么？': '中餐' },
+    },
+  }) + '\n';
+}
+
 test('appends one user + one assistant line → events persisted + broadcast', async () => {
   const h = setupCcHarness();
   try {
@@ -131,7 +180,7 @@ test('appends one user + one assistant line → events persisted + broadcast', a
     assert.equal(rows[0]!.type, 'user_message');
     const u = JSON.parse(rows[0]!.data) as { text: string };
     assert.equal(u.text, 'hello from terminal');
-    assert.equal(rows[1]!.type, 'output.text');
+    assert.equal(rows[1]!.type, 'assistant_text');
     const a = JSON.parse(rows[1]!.data) as { text: string };
     assert.equal(a.text, 'hi back');
 
@@ -268,6 +317,113 @@ test('stop() halts further syncing for that session', async () => {
       .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
       .get(h.sessionId) as { n: number }).n;
     assert.equal(n, 1, 'no events synced after stop');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('claude AskUserQuestion tool_use is mirrored as a question approval card and resolved by tool_result', async () => {
+  const h = setupCcHarness();
+  try {
+    h.watcher.start(h.sessionId, h.filePath, 'claude');
+    await new Promise(r => setTimeout(r, WATCH_ATTACH_MS));
+
+    appendFileSync(h.filePath, ccUserLine('测试一下，你问我一个问题'));
+    appendFileSync(h.filePath, ccAssistantQuestionLine());
+    appendFileSync(h.filePath, ccQuestionResultLine());
+
+    await waitFor(() => {
+      const n = (h.db
+        .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
+        .get(h.sessionId) as { n: number }).n;
+      return n >= 3;
+    });
+
+    const rows = h.db
+      .prepare(`SELECT type, call_id, data FROM events WHERE session_id = ? ORDER BY rowid ASC`)
+      .all(h.sessionId) as Array<{ type: string; call_id: string; data: string }>;
+
+    assert.equal(rows.length, 3);
+    assert.equal(rows[0]!.type, 'user_message');
+    assert.equal(rows[1]!.type, 'approval_requested');
+    assert.equal(rows[1]!.call_id, 'toolu-question');
+    const question = JSON.parse(rows[1]!.data) as {
+      approvalId: string;
+      category: string;
+      questions?: Array<{ question: string; options: Array<{ label: string }> }>;
+    };
+    assert.equal(question.approvalId, 'toolu-question');
+    assert.equal(question.category, 'question');
+    assert.equal(question.questions?.[0]?.question, '晚饭想吃什么？');
+    assert.equal(question.questions?.[0]?.options[0]?.label, '中餐');
+
+    assert.equal(rows[2]!.type, 'approval_resolved');
+    assert.equal(rows[2]!.call_id, 'toolu-question');
+    const resolved = JSON.parse(rows[2]!.data) as {
+      approvalId: string;
+      decision: string;
+      auto: boolean;
+    };
+    assert.equal(resolved.approvalId, 'toolu-question');
+    assert.equal(resolved.decision, 'allow_once');
+    assert.equal(resolved.auto, false);
+
+    const session = h.db
+      .prepare('SELECT status FROM sessions WHERE id = ?')
+      .get(h.sessionId) as { status: string };
+    assert.equal(session.status, 'running');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('claude AskUserQuestion appended after watcher restart is attached to latest turn', async () => {
+  const h = setupCcHarness();
+  try {
+    const turnId = randomUUID();
+    const now = new Date().toISOString();
+    h.db
+      .prepare(
+        `INSERT INTO turns (id, session_id, turn_number, status, created_at, completed_at)
+         VALUES (?, ?, 1, 'completed', ?, ?)`,
+      )
+      .run(turnId, h.sessionId, now, now);
+    h.db
+      .prepare(
+        `INSERT INTO events (id, session_id, turn_id, call_id, type, data, created_at)
+         VALUES (?, ?, ?, ?, 'user_message', ?, ?)`,
+      )
+      .run(randomUUID(), h.sessionId, turnId, randomUUID(), JSON.stringify({ text: '测试一下，你问我一个问题' }), now);
+    writeFileSync(h.filePath, ccUserLine('测试一下，你问我一个问题'));
+
+    h.watcher.start(h.sessionId, h.filePath, 'claude');
+    await new Promise(r => setTimeout(r, WATCH_ATTACH_MS));
+
+    appendFileSync(h.filePath, ccAssistantQuestionLine('toolu-after-restart'));
+
+    await waitFor(() => {
+      const n = (h.db
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE session_id = ? AND type = 'approval_requested'")
+        .get(h.sessionId) as { n: number }).n;
+      return n >= 1;
+    });
+
+    const row = h.db
+      .prepare(
+        `SELECT e.turn_id, e.call_id, e.type, e.data, s.status
+         FROM events e
+         INNER JOIN sessions s ON s.id = e.session_id
+         WHERE e.session_id = ? AND e.type = 'approval_requested'
+         ORDER BY e.rowid DESC
+         LIMIT 1`,
+      )
+      .get(h.sessionId) as { turn_id: string; call_id: string; type: string; data: string; status: string };
+    assert.equal(row.turn_id, turnId);
+    assert.equal(row.call_id, 'toolu-after-restart');
+    assert.equal(row.status, 'pending');
+    const question = JSON.parse(row.data) as { category: string; questions?: Array<{ question: string }> };
+    assert.equal(question.category, 'question');
+    assert.equal(question.questions?.[0]?.question, '晚饭想吃什么？');
   } finally {
     h.cleanup();
   }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ApprovalDecision, ApprovalMode, RuntimeMode, Session, Workspace } from '@gian/shared';
+import type { ApprovalDecision, ApprovalMode, RemoteControlState, RuntimeMode, Session, TtySurface, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
+import { confirm } from '../feedback.js';
 import { createWorkspace, loadBranches, loadRemoteBranches, loadRepoInfo } from '../api.js';
 import type { LocalBranch, RemoteBranch } from '../api.js';
 import { BranchPicker } from '../components/BranchPicker.js';
@@ -12,8 +13,11 @@ import { QueueList } from '../components/QueueList.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import { Terminal, makeSessionWire } from '../components/Terminal.js';
 import { Transcript } from '../transcript/Transcript.js';
-import type { QueueEntry, TokenUsage, TranscriptItem } from '../types.js';
+import { TranscriptMinimap } from '../transcript/TranscriptMinimap.js';
+import { ApprovalCard } from '../transcript/items.js';
+import type { ApprovalActionContext, ApprovalItem, QueueEntry, TokenUsage, TranscriptItem } from '../types.js';
 import type { GianWs } from '../ws.js';
+import { planApprovalResponseDispatch } from '../session-routing.js';
 
 // ─── V2 inline icons (copied verbatim from design/gian-design-v2/js/data.jsx) ─
 function SvgIcon({ d, size = 16, stroke = 1.6 }: { d: string; size?: number; stroke?: number }) {
@@ -119,6 +123,7 @@ export interface CodingViewProps {
   activeSessionId: string | null;
   itemsBySession: Record<string, TranscriptItem[]>;
   pendingBySession: Record<string, boolean>;
+  ttyLockBySession: Record<string, { owner: boolean; reason?: string }>;
   usageBySession: Record<string, TokenUsage>;
   queueBySession: Record<string, QueueEntry[]>;
   /** Codex plan-mode plan markdown per session, populated by plan_update. */
@@ -138,9 +143,25 @@ export interface CodingViewProps {
       attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
     },
   ) => void;
+  onBetaSend: (
+    sessionId: string,
+    text: string,
+    opts?: {
+      attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
+    },
+  ) => void;
   onSendSkill: (sessionId: string, name: string, path: string) => void;
   onStop: (sessionId: string) => void;
   onApprove: (
+    sessionId: string,
+    approvalId: string,
+    decision: ApprovalDecision,
+    answers?: Record<string, string | string[]>,
+    context?: ApprovalActionContext,
+  ) => void;
+  /** Local-only approval resolution for TTY questions, which paste their
+   *  answers into the PTY rather than going through the structured bridge. */
+  onLocalApprovalResolve: (
     sessionId: string,
     approvalId: string,
     decision: ApprovalDecision,
@@ -174,7 +195,8 @@ export interface CodingViewProps {
   ws: GianWs;
   /** Flip the active runtime for a session. Caller forwards to
    *  `session:switch-runtime` WS message. */
-  onSwitchRuntime: (sessionId: string, target: RuntimeMode) => void;
+  onSwitchRuntime: (sessionId: string, target: RuntimeMode, surface?: TtySurface) => void;
+  onClaimTty: (sessionId: string, surface: TtySurface, takeover?: boolean) => void;
   /** Sessions that have been "armed" for a remote-control switch — i.e.
    *  the user clicked Remote while a turn was running. Composer reads
    *  this to lock the input + show a banner. */
@@ -184,6 +206,11 @@ export interface CodingViewProps {
   onRequestRemote: (sessionId: string) => void;
   /** User clicked Cancel on the armed banner. */
   onCancelRemote: (sessionId: string) => void;
+  /** Live Claude Remote Control state per session (TTY mode). */
+  remoteControlBySession: Record<string, RemoteControlState>;
+  /** User clicked the antenna while in TTY mode → toggle Remote Control by
+   *  sending `/remote-control` into the live PTY. */
+  onToggleRemoteControl: (sessionId: string) => void;
   /** Switch app mode to Spaces (workspace management). Triggered from
    *  the sidebar's "N hidden workspaces · manage" footer link. */
   onOpenSpaces: () => void;
@@ -252,13 +279,16 @@ export function CodingView(p: CodingViewProps) {
           workspace={p.activeWorkspace}
           items={p.itemsBySession[p.activeSession.id] ?? []}
           pending={p.pendingBySession[p.activeSession.id] ?? false}
+          ttyLock={p.ttyLockBySession[p.activeSession.id]}
           usage={p.usageBySession[p.activeSession.id] ?? null}
           queue={p.queueBySession[p.activeSession.id] ?? []}
           codexPlanText={p.planBySession[p.activeSession.id]}
           onSend={(text, opts) => p.onSend(p.activeSession!.id, text, opts)}
+          onBetaSend={(text, opts) => p.onBetaSend(p.activeSession!.id, text, opts)}
           onSendSkill={(name, path) => p.onSendSkill(p.activeSession!.id, name, path)}
           onStop={() => p.onStop(p.activeSession!.id)}
-          onApprove={(approvalId, decision, answers) => p.onApprove(p.activeSession!.id, approvalId, decision, answers)}
+          onApprove={(approvalId, decision, answers, context) => p.onApprove(p.activeSession!.id, approvalId, decision, answers, context)}
+          onLocalApprovalResolve={(approvalId, decision, answers) => p.onLocalApprovalResolve(p.activeSession!.id, approvalId, decision, answers)}
           onQueueAdd={text => p.onQueueAdd(p.activeSession!.id, text)}
           onQueueRemove={queueId => p.onQueueRemove(p.activeSession!.id, queueId)}
           onQueueReorder={order => p.onQueueReorder(p.activeSession!.id, order)}
@@ -277,10 +307,13 @@ export function CodingView(p: CodingViewProps) {
           workingTreeId={p.activeWorkingTreeId}
           branch={p.activeBranch}
           ws={p.ws}
-          onSwitchRuntime={target => p.onSwitchRuntime(p.activeSession!.id, target)}
+          onSwitchRuntime={(target, surface) => p.onSwitchRuntime(p.activeSession!.id, target, surface)}
+          onClaimTty={(surface, takeover) => p.onClaimTty(p.activeSession!.id, surface, takeover)}
           armedRemote={p.armedRemoteSwitch.has(p.activeSession.id)}
           onRequestRemote={() => p.onRequestRemote(p.activeSession!.id)}
           onCancelRemote={() => p.onCancelRemote(p.activeSession!.id)}
+          remoteControl={p.remoteControlBySession[p.activeSession.id]}
+          onToggleRemoteControl={() => p.onToggleRemoteControl(p.activeSession!.id)}
         />
       ) : (
         <CodingViewEmpty />
@@ -305,7 +338,7 @@ function CodingViewEmpty() {
         </svg>
         <p className="fpe-title">{t('coding.session.empty')}</p>
         <p className="fpe-hint">
-          <kbd>⌘K</kbd> jump to session, file, or command
+          <kbd>⌘K</kbd> {t('coding.empty.hint')}
         </p>
       </div>
     </main>
@@ -336,6 +369,7 @@ function Sidebar({
   onLoadArchived: () => void | Promise<void>;
   onOpenSpaces: () => void;
 }) {
+  const t = useT();
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [wsFilter, setWsFilter] = useState('all');
   // V2 sidebar state — search box + popover.
@@ -485,8 +519,8 @@ function Sidebar({
           <div className="sb-search">
             <SvgIcon d={ICON.search} />
             <input
-              aria-label="Search sessions"
-              placeholder="Search"
+              aria-label={t('coding.sidebar.search.label')}
+              placeholder={t('coding.sidebar.search.placeholder')}
               value={search}
               onChange={e => setSearch(e.target.value)}
             />
@@ -494,8 +528,8 @@ function Sidebar({
           <button
             type="button"
             className={`sb-iconbtn${hasFilter ? ' has-active' : ''}`}
-            aria-label="Filter sessions"
-            title="Filter"
+            aria-label={t('coding.sidebar.filter.label')}
+            title={t('coding.sidebar.filter.title')}
             onClick={() => setFilterOpen(o => !o)}
           >
             <SvgIcon d={ICON.filter} />
@@ -504,8 +538,8 @@ function Sidebar({
           <button
             type="button"
             className="sb-iconbtn"
-            aria-label="New session"
-            title="New session"
+            aria-label={t('coding.sidebar.new')}
+            title={t('coding.sidebar.new')}
             onClick={onToggleNew}
           >
             <SvgIcon d={ICON.plus} />
@@ -514,23 +548,23 @@ function Sidebar({
           {filterOpen && (
             <div className="filter-pop">
               <div>
-                <div className="lbl">Workspace</div>
+                <div className="lbl">{t('coding.sidebar.filter.workspace')}</div>
                 <select
                   className="select"
                   style={{ width: '100%' }}
                   value={wsFilter === 'all' ? '' : wsFilter}
                   onChange={e => setWsFilter(e.target.value || 'all')}
                 >
-                  <option value="">All workspaces</option>
+                  <option value="">{t('coding.sidebar.filter.allWorkspaces')}</option>
                   {workspaces.map(w => (
                     <option key={w.id} value={w.id}>{w.name}</option>
                   ))}
                 </select>
               </div>
               <div>
-                <div className="lbl">Executor</div>
+                <div className="lbl">{t('coding.sidebar.filter.executor')}</div>
                 <div className="segm" style={{ width: '100%' }}>
-                  {([['', 'All'], ['claude', 'Claude'], ['codex', 'Codex']] as const).map(([v, lbl]) => (
+                  {([['', t('coding.sidebar.filter.all')], ['claude', 'Claude'], ['codex', 'Codex']] as const).map(([v, lbl]) => (
                     <button
                       key={v || 'all'}
                       type="button"
@@ -549,7 +583,7 @@ function Sidebar({
                 style={{ alignSelf: 'flex-start' }}
                 onClick={() => { setWsFilter('all'); setFilterExec(null); }}
               >
-                Reset
+                {t('common.reset')}
               </button>
             </div>
           )}
@@ -586,7 +620,7 @@ function Sidebar({
               className="sb-chip clear"
               onClick={() => { setWsFilter('all'); setFilterExec(null); }}
             >
-              clear
+              {t('coding.sidebar.clear')}
             </button>
           </div>
         )}
@@ -597,7 +631,7 @@ function Sidebar({
           <>
             <div className="sb-group needs-you">
               <span className="dot" />
-              <span>Needs you</span>
+              <span>{t('coding.sidebar.needsYou')}</span>
               <span className="count">{needsYou.length}</span>
             </div>
             {needsYou
@@ -622,7 +656,7 @@ function Sidebar({
           return (
             <>
               <button className="sb-archived" onClick={toggleArchived}>
-                <span className="caret">{archivedOpen ? '▾' : '▸'}</span> Archived
+                <span className="caret">{archivedOpen ? '▾' : '▸'}</span> {t('coding.sidebar.archived')}
                 {archivedLoaded && <span className="count">{visible.length}</span>}
               </button>
               {archivedOpen && (
@@ -630,7 +664,7 @@ function Sidebar({
                   {visible.map(s => renderRow(s, true))}
                   {archivedLoaded && visible.length === 0 && (
                     <span style={{ padding: '4px 10px', color: 'var(--text-3)', fontSize: 11 }}>
-                      no archived sessions
+                      {t('coding.sidebar.noArchived')}
                     </span>
                   )}
                 </>
@@ -648,7 +682,7 @@ function Sidebar({
               className="sb-hidden-link"
               onClick={onOpenSpaces}
             >
-              ↳ {hiddenCount} hidden workspace{hiddenCount === 1 ? '' : 's'} · manage
+              ↳ {hiddenCount} {t(hiddenCount === 1 ? 'coding.sidebar.hiddenOne' : 'coding.sidebar.hiddenMany')} · {t('coding.sidebar.manage')}
             </button>
           );
         })()}
@@ -669,6 +703,7 @@ function SessionRow({
   branchFallback?: string | null;
   onSelect: () => void;
 }) {
+  const t = useT();
   const branch = session.branch ?? branchFallback ?? null;
   return (
     <div
@@ -700,13 +735,13 @@ function SessionRow({
           )}
         </div>
       </div>
-      <span className="ri-age" title="Last activity">{relTime(session.updated_at)}</span>
+      <span className="ri-age" title={t('coding.session.lastActivity')}>{relTime(session.updated_at)}</span>
       <StatusIcon status={session.status} />
       {wsHidden && (
         <span
           className="ri-hidden-badge"
-          title="Workspace 已隐藏 — 在 Settings 里管理"
-          aria-label="workspace hidden"
+          title={t('coding.session.workspaceHidden')}
+          aria-label={t('coding.session.workspaceHidden.aria')}
         >
           <SvgIcon d={ICON.eyeOff} size={11} />
         </span>
@@ -719,10 +754,11 @@ function SessionRow({
  *  pill. Renders nothing for 'new', a spinner for running/pending, a red ⚠
  *  for errors, and a green ✓ for done. */
 function StatusIcon({ status }: { status: import('@gian/shared').SessionStatus }) {
+  const t = useT();
   if (status === 'new') return null;
   if (status === 'running' || status === 'pending') {
     return (
-      <span className="ri-status running" title={status === 'running' ? 'Running' : 'Awaiting approval'} aria-label={status}>
+      <span className="ri-status running" title={status === 'running' ? t('coding.status.running') : t('coding.status.awaitingApproval')} aria-label={status}>
         <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
           <circle cx="8" cy="8" r="6" stroke="var(--accent-soft)" strokeWidth="2" />
           <path d="M14 8a6 6 0 0 0-6-6" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
@@ -732,7 +768,7 @@ function StatusIcon({ status }: { status: import('@gian/shared').SessionStatus }
   }
   if (status === 'error') {
     return (
-      <span className="ri-status err" title="Error" aria-label="error">
+      <span className="ri-status err" title={t('coding.status.error')} aria-label="error">
         <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
           <circle cx="8" cy="8" r="7" fill="var(--danger-soft)" stroke="var(--danger)" strokeWidth="1" />
           <path d="M8 4.5v4 M8 10.6v.4" stroke="var(--danger)" strokeWidth="2" strokeLinecap="round" />
@@ -742,7 +778,7 @@ function StatusIcon({ status }: { status: import('@gian/shared').SessionStatus }
   }
   // done
   return (
-    <span className="ri-status done" title="Done" aria-label="done">
+    <span className="ri-status done" title={t('coding.status.done')} aria-label="done">
       <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
         <circle cx="8" cy="8" r="7" fill="var(--ok-soft)" stroke="var(--ok)" strokeWidth="1" />
         <path d="M5 8l2 2 4-4" stroke="var(--ok)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
@@ -764,6 +800,7 @@ function SessionRowKebab({
   onUnarchive?: () => void;
   onDelete: () => void;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -781,9 +818,13 @@ function SessionRowKebab({
     };
   }, [open]);
 
-  function confirmDelete() {
-    if (typeof window !== 'undefined' && !window.confirm('Delete this session? This cannot be undone.')) return;
-    onDelete();
+  async function confirmDelete() {
+    const ok = await confirm({
+      message: t('coding.session.deleteConfirm'),
+      danger: true,
+      confirmLabel: t('common.delete'),
+    });
+    if (ok) onDelete();
   }
 
   return (
@@ -953,7 +994,7 @@ function NewSessionView({
     mode !== 'worktree' || !branchesLoaded || !composedBranch
       ? null
       : existingLocalNames.has(composedBranch)
-        ? `Branch "${composedBranch}" already exists locally`
+        ? `${composedBranch} ${t('coding.form.branchExists')}`
         : null;
 
   const canSubmit = canCreate
@@ -1005,7 +1046,7 @@ function NewSessionView({
                 >
                   {workspaces.map(w => (
                     <option key={w.id} value={w.id} disabled={w.hidden === 1}>
-                      {w.name}{w.hidden === 1 ? ' (隐藏)' : ''}
+                      {w.name}{w.hidden === 1 ? ` (${t('coding.session.workspaceHidden.aria')})` : ''}
                     </option>
                   ))}
                   <option value="__new__">{t('coding.form.ws.createnew')}</option>
@@ -1015,15 +1056,15 @@ function NewSessionView({
                 <div className="ns-inline-ws">
                   <input
                     className="input"
-                    aria-label="New workspace name"
+                    aria-label={t('coding.form.ws.name.placeholder')}
                     placeholder={t('coding.form.ws.name.placeholder')}
                     value={wsName}
                     onChange={e => setWsName(e.target.value)}
                   />
                   <input
                     className="input"
-                    aria-label="New workspace git remote"
-                    placeholder="Git remote (optional)"
+                    aria-label={t('coding.form.ws.gitremote.label')}
+                    placeholder={t('coding.form.ws.gitremote.placeholder')}
                     value={wsRemote}
                     onChange={e => setWsRemote(e.target.value)}
                   />
@@ -1034,7 +1075,7 @@ function NewSessionView({
                     disabled={wsBusy || !wsName}
                   >
                     {wsBusy ? (
-                      <span className="ns-busy"><span className="ns-spinner" aria-hidden="true" />Creating…</span>
+                      <span className="ns-busy"><span className="ns-spinner" aria-hidden="true" />{t('common.creating')}</span>
                     ) : t('coding.form.ws.create')}
                   </button>
                 </div>
@@ -1066,7 +1107,7 @@ function NewSessionView({
                   <div className="exec-card-dot" />
                   <div className="exec-card-body">
                     <div className="exec-card-name">Claude Code</div>
-                    <div className="exec-card-desc">Anthropic · sonnet-4.6</div>
+                    <div className="exec-card-desc">CLI plan</div>
                   </div>
                 </button>
               </div>
@@ -1114,14 +1155,14 @@ function NewSessionView({
                   className={`segm-item${mode === 'regular' ? ' active' : ''}`}
                   onClick={() => setMode('regular')}
                 >
-                  Regular
+                  {t('coding.form.mode.regular')}
                 </button>
                 <button
                   type="button"
                   className={`segm-item${mode === 'worktree' ? ' active' : ''}`}
                   onClick={() => setMode('worktree')}
                 >
-                  Worktree
+                  {t('coding.form.mode.worktree')}
                 </button>
               </div>
               {mode === 'worktree' && (
@@ -1129,16 +1170,16 @@ function NewSessionView({
                   {/* Base branch — popover picker with search + grouped
                      local/remote sections. Workspace default branch (when
                      known) auto-seeds the value in the useEffect above. */}
-                  <label className="ns-sublabel">Base branch</label>
+                  <label className="ns-sublabel">{t('coding.form.baseBranch')}</label>
                   <BranchPicker
                     branches={branches}
                     remoteBranches={remoteBranches}
                     value={baseBranch}
                     defaultBranch={defaultBranchHint}
                     disabled={!branchesLoaded}
-                    placeholder={branchesLoaded ? 'Pick a base branch…' : 'Loading branches…'}
+                    placeholder={branchesLoaded ? t('coding.form.baseBranch.pick') : t('coding.form.baseBranch.loading')}
                     onChange={setBaseBranch}
-                    ariaLabel="Base branch"
+                    ariaLabel={t('coding.form.baseBranch')}
                   />
 
                   {/* New branch name — fixed `worktree/` prefix + suffix
@@ -1146,11 +1187,11 @@ function NewSessionView({
                      one-click create still works; user can replace it with
                      a meaningful slug. Collisions with existing local refs
                      block submit. */}
-                  <label className="ns-sublabel">New branch name</label>
+                  <label className="ns-sublabel">{t('coding.form.newBranch')}</label>
                   <div className="branch-name-field">
                     <span className="prefix">worktree/</span>
                     <input
-                      aria-label="New branch suffix"
+                      aria-label={t('coding.form.newBranchSuffix')}
                       placeholder="short-id"
                       value={branchSuffix}
                       onChange={e => setBranchSuffix(e.target.value)}
@@ -1171,7 +1212,7 @@ function NewSessionView({
               </div>
               <input
                 className="input"
-                aria-label="Session name"
+                aria-label={t('coding.form.session.name.label')}
                 placeholder={t('coding.new.name.placeholder')}
                 value={sessionName}
                 onChange={e => setSessionName(e.target.value)}
@@ -1184,7 +1225,7 @@ function NewSessionView({
               </div>
               <textarea
                 className="input"
-                aria-label="First message"
+                aria-label={t('coding.form.first.label')}
                 rows={4}
                 placeholder={t('coding.new.first.placeholder')}
                 value={firstMessage}
@@ -1198,7 +1239,7 @@ function NewSessionView({
             </button>
             <button className="btn primary sm" disabled={!canSubmit} onClick={submit}>
               {creating ? (
-                <span className="ns-busy"><span className="ns-spinner" aria-hidden="true" />Creating…</span>
+                <span className="ns-busy"><span className="ns-spinner" aria-hidden="true" />{t('common.creating')}</span>
               ) : t('coding.new.create')}
             </button>
           </div>
@@ -1213,13 +1254,16 @@ function SessionMain({
   workspace,
   items,
   pending,
+  ttyLock,
   usage,
   queue,
   codexPlanText,
   onSend,
+  onBetaSend,
   onSendSkill,
   onStop,
   onApprove,
+  onLocalApprovalResolve,
   onQueueAdd,
   onQueueRemove,
   onQueueReorder,
@@ -1239,22 +1283,29 @@ function SessionMain({
   branch,
   ws,
   onSwitchRuntime,
+  onClaimTty,
   armedRemote,
   onRequestRemote,
   onCancelRemote,
+  remoteControl,
+  onToggleRemoteControl,
 }: {
   session: Session;
   workspace: Workspace | null;
   items: TranscriptItem[];
   pending: boolean;
+  ttyLock?: { owner: boolean; reason?: string };
   usage: TokenUsage | null;
   queue: QueueEntry[];
   codexPlanText?: string;
   ws: GianWs;
-  onSwitchRuntime: (target: RuntimeMode) => void;
+  onSwitchRuntime: (target: RuntimeMode, surface?: TtySurface) => void;
+  onClaimTty: (surface: TtySurface, takeover?: boolean) => void;
   armedRemote: boolean;
   onRequestRemote: () => void;
   onCancelRemote: () => void;
+  remoteControl?: RemoteControlState;
+  onToggleRemoteControl: () => void;
   onSend: (
     text: string,
     opts?: {
@@ -1262,9 +1313,21 @@ function SessionMain({
       attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
     },
   ) => void;
+  onBetaSend: (
+    text: string,
+    opts?: {
+      attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
+    },
+  ) => void;
   onSendSkill: (name: string, path: string) => void;
   onStop: () => void;
   onApprove: (
+    approvalId: string,
+    decision: ApprovalDecision,
+    answers?: Record<string, string | string[]>,
+    context?: ApprovalActionContext,
+  ) => void;
+  onLocalApprovalResolve: (
     approvalId: string,
     decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
@@ -1287,16 +1350,100 @@ function SessionMain({
   workingTreeId: string | null;
   branch: string | null;
 }) {
+  const t = useT();
   const isWorktree = session.branch !== null;
   const terminal = session.worktree_outcome !== null;
-  // V2 chat/cli toggle — now wired to the runtime-mode switch.
-  // `chat` = structured (today's transcript + composer)
-  // `cli`  = pure TTY (xterm panel, no composer)
-  // We read from session.runtime_mode so the active state survives
-  // refreshes (and updates when the server confirms a switch).
-  const chatMode: 'chat' | 'cli' = session.runtime_mode === 'tty' ? 'cli' : 'chat';
-  const isTty = chatMode === 'cli';
+  type SessionSurface = 'chat' | 'beta' | 'cli';
+  const defaultSurface = session.runtime_mode === 'tty'
+    ? (session.executor === 'claude' ? 'beta' : 'cli')
+    : 'chat';
+  const [surface, setSurface] = useState<SessionSurface>(defaultSurface);
+  const surfaceSessionRef = useRef(session.id);
+  const lastClaimRef = useRef('');
+
+  useEffect(() => {
+    if (surfaceSessionRef.current !== session.id) {
+      surfaceSessionRef.current = session.id;
+      setSurface(session.runtime_mode === 'tty'
+        ? (session.executor === 'claude' ? 'beta' : 'cli')
+        : 'chat');
+      return;
+    }
+    if (
+      session.runtime_mode === 'structured'
+      && surface !== 'chat'
+      && !(session.executor === 'claude' && surface === 'beta')
+    ) {
+      setSurface('chat');
+    } else if (session.runtime_mode === 'tty' && surface === 'chat') {
+      setSurface(session.executor === 'claude' ? 'beta' : 'cli');
+    }
+  }, [session.id, session.executor, session.runtime_mode, surface]);
+
+  useEffect(() => {
+    if (
+      session.executor === 'claude'
+      && session.runtime_mode === 'tty'
+      && (surface === 'beta' || surface === 'cli')
+    ) {
+      const key = `${session.id}:${surface}:${session.runtime_mode}`;
+      if (lastClaimRef.current === key) return;
+      lastClaimRef.current = key;
+      onClaimTty(surface);
+    }
+  }, [session.id, session.executor, session.runtime_mode, surface, onClaimTty]);
+
+  const isTty = surface === 'cli' && session.runtime_mode === 'tty';
+  const isBeta = surface === 'beta' && session.executor === 'claude';
+  let pendingQuestion: ApprovalItem | undefined;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i]!;
+    if (
+      item.kind === 'approval'
+      && item.status === 'pending'
+      && item.category === 'question'
+      && (item.questions?.length ?? 0) > 0
+    ) {
+      pendingQuestion = item;
+      break;
+    }
+  }
+  const ttyLockedOut = session.executor === 'claude'
+    && session.runtime_mode === 'tty'
+    && (surface === 'beta' || surface === 'cli')
+    && ttyLock?.owner === false;
   const ttySupported = session.executor === 'claude' || session.executor === 'codex';
+  const betaSupported = session.executor === 'claude';
+  const canSwitchClaudeTtySurface = session.executor === 'claude' && session.runtime_mode === 'tty';
+  const runtimeSwitchDisabled = pending || terminal;
+  const betaDisabled = terminal || (pending && !canSwitchClaudeTtySurface);
+  const cliDisabled = terminal || !ttySupported || (pending && !canSwitchClaudeTtySurface);
+  const handleTranscriptApprove = (
+    approvalId: string,
+    decision: ApprovalDecision,
+    answers?: Record<string, string | string[]>,
+    context?: ApprovalActionContext,
+  ) => {
+    const plan = planApprovalResponseDispatch({
+      executor: session.executor,
+      runtimeMode: session.runtime_mode,
+      surface,
+      decision,
+      answers,
+      context,
+    });
+    if (plan.channel === 'tty') {
+      onBetaSend(plan.text);
+      // The TTY path has no server-side approval bridge to resolve against —
+      // the answer is now a regular user message in the PTY. Apply a synthetic
+      // approval_resolved locally so the QuestionCard flips out of `pending`
+      // immediately; without this the card stays interactive forever. Pass the
+      // picked answers so the resolved card can show what was chosen.
+      onLocalApprovalResolve(approvalId, decision, answers);
+      return;
+    }
+    onApprove(approvalId, decision, answers, context);
+  };
 
   // Bump on pending → idle transition so GitBadge refetches at turn end.
   const [gitRefreshKey, setGitRefreshKey] = useState(0);
@@ -1308,43 +1455,67 @@ function SessionMain({
 
   // Map our session.status → V2 status label + dot variant.
   const statusLabel =
-    session.status === 'running' ? 'RUNNING'
-    : session.status === 'pending' ? 'WAITING'
-    : session.status === 'error' ? 'ERROR'
-    : 'DONE';
+    session.status === 'running' ? t('coding.status.running').toUpperCase()
+    : session.status === 'pending' ? t('coding.status.awaitingApproval').toUpperCase()
+    : session.status === 'error' ? t('coding.status.error').toUpperCase()
+    : t('coding.status.done').toUpperCase();
   const statusDotCls = session.status === 'running' ? 'status-dot run' : 'status-dot';
 
   return (
     <main className="main">
       <div className="main-head">
         <div className="main-head-l">
-          <div className="chat-toggle" role="tablist" aria-label="Runtime mode">
+          <div className="chat-toggle" role="tablist" aria-label={t('coding.runtime.label')}>
             <button
               type="button"
               role="tab"
-              aria-selected={chatMode === 'chat'}
-              className={chatMode === 'chat' ? 'active' : ''}
+              aria-selected={surface === 'chat'}
+              className={surface === 'chat' ? 'active' : ''}
               onClick={() => {
-                if (chatMode !== 'chat') onSwitchRuntime('structured');
+                setSurface('chat');
+                if (session.runtime_mode !== 'structured') onSwitchRuntime('structured');
               }}
-              disabled={pending || terminal}
-              title="Structured mode — transcript cards + composer"
+              disabled={runtimeSwitchDisabled}
+              title={session.executor === 'claude'
+                ? t('coding.runtime.chatClaudeTitle')
+                : t('coding.runtime.chatTitle')}
             >
-              Chat
+              {t('coding.runtime.chat')}
             </button>
+            {betaSupported && (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={surface === 'beta'}
+                className={surface === 'beta' ? 'active' : ''}
+                onClick={() => {
+                  setSurface('beta');
+                  if (session.runtime_mode !== 'tty') onSwitchRuntime('tty', 'beta');
+                  else onClaimTty('beta');
+                }}
+                disabled={betaDisabled}
+                title={t('coding.runtime.betaTitle')}
+              >
+                Beta
+              </button>
+            )}
             <button
               type="button"
               role="tab"
-              aria-selected={chatMode === 'cli'}
-              className={chatMode === 'cli' ? 'active' : ''}
+              aria-selected={surface === 'cli'}
+              className={surface === 'cli' ? 'active' : ''}
               onClick={() => {
                 if (!ttySupported) return;
-                if (chatMode !== 'cli') onSwitchRuntime('tty');
+                setSurface('cli');
+                if (session.runtime_mode !== 'tty') onSwitchRuntime('tty', 'cli');
+                else if (session.executor === 'claude') onClaimTty('cli');
               }}
-              disabled={pending || terminal || !ttySupported}
+              disabled={cliDisabled}
               title={ttySupported
-                ? 'Pure TTY mode — interactive CLI inside xterm'
-                : 'TTY mode is currently only available for claude sessions'}
+                ? (session.executor === 'claude'
+                    ? t('coding.runtime.claudeCliTitle')
+                    : t('coding.runtime.cliTitle'))
+                : t('coding.runtime.ttyUnavailable')}
             >
               CLI
             </button>
@@ -1366,17 +1537,30 @@ function SessionMain({
         <div className={`session-banner ${session.worktree_outcome}`}>
           <span>
             {session.worktree_outcome === 'merged'
-              ? `Worktree merged into ${session.base_branch}. This session is read-only.`
-              : `Worktree discarded. This session is read-only.`}
+              ? `${t('coding.banner.merged')} ${session.base_branch}. ${t('coding.banner.readonly')}`
+              : t('coding.banner.discarded')}
           </span>
           <span className="session-banner-spacer" />
           <button className="btn xs ghost" onClick={() => onArchive(session.archived !== 1)}>
-            {session.archived === 1 ? 'Unarchive' : 'Archive'}
+            {session.archived === 1 ? t('common.unarchive') : t('common.archive')}
           </button>
-          <button className="btn xs danger-ghost" onClick={onDelete}>Delete</button>
+          <button className="btn xs danger-ghost" onClick={onDelete}>{t('common.delete')}</button>
         </div>
       )}
-      {isTty ? (
+      {ttyLockedOut && (
+        <div className="session-banner warning">
+          <span>{ttyLock?.reason ?? 'Claude CLI is open in another window.'}</span>
+          <span className="session-banner-spacer" />
+          <button
+            type="button"
+            className="btn xs secondary"
+            onClick={() => onClaimTty(surface === 'beta' ? 'beta' : 'cli', true)}
+          >
+            {t('coding.banner.takeOver')}
+          </button>
+        </div>
+      )}
+      {isTty && !ttyLockedOut ? (
         <div className="main-scroll tty-pane">
           <Terminal
             instanceKey={`session:${session.id}`}
@@ -1390,26 +1574,39 @@ function SessionMain({
             <Transcript
               items={items}
               pending={pending || session.status === 'running' || session.status === 'pending'}
-              onApprove={onApprove}
+              onApprove={handleTranscriptApprove}
+              hiddenApprovalId={isBeta && pendingQuestion ? pendingQuestion.approvalId : undefined}
             />
           </div>
+          {/* Overlay rail — sibling of `.main-scroll` so it stays fixed while
+              the conversation scrolls underneath it. */}
+          <TranscriptMinimap items={items} />
           <QueueList queue={queue} onRemove={onQueueRemove} onReorder={onQueueReorder} onClear={onQueueClear} onSendNow={onQueueSendNow} />
           <PlanChip items={items} codexPlanText={codexPlanText} sessionId={session.id} />
+          {isBeta && pendingQuestion && (
+            <div className="beta-question-dock">
+              <div className="beta-question-dock-label">{t('coding.beta.waiting')}</div>
+              <ApprovalCard item={pendingQuestion} onApprove={handleTranscriptApprove} />
+            </div>
+          )}
           <Composer
             session={session}
-            onSend={onSend}
+            onSend={isBeta ? onBetaSend : onSend}
             onSendSkill={onSendSkill}
             onStop={onStop}
             onQueueAdd={onQueueAdd}
             onSetMode={onSetMode}
             onSetModel={onSetModel}
             onSetEffort={onSetEffort}
-            disabled={pending || terminal}
+            disabled={pending || terminal || ttyLockedOut || (isBeta && !!pendingQuestion)}
+            disabledSubmitBehavior={isBeta ? 'block' : 'queue'}
             executor={session.executor}
             workspaceId={workspace?.id}
             armedRemote={armedRemote}
             onRequestRemote={onRequestRemote}
             onCancelRemote={onCancelRemote}
+            remoteControl={remoteControl}
+            onToggleRemoteControl={onToggleRemoteControl}
           />
         </>
       )}
@@ -1517,12 +1714,14 @@ function TokStrip({
             <button
               className="ws-kebab-item"
               title="Kill the spawned proxy/agent process and reset this session to idle. Use when Stop didn't work."
-              onClick={() => {
+              onClick={async () => {
                 setOpen(false);
-                if (typeof window !== 'undefined' && !window.confirm(
-                  'Force recover this session? Any in-flight turn will be killed.',
-                )) return;
-                onRecover();
+                const ok = await confirm({
+                  message: 'Force recover this session? Any in-flight turn will be killed.',
+                  danger: true,
+                  confirmLabel: 'Force recover',
+                });
+                if (ok) onRecover();
               }}
             >
               Force recover

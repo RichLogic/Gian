@@ -31,13 +31,19 @@ interface WorkspaceRow {
   path: string;
 }
 
-export function ensureEventsRebuilt(db: Db, sessionId: string): RebuildResult {
-  // Fast path: hot cache already populated.
-  const eventsCount = db
-    .prepare('SELECT COUNT(*) AS c FROM events WHERE session_id = ?')
-    .get(sessionId) as { c: number } | undefined;
-  if (eventsCount && eventsCount.c > 0) {
-    return { turnsInserted: 0, eventsInserted: 0 };
+export function ensureEventsRebuilt(db: Db, sessionId: string, force = false): RebuildResult {
+  // Fast path: hot cache already populated. Skipped when `force` is set — a
+  // forced rebuild re-derives the transcript from the authoritative JSONL even
+  // when events exist, healing sessions whose rows were duplicated/corrupted by
+  // older append-style replays. Safe because `replayNativeJsonl` now clears the
+  // session's rows before re-inserting (a true rebuild, not an append).
+  if (!force) {
+    const eventsCount = db
+      .prepare('SELECT COUNT(*) AS c FROM events WHERE session_id = ?')
+      .get(sessionId) as { c: number } | undefined;
+    if (eventsCount && eventsCount.c > 0) {
+      return { turnsInserted: 0, eventsInserted: 0 };
+    }
   }
 
   const session = db

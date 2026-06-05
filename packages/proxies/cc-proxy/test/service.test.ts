@@ -1,10 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { CcProxyService, formatQuestionAnswers } from '../src/core/service.js';
 import { AppError } from '../src/core/errors.js';
+import { ClaudeMcpRuntime } from '../src/runtime/claude-mcp-runtime.js';
 import type { ClaudeRuntime, ClaudeRuntimeEvents } from '../src/runtime/types.js';
+import {
+  parseEffortLevelsFromHelp,
+  shouldRetryWithoutNoSessionPersistence,
+} from '../src/runtime/claude-mcp-runtime.js';
+import type { ModelCapabilities } from '../src/core/types.js';
 
 class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRuntime {
   readonly spawnCalls: Array<{
@@ -14,7 +23,14 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
     model?: string | null;
     isResume: boolean;
   }> = [];
-  readonly messages: Array<{ sessionId: string; content: string }> = [];
+  readonly messages: Array<{
+    sessionId: string;
+    content: string;
+    options?: {
+      permissionMode?: import('../src/core/types.js').PermissionMode | null;
+      effort?: import('../src/core/types.js').EffortLevel | null;
+    };
+  }> = [];
   readonly permissionResponses: Array<{
     sessionId: string;
     requestId: string;
@@ -22,6 +38,7 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
     extra?: { updatedInput?: Record<string, unknown>; message?: string };
   }> = [];
   readonly resetCalls: Array<{ sessionId: string; newClaudeSessionId: string }> = [];
+  models: ModelCapabilities[] = [];
   private readonly aliveSessions = new Set<string>();
   started = false;
   stopped = false;
@@ -42,8 +59,24 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
     this.aliveSessions.add(options.sessionId);
   }
 
-  async sendMessage(sessionId: string, content: string, _options?: { permissionMode?: import('../src/core/types.js').PermissionMode | null }): Promise<void> {
-    this.messages.push({ sessionId, content });
+  async sendMessage(
+    sessionId: string,
+    content: string,
+    options?: {
+      permissionMode?: import('../src/core/types.js').PermissionMode | null;
+      effort?: import('../src/core/types.js').EffortLevel | null;
+    },
+  ): Promise<void> {
+    const entry: {
+      sessionId: string;
+      content: string;
+      options?: {
+        permissionMode?: import('../src/core/types.js').PermissionMode | null;
+        effort?: import('../src/core/types.js').EffortLevel | null;
+      };
+    } = { sessionId, content };
+    if (options !== undefined) entry.options = options;
+    this.messages.push(entry);
   }
 
   resetClaudeSessionId(sessionId: string, newClaudeSessionId: string): void {
@@ -87,13 +120,91 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
   }
 
   getModels() {
-    return [];
+    return this.models;
   }
 
   async awaitModelDiscovery() {
     /* no-op */
   }
 }
+
+test('parseEffortLevelsFromHelp reads Claude CLI choices without a Gian enum', () => {
+  const help = `
+Options:
+  --effort <level>                      Effort level for the current session
+                                        (low, medium, high, xhigh, max)
+  --model <model>                       Model for the current session.
+`;
+  assert.deepEqual(parseEffortLevelsFromHelp(help), ['low', 'medium', 'high', 'xhigh', 'max']);
+});
+
+test('shouldRetryWithoutNoSessionPersistence detects older Claude CLI rejection', () => {
+  assert.equal(
+    shouldRetryWithoutNoSessionPersistence("error: unknown option '--no-session-persistence'"),
+    true,
+  );
+  assert.equal(
+    shouldRetryWithoutNoSessionPersistence('authentication failed'),
+    false,
+  );
+});
+
+test('capabilities discovery does not run claude -p unless explicitly opted in', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-proxy-billing-safe-'));
+  const fakeClaude = join(dir, 'claude');
+  const marker = join(dir, 'print-mode-called');
+  writeFileSync(fakeClaude, [
+    '#!/bin/sh',
+    `MARKER='${marker}'`,
+    'for arg in "$@"; do',
+    '  if [ "$arg" = "-p" ] || [ "$arg" = "--print" ]; then',
+    '    echo hit > "$MARKER"',
+    '    echo "unexpected print mode" >&2',
+    '    exit 42',
+    '  fi',
+    'done',
+    'if [ "$1" = "--help" ]; then',
+    '  cat <<EOF',
+    'Options:',
+    '  --effort <level>                      Effort level for the current session',
+    '                                        (low, medium, max)',
+    'EOF',
+    '  exit 0',
+    'fi',
+    'exit 0',
+    '',
+  ].join('\n'));
+  chmodSync(fakeClaude, 0o755);
+
+  const oldClaudeBin = process.env.CLAUDE_BIN;
+  const oldAllowProbe = process.env.GIAN_ALLOW_CLAUDE_PRINT_PROBE;
+  process.env.CLAUDE_BIN = fakeClaude;
+  delete process.env.GIAN_ALLOW_CLAUDE_PRINT_PROBE;
+
+  const service = new CcProxyService({ runtime: new ClaudeMcpRuntime() });
+  try {
+    await service.initialize();
+    const caps = await service.listCapabilities();
+    assert.equal(existsSync(marker), false, 'capabilities.list must not invoke claude print mode');
+    // Static alias menu: Default (no --model) + opus/sonnet/haiku aliases.
+    assert.equal(caps.models.length, 4);
+    assert.equal(caps.models[0]!.id, 'claude-default');
+    assert.equal(caps.models[0]!.model, '');
+    assert.equal(caps.models[0]!.isDefault, true);
+    assert.deepEqual(caps.models.map(m => m.model), ['', 'opus', 'sonnet', 'haiku']);
+    // Every entry carries the same billing-safe effort list parsed from --help.
+    for (const m of caps.models) {
+      assert.deepEqual(m.supportedEfforts, ['low', 'medium', 'max']);
+    }
+  } finally {
+    await service.close();
+    if (oldClaudeBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = oldClaudeBin;
+    if (oldAllowProbe === undefined) delete process.env.GIAN_ALLOW_CLAUDE_PRINT_PROBE;
+    else process.env.GIAN_ALLOW_CLAUDE_PRINT_PROBE = oldAllowProbe;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 async function withService(
   run: (ctx: {
@@ -185,6 +296,41 @@ test('service starts turns with the requested model and emits completion events'
     }
     assert.equal((events[1]!.params.data as { text: string }).text, 'done');
     assert.equal((events[2]!.params.data as { status: string }).status, 'completed');
+  });
+});
+
+test('service forwards only effort levels discovered from Claude capabilities', async () => {
+  await withService(async ({ runtime, service }) => {
+    runtime.models = [{
+      id: 'claude-current',
+      model: 'claude-current',
+      displayName: 'claude-current',
+      description: '',
+      hidden: false,
+      isDefault: true,
+      defaultEffort: null,
+      supportedEfforts: ['low', 'dynamic'],
+    }];
+    const created = await service.createSession({
+      cwd: '/tmp',
+      model: 'claude-current',
+    });
+
+    await service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'supported effort' }],
+      thinking: 'dynamic',
+    });
+    assert.equal(runtime.messages[0]!.options?.effort, 'dynamic');
+
+    runtime.emit('channelReply', created.session.id, 'done');
+
+    await service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'unsupported effort' }],
+      thinking: 'off',
+    });
+    assert.equal(runtime.messages[1]!.options?.effort, null);
   });
 });
 

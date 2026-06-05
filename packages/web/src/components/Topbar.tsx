@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useT } from '../i18n/index.js';
 import { PathBreadcrumb } from './PathBreadcrumb.js';
 import type { PathSegment, SessionMenuActions } from './PathBreadcrumb.js';
 
@@ -6,9 +7,9 @@ export type Mode = 'sessions' | 'spaces' | 'bots';
 export type ViewState = 'main' | 'both' | 'workbench';
 
 const MODE_OPTIONS: ReadonlyArray<readonly [Mode, string]> = [
-  ['sessions', 'Sessions'],
-  ['spaces', 'Workspaces'],
-  ['bots', 'Bots'],
+  ['sessions', 'topbar.mode.sessions'],
+  ['spaces', 'topbar.mode.workspaces'],
+  ['bots', 'topbar.mode.bots'],
 ];
 
 function GianMark({ size = 18 }: { size?: number }) {
@@ -69,6 +70,7 @@ export function Topbar({
   onSetViewState,
   showViewSeg = false,
 }: Props) {
+  const t = useT();
   const [modeOpen, setModeOpen] = useState(false);
   const modeRef = useRef<HTMLSpanElement>(null);
 
@@ -89,14 +91,15 @@ export function Topbar({
     };
   }, [modeOpen]);
 
-  const modeLabel = MODE_OPTIONS.find(([k]) => k === mode)?.[1] ?? 'Sessions';
+  const modeLabelKey = MODE_OPTIONS.find(([k]) => k === mode)?.[1] ?? 'topbar.mode.sessions';
+  const modeLabel = t(modeLabelKey);
 
   return (
     <header className="topbar">
       <button
         type="button"
         className="brand"
-        title="Toggle sidebar"
+        title={t('topbar.toggleSidebar')}
         onClick={() => window.dispatchEvent(new CustomEvent('gian.toggle-rail'))}
       >
         <GianMark size={18} />
@@ -108,7 +111,7 @@ export function Topbar({
           type="button"
           className="mode-btn"
           data-testid="mode-button"
-          aria-label={`Current view: ${modeLabel}`}
+          aria-label={`${t('topbar.currentView')}: ${modeLabel}`}
           aria-expanded={modeOpen}
           onClick={() => setModeOpen(o => !o)}
         >
@@ -116,8 +119,8 @@ export function Topbar({
           <span className="caret">▾</span>
         </button>
         {modeOpen && (
-          <div className="mode-pop" role="menu" aria-label="Switch view">
-            {MODE_OPTIONS.map(([key, label]) => (
+          <div className="mode-pop" role="menu" aria-label={t('topbar.switchView')}>
+            {MODE_OPTIONS.map(([key, labelKey]) => (
               <button
                 key={key}
                 type="button"
@@ -128,7 +131,7 @@ export function Topbar({
                 onClick={() => { onSetMode(key); setModeOpen(false); }}
               >
                 <span className="check">{mode === key ? '✓' : ''}</span>
-                {label}
+                {t(labelKey)}
               </button>
             ))}
           </div>
@@ -145,12 +148,12 @@ export function Topbar({
       <span className="topbar-spacer" />
 
       {showViewSeg && onSetViewState && (
-        <div className="view-seg" title="View — chat / split / workbench">
+        <div className="view-seg" title={t('topbar.view.title')}>
           <button
             type="button"
             className={`view-seg-item ${viewState === 'main' ? 'active' : ''}`}
             onClick={() => onSetViewState('main')}
-            title="Chat only"
+            title={t('topbar.view.chatOnly')}
           >
             <ViewIcon variant="main" />
           </button>
@@ -158,7 +161,7 @@ export function Topbar({
             type="button"
             className={`view-seg-item ${viewState === 'both' ? 'active' : ''}`}
             onClick={() => onSetViewState('both')}
-            title="Chat + workbench (split)"
+            title={t('topbar.view.split')}
           >
             <ViewIcon variant="both" />
           </button>
@@ -166,7 +169,7 @@ export function Topbar({
             type="button"
             className={`view-seg-item ${viewState === 'workbench' ? 'active' : ''}`}
             onClick={() => onSetViewState('workbench')}
-            title="Workbench only"
+            title={t('topbar.view.workbenchOnly')}
           >
             <ViewIcon variant="wb" />
           </button>

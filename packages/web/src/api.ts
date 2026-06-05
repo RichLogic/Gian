@@ -67,10 +67,41 @@ export interface ChangedEntry {
   removed: number;
 }
 
-export async function loadChanged(workingTreeId: string): Promise<ChangedEntry[]> {
-  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/changed`);
+/** Diff comparison scope. `all` = working tree vs HEAD (staged+unstaged, the
+ *  historical default). `unstaged` = working tree vs index. `staged` = index
+ *  vs HEAD. Default-omitted from the URL so it stays byte-identical to the
+ *  pre-scope endpoint (GitBadge + older callers rely on that). */
+export type ChangeScope = 'all' | 'unstaged' | 'staged';
+
+export async function loadChanged(
+  workingTreeId: string,
+  scope: ChangeScope = 'all',
+): Promise<ChangedEntry[]> {
+  const q = scope === 'all' ? '' : `?scope=${scope}`;
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/changed${q}`);
   if (!res.ok) return [];
   return (await res.json()) as ChangedEntry[];
+}
+
+/** Stage a single file (`git add -- <path>`). Index-only — never touches file
+ *  contents. Returns true on success. */
+export async function stageFile(workingTreeId: string, path: string): Promise<boolean> {
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/stage`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  return res.ok;
+}
+
+/** Unstage a single file (`git reset HEAD -- <path>`). Index-only. */
+export async function unstageFile(workingTreeId: string, path: string): Promise<boolean> {
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/unstage`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  return res.ok;
 }
 
 export async function loadProxyModels(executor: 'claude' | 'codex'): Promise<Array<import('@gian/shared').CcModelCapabilities | import('@gian/shared').CodexModelCapabilities>> {
@@ -93,8 +124,14 @@ export async function loadSlashCommands(
   return body.commands ?? [];
 }
 
-export async function loadDiff(workingTreeId: string, path: string): Promise<string> {
-  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/diff?path=${encodeURIComponent(path)}`);
+export async function loadDiff(
+  workingTreeId: string,
+  path: string,
+  scope: ChangeScope = 'all',
+): Promise<string> {
+  const params = new URLSearchParams({ path });
+  if (scope !== 'all') params.set('scope', scope);
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/diff?${params.toString()}`);
   if (!res.ok) return '';
   const body = (await res.json()) as { diff: string };
   return body.diff ?? '';
@@ -592,12 +629,38 @@ export async function openFileWith(
   path: string,
   editorId?: string,
 ): Promise<{ ok: true } | { error: string }> {
+  return postOpen(workingTreeId, { path, ...(editorId ? { editor_id: editorId } : {}) });
+}
+
+/** Open a file with a named macOS application (from `loadApps`). */
+export async function openFileWithApp(
+  workingTreeId: string,
+  path: string,
+  app: string,
+): Promise<{ ok: true } | { error: string }> {
+  return postOpen(workingTreeId, { path, app });
+}
+
+/** Open a file with a fixed system opener: system default, reveal in Finder,
+ *  or a Terminal at the file's folder. ('browser' is handled client-side.) */
+export async function openFileBuiltin(
+  workingTreeId: string,
+  path: string,
+  builtin: 'default' | 'finder' | 'terminal',
+): Promise<{ ok: true } | { error: string }> {
+  return postOpen(workingTreeId, { path, builtin });
+}
+
+async function postOpen(
+  workingTreeId: string,
+  body: { path: string; editor_id?: string; app?: string; builtin?: string },
+): Promise<{ ok: true } | { error: string }> {
   const res = await fetch(
     `/api/working_trees/${encodeURIComponent(workingTreeId)}/open`,
     {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path, ...(editorId ? { editor_id: editorId } : {}) }),
+      body: JSON.stringify(body),
     },
   );
   if (res.ok) return { ok: true };
@@ -605,6 +668,31 @@ export async function openFileWith(
     return await res.json() as { error: string };
   } catch {
     return { error: `HTTP ${res.status}` };
+  }
+}
+
+/** Installed applications for the "Open with…" menu (macOS; [] elsewhere). */
+export async function loadApps(): Promise<string[]> {
+  try {
+    const res = await fetch('/api/apps');
+    if (!res.ok) return [];
+    const body = (await res.json()) as { apps?: string[] };
+    return body.apps ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Flat, recursive list of every file path in the working tree (for the
+ *  FILES panel search box). Returns [] on error. */
+export async function loadAllFiles(workingTreeId: string): Promise<string[]> {
+  try {
+    const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/files`);
+    if (!res.ok) return [];
+    const body = (await res.json()) as { files?: string[] };
+    return body.files ?? [];
+  } catch {
+    return [];
   }
 }
 

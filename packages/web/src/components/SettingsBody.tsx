@@ -1,7 +1,19 @@
 import { useEffect, useState } from 'react';
-import type { CcModelCapabilities, CodexModelCapabilities, ExternalEditor, SystemConfig } from '@gian/shared';
+import type { CcModelCapabilities, CodexModelCapabilities, ExternalEditor, OpenFileCategory, SystemConfig } from '@gian/shared';
 import { THEME_DEFAULT_ACCENT } from '@gian/shared';
 import { loadProxyModels, saveSettings } from '../api.js';
+import { useMinimapEnabled, setMinimapEnabled } from '../display-prefs.js';
+import { AppIcon } from './AppIcon.js';
+import { DEFAULT_OPEN_TARGET } from './Sheet.js';
+import { useT } from '../i18n/index.js';
+
+const OPEN_CATEGORIES: Array<{ key: OpenFileCategory; labelKey: string }> = [
+  { key: 'code', labelKey: 'settings.openapps.code' },
+  { key: 'web', labelKey: 'settings.openapps.web' },
+  { key: 'images', labelKey: 'settings.openapps.images' },
+  { key: 'pdf', labelKey: 'settings.openapps.pdf' },
+  { key: 'other', labelKey: 'settings.openapps.other' },
+];
 import {
   browserNotificationPermission,
   loadNotificationPrefs,
@@ -30,23 +42,30 @@ function editorsEqual(a: ExternalEditor[], b: ExternalEditor[]): boolean {
 
 interface Props {
   config: SystemConfig | null;
+  /** Installed apps (macOS) for the "Add application" picker. */
+  apps?: string[];
   onChange: (cfg: SystemConfig) => void;
 }
 
 /** V2 Settings as a Workbench tab body. Six sections per V2 design:
  *  Appearance / Executors / Notifications / Shortcuts / System / About.
- *  Account/Auth/Public access/Language are intentionally hidden (§3.11). */
-export function SettingsBody({ config, onChange }: Props) {
-  if (!config) return <div style={{ padding: 20, color: 'var(--text-3)' }}>Loading…</div>;
-  return <SettingsBodyInner config={config} onChange={onChange} />;
+ *  Account/Auth/Public access stay out of this compact workbench surface;
+ *  locale lives here because the app only supports Chinese/English UI. */
+export function SettingsBody({ config, apps, onChange }: Props) {
+  const t = useT();
+  if (!config) return <div style={{ padding: 20, color: 'var(--text-3)' }}>{t('common.loading')}</div>;
+  return <SettingsBodyInner config={config} apps={apps ?? []} onChange={onChange} />;
 }
 
 function SettingsBodyInner({
-  config, onChange,
+  config, apps, onChange,
 }: {
   config: SystemConfig;
+  apps: string[];
   onChange: (cfg: SystemConfig) => void;
 }) {
+  const t = useT();
+  const minimapOn = useMinimapEnabled();
   const [editors, setEditors] = useState<ExternalEditor[]>(config.external_editors);
 
   // Sync local editor state when config is replaced from outside (e.g. initial load).
@@ -75,30 +94,30 @@ function SettingsBodyInner({
   return (
     <div className="settings-tab-body" data-testid="settings-body">
       <header className="settings-hero">
-        <h2>Settings</h2>
-        <span className="settings-hero-sub">Local instance · single user</span>
+        <h2>{t('settings.title')}</h2>
+        <span className="settings-hero-sub">{t('settings.local.subtitle')}</span>
       </header>
 
-      <div className="settings-eyebrow">Appearance</div>
+      <div className="settings-eyebrow">{t('settings.section.appearance')}</div>
       <div className="settings-section">
         <dl className="kv-grid">
-          <dt>Theme</dt>
+          <dt>{t('settings.appearance.theme')}</dt>
           <dd>
             <div className="theme-row">
               {([
-                ['light', 'Light', ['oklch(0.955 0.004 280)', 'oklch(0.935 0.005 280)', 'oklch(0.22 0.02 280)']],
-                ['warm', 'Warm', ['oklch(0.955 0.020 80)', 'oklch(0.925 0.022 78)', 'oklch(0.30 0.04 55)']],
-                ['dark', 'Dark', ['oklch(0.165 0.012 250)', 'oklch(0.240 0.016 250)', 'oklch(0.93 0.01 250)']],
-              ] as const).map(([key, name, swatches]) => (
+                ['light', 'settings.theme.light', ['oklch(0.955 0.004 280)', 'oklch(0.935 0.005 280)', 'oklch(0.22 0.02 280)']],
+                ['warm', 'settings.theme.warm', ['oklch(0.955 0.020 80)', 'oklch(0.925 0.022 78)', 'oklch(0.30 0.04 55)']],
+                ['dark', 'settings.theme.dark', ['oklch(0.165 0.012 250)', 'oklch(0.240 0.016 250)', 'oklch(0.93 0.01 250)']],
+              ] as const).map(([key, labelKey, swatches]) => (
                 <button key={key} className={`theme-chip ${config.theme === key ? 'active' : ''}`}
                         onClick={() => patch({ theme: key, accent: THEME_DEFAULT_ACCENT[key] })}>
                   <div className="swatches">{swatches.map((c, i) => <i key={i} style={{ background: c }} />)}</div>
-                  <div className="name">{name}</div>
+                  <div className="name">{t(labelKey)}</div>
                 </button>
               ))}
             </div>
           </dd>
-          <dt>Accent</dt>
+          <dt>{t('settings.appearance.accent')}</dt>
           <dd>
             <div className="accent-row">
               {([
@@ -120,18 +139,35 @@ function SettingsBodyInner({
               ))}
             </div>
           </dd>
-          <dt>Density</dt>
+          <dt>{t('settings.appearance.density')}</dt>
           <dd>
             <div className="segm">
               {(['compact', 'cozy', 'roomy'] as const).map(d => (
                 <button key={d} className={`segm-item ${config.density === d ? 'active' : ''}`}
                         onClick={() => patch({ density: d })}>
-                  {d[0]!.toUpperCase() + d.slice(1)}
+                  {t(`settings.density.${d}`)}
                 </button>
               ))}
             </div>
           </dd>
-          <dt>Font · Interface</dt>
+          <dt>{t('settings.appearance.language')}</dt>
+          <dd>
+            <div className="segm">
+              {([
+                ['zh-CN', 'settings.language.zh'],
+                ['en', 'settings.language.en'],
+              ] as const).map(([locale, labelKey]) => (
+                <button
+                  key={locale}
+                  className={`segm-item ${config.locale === locale ? 'active' : ''}`}
+                  onClick={() => patch({ locale })}
+                >
+                  {t(labelKey)}
+                </button>
+              ))}
+            </div>
+          </dd>
+          <dt>{t('settings.appearance.fontInterface')}</dt>
           <dd>
             <div className="segm">
               {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
@@ -142,7 +178,7 @@ function SettingsBodyInner({
               ))}
             </div>
           </dd>
-          <dt>Font · Transcript</dt>
+          <dt>{t('settings.appearance.fontTranscript')}</dt>
           <dd>
             <div className="segm">
               {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
@@ -153,7 +189,7 @@ function SettingsBodyInner({
               ))}
             </div>
           </dd>
-          <dt>Font · Code</dt>
+          <dt>{t('settings.appearance.fontCode')}</dt>
           <dd>
             <div className="segm">
               {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
@@ -164,12 +200,23 @@ function SettingsBodyInner({
               ))}
             </div>
           </dd>
-          <dt>Font</dt>
+          <dt>{t('settings.appearance.fontFamily')}</dt>
           <dd className="mono" style={{ color: 'var(--text-3)' }}>Instrument Sans · JetBrains Mono</dd>
+          <dt>{t('settings.display.minimap')}</dt>
+          <dd>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={minimapOn}
+                onChange={e => setMinimapEnabled(e.target.checked)}
+              />
+              <span>{t('settings.display.minimap.hint')}</span>
+            </label>
+          </dd>
         </dl>
       </div>
 
-      <div className="settings-eyebrow">Executors</div>
+      <div className="settings-eyebrow">{t('settings.section.executor')}</div>
       <div className="settings-section">
         <ExecutorRow
           name="Claude Code"
@@ -189,119 +236,111 @@ function SettingsBodyInner({
         />
       </div>
 
-      <div className="settings-eyebrow">Notifications</div>
+      <div className="settings-eyebrow">{t('settings.section.notifications')}</div>
       <div className="settings-section">
         <NotificationsBlock />
       </div>
 
-      <div className="settings-eyebrow">Shortcuts</div>
+      <div className="settings-eyebrow">{t('settings.section.shortcuts')}</div>
       <div className="settings-section">
         <dl className="kv-grid shortcuts">
-          <dt>Command palette</dt><dd><kbd>⌘</kbd><kbd>K</kbd></dd>
-          <dt>New session</dt><dd><kbd>⌘</kbd><kbd>N</kbd></dd>
-          <dt>Toggle workbench</dt><dd><kbd>⌘</kbd><kbd>\</kbd></dd>
-          <dt>Rename session</dt><dd><kbd>F2</kbd></dd>
-          <dt>Approve / decline</dt><dd><kbd>⏎</kbd>&nbsp;<kbd>⌫</kbd></dd>
+          <dt>{t('settings.shortcuts.commandPalette')}</dt><dd><kbd>⌘</kbd><kbd>K</kbd></dd>
+          <dt>{t('settings.shortcuts.newSession')}</dt><dd><kbd>⌘</kbd><kbd>N</kbd></dd>
+          <dt>{t('settings.shortcuts.toggleWorkbench')}</dt><dd><kbd>⌘</kbd><kbd>\</kbd></dd>
+          <dt>{t('settings.shortcuts.renameSession')}</dt><dd><kbd>F2</kbd></dd>
+          <dt>{t('settings.shortcuts.approveDecline')}</dt><dd><kbd>⏎</kbd>&nbsp;<kbd>⌫</kbd></dd>
         </dl>
       </div>
 
-      <div className="settings-eyebrow">System</div>
+      <div className="settings-eyebrow">{t('settings.section.system')}</div>
       <div className="settings-section">
         <dl className="kv-grid">
-          <dt>Runner</dt>
+          <dt>{t('settings.system.runner')}</dt>
           <dd className="mono">{config.host}:{config.port}</dd>
-          <dt>Workspace root</dt>
+          <dt>{t('settings.system.workspaceRoot')}</dt>
           <dd className="mono">{config.workspace_root}</dd>
         </dl>
       </div>
 
-      <div className="settings-eyebrow">About</div>
+      <div className="settings-eyebrow">{t('settings.section.about')}</div>
       <div className="settings-section">
         <dl className="kv-grid">
-          <dt>Version</dt><dd className="mono">Gian (dev)</dd>
-          <dt>Channel</dt><dd>local</dd>
+          <dt>{t('settings.about.version')}</dt><dd className="mono">Gian (dev)</dd>
+          <dt>{t('settings.about.channel')}</dt><dd>{t('settings.about.local')}</dd>
         </dl>
       </div>
 
-      <div className="settings-eyebrow">External editors</div>
+      <div className="settings-eyebrow">{t('settings.section.externaleditors')}</div>
       <div className="settings-section">
-        <p className="settings-section-help">
-          Programs in the Files view's Open menu. <code>{'{path}'}</code> in Args is
-          replaced with the file path; otherwise the path is appended. Args are split
-          on whitespace — arguments containing spaces aren't supported.
-        </p>
+        <p className="settings-section-help">{t('settings.editors.help')}</p>
         {editors.length === 0 && (
-          <p className="settings-empty">No editors configured. Add one to use it from the Files view.</p>
+          <p className="settings-empty">{t('settings.editors.empty')}</p>
         )}
-        {editors.map((ed, i) => (
-          <div key={ed.id} className="external-editor-row">
-            <label>
-              <span className="ee-label">Name</span>
-              <input
-                type="text"
-                value={ed.name}
-                maxLength={64}
-                onChange={e => {
-                  const next = [...editors];
-                  next[i] = { ...ed, name: e.target.value };
-                  patchEditors(next);
-                }}
-              />
-            </label>
-            <label>
-              <span className="ee-label">Command</span>
-              <input
-                type="text"
-                value={ed.command}
-                onChange={e => {
-                  const next = [...editors];
-                  next[i] = { ...ed, command: e.target.value };
-                  patchEditors(next);
-                }}
-              />
-            </label>
-            <label>
-              <span className="ee-label">Args</span>
-              <input
-                type="text"
-                aria-label="Args"
-                defaultValue={ed.args.join(' ')}
-                onBlur={e => {
-                  const tokens = e.target.value.trim().length === 0
-                    ? []
-                    : e.target.value.trim().split(/\s+/);
-                  const next = [...editors];
-                  next[i] = { ...ed, args: tokens };
-                  patchEditors(next);
-                }}
-              />
-            </label>
+        {editors.map(ed => (
+          <div key={ed.id} className="ee-app-row">
+            <span className="ee-app-name"><AppIcon name={ed.name} /> {ed.name || ed.id}</span>
             <button
               type="button"
-              aria-label="Remove editor"
+              aria-label={t('settings.editors.remove')}
               className="ee-remove"
-              onClick={() => {
-                const next = editors.filter(x => x.id !== ed.id);
-                patchEditors(next);
-              }}
+              onClick={() => patchEditors(editors.filter(x => x.id !== ed.id))}
             >
               ✕
             </button>
           </div>
         ))}
-        <button
-          type="button"
-          className="btn btn-ghost"
-          onClick={() => {
-            const next = [
-              ...editors,
-              { id: newEditorId(), name: '', command: '', args: [] },
-            ];
-            patchEditors(next);
-          }}
-        >
-          + Add editor
-        </button>
+        {apps.length > 0 && (
+          <label className="ee-add-app">
+            <span className="rfc-lbl">{t('settings.editors.addApp')}</span>
+            <select
+              aria-label={t('settings.editors.addApp')}
+              value=""
+              onChange={e => {
+                const app = e.target.value;
+                if (!app) return;
+                // A picked app is stored as an opener that shells out via
+                // `open -a "<App>" <path>` (host buildEditorArgs substitutes {path}).
+                patchEditors([
+                  ...editors,
+                  { id: newEditorId(), name: app, command: 'open', args: ['-a', app, '{path}'] },
+                ]);
+                e.target.value = '';
+              }}
+            >
+              <option value="">{t('settings.editors.addApp.placeholder')}</option>
+              {apps.filter(a => !editors.some(ed => ed.name === a)).map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+          </label>
+        )}
+      </div>
+
+      <div className="settings-eyebrow">{t('settings.section.openapps')}</div>
+      <div className="settings-section">
+        <p className="settings-section-help">{t('settings.openapps.help')}</p>
+        {OPEN_CATEGORIES.map(({ key, labelKey }) => {
+          const cur = (config.open_apps?.[key]) || DEFAULT_OPEN_TARGET[key];
+          // Keep the current app selectable even if it's not in the scanned list.
+          const appOpts = cur.startsWith('@') || apps.includes(cur) ? apps : [cur, ...apps];
+          return (
+            <div key={key} className="open-cat-row">
+              <span className="open-cat-label">{t(labelKey)}</span>
+              <span className="open-cat-pick">
+                {cur === '@newtab'
+                  ? <span className="app-icon app-icon-newtab" aria-hidden>↗</span>
+                  : <AppIcon name={cur === '@finder' ? 'Finder' : cur} />}
+                <select
+                  aria-label={t(labelKey)}
+                  value={cur}
+                  onChange={e => patch({ open_apps: { ...(config.open_apps ?? {}), [key]: e.target.value } })}
+                >
+                  <option value="@newtab">{t('settings.openapps.newtab')}</option>
+                  <option value="@finder">{t('settings.openapps.finder')}</option>
+                  {appOpts.map(a => <option key={a} value={a}>{a}</option>)}
+                </select>
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -309,10 +348,9 @@ function SettingsBodyInner({
 
 /** Renders one executor block (Claude or Codex). Model list comes from
  *  `loadProxyModels(executor)`; effort options derive from the selected
- *  model's capability struct — Cc exposes `supportedEfforts` (low/med/high/max),
- *  Codex exposes `supportedThinking` (minimal/low/med/high/xhigh). Nothing
- *  about the list is hardcoded — when the proxy adds a model or adjusts its
- *  supported levels, this UI follows. */
+ *  model's capability struct — Cc exposes `supportedEfforts`, Codex exposes
+ *  `supportedThinking`. Nothing about the list is hardcoded — when the proxy
+ *  adds a model or adjusts its supported levels, this UI follows. */
 function ExecutorRow({
   name, executor, model, effort, onSetModel, onSetEffort,
 }: {
@@ -323,6 +361,7 @@ function ExecutorRow({
   onSetModel: (v: string) => void;
   onSetEffort: (v: string) => void;
 }) {
+  const t = useT();
   const [models, setModels] = useState<Array<CcModelCapabilities | CodexModelCapabilities>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -355,9 +394,9 @@ function ExecutorRow({
     : [];
 
   const status =
-    loading ? { cls: 'loading', label: 'loading…' }
-    : error ? { cls: 'err', label: 'proxy unavailable' }
-    : { cls: 'ok', label: 'ready' };
+    loading ? { cls: 'loading', label: t('settings.executors.status.loading') }
+    : error ? { cls: 'err', label: t('settings.executors.status.unavailable') }
+    : { cls: 'ok', label: t('settings.executors.status.ready') };
 
   return (
     <div className="exec-row">
@@ -367,7 +406,7 @@ function ExecutorRow({
         <span className={`exec-status ${status.cls}`}>{status.label}</span>
       </div>
       <dl className="kv-grid">
-        <dt>Default model</dt>
+        <dt>{t('settings.executors.defaultModel')}</dt>
         <dd>
           <select
             className="select mono"
@@ -389,15 +428,15 @@ function ExecutorRow({
               }
             }}
           >
-            <option value="">(proxy default)</option>
-            {visible.map(m => (
+            <option value="">{t('settings.executors.proxyDefault')}</option>
+            {visible.filter(m => m.model !== '').map(m => (
               <option key={m.id} value={m.model}>{m.displayName || m.model}</option>
             ))}
           </select>
         </dd>
         {efforts.length > 0 && (
           <>
-            <dt>Effort</dt>
+            <dt>{t('settings.executors.effort')}</dt>
             <dd>
               <select
                 className="select mono"
@@ -405,7 +444,7 @@ function ExecutorRow({
                 value={effort}
                 onChange={e => onSetEffort(e.target.value)}
               >
-                <option value="">(model default)</option>
+                <option value="">{t('settings.executors.modelDefault')}</option>
                 {efforts.map(level => (
                   <option key={level} value={level}>{level}</option>
                 ))}
@@ -419,6 +458,7 @@ function ExecutorRow({
 }
 
 function NotificationsBlock() {
+  const t = useT();
   const [prefs, setPrefs] = useState<NotificationPrefs>(() => loadNotificationPrefs());
   const [permission, setPermission] = useState<BrowserNotificationPermission>(() => browserNotificationPermission());
   const desktopEnabled = prefs.desktop && permission === 'granted';
@@ -440,16 +480,16 @@ function NotificationsBlock() {
 
   const statusText =
     permission === 'granted'
-      ? 'Session done · approval needed · error'
+      ? t('settings.notifications.status.enabled')
       : permission === 'denied'
-        ? 'Blocked in browser'
+        ? t('settings.notifications.status.blocked')
         : permission === 'unsupported'
-          ? 'Unsupported in this browser'
-          : 'Click to allow desktop alerts';
+          ? t('settings.notifications.status.unsupported')
+          : t('settings.notifications.status.allow');
 
   return (
     <dl className="kv-grid">
-      <dt>Desktop</dt>
+      <dt>{t('settings.notifications.desktop')}</dt>
       <dd>
         <label className="switch">
           <input
@@ -461,7 +501,7 @@ function NotificationsBlock() {
           <span>{statusText}</span>
         </label>
       </dd>
-      <dt>Events</dt>
+      <dt>{t('settings.notifications.events')}</dt>
       <dd>
         <label className="switch">
           <input
@@ -470,7 +510,7 @@ function NotificationsBlock() {
             disabled={!desktopEnabled}
             onChange={e => patch({ sessionDone: e.target.checked })}
           />
-          <span>Session done</span>
+          <span>{t('settings.notifications.sessionDone')}</span>
         </label>
         <label className="switch">
           <input
@@ -479,7 +519,7 @@ function NotificationsBlock() {
             disabled={!desktopEnabled}
             onChange={e => patch({ approvalNeeded: e.target.checked })}
           />
-          <span>Approval needed</span>
+          <span>{t('settings.notifications.approvalNeeded')}</span>
         </label>
         <label className="switch">
           <input
@@ -488,10 +528,10 @@ function NotificationsBlock() {
             disabled={!desktopEnabled}
             onChange={e => patch({ errors: e.target.checked })}
           />
-          <span>Error</span>
+          <span>{t('settings.notifications.error')}</span>
         </label>
       </dd>
-      <dt>Sound</dt>
+      <dt>{t('settings.notifications.sound')}</dt>
       <dd>
         <label className="switch">
           <input
@@ -500,10 +540,10 @@ function NotificationsBlock() {
             disabled={!desktopEnabled}
             onChange={e => patch({ sound: e.target.checked })}
           />
-          <span>Soft chime on approval</span>
+          <span>{t('settings.notifications.chime')}</span>
         </label>
       </dd>
-      <dt>Dock badge</dt>
+      <dt>{t('settings.notifications.dockBadge')}</dt>
       <dd>
         <label className="switch">
           <input
@@ -511,7 +551,7 @@ function NotificationsBlock() {
             checked={prefs.badge}
             onChange={e => patch({ badge: e.target.checked })}
           />
-          <span>Show pending approval count</span>
+          <span>{t('settings.notifications.badge')}</span>
         </label>
       </dd>
     </dl>

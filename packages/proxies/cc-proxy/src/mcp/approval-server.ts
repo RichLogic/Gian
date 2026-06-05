@@ -225,12 +225,31 @@ export class ApprovalServer {
     const conn: SessionConnection = { sessionId, server: mcpServer, transport };
     this.connections.set(sessionId, conn);
 
+    // Keepalive. An AskUserQuestion / permission prompt can stay pending for
+    // minutes while the user is away from the card; the SSE response then sits
+    // idle. Without periodic traffic the connection can be dropped (OS/runtime
+    // idle reaping), after which the suspended CallTool never receives its
+    // answer and the turn wedges ("pending 久了 session 卡住"). A comment ping
+    // keeps it warm and makes a dead client fail fast. Comment lines (`:`) are
+    // valid SSE and ignored by the MCP client, so they don't disturb frames.
+    const ping = setInterval(() => {
+      try {
+        if (!res.writableEnded) res.write(': keepalive\n\n');
+      } catch {
+        /* connection gone — transport.onclose handles cleanup */
+      }
+    }, 15_000);
+    if (typeof ping.unref === 'function') ping.unref();
+    const clearPing = () => clearInterval(ping);
+
     transport.onclose = () => {
+      clearPing();
       if (this.connections.get(sessionId) === conn) {
         this.connections.delete(sessionId);
         this.callbacks.onDisconnected(sessionId);
       }
     };
+    res.on('close', clearPing);
 
     await mcpServer.connect(transport);
     this.callbacks.onConnected(sessionId);

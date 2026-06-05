@@ -1,5 +1,5 @@
 import { TtyClaudeRuntime } from '../runtime/tty-claude-runtime.js';
-import type { PermissionMode } from './types.js';
+import type { EffortLevel, PermissionMode } from './types.js';
 
 /** Sink used to forward runtime events as JSON-RPC notifications back to
  *  the host. Same shape as the structured service's emitEvent. */
@@ -18,6 +18,8 @@ export interface TtyStartParams {
   cols: number;
   rows: number;
   model?: string | null;
+  /** Claude CLI `--effort` value discovered from capabilities. */
+  effort?: EffortLevel | null;
   /** Claude CLI `--permission-mode` value. Passed through verbatim after
    *  validation; null/undefined keeps Claude's default. */
   permissionMode?: PermissionMode | null;
@@ -104,6 +106,7 @@ export class TtyClaudeService {
       claudeSessionId: params.claudeSessionId,
       cwd: params.cwd,
       model: params.model ?? null,
+      effort: typeof params.effort === 'string' && params.effort.trim() ? params.effort.trim() : null,
       isResume: !!params.isResume,
       cols: Math.max(1, Math.floor(params.cols)),
       rows: Math.max(1, Math.floor(params.rows)),

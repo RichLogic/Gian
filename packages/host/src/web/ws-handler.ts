@@ -1,4 +1,5 @@
-import type { ClientToServerMessage, StateSyncMessage } from '@gian/shared';
+import { randomUUID } from 'node:crypto';
+import type { ClientToServerMessage, StateSyncMessage, TtySurface } from '@gian/shared';
 import type { WSContext, WSMessageReceive } from 'hono/ws';
 import type { SessionManager } from '../session/manager.js';
 import type { WsBroadcaster } from './ws-broadcast.js';
@@ -37,6 +38,7 @@ export interface WsHandlerDeps {
 
 interface ClientState {
   authed: boolean;
+  clientId: string;
 }
 
 export function makeWsHandlers({ sessions, broadcaster, approvals, tty, codexTty, term, db }: WsHandlerDeps) {
@@ -80,11 +82,13 @@ export function makeWsHandlers({ sessions, broadcaster, approvals, tty, codexTty
 
   return {
     onOpen(_evt: Event, ws: WSContext) {
-      states.set(ws, { authed: false });
+      states.set(ws, { authed: false, clientId: randomUUID() });
       broadcaster.add(ws);
     },
 
     onClose(_evt: WsCloseEvent, ws: WSContext) {
+      const state = states.get(ws);
+      if (state) tty?.releaseClient(state.clientId);
       broadcaster.remove(ws);
       states.delete(ws);
     },
@@ -130,7 +134,7 @@ export function makeWsHandlers({ sessions, broadcaster, approvals, tty, codexTty
       }
 
       try {
-        await dispatch(parsed, sessions, broadcaster, ws, tty, codexTty, term);
+        await dispatch(parsed, sessions, broadcaster, ws, state, tty, codexTty, term);
       } catch (err) {
         console.error('[ws] dispatch error', err);
         // Surface the failure to the client. Without this, errors inside
@@ -179,6 +183,7 @@ async function dispatch(
   sessions: SessionManager,
   broadcaster: WsBroadcaster,
   ws: WSContext,
+  state: ClientState,
   tty?: TtyManager,
   codexTty?: CodexTtyManager,
   term?: WorkbenchTerminalManager,
@@ -189,6 +194,16 @@ async function dispatch(
     let session;
     try { session = sessions.getSession(sessionId); } catch { return undefined; }
     return session.executor === 'codex' ? codexTty : tty;
+  };
+  const requireClaudeTtyOwner = (sessionId: string): void => {
+    const session = sessions.getSession(sessionId);
+    if (session.executor !== 'claude') return;
+    if (session.runtime_mode !== 'tty') {
+      throw Object.assign(new Error('session is not in Claude CLI mode'), { code: 'SWITCH_BLOCKED' });
+    }
+    if (!tty?.owns(sessionId, state.clientId)) {
+      throw Object.assign(new Error('Claude CLI is open in another window'), { code: 'TTY_LOCKED' });
+    }
   };
   switch (msg.type) {
     case 'session:create': {
@@ -266,28 +281,91 @@ async function dispatch(
       return;
     }
     case 'session:switch-runtime': {
+      const session = sessions.getSession(msg.session_id);
+      if (session.executor === 'claude' && tty) {
+        if (msg.target === 'tty') {
+          const claimed = tty.claim(
+            msg.session_id,
+            state.clientId,
+            ws,
+            msg.surface === 'beta' ? 'beta' : 'cli',
+          );
+          if (!claimed) {
+            throw Object.assign(new Error('Claude CLI is open in another window'), { code: 'TTY_LOCKED' });
+          }
+          try {
+            await sessions.switchRuntime(msg.session_id, msg.target, {
+              remoteControl: msg.remote_control === true,
+            });
+          } catch (err) {
+            tty.release(msg.session_id, state.clientId);
+            throw err;
+          }
+          return;
+        }
+        if (tty.isLockedByOther(msg.session_id, state.clientId)) {
+          throw Object.assign(new Error('Claude CLI is open in another window'), { code: 'TTY_LOCKED' });
+        }
+        await sessions.switchRuntime(msg.session_id, msg.target, {
+          remoteControl: msg.remote_control === true,
+        });
+        tty.release(msg.session_id, state.clientId);
+        return;
+      }
       await sessions.switchRuntime(msg.session_id, msg.target, {
         remoteControl: msg.remote_control === true,
       });
       return;
     }
+    case 'session:remote-control': {
+      // Toggle Claude Remote Control by injecting `/remote-control` into the
+      // live PTY. Host-trusted: no TTY-owner check, since the button can be
+      // clicked from the composer on any surface. No-op unless the session is
+      // a claude session currently in TTY mode.
+      const session = sessions.getSession(msg.session_id);
+      if (session.executor !== 'claude' || session.runtime_mode !== 'tty' || !tty) return;
+      await tty.toggleRemoteControl(msg.session_id);
+      return;
+    }
+    case 'tty:claim': {
+      const session = sessions.getSession(msg.session_id);
+      if (session.executor !== 'claude') return;
+      if (!tty) {
+        throw Object.assign(new Error('claude TTY runtime not configured'), { code: 'SWITCH_BLOCKED' });
+      }
+      if (session.runtime_mode !== 'tty') {
+        throw Object.assign(new Error('session is not in Claude CLI mode'), { code: 'SWITCH_BLOCKED' });
+      }
+      const surface: TtySurface = msg.surface === 'beta' ? 'beta' : 'cli';
+      const claimed = tty.claim(msg.session_id, state.clientId, ws, surface, {
+        takeover: msg.takeover === true,
+      });
+      if (!claimed) {
+        throw Object.assign(new Error('Claude CLI is open in another window'), { code: 'TTY_LOCKED' });
+      }
+      return;
+    }
     case 'pty:input': {
       const mgr = ttyManagerFor(msg.session_id);
       if (!mgr) return;
+      requireClaudeTtyOwner(msg.session_id);
       const payload: { data?: string; text?: string } = {};
       if (typeof msg.data === 'string') payload.data = msg.data;
+      if (typeof msg.text === 'string') payload.text = msg.text;
       await mgr.input(msg.session_id, payload);
       return;
     }
     case 'pty:resize': {
       const mgr = ttyManagerFor(msg.session_id);
       if (!mgr) return;
+      requireClaudeTtyOwner(msg.session_id);
       await mgr.resize(msg.session_id, msg.cols, msg.rows);
       return;
     }
     case 'pty:replay-request': {
       const mgr = ttyManagerFor(msg.session_id);
       if (!mgr) return;
+      requireClaudeTtyOwner(msg.session_id);
       const result = await mgr.replay(msg.session_id);
       broadcaster.send(ws, {
         type: 'pty:replay',

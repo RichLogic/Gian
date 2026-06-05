@@ -1,0 +1,128 @@
+[
+  {
+    "type": "assistant_text",
+    "data": {
+      "text": "hello from structured cc",
+      "delta": false
+    }
+  },
+  {
+    "type": "command_execution",
+    "callId": "tool_proxy_bash",
+    "data": {
+      "command": "npm test",
+      "cwd": "/repo",
+      "status": "running",
+      "itemId": "tool_proxy_bash"
+    }
+  },
+  {
+    "type": "approval_requested",
+    "callId": "appr_question",
+    "data": {
+      "approvalId": "appr_question",
+      "category": "question",
+      "risk": "low",
+      "title": "Pick branch",
+      "description": "",
+      "scopeOptions": [
+        "once"
+      ],
+      "toolName": "AskUserQuestion",
+      "questions": [
+        {
+          "question": "Pick branch",
+          "header": "Branch",
+          "multiSelect": false,
+          "options": [
+            {
+              "label": "main"
+            },
+            {
+              "label": "feature"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "type": "approval_requested",
+    "callId": "appr_plan",
+    "data": {
+      "approvalId": "appr_plan",
+      "category": "exit_plan_mode",
+      "risk": "medium",
+      "title": "Plan ready for review",
+      "description": "",
+      "subject": "1. Inspect\n2. Edit",
+      "scopeOptions": [
+        "once"
+      ],
+      "toolName": "ExitPlanMode",
+      "planActions": [
+        "accept_with_auto",
+        "accept_with_ask",
+        "keep_planning"
+      ]
+    }
+  },
+  {
+    "type": "approval_resolved",
+    "callId": "appr_question",
+    "data": {
+      "approvalId": "appr_question",
+      "decision": "allow_once",
+      "auto": false
+    }
+  },
+  {
+    "type": "auto_classifier_denied",
+    "callId": "auto_denied_1",
+    "data": {
+      "action": "Bash",
+      "reason": "blocked by policy",
+      "consecutive": 1,
+      "total": 2
+    }
+  },
+  {
+    "type": "auto_circuit_breaker",
+    "callId": "auto_breaker_1",
+    "data": {
+      "trigger": "consecutive",
+      "consecutive": 3,
+      "total": 3
+    }
+  },
+  {
+    "type": "turn_started",
+    "callId": "turn-start",
+    "data": {
+      "turnId": "turn_proxy_1"
+    }
+  },
+  {
+    "type": "turn_completed",
+    "callId": "turn_proxy_1",
+    "data": {
+      "turnId": "turn_proxy_1",
+      "summary": "done"
+    }
+  },
+  {
+    "type": "session_error",
+    "data": {
+      "message": "process exit 1",
+      "retryable": true
+    }
+  },
+  {
+    "type": "session_error",
+    "data": {
+      "message": "cc-proxy crashed",
+      "retryable": true,
+      "code": "E_RUNTIME"
+    }
+  }
+]

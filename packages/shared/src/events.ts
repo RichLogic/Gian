@@ -254,6 +254,10 @@ export interface ApprovalResolvedData {
   decision: 'allow_once' | 'allow_session' | 'decline';
   /** True when the proxy resolved automatically (safe-agent mode, low-risk auto-approve, etc.). */
   auto: boolean;
+  /** AskUserQuestion only: the answers the user picked, keyed by question
+   *  text. Lets a resolved question card show "answered with …" both live and
+   *  when a transcript is rebuilt from persisted events. */
+  answers?: Record<string, string | string[]>;
 }
 
 /**

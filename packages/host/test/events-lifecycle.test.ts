@@ -356,6 +356,55 @@ test('ensureEventsRebuilt replays cc JSONL into events when cache is empty', () 
   }
 });
 
+test('ensureEventsRebuilt(force) heals duplicates: clears existing rows before rebuilding', () => {
+  const dir = makeTempDir();
+  const originalHome = process.env['HOME'];
+  process.env['HOME'] = dir;
+  try {
+    const db = openDatabase(dir);
+    const wsPath = join(dir, 'proj');
+    mkdirSync(wsPath, { recursive: true });
+    const wsId = seedWorkspace(db, wsPath);
+    const nativeId = `cc_${randomUUID()}`;
+    const sid = seedSession(db, wsId, { nativeSessionId: nativeId, withEvents: false });
+    const projectDir = join(dir, '.claude', 'projects', encodeCcProjectDir(wsPath));
+    mkdirSync(projectDir, { recursive: true });
+    const jsonlPath = join(projectDir, `${nativeId}.jsonl`);
+    writeFileSync(jsonlPath, [
+      JSON.stringify({ type: 'user', message: { content: 'hello world' } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Hi!' }] } }),
+      JSON.stringify({ type: 'user', message: { content: 'second turn' } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Sure.' }] } }),
+    ].join('\n') + '\n', 'utf8');
+
+    const userCount = () =>
+      (db.prepare("SELECT COUNT(*) AS c FROM events WHERE session_id = ? AND type = 'user_message'").get(sid) as { c: number }).c;
+    const turnCount = () =>
+      (db.prepare('SELECT COUNT(*) AS c FROM turns WHERE session_id = ?').get(sid) as { c: number }).c;
+
+    ensureEventsRebuilt(db, sid);
+    assert.equal(userCount(), 2);
+    assert.equal(turnCount(), 2);
+
+    // Unforced second call is still a no-op (count>0 guard).
+    ensureEventsRebuilt(db, sid);
+    assert.equal(userCount(), 2, 'unforced rebuild does not duplicate');
+
+    // Forced rebuild clears + rebuilds — stays at 2, never 4. This is the fix
+    // for the "every turn duplicated" bug and the heal path for corrupted rows.
+    const forced = ensureEventsRebuilt(db, sid, true);
+    assert.equal(forced.turnsInserted, 2, 'force rebuild reinserts the turns');
+    assert.equal(userCount(), 2, 'force rebuild cleared old rows first — no duplication');
+    assert.equal(turnCount(), 2, 'turns not duplicated either');
+
+    db.close();
+  } finally {
+    if (originalHome === undefined) delete process.env['HOME'];
+    else process.env['HOME'] = originalHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('ensureEventsRebuilt is a no-op when JSONL file is missing', () => {
   const dir = makeTempDir();
   const originalHome = process.env['HOME'];

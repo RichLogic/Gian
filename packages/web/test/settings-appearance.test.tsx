@@ -60,4 +60,12 @@ describe('SettingsBody Appearance', () => {
     });
   });
 
+  it('switching language saves only the locale', async () => {
+    render(<SettingsBody config={baseConfig()} onChange={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'English' }));
+    await waitFor(() => {
+      expect(api.saveSettings).toHaveBeenCalledWith({ locale: 'en' });
+    });
+  });
+
 });

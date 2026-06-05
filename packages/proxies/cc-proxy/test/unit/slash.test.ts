@@ -103,6 +103,23 @@ test('listAllSlashCommands — surfaces probe names with descriptions when known
   assert.strictEqual(byName.get('/unknown-skill')!.description, '/unknown-skill');
 });
 
+test('listAllSlashCommands — default path scans files without native probe names', async () => {
+  clearSlashCache();
+  const cwd = mkdtempSync(join(tmpdir(), 'slash-test-'));
+  try {
+    const commandsDir = join(cwd, '.claude', 'commands');
+    mkdirSync(commandsDir, { recursive: true });
+    writeFileSync(join(commandsDir, 'local-only.md'), '---\ndescription: Local command.\n---\n');
+
+    const all = await listAllSlashCommands(cwd);
+    const byName = new Map(all.map((c) => [c.name, c]));
+    assert.ok(byName.get('/local-only'), 'project file command should be present');
+    assert.equal(byName.get('/native-only'), undefined, 'no native probe names should appear by default');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test('listAllSlashCommands — project file commands override probe entries', async () => {
   clearSlashCache();
   const cwd = mkdtempSync(join(tmpdir(), 'slash-test-'));

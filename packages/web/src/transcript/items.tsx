@@ -1,8 +1,9 @@
-import { createContext, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ApprovalDecision } from '@gian/shared';
-import type { AgentSpawnItem, ApprovalItem, AutoNoticeItem, CommandItem, DiffItem, FileReadItem, FileSearchItem, MsgItem, ReasoningItem, ToolItem, WebSearchItem } from '../types.js';
+import { useT } from '../i18n/index.js';
+import type { AgentSpawnItem, ApprovalActionContext, ApprovalItem, AutoNoticeItem, CommandItem, DiffItem, FileReadItem, FileSearchItem, MsgItem, ReasoningItem, ToolItem, WebSearchItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
 
 /**
@@ -34,6 +35,51 @@ export interface PlanOpenPayload {
 export const PlanOpenContext = createContext<
   ((payload: PlanOpenPayload) => void) | null
 >(null);
+
+/**
+ * Provided by App.tsx: a rehype plugin (bound to the active working tree's
+ * file index) that linkifies file references in transcript markdown. Null
+ * until the index loads / when there's no working tree — markdown then renders
+ * with no file linkification. See `linkify-files.ts`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const FileRefRehypeContext = createContext<
+  null | (() => (tree: any) => void)
+>(null);
+
+/** Markdown renderer for transcript prose (assistant text + reasoning). Adds
+ *  the file-linkify rehype plugin and an `a` override so detected files open
+ *  in the in-app preview (with line jump) instead of navigating away. */
+function MarkdownAnchor(props: {
+  node?: { properties?: Record<string, unknown> };
+  href?: string;
+  children?: React.ReactNode;
+}) {
+  const p = props.node?.properties ?? {};
+  const abs = typeof p.dataFileAbs === 'string' ? p.dataFileAbs : null;
+  if (abs) {
+    const line = p.dataFileLine ? Number(p.dataFileLine) : undefined;
+    return <FileLink path={abs} line={line} className="file-link-auto">{props.children}</FileLink>;
+  }
+  return <a href={props.href} target="_blank" rel="noreferrer noopener">{props.children}</a>;
+}
+
+export function MarkdownText({ children }: { children: string }) {
+  const makeRehype = useContext(FileRefRehypeContext);
+  const rehypePlugins = useMemo(
+    () => (makeRehype ? [makeRehype] : []),
+    [makeRehype],
+  );
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      rehypePlugins={rehypePlugins as never}
+      components={{ a: MarkdownAnchor as never }}
+    >
+      {children}
+    </ReactMarkdown>
+  );
+}
 
 /**
  * Renders a file path as a clickable link. By default routes clicks into
@@ -140,8 +186,10 @@ export function ApprovalCard({
     approvalId: string,
     decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
+    context?: ApprovalActionContext,
   ) => void;
 }) {
+  const t = useT();
   const isQuestion = item.category === 'question' && item.questions && item.questions.length > 0;
   const isPlanExit = item.category === 'exit_plan_mode' && item.planActions && item.planActions.length > 0;
   const sessionScopeAllowed = (item.scopeOptions ?? ['once']).includes('session');
@@ -174,13 +222,42 @@ export function ApprovalCard({
     return <QuestionCard item={item} onApprove={onApprove} />;
   }
 
+  // Resolved question: a question isn't an "allow/deny" — it's answered or
+  // cancelled. Render a question-specific resolved card (badge + the picked
+  // answer) instead of the generic "Allowed once · by web" permission note,
+  // which reads wrong for a question.
+  if (item.status !== 'pending' && item.category === 'question') {
+    const cancelled = item.status === 'declined';
+    return (
+      <div className={`approval question ${cancelled ? 'declined' : 'resolved'}`}>
+        <div className="approval-top">
+          <div className="approval-ico">
+            {cancelled ? <XIcon /> : <CheckIcon />}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="approval-title">
+              <span>{item.title}</span>
+              <span className="approval-risk">
+                {cancelled ? t('transcript.question.cancelled') : t('transcript.question.answered')}
+              </span>
+            </div>
+            {!cancelled && item.answeredWith && (
+              <div className="approval-sub">{item.answeredWith}</div>
+            )}
+          </div>
+          <span className="evt-meta" style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
+        </div>
+      </div>
+    );
+  }
+
   if (item.status !== 'pending') {
     const ok = item.status !== 'declined';
     const label =
-      item.status === 'approved-once' ? 'Allowed once' :
-      item.status === 'approved-session' ? 'Allowed for session' :
-      'Declined';
-    const riskLabel = ok ? 'approved' : 'declined';
+      item.status === 'approved-once' ? t('transcript.approval.allowedOnce') :
+      item.status === 'approved-session' ? t('transcript.approval.allowedSession') :
+      t('transcript.approval.declined');
+    const riskLabel = ok ? t('transcript.approval.approved') : t('transcript.approval.declined');
     return (
       <div className={`approval ${ok ? 'resolved' : 'declined'}`}>
         <div className="approval-top">
@@ -192,7 +269,7 @@ export function ApprovalCard({
               <span>{item.title}</span>
               <span className="approval-risk">{riskLabel}</span>
             </div>
-            <div className="approval-sub">{item.reason || 'command'}</div>
+            <div className="approval-sub">{item.reason || t('transcript.approval.command')}</div>
           </div>
           <span className="evt-meta" style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
         </div>
@@ -213,7 +290,7 @@ export function ApprovalCard({
         )}
         <div className="approval-resolved-note">
           <span className="dot" />
-          <span>{label} · by <strong>web</strong></span>
+          <span>{label} · {t('transcript.approval.byWeb')}</span>
         </div>
       </div>
     );
@@ -236,7 +313,7 @@ export function ApprovalCard({
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="approval-title">
             <span>{item.title}</span>
-            <span className={`approval-risk approval-risk--${item.risk}`}>{item.risk} risk</span>
+            <span className={`approval-risk approval-risk--${item.risk}`}>{t(`transcript.approval.${item.risk}Risk`)}</span>
           </div>
           {item.reason && <div className="approval-sub">{item.reason}</div>}
         </div>
@@ -264,33 +341,33 @@ export function ApprovalCard({
             className="btn primary sm"
             onClick={() => onApprove(item.approvalId, 'accept_with_auto')}
           >
-            Yes, auto-accept edits
+            {t('transcript.approval.autoAccept')}
           </button>
           <button
             className="btn secondary sm"
             onClick={() => onApprove(item.approvalId, 'accept_with_ask')}
           >
-            Yes, manually approve edits
+            {t('transcript.approval.manualApprove')}
           </button>
           <button
             className="btn danger-ghost sm"
             onClick={() => onApprove(item.approvalId, 'keep_planning')}
           >
-            No, keep planning
+            {t('transcript.approval.keepPlanning')}
           </button>
         </div>
       ) : (
         <div className="approval-actions">
-          <button className="btn primary sm" onClick={() => onApprove(item.approvalId, 'allow_once')}>Allow once</button>
+          <button className="btn primary sm" onClick={() => onApprove(item.approvalId, 'allow_once')}>{t('transcript.approval.allowOnce')}</button>
           {allowSession && (
-            <button className="btn secondary sm" onClick={() => onApprove(item.approvalId, 'allow_session')}>Allow session</button>
+            <button className="btn secondary sm" onClick={() => onApprove(item.approvalId, 'allow_session')}>{t('transcript.approval.allowSession')}</button>
           )}
-          <button className="btn danger-ghost sm" onClick={() => onApprove(item.approvalId, 'decline')}>Decline</button>
+          <button className="btn danger-ghost sm" onClick={() => onApprove(item.approvalId, 'decline')}>{t('transcript.approval.decline')}</button>
           <span className="spacer" />
           <span className="approval-tip">
-            <kbd className="kc">A</kbd>{' '}once
-            {allowSession && <> · <kbd className="kc">⇧A</kbd>{' '}session</>}
-            {' '}· <kbd className="kc">D</kbd>{' '}decline
+            <kbd className="kc">A</kbd>{' '}{t('transcript.approval.once')}
+            {allowSession && <> · <kbd className="kc">⇧A</kbd>{' '}{t('transcript.approval.session')}</>}
+            {' '}· <kbd className="kc">D</kbd>{' '}{t('transcript.approval.decline')}
           </span>
         </div>
       )}
@@ -299,15 +376,13 @@ export function ApprovalCard({
 }
 
 /**
- * Pending AskUserQuestion approval. cc-proxy routes the AskUserQuestion tool
- * call through the same `approval_prompt` MCP bridge as regular tool
- * approvals; the host normalizer detects `toolName === 'AskUserQuestion'`
- * and tags it with `category='question'` plus a parsed `questions` struct.
+ * Pending AskUserQuestion approval. It can originate from the structured
+ * cc-proxy approval bridge or from the Claude TTY JSONL watcher; both
+ * normalizers tag it with `category='question'` plus parsed questions.
  *
- * Submit serializes the user's selections as an `answers` map keyed by
- * question text; host forwards via the existing `approval:resolve` WS
- * channel and cc-proxy hands it back to the agent through the Claude SDK
- * `updatedInput.answers` channel. Cancel maps to a regular `decline`.
+ * Submit serializes selections as an `answers` map keyed by question text.
+ * The parent view decides whether this should be a structured
+ * `approval:resolve` or a Beta TTY input, based on the active runtime.
  */
 function QuestionCard({
   item,
@@ -318,22 +393,32 @@ function QuestionCard({
     approvalId: string,
     decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
+    context?: ApprovalActionContext,
   ) => void;
 }) {
+  const t = useT();
   // Per-question selection state. Single-select stores the chosen label;
   // multi-select stores a list. "Other" (free text) lives in a parallel map.
   const [selections, setSelections] = useState<Record<string, string | string[]>>({});
   const [other, setOther] = useState<Record<string, string>>({});
+  // Present one question at a time — mirrors how native Claude Code surfaces a
+  // multi-question AskUserQuestion (one selector per question) rather than a
+  // wall of them. Answers are still collected across all and submitted together.
+  const [idx, setIdx] = useState(0);
   const questions = item.questions ?? [];
 
-  const allAnswered = questions.every(q => {
+  const isAnswered = (q: { question: string; multiSelect?: boolean }): boolean => {
     const sel = selections[q.question];
     const free = other[q.question]?.trim();
     if (q.multiSelect) {
       return (Array.isArray(sel) && sel.length > 0) || !!free;
     }
     return (typeof sel === 'string' && sel.length > 0) || !!free;
-  });
+  };
+  const total = questions.length;
+  const cur = questions[Math.min(idx, total - 1)];
+  const curAnswered = cur ? isAnswered(cur) : false;
+  const isLast = idx >= total - 1;
 
   function pickSingle(qText: string, label: string) {
     setSelections(prev => ({ ...prev, [qText]: label }));
@@ -364,7 +449,7 @@ function QuestionCard({
         answers[q.question] = sel;
       }
     }
-    onApprove(item.approvalId, 'allow_once', answers);
+    onApprove(item.approvalId, 'allow_once', answers, { category: item.category });
   }
 
   return (
@@ -375,14 +460,20 @@ function QuestionCard({
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="approval-title">
-            <span>Question{questions.length > 1 ? 's' : ''} from agent</span>
-            <span className="approval-risk">question</span>
+            <span>{t(questions.length > 1 ? 'transcript.question.titlePlural' : 'transcript.question.title')}</span>
+            <span className="approval-risk">{t('transcript.question.badge')}</span>
           </div>
         </div>
         <span className="evt-meta" style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
       </div>
       <div className="question-body">
-        {questions.map((q, qi) => {
+        {total > 1 && (
+          <div className="question-progress">{`${idx + 1} / ${total}`}</div>
+        )}
+        {(() => {
+          const q = cur;
+          const qi = idx;
+          if (!q) return null;
           const sel = selections[q.question];
           return (
             <div key={qi} className="question-block">
@@ -416,10 +507,10 @@ function QuestionCard({
                 })}
                 <li className="question-option question-option--other">
                   <label>
-                    <span className="question-option-label">Other</span>
+                    <span className="question-option-label">{t('transcript.question.other')}</span>
                     <input
                       type="text"
-                      placeholder="Type a custom answer"
+                      placeholder={t('transcript.question.placeholder')}
                       value={other[q.question] ?? ''}
                       onChange={e => setOther(prev => ({ ...prev, [q.question]: e.target.value }))}
                     />
@@ -428,21 +519,39 @@ function QuestionCard({
               </ul>
             </div>
           );
-        })}
+        })()}
       </div>
       <div className="approval-actions">
-        <button
-          className="btn primary sm"
-          disabled={!allAnswered}
-          onClick={submit}
-        >
-          Submit
-        </button>
+        {idx > 0 && (
+          <button
+            className="btn ghost sm"
+            onClick={() => setIdx(i => Math.max(0, i - 1))}
+          >
+            {t('transcript.question.back')}
+          </button>
+        )}
+        {!isLast ? (
+          <button
+            className="btn primary sm"
+            disabled={!curAnswered}
+            onClick={() => setIdx(i => Math.min(total - 1, i + 1))}
+          >
+            {t('transcript.question.next')}
+          </button>
+        ) : (
+          <button
+            className="btn primary sm"
+            disabled={!curAnswered}
+            onClick={submit}
+          >
+            {t('common.submit')}
+          </button>
+        )}
         <button
           className="btn danger-ghost sm"
-          onClick={() => onApprove(item.approvalId, 'decline')}
+          onClick={() => onApprove(item.approvalId, 'decline', undefined, { category: item.category })}
         >
-          Cancel
+          {t('common.cancel')}
         </button>
       </div>
     </div>
@@ -450,6 +559,7 @@ function QuestionCard({
 }
 
 export function DiffCard({ item }: { item: DiffItem }) {
+  const t = useT();
   // Compact-only: click pushes the diff to the inspector drawer instead of
   // expanding inline. The diff itself can be hundreds of lines; inlining it
   // crowded the transcript heavily. Now the card is one-line and the
@@ -469,9 +579,9 @@ export function DiffCard({ item }: { item: DiffItem }) {
       }}
     >
       <div className="evt-head">
-        <span className="evt-verb">Edit</span>
+        <span className="evt-verb">{t('transcript.diff.edit')}</span>
         <span className="evt-subject">
-          {fileCount === 1 ? item.files[0]!.path : `Changed ${fileCount} files`}
+          {fileCount === 1 ? item.files[0]!.path : `${t('transcript.diff.changedFiles')} ${fileCount}`}
         </span>
         <span className="evt-meta">
           <span className="add">+{totalAdd}</span>
@@ -483,12 +593,13 @@ export function DiffCard({ item }: { item: DiffItem }) {
 }
 
 export function ToolEvent({ item }: { item: ToolItem }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   return (
     <div className={`evt agent ${open ? 'open' : ''}`}>
       <div className="evt-head" onClick={() => setOpen(o => !o)}>
         <Caret />
-        <span className="evt-verb">Tool</span>
+        <span className="evt-verb">{t('transcript.tool')}</span>
         <span className="evt-subject" title={item.name}>{item.name}</span>
         <span className="evt-meta" />{/* Tool default state is success — only render an evt-status when failed (TODO when we surface tool errors) */}
       </div>
@@ -502,6 +613,7 @@ export function ToolEvent({ item }: { item: ToolItem }) {
 }
 
 function ToolArgs({ raw }: { raw: string }) {
+  const t = useT();
   // Best-effort: parse the truncated JSON summary into key/value rows for
   // legibility. Falls back to raw mono text when parsing fails (truncation
   // mid-string can leave the JSON invalid).
@@ -510,7 +622,7 @@ function ToolArgs({ raw }: { raw: string }) {
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
     const entries = Object.entries(parsed as Record<string, unknown>);
     if (entries.length === 0) {
-      return <code className="tool-args-empty">no args</code>;
+      return <code className="tool-args-empty">{t('transcript.tool.noArgs')}</code>;
     }
     return (
       <dl className="tool-args">
@@ -537,6 +649,8 @@ function formatVal(v: unknown): string {
 }
 
 function CopyButton({ text, title = 'Copy message' }: { text: string; title?: string }) {
+  const t = useT();
+  const defaultTitle = title === 'Copy message' ? t('transcript.copyMessage') : title;
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<number | null>(null);
   useEffect(() => {
@@ -555,8 +669,8 @@ function CopyButton({ text, title = 'Copy message' }: { text: string; title?: st
     <button
       type="button"
       className={`msg-copy${copied ? ' copied' : ''}`}
-      title={copied ? 'Copied' : title}
-      aria-label={title}
+      title={copied ? t('common.copied') : defaultTitle}
+      aria-label={defaultTitle}
       onClick={onClick}
     >
       {copied ? (
@@ -578,13 +692,14 @@ function CopyButton({ text, title = 'Copy message' }: { text: string; title?: st
 // User messages flow `row-reverse` so the bubble + time align right.
 // hideAvatar is kept in the prop signature for caller compat but is a no-op.
 export function UserMessage({ item }: { item: MsgItem; hideAvatar?: boolean }) {
+  const t = useT();
   // Optimistic echo: `pending` until the server emits its `user_message`,
   // `failed` when an `error` envelope marks it rejected.
   const stateCls = item.pending ? ' pending' : item.failed ? ' failed' : '';
   const hasText = item.text.length > 0;
   const attachments = item.attachments ?? [];
   return (
-    <div className={`msg user${stateCls}`}>
+    <div className={`msg user${stateCls}`} data-msg-id={item.id}>
       <div className="msg-body">
         {attachments.length > 0 && (
           <div className="msg-attachments user-attachments">
@@ -604,7 +719,7 @@ export function UserMessage({ item }: { item: MsgItem; hideAvatar?: boolean }) {
         )}
         {hasText && <div className="msg-text user-text">{item.text}</div>}
         <div className="msg-foot user">
-          {item.failed && <span className="msg-state-failed">failed to send</span>}
+          {item.failed && <span className="msg-state-failed">{t('transcript.failedToSend')}</span>}
           {hasText && <CopyButton text={item.text} />}
           <span className="msg-time user">{formatTime(item.ts)}</span>
         </div>
@@ -621,7 +736,7 @@ export function AssistantMessage({ item, hideAvatar }: { item: MsgItem; hideAvat
     <div className={`msg${hideAvatar ? ' continuation' : ''}`}>
       <div className="msg-body">
         <div className="msg-text md">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
+          <MarkdownText>{item.text}</MarkdownText>
         </div>
         {!hideAvatar && (
           <div className="msg-foot">
@@ -641,16 +756,17 @@ export function AssistantMessage({ item, hideAvatar }: { item: MsgItem; hideAvat
  * differentiated only by the header label.
  */
 export function ReasoningCard({ item }: { item: ReasoningItem }) {
+  const t = useT();
   const lineCount = item.text ? item.text.split('\n').length : 0;
-  const label = item.variant === 'summary' ? 'Reasoning summary' : 'Reasoning';
+  const label = item.variant === 'summary' ? t('transcript.reasoning.summary') : t('transcript.reasoning.full');
   return (
     <details className="reasoning-card" data-variant={item.variant}>
       <summary className="reasoning-card-head">
         <span className="reasoning-card-label">{label}</span>
-        <span className="reasoning-card-meta">{lineCount} {lineCount === 1 ? 'line' : 'lines'}</span>
+        <span className="reasoning-card-meta">{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>
       </summary>
       <div className="reasoning-card-body md">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text}</ReactMarkdown>
+        <MarkdownText>{item.text}</MarkdownText>
       </div>
     </details>
   );
@@ -664,6 +780,7 @@ export function Avatar({ exec }: { exec: 'user' | 'claude' | 'codex' }) {
 }
 
 export function CommandCard({ item }: { item: CommandItem }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const statusClass = item.status === 'running' ? 'running' : item.status === 'success' ? 'success' : 'error';
   const hasOutput = !!(item.stdout || item.stderr);
@@ -671,7 +788,7 @@ export function CommandCard({ item }: { item: CommandItem }) {
     <div className={`evt command ${open && hasOutput ? 'open' : ''}`}>
       <div className="evt-head" onClick={() => hasOutput && setOpen(o => !o)}>
         {hasOutput && <Caret />}
-        <span className="evt-verb">Run</span>
+        <span className="evt-verb">{t('transcript.command.run')}</span>
         <span className="evt-subject cmd" title={item.command}>{item.command}</span>
         <span className="evt-meta">
           {item.cwd && <span style={{ color: 'var(--text-3)' }} title={item.cwd}>{item.cwd}</span>}
@@ -699,6 +816,7 @@ export function CommandCard({ item }: { item: CommandItem }) {
 }
 
 export function FileReadCard({ item }: { item: FileReadItem }) {
+  const t = useT();
   const lineRange = item.startLine !== undefined
     ? ` :${item.startLine}${item.endLine !== undefined ? `–${item.endLine}` : ''}`
     : '';
@@ -706,7 +824,7 @@ export function FileReadCard({ item }: { item: FileReadItem }) {
   return (
     <div className="evt inline">
       <div className="evt-head">
-        <span className="evt-verb">Read</span>
+        <span className="evt-verb">{t('transcript.file.read')}</span>
         <span className="evt-subject path" title={fullLabel}>
           <FileLink path={item.path} line={item.startLine}>{fullLabel}</FileLink>
         </span>
@@ -719,6 +837,7 @@ export function FileReadCard({ item }: { item: FileReadItem }) {
 }
 
 export function FileSearchCard({ item }: { item: FileSearchItem }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const hasMatches = item.matches && item.matches.length > 0;
   const count = item.matchCount ?? item.matches?.length;
@@ -726,12 +845,12 @@ export function FileSearchCard({ item }: { item: FileSearchItem }) {
     <div className={`evt search ${open && hasMatches ? 'open' : ''}`}>
       <div className="evt-head" onClick={() => hasMatches && setOpen(o => !o)}>
         {hasMatches && <Caret />}
-        <span className="evt-verb">{item.searchKind === 'glob' ? 'Glob' : 'Grep'}</span>
+        <span className="evt-verb">{item.searchKind === 'glob' ? t('transcript.file.glob') : t('transcript.file.grep')}</span>
         <span className="evt-subject" title={item.pattern}>
           <span className="search-pattern">{item.pattern}</span>
         </span>
         <span className="evt-meta">
-          {count !== undefined && <span>{count} match{count !== 1 ? 'es' : ''}</span>}
+          {count !== undefined && <span>{count} {t(count === 1 ? 'transcript.file.match' : 'transcript.file.matches')}</span>}
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
         </span>
       </div>
@@ -749,13 +868,14 @@ export function FileSearchCard({ item }: { item: FileSearchItem }) {
 }
 
 export function WebSearchRow({ item }: { item: WebSearchItem }) {
+  const t = useT();
   return (
     <div className="evt web inline">
       <div className="evt-head">
-        <span className="evt-verb">Search</span>
+        <span className="evt-verb">{t('transcript.web.search')}</span>
         <span className="evt-subject" title={item.query}>{item.query}</span>
         <span className="evt-meta">
-          {item.resultCount !== undefined && <span>{item.resultCount} results</span>}
+          {item.resultCount !== undefined && <span>{item.resultCount} {t('transcript.web.results')}</span>}
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
         </span>
       </div>
@@ -771,10 +891,11 @@ export function WebSearchRow({ item }: { item: WebSearchItem }) {
  * those controls exist, the buttons drop in below `.auto-notice-body`.
  */
 export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
+  const t = useT();
   if (item.variant === 'circuit-breaker') {
     const triggerLabel = item.trigger === 'total'
-      ? `${item.total} total denials`
-      : `${item.consecutive} consecutive denials`;
+      ? `${item.total} ${t('transcript.auto.totalDenials')}`
+      : `${item.consecutive} ${t('transcript.auto.consecutiveDenials')}`;
     return (
       <div className="approval declined auto-notice auto-notice--breaker">
         <div className="approval-top">
@@ -783,11 +904,11 @@ export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div className="approval-title">
-              <span>Auto-mode circuit breaker tripped</span>
-              <span className="approval-risk">stopped</span>
+              <span>{t('transcript.auto.breaker')}</span>
+              <span className="approval-risk">{t('transcript.auto.stopped')}</span>
             </div>
             <div className="approval-sub">
-              {triggerLabel} — Claude paused auto-mode for this session.
+              {triggerLabel} — {t('transcript.auto.paused')}
             </div>
           </div>
           <span className="evt-meta" style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
@@ -795,7 +916,7 @@ export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
         <div className="approval-resolved-note">
           <span className="dot" />
           <span>
-            Switch the session to <strong>ask</strong> mode and retry, or start a fresh turn.
+            {t('transcript.auto.recovery')}
           </span>
         </div>
       </div>
@@ -806,9 +927,9 @@ export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
   return (
     <div className="evt inline auto-notice auto-notice--classifier">
       <div className="evt-head">
-        <span className="evt-verb">Auto-block</span>
+        <span className="evt-verb">{t('transcript.auto.block')}</span>
         <span className="evt-subject">
-          <span style={{ color: 'var(--text-2)' }}>{item.action || 'action'}</span>
+          <span style={{ color: 'var(--text-2)' }}>{item.action || t('transcript.auto.action')}</span>
           {item.reason && (
             <span style={{ marginLeft: 8, color: 'var(--text-3)', fontSize: 11.5 }}>
               {item.reason}
@@ -817,7 +938,7 @@ export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
         </span>
         <span className="evt-meta">
           <span style={{ color: 'var(--text-3)' }}>
-            {item.consecutive}/3 · {item.total} total
+            {item.consecutive}/3 · {item.total} {t('transcript.auto.total')}
           </span>
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
         </span>
@@ -827,11 +948,12 @@ export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
 }
 
 export function AgentSpawnRow({ item }: { item: AgentSpawnItem }) {
+  const t = useT();
   const statusClass = item.status === 'running' ? 'running' : item.status === 'done' ? 'success' : 'error';
   return (
     <div className="evt agent">
       <div className="evt-head">
-        <span className="evt-verb">Agent</span>
+        <span className="evt-verb">{t('transcript.agent')}</span>
         <span className="evt-subject" title={item.description}>{item.description}</span>
         <span className="evt-meta">
           {item.status !== 'done' && (

@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { IPty } from 'node-pty';
-import type { PermissionMode } from '../core/types.js';
+import type { EffortLevel, PermissionMode } from '../core/types.js';
 // Pulled in lazily so `import.meta`/native-binding cost is only paid when
 // a session actually flips to TTY. cc-proxy boots cold for every Gian
 // session, even structured-only ones — no reason to load node-pty when
@@ -61,6 +61,8 @@ export interface SpawnPtyOptions {
   cwd: string;
   /** Optional `--model` value (alias or full id). */
   model?: string | null;
+  /** Optional Claude CLI `--effort` value. */
+  effort?: EffortLevel | null;
   /** Claude CLI `--permission-mode` value for interactive TTY. */
   permissionMode?: PermissionMode | null;
   /** True on the *first* spawn of a re-adopted session (initial
@@ -235,8 +237,20 @@ export class TtyClaudeRuntime extends EventEmitter<TtyRuntimeEvents> {
     const session = this.sessions.get(sessionId);
     if (!session || session.exited) return;
     const normalized = text.replace(/\r\n/g, '\n');
-    const payload = `\x1b[200~${normalized}\x1b[201~\r`;
-    session.pty.write(payload);
+    // Write the bracketed paste first, then the submit (Enter) as a SEPARATE
+    // write a tick later. Claude Code's TUI debounces the end of a bracketed
+    // paste; a `\r` sent in the same chunk as the `\x1b[201~` terminator is
+    // frequently swallowed by the paste handler, so the text lands in the
+    // input box but never submits ("message typed but not sent"). Splitting
+    // Enter onto a later tick lets the pasted text commit to the input buffer
+    // first. Delay is env-tunable for slower machines.
+    session.pty.write(`\x1b[200~${normalized}\x1b[201~`);
+    const delayMs = Number(process.env.GIAN_TTY_PASTE_SUBMIT_DELAY_MS ?? 80);
+    setTimeout(() => {
+      const s = this.sessions.get(sessionId);
+      if (!s || s.exited) return;
+      s.pty.write('\r');
+    }, Number.isFinite(delayMs) && delayMs >= 0 ? delayMs : 80);
   }
 
   resize(sessionId: string, cols: number, rows: number): void {
@@ -315,6 +329,9 @@ export class TtyClaudeRuntime extends EventEmitter<TtyRuntimeEvents> {
     }
     if (options.model) {
       args.push('--model', options.model);
+    }
+    if (options.effort) {
+      args.push('--effort', options.effort);
     }
     const mode = options.permissionMode ?? 'default';
     if (mode === 'bypassPermissions') {

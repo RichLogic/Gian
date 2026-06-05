@@ -3,14 +3,15 @@ import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 
 import type { SlashCommand, SlashCommandSource } from '@gian/shared';
-import { probeSlashCommands } from '../runtime/claude-mcp-runtime.js';
 
 // ---------------------------------------------------------------------------
 // Native commands
 //
-// Source of truth is the `slash_commands` array on Claude CLI's `init` event
-// (see `probeSlashCommands`). That list reflects what's actually invokable in
-// `-p` (non-interactive) mode and includes user-installed plugins/skills.
+// The authoritative native/plugin list is the `slash_commands` array on
+// Claude CLI's `init` event (see `probeSlashCommands`), but collecting it
+// requires `claude -p`. Default production listing avoids that billing path
+// and only scans local command files; tests and explicit callers can inject
+// a probe when they really want native discovery.
 //
 // The map below is descriptions-only — when probe returns a name, we look it
 // up here for human-readable text. Names not in this map still appear (with
@@ -164,18 +165,19 @@ export function scanCommandsDir(dir: string, source: SlashCommandSource): SlashC
 // ---------------------------------------------------------------------------
 
 /**
- * Cache of probed slash commands keyed by cwd ('' for no cwd). Probe is
- * expensive (a real `claude -p` spawn ~1-2s) so we only re-run on cache miss.
+ * Cache of slash commands keyed by cwd ('' for no cwd). Default discovery is
+ * billing-safe local filesystem scanning; explicit native probes are still
+ * cached because a real `claude -p` spawn is expensive.
  */
 const SLASH_CACHE = new Map<string, SlashCommand[]>();
 
 /** Probe function shape — injectable for tests so they don't spawn real
- *  `claude` processes. Production callers leave it default. */
+ *  `claude` processes. Production callers leave it null by default. */
 export type ProbeFn = (cwd?: string) => Promise<string[]>;
 
 /**
- * Returns the slash commands actually invokable in this Claude environment:
- *   - native + plugin/skill commands probed from `claude -p` init event
+ * Returns slash commands known without spending Agent SDK credit:
+ *   - optional native + plugin/skill commands from an explicit probe
  *   - user-level file commands from ~/.claude/commands/
  *   - project-level file commands from <cwd>/.claude/commands/ (if cwd given)
  *
@@ -184,13 +186,13 @@ export type ProbeFn = (cwd?: string) => Promise<string[]>;
  */
 export async function listAllSlashCommands(
   cwd?: string,
-  probe: ProbeFn = probeSlashCommands,
+  probe: ProbeFn | null = null,
 ): Promise<SlashCommand[]> {
   const cacheKey = cwd ?? '';
   const cached = SLASH_CACHE.get(cacheKey);
   if (cached) return cached;
 
-  const probeNames = await probe(cwd);
+  const probeNames = probe ? await probe(cwd) : [];
   const native = probeNames.map(nativeToSlashCommand);
   const all: SlashCommand[] = [
     ...native,

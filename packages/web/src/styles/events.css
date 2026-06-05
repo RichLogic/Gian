@@ -69,6 +69,16 @@
   text-decoration: underline;
   text-underline-offset: 2px;
 }
+/* Auto-detected file mentions inside transcript prose — subtly marked as
+   clickable (accent + dotted underline) so they stand out from plain text. */
+.file-link-auto {
+  color: var(--accent-text);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.file-link-auto:hover { text-decoration-style: solid; }
 .evt-meta {
   margin-left: auto;
   display: flex; align-items: center; gap: 8px;

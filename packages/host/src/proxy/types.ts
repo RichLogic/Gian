@@ -70,7 +70,8 @@ export interface CreateSessionParams {
  *
  *   - codex-proxy reads `sandbox` / `approvalPolicy` / `approvalsReviewer`
  *     / `collaborationMode` (codex `turn/start` overrides).
- *   - cc-proxy reads `permissionMode` (Claude CLI `--permission-mode`).
+ *   - cc-proxy reads `permissionMode` and `thinking`
+ *     (Claude CLI `--permission-mode` / `--effort`).
  *
  * Each proxy ignores fields it doesn't use. The translation from host's
  * `ApprovalMode` to these primitives lives in `SessionManager.startTurn`.
@@ -79,7 +80,7 @@ export interface StartTurnParams {
   sessionId: string;
   input: InputItem[];
   model?: string | null;
-  /** Reasoning effort. codex respects; cc-proxy ignores. See ThinkingEffort. */
+  /** Reasoning effort. Proxies translate this to their native effort flag. */
   thinking?: import('@gian/shared').ThinkingEffort | null;
 
   // codex-only

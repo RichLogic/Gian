@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { buildEditorArgs, defaultOpenerArgs } from '../src/web/open-with.js';
+import { appOpenerArgs, buildEditorArgs, defaultOpenerArgs, revealArgs, terminalArgs } from '../src/web/open-with.js';
 import type { ExternalEditor } from '@gian/shared';
 
 const ed = (args: string[]): ExternalEditor => ({
@@ -58,4 +58,19 @@ test('defaultOpenerArgs: unknown platform throws', () => {
     () => defaultOpenerArgs('sunos' as NodeJS.Platform, '/x'),
     /unsupported platform/,
   );
+});
+
+test('appOpenerArgs: builds `open -a "<App>" <path>` with the app name kept as one argv token', () => {
+  const out = appOpenerArgs('Visual Studio Code', '/abs/foo.md');
+  assert.equal(out.command, 'open');
+  // The app name stays a single argv element (no shell), so spaces are safe.
+  assert.deepEqual(out.argv, ['-a', 'Visual Studio Code', '/abs/foo.md']);
+});
+
+test('revealArgs: `open -R <path>` reveals the file in Finder', () => {
+  assert.deepEqual(revealArgs('/abs/foo.md'), { command: 'open', argv: ['-R', '/abs/foo.md'] });
+});
+
+test('terminalArgs: `open -a Terminal <dir>` opens Terminal at the folder', () => {
+  assert.deepEqual(terminalArgs('/abs/dir'), { command: 'open', argv: ['-a', 'Terminal', '/abs/dir'] });
 });

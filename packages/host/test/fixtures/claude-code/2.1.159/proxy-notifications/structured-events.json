@@ -1,0 +1,139 @@
+[
+  {
+    "method": "output.text",
+    "params": {
+      "sessionId": "proxy",
+      "data": {
+        "itemId": "msg_proxy_1",
+        "text": "hello from structured cc"
+      }
+    }
+  },
+  {
+    "method": "tool.use",
+    "params": {
+      "sessionId": "proxy",
+      "data": {
+        "callId": "tool_proxy_bash",
+        "toolName": "Bash",
+        "input": {
+          "command": "npm test",
+          "cwd": "/repo"
+        }
+      }
+    }
+  },
+  {
+    "method": "approval.requested",
+    "params": {
+      "sessionId": "proxy",
+      "data": {
+        "approvalId": "appr_question",
+        "toolName": "AskUserQuestion",
+        "inputPreview": "{\"questions\":[{\"question\":\"Pick branch\",\"header\":\"Branch\",\"multiSelect\":false,\"options\":[{\"label\":\"main\"},{\"label\":\"feature\"}]}]}"
+      }
+    }
+  },
+  {
+    "method": "approval.requested",
+    "params": {
+      "sessionId": "proxy",
+      "data": {
+        "approvalId": "appr_plan",
+        "toolName": "ExitPlanMode",
+        "category": "exit_plan_mode",
+        "inputPreview": "{\"plan\":\"1. Inspect\\n2. Edit\"}"
+      }
+    }
+  },
+  {
+    "method": "approval.resolved",
+    "params": {
+      "sessionId": "proxy",
+      "data": {
+        "approvalId": "appr_question",
+        "behavior": "allow"
+      }
+    }
+  },
+  {
+    "method": "auto.classifier_denied",
+    "params": {
+      "sessionId": "proxy",
+      "data": {
+        "callId": "auto_denied_1",
+        "action": "Bash",
+        "reason": "blocked by policy",
+        "consecutive": 1,
+        "total": 2
+      }
+    }
+  },
+  {
+    "method": "auto.circuit_breaker",
+    "params": {
+      "sessionId": "proxy",
+      "data": {
+        "callId": "auto_breaker_1",
+        "trigger": "consecutive",
+        "consecutive": 3,
+        "total": 3
+      }
+    }
+  },
+  {
+    "method": "turn.started",
+    "params": {
+      "sessionId": "proxy",
+      "turnId": "turn_proxy_1",
+      "data": {}
+    }
+  },
+  {
+    "method": "turn.completed",
+    "params": {
+      "sessionId": "proxy",
+      "turnId": "turn_proxy_1",
+      "data": {
+        "result": "done"
+      }
+    }
+  },
+  {
+    "method": "turn.failed",
+    "params": {
+      "sessionId": "proxy",
+      "data": {
+        "error": "process exit 1"
+      }
+    }
+  },
+  {
+    "method": "runtime.error",
+    "params": {
+      "sessionId": "proxy",
+      "data": {
+        "message": "cc-proxy crashed",
+        "code": "E_RUNTIME"
+      }
+    }
+  },
+  {
+    "method": "token_usage.updated",
+    "params": {
+      "sessionId": "proxy",
+      "data": {
+        "inputTokens": 1
+      }
+    }
+  },
+  {
+    "method": "debug",
+    "params": {
+      "sessionId": "proxy",
+      "data": {
+        "message": "ignored"
+      }
+    }
+  }
+]

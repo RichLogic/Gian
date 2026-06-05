@@ -1,0 +1,106 @@
+[
+  {
+    "boundary": "turn-start",
+    "type": "user_message",
+    "data": {
+      "text": "run the tool matrix"
+    }
+  },
+  {
+    "boundary": "continue",
+    "type": "assistant_text",
+    "data": {
+      "text": "I will inspect the workspace.",
+      "delta": false
+    }
+  },
+  {
+    "boundary": "continue",
+    "type": "command_execution",
+    "callId": "toolu_bash_1",
+    "data": {
+      "command": "pnpm test",
+      "cwd": "/repo",
+      "status": "running",
+      "itemId": "toolu_bash_1"
+    }
+  },
+  {
+    "boundary": "continue",
+    "type": "file_change",
+    "callId": "toolu_write_1",
+    "data": {
+      "files": [
+        {
+          "path": "/repo/new.txt",
+          "kind": "create"
+        }
+      ],
+      "diff": "diff --git a//repo/new.txt b//repo/new.txt\n--- a//repo/new.txt\n+++ b//repo/new.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n"
+    }
+  },
+  {
+    "boundary": "continue",
+    "type": "file_change",
+    "callId": "toolu_edit_1",
+    "data": {
+      "files": [
+        {
+          "path": "/repo/src/app.ts",
+          "kind": "update",
+          "added": 1,
+          "removed": 1
+        }
+      ],
+      "diff": "diff --git a//repo/src/app.ts b//repo/src/app.ts\n--- a//repo/src/app.ts\n+++ b//repo/src/app.ts\n@@ -1,1 +1,1 @@\n-old line\n+new line\n"
+    }
+  },
+  {
+    "boundary": "continue",
+    "type": "file_read",
+    "callId": "toolu_read_1",
+    "data": {
+      "path": "/repo/src/app.ts",
+      "startLine": 4,
+      "endLine": 6
+    }
+  },
+  {
+    "boundary": "continue",
+    "type": "file_search",
+    "callId": "toolu_glob_1",
+    "data": {
+      "pattern": "src/**/*.ts",
+      "kind": "glob"
+    }
+  },
+  {
+    "boundary": "continue",
+    "type": "file_search",
+    "callId": "toolu_grep_1",
+    "data": {
+      "pattern": "approval",
+      "kind": "grep"
+    }
+  },
+  {
+    "boundary": "continue",
+    "type": "web_search",
+    "callId": "toolu_web_1",
+    "data": {
+      "query": "Claude Code hooks"
+    }
+  },
+  {
+    "boundary": "continue",
+    "type": "agent_spawn",
+    "callId": "toolu_agent_1",
+    "data": {
+      "description": "inspect fixtures",
+      "status": "running",
+      "input": {
+        "description": "inspect fixtures"
+      }
+    }
+  }
+]

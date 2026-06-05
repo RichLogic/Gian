@@ -101,7 +101,7 @@ class CapturingBroadcaster {
 }
 
 interface ManagerSpy {
-  start: Array<{ sessionId: string; cwd: string; cols: number; rows: number; permissionMode?: string }>;
+  start: Array<{ sessionId: string; cwd: string; cols: number; rows: number; permissionMode?: string; effort?: string }>;
   stop: Array<{ sessionId: string }>;
 }
 
@@ -121,6 +121,7 @@ function makeFakeTtyManager(spy: ManagerSpy, db: ReturnType<typeof openDatabase>
         cols: opts.cols,
         rows: opts.rows,
         ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
+        ...(session.thinking_effort ? { effort: session.thinking_effort } : {}),
       });
       persist(session.id, 'tty');
       return { replay: [], alive: true };
@@ -180,6 +181,17 @@ test('CODEX-TTY-001: switchRuntime(target=tty) on a CLAUDE session calls claude 
     assert.equal(ctx.codexSpy.start.length, 0,
       'codex manager must NOT see a claude session switch');
     assert.equal(ctx.claudeSpy.start[0]!.sessionId, session.id);
+  } finally { teardown(ctx); }
+});
+
+test('CODEX-TTY-001: switchRuntime(target=tty) carries Claude effort into TTY start', async () => {
+  const ctx = setup();
+  try {
+    const session = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    ctx.sessions.setEffort(session.id, 'dynamic-effort');
+    await ctx.sessions.switchRuntime(session.id, 'tty');
+    assert.equal(ctx.claudeSpy.start.length, 1);
+    assert.equal(ctx.claudeSpy.start[0]!.effort, 'dynamic-effort');
   } finally { teardown(ctx); }
 });
 
@@ -390,6 +402,7 @@ test('CODEX-TTY-001: WS dispatch surfaces SWITCH_BLOCKED (not DISPATCH_FAILED) w
   };
   const sessions = {
     listSessions: () => [],
+    getSession: () => ({ id: 'sess-1', executor: 'codex', runtime_mode: 'structured' }),
     async switchRuntime() {
       throw Object.assign(new Error('finish the current turn before switching runtime'), { code: 'SWITCH_BLOCKED' });
     },

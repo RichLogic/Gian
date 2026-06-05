@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RunnerInfo } from '@gian/shared';
-import type { PendingApproval } from '../App.js';
+import { blockingCount, tierOf, type InboxItem } from '../inbox.js';
+import { useT } from '../i18n/index.js';
 import type { WsState } from '../ws.js';
 
 type Group = 'panel' | 'wb' | 'popout';
@@ -54,6 +55,23 @@ function Icon({ d, size = 17 }: { d: string; size?: number }) {
   );
 }
 
+function InboxRow({ item, name, kindLabel, onClick }: {
+  item: InboxItem;
+  name: string;
+  kindLabel: string;
+  onClick: () => void;
+}) {
+  return (
+    <button className={`row ${item.kind}${item.read ? '' : ' unread'}`} onClick={onClick}>
+      <span className={`cat ${item.kind}`}>{kindLabel}</span>
+      <span className="desc">
+        <span className="inbox-sess">{name}</span>
+        {item.subject && <span className="inbox-sub">{item.subject}</span>}
+      </span>
+    </button>
+  );
+}
+
 interface Props {
   // Panel group (inspector toggles) — Phase 4 wiring; for now buttons can be disabled.
   inspectorTab: 'files' | 'changes' | null;
@@ -68,8 +86,16 @@ interface Props {
 
   // Popout group — fully wired in Phase 1.
   onOpenSearch: () => void;
-  pendingApprovals: PendingApproval[];
+  /** Cross-session attention center: pending approvals, errors, and completed
+   *  turns of sessions you're not watching. */
+  inboxItems: InboxItem[];
+  /** Resolve a session id to a display label for inbox rows. */
+  sessionName: (sessionId: string) => string;
   onJumpToSession: (sessionId: string) => void;
+  /** Mark every inbox item read (fired when the popout opens). */
+  onMarkInboxRead: () => void;
+  /** Drop all FYI (completed) items. */
+  onClearInboxDone: () => void;
 
   // Runner chip (V1-style clickable status pill anchored bottom-right).
   wsState: WsState;
@@ -87,13 +113,17 @@ export function Dock({
   onToggleWbTab,
   wbDisabled,
   onOpenSearch,
-  pendingApprovals,
+  inboxItems,
+  sessionName,
   onJumpToSession,
+  onMarkInboxRead,
+  onClearInboxDone,
   wsState,
   wsAttempt,
   authed,
   runner,
 }: Props) {
+  const t = useT();
   const [inboxOpen, setInboxOpen] = useState(false);
   const [runnerOpen, setRunnerOpen] = useState(false);
   const anchorRef = useRef<HTMLSpanElement>(null);
@@ -133,23 +163,33 @@ export function Dock({
     };
   }, [runnerOpen]);
 
-  const count = pendingApprovals.length;
+  // Badge nags on actionable items only (approvals + errors); completed-turn
+  // FYIs accumulate in the list but don't drive the badge.
+  const badge = blockingCount(inboxItems);
+  const total = inboxItems.length;
+  const blocking = inboxItems.filter(i => tierOf(i.kind) === 'blocking');
+  const fyi = inboxItems.filter(i => tierOf(i.kind) === 'fyi');
+
+  function openInbox(open: boolean) {
+    setInboxOpen(open);
+    if (open) onMarkInboxRead();
+  }
 
   const runnerState: 'ok' | 'reconnecting' | 'offline' =
     wsState === 'open' && authed ? 'ok'
     : wsState === 'connecting' ? 'reconnecting'
     : 'offline';
   const runnerTitle =
-    runnerState === 'ok' ? `Host connected${runner ? ` · ${runner.latency}ms` : ''}`
-    : runnerState === 'reconnecting' ? `Reconnecting (attempt ${wsAttempt})…`
-    : 'Disconnected — reconnecting…';
+    runnerState === 'ok' ? `${t('dock.runner.connected')}${runner ? ` · ${runner.latency}ms` : ''}`
+    : runnerState === 'reconnecting' ? `${t('dock.runner.reconnecting')} (${wsAttempt})…`
+    : t('dock.runner.reconnecting.title');
 
   return (
     <aside className="dock">
-      <div className="dock-group" data-dock-group-label="Panel">
+      <div className="dock-group" data-dock-group-label={t('dock.group.panel')}>
         <DockBtn
           group="panel"
-          label="Files"
+          label={t('dock.files')}
           active={inspectorTab === 'files'}
           disabled={inspectorDisabled}
           onClick={() => onToggleInspector('files')}
@@ -158,7 +198,7 @@ export function Dock({
         </DockBtn>
         <DockBtn
           group="panel"
-          label="Changes"
+          label={t('dock.changes')}
           active={inspectorTab === 'changes'}
           disabled={inspectorDisabled}
           onClick={() => onToggleInspector('changes')}
@@ -169,10 +209,10 @@ export function Dock({
 
       <div className="dock-divider" aria-hidden />
 
-      <div className="dock-group" data-dock-group-label="Workbench">
+      <div className="dock-group" data-dock-group-label={t('dock.group.workbench')}>
         <DockBtn
           group="wb"
-          label="Terminal"
+          label={t('dock.terminal')}
           active={hasTerminal}
           disabled={wbDisabled}
           onClick={() => onToggleWbTab('term')}
@@ -181,7 +221,7 @@ export function Dock({
         </DockBtn>
         <DockBtn
           group="wb"
-          label="Settings"
+          label={t('dock.settings')}
           active={hasSettings}
           disabled={wbDisabled}
           onClick={() => onToggleWbTab('settings')}
@@ -193,8 +233,8 @@ export function Dock({
       <span className="dock-spacer" />
       <div className="dock-divider" aria-hidden />
 
-      <div className="dock-group" data-dock-group-label="Popout">
-        <DockBtn group="popout" label="Search" onClick={onOpenSearch}>
+      <div className="dock-group" data-dock-group-label={t('dock.group.popout')}>
+        <DockBtn group="popout" label={t('dock.search')} onClick={onOpenSearch}>
           <Icon d={ICONS.search} />
         </DockBtn>
         <span
@@ -204,35 +244,54 @@ export function Dock({
         >
           <DockBtn
             group="popout"
-            label="Inbox"
+            label={t('dock.inbox')}
             active={inboxOpen}
-            badge={count}
-            disabled={count === 0}
-            onClick={() => count > 0 && setInboxOpen(o => !o)}
+            badge={badge}
+            disabled={total === 0}
+            onClick={() => total > 0 && openInbox(!inboxOpen)}
           >
             <Icon d={ICONS.inbox} />
           </DockBtn>
-          {inboxOpen && count > 0 && (
+          {inboxOpen && total > 0 && (
             <div className="inbox-pop dock-side">
               <div className="head">
-                <span>Approvals waiting</span>
-                <button className="clear-all" onClick={() => setInboxOpen(false)}>Close</button>
+                <span>{t('dock.inbox')}</span>
+                <span className="head-actions">
+                  {fyi.length > 0 && (
+                    <button className="clear-all" onClick={onClearInboxDone}>{t('dock.inbox.clearDone')}</button>
+                  )}
+                  <button className="clear-all" onClick={() => setInboxOpen(false)}>{t('common.close')}</button>
+                </span>
               </div>
-              {pendingApprovals.map(a => (
-                <button
-                  key={a.id}
-                  className="row"
-                  onClick={() => { setInboxOpen(false); onJumpToSession(a.session_id); }}
-                >
-                  <span className="cat">{a.category}</span>
-                  <span className="desc">{a.description}</span>
-                </button>
-              ))}
+              {blocking.length > 0 && (
+                <>
+                  <div className="inbox-section">{t('dock.inbox.needsYou')}</div>
+                  {blocking.map(item => (
+                    <InboxRow key={item.id} item={item} name={sessionName(item.sessionId)}
+                      kindLabel={t(`dock.inbox.kind.${item.kind}`)}
+                      onClick={() => { setInboxOpen(false); onJumpToSession(item.sessionId); }} />
+                  ))}
+                </>
+              )}
+              {fyi.length > 0 && (
+                <>
+                  <div className="inbox-section">{t('dock.inbox.recent')}</div>
+                  {fyi.map(item => (
+                    <InboxRow key={item.id} item={item} name={sessionName(item.sessionId)}
+                      kindLabel={t(`dock.inbox.kind.${item.kind}`)}
+                      onClick={() => { setInboxOpen(false); onJumpToSession(item.sessionId); }} />
+                  ))}
+                </>
+              )}
             </div>
           )}
         </span>
       </div>
 
+      {/* Connection chip: hidden while healthy (a static green dot is noise);
+          only surfaces when reconnecting/offline so it actually means something. */}
+      {runnerState !== 'ok' && (
+        <>
       <div className="dock-divider" aria-hidden />
 
       <span ref={runnerRef} className="runner-anchor">
@@ -255,27 +314,27 @@ export function Dock({
               <div className="runner-pop-host">
                 <div className="runner-pop-name">{runner?.host ?? 'host'}</div>
                 <div className="runner-pop-meta">
-                  {runnerState === 'ok'
-                    ? `connected${runner ? ` · ${runner.latency}ms · started ${runner.started_ago} ago` : ''}`
-                    : runnerState === 'reconnecting'
-                      ? `reconnecting (attempt ${wsAttempt})…`
-                      : 'disconnected'}
+                  {runnerState === 'reconnecting'
+                    ? `${t('dock.runner.reconnecting')} (${wsAttempt})…`
+                    : t('dock.runner.disconnected')}
                 </div>
               </div>
             </div>
             <div className="runner-pop-divider" />
             {runner && (
               <dl className="runner-pop-list">
-                <dt>Agents</dt><dd>{runner.agents} running</dd>
-                <dt>Disk</dt><dd>{runner.disk}</dd>
+                <dt>{t('dock.runner.agents')}</dt><dd>{runner.agents} {t('dock.runner.running')}</dd>
+                <dt>{t('dock.runner.disk')}</dt><dd>{runner.disk}</dd>
                 <dt>Codex CLI</dt><dd>{runner.codex_version}</dd>
                 <dt>Claude Code</dt><dd>{runner.cc_version}</dd>
-                <dt>Workspace root</dt><dd>{runner.ws_root}</dd>
+                <dt>{t('dock.runner.workspaceRoot')}</dt><dd>{runner.ws_root}</dd>
               </dl>
             )}
           </div>
         )}
       </span>
+        </>
+      )}
     </aside>
   );
 }

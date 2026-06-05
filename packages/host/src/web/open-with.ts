@@ -24,6 +24,22 @@ export function buildEditorArgs(editor: ExternalEditor, absPath: string): OpenCo
   return { command: editor.command, argv };
 }
 
+/** Argv to open a file with a named macOS application via LaunchServices
+ *  (`open -a "<App>" <path>`). macOS-only; callers gate on platform. */
+export function appOpenerArgs(appName: string, absPath: string): OpenCommand {
+  return { command: 'open', argv: ['-a', appName, absPath] };
+}
+
+/** Argv to reveal a file in Finder (`open -R <path>`). macOS-only. */
+export function revealArgs(absPath: string): OpenCommand {
+  return { command: 'open', argv: ['-R', absPath] };
+}
+
+/** Argv to open Terminal at a directory (`open -a Terminal <dir>`). macOS-only. */
+export function terminalArgs(dirPath: string): OpenCommand {
+  return { command: 'open', argv: ['-a', 'Terminal', dirPath] };
+}
+
 /** Argv for the platform default opener. */
 export function defaultOpenerArgs(platform: NodeJS.Platform, absPath: string): OpenCommand {
   if (platform === 'darwin') return { command: 'open', argv: [absPath] };

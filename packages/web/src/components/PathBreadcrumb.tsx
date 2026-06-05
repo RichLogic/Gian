@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useT } from '../i18n/index.js';
 
 export type PathSegmentKind = 'workspace' | 'branch' | 'session';
 
@@ -80,6 +81,7 @@ const ICON = {
 };
 
 export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessionMenu }: Props) {
+  const t = useT();
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -164,34 +166,34 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                 {isCopied && (
                   <span className="path-copied" role="status">
                     <CheckIcon size={10} />
-                    Copied
+                    {t('common.copied')}
                   </span>
                 )}
                 {showMenu && sessionMenu && (
                   <div className="session-menu" ref={menuRef} onClick={e => e.stopPropagation()}>
                     <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onRename(); }}>
-                      <MenuIcon d={ICON.edit} /> Rename
+                      <MenuIcon d={ICON.edit} /> {t('path.menu.rename')}
                       <span className="sub">F2</span>
                     </button>
                     <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onCopyName(); }}>
-                      <MenuIcon d={ICON.copy} /> Copy name
+                      <MenuIcon d={ICON.copy} /> {t('path.menu.copyName')}
                     </button>
                     <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onForceRecover(); }}>
-                      <MenuIcon d={ICON.refresh} /> Force recover
+                      <MenuIcon d={ICON.refresh} /> {t('path.menu.forceRecover')}
                     </button>
                     <div className="rule" />
                     <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onFork('claude'); }}>
-                      <MenuIcon d={ICON.fork} /> Fork as Claude
+                      <MenuIcon d={ICON.fork} /> {t('path.menu.forkClaude')}
                     </button>
                     <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onFork('codex'); }}>
-                      <MenuIcon d={ICON.fork} /> Fork as Codex
+                      <MenuIcon d={ICON.fork} /> {t('path.menu.forkCodex')}
                     </button>
                     <div className="rule" />
                     <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onArchive(); }}>
-                      <MenuIcon d={ICON.folder} /> Archive
+                      <MenuIcon d={ICON.folder} /> {t('common.archive')}
                     </button>
                     <button className="item danger" onClick={() => { setMenuOpen(false); sessionMenu.onDelete(); }}>
-                      <MenuIcon d={ICON.trash} /> Delete session…
+                      <MenuIcon d={ICON.trash} /> {t('path.menu.deleteSession')}
                     </button>
                   </div>
                 )}

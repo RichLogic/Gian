@@ -67,9 +67,9 @@ export interface CapabilitiesPayload {
   slashCommands: import('@gian/shared').SlashCommand[];
 }
 
-/** Claude CLI's `--effort` accepted values (5 levels). Order from cheapest
- *  to most expensive: low → medium → high → xhigh → max. */
-export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+/** Claude CLI's `--effort` values as reported by `claude --help`. Keep this
+ *  open-ended so new Claude Code effort levels do not require a Gian build. */
+export type EffortLevel = string;
 
 export interface ModelCapabilities {
   id: string;
@@ -78,7 +78,8 @@ export interface ModelCapabilities {
   description: string;
   hidden: boolean;
   isDefault: boolean;
-  defaultEffort: EffortLevel;
+  /** Null means Claude Code did not report a default; omit `--effort`. */
+  defaultEffort: EffortLevel | null;
   supportedEfforts: EffortLevel[];
 }
 

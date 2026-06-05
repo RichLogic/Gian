@@ -35,6 +35,27 @@ function makeApproval(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
   };
 }
 
+function makeQuestion(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
+  return makeApproval({
+    approvalId: 'appr-question',
+    title: 'Question from agent',
+    reason: '',
+    cmd: '',
+    risk: 'low',
+    category: 'question',
+    scopeOptions: ['once'],
+    questions: [{
+      question: 'Pick dinner',
+      header: 'DINNER',
+      options: [
+        { label: 'Rice', description: 'simple' },
+        { label: 'Noodles' },
+      ],
+    }],
+    ...overrides,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // APR-001 — surface text: title / risk / reason / subject
 // ---------------------------------------------------------------------------
@@ -131,6 +152,56 @@ describe('APR-001: click-path decisions', () => {
     render(<ApprovalCard item={makeApproval()} onApprove={onApprove} />);
     await user.click(screen.getByRole('button', { name: /Decline/i }));
     expect(onApprove).toHaveBeenCalledWith('appr-1', 'decline');
+  });
+
+  it('APR-001: Question submit includes answers and category context', async () => {
+    const user = userEvent.setup();
+    const onApprove = vi.fn();
+    render(<ApprovalCard item={makeQuestion()} onApprove={onApprove} />);
+
+    await user.click(screen.getByLabelText(/Rice/i));
+    await user.click(screen.getByRole('button', { name: /Submit/i }));
+
+    expect(onApprove).toHaveBeenCalledWith(
+      'appr-question',
+      'allow_once',
+      { 'Pick dinner': 'Rice' },
+      { category: 'question' },
+    );
+  });
+
+  it('APR-001: multi-question card surfaces one at a time and submits all answers', async () => {
+    const user = userEvent.setup();
+    const onApprove = vi.fn();
+    const item = makeQuestion({
+      questions: [
+        { question: 'Pick dinner', header: 'DINNER', options: [{ label: 'Rice' }, { label: 'Noodles' }] },
+        { question: 'Pick drink', header: 'DRINK', options: [{ label: 'Tea' }, { label: 'Water' }] },
+      ],
+    });
+    render(<ApprovalCard item={item} onApprove={onApprove} />);
+
+    // Only the first question is in the DOM; progress shows 1 / 2.
+    expect(screen.getByText('Pick dinner')).toBeInTheDocument();
+    expect(screen.queryByText('Pick drink')).not.toBeInTheDocument();
+    expect(screen.getByText('1 / 2')).toBeInTheDocument();
+
+    // Answer Q1 → Next reveals Q2 (and hides Q1).
+    await user.click(screen.getByLabelText(/Rice/i));
+    await user.click(screen.getByRole('button', { name: /Next/i }));
+    expect(screen.getByText('Pick drink')).toBeInTheDocument();
+    expect(screen.queryByText('Pick dinner')).not.toBeInTheDocument();
+    expect(screen.getByText('2 / 2')).toBeInTheDocument();
+
+    // Answer Q2 → Submit dispatches BOTH answers in one call.
+    await user.click(screen.getByLabelText(/Tea/i));
+    await user.click(screen.getByRole('button', { name: /Submit/i }));
+    expect(onApprove).toHaveBeenCalledWith(
+      'appr-question',
+      'allow_once',
+      { 'Pick dinner': 'Rice', 'Pick drink': 'Tea' },
+      { category: 'question' },
+    );
   });
 });
 
@@ -300,6 +371,32 @@ describe('APR-001: resolved approval states', () => {
     />);
     expect(screen.queryByRole('button', { name: /Allow once/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /^Decline$/i })).toBeNull();
+  });
+
+  it('APR-001: resolved QUESTION renders an "answered" card, not the permission note', () => {
+    // Regression: a resolved AskUserQuestion used to fall through to the
+    // generic resolved card, showing "command" (empty-reason fallback) and the
+    // "Allowed once · by web" permission note — both wrong for a question.
+    render(<ApprovalCard
+      item={makeQuestion({ status: 'approved-once', answeredWith: 'Rice' })}
+      onApprove={vi.fn()}
+    />);
+    expect(screen.getByText(/answered/i)).toBeInTheDocument();
+    expect(screen.getByText('Rice')).toBeInTheDocument();
+    // No permission-style leftovers.
+    expect(screen.queryByText(/Allowed once/i)).toBeNull();
+    expect(screen.queryByText(/by web/i)).toBeNull();
+    expect(screen.queryByText(/^command$/i)).toBeNull();
+  });
+
+  it('APR-001: a declined QUESTION renders "cancelled" and omits the answer line', () => {
+    render(<ApprovalCard
+      item={makeQuestion({ status: 'declined', answeredWith: 'Rice' })}
+      onApprove={vi.fn()}
+    />);
+    expect(screen.getByText(/cancelled/i)).toBeInTheDocument();
+    // Declined → we did not answer, so the picked-answer line must not show.
+    expect(screen.queryByText('Rice')).toBeNull();
   });
 });
 

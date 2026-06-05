@@ -1,0 +1,72 @@
+[
+  {
+    "event": "SessionStart",
+    "body": {
+      "session_id": "cc-events-native",
+      "transcript_path": "/tmp/cc-events.jsonl",
+      "cwd": "/tmp/cc-events",
+      "hook_event_name": "SessionStart"
+    }
+  },
+  {
+    "event": "UserPromptSubmit",
+    "body": {
+      "session_id": "cc-events-native",
+      "transcript_path": "/tmp/cc-events.jsonl",
+      "cwd": "/tmp/cc-events",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "run the hook matrix"
+    }
+  },
+  {
+    "event": "Notification",
+    "body": {
+      "session_id": "cc-events-native",
+      "transcript_path": "/tmp/cc-events.jsonl",
+      "cwd": "/tmp/cc-events",
+      "hook_event_name": "Notification",
+      "message": "Claude needs input",
+      "notification_type": "ask_user"
+    }
+  },
+  {
+    "event": "FileChanged",
+    "body": {
+      "session_id": "cc-events-native",
+      "transcript_path": "/tmp/cc-events.jsonl",
+      "cwd": "/tmp/cc-events",
+      "hook_event_name": "FileChanged",
+      "file_path": "/tmp/cc-events/src/app.ts"
+    }
+  },
+  {
+    "event": "Stop",
+    "body": {
+      "session_id": "cc-events-native",
+      "transcript_path": "/tmp/cc-events.jsonl",
+      "cwd": "/tmp/cc-events",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "done"
+    }
+  },
+  {
+    "event": "StopFailure",
+    "body": {
+      "session_id": "cc-events-native",
+      "transcript_path": "/tmp/cc-events.jsonl",
+      "cwd": "/tmp/cc-events",
+      "hook_event_name": "StopFailure",
+      "error": "boom"
+    }
+  },
+  {
+    "event": "SessionEnd",
+    "body": {
+      "session_id": "cc-events-native",
+      "transcript_path": "/tmp/cc-events.jsonl",
+      "cwd": "/tmp/cc-events",
+      "hook_event_name": "SessionEnd",
+      "reason": "exit"
+    }
+  }
+]

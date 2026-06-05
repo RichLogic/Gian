@@ -224,9 +224,8 @@ export class SessionManager {
 
     // Resolve session defaults from system config when the caller didn't pin
     // them. The Settings panel writes `default_{claude,codex}_{model,effort}`
-    // but until now nothing read them, so newly-created sessions always came
-    // up on the proxy's hardcoded default. Empty strings in config mean "let
-    // the proxy pick" → leave null so we don't override anything.
+    // but until now nothing read them. Empty strings in config mean "let the
+    // proxy / CLI pick" → leave null so we don't override anything.
     const cfg = loadConfig(this.db);
     const defaultModel = input.executor === 'claude'
       ? cfg.default_claude_model.trim()
@@ -816,11 +815,13 @@ export class SessionManager {
   }
 
   setModel(sessionId: string, model: string): void {
+    const trimmed = model.trim();
+    const stored = trimmed.length > 0 ? trimmed : null;
     const now = new Date().toISOString();
     this.db
       .prepare(`UPDATE sessions SET model = ?, updated_at = ? WHERE id = ?`)
-      .run(model, now, sessionId);
-    this.broadcastSessionUpdated(sessionId, { model, updated_at: now });
+      .run(stored, now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { model: stored, updated_at: now });
   }
 
   /** Returns cached capabilities or null if no session has booted that
@@ -834,13 +835,13 @@ export class SessionManager {
   async warmCapabilities(executor: 'codex' | 'claude'): Promise<import('@gian/shared').ProxyCapabilities> {
     const cached = this.capsByExecutor.get(executor);
     // Only return the cache if it actually has models. An empty list usually
-    // means the first probe failed (e.g. `claude` binary missing) — caching
+    // means capability discovery failed (e.g. CLI binary missing) — caching
     // it forever locks the UI into "no models" until process restart. Retry
     // on each call instead so a fix-up (PATH change, binary install) heals
     // itself without bouncing the host.
     //
     // Also drop the cached proxy when models came back empty so the next
-    // attempt actually re-runs the probe inside a fresh runtime instance.
+    // attempt actually re-runs discovery inside a fresh runtime instance.
     if (cached && cached.models.length > 0) return cached;
     if (cached) {
       this.capsByExecutor.delete(executor);

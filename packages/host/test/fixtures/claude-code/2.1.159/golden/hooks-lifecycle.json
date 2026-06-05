@@ -1,0 +1,18 @@
+{
+  "eventNames": [
+    "tty.hook.sessionstart",
+    "tty.hook.userpromptsubmit",
+    "tty.hook.notification",
+    "tty.hook.filechanged",
+    "tty.hook.stop",
+    "tty.hook.stopfailure",
+    "tty.hook.sessionend"
+  ],
+  "statusUpdates": [
+    "running",
+    "done",
+    "error",
+    "done"
+  ],
+  "finalStatus": "done"
+}

@@ -568,6 +568,62 @@
   background: var(--surface-2);
   color: var(--text-1);
 }
+/* "Add editor" button + "Add application" picker sit on one row. */
+.ee-add-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ee-add-app {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ee-add-app select {
+  height: 28px;
+  border: 1px solid var(--border-1);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-1);
+  padding: 0 6px;
+  max-width: 220px;
+}
+/* Configured-app list: one row per opener, name + remove. */
+.ee-app-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px;
+  padding: 6px 4px 6px 10px;
+  border-bottom: 1px solid var(--hairline);
+}
+.ee-app-name { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-1); }
+
+/* Default apps: one row per file category, an icon + an app/target picker. */
+.open-cat-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px;
+  padding: 5px 4px 5px 10px;
+}
+.open-cat-label { font-size: 13px; color: var(--text-1); }
+.open-cat-pick { display: inline-flex; align-items: center; gap: 8px; }
+.open-cat-pick select {
+  height: 28px;
+  border: 1px solid var(--border-1);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-1);
+  padding: 0 6px;
+  max-width: 220px;
+}
+.app-icon-newtab {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+  font-size: 11px; line-height: 1;
+  color: var(--text-2);
+  background: var(--surface-3, var(--surface-2));
+}
+.ee-app-row + .ee-add-app,
+.settings-empty + .ee-add-app { margin-top: 10px; }
 .settings-section-help {
   font-size: 11px;
   color: var(--text-3);

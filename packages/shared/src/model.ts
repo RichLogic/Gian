@@ -82,12 +82,9 @@ export interface Workspace {
 
 export type WorktreeOutcome = 'merged' | 'discarded';
 
-/** Union of every effort/thinking level both proxies expose. cc uses
- *  low/medium/high/max; codex uses minimal/low/medium/high/xhigh. We
- *  normalize them into one type and let each proxy ignore the levels it
- *  doesn't support — supportedEfforts on the model determines what's
- *  selectable in the UI. */
-export type ThinkingEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'max' | 'xhigh';
+/** Effort/thinking level selected by the user. Kept open-ended because
+ *  Claude Code reports its supported `--effort` values at runtime. */
+export type ThinkingEffort = string;
 
 export interface Session {
   id: string;
@@ -97,8 +94,8 @@ export interface Session {
   executor: Executor;
   model: string | null;
   approval_mode: ApprovalMode;
-  /** Reasoning effort. Null = use model's default from capabilities.
-   *  Forwarded to codex turn.start; cc ignores it. */
+  /** Reasoning effort. Null = omit the executor-specific effort flag and let
+   *  the underlying CLI use its own default. */
   thinking_effort: ThinkingEffort | null;
   turns: number;
   active_channel: ActiveChannel | null;
@@ -219,6 +216,16 @@ export interface ExternalEditor {
   args: string[];
 }
 
+/** Broad file categories the "Open" action routes by. Each maps to a target
+ *  the user can pick in Settings (an installed app, a new browser tab, or
+ *  reveal in Finder). */
+export type OpenFileCategory = 'code' | 'web' | 'images' | 'pdf' | 'other';
+
+/** Per-category Open target. Value is an app name (e.g. "Visual Studio Code"),
+ *  the sentinel `@newtab` (open in a browser tab via /raw), `@finder` (reveal),
+ *  or '' / absent to use the built-in default for that category. */
+export type OpenAppPrefs = Partial<Record<OpenFileCategory, string>>;
+
 export type Accent =
   | 'rose' | 'ember' | 'citron' | 'moss'
   | 'teal' | 'azure' | 'ink' | 'plum';
@@ -257,4 +264,8 @@ export interface SystemConfig {
   auth_username: string;
   /** Programs surfaced in the Files view's "Open with…" menu. */
   external_editors: ExternalEditor[];
+  /** Per-category default app for the "Open" button (see OpenAppPrefs).
+   *  Optional so older configs / test fixtures stay valid; loadConfig always
+   *  returns at least `{}`. */
+  open_apps?: OpenAppPrefs;
 }

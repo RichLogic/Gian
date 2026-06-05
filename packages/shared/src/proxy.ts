@@ -8,7 +8,7 @@ export type ProxySessionStatus =
   | 'closed'
   | 'error';
 
-export type CcEffortLevel = 'low' | 'medium' | 'high' | 'max';
+export type CcEffortLevel = string;
 
 export type CodexThinkingLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
@@ -19,7 +19,7 @@ export interface CcModelCapabilities {
   description: string;
   hidden: boolean;
   isDefault: boolean;
-  defaultEffort: CcEffortLevel;
+  defaultEffort: CcEffortLevel | null;
   supportedEfforts: CcEffortLevel[];
 }
 

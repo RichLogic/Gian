@@ -15,6 +15,59 @@ import type {
   WebSearchItem,
 } from '../types.js';
 
+const ATTACHED_IMAGE_RE = /\[Attached image:\s*([^\]]+?)\s*\]/g;
+const IMAGE_EXT_MIME: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', heic: 'image/heic',
+};
+
+/**
+ * Beta/TTY image sends arrive as a JSONL echo with NO structured attachments —
+ * the image is referenced inline as `[Attached image: <abs path>]` (the framing
+ * `planBetaComposerSend` injects so the PTY's `claude` reads it). Recover any
+ * host-served per-session attachment (`…/attachments/<sid>/<file>`) into a real
+ * `MessageAttachment` so the bubble shows a thumbnail like Chat, and strip the
+ * framing from the displayed text. Non-attachment paths / non-images are left
+ * untouched (the normal linkify path still makes them clickable).
+ */
+function recoverInlineImageAttachments(text: string): {
+  text: string; attachments: import('@gian/shared').MessageAttachment[];
+} {
+  const attachments: import('@gian/shared').MessageAttachment[] = [];
+  const stripped = text.replace(ATTACHED_IMAGE_RE, (whole, rawPath: string) => {
+    const m = /\/attachments\/([^/]+)\/([^/?#]+)$/.exec(String(rawPath).trim());
+    const sid = m?.[1];
+    const filename = m?.[2];
+    if (!sid || !filename) return whole;
+    const mime = IMAGE_EXT_MIME[filename.toLowerCase().split('.').pop() ?? ''];
+    if (!mime) return whole;
+    attachments.push({ name: filename, mime, url: `/api/sessions/${sid}/attachments/${filename}` });
+    return '';
+  });
+  return { text: stripped.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(), attachments };
+}
+
+/**
+ * A `question` approval still `pending` once the conversation has moved on (a
+ * new user turn arrived) was answered/cancelled out-of-band — its resolution
+ * just wasn't recorded (e.g. a cancelled TTY question whose JSONL has no
+ * tool_result, leaving an orphaned `approval_requested`). Dismiss it as
+ * `declined` so it stops rendering as an actionable pending card on reload.
+ * Only the genuinely-live question at the tail (no later user turn) stays
+ * pending. Returns the same array reference when nothing changed.
+ */
+function dismissStalePendingQuestions(items: TranscriptItem[]): TranscriptItem[] {
+  let changed = false;
+  const next = items.map(it => {
+    if (it.kind === 'approval' && it.category === 'question' && it.status === 'pending') {
+      changed = true;
+      return { ...it, status: 'declined' as const };
+    }
+    return it;
+  });
+  return changed ? next : items;
+}
+
 /**
  * Folds one envelope into the transcript. Unified type names are the primary
  * path; legacy raw names (still emitted by un-normalized host paths) fall
@@ -196,7 +249,17 @@ export function applyEnvelope(
   // ── approval_requested (unified + legacy) ──
   if (ev === 'approval_requested' || ev === 'approval.requested') {
     const item = parseApprovalRequested(env);
-    return item ? [...items, item] : items;
+    if (!item) return items;
+    // A single AskUserQuestion can surface twice in TTY mode: the live
+    // PreToolUse hook broadcasts it while the tool is pending, then the JSONL
+    // watcher re-emits the same approvalId once the tool_use lands in the
+    // transcript. Dedupe by approvalId so it renders one card — and keep the
+    // existing item (and its status) so a late duplicate request can't
+    // resurrect an already-resolved card.
+    if (items.some(i => i.kind === 'approval' && i.approvalId === item.approvalId)) {
+      return items;
+    }
+    return [...items, item];
   }
 
   // ── approval_resolved (unified + legacy) ──
@@ -207,8 +270,23 @@ export function applyEnvelope(
     const idx = items.findIndex(i => i.kind === 'approval' && i.approvalId === approvalId);
     if (idx < 0) return items;
     const existing = items[idx] as ApprovalItem;
+    // A late auto-decline (TtyManager clears stranded question cards on
+    // SessionEnd / tty.exited / stop) must NOT clobber a card the user already
+    // answered. Once an approval is non-pending, ignore any `auto:true` resolve.
+    if (data.auto === true && existing.status !== 'pending') {
+      return items;
+    }
     const next = items.slice();
-    next[idx] = { ...existing, status: mapApprovalDecision(decision) };
+    // Capture the picked answer(s) for a question resolve so the resolved card
+    // can show "answered with …". Only the synthetic local resolve (TTY paste)
+    // carries answers; the later JSONL watcher resolve does not, so preserve
+    // any value we already have rather than blanking it.
+    const answeredWith = formatAnsweredWith(data.answers) ?? existing.answeredWith;
+    next[idx] = {
+      ...existing,
+      status: mapApprovalDecision(decision),
+      ...(answeredWith ? { answeredWith } : {}),
+    };
     return next;
   }
 
@@ -266,9 +344,12 @@ export function applyEnvelope(
   // SessionManager persists/broadcasts it directly when message:send arrives.
   // Reconciles with the client-side optimistic echo if present.
   if (env.event === 'user_message') {
-    const text = String(data.text ?? '');
+    // A new user turn means any question still pending from earlier was already
+    // dealt with — dismiss orphans so they don't re-surface on reload.
+    const base = dismissStalePendingQuestions(items);
+    let text = String(data.text ?? '');
     const rawAttachments = Array.isArray(data.attachments) ? data.attachments : [];
-    const attachments = rawAttachments
+    let attachments = rawAttachments
       .filter((a): a is { name: string; mime: string; url: string } =>
         typeof a === 'object' && a !== null
         && typeof (a as Record<string, unknown>).name === 'string'
@@ -276,13 +357,22 @@ export function applyEnvelope(
         && typeof (a as Record<string, unknown>).url === 'string',
       )
       .map(a => ({ name: a.name, mime: a.mime, url: a.url }));
+    // No structured attachments (Beta/TTY JSONL echo) → recover inline
+    // `[Attached image: …]` references into thumbnails, Chat-style.
+    if (attachments.length === 0) {
+      const recovered = recoverInlineImageAttachments(text);
+      if (recovered.attachments.length > 0) {
+        attachments = recovered.attachments;
+        text = recovered.text;
+      }
+    }
     const item: MsgItem = {
       kind: 'user', id: env.call_id, text, exec: executor,
       ts: env.ts, turn: env.turn,
       ...(attachments.length > 0 ? { attachments } : {}),
     };
-    for (let i = items.length - 1; i >= 0; i--) {
-      const cand = items[i]!;
+    for (let i = base.length - 1; i >= 0; i--) {
+      const cand = base[i]!;
       if (
         cand.kind === 'user' && cand.pending && cand.text === item.text
         && (cand.attachments?.length ?? 0) === attachments.length
@@ -296,12 +386,12 @@ export function applyEnvelope(
             try { URL.revokeObjectURL(a.url); } catch { /* noop in test envs */ }
           }
         }
-        const next = items.slice();
+        const next = base.slice();
         next[i] = { ...item };
         return next;
       }
     }
-    return [...items, item];
+    return [...base, item];
   }
 
   return items;
@@ -494,6 +584,21 @@ export function mapApprovalDecision(d: string): ApprovalItem['status'] {
 }
 
 /**
+ * Flatten an AskUserQuestion answers map into a single display string for the
+ * resolved card. `{ "Pick dinner": "Rice", "Sides": ["Soup","Salad"] }` →
+ * `"Rice · Soup, Salad"`. Returns null when there's nothing usable so callers
+ * can fall back to a prior value.
+ */
+export function formatAnsweredWith(raw: unknown): string | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const parts = Object.values(raw as Record<string, unknown>)
+    .map(v => Array.isArray(v) ? v.filter(x => typeof x === 'string').join(', ') : (typeof v === 'string' ? v : ''))
+    .map(s => s.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
+/**
  * Handles both `diff.updated` (legacy codex) and `file_change` (unified).
  * Shape (verified codex): `data.params.diff` is a unified diff string.
  * Unified shape: `data.diff` or `data.files` array (if no raw diff available
@@ -593,9 +698,9 @@ export function parseTokenUsage(data: unknown): TokenUsage | null {
     : Number(total.inputTokens ?? 0) + Number(total.cachedInputTokens ?? 0);
   // Self-correct when the recorded window is obviously smaller than the
   // observed usage — happens for sessions started before cc-proxy learned
-  // to read the real model id from `system init`, where the alias-probe
-  // resolved id (200k variant) was stored even though CLI was running the
-  // 1M variant. Bump to the next plausible ceiling so the bar stops
+  // to read the real model id from `system init`, where the stored model id
+  // could say 200k even though CLI was running the 1M variant. Bump to the
+  // next plausible ceiling so the bar stops
   // showing "771k / 200k · compact soon".
   let contextWindow = typeof cw === 'number' ? cw : undefined;
   if (contextWindow && contextUsed > contextWindow) {

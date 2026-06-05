@@ -173,6 +173,31 @@ export interface SessionRuntimeSwitchedMessage {
   runtime_mode: RuntimeMode;
 }
 
+export type TtySurface = 'beta' | 'cli';
+
+export interface TtyLockMessage {
+  type: 'tty:lock';
+  session_id: string;
+  locked: boolean;
+  owner: boolean;
+  surface?: TtySurface;
+  reason?: string;
+}
+
+/**
+ * Claude Code "Remote Control" connection state for a TTY session, parsed
+ * from the status line the CLI prints into the PTY (`Remote Control
+ * connecting… / connected / disconnected`). Ephemeral, PTY-scoped — the host
+ * tracks it in memory and re-emits `disconnected` when the PTY exits.
+ */
+export type RemoteControlState = 'connecting' | 'connected' | 'disconnected';
+
+export interface TtyRemoteControlMessage {
+  type: 'tty:remote-control';
+  session_id: string;
+  state: RemoteControlState;
+}
+
 /**
  * Coarse-grained "the workspace's git state may have changed" ping. Sent
  * after fetch / branch create / merge / drop / worktree teardown — anything
@@ -237,6 +262,8 @@ export type ServerToClientMessage =
   | TermReplayMessage
   | TermExitedMessage
   | SessionRuntimeSwitchedMessage
+  | TtyLockMessage
+  | TtyRemoteControlMessage
   | WorkspaceGitUpdatedMessage
   | ErrorMessage;
 
@@ -438,6 +465,9 @@ export interface SessionSwitchRuntimeMessage {
   type: 'session:switch-runtime';
   session_id: string;
   target: RuntimeMode;
+  /** Claude-only UI surface requesting the TTY lock. `beta` is the
+   *  TTY-backed chat surface; `cli` is the raw xterm surface. */
+  surface?: TtySurface;
   /** When true and target='tty' and executor='claude', spawn the PTY
    *  with Claude Code's `--remote-control` flag so the session can also
    *  be driven from claude.ai / Claude app. Requires Claude Code ≥
@@ -447,13 +477,39 @@ export interface SessionSwitchRuntimeMessage {
 }
 
 /**
+ * Toggle Claude Code Remote Control on a session that's already in TTY mode by
+ * sending the `/remote-control` slash command into the live PTY. Host-trusted
+ * (no web TTY-owner check) — the host writes it via the same input path as
+ * keystrokes. No-op unless executor='claude' and runtime_mode='tty'. The
+ * resulting state change comes back as a `tty:remote-control` broadcast parsed
+ * from the PTY status line, not as a direct reply.
+ */
+export interface SessionRemoteControlMessage {
+  type: 'session:remote-control';
+  session_id: string;
+}
+
+export interface TtyClaimMessage {
+  type: 'tty:claim';
+  session_id: string;
+  surface: TtySurface;
+  /** Explicit user action from a locked-out window. When true, host
+   *  transfers the TTY owner lock to this client and notifies the previous
+   *  owner that it has been kicked off the session TTY. */
+  takeover?: boolean;
+}
+
+/**
  * Keystroke (or paste) headed for the PTY stdin. `data` is base64-encoded
- * raw bytes. Ignored when the session is not currently in `tty` mode.
+ * raw bytes for live terminal input; `text` asks the backend to wrap a full
+ * message in bracketed paste + Enter. Ignored when the session is not
+ * currently in `tty` mode.
  */
 export interface PtyInputMessage {
   type: 'pty:input';
   session_id: string;
-  data: string;
+  data?: string;
+  text?: string;
 }
 
 /**
@@ -538,6 +594,8 @@ export type ClientToServerMessage =
   | QueueSendNowMessage
   | QueueClearMessage
   | SessionSwitchRuntimeMessage
+  | SessionRemoteControlMessage
+  | TtyClaimMessage
   | PtyInputMessage
   | PtyResizeMessage
   | PtyReplayRequestMessage

@@ -188,6 +188,32 @@ test('createSession leaves no row if proxy createSession fails', async () => {
   }
 });
 
+test('setModel with empty string clears stored model override', async () => {
+  const { dir, db, wsId, sessions, broadcaster } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+      name: 'model-clear',
+    });
+    sessions.setModel(session.id, 'claude-opus-4-8');
+    sessions.setModel(session.id, '');
+
+    const row = db.prepare('SELECT model FROM sessions WHERE id = ?').get(session.id) as
+      | { model: string | null }
+      | undefined;
+    assert.ok(row, 'session row persisted');
+    assert.equal(row!.model, null);
+    const update = broadcaster.messages.findLast?.(
+      m => m.type === 'session:updated',
+    ) as { session?: { model?: string | null } } | undefined;
+    assert.equal(update?.session?.model, null);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('createSession rejects unknown workspace', async () => {
   const { dir, db, sessions } = setup();
   try {

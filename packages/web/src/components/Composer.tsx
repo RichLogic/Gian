@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ApprovalMode, CcModelCapabilities, CodexModelCapabilities, MessageAttachment, Session, SlashCommand, SlashCommandSource, ThinkingEffort } from '@gian/shared';
+import type { ApprovalMode, CcModelCapabilities, CodexModelCapabilities, MessageAttachment, RemoteControlState, Session, SlashCommand, SlashCommandSource, ThinkingEffort } from '@gian/shared';
 import { loadProxyModels, loadSlashCommands } from '../api.js';
 import { useT } from '../i18n/index.js';
 
@@ -23,6 +23,26 @@ function writeDraft(sessionId: string, text: string): void {
     else localStorage.removeItem(draftKey(sessionId));
   } catch {
     // localStorage may be unavailable (privacy mode) — drafts become ephemeral.
+  }
+}
+
+/** Window event the Composer listens for to pick up an externally-injected
+ *  draft (e.g. the Changes inspector dropping a "commit and push" prompt into
+ *  the active session's input for the user to review before sending). */
+const COMPOSER_INJECT_EVENT = 'gian:composer-inject';
+
+/** Append `text` to the given session's draft and notify a mounted Composer
+ *  to re-read it. The text is NOT auto-sent — it lands in the textarea so the
+ *  user can edit/confirm. Appends (with a blank line) rather than clobbering an
+ *  existing draft. */
+export function injectComposerDraft(sessionId: string, text: string): void {
+  const existing = readDraft(sessionId);
+  const next = existing ? `${existing}\n\n${text}` : text;
+  writeDraft(sessionId, next);
+  try {
+    window.dispatchEvent(new CustomEvent(COMPOSER_INJECT_EVENT, { detail: { sessionId } }));
+  } catch {
+    // no window (SSR/tests) — the draft is still persisted for next mount.
   }
 }
 
@@ -77,36 +97,43 @@ function fetchModelsCached(executor: 'claude' | 'codex'): Promise<ProxyModel[]> 
 
 function defaultModel(models: ProxyModel[], executor: 'claude' | 'codex'): string {
   const def = models.find(m => m.isDefault) ?? models[0];
-  return def?.model ?? (executor === 'codex' ? 'gpt-5-codex' : 'claude-sonnet-4-6');
+  return def?.model ?? (executor === 'codex' ? 'gpt-5-codex' : '');
 }
 
 function modelLabel(models: ProxyModel[], id: string): string {
   return models.find(m => m.model === id)?.displayName ?? id;
 }
 
-const THINK_LEVELS: ThinkingEffort[] = ['off', 'minimal', 'low', 'medium', 'high', 'max', 'xhigh'];
-const THINK_INDEX: Record<ThinkingEffort, number> = {
+/** A concrete Claude id like `claude-opus-4-8` (synced live from a TTY
+ *  transcript) maps to its `opus`/`sonnet`/`haiku` alias family so the static
+ *  alias menu can still highlight the matching row. Returns the input
+ *  unchanged when it isn't a recognizable concrete claude id. */
+function claudeModelFamily(id: string): string {
+  return /^claude-(opus|sonnet|haiku)\b/.exec(id)?.[1] ?? id;
+}
+
+const THINK_INDEX: Record<string, number> = {
   off: 0, minimal: 1, low: 2, medium: 3, high: 4, max: 5, xhigh: 5,
 };
 
 function supportedEfforts(model: ProxyModel | undefined): ThinkingEffort[] {
-  if (!model) return THINK_LEVELS;
+  if (!model) return [];
   if ('supportedEfforts' in model) return model.supportedEfforts;
   if ('supportedThinking' in model) {
     return model.supportedThinking.map(e => e === null ? 'off' : e) as ThinkingEffort[];
   }
-  return THINK_LEVELS;
+  return [];
 }
 
-function defaultEffort(model: ProxyModel | undefined): ThinkingEffort {
-  if (!model) return 'medium';
+function defaultEffort(model: ProxyModel | undefined): ThinkingEffort | null {
+  if (!model) return null;
   if ('defaultEffort' in model) return model.defaultEffort;
   if ('defaultThinking' in model) return (model.defaultThinking ?? 'off') as ThinkingEffort;
-  return 'medium';
+  return null;
 }
 
-function ThinkBars({ level }: { level: ThinkingEffort }) {
-  const n = THINK_INDEX[level];
+function ThinkBars({ level }: { level: ThinkingEffort | null }) {
+  const n = level ? (THINK_INDEX[level] ?? 0) : 0;
   return (
     <span className="think-bars" data-level={level}>
       <i className={n >= 1 ? 'on' : ''} />
@@ -140,12 +167,6 @@ function fetchSlashCached(executor: 'claude' | 'codex', workspaceId?: string): P
 }
 
 const SOURCE_ORDER: SlashCommandSource[] = ['builtin', 'project', 'user'];
-const SOURCE_LABELS: Record<SlashCommandSource, string> = {
-  builtin: 'BUILTIN',
-  project: 'PROJECT (.claude/commands)',
-  user: 'USER (~/.claude/commands)',
-};
-
 function slashFilterGrouped(
   commands: SlashCommand[],
   prefix: string,
@@ -174,6 +195,9 @@ export function Composer({
   armedRemote = false,
   onRequestRemote,
   onCancelRemote,
+  remoteControl,
+  onToggleRemoteControl,
+  disabledSubmitBehavior = 'queue',
 }: {
   session: Session;
   onSend: (
@@ -202,6 +226,7 @@ export function Composer({
   onSetModel: (model: string) => void;
   onSetEffort: (effort: ThinkingEffort | null) => void;
   disabled: boolean;
+  disabledSubmitBehavior?: 'queue' | 'block';
   executor: 'claude' | 'codex';
   workspaceId?: string;
   footer?: import('react').ReactNode;
@@ -215,6 +240,13 @@ export function Composer({
   /** Called when user clicks Cancel on the armed banner — or clicks the
    *  Remote button again while armed. */
   onCancelRemote?: () => void;
+  /** Live Claude Remote Control state for this session when in TTY mode
+   *  (undefined = never observed / off). Drives the in-TTY toggle's on/off
+   *  appearance. */
+  remoteControl?: RemoteControlState;
+  /** Toggle Remote Control in TTY mode by sending `/remote-control` into the
+   *  live PTY. Only meaningful when `session.runtime_mode === 'tty'`. */
+  onToggleRemoteControl?: () => void;
 }) {
   const t = useT();
   const [text, setText] = useState(() => readDraft(session.id));
@@ -274,8 +306,15 @@ export function Composer({
   }, [executor, workspaceId]);
 
   const currentModel = session.model ?? (models.length > 0 ? defaultModel(models, executor) : '');
-  const currentModelMeta = models.find(m => m.model === currentModel);
-  const thinkLevel: ThinkingEffort = session.thinking_effort ?? defaultEffort(currentModelMeta);
+  // Fall back to the default (or first) entry when the active model isn't in
+  // the menu — e.g. a concrete id like `claude-opus-4-8` synced from a TTY hook
+  // that the static alias list doesn't enumerate. Without this the effort grid
+  // (keyed off the matched row's supportedEfforts) would render empty.
+  const currentModelMeta = models.find(m => m.model === currentModel)
+    ?? models.find(m => m.isDefault)
+    ?? models[0];
+  const explicitThinkLevel = session.thinking_effort;
+  const thinkLevel = explicitThinkLevel ?? defaultEffort(currentModelMeta);
   // Pending file attachments — UI only; not yet sent with messages
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -292,6 +331,23 @@ export function Composer({
   useEffect(() => {
     writeDraft(session.id, text);
   }, [session.id, text]);
+
+  // External draft injection (Changes inspector → "commit / push / create PR"
+  // prompts). The dispatcher has already written the appended draft to
+  // localStorage; we just re-read it into the textarea and focus, caret at end.
+  useEffect(() => {
+    function onInject(e: Event) {
+      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
+      if (detail?.sessionId !== session.id) return;
+      setText(readDraft(session.id));
+      requestAnimationFrame(() => {
+        const el = ref.current;
+        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+      });
+    }
+    window.addEventListener(COMPOSER_INJECT_EVENT, onInject);
+    return () => window.removeEventListener(COMPOSER_INJECT_EVENT, onInject);
+  }, [session.id]);
 
   const activeModel = currentModel;
   const approvalMode = session.approval_mode;
@@ -429,6 +485,7 @@ export function Composer({
       previewUrl: f.previewUrl,
     }));
     if (disabled) {
+      if (disabledSubmitBehavior === 'block') return;
       onQueueAdd(trimmed); // queue ignores images for now (out of scope)
       // Queue path doesn't transfer ownership — revoke previews now.
       for (const f of pendingFiles) URL.revokeObjectURL(f.previewUrl);
@@ -594,20 +651,20 @@ export function Composer({
               <path d="M12 9v6" />
               <path d="M12 18v.01" />
             </svg>
-            <span>Bypass mode — all actions auto-approved</span>
+            <span>{t('composer.bypass.banner')}</span>
           </div>
         )}
 
         {armedRemote && (
           <div className="composer-remote-banner" role="status" aria-live="polite">
             <span className="spinner" />
-            <span>当前 turn 结束后进入 Remote 模式 · 输入已锁</span>
+            <span>{t('composer.remote.banner')}</span>
             <button
               type="button"
               className="composer-remote-cancel"
               onClick={() => onCancelRemote?.()}
             >
-              取消
+              {t('composer.remote.cancel')}
             </button>
           </div>
         )}
@@ -624,7 +681,7 @@ export function Composer({
             disabled={armedRemote}
             placeholder={
               armedRemote
-                ? '等待当前 turn 结束后进入 Remote 模式…'
+                ? t('composer.remote.waiting')
                 : disabled
                   ? t('composer.placeholder.busy')
                   : t('composer.placeholder.idle')
@@ -640,7 +697,7 @@ export function Composer({
                 <img className="att-thumb" src={f.previewUrl} alt="" />
                 <span className="att-name" title={f.error ?? f.name}>{f.name}</span>
                 <span className="att-size">{f.sizeLabel}</span>
-                <button className="att-remove" type="button" onClick={() => removeFile(f.id)} aria-label="Remove attachment">✕</button>
+                <button className="att-remove" type="button" onClick={() => removeFile(f.id)} aria-label={t('composer.attachment.remove')}>✕</button>
               </div>
             ))}
           </div>
@@ -654,7 +711,7 @@ export function Composer({
           >
             {slashLoading && filtered.length === 0 && (
               <div className="cmp-slash-row" style={{ color: 'var(--text-3)', cursor: 'default' }}>
-                <span className="cmp-slash-desc">Loading…</span>
+                <span className="cmp-slash-desc">{t('composer.slash.loading')}</span>
               </div>
             )}
             {filteredGroups.map(group => {
@@ -665,7 +722,7 @@ export function Composer({
               }
               return (
                 <div key={group.source}>
-                  <div className="cmp-slash-section">{SOURCE_LABELS[group.source]}</div>
+                  <div className="cmp-slash-section">{t(`composer.slash.source.${group.source}`)}</div>
                   {group.items.map((item, localIdx) => {
                     const flatIdx = baseIdx + localIdx;
                     return (
@@ -721,15 +778,18 @@ export function Composer({
             >
               <div className="mp-section">
                 <div className="mp-section-head">
-                  <span className="mp-section-title">Model</span>
+                  <span className="mp-section-title">{t('composer.model.section')}</span>
                   <span className="mp-section-hint">{executor}</span>
                 </div>
                 <div className="mp-list">
                   {models.length === 0 && (
-                    <div className="mp-row" style={{ color: 'var(--text-3)', cursor: 'default' }}>Loading…</div>
+                    <div className="mp-row" style={{ color: 'var(--text-3)', cursor: 'default' }}>{t('common.loading')}</div>
                   )}
                   {models.filter(m => !m.hidden).map(m => {
-                    const active = m.model === activeModel;
+                    // Highlight on exact id, or when a concrete synced id
+                    // (`claude-opus-4-8`) matches this alias row's family.
+                    const active = m.model === activeModel
+                      || (!!m.model && m.model === claudeModelFamily(activeModel));
                     return (
                       <button
                         key={m.id}
@@ -749,14 +809,22 @@ export function Composer({
               </div>
               <div className="mp-section">
                 <div className="mp-section-head">
-                  <span className="mp-section-title">Reasoning effort</span>
+                  <span className="mp-section-title">{t('composer.reasoning.effort')}</span>
                 </div>
                 <div className="mp-think-grid">
+                  <button
+                    type="button"
+                    className={`mp-think${explicitThinkLevel === null ? ' active' : ''}`}
+                    onClick={() => onSetEffort(null)}
+                  >
+                    <ThinkBars level={null} />
+                    <span>{t('common.default')}</span>
+                  </button>
                   {supportedEfforts(currentModelMeta).map(lvl => (
                     <button
                       key={lvl}
                       type="button"
-                      className={`mp-think${thinkLevel === lvl ? ' active' : ''}`}
+                      className={`mp-think${explicitThinkLevel === lvl ? ' active' : ''}`}
                       onClick={() => onSetEffort(lvl)}
                     >
                       <ThinkBars level={lvl} />
@@ -807,16 +875,16 @@ export function Composer({
               type="button"
               className={`cmode-item${oneShotBypass ? ' active' : ''}`}
               data-mode="bypass"
-              title="Bypass approvals (this turn only)"
+              title={t('composer.bypass.title')}
               aria-pressed={oneShotBypass}
               onClick={() => setOneShotBypass(v => !v)}
             >
               <span className="cmode-warn" aria-hidden="true">⚠</span>
-              Bypass
+              {t('composer.bypass.button')}
             </button>
           </div>
           {oneShotBypass && (
-            <span className="bypass-hint" role="status">⚠ next turn skips approvals</span>
+            <span className="bypass-hint" role="status">⚠ {t('composer.bypass.hint')}</span>
           )}
 
           {/* Plan-mode exit button — codex only. cc emits ExitPlanMode as a
@@ -837,32 +905,57 @@ export function Composer({
 
           <span className="spacer" />
 
-          {/* Remote control — Claude only, hidden once already in TTY.
-              Click while idle → switch to TTY w/ --remote-control. Click
-              while a turn is running → arm; banner appears, input locks,
-              effect in App.tsx fires the switch when the turn finishes. */}
-          {executor === 'claude' && session.runtime_mode !== 'tty' && onRequestRemote && (
-            <button
-              type="button"
-              className={`composer-act${armedRemote ? ' active' : ''}`}
-              title={armedRemote
-                ? 'Cancel queued Remote switch'
-                : 'Open Claude Code in Remote Control mode'}
-              aria-label="Remote control"
-              aria-pressed={armedRemote}
-              onClick={() => {
-                if (armedRemote) onCancelRemote?.();
-                else onRequestRemote();
-              }}
-            >
-              <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor"
-                   strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M5 12a7 7 0 0 1 14 0" />
-                <path d="M2 12a10 10 0 0 1 20 0" />
-                <circle cx="12" cy="18" r="1.6" fill="currentColor" />
-              </svg>
-            </button>
-          )}
+          {/* Remote control — Claude only.
+              · Structured mode: click → switch to TTY w/ --remote-control
+                (arms while a turn runs; banner + input lock; App.tsx fires the
+                switch when the turn finishes).
+              · TTY mode: click → toggle Remote Control live by sending
+                `/remote-control` into the PTY; the antenna reflects the synced
+                connection state (off / connecting / connected). */}
+          {executor === 'claude' && session.runtime_mode === 'tty'
+            ? onToggleRemoteControl && (
+              <button
+                type="button"
+                className={`composer-act${remoteControl === 'connected' ? ' active' : ''}${remoteControl === 'connecting' ? ' is-connecting' : ''}`}
+                title={
+                  remoteControl === 'connected' ? t('composer.remote.on')
+                  : remoteControl === 'connecting' ? t('composer.remote.connecting')
+                  : t('composer.remote.off')
+                }
+                aria-label={t('composer.remote.control')}
+                aria-pressed={remoteControl === 'connected'}
+                onClick={() => onToggleRemoteControl()}
+              >
+                <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor"
+                     strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M5 12a7 7 0 0 1 14 0" />
+                  <path d="M2 12a10 10 0 0 1 20 0" />
+                  <circle cx="12" cy="18" r="1.6" fill="currentColor" />
+                </svg>
+              </button>
+            )
+            : executor === 'claude' && onRequestRemote && (
+              <button
+                type="button"
+                className={`composer-act${armedRemote ? ' active' : ''}`}
+                title={armedRemote
+                  ? t('composer.remote.cancelSwitch')
+                  : t('composer.remote.open')}
+                aria-label={t('composer.remote.control')}
+                aria-pressed={armedRemote}
+                onClick={() => {
+                  if (armedRemote) onCancelRemote?.();
+                  else onRequestRemote();
+                }}
+              >
+                <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor"
+                     strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M5 12a7 7 0 0 1 14 0" />
+                  <path d="M2 12a10 10 0 0 1 20 0" />
+                  <circle cx="12" cy="18" r="1.6" fill="currentColor" />
+                </svg>
+              </button>
+            )}
 
           {/* Slash command — framed [/] glyph */}
           <button
@@ -883,10 +976,10 @@ export function Composer({
           <button
             type="button"
             className={`composer-act${pendingFiles.length > 0 ? ' active' : ''}`}
-            title="Paste images with ⌘V (file picker coming in v1.1)"
+            title={t('composer.attachment.pasteImagesHint')}
             disabled
             onClick={() => fileInputRef.current?.click()}
-            aria-label="Paste images with ⌘V"
+            aria-label={t('composer.attachment.pasteImages')}
           >
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />

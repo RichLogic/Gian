@@ -20,21 +20,18 @@ import { ApprovalServer, APPROVAL_PROMPT_TOOL } from '../mcp/approval-server.js'
 import type { EffortLevel, ModelCapabilities, PermissionMode } from '../core/types.js';
 import type { ClaudeRuntime, ClaudeRuntimeEvents } from './types.js';
 
-// Known Claude model aliases and their metadata.
-const MODEL_ALIASES: Array<{
-  alias: string;
-  displayName: string;
-  isDefault: boolean;
-  defaultEffort: EffortLevel;
-  supportedEfforts: EffortLevel[];
-}> = [
-  // Claude CLI's `--effort` flag accepts 5 levels uniformly (low/medium/high/
-  // xhigh/max). Per-model differences are runtime-rejected by Claude itself,
-  // so we expose all 5 to the UI and let the model pick.
-  { alias: 'sonnet', displayName: 'Claude Sonnet', isDefault: true, defaultEffort: 'high', supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
-  { alias: 'opus', displayName: 'Claude Opus', isDefault: false, defaultEffort: 'high', supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
-  { alias: 'haiku', displayName: 'Claude Haiku', isDefault: false, defaultEffort: 'medium', supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
-];
+const NO_SESSION_PERSISTENCE_FLAG = '--no-session-persistence';
+const CLAUDE_DEFAULT_MODEL_ID = 'claude-default';
+
+function allowClaudePrintProbe(): boolean {
+  return process.env.GIAN_ALLOW_CLAUDE_PRINT_PROBE === '1';
+}
+
+export function shouldRetryWithoutNoSessionPersistence(stderr: string): boolean {
+  const s = stderr.toLowerCase();
+  return s.includes(NO_SESSION_PERSISTENCE_FLAG)
+    && (s.includes('unknown option') || s.includes('unknown argument') || s.includes('not recognized'));
+}
 
 /**
  * Probe the slash commands available in this Claude environment by spawning
@@ -44,12 +41,12 @@ const MODEL_ALIASES: Array<{
  * an empty list on probe failure.
  */
 export function probeSlashCommands(cwd?: string): Promise<string[]> {
-  return new Promise((resolve) => {
+  const run = (includeNoSessionPersistence: boolean): Promise<string[] | null> => new Promise((resolve) => {
     const args = [
       '-p', 'x',
       '--output-format', 'stream-json',
       '--verbose',
-      '--no-session-persistence',
+      ...(includeNoSessionPersistence ? [NO_SESSION_PERSISTENCE_FLAG] : []),
       '--dangerously-skip-permissions',
     ];
     const proc = spawn(claudeExecutable(), args, {
@@ -59,13 +56,15 @@ export function probeSlashCommands(cwd?: string): Promise<string[]> {
     proc.stdin.end();
 
     let resolved = false;
-    const finish = (list: string[]) => {
+    let stderrBuf = '';
+    const finish = (list: string[] | null) => {
       if (resolved) return;
       resolved = true;
       resolve(list);
       try { proc.kill('SIGTERM'); } catch { /* ignore */ }
     };
 
+    proc.stderr?.on('data', d => { stderrBuf += d.toString(); });
     const lines = createInterface({ input: proc.stdout! });
     lines.on('line', (line) => {
       if (resolved) return;
@@ -80,25 +79,42 @@ export function probeSlashCommands(cwd?: string): Promise<string[]> {
     // an unhandled exception and crashes the proxy process. Treat it as a
     // probe failure → empty list, same as the timeout path.
     proc.on('error', () => finish([]));
-    proc.on('exit', () => finish([]));
+    proc.on('exit', () => {
+      if (includeNoSessionPersistence && shouldRetryWithoutNoSessionPersistence(stderrBuf)) {
+        finish(null);
+      } else {
+        finish([]);
+      }
+    });
     setTimeout(() => finish([]), 15_000);
+  });
+
+  return new Promise((resolve) => {
+    void run(true).then(first => {
+      if (first !== null) {
+        resolve(first);
+        return;
+      }
+      void run(false).then(second => resolve(second ?? []));
+    });
   });
 }
 
 /**
- * Resolve a model alias (e.g. "sonnet") to its full model ID by spawning
- * a throwaway Claude process and reading the init event.
+ * Ask Claude Code what model it would use by spawning a throwaway print-mode
+ * process and reading the `system init` event. The process is killed as soon
+ * as init arrives, before a real assistant turn is needed.
  */
-function resolveModelAlias(alias: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const proc = spawn(claudeExecutable(), [
+function probeCurrentModel(): Promise<string | null> {
+  const run = (includeNoSessionPersistence: boolean): Promise<{ model: string | null; retry: boolean }> => new Promise((resolve) => {
+    const args = [
       '-p', 'x',
-      '--model', alias,
       '--output-format', 'stream-json',
       '--verbose',
-      '--no-session-persistence',
+      ...(includeNoSessionPersistence ? [NO_SESSION_PERSISTENCE_FLAG] : []),
       '--dangerously-skip-permissions',
-    ], { stdio: ['pipe', 'pipe', 'pipe'] });
+    ];
+    const proc = spawn(claudeExecutable(), args, { stdio: ['pipe', 'pipe', 'pipe'] });
     proc.stdin.end();
 
     let resolved = false;
@@ -107,6 +123,12 @@ function resolveModelAlias(alias: string): Promise<string | null> {
     // a silent null — discovery used to swallow this and the UI just sat
     // on an empty model list forever.
     let stderrBuf = '';
+    const finish = (model: string | null, retry = false) => {
+      if (resolved) return;
+      resolved = true;
+      resolve({ model, retry });
+      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+    };
     proc.stderr!.on('data', d => { stderrBuf += d.toString(); });
     const lines = createInterface({ input: proc.stdout! });
     lines.on('line', (line) => {
@@ -114,39 +136,81 @@ function resolveModelAlias(alias: string): Promise<string | null> {
       try {
         const event = JSON.parse(line.trim()) as Record<string, unknown>;
         if (event.type === 'system' && event.subtype === 'init' && typeof event.model === 'string') {
-          resolved = true;
-          resolve(event.model);
-          proc.kill('SIGTERM');
+          finish(event.model);
         }
       } catch { /* ignore */ }
     });
 
     proc.on('exit', (code) => {
       if (!resolved) {
-        if (code !== 0 && stderrBuf.trim()) {
-          console.error(`[cc-proxy:probe ${alias}] claude exited ${code}: ${stderrBuf.trim().split('\n')[0]}`);
+        if (includeNoSessionPersistence && shouldRetryWithoutNoSessionPersistence(stderrBuf)) {
+          finish(null, true);
+          return;
         }
-        resolve(null);
+        if (code !== 0 && stderrBuf.trim()) {
+          console.error(`[cc-proxy:probe model] claude exited ${code}: ${stderrBuf.trim().split('\n')[0]}`);
+        }
+        finish(null);
       }
     });
 
     // Same reason as probeSlashCommands — survive a missing `claude` binary.
     proc.on('error', (err) => {
       if (!resolved) {
-        console.error(`[cc-proxy:probe ${alias}] spawn error: ${err.message}`);
-        resolved = true;
-        resolve(null);
+        console.error(`[cc-proxy:probe model] spawn error: ${err.message}`);
+        finish(null);
       }
     });
 
     // Timeout after 30s.
-    setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        resolve(null);
-        proc.kill('SIGTERM');
+    setTimeout(() => finish(null), 30_000);
+  });
+
+  return new Promise((resolve) => {
+    void run(true).then(first => {
+      if (!first.retry) {
+        resolve(first.model);
+        return;
       }
-    }, 30_000);
+      void run(false).then(second => resolve(second.model));
+    });
+  });
+}
+
+export function parseEffortLevelsFromHelp(helpText: string): EffortLevel[] {
+  const effortSection = helpText.match(/--effort\s+<level>[\s\S]*?\(([^)]*)\)/);
+  if (!effortSection?.[1]) return [];
+  const seen = new Set<string>();
+  const levels: EffortLevel[] = [];
+  for (const raw of effortSection[1].split(',')) {
+    const level = raw.trim();
+    if (!level || seen.has(level)) continue;
+    seen.add(level);
+    levels.push(level);
+  }
+  return levels;
+}
+
+function probeEffortLevels(): Promise<EffortLevel[]> {
+  return new Promise((resolve) => {
+    const proc = spawn(claudeExecutable(), ['--help'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    let resolved = false;
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      resolve(parseEffortLevelsFromHelp(output));
+    };
+    proc.stdout?.on('data', d => { output += d.toString(); });
+    proc.stderr?.on('data', d => { output += d.toString(); });
+    proc.on('error', () => finish());
+    proc.on('exit', () => finish());
+    setTimeout(() => {
+      finish();
+      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+    }, 10_000);
   });
 }
 
@@ -219,13 +283,10 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
   async start(): Promise<number> {
     this.approvalPort = await this.approvalServer.start();
     this.emit('debug', `[runtime] Approval MCP listening on 127.0.0.1:${this.approvalPort}`);
-    // Kick off discovery in the background. discoverModels() shells out to
-    // `claude --model <alias>` per alias and can take seconds when the CLI
-    // is cold or unreachable. Awaiting it here used to block the spawn.ts
-    // stdin loop from starting, so the host's `initialize` request would
-    // time out (and the cc-proxy smoke test fails). Discovery is required
-    // for capabilities.list, not initialize — listCapabilities awaits the
-    // promise via `awaitModelDiscovery()` instead.
+    // Kick off billing-safe capability discovery in the background. This
+    // deliberately does not use `claude -p`: after Anthropic split print
+    // mode into Agent SDK credit, model/slash warmup must not spend credit
+    // behind the user's back. We only read local CLI help by default.
     this.modelDiscoveryPromise = this.discoverModels().catch((err) => {
       this.emit('debug', `[runtime] Model discovery failed: ${err}`);
     });
@@ -236,64 +297,54 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     return this.discoveredModels;
   }
 
-  /** Block until the initial model discovery probe finishes (success or
-   *  failure). Used by capabilities.list so it doesn't return an empty
-   *  models list on a freshly-spawned proxy. */
+  /** Block until initial capability discovery finishes. Used by
+   *  capabilities.list so it doesn't return an empty models array on a
+   *  freshly-spawned proxy. */
   async awaitModelDiscovery(): Promise<void> {
     if (this.modelDiscoveryPromise) await this.modelDiscoveryPromise;
   }
 
   private async discoverModels(): Promise<void> {
-    this.emit('debug', '[runtime] Discovering available models...');
-    const results = await Promise.all(
-      MODEL_ALIASES.map(async (entry) => {
-        try {
-          const modelId = await resolveModelAlias(entry.alias);
-          if (!modelId) return null;
-          // Extract version: "claude-sonnet-4-6" → "4.6", "claude-haiku-4-5-20251001" → "4.5"
-          const versionMatch = modelId.match(/(\d+-\d+)(?:-\d{8,})?$/);
-          const version = versionMatch?.[1]?.replace(/-/g, '.') ?? '';
-          return {
-            id: modelId,
-            model: modelId,
-            displayName: version ? `${entry.displayName} ${version}` : entry.displayName,
-            description: '',
-            hidden: false as boolean,
-            isDefault: entry.isDefault,
-            defaultEffort: entry.defaultEffort,
-            supportedEfforts: entry.supportedEfforts,
-          } as ModelCapabilities;
-        } catch {
-          return null;
-        }
-      }),
-    );
-
-    const base = results.filter((m): m is NonNullable<typeof m> => m !== null);
-
-    // Synthesize the 1M-context variants for sonnet/opus. Claude CLI accepts
-    // a literal `[1m]` suffix on these model ids and routes to the 1M
-    // version; without surfacing them here the user has no way to pick the
-    // larger context. Haiku has no 1M variant. The probe-then-resolve cost
-    // for these is high, so synthesize unconditionally — if claude rejects
-    // it at turn time, the error surfaces naturally.
-    const variants: ModelCapabilities[] = [];
-    for (const m of base) {
-      const isOpus = /opus/i.test(m.displayName);
-      const isSonnet = /sonnet/i.test(m.displayName);
-      if (!isOpus && !isSonnet) continue;
-      const id1m = `${m.model}[1m]`;
-      variants.push({
-        ...m,
-        id: id1m,
-        model: id1m,
-        displayName: `${m.displayName} (1M)`,
-        isDefault: false,
-      });
-    }
-
-    this.discoveredModels = [...base, ...variants];
-    this.emit('debug', `[runtime] Discovered ${this.discoveredModels.length} models: ${this.discoveredModels.map((m) => m.model).join(', ')}`);
+    this.emit('debug', '[runtime] Discovering Claude capabilities (billing-safe)...');
+    const [probedDefaultModel, supportedEfforts] = await Promise.all([
+      allowClaudePrintProbe() ? probeCurrentModel() : Promise.resolve(null),
+      probeEffortLevels(),
+    ]);
+    // Static alias menu. Claude Code accepts `opus` / `sonnet` / `haiku` (and
+    // "no --model" = the configured default) as `--model` values; aliases are
+    // stable (always the latest of that family), so this list never goes stale
+    // and costs zero Agent SDK credit. The interactive `/model` picker shows
+    // exactly this set (Default / Sonnet / Haiku [+ Opus]), so scraping its TUI
+    // would discover nothing extra — the static list IS the full menu.
+    // `probeCurrentModel` (gated off by default) only enriches the Default
+    // entry's label with the resolved concrete name; it never changes which
+    // models are offered.
+    const alias = (
+      id: string,
+      model: string,
+      displayName: string,
+      description: string,
+      isDefault = false,
+    ): ModelCapabilities => ({
+      id, model, displayName, description,
+      hidden: false, isDefault, defaultEffort: null, supportedEfforts,
+    });
+    this.discoveredModels = [
+      // Empty model means "do not pass --model"; Claude Code picks the
+      // configured default. Resolving the concrete name requires `claude -p`,
+      // so it is only attempted behind GIAN_ALLOW_CLAUDE_PRINT_PROBE.
+      alias(
+        CLAUDE_DEFAULT_MODEL_ID,
+        '',
+        probedDefaultModel ? `Default · ${probedDefaultModel}` : 'Default',
+        "Uses Claude Code's configured default model.",
+        true,
+      ),
+      alias('claude-alias-opus', 'opus', 'Opus', 'Most capable for complex work.'),
+      alias('claude-alias-sonnet', 'sonnet', 'Sonnet', 'Best for everyday tasks.'),
+      alias('claude-alias-haiku', 'haiku', 'Haiku', 'Fastest for quick answers.'),
+    ];
+    this.emit('debug', `[runtime] Discovered ${this.discoveredModels.length} models: ${this.discoveredModels.map((m) => m.model || '(default)').join(', ')}`);
   }
 
   async spawnSession(options: {
@@ -418,10 +469,9 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
 
         // The `system init` event reports the actual resolved model id
         // claude is running under (e.g. `claude-opus-4-7[1m]` when the user
-        // has 1M enabled). The alias-probe done at startup only knows the
-        // shorthand (`opus`) and the canonical id (`claude-opus-4-7`); CLI
-        // may auto-promote to a variant we never asked for. Capture it so
-        // tokenUsage downstream picks the right context window.
+        // has 1M enabled). Billing-safe startup capabilities intentionally
+        // don't resolve a concrete model id, so capture the real id from the
+        // actual structured turn and use it for context-window inference.
         if (eventType === 'system' && event.subtype === 'init') {
           if (typeof event.model === 'string') {
             session.detectedModelId = event.model;

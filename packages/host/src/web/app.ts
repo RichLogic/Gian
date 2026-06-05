@@ -18,9 +18,10 @@ import { hashPassword, verifyPassword } from '../auth/passwords.js';
 import { createSessionToken, getUsernameForToken, deleteToken } from '../auth/tokens.js';
 import { requireAuth, AUTH_REQUIRED } from '../auth/middleware.js';
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { isAbsolute, resolve, sep } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { resolveWithinWorkspace } from '../workspace/safe-path.js';
+import { resolveDataDir } from '../storage/paths.js';
 import {
   listLocalBranches,
   buildRemoteBranchList,
@@ -31,7 +32,7 @@ import {
   rawPreviewOversize,
 } from '../workspace/preview-headers.js';
 import { execFileSync, spawn } from 'node:child_process';
-import { buildEditorArgs, defaultOpenerArgs, runOpen, type OpenCommand } from './open-with.js';
+import { appOpenerArgs, buildEditorArgs, defaultOpenerArgs, revealArgs, terminalArgs, runOpen, type OpenCommand } from './open-with.js';
 import { randomBytes } from 'node:crypto';
 // IM layer transplanted from remote-vibe-coding (rvc). Per-platform
 // managers own their bot lifecycle + event routing; build-options.ts
@@ -668,7 +669,10 @@ export function createApp(ctx: AppContext): AppHandle {
       // the hot cache is already populated. Touch last_accessed_at so
       // future sweeps know this session is still in active use.
       try {
-        ensureEventsRebuilt(ctx.db, id);
+        // `?rebuild=1` forces a clean rebuild from JSONL even when events
+        // already exist — used to heal sessions corrupted by older append
+        // replays (duplicated turns / orphaned pending questions).
+        ensureEventsRebuilt(ctx.db, id, c.req.query('rebuild') === '1');
       } catch (err) {
         console.warn(`[gian] failed to rebuild events for session ${id}:`, err);
       }
@@ -1387,14 +1391,24 @@ export function createApp(ctx: AppContext): AppHandle {
     return null;
   }
 
-  // Per-file diff aligned with what Files Changed surfaces: includes both
-  // staged and unstaged edits on tracked files (via `diff HEAD`), and
-  // synthesizes a new-file diff for untracked paths (via `diff --no-index`
-  // against /dev/null). Bare `git diff -- <path>` would miss anything
-  // already `git add`-ed and every untracked file.
-  function computeFileDiff(cwd: string, rel: string): string {
+  // Per-file diff aligned with what Files Changed surfaces. `scope` selects
+  // which slice of the change set to render:
+  //   - 'all' (default): both staged and unstaged edits on tracked files
+  //     (via `diff HEAD`), and a synthesized new-file diff for untracked
+  //     paths (via `diff --no-index` against /dev/null). Bare `git diff --
+  //     <path>` would miss anything already `git add`-ed and every untracked
+  //     file, so 'all' uses HEAD as the base.
+  //   - 'unstaged': only working-tree-vs-index changes (`diff -- <path>`),
+  //     still synthesizing untracked files via --no-index.
+  //   - 'staged': only index-vs-HEAD changes (`diff --cached -- <path>`).
+  //     Untracked files have nothing staged, so no --no-index fallback.
+  function computeFileDiff(cwd: string, rel: string, scope: 'all' | 'unstaged' | 'staged' = 'all'): string {
+    const baseArgs =
+      scope === 'staged' ? ['diff', '--cached'] :
+      scope === 'unstaged' ? ['diff'] :
+      ['diff', 'HEAD'];
     try {
-      const out = execFileSync('git', ['-C', cwd, 'diff', 'HEAD', '--', rel], {
+      const out = execFileSync('git', ['-C', cwd, ...baseArgs, '--', rel], {
         timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
       });
       if (out) return out;
@@ -1402,6 +1416,9 @@ export function createApp(ctx: AppContext): AppHandle {
       // Not a repo, or some other git failure — nothing more we can do.
       return '';
     }
+    // 'staged' scope never synthesizes untracked diffs — an untracked file
+    // has nothing in the index. An empty result there is correct as-is.
+    if (scope === 'staged') return '';
     // Empty result so far means either tracked-but-clean or untracked. Probe
     // tracked-ness; only fall through to --no-index for untracked.
     try {
@@ -1425,6 +1442,13 @@ export function createApp(ctx: AppContext): AppHandle {
         return '';
       }
     }
+  }
+
+  // Shared parser for the `scope` query param across the working-tree change
+  // routes. Anything unrecognized falls back to 'all' so existing callers
+  // (and GitBadge) keep today's behavior.
+  function parseScope(raw: string | undefined): 'all' | 'unstaged' | 'staged' {
+    return raw === 'unstaged' || raw === 'staged' ? raw : 'all';
   }
 
   app.get('/api/working_trees', c => {
@@ -1505,6 +1529,38 @@ export function createApp(ctx: AppContext): AppHandle {
     }
   });
 
+  // Flat, recursive list of every file path in the working tree. Powers the
+  // FILES panel search box (filter-by-name across the whole tree, not just
+  // the lazily-expanded nodes). Same ignore rules as /tree (dotfiles +
+  // node_modules), capped so a pathological repo can't OOM the response.
+  app.get('/api/working_trees/:id/files', async c => {
+    const id = c.req.param('id');
+    const wt = resolveWorkingTree(id);
+    if (!wt) return c.json({ error: 'working tree not found' }, 404);
+    const MAX = 20000;
+    const out: string[] = [];
+    async function walk(absDir: string, rel: string): Promise<void> {
+      if (out.length >= MAX) return;
+      let entries;
+      try {
+        entries = await readdir(absDir, { withFileTypes: true });
+      } catch {
+        return; // unreadable dir — skip
+      }
+      for (const e of entries) {
+        if (out.length >= MAX) return;
+        if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+        const childRel = rel ? `${rel}/${e.name}` : e.name;
+        // isDirectory() on a Dirent does not follow symlinks, so symlinked
+        // dirs are skipped — that also guards against recursion loops.
+        if (e.isDirectory()) await walk(`${absDir}/${e.name}`, childRel);
+        else if (e.isFile()) out.push(childRel);
+      }
+    }
+    await walk(wt.path, '');
+    return c.json({ files: out, truncated: out.length >= MAX });
+  });
+
   app.get('/api/working_trees/:id/file', async c => {
     const id = c.req.param('id');
     const rel = c.req.query('path') ?? '';
@@ -1560,7 +1616,8 @@ export function createApp(ctx: AppContext): AppHandle {
     const resolved = await resolveWithinWorkspace(wt.path, rel);
     if (!resolved) return c.json({ error: 'path escapes working tree' }, 400);
     void resolved;
-    return c.json({ diff: computeFileDiff(wt.path, rel) });
+    const scope = parseScope(c.req.query('scope'));
+    return c.json({ diff: computeFileDiff(wt.path, rel, scope) });
   });
 
   app.get('/api/working_trees/:id/file_meta', async c => {
@@ -1596,10 +1653,21 @@ export function createApp(ctx: AppContext): AppHandle {
 
   // git status --porcelain -z, parsed into the same shape Files Changed expects.
   // X (index) / Y (worktree) two-letter codes mapped to a single kind.
+  //
+  // `scope` ∈ {all (default) | unstaged | staged} selects which slice:
+  //   - all      = every changed file; counts via `git diff --numstat HEAD`
+  //                (staged+unstaged combined). This is the original behavior;
+  //                the default (no scope query) is byte-for-byte unchanged and
+  //                GitBadge + FILE-004 tests depend on it.
+  //   - unstaged = files dirty in the worktree-vs-index (Y column) plus
+  //                untracked; counts via `git diff --numstat` (no HEAD).
+  //   - staged   = files staged in index-vs-HEAD (X column); counts via
+  //                `git diff --numstat --cached`.
   app.get('/api/working_trees/:id/changed', c => {
     const id = c.req.param('id');
     const wt = resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
+    const scope = parseScope(c.req.query('scope'));
 
     let raw = '';
     try {
@@ -1622,20 +1690,44 @@ export function createApp(ctx: AppContext): AppHandle {
       const path = rec.slice(3);
       const isRename = x === 'R' || y === 'R' || x === 'C' || y === 'C';
       if (isRename) i += 1; // skip the old-name record that follows
-      const code = (x !== ' ' && x !== '?' ? x : y);
+      // Bucket by porcelain column. X (index) dirty → there's a staged
+      // change; Y (worktree) dirty, or `??` untracked → there's an unstaged
+      // change. A file can be in both buckets (e.g. partially staged).
+      const untracked = x === '?';
+      const hasStaged = x !== ' ' && x !== '?';
+      const hasUnstaged = y !== ' ' || untracked;
+      if (scope === 'staged' && !hasStaged) continue;
+      if (scope === 'unstaged' && !hasUnstaged) continue;
+      // For unstaged/staged scope, derive kind from the relevant column so a
+      // partially-staged file reports the right kind per slice. For 'all',
+      // keep the original X-then-Y precedence so output is unchanged.
+      const code =
+        scope === 'unstaged' ? (untracked ? '?' : y) :
+        scope === 'staged' ? x :
+        (x !== ' ' && x !== '?' ? x : y);
       let kind: 'create' | 'update' | 'delete' | 'rename';
       if (isRename) kind = 'rename';
       else if (code === 'A' || code === '?') kind = 'create';
       else if (code === 'D') kind = 'delete';
       else kind = 'update';
-      const staged = x !== ' ' && x !== '?';
+      // `staged` is the per-file flag: in 'staged' scope every entry is staged;
+      // in 'unstaged' scope every entry is unstaged; in 'all' scope it reflects
+      // the X column (original behavior).
+      const staged = scope === 'staged' ? true : scope === 'unstaged' ? false : hasStaged;
       out.push({ path, kind, staged, added: 0, removed: 0 });
     }
 
-    // Per-file added/removed line counts via `git diff --numstat HEAD`.
+    // Per-file added/removed line counts. The numstat base mirrors `scope`:
+    //   all      → `git diff --numstat HEAD`     (staged + unstaged)
+    //   unstaged → `git diff --numstat`          (worktree vs index)
+    //   staged   → `git diff --numstat --cached` (index vs HEAD)
     // Cheap enough for a typical working tree; bail silently on error.
+    const numstatArgs =
+      scope === 'staged' ? ['diff', '--numstat', '--cached'] :
+      scope === 'unstaged' ? ['diff', '--numstat'] :
+      ['diff', '--numstat', 'HEAD'];
     try {
-      const numstat = execFileSync('git', ['-C', wt.path, 'diff', '--numstat', 'HEAD'], {
+      const numstat = execFileSync('git', ['-C', wt.path, ...numstatArgs], {
         timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
       });
       const stats = new Map<string, { added: number; removed: number }>();
@@ -1656,9 +1748,11 @@ export function createApp(ctx: AppContext): AppHandle {
       // numstat optional
     }
 
-    // Untracked files (`??`) don't appear in `git diff --numstat HEAD`. Count
+    // Untracked files (`??`) don't appear in any `git diff --numstat`. Count
     // their lines from disk so they contribute to +N totals. Skip files larger
-    // than 1 MiB or with a null byte in the first 8 KiB (binary).
+    // than 1 MiB or with a null byte in the first 8 KiB (binary). Untracked
+    // files only surface in 'all' and 'unstaged' scopes (never 'staged'), and
+    // are always staged=false there, so the guard below catches them.
     for (const e of out) {
       if (e.kind !== 'create' || e.staged || e.added !== 0) continue;
       try {
@@ -1681,6 +1775,151 @@ export function createApp(ctx: AppContext): AppHandle {
     return c.json(out);
   });
 
+  // Installed applications for the Sheet's "Open with…" menu. macOS-only:
+  // scans the standard .app bundle locations (LaunchServices isn't reachable
+  // from Node without a native binding, and a directory scan is good enough —
+  // it lists apps, the user picks one, `open -a` resolves it). Non-mac
+  // platforms return an empty list so the menu degrades to default + editors.
+  app.get('/api/apps', async c => {
+    if (process.platform !== 'darwin') return c.json({ apps: [] });
+    const home = process.env.HOME;
+    const dirs = [
+      '/Applications',
+      '/Applications/Utilities',
+      '/System/Applications',
+      '/System/Applications/Utilities',
+      ...(home ? [`${home}/Applications`] : []),
+    ];
+    const names = new Set<string>();
+    for (const dir of dirs) {
+      try {
+        const entries = await readdir(dir, { withFileTypes: true });
+        for (const e of entries) {
+          // Skip hidden bundles like `.MTEDR` / `.SafeNetworking` — noise in a
+          // user-facing "Open with…" menu.
+          if (e.name.endsWith('.app') && !e.name.startsWith('.')) {
+            names.add(e.name.slice(0, -4));
+          }
+        }
+      } catch {
+        // dir missing on this machine — skip
+      }
+    }
+    return c.json({ apps: Array.from(names).sort((a, b) => a.localeCompare(b)) });
+  });
+
+  // Serve a PNG of a macOS app's icon for the "Open with…" menu + Settings.
+  // macOS-only. The app's `.icns` is converted once with `sips` and cached
+  // under <dataDir>/app-icons/<name>.png. Any failure (weird bundle, missing
+  // icon, sips error) degrades to 404 so the web side falls back to a glyph —
+  // this route must never 500 on a malformed app bundle.
+  app.get('/api/apps/icon', c => {
+    if (process.platform !== 'darwin') return c.json({ error: 'macOS only' }, 404);
+    try {
+      const name = c.req.query('name');
+      if (!name) return c.json({ error: 'name required' }, 400);
+      // It's a display name like "Visual Studio Code" — reject anything that
+      // could escape the app dirs or the cache dir.
+      if (name.includes('/') || name.includes('..') || name.includes('\0')) {
+        return c.json({ error: 'invalid name' }, 400);
+      }
+
+      const cacheDir = join(resolveDataDir(), 'app-icons');
+      mkdirSync(cacheDir, { recursive: true });
+      const cacheFile = join(cacheDir, `${name}.png`);
+      // Defence in depth: the resolved cache path must stay inside cacheDir.
+      if (resolve(cacheFile) !== resolve(cacheDir, `${name}.png`) ||
+          !resolve(cacheFile).startsWith(resolve(cacheDir) + sep)) {
+        return c.json({ error: 'invalid name' }, 400);
+      }
+
+      if (existsSync(cacheFile)) {
+        const bytes = readFileSync(cacheFile);
+        return new Response(new Uint8Array(bytes), {
+          status: 200,
+          headers: {
+            'Content-Type': 'image/png',
+            'Cache-Control': 'public, max-age=86400',
+          },
+        });
+      }
+
+      // Locate <dir>/<name>.app across the same dirs GET /api/apps scans.
+      const home = process.env.HOME;
+      const dirs = [
+        '/Applications',
+        '/Applications/Utilities',
+        '/System/Applications',
+        '/System/Applications/Utilities',
+        // Finder lives here (not a normal /Applications app) — needed so the
+        // "Reveal in Finder" menu item can show the Finder icon.
+        '/System/Library/CoreServices',
+        ...(home ? [`${home}/Applications`] : []),
+      ];
+      let appPath: string | null = null;
+      for (const dir of dirs) {
+        const candidate = join(dir, `${name}.app`);
+        if (existsSync(candidate)) {
+          appPath = candidate;
+          break;
+        }
+      }
+      if (!appPath) return c.json({ error: 'app not found' }, 404);
+
+      // Resolve the .icns: prefer the bundle's declared CFBundleIconFile,
+      // fall back to the first *.icns in Contents/Resources.
+      const resourcesDir = join(appPath, 'Contents/Resources');
+      let icnsPath: string | null = null;
+      try {
+        let icon = execFileSync(
+          'defaults',
+          ['read', join(appPath, 'Contents/Info'), 'CFBundleIconFile'],
+          { encoding: 'utf8' },
+        ).trim();
+        if (icon && !icon.endsWith('.icns')) icon = `${icon}.icns`;
+        if (icon) {
+          const declared = join(resourcesDir, icon);
+          if (existsSync(declared)) icnsPath = declared;
+        }
+      } catch {
+        // `defaults` failed (no key / bad plist) — fall through to readdir.
+      }
+      if (!icnsPath) {
+        try {
+          const first = readdirSync(resourcesDir).find(f => f.endsWith('.icns'));
+          if (first) icnsPath = join(resourcesDir, first);
+        } catch {
+          // Resources dir missing/unreadable — no icon.
+        }
+      }
+      if (!icnsPath) return c.json({ error: 'icon not found' }, 404);
+
+      // Convert to a 64px PNG into the cache. sips throwing → 404.
+      try {
+        execFileSync(
+          'sips',
+          ['-s', 'format', 'png', '-Z', '64', icnsPath, '--out', cacheFile],
+          { stdio: 'ignore', timeout: 5000 },
+        );
+      } catch {
+        return c.json({ error: 'convert failed' }, 404);
+      }
+
+      if (!existsSync(cacheFile)) return c.json({ error: 'convert failed' }, 404);
+      const bytes = readFileSync(cacheFile);
+      return new Response(new Uint8Array(bytes), {
+        status: 200,
+        headers: {
+          'Content-Type': 'image/png',
+          'Cache-Control': 'public, max-age=86400',
+        },
+      });
+    } catch {
+      // Anything unexpected (weird bundle, fs error) → 404, never 500.
+      return c.json({ error: 'icon unavailable' }, 404);
+    }
+  });
+
   // Reveal a working tree (main tree or worktree) in macOS Finder.
   // :id accepts `ws:<workspace-id>` or `wt:<session-id>`, same shape used by
   // the rest of the /api/working_trees/:id endpoints.
@@ -1696,6 +1935,71 @@ export function createApp(ctx: AppContext): AppHandle {
     }
   });
 
+  // Stage a single path into the index (`git add -- <path>`). Works for both
+  // tracked modifications and brand-new untracked files. Index-only — never
+  // touches working-tree contents. Path is bounded to the working tree the
+  // same way /raw and /open are.
+  app.post('/api/working_trees/:id/stage', async c => {
+    const id = c.req.param('id');
+    const wt = resolveWorkingTree(id);
+    if (!wt) return c.json({ error: 'working tree not found' }, 404);
+
+    let body: { path?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid json body' }, 400);
+    }
+    if (!body.path || typeof body.path !== 'string') {
+      return c.json({ error: 'path required' }, 400);
+    }
+    const absPath = await resolveWithinWorkspace(wt.path, body.path);
+    if (!absPath) {
+      return c.json({ error: 'path escapes working tree' }, 400);
+    }
+
+    try {
+      execFileSync('git', ['-C', wt.path, 'add', '--', body.path], {
+        timeout: 5000, stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: String(err) }, 500);
+    }
+  });
+
+  // Unstage a single path from the index (`git reset -q HEAD -- <path>`).
+  // Index-only — leaves the working-tree contents untouched, so it's the
+  // pure inverse of /stage. Same path-boundary check.
+  app.post('/api/working_trees/:id/unstage', async c => {
+    const id = c.req.param('id');
+    const wt = resolveWorkingTree(id);
+    if (!wt) return c.json({ error: 'working tree not found' }, 404);
+
+    let body: { path?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid json body' }, 400);
+    }
+    if (!body.path || typeof body.path !== 'string') {
+      return c.json({ error: 'path required' }, 400);
+    }
+    const absPath = await resolveWithinWorkspace(wt.path, body.path);
+    if (!absPath) {
+      return c.json({ error: 'path escapes working tree' }, 400);
+    }
+
+    try {
+      execFileSync('git', ['-C', wt.path, 'reset', '-q', 'HEAD', '--', body.path], {
+        timeout: 5000, stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: String(err) }, 500);
+    }
+  });
+
   // Open a file via the system default opener or a configured external
   // editor. Path resolution mirrors /raw and /reveal — id must be a known
   // ws:/wt: handle and the relative path is bounded to the working tree.
@@ -1704,7 +2008,7 @@ export function createApp(ctx: AppContext): AppHandle {
     const wt = resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
 
-    let body: { path?: string; editor_id?: string };
+    let body: { path?: string; editor_id?: string; app?: string; builtin?: string };
     try {
       body = await c.req.json();
     } catch {
@@ -1731,6 +2035,51 @@ export function createApp(ctx: AppContext): AppHandle {
       const editor = cfg.external_editors.find(e => e.id === body.editor_id);
       if (!editor) return c.json({ error: 'editor not found' }, 404);
       cmd = buildEditorArgs(editor, absPath);
+    } else if (body.app) {
+      // "Open with…" → a named macOS application (LaunchServices). The app
+      // list itself comes from GET /api/apps, so this is macOS-only.
+      if (process.platform !== 'darwin') {
+        return c.json({ error: 'open-with-app is macOS only' }, 400);
+      }
+      cmd = appOpenerArgs(body.app, absPath);
+    } else if (body.builtin) {
+      // Fixed system openers from the "Open with…" menu. `default` works on
+      // every platform; `finder` (reveal) and `terminal` (open Terminal at the
+      // file's folder) are macOS-only. ('browser' is handled client-side.)
+      if (body.builtin === 'default') {
+        let defaultCmd: OpenCommand;
+        try {
+          defaultCmd = defaultOpenerArgs(process.platform, absPath);
+        } catch (err) {
+          return c.json({ error: String((err as Error).message) }, 500);
+        }
+        // Default opener is the one place where "no handler" is a real, common
+        // outcome the web wants to fall back on. On macOS, `open <file>` exits
+        // non-zero ("No application knows how to open …") when nothing claims
+        // the type — so run it AWAITED here and report 422 on failure instead of
+        // returning a fire-and-forget 200. Other platforms keep the existing
+        // detached runOpen path below.
+        if (process.platform === 'darwin') {
+          try {
+            execFileSync(defaultCmd.command, defaultCmd.argv, {
+              stdio: 'ignore',
+              timeout: 5000,
+            });
+          } catch {
+            return c.json({ error: 'no-app' }, 422);
+          }
+          return c.json({ ok: true });
+        }
+        cmd = defaultCmd;
+      } else if (process.platform !== 'darwin') {
+        return c.json({ error: 'this opener is macOS only' }, 400);
+      } else if (body.builtin === 'finder') {
+        cmd = revealArgs(absPath);
+      } else if (body.builtin === 'terminal') {
+        cmd = terminalArgs(dirname(absPath));
+      } else {
+        return c.json({ error: 'unknown builtin opener' }, 400);
+      }
     } else {
       try {
         cmd = defaultOpenerArgs(process.platform, absPath);

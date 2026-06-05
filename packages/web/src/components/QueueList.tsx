@@ -1,3 +1,4 @@
+import { useT } from '../i18n/index.js';
 import type { QueueEntry } from '../types.js';
 
 export function QueueList({
@@ -13,6 +14,7 @@ export function QueueList({
   onClear: () => void;
   onSendNow?: () => void;
 }) {
+  const t = useT();
   if (queue.length === 0) return null;
 
   function moveUp(index: number) {
@@ -37,18 +39,18 @@ export function QueueList({
     <div className="queue-drawer">
       <div className="qd-head">
         <span className="qd-title">
-          Queued
+          {t('queue.title')}
           <span className="qd-count">{queue.length}</span>
         </span>
-        <span className="qd-sub">· sent serially after current turn</span>
+        <span className="qd-sub">· {t('queue.subtitle')}</span>
         <div className="qd-actions">
           {onSendNow != null ? (
             <button className="btn xs secondary" onClick={onSendNow}>
-              Send now
+              {t('queue.sendNow')}
             </button>
           ) : null}
           <button className="btn xs ghost" onClick={onClear}>
-            Clear
+            {t('common.clear')}
           </button>
         </div>
       </div>
@@ -62,8 +64,8 @@ export function QueueList({
                 className="btn xs ghost icon"
                 onClick={() => moveUp(i)}
                 disabled={i === 0}
-                title="Move up"
-                aria-label="Move up"
+                title={t('queue.moveUp')}
+                aria-label={t('queue.moveUp')}
               >
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M8 12V4M4 7l4-4 4 4" />
@@ -73,8 +75,8 @@ export function QueueList({
                 className="btn xs ghost icon"
                 onClick={() => moveDown(i)}
                 disabled={i === queue.length - 1}
-                title="Move down"
-                aria-label="Move down"
+                title={t('queue.moveDown')}
+                aria-label={t('queue.moveDown')}
               >
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M8 4v8M4 9l4 4 4-4" />
@@ -83,8 +85,8 @@ export function QueueList({
               <button
                 className="btn xs ghost icon"
                 onClick={() => onRemove(entry.id)}
-                title="Remove"
-                aria-label="Remove"
+                title={t('queue.remove')}
+                aria-label={t('queue.remove')}
               >
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
                   <path d="M4 4l8 8M12 4l-8 8" />

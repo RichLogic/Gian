@@ -70,6 +70,7 @@ export class NativeJsonlWatcher {
     if (this.sessions.has(sessionId)) return;
 
     const initialOffset = existsSync(filePath) ? safeSize(filePath) : 0;
+    const latestTurn = this.latestTurn(sessionId);
     const state: WatchedSession = {
       sessionId,
       filePath,
@@ -80,8 +81,8 @@ export class NativeJsonlWatcher {
       paused: false,
       debounceTimer: null,
       lineBuffer: '',
-      currentTurnId: null,
-      currentTurnNumber: this.lastTurnNumber(sessionId),
+      currentTurnId: latestTurn?.id ?? null,
+      currentTurnNumber: latestTurn?.turnNumber ?? 0,
     };
     this.sessions.set(sessionId, state);
     this.attachWatcher(state);
@@ -279,13 +280,41 @@ export class NativeJsonlWatcher {
       ts: Date.now(),
       data,
     });
+    if (type === 'approval_requested') {
+      this.persistSessionStatus(state.sessionId, 'pending');
+    } else if (type === 'approval_resolved') {
+      this.persistSessionStatus(state.sessionId, 'running');
+    }
   }
 
   private lastTurnNumber(sessionId: string): number {
+    return this.latestTurn(sessionId)?.turnNumber ?? 0;
+  }
+
+  private latestTurn(sessionId: string): { id: string; turnNumber: number } | null {
     const row = this.db
-      .prepare('SELECT MAX(turn_number) AS n FROM turns WHERE session_id = ?')
-      .get(sessionId) as { n: number | null } | undefined;
-    return row?.n ?? 0;
+      .prepare(
+        `SELECT id, turn_number
+         FROM turns
+         WHERE session_id = ?
+         ORDER BY turn_number DESC
+         LIMIT 1`,
+      )
+      .get(sessionId) as { id: string; turn_number: number } | undefined;
+    if (!row) return null;
+    return { id: row.id, turnNumber: row.turn_number };
+  }
+
+  private persistSessionStatus(sessionId: string, status: 'pending' | 'running'): void {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
+      .run(status, now, sessionId);
+    if (result.changes <= 0) return;
+    this.broadcaster.broadcast({
+      type: 'session:updated',
+      session: { id: sessionId, status, updated_at: now },
+    });
   }
 }
 
