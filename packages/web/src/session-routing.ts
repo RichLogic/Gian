@@ -9,15 +9,17 @@ export interface CreatedSessionFirstMessagePlan {
 
 /**
  * Decide how the App should dispatch the first message after session:create.
- * Claude defaults to TTY so first-turn text enters the interactive CLI path
- * instead of `message:send`/`claude -p`.
+ * Claude pinned to `tty` (the default) switches to TTY so first-turn text
+ * enters the interactive CLI path instead of `message:send`/`claude -p`.
+ * Claude pinned to `structured` (and Codex) stay structured.
  */
 export function planCreatedSessionFirstMessage(
   executor: Executor,
   pendingMessage: string | null | undefined,
+  claudeChatSurface: ClaudeChatSurface = 'tty',
 ): CreatedSessionFirstMessagePlan {
   const text = pendingMessage?.trim() || null;
-  if (executor === 'claude') {
+  if (executor === 'claude' && claudeChatSurface === 'tty') {
     return {
       switchToTty: true,
       ttyText: text,
@@ -25,6 +27,7 @@ export function planCreatedSessionFirstMessage(
       seedOptimisticEcho: false,
     };
   }
+  // Codex, or Claude pinned to structured (`claude -p`): stay structured.
   return {
     switchToTty: false,
     ttyText: null,
@@ -34,6 +37,79 @@ export function planCreatedSessionFirstMessage(
 }
 
 export type SessionSurface = 'chat' | 'beta' | 'cli';
+
+// ---------------------------------------------------------------------------
+// Chat-view preferences (Settings → 聊天视图). Pure helpers that decide which
+// runtime tabs render and which surface a session opens on, given the global
+// config. See docs/superpowers/specs/2026-06-06-chat-view-settings-design.md.
+// ---------------------------------------------------------------------------
+
+export type ClaudeChatSurface = 'structured' | 'tty';
+
+export interface ChatViewConfig {
+  claude_chat_surface: ClaudeChatSurface;
+  claude_chat_cli: boolean;
+  codex_chat_cli: boolean;
+}
+
+export const DEFAULT_CHAT_VIEW: ChatViewConfig = {
+  claude_chat_surface: 'tty',
+  claude_chat_cli: true,
+  codex_chat_cli: false,
+};
+
+/** Normalize a (possibly partial / null) SystemConfig into concrete chat-view
+ *  prefs, applying the same defaults loadConfig uses on the host. */
+export function resolveChatView(
+  cfg: Partial<ChatViewConfig> | null | undefined,
+): ChatViewConfig {
+  return {
+    claude_chat_surface: cfg?.claude_chat_surface ?? DEFAULT_CHAT_VIEW.claude_chat_surface,
+    claude_chat_cli: cfg?.claude_chat_cli ?? DEFAULT_CHAT_VIEW.claude_chat_cli,
+    codex_chat_cli: cfg?.codex_chat_cli ?? DEFAULT_CHAT_VIEW.codex_chat_cli,
+  };
+}
+
+/** CLI tab default that re-seeds whenever the user flips the Claude chat
+ *  surface: structured → off, tty → on. */
+export function reseedClaudeCli(surface: ClaudeChatSurface): boolean {
+  return surface === 'tty';
+}
+
+/** The runtime a given surface implies. 'chat' is structured; 'beta'/'cli'
+ *  are both TTY surfaces. */
+export function runtimeForSurface(surface: SessionSurface): RuntimeMode {
+  return surface === 'chat' ? 'structured' : 'tty';
+}
+
+/** The primary chat-area surface for an executor under the given prefs.
+ *  Codex chat is always structured ('chat'); Claude follows the config —
+ *  'beta' when tty is selected, else 'chat'. CLI is a separate optional tab,
+ *  never the primary chat surface here. */
+export function runtimeChatSurface(
+  executor: Executor,
+  cfg: ChatViewConfig,
+): 'chat' | 'beta' {
+  if (executor === 'claude' && cfg.claude_chat_surface === 'tty') return 'beta';
+  return 'chat';
+}
+
+export interface RuntimeTab {
+  surface: SessionSurface;
+  /** i18n label kind: 'chat' (the primary surface) or 'cli'. */
+  label: 'chat' | 'cli';
+}
+
+/** Tabs to render in the chat-area tablist for an executor under prefs.
+ *  Always a primary chat tab; a CLI tab is appended when enabled for that
+ *  executor. When the result has a single entry the caller hides the tab
+ *  bar entirely. */
+export function runtimeTabs(executor: Executor, cfg: ChatViewConfig): RuntimeTab[] {
+  const tabs: RuntimeTab[] = [{ surface: runtimeChatSurface(executor, cfg), label: 'chat' }];
+  const showCli = executor === 'claude' ? cfg.claude_chat_cli : cfg.codex_chat_cli;
+  if (showCli) tabs.push({ surface: 'cli', label: 'cli' });
+  return tabs;
+}
 
 export interface ApprovalResponseDispatchInput {
   executor: Executor;

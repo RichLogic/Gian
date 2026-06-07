@@ -133,5 +133,8 @@ export function loadConfig(db: Db): SystemConfig {
     auth_username: map.get('auth_username') ?? '',
     external_editors: externalEditors,
     open_apps: openApps,
+    claude_chat_surface: map.get('claude_chat_surface') === 'structured' ? 'structured' : 'tty',
+    claude_chat_cli: map.has('claude_chat_cli') ? map.get('claude_chat_cli') === 'true' : true,
+    codex_chat_cli: map.get('codex_chat_cli') === 'true',
   };
 }

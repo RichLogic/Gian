@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import type { CcModelCapabilities, CodexModelCapabilities, ExternalEditor, OpenFileCategory, SystemConfig } from '@gian/shared';
 import { THEME_DEFAULT_ACCENT } from '@gian/shared';
 import { loadProxyModels, saveSettings } from '../api.js';
+import { reseedClaudeCli, type ClaudeChatSurface } from '../session-routing.js';
+import { confirm } from '../feedback.js';
 import { useMinimapEnabled, setMinimapEnabled } from '../display-prefs.js';
 import { AppIcon } from './AppIcon.js';
 import { DEFAULT_OPEN_TARGET } from './Sheet.js';
@@ -86,6 +88,27 @@ function SettingsBodyInner({
   function patch(partial: Partial<SystemConfig>) {
     void saveSettings(partial).then(cfg => { if (cfg) onChange(cfg); });
   }
+
+  // Chat-view prefs restructure the runtime tablist for every session, applied
+  // with a hard reload (rather than reactively propagating into all mounted
+  // session views). Confirm first so the reload isn't abrupt; on cancel nothing
+  // is persisted and the control stays at its current value (it's config-driven).
+  async function patchChatView(partial: Partial<SystemConfig>) {
+    const ok = await confirm({
+      title: t('settings.chatview.reload.title'),
+      message: t('settings.chatview.reload.message'),
+      confirmLabel: t('settings.chatview.reload.confirm'),
+      cancelLabel: t('common.cancel'),
+    });
+    if (!ok) return;
+    const cfg = await saveSettings(partial);
+    if (cfg) onChange(cfg);
+    try { window.location.reload(); } catch { /* jsdom / non-browser */ }
+  }
+
+  const claudeSurface: ClaudeChatSurface = config.claude_chat_surface ?? 'tty';
+  const claudeCli = config.claude_chat_cli ?? true;
+  const codexCli = config.codex_chat_cli ?? false;
 
   function patchEditors(next: ExternalEditor[]) {
     setEditors(next);
@@ -234,6 +257,52 @@ function SettingsBodyInner({
           onSetModel={v => patch({ default_codex_model: v })}
           onSetEffort={v => patch({ default_codex_effort: v })}
         />
+      </div>
+
+      <div className="settings-eyebrow">{t('settings.section.chatview')}</div>
+      <div className="settings-section">
+        <p className="settings-section-help">{t('settings.chatview.help')}</p>
+        <dl className="kv-grid">
+          <dt>{t('settings.chatview.claudeSurface')}</dt>
+          <dd>
+            <div className="segm">
+              {([
+                ['structured', 'settings.chatview.claudep'],
+                ['tty', 'settings.chatview.tty'],
+              ] as const).map(([val, labelKey]) => (
+                <button
+                  key={val}
+                  className={`segm-item ${claudeSurface === val ? 'active' : ''}`}
+                  onClick={() => { void patchChatView({ claude_chat_surface: val, claude_chat_cli: reseedClaudeCli(val) }); }}
+                >
+                  {t(labelKey)}
+                </button>
+              ))}
+            </div>
+          </dd>
+          <dt>{t('settings.chatview.claudeCli')}</dt>
+          <dd>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={claudeCli}
+                onChange={e => { void patchChatView({ claude_chat_cli: e.target.checked }); }}
+              />
+              <span>{t('settings.chatview.claudeCli.hint')}</span>
+            </label>
+          </dd>
+          <dt>{t('settings.chatview.codexCli')}</dt>
+          <dd>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={codexCli}
+                onChange={e => { void patchChatView({ codex_chat_cli: e.target.checked }); }}
+              />
+              <span>{t('settings.chatview.codexCli.hint')}</span>
+            </label>
+          </dd>
+        </dl>
       </div>
 
       <div className="settings-eyebrow">{t('settings.section.notifications')}</div>

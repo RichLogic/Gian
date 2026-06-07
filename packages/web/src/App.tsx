@@ -49,7 +49,7 @@ import { FilesView } from './views/FilesView.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import type { SystemConfig } from '@gian/shared';
 import type { QueueEntry, TokenUsage, TranscriptItem } from './types.js';
-import { planBetaComposerSend, planCreatedSessionFirstMessage } from './session-routing.js';
+import { planBetaComposerSend, planCreatedSessionFirstMessage, resolveChatView } from './session-routing.js';
 
 export function App() {
   // The token getter runs every reconnect. With Auth dropped in Phase 1, this
@@ -231,7 +231,11 @@ export function App() {
           setForkingSession(false);
           const pendingMsg = pendingFirstMessageRef.current;
           pendingFirstMessageRef.current = null;
-          const firstMessagePlan = planCreatedSessionFirstMessage(msg.session.executor, pendingMsg);
+          const firstMessagePlan = planCreatedSessionFirstMessage(
+            msg.session.executor,
+            pendingMsg,
+            resolveChatView(systemConfigRef.current).claude_chat_surface,
+          );
           if (firstMessagePlan.switchToTty) {
             setItemsBySession(prev => ({ ...prev, [msg.session.id]: [] }));
             setPendingBySession(p => ({ ...p, [msg.session.id]: false }));
@@ -405,6 +409,10 @@ export function App() {
   // We need the latest sessions list when handling events (to look up executor).
   const sessionsRef = useRef<Session[]>([]);
   useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
+  // Latest config for the create handler — it reads the Claude chat surface to
+  // decide whether a new Claude session switches to TTY or stays structured.
+  const systemConfigRef = useRef<SystemConfig | null>(systemConfig);
+  useEffect(() => { systemConfigRef.current = systemConfig; }, [systemConfig]);
   const archivedSessionsRef = useRef<Session[]>([]);
   useEffect(() => { archivedSessionsRef.current = archivedSessions; }, [archivedSessions]);
   // Latest active session id for the inbox's "don't ping the session you're
@@ -1091,6 +1099,7 @@ export function App() {
               activeSession={activeSession}
               activeWorkspace={activeWorkspace}
               activeSessionId={activeSessionId}
+              chatView={resolveChatView(systemConfig)}
               itemsBySession={itemsBySession}
               pendingBySession={pendingBySession}
               ttyLockBySession={ttyLockBySession}

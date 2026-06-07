@@ -268,4 +268,15 @@ export interface SystemConfig {
    *  Optional so older configs / test fixtures stay valid; loadConfig always
    *  returns at least `{}`. */
   open_apps?: OpenAppPrefs;
+  /** Claude chat main-area surface: 'structured' (`claude -p` / Agent SDK) or
+   *  'tty' (interactive Claude). The non-selected surface is not shown as a
+   *  tab. Optional so older configs / fixtures stay valid; loadConfig defaults
+   *  to 'tty'. */
+  claude_chat_surface?: 'structured' | 'tty';
+  /** Whether Claude sessions show a CLI tab alongside the chat surface.
+   *  loadConfig defaults to true (matches the 'tty' surface default). */
+  claude_chat_cli?: boolean;
+  /** Whether Codex sessions show a CLI tab alongside the chat surface.
+   *  loadConfig defaults to false. */
+  codex_chat_cli?: boolean;
 }

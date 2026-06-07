@@ -17,7 +17,14 @@ import { TranscriptMinimap } from '../transcript/TranscriptMinimap.js';
 import { ApprovalCard } from '../transcript/items.js';
 import type { ApprovalActionContext, ApprovalItem, QueueEntry, TokenUsage, TranscriptItem } from '../types.js';
 import type { GianWs } from '../ws.js';
-import { planApprovalResponseDispatch } from '../session-routing.js';
+import {
+  planApprovalResponseDispatch,
+  runtimeTabs,
+  runtimeChatSurface,
+  runtimeForSurface,
+  type ChatViewConfig,
+  type SessionSurface,
+} from '../session-routing.js';
 
 // ─── V2 inline icons (copied verbatim from design/gian-design-v2/js/data.jsx) ─
 function SvgIcon({ d, size = 16, stroke = 1.6 }: { d: string; size?: number; stroke?: number }) {
@@ -121,6 +128,8 @@ export interface CodingViewProps {
   activeSession: Session | null;
   activeWorkspace: Workspace | null;
   activeSessionId: string | null;
+  /** Resolved chat-view prefs (which runtime tabs to show). From SystemConfig. */
+  chatView: ChatViewConfig;
   itemsBySession: Record<string, TranscriptItem[]>;
   pendingBySession: Record<string, boolean>;
   ttyLockBySession: Record<string, { owner: boolean; reason?: string }>;
@@ -276,6 +285,7 @@ export function CodingView(p: CodingViewProps) {
       ) : p.activeSession ? (
         <SessionMain
           session={p.activeSession}
+          chatView={p.chatView}
           workspace={p.activeWorkspace}
           items={p.itemsBySession[p.activeSession.id] ?? []}
           pending={p.pendingBySession[p.activeSession.id] ?? false}
@@ -1251,6 +1261,7 @@ function NewSessionView({
 
 function SessionMain({
   session,
+  chatView,
   workspace,
   items,
   pending,
@@ -1291,6 +1302,7 @@ function SessionMain({
   onToggleRemoteControl,
 }: {
   session: Session;
+  chatView: ChatViewConfig;
   workspace: Workspace | null;
   items: TranscriptItem[];
   pending: boolean;
@@ -1353,32 +1365,54 @@ function SessionMain({
   const t = useT();
   const isWorktree = session.branch !== null;
   const terminal = session.worktree_outcome !== null;
-  type SessionSurface = 'chat' | 'beta' | 'cli';
-  const defaultSurface = session.runtime_mode === 'tty'
-    ? (session.executor === 'claude' ? 'beta' : 'cli')
-    : 'chat';
-  const [surface, setSurface] = useState<SessionSurface>(defaultSurface);
+  const visibleTabs = runtimeTabs(session.executor, chatView);
+  const tabKey = visibleTabs.map(tb => tb.surface).join(',');
+
+  // The surface a session opens on. Claude follows the configured chat surface
+  // (structured→'chat', tty→'beta'); Codex stays runtime-driven (CLI only when
+  // both enabled and already in TTY).
+  const defaultSurfaceFor = (): SessionSurface => {
+    if (session.executor === 'claude') return runtimeChatSurface('claude', chatView);
+    return session.runtime_mode === 'tty' && chatView.codex_chat_cli ? 'cli' : 'chat';
+  };
+  const [surface, setSurface] = useState<SessionSurface>(defaultSurfaceFor);
   const surfaceSessionRef = useRef(session.id);
   const lastClaimRef = useRef('');
+  const alignedSessionRef = useRef('');
 
+  // Keep `surface` within the currently-visible tabs: reset to the primary
+  // chat surface on session change, or when the active surface is no longer
+  // offered (config changed via reload, or runtime flipped underneath us).
   useEffect(() => {
     if (surfaceSessionRef.current !== session.id) {
       surfaceSessionRef.current = session.id;
-      setSurface(session.runtime_mode === 'tty'
-        ? (session.executor === 'claude' ? 'beta' : 'cli')
-        : 'chat');
+      setSurface(defaultSurfaceFor());
       return;
     }
-    if (
-      session.runtime_mode === 'structured'
-      && surface !== 'chat'
-      && !(session.executor === 'claude' && surface === 'beta')
-    ) {
-      setSurface('chat');
-    } else if (session.runtime_mode === 'tty' && surface === 'chat') {
-      setSurface(session.executor === 'claude' ? 'beta' : 'cli');
+    if (!tabKey.split(',').includes(surface)) {
+      setSurface(defaultSurfaceFor());
     }
-  }, [session.id, session.executor, session.runtime_mode, surface]);
+    // defaultSurfaceFor reads the latest session / chatView via closure.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.id, session.executor, session.runtime_mode, surface, tabKey]);
+
+  // Honor the global Claude chat-surface setting for already-existing sessions:
+  // once per open, when idle, align the stored runtime to the configured chat
+  // surface via the same switch-runtime path a tab click uses. Claude only —
+  // Codex's CLI toggle never forces a runtime change. Shared session id means
+  // the switch keeps history (`--resume`). After this one-shot, tab clicks own
+  // runtime switching, so a later force-recover isn't fought.
+  useEffect(() => {
+    if (session.executor !== 'claude') return;
+    if (alignedSessionRef.current === session.id) return;
+    if (pending || terminal) return;
+    alignedSessionRef.current = session.id;
+    const want = runtimeChatSurface('claude', chatView);
+    const wantRuntime = runtimeForSurface(want);
+    if (session.runtime_mode !== wantRuntime) {
+      onSwitchRuntime(wantRuntime, want === 'beta' ? 'beta' : undefined);
+    }
+  }, [session.id, session.executor, session.runtime_mode, pending, terminal, chatView.claude_chat_surface, onSwitchRuntime]);
 
   useEffect(() => {
     if (
@@ -1413,11 +1447,23 @@ function SessionMain({
     && (surface === 'beta' || surface === 'cli')
     && ttyLock?.owner === false;
   const ttySupported = session.executor === 'claude' || session.executor === 'codex';
-  const betaSupported = session.executor === 'claude';
   const canSwitchClaudeTtySurface = session.executor === 'claude' && session.runtime_mode === 'tty';
   const runtimeSwitchDisabled = pending || terminal;
   const betaDisabled = terminal || (pending && !canSwitchClaudeTtySurface);
   const cliDisabled = terminal || !ttySupported || (pending && !canSwitchClaudeTtySurface);
+  const handleSelectSurface = (next: SessionSurface) => {
+    setSurface(next);
+    if (next === 'chat') {
+      if (session.runtime_mode !== 'structured') onSwitchRuntime('structured');
+    } else if (next === 'beta') {
+      if (session.runtime_mode !== 'tty') onSwitchRuntime('tty', 'beta');
+      else onClaimTty('beta');
+    } else {
+      if (!ttySupported) return;
+      if (session.runtime_mode !== 'tty') onSwitchRuntime('tty', 'cli');
+      else if (session.executor === 'claude') onClaimTty('cli');
+    }
+  };
   const handleTranscriptApprove = (
     approvalId: string,
     decision: ApprovalDecision,
@@ -1465,61 +1511,43 @@ function SessionMain({
     <main className="main">
       <div className="main-head">
         <div className="main-head-l">
-          <div className="chat-toggle" role="tablist" aria-label={t('coding.runtime.label')}>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={surface === 'chat'}
-              className={surface === 'chat' ? 'active' : ''}
-              onClick={() => {
-                setSurface('chat');
-                if (session.runtime_mode !== 'structured') onSwitchRuntime('structured');
-              }}
-              disabled={runtimeSwitchDisabled}
-              title={session.executor === 'claude'
-                ? t('coding.runtime.chatClaudeTitle')
-                : t('coding.runtime.chatTitle')}
-            >
-              {t('coding.runtime.chat')}
-            </button>
-            {betaSupported && (
-              <button
-                type="button"
-                role="tab"
-                aria-selected={surface === 'beta'}
-                className={surface === 'beta' ? 'active' : ''}
-                onClick={() => {
-                  setSurface('beta');
-                  if (session.runtime_mode !== 'tty') onSwitchRuntime('tty', 'beta');
-                  else onClaimTty('beta');
-                }}
-                disabled={betaDisabled}
-                title={t('coding.runtime.betaTitle')}
-              >
-                Beta
-              </button>
-            )}
-            <button
-              type="button"
-              role="tab"
-              aria-selected={surface === 'cli'}
-              className={surface === 'cli' ? 'active' : ''}
-              onClick={() => {
-                if (!ttySupported) return;
-                setSurface('cli');
-                if (session.runtime_mode !== 'tty') onSwitchRuntime('tty', 'cli');
-                else if (session.executor === 'claude') onClaimTty('cli');
-              }}
-              disabled={cliDisabled}
-              title={ttySupported
-                ? (session.executor === 'claude'
-                    ? t('coding.runtime.claudeCliTitle')
-                    : t('coding.runtime.cliTitle'))
-                : t('coding.runtime.ttyUnavailable')}
-            >
-              CLI
-            </button>
-          </div>
+          {/* Runtime tabs are configurable (Settings → 聊天视图). Claude shows a
+              single chat surface — `claude -p` or tty — never both; CLI is an
+              optional extra. The whole bar hides when only one tab is offered. */}
+          {visibleTabs.length > 1 && (
+            <div className="chat-toggle" role="tablist" aria-label={t('coding.runtime.label')}>
+              {visibleTabs.map(tab => {
+                const active = surface === tab.surface;
+                const isChat = tab.label === 'chat';
+                const disabled = isChat
+                  ? (tab.surface === 'beta' ? betaDisabled : runtimeSwitchDisabled)
+                  : cliDisabled;
+                const title = isChat
+                  ? (tab.surface === 'beta'
+                      ? t('coding.runtime.betaTitle')
+                      : (session.executor === 'claude'
+                          ? t('coding.runtime.chatClaudeTitle')
+                          : t('coding.runtime.chatTitle')))
+                  : (session.executor === 'claude'
+                      ? t('coding.runtime.claudeCliTitle')
+                      : t('coding.runtime.cliTitle'));
+                return (
+                  <button
+                    key={tab.surface}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    className={active ? 'active' : ''}
+                    onClick={() => handleSelectSurface(tab.surface)}
+                    disabled={disabled}
+                    title={title}
+                  >
+                    {isChat ? t('coding.runtime.chat') : 'CLI'}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
         <div className="main-head-r">
           {/* §B2 — only +N/−M (no branch, hidden when clean). Status indicator
