@@ -59,6 +59,9 @@ export interface ClaudeRuntime extends EventEmitter<ClaudeRuntimeEvents> {
     permissionMode?: PermissionMode | null;
     /** Per-turn `--effort` value, validated against Claude CLI discovery. */
     effort?: EffortLevel | null;
+    /** Session display name (SESSION-NAME-001). Applied as `--name` only on
+     *  the first (`--session-id`) spawn. */
+    displayName?: string | null;
   }): Promise<void>;
 
   /** Rotate the underlying Claude session id (used by Gian's `/clear`

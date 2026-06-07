@@ -7,11 +7,45 @@ import type { EventEnvelope } from '@gian/shared';
 import type { ApprovalItem } from '../src/types.js';
 import { applyEnvelope } from '../src/transcript/apply.js';
 import {
+  betaComposerSubmitBehavior,
   formatBetaQuestionAnswers,
+  isTurnRunning,
   planApprovalResponseDispatch,
   planBetaComposerSend,
   planCreatedSessionFirstMessage,
+  toggleTtySurface,
 } from '../src/session-routing.js';
+
+describe('betaComposerSubmitBehavior', () => {
+  it('Beta with no pending question enqueues', () => {
+    expect(betaComposerSubmitBehavior(true, false)).toBe('queue');
+  });
+  it('Beta with a pending question blocks (answer first)', () => {
+    expect(betaComposerSubmitBehavior(true, true)).toBe('block');
+  });
+  it('non-Beta always queues', () => {
+    expect(betaComposerSubmitBehavior(false, false)).toBe('queue');
+    expect(betaComposerSubmitBehavior(false, true)).toBe('queue');
+  });
+});
+
+describe('isTurnRunning', () => {
+  it('true while a turn runs', () => {
+    expect(isTurnRunning('running', false)).toBe(true);
+  });
+  it('true when the pending flag is set (structured in-flight)', () => {
+    expect(isTurnRunning('done', true)).toBe(true);
+  });
+  it('false when idle / done / merely locked-out', () => {
+    expect(isTurnRunning('done', false)).toBe(false);
+    expect(isTurnRunning('new', false)).toBe(false);
+  });
+});
+
+describe('toggleTtySurface', () => {
+  it('flips cli → beta', () => { expect(toggleTtySurface('cli')).toBe('beta'); });
+  it('flips beta → cli', () => { expect(toggleTtySurface('beta')).toBe('cli'); });
+});
 
 describe('BILLING-001: first message routing for newly-created sessions', () => {
   it('routes Claude first-turn text to TTY and never to structured message:send', () => {
@@ -43,7 +77,7 @@ describe('BILLING-001: first message routing for newly-created sessions', () => 
 });
 
 describe('BILLING-001: Beta question routing avoids structured approval resolve', () => {
-  it('routes Claude Beta AskUserQuestion answers through TTY input', () => {
+  it('routes Claude Beta AskUserQuestion answers to the CLI surface (no paste-back)', () => {
     const plan = planApprovalResponseDispatch({
       executor: 'claude',
       runtimeMode: 'tty',
@@ -53,15 +87,7 @@ describe('BILLING-001: Beta question routing avoids structured approval resolve'
       context: { category: 'question' },
     });
 
-    expect(plan).toEqual({
-      channel: 'tty',
-      text: [
-        'The user answered your AskUserQuestion via the Gian web UI rather than letting the tool run. Use these answers and continue as if AskUserQuestion had returned them.',
-        '',
-        'Q: Pick dinner',
-        'A: Noodles; Soup',
-      ].join('\n'),
-    });
+    expect(plan).toEqual({ channel: 'cli' });
   });
 
   it('keeps non-question approvals on the structured approval channel', () => {
@@ -85,12 +111,10 @@ describe('BILLING-001: Beta question routing avoids structured approval resolve'
     })).toEqual({ channel: 'structured' });
   });
 
-  it('still routes TTY question answers through the PTY even when surface is chat', () => {
-    // The Beta surface is normally the only place a TTY question card is
-    // visible, but the surface state lags one render behind a runtime flip.
-    // If the user clicks Submit during that window we must not fall through to
-    // the structured bridge — cc-proxy has no MCP approval registered in TTY
-    // mode and would 404.
+  it('routes TTY question answers to the CLI even when surface is chat', () => {
+    // Any answer click on a TTY question card jumps to the CLI where Claude's
+    // own selector is blocking — pasting prose into that selector can't answer
+    // it (it cancels). Regardless of the lagging surface state, never paste.
     const plan = planApprovalResponseDispatch({
       executor: 'claude',
       runtimeMode: 'tty',
@@ -99,10 +123,10 @@ describe('BILLING-001: Beta question routing avoids structured approval resolve'
       answers: { 'Pick dinner': 'Rice' },
       context: { category: 'question' },
     });
-    expect(plan.channel).toBe('tty');
+    expect(plan.channel).toBe('cli');
   });
 
-  it('also routes TTY question answers through the PTY when surface is cli', () => {
+  it('routes TTY question answers to the CLI when surface is cli', () => {
     const plan = planApprovalResponseDispatch({
       executor: 'claude',
       runtimeMode: 'tty',
@@ -110,7 +134,7 @@ describe('BILLING-001: Beta question routing avoids structured approval resolve'
       decision: 'decline',
       context: { category: 'question' },
     });
-    expect(plan.channel).toBe('tty');
+    expect(plan.channel).toBe('cli');
   });
 
   it('formats single and multi answers in the same shape the agent already sees', () => {

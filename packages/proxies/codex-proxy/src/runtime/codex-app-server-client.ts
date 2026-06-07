@@ -254,6 +254,12 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
     return this.request('thread/compact/start', { threadId });
   }
 
+  /** SESSION-NAME-001: set the thread's user-facing display name so it shows
+   *  in `codex resume` / Codex app listings. */
+  async setThreadName(threadId: string, name: string) {
+    return this.request('thread/name/set', { threadId, name });
+  }
+
   async startTurn(
     threadId: string,
     input: InputItem[],

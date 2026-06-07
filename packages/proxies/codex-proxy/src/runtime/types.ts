@@ -57,6 +57,10 @@ export interface CodexRuntime extends RuntimeEventSource {
     },
   ): Promise<{ turn: { id: string; status: string } }>;
   interruptTurn(threadId: string, turnId: string): Promise<unknown>;
+  /** Set a thread's user-facing display name (SESSION-NAME-001). Maps to the
+   *  app-server `thread/name/set` RPC so the name shows in `codex resume` /
+   *  Codex app listings. Optional so the TTY runtime needn't implement it. */
+  setThreadName?(threadId: string, name: string): Promise<unknown>;
   respond(id: number | string, result: unknown): Promise<unknown>;
   listAllModels(): Promise<unknown[]>;
   listSkills(cwd?: string): Promise<SkillsListResponse>;

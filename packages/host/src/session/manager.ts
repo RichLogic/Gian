@@ -11,6 +11,7 @@ import type {
   WorktreeOutcome,
 } from '@gian/shared';
 import { basename } from 'node:path';
+import { existsSync } from 'node:fs';
 import { mimeForAttachment } from '../storage/attachments.js';
 import type { Db } from '../storage/db.js';
 import { loadConfig } from '../storage/config.js';
@@ -22,7 +23,7 @@ import type { QueueManager } from '../queue/index.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import type { TtyManager } from '../tty/manager.js';
 import type { CodexTtyManager } from '../tty/codex-manager.js';
-import { locateNativeJsonl } from '../native/locate-jsonl.js';
+import { locateNativeJsonl, locateCcJsonl, appendCcCustomTitle } from '../native/locate-jsonl.js';
 import {
   normalizeCcNotification,
   normalizeCodexNotification,
@@ -272,6 +273,7 @@ export class SessionManager {
         executor: input.executor,
         cwd,
         model: effectiveModel,
+        displayName: input.name ?? null,
       });
     } catch (err) {
       if (worktreePath && branch) {
@@ -335,6 +337,7 @@ export class SessionManager {
       cwd: session.worktree_path ?? workspace.path,
       model: session.model,
       nativeSessionId: session.native_session_id,
+      displayName: session.name,
     });
     return result.proxySessionId;
   }
@@ -357,6 +360,11 @@ export class SessionManager {
     cwd: string;
     model: string | null;
     nativeSessionId?: string | null;
+    /** SESSION-NAME-001: Gian session name to stamp onto the native session at
+     *  bring-up. codex applies it via `thread/name/set` (covers create-with-name
+     *  and idle-rename-then-next-bringup). claude ignores it here — its name is
+     *  set via `--name` on the first turn / TTY spawn. */
+    displayName?: string | null;
   }): Promise<{ proxySessionId: string; nativeSessionId: string }> {
     const client = await this.proxy.getOrCreate(args.sessionId, args.executor);
     client.onNotification(notification => this.handleNotification(args.sessionId, notification));
@@ -424,6 +432,18 @@ export class SessionManager {
       if (filePath) this.watcher.start(args.sessionId, filePath, args.executor);
     }
 
+    // SESSION-NAME-001: stamp the Gian name onto the codex thread on bring-up
+    // (covers create-with-name and idle-rename-applied-on-next-bringup). Claude
+    // names are handled via `--name` on the first turn, not here. Best-effort.
+    const bringUpName = args.displayName?.trim();
+    if (args.executor === 'codex' && bringUpName && client.setName) {
+      try {
+        await client.setName(bringUpName);
+      } catch (err) {
+        console.warn(`[session] codex setName on bring-up failed for ${args.sessionId}: ${String(err)}`);
+      }
+    }
+
     return {
       proxySessionId: created.session.id,
       nativeSessionId: created.nativeSessionId,
@@ -431,6 +451,15 @@ export class SessionManager {
   }
 
   async stopTurn(sessionId: string): Promise<void> {
+    const session = this.getSession(sessionId);
+    // Claude TTY: the turn runs inside the PTY, so the structured
+    // interruptTurn won't reach it. Inject Esc instead. (codex TTY keeps the
+    // existing path for now — out of scope for this line.)
+    if (session.runtime_mode === 'tty' && session.executor === 'claude') {
+      this.jobs.delete(sessionId);
+      await this.ttyMgr?.interrupt(sessionId);
+      return;
+    }
     const proxySessionId = this.proxySessionIds.get(sessionId);
     if (!proxySessionId) throw new Error(`session not initialized: ${sessionId}`);
     const client = this.proxy.get(sessionId);
@@ -768,6 +797,10 @@ export class SessionManager {
         input: dispatchItems,
         ...(session.model ? { model: session.model } : {}),
         ...(session.thinking_effort ? { thinking: session.thinking_effort } : {}),
+        // SESSION-NAME-001: carry the Gian name so cc-proxy can stamp it onto a
+        // brand-new Claude session via `--name` on its first (--session-id) turn.
+        // cc-proxy ignores it on resume turns; codex ignores the field entirely.
+        ...(session.executor === 'claude' && session.name ? { displayName: session.name } : {}),
         ...policyParams,
       });
     } catch (err) {
@@ -879,6 +912,58 @@ export class SessionManager {
       .prepare(`UPDATE sessions SET name = ?, updated_at = ? WHERE id = ?`)
       .run(stored, now, sessionId);
     this.broadcastSessionUpdated(sessionId, { name: stored, updated_at: now });
+
+    // SESSION-NAME-001: propagate the new name down to the underlying native
+    // session so it's distinguishable in Claude/Codex own listings (remote
+    // control, `--resume`/`codex resume`). Best-effort + fire-and-forget — the
+    // rename itself already succeeded above. We never clear a native name when
+    // the Gian name is emptied (cleared name → no-op).
+    if (stored) {
+      void this.applyNativeSessionName(sessionId, stored).catch(err => {
+        console.warn(`[session] native name sync failed for ${sessionId}: ${String(err)}`);
+      });
+    }
+  }
+
+  /**
+   * SESSION-NAME-001: push the Gian session name onto the native session.
+   *   - claude: append a `custom-title` line to the on-disk JSONL (instant,
+   *     zero ripple — `parseCcLine` ignores non-message lines). Only when the
+   *     JSONL already exists; before the first turn the cc-proxy `--name` flag
+   *     covers it.
+   *   - codex: `thread/name/set` via the live proxy facade, when one is up.
+   *     Otherwise the next bring-up re-applies it (see bringUpProxySession).
+   */
+  private async applyNativeSessionName(sessionId: string, name: string): Promise<void> {
+    const session = this.getSession(sessionId);
+    if (session.executor === 'claude') {
+      this.writeClaudeCustomTitle(session, name);
+    } else if (session.executor === 'codex') {
+      const client = this.proxy.get(sessionId);
+      if (client?.setName) await client.setName(name);
+    }
+  }
+
+  /** Append a `custom-title` record to a Claude session's JSONL so the name
+   *  shows in `claude --resume` / Remote Control listings. No-op when the
+   *  session id or file isn't there yet (the first-turn `--name` covers that). */
+  private writeClaudeCustomTitle(session: Session, name: string): void {
+    const claudeSessionId = session.native_session_id;
+    if (!claudeSessionId) return;
+    const cwd = this.cwdForSession(session);
+    if (!cwd) return;
+    const filePath = locateCcJsonl(claudeSessionId, cwd);
+    if (!filePath || !existsSync(filePath)) return;
+    appendCcCustomTitle(filePath, claudeSessionId, name);
+  }
+
+  /** Resolve the working dir for a session (worktree path, else workspace path). */
+  private cwdForSession(session: Session): string | null {
+    if (session.worktree_path) return session.worktree_path;
+    const workspace = this.db
+      .prepare('SELECT path FROM workspaces WHERE id = ?')
+      .get(session.workspace_id) as { path: string } | undefined;
+    return workspace?.path ?? null;
   }
 
   // -------------------------------------------------------------------------
@@ -907,14 +992,39 @@ export class SessionManager {
     this.broadcastQueueUpdated(sessionId);
   }
 
+  /**
+   * Drain the next queued message into a live Claude TTY. Fired by the
+   * TtyManager `Stop` hook — one entry per completed turn, mirroring the
+   * structured `maybeAutoSendNext`. Pastes via the TTY input path; no-op when
+   * the session left TTY mode (queue is preserved for when it flips back) or
+   * the queue is empty.
+   */
+  drainTtyQueue(sessionId: string): void {
+    let session: Session;
+    try { session = this.getSession(sessionId); } catch { return; }
+    if (session.runtime_mode !== 'tty' || session.executor !== 'claude') return;
+    const next = this.queue.popNext(sessionId);
+    if (!next) return;
+    this.broadcastQueueUpdated(sessionId);
+    void this.ttyMgr?.input(sessionId, { text: next.text });
+  }
+
   async sendQueuedNow(sessionId: string): Promise<void> {
-    // CLI runtime guard: don't pop the head if the session is in TTY mode.
-    // Popping first would lose the queued text on the inevitable
-    // sendMessage rejection; check runtime BEFORE popNext so the head
-    // survives for when the user flips back to Chat.
     const session = this.getSession(sessionId);
     if (session.runtime_mode === 'tty') {
-      throw new Error(`session is in CLI mode; switch to Chat before draining the queue`);
+      // codex TTY drain isn't wired — preserve the queue head and reject so
+      // the existing CODEX-TTY-001 contract holds. Only claude TTY drains.
+      if (session.executor !== 'claude') {
+        throw new Error(`session is in CLI mode; switch to Chat before draining the queue`);
+      }
+      // (d) Claude TTY send_now: paste the head into the PTY immediately. If a
+      // turn is still running, Claude's TUI takes it as a supplementary
+      // message — we deliberately do NOT wait for the Stop hook (auto-drain).
+      const ttyNext = this.queue.popNext(sessionId);
+      if (!ttyNext) return;
+      this.broadcastQueueUpdated(sessionId);
+      await this.ttyMgr?.input(sessionId, { text: ttyNext.text });
+      return;
     }
     // Pop only the head entry. Awaiting sendMessage just unblocks the proxy's
     // startTurn (the turn itself is async); kicking off the next entry from

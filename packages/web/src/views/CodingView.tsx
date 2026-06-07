@@ -18,7 +18,10 @@ import { ApprovalCard } from '../transcript/items.js';
 import type { ApprovalActionContext, ApprovalItem, QueueEntry, TokenUsage, TranscriptItem } from '../types.js';
 import type { GianWs } from '../ws.js';
 import {
+  betaComposerSubmitBehavior,
+  isTurnRunning,
   planApprovalResponseDispatch,
+  toggleTtySurface,
   runtimeTabs,
   runtimeChatSurface,
   runtimeForSurface,
@@ -1464,6 +1467,22 @@ function SessionMain({
       else if (session.executor === 'claude') onClaimTty('cli');
     }
   };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Ctrl+` toggles TTY chat-view ↔ CLI. Capture phase so xterm never sees
+      // it; a bare backtick still types in the terminal. claude TTY only.
+      if (!e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key !== '`' && e.code !== 'Backquote') return;
+      if (session.executor !== 'claude' || session.runtime_mode !== 'tty') return;
+      if (surface !== 'beta' && surface !== 'cli') return;
+      e.preventDefault();
+      e.stopPropagation();
+      handleSelectSurface(toggleTtySurface(surface));
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [session.executor, session.runtime_mode, surface, handleSelectSurface]);
+
   const handleTranscriptApprove = (
     approvalId: string,
     decision: ApprovalDecision,
@@ -1478,14 +1497,12 @@ function SessionMain({
       answers,
       context,
     });
-    if (plan.channel === 'tty') {
-      onBetaSend(plan.text);
-      // The TTY path has no server-side approval bridge to resolve against —
-      // the answer is now a regular user message in the PTY. Apply a synthetic
-      // approval_resolved locally so the QuestionCard flips out of `pending`
-      // immediately; without this the card stays interactive forever. Pass the
-      // picked answers so the resolved card can show what was chosen.
-      onLocalApprovalResolve(approvalId, decision, answers);
+    if (plan.channel === 'cli') {
+      // TTY questions can't be answered by pasting into the blocking selector
+      // (it cancels). Jump to the CLI where Claude's own selector is waiting;
+      // the JSONL watcher resolves the card once the user picks there. No
+      // paste, no local resolve — the card stays pending until the real pick.
+      handleSelectSurface('cli');
       return;
     }
     onApprove(approvalId, decision, answers, context);
@@ -1614,6 +1631,12 @@ function SessionMain({
           {isBeta && pendingQuestion && (
             <div className="beta-question-dock">
               <div className="beta-question-dock-label">{t('coding.beta.waiting')}</div>
+              <button
+                className="btn primary sm beta-question-cli"
+                onClick={() => handleSelectSurface('cli')}
+              >
+                {t('transcript.question.answerInCli')}
+              </button>
               <ApprovalCard item={pendingQuestion} onApprove={handleTranscriptApprove} />
             </div>
           )}
@@ -1626,8 +1649,10 @@ function SessionMain({
             onSetMode={onSetMode}
             onSetModel={onSetModel}
             onSetEffort={onSetEffort}
+            onJumpToCli={() => handleSelectSurface('cli')}
             disabled={pending || terminal || ttyLockedOut || (isBeta && !!pendingQuestion)}
-            disabledSubmitBehavior={isBeta ? 'block' : 'queue'}
+            running={isTurnRunning(session.status, pending)}
+            disabledSubmitBehavior={betaComposerSubmitBehavior(isBeta, !!pendingQuestion)}
             executor={session.executor}
             workspaceId={workspace?.id}
             armedRemote={armedRemote}

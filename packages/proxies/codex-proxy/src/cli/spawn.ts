@@ -8,6 +8,7 @@ import type {
   CreateSessionParams,
   GetSessionParams,
   InterruptTurnParams,
+  SetNameParams,
   JsonRpcLikeRequest,
   SessionSnapshotParams,
   StartTurnParams,
@@ -154,6 +155,9 @@ async function main() {
           break;
         case 'session.get':
           writer.result(message.id, service.getSession((message.params ?? {}) as GetSessionParams));
+          break;
+        case 'session.setName':
+          writer.result(message.id, await service.setName((message.params ?? {}) as SetNameParams));
           break;
         case 'turn.start':
           writer.result(message.id, await service.startTurn((message.params ?? {}) as StartTurnParams, message.id));

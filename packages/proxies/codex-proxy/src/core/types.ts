@@ -135,6 +135,12 @@ export interface GetSessionParams {
   sessionId: string;
 }
 
+/** SESSION-NAME-001: set the codex thread's user-facing display name. */
+export interface SetNameParams {
+  sessionId: string;
+  name: string;
+}
+
 /** Per-turn override of codex's execution policy. All fields are optional —
  *  if omitted, the values from `thread/start` (or codex defaults) apply. */
 export interface StartTurnParams {

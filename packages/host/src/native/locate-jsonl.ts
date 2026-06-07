@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -82,6 +82,30 @@ export function locateCodexJsonl(threadId: string): string | null {
   if (candidates.length === 0) return null;
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return candidates[0]!.path;
+}
+
+/**
+ * SESSION-NAME-001: append a Claude `custom-title` record to a session JSONL so
+ * the Gian name shows in `claude --resume` / Remote Control listings. `parseCcLine`
+ * ignores non-message lines, so this produces no transcript row / event / status
+ * change. Control chars are stripped and the name capped; an empty result is a
+ * no-op (we never clear an existing title). Returns whether a line was written.
+ */
+export function appendCcCustomTitle(
+  filePath: string,
+  claudeSessionId: string,
+  name: string,
+): boolean {
+  // eslint-disable-next-line no-control-regex
+  const clean = name.replace(/[\x00-\x1F\x7F]/g, ' ').trim().slice(0, 200);
+  if (!clean) return false;
+  const line = JSON.stringify({
+    type: 'custom-title',
+    customTitle: clean,
+    sessionId: claudeSessionId,
+  }) + '\n';
+  appendFileSync(filePath, line, 'utf8');
+  return true;
 }
 
 /**

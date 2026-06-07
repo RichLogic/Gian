@@ -119,6 +119,8 @@ export function createApp(ctx: AppContext): AppHandle {
   const hookBaseUrl = `http://127.0.0.1:${hookPort}`;
   const tty = new TtyManager(ctx.db, proxy, broadcaster, hookBaseUrl);
   sessions.setTtyManager(tty);
+  // Beta queue: drain the next queued message into the PTY when a turn ends.
+  tty.setTurnCompleteHandler(sid => sessions.drainTtyQueue(sid));
 
   // Codex CLI runtime coordinator. No hooks (codex has no `--settings`
   // hook surface), so no token registry / settings.json / HTTP route —

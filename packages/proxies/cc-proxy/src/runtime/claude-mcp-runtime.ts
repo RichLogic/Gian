@@ -245,6 +245,20 @@ function claudeExecutable() {
   return 'claude';
 }
 
+/**
+ * Normalize a session display name for the Claude CLI `--name` flag
+ * (SESSION-NAME-001). Strips control characters (incl. CR/LF) and caps the
+ * length so a pasted multi-line name can't smuggle extra argv content or blow
+ * up the terminal-title. Returns null for empty/whitespace-only input so the
+ * caller omits the flag entirely.
+ */
+export function sanitizeDisplayName(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string') return null;
+  // eslint-disable-next-line no-control-regex
+  const cleaned = raw.replace(/[\x00-\x1F\x7F]/g, ' ').trim().slice(0, 200);
+  return cleaned.length > 0 ? cleaned : null;
+}
+
 export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRuntime {
   private readonly sessions = new Map<string, ManagedSession>();
   private discoveredModels: ModelCapabilities[] = [];
@@ -395,6 +409,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
   async sendMessage(sessionId: string, content: string, options?: {
     permissionMode?: PermissionMode | null;
     effort?: EffortLevel | null;
+    displayName?: string | null;
   }): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -671,7 +686,11 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
   private buildClaudeArgs(
     session: ManagedSession,
     content: string,
-    options?: { permissionMode?: PermissionMode | null; effort?: EffortLevel | null },
+    options?: {
+      permissionMode?: PermissionMode | null;
+      effort?: EffortLevel | null;
+      displayName?: string | null;
+    },
   ): string[] {
     const args: string[] = [
       '-p', content,
@@ -705,6 +724,13 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       args.push('--resume', session.claudeSessionId);
     } else {
       args.push('--session-id', session.claudeSessionId);
+      // SESSION-NAME-001: stamp the Gian session name onto the brand-new
+      // Claude session so it's identifiable in `claude --resume` listings.
+      // Only on the first turn — later renames are propagated host-side by
+      // appending a `custom-title` line to the JSONL, so re-asserting an old
+      // `--name` on resume turns would clobber a fresh rename.
+      const displayName = sanitizeDisplayName(options?.displayName);
+      if (displayName) args.push('--name', displayName);
     }
 
     if (session.model) {

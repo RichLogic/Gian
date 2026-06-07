@@ -19,10 +19,11 @@ import { writeFileSync } from 'node:fs';
 interface StubCallLog {
   ttyStart: Array<Record<string, unknown>>;
   ttyKill: Array<{ sessionId: string }>;
+  ttyInput: Array<{ sessionId: string; data?: string; text?: string }>;
 }
 
 function makeStubClient() {
-  const calls: StubCallLog = { ttyStart: [], ttyKill: [] };
+  const calls: StubCallLog = { ttyStart: [], ttyKill: [], ttyInput: [] };
   const client = Object.assign(Object.create(CcProxyClient.prototype), {
     async ttyStart(params: Record<string, unknown>) {
       calls.ttyStart.push(params);
@@ -32,7 +33,9 @@ function makeStubClient() {
       calls.ttyKill.push(params);
       return { ok: true as const };
     },
-    async ttyInput() {},
+    async ttyInput(params: { sessionId: string; data?: string; text?: string }) {
+      calls.ttyInput.push(params);
+    },
     async ttyResize() {},
     async ttyReplay() {
       return { chunks: ['Y2h1bms='], alive: true };
@@ -318,6 +321,36 @@ test('CLAUDE-TTY-004: tty.exited resets Remote Control to disconnected', () => {
       .at(-1) as { type: 'tty:remote-control'; state: string } | undefined;
     assert.equal(last?.state, 'disconnected');
   } finally { teardown(ctx); }
+});
+
+test('STOP-TTY-001: interrupt injects Esc into the PTY', async () => {
+  const ctx = setup();
+  try {
+    seedClaudeSession(ctx.db, { runtime_mode: 'tty' });
+    await ctx.mgr.interrupt('sess-claude-1');
+    assert.equal(ctx.stub.calls.ttyInput.length, 1);
+    const sent = ctx.stub.calls.ttyInput[0]!;
+    assert.equal(sent.sessionId, 'sess-claude-1');
+    assert.equal(Buffer.from(sent.data!, 'base64').toString('utf8'), '\x1b');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-TTY-001: Stop hook fires the turn-complete handler; SessionEnd does not', async () => {
+  const ctx = setup();
+  try {
+    seedClaudeSession(ctx.db, { runtime_mode: 'tty' });
+    const fired: string[] = [];
+    ctx.mgr.setTurnCompleteHandler(sid => fired.push(sid));
+    await ctx.mgr.handleHook('sess-claude-1', 'Stop', {});
+    assert.deepEqual(fired, ['sess-claude-1']);
+    // SessionEnd is teardown, not a completed turn — must NOT drain the queue.
+    await ctx.mgr.handleHook('sess-claude-1', 'SessionEnd', {});
+    assert.deepEqual(fired, ['sess-claude-1']);
+  } finally {
+    teardown(ctx);
+  }
 });
 
 test('CLAUDE-TTY-001: hooks do not duplicate native JSONL transcript events', async () => {

@@ -107,6 +107,11 @@ export interface StartTurnParams {
    *  `thinking` to match the shared host-facing convention used across
    *  executors; translated internally to `--effort`. */
   thinking?: EffortLevel | null;
+  /** Session display name (SESSION-NAME-001). Applied as Claude CLI `--name`
+   *  only on the first (`--session-id`) turn so a session created with a name
+   *  is identifiable in `claude --resume` listings. Later turns ignore it —
+   *  renames are propagated host-side via the JSONL `custom-title` line. */
+  displayName?: string | null;
 }
 
 export interface InterruptTurnParams {

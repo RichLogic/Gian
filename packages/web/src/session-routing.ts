@@ -1,4 +1,4 @@
-import type { ApprovalCategory, ApprovalDecision, Executor, RuntimeMode } from '@gian/shared';
+import type { ApprovalCategory, ApprovalDecision, Executor, RuntimeMode, SessionStatus } from '@gian/shared';
 
 export interface CreatedSessionFirstMessagePlan {
   switchToTty: boolean;
@@ -124,7 +124,7 @@ export interface ApprovalResponseDispatchInput {
 
 export type ApprovalResponseDispatchPlan =
   | { channel: 'structured' }
-  | { channel: 'tty'; text: string };
+  | { channel: 'cli' };
 
 export function planApprovalResponseDispatch(input: ApprovalResponseDispatchInput): ApprovalResponseDispatchPlan {
   if (
@@ -132,18 +132,11 @@ export function planApprovalResponseDispatch(input: ApprovalResponseDispatchInpu
     && input.runtimeMode === 'tty'
     && input.context?.category === 'question'
   ) {
-    // TTY-mode AskUserQuestion always paste-routes back through the PTY,
-    // regardless of which surface the user is looking at when they click an
-    // answer. The structured approval bridge isn't wired in TTY mode — cc-proxy
-    // returns 404 — so routing through `structured` outside the Beta surface
-    // would just fail with APPROVAL_RESOLVE_FAILED. The Beta surface is still
-    // the only place the QuestionCard is actionable in the UI, but during a
-    // transient surface=chat→beta switch (or a stale render) we don't want the
-    // click to silently 404.
-    return {
-      channel: 'tty',
-      text: formatBetaQuestionResponse(input.decision, input.answers),
-    };
+    // The interactive selector lives in the PTY; pasting prose can't answer it
+    // (it cancels). Send the user to the CLI where Claude's own selector is
+    // blocking — JSONL/PostToolUse resolves the card once they pick there.
+    // (`formatBetaQuestionResponse` stays exported for line A's in-chat driver.)
+    return { channel: 'cli' };
   }
   return { channel: 'structured' };
 }
@@ -209,4 +202,40 @@ export function planBetaComposerSend(
   if (!ttyText) return { channel: 'noop' };
   if (runtimeMode === 'tty') return { channel: 'pty', text: ttyText };
   return { channel: 'stage_for_tty', text: ttyText };
+}
+
+/**
+ * Submit behavior for the Beta composer's disabled (busy) state. Beta now
+ * enqueues Enter-while-busy into the same host queue as Chat (the queue drains
+ * into the TTY on the Stop hook). The one exception is a pending
+ * AskUserQuestion: block so Enter doesn't stash a message above an unanswered
+ * question — the user must answer it first.
+ */
+export function betaComposerSubmitBehavior(
+  isBeta: boolean,
+  hasPendingQuestion: boolean,
+): 'queue' | 'block' {
+  if (isBeta && hasPendingQuestion) return 'block';
+  return 'queue';
+}
+
+/**
+ * Whether the Stop button should show (a turn is actually in flight) — NOT
+ * merely because the composer is locked out of another window's TTY or blocked
+ * on a pending question. Those were the desync sources for the Beta stop
+ * button. Hook-driven `status==='running'` gives this for Beta/TTY; structured
+ * turns set status='running' too, and `pending` covers the structured
+ * in-flight window.
+ */
+export function isTurnRunning(status: SessionStatus, pending: boolean): boolean {
+  return pending || status === 'running';
+}
+
+/**
+ * Ctrl+` flips between the TTY chat view ('beta') and the raw CLI ('cli').
+ * Only meaningful in a TTY session; the caller gates on runtime_mode==='tty'
+ * and leaves structured 'chat' alone.
+ */
+export function toggleTtySurface(current: SessionSurface): SessionSurface {
+  return current === 'cli' ? 'beta' : 'cli';
 }

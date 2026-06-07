@@ -38,6 +38,15 @@ export interface ProxyClient {
   interruptTurn(sessionId: string): Promise<void>;
   respondApproval(params: RespondApprovalParams): Promise<void>;
   closeSession(sessionId: string): Promise<void>;
+  /**
+   * Set the underlying native session's display name (SESSION-NAME-001).
+   * codex-proxy implements this via the app-server `thread/name/set` RPC so
+   * the name shows in `codex resume` / Codex app listings. cc-proxy does NOT
+   * implement it — Claude's display name is set host-side (a `--name` flag on
+   * the first turn / TTY spawn, or by appending a `custom-title` line to the
+   * session JSONL on rename), so the method is optional.
+   */
+  setName?(name: string): Promise<void>;
   shutdown(): Promise<void>;
   /**
    * Tear the proxy session down hard, bypassing any graceful RPC. cc-proxy
@@ -93,6 +102,10 @@ export interface StartTurnParams {
 
   // cc-only
   permissionMode?: 'plan' | 'default' | 'auto' | 'bypassPermissions' | null;
+  /** cc-only (SESSION-NAME-001): Claude session display name. cc-proxy applies
+   *  it as `--name` only on the first (`--session-id`) turn; later turns ignore
+   *  it (renames are propagated host-side by writing the JSONL `custom-title`). */
+  displayName?: string | null;
 }
 
 export interface RespondApprovalParams {

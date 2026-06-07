@@ -136,6 +136,13 @@ export class CodexProxyHost {
     return this.request<void>('turn.interrupt', { sessionId });
   }
 
+  /** SESSION-NAME-001: set the codex thread's display name. `sessionId` is the
+   *  proxy-side session id (== threadId). Works on the shared connection
+   *  without resuming the thread. */
+  setThreadName(sessionId: string, name: string): Promise<{ ok: true }> {
+    return this.request<{ ok: true }>('session.setName', { sessionId, name });
+  }
+
   async closeSession(sessionId: string): Promise<void> {
     this.sessions.delete(sessionId);
     try {
@@ -396,6 +403,14 @@ export class CodexProxySessionClient implements ProxyClient {
 
   interruptTurn(sessionId: string): Promise<void> {
     return this.host.interruptTurn(sessionId);
+  }
+
+  /** SESSION-NAME-001: set the codex thread's display name via the shared
+   *  host's `thread/name/set` RPC. No-op if the facade hasn't created its
+   *  session yet (no threadId to target). */
+  async setName(name: string): Promise<void> {
+    if (!this.proxySessionId) return;
+    await this.host.setThreadName(this.proxySessionId, name);
   }
 
   async closeSession(sessionId: string): Promise<void> {

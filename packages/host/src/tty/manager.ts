@@ -86,6 +86,9 @@ export class TtyManager {
   /** Per-session Claude Remote Control state, parsed from the PTY status line.
    *  Drives the composer's remote-control toggle. Cleared on PTY exit. */
   private readonly remoteControl = new Map<string, RemoteControlState>();
+  /** Fired when a TTY turn ends (`Stop` hook). The host wires this to the
+   *  queue drain so Beta walks its queue one entry per completed turn. */
+  private onTtyTurnComplete: ((sessionId: string) => void) | null = null;
 
   constructor(
     private readonly db: Db,
@@ -96,6 +99,11 @@ export class TtyManager {
      *  `allowedHttpHookUrls`. */
     private readonly hookBaseUrl: string,
   ) {}
+
+  /** Wire the host's per-turn queue drain. Set once at startup (app.ts). */
+  setTurnCompleteHandler(fn: (sessionId: string) => void): void {
+    this.onTtyTurnComplete = fn;
+  }
 
   claim(
     sessionId: string,
@@ -190,6 +198,16 @@ export class TtyManager {
     const credentials = this.registry.issue(session.id);
     const hookSettings = this.buildSettings(session.id, credentials.token);
 
+    // SESSION-NAME-001: stamp the Gian name onto the interactive Claude session
+    // via `--name` so it shows in `claude --resume` / Remote Control listings.
+    // Read fresh on every spawn (no revert vs. a direct-write rename).
+    // eslint-disable-next-line no-control-regex
+    const displayName = (session.name ?? '').replace(/[\x00-\x1F\x7F]/g, ' ').trim().slice(0, 200);
+    const extraArgs = [
+      ...(opts.extraArgs ?? []),
+      ...(displayName ? ['--name', displayName] : []),
+    ];
+
     const result = await client.ttyStart({
       sessionId: session.id,
       claudeSessionId: session.native_session_id,
@@ -201,7 +219,7 @@ export class TtyManager {
       effort: session.thinking_effort,
       hookSettings,
       ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
-      ...(opts.extraArgs && opts.extraArgs.length > 0 ? { extraArgs: opts.extraArgs } : {}),
+      ...(extraArgs.length > 0 ? { extraArgs } : {}),
     });
 
     this.persistMode(session.id, 'tty');
@@ -281,6 +299,8 @@ export class TtyManager {
     // the model. Covers a brand-new session (no model at spawn) and a
     // mid-session `/model` switch.
     if (event === 'Stop') this.syncModelFromJsonl(sessionId);
+    // Turn ended → let the host drain the next queued Beta message (if any).
+    if (event === 'Stop') this.onTtyTurnComplete?.(sessionId);
 
     // Surface every hook as a generic event the frontend can show in a
     // future debug panel. Status-pill mapping is done client-side based
@@ -365,6 +385,21 @@ export class TtyManager {
     // `data` is base64-decoded verbatim into the PTY; encode the keystrokes.
     const keystrokes = Buffer.from('/remote-control\r', 'utf8').toString('base64');
     await this.input(sessionId, { data: keystrokes });
+  }
+
+  /**
+   * Interrupt the running turn in a live TTY session by injecting Esc — the
+   * key Claude Code's TUI uses to stop the current generation. No-op when
+   * there's no PTY for the session. Unlike the structured `interruptTurn`,
+   * this actually reaches the interactive `claude` running in the PTY.
+   *
+   * NOTE: single Esc is the first cut; whether Claude needs double-Esc /
+   * Ctrl-C is a line-A spike item (see spec §7.3). Keep the byte here in one
+   * place so that tweak is one line.
+   */
+  async interrupt(sessionId: string): Promise<void> {
+    const esc = Buffer.from('\x1b', 'utf8').toString('base64');
+    await this.input(sessionId, { data: esc });
   }
 
   /** Current Remote Control state for a session (undefined = never observed). */

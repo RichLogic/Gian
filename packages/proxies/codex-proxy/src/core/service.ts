@@ -13,6 +13,7 @@ import type {
   CreateSessionParams,
   FileChangeSummary,
   GetSessionParams,
+  SetNameParams,
   InitializePayload,
   InputItem,
   PendingApproval,
@@ -420,6 +421,26 @@ export class CodexProxyService {
   getSession(params: GetSessionParams) {
     const session = this.requireSessionById(params.sessionId);
     return { session: this.serializeSession(session) };
+  }
+
+  /**
+   * SESSION-NAME-001: set the underlying codex thread's display name via the
+   * app-server `thread/name/set` RPC so the Gian session name shows in
+   * `codex resume` / Codex app listings. Empty/whitespace names are a no-op
+   * (we never clear an existing thread name).
+   */
+  async setName(params: SetNameParams) {
+    const session = this.requireSessionById(params.sessionId);
+    const name = typeof params.name === 'string'
+      // eslint-disable-next-line no-control-regex
+      ? params.name.replace(/[\x00-\x1F\x7F]/g, ' ').trim().slice(0, 200)
+      : '';
+    if (!name) return { ok: true as const };
+    if (!this.runtime.setThreadName) {
+      throw createAppError(501, 'NOT_SUPPORTED', 'Runtime does not support thread/name/set.');
+    }
+    await this.runtime.setThreadName(session.threadId, name);
+    return { ok: true as const };
   }
 
   async startTurn(params: StartTurnParams, requestId?: number | string) {

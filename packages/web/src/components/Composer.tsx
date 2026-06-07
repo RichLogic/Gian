@@ -188,8 +188,8 @@ function flatFiltered(groups: Array<{ source: SlashCommandSource; items: SlashCo
 
 export function Composer({
   session,
-  onSend, onSendSkill, onStop, onQueueAdd, onSetMode, onSetModel, onSetEffort,
-  disabled, executor,
+  onSend, onSendSkill, onStop, onQueueAdd, onSetMode, onSetModel, onSetEffort, onJumpToCli,
+  disabled, running, executor,
   workspaceId,
   footer,
   armedRemote = false,
@@ -225,7 +225,13 @@ export function Composer({
   onSetMode: (mode: ApprovalMode, turns?: number) => void;
   onSetModel: (model: string) => void;
   onSetEffort: (effort: ThinkingEffort | null) => void;
+  /** TTY only: jump to the CLI surface. In TTY, model/effort/mode are
+   *  display-only — clicking them sends the user to the CLI to change them. */
+  onJumpToCli?: () => void;
   disabled: boolean;
+  /** A turn is actually in flight — drives the Send→Stop toggle. Distinct
+   *  from `disabled`, which also covers lock-out / pending-question. */
+  running: boolean;
   disabledSubmitBehavior?: 'queue' | 'block';
   executor: 'claude' | 'codex';
   workspaceId?: string;
@@ -510,11 +516,17 @@ export function Composer({
     setText('');
   }
 
+  // In TTY mode model/effort/mode are display-only — changing them needs the
+  // CLI selector. Clicking any of these controls jumps to the CLI instead.
+  const ttyDisplayOnly = session.runtime_mode === 'tty';
+
   function setMode(mode: ApprovalMode) {
+    if (ttyDisplayOnly) { onJumpToCli?.(); return; }
     onSetMode(mode, mode === 'auto' ? (turns > 1 ? turns : 1) : undefined);
   }
 
   function adjustTurns(delta: number) {
+    if (ttyDisplayOnly) { onJumpToCli?.(); return; }
     const next = Math.max(1, turns + delta);
     onSetMode('auto', next);
   }
@@ -754,8 +766,8 @@ export function Composer({
             ref={modelBtnRef}
             type="button"
             className="composer-opt cmp-model-wrap"
-            title={t('composer.model.title')}
-            onClick={() => setModelPopOpen(v => !v)}
+            title={ttyDisplayOnly ? t('composer.model.titleTty') : t('composer.model.title')}
+            onClick={() => { if (ttyDisplayOnly) { onJumpToCli?.(); return; } setModelPopOpen(v => !v); }}
           >
             <span
               style={{ width: 7, height: 7, borderRadius: 2, display: 'inline-block',
@@ -987,7 +999,7 @@ export function Composer({
           </button>
 
           {/* Send / Stop */}
-          {disabled ? (
+          {running ? (
             <button
               type="button"
               className="composer-act primary danger"

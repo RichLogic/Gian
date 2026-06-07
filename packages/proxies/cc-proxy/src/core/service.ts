@@ -275,6 +275,7 @@ export class CcProxyService {
     await this.runtime.sendMessage(session.id, prompt, {
       permissionMode: params.permissionMode ?? null,
       effort,
+      displayName: params.displayName ?? null,
     });
 
     const updatedSession = this.updateSession(session, {

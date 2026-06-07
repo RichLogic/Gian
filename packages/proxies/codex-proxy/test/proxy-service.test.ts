@@ -10,6 +10,7 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
   nextThreadId = 1;
   nextTurnId = 1;
   compactCalls: string[] = [];
+  setThreadNameCalls: Array<{ threadId: string; name: string }> = [];
   startTurnCalls: Array<{ threadId: string; input: InputItem[] }> = [];
   readonly responses: Array<{ id: number | string; payload: unknown }> = [];
   readonly threads = new Map<string, unknown>();
@@ -64,6 +65,11 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
       status: 'running',
       items: [],
     });
+    return {};
+  }
+
+  async setThreadName(threadId: string, name: string) {
+    this.setThreadNameCalls.push({ threadId, name });
     return {};
   }
 
@@ -181,6 +187,28 @@ async function waitFor(predicate: () => boolean, timeoutMs = 200) {
   }
   assert.equal(predicate(), true, 'Timed out waiting for expected condition.');
 }
+
+test('session.setName routes to runtime.setThreadName with threadId+name (SESSION-NAME-001)', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+
+    await harness.service.setName({ sessionId: created.session.id, name: '  My Session  ' });
+    assert.deepEqual(harness.runtime.setThreadNameCalls, [
+      { threadId: created.session.threadId, name: 'My Session' },
+    ]);
+
+    // Empty / whitespace-only name is a no-op — we never clear an existing name.
+    await harness.service.setName({ sessionId: created.session.id, name: '   ' });
+    assert.equal(harness.runtime.setThreadNameCalls.length, 1);
+
+    // Control characters (CR/LF/tab) are stripped to spaces.
+    await harness.service.setName({ sessionId: created.session.id, name: 'a\nb\tc' });
+    assert.equal(harness.runtime.setThreadNameCalls.at(-1)!.name, 'a b c');
+  } finally {
+    await harness.cleanup();
+  }
+});
 
 test('session.create binds a session to a thread and returns id + threadId', async () => {
   const harness = await createHarness();
