@@ -114,6 +114,11 @@ function SettingsBodyInner({
     setEditors(next);
   }
 
+  // "Default apps" (below) picks from the curated "Open with" list — the apps
+  // the user added above — plus the two built-in system targets (@newtab /
+  // @finder). It deliberately does NOT offer the full scanned app catalog.
+  const editorAppNames = [...new Set(editors.map(e => e.name.trim()).filter(Boolean))];
+
   return (
     <div className="settings-tab-body" data-testid="settings-body">
       <header className="settings-hero">
@@ -318,6 +323,8 @@ function SettingsBodyInner({
           <dt>{t('settings.shortcuts.toggleWorkbench')}</dt><dd><kbd>⌘</kbd><kbd>\</kbd></dd>
           <dt>{t('settings.shortcuts.renameSession')}</dt><dd><kbd>F2</kbd></dd>
           <dt>{t('settings.shortcuts.approveDecline')}</dt><dd><kbd>⏎</kbd>&nbsp;<kbd>⌫</kbd></dd>
+          <dt>{t('settings.shortcuts.showChat')}</dt><dd><kbd>⌃/⌘</kbd><kbd>1</kbd></dd>
+          <dt>{t('settings.shortcuts.showCli')}</dt><dd><kbd>⌃/⌘</kbd><kbd>2</kbd></dd>
         </dl>
       </div>
 
@@ -388,8 +395,12 @@ function SettingsBodyInner({
         <p className="settings-section-help">{t('settings.openapps.help')}</p>
         {OPEN_CATEGORIES.map(({ key, labelKey }) => {
           const cur = (config.open_apps?.[key]) || DEFAULT_OPEN_TARGET[key];
-          // Keep the current app selectable even if it's not in the scanned list.
-          const appOpts = cur.startsWith('@') || apps.includes(cur) ? apps : [cur, ...apps];
+          // Options = the curated "Open with" apps only. Keep the current value
+          // selectable even if it's not in that list (a built-in default like
+          // TextEdit, or an app the user has since removed from "Open with").
+          const appOpts = cur.startsWith('@') || editorAppNames.includes(cur)
+            ? editorAppNames
+            : [cur, ...editorAppNames];
           return (
             <div key={key} className="open-cat-row">
               <span className="open-cat-label">{t(labelKey)}</span>

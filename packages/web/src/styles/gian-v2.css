@@ -1366,6 +1366,36 @@
 .composer-model .think i:nth-child(3) { height: 10px; }
 .composer-model .think i.on { background: var(--accent-text); opacity: 1; }
 
+/* TTY read-only readout — model / effort / mode are owned by the live CLI, so
+   they show as muted, non-interactive text. Only the trailing "edit in CLI"
+   link is actionable (jumps to the terminal). Replaces the interactive model
+   button + mode segmented control while in TTY. */
+.composer-tty-meta {
+  display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding: 4px 8px;
+  font: 500 var(--fz-11)/1 var(--font-mono);
+  color: var(--text-3);
+}
+.composer-tty-meta .ctm-dot {
+  width: 7px; height: 7px; border-radius: 2px; display: inline-block; opacity: 0.7;
+}
+.composer-tty-meta .ctm-model { color: var(--text-2); }
+.composer-tty-meta .ctm-effort { display: inline-flex; align-items: center; gap: 4px; }
+.composer-tty-meta .ctm-effort .think-bars { opacity: 0.85; }
+.composer-tty-meta .ctm-effort-label { text-transform: capitalize; }
+.composer-tty-meta .ctm-mode {
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding-left: 6px; margin-left: 1px;
+  border-left: 1px solid var(--hairline);
+}
+.composer-tty-meta .ctm-edit {
+  margin-left: 2px; padding: 2px 4px;
+  background: transparent; border: 0; border-radius: var(--r-2);
+  font: inherit; color: var(--accent-text);
+  cursor: pointer; opacity: 0.85;
+}
+.composer-tty-meta .ctm-edit:hover { opacity: 1; text-decoration: underline; }
+
 .composer-mode {
   display: inline-flex;
   padding: 2px;
@@ -2048,9 +2078,12 @@
   margin-top: 2px;
 }
 
-/* Diff scope selector in the Changes inspector header. */
-.insp-head .changes-scope {
-  margin-left: auto;
+/* Diff-source scope picker in the Changes inspector header. Custom dropdown
+   (not a native <select>) so it can show a ✓ on the active scope, matching
+   Codex's picker. Trigger chrome mirrors the old <select>. */
+.insp-head .changes-scope { margin-left: auto; position: relative; }
+.changes-scope-btn {
+  display: inline-flex; align-items: center; gap: 4px;
   font: 600 10px/1 var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -2061,7 +2094,38 @@
   padding: 3px 6px;
   cursor: pointer;
 }
-.insp-head .changes-scope:hover { color: var(--text); }
+.changes-scope-btn:hover { color: var(--text); }
+.changes-scope-btn .caret { font-size: 8px; opacity: 0.7; }
+.changes-scope-menu {
+  position: absolute;
+  top: calc(100% + 4px); right: 0;
+  z-index: 30;
+  min-width: 132px;
+  display: flex; flex-direction: column;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  box-shadow: var(--shadow-2);
+}
+.changes-scope-menu button {
+  display: flex; align-items: center; gap: 6px;
+  text-align: left;
+  padding: 6px 8px;
+  border: 0; background: transparent;
+  color: var(--text);
+  border-radius: var(--r-1);
+  font: var(--fz-12)/1 var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.changes-scope-menu button:hover { background: var(--surface-2); }
+.changes-scope-menu button.active { color: var(--text); font-weight: 600; }
+.changes-scope-menu .ck {
+  width: 12px; flex: none;
+  color: var(--accent, var(--text));
+  font-size: 11px; text-align: center;
+}
 
 /* Changed files as a collapsible file tree (reuses .tree / .tree-item chrome).
    A leaf row only opens the diff — Gian's Changes panel never edits file

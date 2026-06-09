@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ApprovalDecision, ApprovalMode, RemoteControlState, RuntimeMode, Session, TtySurface, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
-import { confirm } from '../feedback.js';
+import { confirm, toast } from '../feedback.js';
 import { createWorkspace, loadBranches, loadRemoteBranches, loadRepoInfo } from '../api.js';
 import type { LocalBranch, RemoteBranch } from '../api.js';
 import { BranchPicker } from '../components/BranchPicker.js';
@@ -14,14 +14,12 @@ import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import { Terminal, makeSessionWire } from '../components/Terminal.js';
 import { Transcript } from '../transcript/Transcript.js';
 import { TranscriptMinimap } from '../transcript/TranscriptMinimap.js';
-import { ApprovalCard } from '../transcript/items.js';
 import type { ApprovalActionContext, ApprovalItem, QueueEntry, TokenUsage, TranscriptItem } from '../types.js';
 import type { GianWs } from '../ws.js';
 import {
   betaComposerSubmitBehavior,
   isTurnRunning,
   planApprovalResponseDispatch,
-  toggleTtySurface,
   runtimeTabs,
   runtimeChatSurface,
   runtimeForSurface,
@@ -1469,19 +1467,42 @@ function SessionMain({
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Ctrl+` toggles TTY chat-view ↔ CLI. Capture phase so xterm never sees
-      // it; a bare backtick still types in the terminal. claude TTY only.
-      if (!e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.key !== '`' && e.code !== 'Backquote') return;
+      // Ctrl/Cmd+1 → chat view, Ctrl/Cmd+2 → CLI. Capture phase so xterm never
+      // sees the digit. claude TTY only. (Replaces the old Ctrl+` toggle, which
+      // was awkward to reach on many keyboard layouts.)
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod || e.altKey || e.shiftKey) return;
+      const wantChat = e.key === '1' || e.code === 'Digit1';
+      const wantCli = e.key === '2' || e.code === 'Digit2';
+      if (!wantChat && !wantCli) return;
       if (session.executor !== 'claude' || session.runtime_mode !== 'tty') return;
       if (surface !== 'beta' && surface !== 'cli') return;
       e.preventDefault();
       e.stopPropagation();
-      handleSelectSurface(toggleTtySurface(surface));
+      handleSelectSurface(wantChat ? 'beta' : 'cli');
     };
     document.addEventListener('keydown', onKey, true);
     return () => document.removeEventListener('keydown', onKey, true);
   }, [session.executor, session.runtime_mode, surface, handleSelectSurface]);
+
+  // Beta: a Claude question's interactive selector lives ONLY in the PTY — the
+  // beta surface can't answer it. So when one appears, nudge with a toast and
+  // jump straight to the CLI where the selector is blocking. Once per question;
+  // if the user manually returns to beta the dock still shows the reminder.
+  const autoJumpedQRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (isBeta && pendingQuestion) {
+      if (autoJumpedQRef.current !== pendingQuestion.approvalId) {
+        autoJumpedQRef.current = pendingQuestion.approvalId;
+        toast({ kind: 'info', message: t('coding.beta.questionToast'), duration: 6000 });
+        handleSelectSurface('cli');
+      }
+    } else if (!pendingQuestion) {
+      autoJumpedQRef.current = null;
+    }
+    // handleSelectSurface is recreated each render; the ref guards re-firing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isBeta, pendingQuestion]);
 
   const handleTranscriptApprove = (
     approvalId: string,
@@ -1637,7 +1658,6 @@ function SessionMain({
               >
                 {t('transcript.question.answerInCli')}
               </button>
-              <ApprovalCard item={pendingQuestion} onApprove={handleTranscriptApprove} />
             </div>
           )}
           <Composer

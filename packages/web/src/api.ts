@@ -67,11 +67,18 @@ export interface ChangedEntry {
   removed: number;
 }
 
-/** Diff comparison scope. `all` = working tree vs HEAD (staged+unstaged, the
- *  historical default). `unstaged` = working tree vs index. `staged` = index
- *  vs HEAD. Default-omitted from the URL so it stays byte-identical to the
- *  pre-scope endpoint (GitBadge + older callers rely on that). */
-export type ChangeScope = 'all' | 'unstaged' | 'staged';
+/** Diff comparison scope. Mirrors Codex's five-option picker plus the legacy
+ *  `all`:
+ *   - `all`      = working tree vs HEAD (staged+unstaged, the historical
+ *                  default; default-omitted from the URL so it stays
+ *                  byte-identical to the pre-scope endpoint — GitBadge + older
+ *                  callers rely on that). Not shown in the UI picker.
+ *   - `unstaged` = working tree vs index.
+ *   - `staged`   = index vs HEAD.
+ *   - `commit`   = HEAD's committed delta (parent..HEAD).
+ *   - `branch`   = the whole branch vs its base (merge-base) + untracked.
+ *   - `lastturn` = files the agent edited in its most recent turn, vs HEAD. */
+export type ChangeScope = 'all' | 'unstaged' | 'staged' | 'commit' | 'branch' | 'lastturn';
 
 export async function loadChanged(
   workingTreeId: string,

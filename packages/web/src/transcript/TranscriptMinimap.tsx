@@ -30,6 +30,15 @@ function anchorIndexOf(offs: { offset: number }[], scrollTop: number): number {
   return idx;
 }
 
+/** True when the message row for `id` still has any part at/below the viewport
+ *  top — i.e. it's actually on screen, not scrolled off above it. */
+function isMsgVisible(scrollEl: HTMLElement, id: string | undefined): boolean {
+  if (!id) return false;
+  const node = scrollEl.querySelector(`[data-msg-id="${id}"]`) as HTMLElement | null;
+  if (!node) return false;
+  return node.offsetTop + node.offsetHeight > scrollEl.scrollTop;
+}
+
 /**
  * Navigation for your own messages in the transcript:
  *  - prev/next buttons (always available) jump to the message above/below the
@@ -90,8 +99,12 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
     const updateNav = () => {
       const offs = offsetsRef.current;
       const i = anchorIndexOf(offs, scrollEl.scrollTop);
-      setActiveId(offs[i]?.id ?? null);
-      setCanPrev(i > 0);
+      const cur = offs[i];
+      setActiveId(cur?.id ?? null);
+      // "prev" can also re-show the current message when it has scrolled off the
+      // top, so enable it whenever there's a message above OR the current one is
+      // no longer visible. "next" is unchanged.
+      setCanPrev(i > 0 || (!!cur && !isMsgVisible(scrollEl, cur.id)));
       setCanNext(offs.length > 0 && i < offs.length - 1);
     };
     const measure = () => {
@@ -146,7 +159,16 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
   };
   const goPrev = () => {
     if (!scrollEl) return;
-    const target = offsetsRef.current[anchorIndexOf(offsetsRef.current, scrollEl.scrollTop) - 1];
+    const offs = offsetsRef.current;
+    const i = anchorIndexOf(offs, scrollEl.scrollTop);
+    const cur = offs[i];
+    // If the current (anchored) message has scrolled above the viewport, "prev"
+    // re-shows IT first instead of skipping to the message above it.
+    if (cur && !isMsgVisible(scrollEl, cur.id)) {
+      scrollToOffset(cur.offset);
+      return;
+    }
+    const target = offs[i - 1];
     if (target) scrollToOffset(target.offset);
   };
   const goNext = () => {

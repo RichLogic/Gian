@@ -152,3 +152,22 @@ test('STOP-TTY-001: stopTurn in claude TTY mode injects interrupt, not structure
     teardown(ctx);
   }
 });
+
+test('STOP-TTY-001: stopTurn in claude TTY mode settles status→done so the web spinner clears', async () => {
+  // The Esc interrupt emits no turn.completed; without an explicit settle the
+  // beta spinner (driven by `pending`) stayed stuck "running".
+  const ctx = setup();
+  try {
+    const sid = seedSession(ctx.db, { runtime_mode: 'tty', executor: 'claude', status: 'running' });
+    await ctx.sessions.stopTurn(sid);
+    const updated = ctx.broadcaster.messages.find(
+      m => m.type === 'session:updated' && (m as { session: { id: string; status?: string } }).session.id === sid,
+    ) as { session: { status?: string } } | undefined;
+    assert.ok(updated, 'stopTurn must broadcast session:updated for the TTY session');
+    assert.equal(updated!.session.status, 'done');
+    const row = ctx.db.prepare('SELECT status FROM sessions WHERE id = ?').get(sid) as { status: string };
+    assert.equal(row.status, 'done', 'DB session status must settle to done');
+  } finally {
+    teardown(ctx);
+  }
+});

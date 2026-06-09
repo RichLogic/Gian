@@ -4,6 +4,7 @@ import type { Db } from './db.js';
 
 const EXTERNAL_EDITORS_KEY = 'external_editors';
 const OPEN_APPS_KEY = 'open_apps';
+const OPEN_APP_CATEGORIES = ['code', 'web', 'images', 'pdf', 'other'] as const;
 
 const VALID_ACCENTS: ReadonlySet<Accent> = new Set([
   'rose', 'ember', 'citron', 'moss', 'teal', 'azure', 'ink', 'plum',
@@ -55,12 +56,32 @@ function sanitizeEditors(raw: unknown): ExternalEditor[] {
   return out;
 }
 
+/** Keep only the five known categories with non-empty string values. Mirrors
+ *  the load-side validation so save and load agree on the shape. */
+function sanitizeOpenApps(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (raw && typeof raw === 'object') {
+    for (const k of OPEN_APP_CATEGORIES) {
+      const v = (raw as Record<string, unknown>)[k];
+      if (typeof v === 'string' && v) out[k] = v;
+    }
+  }
+  return out;
+}
+
 export function saveConfig(db: Db, partial: Partial<SystemConfig>): void {
   const stmt = db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)`);
   for (const [key, value] of Object.entries(partial) as [keyof SystemConfig, SystemConfig[keyof SystemConfig]][]) {
     if (key === EXTERNAL_EDITORS_KEY) {
       const cleaned = sanitizeEditors(value);
       stmt.run(key, JSON.stringify(cleaned));
+      continue;
+    }
+    if (key === OPEN_APPS_KEY) {
+      // open_apps is an object — it MUST be JSON-serialized, not coerced via
+      // String() (which yields "[object Object]" and then fails JSON.parse on
+      // load, silently resetting the user's choice to {}).
+      stmt.run(key, JSON.stringify(sanitizeOpenApps(value)));
       continue;
     }
     stmt.run(key, String(value));
@@ -88,15 +109,7 @@ export function loadConfig(db: Db): SystemConfig {
   const rawOpenApps = map.get(OPEN_APPS_KEY);
   if (rawOpenApps) {
     try {
-      const parsed = JSON.parse(rawOpenApps);
-      if (parsed && typeof parsed === 'object') {
-        const out: Record<string, string> = {};
-        for (const k of ['code', 'web', 'images', 'pdf', 'other']) {
-          const v = (parsed as Record<string, unknown>)[k];
-          if (typeof v === 'string' && v) out[k] = v;
-        }
-        openApps = out;
-      }
+      openApps = sanitizeOpenApps(JSON.parse(rawOpenApps));
     } catch {
       openApps = {};
     }

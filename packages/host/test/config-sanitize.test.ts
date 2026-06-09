@@ -42,6 +42,50 @@ test('UI-ACCENT-001 · invalid theme falls back to warm', async () => {
   await ctx.cleanup?.();
 });
 
+// ---------------------------------------------------------------------------
+// open_apps round-trip — regression for "Default apps 设置完没有反应".
+// saveConfig used to fall through to String(value) for the open_apps OBJECT,
+// storing the literal "[object Object]"; loadConfig's JSON.parse then threw
+// and silently reset the user's choice to {}. saveConfig must JSON-serialize.
+// ---------------------------------------------------------------------------
+
+test('open_apps · saveConfig→loadConfig round-trips the per-category app map', async () => {
+  const ctx = await makeTestApp();
+  saveConfig(ctx.db, { open_apps: { code: 'Visual Studio Code', web: '@newtab', pdf: 'Preview' } });
+  const cfg = loadConfig(ctx.db);
+  assert.deepEqual(cfg.open_apps, { code: 'Visual Studio Code', web: '@newtab', pdf: 'Preview' });
+  await ctx.cleanup?.();
+});
+
+test('open_apps · the stored DB value is real JSON, never "[object Object]"', async () => {
+  const ctx = await makeTestApp();
+  saveConfig(ctx.db, { open_apps: { images: 'Preview' } });
+  const row = ctx.db.prepare(`SELECT value FROM config WHERE key = 'open_apps'`).get() as { value: string };
+  assert.notEqual(row.value, '[object Object]', 'must not coerce the object via String()');
+  assert.deepEqual(JSON.parse(row.value), { images: 'Preview' }, 'stored value must be parseable JSON');
+  await ctx.cleanup?.();
+});
+
+test('open_apps · legacy "[object Object]" rows load as {} without crashing', async () => {
+  // Existing installs already have the broken value in the DB; loadConfig must
+  // tolerate it (so the UI shows built-in defaults until the user re-picks).
+  const ctx = await makeTestApp();
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('open_apps', '[object Object]')`).run();
+  const cfg = loadConfig(ctx.db);
+  assert.deepEqual(cfg.open_apps, {});
+  await ctx.cleanup?.();
+});
+
+test('open_apps · saveConfig drops unknown categories and non-string values', async () => {
+  const ctx = await makeTestApp();
+  saveConfig(ctx.db, {
+    open_apps: { code: 'TextEdit', bogus: 'x', images: '', pdf: 42 } as never,
+  });
+  const cfg = loadConfig(ctx.db);
+  assert.deepEqual(cfg.open_apps, { code: 'TextEdit' });
+  await ctx.cleanup?.();
+});
+
 test('UI-ACCENT-001 · defaults when nothing is set', async () => {
   const ctx = await makeTestApp();
   ctx.db.prepare('DELETE FROM config').run();

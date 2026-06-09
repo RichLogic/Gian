@@ -86,6 +86,9 @@ export class TtyManager {
   /** Per-session Claude Remote Control state, parsed from the PTY status line.
    *  Drives the composer's remote-control toggle. Cleared on PTY exit. */
   private readonly remoteControl = new Map<string, RemoteControlState>();
+  /** Rolling, ANSI-stripped tail of recent PTY output per session, so the
+   *  Remote Control status line is detectable even when split across chunks. */
+  private readonly rcBuf = new Map<string, string>();
   /** Fired when a TTY turn ends (`Stop` hook). The host wires this to the
    *  queue drain so Beta walks its queue one entry per completed turn. */
   private onTtyTurnComplete: ((sessionId: string) => void) | null = null;
@@ -356,6 +359,7 @@ export class TtyManager {
       // `pending` before broadcasting the exit so the UI doesn't strand them.
       this.clearPendingQuestions(sessionId);
       // Remote Control dies with the PTY — reset the toggle.
+      this.rcBuf.delete(sessionId);
       if (this.remoteControl.delete(sessionId)) {
         this.broadcaster.broadcast({ type: 'tty:remote-control', session_id: sessionId, state: 'disconnected' });
       }
@@ -413,11 +417,32 @@ export class TtyManager {
    * the chunk so a single redraw carrying a stale + fresh line resolves to the
    * newer state.
    */
-  private detectRemoteControl(sessionId: string, text: string): void {
+  private detectRemoteControl(sessionId: string, chunk: string): void {
+    // Claude's TUI paints the status line as part of a redraw: the phrase can
+    // be split across PTY chunks and wrapped in ANSI escape sequences. Strip
+    // the escapes and scan a rolling per-session tail so a contiguous match is
+    // possible regardless of how the bytes were chunked.
+    const cleaned = chunk
+      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '') // CSI sequences (colors, cursor moves)
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC sequences (titles)
+      .replace(/[\r\b]/g, '');
+    const text = ((this.rcBuf.get(sessionId) ?? '') + cleaned).slice(-4000);
+    this.rcBuf.set(sessionId, text);
+
+    if (process.env.GIAN_RC_DEBUG && /remote.?control/i.test(chunk)) {
+      // Temporary: surface what the PTY actually emits so detection can be tuned.
+      console.error('[rc-debug]', sessionId, JSON.stringify(chunk.slice(0, 400)));
+    }
+
+    // Claude's actual status-line wording (verified from live PTY output):
+    //   connecting → "Remote Control connecting…"
+    //   connected  → "Remote Control active"   (NOT "connected")
+    //   off        → "Remote Control disconnected" (best-known; also clears)
+    const find = (...needles: string[]) => Math.max(...needles.map(n => text.lastIndexOf(n)));
     const at: Record<RemoteControlState, number> = {
-      connecting: text.lastIndexOf('Remote Control connecting'),
-      connected: text.lastIndexOf('Remote Control connected'),
-      disconnected: text.lastIndexOf('Remote Control disconnected'),
+      connecting: find('Remote Control connecting'),
+      connected: find('Remote Control active', 'Remote Control connected'),
+      disconnected: find('Remote Control disconnected', 'Remote Control off'),
     };
     let next: RemoteControlState | null = null;
     let best = -1;
@@ -427,6 +452,7 @@ export class TtyManager {
     if (best < 0 || !next) return;
     if (this.remoteControl.get(sessionId) === next) return;
     this.remoteControl.set(sessionId, next);
+    if (process.env.GIAN_RC_DEBUG) console.error('[rc-debug] →', sessionId, next);
     this.broadcaster.broadcast({ type: 'tty:remote-control', session_id: sessionId, state: next });
   }
 

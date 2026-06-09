@@ -71,17 +71,53 @@ export interface RawPreviewHeaders {
 }
 
 /**
+ * Build an RFC 6266-compliant `Content-Disposition` value for a basename.
+ *
+ * HTTP header values must be ISO-8859-1 (Latin-1). A filename containing
+ * non-ASCII characters — e.g. a CJK name like `方案二.html` — cannot appear
+ * verbatim: Node's HTTP writer throws `ERR_INVALID_CHAR` from
+ * `ServerResponse.writeHead`, and because that fires inside the
+ * `@hono/node-server` adapter *after* the route returns its `Response`, the
+ * route's own try/catch never sees it — the whole response aborts mid-write
+ * (the browser just sees a failed/empty load). So we ALWAYS emit an
+ * ASCII-safe `filename="..."` token, and when the real name has any non-ASCII
+ * char we additionally advertise it via the RFC 5987 `filename*=UTF-8''...`
+ * form (percent-encoded, hence pure ASCII) for modern browsers.
+ */
+function contentDisposition(name: string): string {
+  // ASCII fallback: strip quotes/backslash (no breaking out of the quoted
+  // value — header-injection guard, preserved from the original behavior) and
+  // replace any non-printable-ASCII byte with `_` so the token stays Latin-1.
+  const ascii = name.replace(/["\\]/g, '').replace(/[^\x20-\x7e]/g, '_');
+  let value = `inline; filename="${ascii}"`;
+  if (/[^\x00-\x7f]/.test(name)) {
+    value += `; filename*=UTF-8''${encodeRfc5987(name)}`;
+  }
+  return value;
+}
+
+/** Percent-encode a string for the RFC 5987 `ext-value` grammar (attr-char).
+ *  `encodeURIComponent` covers most of it but leaves `! ' ( ) *` unescaped,
+ *  none of which are attr-chars, so encode those too. */
+function encodeRfc5987(str: string): string {
+  return encodeURIComponent(str).replace(
+    /['()*!]/g,
+    c => '%' + c.charCodeAt(0).toString(16).toUpperCase(),
+  );
+}
+
+/**
  * Resolve MIME from the extension and build the full security-header set.
  * Used by `/api/working_trees/:id/raw`.
  */
 export function buildRawPreviewHeaders(input: RawPreviewHeaderInput): RawPreviewHeaders {
   const ext = input.rel.toLowerCase().split('.').pop() ?? '';
   const contentType = MIME[ext] ?? 'application/octet-stream';
-  const filename = input.rel.split('/').pop()?.replace(/"/g, '') ?? 'file';
+  const basename = input.rel.split('/').pop() ?? 'file';
   const headers: Record<string, string> = {
     'Content-Type': contentType,
     'Content-Length': String(input.size),
-    'Content-Disposition': `inline; filename="${filename}"`,
+    'Content-Disposition': contentDisposition(basename),
     'Cache-Control': 'private, max-age=60',
     'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff',

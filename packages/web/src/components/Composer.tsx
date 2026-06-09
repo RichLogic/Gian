@@ -760,6 +760,33 @@ export function Composer({
         )}
 
         <div className="composer-bar">
+          {/* TTY: model / effort / mode are owned by the live CLI, so here they
+              are a read-only readout, not interactive pills. A single
+              "edit in CLI" link jumps to the terminal to change them. */}
+          {ttyDisplayOnly && (
+            <div className="composer-tty-meta">
+              <span
+                className="ctm-dot"
+                style={{ background: executor === 'codex' ? 'var(--codex)' : 'var(--claude)' }}
+                aria-hidden="true"
+              />
+              <span className="ctm-model">{modelLabel(models, activeModel) || activeModel}</span>
+              <span className="ctm-effort">
+                <ThinkBars level={thinkLevel} />
+                {thinkLevel && <span className="ctm-effort-label">{thinkLevel}</span>}
+              </span>
+              <span className="ctm-mode">{t(`mode.${approvalMode}`)}</span>
+              <button
+                type="button"
+                className="ctm-edit"
+                onClick={() => onJumpToCli?.()}
+                title={t('composer.tty.jumpToCli')}
+              >
+                {t('composer.tty.jumpToCli')} <span aria-hidden="true">↗</span>
+              </button>
+            </div>
+          )}
+          {!ttyDisplayOnly && (<>
           {/* Model picker — opens custom model+thinking popover */}
           <div className="composer-model">
           <button
@@ -914,6 +941,7 @@ export function Composer({
 
           {/* Turns stepper hidden — multi-turn auto-job UI deferred (PR5/#6).
               State + handlers retained so re-enabling is one toggle. */}
+          </>)}
 
           <span className="spacer" />
 
@@ -969,34 +997,40 @@ export function Composer({
               </button>
             )}
 
-          {/* Slash command — framed [/] glyph */}
-          <button
-            ref={slashBtnRef}
-            type="button"
-            className={`composer-act slash-box${slashOpen ? ' active' : ''}`}
-            title={t('composer.slash.title')}
-            onClick={() => {
-              setSlashOpen(v => !v);
-              setSlashIdx(0);
-              ref.current?.focus();
-            }}
-          >
-            <span className="glyph composer-slash-glyph">/</span>
-          </button>
+          {/* Slash command — framed [/] glyph. Hidden in TTY: the live CLI
+              has its own native slash UI, so this would only duplicate it. */}
+          {!ttyDisplayOnly && (
+            <button
+              ref={slashBtnRef}
+              type="button"
+              className={`composer-act slash-box${slashOpen ? ' active' : ''}`}
+              title={t('composer.slash.title')}
+              onClick={() => {
+                setSlashOpen(v => !v);
+                setSlashIdx(0);
+                ref.current?.focus();
+              }}
+            >
+              <span className="glyph composer-slash-glyph">/</span>
+            </button>
+          )}
 
-          {/* Attach files — plus glyph (VS Code style) — picker not supported in v1 */}
-          <button
-            type="button"
-            className={`composer-act${pendingFiles.length > 0 ? ' active' : ''}`}
-            title={t('composer.attachment.pasteImagesHint')}
-            disabled
-            onClick={() => fileInputRef.current?.click()}
-            aria-label={t('composer.attachment.pasteImages')}
-          >
-            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-            </svg>
-          </button>
+          {/* Attach files — plus glyph (VS Code style) — picker not supported in v1.
+              Hidden in TTY (it's a no-op there; paste-to-upload still works). */}
+          {!ttyDisplayOnly && (
+            <button
+              type="button"
+              className={`composer-act${pendingFiles.length > 0 ? ' active' : ''}`}
+              title={t('composer.attachment.pasteImagesHint')}
+              disabled
+              onClick={() => fileInputRef.current?.click()}
+              aria-label={t('composer.attachment.pasteImages')}
+            >
+              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+            </button>
+          )}
 
           {/* Send / Stop */}
           {running ? (

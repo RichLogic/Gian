@@ -44,6 +44,18 @@ function renderChanges(opts: {
   return { onOpenDiff, onComposePrompt };
 }
 
+// Open the custom scope dropdown and pick a scope by its visible label.
+const SCOPE_LABEL: Record<string, string> = {
+  unstaged: 'Unstaged', staged: 'Staged', commit: 'Commit', branch: 'Branch', lastturn: 'Last turn',
+};
+function pickScope(value: keyof typeof SCOPE_LABEL): void {
+  fireEvent.click(document.querySelector('.changes-scope-btn') as HTMLElement);
+  const menu = document.querySelector('.changes-scope-menu') as HTMLElement;
+  const btn = Array.from(menu.querySelectorAll('button'))
+    .find(b => b.textContent?.replace('✓', '').trim() === SCOPE_LABEL[value]) as HTMLElement;
+  fireEvent.click(btn);
+}
+
 describe('Inspector CHANGES', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -51,15 +63,15 @@ describe('Inspector CHANGES', () => {
     (api.loadChanged as ReturnType<typeof vi.fn>).mockResolvedValue([]);
   });
 
-  it('defaults to the "all" scope (no scope arg in the URL path)', async () => {
+  it('defaults to the "branch" scope', async () => {
     renderChanges();
-    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'all'));
+    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'branch'));
   });
 
-  it('switching the scope dropdown re-fetches with that scope', async () => {
+  it('switching the scope re-fetches with that scope', async () => {
     renderChanges();
     await waitFor(() => expect(api.loadChanged).toHaveBeenCalled());
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'staged' } });
+    pickScope('staged');
     await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'staged'));
   });
 
@@ -67,12 +79,15 @@ describe('Inspector CHANGES', () => {
     (api.loadChanged as ReturnType<typeof vi.fn>).mockResolvedValue([unstagedRow]);
     const { onOpenDiff } = renderChanges();
     fireEvent.click(await screen.findByText('a.ts'));
-    expect(onOpenDiff).toHaveBeenCalledWith('src/a.ts', false, 'all');
+    // Default scope is now Branch.
+    expect(onOpenDiff).toHaveBeenCalledWith('src/a.ts', false, 'branch');
   });
 
   it('Stage on an unstaged row calls stageFile then reloads', async () => {
     (api.loadChanged as ReturnType<typeof vi.fn>).mockResolvedValue([unstagedRow]);
     renderChanges();
+    // The stage chip only shows in working-tree scopes.
+    pickScope('unstaged');
     await screen.findByText('a.ts');
     const calls0 = (api.loadChanged as ReturnType<typeof vi.fn>).mock.calls.length;
     fireEvent.click(screen.getByTitle('Stage'));
@@ -87,6 +102,7 @@ describe('Inspector CHANGES', () => {
   it('Unstage on a staged row calls unstageFile', async () => {
     (api.loadChanged as ReturnType<typeof vi.fn>).mockResolvedValue([stagedRow]);
     renderChanges();
+    pickScope('staged');
     await screen.findByText('b.ts');
     fireEvent.click(screen.getByTitle('Unstage'));
     await waitFor(() => expect(api.unstageFile).toHaveBeenCalledWith('ws:demo', 'src/b.ts'));

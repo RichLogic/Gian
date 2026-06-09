@@ -247,6 +247,29 @@ test('FILE-003: /raw returns 400 when the resolved path points at a directory, n
   }
 });
 
+test('FILE-003: /raw serves a file with a non-ASCII (CJK) name without crashing the response', async () => {
+  // Regression for the production bug: a CJK basename landed verbatim in
+  // Content-Disposition, Node threw ERR_INVALID_CHAR while writing headers,
+  // and the response aborted mid-stream so the "Open" link never loaded.
+  const name = '方案二详细设计-第一期-密码加密.html';
+  const html = '<html><body><h1>你好</h1></body></html>';
+  const ctx = await setup({ [`docs/${name}`]: html });
+  try {
+    const res = await fetchRaw(ctx, `docs/${name}`);
+    assert.equal(res.status, 200, 'CJK-named files must serve, not 500');
+    assert.equal(res.headers.get('Content-Type'), 'text/html; charset=utf-8');
+    const dispo = res.headers.get('Content-Disposition')!;
+    assert.ok(/^[\x00-\x7f]*$/.test(dispo),
+      `Content-Disposition must be pure ASCII (ERR_INVALID_CHAR guard) — got: ${dispo}`);
+    assert.ok(dispo.includes("filename*=UTF-8''"),
+      'non-ASCII name must be advertised via RFC 5987 filename*');
+    // Body served byte-for-byte (the CSP/headers path still applies).
+    assert.equal(await res.text(), html);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test('FILE-003: /raw strips embedded quotes from the filename in Content-Disposition (no header injection)', async () => {
   // The helper strips `"` from the basename. Pin via integration that
   // the route doesn't reintroduce it from `rel`.

@@ -69,4 +69,21 @@ describe('Inspector FILES search', () => {
     await waitFor(() => expect(api.loadTree).toHaveBeenCalled());
     expect(api.loadAllFiles).not.toHaveBeenCalled();
   });
+
+  it('switching working tree remounts the tree and refetches from the new tree', async () => {
+    // Regression: the root folder used to be keyed only by reloadKey, so a
+    // workspace switch left it showing the previous tree's cached entries.
+    const { rerender } = render(
+      <Inspector tab="files" workingTreeId="ws:demo" workingTrees={workingTrees}
+        onOpenFile={vi.fn()} onOpenDiff={() => {}} />,
+    );
+    await waitFor(() => expect(api.loadTree).toHaveBeenCalledWith('ws:demo', ''));
+    (api.loadTree as ReturnType<typeof vi.fn>).mockClear();
+
+    rerender(
+      <Inspector tab="files" workingTreeId="ws:other" workingTrees={workingTrees}
+        onOpenFile={vi.fn()} onOpenDiff={() => {}} />,
+    );
+    await waitFor(() => expect(api.loadTree).toHaveBeenCalledWith('ws:other', ''));
+  });
 });

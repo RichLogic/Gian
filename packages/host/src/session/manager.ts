@@ -458,6 +458,18 @@ export class SessionManager {
     if (session.runtime_mode === 'tty' && session.executor === 'claude') {
       this.jobs.delete(sessionId);
       await this.ttyMgr?.interrupt(sessionId);
+      // TTY turns run inside the PTY: they aren't tracked in `activeTurns`, the
+      // Esc interrupt emits no turn.completed, and the JSONL watcher marks no
+      // boundary for an aborted turn. The web spinner is driven by `pending`
+      // (set optimistically on beta-send + from turn_started/completed
+      // envelopes), so without an explicit signal it stays stuck "running".
+      // Settle the session status — `session:updated{status:done}` is what the
+      // web uses to clear pending (mirrors the structured path + force-recover).
+      const now = new Date().toISOString();
+      this.db
+        .prepare(`UPDATE sessions SET status = 'done', updated_at = ? WHERE id = ? AND status != 'done'`)
+        .run(now, sessionId);
+      this.broadcastSessionUpdated(sessionId, { status: 'done', updated_at: now });
       return;
     }
     const proxySessionId = this.proxySessionIds.get(sessionId);

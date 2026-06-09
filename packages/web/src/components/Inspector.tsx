@@ -143,7 +143,10 @@ function FilesInspector({
         ) : (
           <div className="tree">
             <TreeFolder
-              key={reloadKey}
+              // Key on the working tree (not just reloadKey) so switching
+              // workspace remounts the whole tree — otherwise the root folder
+              // keeps the previous tree's cached `entries` and never reloads.
+              key={`${workingTreeId}:${reloadKey}`}
               workingTreeId={workingTreeId}
               relPath=""
               name={rootName}
@@ -375,18 +378,32 @@ function ChangeLeaf({ entry, name, depth, ctx }: { entry: ChangedEntry; name: st
         {entry.added > 0 && <span className="add">+{entry.added}</span>}
         {entry.removed > 0 && <span className="del">−{entry.removed}</span>}
       </span>
-      <button
-        className="changes-stage"
-        type="button"
-        disabled={ctx.busyPath === entry.path}
-        title={entry.staged ? ctx.t('changes.unstage') : ctx.t('changes.stage')}
-        onClick={e => ctx.onToggleStage(e, entry)}
-      >
-        {entry.staged ? ctx.t('changes.unstage') : ctx.t('changes.stage')}
-      </button>
+      {/* Stage/unstage only applies to the working-tree scopes — committed
+          (commit/branch) and last-turn diffs have no staging concept. */}
+      {(ctx.scope === 'unstaged' || ctx.scope === 'staged') && (
+        <button
+          className="changes-stage"
+          type="button"
+          disabled={ctx.busyPath === entry.path}
+          title={entry.staged ? ctx.t('changes.unstage') : ctx.t('changes.stage')}
+          onClick={e => ctx.onToggleStage(e, entry)}
+        >
+          {entry.staged ? ctx.t('changes.unstage') : ctx.t('changes.stage')}
+        </button>
+      )}
     </div>
   );
 }
+
+// The five diff-source scopes offered in the Changes picker, in Codex's order.
+// `all` is intentionally absent — it stays a host-only default for GitBadge.
+const SCOPE_OPTIONS: ReadonlyArray<{ value: ChangeScope; key: string }> = [
+  { value: 'unstaged', key: 'changes.scope.unstaged' },
+  { value: 'staged', key: 'changes.scope.staged' },
+  { value: 'commit', key: 'changes.scope.commit' },
+  { value: 'branch', key: 'changes.scope.branch' },
+  { value: 'lastturn', key: 'changes.scope.lastTurn' },
+];
 
 function ChangesInspector({
   workingTreeId,
@@ -403,14 +420,17 @@ function ChangesInspector({
   const [scope, setScope] = useState<ChangeScope>(() => {
     try {
       const s = localStorage.getItem('gian.changes.scope');
-      if (s === 'unstaged' || s === 'staged' || s === 'all') return s;
+      // Accept the five Codex-aligned scopes. Legacy stored 'all' (dropped from
+      // the picker) falls through to the new default, Branch.
+      if (s === 'unstaged' || s === 'staged' || s === 'commit' || s === 'branch' || s === 'lastturn') return s;
     } catch { /* storage disabled */ }
-    return 'all';
+    return 'branch';
   });
   const [changes, setChanges] = useState<ChangedEntry[]>([]);
   const [reloadKey, setReloadKey] = useState(0);
   const [busyPath, setBusyPath] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
 
   useEffect(() => {
     if (!workingTreeId) {
@@ -455,16 +475,39 @@ function ChangesInspector({
     <aside className="inspector">
       <div className="insp-head">
         <span className="label">{t('inspector.changes')}</span>
-        <select
-          className="changes-scope"
-          value={scope}
-          onChange={e => pickScope(e.target.value as ChangeScope)}
-          title={t('changes.scope.title')}
-        >
-          <option value="all">{t('changes.scope.all')}</option>
-          <option value="unstaged">{t('changes.scope.unstaged')}</option>
-          <option value="staged">{t('changes.scope.staged')}</option>
-        </select>
+        {/* Diff-source picker — the five Codex-aligned scopes, with a ✓ on the
+            active one. Custom menu (not a native <select>) to match Codex. */}
+        <div className="changes-scope">
+          <button
+            className="changes-scope-btn"
+            type="button"
+            title={t('changes.scope.title')}
+            onClick={() => setScopeMenuOpen(o => !o)}
+          >
+            {t(SCOPE_OPTIONS.find(o => o.value === scope)?.key ?? 'changes.scope.branch')}
+            <span className="caret">▾</span>
+          </button>
+          {scopeMenuOpen && (
+            <>
+              <div className="changes-menu-backdrop" onClick={() => setScopeMenuOpen(false)} />
+              <div className="changes-scope-menu" role="menu">
+                {SCOPE_OPTIONS.map(opt => (
+                  <button
+                    key={opt.value}
+                    role="menuitemradio"
+                    aria-checked={scope === opt.value}
+                    type="button"
+                    className={scope === opt.value ? 'active' : ''}
+                    onClick={() => { pickScope(opt.value); setScopeMenuOpen(false); }}
+                  >
+                    <span className="ck">{scope === opt.value ? '✓' : ''}</span>
+                    {t(opt.key)}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
         <button className="iconbtn" title={t('common.refresh')} onClick={() => setReloadKey(k => k + 1)}>
           <Icon d={I.refresh} />
         </button>

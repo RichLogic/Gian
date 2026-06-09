@@ -63,6 +63,36 @@ test('FILE-003: inline Content-Disposition uses basename and strips embedded quo
     'quotes in the filename must be stripped to prevent breaking out of the disposition value');
 });
 
+test('FILE-003: Content-Disposition stays pure ASCII for non-ASCII (CJK) filenames', () => {
+  // Regression: a CJK basename used to be dropped verbatim into the header,
+  // which Node rejects with ERR_INVALID_CHAR (header values are ISO-8859-1) —
+  // the whole /raw response aborted mid-write so the file "wouldn't open".
+  const { headers } = buildRawPreviewHeaders({
+    rel: 'docs/方案二详细设计-第一期-密码加密.html',
+    size: 51578,
+  });
+  const dispo = headers['Content-Disposition']!;
+  // The invariant that actually prevents the crash: the entire value is ASCII.
+  assert.ok(/^[\x00-\x7f]*$/.test(dispo),
+    `Content-Disposition MUST be pure ASCII or Node throws ERR_INVALID_CHAR — got: ${dispo}`);
+  // ASCII fallback: non-ASCII chars become `_`, ASCII (`-`, `.html`) preserved.
+  assert.ok(dispo.startsWith('inline; filename="'));
+  assert.ok(dispo.includes('.html"'), 'extension must survive in the ASCII fallback');
+  // RFC 5987 form carries the real UTF-8 name, percent-encoded.
+  assert.ok(dispo.includes("filename*=UTF-8''"),
+    'non-ASCII names must advertise the UTF-8 filename via RFC 5987 filename*');
+  assert.ok(dispo.includes(encodeURIComponent('方案二详细设计-第一期-密码加密.html')
+    .replace(/['()*!]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())),
+    'filename* must contain the percent-encoded UTF-8 basename');
+});
+
+test('FILE-003: Content-Disposition omits filename* for plain-ASCII names', () => {
+  // No RFC 5987 token when it adds nothing — keeps the common case clean and
+  // backward-compatible with the original single-token form.
+  const { headers } = buildRawPreviewHeaders({ rel: 'subdir/report.pdf', size: 1 });
+  assert.equal(headers['Content-Disposition'], 'inline; filename="report.pdf"');
+});
+
 test('FILE-003: Content-Disposition is always `inline` (never `attachment`)', () => {
   // `attachment` would force a download instead of in-browser preview, which
   // is exactly the opposite of what the Files-tab "Open in new tab" needs.

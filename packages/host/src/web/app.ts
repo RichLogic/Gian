@@ -27,6 +27,7 @@ import {
   buildRemoteBranchList,
   REMOTE_BRANCHES_FOR_EACH_REF_FMT,
 } from '../workspace/git-branches.js';
+import { detectDefaultBranch } from '../workspace/git.js';
 import {
   buildRawPreviewHeaders,
   rawPreviewOversize,
@@ -1393,6 +1394,134 @@ export function createApp(ctx: AppContext): AppHandle {
     return null;
   }
 
+  // Diff-source scope for the Changes review surface. Aligned with Codex's
+  // five-option picker: working-tree slices (`unstaged`/`staged`), the last
+  // commit (`commit`), the whole branch vs its base (`branch`), and the files
+  // the agent touched in its most recent turn (`lastturn`). `all` is retained
+  // for the GitBadge / legacy default and is no longer offered in the web UI.
+  type ChangeScope = 'all' | 'unstaged' | 'staged' | 'commit' | 'branch' | 'lastturn';
+
+  // Empty-tree object hash — the diff base for a root commit (no parent).
+  const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+  function gitText(cwd: string, args: string[]): string {
+    try {
+      return execFileSync('git', ['-C', cwd, ...args], {
+        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      return '';
+    }
+  }
+
+  // Base for the `commit` scope: HEAD's parent, or the empty tree when HEAD is
+  // the root commit (so the first commit still renders as all-added).
+  function commitBase(cwd: string): string {
+    try {
+      execFileSync('git', ['-C', cwd, 'rev-parse', '--verify', '-q', 'HEAD~1'], {
+        stdio: ['ignore', 'ignore', 'ignore'],
+      });
+      return 'HEAD~1';
+    } catch {
+      return EMPTY_TREE;
+    }
+  }
+
+  // Base for the `branch` scope: the merge-base of HEAD with the working tree's
+  // base branch — the session's recorded `base_branch` for a `wt:` tree, else
+  // the repo's detected default. Falls back to HEAD (→ empty branch diff) when
+  // there's no distinct base or git can't resolve a merge-base (e.g. the base
+  // ref isn't local). Result is a commit-ish suitable for `git diff <base>`.
+  function branchBase(wt: { path: string; session_id: string | null }): string {
+    let base: string | null = null;
+    if (wt.session_id) {
+      const row = ctx.db
+        .prepare('SELECT base_branch FROM sessions WHERE id = ?')
+        .get(wt.session_id) as { base_branch: string | null } | undefined;
+      if (row?.base_branch) base = row.base_branch;
+    }
+    if (!base) base = detectDefaultBranch(wt.path);
+    if (!base) return 'HEAD';
+    const mb = gitText(wt.path, ['merge-base', base, 'HEAD']).trim();
+    return mb || 'HEAD';
+  }
+
+  // Distinct file paths the agent edited in the session's most recent turn,
+  // pulled from `file_change` events. Powers the `lastturn` scope. Empty for a
+  // non-session (`ws:`) working tree or a session with no recorded turns.
+  function lastTurnPaths(sessionId: string | null): Set<string> {
+    const paths = new Set<string>();
+    if (!sessionId) return paths;
+    const turn = ctx.db
+      .prepare('SELECT id FROM turns WHERE session_id = ? ORDER BY turn_number DESC LIMIT 1')
+      .get(sessionId) as { id: string } | undefined;
+    if (!turn) return paths;
+    const rows = ctx.db
+      .prepare("SELECT data FROM events WHERE turn_id = ? AND type = 'file_change'")
+      .all(turn.id) as Array<{ data: string }>;
+    for (const r of rows) {
+      try {
+        const parsed = JSON.parse(r.data) as { files?: Array<{ path?: string }> };
+        for (const f of parsed.files ?? []) if (f.path) paths.add(f.path);
+      } catch {
+        // malformed event payload — skip
+      }
+    }
+    return paths;
+  }
+
+  type ChangedFile = { path: string; kind: 'create' | 'update' | 'delete' | 'rename'; staged: boolean; added: number; removed: number };
+
+  // Fill per-file added/removed counts on a changed-file list: `git diff
+  // --numstat` for tracked diffs, then an on-disk line count for untracked
+  // creates that numstat misses (staged=false, still added=0). Shared by every
+  // scope so the count logic lives in one place. Mutates `entries` in place.
+  function fillLineCounts(cwd: string, entries: ChangedFile[], numstatArgs: string[]): void {
+    try {
+      const numstat = execFileSync('git', ['-C', cwd, ...numstatArgs], {
+        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const stats = new Map<string, { added: number; removed: number }>();
+      for (const line of numstat.split('\n')) {
+        if (!line) continue;
+        const [a, r, p] = line.split('\t');
+        if (!p) continue;
+        stats.set(p, {
+          added: a === '-' ? 0 : Number(a) || 0,
+          removed: r === '-' ? 0 : Number(r) || 0,
+        });
+      }
+      for (const e of entries) {
+        const s = stats.get(e.path);
+        if (s) { e.added = s.added; e.removed = s.removed; }
+      }
+    } catch {
+      // numstat optional
+    }
+
+    // Untracked files don't appear in any `git diff --numstat`. Count their
+    // lines from disk so they contribute to +N totals. Skip files larger than
+    // 1 MiB or with a null byte in the first 8 KiB (binary).
+    for (const e of entries) {
+      if (e.kind !== 'create' || e.staged || e.added !== 0) continue;
+      try {
+        const filePath = resolve(cwd, e.path);
+        const st = statSync(filePath);
+        if (!st.isFile() || st.size > 1024 * 1024) continue;
+        const buf = readFileSync(filePath);
+        const probe = buf.subarray(0, Math.min(buf.length, 8192));
+        if (probe.includes(0)) continue;
+        let lines = 0;
+        for (let i = 0; i < buf.length; i++) if (buf[i] === 0x0a) lines++;
+        // Count a trailing-newline-less last line as a line too.
+        if (buf.length > 0 && buf[buf.length - 1] !== 0x0a) lines++;
+        e.added = lines;
+      } catch {
+        // file vanished or unreadable — leave at 0
+      }
+    }
+  }
+
   // Per-file diff aligned with what Files Changed surfaces. `scope` selects
   // which slice of the change set to render:
   //   - 'all' (default): both staged and unstaged edits on tracked files
@@ -1404,11 +1533,13 @@ export function createApp(ctx: AppContext): AppHandle {
   //     still synthesizing untracked files via --no-index.
   //   - 'staged': only index-vs-HEAD changes (`diff --cached -- <path>`).
   //     Untracked files have nothing staged, so no --no-index fallback.
-  function computeFileDiff(cwd: string, rel: string, scope: 'all' | 'unstaged' | 'staged' = 'all'): string {
+  function computeFileDiff(cwd: string, rel: string, scope: ChangeScope = 'all', wt?: { path: string; session_id: string | null }): string {
     const baseArgs =
       scope === 'staged' ? ['diff', '--cached'] :
       scope === 'unstaged' ? ['diff'] :
-      ['diff', 'HEAD'];
+      scope === 'commit' ? ['diff', commitBase(cwd), 'HEAD'] :
+      scope === 'branch' ? ['diff', branchBase(wt ?? { path: cwd, session_id: null })] :
+      ['diff', 'HEAD']; // 'all' and 'lastturn' both diff the working tree vs HEAD
     try {
       const out = execFileSync('git', ['-C', cwd, ...baseArgs, '--', rel], {
         timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
@@ -1418,9 +1549,11 @@ export function createApp(ctx: AppContext): AppHandle {
       // Not a repo, or some other git failure — nothing more we can do.
       return '';
     }
-    // 'staged' scope never synthesizes untracked diffs — an untracked file
-    // has nothing in the index. An empty result there is correct as-is.
-    if (scope === 'staged') return '';
+    // 'staged' and 'commit' scopes never synthesize untracked diffs — an
+    // untracked file has nothing in the index and was in no commit. An empty
+    // result there is correct as-is. ('branch'/'lastturn'/'all'/'unstaged'
+    // fall through so a new-on-branch / agent-created file shows as added.)
+    if (scope === 'staged' || scope === 'commit') return '';
     // Empty result so far means either tracked-but-clean or untracked. Probe
     // tracked-ness; only fall through to --no-index for untracked.
     try {
@@ -1449,8 +1582,11 @@ export function createApp(ctx: AppContext): AppHandle {
   // Shared parser for the `scope` query param across the working-tree change
   // routes. Anything unrecognized falls back to 'all' so existing callers
   // (and GitBadge) keep today's behavior.
-  function parseScope(raw: string | undefined): 'all' | 'unstaged' | 'staged' {
-    return raw === 'unstaged' || raw === 'staged' ? raw : 'all';
+  function parseScope(raw: string | undefined): ChangeScope {
+    return raw === 'unstaged' || raw === 'staged' || raw === 'commit' ||
+      raw === 'branch' || raw === 'lastturn'
+      ? raw
+      : 'all';
   }
 
   app.get('/api/working_trees', c => {
@@ -1619,7 +1755,7 @@ export function createApp(ctx: AppContext): AppHandle {
     if (!resolved) return c.json({ error: 'path escapes working tree' }, 400);
     void resolved;
     const scope = parseScope(c.req.query('scope'));
-    return c.json({ diff: computeFileDiff(wt.path, rel, scope) });
+    return c.json({ diff: computeFileDiff(wt.path, rel, scope, wt) });
   });
 
   app.get('/api/working_trees/:id/file_meta', async c => {
@@ -1653,23 +1789,83 @@ export function createApp(ctx: AppContext): AppHandle {
     return c.json({ uncommitted, edit_count_today: row.n });
   });
 
-  // git status --porcelain -z, parsed into the same shape Files Changed expects.
-  // X (index) / Y (worktree) two-letter codes mapped to a single kind.
+  // Changed-file list for the Changes review surface. `scope` selects which
+  // slice; the five web-facing scopes mirror Codex's picker.
   //
-  // `scope` ∈ {all (default) | unstaged | staged} selects which slice:
+  // Working-tree scopes — `git status --porcelain -z`, X (index) / Y (worktree)
+  // codes mapped to a single kind:
   //   - all      = every changed file; counts via `git diff --numstat HEAD`
-  //                (staged+unstaged combined). This is the original behavior;
-  //                the default (no scope query) is byte-for-byte unchanged and
-  //                GitBadge + FILE-004 tests depend on it.
+  //                (staged+unstaged combined). The original behavior; the
+  //                default (no scope query) is byte-for-byte unchanged and
+  //                GitBadge + FILE-004 tests depend on it. Not offered in the UI.
   //   - unstaged = files dirty in the worktree-vs-index (Y column) plus
   //                untracked; counts via `git diff --numstat` (no HEAD).
   //   - staged   = files staged in index-vs-HEAD (X column); counts via
   //                `git diff --numstat --cached`.
+  //
+  // History scopes — `git diff --name-status` against a base (see the branch in
+  // the handler), staged=false throughout:
+  //   - commit   = HEAD's committed delta (parent..HEAD, or empty-tree..HEAD
+  //                for a root commit).
+  //   - branch   = the whole branch vs its base (merge-base of HEAD with the
+  //                session's base_branch / repo default) + untracked.
+  //   - lastturn = the files the agent edited in its most recent turn
+  //                (file_change events), shown as their live diff vs HEAD.
   app.get('/api/working_trees/:id/changed', c => {
     const id = c.req.param('id');
     const wt = resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
     const scope = parseScope(c.req.query('scope'));
+
+    // History scopes (commit / branch / lastturn) read the file list from
+    // `git diff --name-status` against a base ref, not `git status`.
+    if (scope === 'commit' || scope === 'branch' || scope === 'lastturn') {
+      // Ref(s) to diff against. `<base> HEAD` = the committed delta (commit);
+      // a single ref = that ref vs the working tree (branch / lastturn).
+      const baseRange =
+        scope === 'commit' ? [commitBase(wt.path), 'HEAD'] :
+        scope === 'branch' ? [branchBase(wt)] :
+        ['HEAD']; // lastturn diffs the working tree vs HEAD, then filters
+      const out: ChangedFile[] = [];
+      const recs = gitText(wt.path, ['diff', '--name-status', '-z', ...baseRange]).split('\0');
+      for (let i = 0; i < recs.length; i++) {
+        const status = recs[i];
+        if (!status) continue;
+        const s0 = status[0]!;
+        let path: string;
+        let kind: ChangedFile['kind'];
+        if (s0 === 'R' || s0 === 'C') {
+          // rename/copy: `<status>\0<oldpath>\0<newpath>\0` — keep the new name.
+          path = recs[i + 2] ?? recs[i + 1] ?? '';
+          i += 2;
+          kind = 'rename';
+        } else {
+          path = recs[i + 1] ?? '';
+          i += 1;
+          kind = s0 === 'A' ? 'create' : s0 === 'D' ? 'delete' : 'update';
+        }
+        if (path) out.push({ path, kind, staged: false, added: 0, removed: 0 });
+      }
+      // branch / lastturn also surface untracked files (new on the branch, or
+      // freshly created by the agent). commit never does — they're in no commit.
+      if (scope === 'branch' || scope === 'lastturn') {
+        for (const rec of gitText(wt.path, ['status', '--porcelain=1', '-z']).split('\0')) {
+          if (!rec.startsWith('?? ')) continue;
+          const p = rec.slice(3);
+          if (p && !out.some(e => e.path === p)) {
+            out.push({ path: p, kind: 'create', staged: false, added: 0, removed: 0 });
+          }
+        }
+      }
+      // lastturn: keep only the paths the agent edited in its most recent turn.
+      let list = out;
+      if (scope === 'lastturn') {
+        const turnPaths = lastTurnPaths(wt.session_id);
+        list = out.filter(e => turnPaths.has(e.path));
+      }
+      fillLineCounts(wt.path, list, ['diff', '--numstat', ...baseRange]);
+      return c.json(list);
+    }
 
     let raw = '';
     try {
@@ -1682,7 +1878,7 @@ export function createApp(ctx: AppContext): AppHandle {
 
     // -z output: each entry is `XY <space> <path>\0`. Renames (R/C) are
     // followed by an extra `<oldpath>\0` record we discard.
-    const out: Array<{ path: string; kind: 'create' | 'update' | 'delete' | 'rename'; staged: boolean; added: number; removed: number }> = [];
+    const out: ChangedFile[] = [];
     const records = raw.split('\0');
     for (let i = 0; i < records.length; i++) {
       const rec = records[i];
@@ -1723,56 +1919,11 @@ export function createApp(ctx: AppContext): AppHandle {
     //   all      → `git diff --numstat HEAD`     (staged + unstaged)
     //   unstaged → `git diff --numstat`          (worktree vs index)
     //   staged   → `git diff --numstat --cached` (index vs HEAD)
-    // Cheap enough for a typical working tree; bail silently on error.
     const numstatArgs =
       scope === 'staged' ? ['diff', '--numstat', '--cached'] :
       scope === 'unstaged' ? ['diff', '--numstat'] :
       ['diff', '--numstat', 'HEAD'];
-    try {
-      const numstat = execFileSync('git', ['-C', wt.path, ...numstatArgs], {
-        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      });
-      const stats = new Map<string, { added: number; removed: number }>();
-      for (const line of numstat.split('\n')) {
-        if (!line) continue;
-        const [a, r, p] = line.split('\t');
-        if (!p) continue;
-        stats.set(p, {
-          added: a === '-' ? 0 : Number(a) || 0,
-          removed: r === '-' ? 0 : Number(r) || 0,
-        });
-      }
-      for (const e of out) {
-        const s = stats.get(e.path);
-        if (s) { e.added = s.added; e.removed = s.removed; }
-      }
-    } catch {
-      // numstat optional
-    }
-
-    // Untracked files (`??`) don't appear in any `git diff --numstat`. Count
-    // their lines from disk so they contribute to +N totals. Skip files larger
-    // than 1 MiB or with a null byte in the first 8 KiB (binary). Untracked
-    // files only surface in 'all' and 'unstaged' scopes (never 'staged'), and
-    // are always staged=false there, so the guard below catches them.
-    for (const e of out) {
-      if (e.kind !== 'create' || e.staged || e.added !== 0) continue;
-      try {
-        const filePath = resolve(wt.path, e.path);
-        const st = statSync(filePath);
-        if (!st.isFile() || st.size > 1024 * 1024) continue;
-        const buf = readFileSync(filePath);
-        const probe = buf.subarray(0, Math.min(buf.length, 8192));
-        if (probe.includes(0)) continue;
-        let lines = 0;
-        for (let i = 0; i < buf.length; i++) if (buf[i] === 0x0a) lines++;
-        // Count a trailing-newline-less last line as a line too.
-        if (buf.length > 0 && buf[buf.length - 1] !== 0x0a) lines++;
-        e.added = lines;
-      } catch {
-        // file vanished or unreadable — leave at 0
-      }
-    }
+    fillLineCounts(wt.path, out, numstatArgs);
 
     return c.json(out);
   });
