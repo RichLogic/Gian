@@ -1200,6 +1200,17 @@ export class SessionManager {
   }
 
   /**
+   * Toggle the unread marker. Deliberately does NOT touch `updated_at` — read/
+   * unread is a view-state change and must not reorder the sidebar. Idempotent.
+   */
+  setUnread(sessionId: string, unread: boolean): void {
+    this.db
+      .prepare(`UPDATE sessions SET unread = ? WHERE id = ?`)
+      .run(unread ? 1 : 0, sessionId);
+    this.broadcastSessionUpdated(sessionId, { unread: unread ? 1 : 0 });
+  }
+
+  /**
    * Permanently delete a session. If the session is a still-live worktree
    * (no outcome yet), drop the worktree first to avoid orphaning the dir
    * on disk. Then teardown proxy + cascade-delete via FK constraints.
@@ -1581,10 +1592,20 @@ export class SessionManager {
     // not an error — the session lands at 'done' so the UI doesn't show a red
     // error pill. Only true failures land at 'error'.
     const sessionStatus = status === 'error' ? 'error' : 'done';
-    this.db
-      .prepare(`UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?`)
-      .run(sessionStatus, now, sessionId);
-    this.broadcastSessionUpdated(sessionId, { status: sessionStatus, updated_at: now });
+    if (status === 'stopped') {
+      // User-initiated interrupt: they're looking at it, so don't mark unread.
+      this.db
+        .prepare(`UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?`)
+        .run(sessionStatus, now, sessionId);
+      this.broadcastSessionUpdated(sessionId, { status: sessionStatus, updated_at: now });
+    } else {
+      // Natural completion or failure → the session has a new result to read.
+      // The web clears it again for whichever session the user is viewing.
+      this.db
+        .prepare(`UPDATE sessions SET status = ?, unread = 1, updated_at = ? WHERE id = ?`)
+        .run(sessionStatus, now, sessionId);
+      this.broadcastSessionUpdated(sessionId, { status: sessionStatus, unread: 1, updated_at: now });
+    }
     this.activeTurns.delete(sessionId);
   }
 

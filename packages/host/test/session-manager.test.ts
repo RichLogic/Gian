@@ -329,8 +329,10 @@ test('proxy notification persists event and broadcasts; turn.completed updates s
     assert.ok(types.includes('assistant_text'));
     assert.ok(types.includes('turn_completed'));
 
-    const sessionRow = db.prepare('SELECT status FROM sessions WHERE id = ?').get(session.id) as { status: string };
+    const sessionRow = db.prepare('SELECT status, unread FROM sessions WHERE id = ?').get(session.id) as { status: string; unread: number };
     assert.equal(sessionRow.status, 'done');
+    // A naturally-completed turn marks the session unread (the sidebar dot).
+    assert.equal(sessionRow.unread, 1, 'turn.completed marks the session unread');
 
     const turnRow = db.prepare('SELECT status, completed_at FROM turns WHERE session_id = ?').get(session.id) as { status: string; completed_at: string | null };
     assert.equal(turnRow.status, 'completed');
@@ -339,6 +341,56 @@ test('proxy notification persists event and broadcasts; turn.completed updates s
     const broadcastEvents = broadcaster.messages.filter(m => m.type === 'event') as Array<{ event: string }>;
     assert.ok(broadcastEvents.some(e => e.event === 'assistant_text'));
     assert.ok(broadcastEvents.some(e => e.event === 'turn_completed'));
+    const doneUpdate = broadcaster.messages.find(
+      (m): m is { type: 'session:updated'; session: { status?: string; unread?: number } } =>
+        m.type === 'session:updated' && (m as { session: { status?: string } }).session.status === 'done',
+    );
+    assert.ok(doneUpdate && doneUpdate.session.unread === 1, 'turn.completed broadcasts unread:1');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('user-initiated stop settles status=done WITHOUT marking unread', async () => {
+  const { dir, db, wsId, sessions } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    await sessions.sendMessage(session.id, 'ping'); // opens an active turn
+    await sessions.stopTurn(session.id);            // → completeTurn('stopped')
+
+    const row = db.prepare('SELECT status, unread FROM sessions WHERE id = ?').get(session.id) as { status: string; unread: number };
+    assert.equal(row.status, 'done');
+    assert.equal(row.unread, 0, 'a turn the user stopped themselves is not unread');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('setUnread toggles the flag, broadcasts, and does NOT bump updated_at', async () => {
+  const { dir, db, wsId, sessions, broadcaster } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    const before = db.prepare('SELECT updated_at, unread FROM sessions WHERE id = ?').get(session.id) as { updated_at: string; unread: number };
+    assert.equal(before.unread, 0, 'fresh session starts read');
+    broadcaster.messages.length = 0;
+
+    sessions.setUnread(session.id, true);
+    const marked = db.prepare('SELECT updated_at, unread FROM sessions WHERE id = ?').get(session.id) as { updated_at: string; unread: number };
+    assert.equal(marked.unread, 1);
+    assert.equal(marked.updated_at, before.updated_at, 'read/unread must not reorder the sidebar');
+
+    const upd = broadcaster.messages.find(
+      (m): m is { type: 'session:updated'; session: { unread?: number; updated_at?: string } } =>
+        m.type === 'session:updated',
+    );
+    assert.ok(upd && upd.session.unread === 1, 'broadcasts unread:1');
+    assert.equal(upd!.session.updated_at, undefined, 'broadcast carries no updated_at');
+
+    sessions.setUnread(session.id, false); // mark read (the open-session path)
+    const cleared = db.prepare('SELECT unread FROM sessions WHERE id = ?').get(session.id) as { unread: number };
+    assert.equal(cleared.unread, 0);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

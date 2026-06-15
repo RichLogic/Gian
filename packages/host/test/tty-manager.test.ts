@@ -141,6 +141,39 @@ test('CLAUDE-TTY-001: hook events update session status and broadcast session:up
   } finally { teardown(ctx); }
 });
 
+test('STOP-TTY-002: a CLI-side interrupt (no Stop hook) settles a running turn to done', async () => {
+  // Ctrl+C / Esc in the raw terminal interrupts the turn but does NOT fire the
+  // Stop hook, so the Beta spinner would hang. The PTY prints the interrupt
+  // prompt — detect it and settle. The word "Interrupted" is split by a cursor
+  // escape in the real redraw, so we key on "What should Claude do instead".
+  const ctx = setup();
+  try {
+    const session = seedClaudeSession(ctx.db);
+    await ctx.mgr.handleHook(session.id, 'UserPromptSubmit', { prompt: 'go' }); // → running
+    const data = Buffer.from(
+      '\x1b[38;5;241m Int\x1b[10Grrupted · What should Claude do instead?\r', 'utf8',
+    ).toString('base64');
+    ctx.mgr.handleProxyNotification({ method: 'tty.output', params: { sessionId: session.id, data } });
+    const row = ctx.db.prepare('SELECT status FROM sessions WHERE id = ?').get(session.id) as { status: string };
+    assert.equal(row.status, 'done', 'interrupt detection must settle the running turn to done');
+    const last = ctx.broadcaster.messages.filter(m => m.type === 'session:updated').at(-1) as
+      { session: { status?: string } } | undefined;
+    assert.equal(last?.session.status, 'done');
+  } finally { teardown(ctx); }
+});
+
+test('STOP-TTY-002: interrupt detection is a no-op when the turn is not running', async () => {
+  const ctx = setup();
+  try {
+    const session = seedClaudeSession(ctx.db); // status 'new', never went running
+    const before = ctx.broadcaster.messages.filter(m => m.type === 'session:updated').length;
+    const data = Buffer.from('Interrupted · What should Claude do instead?', 'utf8').toString('base64');
+    ctx.mgr.handleProxyNotification({ method: 'tty.output', params: { sessionId: session.id, data } });
+    const after = ctx.broadcaster.messages.filter(m => m.type === 'session:updated').length;
+    assert.equal(after, before, 'must not broadcast done for a turn that was not running');
+  } finally { teardown(ctx); }
+});
+
 test('CLAUDE-TTY-003: hook permission_mode + effort sync onto the session row', async () => {
   const ctx = setup();
   try {

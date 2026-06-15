@@ -232,6 +232,10 @@ async function dispatch(
       await sessions.deleteSession(msg.session_id);
       return;
     }
+    case 'session:set_unread': {
+      sessions.setUnread(msg.session_id, msg.unread);
+      return;
+    }
     case 'message:send': {
       await sessions.sendMessage(msg.session_id, msg.text, msg.items, msg.oneShotBypass);
       return;

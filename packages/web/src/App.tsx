@@ -262,6 +262,20 @@ export function App() {
         }
         case 'session:updated': {
           const partial = msg.session;
+          // A background turn that finished while the user is already viewing
+          // this session shouldn't stay unread — clear it straight back. (The
+          // sidebar dot is also suppressed for the active row, but this keeps
+          // the persisted DB flag correct after a reload.) The resulting
+          // unread:0 broadcast merges harmlessly and doesn't re-trigger.
+          //
+          // Gate on a terminal status so this ONLY undoes auto-unread from turn
+          // completion (which always carries status). A manual "Mark as unread"
+          // broadcasts `unread:1` alone — that must persist on the active
+          // session so the dot appears once the user navigates away.
+          const fromTurnEnd = partial.status === 'done' || partial.status === 'error';
+          if (partial.unread === 1 && fromTurnEnd && partial.id === activeSessionIdRef.current) {
+            ws.send({ type: 'session:set_unread', session_id: partial.id, unread: false });
+          }
           if (partial.status === 'running' || partial.status === 'pending') {
             setPendingBySession(p => ({ ...p, [partial.id]: true }));
             // Recovered out of the error state — drop its inbox error row.
@@ -644,15 +658,15 @@ export function App() {
     const rawUrl = `/api/working_trees/${encodeURIComponent(wt.id)}/raw?path=${encodeURIComponent(rel)}`;
     const isImage = IMAGE_EXTS.has(ext);
 
-    // Files we can't view in-app (pdf, binaries, unknown) open externally via
-    // their category's configured target (Settings → Default apps). Code/web are
-    // viewed as source in-app here; the Open button still uses the category.
-    if (!isImage) {
-      const cat = openCategoryFor(name);
-      if (cat !== 'code' && cat !== 'web') {
-        dispatchOpen(wt, rel, resolveOpenTarget(cat, systemConfig?.open_apps));
-        return;
-      }
+    // Only pdf truly can't render in-app — it opens externally via its
+    // category target. Everything else (code, web, AND unknown extensions
+    // 'other') is shown as source text here: clicking an unknown-suffix file
+    // should preview it, not jump to Finder. The Open button still routes by
+    // category, so 'other' files default to "reveal in Finder" there. Images
+    // render inline below.
+    if (!isImage && openCategoryFor(name) === 'pdf') {
+      dispatchOpen(wt, rel, resolveOpenTarget('pdf', systemConfig?.open_apps));
+      return;
     }
 
     // Try to promote existing tab. Re-set scrollLine so a fresh click on a
@@ -995,6 +1009,9 @@ export function App() {
           ),
         });
       },
+      onMarkUnread: () => {
+        ws.send({ type: 'session:set_unread', session_id: activeSession.id, unread: true });
+      },
       onArchive: () => {
         const next = activeSession.archived !== 1;
         ws.send({ type: 'session:archive', session_id: activeSession.id, archived: next });
@@ -1020,11 +1037,26 @@ export function App() {
 
   const handleRenameCancel = useCallback(() => setPathRenameActive(false), []);
 
+  // Opening/viewing a session clears its unread marker (mark-read). Guarded on
+  // the current flag so we don't spam the host with no-op set_unread on every
+  // click. Looks in both active and archived lists.
+  const markSessionViewed = useCallback((id: string) => {
+    const s = sessionsRef.current.find(x => x.id === id)
+      ?? archivedSessionsRef.current.find(x => x.id === id);
+    if (s?.unread === 1) ws.send({ type: 'session:set_unread', session_id: id, unread: false });
+  }, [ws]);
+
+  const selectSession = useCallback((id: string) => {
+    setActiveSessionId(id);
+    markSessionViewed(id);
+  }, [markSessionViewed]);
+
   // ─── Dock state (Phase 1: only Search + Inbox are wired) ─────────────────
   const onJumpToSessionFromInbox = (sid: string) => {
     setActiveSessionId(sid);
     setMode('sessions');
     setInboxItems(prev => markSessionRead(prev, sid));
+    markSessionViewed(sid);
   };
 
   // URL-param driven Files view: /?view=files&wt=<id>&path=<rel>
@@ -1113,7 +1145,7 @@ export function App() {
                 setArchivedSessions(list);
                 setArchivedLoaded(true);
               }}
-              onSelectSession={setActiveSessionId}
+              onSelectSession={selectSession}
               onWorkspaceCreated={w => setWorkspaces(prev => [...prev, w])}
               onCreateSession={(input) => {
                 pendingFirstMessageRef.current = input.firstMessage?.trim() || null;

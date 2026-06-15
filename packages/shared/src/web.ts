@@ -393,6 +393,18 @@ export interface SessionDeleteMessage {
   session_id: string;
 }
 
+/**
+ * Toggle a session's unread marker. `unread: false` is the "mark read" path
+ * fired when the user opens/views the session; `unread: true` is the manual
+ * "Mark as unread" menu action. Does not bump `updated_at` host-side, so the
+ * sidebar order is unaffected.
+ */
+export interface SessionSetUnreadMessage {
+  type: 'session:set_unread';
+  session_id: string;
+  unread: boolean;
+}
+
 export interface SessionSetModeMessage {
   type: 'session:set_mode';
   session_id: string;
@@ -583,6 +595,7 @@ export type ClientToServerMessage =
   | SessionRenameMessage
   | SessionArchiveMessage
   | SessionDeleteMessage
+  | SessionSetUnreadMessage
   | SessionSetModeMessage
   | SessionSetModelMessage
   | SessionSetEffortMessage

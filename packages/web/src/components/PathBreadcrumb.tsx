@@ -15,6 +15,7 @@ export interface SessionMenuActions {
   onCopyName: () => void;
   onForceRecover: () => void;
   onFork: (executor: 'claude' | 'codex') => void;
+  onMarkUnread: () => void;
   onArchive: () => void;
   onDelete: () => void;
 }
@@ -78,6 +79,8 @@ const ICON = {
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   trash: 'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13',
   fork: 'M6 3v6 M6 21v-3a4 4 0 0 1 4-4h4a4 4 0 0 0 4-4V3 M6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M6 21a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
+  // envelope — "mark as unread", same idiom as an unread email
+  mail: 'M3 5h18v14H3z M3 7l9 6 9-6',
 };
 
 export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessionMenu }: Props) {
@@ -189,6 +192,9 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                       <MenuIcon d={ICON.fork} /> {t('path.menu.forkCodex')}
                     </button>
                     <div className="rule" />
+                    <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onMarkUnread(); }}>
+                      <MenuIcon d={ICON.mail} /> {t('path.menu.markUnread')}
+                    </button>
                     <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onArchive(); }}>
                       <MenuIcon d={ICON.folder} /> {t('common.archive')}
                     </button>

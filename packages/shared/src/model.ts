@@ -101,6 +101,12 @@ export interface Session {
   active_channel: ActiveChannel | null;
   status: SessionStatus;
   archived: 0 | 1;
+  /** Unread marker. Set to 1 when a background turn finishes (done/error) and
+   *  cleared to 0 when the user opens/views the session. Also togglable by hand
+   *  via the session menu ("Mark as unread"). Drives the sidebar unread dot.
+   *  Read/unread changes do NOT bump `updated_at` — they must not reorder the
+   *  list. */
+  unread: 0 | 1;
   /** Absolute path to the live worktree dir. Null when not in worktree mode
    *  OR when the worktree was removed (merged/discarded). */
   worktree_path: string | null;

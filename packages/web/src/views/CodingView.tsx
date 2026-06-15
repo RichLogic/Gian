@@ -729,6 +729,13 @@ function SessionRow({
     >
       <div className="ri-body">
         <div className="ri-row1">
+          {session.unread === 1 && !active && (
+            <span
+              className="ri-unread-dot"
+              title={t('coding.session.unread')}
+              aria-label={t('coding.session.unread')}
+            />
+          )}
           <span className="ri-title">{session.name || `session ${session.id.slice(0, 6)}`}</span>
         </div>
         <div className="ri-row2">

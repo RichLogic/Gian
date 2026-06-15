@@ -349,10 +349,12 @@ export class TtyManager {
         session_id: sessionId,
         data,
       });
-      // PTY output is base64 in `params.data`; decode to scan for the Remote
-      // Control status line Claude prints. `sendToOwner` forwards the base64
-      // verbatim to xterm, so decoding here is only for our own parsing.
-      this.detectRemoteControl(sessionId, Buffer.from(data, 'base64').toString('utf8'));
+      // PTY output is base64 in `params.data`; decode to scan for status lines
+      // Claude prints. `sendToOwner` forwards the base64 verbatim to xterm, so
+      // decoding here is only for our own parsing.
+      const decoded = Buffer.from(data, 'base64').toString('utf8');
+      this.detectRemoteControl(sessionId, decoded);
+      this.detectInterrupted(sessionId, decoded);
     } else if (notification.method === 'tty.exited') {
       // The PTY-side AskUserQuestion selectors are gone with the process —
       // there's no way left to answer them. Decline any cards still in
@@ -404,6 +406,14 @@ export class TtyManager {
   async interrupt(sessionId: string): Promise<void> {
     const esc = Buffer.from('\x1b', 'utf8').toString('base64');
     await this.input(sessionId, { data: esc });
+    // After Esc, Claude's TUI leaves the interrupted prompt sitting in the
+    // input box — the next Beta message would then be appended to it. Wait for
+    // the interrupt to settle, then clear the line (Ctrl+U = readline kill-line;
+    // no exit risk, unlike Ctrl+C) so the box starts blank.
+    setTimeout(() => {
+      const clearLine = Buffer.from('\x15', 'utf8').toString('base64');
+      void this.input(sessionId, { data: clearLine }).catch(() => {});
+    }, 500);
   }
 
   /** Current Remote Control state for a session (undefined = never observed). */
@@ -417,6 +427,29 @@ export class TtyManager {
    * the chunk so a single redraw carrying a stale + fresh line resolves to the
    * newer state.
    */
+  /**
+   * Catch a turn that was interrupted directly in the CLI (the user pressed
+   * Ctrl+C / Esc in the terminal, not the chat Stop button). Claude's TUI
+   * prints "Interrupted · What should Claude do instead?" — when we see it on a
+   * session whose row still says `running`, settle it to `done` so the Beta
+   * chat spinner clears. The Stop hook covers clean completion / tool aborts;
+   * this covers generation aborts where the hook may not fire. Guarded on the
+   * current status so it only broadcasts once per interrupt.
+   */
+  private detectInterrupted(sessionId: string, chunk: string): void {
+    // Match the prompt Claude prints after an interrupt. We key on "What should
+    // Claude do instead" rather than the word "Interrupted" because the latter
+    // is split by a cursor-move escape in the TUI redraw ("Int\x1b[10Grrupted")
+    // while this phrase lands contiguously.
+    if (!chunk.includes('What should Claude do instead')) return;
+    const row = this.db
+      .prepare('SELECT status FROM sessions WHERE id = ?')
+      .get(sessionId) as { status: string } | undefined;
+    if (row?.status !== 'running') return;
+    if (process.env.GIAN_RC_DEBUG) console.error('[interrupt-debug] → done', sessionId);
+    this.persistStatus(sessionId, 'done');
+  }
+
   private detectRemoteControl(sessionId: string, chunk: string): void {
     // Claude's TUI paints the status line as part of a redraw: the phrase can
     // be split across PTY chunks and wrapped in ANSI escape sequences. Strip
