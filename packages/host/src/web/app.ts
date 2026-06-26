@@ -8,6 +8,7 @@ import type { BotExtra, BotMode, IMPlatform, SystemConfig } from '@gian/shared';
 import { WsBroadcaster } from './ws-broadcast.js';
 import { ProxyManager } from '../proxy/manager.js';
 import { SessionManager } from '../session/manager.js';
+import { TaskManager } from '../task/manager.js';
 import { ApprovalManager } from '../approval/index.js';
 import { QueueManager } from '../queue/index.js';
 import { NativeJsonlWatcher } from '../native/watcher.js';
@@ -111,6 +112,7 @@ export function createApp(ctx: AppContext): AppHandle {
   const queue = new QueueManager(ctx.db);
   const watcher = new NativeJsonlWatcher(ctx.db, broadcaster);
   const sessions = new SessionManager(ctx.db, proxy, broadcaster, approvals, queue, ctx.dataDir, watcher);
+  const tasks = new TaskManager(ctx.db);
 
   // TTY runtime coordinator. The hook base URL must match what the
   // in-PTY `claude` can actually reach — for now this is hard-locked to
@@ -218,7 +220,7 @@ export function createApp(ctx: AppContext): AppHandle {
     })));
   });
 
-  const handlers = makeWsHandlers({ sessions, broadcaster, approvals, tty, codexTty, term, db: ctx.db });
+  const handlers = makeWsHandlers({ sessions, tasks, broadcaster, approvals, tty, codexTty, term, db: ctx.db });
 
   if (AUTH_REQUIRED) {
     ensurePasswordHash(ctx.db);
@@ -536,6 +538,197 @@ export function createApp(ctx: AppContext): AppHandle {
       }
     })();
     return c.json({ ok: true });
+  });
+
+  // -------------------------------------------------------------------------
+  // Tasks (PRD-v3) — lightweight containers grouping Subtask sessions. CRUD
+  // mirrors the workspace route pattern; mutations also broadcast the matching
+  // `task:*` WS message so every connected client stays in sync.
+  // -------------------------------------------------------------------------
+
+  app.get('/api/tasks', c => {
+    return c.json(tasks.listTasks());
+  });
+
+  app.post('/api/tasks', async c => {
+    const body = await c.req.json<{ name?: string; description?: string | null }>();
+    if (typeof body.name !== 'string' || body.name.trim() === '') {
+      return c.json({ error: 'name required' }, 400);
+    }
+    try {
+      const task = tasks.createTask({
+        name: body.name,
+        ...(body.description !== undefined ? { description: body.description } : {}),
+      });
+      broadcaster.broadcast({ type: 'task:created', task });
+      return c.json(task);
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 400);
+    }
+  });
+
+  app.patch('/api/tasks/:id', async c => {
+    const id = c.req.param('id');
+    if (!tasks.getTask(id)) return c.json({ error: 'task not found' }, 404);
+    const body = await c.req.json<{
+      name?: string;
+      description?: string | null;
+      status?: import('@gian/shared').TaskStatus;
+    }>();
+    const patch: import('../task/manager.js').UpdateTaskInput = {};
+    if (body.name !== undefined) patch.name = body.name;
+    if (body.description !== undefined) patch.description = body.description;
+    if (body.status !== undefined) patch.status = body.status;
+    if (Object.keys(patch).length === 0) {
+      return c.json({ error: 'no updatable fields' }, 400);
+    }
+    try {
+      const task = tasks.updateTask(id, patch);
+      broadcaster.broadcast({ type: 'task:updated', task });
+      return c.json(task);
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 400);
+    }
+  });
+
+  app.delete('/api/tasks/:id', c => {
+    const id = c.req.param('id');
+    if (!tasks.getTask(id)) return c.json({ error: 'task not found' }, 404);
+    try {
+      tasks.deleteTask(id);
+      broadcaster.broadcast({ type: 'task:deleted', task_id: id });
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 409);
+    }
+  });
+
+  /**
+   * PRD-v3 — create a Subtask (a session with type='subtask' + task_id) under
+   * a Task. REST so the A1 "create subtask from this" flow can link the new
+   * session to its Task without a new shared WS field on `session:create`.
+   * Broadcasts `session:created` so the web state picks it up.
+   */
+  app.post('/api/tasks/:id/subtasks', async c => {
+    const id = c.req.param('id');
+    if (!tasks.getTask(id)) return c.json({ error: 'task not found' }, 404);
+    const body = await c.req.json<{
+      workspace_id?: string;
+      executor?: import('@gian/shared').Executor;
+      name?: string;
+      model?: string | null;
+      approval_mode?: import('@gian/shared').ApprovalMode;
+      mode?: 'regular' | 'worktree';
+    }>();
+    if (typeof body.workspace_id !== 'string' || body.workspace_id === '') {
+      return c.json({ error: 'workspace_id required' }, 400);
+    }
+    if (body.executor !== 'claude' && body.executor !== 'codex') {
+      return c.json({ error: 'executor must be claude or codex' }, 400);
+    }
+    try {
+      const session = await sessions.createSession({
+        workspace_id: body.workspace_id,
+        executor: body.executor,
+        type: 'subtask',
+        task_id: id,
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.model !== undefined ? { model: body.model } : {}),
+        ...(body.approval_mode !== undefined ? { approval_mode: body.approval_mode } : {}),
+        ...(body.mode !== undefined ? { mode: body.mode } : {}),
+      });
+      broadcaster.broadcast({ type: 'session:created', session });
+      return c.json({ session });
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 500);
+    }
+  });
+
+  /**
+   * PRD-v3 P4 — mark a Subtask complete. Sets the session `done` and fires the
+   * `.ai/` summarizer in the BACKGROUND (the user does not wait — §116). The
+   * one-line subtask summary lands on `sessions.summary` asynchronously and is
+   * broadcast via `session:updated` when ready.
+   */
+  app.post('/api/sessions/:id/complete', c => {
+    const id = c.req.param('id');
+    try {
+      sessions.completeSubtask(id);
+      return c.json({ ok: true });
+    } catch (err) {
+      const msg = (err as Error).message;
+      const status = msg.startsWith('session not found') ? 404 : 400;
+      return c.json({ error: msg }, status);
+    }
+  });
+
+  /**
+   * PRD-v3 P4 §153 — abandon a Subtask. Sets the session `done` and appends ONE
+   * `abandoned: <reason>` line to `.ai/SESSION_LOG.md` in the background. Does
+   * NOT rewrite HANDOFF/STATE.
+   */
+  app.post('/api/sessions/:id/abandon', async c => {
+    const id = c.req.param('id');
+    let reason: string | null = null;
+    try {
+      const body = await c.req.json<{ reason?: string | null }>();
+      if (typeof body?.reason === 'string') reason = body.reason;
+    } catch { /* empty / invalid body is fine — reason stays null */ }
+    try {
+      sessions.abandonSubtask(id, reason);
+      return c.json({ ok: true });
+    } catch (err) {
+      const msg = (err as Error).message;
+      const status = msg.startsWith('session not found') ? 404 : 400;
+      return c.json({ error: msg }, status);
+    }
+  });
+
+  // PRD-v3 P3 — per-Task Manager. The Manager is a read-only Codex session
+  // (type='manager') bound to the hidden root workspace. These routes avoid a
+  // new shared WS message: ensure-manager returns the session (also broadcast
+  // as `session:created` so state_sync picks it up), and the web then renders
+  // its transcript + sends follow-ups via the normal `message:send` WS path.
+
+  /** Get-or-create the Task's Manager session. Idempotent. */
+  app.post('/api/tasks/:id/manager', async c => {
+    const id = c.req.param('id');
+    if (!tasks.getTask(id)) return c.json({ error: 'task not found' }, 404);
+    try {
+      const existed = sessions.getManagerSession(id) !== null;
+      const session = await sessions.ensureManagerSession(id);
+      if (!existed) broadcaster.broadcast({ type: 'session:created', session });
+      return c.json({ session });
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 500);
+    }
+  });
+
+  /**
+   * Send a message to the Task's Manager (PRD-v3 P3 A1). Ensures the Manager,
+   * prepends the system prompt on the first turn, then reuses the structured
+   * sendMessage path — the reply streams as transcript events on the Manager
+   * session (the web subscribes to those over WS). Returns the Manager session
+   * id so the client can focus its transcript.
+   */
+  app.post('/api/tasks/:id/manager/message', async c => {
+    const id = c.req.param('id');
+    if (!tasks.getTask(id)) return c.json({ error: 'task not found' }, 404);
+    const body = await c.req.json<{ text?: string }>();
+    if (typeof body.text !== 'string' || body.text.trim() === '') {
+      return c.json({ error: 'text required' }, 400);
+    }
+    try {
+      const existed = sessions.getManagerSession(id) !== null;
+      const sessionId = await sessions.sendManagerMessage(id, body.text);
+      if (!existed) {
+        const session = sessions.getSession(sessionId);
+        broadcaster.broadcast({ type: 'session:created', session });
+      }
+      return c.json({ session_id: sessionId });
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 500);
+    }
   });
 
   // Proxy capabilities — surfaces real model list (id / displayName /

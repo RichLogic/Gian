@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ClientToServerMessage, StateSyncMessage, TtySurface } from '@gian/shared';
 import type { WSContext, WSMessageReceive } from 'hono/ws';
 import type { SessionManager } from '../session/manager.js';
+import type { TaskManager } from '../task/manager.js';
 import type { WsBroadcaster } from './ws-broadcast.js';
 // IMRouter is removed during the IM transplant — ws-handler no longer
 // notifies it on web message:send. Takeover state will be revisited when
@@ -28,6 +29,7 @@ interface WsCloseEvent {
 
 export interface WsHandlerDeps {
   sessions: SessionManager;
+  tasks?: TaskManager;
   broadcaster: WsBroadcaster;
   approvals?: ApprovalManager;
   tty?: TtyManager;
@@ -41,7 +43,7 @@ interface ClientState {
   clientId: string;
 }
 
-export function makeWsHandlers({ sessions, broadcaster, approvals, tty, codexTty, term, db }: WsHandlerDeps) {
+export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, tty, codexTty, term, db }: WsHandlerDeps) {
   const states = new WeakMap<WSContext, ClientState>();
 
   function sendStateSync(ws: WSContext): void {
@@ -60,6 +62,7 @@ export function makeWsHandlers({ sessions, broadcaster, approvals, tty, codexTty
         ws_root: config.workspace_root,
       },
       sessions: sessions.listSessions(),
+      tasks: tasks?.listTasks() ?? [],
       workspaces: db.prepare('SELECT * FROM workspaces ORDER BY sort_order, name').all() as StateSyncMessage['workspaces'],
       bots: listBots(db),
       approvals: (approvals?.listPending() ?? []).map(r => ({
@@ -134,7 +137,7 @@ export function makeWsHandlers({ sessions, broadcaster, approvals, tty, codexTty
       }
 
       try {
-        await dispatch(parsed, sessions, broadcaster, ws, state, tty, codexTty, term);
+        await dispatch(parsed, sessions, tasks, broadcaster, ws, state, tty, codexTty, term);
       } catch (err) {
         console.error('[ws] dispatch error', err);
         // Surface the failure to the client. Without this, errors inside
@@ -181,6 +184,7 @@ function dispatchErrorCode(messageType: string): string {
 async function dispatch(
   msg: ClientToServerMessage,
   sessions: SessionManager,
+  tasks: TaskManager | undefined,
   broadcaster: WsBroadcaster,
   ws: WSContext,
   state: ClientState,
@@ -234,6 +238,31 @@ async function dispatch(
     }
     case 'session:set_unread': {
       sessions.setUnread(msg.session_id, msg.unread);
+      return;
+    }
+    case 'task:create': {
+      if (!tasks) return;
+      const task = tasks.createTask({
+        name: msg.name,
+        ...(msg.description !== undefined ? { description: msg.description } : {}),
+      });
+      broadcaster.broadcast({ type: 'task:created', task });
+      return;
+    }
+    case 'task:update': {
+      if (!tasks) return;
+      const patch: import('../task/manager.js').UpdateTaskInput = {};
+      if (msg.name !== undefined) patch.name = msg.name;
+      if (msg.description !== undefined) patch.description = msg.description;
+      if (msg.status !== undefined) patch.status = msg.status;
+      const task = tasks.updateTask(msg.task_id, patch);
+      broadcaster.broadcast({ type: 'task:updated', task });
+      return;
+    }
+    case 'task:delete': {
+      if (!tasks) return;
+      tasks.deleteTask(msg.task_id);
+      broadcaster.broadcast({ type: 'task:deleted', task_id: msg.task_id });
       return;
     }
     case 'message:send': {

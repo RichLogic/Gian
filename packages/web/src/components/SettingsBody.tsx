@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { CcModelCapabilities, CodexModelCapabilities, ExternalEditor, OpenFileCategory, SystemConfig } from '@gian/shared';
 import { THEME_DEFAULT_ACCENT } from '@gian/shared';
 import { loadProxyModels, saveSettings } from '../api.js';
@@ -25,6 +26,48 @@ import {
   type NotificationPrefs,
 } from '../notifications.js';
 
+type NavKey = 'appearance' | 'notifications' | 'shortcuts' | 'executors' | 'chatview' | 'openwith';
+
+/** Left-nav groups (locator). `labelKey` is an i18n key; `items` map a
+ *  section anchor id (`sec-<key>`) to its nav label key. */
+const NAV_GROUPS: Array<{
+  labelKey: string;
+  items: Array<[NavKey, string]>;
+}> = [
+  {
+    labelKey: 'settings.nav.group.preferences',
+    items: [
+      ['appearance', 'settings.section.appearance'],
+      ['notifications', 'settings.section.notifications'],
+      ['shortcuts', 'settings.section.shortcuts'],
+    ],
+  },
+  {
+    labelKey: 'settings.nav.group.runtime',
+    items: [
+      ['executors', 'settings.section.executor'],
+      ['chatview', 'settings.section.chatview'],
+      ['openwith', 'settings.section.openwith'],
+    ],
+  },
+];
+
+/** Render the executor caption with the `claude -p` token in monospace,
+ *  matching the design prototype's `.exec-note` (it wraps just that token in
+ *  `.mono`). Splits the translated string on the literal so both locales work. */
+function renderExecNote(text: string): ReactNode {
+  const token = 'claude -p';
+  const idx = text.indexOf(token);
+  if (idx < 0) return text;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <span className="mono">{token}</span>
+      {text.slice(idx + token.length)}
+    </>
+  );
+}
+
 function newEditorId(): string {
   return (globalThis.crypto?.randomUUID?.() ?? `ed-${Date.now()}-${Math.random().toString(16).slice(2)}`);
 }
@@ -49,10 +92,14 @@ interface Props {
   onChange: (cfg: SystemConfig) => void;
 }
 
-/** V2 Settings as a Workbench tab body. Six sections per V2 design:
- *  Appearance / Executors / Notifications / Shortcuts / System / About.
- *  Account/Auth/Public access stay out of this compact workbench surface;
- *  locale lives here because the app only supports Chinese/English UI. */
+/** Settings v3 — left-nav scrollspy locator + vertically-stacked section
+ *  cards (ported 1:1 from design/gian-design-v2). Two nav groups:
+ *  Preferences (Appearance / Notifications / Shortcuts) and Runtime
+ *  (Executors / Chat view / Open with). The nav is a locator, not a
+ *  switcher — clicking scrolls to a section and the active highlight
+ *  follows scroll position. Account/Auth/Public/System/About stay out of
+ *  this compact workbench surface; locale lives here because the app only
+ *  supports Chinese/English UI. */
 export function SettingsBody({ config, apps, onChange }: Props) {
   const t = useT();
   if (!config) return <div style={{ padding: 20, color: 'var(--text-3)' }}>{t('common.loading')}</div>;
@@ -69,6 +116,36 @@ function SettingsBodyInner({
   const t = useT();
   const minimapOn = useMinimapEnabled();
   const [editors, setEditors] = useState<ExternalEditor[]>(config.external_editors);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [activeNav, setActiveNav] = useState<NavKey>('appearance');
+
+  // Nav is a locator, not a switcher: clicking scrolls to the section; the
+  // active highlight follows the scroll position (scrollspy). The scroller is
+  // the enclosing `.sheet-content` island (matches the design prototype).
+  function goTo(key: NavKey) {
+    setActiveNav(key);
+    const el = document.getElementById(`sec-${key}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  useEffect(() => {
+    const root = rootRef.current;
+    const scroller = root?.closest('.sheet-content') as HTMLElement | null;
+    if (!scroller) return;
+    const keys = NAV_GROUPS.flatMap(g => g.items.map(([k]) => k));
+    const onScroll = () => {
+      const top = scroller.getBoundingClientRect().top;
+      let cur: NavKey = keys[0]!;
+      for (const k of keys) {
+        const el = document.getElementById(`sec-${k}`);
+        if (el && el.getBoundingClientRect().top - top <= 56) cur = k;
+      }
+      setActiveNav(cur);
+    };
+    scroller.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+    return () => scroller.removeEventListener('scroll', onScroll);
+  }, []);
 
   // Sync local editor state when config is replaced from outside (e.g. initial load).
   useEffect(() => {
@@ -120,307 +197,330 @@ function SettingsBodyInner({
   const editorAppNames = [...new Set(editors.map(e => e.name.trim()).filter(Boolean))];
 
   return (
-    <div className="settings-tab-body" data-testid="settings-body">
-      <header className="settings-hero">
-        <h2>{t('settings.title')}</h2>
-        <span className="settings-hero-sub">{t('settings.local.subtitle')}</span>
-      </header>
-
-      <div className="settings-eyebrow">{t('settings.section.appearance')}</div>
-      <div className="settings-section">
-        <dl className="kv-grid">
-          <dt>{t('settings.appearance.theme')}</dt>
-          <dd>
-            <div className="theme-row">
-              {([
-                ['light', 'settings.theme.light', ['oklch(0.955 0.004 280)', 'oklch(0.935 0.005 280)', 'oklch(0.22 0.02 280)']],
-                ['warm', 'settings.theme.warm', ['oklch(0.955 0.020 80)', 'oklch(0.925 0.022 78)', 'oklch(0.30 0.04 55)']],
-                ['dark', 'settings.theme.dark', ['oklch(0.165 0.012 250)', 'oklch(0.240 0.016 250)', 'oklch(0.93 0.01 250)']],
-              ] as const).map(([key, labelKey, swatches]) => (
-                <button key={key} className={`theme-chip ${config.theme === key ? 'active' : ''}`}
-                        onClick={() => patch({ theme: key, accent: THEME_DEFAULT_ACCENT[key] })}>
-                  <div className="swatches">{swatches.map((c, i) => <i key={i} style={{ background: c }} />)}</div>
-                  <div className="name">{t(labelKey)}</div>
-                </button>
-              ))}
-            </div>
-          </dd>
-          <dt>{t('settings.appearance.accent')}</dt>
-          <dd>
-            <div className="accent-row">
-              {([
-                ['rose',   'Rose',   'oklch(0.55 0.15   5)'],
-                ['ember',  'Ember',  'oklch(0.55 0.14  35)'],
-                ['citron', 'Citron', 'oklch(0.55 0.13  95)'],
-                ['moss',   'Moss',   'oklch(0.55 0.11 150)'],
-                ['teal',   'Teal',   'oklch(0.55 0.11 195)'],
-                ['azure',  'Azure',  'oklch(0.55 0.13 230)'],
-                ['ink',    'Ink',    'oklch(0.55 0.13 270)'],
-                ['plum',   'Plum',   'oklch(0.55 0.14 320)'],
-              ] as const).map(([k, name, c]) => (
-                <button key={k} className={`accent-swatch ${config.accent === k ? 'active' : ''}`}
-                        style={{ background: c }}
-                        title={name}
-                        onClick={() => patch({ accent: k })}>
-                  <span className="accent-name">{name}</span>
-                </button>
-              ))}
-            </div>
-          </dd>
-          <dt>{t('settings.appearance.density')}</dt>
-          <dd>
-            <div className="segm">
-              {(['compact', 'cozy', 'roomy'] as const).map(d => (
-                <button key={d} className={`segm-item ${config.density === d ? 'active' : ''}`}
-                        onClick={() => patch({ density: d })}>
-                  {t(`settings.density.${d}`)}
-                </button>
-              ))}
-            </div>
-          </dd>
-          <dt>{t('settings.appearance.language')}</dt>
-          <dd>
-            <div className="segm">
-              {([
-                ['zh-CN', 'settings.language.zh'],
-                ['en', 'settings.language.en'],
-              ] as const).map(([locale, labelKey]) => (
-                <button
-                  key={locale}
-                  className={`segm-item ${config.locale === locale ? 'active' : ''}`}
-                  onClick={() => patch({ locale })}
-                >
-                  {t(labelKey)}
-                </button>
-              ))}
-            </div>
-          </dd>
-          <dt>{t('settings.appearance.fontInterface')}</dt>
-          <dd>
-            <div className="segm">
-              {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
-                <button key={s} className={`segm-item ${config.font_scale_chrome === s ? 'active' : ''}`}
-                        onClick={() => patch({ font_scale_chrome: s })}>
-                  {s.toUpperCase()}
-                </button>
-              ))}
-            </div>
-          </dd>
-          <dt>{t('settings.appearance.fontTranscript')}</dt>
-          <dd>
-            <div className="segm">
-              {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
-                <button key={s} className={`segm-item ${config.font_scale_chat === s ? 'active' : ''}`}
-                        onClick={() => patch({ font_scale_chat: s })}>
-                  {s.toUpperCase()}
-                </button>
-              ))}
-            </div>
-          </dd>
-          <dt>{t('settings.appearance.fontCode')}</dt>
-          <dd>
-            <div className="segm">
-              {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
-                <button key={s} className={`segm-item ${config.font_scale_code === s ? 'active' : ''}`}
-                        onClick={() => patch({ font_scale_code: s })}>
-                  {s.toUpperCase()}
-                </button>
-              ))}
-            </div>
-          </dd>
-          <dt>{t('settings.appearance.fontFamily')}</dt>
-          <dd className="mono" style={{ color: 'var(--text-3)' }}>Instrument Sans · JetBrains Mono</dd>
-          <dt>{t('settings.display.minimap')}</dt>
-          <dd>
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={minimapOn}
-                onChange={e => setMinimapEnabled(e.target.checked)}
-              />
-              <span>{t('settings.display.minimap.hint')}</span>
-            </label>
-          </dd>
-        </dl>
-      </div>
-
-      <div className="settings-eyebrow">{t('settings.section.executor')}</div>
-      <div className="settings-section">
-        <ExecutorRow
-          name="Claude Code"
-          executor="claude"
-          model={config.default_claude_model}
-          effort={config.default_claude_effort}
-          onSetModel={v => patch({ default_claude_model: v })}
-          onSetEffort={v => patch({ default_claude_effort: v })}
-        />
-        <ExecutorRow
-          name="Codex"
-          executor="codex"
-          model={config.default_codex_model}
-          effort={config.default_codex_effort}
-          onSetModel={v => patch({ default_codex_model: v })}
-          onSetEffort={v => patch({ default_codex_effort: v })}
-        />
-      </div>
-
-      <div className="settings-eyebrow">{t('settings.section.chatview')}</div>
-      <div className="settings-section">
-        <p className="settings-section-help">{t('settings.chatview.help')}</p>
-        <dl className="kv-grid">
-          <dt>{t('settings.chatview.claudeSurface')}</dt>
-          <dd>
-            <div className="segm">
-              {([
-                ['structured', 'settings.chatview.claudep'],
-                ['tty', 'settings.chatview.tty'],
-              ] as const).map(([val, labelKey]) => (
-                <button
-                  key={val}
-                  className={`segm-item ${claudeSurface === val ? 'active' : ''}`}
-                  onClick={() => { void patchChatView({ claude_chat_surface: val, claude_chat_cli: reseedClaudeCli(val) }); }}
-                >
-                  {t(labelKey)}
-                </button>
-              ))}
-            </div>
-          </dd>
-          <dt>{t('settings.chatview.claudeCli')}</dt>
-          <dd>
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={claudeCli}
-                onChange={e => { void patchChatView({ claude_chat_cli: e.target.checked }); }}
-              />
-              <span>{t('settings.chatview.claudeCli.hint')}</span>
-            </label>
-          </dd>
-          <dt>{t('settings.chatview.codexCli')}</dt>
-          <dd>
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={codexCli}
-                onChange={e => { void patchChatView({ codex_chat_cli: e.target.checked }); }}
-              />
-              <span>{t('settings.chatview.codexCli.hint')}</span>
-            </label>
-          </dd>
-        </dl>
-      </div>
-
-      <div className="settings-eyebrow">{t('settings.section.notifications')}</div>
-      <div className="settings-section">
-        <NotificationsBlock />
-      </div>
-
-      <div className="settings-eyebrow">{t('settings.section.shortcuts')}</div>
-      <div className="settings-section">
-        <dl className="kv-grid shortcuts">
-          <dt>{t('settings.shortcuts.commandPalette')}</dt><dd><kbd>⌘</kbd><kbd>K</kbd></dd>
-          <dt>{t('settings.shortcuts.newSession')}</dt><dd><kbd>⌘</kbd><kbd>N</kbd></dd>
-          <dt>{t('settings.shortcuts.toggleWorkbench')}</dt><dd><kbd>⌘</kbd><kbd>\</kbd></dd>
-          <dt>{t('settings.shortcuts.renameSession')}</dt><dd><kbd>F2</kbd></dd>
-          <dt>{t('settings.shortcuts.approveDecline')}</dt><dd><kbd>⏎</kbd>&nbsp;<kbd>⌫</kbd></dd>
-          <dt>{t('settings.shortcuts.showChat')}</dt><dd><kbd>⌃/⌘</kbd><kbd>1</kbd></dd>
-          <dt>{t('settings.shortcuts.showCli')}</dt><dd><kbd>⌃/⌘</kbd><kbd>2</kbd></dd>
-        </dl>
-      </div>
-
-      <div className="settings-eyebrow">{t('settings.section.system')}</div>
-      <div className="settings-section">
-        <dl className="kv-grid">
-          <dt>{t('settings.system.runner')}</dt>
-          <dd className="mono">{config.host}:{config.port}</dd>
-          <dt>{t('settings.system.workspaceRoot')}</dt>
-          <dd className="mono">{config.workspace_root}</dd>
-        </dl>
-      </div>
-
-      <div className="settings-eyebrow">{t('settings.section.about')}</div>
-      <div className="settings-section">
-        <dl className="kv-grid">
-          <dt>{t('settings.about.version')}</dt><dd className="mono">Gian (dev)</dd>
-          <dt>{t('settings.about.channel')}</dt><dd>{t('settings.about.local')}</dd>
-        </dl>
-      </div>
-
-      <div className="settings-eyebrow">{t('settings.section.externaleditors')}</div>
-      <div className="settings-section">
-        <p className="settings-section-help">{t('settings.editors.help')}</p>
-        {editors.length === 0 && (
-          <p className="settings-empty">{t('settings.editors.empty')}</p>
-        )}
-        {editors.map(ed => (
-          <div key={ed.id} className="ee-app-row">
-            <span className="ee-app-name"><AppIcon name={ed.name} /> {ed.name || ed.id}</span>
-            <button
-              type="button"
-              aria-label={t('settings.editors.remove')}
-              className="ee-remove"
-              onClick={() => patchEditors(editors.filter(x => x.id !== ed.id))}
-            >
-              ✕
-            </button>
+    <div className="settings2" data-testid="settings-body" ref={rootRef}>
+      <nav className="settings2-nav">
+        <div className="settings2-title">{t('settings.title')}</div>
+        {NAV_GROUPS.map(group => (
+          <div className="s2-group" key={group.labelKey}>
+            <div className="s2-grouplabel">{t(group.labelKey)}</div>
+            {group.items.map(([key, labelKey]) => (
+              <button
+                key={key}
+                type="button"
+                className={`s2-navitem ${activeNav === key ? 'active' : ''}`}
+                onClick={() => goTo(key)}
+              >
+                {t(labelKey)}
+              </button>
+            ))}
           </div>
         ))}
-        {apps.length > 0 && (
-          <label className="ee-add-app">
-            <span className="rfc-lbl">{t('settings.editors.addApp')}</span>
-            <select
-              aria-label={t('settings.editors.addApp')}
-              value=""
-              onChange={e => {
-                const app = e.target.value;
-                if (!app) return;
-                // A picked app is stored as an opener that shells out via
-                // `open -a "<App>" <path>` (host buildEditorArgs substitutes {path}).
-                patchEditors([
-                  ...editors,
-                  { id: newEditorId(), name: app, command: 'open', args: ['-a', app, '{path}'] },
-                ]);
-                e.target.value = '';
-              }}
-            >
-              <option value="">{t('settings.editors.addApp.placeholder')}</option>
-              {apps.filter(a => !editors.some(ed => ed.name === a)).map(a => <option key={a} value={a}>{a}</option>)}
-            </select>
-          </label>
-        )}
-      </div>
+        <div className="s2-foot mono">{t('settings.foot')}</div>
+      </nav>
 
-      <div className="settings-eyebrow">{t('settings.section.openapps')}</div>
-      <div className="settings-section">
-        <p className="settings-section-help">{t('settings.openapps.help')}</p>
-        {OPEN_CATEGORIES.map(({ key, labelKey }) => {
-          const cur = (config.open_apps?.[key]) || DEFAULT_OPEN_TARGET[key];
-          // Options = the curated "Open with" apps only. Keep the current value
-          // selectable even if it's not in that list (a built-in default like
-          // TextEdit, or an app the user has since removed from "Open with").
-          const appOpts = cur.startsWith('@') || editorAppNames.includes(cur)
-            ? editorAppNames
-            : [cur, ...editorAppNames];
-          return (
-            <div key={key} className="open-cat-row">
-              <span className="open-cat-label">{t(labelKey)}</span>
-              <span className="open-cat-pick">
-                {cur === '@newtab'
-                  ? <span className="app-icon app-icon-newtab" aria-hidden>↗</span>
-                  : <AppIcon name={cur === '@finder' ? 'Finder' : cur} />}
-                <select
-                  aria-label={t(labelKey)}
-                  value={cur}
-                  onChange={e => patch({ open_apps: { ...(config.open_apps ?? {}), [key]: e.target.value } })}
-                >
-                  <option value="@newtab">{t('settings.openapps.newtab')}</option>
-                  <option value="@finder">{t('settings.openapps.finder')}</option>
-                  {appOpts.map(a => <option key={a} value={a}>{a}</option>)}
-                </select>
-              </span>
+      <div className="settings2-main">
+        {/* ── Appearance ── */}
+        <section id="sec-appearance" className="s2-section">
+          <h3 className="s2-sectiontitle">{t('settings.section.appearance')}</h3>
+          <div className="s2-card">
+            <dl className="kv-grid">
+              <dt>{t('settings.appearance.theme')}</dt>
+              <dd>
+                <div className="theme-row">
+                  {([
+                    ['light', 'settings.theme.light', ['oklch(0.955 0.004 280)', 'oklch(0.935 0.005 280)', 'oklch(0.22 0.02 280)']],
+                    ['warm', 'settings.theme.warm', ['oklch(0.955 0.020 80)', 'oklch(0.925 0.022 78)', 'oklch(0.30 0.04 55)']],
+                    ['dark', 'settings.theme.dark', ['oklch(0.165 0.012 250)', 'oklch(0.240 0.016 250)', 'oklch(0.93 0.01 250)']],
+                  ] as const).map(([key, labelKey, swatches]) => (
+                    <button key={key} className={`theme-chip ${config.theme === key ? 'active' : ''}`}
+                            onClick={() => patch({ theme: key, accent: THEME_DEFAULT_ACCENT[key] })}>
+                      <div className="swatches">{swatches.map((c, i) => <i key={i} style={{ background: c }} />)}</div>
+                      <div className="name">{t(labelKey)}</div>
+                    </button>
+                  ))}
+                </div>
+              </dd>
+              <dt>{t('settings.appearance.accent')}</dt>
+              <dd>
+                <div className="accent-row">
+                  {([
+                    ['rose',   'Rose',   'oklch(0.55 0.15   5)'],
+                    ['ember',  'Ember',  'oklch(0.55 0.14  35)'],
+                    ['citron', 'Citron', 'oklch(0.55 0.13  95)'],
+                    ['moss',   'Moss',   'oklch(0.55 0.11 150)'],
+                    ['teal',   'Teal',   'oklch(0.55 0.11 195)'],
+                    ['azure',  'Azure',  'oklch(0.55 0.13 230)'],
+                    ['ink',    'Ink',    'oklch(0.55 0.13 270)'],
+                    ['plum',   'Plum',   'oklch(0.55 0.14 320)'],
+                  ] as const).map(([k, name, c]) => (
+                    <button key={k} className={`accent-swatch ${config.accent === k ? 'active' : ''}`}
+                            style={{ background: c }}
+                            title={name}
+                            onClick={() => patch({ accent: k })}>
+                      <span className="accent-name">{name}</span>
+                    </button>
+                  ))}
+                </div>
+              </dd>
+              <dt>{t('settings.appearance.density')}</dt>
+              <dd>
+                <div className="segm">
+                  {(['compact', 'cozy', 'roomy'] as const).map(d => (
+                    <button key={d} className={`segm-item ${config.density === d ? 'active' : ''}`}
+                            onClick={() => patch({ density: d })}>
+                      {t(`settings.density.${d}`)}
+                    </button>
+                  ))}
+                </div>
+              </dd>
+              <dt>{t('settings.appearance.language')}</dt>
+              <dd>
+                <div className="segm">
+                  {([
+                    ['zh-CN', 'settings.language.zh'],
+                    ['en', 'settings.language.en'],
+                  ] as const).map(([locale, labelKey]) => (
+                    <button
+                      key={locale}
+                      className={`segm-item ${config.locale === locale ? 'active' : ''}`}
+                      onClick={() => patch({ locale })}
+                    >
+                      {t(labelKey)}
+                    </button>
+                  ))}
+                </div>
+              </dd>
+              <dt>{t('settings.appearance.fontInterface')}</dt>
+              <dd>
+                <div className="segm">
+                  {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
+                    <button key={s} className={`segm-item ${config.font_scale_chrome === s ? 'active' : ''}`}
+                            onClick={() => patch({ font_scale_chrome: s })}>
+                      {s.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </dd>
+              <dt>{t('settings.appearance.fontTranscript')}</dt>
+              <dd>
+                <div className="segm">
+                  {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
+                    <button key={s} className={`segm-item ${config.font_scale_chat === s ? 'active' : ''}`}
+                            onClick={() => patch({ font_scale_chat: s })}>
+                      {s.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </dd>
+              <dt>{t('settings.appearance.fontCode')}</dt>
+              <dd>
+                <div className="segm">
+                  {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
+                    <button key={s} className={`segm-item ${config.font_scale_code === s ? 'active' : ''}`}
+                            onClick={() => patch({ font_scale_code: s })}>
+                      {s.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </dd>
+              <dt>{t('settings.appearance.fontFamily')}</dt>
+              <dd className="mono" style={{ color: 'var(--text-3)' }}>Instrument Sans · JetBrains Mono</dd>
+              <dt>{t('settings.display.minimap')}</dt>
+              <dd>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={minimapOn}
+                    onChange={e => setMinimapEnabled(e.target.checked)}
+                  />
+                  <span>{t('settings.display.minimap.hint')}</span>
+                </label>
+              </dd>
+            </dl>
+          </div>
+        </section>
+
+        {/* ── Notifications ── */}
+        <section id="sec-notifications" className="s2-section">
+          <h3 className="s2-sectiontitle">{t('settings.section.notifications')}</h3>
+          <div className="s2-card">
+            <NotificationsBlock />
+          </div>
+        </section>
+
+        {/* ── Shortcuts ── */}
+        <section id="sec-shortcuts" className="s2-section">
+          <h3 className="s2-sectiontitle">{t('settings.section.shortcuts')}</h3>
+          <div className="s2-card">
+            <dl className="kv-grid shortcuts">
+              <dt>{t('settings.shortcuts.commandPalette')}</dt><dd><kbd>⌘</kbd><kbd>K</kbd></dd>
+              <dt>{t('settings.shortcuts.newSession')}</dt><dd><kbd>⌘</kbd><kbd>N</kbd></dd>
+              <dt>{t('settings.shortcuts.toggleWorkbench')}</dt><dd><kbd>⌘</kbd><kbd>\</kbd></dd>
+              <dt>{t('settings.shortcuts.renameSession')}</dt><dd><kbd>F2</kbd></dd>
+              <dt>{t('settings.shortcuts.approveDecline')}</dt><dd><kbd>⏎</kbd>&nbsp;<kbd>⌫</kbd></dd>
+              <dt>{t('settings.shortcuts.showChat')}</dt><dd><kbd>⌃/⌘</kbd><kbd>1</kbd></dd>
+              <dt>{t('settings.shortcuts.showCli')}</dt><dd><kbd>⌃/⌘</kbd><kbd>2</kbd></dd>
+            </dl>
+          </div>
+        </section>
+
+        {/* ── Executors ── */}
+        <section id="sec-executors" className="s2-section">
+          <h3 className="s2-sectiontitle">{t('settings.section.executor')}</h3>
+          <div className="s2-card">
+            <ExecutorRow
+              name="Claude Code"
+              executor="claude"
+              effortLabelKey="settings.executors.effort"
+              note={renderExecNote(t('settings.executors.note'))}
+              model={config.default_claude_model}
+              effort={config.default_claude_effort}
+              onSetModel={v => patch({ default_claude_model: v })}
+              onSetEffort={v => patch({ default_claude_effort: v })}
+            />
+            <ExecutorRow
+              name="Codex"
+              executor="codex"
+              effortLabelKey="settings.executors.thinking"
+              model={config.default_codex_model}
+              effort={config.default_codex_effort}
+              onSetModel={v => patch({ default_codex_model: v })}
+              onSetEffort={v => patch({ default_codex_effort: v })}
+            />
+          </div>
+        </section>
+
+        {/* ── Chat view ── */}
+        <section id="sec-chatview" className="s2-section">
+          <h3 className="s2-sectiontitle">{t('settings.section.chatview')}</h3>
+          <div className="s2-card">
+            <p className="s2-help">{t('settings.chatview.help')}</p>
+            <dl className="kv-grid">
+              <dt>{t('settings.chatview.claudeSurface')}</dt>
+              <dd>
+                <div className="segm">
+                  {([
+                    ['structured', 'settings.chatview.claudep'],
+                    ['tty', 'settings.chatview.tty'],
+                  ] as const).map(([val, labelKey]) => (
+                    <button
+                      key={val}
+                      className={`segm-item ${claudeSurface === val ? 'active' : ''}`}
+                      onClick={() => { void patchChatView({ claude_chat_surface: val, claude_chat_cli: reseedClaudeCli(val) }); }}
+                    >
+                      {t(labelKey)}
+                    </button>
+                  ))}
+                </div>
+              </dd>
+              <dt>{t('settings.chatview.claudeCli')}</dt>
+              <dd>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={claudeCli}
+                    onChange={e => { void patchChatView({ claude_chat_cli: e.target.checked }); }}
+                  />
+                  <span>{t('settings.chatview.claudeCli.hint')}</span>
+                </label>
+              </dd>
+              <dt>{t('settings.chatview.codexCli')}</dt>
+              <dd>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={codexCli}
+                    onChange={e => { void patchChatView({ codex_chat_cli: e.target.checked }); }}
+                  />
+                  <span>{t('settings.chatview.codexCli.hint')}</span>
+                </label>
+              </dd>
+            </dl>
+          </div>
+        </section>
+
+        {/* ── Open with (merged: external editors + default app by file type) ── */}
+        <section id="sec-openwith" className="s2-section">
+          <h3 className="s2-sectiontitle">{t('settings.section.openwith')}</h3>
+          <div className="s2-card">
+            <p className="s2-help">{t('settings.openwith.help')}</p>
+
+            <div className="s2-subhead">{t('settings.openwith.applications')}</div>
+            <div className="ee-list">
+              {editors.length === 0 && (
+                <p className="settings-empty">{t('settings.editors.empty')}</p>
+              )}
+              {editors.map(ed => (
+                <div key={ed.id} className="ee-app-row">
+                  <span className="ee-app-name"><AppIcon name={ed.name} /> {ed.name || ed.id}</span>
+                  <button
+                    type="button"
+                    aria-label={t('settings.editors.remove')}
+                    className="ee-remove"
+                    onClick={() => patchEditors(editors.filter(x => x.id !== ed.id))}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              {apps.length > 0 && (
+                <label className="ee-add-app">
+                  <span className="rfc-lbl">{t('settings.editors.addApp')}</span>
+                  <select
+                    aria-label={t('settings.editors.addApp')}
+                    value=""
+                    onChange={e => {
+                      const app = e.target.value;
+                      if (!app) return;
+                      // A picked app is stored as an opener that shells out via
+                      // `open -a "<App>" <path>` (host buildEditorArgs substitutes {path}).
+                      patchEditors([
+                        ...editors,
+                        { id: newEditorId(), name: app, command: 'open', args: ['-a', app, '{path}'] },
+                      ]);
+                      e.target.value = '';
+                    }}
+                  >
+                    <option value="">{t('settings.editors.addApp.placeholder')}</option>
+                    {apps.filter(a => !editors.some(ed => ed.name === a)).map(a => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                </label>
+              )}
             </div>
-          );
-        })}
+
+            <div className="s2-subhead">{t('settings.openwith.defaults')}</div>
+            <div className="openapps">
+              {OPEN_CATEGORIES.map(({ key, labelKey }) => {
+                const cur = (config.open_apps?.[key]) || DEFAULT_OPEN_TARGET[key];
+                // Options = the curated "Open with" apps only. Keep the current value
+                // selectable even if it's not in that list (a built-in default like
+                // TextEdit, or an app the user has since removed from "Open with").
+                const appOpts = cur.startsWith('@') || editorAppNames.includes(cur)
+                  ? editorAppNames
+                  : [cur, ...editorAppNames];
+                return (
+                  <div key={key} className="open-cat-row">
+                    <span className="open-cat-label">{t(labelKey)}</span>
+                    <span className="open-cat-pick">
+                      {cur === '@newtab'
+                        ? <span className="app-icon app-icon-newtab" aria-hidden>↗</span>
+                        : <AppIcon name={cur === '@finder' ? 'Finder' : cur} />}
+                      <select
+                        aria-label={t(labelKey)}
+                        value={cur}
+                        onChange={e => patch({ open_apps: { ...(config.open_apps ?? {}), [key]: e.target.value } })}
+                      >
+                        <option value="@newtab">{t('settings.openapps.newtab')}</option>
+                        <option value="@finder">{t('settings.openapps.finder')}</option>
+                        {appOpts.map(a => <option key={a} value={a}>{a}</option>)}
+                      </select>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   );
@@ -432,12 +532,16 @@ function SettingsBodyInner({
  *  `supportedThinking`. Nothing about the list is hardcoded — when the proxy
  *  adds a model or adjusts its supported levels, this UI follows. */
 function ExecutorRow({
-  name, executor, model, effort, onSetModel, onSetEffort,
+  name, executor, model, effort, effortLabelKey, note, onSetModel, onSetEffort,
 }: {
   name: string;
   executor: 'claude' | 'codex';
   model: string;
   effort: string;
+  /** i18n key for the effort/thinking row label (Claude → Effort, Codex → Thinking). */
+  effortLabelKey: string;
+  /** Optional muted caption under the row (e.g. the `claude -p` note). */
+  note?: ReactNode;
   onSetModel: (v: string) => void;
   onSetEffort: (v: string) => void;
 }) {
@@ -516,7 +620,7 @@ function ExecutorRow({
         </dd>
         {efforts.length > 0 && (
           <>
-            <dt>{t('settings.executors.effort')}</dt>
+            <dt>{t(effortLabelKey)}</dt>
             <dd>
               <select
                 className="select mono"
@@ -533,6 +637,7 @@ function ExecutorRow({
           </>
         )}
       </dl>
+      {note && <p className="exec-note">{note}</p>}
     </div>
   );
 }

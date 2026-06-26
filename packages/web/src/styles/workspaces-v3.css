@@ -1,0 +1,81 @@
+/* ============================================================
+   Workspaces v3 — relocate the Workspaces UI to match the
+   design prototype (design/gian-design-v2):
+     • the LIST lives in the right Inspector rail (zone 4),
+       opened from the dock "Workspaces" button;
+     • a clicked workspace's DETAIL opens as a Workbench tab
+       (zone 3).
+
+   Scoped to .ws-list / .ws-item* / .ws-act / .ws-detail* and the
+   .ws-detail-tab sheet wrapper only — no global tokens / shared
+   stylesheets are touched. Port of the prototype's
+   css/app.css `.ws-list` / `.ws-item*` / `.ws-act` / `.ws-detail*`
+   block, adapted to the real app's Inspector + Sheet chrome.
+   ============================================================ */
+
+/* ── Inspector navigator (zone 4) ──────────────────────────── */
+.ws-list { display: flex; flex-direction: column; gap: 2px; }
+.ws-item {
+  display: flex; align-items: center; gap: 2px;
+  padding: 3px 4px 3px 8px; border-radius: var(--r-2);
+  transition: background 100ms var(--ease);
+}
+.ws-item:hover { background: var(--surface-2); }
+.ws-item.active { background: var(--accent-soft); }
+.ws-item-main {
+  flex: 1; min-width: 0; display: flex; align-items: center;
+  text-align: left; border: 0; background: transparent; cursor: pointer;
+  padding: 5px 2px;
+}
+.ws-item-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ws-item-name { font: 500 var(--fz-13)/1.2 var(--font-sans); color: var(--text); }
+.ws-item.hidden { opacity: 0.6; }
+.ws-item.hidden .ws-item-name { text-decoration: line-through; color: var(--text-3); }
+.ws-item-path {
+  font-size: 10.5px; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ws-item-actions { flex: none; display: flex; align-items: center; gap: 1px; }
+.ws-act {
+  width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+  border: 0; background: transparent; color: var(--text-3); cursor: pointer;
+  border-radius: var(--r-1); transition: background 100ms var(--ease), color 100ms var(--ease);
+}
+.ws-act:hover:not(:disabled) { background: var(--surface-3); color: var(--text); }
+.ws-act:disabled { opacity: 0.3; cursor: default; }
+
+/* ── Workbench detail tab (zone 3) ──────────────────────────
+   The detail reuses the real app's <SpaceDetail/> (Overview / Git /
+   Native panes + their API wiring) verbatim. SpaceDetail renders a
+   `.main > .main-scroll > .detail` island intended for the full-page
+   Spaces view; inside a Sheet tab we strip its island chrome (shadow,
+   radius, margin) and let the Sheet's own `.sheet-content` own the
+   scroll, so it reads as a flush detail body — matching the
+   prototype's `.ws-detail` surface. */
+.ws-detail-tab {
+  flex: 1; min-height: 0; min-width: 0;
+  display: flex;
+}
+.ws-detail-tab .main {
+  margin: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+/* SpaceDetail's own scroller nests inside the sheet's scroller — let it
+   grow naturally; the sheet content area provides the outer scroll. */
+.ws-detail-tab .main-scroll { overflow: visible; }
+
+/* CLAUDE.md drawer (ClaudeMdInspector) opens to the right of the detail
+   inside the tab. Narrow it from the full-page 480px so it fits a Sheet
+   pane, and cap it to the pane width. */
+.ws-detail-tab.has-inspector { flex-direction: row; }
+.ws-detail-tab.has-inspector .main { min-width: 0; }
+.ws-detail-tab .spaces-inspector {
+  flex: 0 1 360px;
+  min-width: 240px;
+  max-width: 60%;
+}
+
+/* New-workspace form hosted inside a Workbench tab (not a jump to spaces mode) */
+.ws-new-panel { padding: 18px 22px 28px; overflow-y: auto; height: 100%; }

@@ -216,7 +216,7 @@ function NewBotForm({
           </div>
 
           <div style={{ marginBottom: 14 }}>
-            <div style={{ font: '600 10.5px/1 var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-3)', marginBottom: 8 }}>
+            <div style={{ font: '600 10.5px/1 var(--font-mono)', textTransform: 'none', letterSpacing: '0.08em', color: 'var(--text-3)', marginBottom: 8 }}>
               Platform
             </div>
             <div className="segm">
@@ -365,7 +365,7 @@ function NewBotForm({
                 </button>
               </div>
               <div style={{ marginTop: 14 }}>
-                <div style={{ font: '600 10.5px/1 var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-3)', marginBottom: 6 }}>
+                <div style={{ font: '600 10.5px/1 var(--font-mono)', textTransform: 'none', letterSpacing: '0.06em', color: 'var(--text-3)', marginBottom: 6 }}>
                   {t('bots.form.allowedusers.label')}
                 </div>
                 <input
@@ -718,7 +718,7 @@ function BotDetail({
 
           {/* ===== Mode behavior ===== */}
           <div style={{ marginTop: 14 }}>
-            <div style={{ font: '600 10.5px/1 var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-3)', marginBottom: 8 }}>
+            <div style={{ font: '600 10.5px/1 var(--font-mono)', textTransform: 'none', letterSpacing: '0.08em', color: 'var(--text-3)', marginBottom: 8 }}>
               Mode behavior
             </div>
             <div className="mode-cards">

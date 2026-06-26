@@ -1,6 +1,6 @@
 export type Executor = 'codex' | 'claude';
 
-export type SessionType = 'coding';
+export type SessionType = 'coding' | 'subtask' | 'manager';
 
 /**
  * Mode that decides who (and how) approves agent actions.
@@ -90,6 +90,10 @@ export interface Session {
   id: string;
   name: string | null;
   type: SessionType;
+  /** The Task this session belongs to (PRD-v3). A non-null task_id with
+   *  type='subtask' is a Subtask; type='manager' is the Task's read-only Codex
+   *  manager. Null = a standalone ("scattered") session. */
+  task_id: string | null;
   workspace_id: string;
   executor: Executor;
   model: string | null;
@@ -126,9 +130,38 @@ export interface Session {
    *  path) or `tty` (interactive CLI in a PTY). Mutable at runtime via the
    *  session header toggle. */
   runtime_mode: RuntimeMode;
+  /** Subtask-level summary (PRD-v3 P4). Written by the summarizer when a
+   *  `type='subtask'` session completes, and user-editable thereafter. The
+   *  per-Task Manager inlines it into its system prompt. Null until the
+   *  summarizer runs (and for non-subtask sessions). */
+  summary: string | null;
   created_at: string;
   updated_at: string;
 }
+
+export type TaskStatus = 'open' | 'done' | 'archived';
+
+/**
+ * Lightweight container for "one thing the user is doing" (PRD-v3). A Task
+ * groups multiple Subtasks (sessions) — possibly spread across workspaces.
+ * It does NOT bind a workspace; workspace membership is decided by its Subtasks.
+ */
+export interface Task {
+  id: string;
+  name: string;
+  description: string | null;
+  status: TaskStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * A Subtask IS a Session — one with `type === 'subtask'` and a non-null
+ * `task_id`. It reuses the full Session machinery (proxy, worktree, runtime
+ * mode, …); the Task layer only groups and orders them. Kept as an alias so
+ * call sites can read intent without a parallel type.
+ */
+export type Subtask = Session;
 
 export interface Turn {
   id: string;

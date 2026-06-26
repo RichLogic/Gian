@@ -48,7 +48,7 @@
   font-size: 10px; font-weight: 700;
   letter-spacing: 0.04em;
   color: var(--text-3);
-  text-transform: uppercase;
+  text-transform: none;
 }
 .evt-subject {
   font-family: var(--font-mono);
@@ -97,7 +97,7 @@
   border-radius: var(--r-pill);
   font-family: var(--font-mono);
   font-size: 9.5px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.04em;
+  text-transform: none; letter-spacing: 0.04em;
   line-height: 1.5;
 }
 .evt-status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
@@ -129,7 +129,7 @@
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--text-3);
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
@@ -182,7 +182,7 @@
 .evt.thinking .evt-body p + p { margin-top: 4px; }
 .evt.thinking .evt-body .thinking-head {
   font-family: var(--font-mono); font-size: 10px; color: var(--text-3);
-  text-transform: uppercase; letter-spacing: 0.06em; font-style: normal;
+  text-transform: none; letter-spacing: 0.06em; font-style: normal;
   margin-bottom: 4px;
 }
 
@@ -391,7 +391,7 @@
   color: var(--text-3);
   font-family: var(--font-mono);
   font-size: 10px;
-  text-transform: uppercase; letter-spacing: 0.08em;
+  text-transform: none; letter-spacing: 0.08em;
 }
 .turn-sep::before, .turn-sep::after {
   content: "";
@@ -449,7 +449,7 @@
 .job-bar-label {
   font-family: var(--font-mono);
   font-size: 10px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.08em;
+  text-transform: none; letter-spacing: 0.08em;
   color: var(--accent-text);
   display: flex; align-items: center; gap: 6px;
 }
@@ -520,7 +520,7 @@
   display: inline-flex; align-items: center;
   font-family: var(--font-mono);
   font-size: 9px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.04em;
+  text-transform: none; letter-spacing: 0.04em;
   padding: 1px 4px;
   border-radius: var(--r-1);
   color: var(--text-3);
@@ -545,7 +545,7 @@
   font-family: var(--font-mono);
   font-size: 10px; font-weight: 600;
   color: var(--text-3);
-  text-transform: uppercase; letter-spacing: 0.04em;
+  text-transform: none; letter-spacing: 0.04em;
   white-space: nowrap;
 }
 .cmode-item:hover { color: var(--text); }
@@ -564,7 +564,7 @@
 .turns-stepper .ts-lbl {
   color: var(--text-3);
   font-size: 9px;
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.06em;
   margin-right: 2px;
 }
@@ -671,7 +671,7 @@
 .rail-fchip .rfc-lbl {
   color: var(--text-3);
   font-size: 9px;
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.06em;
   flex: 0 0 auto;
 }
@@ -896,7 +896,7 @@
 .grant-row:hover { background: var(--surface); }
 .grant-cat {
   font-size: 9px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.04em;
+  text-transform: none; letter-spacing: 0.04em;
   padding: 1px 5px;
   border-radius: var(--r-1);
   background: var(--surface-3);
@@ -961,7 +961,7 @@
   font-family: var(--font-mono);
   font-size: 10px;
   font-style: normal;
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.04em;
   color: var(--text-3);
   background: var(--surface-2);
@@ -981,7 +981,7 @@
 .attach-row .attach-row-lbl {
   font-family: var(--font-mono);
   font-size: 10px;
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.04em;
   color: var(--text-3);
 }
@@ -1037,7 +1037,7 @@
 .job-card-label {
   font-family: var(--font-mono);
   font-size: 10.5px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.06em;
+  text-transform: none; letter-spacing: 0.06em;
   color: var(--ok);
 }
 .job-card.warn .job-card-label { color: var(--warn); }
@@ -1096,7 +1096,7 @@
 .tok-strip-lbl {
   font-family: var(--font-mono);
   font-size: 10px;
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.06em;
   color: var(--text-3);
 }
@@ -1179,7 +1179,7 @@
   font-family: var(--font-mono);
   font-size: 9.5px;
   color: var(--text-3);
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.05em;
   white-space: nowrap;
 }
@@ -1193,7 +1193,7 @@
   padding: 8px 12px 4px;
   font-family: var(--font-mono);
   font-size: 9.5px;
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.06em;
   color: var(--text-3);
 }
@@ -1289,7 +1289,7 @@
 .im-switch-key {
   font-family: var(--font-mono);
   font-size: 9.5px;
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.06em;
   color: var(--text-3);
   flex-shrink: 0;

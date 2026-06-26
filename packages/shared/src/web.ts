@@ -10,6 +10,8 @@ import type {
   RuntimeMode,
   Session,
   SystemConfig,
+  Task,
+  TaskStatus,
   Workspace,
 } from './model.js';
 import type { InputItem } from './proxy.js';
@@ -42,6 +44,7 @@ export interface StateSyncMessage {
   runner: RunnerInfo;
   sessions: Session[];
   workspaces: Workspace[];
+  tasks: Task[];
   bots: Bot[];
   approvals: Approval[];
   config: SystemConfig;
@@ -73,6 +76,41 @@ export interface SessionCreatedMessage {
 export interface SessionDeletedMessage {
   type: 'session:deleted';
   session_id: string;
+}
+
+// ── Tasks (PRD-v3) ──────────────────────────────────────────────────────────
+export interface TaskCreatedMessage {
+  type: 'task:created';
+  task: Task;
+}
+
+export interface TaskUpdatedMessage {
+  type: 'task:updated';
+  task: Pick<Task, 'id'> & Partial<Task>;
+}
+
+export interface TaskDeletedMessage {
+  type: 'task:deleted';
+  task_id: string;
+}
+
+export interface TaskCreateMessage {
+  type: 'task:create';
+  name: string;
+  description?: string;
+}
+
+export interface TaskUpdateMessage {
+  type: 'task:update';
+  task_id: string;
+  name?: string;
+  description?: string;
+  status?: TaskStatus;
+}
+
+export interface TaskDeleteMessage {
+  type: 'task:delete';
+  task_id: string;
 }
 
 export interface ApprovalCreatedMessage {
@@ -250,6 +288,9 @@ export type ServerToClientMessage =
   | SessionUpdatedMessage
   | SessionCreatedMessage
   | SessionDeletedMessage
+  | TaskCreatedMessage
+  | TaskUpdatedMessage
+  | TaskDeletedMessage
   | ApprovalCreatedMessage
   | ApprovalUpdatedMessage
   | QueueUpdatedMessage
@@ -595,6 +636,9 @@ export type ClientToServerMessage =
   | SessionRenameMessage
   | SessionArchiveMessage
   | SessionDeleteMessage
+  | TaskCreateMessage
+  | TaskUpdateMessage
+  | TaskDeleteMessage
   | SessionSetUnreadMessage
   | SessionSetModeMessage
   | SessionSetModelMessage

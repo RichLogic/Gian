@@ -1,0 +1,269 @@
+/* ============================================================================
+ * tasks-v3.css — Tasks mode visuals, ported 1:1 from the design prototype
+ * (design/gian-design-v2). The shared V2 vocabulary (.sidebar, .sb-*, .rail-item,
+ * .ri-*, .main, .main-head, .main-scroll, .transcript, .composer*, .btn,
+ * .session-status) is already supplied by gian-v2.css / shell-v2.css — this file
+ * only adds the Tasks-specific pieces: task/subtask rows, the Reminders-style
+ * done toggle (round for tasks, square for subtasks), the Manager main-head
+ * chrome, and the inline new-task / new-subtask forms. The subtask status
+ * indicator reuses the Sessions sidebar `.ri-status` (CodingView StatusIcon),
+ * so it is NOT styled here. No shared tokens or global rules touched.
+ * ==========================================================================*/
+
+/* ---- Sidebar: Task / Subtask rows (prototype: app.css .task-row/.subtask-row) ---- */
+.task-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 7px 8px 8px 8px;
+}
+.task-row .ri-body { flex: 1 1 auto; min-width: 0; }
+
+.subtask-row {
+  display: flex;
+  align-items: flex-start;
+  padding: 5px 8px 6px 28px; /* left indent baked into padding so width:100% still fits */
+  gap: 6px;
+  position: relative;
+}
+.subtask-row .ri-body { flex: 1 1 auto; min-width: 0; }
+/* Vertical guide line connecting nested subtasks to their parent. */
+.subtask-row::before {
+  content: "";
+  position: absolute;
+  left: 14px; top: 0; bottom: 0;
+  width: 1px;
+  background: var(--hairline);
+}
+.subtask-row .ri-title { font-weight: 500; }
+.subtask-row .ri-row2 { padding-right: 8px; }
+.subtask-row.active { background: var(--accent-soft); }
+.subtask-row.active .ri-title { color: var(--accent-text); }
+
+/* Inline empty-state for a selected task with no subtasks yet. */
+.tasks-empty-subs {
+  padding: 4px 8px 8px 28px;
+  font: var(--fz-12)/1.4 var(--font-sans);
+  color: var(--text-3);
+}
+
+/* ---- Done toggle (Reminders-style checkbox at row start) ---- */
+.done-toggle {
+  flex: 0 0 auto;
+  width: 18px; height: 18px;
+  margin-top: 1px;
+  border-radius: 50%;
+  color: transparent;
+  background: transparent;
+  border: 1.5px solid var(--text-3);
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
+}
+.done-toggle:hover {
+  border-color: var(--ok);
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+.done-toggle.done {
+  border-color: var(--ok);
+  background: var(--ok);
+  color: var(--surface);
+}
+.done-toggle.done:hover {
+  /* hover on a done row = revert affordance */
+  background: var(--surface);
+  color: var(--ok);
+}
+
+/* ---- Subtask done toggle ------------------------------------------------
+ * A subtask IS a session; completing it (POST /api/sessions/:id/complete) is
+ * one-way — there is no reopen endpoint — so the done toggle is disabled once
+ * done and must NOT show the parent task's hover/revert affordance. The toggle
+ * is slightly smaller than a task's and sits INSIDE the row's 28px left indent
+ * (see `.subtask-row` above) so the subtask stays visibly nested under its
+ * parent — its toggle starts ~20px to the right of the parent task's toggle. */
+.subtask-done-toggle {
+  width: 16px; height: 16px;
+  /* Square (vs the parent task's round toggle) so subtask vs task reads at a
+     glance — slight rounding keeps it from looking harsh. */
+  border-radius: var(--r-1);
+}
+.subtask-done-toggle.done {
+  /* one-way: completed subtasks stay filled, no revert hover */
+  cursor: default;
+}
+.subtask-done-toggle.done:hover {
+  background: var(--ok);
+  color: var(--surface);
+}
+
+/* Strikethrough + muted title for done tasks/subtasks in the sidebar. */
+.rail-item.status-done .ri-title {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  color: var(--text-3);
+}
+.rail-item.status-done.active .ri-title { color: var(--accent-text); }
+
+/* ---- Manager main pane chrome (prototype: .manager-eyebrow / .manager-task-name) ---- */
+.manager-eyebrow {
+  font: 600 9.5px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  padding: 3px 6px;
+  border-radius: var(--r-1);
+}
+.manager-task-name {
+  font: 600 var(--fz-13)/1.3 var(--font-sans);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60ch;
+}
+
+/* Tasks status label is sentence-case ("open" / "running"), matching the
+   prototype — overrides gian-v2.css's uppercase treatment, scoped to Tasks. */
+.tasks-main .session-status .status-label { text-transform: none; }
+
+/* ---- Manager transcript placeholder (no messages yet) ---- */
+.tasks-manager-placeholder {
+  max-width: 560px;
+  margin: 8px auto 0;
+  display: flex; flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+.tasks-manager-placeholder p {
+  margin: 0;
+  font: var(--fz-13)/1.6 var(--font-sans);
+  color: var(--text-2);
+}
+
+/* ---- Manager composer — narrow single-action variant over the shared chrome ---- */
+.composer.tasks-manager-composer .composer-bar { padding-top: 2px; }
+
+/* ---- Empty detail state ---- */
+.main.tasks-detail-empty {
+  align-items: center;
+  justify-content: center;
+}
+.main.tasks-detail-empty p {
+  margin: 0;
+  font: var(--fz-13)/1.5 var(--font-sans);
+  color: var(--text-3);
+}
+
+/* ---- Subtask main panel (jump-to-Sessions) ---- */
+.tasks-subtask-panel {
+  max-width: 560px;
+  margin: 8px auto 0;
+  display: flex; flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+}
+.tasks-subtask-hint {
+  margin: 0;
+  font: var(--fz-13)/1.6 var(--font-sans);
+  color: var(--text-2);
+}
+
+/* ---- Inline new-task form (sidebar) ---- */
+.tasks-new-form {
+  display: flex; flex-direction: column; gap: 6px;
+  margin: 8px 2px 10px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+}
+.tasks-new-input {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-1);
+  padding: 6px 8px;
+  font: var(--fz-12)/1.4 var(--font-sans);
+  color: var(--text);
+  outline: 0;
+  transition: border-color 120ms var(--ease), box-shadow 120ms var(--ease);
+}
+.tasks-new-input::placeholder { color: var(--text-3); }
+.tasks-new-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
+.tasks-new-form-actions {
+  display: flex; gap: 6px; justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.tasks-list-empty {
+  margin: 16px 8px;
+  font: var(--fz-12)/1.5 var(--font-sans);
+  color: var(--text-3);
+}
+
+/* ---- New-subtask form (main scroll, A1) ---- */
+.tasks-subtask-form {
+  /* Banner above the transcript (not inside the auto-scrolling `.main-scroll`),
+     so keep it at its natural height — never let the flex column squish it. */
+  flex: 0 0 auto;
+  max-width: 560px;
+  width: 100%;
+  margin: 12px auto;
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-3);
+}
+.tasks-subtask-form-title {
+  font: 600 var(--fz-13)/1.3 var(--font-sans);
+  color: var(--text);
+}
+.tasks-field { display: flex; flex-direction: column; gap: 4px; }
+.tasks-field-label {
+  font: 600 10.5px/1 var(--font-mono);
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+}
+.tasks-field-input {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  padding: 7px 9px;
+  font: var(--fz-13)/1.5 var(--font-sans);
+  color: var(--text);
+  outline: 0;
+  resize: vertical;
+  transition: border-color 120ms var(--ease), box-shadow 120ms var(--ease);
+}
+.tasks-field-input::placeholder { color: var(--text-3); }
+.tasks-field-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
+.tasks-subtask-form-actions {
+  display: flex; gap: 8px; justify-content: flex-end;
+  margin-top: 2px;
+}
+
+/* ── Compact Manager panel embedded in the right Inspector rail (zone 4) ──
+   Shown when a subtask is selected in Tasks mode (dock "Manager" toggle).
+   Reuses the full ManagerPanel as a head-less (.compact) flat fill of the
+   inspector slot — the `.inspector` aside already supplies surface/shadow, so
+   the inner `.main` island is stripped to a transparent, edge-to-edge body.
+   Mirrors design/gian-design-v2 → .manager-inspector. */
+.manager-inspector .manager-inspector-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+.manager-inspector .manager-inspector-body .main {
+  width: 100%;
+  margin: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+.manager-inspector .composer-wrap { padding: 6px 10px 10px; }
+.manager-inspector .composer { max-width: none; }

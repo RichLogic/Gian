@@ -12,12 +12,15 @@ export interface PathSegment {
 
 export interface SessionMenuActions {
   onRename: () => void;
-  onCopyName: () => void;
-  onForceRecover: () => void;
-  onFork: (executor: 'claude' | 'codex') => void;
-  onMarkUnread: () => void;
-  onArchive: () => void;
-  onDelete: () => void;
+  // All others are optional — the menu adapts to the context (full session /
+  // subtask / task). When a callback is absent, its item is hidden.
+  // Subtask drops fork/archive/delete; Task drops forceRecover/markUnread/fork.
+  onCopyName?: () => void;
+  onForceRecover?: () => void;
+  onMarkUnread?: () => void;
+  onFork?: (executor: 'claude' | 'codex') => void;
+  onArchive?: () => void;
+  onDelete?: () => void;
 }
 
 interface Props {
@@ -178,29 +181,45 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                       <MenuIcon d={ICON.edit} /> {t('path.menu.rename')}
                       <span className="sub">F2</span>
                     </button>
-                    <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onCopyName(); }}>
-                      <MenuIcon d={ICON.copy} /> {t('path.menu.copyName')}
-                    </button>
-                    <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onForceRecover(); }}>
-                      <MenuIcon d={ICON.refresh} /> {t('path.menu.forceRecover')}
-                    </button>
-                    <div className="rule" />
-                    <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onFork('claude'); }}>
-                      <MenuIcon d={ICON.fork} /> {t('path.menu.forkClaude')}
-                    </button>
-                    <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onFork('codex'); }}>
-                      <MenuIcon d={ICON.fork} /> {t('path.menu.forkCodex')}
-                    </button>
-                    <div className="rule" />
-                    <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onMarkUnread(); }}>
-                      <MenuIcon d={ICON.mail} /> {t('path.menu.markUnread')}
-                    </button>
-                    <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onArchive(); }}>
-                      <MenuIcon d={ICON.folder} /> {t('common.archive')}
-                    </button>
-                    <button className="item danger" onClick={() => { setMenuOpen(false); sessionMenu.onDelete(); }}>
-                      <MenuIcon d={ICON.trash} /> {t('path.menu.deleteSession')}
-                    </button>
+                    {sessionMenu.onCopyName && (
+                      <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onCopyName!(); }}>
+                        <MenuIcon d={ICON.copy} /> {t('path.menu.copyName')}
+                      </button>
+                    )}
+                    {sessionMenu.onForceRecover && (
+                      <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onForceRecover!(); }}>
+                        <MenuIcon d={ICON.refresh} /> {t('path.menu.forceRecover')}
+                      </button>
+                    )}
+                    {sessionMenu.onFork && (
+                      <>
+                        <div className="rule" />
+                        <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onFork!('claude'); }}>
+                          <MenuIcon d={ICON.fork} /> {t('path.menu.forkClaude')}
+                        </button>
+                        <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onFork!('codex'); }}>
+                          <MenuIcon d={ICON.fork} /> {t('path.menu.forkCodex')}
+                        </button>
+                      </>
+                    )}
+                    {(sessionMenu.onMarkUnread || sessionMenu.onArchive || sessionMenu.onDelete) && (
+                      <div className="rule" />
+                    )}
+                    {sessionMenu.onMarkUnread && (
+                      <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onMarkUnread!(); }}>
+                        <MenuIcon d={ICON.mail} /> {t('path.menu.markUnread')}
+                      </button>
+                    )}
+                    {sessionMenu.onArchive && (
+                      <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onArchive!(); }}>
+                        <MenuIcon d={ICON.folder} /> {t('common.archive')}
+                      </button>
+                    )}
+                    {sessionMenu.onDelete && (
+                      <button className="item danger" onClick={() => { setMenuOpen(false); sessionMenu.onDelete!(); }}>
+                        <MenuIcon d={ICON.trash} /> {t('path.menu.deleteSession')}
+                      </button>
+                    )}
                   </div>
                 )}
               </span>

@@ -7,6 +7,14 @@
 /* Phase 1+ — V2 shell + inner overrides; loaded LAST so V2 rules win. */
 @import url('./gian-v2.css');
 @import url('./shell-v2.css');
+/* Settings v3 — left-nav scrollspy + stacked cards; loaded after V2 +
+   legacy session.css so it overrides the ee- / open-cat- rules there. */
+@import url('./settings-v3.css');
+/* Tasks mode visuals (PRD-v3) — loaded after V2 so Tasks-specific rules win. */
+@import url('./tasks-v3.css');
+/* Workspaces v3 — Inspector list + Workbench detail tab; loaded after V2 so
+   the .ws-* list + .ws-detail-tab overrides win. */
+@import url('./workspaces-v3.css');
 
 * {
   box-sizing: border-box;

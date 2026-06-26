@@ -1,4 +1,4 @@
-import type { EventEnvelope, Session, SystemConfig, Workspace } from '@gian/shared';
+import type { EventEnvelope, Session, SystemConfig, Task, Workspace } from '@gian/shared';
 
 export interface TreeEntry {
   name: string;
@@ -242,6 +242,109 @@ export async function reorderWorkspaces(ids: string[]): Promise<void> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ids }),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Tasks (PRD-v3) — Subtasks are just sessions filtered by task_id, so there is
+// no subtask endpoint here. Tasks are primarily seeded from `state_sync` and
+// kept fresh via the WS `task:*` messages; these REST helpers mirror the
+// workspace ones for the initial / fallback fetch and the create flow.
+// ---------------------------------------------------------------------------
+
+export async function loadTasks(): Promise<Task[]> {
+  try {
+    const res = await fetch('/api/tasks');
+    if (!res.ok) return [];
+    return (await res.json()) as Task[];
+  } catch {
+    return [];
+  }
+}
+
+export async function createTask(input: { name: string; description?: string }): Promise<Task | null> {
+  try {
+    const res = await fetch('/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: input.name,
+        ...(input.description ? { description: input.description } : {}),
+      }),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as Task;
+  } catch {
+    return null;
+  }
+}
+
+/** PRD-v3 P3 — get-or-create the Task's read-only Codex Manager session.
+ *  Idempotent; the host also broadcasts `session:created` on first creation. */
+export async function ensureManagerSession(taskId: string): Promise<Session | null> {
+  try {
+    const res = await fetch(`/api/tasks/${taskId}/manager`, { method: 'POST' });
+    if (!res.ok) return null;
+    return ((await res.json()) as { session: Session }).session;
+  } catch {
+    return null;
+  }
+}
+
+/** PRD-v3 P3 A1 — send a message to the Task's Manager. The reply streams back
+ *  as transcript events on the returned Manager session id (via WS). */
+export async function sendManagerMessage(
+  taskId: string,
+  text: string,
+): Promise<{ session_id: string } | null> {
+  try {
+    const res = await fetch(`/api/tasks/${taskId}/manager/message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as { session_id: string };
+  } catch {
+    return null;
+  }
+}
+
+/** PRD-v3 P3 A1 — create a Subtask (session with type='subtask' + task_id)
+ *  under a Task. Returns the created session or null. The host broadcasts
+ *  `session:created` so the global session list updates. */
+export async function createSubtask(
+  taskId: string,
+  input: {
+    workspace_id: string;
+    executor: 'claude' | 'codex';
+    name?: string;
+    model?: string | null;
+    approval_mode?: import('@gian/shared').ApprovalMode;
+    mode?: 'regular' | 'worktree';
+  },
+): Promise<Session | null> {
+  try {
+    const res = await fetch(`/api/tasks/${taskId}/subtasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) return null;
+    return ((await res.json()) as { session: Session }).session;
+  } catch {
+    return null;
+  }
+}
+
+/** PRD-v3 P3 — mark a Subtask's session done. The host flips status to 'done'
+ *  and runs the summarizer, then broadcasts `session:updated` so the row
+ *  reflects it. One-way (no reopen endpoint). Fail-soft. */
+export async function completeSubtask(sessionId: string): Promise<void> {
+  try {
+    await fetch(`/api/sessions/${sessionId}/complete`, { method: 'POST' });
+  } catch {
+    /* fail-soft: the row stays as-is; the broadcast would have updated it */
+  }
 }
 
 export async function loadArchivedSessions(): Promise<Session[]> {

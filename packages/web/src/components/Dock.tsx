@@ -39,6 +39,10 @@ function DockBtn({ group, label, active, disabled, badge, onClick, children }: D
 }
 
 const ICONS = {
+  // `grid` mirrors the design prototype's Dock "Workspaces" button glyph.
+  grid: 'M4 4h7v7H4z M13 4h7v7h-7z M4 13h7v7H4z M13 13h7v7h-7z',
+  // `chat` — the Tasks-mode "Manager" panel toggle (subtask context only).
+  chat: 'M21 12c0 4.4-4 8-9 8-1.2 0-2.3-.2-3.4-.6L3 21l1.5-4.4A7.8 7.8 0 0 1 3 12c0-4.4 4-8 9-8s9 3.6 9 8z',
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   diff: 'M9 4v12 M9 4l-3 3 M9 4l3 3 M15 20V8 M15 20l3-3 M15 20l-3-3',
   terminal: 'M5 7l5 5-5 5 M12 19h8',
@@ -74,9 +78,16 @@ function InboxRow({ item, name, kindLabel, onClick }: {
 
 interface Props {
   // Panel group (inspector toggles) — Phase 4 wiring; for now buttons can be disabled.
-  inspectorTab: 'files' | 'changes' | null;
-  onToggleInspector: (kind: 'files' | 'changes') => void;
+  inspectorTab: 'files' | 'changes' | 'workspaces' | 'manager' | null;
+  onToggleInspector: (kind: 'files' | 'changes' | 'workspaces' | 'manager') => void;
   inspectorDisabled?: boolean;
+  /** Workspaces is a global tool (not session-specific), so it has its own
+   *  disabled flag — enabled in Tasks mode too, unlike Files / Changes. */
+  workspacesDisabled?: boolean;
+  /** The Tasks-mode Manager panel toggle. Only meaningful while a subtask is
+   *  selected (the Manager is the parent Task's), so the button is rendered
+   *  only when `managerVisible` — matching the design's subtask-only affordance. */
+  managerVisible?: boolean;
 
   // Workbench group — Phase 3 wiring.
   hasTerminal: boolean;
@@ -108,6 +119,8 @@ export function Dock({
   inspectorTab,
   onToggleInspector,
   inspectorDisabled,
+  workspacesDisabled,
+  managerVisible,
   hasTerminal,
   hasSettings,
   onToggleWbTab,
@@ -187,6 +200,25 @@ export function Dock({
   return (
     <aside className="dock">
       <div className="dock-group" data-dock-group-label={t('dock.group.panel')}>
+        {managerVisible && (
+          <DockBtn
+            group="panel"
+            label={t('dock.manager')}
+            active={inspectorTab === 'manager'}
+            onClick={() => onToggleInspector('manager')}
+          >
+            <Icon d={ICONS.chat} />
+          </DockBtn>
+        )}
+        <DockBtn
+          group="panel"
+          label={t('topbar.mode.workspaces')}
+          active={inspectorTab === 'workspaces'}
+          disabled={workspacesDisabled}
+          onClick={() => onToggleInspector('workspaces')}
+        >
+          <Icon d={ICONS.grid} />
+        </DockBtn>
         <DockBtn
           group="panel"
           label={t('dock.files')}

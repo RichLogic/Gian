@@ -166,6 +166,34 @@ function useNewWorkspace(onChange: () => void) {
   return { open, setOpen, form, setForm, saving, error, notes, submit, reset };
 }
 
+/** Self-contained "new workspace" form for hosting inside a Workbench tab
+ *  (replaces the old jump to `spaces` mode). On a successful create it calls
+ *  `onChange` (refresh the list) then `onClose` (close the tab). */
+export function NewWorkspacePanel({
+  workspaceRoot,
+  onChange,
+  onClose,
+}: {
+  workspaceRoot: string;
+  onChange: () => void;
+  onClose: () => void;
+}) {
+  const newWs = useNewWorkspace(() => { onChange(); onClose(); });
+  return (
+    <div className="ws-new-panel">
+      <NewWorkspaceForm
+        form={newWs.form}
+        saving={newWs.saving}
+        error={newWs.error}
+        workspaceRoot={workspaceRoot}
+        onChange={f => newWs.setForm(prev => ({ ...prev, ...f }))}
+        onSubmit={newWs.submit}
+        onCancel={onClose}
+      />
+    </div>
+  );
+}
+
 export interface CreateWorktreeSessionInput {
   workspaceId: string;
   executor: 'claude' | 'codex';
@@ -515,7 +543,7 @@ function BrowseFolderButton({
   );
 }
 
-function SpaceDetail({
+export function SpaceDetail({
   workspace,
   allSessions,
   ws,
@@ -1573,7 +1601,7 @@ function NativeSessionsPane({
           <button className={`segm-item${status === 'adopted' ? ' active' : ''}`} onClick={() => setStatus('adopted')}>Adopted</button>
           <button className={`segm-item${status === 'available' ? ' active' : ''}`} onClick={() => setStatus('available')}>Available</button>
         </div>
-        <span style={{ marginLeft: 'auto', font: '500 10.5px/1 var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-3)' }}>
+        <span style={{ marginLeft: 'auto', font: '500 10.5px/1 var(--font-mono)', textTransform: 'none', letterSpacing: '0.06em', color: 'var(--text-3)' }}>
           {filtered.length} sessions
         </span>
       </div>
@@ -1973,7 +2001,7 @@ function relTime(iso: string): string {
 }
 
 
-function ClaudeMdInspector({
+export function ClaudeMdInspector({
   workspaceId,
   workspaceName,
   onClose,

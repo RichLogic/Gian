@@ -770,8 +770,9 @@ function SessionRow({
 
 /** §#7 status indicator: replaces the per-row kebab + the main-head status
  *  pill. Renders nothing for 'new', a spinner for running/pending, a red ⚠
- *  for errors, and a green ✓ for done. */
-function StatusIcon({ status }: { status: import('@gian/shared').SessionStatus }) {
+ *  for errors, and a green ✓ for done. Exported so the Tasks-mode subtask rows
+ *  reuse the exact same indicator (no fixed idle circle) as session rows. */
+export function StatusIcon({ status }: { status: import('@gian/shared').SessionStatus }) {
   const t = useT();
   if (status === 'new') return null;
   if (status === 'running' || status === 'pending') {
@@ -1267,7 +1268,7 @@ function NewSessionView({
   );
 }
 
-function SessionMain({
+export function SessionMain({
   session,
   chatView,
   workspace,

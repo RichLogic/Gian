@@ -6,10 +6,12 @@ import type {
   ProxyNotification,
   RuntimeMode,
   Session,
+  SessionType,
   ThinkingEffort,
   UnifiedEvent,
   WorktreeOutcome,
 } from '@gian/shared';
+import { MANAGER_SYS_OPEN, MANAGER_SYS_CLOSE } from '@gian/shared';
 import { basename } from 'node:path';
 import { existsSync } from 'node:fs';
 import { mimeForAttachment } from '../storage/attachments.js';
@@ -37,6 +39,19 @@ import {
 } from '../workspace/git.js';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import {
+  getOrCreateRootWorkspace,
+  buildManagerSystemPrompt,
+  MANAGER_EXECUTOR,
+  MANAGER_MODEL,
+  MANAGER_EFFORT,
+} from '../task/manager-session.js';
+import {
+  summarizeCompletedSubtask,
+  applyAbandonWriteback,
+  type SubtaskContext,
+  type SummaryLlm,
+} from '../task/summarizer.js';
 
 export interface CreateSessionInput {
   workspace_id: string;
@@ -50,6 +65,16 @@ export interface CreateSessionInput {
   base_branch?: string;
   /** Override for worktree mode (defaults to worktree/<short-id>). */
   branch?: string;
+  /** PRD-v3 Task abstraction. Defaults to 'coding' for standalone sessions.
+   *  A Subtask is created with type='subtask'; the per-Task read-only Codex
+   *  Manager with type='manager'. */
+  type?: SessionType;
+  /** The Task this session belongs to (PRD-v3). Null/absent = a standalone
+   *  ("scattered") session. */
+  task_id?: string | null;
+  /** Pin the reasoning effort at create time (Manager forces 'xhigh').
+   *  Defaults to the per-executor config default when absent. */
+  thinking_effort?: ThinkingEffort | null;
 }
 
 /**
@@ -238,9 +263,16 @@ export class SessionManager {
     const effectiveModel: string | null = explicitModel
       ? explicitModel
       : (defaultModel || null);
-    const effectiveEffort: ThinkingEffort | null = defaultEffort
-      ? (defaultEffort as ThinkingEffort)
-      : null;
+    // Explicit effort (Manager pins 'xhigh') wins over the config default.
+    const explicitEffort = typeof input.thinking_effort === 'string'
+      ? input.thinking_effort.trim()
+      : '';
+    const effectiveEffort: ThinkingEffort | null = explicitEffort
+      ? (explicitEffort as ThinkingEffort)
+      : (defaultEffort ? (defaultEffort as ThinkingEffort) : null);
+
+    const sessionType: SessionType = input.type ?? 'coding';
+    const taskId: string | null = input.task_id ?? null;
 
     let worktreePath: string | null = null;
     let branch: string | null = null;
@@ -288,12 +320,14 @@ export class SessionManager {
 
     this.db
       .prepare(
-        `INSERT INTO sessions (id, name, type, workspace_id, executor, model, approval_mode, thinking_effort, turns, active_channel, status, archived, worktree_path, branch, base_branch, worktree_outcome, native_session_id, runtime_mode, created_at, updated_at)
-         VALUES (@id, @name, 'coding', @workspace_id, @executor, @model, @approval_mode, @thinking_effort, 1, 'web', 'new', 0, @worktree_path, @branch, @base_branch, NULL, @native_session_id, 'structured', @now, @now)`,
+        `INSERT INTO sessions (id, name, type, task_id, workspace_id, executor, model, approval_mode, thinking_effort, turns, active_channel, status, archived, worktree_path, branch, base_branch, worktree_outcome, native_session_id, runtime_mode, created_at, updated_at)
+         VALUES (@id, @name, @type, @task_id, @workspace_id, @executor, @model, @approval_mode, @thinking_effort, 1, 'web', 'new', 0, @worktree_path, @branch, @base_branch, NULL, @native_session_id, 'structured', @now, @now)`,
       )
       .run({
         id,
         name: input.name ?? null,
+        type: sessionType,
+        task_id: taskId,
         workspace_id: input.workspace_id,
         executor: input.executor,
         model: effectiveModel,
@@ -311,6 +345,127 @@ export class SessionManager {
     }
 
     return this.getSession(id);
+  }
+
+  // -------------------------------------------------------------------------
+  // Per-Task Manager (PRD-v3 P3)
+  // -------------------------------------------------------------------------
+
+  /** Find the existing Manager session for a Task, if any. One per Task. */
+  getManagerSession(taskId: string): Session | null {
+    const row = this.db
+      .prepare(`SELECT * FROM sessions WHERE task_id = ? AND type = 'manager' LIMIT 1`)
+      .get(taskId) as Session | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * Get-or-create the per-Task Manager session (PRD-v3 P3). The Manager is a
+   * `type='manager'` Codex session bound to the hidden root workspace
+   * (`workspace_root`), running `gpt-5.5` / `xhigh`, with NO worktree and
+   * persistent across turns. Read-only is enforced per-turn in `sendMessage`
+   * (type==='manager' → sandbox:'read-only' + approvalPolicy:'never'), NOT
+   * here and NOT via the system prompt.
+   *
+   * Idempotent: returns the existing Manager when one already exists for the
+   * Task. Lazy creation — called on the first manager message (or eagerly by
+   * the web when a Task detail opens).
+   */
+  async ensureManagerSession(taskId: string): Promise<Session> {
+    const existing = this.getManagerSession(taskId);
+    if (existing) return existing;
+
+    const task = this.db
+      .prepare('SELECT * FROM tasks WHERE id = ?')
+      .get(taskId) as import('@gian/shared').Task | undefined;
+    if (!task) throw new Error(`task not found: ${taskId}`);
+
+    const root = getOrCreateRootWorkspace(this.db);
+
+    // Reuse the standard create path so the Manager gets the same proxy
+    // bring-up + native-session capture as any other session. `approval_mode`
+    // is irrelevant for the Manager (read-only is forced per-turn) but the
+    // column is NOT NULL, so set a benign value. No worktree.
+    return this.createSession({
+      workspace_id: root.id,
+      executor: MANAGER_EXECUTOR,
+      name: `Manager · ${task.name}`,
+      model: MANAGER_MODEL,
+      thinking_effort: MANAGER_EFFORT,
+      approval_mode: 'plan',
+      type: 'manager',
+      task_id: taskId,
+      mode: 'regular',
+    });
+  }
+
+  /**
+   * Build the Manager's system prompt for a Task (role + inlined subtask
+   * metadata + signposts to the `.ai/` dirs and workspaces under the root).
+   * Pure read — used by the message path to prepend context.
+   *
+   * TODO(P3-live): the codex-proxy `session.create` / `turn.start` API has no
+   * `instructions` / system-prompt channel (see
+   * packages/proxies/codex-proxy/src/core/types.ts — StartTurnParams has no
+   * such field). So today this prompt is prepended to the Manager's FIRST user
+   * message (see sendManagerMessage). If codex-proxy gains a native system /
+   * baseInstructions field, switch to passing it there so it doesn't consume
+   * turn budget / appear in the transcript.
+   */
+  buildManagerPrompt(taskId: string): string {
+    const task = this.db
+      .prepare('SELECT * FROM tasks WHERE id = ?')
+      .get(taskId) as import('@gian/shared').Task | undefined;
+    if (!task) throw new Error(`task not found: ${taskId}`);
+
+    const subtasks = this.db
+      .prepare(`SELECT * FROM sessions WHERE task_id = ? AND type = 'subtask' ORDER BY created_at ASC`)
+      .all(taskId) as Session[];
+
+    // Distinct workspace paths touched by the Task's subtasks.
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT w.path AS path
+         FROM sessions s JOIN workspaces w ON w.id = s.workspace_id
+         WHERE s.task_id = ? AND s.type = 'subtask'`,
+      )
+      .all(taskId) as Array<{ path: string }>;
+    const workspacePaths = rows.map(r => r.path);
+
+    const root = getOrCreateRootWorkspace(this.db);
+    return buildManagerSystemPrompt({
+      task,
+      subtasks,
+      workspacePaths,
+      rootPath: root.path,
+    });
+  }
+
+  /**
+   * Send a message to a Task's Manager (PRD-v3 P3 A1). Ensures the Manager
+   * session exists, prepends the system prompt to the FIRST turn (see
+   * buildManagerPrompt's TODO(P3-live) about the missing native system
+   * channel), then reuses the normal structured `sendMessage` path — the
+   * Manager IS a session, so its transcript streams over the same events/WS.
+   *
+   * Returns the Manager session id so the caller (WS handler) can echo it back
+   * to the web, which then renders the Manager session's transcript.
+   */
+  async sendManagerMessage(taskId: string, text: string): Promise<string> {
+    const manager = await this.ensureManagerSession(taskId);
+
+    // Prepend the system prompt only on the Manager's very first turn. After
+    // that the codex thread retains context, so later messages go through bare.
+    const isFirstTurn = this.persistedTurnCount(manager.id) === 0;
+    // Wrap the system prompt in sentinels so the web can hide it from the
+    // transcript while codex still receives it (codex-proxy has no system
+    // channel). See stripManagerSystemPrefix in @gian/shared.
+    const payload = isFirstTurn
+      ? `${MANAGER_SYS_OPEN}\n${this.buildManagerPrompt(taskId)}\n${MANAGER_SYS_CLOSE}\n\n${text}`
+      : text;
+
+    await this.sendMessage(manager.id, payload);
+    return manager.id;
   }
 
   /**
@@ -788,7 +943,21 @@ export class SessionManager {
     // One-shot bypass: override the per-turn policy without touching
     // session.approval_mode in DB. Applied only for this startTurn — the next
     // user-initiated send falls back to the session's stored mode.
-    const policyParams = oneShotBypass
+    //
+    // PRD-v3 P3 — Manager hard read-only: a type='manager' session is the
+    // per-Task read-only Codex manager. EVERY turn is forced to codex
+    // sandbox:'read-only' + approvalPolicy:'never', regardless of
+    // approval_mode or a one-shot bypass. This is the security boundary (the
+    // Manager reads `.ai/` + repo code which may carry prompt-injection); it
+    // is enforced at the sandbox layer, NOT via the system prompt. `never`
+    // means codex never surfaces approvals — there is nothing to approve in a
+    // read-only sandbox (no writes / no command execution available).
+    const policyParams = session.type === 'manager'
+      ? {
+          sandbox: 'read-only' as const,
+          approvalPolicy: 'never' as const,
+        }
+      : oneShotBypass
       ? (session.executor === 'claude'
         ? { permissionMode: 'bypassPermissions' as const }
         : {
@@ -1086,6 +1255,140 @@ export class SessionManager {
     return this.db
       .prepare(`SELECT * FROM sessions WHERE ${where} ORDER BY updated_at DESC`)
       .all() as Session[];
+  }
+
+  // -------------------------------------------------------------------------
+  // Subtask completion → `.ai/` write-back (PRD-v3 P4)
+  //
+  // When a Subtask (type='subtask') is marked complete the session lands at
+  // `done` and the summarizer rewrites the workspace's `.ai/` context in the
+  // BACKGROUND — the user must never wait (§116). Abandon only appends one
+  // SESSION_LOG line (§153).
+  // -------------------------------------------------------------------------
+
+  /** Optional cheap-model LLM hook for the summarizer. Null/absent ⇒ the
+   *  deterministic template fallback runs. TODO(P4-live): inject a small-model
+   *  direct client (NOT the Manager's gpt-5.5). */
+  private summaryLlm: SummaryLlm | null = null;
+
+  setSummaryLlm(llm: SummaryLlm | null): void {
+    this.summaryLlm = llm;
+  }
+
+  /**
+   * Mark a Subtask complete: set the session `done`, then fire the `.ai/`
+   * summarizer in the background. Never blocks — the writeback runs after this
+   * returns and persists `sessions.summary` when it finishes.
+   */
+  completeSubtask(sessionId: string): void {
+    const session = this.getSession(sessionId);
+    if (session.type !== 'subtask') {
+      throw new Error(`session ${sessionId} is not a subtask (type=${session.type})`);
+    }
+    const now = new Date().toISOString();
+    this.db
+      .prepare(`UPDATE sessions SET status = 'done', updated_at = ? WHERE id = ?`)
+      .run(now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { status: 'done', updated_at: now });
+
+    this.runSummarizerInBackground(session, 'done');
+  }
+
+  /**
+   * Abandon a Subtask (§153): set the session `done` and append ONE
+   * SESSION_LOG line (`abandoned: <reason>`). HANDOFF/STATE are NOT rewritten.
+   * Runs in the background like completion so it never blocks.
+   */
+  abandonSubtask(sessionId: string, reason?: string | null): void {
+    const session = this.getSession(sessionId);
+    if (session.type !== 'subtask') {
+      throw new Error(`session ${sessionId} is not a subtask (type=${session.type})`);
+    }
+    const now = new Date().toISOString();
+    this.db
+      .prepare(`UPDATE sessions SET status = 'done', updated_at = ? WHERE id = ?`)
+      .run(now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { status: 'done', updated_at: now });
+
+    this.runSummarizerInBackground(session, 'abandoned', reason ?? null);
+  }
+
+  /** Resolve the workspace path for a session, or null when it's gone. */
+  private workspacePathFor(workspaceId: string): string | null {
+    const ws = this.db
+      .prepare('SELECT path FROM workspaces WHERE id = ?')
+      .get(workspaceId) as { path: string } | undefined;
+    return ws?.path ?? null;
+  }
+
+  /** Concatenate the session's persisted assistant text into a transcript blob
+   *  for the summarizer. Best-effort — empty is fine (template still works). */
+  private buildTranscript(sessionId: string): string {
+    const rows = this.db
+      .prepare(
+        `SELECT data FROM events
+         WHERE session_id = ? AND type = 'assistant_text'
+         ORDER BY rowid ASC`,
+      )
+      .all(sessionId) as { data: string }[];
+    const parts: string[] = [];
+    for (const row of rows) {
+      try {
+        const data = JSON.parse(row.data) as Record<string, unknown>;
+        const text = String(data.text ?? data.delta ?? '');
+        if (text) parts.push(text);
+      } catch { /* skip unparseable */ }
+    }
+    return parts.join('');
+  }
+
+  /**
+   * Fire the `.ai/` writeback off the hot path. Resolves the workspace dir,
+   * builds the transcript, runs the (live-or-template) summarizer, and — for
+   * completion — persists the one-line summary to `sessions.summary`. All
+   * errors are swallowed and logged: a writeback failure must never surface to
+   * the user or affect session state (§116/§155).
+   */
+  private runSummarizerInBackground(
+    session: Session,
+    status: 'done' | 'abandoned',
+    reason: string | null = null,
+  ): void {
+    const workspaceDir = this.workspacePathFor(session.workspace_id);
+    const subtask: SubtaskContext = {
+      id: session.id,
+      name: session.name,
+      status,
+      transcript: status === 'done' ? this.buildTranscript(session.id) : undefined,
+    };
+
+    // Detach: schedule on the microtask queue so completeTurn/the REST handler
+    // returns immediately. Any throw is contained here.
+    void Promise.resolve().then(async () => {
+      try {
+        if (!workspaceDir) {
+          console.error(`[summarizer] workspace gone for subtask ${session.id}; skipping writeback`);
+          return;
+        }
+        if (status === 'abandoned') {
+          applyAbandonWriteback(workspaceDir, subtask, reason);
+          return;
+        }
+        const result = await summarizeCompletedSubtask({
+          workspaceDir,
+          subtask,
+          llm: this.summaryLlm,
+        });
+        // Persist the user-editable subtask summary.
+        const now = new Date().toISOString();
+        this.db
+          .prepare(`UPDATE sessions SET summary = ?, updated_at = ? WHERE id = ?`)
+          .run(result.summary, now, session.id);
+        this.broadcastSessionUpdated(session.id, { summary: result.summary, updated_at: now });
+      } catch (err) {
+        console.error(`[summarizer] writeback failed for subtask ${session.id}:`, err);
+      }
+    });
   }
 
   // -------------------------------------------------------------------------

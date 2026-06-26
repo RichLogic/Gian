@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { scaffoldAiDir } from './ai-scaffold.js';
 
 export interface InitWorkspaceInput {
   /** Absolute path on disk where the workspace should live. */
@@ -32,9 +33,11 @@ export interface InitWorkspaceResult {
  * Idempotent on the parent — fails if the target dir is already non-empty
  * (we don't want to clobber an existing project the user has there).
  *
- * Adopt mode (`adopt: true`) only verifies the path exists and skips ALL
- * filesystem writes — it's a read-only registration so we never touch the
- * user's existing project files.
+ * Adopt mode (`adopt: true`) skips mkdir/clone/git-init and the default
+ * CLAUDE.md / AGENTS.md scaffolding — we don't write into the user's existing
+ * project files. It DOES still get the gian-managed `.ai/` scaffold +
+ * `CLAUDE.local.md` pointer (PRD-v3 §121): those are gian's own,
+ * non-destructive, gitignored files, so creating them on adopt is intended.
  */
 export function initWorkspace(input: InitWorkspaceInput): InitWorkspaceResult {
   const notes: string[] = [];
@@ -99,6 +102,17 @@ export function initWorkspace(input: InitWorkspaceInput): InitWorkspaceResult {
         notes.push(`symlink AGENTS.md failed: ${(err as Error).message}`);
       }
     }
+  }
+
+  // Always provision the gian-managed `.ai/` scaffold + `CLAUDE.local.md`
+  // pointer — for fresh creates AND adopts. It's idempotent and only writes
+  // gian's own gitignored files, never the user's CLAUDE.md / AGENTS.md.
+  try {
+    const scaffold = scaffoldAiDir(target);
+    notes.push(...scaffold.notes);
+  } catch (err) {
+    // Non-fatal: a workspace without `.ai/` is degraded but usable.
+    notes.push(`.ai/ scaffold failed: ${(err as Error).message}`);
   }
 
   return { ok: true, notes };

@@ -43,7 +43,7 @@
 .runner-lbl {
   font-family: var(--font-mono);
   font-size: 10px;
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.06em;
   color: var(--text-3);
 }
@@ -83,7 +83,7 @@
 .crumb-lbl {
   font-family: var(--font-mono);
   font-size: 10px;
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.06em;
   color: var(--text-3);
 }
@@ -242,7 +242,7 @@
   padding: 8px 12px 6px;
   font-family: var(--font-mono);
   font-size: 10px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.07em;
+  text-transform: none; letter-spacing: 0.07em;
   color: var(--text-3);
   border-bottom: 1px solid var(--hairline);
 }
@@ -270,7 +270,7 @@
   flex-shrink: 0;
   font-family: var(--font-mono);
   font-size: 9.5px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.05em;
+  text-transform: none; letter-spacing: 0.05em;
   padding: 1px 5px;
   border-radius: var(--r-1);
   background: var(--warn-soft);
@@ -410,7 +410,7 @@
   font-weight: 600;
   color: var(--text-3);
   letter-spacing: 0.08em;
-  text-transform: uppercase;
+  text-transform: none;
 }
 .rail-scroll {
   flex: 1;
@@ -421,7 +421,7 @@
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-3);
-  text-transform: uppercase; letter-spacing: 0.08em;
+  text-transform: none; letter-spacing: 0.08em;
   padding: 10px 8px 4px;
 }
 .rail-group.needs-you-group {
@@ -513,7 +513,7 @@
 .main-head-changes .ghb-branch { color: var(--text); white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
 .main-head-changes .ghb-wt {
   font-size: 9px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.06em;
+  text-transform: none; letter-spacing: 0.06em;
   padding: 1px 4px; border-radius: var(--r-1);
   background: var(--accent-soft); color: var(--accent-text);
 }

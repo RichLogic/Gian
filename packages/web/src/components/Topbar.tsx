@@ -3,13 +3,16 @@ import { useT } from '../i18n/index.js';
 import { PathBreadcrumb } from './PathBreadcrumb.js';
 import type { PathSegment, SessionMenuActions } from './PathBreadcrumb.js';
 
-export type Mode = 'sessions' | 'spaces' | 'bots';
+export type Mode = 'sessions' | 'tasks' | 'spaces' | 'bots';
 export type ViewState = 'main' | 'both' | 'workbench';
 
+// Per the design: only Sessions + Tasks are top-level modes. Workspaces moved
+// into the Inspector rail (dock "Workspaces" button) + Workbench detail; Bots
+// are hidden. The 'spaces'/'bots' modes still exist as routes (e.g. the
+// workspace-create flow opens 'spaces'), just not as dropdown entries.
 const MODE_OPTIONS: ReadonlyArray<readonly [Mode, string]> = [
   ['sessions', 'topbar.mode.sessions'],
-  ['spaces', 'topbar.mode.workspaces'],
-  ['bots', 'topbar.mode.bots'],
+  ['tasks', 'topbar.mode.tasks'],
 ];
 
 function GianMark({ size = 18 }: { size?: number }) {

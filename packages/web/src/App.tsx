@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Bot, EventEnvelope, RemoteControlState, RunnerInfo, ServerToClientMessage, Session, Workspace } from '@gian/shared';
+import type { ApprovalDecision, ApprovalMode, Bot, EventEnvelope, RemoteControlState, RunnerInfo, RuntimeMode, ServerToClientMessage, Session, Task, TtySurface, Workspace } from '@gian/shared';
 import { LocaleProvider } from './i18n/index.js';
 import { EN } from './i18n/en.js';
 import { ZH } from './i18n/zh.js';
 import type { WsState } from './ws.js';
 import { GianWs } from './ws.js';
-import { makeWsUrl, loadWorkspaces, loadSessions, loadEvents, loadSettings, loadWorkingTrees, loadBots, loadFile, loadDiff, fetchWsToken, loadRepoInfo, loadApps, loadAllFiles, openFileWith, openFileWithApp, openFileBuiltin } from './api.js';
+import { makeWsUrl, loadWorkspaces, loadSessions, loadTasks, loadEvents, loadSettings, loadWorkingTrees, loadBots, loadFile, loadDiff, fetchWsToken, loadRepoInfo, loadApps, loadAllFiles, openFileWith, openFileWithApp, openFileBuiltin } from './api.js';
 import type { ChangeScope } from './api.js';
 import { injectComposerDraft } from './components/Composer.js';
 import type { WorkingTree } from './api.js';
@@ -40,14 +40,17 @@ import type { SheetTab, FileViewMode } from './components/Sheet.js';
 import { Splitter } from './components/Splitter.js';
 import { Inspector } from './components/Inspector.js';
 import type { InspectorTab } from './components/Inspector.js';
+import { WorkspacesInspector, WorkspaceDetailBody } from './components/WorkspacesPanel.js';
 import { SettingsBody } from './components/SettingsBody.js';
 import { Terminal, makeWorkbenchWire } from './components/Terminal.js';
-import { CodingView } from './views/CodingView.js';
-import { SpacesView } from './views/SpacesView.js';
+import { CodingView, SessionMain } from './views/CodingView.js';
+import { SpacesView, NewWorkspacePanel } from './views/SpacesView.js';
+import { TasksView, ManagerInspector } from './views/TasksView.js';
 import { BotsView } from './views/BotsView.js';
 import { FilesView } from './views/FilesView.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import type { SystemConfig } from '@gian/shared';
+import { stripManagerSystemPrefix } from '@gian/shared';
 import type { QueueEntry, TokenUsage, TranscriptItem } from './types.js';
 import { planBetaComposerSend, planCreatedSessionFirstMessage, resolveChatView } from './session-routing.js';
 
@@ -70,6 +73,12 @@ export function App() {
   const [workspaceBranches, setWorkspaceBranches] = useState<Record<string, string | null>>({});
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  // ─── Tasks (PRD-v3) ───────────────────────────────────────────────────────
+  // Tasks group Subtasks (sessions with type==='subtask' + a matching task_id).
+  // Seeded from state_sync, kept fresh via the WS task:* handlers below.
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [activeSubtaskId, setActiveSubtaskId] = useState<string | null>(null);
   const [itemsBySession, setItemsBySession] = useState<Record<string, TranscriptItem[]>>({});
   const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
   const [usageBySession, setUsageBySession] = useState<Record<string, TokenUsage>>({});
@@ -217,6 +226,7 @@ export function App() {
           // initial fetches. On reconnect this also refreshes all app state.
           setWorkspaces(msg.workspaces);
           setSessions(msg.sessions);
+          setTasks(msg.tasks);
           setBots(msg.bots);
           setSystemConfig(msg.config);
           setRunner(msg.runner);
@@ -344,6 +354,22 @@ export function App() {
           setActiveSessionId(prev => (prev === msg.session_id ? null : prev));
           setInboxItems(prev => removeInboxSession(prev, msg.session_id));
           return;
+        // ── Tasks (PRD-v3) — mirror the session:* handlers above. ──
+        case 'task:created':
+          setTasks(prev => [msg.task, ...prev.filter(t => t.id !== msg.task.id)]);
+          setActiveTaskId(msg.task.id);
+          setActiveSubtaskId(null);
+          return;
+        case 'task:updated': {
+          const partial = msg.task;
+          setTasks(prev => prev.map(t => (t.id === partial.id ? { ...t, ...partial } : t)));
+          return;
+        }
+        case 'task:deleted':
+          setTasks(prev => prev.filter(t => t.id !== msg.task_id));
+          setActiveTaskId(prev => (prev === msg.task_id ? null : prev));
+          setActiveSubtaskId(null);
+          return;
         case 'queue:updated':
           setQueueBySession(prev => ({ ...prev, [msg.session_id]: msg.queue }));
           return;
@@ -388,9 +414,10 @@ export function App() {
       }
     });
     // Fallback: if state_sync doesn't arrive (old host), keep REST fetches.
-    void Promise.all([loadWorkspaces(), loadSessions()]).then(([w, ss]) => {
+    void Promise.all([loadWorkspaces(), loadSessions(), loadTasks()]).then(([w, ss, ts]) => {
       setWorkspaces(prev => prev.length > 0 ? prev : w);
       setSessions(prev => prev.length > 0 ? prev : ss);
+      setTasks(prev => prev.length > 0 ? prev : ts);
     });
     return () => { off(); offState(); };
   }, [ws, handleEnvelope]);
@@ -808,11 +835,20 @@ export function App() {
     if (kind === 'term') {
       const hasTerm = wbTabs.some(t => t.kind === 'term');
       if (hasTerm) {
-        const terminalVisible = mode === 'sessions' && viewState !== 'main' && !termHidden;
+        // The workbench sheet renders in ANY workbench-active view — Sessions
+        // AND Tasks (the Manager view and subtasks alike) — so toggling the
+        // terminal should just show/hide it in place. The old check only
+        // counted Sessions + subtasks as "session view", so toggling from the
+        // Tasks Manager view wrongly yanked the user into Sessions mode.
+        const wbActiveNow = mode === 'sessions' || mode === 'tasks';
+        const terminalVisible = wbActiveNow && viewState !== 'main' && !termHidden;
         if (terminalVisible) {
           setTermHidden(true);
         } else {
-          setMode('sessions');
+          // Only fall back to Sessions from a non-workbench view (spaces/bots),
+          // where the sheet can't render anyway. The dock button is disabled
+          // there, so this is just a safety net.
+          if (!wbActiveNow) setMode('sessions');
           setTermHidden(false);
           setViewState(v => v === 'main' ? 'both' : v);
         }
@@ -900,6 +936,45 @@ export function App() {
     setInspectorTab(curr => curr === kind ? null : kind);
   }
 
+  /** Open a workspace's detail as a Workbench tab (zone 3). The list lives in
+   *  the Inspector (zone 4); clicking a row opens/activates its detail tab here.
+   *  One tab per workspace, keyed by id, so re-clicking re-activates. Mirrors
+   *  design/gian-design-v2/js/app.jsx → openWorkspaceInSheet. */
+  function openWorkspaceInSheet(wsId: string): void {
+    const ws = workspaces.find(w => w.id === wsId);
+    if (!ws) return;
+    const id = `tab-ws-${wsId}`;
+    setWbTabs(prev => {
+      const existing = prev.find(t => t.id === id);
+      if (existing) {
+        setWbActive(a => ({ ...a, [existing.pane]: id }));
+        setViewState(v => v === 'main' ? 'both' : v);
+        return prev;
+      }
+      const tab: SheetTab = { id, pane: 0, name: ws.name, kind: 'workspace', icoKind: 'grid', ico: '▣', wsId };
+      setWbActive(a => ({ ...a, 0: id }));
+      setViewState(v => v === 'main' ? 'both' : v);
+      return [...prev, tab];
+    });
+  }
+
+  /** Open the "new workspace" form as a Workbench tab (singleton) instead of
+   *  jumping to the now-hidden `spaces` mode. */
+  function openNewWorkspaceInSheet(): void {
+    const id = 'tab-new-workspace';
+    setWbTabs(prev => {
+      if (prev.some(t => t.id === id)) {
+        setWbActive(a => ({ ...a, 0: id }));
+        setViewState(v => v === 'main' ? 'both' : v);
+        return prev;
+      }
+      const tab: SheetTab = { id, pane: 0, name: 'New workspace', kind: 'new-workspace', icoKind: 'grid', ico: '+' };
+      setWbActive(a => ({ ...a, 0: id }));
+      setViewState(v => v === 'main' ? 'both' : v);
+      return [...prev, tab];
+    });
+  }
+
   const locale = systemConfig?.locale ?? 'en';
   const appT = useCallback((key: string) => {
     const messages = locale === 'zh-CN' ? ZH : EN;
@@ -926,7 +1001,9 @@ export function App() {
   const activeListedWs = activeWorkspace;
 
   const pathSegments: PathSegment[] = useMemo(() => {
-    if (mode === 'sessions') {
+    // Subtasks reuse the session breadcrumb (Workspace › Branch › Subtask):
+    // a subtask IS a session and activeSession is already synced to it.
+    if (mode === 'sessions' || (mode === 'tasks' && activeSubtaskId)) {
       if (!activeSession) return [];
       const segs: PathSegment[] = [];
       segs.push({
@@ -949,6 +1026,17 @@ export function App() {
       });
       return segs;
     }
+    // Task (Manager view): a single-level breadcrumb — just the task name ▾.
+    if (mode === 'tasks' && activeTaskId) {
+      const task = tasks.find(t => t.id === activeTaskId);
+      if (!task) return [];
+      return [{
+        kind: 'session',
+        label: task.name || appT('coding.session.untitled'),
+        copyHint: appT('coding.session.actions'),
+        editing: pathRenameActive,
+      }];
+    }
     if (mode === 'spaces') {
       if (!activeListedWs) return [];
       return [{
@@ -966,11 +1054,28 @@ export function App() {
       }];
     }
     return [];
-  }, [mode, activeSession, activeWorkspace, activeBranch, activeListedWs, activeBot, pathRenameActive, appT]);
+  }, [mode, activeTaskId, tasks, activeSubtaskId, activeSession, activeWorkspace, activeBranch, activeListedWs, activeBot, pathRenameActive, appT]);
 
   // Session-menu actions (Rename / Copy / Recover / Archive / Delete)
   const sessionMenu: SessionMenuActions | null = useMemo(() => {
-    if (mode !== 'sessions' || !activeSession) return null;
+    // Task (Manager view): a one-level menu — Rename / Copy name / Archive.
+    if (mode === 'tasks' && !activeSubtaskId && activeTaskId) {
+      const task = tasks.find(t => t.id === activeTaskId);
+      if (!task) return null;
+      return {
+        onRename: () => setPathRenameActive(true),
+        onCopyName: () => {
+          try { void navigator.clipboard?.writeText(task.name || ''); } catch (_) { /* ignore */ }
+        },
+        onArchive: () => {
+          ws.send({ type: 'task:update', task_id: task.id, status: task.status === 'archived' ? 'open' : 'archived' });
+        },
+      };
+    }
+    // Subtasks get the same menu MINUS fork / archive / delete — a subtask's
+    // lifecycle is managed via its parent Task, not its own session.
+    const isSubtask = mode === 'tasks' && !!activeSubtaskId;
+    if ((mode !== 'sessions' && !isSubtask) || !activeSession) return null;
     return {
       onRename: () => setPathRenameActive(true),
       onCopyName: () => {
@@ -983,7 +1088,11 @@ export function App() {
         ttySwitchRef.current.clear(activeSession.id);
         ws.send({ type: 'session:recover', session_id: activeSession.id });
       },
-      onFork: (executor) => {
+      onMarkUnread: () => {
+        ws.send({ type: 'session:set_unread', session_id: activeSession.id, unread: true });
+      },
+      ...(isSubtask ? {} : {
+      onFork: (executor: 'claude' | 'codex') => {
         // Clone every property the host accepts on session:create except
         // `branch` (worktrees must own a unique branch — let the host
         // auto-generate). Name = original + " copy". Executor is the
@@ -1009,9 +1118,6 @@ export function App() {
           ),
         });
       },
-      onMarkUnread: () => {
-        ws.send({ type: 'session:set_unread', session_id: activeSession.id, unread: true });
-      },
       onArchive: () => {
         const next = activeSession.archived !== 1;
         ws.send({ type: 'session:archive', session_id: activeSession.id, archived: next });
@@ -1024,16 +1130,24 @@ export function App() {
         });
         if (ok) ws.send({ type: 'session:delete', session_id: activeSession.id });
       },
+      }),
     };
-  }, [mode, activeSession, ws, appT]);
+  }, [mode, activeTaskId, tasks, activeSubtaskId, activeSession, ws, appT]);
 
   const handleRenameSubmit = useCallback((value: string) => {
     setPathRenameActive(false);
-    if (!activeSession) return;
     const trimmed = value.trim();
-    if (!trimmed || trimmed === activeSession.name) return;
+    if (!trimmed) return;
+    // Task rename (Manager view) vs session/subtask rename.
+    if (mode === 'tasks' && !activeSubtaskId && activeTaskId) {
+      const task = tasks.find(t => t.id === activeTaskId);
+      if (!task || trimmed === task.name) return;
+      ws.send({ type: 'task:update', task_id: activeTaskId, name: trimmed });
+      return;
+    }
+    if (!activeSession || trimmed === activeSession.name) return;
     ws.send({ type: 'session:rename', session_id: activeSession.id, name: trimmed });
-  }, [activeSession, ws]);
+  }, [mode, activeTaskId, activeSubtaskId, tasks, activeSession, ws]);
 
   const handleRenameCancel = useCallback(() => setPathRenameActive(false), []);
 
@@ -1050,6 +1164,337 @@ export function App() {
     setActiveSessionId(id);
     markSessionViewed(id);
   }, [markSessionViewed]);
+
+  // A Subtask IS a Session. When a subtask is selected in Tasks mode we render
+  // the full SessionMain view for it inline, which means `activeSession`,
+  // `itemsBySession[id]`, the workbench Sheet, and the Inspector must all
+  // resolve to that subtask's session. Sync `activeSessionId` to the active
+  // subtask (and mark it viewed) so all of that machinery — shared with
+  // Sessions mode — targets the subtask. When no subtask is selected the
+  // Manager panel is shown and we leave `activeSessionId` untouched.
+  useEffect(() => {
+    if (mode !== 'tasks' || !activeSubtaskId) return;
+    if (activeSessionIdRef.current === activeSubtaskId) return;
+    setActiveSessionId(activeSubtaskId);
+    markSessionViewed(activeSubtaskId);
+  }, [mode, activeSubtaskId, markSessionViewed]);
+
+  // ─── Per-session SessionMain callbacks (shared) ──────────────────────────
+  // These are the App-level handlers <SessionMain> needs, each keyed by an
+  // explicit session id. CodingView (Sessions mode) and the inline subtask
+  // SessionMain (Tasks mode) both bind to these identical handlers — the only
+  // difference is which session id they're bound to. Defining them once here
+  // (instead of inline in the CodingView JSX) is what lets the Tasks-mode
+  // subtask view reuse the exact same wiring.
+  const sessionMainHandlers = {
+    onSend: (
+      sessionId: string,
+      text: string,
+      opts?: {
+        oneShotBypass?: boolean;
+        attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
+      },
+    ) => {
+      // Optimistic echo: append a pending user msg to the transcript
+      // and arm the thinking ticker before the server confirms. The
+      // real `user_message` event reconciles in applyEnvelope.
+      const exec = sessionsRef.current.find(s => s.id === sessionId)?.executor ?? 'claude';
+      const attachments = opts?.attachments ?? [];
+      const optimistic = createOptimisticEcho({
+        sessionId,
+        text,
+        exec,
+        // Reuse the composer's blob URL as the <img src> for the
+        // pending bubble — ownership transferred on send; the
+        // user_message reconciler revokes it after swapping in
+        // the server URL.
+        attachments: attachments.length > 0
+          ? attachments.map(a => ({ name: a.name, mime: a.mime, url: a.previewUrl }))
+          : undefined,
+      });
+      setItemsBySession(prev => ({
+        ...prev,
+        [sessionId]: [...(prev[sessionId] ?? []), optimistic],
+      }));
+      setPendingBySession(p => ({ ...p, [sessionId]: true }));
+
+      const items: Array<
+        | { type: 'text'; text: string }
+        | { type: 'localImage'; path: string; name?: string; mime?: string }
+      > = [];
+      if (text.trim()) items.push({ type: 'text', text });
+      for (const a of attachments) {
+        items.push({ type: 'localImage', path: a.path, name: a.name, mime: a.mime });
+      }
+
+      ws.send({
+        type: 'message:send',
+        session_id: sessionId,
+        text,
+        ...(items.length > 0 ? { items } : {}),
+        ...(opts?.oneShotBypass ? { oneShotBypass: true } : {}),
+      });
+    },
+    onBetaSend: (
+      sessionId: string,
+      text: string,
+      opts?: { attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }> },
+    ) => {
+      const attachments = opts?.attachments ?? [];
+      const session = sessionsRef.current.find(s => s.id === sessionId);
+      const plan = planBetaComposerSend(session?.runtime_mode ?? 'structured', text, attachments);
+      if (plan.channel === 'noop') return;
+      setPendingBySession(p => ({ ...p, [sessionId]: true }));
+      if (plan.channel === 'stage_for_tty') {
+        const { sendSwitch } = ttySwitchRef.current.stage(sessionId, plan.text);
+        if (sendSwitch) {
+          ws.send({ type: 'session:switch-runtime', session_id: sessionId, target: 'tty', surface: 'beta' });
+        }
+        return;
+      }
+      ws.send({ type: 'pty:input', session_id: sessionId, text: plan.text });
+    },
+    onSendSkill: (sessionId: string, name: string, path: string) =>
+      ws.send({
+        type: 'message:send',
+        session_id: sessionId,
+        text: `/${name}`,
+        items: [{ type: 'skill', name, path }],
+      }),
+    onStop: (sessionId: string) => ws.send({ type: 'session:stop', session_id: sessionId }),
+    onApprove: (
+      sessionId: string,
+      approvalId: string,
+      decision: ApprovalDecision,
+      answers?: Record<string, string | string[]>,
+    ) =>
+      ws.send({
+        type: 'approval:resolve',
+        session_id: sessionId,
+        approval_id: approvalId,
+        decision,
+        ...(answers ? { answers } : {}),
+      }),
+    onLocalApprovalResolve: (
+      sessionId: string,
+      approvalId: string,
+      decision: ApprovalDecision,
+      answers?: Record<string, string | string[]>,
+    ) => {
+      // TTY-mode AskUserQuestion answers are pasted into the PTY
+      // rather than resolved over the structured approval bridge —
+      // the bridge isn't wired in TTY (cc-proxy would 404). Synthesize
+      // an approval_resolved envelope so the QuestionCard transitions
+      // out of `pending` immediately. Carry the picked answers so the
+      // resolved card can show "answered with …". Any later duplicate
+      // from the JSONL watcher is harmless: apply.ts dedupes by
+      // approvalId, preserves status, and won't blank answeredWith.
+      const session = sessionsRef.current.find(s => s.id === sessionId);
+      const executor = session?.executor === 'codex' ? 'codex' : 'claude';
+      handleEnvelope({
+        session_id: sessionId,
+        turn: 0,
+        call_id: approvalId,
+        event: 'approval_resolved',
+        ts: Date.now(),
+        data: { approvalId, decision, auto: false, ...(answers ? { answers } : {}) },
+      }, executor);
+    },
+    onQueueAdd: (sessionId: string, text: string) =>
+      ws.send({ type: 'queue:add', session_id: sessionId, text }),
+    onQueueRemove: (sessionId: string, queueId: string) =>
+      ws.send({ type: 'queue:remove', session_id: sessionId, queue_id: queueId }),
+    onQueueReorder: (sessionId: string, order: string[]) =>
+      ws.send({ type: 'queue:reorder', session_id: sessionId, order }),
+    onQueueClear: (sessionId: string) => ws.send({ type: 'queue:clear', session_id: sessionId }),
+    onQueueSendNow: (sessionId: string) => {
+      // Beta/TTY (claude): send_now pastes the queue head straight
+      // into the PTY. Mid-turn, Claude's TUI holds it as a queued
+      // message and only writes it to the JSONL — where the watcher
+      // can surface it in Beta — once the running turn ends. So the
+      // bubble would vanish from the queue yet not appear in the
+      // transcript until much later. Seed an optimistic echo of the
+      // head so it shows immediately; the watcher's `user_message`
+      // reconciles it by text (apply.ts), so no duplicate. Structured
+      // send_now already echoes via the host-broadcast user_message,
+      // so we only patch the TTY gap here.
+      const session = sessionsRef.current.find(s => s.id === sessionId);
+      if (session?.executor === 'claude' && session.runtime_mode === 'tty') {
+        const head = (queueBySession[sessionId] ?? [])[0];
+        if (head) {
+          const optimistic = createOptimisticEcho({ sessionId, text: head.text, exec: 'claude' });
+          setItemsBySession(prev => ({
+            ...prev,
+            [sessionId]: [...(prev[sessionId] ?? []), optimistic],
+          }));
+          setPendingBySession(p => ({ ...p, [sessionId]: true }));
+        }
+      }
+      ws.send({ type: 'queue:send_now', session_id: sessionId });
+    },
+    onSetMode: (sessionId: string, approvalMode: ApprovalMode, turns?: number) =>
+      ws.send({ type: 'session:set_mode', session_id: sessionId, approval_mode: approvalMode, turns }),
+    onSetModel: (sessionId: string, model: string) =>
+      ws.send({ type: 'session:set_model', session_id: sessionId, model }),
+    onSetEffort: (sessionId: string, effort: import('@gian/shared').ThinkingEffort | null) =>
+      ws.send({ type: 'session:set_effort', session_id: sessionId, effort }),
+    onArchive: (id: string, archived: boolean) =>
+      ws.send({ type: 'session:archive', session_id: id, archived }),
+    onDelete: (id: string) => ws.send({ type: 'session:delete', session_id: id }),
+    onRecover: (id: string) => { ttySwitchRef.current.clear(id); ws.send({ type: 'session:recover', session_id: id }); },
+    onMerge: async (id: string) => {
+      const { mergeSession } = await import('./api.js');
+      const r = await mergeSession(id);
+      if (!r.ok) toast({ kind: 'error', message: r.error ?? 'merge failed' });
+    },
+    onDrop: async (id: string) => {
+      const { dropSession } = await import('./api.js');
+      const r = await dropSession(id);
+      if (!r.ok) toast({ kind: 'error', message: r.error ?? 'drop failed' });
+    },
+    onRename: (id: string, name: string) =>
+      ws.send({ type: 'session:rename', session_id: id, name }),
+    onSwitchRuntime: (sessionId: string, target: RuntimeMode, surface?: TtySurface) =>
+      ws.send({
+        type: 'session:switch-runtime',
+        session_id: sessionId,
+        target,
+        ...(surface ? { surface } : {}),
+      }),
+    onClaimTty: (sessionId: string, surface: TtySurface, takeover?: boolean) =>
+      ws.send({
+        type: 'tty:claim',
+        session_id: sessionId,
+        surface,
+        ...(takeover ? { takeover: true } : {}),
+      }),
+    onRequestRemote: (sessionId: string) => {
+      const s = sessionsRef.current.find(x => x.id === sessionId);
+      const busy = s?.status === 'running' || s?.status === 'pending';
+      if (busy) {
+        // Arm; the effect above fires the switch when status flips.
+        setArmedRemoteSwitch(prev => {
+          const next = new Set(prev);
+          next.add(sessionId);
+          return next;
+        });
+        return;
+      }
+      ws.send({
+        type: 'session:switch-runtime',
+        session_id: sessionId,
+        target: 'tty',
+        remote_control: true,
+      });
+    },
+    onCancelRemote: (sessionId: string) => {
+      setArmedRemoteSwitch(prev => {
+        if (!prev.has(sessionId)) return prev;
+        const next = new Set(prev);
+        next.delete(sessionId);
+        return next;
+      });
+    },
+    onToggleRemoteControl: (sessionId: string) => {
+      ws.send({ type: 'session:remote-control', session_id: sessionId });
+    },
+  };
+
+  // ─── Per-Task Manager (PRD-v3 P3) ────────────────────────────────────────
+  // The Manager is a session (type='manager') bound to a Task. Its transcript
+  // lives in the same itemsBySession map as any session, keyed by its session
+  // id. We resolve the active Task's Manager session, hand its items/pending
+  // down to TasksView, and provide ensure/send/create-subtask callbacks.
+  const activeManagerSession = useMemo(
+    () => (activeTaskId
+      ? sessions.find(s => s.type === 'manager' && s.task_id === activeTaskId) ?? null
+      : null),
+    [sessions, activeTaskId],
+  );
+  // The Task object behind the active Manager — fed to the compact
+  // ManagerInspector (zone 4) shown while a subtask is selected.
+  const activeManagerTask = useMemo(
+    () => (activeTaskId ? tasks.find(t => t.id === activeTaskId) ?? null : null),
+    [tasks, activeTaskId],
+  );
+  const managerItems = activeManagerSession
+    ? (itemsBySession[activeManagerSession.id] ?? []).map(it =>
+        it.kind === 'user' ? { ...it, text: stripManagerSystemPrefix(it.text) } : it,
+      )
+    : [];
+  const managerPending = activeManagerSession
+    ? (pendingBySession[activeManagerSession.id] ?? activeManagerSession.status === 'running')
+    : false;
+
+  // Hydrate a session's transcript from the REST event log if not loaded yet.
+  // Shared shape with the activeSessionId hydration effect above.
+  const hydrateTranscript = useCallback((sessionId: string, exec: 'claude' | 'codex') => {
+    if (itemsBySession[sessionId] !== undefined) return;
+    void loadEvents(sessionId).then(events => {
+      const items = events.reduce<TranscriptItem[]>(
+        (acc, e) => applyEnvelope(acc, e, exec),
+        [],
+      );
+      setItemsBySession(prev =>
+        prev[sessionId] !== undefined ? prev : { ...prev, [sessionId]: items });
+    });
+  }, [itemsBySession]);
+
+  // Ensure the Manager session exists for a Task, then hydrate its transcript.
+  const onManagerMount = useCallback((taskId: string) => {
+    const existing = sessionsRef.current.find(
+      s => s.type === 'manager' && s.task_id === taskId,
+    );
+    if (existing) {
+      hydrateTranscript(existing.id, existing.executor);
+      return;
+    }
+    void import('./api.js').then(m => m.ensureManagerSession(taskId)).then(session => {
+      // session:created arrives via WS and updates `sessions`; seed an empty
+      // transcript so the panel renders the placeholder until the user sends.
+      if (session) {
+        setItemsBySession(prev =>
+          prev[session.id] !== undefined ? prev : { ...prev, [session.id]: [] });
+      }
+    });
+  }, [hydrateTranscript]);
+
+  const onManagerSend = useCallback((taskId: string, text: string) => {
+    // Optimistic echo against the manager session if we already know it. The
+    // real user_message reconciles via applyEnvelope by exact text match.
+    const mgr = sessionsRef.current.find(
+      s => s.type === 'manager' && s.task_id === taskId,
+    );
+    if (mgr) {
+      const echo = createOptimisticEcho({ sessionId: mgr.id, text, exec: mgr.executor });
+      setItemsBySession(prev => {
+        const list = prev[mgr.id] ?? [];
+        return { ...prev, [mgr.id]: [...list, echo] };
+      });
+      setPendingBySession(p => ({ ...p, [mgr.id]: true }));
+    }
+    void import('./api.js').then(m => m.sendManagerMessage(taskId, text));
+  }, []);
+
+  const onCreateSubtask = useCallback((taskId: string, draft: {
+    workspace_id: string; executor: 'claude' | 'codex'; name?: string; prompt: string;
+  }) => {
+    void import('./api.js').then(m => m.createSubtask(taskId, {
+      workspace_id: draft.workspace_id,
+      executor: draft.executor,
+      ...(draft.name ? { name: draft.name } : {}),
+    })).then(session => {
+      if (!session) {
+        toast({ kind: 'error', message: 'create subtask failed' });
+        return;
+      }
+      // TODO(P3-live): deliver `draft.prompt` as the subtask's first message
+      // once subtasks have an explicit "start" that spawns the runtime (P1/P2
+      // wiring). For now the session is created in draft and the prompt is
+      // surfaced to the user to send manually from the session view.
+      setActiveSubtaskId(session.id);
+    });
+  }, []);
 
   // ─── Dock state (Phase 1: only Search + Inbox are wired) ─────────────────
   const onJumpToSessionFromInbox = (sid: string) => {
@@ -1081,14 +1526,108 @@ export function App() {
 
   const hasWbTermTabs = wbTabs.some(t => t.kind === 'term');
   const hasWbNonTermTabs = wbTabs.some(t => t.kind !== 'term');
+  // A Subtask IS a Session: when one is selected in Tasks mode the main area
+  // renders the full SessionMain view, so the workbench Sheet / Inspector /
+  // terminal must work there exactly as they do in Sessions mode. We treat
+  // "Sessions mode" OR "Tasks mode with an active subtask" as a single
+  // "session view active" condition for every gate below.
+  const subtaskActive = mode === 'tasks' && !!activeSubtaskId && !!activeSession;
+  const sessionViewActive = mode === 'sessions' || subtaskActive;
+  // The Manager inspector tab only makes sense for a subtask. If the subtask
+  // context is lost (deselected, or you leave Tasks mode) while it's open,
+  // close the rail rather than leave an empty splitter behind.
+  useEffect(() => {
+    if (inspectorTab === 'manager' && !subtaskActive) setInspectorTab(null);
+  }, [inspectorTab, subtaskActive]);
   // Keep terminal tabs mounted even when the workbench is hidden by the
   // main/session view toggle or by switching to another top-level section.
   // The PTY is closed only by the tab close action above.
-  const sheetMounted = wbTabs.length > 0 && (hasWbTermTabs || (mode === 'sessions' && viewState !== 'main'));
-  const sheetVisible = mode === 'sessions'
+  // Global workbench tools (Settings, Terminal, Workspaces inspector) are
+  // available in BOTH Sessions and Tasks (incl. the Manager view) — they aren't
+  // tied to an active session. Only the Files / Changes inspector is
+  // session-specific (gated on sessionViewActive below).
+  const workbenchActive = mode === 'sessions' || mode === 'tasks';
+  const sheetMounted = wbTabs.length > 0 && (hasWbTermTabs || (workbenchActive && viewState !== 'main'));
+  const sheetVisible = workbenchActive
     && viewState !== 'main'
     && (hasWbNonTermTabs || (hasWbTermTabs && !termHidden));
-  const terminalDockActive = hasWbTermTabs && mode === 'sessions' && viewState !== 'main' && !termHidden;
+  const terminalDockActive = hasWbTermTabs && workbenchActive && viewState !== 'main' && !termHidden;
+
+  // Workspace tabs in the Workbench (zone 3) drive the active-row highlight in
+  // the WorkspacesInspector (zone 4). Derived from wbTabs/wbActive so it can't
+  // drift out of sync with the tab strip.
+  const openWsIds = new Set(
+    wbTabs.filter(t => t.kind === 'workspace' && t.wsId).map(t => t.wsId as string),
+  );
+  const activeWorkspaceTab = ([wbActive[0], wbActive[1]] as Array<string | null>)
+    .map(id => wbTabs.find(t => t.id === id))
+    .find(t => t?.kind === 'workspace');
+  const selectedWsId = activeWorkspaceTab?.wsId ?? null;
+
+  // A Subtask IS a Session. When one is selected in Tasks mode we render the
+  // exact same <SessionMain> that CodingView renders in Sessions mode — wired
+  // to the identical App-level handlers (rebound to the subtask's id) and the
+  // same transcript context providers. The activeSessionId-sync effect above
+  // keeps `activeSession`, `itemsBySession`, the Sheet, and the Inspector all
+  // pointed at this subtask. TasksView renders this element where the old
+  // "Open in Sessions" placeholder used to live (inside its own `.main`).
+  const subtask = subtaskActive ? activeSession : null;
+  const subtaskWorkspace = subtask
+    ? workspaces.find(w => w.id === subtask.workspace_id) ?? null
+    : null;
+  const subtaskWorkingTreeId = defaultWorkingTreeIdFor(subtask);
+  const subtaskMain = subtask ? (
+    <FileLinkOpenContext.Provider value={(absPath, line) => { void openFileInSheet(absPath, false, line); }}>
+    <FileRefRehypeContext.Provider value={fileRehype}>
+    <DiffOpenContext.Provider value={() => { /* §C — diff not clickable */ }}>
+    <PlanOpenContext.Provider value={(payload) => openPlanInSheet(payload.id, payload.markdown)}>
+      <SessionMain
+        session={subtask}
+        chatView={resolveChatView(systemConfig)}
+        workspace={subtaskWorkspace}
+        items={itemsBySession[subtask.id] ?? []}
+        pending={pendingBySession[subtask.id] ?? false}
+        ttyLock={ttyLockBySession[subtask.id]}
+        usage={usageBySession[subtask.id] ?? null}
+        queue={queueBySession[subtask.id] ?? []}
+        codexPlanText={planBySession[subtask.id]}
+        onSend={(text, opts) => sessionMainHandlers.onSend(subtask.id, text, opts)}
+        onBetaSend={(text, opts) => sessionMainHandlers.onBetaSend(subtask.id, text, opts)}
+        onSendSkill={(name, path) => sessionMainHandlers.onSendSkill(subtask.id, name, path)}
+        onStop={() => sessionMainHandlers.onStop(subtask.id)}
+        onApprove={(approvalId, decision, answers) => sessionMainHandlers.onApprove(subtask.id, approvalId, decision, answers)}
+        onLocalApprovalResolve={(approvalId, decision, answers) => sessionMainHandlers.onLocalApprovalResolve(subtask.id, approvalId, decision, answers)}
+        onQueueAdd={text => sessionMainHandlers.onQueueAdd(subtask.id, text)}
+        onQueueRemove={queueId => sessionMainHandlers.onQueueRemove(subtask.id, queueId)}
+        onQueueReorder={order => sessionMainHandlers.onQueueReorder(subtask.id, order)}
+        onQueueClear={() => sessionMainHandlers.onQueueClear(subtask.id)}
+        onQueueSendNow={() => sessionMainHandlers.onQueueSendNow(subtask.id)}
+        onSetMode={(approvalMode, turns) => sessionMainHandlers.onSetMode(subtask.id, approvalMode, turns)}
+        onSetModel={model => sessionMainHandlers.onSetModel(subtask.id, model)}
+        onSetEffort={effort => sessionMainHandlers.onSetEffort(subtask.id, effort)}
+        onMerge={() => sessionMainHandlers.onMerge(subtask.id)}
+        onDrop={() => sessionMainHandlers.onDrop(subtask.id)}
+        onArchive={archived => sessionMainHandlers.onArchive(subtask.id, archived)}
+        onDelete={() => sessionMainHandlers.onDelete(subtask.id)}
+        onRecover={() => sessionMainHandlers.onRecover(subtask.id)}
+        onRename={name => sessionMainHandlers.onRename(subtask.id, name)}
+        onShowChanges={() => { toggleInspector('changes'); }}
+        workingTreeId={subtaskWorkingTreeId}
+        branch={workingTrees.find(wt => wt.id === subtaskWorkingTreeId)?.branch ?? null}
+        ws={ws}
+        onSwitchRuntime={(target, surface) => sessionMainHandlers.onSwitchRuntime(subtask.id, target, surface)}
+        onClaimTty={(surface, takeover) => sessionMainHandlers.onClaimTty(subtask.id, surface, takeover)}
+        armedRemote={armedRemoteSwitch.has(subtask.id)}
+        onRequestRemote={() => sessionMainHandlers.onRequestRemote(subtask.id)}
+        onCancelRemote={() => sessionMainHandlers.onCancelRemote(subtask.id)}
+        remoteControl={remoteControlBySession[subtask.id]}
+        onToggleRemoteControl={() => sessionMainHandlers.onToggleRemoteControl(subtask.id)}
+      />
+    </PlanOpenContext.Provider>
+    </DiffOpenContext.Provider>
+    </FileRefRehypeContext.Provider>
+    </FileLinkOpenContext.Provider>
+  ) : null;
 
   return (
     <LocaleProvider locale={locale}>
@@ -1100,7 +1639,7 @@ export function App() {
         sessionMenu={sessionMenu}
         onRenameSubmit={handleRenameSubmit}
         onRenameCancel={handleRenameCancel}
-        showViewSeg={mode === 'sessions' && wbTabs.length > 0}
+        showViewSeg={workbenchActive && wbTabs.length > 0}
         viewState={viewState}
         onSetViewState={setViewState}
       />
@@ -1162,143 +1701,26 @@ export function App() {
                 });
               }}
               creatingSession={creatingSession}
-              onArchive={(id, archived) => ws.send({ type: 'session:archive', session_id: id, archived })}
-              onDelete={id => ws.send({ type: 'session:delete', session_id: id })}
-              onRecover={id => { ttySwitchRef.current.clear(id); ws.send({ type: 'session:recover', session_id: id }); }}
-              onMerge={async id => {
-                const { mergeSession } = await import('./api.js');
-                const r = await mergeSession(id);
-                if (!r.ok) toast({ kind: 'error', message: r.error ?? 'merge failed' });
-              }}
-              onDrop={async id => {
-                const { dropSession } = await import('./api.js');
-                const r = await dropSession(id);
-                if (!r.ok) toast({ kind: 'error', message: r.error ?? 'drop failed' });
-              }}
-              onSend={(sessionId, text, opts) => {
-                // Optimistic echo: append a pending user msg to the transcript
-                // and arm the thinking ticker before the server confirms. The
-                // real `user_message` event reconciles in applyEnvelope.
-                const exec = sessionsRef.current.find(s => s.id === sessionId)?.executor ?? 'claude';
-                const attachments = opts?.attachments ?? [];
-                const optimistic = createOptimisticEcho({
-                  sessionId,
-                  text,
-                  exec,
-                  // Reuse the composer's blob URL as the <img src> for the
-                  // pending bubble — ownership transferred on send; the
-                  // user_message reconciler revokes it after swapping in
-                  // the server URL.
-                  attachments: attachments.length > 0
-                    ? attachments.map(a => ({ name: a.name, mime: a.mime, url: a.previewUrl }))
-                    : undefined,
-                });
-                setItemsBySession(prev => ({
-                  ...prev,
-                  [sessionId]: [...(prev[sessionId] ?? []), optimistic],
-                }));
-                setPendingBySession(p => ({ ...p, [sessionId]: true }));
-
-                const items: Array<
-                  | { type: 'text'; text: string }
-                  | { type: 'localImage'; path: string; name?: string; mime?: string }
-                > = [];
-                if (text.trim()) items.push({ type: 'text', text });
-                for (const a of attachments) {
-                  items.push({ type: 'localImage', path: a.path, name: a.name, mime: a.mime });
-                }
-
-                ws.send({
-                  type: 'message:send',
-                  session_id: sessionId,
-                  text,
-                  ...(items.length > 0 ? { items } : {}),
-                  ...(opts?.oneShotBypass ? { oneShotBypass: true } : {}),
-                });
-              }}
-              onBetaSend={(sessionId, text, opts) => {
-                const attachments = opts?.attachments ?? [];
-                const session = sessionsRef.current.find(s => s.id === sessionId);
-                const plan = planBetaComposerSend(session?.runtime_mode ?? 'structured', text, attachments);
-                if (plan.channel === 'noop') return;
-                setPendingBySession(p => ({ ...p, [sessionId]: true }));
-                if (plan.channel === 'stage_for_tty') {
-                  const { sendSwitch } = ttySwitchRef.current.stage(sessionId, plan.text);
-                  if (sendSwitch) {
-                    ws.send({ type: 'session:switch-runtime', session_id: sessionId, target: 'tty', surface: 'beta' });
-                  }
-                  return;
-                }
-                ws.send({ type: 'pty:input', session_id: sessionId, text: plan.text });
-              }}
-              onSendSkill={(sessionId, name, path) =>
-                ws.send({
-                  type: 'message:send',
-                  session_id: sessionId,
-                  text: `/${name}`,
-                  items: [{ type: 'skill', name, path }],
-                })
-              }
-              onStop={sessionId =>
-                ws.send({ type: 'session:stop', session_id: sessionId })
-              }
-              onApprove={(sessionId, approvalId, decision, answers) =>
-                ws.send({
-                  type: 'approval:resolve',
-                  session_id: sessionId,
-                  approval_id: approvalId,
-                  decision,
-                  ...(answers ? { answers } : {}),
-                })
-              }
-              onLocalApprovalResolve={(sessionId, approvalId, decision, answers) => {
-                // TTY-mode AskUserQuestion answers are pasted into the PTY
-                // rather than resolved over the structured approval bridge —
-                // the bridge isn't wired in TTY (cc-proxy would 404). Synthesize
-                // an approval_resolved envelope so the QuestionCard transitions
-                // out of `pending` immediately. Carry the picked answers so the
-                // resolved card can show "answered with …". Any later duplicate
-                // from the JSONL watcher is harmless: apply.ts dedupes by
-                // approvalId, preserves status, and won't blank answeredWith.
-                const session = sessionsRef.current.find(s => s.id === sessionId);
-                const executor = session?.executor === 'codex' ? 'codex' : 'claude';
-                handleEnvelope({
-                  session_id: sessionId,
-                  turn: 0,
-                  call_id: approvalId,
-                  event: 'approval_resolved',
-                  ts: Date.now(),
-                  data: { approvalId, decision, auto: false, ...(answers ? { answers } : {}) },
-                }, executor);
-              }
-              }
-              onQueueAdd={(sessionId, text) =>
-                ws.send({ type: 'queue:add', session_id: sessionId, text })
-              }
-              onQueueRemove={(sessionId, queueId) =>
-                ws.send({ type: 'queue:remove', session_id: sessionId, queue_id: queueId })
-              }
-              onQueueReorder={(sessionId, order) =>
-                ws.send({ type: 'queue:reorder', session_id: sessionId, order })
-              }
-              onQueueClear={sessionId =>
-                ws.send({ type: 'queue:clear', session_id: sessionId })
-              }
-              onQueueSendNow={sessionId =>
-                ws.send({ type: 'queue:send_now', session_id: sessionId })
-              }
-              onSetMode={(sessionId, approvalMode, turns) =>
-                ws.send({ type: 'session:set_mode', session_id: sessionId, approval_mode: approvalMode, turns })
-              }
-              onSetModel={(sessionId, model) =>
-                ws.send({ type: 'session:set_model', session_id: sessionId, model })
-              }
-              onSetEffort={(sessionId, effort) =>
-                ws.send({ type: 'session:set_effort', session_id: sessionId, effort })
-              }
-              onRename={(id, name) =>
-                ws.send({ type: 'session:rename', session_id: id, name })
-              }
+              onArchive={sessionMainHandlers.onArchive}
+              onDelete={sessionMainHandlers.onDelete}
+              onRecover={sessionMainHandlers.onRecover}
+              onMerge={sessionMainHandlers.onMerge}
+              onDrop={sessionMainHandlers.onDrop}
+              onSend={sessionMainHandlers.onSend}
+              onBetaSend={sessionMainHandlers.onBetaSend}
+              onSendSkill={sessionMainHandlers.onSendSkill}
+              onStop={sessionMainHandlers.onStop}
+              onApprove={sessionMainHandlers.onApprove}
+              onLocalApprovalResolve={sessionMainHandlers.onLocalApprovalResolve}
+              onQueueAdd={sessionMainHandlers.onQueueAdd}
+              onQueueRemove={sessionMainHandlers.onQueueRemove}
+              onQueueReorder={sessionMainHandlers.onQueueReorder}
+              onQueueClear={sessionMainHandlers.onQueueClear}
+              onQueueSendNow={sessionMainHandlers.onQueueSendNow}
+              onSetMode={sessionMainHandlers.onSetMode}
+              onSetModel={sessionMainHandlers.onSetModel}
+              onSetEffort={sessionMainHandlers.onSetEffort}
+              onRename={sessionMainHandlers.onRename}
               onShowChanges={() => { toggleInspector('changes'); }}
               activeWorkingTreeId={defaultWorkingTreeIdFor(activeSession)}
               activeBranch={
@@ -1308,53 +1730,12 @@ export function App() {
               previewTarget={null}
               onClosePreview={() => { /* no-op — replaced by Sheet */ }}
               ws={ws}
-              onSwitchRuntime={(sessionId, target, surface) =>
-                ws.send({
-                  type: 'session:switch-runtime',
-                  session_id: sessionId,
-                  target,
-                  ...(surface ? { surface } : {}),
-                })
-              }
-              onClaimTty={(sessionId, surface, takeover) =>
-                ws.send({
-                  type: 'tty:claim',
-                  session_id: sessionId,
-                  surface,
-                  ...(takeover ? { takeover: true } : {}),
-                })
-              }
+              onSwitchRuntime={sessionMainHandlers.onSwitchRuntime}
+              onClaimTty={sessionMainHandlers.onClaimTty}
               armedRemoteSwitch={armedRemoteSwitch}
-              onRequestRemote={(sessionId) => {
-                const s = sessionsRef.current.find(x => x.id === sessionId);
-                const busy = s?.status === 'running' || s?.status === 'pending';
-                if (busy) {
-                  // Arm; the effect above fires the switch when status flips.
-                  setArmedRemoteSwitch(prev => {
-                    const next = new Set(prev);
-                    next.add(sessionId);
-                    return next;
-                  });
-                  return;
-                }
-                ws.send({
-                  type: 'session:switch-runtime',
-                  session_id: sessionId,
-                  target: 'tty',
-                  remote_control: true,
-                });
-              }}
-              onCancelRemote={(sessionId) => {
-                setArmedRemoteSwitch(prev => {
-                  if (!prev.has(sessionId)) return prev;
-                  const next = new Set(prev);
-                  next.delete(sessionId);
-                  return next;
-                });
-              }}
-              onToggleRemoteControl={(sessionId) => {
-                ws.send({ type: 'session:remote-control', session_id: sessionId });
-              }}
+              onRequestRemote={sessionMainHandlers.onRequestRemote}
+              onCancelRemote={sessionMainHandlers.onCancelRemote}
+              onToggleRemoteControl={sessionMainHandlers.onToggleRemoteControl}
               onOpenSpaces={() => setMode('spaces')}
             />
           </PlanOpenContext.Provider>
@@ -1381,6 +1762,31 @@ export function App() {
               }}
             />
           )}
+          {mode === 'tasks' && (
+            <TasksView
+              tasks={tasks}
+              sessions={sessions}
+              workspaces={workspaces}
+              ws={ws}
+              activeTaskId={activeTaskId}
+              activeSubtaskId={activeSubtaskId}
+              managerItems={managerItems}
+              managerPending={managerPending}
+              onManagerMount={onManagerMount}
+              onManagerSend={onManagerSend}
+              onCreateSubtask={onCreateSubtask}
+              onSelectTask={(taskId) => { setActiveTaskId(taskId); setActiveSubtaskId(null); }}
+              onSelectSubtask={(taskId, subtaskId) => { setActiveTaskId(taskId); setActiveSubtaskId(subtaskId); }}
+              subtaskMain={subtaskMain}
+              onOpenSubtaskSession={(subtaskId) => {
+                // Secondary affordance: pop the subtask out into full Sessions
+                // mode. The default is the inline SessionMain (`subtaskMain`).
+                setActiveSessionId(subtaskId);
+                markSessionViewed(subtaskId);
+                setMode('sessions');
+              }}
+            />
+          )}
           {mode === 'bots' && (
             <BotsView
               bots={bots}
@@ -1393,7 +1799,7 @@ export function App() {
           return (
           <>
             {sheetVisible && viewState !== 'workbench' && (
-              <Splitter side="right" varName="--sheet-w" base={440} min={300} max={800} invert />
+              <Splitter side="right" varName="--sheet-w" base={600} min={420} max={1080} invert />
             )}
             <Sheet
               tabs={wbTabs}
@@ -1436,41 +1842,98 @@ export function App() {
                     </div>
                   );
                 }
+                if (t.kind === 'new-workspace') {
+                  return (
+                    <NewWorkspacePanel
+                      workspaceRoot={systemConfig?.workspace_root ?? '~/Coding'}
+                      onChange={() => void loadWorkspaces().then(setWorkspaces)}
+                      onClose={() => sheetActions.closeTab(t.id)}
+                    />
+                  );
+                }
+                if (t.kind === 'workspace') {
+                  const wsForTab = workspaces.find(w => w.id === t.wsId) ?? null;
+                  return (
+                    <WorkspaceDetailBody
+                      workspace={wsForTab}
+                      ws={ws}
+                      systemConfig={systemConfig}
+                      onChange={() => void loadWorkspaces().then(setWorkspaces)}
+                      onCreateWorktreeSession={(input) => {
+                        ws.send({
+                          type: 'session:create',
+                          workspace_id: input.workspaceId,
+                          executor: input.executor,
+                          approval_mode: 'auto',
+                          mode: 'worktree',
+                          ...(input.baseBranch ? { base_branch: input.baseBranch } : {}),
+                          ...(input.branch ? { branch: input.branch } : {}),
+                        });
+                      }}
+                    />
+                  );
+                }
                 return null;
               }}
             />
           </>
           );
         })()}
-        {mode === 'sessions' && inspectorTab !== null && (
+        {((sessionViewActive || inspectorTab === 'workspaces' || inspectorTab === 'manager') && workbenchActive) && inspectorTab !== null && (
           <>
             <Splitter side="right" varName="--inspector-w" base={280} min={220} max={500} invert />
-            <Inspector
-              tab={inspectorTab}
-              workingTreeId={defaultWorkingTreeIdFor(activeSession)}
-              workingTrees={workingTrees}
-              onOpenFile={(rel, perm) => {
-                const sess = activeSession;
-                const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
-                const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
-                if (!wt) return;
-                const abs = `${wt.path}/${rel}`;
-                void openFileInSheet(abs, perm);
-              }}
-              onOpenDiff={(rel, perm, scope) => { void openDiffInSheet(rel, perm, scope); }}
-              canCommit={!!activeSession}
-              onComposePrompt={text => { if (activeSessionId) injectComposerDraft(activeSessionId, text); }}
-            />
+            {inspectorTab === 'manager' && subtaskActive && activeManagerTask ? (
+              <ManagerInspector
+                task={activeManagerTask}
+                workspaces={workspaces}
+                items={managerItems}
+                pending={managerPending}
+                onMount={onManagerMount}
+                onSend={onManagerSend}
+              />
+            ) : inspectorTab === 'workspaces' ? (
+              <WorkspacesInspector
+                workspaces={workspaces}
+                selectedWsId={selectedWsId}
+                openWsIds={openWsIds}
+                onOpenWorkspace={openWorkspaceInSheet}
+                onChange={() => void loadWorkspaces().then(setWorkspaces)}
+                onNewWorkspace={openNewWorkspaceInSheet}
+              />
+            ) : inspectorTab === 'manager' ? (
+              // Manager tab but no subtask/task context yet — render nothing
+              // (the dock button only appears for subtasks, so this is rare).
+              null
+            ) : (
+              <Inspector
+                tab={inspectorTab}
+                workingTreeId={defaultWorkingTreeIdFor(activeSession)}
+                workingTrees={workingTrees}
+                onOpenFile={(rel, perm) => {
+                  const sess = activeSession;
+                  const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
+                  const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
+                  if (!wt) return;
+                  const abs = `${wt.path}/${rel}`;
+                  void openFileInSheet(abs, perm);
+                }}
+                onOpenDiff={(rel, perm, scope) => { void openDiffInSheet(rel, perm, scope); }}
+                canCommit={!!activeSession}
+                onComposePrompt={text => { if (activeSessionId) injectComposerDraft(activeSessionId, text); }}
+              />
+            )}
           </>
         )}
         <Dock
           inspectorTab={inspectorTab}
           onToggleInspector={toggleInspector}
-          inspectorDisabled={mode !== 'sessions'}
+          inspectorDisabled={!sessionViewActive}
+          workspacesDisabled={!workbenchActive}
+          managerVisible={subtaskActive}
           hasTerminal={terminalDockActive}
           hasSettings={wbTabs.some(t => t.kind === 'settings')}
           onToggleWbTab={toggleWbTabKind}
-          wbDisabled={mode !== 'sessions'}
+          wbDisabled={!workbenchActive}
           onOpenSearch={() => setPaletteOpen(true)}
           inboxItems={inboxItems}
           sessionName={sid => {

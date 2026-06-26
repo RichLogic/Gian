@@ -184,7 +184,7 @@
   background: var(--warn-soft);
   border-radius: var(--r-1);
   letter-spacing: 0.02em;
-  text-transform: uppercase;
+  text-transform: none;
 }
 
 /* ---------- Buttons ---------- */
@@ -347,7 +347,7 @@
   font-family: var(--font-mono);
   font-size: 10.5px; font-weight: 600;
   color: var(--text-3);
-  text-transform: uppercase; letter-spacing: 0.08em;
+  text-transform: none; letter-spacing: 0.08em;
 }
 .fcard-body {
   padding: 4px 14px 14px;

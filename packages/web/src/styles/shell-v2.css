@@ -206,7 +206,7 @@
   color: var(--text-inv);
   font: 500 10.5px/1 var(--font-mono);
   letter-spacing: 0.06em;
-  text-transform: uppercase;
+  text-transform: none;
   padding: 4px 7px 4px 6px;
   border-radius: var(--r-1);
   box-shadow: var(--shadow-2);
@@ -434,7 +434,7 @@
   gap: 10px;
   padding: 8px 12px 6px;
   font: 700 10px/1 var(--font-mono);
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.07em;
   color: var(--text-3);
   border-bottom: 1px solid var(--hairline);
@@ -464,7 +464,7 @@
 .inbox-pop .cat {
   flex: none;
   font: 700 9.5px/1 var(--font-mono);
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.05em;
   padding: 2px 5px;
   border-radius: var(--r-1);

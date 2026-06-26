@@ -4,7 +4,12 @@ import { loadTree, loadChanged, loadAllFiles, stageFile, unstageFile } from '../
 import type { TreeEntry, ChangedEntry, WorkingTree, ChangeScope } from '../api.js';
 import { useT } from '../i18n/index.js';
 
-export type InspectorTab = 'files' | 'changes';
+// 'workspaces' and 'manager' are rendered by App.tsx (they need workspace /
+// Task-Manager data + callbacks the generic Inspector doesn't carry); the
+// generic Inspector below only handles the working-tree-scoped 'files' /
+// 'changes' tabs. 'manager' is the compact Task-Manager panel shown in the
+// right rail when a subtask is selected in Tasks mode.
+export type InspectorTab = 'files' | 'changes' | 'workspaces' | 'manager';
 
 function Icon({ d, size = 13, stroke = 1.6 }: { d: string; size?: number; stroke?: number }) {
   return (
@@ -56,6 +61,9 @@ interface Props {
 }
 
 export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, onOpenDiff, canCommit, onComposePrompt }: Props) {
+  // 'workspaces' is handled upstream in App.tsx — this component only renders the
+  // working-tree-scoped tabs.
+  if (tab === 'workspaces') return null;
   if (tab === 'files') return <FilesInspector workingTreeId={workingTreeId} workingTrees={workingTrees} onOpenFile={onOpenFile} />;
   return <ChangesInspector workingTreeId={workingTreeId} onOpenDiff={onOpenDiff} canCommit={canCommit} onComposePrompt={onComposePrompt} />;
 }

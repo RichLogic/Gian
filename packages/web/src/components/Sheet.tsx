@@ -5,7 +5,7 @@ import { parseUnifiedDiff } from '../transcript/apply.js';
 import { Splitter } from './Splitter.js';
 import { AppIcon } from './AppIcon.js';
 
-export type SheetTabKind = 'file' | 'term' | 'settings' | 'plan' | 'diff';
+export type SheetTabKind = 'file' | 'term' | 'settings' | 'plan' | 'diff' | 'workspace' | 'new-workspace';
 export type FileViewMode = 'source' | 'preview';
 
 /** Target chosen from a file tab's "Open with…" menu, or via the smart Open
@@ -23,8 +23,11 @@ export interface SheetTab {
   pane: 0 | 1;
   name: string;
   kind: SheetTabKind;
-  icoKind: 'md' | 'ts' | 'tsx' | 'json' | 'css' | 'term' | 'gear' | 'plan' | 'diff' | 'img';
+  icoKind: 'md' | 'ts' | 'tsx' | 'json' | 'css' | 'term' | 'gear' | 'plan' | 'diff' | 'img' | 'grid';
   ico: string;
+  /** Workspace id this tab renders (for kind === 'workspace'). The body is
+   *  provided by the host via `renderTab` (it needs workspace data + ws conn). */
+  wsId?: string;
   /** When true, this tab is a "preview" (italic name, replaced by next preview).
    *  Double-click or pin to promote to permanent. */
   preview?: boolean;
