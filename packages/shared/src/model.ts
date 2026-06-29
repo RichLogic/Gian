@@ -135,6 +135,11 @@ export interface Session {
    *  per-Task Manager inlines it into its system prompt. Null until the
    *  summarizer runs (and for non-subtask sessions). */
   summary: string | null;
+  /** User-set completion flag for a `type='subtask'` session, kept SEPARATE
+   *  from `status` (the turn lifecycle). Null = not completed; an ISO string =
+   *  the moment the user marked it complete. Set via `complete`, cleared via
+   *  `reopen`. Finishing a turn never touches this (migration 027). */
+  completed_at: string | null;
   created_at: string;
   updated_at: string;
 }

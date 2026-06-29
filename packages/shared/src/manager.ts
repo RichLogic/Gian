@@ -19,3 +19,61 @@ export function stripManagerSystemPrefix(text: string): string {
   if (close === -1) return text;
   return text.slice(close + MANAGER_SYS_CLOSE.length).replace(/^\s+/, '');
 }
+
+// ── Manager `create_subtask` proposal protocol (spec 2026-06-28 §A2) ──
+// codex-proxy has no tool/schema channel for the Manager, so it PROPOSES a
+// subtask by emitting an ASCII-delimited block in its reply; the web parses it
+// into an editable confirm card and hides the raw block from the transcript.
+export const CREATE_SUBTASK_OPEN = '<<gian:create_subtask>>';
+export const CREATE_SUBTASK_CLOSE = '<</gian:create_subtask>>';
+
+export interface CreateSubtaskProposal {
+  /** Short title (optional). */
+  name?: string;
+  /** Workspace name or absolute path — resolved to a workspace_id on the web. */
+  workspace?: string;
+  executor?: 'claude' | 'codex';
+  /** Initial instruction for the subtask; required (empty proposals ignored). */
+  prompt: string;
+}
+
+/** Parse the LAST `<<gian:create_subtask>> {json} <</gian:create_subtask>>`
+ *  block from Manager assistant text. Returns null when absent, malformed, or
+ *  missing a non-empty `prompt` (so half-typed/streaming blocks don't render a
+ *  card prematurely). */
+export function parseCreateSubtaskProposal(text: string): CreateSubtaskProposal | null {
+  const open = text.lastIndexOf(CREATE_SUBTASK_OPEN);
+  if (open === -1) return null;
+  const close = text.indexOf(CREATE_SUBTASK_CLOSE, open);
+  if (close === -1) return null;
+  const json = text.slice(open + CREATE_SUBTASK_OPEN.length, close).trim();
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(json) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const prompt = typeof obj.prompt === 'string' ? obj.prompt : '';
+  if (!prompt.trim()) return null;
+  const executor = obj.executor === 'claude' || obj.executor === 'codex' ? obj.executor : undefined;
+  return {
+    prompt,
+    ...(typeof obj.name === 'string' && obj.name.trim() ? { name: obj.name } : {}),
+    ...(typeof obj.workspace === 'string' && obj.workspace.trim() ? { workspace: obj.workspace } : {}),
+    ...(executor ? { executor } : {}),
+  };
+}
+
+/** Remove every create_subtask block from Manager assistant text so the user
+ *  sees clean prose, not the raw JSON block. */
+export function stripCreateSubtaskBlocks(text: string): string {
+  let out = text;
+  for (;;) {
+    const open = out.indexOf(CREATE_SUBTASK_OPEN);
+    if (open === -1) break;
+    const close = out.indexOf(CREATE_SUBTASK_CLOSE, open);
+    if (close === -1) { out = out.slice(0, open).trimEnd(); break; }
+    out = out.slice(0, open) + out.slice(close + CREATE_SUBTASK_CLOSE.length);
+  }
+  return out.replace(/\n{3,}/g, '\n\n').trim();
+}

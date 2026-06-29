@@ -75,6 +75,17 @@ body[data-accent="azure"]   { --accent-h: 230; --accent-c: 0.13; }
 body[data-accent="ink"]     { --accent-h: 270; --accent-c: 0.13; }
 body[data-accent="plum"]    { --accent-h: 320; --accent-c: 0.14; }
 
+/* ---------- Status-icon gradient (spec 2026-06-28 §H) ----------
+   Three analogous oklch stops swept around the accent hue, plus a glow color.
+   Computed from --accent-h / --accent-c and the per-theme --gL1/2/3 above, so
+   the status icons re-tint for every accent + theme automatically. */
+body {
+  --g1:    oklch(var(--gL1) calc(var(--accent-c) + 0.04) calc(var(--accent-h) - 46));
+  --g2:    oklch(var(--gL2) calc(var(--accent-c) + 0.06) calc(var(--accent-h) + 8));
+  --g3:    oklch(var(--gL3) calc(var(--accent-c) + 0.04) calc(var(--accent-h) + 60));
+  --gGlow: oklch(var(--gL2) var(--accent-c) calc(var(--accent-h) + 8) / 0.6);
+}
+
 /* ---------- Font scale per zone ----------
    Each zone container redeclares --fz-* with its own --zone-scale,
    so each rule re-evaluates the calc() at the matching element. The
@@ -172,6 +183,8 @@ body[data-theme="light"] {
   --accent-text:   oklch(0.42 var(--accent-c) var(--accent-h));
   --accent-soft:   oklch(0.55 var(--accent-c) var(--accent-h) / 0.12);
   --accent-ring:   oklch(0.55 var(--accent-c) var(--accent-h) / 0.30);
+  /* Status-icon gradient lightness band (spec 2026-06-28 §H1). */
+  --gL1: 0.66; --gL2: 0.74; --gL3: 0.58;
 
   --ok:    oklch(0.58 0.13 150);
   --ok-soft: oklch(0.58 0.13 150 / 0.13);
@@ -211,6 +224,7 @@ body[data-theme="warm"] {
   --accent-text:   oklch(0.40 var(--accent-c) var(--accent-h));
   --accent-soft:   oklch(0.52 var(--accent-c) var(--accent-h) / 0.14);
   --accent-ring:   oklch(0.52 var(--accent-c) var(--accent-h) / 0.32);
+  --gL1: 0.64; --gL2: 0.73; --gL3: 0.56;
 
   --ok:    oklch(0.55 0.13 150);
   --ok-soft: oklch(0.55 0.13 150 / 0.14);
@@ -250,6 +264,7 @@ body[data-theme="dark"] {
   --accent-text:   oklch(0.80 var(--accent-c) var(--accent-h));
   --accent-soft:   oklch(0.72 var(--accent-c) var(--accent-h) / 0.18);
   --accent-ring:   oklch(0.72 var(--accent-c) var(--accent-h) / 0.40);
+  --gL1: 0.70; --gL2: 0.80; --gL3: 0.62;
 
   --ok:    oklch(0.75 0.14 150);
   --ok-soft: oklch(0.75 0.14 150 / 0.16);

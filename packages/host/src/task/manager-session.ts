@@ -64,15 +64,16 @@ export function getOrCreateRootWorkspace(db: Db): RootWorkspaceRow {
 }
 
 /**
- * Build the Manager's system prompt: who it is (read-only project manager,
- * suggest-don't-execute), the Task's subtask metadata inlined (name / status /
- * summary), and signposts to the `.ai/` dirs + workspaces under the root so
- * the Manager can read on demand with Codex's native file tools.
+ * Build the Manager's system prompt: who it is (writable project
+ * planner/orchestrator that proposes — but does not personally do — work), the
+ * Task's subtask metadata inlined (name / completion / summary), the ASCII
+ * `create_subtask` proposal protocol, and signposts to the `.ai/` dirs +
+ * workspaces under the root.
  *
- * Per PRD §93-98 the prompt carries SOFT guidance only — the read-only
- * boundary is the sandbox, not this text. We do NOT restate "please don't
- * write" as if it were a control; the sandbox already removes write / command
- * tools entirely.
+ * Spec 2026-06-28 §A1/§A2 (supersedes PRD-v3 §A1): the Manager runs
+ * sandbox:'workspace-write' so it CAN edit/run — the "doesn't do the work
+ * itself" boundary is a soft prompt convention (propose Subtasks, let the user
+ * confirm), not a sandbox lock.
  */
 export function buildManagerSystemPrompt(args: {
   task: Task;
@@ -94,7 +95,10 @@ export function buildManagerSystemPrompt(args: {
         // Subtask achieved without reading transcripts.
         const summary = s.summary?.trim();
         const summaryPart = summary ? ` — ${summary}` : '';
-        return `- ${name} [${s.executor}/${s.status}]${summaryPart}`;
+        // Show user-completion (completed_at), not the turn `status` — the
+        // Manager plans around what's done, not whether a turn is mid-flight.
+        const done = s.completed_at ? 'completed' : 'open';
+        return `- ${name} [${s.executor}/${done}]${summaryPart}`;
       });
 
   const workspaceLines = workspacePaths.length === 0
@@ -102,15 +106,21 @@ export function buildManagerSystemPrompt(args: {
     : workspacePaths.map(p => `- ${p}  (read its \`.ai/\` dir: ${p}/.ai/)`);
 
   return [
-    'You are the read-only project Manager for a Gian Task.',
+    'You are the project Manager for a Gian Task — its planner and orchestrator.',
     '',
-    'Your job: help the user understand and plan this Task across its',
-    'workspaces. You can read and grep any file under the project root with',
-    'your native file tools. You propose; you do not execute. When you want a',
-    'unit of work done, write a prose `create_subtask` suggestion describing',
-    'the workspace, executor, and an initial prompt — the user reviews it and',
-    'creates the Subtask. You cannot create, start, or complete Subtasks',
-    'yourself, nor edit files or run commands.',
+    'You can read, grep, write files, and run commands anywhere under the',
+    'project root with your native tools. But you do NOT do the coding work',
+    'yourself: to get a unit of work done you PROPOSE a Subtask and the user',
+    'confirms it. Emit each proposal as exactly this ASCII-delimited block:',
+    '',
+    '<<gian:create_subtask>>',
+    '{ "name": "<short title>", "workspace": "<workspace name or absolute path>", "executor": "codex|claude", "prompt": "<initial instruction for the subtask>" }',
+    '<</gian:create_subtask>>',
+    '',
+    'The user reviews/edits that card and creates the Subtask; it then runs with',
+    'your `prompt` as its first message. Do NOT create, start, or complete',
+    'Subtasks yourself (e.g. by calling the API) — always propose and let the',
+    'user confirm.',
     '',
     `# Task: ${task.name}`,
     task.description ? task.description : '(no description)',

@@ -337,13 +337,22 @@ export async function createSubtask(
 }
 
 /** PRD-v3 P3 — mark a Subtask's session done. The host flips status to 'done'
- *  and runs the summarizer, then broadcasts `session:updated` so the row
- *  reflects it. One-way (no reopen endpoint). Fail-soft. */
+ *  (sets `completed_at`, spec §B) and runs the summarizer, then broadcasts
+ *  `session:updated` so the row reflects it. Fail-soft. */
 export async function completeSubtask(sessionId: string): Promise<void> {
   try {
     await fetch(`/api/sessions/${sessionId}/complete`, { method: 'POST' });
   } catch {
     /* fail-soft: the row stays as-is; the broadcast would have updated it */
+  }
+}
+
+/** Reopen a completed Subtask (spec §B) — clears `completed_at`. Fail-soft. */
+export async function reopenSubtask(sessionId: string): Promise<void> {
+  try {
+    await fetch(`/api/sessions/${sessionId}/reopen`, { method: 'POST' });
+  } catch {
+    /* fail-soft */
   }
 }
 

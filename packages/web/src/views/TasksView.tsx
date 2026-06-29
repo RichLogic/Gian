@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Executor, Session, Task, Workspace } from '@gian/shared';
-import { completeSubtask } from '../api.js';
+import { toast } from '../feedback.js';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import { Transcript } from '../transcript/Transcript.js';
@@ -23,7 +23,16 @@ const I = {
   search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-4.3-4.3',
   send: 'M5 12l14-7-5 17-3-7z',
   refresh: 'M3 12a9 9 0 0 1 15.5-6.3L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15.5 6.3L3 16 M3 21v-5h5',
+  caretRight: 'M9 6l6 6-6 6',
+  caretDown: 'M6 9l6 6 6-6',
 };
+
+/** A subtask "needs the user" (待处理, spec §D/§E): waiting on input (pending)
+ *  or a finished turn (done/error) the user hasn't read. */
+function subtaskNeedsAttention(s: Session): boolean {
+  return s.status === 'pending'
+    || ((s.status === 'done' || s.status === 'error') && s.unread === 1);
+}
 
 function Icon({ d, size = 14, stroke = 1.8 }: { d: string; size?: number; stroke?: number }) {
   return (
@@ -74,6 +83,7 @@ export function TasksView({
   activeSubtaskId,
   managerItems,
   managerPending,
+  managerProposal,
   subtaskMain,
   onSelectTask,
   onSelectSubtask,
@@ -93,6 +103,8 @@ export function TasksView({
   managerItems: TranscriptItem[];
   /** Whether the Manager has a turn in flight. */
   managerPending: boolean;
+  /** Latest Manager-proposed subtask parsed from its reply (spec §A2). */
+  managerProposal: Partial<NewSubtaskDraft> | null;
   /** A Subtask IS a Session: when one is selected, App builds the full
    *  <SessionMain> element (the same one CodingView renders in Sessions mode,
    *  wired to the same App-level handlers rebound to the subtask's id) and
@@ -142,6 +154,7 @@ export function TasksView({
         workspaces={workspaces}
         managerItems={managerItems}
         managerPending={managerPending}
+        managerProposal={managerProposal}
         onOpenSubtaskSession={onOpenSubtaskSession}
         onManagerMount={onManagerMount}
         onManagerSend={onManagerSend}
@@ -214,6 +227,7 @@ function TasksList({
   const t = useT();
   const [creating, setCreating] = useState(false);
   const [search, setSearch] = useState('');
+  const [doneOpen, setDoneOpen] = useState(false); // Done group collapsed by default (spec §G)
 
   // Archived tasks are hidden from the list (they're a soft-delete state).
   const visible = useMemo(() => {
@@ -239,28 +253,35 @@ function TasksList({
     setCreating(false);
   }
 
-  const renderGroup = (group: Task[]) =>
+  // A Task has an active subtask turn when any of its subtasks is running/
+  // pending — the host blocks marking the Task done in that case (spec §G); we
+  // pre-check here only to surface a toast (the real guard is host-side).
+  const hasActiveSubtask = (taskId: string) =>
+    sessions.some(s => s.task_id === taskId && s.type === 'subtask'
+      && (s.status === 'running' || s.status === 'pending'));
+
+  // Open tasks (spec §C): EVERY one is expanded with its subtasks nested, so
+  // multiple concurrent tasks stay visible at once.
+  const renderOpen = (group: Task[]) =>
     group.map(task => {
       const childSubs = subtasksFor(sessions, task.id);
-      // Prototype semantics: the SELECTED task is the expanded one — its
-      // subtasks render nested beneath it. No caret/triangle.
-      const expanded = task.id === activeTaskId;
       return (
         <div key={task.id} className="tasks-list-task">
           <TaskRow
             task={task}
             active={task.id === activeTaskId && !activeSubtaskId}
             subCount={childSubs.length}
+            needsAttention={childSubs.some(subtaskNeedsAttention)}
             onSelect={() => onSelectTask(task.id)}
-            onToggleDone={() =>
-              ws.send({
-                type: 'task:update',
-                task_id: task.id,
-                status: task.status === 'done' ? 'open' : 'done',
-              })
-            }
+            onToggleDone={() => {
+              if (hasActiveSubtask(task.id)) {
+                toast({ kind: 'error', message: t('tasks.done.blocked') });
+                return;
+              }
+              ws.send({ type: 'task:update', task_id: task.id, status: 'done' });
+            }}
           />
-          {expanded && childSubs.map(st => (
+          {childSubs.map(st => (
             <SubtaskRow
               key={st.id}
               subtask={st}
@@ -268,7 +289,7 @@ function TasksList({
               onSelect={() => onSelectSubtask(task.id, st.id)}
             />
           ))}
-          {expanded && childSubs.length === 0 && (
+          {childSubs.length === 0 && (
             <div className="tasks-empty-subs">{t('tasks.subtasks.empty')}</div>
           )}
         </div>
@@ -299,28 +320,80 @@ function TasksList({
         </div>
       </div>
 
+      {/* No "Open" header (spec §F) — active tasks list directly. */}
       <div className="sb-scroll">
         {creating && (
           <NewTaskForm onSubmit={createTaskNow} onCancel={() => setCreating(false)} />
         )}
-
-        <div className="sb-group">
-          <span>{t('tasks.group.open')}</span>
-          <span className="count">{open.length}</span>
-        </div>
-        {renderGroup(open)}
-
-        <div className="sb-group" style={{ marginTop: 14 }}>
-          <span>{t('tasks.group.done')}</span>
-          <span className="count">{done.length}</span>
-        </div>
-        {renderGroup(done)}
-
+        {renderOpen(open)}
         {visible.length === 0 && !creating && (
           <p className="tasks-list-empty">{t('tasks.empty')}</p>
         )}
       </div>
+
+      {/* Done tasks (spec §G): pinned to the bottom, collapsed by default,
+          reopen-only — no opening / messaging / other actions. */}
+      {done.length > 0 && (
+        <div className="tasks-done-pinned">
+          <button
+            className="sb-group done-group-head"
+            onClick={() => setDoneOpen(o => !o)}
+            aria-expanded={doneOpen}
+          >
+            <Icon d={doneOpen ? I.caretDown : I.caretRight} size={12} />
+            <span>{t('tasks.group.done')}</span>
+            <span className="count">{done.length}</span>
+          </button>
+          {doneOpen && (
+            <div className="done-group-body">
+              {done.map(task => (
+                <DoneTaskRow
+                  key={task.id}
+                  task={task}
+                  needsAttention={subtasksFor(sessions, task.id).some(subtaskNeedsAttention)}
+                  onReopen={() => ws.send({ type: 'task:update', task_id: task.id, status: 'open' })}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </aside>
+  );
+}
+
+/**
+ * A completed Task in the pinned Done group (spec §G). Reopen-only: the round
+ * toggle returns it to the active area; the row is NOT selectable (no opening /
+ * messaging) and shows no subtasks.
+ */
+function DoneTaskRow({ task, needsAttention, onReopen }: {
+  task: Task;
+  /** Spec §G / Codex review: a done Task still surfaces the rollup dot when a
+   *  child subtask is 待处理, so active/unread subtasks aren't lost in the
+   *  collapsed Done group. */
+  needsAttention: boolean;
+  onReopen: () => void;
+}) {
+  const t = useT();
+  return (
+    <div className="rail-item task-row done-task-row">
+      <button
+        className="done-toggle done"
+        title={t('tasks.reopen')}
+        onClick={e => { e.stopPropagation(); onReopen(); }}
+      >
+        <Icon d={I.check} size={12} stroke={2.4} />
+      </button>
+      <div className="ri-body">
+        <div className="ri-row1">
+          <span className="ri-title">{task.name}</span>
+          {needsAttention && (
+            <span className="task-attn-dot" title={t('tasks.needsAttention')} aria-label={t('tasks.needsAttention')} />
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -333,12 +406,15 @@ function TaskRow({
   task,
   active,
   subCount,
+  needsAttention,
   onSelect,
   onToggleDone,
 }: {
   task: Task;
   active: boolean;
   subCount: number;
+  /** Spec §E: any subtask is 待处理 → show a solid accent rollup dot. */
+  needsAttention: boolean;
   onSelect: () => void;
   onToggleDone: () => void;
 }) {
@@ -364,6 +440,11 @@ function TaskRow({
       <div className="ri-body">
         <div className="ri-row1">
           <span className="ri-title">{task.name}</span>
+          {/* Spec §E: solid accent rollup dot — no gradient, distinct from the
+             subtask status glyphs — when any subtask needs the user. */}
+          {needsAttention && (
+            <span className="task-attn-dot" title={t('tasks.needsAttention')} aria-label={t('tasks.needsAttention')} />
+          )}
         </div>
         <div className="ri-row2">
           <span className="ri-sub" style={{ flex: 1 }}>
@@ -377,10 +458,11 @@ function TaskRow({
 }
 
 /**
- * Nested subtask row. Ported from the prototype's SubtaskRow — a
- * `.rail-item.subtask-row` indented under its parent, with a square done
- * toggle (distinguishes it from the parent task's round one), the executor +
- * runtime/status subtitle, and the shared session `StatusIcon` (idle = blank).
+ * Nested subtask row (spec 2026-06-28 §B/§D). `.rail-item.subtask-row` indented
+ * under its parent. No square toggle anymore — completion (`completed_at`) is a
+ * USER flag, separate from turn `status`, set from the breadcrumb session menu;
+ * a completed subtask renders struck-through + greyed in place. The shared
+ * `StatusIcon` (right) shows turn state with merged unread/"待处理".
  */
 function SubtaskRow({
   subtask,
@@ -392,18 +474,10 @@ function SubtaskRow({
   onSelect: () => void;
 }) {
   const t = useT();
-  // A Subtask IS a Session: "done" maps to status==='done'. Completing is
-  // one-way (POST /api/sessions/:id/complete → host flips status + summarizes,
-  // then broadcasts session:updated so this row refreshes itself). There is no
-  // reopen endpoint, so clicking a done toggle is a no-op.
-  const done = subtask.status === 'done';
-  function toggleDone() {
-    if (done) return; // one-way: no reopen
-    void completeSubtask(subtask.id);
-  }
+  const done = subtask.completed_at != null;
   return (
     <div
-      className={`rail-item subtask-row status-${subtask.status}${active ? ' active' : ''}`}
+      className={`rail-item subtask-row status-${subtask.status}${done ? ' subtask-done' : ''}${active ? ' active' : ''}`}
       role="button"
       tabIndex={0}
       onClick={onSelect}
@@ -411,30 +485,16 @@ function SubtaskRow({
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); }
       }}
     >
-      <button
-        className={`done-toggle subtask-done-toggle${done ? ' done' : ''}`}
-        title={done ? t('tasks.subtask.done') : t('tasks.subtask.markDone')}
-        disabled={done}
-        onClick={e => { e.stopPropagation(); toggleDone(); }}
-      >
-        <Icon d={I.check} size={12} stroke={2.4} />
-      </button>
       <div className="ri-body">
         <div className="ri-row1">
           <span className="ri-title">{subtask.name || t('coding.session.untitled')}</span>
-          {/* Same indicator as the Sessions sidebar: nothing when idle/new,
-             spinner while running, ✓ when done, ! on error — no fixed circle. */}
-          <StatusIcon status={subtask.status} />
-          {subtask.unread === 1 && !active && (
-            <span className="ri-unread-dot" title={t('coding.session.unread')} aria-label={t('coding.session.unread')} />
-          )}
+          {/* Unread is merged into the StatusIcon (spec §D) — no separate dot. */}
+          <StatusIcon status={subtask.status} unread={subtask.unread === 1 && !active} />
         </div>
         <div className="ri-row2">
           <span className={`ri-exec ${subtask.executor}`}>
             {subtask.executor === 'claude' ? 'Claude' : 'Codex'}
           </span>
-          <span className="ri-dot-sep">·</span>
-          <span className="ri-sub">{subtask.runtime_mode ?? subtask.status}</span>
         </div>
       </div>
     </div>
@@ -448,6 +508,7 @@ function TaskDetail({
   workspaces,
   managerItems,
   managerPending,
+  managerProposal,
   onOpenSubtaskSession,
   onManagerMount,
   onManagerSend,
@@ -459,6 +520,7 @@ function TaskDetail({
   workspaces: Workspace[];
   managerItems: TranscriptItem[];
   managerPending: boolean;
+  managerProposal: Partial<NewSubtaskDraft> | null;
   onOpenSubtaskSession: (subtaskId: string) => void;
   onManagerMount: (taskId: string) => void;
   onManagerSend: (taskId: string, text: string) => void;
@@ -508,6 +570,7 @@ function TaskDetail({
       workspaces={workspaces}
       items={managerItems}
       pending={managerPending}
+      proposal={managerProposal}
       onMount={onManagerMount}
       onSend={onManagerSend}
       onCreateSubtask={onCreateSubtask}
@@ -535,6 +598,7 @@ function ManagerPanel({
   onMount,
   onSend,
   onCreateSubtask,
+  proposal,
   compact = false,
 }: {
   task: Task;
@@ -544,6 +608,9 @@ function ManagerPanel({
   onMount: (taskId: string) => void;
   onSend: (taskId: string, text: string) => void;
   onCreateSubtask: (taskId: string, draft: NewSubtaskDraft) => void;
+  /** Latest Manager-proposed subtask (spec §A2), parsed from its reply and
+   *  prefilled into the confirm card; the card auto-opens on a new proposal. */
+  proposal?: Partial<NewSubtaskDraft> | null;
   /** Compact = embedded in the right Inspector rail (zone 4) when a subtask is
    *  selected. Drops the `.main-head` (the wrapping ManagerInspector supplies
    *  its own header) and the create-subtask affordance, matching the design's
@@ -553,11 +620,20 @@ function ManagerPanel({
   const t = useT();
   const [draft, setDraft] = useState('');
   const [showNewSubtask, setShowNewSubtask] = useState(false);
+  const [dismissedPrompt, setDismissedPrompt] = useState<string | null>(null);
 
   // Ensure the Manager session + hydrate its transcript when this Task opens.
   useEffect(() => {
     onMount(task.id);
   }, [task.id, onMount]);
+
+  // Auto-open the confirm card when the Manager proposes a (new) subtask
+  // (spec §A2). Dismissing/submitting suppresses re-open for that same prompt.
+  useEffect(() => {
+    if (!compact && proposal?.prompt && proposal.prompt !== dismissedPrompt) {
+      setShowNewSubtask(true);
+    }
+  }, [compact, proposal, dismissedPrompt]);
 
   function send() {
     const text = draft.trim();
@@ -575,16 +651,13 @@ function ManagerPanel({
             <span className="manager-task-name">{task.name}</span>
           </div>
           <div className="main-head-r">
+            {/* No task-status pill (spec §F — "Open" removed). */}
             <button
               className="btn sm ghost"
               onClick={() => setShowNewSubtask(s => !s)}
             >
               {t('tasks.manager.createSubtask')}
             </button>
-            <span className="session-status">
-              <span className={`status-dot${task.status === 'open' ? ' run' : ''}`} />
-              <span className="status-label">{task.status}</span>
-            </span>
           </div>
         </div>
       )}
@@ -596,11 +669,16 @@ function ManagerPanel({
       {!compact && showNewSubtask && (
         <NewSubtaskForm
           workspaces={workspaces}
+          prefill={proposal ?? undefined}
           onSubmit={d => {
             onCreateSubtask(task.id, d);
             setShowNewSubtask(false);
+            setDismissedPrompt(proposal?.prompt ?? null);
           }}
-          onCancel={() => setShowNewSubtask(false)}
+          onCancel={() => {
+            setShowNewSubtask(false);
+            setDismissedPrompt(proposal?.prompt ?? null);
+          }}
         />
       )}
 

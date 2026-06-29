@@ -59,6 +59,25 @@ export class TaskManager {
     const existing = this.getTask(id);
     if (!existing) throw new Error(`task not found: ${id}`);
 
+    // Host-enforced done guard (spec 2026-06-28 §G / Codex R2 #4): refuse to
+    // mark a Task done while any of its subtasks has a turn running/pending —
+    // those active subtasks would be orphaned in the collapsed Done group.
+    // Enforced here (not just UI) so REST + WS + any client all hit it.
+    // Unread-but-finished subtasks do NOT block.
+    if (input.status === 'done' && existing.status !== 'done') {
+      const active = this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM sessions
+           WHERE task_id = ? AND type = 'subtask' AND status IN ('running', 'pending')`,
+        )
+        .get(id) as { n: number };
+      if (active.n > 0) {
+        throw new Error(
+          `TASK_HAS_ACTIVE_SUBTASKS: ${active.n} subtask(s) still running/pending`,
+        );
+      }
+    }
+
     const sets: string[] = [];
     const params: Record<string, unknown> = { id };
     if (input.name !== undefined) {

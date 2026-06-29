@@ -816,6 +816,45 @@
 .ri-status.err svg path { stroke-linecap: round; }
 .rail-item.active .ri-status { opacity: 1; }
 
+/* Status icon — gradient disc + knockout glyph (spec 2026-06-28 §H).
+   Rendered INSIDE the .ri-status positioning wrapper, so session-row +
+   subtask-row placement is unchanged; only the visual is new. Colours are
+   computed from --g1/2/3 (tokens.css) and re-tint per accent + theme. */
+.gico { position: relative; display: inline-flex; flex: 0 0 auto; width: 18px; height: 18px; }
+.gico .gfill {
+  position: absolute; inset: 0;
+  -webkit-mask-repeat: no-repeat, no-repeat; mask-repeat: no-repeat, no-repeat;
+  -webkit-mask-position: center, center; mask-position: center, center;
+  -webkit-mask-size: contain, contain; mask-size: contain, contain;
+  mask-composite: subtract;
+}
+/* 待处理 (unread / pending) — flowing gradient + breathe + glow */
+.gico.unread .gfill {
+  background: linear-gradient(115deg, var(--g1), var(--g2) 42%, var(--g3) 78%, var(--g1));
+  background-size: 230% 230%;
+  animation: gico-flow 4s ease-in-out infinite;
+  filter: drop-shadow(0 0 4px var(--gGlow));
+}
+.gico.unread { animation: gico-breathe 4s ease-in-out infinite; }
+/* 已读 (read) — solid accent, static */
+.gico.read .gfill { background: var(--accent); }
+/* running — fixed 16px gradient ring, spin only */
+.gico.ring { width: 16px; height: 16px; }
+.gico.ring .gring {
+  position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(from 0deg, var(--g1), var(--g2), var(--g3), var(--g2), var(--g1));
+  -webkit-mask: radial-gradient(closest-side, transparent 56%, #000 59%);
+  mask: radial-gradient(closest-side, transparent 56%, #000 59%);
+  animation: gico-spin 4s linear infinite;
+  filter: drop-shadow(0 0 4px var(--gGlow));
+}
+@keyframes gico-flow { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+@keyframes gico-breathe { 0%, 100% { transform: scale(0.778); } 50% { transform: scale(1); } }
+@keyframes gico-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .gico.unread, .gico.unread .gfill, .gico.ring .gring { animation: none !important; }
+}
+
 /* ---------- User-message position reset ----------
    V2's `.msg.user` is `position: sticky` by default for the pin feature. We
    removed the pin entirely — users found it more confusing than useful — so

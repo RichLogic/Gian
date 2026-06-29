@@ -944,17 +944,18 @@ export class SessionManager {
     // session.approval_mode in DB. Applied only for this startTurn — the next
     // user-initiated send falls back to the session's stored mode.
     //
-    // PRD-v3 P3 — Manager hard read-only: a type='manager' session is the
-    // per-Task read-only Codex manager. EVERY turn is forced to codex
-    // sandbox:'read-only' + approvalPolicy:'never', regardless of
-    // approval_mode or a one-shot bypass. This is the security boundary (the
-    // Manager reads `.ai/` + repo code which may carry prompt-injection); it
-    // is enforced at the sandbox layer, NOT via the system prompt. `never`
-    // means codex never surfaces approvals — there is nothing to approve in a
-    // read-only sandbox (no writes / no command execution available).
+    // Manager is WRITABLE (spec 2026-06-28 §A1, supersedes PRD-v3 §A1's
+    // read-only Manager). A type='manager' session is the per-Task Codex
+    // orchestrator: it may read/write/run within the root workspace (`~/Coding`,
+    // spanning all projects) but does NOT do the coding work itself — it
+    // proposes Subtasks via a confirm-gated `create_subtask` block. EVERY turn
+    // is forced to codex sandbox:'workspace-write' + approvalPolicy:'never'
+    // (regardless of approval_mode / one-shot bypass): `never` because the
+    // Manager panel has no approval-card UI. Risk: writable at the root spans
+    // every project under `~/Coding`.
     const policyParams = session.type === 'manager'
       ? {
-          sandbox: 'read-only' as const,
+          sandbox: 'workspace-write' as const,
           approvalPolicy: 'never' as const,
         }
       : oneShotBypass
@@ -1276,9 +1277,10 @@ export class SessionManager {
   }
 
   /**
-   * Mark a Subtask complete: set the session `done`, then fire the `.ai/`
-   * summarizer in the background. Never blocks — the writeback runs after this
-   * returns and persists `sessions.summary` when it finishes.
+   * Mark a Subtask complete: set the USER completion flag `completed_at`
+   * (NOT `status` — that stays the turn lifecycle, migration 027), then fire
+   * the `.ai/` summarizer in the background. Never blocks. Orthogonal to the
+   * turn: callable even while a turn is running/pending (spec §B2).
    */
   completeSubtask(sessionId: string): void {
     const session = this.getSession(sessionId);
@@ -1287,11 +1289,30 @@ export class SessionManager {
     }
     const now = new Date().toISOString();
     this.db
-      .prepare(`UPDATE sessions SET status = 'done', updated_at = ? WHERE id = ?`)
-      .run(now, sessionId);
-    this.broadcastSessionUpdated(sessionId, { status: 'done', updated_at: now });
+      .prepare(`UPDATE sessions SET completed_at = ?, updated_at = ? WHERE id = ?`)
+      .run(now, now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { completed_at: now, updated_at: now });
 
-    this.runSummarizerInBackground(session, 'done');
+    // `now` is the version token: the writeback only proceeds if completed_at
+    // still equals it (guards reopen, reopen+recomplete, and abandon races).
+    this.runSummarizerInBackground(session, 'done', null, now);
+  }
+
+  /**
+   * Reopen a completed Subtask: clear `completed_at`. No summarizer. The
+   * in-flight summarizer writeback (if any) re-checks `completed_at` before
+   * touching `.ai/` and bails when it sees null (spec §B2 / R2 #3).
+   */
+  reopenSubtask(sessionId: string): void {
+    const session = this.getSession(sessionId);
+    if (session.type !== 'subtask') {
+      throw new Error(`session ${sessionId} is not a subtask (type=${session.type})`);
+    }
+    const now = new Date().toISOString();
+    this.db
+      .prepare(`UPDATE sessions SET completed_at = NULL, updated_at = ? WHERE id = ?`)
+      .run(now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { completed_at: null, updated_at: now });
   }
 
   /**
@@ -1306,11 +1327,11 @@ export class SessionManager {
     }
     const now = new Date().toISOString();
     this.db
-      .prepare(`UPDATE sessions SET status = 'done', updated_at = ? WHERE id = ?`)
-      .run(now, sessionId);
-    this.broadcastSessionUpdated(sessionId, { status: 'done', updated_at: now });
+      .prepare(`UPDATE sessions SET completed_at = ?, updated_at = ? WHERE id = ?`)
+      .run(now, now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { completed_at: now, updated_at: now });
 
-    this.runSummarizerInBackground(session, 'abandoned', reason ?? null);
+    this.runSummarizerInBackground(session, 'abandoned', reason ?? null, now);
   }
 
   /** Resolve the workspace path for a session, or null when it's gone. */
@@ -1353,6 +1374,12 @@ export class SessionManager {
     session: Session,
     status: 'done' | 'abandoned',
     reason: string | null = null,
+    /** Version token = the `completed_at` value stamped by this complete/abandon
+     *  call. The detached writeback only proceeds while the row's completed_at
+     *  STILL equals it — so a reopen (null), a reopen+recomplete (different
+     *  timestamp), or an abandon-after-complete (different timestamp) all cancel
+     *  the stale writeback. A plain truthiness check would miss recomplete. */
+    token: string | null = null,
   ): void {
     const workspaceDir = this.workspacePathFor(session.workspace_id);
     const subtask: SubtaskContext = {
@@ -1363,13 +1390,23 @@ export class SessionManager {
     };
 
     // Detach: schedule on the microtask queue so completeTurn/the REST handler
-    // returns immediately. Any throw is contained here.
+    // returns immediately. Any throw is contained here. The version-token guard
+    // (Codex review) is re-checked before touching `.ai/` and again after the
+    // async summarize() await.
+    const stillCurrent = () => {
+      const current = (this.db
+        .prepare('SELECT completed_at FROM sessions WHERE id = ?')
+        .get(session.id) as { completed_at: string | null } | undefined)?.completed_at ?? null;
+      return token !== null && current === token;
+    };
+
     void Promise.resolve().then(async () => {
       try {
         if (!workspaceDir) {
           console.error(`[summarizer] workspace gone for subtask ${session.id}; skipping writeback`);
           return;
         }
+        if (!stillCurrent()) return; // reopened / recompleted / abandoned since
         if (status === 'abandoned') {
           applyAbandonWriteback(workspaceDir, subtask, reason);
           return;
@@ -1379,6 +1416,7 @@ export class SessionManager {
           subtask,
           llm: this.summaryLlm,
         });
+        if (!stillCurrent()) return; // reopened / recompleted / abandoned during summarize()
         // Persist the user-editable subtask summary.
         const now = new Date().toISOString();
         this.db

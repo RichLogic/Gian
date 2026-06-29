@@ -267,3 +267,58 @@
 }
 .manager-inspector .composer-wrap { padding: 6px 10px 10px; }
 .manager-inspector .composer { max-width: none; }
+
+/* ============================================================
+   Tasks redesign (spec 2026-06-28 §B/§E/§G)
+   ============================================================ */
+
+/* §B — completed subtask: struck-through + greyed in place (no square toggle) */
+.rail-item.subtask-row.subtask-done { opacity: 0.6; }
+.rail-item.subtask-row.subtask-done .ri-title {
+  text-decoration: line-through;
+  color: var(--text-3);
+}
+
+/* §E — parent task "needs you" rollup: a solid accent dot, no gradient,
+   distinct from the subtask status glyphs. */
+.task-attn-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  animation: task-attn-pulse 2.2s ease-in-out infinite;
+}
+@keyframes task-attn-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--accent-soft); }
+  50%      { box-shadow: 0 0 0 5px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .task-attn-dot { animation: none; }
+}
+
+/* §G — Done tasks pinned to the bottom, collapsible, reopen-only */
+.tasks-done-pinned {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--hairline);
+  background: var(--surface);
+}
+.done-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  cursor: pointer;
+  text-align: left;
+}
+.done-group-head .count { margin-left: auto; }
+.done-group-body {
+  max-height: 38vh;
+  overflow-y: auto;
+  padding-bottom: 6px;
+}
+/* reopen-only row: not selectable, greyed, struck title */
+.rail-item.done-task-row { cursor: default; opacity: 0.7; }
+.rail-item.done-task-row .ri-title {
+  text-decoration: line-through;
+  color: var(--text-3);
+}

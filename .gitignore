@@ -36,3 +36,6 @@ test-results/
 playwright-report/
 playwright/.cache/
 .DS_Store
+
+# Local debug-driver runtime output (logs / pids / driver script)
+.gian-runtime/

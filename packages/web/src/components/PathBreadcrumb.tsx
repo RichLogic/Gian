@@ -21,6 +21,10 @@ export interface SessionMenuActions {
   onFork?: (executor: 'claude' | 'codex') => void;
   onArchive?: () => void;
   onDelete?: () => void;
+  /** Subtask only (spec §B): toggle the user completion flag. `completed`
+   *  drives the label ("Mark complete" ↔ "Reopen"). */
+  onToggleComplete?: () => void;
+  completed?: boolean;
 }
 
 interface Props {
@@ -84,6 +88,8 @@ const ICON = {
   fork: 'M6 3v6 M6 21v-3a4 4 0 0 1 4-4h4a4 4 0 0 0 4-4V3 M6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M6 21a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
   // envelope — "mark as unread", same idiom as an unread email
   mail: 'M3 5h18v14H3z M3 7l9 6 9-6',
+  // check — "mark complete" (subtask)
+  check: 'M5 12l5 5L20 7',
 };
 
 export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessionMenu }: Props) {
@@ -181,6 +187,12 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                       <MenuIcon d={ICON.edit} /> {t('path.menu.rename')}
                       <span className="sub">F2</span>
                     </button>
+                    {sessionMenu.onToggleComplete && (
+                      <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onToggleComplete!(); }}>
+                        <MenuIcon d={sessionMenu.completed ? ICON.refresh : ICON.check} />{' '}
+                        {sessionMenu.completed ? t('tasks.subtask.reopen') : t('tasks.subtask.complete')}
+                      </button>
+                    )}
                     {sessionMenu.onCopyName && (
                       <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onCopyName!(); }}>
                         <MenuIcon d={ICON.copy} /> {t('path.menu.copyName')}

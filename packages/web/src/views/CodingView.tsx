@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { ApprovalDecision, ApprovalMode, RemoteControlState, RuntimeMode, Session, TtySurface, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { confirm, toast } from '../feedback.js';
@@ -729,13 +729,7 @@ function SessionRow({
     >
       <div className="ri-body">
         <div className="ri-row1">
-          {session.unread === 1 && !active && (
-            <span
-              className="ri-unread-dot"
-              title={t('coding.session.unread')}
-              aria-label={t('coding.session.unread')}
-            />
-          )}
+          {/* Unread is merged into the StatusIcon (spec §D) — no separate dot. */}
           <span className="ri-title">{session.name || `session ${session.id.slice(0, 6)}`}</span>
         </div>
         <div className="ri-row2">
@@ -754,7 +748,7 @@ function SessionRow({
         </div>
       </div>
       <span className="ri-age" title={t('coding.session.lastActivity')}>{relTime(session.updated_at)}</span>
-      <StatusIcon status={session.status} />
+      <StatusIcon status={session.status} unread={session.unread === 1 && !active} />
       {wsHidden && (
         <span
           className="ri-hidden-badge"
@@ -768,40 +762,59 @@ function SessionRow({
   );
 }
 
-/** §#7 status indicator: replaces the per-row kebab + the main-head status
- *  pill. Renders nothing for 'new', a spinner for running/pending, a red ⚠
- *  for errors, and a green ✓ for done. Exported so the Tasks-mode subtask rows
- *  reuse the exact same indicator (no fixed idle circle) as session rows. */
-export function StatusIcon({ status }: { status: import('@gian/shared').SessionStatus }) {
+// Status icon — gradient disc + knockout glyph (spec 2026-06-28 §H). The glyph
+// is a CSS-mask knockout of a gradient/accent disc (✅-emoji style). Built as
+// data-URI masks set via React style props (avoids the inline-attribute quote
+// pitfall). `mask-composite: subtract` carves the glyph out of the disc.
+const GICO_DISC = "<circle cx='8' cy='8' r='7.4' fill='#fff'/>";
+function gicoGlyph(kind: 'done' | 'err' | 'pend'): string {
+  if (kind === 'done') return "<path d='M5 8l2 2 4-4' fill='none' stroke='#fff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/>";
+  if (kind === 'err') return "<path d='M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8' fill='none' stroke='#fff' stroke-width='2.2' stroke-linecap='round'/>";
+  return "<rect x='7.05' y='3.8' width='1.9' height='5.3' rx='.95' fill='#fff'/><circle cx='8' cy='11.4' r='1.05' fill='#fff'/>";
+}
+function gicoMaskUrl(inner: string): string {
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>${inner}</svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+}
+function gicoMaskStyle(kind: 'done' | 'err' | 'pend'): CSSProperties {
+  const layers = `${gicoMaskUrl(GICO_DISC)}, ${gicoMaskUrl(gicoGlyph(kind))}`;
+  return { maskImage: layers, WebkitMaskImage: layers };
+}
+
+/** §#7 status indicator (spec 2026-06-28 §H). Nothing for 'new'; a spinning
+ *  gradient ring for running; ❗ for pending (always "待处理"); ✓ for done and
+ *  ✕ for error rendered as a flowing gradient while `unread` ("待处理") and a
+ *  solid-accent knockout once read. Exported so Tasks-mode subtask rows reuse
+ *  the exact same indicator + unread semantics as session rows. */
+export function StatusIcon({ status, unread = false }: {
+  status: import('@gian/shared').SessionStatus;
+  /** Merged unread/"待处理" signal — drives the gradient-vs-solid look on
+   *  terminal (done/error) states. Pending is always treated as 待处理. */
+  unread?: boolean;
+}) {
   const t = useT();
   if (status === 'new') return null;
-  if (status === 'running' || status === 'pending') {
+  if (status === 'running') {
     return (
-      <span className="ri-status running" title={status === 'running' ? t('coding.status.running') : t('coding.status.awaitingApproval')} aria-label={status}>
-        <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
-          <circle cx="8" cy="8" r="6" stroke="var(--accent-soft)" strokeWidth="2" />
-          <path d="M14 8a6 6 0 0 0-6-6" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
-        </svg>
+      <span className="ri-status running" title={t('coding.status.running')} aria-label="running">
+        <span className="gico ring"><span className="gring" /></span>
       </span>
     );
   }
-  if (status === 'error') {
-    return (
-      <span className="ri-status err" title={t('coding.status.error')} aria-label="error">
-        <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
-          <circle cx="8" cy="8" r="7" fill="var(--danger-soft)" stroke="var(--danger)" strokeWidth="1" />
-          <path d="M8 4.5v4 M8 10.6v.4" stroke="var(--danger)" strokeWidth="2" strokeLinecap="round" />
-        </svg>
-      </span>
-    );
-  }
-  // done
+  const kind: 'done' | 'err' | 'pend' =
+    status === 'pending' ? 'pend' : status === 'error' ? 'err' : 'done';
+  const attention = status === 'pending' || unread;
+  const wrapClass = kind === 'err' ? 'err' : kind === 'pend' ? 'pending' : 'done';
+  const label = status === 'pending'
+    ? t('coding.status.awaitingApproval')
+    : status === 'error'
+    ? t('coding.status.error')
+    : t('coding.status.done');
   return (
-    <span className="ri-status done" title={t('coding.status.done')} aria-label="done">
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
-        <circle cx="8" cy="8" r="7" fill="var(--ok-soft)" stroke="var(--ok)" strokeWidth="1" />
-        <path d="M5 8l2 2 4-4" stroke="var(--ok)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
+    <span className={`ri-status ${wrapClass}`} title={label} aria-label={status}>
+      <span className={`gico ${attention ? 'unread' : 'read'} ${kind}`}>
+        <span className="gfill" style={gicoMaskStyle(kind)} />
+      </span>
     </span>
   );
 }

@@ -645,15 +645,32 @@ export function createApp(ctx: AppContext): AppHandle {
   });
 
   /**
-   * PRD-v3 P4 — mark a Subtask complete. Sets the session `done` and fires the
-   * `.ai/` summarizer in the BACKGROUND (the user does not wait — §116). The
-   * one-line subtask summary lands on `sessions.summary` asynchronously and is
-   * broadcast via `session:updated` when ready.
+   * Mark a Subtask complete (spec 2026-06-28 §B). Sets the user flag
+   * `completed_at` (NOT turn `status`) and fires the `.ai/` summarizer in the
+   * BACKGROUND (the user does not wait — §116). The one-line subtask summary
+   * lands on `sessions.summary` asynchronously and is broadcast when ready.
    */
   app.post('/api/sessions/:id/complete', c => {
     const id = c.req.param('id');
     try {
       sessions.completeSubtask(id);
+      return c.json({ ok: true });
+    } catch (err) {
+      const msg = (err as Error).message;
+      const status = msg.startsWith('session not found') ? 404 : 400;
+      return c.json({ error: msg }, status);
+    }
+  });
+
+  /**
+   * Reopen a completed Subtask (spec 2026-06-28 §B). Clears `completed_at`; no
+   * summarizer. Any in-flight completion writeback bails when it sees the
+   * cleared flag (R2 #3).
+   */
+  app.post('/api/sessions/:id/reopen', c => {
+    const id = c.req.param('id');
+    try {
+      sessions.reopenSubtask(id);
       return c.json({ ok: true });
     } catch (err) {
       const msg = (err as Error).message;

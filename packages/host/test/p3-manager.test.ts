@@ -176,7 +176,7 @@ test('ensureManagerSession creates one manager session bound to root (idempotent
   }
 });
 
-test('manager turn is forced read-only regardless of approval_mode', async () => {
+test('manager turn is forced workspace-write + never regardless of approval_mode', async () => {
   const { dir, db, proxyMgr, sessions, tasks } = setup();
   try {
     const task = tasks.createTask({ name: 'Audit' });
@@ -184,7 +184,8 @@ test('manager turn is forced read-only regardless of approval_mode', async () =>
 
     const params = proxyMgr.client.lastStartTurnParams;
     assert.ok(params, 'startTurn was called');
-    assert.equal(params!.sandbox, 'read-only', 'sandbox forced read-only');
+    // Manager is writable (spec 2026-06-28 §A1, supersedes PRD-v3 §A1).
+    assert.equal(params!.sandbox, 'workspace-write', 'sandbox forced workspace-write');
     assert.equal(params!.approvalPolicy, 'never', 'approvals forced never');
     assert.equal(params!.thinking, MANAGER_EFFORT, 'effort applied per-turn');
   } finally {
@@ -199,7 +200,8 @@ test('sendManagerMessage prepends the system prompt on the first turn only', asy
     const task = tasks.createTask({ name: 'Plan release', description: 'cut v1' });
     await sessions.sendManagerMessage(task.id, 'first');
     const firstInput = (proxyMgr.client.lastStartTurnParams!.input as Array<{ text: string }>)[0]!.text;
-    assert.match(firstInput, /read-only project Manager/, 'system prompt prepended on first turn');
+    assert.match(firstInput, /project Manager/, 'system prompt prepended on first turn');
+    assert.match(firstInput, /<<gian:create_subtask>>/, 'create_subtask proposal protocol included');
     assert.match(firstInput, /Plan release/, 'task name inlined');
     assert.match(firstInput, /first$/, 'user text appended after the prompt');
 
@@ -230,14 +232,69 @@ test('buildManagerSystemPrompt inlines subtask metadata and signposts', () => {
         active_channel: 'web', status: 'done', archived: 0, unread: 0,
         worktree_path: null, branch: null, base_branch: null,
         worktree_outcome: null, native_session_id: null,
-        runtime_mode: 'structured', created_at: '', updated_at: '',
+        runtime_mode: 'structured', summary: null,
+        completed_at: '2026-06-28T00:00:00Z', created_at: '', updated_at: '',
       },
     ],
     workspacePaths: ['/Users/x/Coding/app'],
     rootPath: '/Users/x/Coding',
   });
   assert.match(prompt, /Refactor auth/);
-  assert.match(prompt, /login flow \[claude\/done\]/);
+  // Shows user-completion (completed_at), not turn status (spec §B).
+  assert.match(prompt, /login flow \[claude\/completed\]/);
   assert.match(prompt, /\/Users\/x\/Coding\/app/);
   assert.match(prompt, /\.ai\//);
+});
+
+test('completeSubtask sets completed_at (not turn status); reopen clears it', async () => {
+  const { dir, db, sessions, tasks } = setup();
+  try {
+    const task = tasks.createTask({ name: 'Build' });
+    const wsId = randomUUID();
+    db.prepare(`INSERT INTO workspaces (id, name, path, hidden) VALUES (?, 'tmp', ?, 0)`).run(wsId, dir);
+    const sub = await sessions.createSession({
+      workspace_id: wsId, executor: 'codex', type: 'subtask', task_id: task.id,
+    });
+    const read = () => db.prepare('SELECT status, completed_at FROM sessions WHERE id = ?')
+      .get(sub.id) as { status: string; completed_at: string | null };
+
+    assert.equal(read().completed_at, null, 'starts not completed');
+
+    sessions.completeSubtask(sub.id);
+    const done = read();
+    assert.ok(done.completed_at, 'completed_at set on complete');
+    assert.notEqual(done.status, 'done', 'completion does NOT force turn status=done');
+
+    sessions.reopenSubtask(sub.id);
+    assert.equal(read().completed_at, null, 'reopen clears completed_at');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('updateTask refuses status=done while a subtask turn is running/pending', async () => {
+  const { dir, db, sessions, tasks } = setup();
+  try {
+    const task = tasks.createTask({ name: 'Ship' });
+    const wsId = randomUUID();
+    db.prepare(`INSERT INTO workspaces (id, name, path, hidden) VALUES (?, 'tmp', ?, 0)`).run(wsId, dir);
+    const sub = await sessions.createSession({
+      workspace_id: wsId, executor: 'codex', type: 'subtask', task_id: task.id,
+    });
+
+    db.prepare(`UPDATE sessions SET status = 'running' WHERE id = ?`).run(sub.id);
+    assert.throws(
+      () => tasks.updateTask(task.id, { status: 'done' }),
+      /TASK_HAS_ACTIVE_SUBTASKS/,
+      'blocked while subtask turn running',
+    );
+
+    // Settling the subtask turn (done = terminal, not active) lets the Task close.
+    db.prepare(`UPDATE sessions SET status = 'done' WHERE id = ?`).run(sub.id);
+    assert.equal(tasks.updateTask(task.id, { status: 'done' }).status, 'done');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

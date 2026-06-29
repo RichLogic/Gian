@@ -45,12 +45,12 @@ import { SettingsBody } from './components/SettingsBody.js';
 import { Terminal, makeWorkbenchWire } from './components/Terminal.js';
 import { CodingView, SessionMain } from './views/CodingView.js';
 import { SpacesView, NewWorkspacePanel } from './views/SpacesView.js';
-import { TasksView, ManagerInspector } from './views/TasksView.js';
+import { TasksView, ManagerInspector, type NewSubtaskDraft } from './views/TasksView.js';
 import { BotsView } from './views/BotsView.js';
 import { FilesView } from './views/FilesView.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import type { SystemConfig } from '@gian/shared';
-import { stripManagerSystemPrefix } from '@gian/shared';
+import { stripManagerSystemPrefix, parseCreateSubtaskProposal, stripCreateSubtaskBlocks } from '@gian/shared';
 import type { QueueEntry, TokenUsage, TranscriptItem } from './types.js';
 import { planBetaComposerSend, planCreatedSessionFirstMessage, resolveChatView } from './session-routing.js';
 
@@ -1091,6 +1091,17 @@ export function App() {
       onMarkUnread: () => {
         ws.send({ type: 'session:set_unread', session_id: activeSession.id, unread: true });
       },
+      // Subtask completion (spec §B) lives here now (the row's square toggle was
+      // removed). Toggles the user `completed_at` flag, separate from turn status.
+      ...(isSubtask ? {
+        completed: activeSession.completed_at != null,
+        onToggleComplete: () => {
+          const done = activeSession.completed_at != null;
+          void import('./api.js').then(m =>
+            done ? m.reopenSubtask(activeSession.id) : m.completeSubtask(activeSession.id),
+          );
+        },
+      } : {}),
       ...(isSubtask ? {} : {
       onFork: (executor: 'claude' | 'codex') => {
         // Clone every property the host accepts on session:create except
@@ -1417,11 +1428,46 @@ export function App() {
     () => (activeTaskId ? tasks.find(t => t.id === activeTaskId) ?? null : null),
     [tasks, activeTaskId],
   );
-  const managerItems = activeManagerSession
-    ? (itemsBySession[activeManagerSession.id] ?? []).map(it =>
-        it.kind === 'user' ? { ...it, text: stripManagerSystemPrefix(it.text) } : it,
-      )
+  const rawManagerItems = activeManagerSession
+    ? (itemsBySession[activeManagerSession.id] ?? [])
     : [];
+  // Display: strip the system prefix (user msg) and the create_subtask proposal
+  // blocks (assistant msg) so the transcript reads as clean prose (spec §A2).
+  const managerItems = rawManagerItems.map(it =>
+    it.kind === 'user' ? { ...it, text: stripManagerSystemPrefix(it.text) }
+      : it.kind === 'assistant' ? { ...it, text: stripCreateSubtaskBlocks(it.text) }
+      : it,
+  );
+  // Latest Manager `create_subtask` proposal (spec §A2), parsed from the RAW
+  // assistant text and resolved to a prefilled subtask draft for the confirm
+  // card. workspace name/path → id: exact path first, then a UNIQUE name match
+  // (names aren't unique — ambiguous/0 → leave unset, user picks). Codex R2 #6.
+  const managerProposal = useMemo<Partial<NewSubtaskDraft> | null>(() => {
+    for (let i = rawManagerItems.length - 1; i >= 0; i--) {
+      const it = rawManagerItems[i];
+      if (!it || it.kind !== 'assistant') continue;
+      const p = parseCreateSubtaskProposal(it.text);
+      if (!p) continue;
+      const visible = workspaces.filter(w => w.hidden !== 1);
+      let wsId: string | undefined;
+      if (p.workspace) {
+        const byPath = visible.find(w => w.path === p.workspace);
+        if (byPath) wsId = byPath.id;
+        else {
+          const lower = p.workspace.toLowerCase();
+          const byName = visible.filter(w => w.name.toLowerCase() === lower);
+          if (byName.length === 1) wsId = byName[0]!.id;
+        }
+      }
+      return {
+        prompt: p.prompt,
+        ...(p.name ? { name: p.name } : {}),
+        ...(p.executor ? { executor: p.executor } : {}),
+        ...(wsId ? { workspace_id: wsId } : {}),
+      };
+    }
+    return null;
+  }, [rawManagerItems, workspaces]);
   const managerPending = activeManagerSession
     ? (pendingBySession[activeManagerSession.id] ?? activeManagerSession.status === 'running')
     : false;
@@ -1479,19 +1525,22 @@ export function App() {
   const onCreateSubtask = useCallback((taskId: string, draft: {
     workspace_id: string; executor: 'claude' | 'codex'; name?: string; prompt: string;
   }) => {
+    // Spec §A3: stage the first prompt so the `session:created` handler delivers
+    // it through the SAME billing-safe first-message routing as a new session
+    // (Claude → TTY `pty:input`, Codex → structured). No backend/prompt field.
+    pendingFirstMessageRef.current = draft.prompt?.trim() || null;
     void import('./api.js').then(m => m.createSubtask(taskId, {
       workspace_id: draft.workspace_id,
       executor: draft.executor,
       ...(draft.name ? { name: draft.name } : {}),
     })).then(session => {
       if (!session) {
+        pendingFirstMessageRef.current = null;
         toast({ kind: 'error', message: 'create subtask failed' });
         return;
       }
-      // TODO(P3-live): deliver `draft.prompt` as the subtask's first message
-      // once subtasks have an explicit "start" that spawns the runtime (P1/P2
-      // wiring). For now the session is created in draft and the prompt is
-      // surfaced to the user to send manually from the session view.
+      // The `session:created` broadcast (already fired by the host) runs the
+      // first-message plan with the staged prompt. Just focus the new subtask.
       setActiveSubtaskId(session.id);
     });
   }, []);
@@ -1772,6 +1821,7 @@ export function App() {
               activeSubtaskId={activeSubtaskId}
               managerItems={managerItems}
               managerPending={managerPending}
+              managerProposal={managerProposal}
               onManagerMount={onManagerMount}
               onManagerSend={onManagerSend}
               onCreateSubtask={onCreateSubtask}
