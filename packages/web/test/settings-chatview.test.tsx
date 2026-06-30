@@ -59,27 +59,19 @@ describe('CHATVIEW-001: chat-view settings confirm-then-reload', () => {
     expect(reloadMock).not.toHaveBeenCalled();
   });
 
-  it('confirming saves the surface + reseeded CLI default, then reloads', async () => {
+  it('confirming saves the surface, then reloads (CLI tab is now runtime-derived)', async () => {
     confirmMock.mockResolvedValue(true);
     render(<SettingsBody config={baseConfig()} onChange={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: 'claude -p' }));
     await waitFor(() => {
-      expect(api.saveSettings).toHaveBeenCalledWith({
-        claude_chat_surface: 'structured',
-        claude_chat_cli: false, // reseeded: structured → CLI off
-      });
+      expect(api.saveSettings).toHaveBeenCalledWith({ claude_chat_surface: 'structured' });
     });
     await waitFor(() => expect(reloadMock).toHaveBeenCalled());
   });
 
-  it('toggling Codex CLI also goes through the confirm gate', async () => {
-    confirmMock.mockResolvedValue(true);
+  it('no longer renders the Claude / Codex CLI-tab toggles', () => {
     render(<SettingsBody config={baseConfig()} onChange={() => {}} />);
-    const codexToggle = screen.getByText('Show a CLI (terminal) tab for Codex sessions')
-      .closest('label')!.querySelector('input')!;
-    fireEvent.click(codexToggle);
-    await waitFor(() => {
-      expect(api.saveSettings).toHaveBeenCalledWith({ codex_chat_cli: true });
-    });
+    expect(screen.queryByText('Show a CLI (terminal) tab for Claude sessions')).toBeNull();
+    expect(screen.queryByText('Show a CLI (terminal) tab for Codex sessions')).toBeNull();
   });
 });

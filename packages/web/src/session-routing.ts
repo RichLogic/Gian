@@ -48,32 +48,22 @@ export type ClaudeChatSurface = 'structured' | 'tty';
 
 export interface ChatViewConfig {
   claude_chat_surface: ClaudeChatSurface;
-  claude_chat_cli: boolean;
-  codex_chat_cli: boolean;
 }
 
 export const DEFAULT_CHAT_VIEW: ChatViewConfig = {
   claude_chat_surface: 'tty',
-  claude_chat_cli: true,
-  codex_chat_cli: false,
 };
 
 /** Normalize a (possibly partial / null) SystemConfig into concrete chat-view
- *  prefs, applying the same defaults loadConfig uses on the host. */
+ *  prefs, applying the same defaults loadConfig uses on the host. The CLI tab
+ *  is no longer a stored preference — it's derived from the runtime (see
+ *  `runtimeTabs`): Claude on TTY gets a CLI, `claude -p` and Codex never do. */
 export function resolveChatView(
   cfg: Partial<ChatViewConfig> | null | undefined,
 ): ChatViewConfig {
   return {
     claude_chat_surface: cfg?.claude_chat_surface ?? DEFAULT_CHAT_VIEW.claude_chat_surface,
-    claude_chat_cli: cfg?.claude_chat_cli ?? DEFAULT_CHAT_VIEW.claude_chat_cli,
-    codex_chat_cli: cfg?.codex_chat_cli ?? DEFAULT_CHAT_VIEW.codex_chat_cli,
   };
-}
-
-/** CLI tab default that re-seeds whenever the user flips the Claude chat
- *  surface: structured → off, tty → on. */
-export function reseedClaudeCli(surface: ClaudeChatSurface): boolean {
-  return surface === 'tty';
 }
 
 /** The runtime a given surface implies. 'chat' is structured; 'beta'/'cli'
@@ -106,8 +96,12 @@ export interface RuntimeTab {
  *  bar entirely. */
 export function runtimeTabs(executor: Executor, cfg: ChatViewConfig): RuntimeTab[] {
   const tabs: RuntimeTab[] = [{ surface: runtimeChatSurface(executor, cfg), label: 'chat' }];
-  const showCli = executor === 'claude' ? cfg.claude_chat_cli : cfg.codex_chat_cli;
-  if (showCli) tabs.push({ surface: 'cli', label: 'cli' });
+  // The CLI (raw xterm) tab exists only for Claude on the TTY surface — the
+  // interactive subscription path. `claude -p` (structured) and Codex never
+  // get a CLI tab.
+  if (executor === 'claude' && cfg.claude_chat_surface === 'tty') {
+    tabs.push({ surface: 'cli', label: 'cli' });
+  }
   return tabs;
 }
 

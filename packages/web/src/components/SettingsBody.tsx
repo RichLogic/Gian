@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import type { CcModelCapabilities, CodexModelCapabilities, ExternalEditor, OpenFileCategory, SystemConfig } from '@gian/shared';
 import { THEME_DEFAULT_ACCENT } from '@gian/shared';
 import { loadProxyModels, saveSettings } from '../api.js';
-import { reseedClaudeCli, type ClaudeChatSurface } from '../session-routing.js';
+import { type ClaudeChatSurface } from '../session-routing.js';
 import { confirm } from '../feedback.js';
 import { useMinimapEnabled, setMinimapEnabled } from '../display-prefs.js';
 import { AppIcon } from './AppIcon.js';
@@ -184,8 +184,6 @@ function SettingsBodyInner({
   }
 
   const claudeSurface: ClaudeChatSurface = config.claude_chat_surface ?? 'tty';
-  const claudeCli = config.claude_chat_cli ?? true;
-  const codexCli = config.codex_chat_cli ?? false;
 
   function patchEditors(next: ExternalEditor[]) {
     setEditors(next);
@@ -407,34 +405,12 @@ function SettingsBodyInner({
                     <button
                       key={val}
                       className={`segm-item ${claudeSurface === val ? 'active' : ''}`}
-                      onClick={() => { void patchChatView({ claude_chat_surface: val, claude_chat_cli: reseedClaudeCli(val) }); }}
+                      onClick={() => { void patchChatView({ claude_chat_surface: val }); }}
                     >
                       {t(labelKey)}
                     </button>
                   ))}
                 </div>
-              </dd>
-              <dt>{t('settings.chatview.claudeCli')}</dt>
-              <dd>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={claudeCli}
-                    onChange={e => { void patchChatView({ claude_chat_cli: e.target.checked }); }}
-                  />
-                  <span>{t('settings.chatview.claudeCli.hint')}</span>
-                </label>
-              </dd>
-              <dt>{t('settings.chatview.codexCli')}</dt>
-              <dd>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={codexCli}
-                    onChange={e => { void patchChatView({ codex_chat_cli: e.target.checked }); }}
-                  />
-                  <span>{t('settings.chatview.codexCli.hint')}</span>
-                </label>
               </dd>
             </dl>
           </div>

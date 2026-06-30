@@ -1399,11 +1399,11 @@ export function SessionMain({
   const tabKey = visibleTabs.map(tb => tb.surface).join(',');
 
   // The surface a session opens on. Claude follows the configured chat surface
-  // (structured→'chat', tty→'beta'); Codex stays runtime-driven (CLI only when
-  // both enabled and already in TTY).
+  // (structured→'chat', tty→'beta'); Codex always opens on 'chat' (it has no
+  // CLI tab anymore).
   const defaultSurfaceFor = (): SessionSurface => {
     if (session.executor === 'claude') return runtimeChatSurface('claude', chatView);
-    return session.runtime_mode === 'tty' && chatView.codex_chat_cli ? 'cli' : 'chat';
+    return 'chat';
   };
   const [surface, setSurface] = useState<SessionSurface>(defaultSurfaceFor);
   const surfaceSessionRef = useRef(session.id);
@@ -1676,7 +1676,7 @@ export function SessionMain({
           <button
             type="button"
             className="btn xs secondary"
-            onClick={() => onSwitchRuntime('tty', surface === 'beta' ? 'beta' : undefined, { force: true })}
+            onClick={() => { setSurface('cli'); onSwitchRuntime('tty', 'cli', { force: true }); }}
           >
             {t('coding.banner.openTty')}
           </button>

@@ -7,7 +7,6 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_CHAT_VIEW,
   planCreatedSessionFirstMessage,
-  reseedClaudeCli,
   resolveChatView,
   runtimeChatSurface,
   runtimeForSurface,
@@ -15,8 +14,8 @@ import {
   type ChatViewConfig,
 } from '../src/session-routing.js';
 
-const TTY: ChatViewConfig = { claude_chat_surface: 'tty', claude_chat_cli: true, codex_chat_cli: false };
-const STRUCTURED: ChatViewConfig = { claude_chat_surface: 'structured', claude_chat_cli: false, codex_chat_cli: false };
+const TTY: ChatViewConfig = { claude_chat_surface: 'tty' };
+const STRUCTURED: ChatViewConfig = { claude_chat_surface: 'structured' };
 
 describe('CHATVIEW-001: resolveChatView', () => {
   it('returns defaults for null/undefined', () => {
@@ -24,27 +23,15 @@ describe('CHATVIEW-001: resolveChatView', () => {
     expect(resolveChatView(undefined)).toEqual(DEFAULT_CHAT_VIEW);
   });
 
-  it('default = tty + claude CLI on + codex CLI off', () => {
-    expect(DEFAULT_CHAT_VIEW).toEqual({
-      claude_chat_surface: 'tty',
-      claude_chat_cli: true,
-      codex_chat_cli: false,
-    });
+  it('default = tty (CLI is no longer a stored pref)', () => {
+    expect(DEFAULT_CHAT_VIEW).toEqual({ claude_chat_surface: 'tty' });
   });
 
-  it('fills missing fields from defaults', () => {
+  it('fills the missing surface from defaults', () => {
+    expect(resolveChatView({})).toEqual({ claude_chat_surface: 'tty' });
     expect(resolveChatView({ claude_chat_surface: 'structured' })).toEqual({
       claude_chat_surface: 'structured',
-      claude_chat_cli: true,
-      codex_chat_cli: false,
     });
-  });
-});
-
-describe('CHATVIEW-001: reseedClaudeCli', () => {
-  it('tty seeds CLI on, structured seeds CLI off', () => {
-    expect(reseedClaudeCli('tty')).toBe(true);
-    expect(reseedClaudeCli('structured')).toBe(false);
   });
 });
 
@@ -65,44 +52,23 @@ describe('CHATVIEW-001: runtimeChatSurface', () => {
   });
 });
 
-describe('CHATVIEW-001: runtimeTabs', () => {
-  it('claude tty + cli → Chat(beta) · CLI', () => {
-    expect(runtimeTabs('claude', { ...TTY, claude_chat_cli: true })).toEqual([
+describe('CHATVIEW-001: runtimeTabs (CLI derived from runtime, not a toggle)', () => {
+  it('claude tty → Chat(beta) · CLI', () => {
+    expect(runtimeTabs('claude', TTY)).toEqual([
       { surface: 'beta', label: 'chat' },
       { surface: 'cli', label: 'cli' },
     ]);
   });
 
-  it('claude tty, no cli → single Chat(beta)', () => {
-    expect(runtimeTabs('claude', { ...TTY, claude_chat_cli: false })).toEqual([
-      { surface: 'beta', label: 'chat' },
-    ]);
-  });
-
-  it('claude structured + cli → Chat(chat) · CLI', () => {
-    expect(runtimeTabs('claude', { ...STRUCTURED, claude_chat_cli: true })).toEqual([
-      { surface: 'chat', label: 'chat' },
-      { surface: 'cli', label: 'cli' },
-    ]);
-  });
-
-  it('claude structured, no cli → single Chat(chat)', () => {
+  it('claude structured (claude -p) → single Chat(chat), no CLI', () => {
     expect(runtimeTabs('claude', STRUCTURED)).toEqual([
       { surface: 'chat', label: 'chat' },
     ]);
   });
 
-  it('codex cli on → Chat(chat) · CLI', () => {
-    expect(runtimeTabs('codex', { ...STRUCTURED, codex_chat_cli: true })).toEqual([
-      { surface: 'chat', label: 'chat' },
-      { surface: 'cli', label: 'cli' },
-    ]);
-  });
-
-  it('codex cli off → single Chat(chat)', () => {
-    expect(runtimeTabs('codex', STRUCTURED)).toEqual([
-      { surface: 'chat', label: 'chat' },
-    ]);
+  it('codex never gets a CLI tab, on either surface', () => {
+    expect(runtimeTabs('codex', TTY)).toEqual([{ surface: 'chat', label: 'chat' }]);
+    expect(runtimeTabs('codex', STRUCTURED)).toEqual([{ surface: 'chat', label: 'chat' }]);
   });
 });
 
