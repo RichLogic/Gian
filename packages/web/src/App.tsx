@@ -1150,6 +1150,14 @@ export function App() {
         onCopyName: () => {
           try { void navigator.clipboard?.writeText(task.name || ''); } catch (_) { /* ignore */ }
         },
+        // Force recover = unwedge the Task's Manager session (it's headless, so
+        // its recover lives on the Task menu).
+        onForceRecover: () => {
+          const mgr = sessionsRef.current.find(s => s.type === 'manager' && s.task_id === task.id);
+          if (!mgr) return;
+          ttySwitchRef.current.clear(mgr.id);
+          ws.send({ type: 'session:recover', session_id: mgr.id });
+        },
         onDelete: async () => {
           const ok = await confirmDialog({
             message: `${appT('tasks.remove.confirmPrefix')} "${task.name || appT('tasks.untitled')}"? ${appT('tasks.remove.confirmSuffix')}`,
@@ -1179,6 +1187,16 @@ export function App() {
       },
       onMarkUnread: () => {
         ws.send({ type: 'session:set_unread', session_id: activeSession.id, unread: true });
+      },
+      // Delete is available for both subtasks and sessions (a subtask IS a
+      // session). Fork / archive stay session-only (below).
+      onDelete: async () => {
+        const ok = await confirmDialog({
+          message: `${appT('coding.session.deleteConfirmPrefix')} "${activeSession.name || appT('coding.session.untitled')}"? ${appT('coding.session.deleteConfirmSuffix')}`,
+          danger: true,
+          confirmLabel: appT('common.delete'),
+        });
+        if (ok) ws.send({ type: 'session:delete', session_id: activeSession.id });
       },
       // Subtask completion (spec §B) lives here now (the row's square toggle was
       // removed). Toggles the user `completed_at` flag, separate from turn status.
@@ -1221,14 +1239,6 @@ export function App() {
       onArchive: () => {
         const next = activeSession.archived !== 1;
         ws.send({ type: 'session:archive', session_id: activeSession.id, archived: next });
-      },
-      onDelete: async () => {
-        const ok = await confirmDialog({
-          message: `${appT('coding.session.deleteConfirmPrefix')} "${activeSession.name || appT('coding.session.untitled')}"? ${appT('coding.session.deleteConfirmSuffix')}`,
-          danger: true,
-          confirmLabel: appT('common.delete'),
-        });
-        if (ok) ws.send({ type: 'session:delete', session_id: activeSession.id });
       },
       }),
     };

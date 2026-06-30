@@ -127,7 +127,8 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
 
   if (m.kind === 'task') {
     copy();
-    if (m.onDelete) items.push({ key: 'remove', icon: ICON.trash, label: t('path.menu.removeTask'), onClick: m.onDelete, danger: true, ruleBefore: true });
+    if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, ruleBefore: true });
+    if (m.onDelete) items.push({ key: 'remove', icon: ICON.trash, label: t('path.menu.removeTask'), onClick: m.onDelete, danger: true });
     return items;
   }
 
@@ -141,6 +142,7 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
       onClick: m.onToggleComplete,
     });
     if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, ruleBefore: true });
+    if (m.onDelete) items.push({ key: 'delete', icon: ICON.trash, label: t('path.menu.deleteSession'), onClick: m.onDelete, danger: true });
     return items;
   }
 

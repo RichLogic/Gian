@@ -385,10 +385,12 @@
    Tasks redesign (spec 2026-06-28 §B/§E/§G)
    ============================================================ */
 
-/* §B — completed subtask: greyed in place. NO strikethrough (the line-through
-   read as "cancelled", not "done" — the dim + the menu's Reopen are the signal). */
+/* §B — user-completed subtask (completed_at set via "Mark complete"): struck
+   through + greyed. This is the *user completion* flag only — a finished TURN
+   (status-done) is NOT struck (that rule is scoped `:not(.subtask-row)` above). */
 .rail-item.subtask-row.subtask-done { opacity: 0.6; }
 .rail-item.subtask-row.subtask-done .ri-title {
+  text-decoration: line-through;
   color: var(--text-3);
 }
 
