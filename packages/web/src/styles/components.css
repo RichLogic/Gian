@@ -65,7 +65,8 @@
 .ri-age {
   position: absolute;
   right: 10px;
-  bottom: 8px;
+  top: 50%;
+  transform: translateY(-50%);
   color: var(--text-3);
   font-family: var(--font-mono);
   font-size: 10px;
@@ -74,6 +75,9 @@
 .rail-item.active .ri-age { color: var(--text-2); }
 /* Reserve room on row2 so the absolute-positioned age never overlaps text */
 .ri-row2 { padding-right: 36px; }
+/* Single-line session rows: the title is now on row1 with the age/status at the
+   right, so row1 needs the same right gap (row2 is gone). */
+.session-row .ri-row1 { padding-right: 38px; }
 
 /* — ported from design/components.css — rail-item focus-visible */
 .rail-item:focus-visible {

@@ -694,22 +694,21 @@ function Sidebar({
 }
 
 function SessionRow({
-  session, active, archived, wsHidden, branchFallback, onSelect,
+  session, active, archived, wsHidden, onSelect,
 }: {
   session: Session;
   active: boolean;
   archived?: boolean;
   wsHidden?: boolean;
-  /** Workspace HEAD branch — shown when the session itself doesn't own a
-   *  worktree branch (regular sessions ride the workspace's checkout). */
+  /** Accepted for compatibility (renderRow still passes it); the single-line
+   *  Codex-style row no longer renders the branch. */
   branchFallback?: string | null;
   onSelect: () => void;
 }) {
   const t = useT();
-  const branch = session.branch ?? branchFallback ?? null;
   return (
     <div
-      className={`rail-item${active ? ' active' : ''}${archived ? ' archived' : ''}`}
+      className={`rail-item session-row${active ? ' active' : ''}${archived ? ' archived' : ''}`}
       data-testid={`session-row-${session.id}`}
       role="button"
       tabIndex={0}
@@ -720,26 +719,15 @@ function SessionRow({
     >
       <div className="ri-body">
         <div className="ri-row1">
-          {/* Unread is merged into the StatusIcon (spec §D) — no separate dot. */}
+          {/* Single-line (Codex-style) row: title only; executor/branch dropped. */}
           <span className="ri-title">{session.name || `session ${session.id.slice(0, 6)}`}</span>
         </div>
-        <div className="ri-row2">
-          <span className={`ri-exec ${session.executor}`}>
-            {session.executor === 'claude' ? 'Claude' : 'Codex'}
-          </span>
-          {branch && (
-            <>
-              <span className="ri-dot-sep">·</span>
-              <span className="ri-branch">
-                <SvgIcon d={ICON.branch} size={9} />
-                <span className="ri-branch-name">{branch}</span>
-              </span>
-            </>
-          )}
-        </div>
       </div>
-      <span className="ri-age" title={t('coding.session.lastActivity')}>{relTime(session.updated_at)}</span>
-      <StatusIcon status={session.status} unread={session.unread === 1 && !active} />
+      {/* Row-end = status glyph when there is one (running/pending/error/unread),
+          else the relative time. Mutually exclusive so the row stays compact. */}
+      {statusGlyphShown(session.status, session.unread === 1 && !active)
+        ? <StatusIcon status={session.status} unread={session.unread === 1 && !active} />
+        : <span className="ri-age" title={t('coding.session.lastActivity')}>{relTime(session.updated_at)}</span>}
       {wsHidden && (
         <span
           className="ri-hidden-badge"
@@ -777,6 +765,15 @@ function gicoMaskStyle(kind: 'done' | 'err' | 'pend'): CSSProperties {
  *  ✕ for error rendered as a flowing gradient while `unread` ("待处理") and a
  *  solid-accent knockout once read. Exported so Tasks-mode subtask rows reuse
  *  the exact same indicator + unread semantics as session rows. */
+/** Whether StatusIcon renders a glyph at all for this state. Mirrors StatusIcon's
+ *  null-returns: nothing for 'new' or a completed-and-read turn. Callers use this
+ *  to decide whether to show the time instead (single-line rows). */
+export function statusGlyphShown(status: import('@gian/shared').SessionStatus, unread: boolean): boolean {
+  if (status === 'running' || status === 'pending' || status === 'error') return true;
+  if (status === 'done') return unread;
+  return false;
+}
+
 export function StatusIcon({ status, unread = false }: {
   status: import('@gian/shared').SessionStatus;
   /** Merged unread/"待处理" signal — drives the gradient-vs-solid look on

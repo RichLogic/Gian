@@ -520,7 +520,6 @@ function TaskRow({
   onToggleDone: () => void;
 }) {
   const t = useT();
-  const age = relativeAge(task.updated_at);
   const done = task.status === 'done';
   const showCount = !done && attnCount > 0;
   return (
@@ -548,12 +547,9 @@ function TaskRow({
         <div className="ri-row1">
           <span className="ri-title">{task.name}</span>
         </div>
-        <div className="ri-row2">
-          {age && <span className="ri-sub" style={{ flex: 1 }} title={task.updated_at}>{age}</span>}
-        </div>
       </div>
-      {/* Row-end = the Manager-as-session StatusIcon (same as a subtask row).
-          Null/`new` manager → renders nothing, leaving just the timestamp. */}
+      {/* Single-line (Codex-style): no timestamp row — same shape as a subtask.
+          Row-end = the Manager-as-session StatusIcon (null/`new` → nothing). */}
       {managerSession && (
         <StatusIcon status={managerSession.status} unread={managerSession.unread === 1 && !active} />
       )}
@@ -597,11 +593,7 @@ function SubtaskRow({
               gated on `!active`, which only revealed it after navigating away). */}
           <StatusIcon status={subtask.status} unread={subtask.unread === 1} />
         </div>
-        <div className="ri-row2">
-          <span className={`ri-exec ${subtask.executor}`}>
-            {subtask.executor === 'claude' ? 'Claude' : 'Codex'}
-          </span>
-        </div>
+        {/* Single-line (Codex-style): the Claude/Codex executor label was dropped. */}
       </div>
     </div>
   );

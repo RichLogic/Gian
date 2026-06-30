@@ -806,7 +806,8 @@
 /* §#7 — session-row status indicator (replaces the legacy kebab). */
 .ri-status {
   position: absolute;
-  top: 8px; right: 8px;
+  top: 50%; right: 8px;
+  transform: translateY(-50%);
   display: inline-flex; align-items: center; justify-content: center;
   width: 16px; height: 16px;
   pointer-events: none;

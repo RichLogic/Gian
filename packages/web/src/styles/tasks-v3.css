@@ -13,7 +13,7 @@
 /* ---- Sidebar: Task / Subtask rows (prototype: app.css .task-row/.subtask-row) ---- */
 .task-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center; /* single-line: circle + title on the same baseline */
   gap: 6px;
   padding: 7px 8px 8px 8px;
 }
@@ -22,7 +22,9 @@
 .subtask-row {
   display: flex;
   align-items: flex-start;
-  padding: 5px 8px 6px 28px; /* left indent baked into padding so width:100% still fits */
+  /* left indent = task content start (8 pad + 18 toggle + 6 gap = 32) so the
+     subtask title lines up exactly under the parent task's title. */
+  padding: 5px 8px 6px 32px;
   gap: 6px;
   position: relative;
 }
@@ -59,7 +61,6 @@
   position: relative;
   flex: 0 0 auto;
   width: 18px; height: 18px;
-  margin-top: 1px;
   border-radius: 50%;
   color: transparent;
   background: transparent;
