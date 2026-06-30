@@ -40,6 +40,13 @@
 .subtask-row.active { background: var(--accent-soft); }
 .subtask-row.active .ri-title { color: var(--accent-text); }
 
+/* Reserve room on the title row for the absolutely-positioned status indicator
+   (.ri-status: 16px at top:8/right:8) so a long title ellipsizes cleanly
+   instead of sliding under the spinner. Subtask rows always carry a StatusIcon;
+   task rows show the Manager running spinner (issue #1). */
+.subtask-row .ri-row1,
+.task-row .ri-row1 { padding-right: 22px; }
+
 /* Inline empty-state for a selected task with no subtasks yet. */
 .tasks-empty-subs {
   padding: 4px 8px 8px 28px;
@@ -49,6 +56,7 @@
 
 /* ---- Done toggle (Reminders-style checkbox at row start) ---- */
 .done-toggle {
+  position: relative;
   flex: 0 0 auto;
   width: 18px; height: 18px;
   margin-top: 1px;
@@ -61,19 +69,61 @@
   transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
 }
 .done-toggle:hover {
-  border-color: var(--ok);
-  color: var(--ok);
-  background: var(--ok-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+  animation: dt-hover-pulse 1.1s ease-in-out infinite;
 }
 .done-toggle.done {
-  border-color: var(--ok);
-  background: var(--ok);
+  border-color: var(--accent);
+  background: var(--accent);
   color: var(--surface);
 }
 .done-toggle.done:hover {
   /* hover on a done row = revert affordance */
   background: var(--surface);
-  color: var(--ok);
+  color: var(--accent);
+}
+/* Extra hover animation on the circle — a gentle pulse signalling it's actionable. */
+@keyframes dt-hover-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.14); } }
+/* Open task with N subtasks that need you: the circle carries the count in the
+   accent colour, overlaid on the (invisible) check glyph. On hover the count
+   fades and the check reveals — preserving the "click to mark done" affordance. */
+.done-toggle.has-count {
+  border-color: var(--accent);
+}
+.done-toggle .dt-count {
+  position: absolute;
+  inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font: 700 10px/1 var(--font-mono);
+  color: var(--accent);
+  transition: opacity 120ms var(--ease);
+}
+.done-toggle.has-count:hover .dt-count { opacity: 0; }
+
+/* Hover the circle = preview "mark done": strike the task title left→right.
+   Open tasks only (done tasks already show a static strike). */
+/* Shrink the task title to its text width (the global rule is `flex: 1 1 auto`,
+   which would stretch it across the row and make the strike overshoot far past
+   the text). Row1 holds only the title now, so shrink-to-fit is safe; long
+   titles still ellipsize via min-width:0 + overflow. */
+.task-row .ri-row1 > .ri-title { flex: 0 1 auto; max-width: 100%; }
+.task-row .ri-title { position: relative; }
+.task-row .ri-title::after {
+  content: '';
+  position: absolute; left: 0; top: 50%;
+  height: 1.5px; width: 0;
+  background: var(--accent);
+  transform: translateY(-50%);
+  transition: width 220ms var(--ease);
+  pointer-events: none;
+}
+.task-row:not(.status-done) .done-toggle:hover ~ .ri-body .ri-title::after { width: 100%; }
+
+@media (prefers-reduced-motion: reduce) {
+  .done-toggle:hover { animation: none; }
+  .task-row .ri-title::after { transition: none; }
 }
 
 /* ---- Subtask done toggle ------------------------------------------------
@@ -98,13 +148,16 @@
   color: var(--surface);
 }
 
-/* Strikethrough + muted title for done tasks/subtasks in the sidebar. */
-.rail-item.status-done .ri-title {
+/* Strikethrough + muted title for done TASK rows in the sidebar. Scoped to
+   exclude subtask rows: a subtask whose *turn* finished (status-done) is NOT
+   "completed" and must never be struck through (completion is a separate user
+   flag, and even that no longer strikes — see `.subtask-row.subtask-done`). */
+.rail-item.status-done:not(.subtask-row) .ri-title {
   text-decoration: line-through;
   text-decoration-thickness: 1px;
   color: var(--text-3);
 }
-.rail-item.status-done.active .ri-title { color: var(--accent-text); }
+.rail-item.status-done:not(.subtask-row).active .ri-title { color: var(--accent-text); }
 
 /* ---- Manager main pane chrome (prototype: .manager-eyebrow / .manager-task-name) ---- */
 .manager-eyebrow {
@@ -128,6 +181,64 @@
    prototype — overrides gian-v2.css's uppercase treatment, scoped to Tasks. */
 .tasks-main .session-status .status-label { text-transform: none; }
 
+/* ---- Manager running pill (issue #1: panel head + compact inspector head) ---- */
+.manager-status {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  font: 600 10px/1 var(--font-mono);
+  letter-spacing: 0.03em;
+}
+.manager-status.running { color: var(--accent-text); background: var(--accent-soft); }
+.manager-status.compact { padding: 0; background: transparent; }
+.manager-status-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  animation: manager-pulse 1.2s ease-in-out infinite;
+}
+@keyframes manager-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) {
+  .manager-status-dot { animation: none; }
+}
+
+/* ---- Inline subtask-action cards in the Manager conversation (issue #2) ---- */
+.manager-subtask-card {
+  display: flex; gap: 10px; align-items: flex-start;
+  max-width: 720px; width: 100%;
+  margin: 10px auto 0;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-3);
+}
+.manager-subtask-card.dismissed { opacity: 0.72; }
+.msc-icon {
+  flex: 0 0 auto; width: 20px; height: 20px; margin-top: 1px;
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #fff;
+}
+.msc-icon.created { background: var(--ok); }
+.msc-icon.dismissed { background: var(--text-3); }
+.msc-body { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 4px; }
+.msc-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.msc-status { font: 600 var(--fz-12)/1.2 var(--font-sans); color: var(--text); flex: 0 0 auto; }
+.msc-name {
+  font: var(--fz-12)/1.2 var(--font-sans); color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.msc-meta {
+  display: flex; align-items: center; gap: 6px;
+  font: 10px/1.4 var(--font-mono); color: var(--text-3);
+}
+.msc-ws { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msc-prompt {
+  margin: 2px 0 0;
+  font: var(--fz-12)/1.5 var(--font-sans); color: var(--text-2);
+  word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+
 /* ---- Manager transcript placeholder (no messages yet) ---- */
 .tasks-manager-placeholder {
   max-width: 560px;
@@ -142,8 +253,10 @@
   color: var(--text-2);
 }
 
-/* ---- Manager composer — narrow single-action variant over the shared chrome ---- */
-.composer.tasks-manager-composer .composer-bar { padding-top: 2px; }
+/* The Manager composer is the shared <Composer> in `minimal` mode (same
+   `.composer-wrap > .composer` chrome and 820px max-width as a normal session)
+   — no Tasks-specific composer class. The only scoped override is the compact
+   rail's edge-to-edge `.manager-inspector .composer { max-width: none }` below. */
 
 /* ---- Empty detail state ---- */
 .main.tasks-detail-empty {
@@ -272,10 +385,10 @@
    Tasks redesign (spec 2026-06-28 §B/§E/§G)
    ============================================================ */
 
-/* §B — completed subtask: struck-through + greyed in place (no square toggle) */
+/* §B — completed subtask: greyed in place. NO strikethrough (the line-through
+   read as "cancelled", not "done" — the dim + the menu's Reopen are the signal). */
 .rail-item.subtask-row.subtask-done { opacity: 0.6; }
 .rail-item.subtask-row.subtask-done .ri-title {
-  text-decoration: line-through;
   color: var(--text-3);
 }
 

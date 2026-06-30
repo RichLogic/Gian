@@ -39,3 +39,6 @@ playwright/.cache/
 
 # Local debug-driver runtime output (logs / pids / driver script)
 .gian-runtime/
+
+# Gian-maintained per-workspace AI context (runtime scaffold)
+.ai/

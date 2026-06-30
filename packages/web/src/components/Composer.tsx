@@ -198,6 +198,8 @@ export function Composer({
   remoteControl,
   onToggleRemoteControl,
   disabledSubmitBehavior = 'queue',
+  variant = 'full',
+  placeholder,
 }: {
   session: Session;
   onSend: (
@@ -253,8 +255,18 @@ export function Composer({
   /** Toggle Remote Control in TTY mode by sending `/remote-control` into the
    *  live PTY. Only meaningful when `session.runtime_mode === 'tty'`. */
   onToggleRemoteControl?: () => void;
+  /** `'minimal'` strips the model / approval-mode / slash / attachment / bypass
+   *  controls down to a bare textarea + Send/Stop. Used by the read-only Task
+   *  Manager composer: the Manager is a fixed-config Codex session (forced model/policy), so those
+   *  affordances would expose abilities it doesn't have. The draft-persistence,
+   *  Send→Stop toggle, width and keyboard handling are all kept identical to a
+   *  normal session composer. */
+  variant?: 'full' | 'minimal';
+  /** Override the idle placeholder text (defaults to `composer.placeholder.idle`). */
+  placeholder?: string;
 }) {
   const t = useT();
+  const minimal = variant === 'minimal';
   const [text, setText] = useState(() => readDraft(session.id));
 
   // Session swap: snapshot current draft under the OUTGOING session's key,
@@ -371,6 +383,8 @@ export function Composer({
   }, [text]);
 
   useEffect(() => {
+    // Minimal variant has no slash UI — never auto-open the popover.
+    if (minimal) return;
     // Auto-open / auto-filter the popover based on what the user types.
     // Empty input is a no-op — the slash button click is what controls the
     // popover when there's no `/` text — otherwise an async slashCommands
@@ -390,7 +404,7 @@ export function Composer({
       // Non-slash text → close. Empty text is a no-op (button-controlled).
       setSlashOpen(false);
     }
-  }, [text, slashCommands]);
+  }, [text, slashCommands, minimal]);
 
   useEffect(() => {
     if (!slashOpen) return;
@@ -595,6 +609,9 @@ export function Composer({
   }
 
   function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    // Minimal variant has no attachment pipeline — let text paste through
+    // normally rather than intercepting images we can't send.
+    if (minimal) return;
     const items = Array.from(e.clipboardData?.items ?? []);
     const images = items.filter(it => it.kind === 'file' && it.type.startsWith('image/'));
     if (images.length === 0) return; // let normal text paste through
@@ -632,7 +649,9 @@ export function Composer({
         return;
       }
     }
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+    // ⌘/Ctrl+Enter is the global "send now" shortcut — let it bubble to the
+    // document handler instead of submitting/queuing the current draft here.
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
       submit();
     }
@@ -696,7 +715,7 @@ export function Composer({
                 ? t('composer.remote.waiting')
                 : disabled
                   ? t('composer.placeholder.busy')
-                  : t('composer.placeholder.idle')
+                  : (placeholder ?? t('composer.placeholder.idle'))
             }
           />
         </div>
@@ -715,7 +734,7 @@ export function Composer({
           </div>
         )}
 
-        {slashOpen && slashPopPos && (slashLoading || filteredGroups.length > 0) && createPortal(
+        {!minimal && slashOpen && slashPopPos && (slashLoading || filteredGroups.length > 0) && createPortal(
           <div
             ref={popRef}
             className="cmp-slash-pop"
@@ -763,7 +782,7 @@ export function Composer({
           {/* TTY: model / effort / mode are owned by the live CLI, so here they
               are a read-only readout, not interactive pills. A single
               "edit in CLI" link jumps to the terminal to change them. */}
-          {ttyDisplayOnly && (
+          {!minimal && ttyDisplayOnly && (
             <div className="composer-tty-meta">
               <span
                 className="ctm-dot"
@@ -786,7 +805,7 @@ export function Composer({
               </button>
             </div>
           )}
-          {!ttyDisplayOnly && (<>
+          {!ttyDisplayOnly && !minimal && (<>
           {/* Model picker — opens custom model+thinking popover */}
           <div className="composer-model">
           <button
@@ -998,8 +1017,9 @@ export function Composer({
             )}
 
           {/* Slash command — framed [/] glyph. Hidden in TTY: the live CLI
-              has its own native slash UI, so this would only duplicate it. */}
-          {!ttyDisplayOnly && (
+              has its own native slash UI, so this would only duplicate it.
+              Hidden in minimal: the Manager composer has no slash surface. */}
+          {!ttyDisplayOnly && !minimal && (
             <button
               ref={slashBtnRef}
               type="button"
@@ -1016,8 +1036,9 @@ export function Composer({
           )}
 
           {/* Attach files — plus glyph (VS Code style) — picker not supported in v1.
-              Hidden in TTY (it's a no-op there; paste-to-upload still works). */}
-          {!ttyDisplayOnly && (
+              Hidden in TTY (it's a no-op there; paste-to-upload still works).
+              Hidden in minimal: the Manager composer has no attachment pipeline. */}
+          {!ttyDisplayOnly && !minimal && (
             <button
               type="button"
               className={`composer-act${pendingFiles.length > 0 ? ' active' : ''}`}

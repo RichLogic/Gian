@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ApprovalDecision } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import type { ApprovalActionContext, StatusItem, TranscriptItem } from '../types.js';
@@ -221,8 +221,18 @@ function countActions(items: TranscriptItem[], t: (key: string) => string): stri
   ].filter(Boolean).join(' · ');
 }
 
+/** A non-event node interleaved into the transcript by timestamp — e.g. the
+ *  Manager's `created/dismissed` subtask cards, which must read in-line at the
+ *  point in the conversation where the user acted, not all at the bottom. */
+export interface TranscriptExtra {
+  id: string;
+  /** Render immediately after the last transcript item whose `ts` ≤ this. */
+  afterTs: number;
+  node: ReactNode;
+}
+
 export function Transcript({
-  items, pending, onApprove, hiddenApprovalId,
+  items, pending, onApprove, hiddenApprovalId, extras,
 }: {
   items: TranscriptItem[];
   pending: boolean;
@@ -235,6 +245,8 @@ export function Transcript({
   /** Approval id pinned elsewhere (e.g. the Beta question dock). Suppress its
    *  inline transcript card so a pending question isn't shown twice. */
   hiddenApprovalId?: string;
+  /** Extra nodes interleaved among the items by timestamp (Manager subtask cards). */
+  extras?: TranscriptExtra[];
 }) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
@@ -260,7 +272,7 @@ export function Transcript({
       scroller.scrollTop = scroller.scrollHeight;
     });
     return () => window.cancelAnimationFrame(id);
-  }, [items.length, tailLen, pending]);
+  }, [items.length, tailLen, pending, extras?.length]);
 
   // Find the most recent user message — that's the "current" turn's user input.
   const currentUser = useMemo(() => {
@@ -279,7 +291,7 @@ export function Transcript({
 
   return (
     <div className="transcript" ref={ref}>
-        {items.length === 0 && !pending && (
+        {items.length === 0 && (extras?.length ?? 0) === 0 && !pending && (
           <div className="transcript-empty">{t('transcript.empty')}</div>
         )}
         {(() => {
@@ -296,36 +308,55 @@ export function Transcript({
           const visibleItems = hiddenApprovalId
             ? items.filter(it => !(it.kind === 'approval' && it.approvalId === hiddenApprovalId))
             : items;
-          return groupIntoBlocks(visibleItems).map((item) => {
+          const blocks = groupIntoBlocks(visibleItems);
+          // Interleave `extras` (Manager subtask cards) by timestamp: each one
+          // renders after the last block whose ts ≤ its afterTs. A card is a
+          // sender break, like any non-text item.
+          const sortedExtras = (extras ?? []).slice().sort((a, b) => a.afterTs - b.afterTs);
+          const blockTs = (b: RenderableItem): number =>
+            b.kind === 'turn-actions'
+              ? (b.items[b.items.length - 1]?.ts ?? 0)
+              : ((b as { ts?: number }).ts ?? 0);
+          const out: ReactNode[] = [];
+          let ei = 0;
+          const flushExtrasBefore = (limit: number) => {
+            while (ei < sortedExtras.length && sortedExtras[ei]!.afterTs < limit) {
+              out.push(<Fragment key={`x_${sortedExtras[ei]!.id}`}>{sortedExtras[ei]!.node}</Fragment>);
+              prevSender = null;
+              ei++;
+            }
+          };
+          blocks.forEach((item, bi) => {
             if (item.kind === 'turn-actions') {
               prevSender = null;
-              return <TurnActionsBlock key={item.id} block={item} onApprove={onApprove} />;
-            }
-            let hideAvatar = false;
-            if (item.kind === 'user') {
-              hideAvatar = prevSender === 'user';
-              prevSender = 'user';
-            } else if (item.kind === 'assistant') {
-              hideAvatar = prevSender === item.exec;
-              prevSender = item.exec;
+              out.push(<TurnActionsBlock key={item.id} block={item} onApprove={onApprove} />);
             } else {
-              // Anything else rendered between two text bubbles — reasoning,
-              // approval, error, diff, auto-notice, status, turn markers —
-              // counts as a sender break. The next assistant text must get a
-              // fresh header (time + copy), even when the bubbles are from
-              // the same exec. Codex in particular interleaves reasoning
-              // cards between assistant_text chunks; without this the
-              // post-reasoning bubble would lose its footer.
-              prevSender = null;
+              let hideAvatar = false;
+              if (item.kind === 'user') {
+                hideAvatar = prevSender === 'user';
+                prevSender = 'user';
+              } else if (item.kind === 'assistant') {
+                hideAvatar = prevSender === item.exec;
+                prevSender = item.exec;
+              } else {
+                // Anything else between two text bubbles counts as a sender
+                // break so the next assistant text gets a fresh header.
+                prevSender = null;
+              }
+              out.push(renderItem(
+                item,
+                onApprove,
+                currentUserRef,
+                item.kind === 'user' && currentUser !== null && item.id === currentUser.id,
+                hideAvatar,
+              ));
             }
-            return renderItem(
-              item,
-              onApprove,
-              currentUserRef,
-              item.kind === 'user' && currentUser !== null && item.id === currentUser.id,
-              hideAvatar,
-            );
+            const nextTs = bi + 1 < blocks.length ? blockTs(blocks[bi + 1]!) : Infinity;
+            flushExtrasBefore(nextTs);
           });
+          // Trailing extras (afterTs ≥ last block, or there were no blocks).
+          flushExtrasBefore(Infinity);
+          return out;
         })()}
         {showMascot && (
           <div className="msg-mascot">

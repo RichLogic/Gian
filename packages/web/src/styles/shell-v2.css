@@ -820,7 +820,7 @@
    Rendered INSIDE the .ri-status positioning wrapper, so session-row +
    subtask-row placement is unchanged; only the visual is new. Colours are
    computed from --g1/2/3 (tokens.css) and re-tint per accent + theme. */
-.gico { position: relative; display: inline-flex; flex: 0 0 auto; width: 18px; height: 18px; }
+.gico { position: relative; display: inline-flex; flex: 0 0 auto; width: 16px; height: 16px; }
 .gico .gfill {
   position: absolute; inset: 0;
   -webkit-mask-repeat: no-repeat, no-repeat; mask-repeat: no-repeat, no-repeat;
@@ -849,7 +849,8 @@
   filter: drop-shadow(0 0 4px var(--gGlow));
 }
 @keyframes gico-flow { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
-@keyframes gico-breathe { 0%, 100% { transform: scale(0.778); } 50% { transform: scale(1); } }
+/* Breathe between 14px (0.875×16) and 18px (1.125×16) — base .gico is 16px. */
+@keyframes gico-breathe { 0%, 100% { transform: scale(0.875); } 50% { transform: scale(1.125); } }
 @keyframes gico-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .gico.unread, .gico.unread .gfill, .gico.ring .gring { animation: none !important; }

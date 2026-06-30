@@ -353,10 +353,11 @@ function SettingsBodyInner({
           <h3 className="s2-sectiontitle">{t('settings.section.shortcuts')}</h3>
           <div className="s2-card">
             <dl className="kv-grid shortcuts">
-              <dt>{t('settings.shortcuts.commandPalette')}</dt><dd><kbd>⌘</kbd><kbd>K</kbd></dd>
-              <dt>{t('settings.shortcuts.newSession')}</dt><dd><kbd>⌘</kbd><kbd>N</kbd></dd>
-              <dt>{t('settings.shortcuts.toggleWorkbench')}</dt><dd><kbd>⌘</kbd><kbd>\</kbd></dd>
-              <dt>{t('settings.shortcuts.renameSession')}</dt><dd><kbd>F2</kbd></dd>
+              <dt>{t('settings.shortcuts.commandPalette')}</dt><dd><kbd>⌘</kbd><kbd>⇧</kbd><kbd>K</kbd></dd>
+              <dt>{t('settings.shortcuts.sendNow')}</dt><dd><kbd>⌘</kbd><kbd>⏎</kbd></dd>
+              <dt>{t('settings.shortcuts.createClaudeChild')}</dt><dd><kbd>⌘</kbd><kbd>J</kbd></dd>
+              <dt>{t('settings.shortcuts.createCodexChild')}</dt><dd><kbd>⌘</kbd><kbd>K</kbd></dd>
+              <dt>{t('settings.shortcuts.markUnread')}</dt><dd><kbd>⌘</kbd><kbd>U</kbd></dd>
               <dt>{t('settings.shortcuts.approveDecline')}</dt><dd><kbd>⏎</kbd>&nbsp;<kbd>⌫</kbd></dd>
               <dt>{t('settings.shortcuts.showChat')}</dt><dd><kbd>⌃/⌘</kbd><kbd>1</kbd></dd>
               <dt>{t('settings.shortcuts.showCli')}</dt><dd><kbd>⌃/⌘</kbd><kbd>2</kbd></dd>

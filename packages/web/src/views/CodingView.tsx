@@ -456,6 +456,10 @@ function Sidebar({
   }
 
   const filtered = active.filter(s => {
+    // The per-Task Manager (type='manager') lives in Tasks mode only — it is
+    // never a row in the Sessions list. Subtasks (type='subtask') DO appear
+    // here: a subtask is a 1:1 session.
+    if (s.type === 'manager') return false;
     if (wsFilter !== 'all' && s.workspace_id !== wsFilter) return false;
     if (filterExec && s.executor !== filterExec) return false;
     const ws = wsById.get(s.workspace_id);
@@ -466,9 +470,10 @@ function Sidebar({
     return matchesSearch(s, ws?.name ?? '');
   });
 
-  const needsYou = filtered.filter(s => s.status === 'pending' || s.status === 'error');
-  const needsYouIds = new Set(needsYou.map(s => s.id));
-  const rest = filtered.filter(s => !needsYouIds.has(s.id));
+  // Every session groups by workspace — no "needs you" section pinned to the
+  // top (it overrode workspace grouping). Attention is conveyed per-row via the
+  // StatusIcon (pending/error/unread), not by reordering.
+  const rest = filtered;
 
   function renderRow(s: Session, isArchived = false) {
     return (
@@ -638,20 +643,6 @@ function Sidebar({
       </div>
 
       <div className="sb-scroll">
-        {needsYou.length > 0 && (
-          <>
-            <div className="sb-group needs-you">
-              <span className="dot" />
-              <span>{t('coding.sidebar.needsYou')}</span>
-              <span className="count">{needsYou.length}</span>
-            </div>
-            {needsYou
-              .slice()
-              .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
-              .map(s => renderRow(s))}
-          </>
-        )}
-
         {renderGroups()}
 
         {(() => {
@@ -1310,6 +1301,7 @@ export function SessionMain({
   onArchive,
   onDelete,
   onRecover,
+  onReopen,
   onRename,
   onShowChanges,
   workingTreeId,
@@ -1379,6 +1371,9 @@ export function SessionMain({
   onArchive: (archived: boolean) => void;
   onDelete: () => void;
   onRecover: () => void;
+  /** Reopen a completed subtask (clears `completed_at`). Subtask-only — the
+   *  completed banner's affordance; absent for regular sessions. */
+  onReopen?: () => void;
   onRename: (name: string) => void;
   onShowChanges: () => void;
   workingTreeId: string | null;
@@ -1387,6 +1382,10 @@ export function SessionMain({
   const t = useT();
   const isWorktree = session.branch !== null;
   const terminal = session.worktree_outcome !== null;
+  // A user-completed subtask is read-only in the chat: sending is blocked in the
+  // UI until it's reopened (the turn machinery still works, but a "done" subtask
+  // shouldn't accept new messages). Regular sessions never hit this.
+  const subtaskCompleted = session.type === 'subtask' && session.completed_at != null;
   const visibleTabs = runtimeTabs(session.executor, chatView);
   const tabKey = visibleTabs.map(tb => tb.surface).join(',');
 
@@ -1570,6 +1569,12 @@ export function SessionMain({
     <main className="main">
       <div className="main-head">
         <div className="main-head-l">
+          {/* A Subtask IS a session; this same SessionMain renders both. Tag the
+              subtask variant with a "Subtask" eyebrow (mirrors the Manager
+              panel's "Manager" eyebrow) so its top-left identifies it. */}
+          {session.type === 'subtask' && (
+            <span className="manager-eyebrow">{t('tasks.subtask.title')}</span>
+          )}
           {/* Runtime tabs are configurable (Settings → 聊天视图). Claude shows a
               single chat surface — `claude -p` or tty — never both; CLI is an
               optional extra. The whole bar hides when only one tab is offered. */}
@@ -1647,6 +1652,17 @@ export function SessionMain({
           </button>
         </div>
       )}
+      {subtaskCompleted && (
+        <div className="session-banner">
+          <span>{t('coding.banner.subtaskCompleted')}</span>
+          <span className="session-banner-spacer" />
+          {onReopen && (
+            <button className="btn xs secondary" onClick={onReopen}>
+              {t('tasks.subtask.reopen')}
+            </button>
+          )}
+        </div>
+      )}
       {isTty && !ttyLockedOut ? (
         <div className="main-scroll tty-pane">
           <Terminal
@@ -1691,9 +1707,9 @@ export function SessionMain({
             onSetModel={onSetModel}
             onSetEffort={onSetEffort}
             onJumpToCli={() => handleSelectSurface('cli')}
-            disabled={pending || terminal || ttyLockedOut || (isBeta && !!pendingQuestion)}
+            disabled={pending || terminal || subtaskCompleted || ttyLockedOut || (isBeta && !!pendingQuestion)}
             running={isTurnRunning(session.status, pending)}
-            disabledSubmitBehavior={betaComposerSubmitBehavior(isBeta, !!pendingQuestion)}
+            disabledSubmitBehavior={subtaskCompleted ? 'block' : betaComposerSubmitBehavior(isBeta, !!pendingQuestion)}
             executor={session.executor}
             workspaceId={workspace?.id}
             armedRemote={armedRemote}

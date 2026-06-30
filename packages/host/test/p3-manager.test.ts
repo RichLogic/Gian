@@ -176,18 +176,28 @@ test('ensureManagerSession creates one manager session bound to root (idempotent
   }
 });
 
-test('manager turn is forced workspace-write + never regardless of approval_mode', async () => {
+test('manager turn honors its approval_mode (default plan → read-only; auto → writable)', async () => {
   const { dir, db, proxyMgr, sessions, tasks } = setup();
   try {
     const task = tasks.createTask({ name: 'Audit' });
-    await sessions.sendManagerMessage(task.id, 'what is this project?');
+    const mgr = await sessions.ensureManagerSession(task.id);
 
-    const params = proxyMgr.client.lastStartTurnParams;
+    // No policy is forced anymore (decision 2026-06-29): the Manager honors its
+    // approval_mode like any session. Default is 'plan' → codex read-only +
+    // on-request, so a fresh Manager plans/reads.
+    await sessions.sendManagerMessage(task.id, 'what is this project?');
+    let params = proxyMgr.client.lastStartTurnParams;
     assert.ok(params, 'startTurn was called');
-    // Manager is writable (spec 2026-06-28 §A1, supersedes PRD-v3 §A1).
-    assert.equal(params!.sandbox, 'workspace-write', 'sandbox forced workspace-write');
-    assert.equal(params!.approvalPolicy, 'never', 'approvals forced never');
+    assert.equal(params!.sandbox, 'read-only', 'plan → read-only');
+    assert.equal(params!.approvalPolicy, 'on-request', 'plan → on-request');
     assert.equal(params!.thinking, MANAGER_EFFORT, 'effort applied per-turn');
+
+    // Escalate to 'auto' → the next turn is writable (workspace-write).
+    await sessions.stopTurn(mgr.id);
+    sessions.setApprovalMode(mgr.id, 'auto');
+    await sessions.sendManagerMessage(task.id, 'now make the change');
+    params = proxyMgr.client.lastStartTurnParams;
+    assert.equal(params!.sandbox, 'workspace-write', 'auto → workspace-write');
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

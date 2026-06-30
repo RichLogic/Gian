@@ -1,4 +1,5 @@
 import type { EventEnvelope } from '@gian/shared';
+import { stripManagerSystemPrefix } from '@gian/shared';
 import type {
   AgentSpawnItem,
   ApprovalItem,
@@ -371,10 +372,17 @@ export function applyEnvelope(
       ts: env.ts, turn: env.turn,
       ...(attachments.length > 0 ? { attachments } : {}),
     };
+    // The Manager prepends a sentinel-wrapped meta block (system prompt on the
+    // first turn, or a `create_subtask` action note on later turns) to the user
+    // text host-side, so the server echo carries it but the client's optimistic
+    // echo holds only the bare text. Compare against the stripped form too, or
+    // the first Manager message reconciles against nothing and renders twice.
+    const strippedItemText = stripManagerSystemPrefix(item.text);
     for (let i = base.length - 1; i >= 0; i--) {
       const cand = base[i]!;
       if (
-        cand.kind === 'user' && cand.pending && cand.text === item.text
+        cand.kind === 'user' && cand.pending
+        && (cand.text === item.text || cand.text === strippedItemText)
         && (cand.attachments?.length ?? 0) === attachments.length
       ) {
         // Reconciled — release the optimistic blob URLs before we swap the

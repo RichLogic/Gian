@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { useT } from '../i18n/index.js';
 
 export type PathSegmentKind = 'workspace' | 'branch' | 'session';
@@ -11,6 +11,9 @@ export interface PathSegment {
 }
 
 export interface SessionMenuActions {
+  /** Which context this menu is for — drives the item set, order, grouping and
+   *  danger styling (see buildMenuItems). Defaults to 'session'. */
+  kind?: 'session' | 'subtask' | 'task';
   onRename: () => void;
   // All others are optional — the menu adapts to the context (full session /
   // subtask / task). When a callback is absent, its item is hidden.
@@ -91,6 +94,68 @@ const ICON = {
   // check — "mark complete" (subtask)
   check: 'M5 12l5 5L20 7',
 };
+
+interface MenuItemDesc {
+  key: string;
+  icon: string;
+  label: string;
+  onClick: () => void;
+  /** Render a divider above this item (group separator). */
+  ruleBefore?: boolean;
+  /** Danger (red) styling. */
+  danger?: boolean;
+  /** Right-aligned hint, e.g. the F2 shortcut. */
+  hint?: string;
+}
+
+/**
+ * Build the ordered menu item list for the active context. Three distinct
+ * layouts (decided 2026-06-29) — they differ in order, grouping and which
+ * actions are destructive, so a single fixed template can't express them:
+ *
+ *  session : Rename · Copy · Unread ┊ Fork×2 · Recover(red) ┊ Archive · Delete(red)
+ *  subtask : Rename · Copy ┊ Unread · Complete ┊ Recover(red)
+ *  task    : Rename · Copy ┊ Remove(red)
+ */
+function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuItemDesc[] {
+  const items: MenuItemDesc[] = [
+    { key: 'rename', icon: ICON.edit, label: t('path.menu.rename'), onClick: m.onRename, hint: 'F2' },
+  ];
+  const copy = () => {
+    if (m.onCopyName) items.push({ key: 'copy', icon: ICON.copy, label: t('path.menu.copyName'), onClick: m.onCopyName });
+  };
+
+  if (m.kind === 'task') {
+    copy();
+    if (m.onDelete) items.push({ key: 'remove', icon: ICON.trash, label: t('path.menu.removeTask'), onClick: m.onDelete, danger: true, ruleBefore: true });
+    return items;
+  }
+
+  if (m.kind === 'subtask') {
+    copy();
+    if (m.onMarkUnread) items.push({ key: 'unread', icon: ICON.mail, label: t('path.menu.markUnread'), onClick: m.onMarkUnread, ruleBefore: true });
+    if (m.onToggleComplete) items.push({
+      key: 'complete',
+      icon: m.completed ? ICON.refresh : ICON.check,
+      label: m.completed ? t('tasks.subtask.reopen') : t('tasks.subtask.complete'),
+      onClick: m.onToggleComplete,
+    });
+    if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, ruleBefore: true });
+    return items;
+  }
+
+  // session (default)
+  copy();
+  if (m.onMarkUnread) items.push({ key: 'unread', icon: ICON.mail, label: t('path.menu.markUnread'), onClick: m.onMarkUnread });
+  if (m.onFork) {
+    items.push({ key: 'fork-claude', icon: ICON.fork, label: t('path.menu.forkClaude'), onClick: () => m.onFork!('claude'), ruleBefore: true });
+    items.push({ key: 'fork-codex', icon: ICON.fork, label: t('path.menu.forkCodex'), onClick: () => m.onFork!('codex') });
+  }
+  if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true });
+  if (m.onArchive) items.push({ key: 'archive', icon: ICON.folder, label: t('common.archive'), onClick: m.onArchive, ruleBefore: true });
+  if (m.onDelete) items.push({ key: 'delete', icon: ICON.trash, label: t('path.menu.deleteSession'), onClick: m.onDelete, danger: true });
+  return items;
+}
 
 export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessionMenu }: Props) {
   const t = useT();
@@ -183,55 +248,18 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                 )}
                 {showMenu && sessionMenu && (
                   <div className="session-menu" ref={menuRef} onClick={e => e.stopPropagation()}>
-                    <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onRename(); }}>
-                      <MenuIcon d={ICON.edit} /> {t('path.menu.rename')}
-                      <span className="sub">F2</span>
-                    </button>
-                    {sessionMenu.onToggleComplete && (
-                      <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onToggleComplete!(); }}>
-                        <MenuIcon d={sessionMenu.completed ? ICON.refresh : ICON.check} />{' '}
-                        {sessionMenu.completed ? t('tasks.subtask.reopen') : t('tasks.subtask.complete')}
-                      </button>
-                    )}
-                    {sessionMenu.onCopyName && (
-                      <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onCopyName!(); }}>
-                        <MenuIcon d={ICON.copy} /> {t('path.menu.copyName')}
-                      </button>
-                    )}
-                    {sessionMenu.onForceRecover && (
-                      <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onForceRecover!(); }}>
-                        <MenuIcon d={ICON.refresh} /> {t('path.menu.forceRecover')}
-                      </button>
-                    )}
-                    {sessionMenu.onFork && (
-                      <>
-                        <div className="rule" />
-                        <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onFork!('claude'); }}>
-                          <MenuIcon d={ICON.fork} /> {t('path.menu.forkClaude')}
+                    {buildMenuItems(sessionMenu, t).map(it => (
+                      <Fragment key={it.key}>
+                        {it.ruleBefore && <div className="rule" />}
+                        <button
+                          className={`item${it.danger ? ' danger' : ''}`}
+                          onClick={() => { setMenuOpen(false); it.onClick(); }}
+                        >
+                          <MenuIcon d={it.icon} /> {it.label}
+                          {it.hint && <span className="sub">{it.hint}</span>}
                         </button>
-                        <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onFork!('codex'); }}>
-                          <MenuIcon d={ICON.fork} /> {t('path.menu.forkCodex')}
-                        </button>
-                      </>
-                    )}
-                    {(sessionMenu.onMarkUnread || sessionMenu.onArchive || sessionMenu.onDelete) && (
-                      <div className="rule" />
-                    )}
-                    {sessionMenu.onMarkUnread && (
-                      <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onMarkUnread!(); }}>
-                        <MenuIcon d={ICON.mail} /> {t('path.menu.markUnread')}
-                      </button>
-                    )}
-                    {sessionMenu.onArchive && (
-                      <button className="item" onClick={() => { setMenuOpen(false); sessionMenu.onArchive!(); }}>
-                        <MenuIcon d={ICON.folder} /> {t('common.archive')}
-                      </button>
-                    )}
-                    {sessionMenu.onDelete && (
-                      <button className="item danger" onClick={() => { setMenuOpen(false); sessionMenu.onDelete!(); }}>
-                        <MenuIcon d={ICON.trash} /> {t('path.menu.deleteSession')}
-                      </button>
-                    )}
+                      </Fragment>
+                    ))}
                   </div>
                 )}
               </span>

@@ -11,8 +11,8 @@ export type ViewState = 'main' | 'both' | 'workbench';
 // are hidden. The 'spaces'/'bots' modes still exist as routes (e.g. the
 // workspace-create flow opens 'spaces'), just not as dropdown entries.
 const MODE_OPTIONS: ReadonlyArray<readonly [Mode, string]> = [
-  ['sessions', 'topbar.mode.sessions'],
   ['tasks', 'topbar.mode.tasks'],
+  ['sessions', 'topbar.mode.sessions'],
 ];
 
 function GianMark({ size = 18 }: { size?: number }) {

@@ -45,12 +45,12 @@ import { SettingsBody } from './components/SettingsBody.js';
 import { Terminal, makeWorkbenchWire } from './components/Terminal.js';
 import { CodingView, SessionMain } from './views/CodingView.js';
 import { SpacesView, NewWorkspacePanel } from './views/SpacesView.js';
-import { TasksView, ManagerInspector, type NewSubtaskDraft } from './views/TasksView.js';
+import { TasksView, ManagerInspector, managerCardContextNote, type NewSubtaskDraft, type ManagerSubtaskCard, type ManagerComposerHandlers } from './views/TasksView.js';
 import { BotsView } from './views/BotsView.js';
 import { FilesView } from './views/FilesView.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import type { SystemConfig } from '@gian/shared';
-import { stripManagerSystemPrefix, parseCreateSubtaskProposal, stripCreateSubtaskBlocks } from '@gian/shared';
+import { stripManagerSystemPrefix, parseCreateSubtaskProposal, stripCreateSubtaskBlocks, wrapManagerContextNote } from '@gian/shared';
 import type { QueueEntry, TokenUsage, TranscriptItem } from './types.js';
 import { planBetaComposerSend, planCreatedSessionFirstMessage, resolveChatView } from './session-routing.js';
 
@@ -79,13 +79,29 @@ export function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeSubtaskId, setActiveSubtaskId] = useState<string | null>(null);
+  // Per-Task static "subtask action" cards (created / dismissed) that live in
+  // the Manager conversation (PRD-v3 §A2 follow-up). App-level so they survive
+  // ManagerPanel unmount when you navigate between tasks/subtasks. Each card's
+  // `acked` flag tracks whether its context note has been folded into a Manager
+  // message yet.
+  const [managerCardsByTask, setManagerCardsByTask] = useState<Record<string, ManagerSubtaskCard[]>>({});
+  // Debug switch (early Manager bring-up): when ON, the Manager transcript shows
+  // the raw "plumbing" — the first-turn system prompt and the create_subtask
+  // proposal blocks — instead of stripping them. Defaults ON; flip OFF once the
+  // Manager UX is trusted to restore the clean render. Persisted in localStorage.
+  const [showManagerRaw, setShowManagerRaw] = useState<boolean>(() => {
+    try { return localStorage.getItem('gian.manager.debugRaw') !== '0'; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('gian.manager.debugRaw', showManagerRaw ? '1' : '0'); } catch { /* ignore */ }
+  }, [showManagerRaw]);
   const [itemsBySession, setItemsBySession] = useState<Record<string, TranscriptItem[]>>({});
   const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
   const [usageBySession, setUsageBySession] = useState<Record<string, TokenUsage>>({});
   const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
   const [ttyLockBySession, setTtyLockBySession] = useState<Record<string, { owner: boolean; reason?: string }>>({});
   const [remoteControlBySession, setRemoteControlBySession] = useState<Record<string, RemoteControlState>>({});
-  const [mode, setMode] = useState<Mode>('sessions');
+  const [mode, setMode] = useState<Mode>('tasks');
   const [workingTrees, setWorkingTrees] = useState<WorkingTree[]>([]);
   // Installed apps for the Sheet's "Open with…" menu (macOS; [] elsewhere).
   // Fetched once — the list is stable for a session.
@@ -156,9 +172,11 @@ export function App() {
   const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
 
   useEffect(() => {
+    // ⌘⇧K toggles the command palette (plain ⌘K was reassigned to "create Codex
+    // child" — see the action-shortcuts effect below).
     function onKeyDown(e: KeyboardEvent) {
       const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.key === 'k') {
+      if (mod && e.shiftKey && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setPaletteOpen(o => !o);
       }
@@ -169,6 +187,64 @@ export function App() {
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [paletteOpen]);
+
+  // Action shortcuts (documented in Settings → Shortcuts):
+  //   ⌘⏎  send the queued message now (active session, or the Task's Manager)
+  //   ⌘U  mark the active session as unread
+  //   ⌘J  spawn a Claude child — a subtask (Tasks/Manager view) or a fork of the
+  //   ⌘K  spawn a Codex child  active session ("fork from" semantics) otherwise
+  useEffect(() => {
+    // Fork the active session into a child of `executor`, OR (in the Manager
+    // view) open the create-subtask form preset to that executor.
+    function spawnChild(executor: 'claude' | 'codex') {
+      if (mode === 'tasks' && activeTaskId && !activeSubtaskId) {
+        window.dispatchEvent(new CustomEvent('gian:new-subtask', { detail: { executor } }));
+        return;
+      }
+      const session = activeSessionId
+        ? sessionsRef.current.find(s => s.id === activeSessionId) ?? null
+        : null;
+      if (!session) return;
+      const baseName = session.name && session.name.length > 0
+        ? session.name
+        : `session ${session.id.slice(0, 6)}`;
+      const isWorktree = session.worktree_path !== null;
+      setCreatingSession(true);
+      setForkingSession(true);
+      ws.send({
+        type: 'session:create',
+        workspace_id: session.workspace_id,
+        executor,
+        approval_mode: session.approval_mode,
+        name: `${baseName} copy`,
+        ...(isWorktree
+          ? { mode: 'worktree', ...(session.base_branch ? { base_branch: session.base_branch } : {}) }
+          : { mode: 'regular' }),
+      });
+    }
+    function onKey(e: KeyboardEvent) {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod || e.shiftKey || e.altKey) return;
+      if (e.key === 'Enter') {
+        const sid = activeSessionId
+          ?? (mode === 'tasks' && activeTaskId && !activeSubtaskId
+            ? (sessionsRef.current.find(s => s.type === 'manager' && s.task_id === activeTaskId)?.id ?? null)
+            : null);
+        if (sid) { e.preventDefault(); ws.send({ type: 'queue:send_now', session_id: sid }); }
+        return;
+      }
+      const k = e.key.toLowerCase();
+      if (k === 'u') {
+        if (activeSessionId) { e.preventDefault(); ws.send({ type: 'session:set_unread', session_id: activeSessionId, unread: true }); }
+      } else if (k === 'j') {
+        e.preventDefault(); spawnChild('claude');
+      } else if (k === 'k') {
+        e.preventDefault(); spawnChild('codex');
+      }
+    }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [mode, activeSessionId, activeTaskId, activeSubtaskId, ws]);
 
   const handleEnvelope = useCallback((env: EventEnvelope, executor: 'claude' | 'codex') => {
     const notifyingSession = sessionsRef.current.find(s => s.id === env.session_id) ?? null;
@@ -450,6 +526,12 @@ export function App() {
   // We need the latest sessions list when handling events (to look up executor).
   const sessionsRef = useRef<Session[]>([]);
   useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
+  const workspacesRef = useRef<Workspace[]>([]);
+  useEffect(() => { workspacesRef.current = workspaces; }, [workspaces]);
+  // Latest Manager cards for the stable onManagerSend callback (reads unacked
+  // cards to fold into the next message's hidden context).
+  const managerCardsByTaskRef = useRef(managerCardsByTask);
+  useEffect(() => { managerCardsByTaskRef.current = managerCardsByTask; }, [managerCardsByTask]);
   // Latest config for the create handler — it reads the Claude chat surface to
   // decide whether a new Claude session switches to TTY or stays structured.
   const systemConfigRef = useRef<SystemConfig | null>(systemConfig);
@@ -1058,17 +1140,23 @@ export function App() {
 
   // Session-menu actions (Rename / Copy / Recover / Archive / Delete)
   const sessionMenu: SessionMenuActions | null = useMemo(() => {
-    // Task (Manager view): a one-level menu — Rename / Copy name / Archive.
+    // Task (Manager view): a one-level menu — Rename / Copy name ┊ Remove (red).
     if (mode === 'tasks' && !activeSubtaskId && activeTaskId) {
       const task = tasks.find(t => t.id === activeTaskId);
       if (!task) return null;
       return {
+        kind: 'task' as const,
         onRename: () => setPathRenameActive(true),
         onCopyName: () => {
           try { void navigator.clipboard?.writeText(task.name || ''); } catch (_) { /* ignore */ }
         },
-        onArchive: () => {
-          ws.send({ type: 'task:update', task_id: task.id, status: task.status === 'archived' ? 'open' : 'archived' });
+        onDelete: async () => {
+          const ok = await confirmDialog({
+            message: `${appT('tasks.remove.confirmPrefix')} "${task.name || appT('tasks.untitled')}"? ${appT('tasks.remove.confirmSuffix')}`,
+            danger: true,
+            confirmLabel: appT('common.delete'),
+          });
+          if (ok) ws.send({ type: 'task:delete', task_id: task.id });
         },
       };
     }
@@ -1077,6 +1165,7 @@ export function App() {
     const isSubtask = mode === 'tasks' && !!activeSubtaskId;
     if ((mode !== 'sessions' && !isSubtask) || !activeSession) return null;
     return {
+      kind: (isSubtask ? 'subtask' : 'session') as 'subtask' | 'session',
       onRename: () => setPathRenameActive(true),
       onCopyName: () => {
         try { void navigator.clipboard?.writeText(activeSession.name || ''); } catch (_) { /* ignore */ }
@@ -1189,6 +1278,22 @@ export function App() {
     setActiveSessionId(activeSubtaskId);
     markSessionViewed(activeSubtaskId);
   }, [mode, activeSubtaskId, markSessionViewed]);
+
+  // Tasks-mode Manager view (no subtask selected) views no session. If
+  // `activeSessionId` still points at a subtask from an earlier visit, clear it
+  // — otherwise that stale subtask stays falsely "active", which (a) auto-clears
+  // its unread when a background turn finishes there (so a finished subtask
+  // wrongly shows as read) and (b) makes re-selecting it skip mark-read (the
+  // sync effect's `=== activeSubtaskId` guard short-circuits). Only resets when
+  // the lingering active session is itself a subtask, so a normal session
+  // selected in Sessions mode is preserved across a mode switch.
+  useEffect(() => {
+    if (mode !== 'tasks' || activeSubtaskId) return;
+    const cur = activeSessionIdRef.current;
+    if (cur && sessionsRef.current.find(s => s.id === cur)?.type === 'subtask') {
+      setActiveSessionId(null);
+    }
+  }, [mode, activeSubtaskId]);
 
   // ─── Per-session SessionMain callbacks (shared) ──────────────────────────
   // These are the App-level handlers <SessionMain> needs, each keyed by an
@@ -1432,12 +1537,17 @@ export function App() {
     ? (itemsBySession[activeManagerSession.id] ?? [])
     : [];
   // Display: strip the system prefix (user msg) and the create_subtask proposal
-  // blocks (assistant msg) so the transcript reads as clean prose (spec §A2).
-  const managerItems = rawManagerItems.map(it =>
-    it.kind === 'user' ? { ...it, text: stripManagerSystemPrefix(it.text) }
-      : it.kind === 'assistant' ? { ...it, text: stripCreateSubtaskBlocks(it.text) }
-      : it,
-  );
+  // blocks (assistant msg) so the transcript reads as clean prose (spec §A2) —
+  // UNLESS the debug `showManagerRaw` switch is on, which surfaces the raw
+  // plumbing for early bring-up. The create_subtask confirm card still renders
+  // either way (it's parsed from rawManagerItems below, independent of this).
+  const managerItems = showManagerRaw
+    ? rawManagerItems
+    : rawManagerItems.map(it =>
+        it.kind === 'user' ? { ...it, text: stripManagerSystemPrefix(it.text) }
+          : it.kind === 'assistant' ? { ...it, text: stripCreateSubtaskBlocks(it.text) }
+          : it,
+      );
   // Latest Manager `create_subtask` proposal (spec §A2), parsed from the RAW
   // assistant text and resolved to a prefilled subtask draft for the confirm
   // card. workspace name/path → id: exact path first, then a UNIQUE name match
@@ -1471,6 +1581,30 @@ export function App() {
   const managerPending = activeManagerSession
     ? (pendingBySession[activeManagerSession.id] ?? activeManagerSession.status === 'running')
     : false;
+  // The Manager IS a session, so its (now full) composer reuses the exact same
+  // App-level session handlers, bound to the manager session id — model / mode /
+  // effort / slash / queue / approvals all work like a normal session.
+  const managerSessionId = activeManagerSession?.id ?? null;
+  const managerQueue = managerSessionId ? (queueBySession[managerSessionId] ?? []) : [];
+  const managerHandlers = useMemo<ManagerComposerHandlers | null>(() => {
+    if (!managerSessionId) return null;
+    return {
+      onSetModel: (model) => sessionMainHandlers.onSetModel(managerSessionId, model),
+      onSetMode: (mode, turns) => sessionMainHandlers.onSetMode(managerSessionId, mode, turns),
+      onSetEffort: (effort) => sessionMainHandlers.onSetEffort(managerSessionId, effort),
+      onSendSkill: (name, path) => sessionMainHandlers.onSendSkill(managerSessionId, name, path),
+      onQueueAdd: (t) => sessionMainHandlers.onQueueAdd(managerSessionId, t),
+      onQueueRemove: (queueId) => sessionMainHandlers.onQueueRemove(managerSessionId, queueId),
+      onQueueReorder: (order) => sessionMainHandlers.onQueueReorder(managerSessionId, order),
+      onQueueClear: () => sessionMainHandlers.onQueueClear(managerSessionId),
+      onQueueSendNow: () => sessionMainHandlers.onQueueSendNow(managerSessionId),
+      onApprove: (approvalId, decision, answers) =>
+        sessionMainHandlers.onApprove(managerSessionId, approvalId, decision, answers),
+    };
+    // sessionMainHandlers is a fresh object each render but closes only over
+    // stable refs/setters, so keying the memo on the session id is sufficient.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [managerSessionId]);
 
   // Hydrate a session's transcript from the REST event log if not loaded yet.
   // Shared shape with the activeSessionId hydration effect above.
@@ -1487,6 +1621,21 @@ export function App() {
   }, [itemsBySession]);
 
   // Ensure the Manager session exists for a Task, then hydrate its transcript.
+  // Clear the Manager's unread once its panel is actually on screen — the full
+  // panel (task open, no subtask) or the compact inspector (subtask open with
+  // the Manager rail showing). Without this the task row's row-end StatusIcon
+  // (driven by the Manager's unread) would stay lit forever, since the Manager
+  // is never the `activeSessionId` that markSessionViewed clears.
+  const managerPanelVisible = mode === 'tasks' && (
+    (!activeSubtaskId && !!activeTaskId) ||
+    (!!activeSubtaskId && inspectorTab === 'manager')
+  );
+  useEffect(() => {
+    const mgr = activeManagerSession;
+    if (!managerPanelVisible || !mgr || mgr.unread !== 1) return;
+    ws.send({ type: 'session:set_unread', session_id: mgr.id, unread: false });
+  }, [managerPanelVisible, activeManagerSession, ws]);
+
   const onManagerMount = useCallback((taskId: string) => {
     const existing = sessionsRef.current.find(
       s => s.type === 'manager' && s.task_id === taskId,
@@ -1505,44 +1654,127 @@ export function App() {
     });
   }, [hydrateTranscript]);
 
-  const onManagerSend = useCallback((taskId: string, text: string) => {
-    // Optimistic echo against the manager session if we already know it. The
-    // real user_message reconciles via applyEnvelope by exact text match.
+  const onManagerSend = useCallback((
+    taskId: string,
+    text: string,
+    opts?: { attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }> },
+  ) => {
+    // §A2 follow-up: fold any not-yet-acknowledged subtask-action notes into a
+    // hidden, sentinel-wrapped context block prepended to the message — so the
+    // Manager learns "the user created/dismissed subtask X" without a separate
+    // turn. The optimistic echo uses the BARE text; the reconciler strips the
+    // wrapper (and so does managerItems unless showManagerRaw is on).
+    const cards = managerCardsByTaskRef.current[taskId] ?? [];
+    const unacked = cards.filter(c => !c.acked);
+    const sentText = wrapManagerContextNote(unacked.map(managerCardContextNote), text);
     const mgr = sessionsRef.current.find(
       s => s.type === 'manager' && s.task_id === taskId,
     );
-    if (mgr) {
-      const echo = createOptimisticEcho({ sessionId: mgr.id, text, exec: mgr.executor });
-      setItemsBySession(prev => {
-        const list = prev[mgr.id] ?? [];
-        return { ...prev, [mgr.id]: [...list, echo] };
-      });
-      setPendingBySession(p => ({ ...p, [mgr.id]: true }));
+    if (!mgr) return;
+    const attachments = opts?.attachments ?? [];
+    // Optimistic echo against the manager session. The real user_message
+    // reconciles via applyEnvelope (stripped-text match).
+    const echo = createOptimisticEcho({
+      sessionId: mgr.id,
+      text,
+      exec: mgr.executor,
+      attachments: attachments.length > 0
+        ? attachments.map(a => ({ name: a.name, mime: a.mime, url: a.previewUrl }))
+        : undefined,
+    });
+    setItemsBySession(prev => ({ ...prev, [mgr.id]: [...(prev[mgr.id] ?? []), echo] }));
+    setPendingBySession(p => ({ ...p, [mgr.id]: true }));
+    // Send over the SAME structured message:send the session composer uses —
+    // the host prepends the Manager system prompt on the first turn (keyed on
+    // type==='manager'), so the Manager composer no longer needs the bespoke
+    // REST path. Carries text + any image attachments as structured items.
+    const items: Array<
+      | { type: 'text'; text: string }
+      | { type: 'localImage'; path: string; name?: string; mime?: string }
+    > = [];
+    if (sentText.trim()) items.push({ type: 'text', text: sentText });
+    for (const a of attachments) items.push({ type: 'localImage', path: a.path, name: a.name, mime: a.mime });
+    ws.send({
+      type: 'message:send',
+      session_id: mgr.id,
+      text: sentText,
+      ...(items.length > 0 ? { items } : {}),
+    });
+    // Ack the folded cards (best-effort — the structured send is reliable, and
+    // unlike the old REST call there's no response to await).
+    if (unacked.length > 0) {
+      const ackedIds = new Set(unacked.map(c => c.id));
+      setManagerCardsByTask(prev => ({
+        ...prev,
+        [taskId]: (prev[taskId] ?? []).map(c => ackedIds.has(c.id) ? { ...c, acked: true } : c),
+      }));
     }
-    void import('./api.js').then(m => m.sendManagerMessage(taskId, text));
-  }, []);
+  }, [ws]);
 
-  const onCreateSubtask = useCallback((taskId: string, draft: {
-    workspace_id: string; executor: 'claude' | 'codex'; name?: string; prompt: string;
-  }) => {
-    // Spec §A3: stage the first prompt so the `session:created` handler delivers
-    // it through the SAME billing-safe first-message routing as a new session
-    // (Claude → TTY `pty:input`, Codex → structured). No backend/prompt field.
-    pendingFirstMessageRef.current = draft.prompt?.trim() || null;
+  // Stop the Manager's in-flight turn — same `session:stop` path a normal
+  // session's Composer Stop button uses, resolved to the manager session id.
+  const onManagerStop = useCallback((taskId: string) => {
+    const mgr = sessionsRef.current.find(
+      s => s.type === 'manager' && s.task_id === taskId,
+    );
+    if (mgr) ws.send({ type: 'session:stop', session_id: mgr.id });
+  }, [ws]);
+
+  const onCreateSubtask = useCallback((taskId: string, draft: NewSubtaskDraft) => {
     void import('./api.js').then(m => m.createSubtask(taskId, {
       workspace_id: draft.workspace_id,
       executor: draft.executor,
       ...(draft.name ? { name: draft.name } : {}),
     })).then(session => {
       if (!session) {
-        pendingFirstMessageRef.current = null;
         toast({ kind: 'error', message: 'create subtask failed' });
         return;
       }
-      // The `session:created` broadcast (already fired by the host) runs the
-      // first-message plan with the staged prompt. Just focus the new subtask.
+      const prompt = draft.prompt?.trim() ?? '';
+      // Issue #5: prefill the first prompt into the new subtask's composer draft
+      // instead of auto-sending it. Robust for Claude (whose first turn must go
+      // through the TTY, where the staged-first-message routing was unreliable)
+      // and lets the user review before pressing Enter. Works even though the
+      // subtask's Composer isn't mounted yet — injectComposerDraft persists to
+      // localStorage, which the Composer reads on mount.
+      if (prompt) injectComposerDraft(session.id, prompt);
+      // §A2 follow-up: leave a static "created" card in the Manager conversation
+      // and queue its context for the Manager's next turn.
+      const wsLabel = workspacesRef.current.find(w => w.id === draft.workspace_id)?.name;
+      setManagerCardsByTask(prev => ({
+        ...prev,
+        [taskId]: [...(prev[taskId] ?? []), {
+          id: session.id,
+          status: 'created',
+          executor: draft.executor,
+          prompt,
+          ...(draft.name ? { name: draft.name } : {}),
+          ...(wsLabel ? { workspaceLabel: wsLabel } : {}),
+          ts: Date.now(),
+          acked: false,
+        }],
+      }));
       setActiveSubtaskId(session.id);
     });
+  }, []);
+
+  // §A2 follow-up: the user declined a subtask proposal. Leave a static
+  // "dismissed" card in the conversation and queue its context for the Manager.
+  const onDismissSubtaskProposal = useCallback((taskId: string, draft: NewSubtaskDraft) => {
+    const wsLabel = workspacesRef.current.find(w => w.id === draft.workspace_id)?.name;
+    setManagerCardsByTask(prev => ({
+      ...prev,
+      [taskId]: [...(prev[taskId] ?? []), {
+        id: `dismissed:${taskId}:${crypto.randomUUID()}`,
+        status: 'dismissed',
+        executor: draft.executor,
+        prompt: draft.prompt?.trim() ?? '',
+        ...(draft.name ? { name: draft.name } : {}),
+        ...(wsLabel ? { workspaceLabel: wsLabel } : {}),
+        ts: Date.now(),
+        acked: false,
+      }],
+    }));
   }, []);
 
   // ─── Dock state (Phase 1: only Search + Inbox are wired) ─────────────────
@@ -1659,6 +1891,7 @@ export function App() {
         onArchive={archived => sessionMainHandlers.onArchive(subtask.id, archived)}
         onDelete={() => sessionMainHandlers.onDelete(subtask.id)}
         onRecover={() => sessionMainHandlers.onRecover(subtask.id)}
+        onReopen={() => { void import('./api.js').then(m => m.reopenSubtask(subtask.id)); }}
         onRename={name => sessionMainHandlers.onRename(subtask.id, name)}
         onShowChanges={() => { toggleInspector('changes'); }}
         workingTreeId={subtaskWorkingTreeId}
@@ -1819,12 +2052,20 @@ export function App() {
               ws={ws}
               activeTaskId={activeTaskId}
               activeSubtaskId={activeSubtaskId}
+              managerSession={activeManagerSession}
               managerItems={managerItems}
               managerPending={managerPending}
               managerProposal={managerProposal}
+              managerCards={activeTaskId ? (managerCardsByTask[activeTaskId] ?? []) : []}
+              managerHandlers={managerHandlers}
+              managerQueue={managerQueue}
+              showManagerRaw={showManagerRaw}
+              onToggleManagerRaw={() => setShowManagerRaw(v => !v)}
               onManagerMount={onManagerMount}
               onManagerSend={onManagerSend}
+              onManagerStop={onManagerStop}
               onCreateSubtask={onCreateSubtask}
+              onDismissSubtaskProposal={onDismissSubtaskProposal}
               onSelectTask={(taskId) => { setActiveTaskId(taskId); setActiveSubtaskId(null); }}
               onSelectSubtask={(taskId, subtaskId) => { setActiveTaskId(taskId); setActiveSubtaskId(subtaskId); }}
               subtaskMain={subtaskMain}
@@ -1935,11 +2176,15 @@ export function App() {
             {inspectorTab === 'manager' && subtaskActive && activeManagerTask ? (
               <ManagerInspector
                 task={activeManagerTask}
+                session={activeManagerSession}
                 workspaces={workspaces}
                 items={managerItems}
                 pending={managerPending}
+                handlers={managerHandlers}
+                queue={managerQueue}
                 onMount={onManagerMount}
                 onSend={onManagerSend}
+                onStop={onManagerStop}
               />
             ) : inspectorTab === 'workspaces' ? (
               <WorkspacesInspector

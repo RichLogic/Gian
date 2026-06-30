@@ -363,9 +363,9 @@ export class SessionManager {
    * Get-or-create the per-Task Manager session (PRD-v3 P3). The Manager is a
    * `type='manager'` Codex session bound to the hidden root workspace
    * (`workspace_root`), running `gpt-5.5` / `xhigh`, with NO worktree and
-   * persistent across turns. Read-only is enforced per-turn in `sendMessage`
-   * (type==='manager' → sandbox:'read-only' + approvalPolicy:'never'), NOT
-   * here and NOT via the system prompt.
+   * persistent across turns. It honors its `approval_mode` per-turn like any
+   * session (default 'plan' → read-only + on-request); the user escalates via
+   * the composer's mode picker. No policy is forced here.
    *
    * Idempotent: returns the existing Manager when one already exists for the
    * Task. Lazy creation — called on the first manager message (or eagerly by
@@ -453,18 +453,10 @@ export class SessionManager {
    */
   async sendManagerMessage(taskId: string, text: string): Promise<string> {
     const manager = await this.ensureManagerSession(taskId);
-
-    // Prepend the system prompt only on the Manager's very first turn. After
-    // that the codex thread retains context, so later messages go through bare.
-    const isFirstTurn = this.persistedTurnCount(manager.id) === 0;
-    // Wrap the system prompt in sentinels so the web can hide it from the
-    // transcript while codex still receives it (codex-proxy has no system
-    // channel). See stripManagerSystemPrefix in @gian/shared.
-    const payload = isFirstTurn
-      ? `${MANAGER_SYS_OPEN}\n${this.buildManagerPrompt(taskId)}\n${MANAGER_SYS_CLOSE}\n\n${text}`
-      : text;
-
-    await this.sendMessage(manager.id, payload);
+    // The first-turn system-prompt prepend now lives in sendMessage (keyed on
+    // type==='manager'), so it applies exactly once to every send path — this
+    // REST helper and the structured message:send the web composer uses.
+    await this.sendMessage(manager.id, text);
     return manager.id;
   }
 
@@ -896,6 +888,34 @@ export class SessionManager {
     const client = this.proxy.get(sessionId);
     if (!client) throw new Error(`no proxy for session: ${sessionId}`);
 
+    // Per-Task Manager: neither proxy has a system/instructions channel for a
+    // persistent chat session, so the Manager's system prompt is prepended to
+    // its FIRST turn, wrapped in sentinels the web strips at render
+    // (stripManagerSystemPrefix). Done HERE — not in sendManagerMessage — so it
+    // applies exactly once to EVERY entry path: the REST helper AND the
+    // structured `message:send` the web now uses for the Manager composer.
+    if (session.type === 'manager' && session.task_id && this.persistedTurnCount(sessionId) === 0) {
+      const prompt = this.buildManagerPrompt(session.task_id);
+      const wrapped = `${MANAGER_SYS_OPEN}\n${prompt}\n${MANAGER_SYS_CLOSE}`;
+      text = text.trim() ? `${wrapped}\n\n${text}` : wrapped;
+      // When the turn carries structured items (e.g. an image attachment on the
+      // very first message), the model reads `items`, not `text` — so fold the
+      // prompt into the first text item too (or prepend one if there is none).
+      if (items && items.length > 0) {
+        const ti = items.findIndex(it => it.type === 'text');
+        if (ti >= 0) {
+          const orig = (items[ti] as { type: 'text'; text: string }).text;
+          items = items.map((it, i) =>
+            i === ti
+              ? { type: 'text' as const, text: orig.trim() ? `${wrapped}\n\n${orig}` : wrapped }
+              : it,
+          );
+        } else {
+          items = [{ type: 'text' as const, text: wrapped }, ...items];
+        }
+      }
+    }
+
     const turnNumber = this.nextTurnNumber(sessionId);
     const turnId = randomUUID();
     const now = new Date().toISOString();
@@ -944,21 +964,16 @@ export class SessionManager {
     // session.approval_mode in DB. Applied only for this startTurn — the next
     // user-initiated send falls back to the session's stored mode.
     //
-    // Manager is WRITABLE (spec 2026-06-28 §A1, supersedes PRD-v3 §A1's
-    // read-only Manager). A type='manager' session is the per-Task Codex
-    // orchestrator: it may read/write/run within the root workspace (`~/Coding`,
-    // spanning all projects) but does NOT do the coding work itself — it
-    // proposes Subtasks via a confirm-gated `create_subtask` block. EVERY turn
-    // is forced to codex sandbox:'workspace-write' + approvalPolicy:'never'
-    // (regardless of approval_mode / one-shot bypass): `never` because the
-    // Manager panel has no approval-card UI. Risk: writable at the root spans
-    // every project under `~/Coding`.
-    const policyParams = session.type === 'manager'
-      ? {
-          sandbox: 'workspace-write' as const,
-          approvalPolicy: 'never' as const,
-        }
-      : oneShotBypass
+    // The per-Task Manager now honors its `approval_mode` like any other
+    // session (decision 2026-06-29, supersedes the earlier forced
+    // sandbox:'workspace-write' + approvalPolicy:'never'): its composer is the
+    // full session composer, so the mode picker is live and `ask` turns surface
+    // real approval cards in the Manager panel. Default mode is 'plan'
+    // (read-only + on-request), so a fresh Manager plans/reads until the user
+    // escalates it to 'auto' for writes. It still binds the root workspace
+    // (`~/Coding`, spanning all projects), so 'auto' there is broad — the mode
+    // picker is the gate.
+    const policyParams = oneShotBypass
       ? (session.executor === 'claude'
         ? { permissionMode: 'bypassPermissions' as const }
         : {
