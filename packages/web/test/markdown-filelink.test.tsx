@@ -66,3 +66,23 @@ describe('MarkdownText file linkification', () => {
     expect(onOpen.container.querySelector('a')).toBeNull();
   });
 });
+
+describe('MarkdownText fenced code block copy button', () => {
+  it('wraps a fenced block and copies its source (trailing newline trimmed)', () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const onOpen = renderMd('```js\nconst x = 1;\nconsole.log(x);\n```');
+    const block = onOpen.container.querySelector('.code-block');
+    expect(block).toBeTruthy();
+    const btn = block!.querySelector('.code-copy');
+    expect(btn).toBeTruthy();
+    fireEvent.click(btn!);
+    expect(writeText).toHaveBeenCalledWith('const x = 1;\nconsole.log(x);');
+  });
+
+  it('does not add the copy button to inline code', () => {
+    const onOpen = renderMd('use `foo()` inline here');
+    expect(onOpen.container.querySelector('.code-block')).toBeNull();
+    expect(onOpen.container.querySelector('.code-copy')).toBeNull();
+  });
+});
