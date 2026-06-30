@@ -82,6 +82,7 @@ export function renderItem(
   currentUserRef?: React.RefObject<HTMLDivElement | null>,
   isCurrentUser?: boolean,
   hideAvatar?: boolean,
+  showFooter?: boolean,
 ) {
   switch (item.kind) {
     case 'user':
@@ -94,7 +95,7 @@ export function renderItem(
       }
       return <UserMessage key={item.id} item={item} hideAvatar={hideAvatar} />;
     case 'assistant':
-      return <AssistantMessage key={item.id} item={item} hideAvatar={hideAvatar} />;
+      return <AssistantMessage key={item.id} item={item} hideAvatar={hideAvatar} showFooter={showFooter} />;
     case 'reasoning':
       return <ReasoningCard key={item.id} item={item} />;
     case 'tool':
@@ -332,12 +333,21 @@ export function Transcript({
               out.push(<TurnActionsBlock key={item.id} block={item} onApprove={onApprove} />);
             } else {
               let hideAvatar = false;
+              // Assistant footer (time + copy) renders on the TAIL of a
+              // same-sender run, not the head — so a multi-bubble turn shows one
+              // timestamp at the end and the final bubble never loses it.
+              let isTail = true;
               if (item.kind === 'user') {
                 hideAvatar = prevSender === 'user';
                 prevSender = 'user';
               } else if (item.kind === 'assistant') {
                 hideAvatar = prevSender === item.exec;
                 prevSender = item.exec;
+                const next = blocks[bi + 1];
+                const nextTs = next ? blockTs(next) : Infinity;
+                // An interleaved extra (subtask card) also breaks the run.
+                const extraBreaks = ei < sortedExtras.length && sortedExtras[ei]!.afterTs < nextTs;
+                isTail = extraBreaks || !next || next.kind !== 'assistant' || next.exec !== item.exec;
               } else {
                 // Anything else between two text bubbles counts as a sender
                 // break so the next assistant text gets a fresh header.
@@ -349,6 +359,7 @@ export function Transcript({
                 currentUserRef,
                 item.kind === 'user' && currentUser !== null && item.id === currentUser.id,
                 hideAvatar,
+                isTail,
               ));
             }
             const nextTs = bi + 1 < blocks.length ? blockTs(blocks[bi + 1]!) : Infinity;

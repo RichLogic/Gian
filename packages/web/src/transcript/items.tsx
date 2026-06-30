@@ -728,17 +728,19 @@ export function UserMessage({ item }: { item: MsgItem; hideAvatar?: boolean }) {
   );
 }
 
-export function AssistantMessage({ item, hideAvatar }: { item: MsgItem; hideAvatar?: boolean }) {
-  // V2 design: no author label, time sits below the message body. Continuation
-  // chunks (consecutive same-sender bubbles from streaming) suppress the time
-  // so a streamed turn doesn't print a stack of timestamps.
+export function AssistantMessage({ item, hideAvatar, showFooter }: { item: MsgItem; hideAvatar?: boolean; showFooter?: boolean }) {
+  // V2 design: no author label, time sits below the message body. The footer
+  // (time + copy) renders on the TAIL of a same-sender run — `hideAvatar` keeps
+  // the tight continuation spacing for mid-run bubbles, but `showFooter` (the
+  // last bubble of the run) decides the time/copy so a multi-bubble turn shows
+  // one timestamp at the end and the final bubble never loses it.
   return (
     <div className={`msg${hideAvatar ? ' continuation' : ''}`}>
       <div className="msg-body">
         <div className="msg-text md">
           <MarkdownText>{item.text}</MarkdownText>
         </div>
-        {!hideAvatar && (
+        {showFooter && (
           <div className="msg-foot">
             <span className="msg-time">{formatTime(item.ts)}</span>
             <CopyButton text={item.text} />

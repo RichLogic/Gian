@@ -889,7 +889,8 @@
   color: var(--text-3);
   border-radius: var(--r-1);
   cursor: pointer;
-  opacity: 0;
+  /* Always visible (no longer hover-to-reveal); brightens on hover. */
+  opacity: 0.55;
   transition: opacity 120ms var(--ease), background 120ms var(--ease), color 120ms var(--ease);
 }
 .msg:hover .msg-copy { opacity: 1; }
