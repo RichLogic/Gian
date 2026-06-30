@@ -287,11 +287,21 @@ export class TtyManager {
     } else if (event === 'StopFailure') {
       this.persistStatus(sessionId, 'error');
     } else if (event === 'PreToolUse') {
+      // PreToolUse is registered ONLY for AskUserQuestion (see buildSettings),
+      // so this always means Claude is blocked waiting for the user to answer.
+      // Surface the question AND flip the status to 'pending' (待处理) so the row
+      // stops spinning while it waits.
       this.surfaceInteractiveQuestion(sessionId, body);
+      this.persistStatus(sessionId, 'pending');
     } else if (event === 'PostToolUse') {
       // The question was answered (the tool ran), so it's no longer pending —
       // drop it before any later SessionEnd/exit/stop would auto-decline it.
       this.removePendingQuestion(sessionId, body);
+      // Turn resumes once the last question is answered → back to running
+      // (until Stop flips it to done).
+      if (!this.pendingQuestions.get(sessionId)?.size) {
+        this.persistStatus(sessionId, 'running');
+      }
     }
 
     // Every hook carries the CLI's live `permission_mode` (and most carry
