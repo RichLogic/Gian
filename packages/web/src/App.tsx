@@ -1153,6 +1153,12 @@ export function App() {
         onCopyName: () => {
           try { void navigator.clipboard?.writeText(task.name || ''); } catch (_) { /* ignore */ }
         },
+        // A task's "unread" is its Manager session's unread (the task row-end
+        // shows the Manager StatusIcon), so mark the Manager unread.
+        onMarkUnread: () => {
+          const mgr = sessionsRef.current.find(s => s.type === 'manager' && s.task_id === task.id);
+          if (mgr) ws.send({ type: 'session:set_unread', session_id: mgr.id, unread: true });
+        },
         // Force recover = unwedge the Task's Manager session (it's headless, so
         // its recover lives on the Task menu).
         onForceRecover: () => {
@@ -1644,10 +1650,18 @@ export function App() {
     (!activeSubtaskId && !!activeTaskId) ||
     (!!activeSubtaskId && inspectorTab === 'manager')
   );
+  // Clear ONCE per view, on the transition into the panel (mark-read-on-open).
+  // Re-runs while the same Manager stays on screen are no-ops, so an unread the
+  // user sets via the task menu's "Mark as unread" — or a turn that completes
+  // while they watch — is not auto-cleared out from under them. Reset when the
+  // panel hides so re-opening the task reads it again.
+  const mgrViewClearedRef = useRef<string | null>(null);
   useEffect(() => {
     const mgr = activeManagerSession;
-    if (!managerPanelVisible || !mgr || mgr.unread !== 1) return;
-    ws.send({ type: 'session:set_unread', session_id: mgr.id, unread: false });
+    if (!managerPanelVisible || !mgr) { mgrViewClearedRef.current = null; return; }
+    if (mgrViewClearedRef.current === mgr.id) return;
+    mgrViewClearedRef.current = mgr.id;
+    if (mgr.unread === 1) ws.send({ type: 'session:set_unread', session_id: mgr.id, unread: false });
   }, [managerPanelVisible, activeManagerSession, ws]);
 
   const onManagerMount = useCallback((taskId: string) => {

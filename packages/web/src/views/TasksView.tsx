@@ -533,8 +533,8 @@ function TaskRow({
       </div>
       {/* Single-line (Codex-style): row-end = the Manager-as-session StatusIcon
           when it has one, else the task's compact relative time. */}
-      {managerSession && statusGlyphShown(managerSession.status, managerSession.unread === 1 && !active)
-        ? <StatusIcon status={managerSession.status} unread={managerSession.unread === 1 && !active} />
+      {managerSession && statusGlyphShown(managerSession.status, managerSession.unread === 1)
+        ? <StatusIcon status={managerSession.status} unread={managerSession.unread === 1} />
         : <span className="ri-age">{relTime(task.updated_at)}</span>}
     </div>
   );

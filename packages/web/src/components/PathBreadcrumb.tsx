@@ -115,7 +115,7 @@ interface MenuItemDesc {
  *
  *  session : Rename · Copy · Unread ┊ Fork×2 · Recover(red) ┊ Archive · Delete(red)
  *  subtask : Rename · Copy ┊ Unread · Complete ┊ Recover(red)
- *  task    : Rename · Copy ┊ Remove(red)
+ *  task    : Rename · Copy ┊ Unread ┊ Recover(red) · Remove(red)
  */
 function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuItemDesc[] {
   const items: MenuItemDesc[] = [
@@ -127,6 +127,7 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
 
   if (m.kind === 'task') {
     copy();
+    if (m.onMarkUnread) items.push({ key: 'unread', icon: ICON.mail, label: t('path.menu.markUnread'), onClick: m.onMarkUnread, ruleBefore: true });
     if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, ruleBefore: true });
     if (m.onDelete) items.push({ key: 'remove', icon: ICON.trash, label: t('path.menu.removeTask'), onClick: m.onDelete, danger: true });
     return items;
