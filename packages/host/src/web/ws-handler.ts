@@ -341,6 +341,7 @@ async function dispatch(
         }
         await sessions.switchRuntime(msg.session_id, msg.target, {
           remoteControl: msg.remote_control === true,
+          force: msg.force === true,
         });
         tty.release(msg.session_id, state.clientId);
         return;
@@ -376,6 +377,22 @@ async function dispatch(
       if (!claimed) {
         throw Object.assign(new Error('Claude CLI is open in another window'), { code: 'TTY_LOCKED' });
       }
+      // Report whether the underlying PTY is actually alive. After a host
+      // restart the session is still runtime_mode='tty' but no PTY was
+      // respawned — the chat is dead until the user re-opens it. Fire-and-forget
+      // (the lock-owner broadcast above already happened).
+      void tty.replay(msg.session_id)
+        .then(({ alive }) => {
+          broadcaster.send(ws, {
+            type: 'tty:lock',
+            session_id: msg.session_id,
+            locked: true,
+            owner: true,
+            surface,
+            alive,
+          });
+        })
+        .catch(() => { /* best-effort liveness probe */ });
       return;
     }
     case 'pty:input': {

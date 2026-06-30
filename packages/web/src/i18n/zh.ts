@@ -602,6 +602,8 @@ export const ZH: Messages = {
   'coding.banner.discarded': 'Worktree 已丢弃。此会话为只读。',
   'coding.banner.readonly': '此会话为只读。',
   'coding.banner.subtaskCompleted': '该子任务已完成。重新打开后才能继续发消息。',
+  'coding.banner.ttyNotRunning': '该会话的 Claude CLI 未运行（重启后不会自动开启）。',
+  'coding.banner.openTty': '开启 TTY',
   'coding.banner.takeOver': '接管',
   'coding.beta.waiting': 'Claude 正在等待这个回答',
   'coding.beta.questionToast': 'Claude 有一个问题 — 请在 CLI 中回答',

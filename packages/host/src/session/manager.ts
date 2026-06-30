@@ -715,7 +715,7 @@ export class SessionManager {
   async switchRuntime(
     sessionId: string,
     target: RuntimeMode,
-    opts: { remoteControl?: boolean } = {},
+    opts: { remoteControl?: boolean; force?: boolean } = {},
   ): Promise<void> {
     const session = this.getSession(sessionId);
     if (session.executor !== 'claude' && session.executor !== 'codex') {
@@ -730,8 +730,10 @@ export class SessionManager {
     if (session.executor === 'codex' && !this.codexTtyMgr) {
       throw Object.assign(new Error('codex TTY runtime not configured'), { code: 'SWITCH_BLOCKED' });
     }
-    if (session.runtime_mode === target) {
-      // No-op; do not error — the toggle button may double-fire.
+    if (session.runtime_mode === target && !opts.force) {
+      // No-op; do not error — the toggle button may double-fire. `force`
+      // bypasses this to re-spawn a dead PTY (host restart left the session
+      // in tty mode without a live PTY).
       return;
     }
     if (session.worktree_outcome !== null) {

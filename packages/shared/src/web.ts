@@ -220,6 +220,11 @@ export interface TtyLockMessage {
   owner: boolean;
   surface?: TtySurface;
   reason?: string;
+  /** Whether the underlying PTY is actually alive. After a host restart a
+   *  session can still be `runtime_mode='tty'` with no PTY (it isn't auto-
+   *  respawned), so the client shows a "TTY not running — open it" affordance
+   *  when this is explicitly `false`. Omitted by the lock-only broadcasts. */
+  alive?: boolean;
 }
 
 /**
@@ -527,6 +532,11 @@ export interface SessionSwitchRuntimeMessage {
    *  2.1.52; older binaries will surface a spawn error. Ignored for
    *  non-claude / non-tty switches. */
   remote_control?: boolean;
+  /** Force the switch even when the session is already in `target` mode. Used
+   *  to re-spawn a dead PTY (e.g. after a host restart the session is still
+   *  `runtime_mode='tty'` but no PTY exists). Without this, switchRuntime
+   *  no-ops when already in the target mode. */
+  force?: boolean;
 }
 
 /**

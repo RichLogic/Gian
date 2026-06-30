@@ -602,6 +602,8 @@ export const EN: Messages = {
   'coding.banner.discarded': 'Worktree discarded. This session is read-only.',
   'coding.banner.readonly': 'This session is read-only.',
   'coding.banner.subtaskCompleted': 'This subtask is completed. Reopen it to send more messages.',
+  'coding.banner.ttyNotRunning': 'The Claude CLI isn’t running for this session (it doesn’t auto-start after a restart).',
+  'coding.banner.openTty': 'Open TTY',
   'coding.banner.takeOver': 'Take over',
   'coding.beta.waiting': 'Claude is waiting for this answer',
   'coding.beta.questionToast': 'Claude is asking a question — answer it in the CLI',

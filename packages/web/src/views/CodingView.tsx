@@ -205,7 +205,7 @@ export interface CodingViewProps {
   ws: GianWs;
   /** Flip the active runtime for a session. Caller forwards to
    *  `session:switch-runtime` WS message. */
-  onSwitchRuntime: (sessionId: string, target: RuntimeMode, surface?: TtySurface) => void;
+  onSwitchRuntime: (sessionId: string, target: RuntimeMode, surface?: TtySurface, opts?: { force?: boolean }) => void;
   onClaimTty: (sessionId: string, surface: TtySurface, takeover?: boolean) => void;
   /** Sessions that have been "armed" for a remote-control switch — i.e.
    *  the user clicked Remote while a turn was running. Composer reads
@@ -318,7 +318,7 @@ export function CodingView(p: CodingViewProps) {
           workingTreeId={p.activeWorkingTreeId}
           branch={p.activeBranch}
           ws={p.ws}
-          onSwitchRuntime={(target, surface) => p.onSwitchRuntime(p.activeSession!.id, target, surface)}
+          onSwitchRuntime={(target, surface, opts) => p.onSwitchRuntime(p.activeSession!.id, target, surface, opts)}
           onClaimTty={(surface, takeover) => p.onClaimTty(p.activeSession!.id, surface, takeover)}
           armedRemote={p.armedRemoteSwitch.has(p.activeSession.id)}
           onRequestRemote={() => p.onRequestRemote(p.activeSession!.id)}
@@ -795,6 +795,9 @@ export function StatusIcon({ status, unread = false }: {
   const kind: 'done' | 'err' | 'pend' =
     status === 'pending' ? 'pend' : status === 'error' ? 'err' : 'done';
   const attention = status === 'pending' || unread;
+  // Spec change (2026-06-30): a normally-completed-and-read turn shows NO icon.
+  // Only "needs you" (pending / error / unread) and running surface a glyph.
+  if (kind === 'done' && !attention) return null;
   const wrapClass = kind === 'err' ? 'err' : kind === 'pend' ? 'pending' : 'done';
   const label = status === 'pending'
     ? t('coding.status.awaitingApproval')
@@ -1320,12 +1323,12 @@ export function SessionMain({
   workspace: Workspace | null;
   items: TranscriptItem[];
   pending: boolean;
-  ttyLock?: { owner: boolean; reason?: string };
+  ttyLock?: { owner: boolean; reason?: string; alive?: boolean };
   usage: TokenUsage | null;
   queue: QueueEntry[];
   codexPlanText?: string;
   ws: GianWs;
-  onSwitchRuntime: (target: RuntimeMode, surface?: TtySurface) => void;
+  onSwitchRuntime: (target: RuntimeMode, surface?: TtySurface, opts?: { force?: boolean }) => void;
   onClaimTty: (surface: TtySurface, takeover?: boolean) => void;
   armedRemote: boolean;
   onRequestRemote: () => void;
@@ -1467,6 +1470,14 @@ export function SessionMain({
     && session.runtime_mode === 'tty'
     && (surface === 'beta' || surface === 'cli')
     && ttyLock?.owner === false;
+  // Claude TTY chat opened but the underlying PTY isn't running — after a host
+  // restart the session stays runtime_mode='tty' yet no PTY was respawned. We
+  // own the lock (not locked out) but the host reported alive===false.
+  const ttyDead = session.executor === 'claude'
+    && session.runtime_mode === 'tty'
+    && (surface === 'beta' || surface === 'cli')
+    && ttyLock?.owner !== false
+    && ttyLock?.alive === false;
   const ttySupported = session.executor === 'claude' || session.executor === 'codex';
   const canSwitchClaudeTtySurface = session.executor === 'claude' && session.runtime_mode === 'tty';
   const runtimeSwitchDisabled = pending || terminal;
@@ -1652,6 +1663,19 @@ export function SessionMain({
           </button>
         </div>
       )}
+      {ttyDead && (
+        <div className="session-banner warning">
+          <span>{t('coding.banner.ttyNotRunning')}</span>
+          <span className="session-banner-spacer" />
+          <button
+            type="button"
+            className="btn xs secondary"
+            onClick={() => onSwitchRuntime('tty', surface === 'beta' ? 'beta' : undefined, { force: true })}
+          >
+            {t('coding.banner.openTty')}
+          </button>
+        </div>
+      )}
       {subtaskCompleted && (
         <div className="session-banner">
           <span>{t('coding.banner.subtaskCompleted')}</span>
@@ -1707,7 +1731,7 @@ export function SessionMain({
             onSetModel={onSetModel}
             onSetEffort={onSetEffort}
             onJumpToCli={() => handleSelectSurface('cli')}
-            disabled={pending || terminal || subtaskCompleted || ttyLockedOut || (isBeta && !!pendingQuestion)}
+            disabled={pending || terminal || subtaskCompleted || ttyLockedOut || ttyDead || (isBeta && !!pendingQuestion)}
             running={isTurnRunning(session.status, pending)}
             disabledSubmitBehavior={subtaskCompleted ? 'block' : betaComposerSubmitBehavior(isBeta, !!pendingQuestion)}
             executor={session.executor}

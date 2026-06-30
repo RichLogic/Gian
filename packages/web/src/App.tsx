@@ -99,7 +99,7 @@ export function App() {
   const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
   const [usageBySession, setUsageBySession] = useState<Record<string, TokenUsage>>({});
   const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
-  const [ttyLockBySession, setTtyLockBySession] = useState<Record<string, { owner: boolean; reason?: string }>>({});
+  const [ttyLockBySession, setTtyLockBySession] = useState<Record<string, { owner: boolean; reason?: string; alive?: boolean }>>({});
   const [remoteControlBySession, setRemoteControlBySession] = useState<Record<string, RemoteControlState>>({});
   const [mode, setMode] = useState<Mode>('tasks');
   const [workingTrees, setWorkingTrees] = useState<WorkingTree[]>([]);
@@ -418,6 +418,9 @@ export function App() {
             [msg.session_id]: {
               owner: msg.owner,
               ...(msg.reason ? { reason: msg.reason } : {}),
+              // The claim broadcasts owner first, then a follow-up with `alive`.
+              // Carry the last-known aliveness forward across owner-only updates.
+              alive: msg.alive !== undefined ? msg.alive : prev[msg.session_id]?.alive,
             },
           }));
           return;
@@ -1480,12 +1483,13 @@ export function App() {
     },
     onRename: (id: string, name: string) =>
       ws.send({ type: 'session:rename', session_id: id, name }),
-    onSwitchRuntime: (sessionId: string, target: RuntimeMode, surface?: TtySurface) =>
+    onSwitchRuntime: (sessionId: string, target: RuntimeMode, surface?: TtySurface, opts?: { force?: boolean }) =>
       ws.send({
         type: 'session:switch-runtime',
         session_id: sessionId,
         target,
         ...(surface ? { surface } : {}),
+        ...(opts?.force ? { force: true } : {}),
       }),
     onClaimTty: (sessionId: string, surface: TtySurface, takeover?: boolean) =>
       ws.send({
@@ -1907,7 +1911,7 @@ export function App() {
         workingTreeId={subtaskWorkingTreeId}
         branch={workingTrees.find(wt => wt.id === subtaskWorkingTreeId)?.branch ?? null}
         ws={ws}
-        onSwitchRuntime={(target, surface) => sessionMainHandlers.onSwitchRuntime(subtask.id, target, surface)}
+        onSwitchRuntime={(target, surface, opts) => sessionMainHandlers.onSwitchRuntime(subtask.id, target, surface, opts)}
         onClaimTty={(surface, takeover) => sessionMainHandlers.onClaimTty(subtask.id, surface, takeover)}
         armedRemote={armedRemoteSwitch.has(subtask.id)}
         onRequestRemote={() => sessionMainHandlers.onRequestRemote(subtask.id)}
