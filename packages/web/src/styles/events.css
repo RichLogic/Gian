@@ -19,7 +19,9 @@
   font-size: var(--fz-11);
   color: var(--text-2);
   cursor: pointer;
-  user-select: none;
+  /* Selectable so the command / path / subject can be copied — a click still
+     toggles the card (a click is not a drag-select). */
+  user-select: text;
   transition: background 80ms;
 }
 .evt-head:hover { background: var(--surface-3); }
