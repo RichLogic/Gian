@@ -592,8 +592,10 @@ function SubtaskRow({
       <div className="ri-body">
         <div className="ri-row1">
           <span className="ri-title">{subtask.name || t('coding.session.untitled')}</span>
-          {/* Unread is merged into the StatusIcon (spec §D) — no separate dot. */}
-          <StatusIcon status={subtask.status} unread={subtask.unread === 1 && !active} />
+          {/* Unread is merged into the StatusIcon (spec §D). Show it even on the
+              active row so "Mark as unread" gives immediate feedback (no longer
+              gated on `!active`, which only revealed it after navigating away). */}
+          <StatusIcon status={subtask.status} unread={subtask.unread === 1} />
         </div>
         <div className="ri-row2">
           <span className={`ri-exec ${subtask.executor}`}>

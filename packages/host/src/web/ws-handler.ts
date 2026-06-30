@@ -329,11 +329,27 @@ async function dispatch(
           try {
             await sessions.switchRuntime(msg.session_id, msg.target, {
               remoteControl: msg.remote_control === true,
+              force: msg.force === true,
             });
           } catch (err) {
             tty.release(msg.session_id, state.clientId);
             throw err;
           }
+          // After (re)spawning, report the live PTY state so a stale "TTY not
+          // running" banner clears. A force re-spawn leaves runtime_mode='tty'
+          // unchanged, so the client's claim effect won't re-probe on its own.
+          void tty.replay(msg.session_id)
+            .then(({ alive }) => {
+              broadcaster.send(ws, {
+                type: 'tty:lock',
+                session_id: msg.session_id,
+                locked: true,
+                owner: true,
+                surface: msg.surface === 'beta' ? 'beta' : 'cli',
+                alive,
+              });
+            })
+            .catch(() => { /* best-effort liveness probe */ });
           return;
         }
         if (tty.isLockedByOther(msg.session_id, state.clientId)) {
