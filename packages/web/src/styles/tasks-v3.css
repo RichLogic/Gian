@@ -46,8 +46,9 @@
    (.ri-status: 16px at top:8/right:8) so a long title ellipsizes cleanly
    instead of sliding under the spinner. Subtask rows always carry a StatusIcon;
    task rows show the Manager running spinner (issue #1). */
+/* Reserve room for the row-end status glyph OR the compact time (shortAge). */
 .subtask-row .ri-row1,
-.task-row .ri-row1 { padding-right: 22px; }
+.task-row .ri-row1 { padding-right: 34px; }
 
 /* Inline empty-state for a selected task with no subtasks yet. */
 .tasks-empty-subs {

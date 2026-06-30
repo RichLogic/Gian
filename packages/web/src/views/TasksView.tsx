@@ -6,7 +6,7 @@ import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import { Composer } from '../components/Composer.js';
 import { QueueList } from '../components/QueueList.js';
 import { Transcript } from '../transcript/Transcript.js';
-import { StatusIcon } from './CodingView.js';
+import { StatusIcon, statusGlyphShown, relTime } from './CodingView.js';
 import type { QueueEntry, TranscriptItem } from '../types.js';
 import type { GianWs } from '../ws.js';
 
@@ -110,23 +110,6 @@ function subtasksFor(sessions: Session[], taskId: string): Session[] {
   return sessions.filter(s => s.task_id === taskId && s.type === 'subtask');
 }
 
-/** Compact relative-time label for the task row's trailing `.ri-age`, matching
- *  the prototype's "2 min ago" / "Today 11:04" / "May 18" treatment. */
-function relativeAge(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return '';
-  const now = Date.now();
-  const diff = now - then;
-  const min = Math.floor(diff / 60000);
-  if (min < 1) return 'now';
-  if (min < 60) return `${min} min ago`;
-  const d = new Date(then);
-  const sameDay = new Date(now).toDateString() === d.toDateString();
-  if (sameDay) {
-    return `Today ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
-  }
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-}
 
 export function TasksView({
   tasks,
@@ -548,11 +531,11 @@ function TaskRow({
           <span className="ri-title">{task.name}</span>
         </div>
       </div>
-      {/* Single-line (Codex-style): no timestamp row — same shape as a subtask.
-          Row-end = the Manager-as-session StatusIcon (null/`new` → nothing). */}
-      {managerSession && (
-        <StatusIcon status={managerSession.status} unread={managerSession.unread === 1 && !active} />
-      )}
+      {/* Single-line (Codex-style): row-end = the Manager-as-session StatusIcon
+          when it has one, else the task's compact relative time. */}
+      {managerSession && statusGlyphShown(managerSession.status, managerSession.unread === 1 && !active)
+        ? <StatusIcon status={managerSession.status} unread={managerSession.unread === 1 && !active} />
+        : <span className="ri-age">{relTime(task.updated_at)}</span>}
     </div>
   );
 }
@@ -588,10 +571,12 @@ function SubtaskRow({
       <div className="ri-body">
         <div className="ri-row1">
           <span className="ri-title">{subtask.name || t('coding.session.untitled')}</span>
-          {/* Unread is merged into the StatusIcon (spec §D). Show it even on the
-              active row so "Mark as unread" gives immediate feedback (no longer
-              gated on `!active`, which only revealed it after navigating away). */}
-          <StatusIcon status={subtask.status} unread={subtask.unread === 1} />
+          {/* Row-end = status glyph when there is one (unread shows even on the
+              active row, for immediate "Mark as unread" feedback), else the
+              compact relative time. */}
+          {statusGlyphShown(subtask.status, subtask.unread === 1)
+            ? <StatusIcon status={subtask.status} unread={subtask.unread === 1} />
+            : <span className="ri-age">{relTime(subtask.updated_at)}</span>}
         </div>
         {/* Single-line (Codex-style): the Claude/Codex executor label was dropped. */}
       </div>
