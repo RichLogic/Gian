@@ -282,10 +282,16 @@ export class TtyManager {
 
     if (event === 'UserPromptSubmit') {
       this.persistStatus(sessionId, 'running');
-    } else if (event === 'Stop' || event === 'SessionEnd') {
+    } else if (event === 'Stop') {
+      // Natural turn completion → done + unread (new result to read). The web
+      // clears it again for whichever session the user is actively viewing.
+      this.persistStatus(sessionId, 'done', { markUnread: true });
+    } else if (event === 'SessionEnd') {
+      // Session lifecycle end (process exit), not a turn result — keep the
+      // status correct but leave the unread flag untouched.
       this.persistStatus(sessionId, 'done');
     } else if (event === 'StopFailure') {
-      this.persistStatus(sessionId, 'error');
+      this.persistStatus(sessionId, 'error', { markUnread: true });
     } else if (event === 'PreToolUse') {
       // PreToolUse is registered ONLY for AskUserQuestion (see buildSettings),
       // so this always means Claude is blocked waiting for the user to answer.
@@ -706,15 +712,29 @@ export class TtyManager {
     });
   }
 
-  private persistStatus(sessionId: string, status: SessionStatus): void {
+  private persistStatus(
+    sessionId: string,
+    status: SessionStatus,
+    opts: { markUnread?: boolean } = {},
+  ): void {
     const now = new Date().toISOString();
-    const result = this.db
-      .prepare('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
-      .run(status, now, sessionId);
+    // A natural turn end marks the session unread (a new result to read) — the
+    // same as the structured `completeTurn`. Without this, a Claude TTY turn
+    // landed at status='done' with unread untouched, so it never lit a 待处理
+    // marker (and with done+read showing no glyph, looked like nothing finished).
+    const result = opts.markUnread
+      ? this.db
+          .prepare('UPDATE sessions SET status = ?, unread = 1, updated_at = ? WHERE id = ?')
+          .run(status, now, sessionId)
+      : this.db
+          .prepare('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
+          .run(status, now, sessionId);
     if (result.changes <= 0) return;
     this.broadcaster.broadcast({
       type: 'session:updated',
-      session: { id: sessionId, status, updated_at: now },
+      session: opts.markUnread
+        ? { id: sessionId, status, unread: 1, updated_at: now }
+        : { id: sessionId, status, updated_at: now },
     });
   }
 

@@ -130,14 +130,19 @@ test('CLAUDE-TTY-001: hook events update session status and broadcast session:up
     assert.equal(row.status, 'running');
 
     await ctx.mgr.handleHook(session.id, 'Stop', { last_assistant_message: 'done' });
-    row = ctx.db.prepare('SELECT status FROM sessions WHERE id = ?').get(session.id) as { status: string };
+    row = ctx.db.prepare('SELECT status, unread FROM sessions WHERE id = ?').get(session.id) as { status: string; unread: number };
     assert.equal(row.status, 'done');
+    // Natural turn end marks the session unread (a new result to read) — same as
+    // the structured completeTurn. Regression: TTY used to leave unread=0.
+    assert.equal(row.unread, 1, 'Stop must mark the TTY session unread');
 
     const updates = ctx.broadcaster.messages.filter(m => m.type === 'session:updated') as Array<{
       type: 'session:updated';
-      session: { status?: string };
+      session: { status?: string; unread?: number };
     }>;
     assert.deepEqual(updates.map(m => m.session.status).filter(Boolean), ['running', 'done']);
+    const stopUpdate = updates[updates.length - 1];
+    assert.equal(stopUpdate?.session.unread, 1, 'the Stop broadcast carries unread:1');
   } finally { teardown(ctx); }
 });
 
@@ -245,8 +250,9 @@ test('CLAUDE-TTY-001: StopFailure marks the TTY session error', async () => {
   try {
     const session = seedClaudeSession(ctx.db);
     await ctx.mgr.handleHook(session.id, 'StopFailure', { error: 'boom' });
-    const row = ctx.db.prepare('SELECT status FROM sessions WHERE id = ?').get(session.id) as { status: string };
+    const row = ctx.db.prepare('SELECT status, unread FROM sessions WHERE id = ?').get(session.id) as { status: string; unread: number };
     assert.equal(row.status, 'error');
+    assert.equal(row.unread, 1, 'a failed TTY turn marks the session unread too');
   } finally { teardown(ctx); }
 });
 
