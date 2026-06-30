@@ -336,6 +336,16 @@
   font-size: inherit;
   border-radius: 0;
 }
+/* Fenced code block + its pinned copy button. The button rides the (non-
+   scrolling) wrapper so it stays put while the <pre> scrolls horizontally;
+   the surface-3 backdrop masks any code text it overlaps in the top-right. */
+.code-block { position: relative; }
+.code-block .code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: var(--surface-3);
+}
 .msg-text.md blockquote {
   border-left: 2px solid var(--surface-3);
   padding-left: 10px;

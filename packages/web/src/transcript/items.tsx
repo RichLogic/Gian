@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, isValidElement, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ApprovalDecision } from '@gian/shared';
@@ -64,6 +64,29 @@ function MarkdownAnchor(props: {
   return <a href={props.href} target="_blank" rel="noreferrer noopener">{props.children}</a>;
 }
 
+/** Recursively flatten a React node tree to its text — used to recover the raw
+ *  source of a fenced code block for its copy button. */
+function reactNodeText(node: React.ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(reactNodeText).join('');
+  if (isValidElement(node)) return reactNodeText((node.props as { children?: React.ReactNode }).children);
+  return '';
+}
+
+/** Custom <pre> for rendered markdown: wraps the code block so a copy button can
+ *  pin to its top-right (the <pre> itself scrolls horizontally, so the button
+ *  rides the non-scrolling wrapper). */
+function MarkdownPre({ children }: { node?: unknown; children?: React.ReactNode }) {
+  const t = useT();
+  const code = reactNodeText(children).replace(/\n+$/, '');
+  return (
+    <div className="code-block">
+      {code.length > 0 && <CopyButton text={code} title={t('transcript.copyCode')} className="code-copy" />}
+      <pre>{children}</pre>
+    </div>
+  );
+}
+
 export function MarkdownText({ children }: { children: string }) {
   const makeRehype = useContext(FileRefRehypeContext);
   const rehypePlugins = useMemo(
@@ -74,7 +97,7 @@ export function MarkdownText({ children }: { children: string }) {
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       rehypePlugins={rehypePlugins as never}
-      components={{ a: MarkdownAnchor as never }}
+      components={{ a: MarkdownAnchor as never, pre: MarkdownPre as never }}
     >
       {children}
     </ReactMarkdown>
@@ -648,7 +671,7 @@ function formatVal(v: unknown): string {
   return s.length > 120 ? s.slice(0, 120) + '…' : s;
 }
 
-function CopyButton({ text, title = 'Copy message' }: { text: string; title?: string }) {
+function CopyButton({ text, title = 'Copy message', className }: { text: string; title?: string; className?: string }) {
   const t = useT();
   const defaultTitle = title === 'Copy message' ? t('transcript.copyMessage') : title;
   const [copied, setCopied] = useState(false);
@@ -668,7 +691,7 @@ function CopyButton({ text, title = 'Copy message' }: { text: string; title?: st
   return (
     <button
       type="button"
-      className={`msg-copy${copied ? ' copied' : ''}`}
+      className={`msg-copy${className ? ` ${className}` : ''}${copied ? ' copied' : ''}`}
       title={copied ? t('common.copied') : defaultTitle}
       aria-label={defaultTitle}
       onClick={onClick}

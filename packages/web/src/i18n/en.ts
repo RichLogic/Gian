@@ -609,6 +609,7 @@ export const EN: Messages = {
   'coding.beta.questionToast': 'Claude is asking a question — answer it in the CLI',
   'coding.forking': 'Forking session…',
   'transcript.copyMessage': 'Copy message',
+  'transcript.copyCode': 'Copy code',
   'transcript.failedToSend': 'failed to send',
   'transcript.reasoning.summary': 'Reasoning summary',
   'transcript.reasoning.full': 'Reasoning',

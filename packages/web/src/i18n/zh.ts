@@ -609,6 +609,7 @@ export const ZH: Messages = {
   'coding.beta.questionToast': 'Claude 有一个问题 — 请在 CLI 中回答',
   'coding.forking': '正在 fork 会话…',
   'transcript.copyMessage': '复制消息',
+  'transcript.copyCode': '复制代码',
   'transcript.failedToSend': '发送失败',
   'transcript.reasoning.summary': '推理摘要',
   'transcript.reasoning.full': '推理',
