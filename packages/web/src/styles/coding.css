@@ -3997,6 +3997,11 @@
   display: flex; align-items: center;
 }
 .session-row-wrap > .session-row { flex: 1; min-width: 0; }
+/* Sessions list (Codex-style, 2026-07-01): a uniform left indent so rows read as
+   children of their workspace-group header (whose title sits at ~24px past the
+   caret), and a plain — not bold — title. */
+.rail-item.session-row { padding-left: 24px; }
+.session-row .ri-title { font-weight: 400; }
 .session-row-menu {
   flex: 0 0 auto;
   width: 22px; height: 22px;

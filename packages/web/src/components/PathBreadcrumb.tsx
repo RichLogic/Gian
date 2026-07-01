@@ -21,6 +21,10 @@ export interface SessionMenuActions {
   onCopyName?: () => void;
   onForceRecover?: () => void;
   onMarkUnread?: () => void;
+  /** Task only: pin / unpin to the top of the Tasks list. `pinned` drives the
+   *  label ("Pin" ↔ "Unpin") and the toggle behaviour. */
+  onPin?: () => void;
+  pinned?: boolean;
   onFork?: (executor: 'claude' | 'codex') => void;
   onArchive?: () => void;
   onDelete?: () => void;
@@ -93,6 +97,8 @@ const ICON = {
   mail: 'M3 5h18v14H3z M3 7l9 6 9-6',
   // check — "mark complete" (subtask)
   check: 'M5 12l5 5L20 7',
+  // pushpin — pin / unpin a task to the top of the list
+  pin: 'M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z',
 };
 
 interface MenuItemDesc {
@@ -128,6 +134,7 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
   if (m.kind === 'task') {
     copy();
     if (m.onMarkUnread) items.push({ key: 'unread', icon: ICON.mail, label: t('path.menu.markUnread'), onClick: m.onMarkUnread, ruleBefore: true });
+    if (m.onPin) items.push({ key: 'pin', icon: ICON.pin, label: t(m.pinned ? 'path.menu.unpin' : 'path.menu.pin'), onClick: m.onPin });
     if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, ruleBefore: true });
     if (m.onDelete) items.push({ key: 'remove', icon: ICON.trash, label: t('path.menu.removeTask'), onClick: m.onDelete, danger: true });
     return items;

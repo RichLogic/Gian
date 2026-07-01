@@ -736,7 +736,7 @@ function SessionRow({
           else the relative time. Mutually exclusive so the row stays compact. */}
       {statusGlyphShown(session.status, session.unread === 1 && !active)
         ? <StatusIcon status={session.status} unread={session.unread === 1 && !active} />
-        : <span className="ri-age" title={t('coding.session.lastActivity')}>{relTime(session.updated_at)}</span>}
+        : <span className={`ri-age ${session.executor}`} title={t('coding.session.lastActivity')}>{relTime(session.updated_at)}</span>}
       {wsHidden && (
         <span
           className="ri-hidden-badge"
@@ -757,8 +757,12 @@ function SessionRow({
 const GICO_DISC = "<circle cx='8' cy='8' r='7.4' fill='#fff'/>";
 function gicoGlyph(kind: 'done' | 'err' | 'pend'): string {
   if (kind === 'done') return "<path d='M5 8l2 2 4-4' fill='none' stroke='#fff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/>";
-  if (kind === 'err') return "<path d='M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8' fill='none' stroke='#fff' stroke-width='2.2' stroke-linecap='round'/>";
-  return "<rect x='7.05' y='3.8' width='1.9' height='5.3' rx='.95' fill='#fff'/><circle cx='8' cy='11.4' r='1.05' fill='#fff'/>";
+  // error = ❗ exclamation (was pending's glyph until 2026-07-01 — moved here so
+  // a bare "!" reads as a genuine failure, not a routine approval pause).
+  if (kind === 'err') return "<rect x='7.05' y='3.8' width='1.9' height='5.3' rx='.95' fill='#fff'/><circle cx='8' cy='11.4' r='1.05' fill='#fff'/>";
+  // pending = ⏸ two pause bars — "I've paused, awaiting your approval" reads
+  // calmer than the old exclamation and never alarms.
+  return "<rect x='5.5' y='4.8' width='1.7' height='6.4' rx='.85' fill='#fff'/><rect x='8.8' y='4.8' width='1.7' height='6.4' rx='.85' fill='#fff'/>";
 }
 function gicoMaskUrl(inner: string): string {
   const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>${inner}</svg>`;
@@ -770,8 +774,8 @@ function gicoMaskStyle(kind: 'done' | 'err' | 'pend'): CSSProperties {
 }
 
 /** §#7 status indicator (spec 2026-06-28 §H). Nothing for 'new'; a spinning
- *  gradient ring for running; ❗ for pending (always "待处理"); ✓ for done and
- *  ✕ for error rendered as a flowing gradient while `unread` ("待处理") and a
+ *  gradient ring for running; ⏸ pause bars for pending (always "待处理"); ✓ for
+ *  done and ❗ for error rendered as a flowing gradient while `unread` ("待处理") and a
  *  solid-accent knockout once read. Exported so Tasks-mode subtask rows reuse
  *  the exact same indicator + unread semantics as session rows. */
 /** Whether StatusIcon renders a glyph at all for this state. Mirrors StatusIcon's

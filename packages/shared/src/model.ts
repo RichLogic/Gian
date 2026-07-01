@@ -158,6 +158,9 @@ export interface Task {
   status: TaskStatus;
   created_at: string;
   updated_at: string;
+  /** When the task was pinned (ISO-8601), or null when not pinned. Pinned tasks
+   *  sort above the rest, most-recently-pinned first (pinned_at DESC). */
+  pinned_at: string | null;
 }
 
 /**

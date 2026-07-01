@@ -52,6 +52,19 @@ import {
   type SubtaskContext,
   type SummaryLlm,
 } from '../task/summarizer.js';
+import { buildFirstTurnRolePrefix, roleForSessionType } from '../task/role-injector.js';
+import { regenerateStateViewIfDirty } from '../workspace/ai-views.js';
+import { ActionExecutor, isTerminalStatus, type MessageOutcome } from '../task/action-executor.js';
+import { parseGianAction, computePayloadHash } from '../task/action-parser.js';
+import {
+  getActiveLoop,
+  getLoop,
+  insertLoop,
+  updateLoop,
+  type InsertLoopInput,
+} from '../task/task-store.js';
+import { advanceLoop } from '../task/loop-engine.js';
+import type { SubmitStepParams, TaskAction, TaskLoop } from '@gian/shared';
 
 export interface CreateSessionInput {
   workspace_id: string;
@@ -207,6 +220,8 @@ export class SessionManager {
   /** Capabilities cached on first proxy session create per executor.
    *  GET /api/proxy/:executor/models reads this. */
   private capsByExecutor = new Map<string, import('@gian/shared').ProxyCapabilities>();
+  /** Gian action executor (lazy — bound to this manager's side effects). */
+  private _actionExecutor: ActionExecutor | null = null;
 
   constructor(
     private db: Db,
@@ -918,6 +933,44 @@ export class SessionManager {
       }
     }
 
+    // gian-task context engine (RoleInjector, §4A.C). Env-gated until the wider
+    // feature lands (Slice 2+): with GIAN_TASK_ROLES=1, an INDIVIDUAL (coding)
+    // session gets the merged STATE.view refreshed before it orients, and on its
+    // FIRST turn a small ROLE header prepended (structured / prepend-first-message
+    // path). Best-effort — a scaffold/view hiccup must never block the turn.
+    if (process.env.GIAN_TASK_ROLES === '1' && (session.type === 'coding' || session.type === 'subtask')) {
+      const wsPath = this.workspacePathFor(session.workspace_id);
+      if (wsPath) {
+        try {
+          regenerateStateViewIfDirty(wsPath);
+        } catch {
+          /* view refresh is a derived cache — ignore failures */
+        }
+        if (this.persistedTurnCount(sessionId) === 0) {
+          const prefix = buildFirstTurnRolePrefix({
+            role: roleForSessionType(session.type),
+            sessionId,
+            workspacePath: wsPath,
+            taskName: session.task_id ? this.taskNameFor(session.task_id) : null,
+          });
+          text = text.trim() ? `${prefix}\n\n${text}` : prefix;
+          if (items && items.length > 0) {
+            const ti = items.findIndex(it => it.type === 'text');
+            if (ti >= 0) {
+              const orig = (items[ti] as { type: 'text'; text: string }).text;
+              items = items.map((it, i) =>
+                i === ti
+                  ? { type: 'text' as const, text: orig.trim() ? `${prefix}\n\n${orig}` : prefix }
+                  : it,
+              );
+            } else {
+              items = [{ type: 'text' as const, text: prefix }, ...items];
+            }
+          }
+        }
+      }
+    }
+
     const turnNumber = this.nextTurnNumber(sessionId);
     const turnId = randomUUID();
     const now = new Date().toISOString();
@@ -1205,7 +1258,62 @@ export class SessionManager {
     const next = this.queue.popNext(sessionId);
     if (!next) return;
     this.broadcastQueueUpdated(sessionId);
-    void this.ttyMgr?.input(sessionId, { text: next.text });
+    const p = this.ttyMgr?.input(sessionId, { text: next.text });
+    if (p) {
+      // A failed PTY write must not silently swallow the message (a lost PM wake
+      // or message_subtask). Re-enqueue for the next Stop-hook drain.
+      void p.catch(() => {
+        this.queue.add(sessionId, next.text);
+        this.broadcastQueueUpdated(sessionId);
+      });
+    }
+  }
+
+  /**
+   * Host-owned TTY automation channel (proposal §4A.B). Delivers host-originated
+   * text (a brief, a fix message, a wake digest) into a live Claude TTY WITHOUT
+   * fighting the user for the PTY: the text is always enqueued (never lost), and
+   * pasted immediately only when the session is idle — no running/pending turn
+   * and no AskUserQuestion in flight. When busy it stays queued and the existing
+   * Stop-hook drain (`drainTtyQueue`) delivers it on the next turn boundary.
+   * Independent of the structured `sendMessage` tty-reject, which is unchanged.
+   */
+  async automatedInput(
+    sessionId: string,
+    text: string,
+    opts: { reason: string },
+  ): Promise<'delivered' | 'queued' | 'unsupported'> {
+    let session: Session;
+    try {
+      session = this.getSession(sessionId);
+    } catch {
+      return 'unsupported';
+    }
+    if (session.runtime_mode !== 'tty' || session.executor !== 'claude' || !this.ttyMgr) {
+      return 'unsupported';
+    }
+    const busy =
+      session.status === 'running' ||
+      session.status === 'pending' ||
+      this.ttyMgr.hasPendingQuestion(sessionId);
+    // Never jump the FIFO queue: if the session is busy OR already has a
+    // backlog, enqueue and let the Stop-hook drain deliver it in order. (Pasting
+    // the queue head here would send someone else's older message while wrongly
+    // reporting THIS text as delivered.)
+    const backlog = this.queue.list(sessionId).length > 0;
+    if (busy || backlog) {
+      this.enqueueMessage(sessionId, text);
+      return 'queued';
+    }
+    // Idle with an empty queue → paste exactly this text now.
+    try {
+      await this.ttyMgr.input(sessionId, { text });
+      console.log(`[gian-task] automated TTY input session=${sessionId} reason=${opts.reason}`);
+      return 'delivered';
+    } catch {
+      this.enqueueMessage(sessionId, text); // re-queue for the Stop-hook drain
+      return 'queued';
+    }
   }
 
   async sendQueuedNow(sessionId: string): Promise<void> {
@@ -1357,6 +1465,324 @@ export class SessionManager {
       .prepare('SELECT path FROM workspaces WHERE id = ?')
       .get(workspaceId) as { path: string } | undefined;
     return ws?.path ?? null;
+  }
+
+  // -------------------------------------------------------------------------
+  // gian-task action protocol (proposal §4A.A / Slice 2-3). Env-gated by
+  // GIAN_TASK_ROLES; the executor/loop tables are inert until it's on.
+  // -------------------------------------------------------------------------
+
+  /** Lazily-built executor bound to this manager's side effects. */
+  private actionExecutor(): ActionExecutor {
+    if (this._actionExecutor) return this._actionExecutor;
+    this._actionExecutor = new ActionExecutor(this.db, {
+      resolveWorkspaceId: nameOrPath => this.resolveWorkspaceId(nameOrPath),
+      createSubtask: input => this.createSubtaskFromAction(input),
+      messageSubtask: input => this.deliverToSubtask(input),
+      writeStepSummary: input => this.writeStepSummary(input.session, input.params),
+      onStepSubmitted: input => this.handleStepSubmitted(input.taskId, input.session, input.params),
+    });
+    return this._actionExecutor;
+  }
+
+  /** Reconstruct a completed turn's final assistant text from persisted full
+   *  assistant messages (Claude path — `assistant_text` events are whole
+   *  messages, not deltas). Codex does NOT come here: it passes the authoritative
+   *  `turn_completed` assistantText directly (final-only contract, §4A.A ①), so
+   *  we never parse un-persisted `output.text.delta` streams. */
+  private finalAssistantTextForTurn(turnId: string): string {
+    const parts: string[] = [];
+    const rows = this.db
+      .prepare(
+        `SELECT data FROM events WHERE turn_id = ? AND type IN ('assistant_text','output.text') ORDER BY rowid ASC`,
+      )
+      .all(turnId) as { data: string }[];
+    for (const row of rows) {
+      try {
+        const data = JSON.parse(row.data) as Record<string, unknown>;
+        if (typeof data.text === 'string' && data.text) parts.push(data.text);
+      } catch {
+        /* skip malformed */
+      }
+    }
+    return parts.join('');
+  }
+
+  /** Codex `turn_completed` carries the authoritative final assistant text
+   *  (`assistantText` = all agentMessage text joined, service.ts:1188). Returns
+   *  it for a codex session, or undefined otherwise (Claude reconstructs from
+   *  its own events). */
+  private codexFinalTextFromNotification(sessionId: string, n: ProxyNotification): string | undefined {
+    let session: Session;
+    try {
+      session = this.getSession(sessionId);
+    } catch {
+      return undefined;
+    }
+    if (session.executor !== 'codex') return undefined;
+    const params = (n as { params?: unknown }).params as Record<string, unknown> | undefined;
+    const data = ((params?.data ?? params) ?? {}) as Record<string, unknown>;
+    const summary = (data.summary ?? {}) as Record<string, unknown>;
+    const at = summary.assistantText;
+    return typeof at === 'string' && at ? at : undefined;
+  }
+
+  /**
+   * TTY turn completed (`Stop` hook): drain the Beta queue AND, when the
+   * gian-task feature is on, parse the Stop hook's final assistant text for a
+   * trailing gian:action. Wired as the TtyManager turn-complete handler.
+   */
+  handleTtyTurnComplete(sessionId: string, finalText?: string, turnKey?: string): void {
+    this.drainTtyQueue(sessionId);
+    if (process.env.GIAN_TASK_ROLES !== '1' || !finalText) return;
+    let session: Session;
+    try {
+      session = this.getSession(sessionId);
+    } catch {
+      return;
+    }
+    if (!session.task_id) return;
+    // Per-turn ordinal → two turns with identical text are distinct actions,
+    // while a re-fired Stop for the same turn dedups. Text hash only as a
+    // defensive fallback when the ordinal is somehow missing.
+    this.recordAndDriveAction(session, finalText, {
+      hostTurnId: null,
+      sourceTurnKey: turnKey ? `tty:${turnKey}` : `tty:hash:${computePayloadHash(finalText)}`,
+    });
+  }
+
+  /** Parse + record + execute a trailing gian:action from a completed structured
+   *  turn. `explicitFinalText` is the runtime's authoritative final-only text —
+   *  Codex passes `turn_completed`'s `assistantText` (§4A.A ①); Claude passes
+   *  nothing and we reconstruct from its persisted full assistant_text messages. */
+  private processCompletedTurnAction(sessionId: string, turnId: string, explicitFinalText?: string): void {
+    let session: Session;
+    try {
+      session = this.getSession(sessionId);
+    } catch {
+      return;
+    }
+    if (!session.task_id) return; // actions only mean something inside a Task
+    const finalText = explicitFinalText ?? this.finalAssistantTextForTurn(turnId);
+    if (!finalText) return;
+    this.recordAndDriveAction(session, finalText, { hostTurnId: turnId, sourceTurnKey: turnId });
+  }
+
+  /**
+   * Parse a final-text blob and, if it carries a trailing gian:action,
+   * SYNCHRONOUSLY record it (durability floor — the row exists before the async
+   * side effect, so a crash is recoverable by the startup scan) then drive it
+   * to completion asynchronously.
+   */
+  private recordAndDriveAction(
+    session: Session,
+    finalText: string,
+    keys: { hostTurnId: string | null; sourceTurnKey: string },
+  ): void {
+    const parsed = parseGianAction(finalText);
+    if (!parsed.ok) return;
+    const ex = this.actionExecutor();
+    const rec = ex.recordParsed({
+      session,
+      action: parsed.action,
+      blockText: parsed.blockText,
+      hostTurnId: keys.hostTurnId,
+      sourceTurnKey: keys.sourceTurnKey,
+    });
+    if (!rec || isTerminalStatus(rec.status) || rec.status === 'staged' || rec.status === 'queued') return;
+    void ex.driveRecorded(rec.action_id, session).catch(err =>
+      console.error(`[gian-task] action drive failed session=${session.id} action=${rec.action_id}: ${(err as Error).message}`),
+    );
+  }
+
+  /**
+   * Startup reconciliation (durability): re-drive any action rows a crash/restart
+   * left non-terminal (parsed/validated/authorized/executing). Idempotent — the
+   * executor's guards mark an interrupted `executing` failed and re-authorize the
+   * rest. Call once at boot (app.ts) when the feature is enabled.
+   */
+  resumePendingTaskActions(): void {
+    if (process.env.GIAN_TASK_ROLES !== '1') return;
+    const rows = this.db
+      .prepare("SELECT action_id, session_id FROM task_actions WHERE status IN ('parsed','validated','authorized','executing')")
+      .all() as { action_id: string; session_id: string }[];
+    for (const r of rows) {
+      let session: Session;
+      try {
+        session = this.getSession(r.session_id);
+      } catch {
+        continue;
+      }
+      void this.actionExecutor().resume(r.action_id, session).catch(err =>
+        console.error(`[gian-task] resume failed action=${r.action_id}: ${(err as Error).message}`),
+      );
+    }
+  }
+
+  /** Resolve a workspace name or absolute path to a canonical workspace id. */
+  private resolveWorkspaceId(nameOrPath: string): string | null {
+    const row = this.db
+      .prepare('SELECT id FROM workspaces WHERE name = ? OR path = ? LIMIT 1')
+      .get(nameOrPath, nameOrPath) as { id: string } | undefined;
+    return row?.id ?? null;
+  }
+
+  /** create_subtask handler: spawn a subtask under the task and deliver its
+   *  brief as the first message. Returns the new subtask session id. */
+  private async createSubtaskFromAction(input: {
+    taskId: string;
+    workspaceId: string;
+    executor: Executor;
+    name?: string;
+    brief: string;
+  }): Promise<string> {
+    const session = await this.createSession({
+      workspace_id: input.workspaceId,
+      executor: input.executor,
+      type: 'subtask',
+      task_id: input.taskId,
+      ...(input.name ? { name: input.name } : {}),
+    });
+    this.broadcaster.broadcast({ type: 'session:created', session });
+    // AWAIT the brief handoff (RoleInjector prepends the ENGINEER ROLE header).
+    // sendMessage resolves once startTurn is accepted; if the proxy/session
+    // fails to start it throws, so the executor marks the action failed and
+    // does NOT point the loop at an engineer that never received its brief.
+    await this.sendMessage(session.id, input.brief);
+    return session.id;
+  }
+
+  /** message_subtask handler: deliver to an existing subtask honoring its state
+   *  (§4A.A ⑤). idle → send; busy/TTY → queue; terminal → failed. */
+  private async deliverToSubtask(input: {
+    taskId: string;
+    subtaskId: string;
+    text: string;
+  }): Promise<MessageOutcome> {
+    let target: Session;
+    try {
+      target = this.getSession(input.subtaskId);
+    } catch {
+      return 'failed';
+    }
+    if (target.task_id !== input.taskId) return 'failed'; // per-task isolation
+    if (target.completed_at || target.worktree_outcome) return 'failed'; // terminal
+    // TTY targets go through the host-owned automation channel (§4A.B): pasted
+    // now if idle, else queued for the Stop-hook drain.
+    if (target.runtime_mode === 'tty') {
+      const outcome = await this.automatedInput(input.subtaskId, input.text, { reason: 'message_subtask' });
+      if (outcome === 'delivered') return 'delivered';
+      if (outcome === 'queued') return 'queued';
+      // 'unsupported' (e.g. a codex TTY, not yet host-drivable) must NOT be
+      // reported as delivered — surface it so the PM message isn't silently lost.
+      return 'failed';
+    }
+    // A busy structured turn queues (drains on turn.completed via maybeAutoSendNext).
+    if (this.activeTurns.has(input.subtaskId)) {
+      this.enqueueMessage(input.subtaskId, input.text);
+      return 'queued';
+    }
+    try {
+      await this.sendMessage(input.subtaskId, input.text);
+      return 'delivered';
+    } catch {
+      this.enqueueMessage(input.subtaskId, input.text);
+      return 'queued';
+    }
+  }
+
+  /** submit_step handler: write the engineer's step summary onto its session
+   *  (M5 — the action handler now owns sessions.summary for task subtasks). */
+  private writeStepSummary(session: Session, params: SubmitStepParams): void {
+    const verdict = params.verdict ? ` [${params.verdict}]` : '';
+    const points = params.points && params.points.length > 0 ? ` — ${params.points.join('; ')}` : '';
+    const summary = `${params.headline}${verdict}${points}`.slice(0, 2000);
+    const now = new Date().toISOString();
+    this.db.prepare('UPDATE sessions SET summary = ?, updated_at = ? WHERE id = ?').run(summary, now, session.id);
+    this.broadcastSessionUpdated(session.id, { summary, updated_at: now });
+  }
+
+  /** After an engineer submits its step: advance the loop (if any), wake the PM. */
+  private async handleStepSubmitted(taskId: string, session: Session, params: SubmitStepParams): Promise<void> {
+    const loop = getActiveLoop(this.db, taskId);
+    let loopNote = '';
+    if (loop) {
+      const decision = advanceLoop(loop, { status: params.status, verdict: params.verdict ?? null });
+      updateLoop(this.db, loop.id, { status: decision.nextStatus, round: decision.nextRound });
+      loopNote = `loop: ${decision.nextRound}/${loop.max_rounds || '∞'} (${decision.outcome})`;
+    }
+    await this.wakePmForStep(taskId, session, params, loopNote);
+  }
+
+  /** Wake the task's PM (manager session) with a completion digest (§4.8 ④). */
+  private async wakePmForStep(taskId: string, subtask: Session, params: SubmitStepParams, loopNote: string): Promise<void> {
+    const manager = this.db
+      .prepare("SELECT * FROM sessions WHERE task_id = ? AND type = 'manager' AND archived = 0 LIMIT 1")
+      .get(taskId) as Session | undefined;
+    if (!manager) return; // no PM to wake (manual subtask)
+    const verdict = params.verdict ? `结论: ${params.verdict}` : `status: ${params.status}`;
+    const points = params.points && params.points.length > 0 ? `\n要点: ${params.points.join('; ')}` : '';
+    const digest = [
+      MANAGER_SYS_OPEN,
+      '<<gian:subtask-done>>',
+      `${subtask.name ?? subtask.id} [${subtask.executor}] 完成。${verdict}${points}`,
+      loopNote,
+      '请决定下一步。',
+      '<</gian:subtask-done>>',
+      MANAGER_SYS_CLOSE,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    if (manager.runtime_mode === 'tty') {
+      await this.automatedInput(manager.id, digest, { reason: 'wake-pm' });
+    } else if (this.activeTurns.has(manager.id)) {
+      // Structured PM mid-turn — enqueue so the completion signal isn't lost;
+      // maybeAutoSendNext drains it on the next turn.completed.
+      this.enqueueMessage(manager.id, digest);
+    } else {
+      await this.sendMessage(manager.id, digest);
+    }
+  }
+
+  /** Start a loop contract for a task (§4.5). Any prior active loop is closed. */
+  startLoop(taskId: string, input: Omit<InsertLoopInput, 'id' | 'task_id'>): TaskLoop {
+    if (!this.taskNameFor(taskId)) throw new Error(`task not found: ${taskId}`);
+    const prior = getActiveLoop(this.db, taskId);
+    if (prior) updateLoop(this.db, prior.id, { status: 'done' });
+    const id = randomUUID();
+    insertLoop(this.db, { id, task_id: taskId, ...input });
+    return getLoop(this.db, id) as TaskLoop;
+  }
+
+  getTaskLoop(taskId: string): TaskLoop | null {
+    return getActiveLoop(this.db, taskId);
+  }
+
+  /** Actions recorded for a task, newest first (drives the staged-confirm chip). */
+  listTaskActions(taskId: string): TaskAction[] {
+    return this.db
+      .prepare('SELECT * FROM task_actions WHERE task_id = ? ORDER BY created_at DESC')
+      .all(taskId) as TaskAction[];
+  }
+
+  /** Confirm a staged action (user clicked confirm). Verifies the action
+   *  belongs to `taskId` — a cross-task action id is rejected as not-found. */
+  async confirmTaskAction(taskId: string, actionId: string): Promise<TaskAction | null> {
+    const row = this.db
+      .prepare('SELECT * FROM task_actions WHERE action_id = ?')
+      .get(actionId) as TaskAction | undefined;
+    if (!row || row.task_id !== taskId) return null;
+    const session = this.getSession(row.session_id);
+    return this.actionExecutor().confirmStaged(actionId, session);
+  }
+
+  /** Reject a staged action (user clicked reject). Task-ownership checked. */
+  rejectTaskAction(taskId: string, actionId: string): TaskAction | null {
+    const row = this.db
+      .prepare('SELECT task_id FROM task_actions WHERE action_id = ?')
+      .get(actionId) as { task_id: string } | undefined;
+    if (!row || row.task_id !== taskId) return null;
+    return this.actionExecutor().rejectStaged(actionId);
   }
 
   /** Concatenate the session's persisted assistant text into a transcript blob
@@ -1645,6 +2071,14 @@ export class SessionManager {
     return row?.n ?? 0;
   }
 
+  /** Task display name, or null if unknown. */
+  private taskNameFor(taskId: string): string | null {
+    const row = this.db
+      .prepare('SELECT name FROM tasks WHERE id = ?')
+      .get(taskId) as { name: string } | undefined;
+    return row?.name ?? null;
+  }
+
   private handleNotification(
     sessionId: string,
     notification: ProxyNotification,
@@ -1754,7 +2188,9 @@ export class SessionManager {
   /** Pre-normalization hook for turn lifecycle bookkeeping (status + queue). */
   private handleLifecycle(sessionId: string, n: ProxyNotification): void {
     if (n.method === 'turn.completed') {
-      this.completeTurn(sessionId, 'completed');
+      // Codex carries the authoritative final text on the notification; Claude
+      // passes nothing here and completeTurn reconstructs from its events.
+      this.completeTurn(sessionId, 'completed', this.codexFinalTextFromNotification(sessionId, n));
       // Live Sync v2: proxy finished writing this turn to the JSONL; advance
       // watcher offset to current EOF so we skip our own writes and resume
       // tailing for any external CLI appends from here.
@@ -1939,7 +2375,11 @@ export class SessionManager {
     this.completeTurn(sessionId, 'error');
   }
 
-  private completeTurn(sessionId: string, status: 'completed' | 'error' | 'stopped'): void {
+  private completeTurn(
+    sessionId: string,
+    status: 'completed' | 'error' | 'stopped',
+    finalText?: string,
+  ): void {
     const active = this.activeTurns.get(sessionId);
     if (!active) return;
     const now = new Date().toISOString();
@@ -1963,6 +2403,13 @@ export class SessionManager {
         .prepare(`UPDATE sessions SET status = ?, unread = 1, updated_at = ? WHERE id = ?`)
         .run(sessionStatus, now, sessionId);
       this.broadcastSessionUpdated(sessionId, { status: sessionStatus, unread: 1, updated_at: now });
+    }
+    // gian-task action protocol (env-gated). Parse the just-completed turn's
+    // final assistant text for a trailing <<gian:action>> block; the row is
+    // recorded SYNCHRONOUSLY here (durability), then executed async so
+    // completion never blocks. Only clean completions.
+    if (process.env.GIAN_TASK_ROLES === '1' && status === 'completed') {
+      this.processCompletedTurnAction(sessionId, active.id, finalText);
     }
     this.activeTurns.delete(sessionId);
   }

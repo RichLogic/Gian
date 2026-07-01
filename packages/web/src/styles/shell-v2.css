@@ -846,7 +846,9 @@
   background: conic-gradient(from 0deg, var(--g1), var(--g2), var(--g3), var(--g2), var(--g1));
   -webkit-mask: radial-gradient(closest-side, transparent 56%, #000 59%);
   mask: radial-gradient(closest-side, transparent 56%, #000 59%);
-  animation: gico-spin 4s linear infinite;
+  /* Running spins faster than the 4s 待处理 flow/breathe — it's active work,
+     not a slow "needs you" pulse, so it should visibly turn (2026-07-01). */
+  animation: gico-spin 1.2s linear infinite;
   filter: drop-shadow(0 0 4px var(--gGlow));
 }
 @keyframes gico-flow { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }

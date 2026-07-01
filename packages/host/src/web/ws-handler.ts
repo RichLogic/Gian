@@ -255,8 +255,11 @@ async function dispatch(
       if (msg.name !== undefined) patch.name = msg.name;
       if (msg.description !== undefined) patch.description = msg.description;
       if (msg.status !== undefined) patch.status = msg.status;
-      const task = tasks.updateTask(msg.task_id, patch);
-      broadcaster.broadcast({ type: 'task:updated', task });
+      // Pin is a separate, updated_at-neutral path (setTaskPinned); a content
+      // patch (if any) runs first, then the pin, and the final row is broadcast.
+      let task = Object.keys(patch).length > 0 ? tasks.updateTask(msg.task_id, patch) : undefined;
+      if (msg.pinned !== undefined) task = tasks.setTaskPinned(msg.task_id, msg.pinned);
+      if (task) broadcaster.broadcast({ type: 'task:updated', task });
       return;
     }
     case 'task:delete': {

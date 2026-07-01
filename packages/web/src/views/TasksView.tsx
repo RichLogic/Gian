@@ -79,6 +79,7 @@ const I = {
   caretRight: 'M9 6l6 6-6 6',
   caretDown: 'M6 9l6 6 6-6',
   x: 'M6 6l12 12 M6 18L18 6',
+  pin: 'M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z',
 };
 
 /** A subtask "needs the user" (待处理, spec §D/§E): waiting on input (pending)
@@ -105,9 +106,25 @@ function Icon({ d, size = 14, stroke = 1.8 }: { d: string; size?: number; stroke
   );
 }
 
-/** A Subtask is a Session with type==='subtask' and a matching task_id. */
+/** A Subtask is a Session with type==='subtask' and a matching task_id. Ordered
+ *  by creation time, newest first (created_at DESC) — a stable "steps" order
+ *  that doesn't jump around on activity (decided 2026-07-01). */
 function subtasksFor(sessions: Session[], taskId: string): Session[] {
-  return sessions.filter(s => s.task_id === taskId && s.type === 'subtask');
+  return sessions
+    .filter(s => s.task_id === taskId && s.type === 'subtask')
+    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+
+/** Task ordering for the open group (decided 2026-07-01): pinned tasks first,
+ *  most-recently-pinned on top (pinned_at DESC); the rest by creation time,
+ *  newest first (created_at DESC). ISO-8601 strings compare lexicographically
+ *  in time order. The done group ignores pins and just uses created_at DESC. */
+function compareOpenTasks(a: Task, b: Task): number {
+  const ap = a.pinned_at, bp = b.pinned_at;
+  if (ap && bp) return bp.localeCompare(ap);
+  if (ap) return -1;
+  if (bp) return 1;
+  return b.created_at.localeCompare(a.created_at);
 }
 
 
@@ -303,6 +320,23 @@ function TasksList({
   const [creating, setCreating] = useState(false);
   const [search, setSearch] = useState('');
   const [doneOpen, setDoneOpen] = useState(false); // Done group collapsed by default (spec §G)
+  // Per-task subtask collapse (Codex-style, 2026-07-01). Default = expanded
+  // (empty set); a hover caret on the TaskRow toggles it. Persisted so the
+  // choice survives reloads.
+  const [collapsedTasks, setCollapsedTasks] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('gian.tasks.collapsed');
+      return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+    } catch { return new Set(); }
+  });
+  const toggleTaskCollapsed = (taskId: string) => {
+    setCollapsedTasks(prev => {
+      const next = new Set(prev);
+      if (next.has(taskId)) next.delete(taskId); else next.add(taskId);
+      try { localStorage.setItem('gian.tasks.collapsed', JSON.stringify([...next])); } catch { /* ignore */ }
+      return next;
+    });
+  };
 
   // Archived tasks are hidden from the list (they're a soft-delete state).
   const visible = useMemo(() => {
@@ -316,8 +350,17 @@ function TasksList({
       );
     });
   }, [tasks, search]);
-  const open = visible.filter(task => task.status === 'open');
-  const done = visible.filter(task => task.status === 'done');
+  // Sort on render (not by array order) so live pin/unpin re-orders instantly
+  // and matches the host snapshot after a refresh — no more "jump on reload".
+  const open = useMemo(
+    () => visible.filter(task => task.status === 'open').sort(compareOpenTasks),
+    [visible],
+  );
+  const done = useMemo(
+    () => visible.filter(task => task.status === 'done')
+      .sort((a, b) => b.created_at.localeCompare(a.created_at)),
+    [visible],
+  );
 
   function createTaskNow(input: { name: string }) {
     // Match how other entities are created in the app: fire a WS message and
@@ -342,6 +385,7 @@ function TasksList({
       const childSubs = subtasksFor(sessions, task.id);
       const attnCount = childSubs.filter(subtaskNeedsAttention).length;
       const mgr = sessions.find(s => s.task_id === task.id && s.type === 'manager') ?? null;
+      const isCollapsed = collapsedTasks.has(task.id);
       return (
         <div key={task.id} className="tasks-list-task">
           <TaskRow
@@ -357,8 +401,11 @@ function TasksList({
               }
               ws.send({ type: 'task:update', task_id: task.id, status: 'done' });
             }}
+            hasSubtasks={childSubs.length > 0}
+            collapsed={isCollapsed}
+            onToggleCollapse={() => toggleTaskCollapsed(task.id)}
           />
-          {childSubs.map(st => (
+          {!isCollapsed && childSubs.map(st => (
             <SubtaskRow
               key={st.id}
               subtask={st}
@@ -366,7 +413,7 @@ function TasksList({
               onSelect={() => onSelectSubtask(task.id, st.id)}
             />
           ))}
-          {childSubs.length === 0 && (
+          {!isCollapsed && childSubs.length === 0 && (
             <div className="tasks-empty-subs">{t('tasks.subtasks.empty')}</div>
           )}
         </div>
@@ -491,6 +538,9 @@ function TaskRow({
   managerSession,
   onSelect,
   onToggleDone,
+  hasSubtasks,
+  collapsed,
+  onToggleCollapse,
 }: {
   task: Task;
   active: boolean;
@@ -501,6 +551,11 @@ function TaskRow({
   managerSession: Session | null;
   onSelect: () => void;
   onToggleDone: () => void;
+  /** Whether the task has any subtasks — the collapse caret only shows if so. */
+  hasSubtasks: boolean;
+  /** Subtasks currently collapsed (hidden). Drives the caret direction. */
+  collapsed: boolean;
+  onToggleCollapse: () => void;
 }) {
   const t = useT();
   const done = task.status === 'done';
@@ -528,14 +583,30 @@ function TaskRow({
       </button>
       <div className="ri-body">
         <div className="ri-row1">
+          {task.pinned_at != null && (
+            <span className="task-pin-badge" title={t('tasks.pinned')} aria-label={t('tasks.pinned')}>
+              <Icon d={I.pin} size={11} stroke={1.8} />
+            </span>
+          )}
           <span className="ri-title">{task.name}</span>
+          {hasSubtasks && (
+            <button
+              className="task-collapse-toggle"
+              title={collapsed ? t('tasks.expand') : t('tasks.collapse')}
+              aria-label={collapsed ? t('tasks.expand') : t('tasks.collapse')}
+              aria-expanded={!collapsed}
+              onClick={e => { e.stopPropagation(); onToggleCollapse(); }}
+            >
+              <Icon d={collapsed ? I.caretRight : I.caretDown} size={13} stroke={2} />
+            </button>
+          )}
         </div>
       </div>
       {/* Single-line (Codex-style): row-end = the Manager-as-session StatusIcon
           when it has one, else the task's compact relative time. */}
       {managerSession && statusGlyphShown(managerSession.status, managerSession.unread === 1)
         ? <StatusIcon status={managerSession.status} unread={managerSession.unread === 1} />
-        : <span className="ri-age">{relTime(task.updated_at)}</span>}
+        : <span className={`ri-age ${managerSession?.executor ?? 'claude'}`}>{relTime(task.updated_at)}</span>}
     </div>
   );
 }
@@ -576,7 +647,7 @@ function SubtaskRow({
               compact relative time. */}
           {statusGlyphShown(subtask.status, subtask.unread === 1)
             ? <StatusIcon status={subtask.status} unread={subtask.unread === 1} />
-            : <span className="ri-age">{relTime(subtask.updated_at)}</span>}
+            : <span className={`ri-age ${subtask.executor}`}>{relTime(subtask.updated_at)}</span>}
         </div>
         {/* Single-line (Codex-style): the Claude/Codex executor label was dropped. */}
       </div>

@@ -40,9 +40,33 @@ export class TaskManager {
   }
 
   listTasks(): Task[] {
+    // Pinned tasks first (most-recently-pinned on top), then the rest by
+    // creation time (newest first). `(pinned_at IS NOT NULL) DESC` puts the
+    // pinned group ahead; within each group the trailing keys order it. The web
+    // client re-sorts by the same keys (single source of truth for live pin
+    // moves), so this only needs to make the initial snapshot consistent.
     return this.db
-      .prepare('SELECT * FROM tasks ORDER BY updated_at DESC')
+      .prepare(
+        `SELECT * FROM tasks
+         ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC, created_at DESC`,
+      )
       .all() as Task[];
+  }
+
+  /**
+   * Pin or unpin a task. Stamps `pinned_at` with the current time (pin) or
+   * clears it to NULL (unpin). Deliberately does NOT bump `updated_at` — a pin
+   * is view metadata, not a content edit, and the list no longer orders by
+   * updated_at anyway. Throws if the task doesn't exist.
+   */
+  setTaskPinned(id: string, pinned: boolean): Task {
+    const existing = this.getTask(id);
+    if (!existing) throw new Error(`task not found: ${id}`);
+    const pinnedAt = pinned ? new Date().toISOString() : null;
+    this.db
+      .prepare('UPDATE tasks SET pinned_at = @pinnedAt WHERE id = @id')
+      .run({ id, pinnedAt });
+    return this.getTaskOrThrow(id);
   }
 
   getTask(id: string): Task | undefined {

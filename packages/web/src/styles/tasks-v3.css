@@ -123,6 +123,32 @@
 }
 .task-row:not(.status-done) .done-toggle:hover ~ .ri-body .ri-title::after { width: 100%; }
 
+/* Pinned-task badge: a small accent pushpin before the title (pinned tasks sort
+   to the top; the badge says why). flex:none so it never shrinks. */
+.task-pin-badge {
+  display: inline-flex; align-items: center; flex: none;
+  margin-right: 4px;
+  color: var(--accent);
+}
+
+/* Codex-style collapse caret: after the title, revealed on row hover. When the
+   task is COLLAPSED it stays faintly visible so the row advertises it can be
+   expanded even without hovering. */
+.task-collapse-toggle {
+  flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px;
+  padding: 0; margin: 0 0 0 2px;
+  border: none; background: none; cursor: pointer;
+  color: var(--text-3);
+  opacity: 0;
+  transition: opacity 120ms var(--ease), color 120ms var(--ease);
+}
+.task-row:hover .task-collapse-toggle { opacity: 0.6; }
+.task-collapse-toggle:hover { opacity: 1; color: var(--text); }
+.task-collapse-toggle[aria-expanded="false"] { opacity: 0.5; }
+.task-row:hover .task-collapse-toggle[aria-expanded="false"] { opacity: 0.85; }
+
 @media (prefers-reduced-motion: reduce) {
   .done-toggle:hover { animation: none; }
   .task-row .ri-title::after { transition: none; }

@@ -89,9 +89,22 @@ export class TtyManager {
   /** Rolling, ANSI-stripped tail of recent PTY output per session, so the
    *  Remote Control status line is detectable even when split across chunks. */
   private readonly rcBuf = new Map<string, string>();
+  /** Raw rolling tail of recent PTY output per session, so the interrupt prompt
+   *  anchor "· What should Claude do instead" is matchable even when Claude's
+   *  redraw splits it across chunks. Kept RAW (not ANSI-stripped) because the
+   *  anchor is contiguous plain text and stripping would corrupt the cursor-move
+   *  redraw. Consumed (cleared) on a match so a stale prompt can't re-fire on the
+   *  next turn. Cleared on PTY exit. */
+  private readonly intrBuf = new Map<string, string>();
   /** Fired when a TTY turn ends (`Stop` hook). The host wires this to the
-   *  queue drain so Beta walks its queue one entry per completed turn. */
-  private onTtyTurnComplete: ((sessionId: string) => void) | null = null;
+   *  queue drain (and the gian-task action parser). `finalText` is the Stop
+   *  hook's `last_assistant_message` — the parser's TTY event source (§4A.A ①).
+   *  `turnKey` is a persistent per-session turn ordinal (bumped on each
+   *  `UserPromptSubmit`, stored in `sessions.tty_turn_seq`, migration 030) — a
+   *  STABLE per-turn dedup key that survives restart, so two turns with identical
+   *  final text still execute as distinct actions (a re-fired Stop for the same
+   *  turn keeps the same key and dedups). */
+  private onTtyTurnComplete: ((sessionId: string, finalText?: string, turnKey?: string) => void) | null = null;
 
   constructor(
     private readonly db: Db,
@@ -104,7 +117,7 @@ export class TtyManager {
   ) {}
 
   /** Wire the host's per-turn queue drain. Set once at startup (app.ts). */
-  setTurnCompleteHandler(fn: (sessionId: string) => void): void {
+  setTurnCompleteHandler(fn: (sessionId: string, finalText?: string, turnKey?: string) => void): void {
     this.onTtyTurnComplete = fn;
   }
 
@@ -160,6 +173,12 @@ export class TtyManager {
   isLockedByOther(sessionId: string, clientId: string): boolean {
     const lock = this.locks.get(sessionId);
     return !!lock && lock.clientId !== clientId;
+  }
+
+  /** True when a Claude TTY session is waiting on an AskUserQuestion (so the
+   *  host-owned automation channel must not paste into a blocked selector). */
+  hasPendingQuestion(sessionId: string): boolean {
+    return (this.pendingQuestions.get(sessionId)?.size ?? 0) > 0;
   }
 
   release(sessionId: string, clientId?: string): void {
@@ -281,6 +300,9 @@ export class TtyManager {
     console.log(`[tty:hook] sess=${sessionId} event=${event} keys=${summary}`);
 
     if (event === 'UserPromptSubmit') {
+      // New turn → bump the persistent ordinal so its Stop carries a fresh dedup
+      // key that survives restart (sessions.tty_turn_seq, migration 030).
+      this.db.prepare('UPDATE sessions SET tty_turn_seq = tty_turn_seq + 1 WHERE id = ?').run(sessionId);
       this.persistStatus(sessionId, 'running');
     } else if (event === 'Stop') {
       // Natural turn completion → done + unread (new result to read). The web
@@ -319,7 +341,17 @@ export class TtyManager {
     // mid-session `/model` switch.
     if (event === 'Stop') this.syncModelFromJsonl(sessionId);
     // Turn ended → let the host drain the next queued Beta message (if any).
-    if (event === 'Stop') this.onTtyTurnComplete?.(sessionId);
+    if (event === 'Stop') {
+      // Stop carries `last_assistant_message` — the TTY event source for the
+      // gian-task action parser (§4A.A ①). Pass it through with the drain, plus
+      // the host-maintained per-turn ordinal as a stable dedup key.
+      const lam = typeof body === 'object' && body !== null
+        ? (body as Record<string, unknown>).last_assistant_message
+        : undefined;
+      const row = this.db.prepare('SELECT tty_turn_seq FROM sessions WHERE id = ?').get(sessionId) as { tty_turn_seq: number } | undefined;
+      const seq = row?.tty_turn_seq ?? 0;
+      this.onTtyTurnComplete?.(sessionId, typeof lam === 'string' ? lam : undefined, `${sessionId}:${seq}`);
+    }
 
     // Surface every hook as a generic event the frontend can show in a
     // future debug panel. Status-pill mapping is done client-side based
@@ -378,6 +410,7 @@ export class TtyManager {
       this.clearPendingQuestions(sessionId);
       // Remote Control dies with the PTY — reset the toggle.
       this.rcBuf.delete(sessionId);
+      this.intrBuf.delete(sessionId);
       if (this.remoteControl.delete(sessionId)) {
         this.broadcaster.broadcast({ type: 'tty:remote-control', session_id: sessionId, state: 'disconnected' });
       }
@@ -449,15 +482,32 @@ export class TtyManager {
    * prints "Interrupted · What should Claude do instead?" — when we see it on a
    * session whose row still says `running`, settle it to `done` so the Beta
    * chat spinner clears. The Stop hook covers clean completion / tool aborts;
-   * this covers generation aborts where the hook may not fire. Guarded on the
-   * current status so it only broadcasts once per interrupt.
+   * this covers generation aborts where the hook may not fire.
+   *
+   * Matching is deliberately stricter (2026-07-01): the earlier version keyed on
+   * the bare substring "What should Claude do instead", which fired whenever
+   * that phrase appeared ANYWHERE in the output — including in Claude's own
+   * assistant text — and silently settled a still-running turn to `done`
+   * (invisible once "done+read shows no icon"). We can't key on "Interrupted":
+   * the redraw paints it via a cursor-move OVERWRITE ("Int\x1b[10Grrupted"), so
+   * neither the raw bytes nor an ANSI-stripped form spell "Interrupted"
+   * (stripping yields "Intrrupted"). What IS printed contiguously is the
+   * separator + prompt "· What should Claude do instead". The middot-prefixed
+   * form is specific to Claude's interrupt line; ordinary prose essentially
+   * never carries it, so this eliminates the false positives while still
+   * catching a real interrupt (a rolling raw tail also handles a chunk split
+   * mid-phrase). Consumed on match so a stale prompt can't re-fire next turn.
    */
   private detectInterrupted(sessionId: string, chunk: string): void {
-    // Match the prompt Claude prints after an interrupt. We key on "What should
-    // Claude do instead" rather than the word "Interrupted" because the latter
-    // is split by a cursor-move escape in the TUI redraw ("Int\x1b[10Grrupted")
-    // while this phrase lands contiguously.
-    if (!chunk.includes('What should Claude do instead')) return;
+    // Raw (NOT ANSI-stripped) rolling tail: the anchor below is plain contiguous
+    // text in the real stream, and stripping would corrupt the cursor-move
+    // overwrite that paints "Interrupted" anyway.
+    const text = ((this.intrBuf.get(sessionId) ?? '') + chunk).slice(-4000);
+    this.intrBuf.set(sessionId, text);
+    if (!text.includes('· What should Claude do instead')) return;
+    // Consume the matched prompt so it can't re-fire on the next turn (the tail
+    // would otherwise still hold it until it scrolls past the 4000-char window).
+    this.intrBuf.delete(sessionId);
     const row = this.db
       .prepare('SELECT status FROM sessions WHERE id = ?')
       .get(sessionId) as { status: string } | undefined;

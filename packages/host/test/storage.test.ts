@@ -28,9 +28,78 @@ test('openDatabase runs migrations and creates expected tables', () => {
       'bots',
       'config',
       'migrations',
+      'tasks',
+      'task_loops',
+      'task_actions',
     ]) {
       assert.ok(names.includes(expected), `missing table ${expected}`);
     }
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ACTION-DB-001 — task_loops / task_actions schema + FK behavior (migration 028).
+test('migration 028 creates task_loops / task_actions with expected columns and FKs', () => {
+  const dir = makeTempDir();
+  try {
+    const db = openDatabase(dir);
+
+    const loopCols = (db.prepare('PRAGMA table_info(task_loops)').all() as Array<{ name: string }>)
+      .map(c => c.name);
+    for (const col of [
+      'id', 'task_id', 'status', 'allowed_methods', 'allowed_workspaces', 'allowed_executors',
+      'round', 'max_rounds', 'current_step', 'current_step_session_id', 'expected_role',
+      'created_at', 'updated_at',
+    ]) {
+      assert.ok(loopCols.includes(col), `task_loops missing column ${col}`);
+    }
+
+    const actionCols = (db.prepare('PRAGMA table_info(task_actions)').all() as Array<{ name: string }>)
+      .map(c => c.name);
+    for (const col of [
+      'action_id', 'task_id', 'session_id', 'host_turn_id', 'source_turn_key', 'method',
+      'payload_hash', 'payload', 'status', 'result', 'error', 'created_at', 'updated_at',
+    ]) {
+      assert.ok(actionCols.includes(col), `task_actions missing column ${col}`);
+    }
+
+    // FK directions + on-delete actions.
+    const loopFks = db.prepare('PRAGMA foreign_key_list(task_loops)').all() as Array<{ from: string; table: string; on_delete: string }>;
+    assert.equal(loopFks.find(f => f.from === 'task_id')?.on_delete, 'CASCADE');
+    assert.equal(loopFks.find(f => f.from === 'current_step_session_id')?.on_delete, 'SET NULL');
+    const actFks = db.prepare('PRAGMA foreign_key_list(task_actions)').all() as Array<{ from: string; table: string; on_delete: string }>;
+    assert.equal(actFks.find(f => f.from === 'task_id')?.on_delete, 'CASCADE');
+    assert.equal(actFks.find(f => f.from === 'session_id')?.on_delete, 'CASCADE');
+
+    // action_id is the primary key → duplicate insert rejected (idempotency floor).
+    db.exec("INSERT INTO tasks(id,name,status,created_at,updated_at) VALUES('t1','T','open',datetime('now'),datetime('now'))");
+    db.exec("INSERT INTO workspaces(id,name,path,sort_order,hidden,created_at,updated_at) VALUES('w1','w','/tmp',0,0,datetime('now'),datetime('now'))");
+    db.exec("INSERT INTO sessions(id,name,type,task_id,workspace_id,executor,approval_mode,turns,status,archived,unread,native_session_id,runtime_mode,created_at,updated_at) VALUES('s1',NULL,'subtask','t1','w1','claude','plan',0,'new',0,0,'','structured',datetime('now'),datetime('now'))");
+    db.exec("INSERT INTO task_loops(id,task_id,current_step_session_id) VALUES('l1','t1','s1')");
+    db.exec("INSERT INTO task_actions(action_id,task_id,session_id,method,payload_hash,payload) VALUES('a1','t1','s1','submit_step','ph','{}')");
+    assert.throws(
+      () => db.exec("INSERT INTO task_actions(action_id,task_id,session_id,method,payload_hash,payload) VALUES('a1','t1','s1','submit_step','ph','{}')"),
+      /UNIQUE|PRIMARY/i,
+    );
+
+    // Defaults land as declared.
+    const loop = db.prepare("SELECT status, allowed_methods, round, max_rounds FROM task_loops WHERE id='l1'").get() as { status: string; allowed_methods: string; round: number; max_rounds: number };
+    assert.equal(loop.status, 'active');
+    assert.equal(loop.allowed_methods, '[]');
+    assert.equal(loop.round, 0);
+    assert.equal(loop.max_rounds, 0);
+    assert.equal((db.prepare("SELECT status FROM task_actions WHERE action_id='a1'").get() as { status: string }).status, 'parsed');
+
+    // FK on-delete: deleting the session SET NULLs the loop pointer and CASCADEs the action.
+    db.exec("DELETE FROM sessions WHERE id='s1'");
+    assert.equal((db.prepare("SELECT current_step_session_id FROM task_loops WHERE id='l1'").get() as { current_step_session_id: string | null }).current_step_session_id, null);
+    assert.equal((db.prepare('SELECT COUNT(*) AS c FROM task_actions').get() as { c: number }).c, 0);
+    // Deleting the task CASCADEs the loop.
+    db.exec("DELETE FROM tasks WHERE id='t1'");
+    assert.equal((db.prepare('SELECT COUNT(*) AS c FROM task_loops').get() as { c: number }).c, 0);
+
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

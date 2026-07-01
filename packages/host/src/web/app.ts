@@ -123,7 +123,10 @@ export function createApp(ctx: AppContext): AppHandle {
   const tty = new TtyManager(ctx.db, proxy, broadcaster, hookBaseUrl);
   sessions.setTtyManager(tty);
   // Beta queue: drain the next queued message into the PTY when a turn ends.
-  tty.setTurnCompleteHandler(sid => sessions.drainTtyQueue(sid));
+  tty.setTurnCompleteHandler((sid, finalText, turnKey) => sessions.handleTtyTurnComplete(sid, finalText, turnKey));
+  // gian-task durability: re-drive any action rows a prior crash/restart left
+  // non-terminal (no-op unless GIAN_TASK_ROLES is on and rows are pending).
+  sessions.resumePendingTaskActions();
 
   // Codex CLI runtime coordinator. No hooks (codex has no `--settings`
   // hook surface), so no token registry / settings.json / HTTP route —
@@ -642,6 +645,66 @@ export function createApp(ctx: AppContext): AppHandle {
     } catch (err) {
       return c.json({ error: (err as Error).message }, 500);
     }
+  });
+
+  // ── gian-task action protocol (proposal §4A.A). Env-gated behavior lives in
+  //    SessionManager; these routes expose loop + staged-action management. ──
+
+  /** Start / replace a task's loop contract (§4.5). */
+  app.post('/api/tasks/:id/loop', async c => {
+    const id = c.req.param('id');
+    if (!tasks.getTask(id)) return c.json({ error: 'task not found' }, 404);
+    const body = await c.req.json<{
+      allowed_methods?: import('@gian/shared').GianActionMethod[];
+      allowed_workspaces?: string[];
+      allowed_executors?: import('@gian/shared').Executor[];
+      max_rounds?: number;
+      current_step?: string | null;
+      current_step_session_id?: string | null;
+      expected_role?: import('@gian/shared').Role | null;
+    }>().catch(() => ({}));
+    try {
+      const loop = sessions.startLoop(id, body);
+      return c.json({ loop });
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 400);
+    }
+  });
+
+  /** The task's active loop, or null. */
+  app.get('/api/tasks/:id/loop', c => {
+    const id = c.req.param('id');
+    if (!tasks.getTask(id)) return c.json({ error: 'task not found' }, 404);
+    return c.json({ loop: sessions.getTaskLoop(id) });
+  });
+
+  /** Actions recorded for a task (drives the staged-confirm chip). */
+  app.get('/api/tasks/:id/actions', c => {
+    const id = c.req.param('id');
+    if (!tasks.getTask(id)) return c.json({ error: 'task not found' }, 404);
+    return c.json({ actions: sessions.listTaskActions(id) });
+  });
+
+  /** Confirm a staged action (user chip → execute). Scoped to the task. */
+  app.post('/api/tasks/:id/actions/:actionId/confirm', async c => {
+    const id = c.req.param('id');
+    const actionId = c.req.param('actionId');
+    try {
+      const action = await sessions.confirmTaskAction(id, actionId);
+      if (!action) return c.json({ error: 'action not found' }, 404);
+      return c.json({ action });
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 400);
+    }
+  });
+
+  /** Reject a staged action (user chip → rejected). Scoped to the task. */
+  app.post('/api/tasks/:id/actions/:actionId/reject', c => {
+    const id = c.req.param('id');
+    const actionId = c.req.param('actionId');
+    const action = sessions.rejectTaskAction(id, actionId);
+    if (!action) return c.json({ error: 'action not found' }, 404);
+    return c.json({ action });
   });
 
   /**

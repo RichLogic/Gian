@@ -1,4 +1,5 @@
 import type { EventEnvelope, Session } from '@gian/shared';
+import { stripGianActionBlocks } from '@gian/shared';
 
 const PREFS_KEY = 'gian.notificationPrefs.v1';
 
@@ -80,7 +81,7 @@ function notificationForEnvelope(
   const label = sessionLabel(session);
   if (env.event === 'turn_completed') {
     if (!prefs.sessionDone) return null;
-    const summary = typeof env.data.summary === 'string' ? env.data.summary.trim() : '';
+    const summary = typeof env.data.summary === 'string' ? stripGianActionBlocks(env.data.summary).trim() : '';
     return {
       title: `Gian · ${label} completed`,
       body: summary || `Turn ${env.turn} completed.`,

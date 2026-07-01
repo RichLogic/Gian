@@ -1,5 +1,13 @@
 import type { EventEnvelope } from '@gian/shared';
-import { stripManagerSystemPrefix } from '@gian/shared';
+import { stripManagerSystemPrefix, stripGianRolePrefix, stripGianActionBlocks, GIAN_ACTION_CLOSE } from '@gian/shared';
+
+/** Strip complete gian:action blocks from accumulating assistant text — only
+ *  once a CLOSE sentinel is present, so a block split across streaming deltas is
+ *  never half-stripped (which would corrupt on the next append). No-op when no
+ *  block is present (the default, and always when the feature is off). */
+function stripSettledActionBlocks(text: string): string {
+  return text.includes(GIAN_ACTION_CLOSE) ? stripGianActionBlocks(text) : text;
+}
 import type {
   AgentSpawnItem,
   ApprovalItem,
@@ -104,12 +112,12 @@ export function applyEnvelope(
     if (idx >= 0) {
       const existing = items[idx] as MsgItem;
       const next = items.slice();
-      next[idx] = { ...existing, text: existing.text + chunk };
+      next[idx] = { ...existing, text: stripSettledActionBlocks(existing.text + chunk) };
       return next;
     }
     const created: MsgItem = {
       kind: 'assistant', id: itemId,
-      text: chunk, exec: executor,
+      text: stripSettledActionBlocks(chunk), exec: executor,
       ts: env.ts, turn: env.turn,
     };
     return [...items, created];
@@ -367,17 +375,22 @@ export function applyEnvelope(
         text = recovered.text;
       }
     }
+    // Strip the always-hidden gian-task ROLE header from the first-turn user
+    // message so it never shows in ANY transcript (normal/subtask views read
+    // this stored text directly). The Manager system prefix is intentionally
+    // NOT stripped here — showManagerRaw reveals it at render.
     const item: MsgItem = {
-      kind: 'user', id: env.call_id, text, exec: executor,
+      kind: 'user', id: env.call_id, text: stripGianRolePrefix(text), exec: executor,
       ts: env.ts, turn: env.turn,
       ...(attachments.length > 0 ? { attachments } : {}),
     };
-    // The Manager prepends a sentinel-wrapped meta block (system prompt on the
-    // first turn, or a `create_subtask` action note on later turns) to the user
-    // text host-side, so the server echo carries it but the client's optimistic
-    // echo holds only the bare text. Compare against the stripped form too, or
-    // the first Manager message reconciles against nothing and renders twice.
-    const strippedItemText = stripManagerSystemPrefix(item.text);
+    // The host prepends a sentinel-wrapped meta block to the user text: the
+    // Manager system prompt / a `create_subtask` note (<<gian:manager-system>>),
+    // or the gian-task ROLE header on a task session's first turn
+    // (<<gian:role>>). The server echo carries it but the client's optimistic
+    // echo holds only the bare text — compare against the stripped form too, or
+    // the first message reconciles against nothing and renders twice.
+    const strippedItemText = stripGianRolePrefix(stripManagerSystemPrefix(item.text));
     for (let i = base.length - 1; i >= 0; i--) {
       const cand = base[i]!;
       if (

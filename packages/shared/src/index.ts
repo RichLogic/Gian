@@ -1,4 +1,5 @@
 export * from './model.js';
+export * from './action.js';
 export * from './manager.js';
 export * from './proxy.js';
 export * from './web.js';

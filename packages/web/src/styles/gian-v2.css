@@ -703,6 +703,13 @@
   pointer-events: none;
 }
 .rail-item.active .ri-age { color: var(--text-2); }
+/* Executor-tinted time (replaces the dropped Claude/Codex text label):
+   Claude = 橙 --claude(h36), Codex = 蓝紫 --codex(h270). Higher specificity than
+   both the base .ri-age and the .active override so the tint always wins. */
+.ri-age.claude { color: var(--claude); }
+.ri-age.codex  { color: var(--codex); }
+.rail-item.active .ri-age.claude { color: var(--claude); }
+.rail-item.active .ri-age.codex  { color: var(--codex); }
 .ri-kebab {
   position: absolute; top: 6px; right: 6px;
   width: 22px; height: 22px;

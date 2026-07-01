@@ -1,4 +1,5 @@
 import type { Approval, EventEnvelope, Session } from '@gian/shared';
+import { stripGianActionBlocks } from '@gian/shared';
 import type { NotificationPrefs } from './notifications.js';
 
 /**
@@ -89,7 +90,7 @@ export function classifyEnvelope(env: EventEnvelope): Classified | null {
     return { kind: 'error', id: `error:${sid}`, subject: str(env.data.message) };
   }
   if (env.event === 'turn_completed') {
-    return { kind: 'done', id: `done:${sid}:${env.turn}`, subject: str(env.data.summary).trim() };
+    return { kind: 'done', id: `done:${sid}:${env.turn}`, subject: stripGianActionBlocks(str(env.data.summary)).trim() };
   }
   return null;
 }

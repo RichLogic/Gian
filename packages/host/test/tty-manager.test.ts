@@ -179,6 +179,28 @@ test('STOP-TTY-002: interrupt detection is a no-op when the turn is not running'
   } finally { teardown(ctx); }
 });
 
+test('STOP-TTY-002: a bare "What should Claude do instead" in assistant text does NOT settle a running turn', async () => {
+  // Regression (2026-07-01): the old bare-substring match fired on ANY mention
+  // of the phrase — e.g. Claude discussing Claude Code, or this very sentence —
+  // and silently killed a still-running turn (invisible once done+read shows no
+  // icon). Only the middot-prefixed interrupt line ("· What should Claude do
+  // instead") counts now; a mention without that separator must be ignored.
+  const ctx = setup();
+  try {
+    const session = seedClaudeSession(ctx.db);
+    await ctx.mgr.handleHook(session.id, 'UserPromptSubmit', { prompt: 'go' }); // → running
+    const before = ctx.broadcaster.messages.filter(m => m.type === 'session:updated').length;
+    const data = Buffer.from(
+      'The TUI prints "What should Claude do instead?" after you press Esc.\r', 'utf8',
+    ).toString('base64');
+    ctx.mgr.handleProxyNotification({ method: 'tty.output', params: { sessionId: session.id, data } });
+    const row = ctx.db.prepare('SELECT status FROM sessions WHERE id = ?').get(session.id) as { status: string };
+    assert.equal(row.status, 'running', 'a bare mention (no middot prefix) must not settle the turn to done');
+    const after = ctx.broadcaster.messages.filter(m => m.type === 'session:updated').length;
+    assert.equal(after, before, 'no session:updated should be broadcast for a bare mention');
+  } finally { teardown(ctx); }
+});
+
 test('CLAUDE-TTY-003: hook permission_mode + effort sync onto the session row', async () => {
   const ctx = setup();
   try {

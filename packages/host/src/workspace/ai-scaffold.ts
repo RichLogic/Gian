@@ -1,15 +1,28 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { GIAN_TASK_SKILL_FILES } from '../task/skill-templates.js';
 
 /**
- * The gian-managed `.ai/` scaffold (PRD-v3 P2a).
+ * The gian-managed `.ai/` scaffold (PRD-v3 P2a; extended for the gian-task
+ * context engine, proposal gian-task-pm-engineer §4.3 / §4.7).
  *
  * One set per Workspace, created at init / adopt time and maintained by gian.
- * See `docs/PRD-v3-task-abstraction.md` §109-120 for the file table.
  *
- * Every helper here is **idempotent and non-destructive**: a file is only
- * created when MISSING. We never overwrite existing content (the user / a prior
- * Subtask may already own it) and we never touch `CLAUDE.md` / `AGENTS.md`.
+ * Layout:
+ *   .ai/MEMORY.md            canonical long-term truth (committable, plane A)
+ *   .ai/STATE.md/HANDOFF.md  legacy single-file scaffold (kept for back-compat)
+ *   .ai/SESSION_LOG.md       legacy completion log (kept for back-compat)
+ *   .ai/sessions/            per-session shards `<id>.state.md` / `<id>.report.md`
+ *   .ai/log/                 per-session append-only logs
+ *   .ai/.history/            atomic-write backups (created lazily by backups)
+ *   .ai/STATE.view.md        HOST-generated merge view (see ai-views.ts)
+ *   .ai/gian-task/<role>.md  the gian-task role playbooks (Gian-owned templates)
+ *
+ * The user-content files (`MEMORY.md` etc.) are **idempotent and non-destructive**:
+ * created only when MISSING, never overwritten, and we never touch
+ * `CLAUDE.md` / `AGENTS.md`. The gian-task playbooks are Gian-owned templates,
+ * so they are (re)written every call to stay fresh; derived files
+ * (`sessions/`, `log/`, `.history/`, `STATE.view.md`, `gian-task/`) are gitignored.
  */
 
 interface ScaffoldFile {
@@ -81,22 +94,41 @@ const AI_FILES: ScaffoldFile[] = [
   },
 ];
 
+/** Directories created under the workspace (relative paths). `.ai/.history/`
+ *  is intentionally NOT here — it is created lazily by `backupToHistory` only
+ *  when a backup is actually made (so its presence means "a backup happened"). */
+const AI_SUBDIRS = ['.ai/sessions', '.ai/log', '.ai/gian-task'];
+
+/** Directory the gian-task role playbooks are materialized into. */
+const GIAN_TASK_DIR_REL = '.ai/gian-task';
+
 /** The ≤10-line pointer file telling the model what lives in `.ai/`. */
 const CLAUDE_LOCAL_MD = [
   '<!-- gian-managed pointer — gitignored. Do not @-import growing files. -->',
   '# Workspace AI context',
   '',
-  'gian 维护一套 `.ai/` 脚手架：',
+  'gian 维护一套 `.ai/` 脚手架（gian-task context engine）：',
   '',
-  '- `.ai/HANDOFF.md` — 上一个 Subtask 给下一个的交接简报（启动时注入）。',
-  '- `.ai/STATE.md` — 当前 Workspace 状态快照（启动时注入，保持精简）。',
-  '- `.ai/MEMORY.md` — 长期项目事实（按需 Read）。',
-  '- `.ai/SESSION_LOG.md` — 完成记录，append-only（按需 Read）。',
+  '- `.ai/MEMORY.md` — 长期项目事实（canonical，按需 Read）。',
+  '- `.ai/STATE.view.md` — 各 session 状态分片的合并视图（Gian 生成，只读）。',
+  '- `.ai/sessions/<id>.state.md` / `.report.md` — 每个 session 只写自己的分片。',
+  '- `.ai/gian-task/<role>.md` — 角色 playbook（Gian 注入的 ROLE 头会指向它）。',
+  '- `.ai/HANDOFF.md` / `.ai/STATE.md` / `.ai/SESSION_LOG.md` — 旧版单文件（兼容保留）。',
   '',
 ].join('\n');
 
 const CLAUDE_LOCAL_REL = 'CLAUDE.local.md';
-const GITIGNORE_LINE = 'CLAUDE.local.md';
+
+/** Lines gian ensures are gitignored: the pointer + every derived (host-owned)
+ *  `.ai/` path. `MEMORY.md` and the legacy single files stay committable. */
+const GITIGNORE_LINES = [
+  'CLAUDE.local.md',
+  '.ai/sessions/',
+  '.ai/log/',
+  '.ai/.history/',
+  '.ai/STATE.view.md',
+  '.ai/gian-task/',
+];
 
 export interface ScaffoldResult {
   /** Free-form notes about what was created — folded into init notes. */
@@ -114,7 +146,11 @@ export function scaffoldAiDir(target: string): ScaffoldResult {
   const notes: string[] = [];
 
   mkdirSync(join(target, '.ai'), { recursive: true });
+  for (const sub of AI_SUBDIRS) {
+    mkdirSync(join(target, sub), { recursive: true });
+  }
 
+  // User-content files: create only when missing (non-destructive).
   for (const file of AI_FILES) {
     const abs = join(target, file.rel);
     if (!existsSync(abs)) {
@@ -123,39 +159,47 @@ export function scaffoldAiDir(target: string): ScaffoldResult {
     }
   }
 
+  // gian-task role playbooks: Gian-owned templates, (re)written every call so
+  // improvements propagate. Agents read but never edit these.
+  for (const skill of GIAN_TASK_SKILL_FILES) {
+    writeFileSync(join(target, GIAN_TASK_DIR_REL, skill.name), skill.content, 'utf8');
+  }
+
   const claudeLocal = join(target, CLAUDE_LOCAL_REL);
   if (!existsSync(claudeLocal)) {
     writeFileSync(claudeLocal, CLAUDE_LOCAL_MD, 'utf8');
     notes.push(`created ${CLAUDE_LOCAL_REL}`);
   }
 
-  if (ensureGitignoreLine(target)) {
-    notes.push(`gitignored ${GITIGNORE_LINE}`);
+  const added = ensureGitignoreLines(target, GITIGNORE_LINES);
+  if (added.length > 0) {
+    notes.push(`gitignored ${added.join(', ')}`);
   }
 
   return { notes };
 }
 
 /**
- * Append `CLAUDE.local.md` to the workspace `.gitignore` if it isn't already
- * ignored. Creates `.gitignore` when absent. Returns true if a line was added.
+ * Ensure each of `lines` is present in the workspace `.gitignore`. Creates
+ * `.gitignore` when absent. Returns the lines that were newly added.
  *
  * Match is on whole, trimmed lines so we don't double-add and don't get fooled
  * by a substring (e.g. a different `foo/CLAUDE.local.md` entry).
  */
-function ensureGitignoreLine(target: string): boolean {
+function ensureGitignoreLines(target: string, lines: string[]): string[] {
   const gitignore = join(target, '.gitignore');
-  if (existsSync(gitignore)) {
-    const body = readFileSync(gitignore, 'utf8');
-    const present = body
-      .split('\n')
-      .some(line => line.trim() === GITIGNORE_LINE);
-    if (present) return false;
-    // Append on its own line; guard against a missing trailing newline.
-    const prefix = body.length > 0 && !body.endsWith('\n') ? '\n' : '';
-    appendFileSync(gitignore, `${prefix}${GITIGNORE_LINE}\n`, 'utf8');
-    return true;
+  const existing = existsSync(gitignore) ? readFileSync(gitignore, 'utf8') : '';
+  const present = new Set(existing.split('\n').map(l => l.trim()));
+
+  const toAdd = lines.filter(l => !present.has(l));
+  if (toAdd.length === 0) return [];
+
+  const block = toAdd.join('\n');
+  if (existing.length === 0) {
+    writeFileSync(gitignore, `${block}\n`, 'utf8');
+  } else {
+    const prefix = existing.endsWith('\n') ? '' : '\n';
+    appendFileSync(gitignore, `${prefix}${block}\n`, 'utf8');
   }
-  writeFileSync(gitignore, `${GITIGNORE_LINE}\n`, 'utf8');
-  return true;
+  return toAdd;
 }

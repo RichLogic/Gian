@@ -50,7 +50,7 @@ import { BotsView } from './views/BotsView.js';
 import { FilesView } from './views/FilesView.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import type { SystemConfig } from '@gian/shared';
-import { stripManagerSystemPrefix, parseCreateSubtaskProposal, stripCreateSubtaskBlocks, wrapManagerContextNote } from '@gian/shared';
+import { stripManagerSystemPrefix, parseCreateSubtaskProposal, stripCreateSubtaskBlocks, wrapManagerContextNote, stripGianRolePrefix, stripGianActionBlocks } from '@gian/shared';
 import type { QueueEntry, TokenUsage, TranscriptItem } from './types.js';
 import { planBetaComposerSend, planCreatedSessionFirstMessage, resolveChatView } from './session-routing.js';
 
@@ -1159,6 +1159,16 @@ export function App() {
           const mgr = sessionsRef.current.find(s => s.type === 'manager' && s.task_id === task.id);
           if (mgr) ws.send({ type: 'session:set_unread', session_id: mgr.id, unread: true });
         },
+        // Pin toggles `tasks.pinned_at` on the host (task:update{pinned}). We
+        // optimistically stamp/clear it locally so the row re-sorts instantly
+        // (the host echoes task:updated with the authoritative timestamp).
+        pinned: task.pinned_at != null,
+        onPin: () => {
+          const willPin = task.pinned_at == null;
+          const optimistic = willPin ? new Date().toISOString() : null;
+          setTasks(prev => prev.map(x => (x.id === task.id ? { ...x, pinned_at: optimistic } : x)));
+          ws.send({ type: 'task:update', task_id: task.id, pinned: willPin });
+        },
         // Force recover = unwedge the Task's Manager session (it's headless, so
         // its recover lives on the Task menu).
         onForceRecover: () => {
@@ -1564,8 +1574,8 @@ export function App() {
   const managerItems = showManagerRaw
     ? rawManagerItems
     : rawManagerItems.map(it =>
-        it.kind === 'user' ? { ...it, text: stripManagerSystemPrefix(it.text) }
-          : it.kind === 'assistant' ? { ...it, text: stripCreateSubtaskBlocks(it.text) }
+        it.kind === 'user' ? { ...it, text: stripGianRolePrefix(stripManagerSystemPrefix(it.text)) }
+          : it.kind === 'assistant' ? { ...it, text: stripGianActionBlocks(stripCreateSubtaskBlocks(it.text)) }
           : it,
       );
   // Latest Manager `create_subtask` proposal (spec §A2), parsed from the RAW

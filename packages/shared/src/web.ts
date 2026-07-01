@@ -106,6 +106,9 @@ export interface TaskUpdateMessage {
   name?: string;
   description?: string;
   status?: TaskStatus;
+  /** Pin / unpin the task. Independent of the content fields above; the host
+   *  stamps `pinned_at` (pin) or clears it (unpin) without bumping updated_at. */
+  pinned?: boolean;
 }
 
 export interface TaskDeleteMessage {
