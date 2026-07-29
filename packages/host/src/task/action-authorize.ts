@@ -60,10 +60,15 @@ export function authorizeAction(input: AuthorizeInput): AuthResult {
     return { decision: 'execute', reason: 'submit_step by the step owner' };
   }
 
-  // 3. create_subtask / message_subtask — need an authorizing active loop, else
-  //    stage for user confirm.
+  // 3. create_subtask / message_subtask (PM-only, past the role gate).
+  //    No active loop → EXECUTE directly. The PM's playbook makes it align with
+  //    the user in natural language BEFORE emitting the envelope, so the human
+  //    checkpoint already happened in the conversation — this is what lets the
+  //    flow work on a Claude-TTY PM, where there is no UI to render a confirm
+  //    chip (user decision 2026-07-03, overrides the earlier staged-chip design).
+  //    A paused/finished loop is treated the same as no loop here.
   if (!loop || loop.status !== 'active') {
-    return { decision: 'staged', reason: loop ? `loop is ${loop.status}` : 'no active loop — awaiting user confirm' };
+    return { decision: 'execute', reason: loop ? `loop is ${loop.status} — PM direct build` : 'no active loop — PM aligned in conversation' };
   }
   if (loop.allowed_methods.length > 0 && !loop.allowed_methods.includes(action.method)) {
     return { decision: 'staged', reason: `${action.method} not in loop.allowed_methods` };

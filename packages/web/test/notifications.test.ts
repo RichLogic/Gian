@@ -92,6 +92,15 @@ describe('browser notifications', () => {
     expect(FakeNotification.instances[0]!.options?.body).toBe('Implemented the parser.');
   });
 
+  it('uses a Kimi fallback label for unnamed Kimi sessions', () => {
+    maybeNotifyForEnvelope(
+      envelope('turn_completed', {}),
+      { session: { name: null, executor: 'kimi' } },
+    );
+
+    expect(FakeNotification.instances[0]!.title).toBe('Gian · Kimi session completed');
+  });
+
   it('does not notify when browser permission has not been granted', () => {
     installNotification('default');
 

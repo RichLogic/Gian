@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ApprovalDecision, ApprovalMode, Executor, Session, Task, ThinkingEffort, Workspace } from '@gian/shared';
+import type { ApprovalDecision, ApprovalMode, Executor, NativeConfigValue, Session, Task, ThinkingEffort, Workspace } from '@gian/shared';
 import { toast } from '../feedback.js';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
@@ -8,6 +8,7 @@ import { QueueList } from '../components/QueueList.js';
 import { Transcript } from '../transcript/Transcript.js';
 import { StatusIcon, statusGlyphShown, relTime } from './CodingView.js';
 import type { QueueEntry, TranscriptItem } from '../types.js';
+import type { ApprovalActionContext } from '../types.js';
 import type { GianWs } from '../ws.js';
 
 /** The session-level handlers the full Manager composer needs, pre-bound to the
@@ -17,13 +18,20 @@ export interface ManagerComposerHandlers {
   onSetModel: (model: string) => void;
   onSetMode: (mode: ApprovalMode, turns?: number) => void;
   onSetEffort: (effort: ThinkingEffort | null) => void;
+  onSetServiceTier: (tier: 'fast' | null) => void;
+  onSetNativeConfig: (configId: string, value: NativeConfigValue) => void;
   onSendSkill: (name: string, path: string) => void;
   onQueueAdd: (text: string) => void;
   onQueueRemove: (queueId: string) => void;
   onQueueReorder: (order: string[]) => void;
   onQueueClear: () => void;
   onQueueSendNow: () => void;
-  onApprove: (approvalId: string, decision: ApprovalDecision, answers?: Record<string, string | string[]>) => void;
+  onApprove: (
+    approvalId: string,
+    decision: ApprovalDecision,
+    answers?: Record<string, string | string[]>,
+    context?: ApprovalActionContext,
+  ) => void;
 }
 
 /** Params the A1 "create subtask from this" prefilled form collects. */
@@ -34,13 +42,12 @@ export interface NewSubtaskDraft {
   prompt: string;
 }
 
-/** A resolved subtask-proposal card that stays in the Manager conversation
- *  after the user acts on it (§A2 follow-up). `created` = a subtask was made;
- *  `dismissed` = the proposal was declined. Non-interactive once it lands. */
+/** A resolved manual subtask-create card that stays in the Manager conversation
+ *  after the user creates it from the inline form. Non-interactive once it lands. */
 export interface ManagerSubtaskCard {
-  /** Subtask session id (created) or a generated id (dismissed). */
+  /** Subtask session id. */
   id: string;
-  status: 'created' | 'dismissed';
+  status: 'created';
   name?: string;
   /** Display name of the chosen workspace. */
   workspaceLabel?: string;
@@ -55,7 +62,7 @@ export interface ManagerSubtaskCard {
 }
 
 /** Build the hidden, LLM-facing context note for a resolved card — prepended to
- *  the Manager's next message so it learns what the user did with its proposal.
+ *  the Manager's next message so it learns which manual subtask was created.
  *  English to match the Manager system prompt. */
 export function managerCardContextNote(card: ManagerSubtaskCard): string {
   const bits = [
@@ -63,10 +70,7 @@ export function managerCardContextNote(card: ManagerSubtaskCard): string {
     card.workspaceLabel ? `workspace: "${card.workspaceLabel}"` : null,
     `executor: ${card.executor}`,
   ].filter(Boolean).join(', ');
-  if (card.status === 'created') {
-    return `[The user created a subtask — ${bits}. Its initial prompt was pre-filled into that subtask's composer for the user to send.]`;
-  }
-  return `[The user dismissed your subtask proposal (${bits}) without creating it.]`;
+  return `[The user created a subtask — ${bits}. Its initial prompt was pre-filled into that subtask's composer for the user to send.]`;
 }
 
 // ── V2 icon paths (verbatim subset from design/gian-design-v2/js/data.jsx) ──
@@ -133,12 +137,12 @@ export function TasksView({
   sessions,
   workspaces,
   ws,
+  defaultTaskExecutor,
   activeTaskId,
   activeSubtaskId,
   managerSession,
   managerItems,
   managerPending,
-  managerProposal,
   managerCards,
   managerHandlers,
   managerQueue,
@@ -152,12 +156,14 @@ export function TasksView({
   onManagerSend,
   onManagerStop,
   onCreateSubtask,
-  onDismissSubtaskProposal,
 }: {
   tasks: Task[];
   sessions: Session[];
   workspaces: Workspace[];
   ws: GianWs;
+  /** Which executor a plain click on the sidebar "+" creates the PM on
+   *  (`config.default_task_executor`). The "+" hover menu overrides it. */
+  defaultTaskExecutor: Executor;
   activeTaskId: string | null;
   activeSubtaskId: string | null;
   /** The active Task's Manager session (type='manager'), or null until it has
@@ -169,10 +175,8 @@ export function TasksView({
   managerItems: TranscriptItem[];
   /** Whether the Manager has a turn in flight. */
   managerPending: boolean;
-  /** Latest Manager-proposed subtask parsed from its reply (spec §A2). */
-  managerProposal: Partial<NewSubtaskDraft> | null;
-  /** Resolved subtask-action cards (created / dismissed) that stay in the
-   *  Manager conversation for the active Task (§A2 follow-up). */
+  /** "Created" subtask cards (left by the manual create form) that stay in the
+   *  Manager conversation for the active Task. */
   managerCards: ManagerSubtaskCard[];
   /** Session-level handlers (model / mode / effort / slash / queue / approve)
    *  pre-bound to the Manager session id — the full Manager composer reuses
@@ -204,12 +208,19 @@ export function TasksView({
   onManagerSend: (taskId: string, text: string, opts?: { attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }> }) => void;
   /** Stop the Task's Manager turn (session:stop on the manager session). */
   onManagerStop: (taskId: string) => void;
-  /** A1 — create a Subtask from the prefilled form. */
+  /** Create a Subtask from the manual create form. */
   onCreateSubtask: (taskId: string, draft: NewSubtaskDraft) => void;
-  /** The user declined a subtask proposal (leaves a `dismissed` card). */
-  onDismissSubtaskProposal: (taskId: string, draft: NewSubtaskDraft) => void;
 }) {
   const rail = useResizableWidth('tasks.rail.w', 300, 220, 480, 'left');
+
+  // The top-left "Gian" brand button broadcasts `gian.toggle-rail` (Topbar);
+  // each view collapses its own rail. Sessions (CodingView) already listens —
+  // Tasks was missing this, so the brand button did nothing here.
+  useEffect(() => {
+    const onToggle = () => rail.setCollapsed(!rail.collapsed);
+    window.addEventListener('gian.toggle-rail', onToggle);
+    return () => window.removeEventListener('gian.toggle-rail', onToggle);
+  }, [rail]);
 
   const activeTask = tasks.find(t => t.id === activeTaskId) ?? null;
   const activeSubtask = activeSubtaskId
@@ -218,19 +229,24 @@ export function TasksView({
 
   return (
     <div
-      className="view"
+      className={`view${rail.collapsed ? ' rail-collapsed' : ''}`}
       style={{ '--rail-w': `${rail.width}px` } as React.CSSProperties}
     >
-      <TasksList
-        tasks={tasks}
-        sessions={sessions}
-        ws={ws}
-        activeTaskId={activeTaskId}
-        activeSubtaskId={activeSubtaskId}
-        onSelectTask={onSelectTask}
-        onSelectSubtask={onSelectSubtask}
-      />
-      <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize tasks list" />
+      {!rail.collapsed && (
+        <>
+          <TasksList
+            tasks={tasks}
+            sessions={sessions}
+            ws={ws}
+            defaultTaskExecutor={defaultTaskExecutor}
+            activeTaskId={activeTaskId}
+            activeSubtaskId={activeSubtaskId}
+            onSelectTask={onSelectTask}
+            onSelectSubtask={onSelectSubtask}
+          />
+          <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize tasks list" />
+        </>
+      )}
       <TaskDetail
         task={activeTask}
         subtask={activeSubtask}
@@ -239,7 +255,6 @@ export function TasksView({
         managerSession={managerSession}
         managerItems={managerItems}
         managerPending={managerPending}
-        managerProposal={managerProposal}
         managerCards={managerCards}
         managerHandlers={managerHandlers}
         managerQueue={managerQueue}
@@ -250,7 +265,6 @@ export function TasksView({
         onManagerSend={onManagerSend}
         onManagerStop={onManagerStop}
         onCreateSubtask={onCreateSubtask}
-        onDismissSubtaskProposal={onDismissSubtaskProposal}
       />
     </div>
   );
@@ -259,9 +273,13 @@ export function TasksView({
 /** Inline new-task form — mirrors the search-row's affordance with a small
  *  two-field card under the sidebar head. */
 function NewTaskForm({
+  executor,
   onSubmit,
   onCancel,
 }: {
+  /** Which executor the Task's PM will run on (chosen at the "+"). Shown here
+   *  so the user sees it before committing; the "+" hover menu changes it. */
+  executor: Executor;
   onSubmit: (input: { name: string }) => void;
   onCancel: () => void;
 }) {
@@ -276,6 +294,10 @@ function NewTaskForm({
 
   return (
     <div className="tasks-new-form">
+      <div className="tasks-new-pm">
+        <span className={`sb-newtask-dot ${executor}`} />
+        {t('tasks.form.pm')} · {executor === 'claude' ? 'Claude' : executor === 'codex' ? 'Codex' : 'Kimi'}
+      </div>
       <input
         className="tasks-new-input"
         aria-label={t('tasks.form.name.label')}
@@ -303,6 +325,7 @@ function TasksList({
   tasks,
   sessions,
   ws,
+  defaultTaskExecutor,
   activeTaskId,
   activeSubtaskId,
   onSelectTask,
@@ -311,6 +334,7 @@ function TasksList({
   tasks: Task[];
   sessions: Session[];
   ws: GianWs;
+  defaultTaskExecutor: Executor;
   activeTaskId: string | null;
   activeSubtaskId: string | null;
   onSelectTask: (taskId: string) => void;
@@ -318,6 +342,10 @@ function TasksList({
 }) {
   const t = useT();
   const [creating, setCreating] = useState(false);
+  const [createMenuOpen, setCreateMenuOpen] = useState(false);
+  // Which executor the new Task's PM runs on. Set by the "+" (plain click →
+  // the config default; hover menu → an explicit pick), rides into task:create.
+  const [createExecutor, setCreateExecutor] = useState<Executor>(defaultTaskExecutor);
   const [search, setSearch] = useState('');
   const [doneOpen, setDoneOpen] = useState(false); // Done group collapsed by default (spec §G)
   // Per-task subtask collapse (Codex-style, 2026-07-01). Default = expanded
@@ -362,12 +390,21 @@ function TasksList({
     [visible],
   );
 
+  // Open the create form for a specific PM executor. Plain "+" click passes the
+  // config default; the "+" hover menu passes an explicit executor.
+  function startCreate(executor: Executor) {
+    setCreateExecutor(executor);
+    setCreating(true);
+    setCreateMenuOpen(false);
+  }
+
   function createTaskNow(input: { name: string }) {
     // Match how other entities are created in the app: fire a WS message and
     // let the host echo back `task:created`. (REST createTask() also exists in
     // api.ts for the initial/fallback path.) Description is optional on the
-    // wire and intentionally not collected by the form.
-    ws.send({ type: 'task:create', name: input.name });
+    // wire and intentionally not collected by the form. `executor` picks which
+    // executor the Task's PM runs on (chosen at the "+").
+    ws.send({ type: 'task:create', name: input.name, executor: createExecutor });
     setCreating(false);
   }
 
@@ -433,21 +470,59 @@ function TasksList({
             />
           </div>
           <span className="sb-sep" />
-          <button
-            className={`sb-iconbtn${creating ? ' active' : ''}`}
-            title={t('tasks.new')}
-            aria-label={t('tasks.new')}
-            onClick={() => setCreating(c => !c)}
+          {/* "+" — plain click creates a Task whose PM runs on the config
+              default executor; hover/focus reveals the native executor choices
+              (gian-task-pm-engineer §4.2 — PM executor is per-Task). */}
+          <div
+            className={`sb-newtask${createMenuOpen ? ' open' : ''}`}
+            onMouseEnter={() => setCreateMenuOpen(true)}
+            onMouseLeave={() => setCreateMenuOpen(false)}
+            onFocus={() => setCreateMenuOpen(true)}
+            onBlur={event => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setCreateMenuOpen(false);
+              }
+            }}
+            onKeyDown={event => {
+              if (event.key === 'Escape') setCreateMenuOpen(false);
+            }}
           >
-            <Icon d={I.plus} />
-          </button>
+            <button
+              className={`sb-iconbtn${creating ? ' active' : ''}`}
+              title={t('tasks.new')}
+              aria-label={t('tasks.new')}
+              aria-haspopup="menu"
+              aria-expanded={createMenuOpen}
+              onClick={() => {
+                if (creating) {
+                  setCreating(false);
+                  setCreateMenuOpen(false);
+                } else {
+                  startCreate(defaultTaskExecutor);
+                }
+              }}
+            >
+              <Icon d={I.plus} />
+            </button>
+            <div className="sb-newtask-menu" role="menu" aria-label={t('tasks.new')}>
+              <button className="sb-newtask-item" role="menuitem" onClick={() => startCreate('claude')}>
+                <span className="sb-newtask-dot claude" />{t('tasks.new.withClaude')}
+              </button>
+              <button className="sb-newtask-item" role="menuitem" onClick={() => startCreate('codex')}>
+                <span className="sb-newtask-dot codex" />{t('tasks.new.withCodex')}
+              </button>
+              <button className="sb-newtask-item" role="menuitem" onClick={() => startCreate('kimi')}>
+                <span className="sb-newtask-dot kimi" />Kimi Code
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
       {/* No "Open" header (spec §F) — active tasks list directly. */}
       <div className="sb-scroll">
         {creating && (
-          <NewTaskForm onSubmit={createTaskNow} onCancel={() => setCreating(false)} />
+          <NewTaskForm executor={createExecutor} onSubmit={createTaskNow} onCancel={() => setCreating(false)} />
         )}
         {renderOpen(open)}
         {visible.length === 0 && !creating && (
@@ -649,7 +724,7 @@ function SubtaskRow({
             ? <StatusIcon status={subtask.status} unread={subtask.unread === 1} />
             : <span className={`ri-age ${subtask.executor}`}>{relTime(subtask.updated_at)}</span>}
         </div>
-        {/* Single-line (Codex-style): the Claude/Codex executor label was dropped. */}
+        {/* Compact single-line layout: executor is carried by the time tint. */}
       </div>
     </div>
   );
@@ -663,7 +738,6 @@ function TaskDetail({
   managerSession,
   managerItems,
   managerPending,
-  managerProposal,
   managerCards,
   managerHandlers,
   managerQueue,
@@ -674,7 +748,6 @@ function TaskDetail({
   onManagerSend,
   onManagerStop,
   onCreateSubtask,
-  onDismissSubtaskProposal,
 }: {
   task: Task | null;
   subtask: Session | null;
@@ -683,7 +756,6 @@ function TaskDetail({
   managerSession: Session | null;
   managerItems: TranscriptItem[];
   managerPending: boolean;
-  managerProposal: Partial<NewSubtaskDraft> | null;
   managerCards: ManagerSubtaskCard[];
   managerHandlers: ManagerComposerHandlers | null;
   managerQueue: QueueEntry[];
@@ -694,7 +766,6 @@ function TaskDetail({
   onManagerSend: (taskId: string, text: string, opts?: { attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }> }) => void;
   onManagerStop: (taskId: string) => void;
   onCreateSubtask: (taskId: string, draft: NewSubtaskDraft) => void;
-  onDismissSubtaskProposal: (taskId: string, draft: NewSubtaskDraft) => void;
 }) {
   const t = useT();
 
@@ -741,7 +812,6 @@ function TaskDetail({
       workspaces={workspaces}
       items={managerItems}
       pending={managerPending}
-      proposal={managerProposal}
       cards={managerCards}
       handlers={managerHandlers}
       queue={managerQueue}
@@ -751,7 +821,6 @@ function TaskDetail({
       onSend={onManagerSend}
       onStop={onManagerStop}
       onCreateSubtask={onCreateSubtask}
-      onDismissProposal={onDismissSubtaskProposal}
     />
   );
 }
@@ -782,8 +851,6 @@ function ManagerPanel({
   onSend,
   onStop,
   onCreateSubtask,
-  onDismissProposal,
-  proposal,
   cards = [],
   compact = false,
 }: {
@@ -809,12 +876,8 @@ function ManagerPanel({
   onSend: (taskId: string, text: string, opts?: { attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }> }) => void;
   onStop: (taskId: string) => void;
   onCreateSubtask: (taskId: string, draft: NewSubtaskDraft) => void;
-  onDismissProposal: (taskId: string, draft: NewSubtaskDraft) => void;
-  /** Latest Manager-proposed subtask (spec §A2), parsed from its reply and
-   *  prefilled into the confirm card; the card auto-opens on a new proposal. */
-  proposal?: Partial<NewSubtaskDraft> | null;
-  /** Resolved (created / dismissed) subtask cards that stay in the conversation
-   *  (§A2 follow-up). */
+  /** Resolved "created" subtask cards that stay in the conversation (left by the
+   *  manual create form). */
   cards?: ManagerSubtaskCard[];
   /** Compact = embedded in the right Inspector rail (zone 4) when a subtask is
    *  selected. Drops the `.main-head` (the wrapping ManagerInspector supplies
@@ -823,14 +886,12 @@ function ManagerPanel({
   compact?: boolean;
 }) {
   const t = useT();
+  // The new-subtask FORM is now manual only — opened by the header "Create
+  // subtask from this" button or the ⌘J/⌘K shortcut. The Manager no longer
+  // proposes into a card/chip; it aligns in natural language and emits a
+  // `<<gian:action>>` the host executes directly (surface-agnostic, TTY-safe).
   const [showNewSubtask, setShowNewSubtask] = useState(false);
-  // Whether the open form came from a Manager `create_subtask` proposal (vs the
-  // header "Create subtask from this" button). Cancelling only leaves a
-  // "dismissed" card when there was a real proposal to dismiss.
-  const [formFromProposal, setFormFromProposal] = useState(false);
-  const [dismissedPrompt, setDismissedPrompt] = useState<string | null>(null);
-  // Executor preset from the ⌘J/⌘K shortcut (Claude / Codex). Null = use the
-  // proposal's executor (or the form default).
+  // Executor preset from the ⌘J/⌘K shortcut (Claude / Codex). Null = form default.
   const [presetExecutor, setPresetExecutor] = useState<Executor | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -847,7 +908,6 @@ function ManagerPanel({
       const ex = (e as CustomEvent<{ executor?: Executor }>).detail?.executor ?? null;
       setPresetExecutor(ex);
       setShowNewSubtask(true);
-      setFormFromProposal(false);
     };
     window.addEventListener('gian:new-subtask', open);
     return () => window.removeEventListener('gian:new-subtask', open);
@@ -861,15 +921,6 @@ function ManagerPanel({
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [showNewSubtask]);
-
-  // Auto-open the confirm card when the Manager proposes a (new) subtask
-  // (spec §A2). Dismissing/submitting suppresses re-open for that same prompt.
-  useEffect(() => {
-    if (!compact && proposal?.prompt && proposal.prompt !== dismissedPrompt) {
-      setShowNewSubtask(true);
-      setFormFromProposal(true);
-    }
-  }, [compact, proposal, dismissedPrompt]);
 
   // The Manager is a fixed-config Codex session: a turn is "in flight" while it's
   // running or (defensively) pending. That drives the Composer's Send→Stop
@@ -913,7 +964,7 @@ function ManagerPanel({
             )}
             <button
               className="btn sm ghost"
-              onClick={() => { setShowNewSubtask(s => !s); setFormFromProposal(false); }}
+              onClick={() => setShowNewSubtask(s => !s)}
             >
               {t('tasks.manager.createSubtask')}
             </button>
@@ -944,31 +995,25 @@ function ManagerPanel({
                 }))}
               />
             )}
-            {/* The open form is part of the conversation flow (not a top banner).
-                The Transcript only auto-scrolls on items/pending changes, not on
-                form keystrokes, so editing here is safe. */}
+            {/* Manual create-subtask form — opened by the header button or ⌘J/⌘K.
+                Part of the conversation flow (not a top banner). The Transcript
+                only auto-scrolls on items/pending changes, not on form
+                keystrokes, so editing here is safe. */}
             {showInlineForm && (
               <NewSubtaskForm
-                // Remount when the executor preset (⌘J/⌘K) or proposal changes so
-                // the form re-initialises its executor field.
-                key={`${proposal?.prompt ?? ''}:${presetExecutor ?? ''}`}
+                // Remount when the executor preset (⌘J/⌘K) changes so the form
+                // re-initialises its executor field.
+                key={presetExecutor ?? ''}
                 workspaces={workspaces}
-                prefill={proposal ?? (presetExecutor ? { executor: presetExecutor } : undefined)}
+                prefill={presetExecutor ? { executor: presetExecutor } : undefined}
                 onSubmit={d => {
                   onCreateSubtask(task.id, d);
                   setShowNewSubtask(false);
                   setPresetExecutor(null);
-                  setDismissedPrompt(proposal?.prompt ?? null);
                 }}
-                onCancel={d => {
-                  // Cancelling a real proposal leaves a static "dismissed" card
-                  // (and feeds the Manager that context next turn). Cancelling a
-                  // manually-opened form just closes it — there's no proposal to
-                  // dismiss, so a "Proposal dismissed" record would be misleading.
-                  if (formFromProposal && d) onDismissProposal(task.id, d);
+                onCancel={() => {
                   setShowNewSubtask(false);
                   setPresetExecutor(null);
-                  setDismissedPrompt(proposal?.prompt ?? null);
                 }}
               />
             )}
@@ -1002,6 +1047,9 @@ function ManagerPanel({
             onSetMode={(mode, turns) => handlers?.onSetMode(mode, turns)}
             onSetModel={model => handlers?.onSetModel(model)}
             onSetEffort={effort => handlers?.onSetEffort(effort)}
+            onSetServiceTier={tier => handlers?.onSetServiceTier(tier)}
+            onSetNativeConfig={(configId, value) =>
+              handlers?.onSetNativeConfig(configId, value)}
             disabled={managerRunning}
             running={managerRunning}
             executor={session.executor}
@@ -1094,7 +1142,6 @@ export function ManagerInspector({
           onSend={onSend}
           onStop={onStop}
           onCreateSubtask={() => { /* compact: create-subtask lives in the full Manager view */ }}
-          onDismissProposal={() => { /* compact: no inline form */ }}
           compact
         />
       </div>
@@ -1105,9 +1152,8 @@ export function ManagerInspector({
 /**
  * A1 prefilled NewSubtask form. Prefills the workspace (first visible),
  * executor, and an empty prompt. The user confirms; submission creates a real
- * Subtask (session with task_id) via the REST path in App. TODO(P3-live): seed
- * these fields from the Manager's parsed `create_subtask` prose instead of
- * leaving them at defaults.
+ * Subtask (session with task_id) via the REST path in App. Manager-authored
+ * subtasks now use the action envelope path directly; this form is manual.
  */
 function NewSubtaskForm({
   workspaces,
@@ -1117,8 +1163,8 @@ function NewSubtaskForm({
 }: {
   workspaces: Workspace[];
   onSubmit: (draft: NewSubtaskDraft) => void;
-  /** Cancel carries the current draft so the caller can leave a "dismissed"
-   *  card (§A2 follow-up). Undefined when there's no workspace to act on. */
+  /** Cancel carries the current draft for legacy callers; the current manual
+   *  flow ignores it and simply closes. Undefined when there's no workspace. */
   onCancel: (draft?: NewSubtaskDraft) => void;
   /** Optional context-derived defaults (A1 auto-extract target). */
   prefill?: Partial<NewSubtaskDraft>;
@@ -1177,6 +1223,7 @@ function NewSubtaskForm({
         >
           <option value="codex">Codex</option>
           <option value="claude">Claude</option>
+          <option value="kimi">Kimi Code</option>
         </select>
       </label>
       <label className="tasks-field">
@@ -1209,28 +1256,26 @@ function NewSubtaskForm({
 }
 
 /**
- * A resolved subtask-proposal card (§A2 follow-up) — a non-interactive record
- * that the user created or dismissed a subtask, kept inline in the Manager
- * conversation so the exchange reads as a continuous history.
+ * A resolved manual subtask-create card — a non-interactive record kept inline
+ * in the Manager conversation so the exchange reads as a continuous history.
  */
 function SubtaskCard({ card }: { card: ManagerSubtaskCard }) {
   const t = useT();
-  const created = card.status === 'created';
   return (
-    <div className={`manager-subtask-card ${card.status}`}>
-      <span className={`msc-icon ${card.status}`} aria-hidden="true">
-        <Icon d={created ? I.check : I.x} size={12} stroke={2.2} />
+    <div className="manager-subtask-card created">
+      <span className="msc-icon created" aria-hidden="true">
+        <Icon d={I.check} size={12} stroke={2.2} />
       </span>
       <div className="msc-body">
         <div className="msc-head">
           <span className="msc-status">
-            {created ? t('tasks.subtaskCard.created') : t('tasks.subtaskCard.dismissed')}
+            {t('tasks.subtaskCard.created')}
           </span>
           {card.name && <span className="msc-name">{card.name}</span>}
         </div>
         <div className="msc-meta">
           <span className={`ri-exec ${card.executor}`}>
-            {card.executor === 'claude' ? 'Claude' : 'Codex'}
+            {card.executor === 'claude' ? 'Claude' : card.executor === 'codex' ? 'Codex' : 'Kimi'}
           </span>
           {card.workspaceLabel && (
             <>

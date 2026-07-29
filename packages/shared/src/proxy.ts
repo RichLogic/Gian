@@ -10,7 +10,8 @@ export type ProxySessionStatus =
 
 export type CcEffortLevel = string;
 
-export type CodexThinkingLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+/** Codex owns this vocabulary and may add levels without a Gian release. */
+export type CodexThinkingLevel = string;
 
 export interface CcModelCapabilities {
   id: string;
@@ -77,12 +78,34 @@ export interface CodexCapabilities {
   slashCommands: SlashCommand[];
 }
 
+export interface KimiCapabilities {
+  protocolVersion: string;
+  models: [];
+  slashCommands: [];
+  agentInfo?: {
+    name?: string;
+    title?: string;
+    version?: string;
+  };
+  authMethods?: Array<{
+    id: string;
+    name: string;
+    description?: string;
+  }>;
+  sessionCapabilities: {
+    load: boolean;
+    list: boolean;
+    resume: boolean;
+    close: boolean;
+  };
+}
+
 export interface SlashListResult {
   /** Built-in + user-level + project-level (when cwd was given). */
   commands: SlashCommand[];
 }
 
-export type ProxyCapabilities = CcCapabilities | CodexCapabilities;
+export type ProxyCapabilities = CcCapabilities | CodexCapabilities | KimiCapabilities;
 
 export interface InitializeResult {
   mode: 'spawn';
@@ -137,6 +160,9 @@ export interface ProxySession {
   createdAt: string;
   updatedAt: string;
   lastError: string | null;
+  nativeSessionId?: string;
+  configOptions?: import('./model.js').NativeConfigOption[];
+  slashCommands?: SlashCommand[];
 }
 
 export interface ProxyTurn {
@@ -181,6 +207,24 @@ export interface ProxyNotification<T = unknown> {
   };
 }
 
+/** Canonical session-scoped usage payload emitted by executor proxies.
+ * Current context is replaceable state; conversation usage is either an
+ * executor-authoritative absolute value or one per-turn delta. */
+export interface TokenUsageUpdate {
+  context?: {
+    used: number;
+    window?: number;
+  } | null;
+  conversation?: {
+    mode: 'absolute' | 'delta' | 'reset';
+    inputTokens?: number;
+    outputTokens?: number;
+    cachedInputTokens?: number;
+    totalTokens?: number;
+  };
+  reason?: 'compact_started' | 'session_reset';
+}
+
 export type ProxyErrorCode =
   | 'INVALID_REQUEST'
   | 'SESSION_NOT_FOUND'
@@ -191,6 +235,8 @@ export type ProxyErrorCode =
   | 'SESSION_STALE'
   | 'SESSION_ERROR'
   | 'PROCESS_SPAWN_FAILED'
+  | 'AUTH_REQUIRED'
+  | 'INVALID_APPROVAL_OPTION'
   | 'INTERNAL_ERROR';
 
 export const PROXY_METHODS = [
@@ -235,6 +281,9 @@ export const PROXY_NOTIFICATION_METHODS = [
   // Stats and runtime (both proxies)
   'token_usage.updated',
   'runtime.error',
+  // Kimi ACP event stream
+  'acp.sessionUpdate',
+  'runtime.stopped',
 ] as const;
 
 export type ProxyNotificationMethod = (typeof PROXY_NOTIFICATION_METHODS)[number];

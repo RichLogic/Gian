@@ -1,4 +1,4 @@
-export type Executor = 'codex' | 'claude';
+export type Executor = 'codex' | 'claude' | 'kimi';
 
 export type SessionType = 'coding' | 'subtask' | 'manager';
 
@@ -16,10 +16,61 @@ export type SessionType = 'coding' | 'subtask' | 'manager';
  *             `--permission-mode auto` (Anthropic classifier filters); codex
  *             maps to (sandbox=workspace-write, approval=on-request,
  *             reviewer=auto_review).
+ * - `custom` — codex only. Restores the effective permissions loaded from
+ *             config.toml when the native thread was attached.
+ *
+ * - `full-access` — codex only, persistent. (sandbox=danger-full-access,
+ *             approval=never): unrestricted file + network, no approval cards.
+ *             The codex composer surfaces this as "Full access"; it replaces the
+ *             old per-turn one-shot bypass. Claude has no persistent equivalent
+ *             (it keeps the plan/ask/auto segmented control + per-turn bypass),
+ *             so a claude session never carries this value.
  *
  * IM channels only support `auto` (no UI for approvals — see im/router.ts).
  */
-export type ApprovalMode = 'plan' | 'ask' | 'auto';
+export type ApprovalMode = 'plan' | 'ask' | 'auto' | 'custom' | 'full-access';
+
+export type NativeConfigValue = string | boolean | number | null;
+
+export interface NativeConfigChoice {
+  value: NativeConfigValue;
+  label: string;
+  description?: string;
+  /** Optional ACP group label. Opaque to the host. */
+  group?: string;
+}
+
+/**
+ * Executor-owned session configuration. IDs and values are deliberately
+ * opaque: Gian renders and round-trips them but never maps their semantics
+ * across CLIs.
+ */
+export interface NativeConfigOption {
+  id: string;
+  name: string;
+  category?: string;
+  description?: string;
+  type: 'select' | 'boolean' | 'number' | 'text';
+  currentValue: NativeConfigValue;
+  choices?: NativeConfigChoice[];
+  scope: 'session' | 'turn';
+}
+
+export interface ExecutorConfigState {
+  schemaVersion: 1;
+  values: Record<string, NativeConfigValue>;
+}
+
+export interface NativeApprovalOption {
+  optionId: string;
+  label: string;
+  kind:
+    | 'allow_once'
+    | 'allow_always'
+    | 'reject_once'
+    | 'reject_always'
+    | string;
+}
 
 export type ActiveChannel = 'web' | 'im';
 
@@ -91,16 +142,26 @@ export interface Session {
   name: string | null;
   type: SessionType;
   /** The Task this session belongs to (PRD-v3). A non-null task_id with
-   *  type='subtask' is a Subtask; type='manager' is the Task's read-only Codex
+   *  type='subtask' is a Subtask; type='manager' is the Task's executor-backed
    *  manager. Null = a standalone ("scattered") session. */
   task_id: string | null;
   workspace_id: string;
   executor: Executor;
   model: string | null;
-  approval_mode: ApprovalMode;
+  /** Legacy Claude/Codex policy. Kimi stores its exact ACP mode in
+   *  `executor_config` and therefore keeps this NULL. */
+  approval_mode: ApprovalMode | null;
+  /** Exact executor-native values, persisted as JSON by the host. */
+  executor_config: ExecutorConfigState;
+  /** Dynamic choices reported by the live executor. Empty until attached. */
+  native_config_options: NativeConfigOption[];
   /** Reasoning effort. Null = omit the executor-specific effort flag and let
    *  the underlying CLI use its own default. */
   thinking_effort: ThinkingEffort | null;
+  /** Codex service tier — 'fast' when the composer's Fast toggle is on, else
+   *  null. Rides every Codex turn (applies next turn); null for other
+   *  executors. */
+  service_tier: 'fast' | 'flex' | null;
   turns: number;
   active_channel: ActiveChannel | null;
   status: SessionStatus;
@@ -122,14 +183,29 @@ export interface Session {
   base_branch: string | null;
   /** Terminal state of a worktree session. Null while active. */
   worktree_outcome: WorktreeOutcome | null;
-  /** When this Gian session was created by adopting an existing native
-   *  cc / codex session, the native session UUID. The proxy then uses it
-   *  as the resume id so the on-disk JSONL stays the source of truth. */
+  /** Native executor session id. Claude/Codex resume their on-disk history;
+   *  Kimi loads or resumes the corresponding ACP session. */
   native_session_id: string | null;
-  /** Active CLI runtime — `structured` (today's `claude -p` / `codex proto`
-   *  path) or `tty` (interactive CLI in a PTY). Mutable at runtime via the
-   *  session header toggle. */
+  /** Active CLI runtime — `structured` (`claude -p`, Codex app-server, or
+   *  Kimi ACP) or `tty` (interactive Claude/Codex in a PTY). Mutable where
+   *  the executor supports runtime switching. */
   runtime_mode: RuntimeMode;
+  /** Tokens occupying the executor's current context window. Null after an
+   *  invalidation (for example `/compact`) until the executor reports again.
+   *  Optional for compatibility with hosts predating migration 034. */
+  context_tokens_used?: number | null;
+  /** Executor-reported context-window capacity, when available. */
+  context_window_tokens?: number | null;
+  /** Last context sample or invalidation time. Does not reorder the session. */
+  context_usage_updated_at?: string | null;
+  /** Cumulative conversation usage. Only display when
+   *  `conversation_usage_complete` is 1. */
+  conversation_input_tokens?: number | null;
+  conversation_output_tokens?: number | null;
+  conversation_cached_input_tokens?: number | null;
+  conversation_total_tokens?: number | null;
+  /** Whether cumulative fields cover the native conversation from its start. */
+  conversation_usage_complete?: 0 | 1;
   /** Subtask-level summary (PRD-v3 P4). Written by the summarizer when a
    *  `type='subtask'` session completes, and user-editable thereafter. The
    *  per-Task Manager inlines it into its system prompt. Null until the
@@ -161,6 +237,10 @@ export interface Task {
   /** When the task was pinned (ISO-8601), or null when not pinned. Pinned tasks
    *  sort above the rest, most-recently-pinned first (pinned_at DESC). */
   pinned_at: string | null;
+  /** Which executor this Task's Manager (PM) runs on — chosen at creation via
+   *  the sidebar "+". NULL on legacy tasks → falls back to the config default
+   *  (`default_task_executor`) when the Manager session is first ensured. */
+  manager_executor: Executor | null;
 }
 
 /**
@@ -206,6 +286,8 @@ export interface Approval {
   resolved_by: ApprovalResolvedBy | null;
   resolved_at: string | null;
   created_at: string;
+  /** Executor-owned choices, used by Kimi ACP permission requests. */
+  native_options?: NativeApprovalOption[];
 }
 
 export interface QueueEntry {
@@ -308,6 +390,9 @@ export interface SystemConfig {
   default_codex_model: string;
   /** Default reasoning effort for new codex sessions. Empty = use model default. */
   default_codex_effort: string;
+  /** Which executor a plain click on the tasks "+" creates the PM on. The hover
+   *  menu on "+" overrides it per-task. Defaults to 'claude'. */
+  default_task_executor: Executor;
   auth_username: string;
   /** Programs surfaced in the Files view's "Open with…" menu. */
   external_editors: ExternalEditor[];

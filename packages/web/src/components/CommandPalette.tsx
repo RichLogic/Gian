@@ -84,7 +84,7 @@ export function CommandPalette({
   }, [open, initialQuery, activeWorkingTreeId]);
 
   const activeSession = sessions.find(s => s.id === activeSessionId) ?? null;
-  const executor: 'claude' | 'codex' = activeSession?.executor ?? 'claude';
+  const executor = activeSession?.executor ?? 'claude';
 
   const results = useMemo<ResultItem[]>(() => {
     const out: ResultItem[] = [];
@@ -133,7 +133,7 @@ export function CommandPalette({
       });
     }
 
-    const cmds = SLASH_COMMANDS[executor];
+    const cmds = executor === 'kimi' ? [] : SLASH_COMMANDS[executor];
     for (const c of cmds) {
       if (!query || match(c.cmd, query) || match(c.desc, query)) {
         out.push({

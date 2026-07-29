@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import type { Task, TaskStatus } from '@gian/shared';
+import type { Executor, Task, TaskStatus } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 
 export interface CreateTaskInput {
   name: string;
   description?: string | null;
+  /** Which executor the Task's Manager (PM) runs on. NULL/omitted → resolved
+   *  from the `default_task_executor` config default when the Manager is
+   *  first ensured (see SessionManager.ensureManagerSession). */
+  manager_executor?: Executor | null;
 }
 
 export interface UpdateTaskInput {
@@ -30,12 +34,13 @@ export class TaskManager {
     const id = randomUUID();
     const now = new Date().toISOString();
     const description = input.description ?? null;
+    const managerExecutor = input.manager_executor ?? null;
     this.db
       .prepare(
-        `INSERT INTO tasks (id, name, description, status, created_at, updated_at)
-         VALUES (@id, @name, @description, 'open', @now, @now)`,
+        `INSERT INTO tasks (id, name, description, status, manager_executor, created_at, updated_at)
+         VALUES (@id, @name, @description, 'open', @managerExecutor, @now, @now)`,
       )
-      .run({ id, name: input.name, description, now });
+      .run({ id, name: input.name, description, managerExecutor, now });
     return this.getTaskOrThrow(id);
   }
 

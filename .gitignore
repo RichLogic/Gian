@@ -35,10 +35,14 @@ AGENTS.md
 test-results/
 playwright-report/
 playwright/.cache/
+output/playwright/
 .DS_Store
+
+# Desktop packaging
+/packages/desktop/release/
 
 # Local debug-driver runtime output (logs / pids / driver script)
 .gian-runtime/
 
-# Gian-maintained per-workspace AI context (runtime scaffold)
+# Gian-maintained per-workspace AI context (runtime scaffold; see workspace/ai-scaffold.ts)
 .ai/

@@ -15,6 +15,14 @@ export const FileLinkOpenContext = createContext<
   ((absPath: string, line?: number) => void) | null
 >(null);
 
+/** Provided by App.tsx to open an image in the in-app lightbox (an in-page
+ *  overlay) instead of navigating to a new browser tab. Consumed by the user
+ *  message attachment thumbnails. Null when no provider is mounted, in which
+ *  case the thumbnail falls back to its plain `href` (new tab). */
+export const ImageZoomContext = createContext<
+  ((src: string, alt?: string) => void) | null
+>(null);
+
 /** Provided by App.tsx to push a DiffItem into the 4th-level inspector. Click
  *  handler on DiffCard fires this instead of expanding inline — the card
  *  itself stays compact (just file path + +/- stats). */
@@ -215,13 +223,14 @@ export function ApprovalCard({
   const t = useT();
   const isQuestion = item.category === 'question' && item.questions && item.questions.length > 0;
   const isPlanExit = item.category === 'exit_plan_mode' && item.planActions && item.planActions.length > 0;
+  const isNative = (item.nativeOptions?.length ?? 0) > 0;
   const sessionScopeAllowed = (item.scopeOptions ?? ['once']).includes('session');
 
   // Keyboard shortcut wiring (A / Shift+A / D) while pending — only for
   // ordinary approvals; AskUserQuestion uses option pickers, and the plan
   // exit card uses semantic three-way buttons rather than allow/deny.
   useEffect(() => {
-    if (item.status !== 'pending' || isQuestion || isPlanExit) return;
+    if (item.status !== 'pending' || isQuestion || isPlanExit || isNative) return;
     function handleKey(e: KeyboardEvent) {
       // Ignore if focus is in an input/textarea/contenteditable
       const tag = (e.target as HTMLElement | null)?.tagName ?? '';
@@ -239,7 +248,7 @@ export function ApprovalCard({
     }
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [item.status, item.approvalId, onApprove, isQuestion, isPlanExit, sessionScopeAllowed]);
+  }, [item.status, item.approvalId, onApprove, isQuestion, isPlanExit, isNative, sessionScopeAllowed]);
 
   if (item.status === 'pending' && isQuestion) {
     return <QuestionCard item={item} onApprove={onApprove} />;
@@ -358,7 +367,35 @@ export function ApprovalCard({
             </div>
           )
       )}
-      {isPlanExit ? (
+      {isNative ? (
+        <div className="approval-actions approval-actions--native">
+          {item.nativeOptions!.map(option => {
+            const rejected = option.kind.startsWith('reject');
+            const decision: ApprovalDecision = rejected
+              ? 'decline'
+              : option.kind === 'allow_always'
+                ? 'allow_session'
+                : 'allow_once';
+            return (
+              <button
+                key={option.optionId}
+                className={`btn sm ${rejected ? 'danger-ghost' : 'primary'}`}
+                onClick={() => onApprove(
+                  item.approvalId,
+                  decision,
+                  undefined,
+                  {
+                    category: item.category,
+                    nativeOptionId: option.optionId,
+                  },
+                )}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : isPlanExit ? (
         <div className="approval-actions approval-actions--plan">
           <button
             className="btn primary sm"
@@ -716,6 +753,7 @@ function CopyButton({ text, title = 'Copy message', className }: { text: string;
 // hideAvatar is kept in the prop signature for caller compat but is a no-op.
 export function UserMessage({ item }: { item: MsgItem; hideAvatar?: boolean }) {
   const t = useT();
+  const zoom = useContext(ImageZoomContext);
   // Optimistic echo: `pending` until the server emits its `user_message`,
   // `failed` when an `error` envelope marks it rejected.
   const stateCls = item.pending ? ' pending' : item.failed ? ' failed' : '';
@@ -729,11 +767,19 @@ export function UserMessage({ item }: { item: MsgItem; hideAvatar?: boolean }) {
             {attachments.map((a, i) => (
               <a
                 key={`${a.url}-${i}`}
-                className="msg-att"
+                className={`msg-att${zoom ? ' zoomable' : ''}`}
                 href={a.url}
                 target="_blank"
                 rel="noreferrer"
                 title={a.name}
+                onClick={zoom ? (e) => {
+                  // Plain left-click → in-app lightbox. Leave modified clicks
+                  // (⌘/ctrl/shift/alt, middle button) to the browser so
+                  // "open in new tab" still works via the underlying href.
+                  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+                  e.preventDefault();
+                  zoom(a.url, a.name);
+                } : undefined}
               >
                 <img src={a.url} alt={a.name} />
               </a>
@@ -799,7 +845,7 @@ export function ReasoningCard({ item }: { item: ReasoningItem }) {
 
 // Kept as an unused export to avoid breaking external imports. V2 design
 // doesn't render avatars in the transcript; this is left as a stub.
-export function Avatar({ exec }: { exec: 'user' | 'claude' | 'codex' }) {
+export function Avatar({ exec }: { exec: 'user' | import('@gian/shared').Executor }) {
   const label = exec === 'user' ? 'R' : 'C';
   return <div className={`msg-av ${exec}`} aria-hidden>{label}</div>;
 }

@@ -1,0 +1,155 @@
+:root {
+  color-scheme: light dark;
+  font-family:
+    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", sans-serif;
+  background: #f6f5f1;
+  color: #20201d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  background:
+    linear-gradient(#deddd7 1px, transparent 1px),
+    linear-gradient(90deg, #deddd7 1px, transparent 1px),
+    #f6f5f1;
+  background-size: 32px 32px;
+}
+
+.window-drag-region {
+  position: fixed;
+  z-index: 1;
+  top: 0;
+  right: 0;
+  left: 80px;
+  height: 44px;
+  -webkit-app-region: drag;
+  app-region: drag;
+  user-select: none;
+}
+
+main {
+  width: min(560px, calc(100vw - 48px));
+  padding: 48px 0;
+}
+
+.logo {
+  display: block;
+  margin-bottom: 28px;
+}
+
+.eyebrow {
+  margin: 0 0 10px;
+  color: #6c6b65;
+  font: 700 11px/1.2 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  letter-spacing: 0;
+}
+
+h1 {
+  margin: 0;
+  max-width: 520px;
+  font-size: 32px;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+
+.message {
+  max-width: 520px;
+  margin: 16px 0 10px;
+  color: #585751;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+code {
+  display: block;
+  min-height: 20px;
+  color: #2f6552;
+  font: 500 12px/1.5 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 28px;
+}
+
+button {
+  min-width: 96px;
+  min-height: 38px;
+  padding: 0 16px;
+  border: 1px solid #20201d;
+  border-radius: 6px;
+  background: #20201d;
+  color: #fff;
+  font: 650 13px/1 inherit;
+  cursor: pointer;
+}
+
+button.secondary {
+  border-color: #aaa8a0;
+  background: #eeede8;
+  color: #20201d;
+}
+
+button:focus-visible {
+  outline: 2px solid #2f8064;
+  outline-offset: 3px;
+}
+
+button:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+
+.status {
+  min-height: 20px;
+  margin: 14px 0 0;
+  color: #6c6b65;
+  font-size: 13px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    background: #181917;
+    color: #efeee9;
+  }
+
+  body {
+    background:
+      linear-gradient(#2a2b28 1px, transparent 1px),
+      linear-gradient(90deg, #2a2b28 1px, transparent 1px),
+      #181917;
+  }
+
+  .eyebrow,
+  .message,
+  .status {
+    color: #aaa9a3;
+  }
+
+  code {
+    color: #79bfa4;
+  }
+
+  button {
+    border-color: #efeee9;
+    background: #efeee9;
+    color: #181917;
+  }
+
+  button.secondary {
+    border-color: #53544f;
+    background: #272825;
+    color: #efeee9;
+  }
+}

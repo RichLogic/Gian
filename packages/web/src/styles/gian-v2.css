@@ -460,6 +460,50 @@
   background: var(--accent);
   box-shadow: 0 0 0 1.5px var(--surface);
 }
+/* "+" new-task split control: plain click = default executor (config);
+   component state opens the executor menu on hover/focus and closes it after
+   selection so it cannot cover the inline form. */
+.sb-newtask { position: relative; display: inline-flex; flex: none; }
+.sb-newtask-menu {
+  position: absolute;
+  top: 100%; right: 0;
+  z-index: 30;
+  min-width: 172px;
+  margin-top: 4px;
+  padding: 4px;
+  display: flex; flex-direction: column; gap: 2px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  opacity: 0; visibility: hidden; transform: translateY(-3px);
+  pointer-events: none;
+  transition: opacity 120ms var(--ease), transform 120ms var(--ease), visibility 120ms;
+}
+/* Bridge the 4px gap so moving the cursor button→menu keeps :hover. */
+.sb-newtask-menu::before {
+  content: ''; position: absolute; left: 0; right: 0; top: -6px; height: 6px;
+}
+.sb-newtask.open .sb-newtask-menu {
+  opacity: 1; visibility: visible; transform: translateY(0);
+  pointer-events: auto;
+}
+.sb-newtask-item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0; background: transparent;
+  border-radius: var(--r-1);
+  font: var(--fz-12)/1.2 var(--font-sans);
+  color: var(--text-2);
+  text-align: left; cursor: pointer;
+}
+.sb-newtask-item:hover { background: var(--surface-2); color: var(--text); }
+.sb-newtask-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.sb-newtask-dot.claude { background: #c78a4e; }
+.sb-newtask-dot.codex { background: #10a37f; }
+.sb-newtask-dot.kimi { background: var(--kimi); box-shadow: 0 0 0 1px oklch(0.65 0 0 / 0.55); }
+
 .sb-sep {
   width: 1px; height: 16px;
   background: var(--hairline);
@@ -573,31 +617,43 @@
   overflow-y: auto;
   padding: 0 6px 10px;
 }
+/* Project group header — Codex-style: sans label with a folder glyph, plain
+   count, hover as a soft rounded row (no mono eyebrow / count pill). */
 .sb-group {
   display: flex; align-items: center; gap: 6px;
-  padding: 8px 8px 4px;
-  font: 600 11px/1 var(--font-mono);
-  color: var(--text-2);
-  text-transform: none;
-  letter-spacing: 0;
+  margin: 6px 2px 1px;
+  padding: 5px 8px;
+  border-radius: var(--r-2);
+  font: 600 var(--fz-12)/1.2 var(--font-sans);
+  color: var(--text);
   cursor: pointer;
   user-select: none;
 }
+.sb-group:first-child { margin-top: 2px; }
+.sb-group:hover { background: var(--surface-2); }
 .sb-group .caret {
-  width: 9px;
+  width: 10px;
   color: var(--text-3);
   font-size: 9px;
   flex: none;
   display: inline-flex; align-items: center; justify-content: center;
 }
+/* Folder glyph ahead of the workspace name (the name span is the 2nd child —
+   no JSX hook, so it rides in via CSS). */
+.sb-group > span:nth-child(2)::before {
+  content: '';
+  display: inline-block;
+  width: 13px; height: 13px;
+  margin-right: 6px;
+  vertical-align: -2.5px;
+  background: var(--text-3);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
 .sb-group .count {
   margin-left: auto;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font: 500 10.5px/1 var(--font-mono);
   color: var(--text-3);
-  background: var(--surface-2);
-  border-radius: 3px;
-  padding: 1px 5px;
 }
 .sb-group.needs-you { cursor: default; }
 .sb-group.needs-you .caret { display: none; }
@@ -678,6 +734,7 @@
 }
 .ri-exec.claude { color: var(--claude); }
 .ri-exec.codex  { color: var(--codex); }
+.ri-exec.kimi { color: var(--text); }
 .ri-branch {
   display: inline-flex; align-items: center; gap: 3px;
   color: var(--text-2);
@@ -703,13 +760,9 @@
   pointer-events: none;
 }
 .rail-item.active .ri-age { color: var(--text-2); }
-/* Executor-tinted time (replaces the dropped Claude/Codex text label):
-   Claude = 橙 --claude(h36), Codex = 蓝紫 --codex(h270). Higher specificity than
-   both the base .ri-age and the .active override so the tint always wins. */
-.ri-age.claude { color: var(--claude); }
-.ri-age.codex  { color: var(--codex); }
-.rail-item.active .ri-age.claude { color: var(--claude); }
-.rail-item.active .ri-age.codex  { color: var(--codex); }
+/* The row still carries an executor class on .ri-age (JSX), but the tint was
+   dropped (2026-07-29 sidebar polish): coloured ages read as noise next to the
+   StatusIcon, which now owns per-row status colour. Neutral grey everywhere. */
 .ri-kebab {
   position: absolute; top: 6px; right: 6px;
   width: 22px; height: 22px;
@@ -1139,6 +1192,43 @@
   width: auto;
   height: auto;
   object-fit: cover;
+}
+.msg-att.zoomable { cursor: zoom-in; }
+
+/* In-page image preview overlay (see components/ImageLightbox.tsx). Blows a
+   transcript thumbnail up over the current page instead of a new browser tab.
+   Backdrop dims the app and click-dismisses; sits above the command palette. */
+.img-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  background: oklch(0 0 0 / 0.72);
+  backdrop-filter: blur(4px);
+  cursor: zoom-out;
+  animation: img-lightbox-in 120ms var(--ease);
+}
+@keyframes img-lightbox-in { from { opacity: 0; } to { opacity: 1; } }
+.img-lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: var(--r-2);
+  box-shadow: 0 12px 48px oklch(0 0 0 / 0.5);
+  cursor: default;
+}
+.img-lightbox-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  font-size: 22px;
+  line-height: 1;
+  color: #fff;
 }
 
 /* event card */
@@ -1850,7 +1940,7 @@
 .md-preview h3 { font-size: 14px; color: var(--text); }
 .md-preview h4 { font-size: 13px; color: var(--text-2); }
 .md-preview p { margin: 0 0 10px; text-wrap: pretty; }
-.md-preview ul { margin: 0 0 10px; padding-left: 20px; }
+.md-preview ul, .md-preview ol { margin: 0 0 10px; padding-left: 20px; }
 .md-preview li { margin-bottom: 4px; }
 .md-preview code {
   font: 11.5px/1.4 var(--font-mono);
@@ -1859,20 +1949,55 @@
   border-radius: 3px;
   color: var(--text);
 }
-.md-preview .md-code {
+.md-preview .md-code, .md-preview pre {
   background: var(--surface-2);
   border-radius: var(--r-2);
   padding: 10px 12px;
   margin: 0 0 12px;
   overflow-x: auto;
 }
-.md-preview .md-code code {
+.md-preview .md-code code, .md-preview pre code {
   background: transparent;
   padding: 0;
   font: 11.5px/1.55 var(--font-mono);
   color: var(--text);
 }
 .md-preview strong { font-weight: 600; color: var(--text); }
+.md-preview em { font-style: italic; }
+.md-preview a { color: var(--accent, var(--text)); text-decoration: underline; }
+.md-preview blockquote {
+  margin: 0 0 10px;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--text-2);
+}
+.md-preview hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}
+/* GFM tables — react-markdown + remark-gfm emit real <table> markup. */
+.md-preview table {
+  border-collapse: collapse;
+  margin: 0 0 12px;
+  width: auto;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+  font-size: 12.5px;
+}
+.md-preview th, .md-preview td {
+  border: 1px solid var(--border);
+  padding: 5px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-preview th {
+  background: var(--surface-2);
+  font-weight: 600;
+  color: var(--text);
+}
+.md-preview tbody tr:nth-child(even) { background: var(--surface-2); }
 
 .sheet-term {
   /* Real-terminal mode: xterm owns the inside. No padding/overflow on
@@ -1979,14 +2104,16 @@
 .insp-note { padding: 10px 12px; color: var(--text-3); font-size: 12px; font-style: italic; }
 .tree-name .hit-dir { color: var(--text-3); opacity: 0.8; }
 
-.tree { padding: 0 2px; font-family: var(--font-mono); font-size: var(--fz-11); }
+/* File trees render in sans (Codex-style); mono is reserved for code/diff
+   panes. Slightly roomier rows + r-2 radius to match the rail items. */
+.tree { padding: 0 2px; font-family: var(--font-sans); font-size: var(--fz-12); }
 .tree-item {
   display: grid;
   grid-template-columns: 12px 14px 1fr auto;
-  gap: 5px;
+  gap: 6px;
   align-items: center;
-  padding: 3px 6px;
-  border-radius: var(--r-1);
+  padding: 4px 6px;
+  border-radius: var(--r-2);
   cursor: pointer;
   color: var(--text-2);
   user-select: none;
@@ -2149,17 +2276,16 @@
 }
 .tree-item.changes-leaf .files-badge {
   width: 16px; height: 16px;
-  border-radius: var(--r-1);
   display: inline-flex; align-items: center; justify-content: center;
-  font: 700 9px/1 var(--font-mono);
+  font: 600 10.5px/1 var(--font-mono);
   text-transform: none;
 }
-.tree-item.changes-leaf .files-badge.add { background: oklch(from var(--ok) l c h / 0.15); color: var(--ok); }
-.tree-item.changes-leaf .files-badge.mod { background: oklch(from var(--warn) l c h / 0.15); color: var(--warn); }
-.tree-item.changes-leaf .files-badge.del { background: oklch(from var(--danger) l c h / 0.15); color: var(--danger); }
+.tree-item.changes-leaf .files-badge.add { color: var(--ok); }
+.tree-item.changes-leaf .files-badge.mod { color: var(--warn); }
+.tree-item.changes-leaf .files-badge.del { color: var(--danger); }
 .tree-item.changes-leaf .stat { display: inline-flex; gap: 6px; font: 10.5px/1 var(--font-mono); }
 .tree-item.changes-leaf .stat .add { color: var(--ok); }
-.tree-item.changes-leaf .stat .del { color: var(--warn); }
+.tree-item.changes-leaf .stat .del { color: var(--danger); }
 
 /* Per-file stage/unstage chip — overlaid on the right, revealed on hover or
    when the file is staged. Absolute so it never reserves layout width. */
@@ -3078,6 +3204,7 @@
 .exec-dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
 .exec-dot.claude { background: var(--claude); }
 .exec-dot.codex  { background: var(--codex); }
+.exec-dot.kimi { background: var(--kimi); box-shadow: 0 0 0 1px oklch(0.65 0 0 / 0.55); }
 .exec-name { font: 500 13px/1 var(--font-sans); color: var(--text); }
 .exec-ver  { color: var(--text-3); font-size: 11px; }
 .exec-status {

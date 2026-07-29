@@ -16,6 +16,7 @@ import { getUsernameForToken } from '../auth/tokens.js';
 import { AUTH_REQUIRED } from '../auth/middleware.js';
 import { loadConfig } from '../storage/config.js';
 import { listBots } from '../storage/bots.js';
+import { deleteTaskCascade } from '../task/delete-cascade.js';
 
 interface WsMessageEvent {
   data: WSMessageReceive;
@@ -77,6 +78,7 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, tty, c
         resolved_by: r.resolvedBy ?? null,
         resolved_at: r.resolvedAt ? new Date(r.resolvedAt).toISOString() : null,
         created_at: new Date(r.createdAt).toISOString(),
+        ...(r.nativeOptions ? { native_options: r.nativeOptions } : {}),
       })),
       config,
     };
@@ -155,6 +157,7 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, tty, c
           : null;
         broadcaster.send(ws, {
           type: 'error',
+          request_type: parsed.type,
           ...(typeof sessionIdField === 'string' ? { session_id: sessionIdField } : {}),
           code: explicitCode ?? dispatchErrorCode(parsed.type),
           message: err instanceof Error ? err.message : String(err),
@@ -176,6 +179,8 @@ function dispatchErrorCode(messageType: string): string {
       return 'SESSION_STOP_FAILED';
     case 'queue:send_now':
       return 'QUEUE_SEND_NOW_FAILED';
+    case 'task:delete':
+      return 'TASK_DELETE_FAILED';
     default:
       return 'DISPATCH_FAILED';
   }
@@ -245,6 +250,7 @@ async function dispatch(
       const task = tasks.createTask({
         name: msg.name,
         ...(msg.description !== undefined ? { description: msg.description } : {}),
+        ...(msg.executor !== undefined ? { manager_executor: msg.executor } : {}),
       });
       broadcaster.broadcast({ type: 'task:created', task });
       return;
@@ -264,7 +270,7 @@ async function dispatch(
     }
     case 'task:delete': {
       if (!tasks) return;
-      tasks.deleteTask(msg.task_id);
+      await deleteTaskCascade(tasks, sessions, msg.task_id);
       broadcaster.broadcast({ type: 'task:deleted', task_id: msg.task_id });
       return;
     }
@@ -273,7 +279,13 @@ async function dispatch(
       return;
     }
     case 'approval:resolve': {
-      await sessions.respondApproval(msg.session_id, msg.approval_id, msg.decision, msg.answers);
+      await sessions.respondApproval(
+        msg.session_id,
+        msg.approval_id,
+        msg.decision,
+        msg.answers,
+        msg.native_option_id,
+      );
       return;
     }
     case 'session:stop': {
@@ -292,8 +304,16 @@ async function dispatch(
       sessions.setEffort(msg.session_id, msg.effort);
       return;
     }
+    case 'session:set_service_tier': {
+      sessions.setServiceTier(msg.session_id, msg.service_tier);
+      return;
+    }
     case 'session:set_model': {
       sessions.setModel(msg.session_id, msg.model);
+      return;
+    }
+    case 'session:set_native_config': {
+      await sessions.setNativeConfig(msg.session_id, msg.config_id, msg.value);
       return;
     }
     case 'queue:add': {

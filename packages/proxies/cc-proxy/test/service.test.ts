@@ -10,7 +10,10 @@ import { AppError } from '../src/core/errors.js';
 import { ClaudeMcpRuntime } from '../src/runtime/claude-mcp-runtime.js';
 import type { ClaudeRuntime, ClaudeRuntimeEvents } from '../src/runtime/types.js';
 import {
+  parseClaudeAssistantUsage,
+  parseClaudeResultUsage,
   parseEffortLevelsFromHelp,
+  isClaudeCompactBoundary,
   shouldRetryWithoutNoSessionPersistence,
 } from '../src/runtime/claude-mcp-runtime.js';
 import type { ModelCapabilities } from '../src/core/types.js';
@@ -147,6 +150,159 @@ test('shouldRetryWithoutNoSessionPersistence detects older Claude CLI rejection'
     shouldRetryWithoutNoSessionPersistence('authentication failed'),
     false,
   );
+});
+
+test('Claude compact boundary detection covers native auto-compaction signals', () => {
+  assert.equal(isClaudeCompactBoundary({
+    type: 'system',
+    subtype: 'compact_boundary',
+  }), true);
+  assert.equal(isClaudeCompactBoundary({
+    type: 'system',
+    subtype: 'init',
+  }), false);
+});
+
+test('Claude auto-compaction clears the pre-boundary context before result parsing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-proxy-compact-boundary-'));
+  const fakeClaude = join(dir, 'claude');
+  writeFileSync(fakeClaude, [
+    '#!/usr/bin/env node',
+    "console.log(JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-4-8', usage: { input_tokens: 180000, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, content: [] } }));",
+    "console.log(JSON.stringify({ type: 'system', subtype: 'compact_boundary' }));",
+    "console.log(JSON.stringify({ type: 'result', subtype: 'success', result: '', usage: { input_tokens: 100, output_tokens: 25, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0 }, modelUsage: { 'claude-opus-4-8': { inputTokens: 100, outputTokens: 25, cacheReadInputTokens: 1000, cacheCreationInputTokens: 0, contextWindow: 200000 } } }));",
+  ].join('\n'));
+  chmodSync(fakeClaude, 0o755);
+
+  const oldClaudeBin = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = fakeClaude;
+  const runtime = new ClaudeMcpRuntime();
+  const usageEvents: Array<Record<string, unknown>> = [];
+  runtime.on('tokenUsage', (_sessionId, usage) => {
+    usageEvents.push(usage as unknown as Record<string, unknown>);
+  });
+  const exited = new Promise<void>((resolve) => {
+    runtime.once('processExited', () => resolve());
+  });
+
+  try {
+    await runtime.spawnSession({
+      sessionId: 'session-auto-compact',
+      claudeSessionId: '00000000-0000-4000-8000-000000000001',
+      cwd: dir,
+      model: null,
+      isResume: false,
+    });
+    await runtime.sendMessage('session-auto-compact', 'continue', {
+      permissionMode: 'bypassPermissions',
+    });
+    await exited;
+
+    assert.deepEqual(usageEvents[0], {
+      context: { used: 180_000 },
+    });
+    assert.deepEqual(usageEvents[1], {
+      context: null,
+      reason: 'compact_started',
+    });
+    assert.deepEqual(usageEvents[2], {
+      conversation: {
+        mode: 'delta',
+        inputTokens: 1_100,
+        outputTokens: 25,
+        cachedInputTokens: 1_000,
+        totalTokens: 1_125,
+      },
+    });
+  } finally {
+    await runtime.stop();
+    if (oldClaudeBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = oldClaudeBin;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Claude stream usage keeps current context separate from result aggregates', () => {
+  const assistant = parseClaudeAssistantUsage({
+    type: 'assistant',
+    message: {
+      model: 'claude-opus-4-8[1m]',
+      usage: {
+        input_tokens: 120,
+        cache_read_input_tokens: 62_000,
+        cache_creation_input_tokens: 880,
+        output_tokens: 450,
+      },
+    },
+  });
+  assert.deepEqual(assistant, {
+    context: { used: 63_000 },
+    model: 'claude-opus-4-8[1m]',
+  });
+
+  const result = parseClaudeResultUsage({
+    type: 'result',
+    usage: {
+      input_tokens: 200,
+      cache_read_input_tokens: 90_000,
+      cache_creation_input_tokens: 1_000,
+      output_tokens: 2_000,
+    },
+    modelUsage: {
+      'claude-opus-4-8[1m]': {
+        contextWindow: 1_000_000,
+      },
+    },
+  }, assistant!.context, assistant!.model);
+  assert.deepEqual(result, {
+    context: { used: 63_000, window: 1_000_000 },
+    conversation: {
+      mode: 'delta',
+      inputTokens: 91_200,
+      outputTokens: 2_000,
+      cachedInputTokens: 91_000,
+      totalTokens: 93_200,
+    },
+  });
+});
+
+test('Claude result usage prefers whole-tree modelUsage over the top-level fallback', () => {
+  const result = parseClaudeResultUsage({
+    type: 'result',
+    usage: {
+      input_tokens: 5,
+      output_tokens: 6,
+      cache_read_input_tokens: 7,
+      cache_creation_input_tokens: 8,
+    },
+    modelUsage: {
+      'claude-opus-4-8': {
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheReadInputTokens: 1_000,
+        cacheCreationInputTokens: 50,
+        contextWindow: 1_000_000,
+      },
+      'claude-haiku-4-5': {
+        inputTokens: 30,
+        outputTokens: 10,
+        cacheReadInputTokens: 200,
+        cacheCreationInputTokens: 5,
+        contextWindow: 200_000,
+      },
+    },
+  }, { used: 63_000 }, 'claude-opus-4-8');
+
+  assert.deepEqual(result, {
+    context: { used: 63_000, window: 1_000_000 },
+    conversation: {
+      mode: 'delta',
+      inputTokens: 1_385,
+      outputTokens: 30,
+      cachedInputTokens: 1_255,
+      totalTokens: 1_415,
+    },
+  });
 });
 
 test('capabilities discovery does not run claude -p unless explicitly opted in', async () => {
@@ -296,6 +452,81 @@ test('service starts turns with the requested model and emits completion events'
     }
     assert.equal((events[1]!.params.data as { text: string }).text, 'done');
     assert.equal((events[2]!.params.data as { status: string }).status, 'completed');
+  });
+});
+
+test('service does not guess a Claude context window without an explicit capacity', async () => {
+  await withService(async ({ runtime, service, events }) => {
+    const ordinary = await service.createSession({
+      cwd: '/tmp',
+      model: 'claude-opus-4-8',
+    });
+    runtime.emit('tokenUsage', ordinary.session.id, {
+      context: { used: 63_000 },
+    });
+    assert.deepEqual(events.at(-1)?.params.data, {
+      context: { used: 63_000 },
+    });
+
+    const extended = await service.createSession({
+      cwd: '/tmp',
+      model: 'claude-opus-4-8[1m]',
+    });
+    runtime.emit('tokenUsage', extended.session.id, {
+      context: { used: 63_000 },
+    });
+    assert.deepEqual(events.at(-1)?.params.data, {
+      context: { used: 63_000, window: 1_000_000 },
+    });
+  });
+});
+
+test('Claude /compact invalidates context and rejects compact-turn context samples', async () => {
+  await withService(async ({ runtime, service, events }) => {
+    const created = await service.createSession({ cwd: '/tmp' });
+    await service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: '/compact' }],
+    }, 'req-compact');
+
+    assert.deepEqual(events.map(event => event.method), [
+      'token_usage.updated',
+      'turn.started',
+    ]);
+    assert.deepEqual(events[0]!.params.data, {
+      context: null,
+      reason: 'compact_started',
+    });
+    assert.equal(events[0]!.params.turnId, events[1]!.params.turnId);
+
+    runtime.emit('tokenUsage', created.session.id, {
+      context: { used: 190_000, window: 200_000 },
+    });
+    assert.equal(
+      events.filter(event => event.method === 'token_usage.updated').length,
+      1,
+      'the compaction request must not refill context with its own input size',
+    );
+
+    runtime.emit('tokenUsage', created.session.id, {
+      context: { used: 190_000, window: 200_000 },
+      conversation: { mode: 'delta', totalTokens: 1_200 },
+    });
+    assert.deepEqual(events.at(-1)?.params.data, {
+      conversation: { mode: 'delta', totalTokens: 1_200 },
+    });
+
+    runtime.emit('channelReply', created.session.id, '');
+    await service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'next turn' }],
+    });
+    runtime.emit('tokenUsage', created.session.id, {
+      context: { used: 32_000, window: 200_000 },
+    });
+    assert.deepEqual(events.at(-1)?.params.data, {
+      context: { used: 32_000, window: 200_000 },
+    });
   });
 });
 

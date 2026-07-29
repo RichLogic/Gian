@@ -1,4 +1,4 @@
-import type { EventEnvelope, Session, SystemConfig, Task, Workspace } from '@gian/shared';
+import type { EventEnvelope, Executor, Session, SystemConfig, Task, Workspace } from '@gian/shared';
 
 export interface TreeEntry {
   name: string;
@@ -131,6 +131,29 @@ export async function loadSlashCommands(
   return body.commands ?? [];
 }
 
+export async function loadSessionSlashCommands(
+  sessionId: string,
+): Promise<import('@gian/shared').SlashCommand[]> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/slash`);
+  if (!res.ok) return [];
+  const body = (await res.json()) as { commands?: import('@gian/shared').SlashCommand[] };
+  return body.commands ?? [];
+}
+
+export async function loadNativeConfig(
+  sessionId: string,
+): Promise<{
+  state: import('@gian/shared').ExecutorConfigState;
+  options: import('@gian/shared').NativeConfigOption[];
+} | null> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/native-config`);
+  if (!res.ok) return null;
+  return (await res.json()) as {
+    state: import('@gian/shared').ExecutorConfigState;
+    options: import('@gian/shared').NativeConfigOption[];
+  };
+}
+
 export async function loadDiff(
   workingTreeId: string,
   path: string,
@@ -261,7 +284,7 @@ export async function loadTasks(): Promise<Task[]> {
   }
 }
 
-export async function createTask(input: { name: string; description?: string }): Promise<Task | null> {
+export async function createTask(input: { name: string; description?: string; executor?: Executor }): Promise<Task | null> {
   try {
     const res = await fetch('/api/tasks', {
       method: 'POST',
@@ -269,6 +292,7 @@ export async function createTask(input: { name: string; description?: string }):
       body: JSON.stringify({
         name: input.name,
         ...(input.description ? { description: input.description } : {}),
+        ...(input.executor ? { executor: input.executor } : {}),
       }),
     });
     if (!res.ok) return null;
@@ -278,7 +302,7 @@ export async function createTask(input: { name: string; description?: string }):
   }
 }
 
-/** PRD-v3 P3 — get-or-create the Task's read-only Codex Manager session.
+/** PRD-v3 P3 — get-or-create the Task's Manager session.
  *  Idempotent; the host also broadcasts `session:created` on first creation. */
 export async function ensureManagerSession(taskId: string): Promise<Session | null> {
   try {
@@ -316,7 +340,7 @@ export async function createSubtask(
   taskId: string,
   input: {
     workspace_id: string;
-    executor: 'claude' | 'codex';
+    executor: import('@gian/shared').Executor;
     name?: string;
     model?: string | null;
     approval_mode?: import('@gian/shared').ApprovalMode;
@@ -583,7 +607,7 @@ export async function adoptNativeSession(
 
 export async function deleteNativeSession(
   workspaceId: string,
-  executor: 'claude' | 'codex',
+  executor: import('@gian/shared').Executor,
   nativeId: string,
 ): Promise<{ ok: boolean; error?: string }> {
   const res = await fetch(
@@ -814,4 +838,3 @@ export async function loadAllFiles(workingTreeId: string): Promise<string[]> {
     return [];
   }
 }
-

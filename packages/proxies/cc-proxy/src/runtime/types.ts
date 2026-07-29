@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 
+import type { TokenUsageUpdate } from '@gian/shared';
 import type { EffortLevel, ModelCapabilities, PermissionMode } from '../core/types.js';
 
 /**
@@ -26,15 +27,9 @@ export interface ClaudeRuntimeEvents {
   autoClassifierDenied: [sessionId: string, action: string, reason: string, consecutive: number, total: number];
   autoCircuitBreaker: [sessionId: string, trigger: 'consecutive' | 'total', consecutive: number, total: number];
   toolUse: [sessionId: string, toolName: string, input: Record<string, unknown>];
-  /** Cumulative token usage for the current turn. Claude CLI reports this on
-   *  the `result` event. Numbers are per-turn (input includes resumed history
-   *  context, output is the new reply). */
-  tokenUsage: [sessionId: string, usage: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadInputTokens: number;
-    cacheCreationInputTokens: number;
-  }];
+  /** Current context samples from assistant events plus the result event's
+   *  per-invocation conversation delta and authoritative context-window size. */
+  tokenUsage: [sessionId: string, usage: TokenUsageUpdate];
   processExited: [sessionId: string, code: number | null, signal: string | null];
   debug: [message: string];
 }

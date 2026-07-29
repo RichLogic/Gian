@@ -21,6 +21,7 @@ export type EventType =
   | 'file_read'
   | 'file_search'
   | 'web_search'
+  | 'tool_execution'
   | 'agent_spawn'
   | 'approval_requested'
   | 'approval_resolved'
@@ -169,6 +170,20 @@ export interface WebSearchData {
 }
 
 /**
+ * Generic executor tool event used when a tool cannot be represented without
+ * loss by one of the specialized cards above.
+ */
+export interface ToolExecutionData {
+  itemId: string;
+  title: string;
+  kind?: string;
+  status: 'pending' | 'running' | 'success' | 'error';
+  input?: unknown;
+  output?: unknown;
+  locations?: Array<{ path: string; line?: number }>;
+}
+
+/**
  * Sub-agent spawned by the AI.
  *
  * from: cc only (Agent tool_use)
@@ -228,6 +243,9 @@ export interface ApprovalRequestedData {
    *   'keep_planning'     → reject; agent stays in plan mode for more input
    */
   planActions?: ('accept_with_auto' | 'accept_with_ask' | 'keep_planning')[];
+  /** Exact choices supplied by the executor. When present the UI must return
+   *  one `optionId` rather than translating through Gian ApprovalDecision. */
+  nativeOptions?: import('./model.js').NativeApprovalOption[];
 }
 
 export interface AskQuestionOption {
@@ -258,6 +276,7 @@ export interface ApprovalResolvedData {
    *  text. Lets a resolved question card show "answered with …" both live and
    *  when a transcript is rebuilt from persisted events. */
   answers?: Record<string, string | string[]>;
+  nativeOptionId?: string | null;
 }
 
 /**
@@ -343,6 +362,7 @@ export type EventDataByType = {
   file_read: FileReadData;
   file_search: FileSearchData;
   web_search: WebSearchData;
+  tool_execution: ToolExecutionData;
   agent_spawn: AgentSpawnData;
   approval_requested: ApprovalRequestedData;
   approval_resolved: ApprovalResolvedData;

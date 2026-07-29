@@ -103,7 +103,7 @@ files yourself — you create and steer subtasks (ENGINEERs) and drive the loop.
 Emit ONE action as the LAST thing in a reply, as bare text (no code fence):
 
 - Create a subtask:
-  \`<<gian:action>>{"method":"create_subtask","params":{"workspace":"<name|path>","executor":"claude|codex","brief":"<intent: goal / why / boundaries / where to look>","name":"<short>"}}<</gian:action>>\`
+  \`<<gian:action>>{"method":"create_subtask","params":{"workspace":"<name|path>","executor":"claude|codex|kimi","brief":"<intent: goal / why / boundaries / where to look>","name":"<short>"}}<</gian:action>>\`
 - Message an existing subtask (e.g. a fix round):
   \`<<gian:action>>{"method":"message_subtask","params":{"subtask_id":"<id>","text":"<fix points>"}}<</gian:action>>\`
 

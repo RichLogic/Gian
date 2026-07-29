@@ -472,7 +472,7 @@ function ChangesInspector({
   }
 
   // Compose a git-action prompt and drop it into the active session composer.
-  // Never auto-sent — executor (Claude/Codex) runs the git itself once the user
+  // Never auto-sent — the selected executor runs git once the user
   // reviews and sends. Keeps Gian's Changes panel free of any git write path.
   function fire(promptKey: string) {
     onComposePrompt(t(promptKey));

@@ -84,6 +84,14 @@ function renderComposer(opts: {
   return { onSend, onSetMode };
 }
 
+async function toggleBypass(user: ReturnType<typeof userEvent.setup>) {
+  const trigger = document.querySelector('.cmp-approval-btn') as HTMLButtonElement;
+  expect(trigger).toBeTruthy();
+  await user.click(trigger);
+  const label = await screen.findByText('Bypass', { selector: '.mp-row-title' });
+  await user.click(label.closest('button')!);
+}
+
 describe('SEC-012: Composer one-shot bypass UI', () => {
   beforeEach(() => {
     // localStorage drafts persist across tests in the same jsdom; clear so
@@ -91,36 +99,28 @@ describe('SEC-012: Composer one-shot bypass UI', () => {
     localStorage.clear();
   });
 
-  it('SEC-012: ⚡ Bypass button toggles aria-pressed and surfaces a "skips approvals" warning', async () => {
+  it('SEC-012: Bypass mode surfaces a "skips approvals" warning', async () => {
     const user = userEvent.setup();
     renderComposer();
-
-    // The Bypass button is in the approval-mode segmented control.
-    const bypass = screen.getByRole('button', { name: /Bypass/i });
-    expect(bypass).toHaveAttribute('aria-pressed', 'false');
 
     // No warning visible yet.
     expect(screen.queryByRole('status')).toBeNull();
 
-    await user.click(bypass);
+    await toggleBypass(user);
 
-    // Toggled — aria-pressed flips AND a status warning appears.
-    expect(bypass).toHaveAttribute('aria-pressed', 'true');
+    expect(document.querySelector('.cmp-approval-btn')?.textContent).toMatch(/Bypass/i);
     const status = await screen.findByRole('status');
-    expect(status.textContent).toMatch(/next turn skips approvals/i);
+    expect(status.textContent).toMatch(/auto-approved/i);
   });
 
   it('SEC-012: clicking Bypass twice toggles back to the un-armed state (warning removed)', async () => {
     const user = userEvent.setup();
     renderComposer();
-    const bypass = screen.getByRole('button', { name: /Bypass/i });
 
-    await user.click(bypass);
-    expect(bypass).toHaveAttribute('aria-pressed', 'true');
+    await toggleBypass(user);
     expect(screen.queryByRole('status')).not.toBeNull();
 
-    await user.click(bypass);
-    expect(bypass).toHaveAttribute('aria-pressed', 'false');
+    await toggleBypass(user);
     expect(screen.queryByRole('status')).toBeNull();
   });
 
@@ -140,8 +140,7 @@ describe('SEC-012: Composer one-shot bypass UI', () => {
     const user = userEvent.setup();
     const { onSend } = renderComposer();
 
-    const bypass = screen.getByRole('button', { name: /Bypass/i });
-    await user.click(bypass);
+    await toggleBypass(user);
 
     const textarea = screen.getByRole('textbox');
     await user.type(textarea, 'risky turn');
@@ -155,7 +154,7 @@ describe('SEC-012: Composer one-shot bypass UI', () => {
     const user = userEvent.setup();
     const { onSend } = renderComposer();
 
-    await user.click(screen.getByRole('button', { name: /Bypass/i }));
+    await toggleBypass(user);
     const textarea = screen.getByRole('textbox');
     await user.type(textarea, 'turn 1 bypass');
     await user.keyboard('{Enter}');
@@ -167,8 +166,8 @@ describe('SEC-012: Composer one-shot bypass UI', () => {
     expect(onSend).toHaveBeenNthCalledWith(1, 'turn 1 bypass', { oneShotBypass: true });
     expect(onSend).toHaveBeenNthCalledWith(2, 'turn 2 normal', undefined);
 
-    // Warning gone, aria-pressed back to false.
-    expect(screen.getByRole('button', { name: /Bypass/i })).toHaveAttribute('aria-pressed', 'false');
+    // Warning gone, and the mode trigger returns to the stored session mode.
+    expect(document.querySelector('.cmp-approval-btn')?.textContent).toMatch(/Ask/i);
     expect(screen.queryByRole('status')).toBeNull();
   });
 
@@ -198,7 +197,7 @@ describe('SEC-012: Composer one-shot bypass UI', () => {
       </LocaleProvider>,
     );
 
-    await user.click(screen.getByRole('button', { name: /Bypass/i }));
+    await toggleBypass(user);
     expect(onSetMode).not.toHaveBeenCalled();
 
     // Even after a send with bypass armed, mode stays untouched.
@@ -239,8 +238,8 @@ describe('SEC-012: Composer one-shot bypass UI', () => {
       );
 
     const { rerender, unmount } = renderWith(sessionA);
-    await user.click(screen.getByRole('button', { name: /Bypass/i }));
-    expect(screen.getByRole('button', { name: /Bypass/i })).toHaveAttribute('aria-pressed', 'true');
+    await toggleBypass(user);
+    expect(document.querySelector('.cmp-approval-btn')?.textContent).toMatch(/Bypass/i);
 
     // Swap session in-place. Composer is a single component; render with
     // the new session and verify state reset.
@@ -267,8 +266,8 @@ describe('SEC-012: Composer one-shot bypass UI', () => {
     // session-keyed). Document this contract: bypass is component-scoped.
     // Anchor the assertion to whatever the production behavior is so a
     // future per-session refactor is loud.
-    const stillPressed = screen.getByRole('button', { name: /Bypass/i }).getAttribute('aria-pressed');
-    expect(['true', 'false']).toContain(stillPressed);
+    const stillArmed = document.querySelector('.cmp-approval-btn')?.textContent ?? '';
+    expect(/Bypass|Ask/.test(stillArmed)).toBe(true);
     // If the implementation later switches to per-session bypass, this
     // assertion can be tightened to 'false'.
     unmount();

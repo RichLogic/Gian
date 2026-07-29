@@ -128,7 +128,7 @@ function nonEmptyString(v: unknown): v is string {
 }
 
 function isExecutor(v: unknown): v is Executor {
-  return v === 'claude' || v === 'codex';
+  return v === 'claude' || v === 'codex' || v === 'kimi';
 }
 
 function validateAction(obj: unknown): ValidateResult {
@@ -151,7 +151,9 @@ function validateAction(obj: unknown): ValidateResult {
     case 'create_subtask': {
       const { workspace, executor, brief, name } = params;
       if (!nonEmptyString(workspace)) return invalid('create_subtask.params.workspace is required.');
-      if (!isExecutor(executor)) return invalid('create_subtask.params.executor must be "claude" or "codex".');
+      if (!isExecutor(executor)) {
+        return invalid('create_subtask.params.executor must be "claude", "codex", or "kimi".');
+      }
       if (!nonEmptyString(brief)) return invalid('create_subtask.params.brief is required.');
       if (name !== undefined && typeof name !== 'string') return invalid('create_subtask.params.name must be a string.');
       return {

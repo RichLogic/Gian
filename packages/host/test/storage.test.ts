@@ -122,6 +122,112 @@ test('migrations are idempotent across reopens', () => {
   }
 });
 
+test('migration 033 allows Kimi NULL approval mode and exact native config JSON', () => {
+  const dir = makeTempDir();
+  try {
+    const db = openDatabase(dir);
+    const columns = db.prepare('PRAGMA table_info(sessions)').all() as Array<{
+      name: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+    const approvalMode = columns.find(column => column.name === 'approval_mode');
+    const executorConfig = columns.find(column => column.name === 'executor_config_json');
+    assert.equal(approvalMode?.notnull, 0);
+    assert.equal(executorConfig?.notnull, 1);
+    assert.equal(
+      executorConfig?.dflt_value,
+      `'{"schemaVersion":1,"values":{}}'`,
+    );
+
+    db.prepare(
+      'INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)',
+    ).run('w-kimi', 'Kimi', '/tmp/kimi');
+    db.prepare(
+      `INSERT INTO sessions (
+        id, workspace_id, executor, approval_mode, executor_config_json,
+        native_session_id
+      ) VALUES (?, ?, ?, NULL, ?, ?)`,
+    ).run(
+      's-kimi',
+      'w-kimi',
+      'kimi',
+      JSON.stringify({
+        schemaVersion: 1,
+        values: { model: 'kimi-k2', mode: 'yolo' },
+      }),
+      'native-kimi',
+    );
+    const row = db.prepare(
+      'SELECT approval_mode, executor_config_json FROM sessions WHERE id = ?',
+    ).get('s-kimi') as {
+      approval_mode: string | null;
+      executor_config_json: string;
+    };
+    assert.equal(row.approval_mode, null);
+    assert.deepEqual(JSON.parse(row.executor_config_json), {
+      schemaVersion: 1,
+      values: { model: 'kimi-k2', mode: 'yolo' },
+    });
+    assert.deepEqual(db.pragma('foreign_key_check'), []);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration 034 adds nullable context state and incomplete legacy totals', () => {
+  const dir = makeTempDir();
+  try {
+    const db = openDatabase(dir);
+    const columns = db.prepare('PRAGMA table_info(sessions)').all() as Array<{
+      name: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+    for (const name of [
+      'context_tokens_used',
+      'context_window_tokens',
+      'context_usage_updated_at',
+      'conversation_input_tokens',
+      'conversation_output_tokens',
+      'conversation_cached_input_tokens',
+      'conversation_total_tokens',
+      'conversation_usage_complete',
+    ]) {
+      assert.ok(columns.some(column => column.name === name), `sessions missing ${name}`);
+    }
+    assert.equal(
+      columns.find(column => column.name === 'conversation_usage_complete')?.dflt_value,
+      '0',
+    );
+
+    db.prepare('INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)')
+      .run('w-usage', 'Usage', '/tmp/usage');
+    db.prepare(
+      `INSERT INTO sessions (id, workspace_id, executor, native_session_id)
+       VALUES (?, ?, ?, ?)`,
+    ).run('s-legacy', 'w-usage', 'codex', 'native-usage');
+    const row = db.prepare(
+      `SELECT context_tokens_used, context_window_tokens,
+              conversation_total_tokens, conversation_usage_complete
+       FROM sessions WHERE id = ?`,
+    ).get('s-legacy') as {
+      context_tokens_used: number | null;
+      context_window_tokens: number | null;
+      conversation_total_tokens: number | null;
+      conversation_usage_complete: number;
+    };
+    assert.equal(row.context_tokens_used, null);
+    assert.equal(row.context_window_tokens, null);
+    assert.equal(row.conversation_total_tokens, null);
+    assert.equal(row.conversation_usage_complete, 0);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('loadConfig returns defaults from seeded config rows', () => {
   const dir = makeTempDir();
   try {

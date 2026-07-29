@@ -1,4 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { OpenFileCategory, OpenAppPrefs } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { parseUnifiedDiff } from '../transcript/apply.js';
@@ -192,76 +194,17 @@ function FileBody({ lines, scrollLine }: { lines: Array<[string, string, string?
   );
 }
 
-/** Minimal markdown renderer for tab preview mode — headings/paragraphs/lists/code fences. */
+/** Markdown renderer for file preview & plan bodies. Uses react-markdown +
+ *  remark-gfm so GFM tables, ordered lists, task lists, links and blockquotes
+ *  render properly — the previous hand-rolled parser knew only headings /
+ *  paragraphs / bullet lists / code fences and flattened everything else
+ *  (notably tables) into a run-on paragraph. Raw HTML stays disabled
+ *  (react-markdown's default: no rehype-raw) so previewed file contents can't
+ *  inject markup. Styling hangs off the shared `.md-preview` class. */
 function MarkdownPreview({ source }: { source: string }) {
-  type Block =
-    | { type: 'h'; lvl: number; text: string }
-    | { type: 'p'; text: string }
-    | { type: 'ul'; items: string[] }
-    | { type: 'code'; lang: string; code: string };
-  const rows = source.split('\n');
-  const blocks: Block[] = [];
-  let i = 0;
-  while (i < rows.length) {
-    const ln = rows[i] ?? '';
-    if (/^```/.test(ln)) {
-      const lang = ln.slice(3).trim();
-      const code: string[] = [];
-      i++;
-      while (i < rows.length && !/^```/.test(rows[i] ?? '')) { code.push(rows[i] ?? ''); i++; }
-      i++;
-      blocks.push({ type: 'code', lang, code: code.join('\n') });
-      continue;
-    }
-    const h = ln.match(/^(#{1,4})\s+(.*)$/);
-    if (h) { blocks.push({ type: 'h', lvl: h[1]!.length, text: h[2]! }); i++; continue; }
-    if (/^[-*]\s+/.test(ln)) {
-      const items: string[] = [];
-      while (i < rows.length && /^[-*]\s+/.test(rows[i] ?? '')) {
-        items.push((rows[i] ?? '').replace(/^[-*]\s+/, ''));
-        i++;
-      }
-      blocks.push({ type: 'ul', items });
-      continue;
-    }
-    if (ln.trim() === '') { i++; continue; }
-    const paras = [ln];
-    i++;
-    while (i < rows.length && (rows[i] ?? '').trim() !== '' && !/^(#{1,4}\s|[-*]\s|```)/.test(rows[i] ?? '')) {
-      paras.push(rows[i] ?? ''); i++;
-    }
-    blocks.push({ type: 'p', text: paras.join(' ') });
-  }
-  function inline(t: string, kp: number): React.ReactNode[] {
-    const parts: React.ReactNode[] = [];
-    let rest = t;
-    let key = kp;
-    while (rest.length) {
-      const m = rest.match(/`([^`]+)`|\*\*([^*]+)\*\*/);
-      if (!m) { parts.push(rest); break; }
-      if (m.index! > 0) parts.push(rest.slice(0, m.index));
-      if (m[1] !== undefined) parts.push(<code key={`c${key++}`}>{m[1]}</code>);
-      else parts.push(<strong key={`s${key++}`}>{m[2]}</strong>);
-      rest = rest.slice(m.index! + m[0].length);
-    }
-    return parts;
-  }
   return (
     <div className="md-preview">
-      {blocks.map((b, k) => {
-        if (b.type === 'h') {
-          const lvl = Math.min(b.lvl, 4) as 1 | 2 | 3 | 4;
-          const Tag = (`h${lvl}` as 'h1' | 'h2' | 'h3' | 'h4');
-          return <Tag key={k}>{inline(b.text, k * 100)}</Tag>;
-        }
-        if (b.type === 'p') return <p key={k}>{inline(b.text, k * 100)}</p>;
-        if (b.type === 'ul') return (
-          <ul key={k}>
-            {b.items.map((it, j) => <li key={j}>{inline(it, k * 100 + j)}</li>)}
-          </ul>
-        );
-        return <pre key={k} className="md-code"><code>{b.code}</code></pre>;
-      })}
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{source}</ReactMarkdown>
     </div>
   );
 }

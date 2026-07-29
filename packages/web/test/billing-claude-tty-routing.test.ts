@@ -10,11 +10,34 @@ import {
   betaComposerSubmitBehavior,
   formatBetaQuestionAnswers,
   isTurnRunning,
+  isSessionCreateDispatchError,
   planApprovalResponseDispatch,
   planBetaComposerSend,
   planCreatedSessionFirstMessage,
   toggleTtySurface,
 } from '../src/session-routing.js';
+
+describe('session:create error correlation', () => {
+  it('settles create state for executor-native AUTH_REQUIRED errors', () => {
+    expect(isSessionCreateDispatchError({
+      code: 'AUTH_REQUIRED',
+      request_type: 'session:create',
+    })).toBe(true);
+  });
+
+  it('keeps the legacy SESSION_CREATE_FAILED fallback', () => {
+    expect(isSessionCreateDispatchError({
+      code: 'SESSION_CREATE_FAILED',
+    })).toBe(true);
+  });
+
+  it('does not settle create state for unrelated errors', () => {
+    expect(isSessionCreateDispatchError({
+      code: 'AUTH_REQUIRED',
+      request_type: 'message:send',
+    })).toBe(false);
+  });
+});
 
 describe('betaComposerSubmitBehavior', () => {
   it('Beta with no pending question enqueues', () => {

@@ -2,7 +2,7 @@ export interface MsgItem {
   kind: 'user' | 'assistant';
   id: string;
   text: string;
-  exec: 'claude' | 'codex';
+  exec: import('@gian/shared').Executor;
   ts: number;
   turn: number;
   /** Local-only user echo awaiting the server's `user_message` event. */
@@ -156,12 +156,16 @@ export interface ApprovalItem {
    *  in place of the generic Allow once / Allow session / Decline. Maps to
    *  ApprovalDecision variants 1:1. */
   planActions?: ('accept_with_auto' | 'accept_with_ask' | 'keep_planning')[];
+  /** Exact executor-owned buttons for ACP-native permission requests. */
+  nativeOptions?: import('@gian/shared').NativeApprovalOption[];
+  nativeOptionId?: string;
   ts: number;
   turn: number;
 }
 
 export interface ApprovalActionContext {
   category?: import('@gian/shared').ApprovalCategory;
+  nativeOptionId?: string;
 }
 
 export interface DiffFile {
@@ -192,23 +196,6 @@ export type TranscriptItem =
   | WebSearchItem
   | AgentSpawnItem
   | AutoNoticeItem;
-
-export interface TokenUsage {
-  total: number;
-  input: number;
-  output: number;
-  cached: number;
-  /**
-   * Estimate of the conversation tokens sent on the most recent turn — i.e.
-   * what's currently in the model's context window. Drops after a /compact
-   * because the next turn ships a condensed history. The context bar should
-   * divide this by `contextWindow`, NOT `total`: for codex `total` is the
-   * session-lifetime cumulative sum and quickly exceeds `contextWindow`,
-   * pegging the bar at 100% forever.
-   */
-  contextUsed: number;
-  contextWindow?: number;
-}
 
 export type View = 'coding' | 'files' | 'workspaces' | 'bots';
 

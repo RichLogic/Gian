@@ -1,10 +1,27 @@
-import type { ApprovalCategory, ApprovalDecision, Executor, RuntimeMode, SessionStatus } from '@gian/shared';
+import type {
+  ApprovalCategory,
+  ApprovalDecision,
+  ErrorMessage,
+  Executor,
+  RuntimeMode,
+  SessionStatus,
+} from '@gian/shared';
 
 export interface CreatedSessionFirstMessagePlan {
   switchToTty: boolean;
   ttyText: string | null;
   structuredText: string | null;
   seedOptimisticEcho: boolean;
+}
+
+/** A session:create failure can carry an executor-native code (for example
+ * AUTH_REQUIRED), so the request correlation is authoritative. Keep the
+ * legacy code fallback for hosts that predate request_type. */
+export function isSessionCreateDispatchError(
+  error: Pick<ErrorMessage, 'code' | 'request_type'>,
+): boolean {
+  return error.request_type === 'session:create'
+    || error.code === 'SESSION_CREATE_FAILED';
 }
 
 /**

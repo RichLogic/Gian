@@ -84,6 +84,7 @@ describe('Composer TTY read-only controls', () => {
     expect(document.querySelector('.cmp-model-wrap')).toBeNull(); // model button
     expect(document.querySelector('.composer-mode')).toBeNull();  // PLAN/ASK/AUTO segment
     expect(document.querySelector('.slash-box')).toBeNull();      // slash button
+    expect(document.querySelector('.context-usage-anchor')).toBeNull();
     // No non-primary action buttons (slash / attachment / remote) — only Send.
     expect(document.querySelectorAll('.composer-act:not(.primary)').length).toBe(0);
     expect(document.querySelector('.composer-act.primary')).not.toBeNull(); // Send stays
@@ -97,14 +98,15 @@ describe('Composer TTY read-only controls', () => {
     expect(onJumpToCli).toHaveBeenCalledTimes(1);
   });
 
-  it('structured: keeps the interactive model / mode / slash controls and no read-only readout', () => {
+  it('structured: keeps interactive model and mode controls without visible slash or Remote buttons', () => {
     renderComposer(makeSession({ runtime_mode: 'structured' }));
 
     expect(document.querySelector('.composer-tty-meta')).toBeNull();
     expect(document.querySelector('.cmp-model-wrap')).not.toBeNull();
-    expect(document.querySelector('.composer-mode')).not.toBeNull();
-    expect(document.querySelector('.slash-box')).not.toBeNull();
-    // slash + attachment are present (no remote handler wired here).
-    expect(document.querySelectorAll('.composer-act:not(.primary)').length).toBe(2);
+    expect(document.querySelector('.cmp-approval-btn')).not.toBeNull();
+    expect(document.querySelector('.context-usage-anchor')).not.toBeNull();
+    expect(document.querySelector('.slash-box')).toBeNull();
+    // Only the disabled attachment action remains beside Send.
+    expect(document.querySelectorAll('.composer-act:not(.primary)').length).toBe(1);
   });
 });

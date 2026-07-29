@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { ApprovalDecision, ApprovalMode, RemoteControlState, RuntimeMode, Session, TtySurface, Workspace } from '@gian/shared';
+import type { ApprovalDecision, ApprovalMode, Executor, NativeConfigValue, RemoteControlState, RuntimeMode, Session, TtySurface, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { confirm, toast } from '../feedback.js';
 import { createWorkspace, loadBranches, loadRemoteBranches, loadRepoInfo } from '../api.js';
@@ -14,7 +14,7 @@ import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import { Terminal, makeSessionWire } from '../components/Terminal.js';
 import { Transcript } from '../transcript/Transcript.js';
 import { TranscriptMinimap } from '../transcript/TranscriptMinimap.js';
-import type { ApprovalActionContext, ApprovalItem, QueueEntry, TokenUsage, TranscriptItem } from '../types.js';
+import type { ApprovalActionContext, ApprovalItem, QueueEntry, TranscriptItem } from '../types.js';
 import type { GianWs } from '../ws.js';
 import {
   betaComposerSubmitBehavior,
@@ -77,8 +77,8 @@ export function relTime(iso: string): string {
 export interface CreateSessionInput {
   workspaceId: string;
   name: string;
-  executor: 'claude' | 'codex';
-  approvalMode: ApprovalMode;
+  executor: Executor;
+  approvalMode?: ApprovalMode;
   mode?: 'regular' | 'worktree';
   baseBranch?: string;
   /** User-chosen name for the branch the worktree will create. Optional —
@@ -96,7 +96,7 @@ export interface CreateSessionInput {
 export interface SessionCreateFormState {
   workspaceId: string;
   sessionName: string;
-  executor: 'claude' | 'codex';
+  executor: Executor;
   approvalMode: ApprovalMode;
   mode: 'regular' | 'worktree';
   baseBranch: string;
@@ -118,7 +118,7 @@ export function buildSessionCreatePayload(form: SessionCreateFormState): CreateS
     workspaceId: form.workspaceId,
     name: form.sessionName.trim(),
     executor: form.executor,
-    approvalMode: form.approvalMode,
+    ...(form.executor === 'kimi' ? {} : { approvalMode: form.approvalMode }),
     mode: form.mode,
     ...(form.mode === 'worktree' && form.baseBranch.trim() ? { baseBranch: form.baseBranch.trim() } : {}),
     ...(form.mode === 'worktree' && form.composedBranch ? { branch: form.composedBranch } : {}),
@@ -143,7 +143,6 @@ export interface CodingViewProps {
   itemsBySession: Record<string, TranscriptItem[]>;
   pendingBySession: Record<string, boolean>;
   ttyLockBySession: Record<string, { owner: boolean; reason?: string }>;
-  usageBySession: Record<string, TokenUsage>;
   queueBySession: Record<string, QueueEntry[]>;
   /** Codex plan-mode plan markdown per session, populated by plan_update. */
   planBySession: Record<string, string>;
@@ -194,6 +193,12 @@ export interface CodingViewProps {
   onSetMode: (sessionId: string, approvalMode: ApprovalMode, turns?: number) => void;
   onSetModel: (sessionId: string, model: string) => void;
   onSetEffort: (sessionId: string, effort: import('@gian/shared').ThinkingEffort | null) => void;
+  onSetServiceTier: (sessionId: string, tier: 'fast' | null) => void;
+  onSetNativeConfig: (
+    sessionId: string,
+    configId: string,
+    value: NativeConfigValue,
+  ) => void;
   onArchive: (sessionId: string, archived: boolean) => void;
   onDelete: (sessionId: string) => void;
   onRecover: (sessionId: string) => void;
@@ -300,7 +305,6 @@ export function CodingView(p: CodingViewProps) {
           items={p.itemsBySession[p.activeSession.id] ?? []}
           pending={p.pendingBySession[p.activeSession.id] ?? false}
           ttyLock={p.ttyLockBySession[p.activeSession.id]}
-          usage={p.usageBySession[p.activeSession.id] ?? null}
           queue={p.queueBySession[p.activeSession.id] ?? []}
           codexPlanText={p.planBySession[p.activeSession.id]}
           onSend={(text, opts) => p.onSend(p.activeSession!.id, text, opts)}
@@ -317,6 +321,9 @@ export function CodingView(p: CodingViewProps) {
           onSetMode={(mode, turns) => p.onSetMode(p.activeSession!.id, mode, turns)}
           onSetModel={model => p.onSetModel(p.activeSession!.id, model)}
           onSetEffort={effort => p.onSetEffort(p.activeSession!.id, effort)}
+          onSetServiceTier={tier => p.onSetServiceTier(p.activeSession!.id, tier)}
+          onSetNativeConfig={(configId, value) =>
+            p.onSetNativeConfig(p.activeSession!.id, configId, value)}
           onMerge={() => p.onMerge(p.activeSession!.id)}
           onDrop={() => p.onDrop(p.activeSession!.id)}
           onArchive={archived => p.onArchive(p.activeSession!.id, archived)}
@@ -394,7 +401,7 @@ function Sidebar({
   const [wsFilter, setWsFilter] = useState('all');
   // V2 sidebar state — search box + popover.
   const [search, setSearch] = useState('');
-  const [filterExec, setFilterExec] = useState<null | 'claude' | 'codex'>(null);
+  const [filterExec, setFilterExec] = useState<Executor | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
   const headRef = useRef<HTMLDivElement>(null);
 
@@ -589,13 +596,18 @@ function Sidebar({
               <div>
                 <div className="lbl">{t('coding.sidebar.filter.executor')}</div>
                 <div className="segm" style={{ width: '100%' }}>
-                  {([['', t('coding.sidebar.filter.all')], ['claude', 'Claude'], ['codex', 'Codex']] as const).map(([v, lbl]) => (
+                  {([
+                    ['', t('coding.sidebar.filter.all')],
+                    ['claude', 'Claude'],
+                    ['codex', 'Codex'],
+                    ['kimi', 'Kimi'],
+                  ] as const).map(([v, lbl]) => (
                     <button
                       key={v || 'all'}
                       type="button"
                       className={`segm-item${(filterExec ?? '') === v ? ' active' : ''}`}
                       style={{ flex: 1 }}
-                      onClick={() => setFilterExec(v === '' ? null : (v as 'claude' | 'codex'))}
+                      onClick={() => setFilterExec(v === '' ? null : v)}
                     >
                       {lbl}
                     </button>
@@ -933,7 +945,7 @@ function NewSessionView({
     workspaces.find(w => w.hidden !== 1)?.id ?? workspaces[0]?.id ?? ''
   );
   const [sessionName, setSessionName] = useState('');
-  const [executor, setExecutor] = useState<'claude' | 'codex'>('codex');
+  const [executor, setExecutor] = useState<Executor>('codex');
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask');
   const [mode, setMode] = useState<'regular' | 'worktree'>('regular');
   const [baseBranch, setBaseBranch] = useState('');
@@ -1127,7 +1139,10 @@ function NewSessionView({
                 <button
                   type="button"
                   className={`exec-card codex${executor === 'codex' ? ' active' : ''}`}
-                  onClick={() => setExecutor('codex')}
+                  onClick={() => {
+                    setExecutor('codex');
+                    if (approvalMode === 'plan') setApprovalMode('ask');
+                  }}
                 >
                   <div className="exec-card-dot" />
                   <div className="exec-card-body">
@@ -1138,7 +1153,12 @@ function NewSessionView({
                 <button
                   type="button"
                   className={`exec-card claude${executor === 'claude' ? ' active' : ''}`}
-                  onClick={() => setExecutor('claude')}
+                  onClick={() => {
+                    setExecutor('claude');
+                    if (approvalMode === 'custom' || approvalMode === 'full-access') {
+                      setApprovalMode('ask');
+                    }
+                  }}
                 >
                   <div className="exec-card-dot" />
                   <div className="exec-card-body">
@@ -1146,39 +1166,51 @@ function NewSessionView({
                     <div className="exec-card-desc">CLI plan</div>
                   </div>
                 </button>
+                <button
+                  type="button"
+                  className={`exec-card kimi${executor === 'kimi' ? ' active' : ''}`}
+                  onClick={() => setExecutor('kimi')}
+                >
+                  <div className="exec-card-dot" />
+                  <div className="exec-card-body">
+                    <div className="exec-card-name">Kimi Code</div>
+                    <div className="exec-card-desc">Moonshot AI · ACP</div>
+                  </div>
+                </button>
               </div>
             </div>
 
-            <div className="field">
+            {executor !== 'kimi' && <div className="field">
               <div className="field-lbl">
                 <span>{t('coding.new.approval')}</span>
                 <span className="field-hint">{t('coding.new.approval.hint')}</span>
               </div>
               <div className="segm" style={{ width: 'fit-content' }}>
-                <button
-                  type="button"
-                  className={`segm-item${approvalMode === 'plan' ? ' active' : ''}`}
-                  onClick={() => setApprovalMode('plan')}
-                >
-                  {t('mode.plan')}
-                </button>
-                <button
-                  type="button"
-                  className={`segm-item${approvalMode === 'ask' ? ' active' : ''}`}
-                  onClick={() => setApprovalMode('ask')}
-                >
-                  {t('mode.ask')}
-                </button>
-                <button
-                  type="button"
-                  className={`segm-item${approvalMode === 'auto' ? ' active' : ''}`}
-                  onClick={() => setApprovalMode('auto')}
-                >
-                  {t('mode.auto')}
-                </button>
+                {(executor === 'codex'
+                  ? [
+                      ['custom', t('mode.custom')],
+                      ['ask', t('composer.approval.ask.title')],
+                      ['auto', t('composer.approval.approve.title')],
+                      ['full-access', t('mode.full-access')],
+                    ] as Array<[ApprovalMode, string]>
+                  : [
+                      ['plan', t('mode.plan')],
+                      ['ask', t('mode.ask')],
+                      ['auto', t('mode.auto')],
+                    ] as Array<[ApprovalMode, string]>
+                ).map(([approval, label]) => (
+                  <button
+                    key={approval}
+                    type="button"
+                    className={`segm-item${approvalMode === approval ? ' active' : ''}`}
+                    onClick={() => setApprovalMode(approval)}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
               <div className="field-hint">{t('coding.new.approval.help')}</div>
-            </div>
+            </div>}
 
             <div className="field">
               <div className="field-lbl">
@@ -1292,7 +1324,6 @@ export function SessionMain({
   items,
   pending,
   ttyLock,
-  usage,
   queue,
   codexPlanText,
   onSend,
@@ -1309,6 +1340,8 @@ export function SessionMain({
   onSetMode,
   onSetModel,
   onSetEffort,
+  onSetServiceTier,
+  onSetNativeConfig,
   onMerge,
   onDrop,
   onArchive,
@@ -1334,7 +1367,6 @@ export function SessionMain({
   items: TranscriptItem[];
   pending: boolean;
   ttyLock?: { owner: boolean; reason?: string; alive?: boolean };
-  usage: TokenUsage | null;
   queue: QueueEntry[];
   codexPlanText?: string;
   ws: GianWs;
@@ -1379,6 +1411,8 @@ export function SessionMain({
   onSetMode: (mode: ApprovalMode, turns?: number) => void;
   onSetModel: (model: string) => void;
   onSetEffort: (effort: import('@gian/shared').ThinkingEffort | null) => void;
+  onSetServiceTier: (tier: 'fast' | null) => void;
+  onSetNativeConfig: (configId: string, value: NativeConfigValue) => void;
   onMerge: () => void | Promise<void>;
   onDrop: () => void | Promise<void>;
   onArchive: (archived: boolean) => void;
@@ -1740,6 +1774,8 @@ export function SessionMain({
             onSetMode={onSetMode}
             onSetModel={onSetModel}
             onSetEffort={onSetEffort}
+            onSetServiceTier={onSetServiceTier}
+            onSetNativeConfig={onSetNativeConfig}
             onJumpToCli={() => handleSelectSurface('cli')}
             disabled={pending || terminal || subtaskCompleted || ttyLockedOut || ttyDead || (isBeta && !!pendingQuestion)}
             running={isTurnRunning(session.status, pending)}
@@ -1755,127 +1791,5 @@ export function SessionMain({
         </>
       )}
     </main>
-  );
-}
-
-/**
- * Context strip + session kebab below the composer (PR5/A2 design).
- * Replaces the old `main-head-r` UsageChip + kebab combo.
- */
-function TokStrip({
-  usage,
-  isWorktree,
-  terminal,
-  archived,
-  onResetContext,
-  onArchive,
-  onDelete,
-  onRecover,
-  onMergeToBase,
-  onDropWorktree,
-}: {
-  usage: TokenUsage | null;
-  isWorktree: boolean;
-  terminal: boolean;
-  archived: boolean;
-  onResetContext: () => void;
-  onArchive: () => void;
-  onDelete: () => void;
-  onRecover: () => void;
-  onMergeToBase: () => void;
-  onDropWorktree: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (e: PointerEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('pointerdown', onPointerDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
-
-  const contextWindow = usage?.contextWindow ?? 200_000;
-  // contextUsed = last-turn prompt size (drops after /compact); using `total`
-  // would peg codex at 100% forever since `total` is session-cumulative.
-  const used = usage?.contextUsed ?? 0;
-  const ratio = usage ? Math.min(1, used / contextWindow) : 0;
-  const pct = ratio * 100;
-  const fillCls = pct >= 95 ? 'danger' : pct >= 85 ? 'warn' : '';
-  const compactHint = usage ? (pct >= 85 ? 'compact soon' : 'compact 90%') : '';
-
-  function fmtK(n: number): string {
-    if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
-    return String(n);
-  }
-
-  return (
-    <div className="tok-strip">
-      <span className="tok-strip-lbl">Context</span>
-      <span className="tok-strip-val">
-        {usage ? <><b>{fmtK(used)}</b> / {fmtK(contextWindow)}</> : <b>—</b>}
-      </span>
-      <div className="tok-bar" title={usage ? `${used.toLocaleString()} / ${contextWindow.toLocaleString()} tokens` : 'no usage data yet'}>
-        <div className={`tok-bar-fill ${fillCls}`} style={{ width: `${pct}%` }} />
-        <div className="tok-bar-mark" style={{ left: '90%' }} title="auto-compact threshold" />
-      </div>
-      {usage && <span className="tok-compact-hint">{compactHint}</span>}
-      <span className="spacer" />
-      <div className="ws-kebab-anchor ts-kebab" ref={ref}>
-        <button
-          type="button"
-          className="ws-kebab-btn"
-          onClick={() => setOpen(o => !o)}
-          title="Session menu"
-          aria-label="Session menu"
-        >
-          ⋯
-        </button>
-        {open && (
-          <div className="ws-kebab-pop">
-            {isWorktree && !terminal && (
-              <>
-                <button className="ws-kebab-item" onClick={() => { setOpen(false); onMergeToBase(); }}>
-                  Merge to base
-                </button>
-                <button className="ws-kebab-item danger" onClick={() => { setOpen(false); onDropWorktree(); }}>
-                  Drop worktree
-                </button>
-                <div className="ws-kebab-divider" />
-              </>
-            )}
-            <button className="ws-kebab-item" onClick={() => { setOpen(false); onArchive(); }}>
-              {archived ? 'Unarchive session' : 'Archive session'}
-            </button>
-            <div className="ws-kebab-divider" />
-            <button
-              className="ws-kebab-item"
-              title="Kill the spawned proxy/agent process and reset this session to idle. Use when Stop didn't work."
-              onClick={async () => {
-                setOpen(false);
-                const ok = await confirm({
-                  message: 'Force recover this session? Any in-flight turn will be killed.',
-                  danger: true,
-                  confirmLabel: 'Force recover',
-                });
-                if (ok) onRecover();
-              }}
-            >
-              Force recover
-            </button>
-            <button className="ws-kebab-item danger" onClick={() => { setOpen(false); onDelete(); }}>
-              Delete session
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
   );
 }

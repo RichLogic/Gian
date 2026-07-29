@@ -63,12 +63,14 @@ function setup(): Fixture {
   return { db, ex, mgr, eng, calls, dispose: () => { db.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
-test('ACTION-EXEC-001: create_subtask from PM with no loop → staged (not executed)', async () => {
+test('ACTION-EXEC-001: create_subtask from PM with no loop → executed directly (PM aligned in conversation)', async () => {
   const f = setup();
   try {
+    // No loop → execute. The PM aligns in natural language before emitting, so
+    // the human checkpoint already happened (works on Claude TTY, no chip).
     const r = await f.ex.handle({ session: f.mgr, action: CREATE, blockText: 'B1', hostTurnId: 'ta', sourceTurnKey: 'ta' });
-    assert.equal(r?.status, 'staged');
-    assert.equal(f.calls.createSubtask.length, 0);
+    assert.equal(r?.status, 'done');
+    assert.equal(f.calls.createSubtask.length, 1);
   } finally { f.dispose(); }
 });
 
@@ -156,6 +158,9 @@ test('ACTION-EXEC-001: submit_step from an engineer → executed (summary + wake
 test('ACTION-EXEC-001: confirmStaged executes a staged action', async () => {
   const f = setup();
   try {
+    // Staged now only arises from a loop restriction (no-loop → execute). A loop
+    // that doesn't allow create_subtask stages it for a user confirm.
+    insertLoop(f.db, { id: 'l1', task_id: 't1', max_rounds: 3, allowed_methods: ['message_subtask'] });
     const staged = await f.ex.handle({ session: f.mgr, action: CREATE, blockText: 'B5', hostTurnId: 'te', sourceTurnKey: 'te' });
     assert.equal(staged?.status, 'staged');
     const done = await f.ex.confirmStaged(staged!.action_id, f.mgr);
@@ -167,7 +172,9 @@ test('ACTION-EXEC-001: confirmStaged executes a staged action', async () => {
 test('ACTION-EXEC-001: rejectStaged rejects without executing', async () => {
   const f = setup();
   try {
+    insertLoop(f.db, { id: 'l1', task_id: 't1', max_rounds: 3, allowed_methods: ['message_subtask'] });
     const staged = await f.ex.handle({ session: f.mgr, action: CREATE, blockText: 'B6', hostTurnId: 'tf', sourceTurnKey: 'tf' });
+    assert.equal(staged?.status, 'staged');
     const rejected = f.ex.rejectStaged(staged!.action_id);
     assert.equal(rejected?.status, 'rejected');
     assert.equal(f.calls.createSubtask.length, 0);

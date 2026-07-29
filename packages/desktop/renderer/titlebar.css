@@ -1,0 +1,25 @@
+/*
+ * Injected by the Electron shell only. The regular browser UI keeps its
+ * original layout, while the desktop window lets Gian's topbar occupy the
+ * native titlebar row beside the macOS traffic lights.
+ */
+.topbar {
+  padding-left: max(82px, calc(env(titlebar-area-x, 0px) + 8px)) !important;
+  -webkit-app-region: drag;
+  app-region: drag;
+  user-select: none;
+}
+
+.topbar button,
+.topbar a,
+.topbar input,
+.topbar select,
+.topbar textarea,
+.topbar [contenteditable="true"],
+.topbar [role="button"],
+.topbar [role="menu"],
+.topbar [role="menuitem"],
+.topbar [role="menuitemradio"] {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}

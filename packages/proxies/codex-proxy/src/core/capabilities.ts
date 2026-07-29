@@ -1,8 +1,5 @@
 import type { ModelCapabilities, ThinkingLevel } from './types.js';
 
-const THINKING_ORDER: ThinkingLevel[] = ['minimal', 'low', 'medium', 'high', 'xhigh'];
-const THINKING_RANK = new Map(THINKING_ORDER.map((entry, index) => [entry, index]));
-
 type RuntimeEffortEntry =
   | string
   | {
@@ -21,10 +18,7 @@ type RuntimeModelRecord = {
 };
 
 function normalizeThinking(value: unknown): ThinkingLevel | null {
-  if (value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh') {
-    return value;
-  }
-  return null;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 function supportedThinking(entries: RuntimeEffortEntry[] | undefined) {
@@ -37,7 +31,7 @@ function supportedThinking(entries: RuntimeEffortEntry[] | undefined) {
     }
   }
 
-  return [...values].sort((left, right) => (THINKING_RANK.get(left) ?? 99) - (THINKING_RANK.get(right) ?? 99));
+  return [...values];
 }
 
 function defaultThinking(record: RuntimeModelRecord, supported: ThinkingLevel[]) {

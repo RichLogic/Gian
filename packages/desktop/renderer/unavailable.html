@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src 'self'; script-src 'self'; style-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gian is unavailable</title>
+    <link rel="stylesheet" href="./unavailable.css" />
+  </head>
+  <body>
+    <div class="window-drag-region" aria-hidden="true"></div>
+    <main>
+      <img class="logo" src="./gian-icon.svg" alt="" width="72" height="72" />
+      <p class="eyebrow">GIAN DESKTOP</p>
+      <h1 id="title">Gian is unavailable</h1>
+      <p class="message" id="message">
+        The desktop app could not connect to the Gian host.
+      </p>
+      <code id="target"></code>
+      <div class="actions">
+        <button id="retry" type="button">Retry</button>
+        <button id="logs" class="secondary" type="button">Open logs</button>
+      </div>
+      <p class="status" id="status" role="status" aria-live="polite"></p>
+    </main>
+    <script src="./unavailable.js"></script>
+  </body>
+</html>

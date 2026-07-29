@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ApprovalDecision, ApprovalMode, Bot, EventEnvelope, RemoteControlState, RunnerInfo, RuntimeMode, ServerToClientMessage, Session, Task, TtySurface, Workspace } from '@gian/shared';
+import type { ApprovalDecision, ApprovalMode, Bot, EventEnvelope, Executor, RemoteControlState, RunnerInfo, RuntimeMode, ServerToClientMessage, Session, Task, TtySurface, Workspace } from '@gian/shared';
 import { LocaleProvider } from './i18n/index.js';
 import { EN } from './i18n/en.js';
 import { ZH } from './i18n/zh.js';
@@ -13,7 +13,7 @@ import type { SheetOpenWith } from './components/Sheet.js';
 import { buildFileRefIndex, makeFileLinkifyRehype } from './transcript/linkify-files.js';
 import { FileRefRehypeContext } from './transcript/items.js';
 import { isWithinRoot, longestRootMatch } from './utils/paths.js';
-import { applyEnvelope, applyErrorEnvelopeToSession, applyPlanUpdate, createOptimisticEcho, nextPendingFromEnvelope, parseTokenUsage } from './transcript/apply.js';
+import { applyEnvelope, applyErrorEnvelopeToSession, applyPlanUpdate, createOptimisticEcho, nextPendingFromEnvelope } from './transcript/apply.js';
 import { loadNotificationPrefs, maybeNotifyForEnvelope } from './notifications.js';
 import {
   applyApprovalCreated,
@@ -28,7 +28,8 @@ import {
   type InboxItem,
 } from './inbox.js';
 import { PendingTtySwitch } from './tty-switch.js';
-import { DiffOpenContext, FileLinkOpenContext, PlanOpenContext } from './transcript/items.js';
+import { DiffOpenContext, FileLinkOpenContext, ImageZoomContext, PlanOpenContext } from './transcript/items.js';
+import { ImageLightbox, type ZoomImage } from './components/ImageLightbox.js';
 import { Topbar } from './components/Topbar.js';
 import type { Mode, ViewState } from './components/Topbar.js';
 import type { PathSegment, SessionMenuActions } from './components/PathBreadcrumb.js';
@@ -50,9 +51,14 @@ import { BotsView } from './views/BotsView.js';
 import { FilesView } from './views/FilesView.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import type { SystemConfig } from '@gian/shared';
-import { stripManagerSystemPrefix, parseCreateSubtaskProposal, stripCreateSubtaskBlocks, wrapManagerContextNote, stripGianRolePrefix, stripGianActionBlocks } from '@gian/shared';
-import type { QueueEntry, TokenUsage, TranscriptItem } from './types.js';
-import { planBetaComposerSend, planCreatedSessionFirstMessage, resolveChatView } from './session-routing.js';
+import { stripManagerSystemPrefix, stripCreateSubtaskBlocks, wrapManagerContextNote, stripGianRolePrefix, stripGianActionBlocks } from '@gian/shared';
+import type { QueueEntry, TranscriptItem } from './types.js';
+import {
+  isSessionCreateDispatchError,
+  planBetaComposerSend,
+  planCreatedSessionFirstMessage,
+  resolveChatView,
+} from './session-routing.js';
 
 export function App() {
   // The token getter runs every reconnect. With Auth dropped in Phase 1, this
@@ -79,16 +85,17 @@ export function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeSubtaskId, setActiveSubtaskId] = useState<string | null>(null);
-  // Per-Task static "subtask action" cards (created / dismissed) that live in
-  // the Manager conversation (PRD-v3 §A2 follow-up). App-level so they survive
+  // Per-Task static manual subtask-created cards that live in the Manager
+  // conversation. App-level so they survive
   // ManagerPanel unmount when you navigate between tasks/subtasks. Each card's
   // `acked` flag tracks whether its context note has been folded into a Manager
   // message yet.
   const [managerCardsByTask, setManagerCardsByTask] = useState<Record<string, ManagerSubtaskCard[]>>({});
   // Debug switch (early Manager bring-up): when ON, the Manager transcript shows
-  // the raw "plumbing" — the first-turn system prompt and the create_subtask
-  // proposal blocks — instead of stripping them. Defaults ON; flip OFF once the
-  // Manager UX is trusted to restore the clean render. Persisted in localStorage.
+  // the raw "plumbing" — the first-turn system prompt plus legacy
+  // create_subtask blocks / current action envelopes — instead of stripping
+  // them. Defaults ON; flip OFF once the Manager UX is trusted to restore the
+  // clean render. Persisted in localStorage.
   const [showManagerRaw, setShowManagerRaw] = useState<boolean>(() => {
     try { return localStorage.getItem('gian.manager.debugRaw') !== '0'; } catch { return true; }
   });
@@ -97,7 +104,6 @@ export function App() {
   }, [showManagerRaw]);
   const [itemsBySession, setItemsBySession] = useState<Record<string, TranscriptItem[]>>({});
   const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
-  const [usageBySession, setUsageBySession] = useState<Record<string, TokenUsage>>({});
   const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
   const [ttyLockBySession, setTtyLockBySession] = useState<Record<string, { owner: boolean; reason?: string; alive?: boolean }>>({});
   const [remoteControlBySession, setRemoteControlBySession] = useState<Record<string, RemoteControlState>>({});
@@ -120,6 +126,9 @@ export function App() {
   const [systemConfig, setSystemConfig] = useState<SystemConfig | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteInitialQuery, setPaletteInitialQuery] = useState<string | undefined>(undefined);
+  // Image tapped in a transcript bubble → shown in the in-app lightbox
+  // (ImageZoomContext below), instead of opening a new browser tab.
+  const [zoomImage, setZoomImage] = useState<ZoomImage | null>(null);
   const [archivedSessions, setArchivedSessions] = useState<Session[]>([]);
   const [archivedLoaded, setArchivedLoaded] = useState(false);
   const [pathRenameActive, setPathRenameActive] = useState(false);
@@ -215,7 +224,7 @@ export function App() {
         type: 'session:create',
         workspace_id: session.workspace_id,
         executor,
-        approval_mode: session.approval_mode,
+        ...(session.approval_mode ? { approval_mode: session.approval_mode } : {}),
         name: `${baseName} copy`,
         ...(isWorktree
           ? { mode: 'worktree', ...(session.base_branch ? { base_branch: session.base_branch } : {}) }
@@ -246,7 +255,7 @@ export function App() {
     return () => document.removeEventListener('keydown', onKey);
   }, [mode, activeSessionId, activeTaskId, activeSubtaskId, ws]);
 
-  const handleEnvelope = useCallback((env: EventEnvelope, executor: 'claude' | 'codex') => {
+  const handleEnvelope = useCallback((env: EventEnvelope, executor: Executor) => {
     const notifyingSession = sessionsRef.current.find(s => s.id === env.session_id) ?? null;
     maybeNotifyForEnvelope(env, {
       session: notifyingSession,
@@ -263,10 +272,6 @@ export function App() {
     const nextPending = nextPendingFromEnvelope(env);
     if (nextPending !== null) {
       setPendingBySession(p => ({ ...p, [env.session_id]: nextPending }));
-    }
-    if (env.event === 'token_usage.updated') {
-      const usage = parseTokenUsage(env.data);
-      if (usage) setUsageBySession(prev => ({ ...prev, [env.session_id]: usage }));
     }
     // Codex plan-mode: plan_update either streams (delta:true → append) or
     // finalizes (delta:false → replace). PlanChip subscribes to this state.
@@ -412,6 +417,32 @@ export function App() {
           }
           return;
         }
+        case 'session:native-config':
+          setSessions(prev => prev.map(session =>
+            session.id === msg.session_id
+              ? {
+                  ...session,
+                  executor_config: msg.state,
+                  native_config_options: msg.options,
+                }
+              : session));
+          setArchivedSessions(prev => prev.map(session =>
+            session.id === msg.session_id
+              ? {
+                  ...session,
+                  executor_config: msg.state,
+                  native_config_options: msg.options,
+                }
+              : session));
+          return;
+        case 'session:slash-commands':
+          window.dispatchEvent(new CustomEvent('gian:session-slash-commands', {
+            detail: {
+              sessionId: msg.session_id,
+              commands: msg.commands,
+            },
+          }));
+          return;
         case 'tty:lock':
           setTtyLockBySession(prev => ({
             ...prev,
@@ -484,7 +515,7 @@ export function App() {
             });
             setPendingBySession(p => ({ ...p, [sid]: false }));
           }
-          if (msg.code === 'SESSION_CREATE_FAILED') {
+          if (isSessionCreateDispatchError(msg)) {
             setCreatingSession(false);
             setForkingSession(false);
           }
@@ -589,14 +620,6 @@ export function App() {
         [],
       );
       setItemsBySession(prev => ({ ...prev, [activeSessionId]: items }));
-      // Backfill token usage from the latest token_usage.updated event.
-      for (let i = events.length - 1; i >= 0; i--) {
-        if (events[i]!.event === 'token_usage.updated') {
-          const usage = parseTokenUsage(events[i]!.data);
-          if (usage) setUsageBySession(prev => ({ ...prev, [activeSessionId]: usage }));
-          break;
-        }
-      }
     });
   }, [activeSessionId, itemsBySession, sessions, archivedSessions]);
 
@@ -1178,8 +1201,14 @@ export function App() {
           ws.send({ type: 'session:recover', session_id: mgr.id });
         },
         onDelete: async () => {
+          // Cascade: the host deletes the task's PM + subtask sessions too, so
+          // warn with the count (the delete is permanent, no orphaning).
+          const ownedCount = sessions.filter(s => s.task_id === task.id).length;
+          const cascade = ownedCount > 0
+            ? ` ${appT('tasks.remove.cascade').replace('{n}', String(ownedCount))}`
+            : '';
           const ok = await confirmDialog({
-            message: `${appT('tasks.remove.confirmPrefix')} "${task.name || appT('tasks.untitled')}"? ${appT('tasks.remove.confirmSuffix')}`,
+            message: `${appT('tasks.remove.confirmPrefix')} "${task.name || appT('tasks.untitled')}"? ${appT('tasks.remove.confirmSuffix')}${cascade}`,
             danger: true,
             confirmLabel: appT('common.delete'),
           });
@@ -1229,7 +1258,7 @@ export function App() {
         },
       } : {}),
       ...(isSubtask ? {} : {
-      onFork: (executor: 'claude' | 'codex') => {
+      onFork: (executor: Executor) => {
         // Clone every property the host accepts on session:create except
         // `branch` (worktrees must own a unique branch — let the host
         // auto-generate). Name = original + " copy". Executor is the
@@ -1244,7 +1273,9 @@ export function App() {
           type: 'session:create',
           workspace_id: activeSession.workspace_id,
           executor,
-          approval_mode: activeSession.approval_mode,
+          ...(executor !== 'kimi' && activeSession.approval_mode
+            ? { approval_mode: activeSession.approval_mode }
+            : {}),
           name: `${baseName} copy`,
           ...(isWorktree
             ? {
@@ -1412,6 +1443,7 @@ export function App() {
       approvalId: string,
       decision: ApprovalDecision,
       answers?: Record<string, string | string[]>,
+      context?: import('./types.js').ApprovalActionContext,
     ) =>
       ws.send({
         type: 'approval:resolve',
@@ -1419,6 +1451,9 @@ export function App() {
         approval_id: approvalId,
         decision,
         ...(answers ? { answers } : {}),
+        ...(context?.nativeOptionId
+          ? { native_option_id: context.nativeOptionId }
+          : {}),
       }),
     onLocalApprovalResolve: (
       sessionId: string,
@@ -1435,7 +1470,7 @@ export function App() {
       // from the JSONL watcher is harmless: apply.ts dedupes by
       // approvalId, preserves status, and won't blank answeredWith.
       const session = sessionsRef.current.find(s => s.id === sessionId);
-      const executor = session?.executor === 'codex' ? 'codex' : 'claude';
+      const executor = session?.executor ?? 'claude';
       handleEnvelope({
         session_id: sessionId,
         turn: 0,
@@ -1483,6 +1518,19 @@ export function App() {
       ws.send({ type: 'session:set_model', session_id: sessionId, model }),
     onSetEffort: (sessionId: string, effort: import('@gian/shared').ThinkingEffort | null) =>
       ws.send({ type: 'session:set_effort', session_id: sessionId, effort }),
+    onSetServiceTier: (sessionId: string, tier: 'fast' | null) =>
+      ws.send({ type: 'session:set_service_tier', session_id: sessionId, service_tier: tier }),
+    onSetNativeConfig: (
+      sessionId: string,
+      configId: string,
+      value: import('@gian/shared').NativeConfigValue,
+    ) =>
+      ws.send({
+        type: 'session:set_native_config',
+        session_id: sessionId,
+        config_id: configId,
+        value,
+      }),
     onArchive: (id: string, archived: boolean) =>
       ws.send({ type: 'session:archive', session_id: id, archived }),
     onDelete: (id: string) => ws.send({ type: 'session:delete', session_id: id }),
@@ -1566,11 +1614,10 @@ export function App() {
   const rawManagerItems = activeManagerSession
     ? (itemsBySession[activeManagerSession.id] ?? [])
     : [];
-  // Display: strip the system prefix (user msg) and the create_subtask proposal
-  // blocks (assistant msg) so the transcript reads as clean prose (spec §A2) —
+  // Display: strip the system prefix (user msg) and legacy create_subtask blocks
+  // / current action envelopes (assistant msg) so the transcript reads as clean prose —
   // UNLESS the debug `showManagerRaw` switch is on, which surfaces the raw
-  // plumbing for early bring-up. The create_subtask confirm card still renders
-  // either way (it's parsed from rawManagerItems below, independent of this).
+  // plumbing for early bring-up.
   const managerItems = showManagerRaw
     ? rawManagerItems
     : rawManagerItems.map(it =>
@@ -1578,36 +1625,10 @@ export function App() {
           : it.kind === 'assistant' ? { ...it, text: stripGianActionBlocks(stripCreateSubtaskBlocks(it.text)) }
           : it,
       );
-  // Latest Manager `create_subtask` proposal (spec §A2), parsed from the RAW
-  // assistant text and resolved to a prefilled subtask draft for the confirm
-  // card. workspace name/path → id: exact path first, then a UNIQUE name match
-  // (names aren't unique — ambiguous/0 → leave unset, user picks). Codex R2 #6.
-  const managerProposal = useMemo<Partial<NewSubtaskDraft> | null>(() => {
-    for (let i = rawManagerItems.length - 1; i >= 0; i--) {
-      const it = rawManagerItems[i];
-      if (!it || it.kind !== 'assistant') continue;
-      const p = parseCreateSubtaskProposal(it.text);
-      if (!p) continue;
-      const visible = workspaces.filter(w => w.hidden !== 1);
-      let wsId: string | undefined;
-      if (p.workspace) {
-        const byPath = visible.find(w => w.path === p.workspace);
-        if (byPath) wsId = byPath.id;
-        else {
-          const lower = p.workspace.toLowerCase();
-          const byName = visible.filter(w => w.name.toLowerCase() === lower);
-          if (byName.length === 1) wsId = byName[0]!.id;
-        }
-      }
-      return {
-        prompt: p.prompt,
-        ...(p.name ? { name: p.name } : {}),
-        ...(p.executor ? { executor: p.executor } : {}),
-        ...(wsId ? { workspace_id: wsId } : {}),
-      };
-    }
-    return null;
-  }, [rawManagerItems, workspaces]);
+  // The Manager no longer proposes subtasks into a card/chip. It aligns in
+  // natural language and emits a `<<gian:action>>` the host executes directly
+  // (surface-agnostic — works in web AND Claude TTY). Manual creation still uses
+  // the NewSubtaskForm (header "Create subtask from this" button).
   const managerPending = activeManagerSession
     ? (pendingBySession[activeManagerSession.id] ?? activeManagerSession.status === 'running')
     : false;
@@ -1622,14 +1643,17 @@ export function App() {
       onSetModel: (model) => sessionMainHandlers.onSetModel(managerSessionId, model),
       onSetMode: (mode, turns) => sessionMainHandlers.onSetMode(managerSessionId, mode, turns),
       onSetEffort: (effort) => sessionMainHandlers.onSetEffort(managerSessionId, effort),
+      onSetServiceTier: (tier) => sessionMainHandlers.onSetServiceTier(managerSessionId, tier),
+      onSetNativeConfig: (configId, value) =>
+        sessionMainHandlers.onSetNativeConfig(managerSessionId, configId, value),
       onSendSkill: (name, path) => sessionMainHandlers.onSendSkill(managerSessionId, name, path),
       onQueueAdd: (t) => sessionMainHandlers.onQueueAdd(managerSessionId, t),
       onQueueRemove: (queueId) => sessionMainHandlers.onQueueRemove(managerSessionId, queueId),
       onQueueReorder: (order) => sessionMainHandlers.onQueueReorder(managerSessionId, order),
       onQueueClear: () => sessionMainHandlers.onQueueClear(managerSessionId),
       onQueueSendNow: () => sessionMainHandlers.onQueueSendNow(managerSessionId),
-      onApprove: (approvalId, decision, answers) =>
-        sessionMainHandlers.onApprove(managerSessionId, approvalId, decision, answers),
+      onApprove: (approvalId, decision, answers, context) =>
+        sessionMainHandlers.onApprove(managerSessionId, approvalId, decision, answers, context),
     };
     // sessionMainHandlers is a fresh object each render but closes only over
     // stable refs/setters, so keying the memo on the session id is sufficient.
@@ -1638,7 +1662,7 @@ export function App() {
 
   // Hydrate a session's transcript from the REST event log if not loaded yet.
   // Shared shape with the activeSessionId hydration effect above.
-  const hydrateTranscript = useCallback((sessionId: string, exec: 'claude' | 'codex') => {
+  const hydrateTranscript = useCallback((sessionId: string, exec: Executor) => {
     if (itemsBySession[sessionId] !== undefined) return;
     void loadEvents(sessionId).then(events => {
       const items = events.reduce<TranscriptItem[]>(
@@ -1699,7 +1723,7 @@ export function App() {
   ) => {
     // §A2 follow-up: fold any not-yet-acknowledged subtask-action notes into a
     // hidden, sentinel-wrapped context block prepended to the message — so the
-    // Manager learns "the user created/dismissed subtask X" without a separate
+    // Manager learns "the user created manual subtask X" without a separate
     // turn. The optimistic echo uses the BARE text; the reconciler strips the
     // wrapper (and so does managerItems unless showManagerRaw is on).
     const cards = managerCardsByTaskRef.current[taskId] ?? [];
@@ -1796,25 +1820,6 @@ export function App() {
     });
   }, []);
 
-  // §A2 follow-up: the user declined a subtask proposal. Leave a static
-  // "dismissed" card in the conversation and queue its context for the Manager.
-  const onDismissSubtaskProposal = useCallback((taskId: string, draft: NewSubtaskDraft) => {
-    const wsLabel = workspacesRef.current.find(w => w.id === draft.workspace_id)?.name;
-    setManagerCardsByTask(prev => ({
-      ...prev,
-      [taskId]: [...(prev[taskId] ?? []), {
-        id: `dismissed:${taskId}:${crypto.randomUUID()}`,
-        status: 'dismissed',
-        executor: draft.executor,
-        prompt: draft.prompt?.trim() ?? '',
-        ...(draft.name ? { name: draft.name } : {}),
-        ...(wsLabel ? { workspaceLabel: wsLabel } : {}),
-        ts: Date.now(),
-        acked: false,
-      }],
-    }));
-  }, []);
-
   // ─── Dock state (Phase 1: only Search + Inbox are wired) ─────────────────
   const onJumpToSessionFromInbox = (sid: string) => {
     setActiveSessionId(sid);
@@ -1907,14 +1912,14 @@ export function App() {
         items={itemsBySession[subtask.id] ?? []}
         pending={pendingBySession[subtask.id] ?? false}
         ttyLock={ttyLockBySession[subtask.id]}
-        usage={usageBySession[subtask.id] ?? null}
         queue={queueBySession[subtask.id] ?? []}
         codexPlanText={planBySession[subtask.id]}
         onSend={(text, opts) => sessionMainHandlers.onSend(subtask.id, text, opts)}
         onBetaSend={(text, opts) => sessionMainHandlers.onBetaSend(subtask.id, text, opts)}
         onSendSkill={(name, path) => sessionMainHandlers.onSendSkill(subtask.id, name, path)}
         onStop={() => sessionMainHandlers.onStop(subtask.id)}
-        onApprove={(approvalId, decision, answers) => sessionMainHandlers.onApprove(subtask.id, approvalId, decision, answers)}
+        onApprove={(approvalId, decision, answers, context) =>
+          sessionMainHandlers.onApprove(subtask.id, approvalId, decision, answers, context)}
         onLocalApprovalResolve={(approvalId, decision, answers) => sessionMainHandlers.onLocalApprovalResolve(subtask.id, approvalId, decision, answers)}
         onQueueAdd={text => sessionMainHandlers.onQueueAdd(subtask.id, text)}
         onQueueRemove={queueId => sessionMainHandlers.onQueueRemove(subtask.id, queueId)}
@@ -1924,6 +1929,9 @@ export function App() {
         onSetMode={(approvalMode, turns) => sessionMainHandlers.onSetMode(subtask.id, approvalMode, turns)}
         onSetModel={model => sessionMainHandlers.onSetModel(subtask.id, model)}
         onSetEffort={effort => sessionMainHandlers.onSetEffort(subtask.id, effort)}
+        onSetServiceTier={tier => sessionMainHandlers.onSetServiceTier(subtask.id, tier)}
+        onSetNativeConfig={(configId, value) =>
+          sessionMainHandlers.onSetNativeConfig(subtask.id, configId, value)}
         onMerge={() => sessionMainHandlers.onMerge(subtask.id)}
         onDrop={() => sessionMainHandlers.onDrop(subtask.id)}
         onArchive={archived => sessionMainHandlers.onArchive(subtask.id, archived)}
@@ -1951,6 +1959,7 @@ export function App() {
 
   return (
     <LocaleProvider locale={locale}>
+    <ImageZoomContext.Provider value={(src, alt) => setZoomImage({ src, alt })}>
     <div className="app">
       <Topbar
         mode={mode}
@@ -1963,6 +1972,7 @@ export function App() {
         viewState={viewState}
         onSetViewState={setViewState}
       />
+      <ImageLightbox image={zoomImage} onClose={() => setZoomImage(null)} />
       <CommandPalette
         open={paletteOpen}
         onClose={() => { setPaletteOpen(false); setPaletteInitialQuery(undefined); }}
@@ -1995,7 +2005,6 @@ export function App() {
               pendingBySession={pendingBySession}
               ttyLockBySession={ttyLockBySession}
               remoteControlBySession={remoteControlBySession}
-              usageBySession={usageBySession}
               queueBySession={queueBySession}
               planBySession={planBySession}
               onLoadArchived={async () => {
@@ -2013,7 +2022,9 @@ export function App() {
                   type: 'session:create',
                   workspace_id: input.workspaceId,
                   executor: input.executor,
-                  approval_mode: input.approvalMode,
+                  ...(input.executor !== 'kimi' && input.approvalMode
+                    ? { approval_mode: input.approvalMode }
+                    : {}),
                   ...(input.name ? { name: input.name } : {}),
                   ...(input.mode ? { mode: input.mode } : {}),
                   ...(input.baseBranch ? { base_branch: input.baseBranch } : {}),
@@ -2040,6 +2051,8 @@ export function App() {
               onSetMode={sessionMainHandlers.onSetMode}
               onSetModel={sessionMainHandlers.onSetModel}
               onSetEffort={sessionMainHandlers.onSetEffort}
+              onSetServiceTier={sessionMainHandlers.onSetServiceTier}
+              onSetNativeConfig={sessionMainHandlers.onSetNativeConfig}
               onRename={sessionMainHandlers.onRename}
               onShowChanges={() => { toggleInspector('changes'); }}
               activeWorkingTreeId={defaultWorkingTreeIdFor(activeSession)}
@@ -2074,7 +2087,7 @@ export function App() {
                   type: 'session:create',
                   workspace_id: input.workspaceId,
                   executor: input.executor,
-                  approval_mode: 'auto',
+                  ...(input.executor === 'kimi' ? {} : { approval_mode: 'auto' as const }),
                   mode: 'worktree',
                   ...(input.baseBranch ? { base_branch: input.baseBranch } : {}),
                   ...(input.branch ? { branch: input.branch } : {}),
@@ -2088,12 +2101,12 @@ export function App() {
               sessions={sessions}
               workspaces={workspaces}
               ws={ws}
+              defaultTaskExecutor={systemConfig?.default_task_executor ?? 'claude'}
               activeTaskId={activeTaskId}
               activeSubtaskId={activeSubtaskId}
               managerSession={activeManagerSession}
               managerItems={managerItems}
               managerPending={managerPending}
-              managerProposal={managerProposal}
               managerCards={activeTaskId ? (managerCardsByTask[activeTaskId] ?? []) : []}
               managerHandlers={managerHandlers}
               managerQueue={managerQueue}
@@ -2103,7 +2116,6 @@ export function App() {
               onManagerSend={onManagerSend}
               onManagerStop={onManagerStop}
               onCreateSubtask={onCreateSubtask}
-              onDismissSubtaskProposal={onDismissSubtaskProposal}
               onSelectTask={(taskId) => { setActiveTaskId(taskId); setActiveSubtaskId(null); }}
               onSelectSubtask={(taskId, subtaskId) => { setActiveTaskId(taskId); setActiveSubtaskId(subtaskId); }}
               subtaskMain={subtaskMain}
@@ -2193,7 +2205,7 @@ export function App() {
                           type: 'session:create',
                           workspace_id: input.workspaceId,
                           executor: input.executor,
-                          approval_mode: 'auto',
+                          ...(input.executor === 'kimi' ? {} : { approval_mode: 'auto' as const }),
                           mode: 'worktree',
                           ...(input.baseBranch ? { base_branch: input.baseBranch } : {}),
                           ...(input.branch ? { branch: input.branch } : {}),
@@ -2290,6 +2302,7 @@ export function App() {
       )}
       <Toaster />
     </div>
+    </ImageZoomContext.Provider>
     </LocaleProvider>
   );
 }

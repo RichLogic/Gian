@@ -1,0 +1,11 @@
+-- 031_tasks_manager_executor.sql — per-Task PM executor choice.
+--
+-- Until now the Task Manager (PM) was hard-coded to codex (MANAGER_EXECUTOR in
+-- manager-session.ts). The gian-task design (proposal gian-task-pm-engineer §4.2)
+-- makes the PM's executor a per-Task choice (claude | codex). The user picks it
+-- at task-creation time via the sidebar "+" (hover → Claude/Codex; plain click →
+-- the `default_task_executor` config default, itself defaulting to claude).
+--
+-- Nullable: legacy tasks (created before this column) carry NULL and fall back
+-- to the config default when their Manager session is first ensured.
+ALTER TABLE tasks ADD COLUMN manager_executor TEXT;   -- 'claude' | 'codex' | NULL

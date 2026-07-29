@@ -6,8 +6,10 @@ import type {
   ApprovalPolicy,
   ApprovalsReviewer,
   CollaborationMode,
+  ConfiguredPermissions,
   InputItem,
   SandboxMode,
+  SandboxPolicy,
   ThinkingLevel,
 } from '../core/types.js';
 import type { CodexRuntime } from './types.js';
@@ -70,10 +72,67 @@ function toSandboxPolicy(sandbox: SandboxMode) {
   }
 }
 
-/** The simple `sandbox` field on `thread/start` accepts the kebab-case enum
- *  directly, so this is a pass-through with explicit narrowing. */
-function toThreadSandbox(sandbox: SandboxMode) {
-  return sandbox;
+interface ThreadBootstrapResponse {
+  thread?: { id?: unknown };
+  approvalPolicy?: unknown;
+  approvalsReviewer?: unknown;
+  sandbox?: unknown;
+  activePermissionProfile?: { id?: unknown } | null;
+}
+
+function normalizeConfiguredPermissions(response: ThreadBootstrapResponse): ConfiguredPermissions {
+  const approvalPolicy = response.approvalPolicy;
+  const approvalsReviewer = response.approvalsReviewer;
+  const sandboxPolicy = response.sandbox;
+  const permissions = response.activePermissionProfile?.id;
+  if (
+    !(
+      approvalPolicy === 'untrusted'
+      || approvalPolicy === 'on-failure'
+      || approvalPolicy === 'on-request'
+      || approvalPolicy === 'never'
+      || (
+        approvalPolicy
+        && typeof approvalPolicy === 'object'
+        && 'granular' in approvalPolicy
+      )
+    )
+  ) {
+    throw new Error('Codex thread response omitted its effective approval policy.');
+  }
+  const normalizedApprovalPolicy = approvalPolicy as ApprovalPolicy;
+  if (
+    approvalsReviewer !== 'user'
+    && approvalsReviewer !== 'auto_review'
+    && approvalsReviewer !== 'guardian_subagent'
+  ) {
+    throw new Error('Codex thread response omitted its effective approvals reviewer.');
+  }
+  if (typeof permissions === 'string' && permissions) {
+    return { approvalPolicy: normalizedApprovalPolicy, approvalsReviewer, permissions };
+  }
+  if (!sandboxPolicy || typeof sandboxPolicy !== 'object' || typeof (sandboxPolicy as { type?: unknown }).type !== 'string') {
+    throw new Error('Codex thread response omitted its effective sandbox policy.');
+  }
+  return {
+    approvalPolicy: normalizedApprovalPolicy,
+    approvalsReviewer,
+    sandboxPolicy: sandboxPolicy as SandboxPolicy,
+  };
+}
+
+function normalizeThreadBootstrap(response: unknown) {
+  const record = response && typeof response === 'object'
+    ? response as ThreadBootstrapResponse
+    : {};
+  const threadId = record.thread?.id;
+  if (typeof threadId !== 'string' || !threadId) {
+    throw new Error('Codex thread response omitted its thread id.');
+  }
+  return {
+    thread: { id: threadId },
+    configuredPermissions: normalizeConfiguredPermissions(record),
+  };
 }
 
 interface PendingRequest {
@@ -226,21 +285,17 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
     model?: string | null;
     ephemeral?: boolean;
   }) {
-    // Permissive thread-level defaults; per-turn `startTurn` overrides decide
-    // the actual policy on every turn.
-    return this.request('thread/start', {
+    const response = await this.request('thread/start', {
       cwd: options.cwd,
-      sandbox: toThreadSandbox('workspace-write'),
-      approvalPolicy: 'on-request',
-      approvalsReviewer: 'user',
       experimentalRawEvents: false,
       ...(options.model ? { model: options.model } : {}),
       ...(options.ephemeral ? { ephemeral: true } : {}),
-    }) as Promise<{ thread: { id: string } }>;
+    });
+    return normalizeThreadBootstrap(response);
   }
 
   async resumeThread(threadId: string) {
-    return this.request('thread/resume', { threadId });
+    return normalizeThreadBootstrap(await this.request('thread/resume', { threadId }));
   }
 
   async readThread(threadId: string) {
@@ -267,6 +322,8 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
       model?: string | null;
       thinking?: ThinkingLevel | null;
       sandbox?: SandboxMode | null;
+      sandboxPolicy?: SandboxPolicy | null;
+      permissions?: string | null;
       approvalPolicy?: ApprovalPolicy | null;
       approvalsReviewer?: ApprovalsReviewer | null;
       collaborationMode?: CollaborationMode | null;
@@ -274,15 +331,21 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
       serviceTier?: 'fast' | 'flex' | null;
     } = {},
   ) {
+    const sandboxParams = options.permissions
+      ? { permissions: options.permissions }
+      : options.sandboxPolicy
+        ? { sandboxPolicy: options.sandboxPolicy }
+        : options.sandbox
+          ? { sandboxPolicy: toSandboxPolicy(options.sandbox) }
+          : {};
     return this.request('turn/start', {
       threadId,
       input,
       ...(options.model ? { model: options.model } : {}),
       ...(options.thinking ? { effort: options.thinking } : {}),
-      ...(options.sandbox ? { sandboxPolicy: toSandboxPolicy(options.sandbox) } : {}),
+      ...sandboxParams,
       ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
       ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {}),
-      ...(options.collaborationMode ? { mode: options.collaborationMode } : {}),
       ...(options.reasoningSummary ? { summary: options.reasoningSummary } : {}),
       ...(options.serviceTier ? { serviceTier: options.serviceTier } : {}),
     }) as Promise<{ turn: { id: string; status: string } }>;

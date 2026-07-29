@@ -1,7 +1,10 @@
 import type {
+  ExecutorConfigState,
   Executor,
   InitializeResult,
   InputItem,
+  NativeConfigOption,
+  NativeConfigValue,
   ProxyCapabilities,
   ProxyNotification,
   ProxySession,
@@ -33,7 +36,12 @@ export interface ProxyClient {
    */
   createSession(
     params: CreateSessionParams,
-  ): Promise<{ session: ProxySession; nativeSessionId: string }>;
+  ): Promise<{
+    session: ProxySession;
+    nativeSessionId: string;
+    configOptions?: NativeConfigOption[];
+    replayUpdates?: unknown[];
+  }>;
   startTurn(params: StartTurnParams): Promise<{ session: ProxySession; turn: { id: string } }>;
   interruptTurn(sessionId: string): Promise<void>;
   respondApproval(params: RespondApprovalParams): Promise<void>;
@@ -47,13 +55,24 @@ export interface ProxyClient {
    * session JSONL on rename), so the method is optional.
    */
   setName?(name: string): Promise<void>;
+  /** Executor-native session configuration (Kimi ACP today). */
+  getNativeConfig?(): Promise<{
+    state: ExecutorConfigState;
+    options: NativeConfigOption[];
+  }>;
+  setNativeConfig?(configId: string, value: NativeConfigValue): Promise<{
+    state: ExecutorConfigState;
+    options: NativeConfigOption[];
+  }>;
+  /** Executor-native session discovery (Kimi ACP session/list today). */
+  listNativeSessions?(params?: { cwd?: string; cursor?: string }): Promise<unknown>;
   shutdown(): Promise<void>;
   /**
-   * Tear the proxy session down hard, bypassing any graceful RPC. cc-proxy
-   * SIGKILLs its node child + child claude process; codex-proxy fires a
-   * non-awaited `session.close` to the shared host so the rest of the codex
-   * sessions stay up. Used by SessionManager.forceRecover when a session is
-   * wedged in a way that interruptTurn can't unstick.
+   * Tear the proxy session down without waiting on a graceful RPC. cc-proxy
+   * SIGKILLs its node child + child Claude process; shared Codex/Kimi hosts
+   * fire a non-awaited per-session close so their other sessions stay up.
+   * Used by SessionManager.forceRecover when interruptTurn cannot unstick a
+   * session.
    */
   forceKill(): void;
   onNotification(handler: NotificationHandler): () => void;
@@ -66,10 +85,15 @@ export interface CreateSessionParams {
   /** codex-only: start a thread that should not be materialized on disk. */
   ephemeral?: boolean;
   /** Adopt an existing native session: claudeSessionId for cc, threadId for
-   *  codex. When set, the proxy resumes the on-disk session instead of
-   *  generating a fresh id. */
+   *  Codex, or nativeSessionId for ACP-backed executors. */
   claudeSessionId?: string;
   threadId?: string;
+  /** Generic native id for executors whose protocol is not cc/codex. */
+  nativeSessionId?: string;
+  /** `load` replays history for first adoption; `resume` only reattaches. */
+  resumeMode?: 'load' | 'resume';
+  /** ACP MCP declarations. Empty in Gian's first Kimi slice. */
+  mcpServers?: unknown[];
 }
 
 /**
@@ -94,6 +118,8 @@ export interface StartTurnParams {
 
   // codex-only
   sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access' | null;
+  /** Restore the config.toml-derived Codex policy captured on attach. */
+  useConfiguredPermissions?: boolean;
   approvalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never' | null;
   approvalsReviewer?: 'user' | 'auto_review' | null;
   collaborationMode?: 'plan' | 'default' | null;
@@ -117,6 +143,8 @@ export interface RespondApprovalParams {
    *  uses these to feed the agent back via the `updatedInput.answers`
    *  channel; codex-proxy ignores. */
   answers?: Record<string, string | string[]>;
+  /** Exact executor-owned option ID for ACP-native approvals. */
+  nativeOptionId?: string;
 }
 
 export type NotificationHandler = (notification: ProxyNotification) => void;

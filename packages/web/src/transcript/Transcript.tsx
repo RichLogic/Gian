@@ -223,7 +223,7 @@ function countActions(items: TranscriptItem[], t: (key: string) => string): stri
 }
 
 /** A non-event node interleaved into the transcript by timestamp — e.g. the
- *  Manager's `created/dismissed` subtask cards, which must read in-line at the
+ *  Manager's manual subtask-created cards, which must read in-line at the
  *  point in the conversation where the user acted, not all at the bottom. */
 export interface TranscriptExtra {
   id: string;
@@ -301,7 +301,7 @@ export function Transcript({
           // chunks within a single text block). Any intervening item — user
           // message, turn-actions block, approval, error, or diff — counts as
           // a sender break, so the next text gets a fresh header.
-          let prevSender: 'user' | 'claude' | 'codex' | null = null;
+          let prevSender: 'user' | import('@gian/shared').Executor | null = null;
           // Drop the approval card pinned in the dock so it doesn't render
           // twice. Only the *pending* card is docked; once resolved the dock
           // releases it (hiddenApprovalId clears) and the resolved card shows

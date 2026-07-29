@@ -143,6 +143,11 @@ export function loadConfig(db: Db): SystemConfig {
     default_claude_effort: map.get('default_claude_effort') ?? '',
     default_codex_model: map.get('default_codex_model') ?? '',
     default_codex_effort: map.get('default_codex_effort') ?? '',
+    default_task_executor: map.get('default_task_executor') === 'codex'
+      ? 'codex'
+      : map.get('default_task_executor') === 'kimi'
+        ? 'kimi'
+        : 'claude',
     auth_username: map.get('auth_username') ?? '',
     external_editors: externalEditors,
     open_apps: openApps,

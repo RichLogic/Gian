@@ -4,7 +4,7 @@
 //        the user text, so the server `user_message` echo differs from the
 //        client's bare optimistic echo. applyEnvelope must reconcile them by
 //        comparing the STRIPPED server text.
-//   #2 — The "subtask created / dismissed" context note that gets folded into
+//   #2 — The "subtask created" context note that gets folded into
 //        the Manager's next message: wrapManagerContextNote wraps it in the
 //        sentinels (so the transcript strips it) and managerCardContextNote
 //        renders a sensible LLM-facing summary.
@@ -91,12 +91,5 @@ describe('#2: Manager context note', () => {
     expect(note).toContain('Wire it');
     expect(note).toContain('Gian-Dev');
     expect(note).toContain('codex');
-  });
-
-  it('summarises a dismissed card for the LLM', () => {
-    const card: ManagerSubtaskCard = {
-      id: 'd1', status: 'dismissed', executor: 'claude', prompt: 'nope', ts: 1000, acked: false,
-    };
-    expect(managerCardContextNote(card)).toContain('dismissed your subtask proposal');
   });
 });

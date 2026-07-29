@@ -761,29 +761,6 @@
 }
 .attach-chip svg { width: 10px; height: 10px; color: var(--text-3); }
 
-/* Token usage strip under composer */
-.tok-strip {
-  max-width: 820px;
-  margin: 4px auto 0;
-  display: flex; align-items: center; gap: 14px;
-  padding: 2px 4px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-3);
-  flex-wrap: nowrap;
-  white-space: nowrap;
-}
-.tok-strip b { color: var(--text-2); font-weight: 600; }
-.tok-strip .spacer { flex: 1; }
-.tok-bar {
-  flex: 1; height: 2px;
-  background: var(--surface-2);
-  border-radius: 1px;
-  overflow: hidden;
-  max-width: 120px;
-}
-.tok-bar-fill { height: 100%; background: var(--accent); }
-
 /* Inspector empty state */
 .inspector-empty {
   flex: 1;
@@ -1075,7 +1052,7 @@
 }
 
 /* ============================================================
-   Composer extras: slash button + tok-strip upgrade + session menu
+   Composer extras: slash button + session menu
    ============================================================ */
 .slash-btn {
   width: 22px; height: 22px;
@@ -1093,47 +1070,6 @@
   font-size: 13px;
   font-weight: 700;
   line-height: 1;
-}
-
-.tok-strip-lbl {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  text-transform: none;
-  letter-spacing: 0.06em;
-  color: var(--text-3);
-}
-.tok-strip-val { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); }
-.tok-strip-val b { color: var(--text-2); }
-.tok-bar {
-  position: relative;
-  flex: 1; height: 3px;
-  max-width: 220px;
-  background: var(--surface-2);
-  border-radius: 2px;
-  overflow: visible;
-}
-.tok-bar-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 200ms var(--ease); }
-.tok-bar-fill.warn  { background: var(--warn); }
-.tok-bar-fill.danger { background: var(--danger); animation: breath 1.6s ease-in-out infinite; }
-.tok-bar-mark {
-  position: absolute; top: -2px; bottom: -2px;
-  width: 1px;
-  background: var(--text-3);
-  opacity: 0.45;
-}
-.tok-bar-mark::after {
-  content: "";
-  position: absolute; top: -2px; left: -2px;
-  width: 5px; height: 5px;
-  background: var(--text-3);
-  opacity: 0.6;
-  border-radius: 50%;
-}
-.tok-compact-hint {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-3);
-  white-space: nowrap;
 }
 
 /* ============================================================

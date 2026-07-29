@@ -11,16 +11,42 @@
 
 export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 
-export type ApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never';
+export type ApprovalPolicy =
+  | 'untrusted'
+  | 'on-failure'
+  | 'on-request'
+  | 'never'
+  | {
+    granular: {
+      sandbox_approval: boolean;
+      rules: boolean;
+      skill_approval: boolean;
+      request_permissions: boolean;
+      mcp_elicitations: boolean;
+    };
+  };
 
-export type ApprovalsReviewer = 'user' | 'auto_review';
+export type ApprovalsReviewer = 'user' | 'auto_review' | 'guardian_subagent';
 
 export type CollaborationMode = 'plan' | 'default';
 
 export type SessionStatus = 'idle' | 'running' | 'needs-approval' | 'stale' | 'closed' | 'error';
-export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+/** Opaque Codex effort id returned by model/list. */
+export type ThinkingLevel = string;
 export type ApprovalScope = 'once' | 'session';
 export type ApprovalDecision = 'accept' | 'decline';
+
+export interface SandboxPolicy {
+  type: string;
+  [key: string]: unknown;
+}
+
+export interface ConfiguredPermissions {
+  approvalPolicy: ApprovalPolicy;
+  approvalsReviewer: ApprovalsReviewer;
+  permissions?: string;
+  sandboxPolicy?: SandboxPolicy;
+}
 
 export interface TextInputItem {
   type: 'text';
@@ -47,6 +73,7 @@ export interface SessionRecord {
   id: string;
   cwd: string;
   threadId: string;
+  configuredPermissions: ConfiguredPermissions;
   model: string | null;
   thinking: ThinkingLevel | null;
   status: SessionStatus;
@@ -150,6 +177,9 @@ export interface StartTurnParams {
   thinking?: ThinkingLevel | null;
   /** Sandbox layer (filesystem / network access boundary). */
   sandbox?: SandboxMode | null;
+  /** Restore the config.toml-derived policy captured when this thread was
+   *  attached. Used by the Codex "Custom" composer mode. */
+  useConfiguredPermissions?: boolean;
   /** When codex should ask for approval. */
   approvalPolicy?: ApprovalPolicy | null;
   /** Who reviews approvals — `user` relays to host, `auto_review` is a codex

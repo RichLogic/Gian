@@ -229,7 +229,7 @@
   .manager-status-dot { animation: none; }
 }
 
-/* ---- Inline subtask-action cards in the Manager conversation (issue #2) ---- */
+/* ---- Inline manual subtask-created cards in the Manager conversation ---- */
 .manager-subtask-card {
   display: flex; gap: 10px; align-items: flex-start;
   max-width: 720px; width: 100%;
@@ -239,7 +239,6 @@
   border: 1px solid var(--hairline);
   border-radius: var(--r-3);
 }
-.manager-subtask-card.dismissed { opacity: 0.72; }
 .msc-icon {
   flex: 0 0 auto; width: 20px; height: 20px; margin-top: 1px;
   border-radius: 50%;
@@ -247,7 +246,6 @@
   color: #fff;
 }
 .msc-icon.created { background: var(--ok); }
-.msc-icon.dismissed { background: var(--text-3); }
 .msc-body { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 4px; }
 .msc-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .msc-status { font: 600 var(--fz-12)/1.2 var(--font-sans); color: var(--text); flex: 0 0 auto; }
@@ -319,6 +317,12 @@
   background: var(--surface);
   border: 1px solid var(--hairline);
   border-radius: var(--r-2);
+}
+.tasks-new-pm {
+  display: flex; align-items: center; gap: 6px;
+  font: var(--fz-11)/1.2 var(--font-sans);
+  color: var(--text-3);
+  margin: 0 2px 2px;
 }
 .tasks-new-input {
   width: 100%;

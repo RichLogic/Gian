@@ -2,8 +2,10 @@ import type {
   ApprovalPolicy,
   ApprovalsReviewer,
   CollaborationMode,
+  ConfiguredPermissions,
   InputItem,
   SandboxMode,
+  SandboxPolicy,
   ThinkingLevel,
 } from '../core/types.js';
 
@@ -25,15 +27,16 @@ export interface RuntimeEventSource {
 
 export interface CodexRuntime extends RuntimeEventSource {
   ensureStarted(): Promise<void>;
-  /** Start a fresh thread. The thread-level sandbox is just the initial
-   *  state — actual sandbox/approval policy is set per-turn via `startTurn`,
-   *  so we use a permissive default here (workspace-write). */
+  /** Start a fresh thread using Codex's effective config. */
   startThread(options: {
     cwd: string;
     model?: string | null;
     ephemeral?: boolean;
-  }): Promise<{ thread: { id: string } }>;
-  resumeThread(threadId: string): Promise<unknown>;
+  }): Promise<{ thread: { id: string }; configuredPermissions: ConfiguredPermissions }>;
+  resumeThread(threadId: string): Promise<{
+    thread: { id: string };
+    configuredPermissions: ConfiguredPermissions;
+  }>;
   readThread(threadId: string): Promise<{ thread: unknown }>;
   compactThread(threadId: string): Promise<unknown>;
   startTurn(
@@ -44,6 +47,10 @@ export interface CodexRuntime extends RuntimeEventSource {
       thinking?: ThinkingLevel | null;
       /** Per-turn sandbox override (codex `sandboxPolicy` on TurnStartParams). */
       sandbox?: SandboxMode | null;
+      /** Exact sandbox policy captured from the thread response. */
+      sandboxPolicy?: SandboxPolicy | null;
+      /** Named permissions profile captured from the thread response. */
+      permissions?: string | null;
       /** Per-turn approval policy override. */
       approvalPolicy?: ApprovalPolicy | null;
       /** Per-turn approvals reviewer override. `auto_review` lets codex's

@@ -4,11 +4,12 @@ import { createNodeWebSocket } from '@hono/node-ws';
 import { setCookie, deleteCookie } from 'hono/cookie';
 import { fileURLToPath } from 'node:url';
 import type { Db } from '../storage/db.js';
-import type { BotExtra, BotMode, IMPlatform, SystemConfig } from '@gian/shared';
+import type { ApprovalMode, BotExtra, BotMode, Executor, IMPlatform, SystemConfig } from '@gian/shared';
 import { WsBroadcaster } from './ws-broadcast.js';
 import { ProxyManager } from '../proxy/manager.js';
 import { SessionManager } from '../session/manager.js';
 import { TaskManager } from '../task/manager.js';
+import { deleteTaskCascade } from '../task/delete-cascade.js';
 import { ApprovalManager } from '../approval/index.js';
 import { QueueManager } from '../queue/index.js';
 import { NativeJsonlWatcher } from '../native/watcher.js';
@@ -81,6 +82,7 @@ import {
   readAttachment,
   writeAttachment,
 } from '../storage/attachments.js';
+import type { CliRuntimeManager } from '../runtime/manager.js';
 
 export interface AppContext {
   db: Db;
@@ -88,7 +90,9 @@ export interface AppContext {
   dataDir: string;
   ccProxyEntry: string;
   codexProxyEntry?: string;
+  kimiProxyEntry?: string;
   codexBin?: string;
+  runtimeManager?: CliRuntimeManager;
 }
 
 export interface AppHandle {
@@ -106,7 +110,9 @@ export function createApp(ctx: AppContext): AppHandle {
     dataDir: ctx.dataDir,
     ccProxyEntry: ctx.ccProxyEntry,
     codexProxyEntry: ctx.codexProxyEntry,
+    kimiProxyEntry: ctx.kimiProxyEntry,
     codexBin: ctx.codexBin,
+    runtimeManager: ctx.runtimeManager,
   });
   const approvals = new ApprovalManager(broadcaster);
   const queue = new QueueManager(ctx.db);
@@ -125,7 +131,8 @@ export function createApp(ctx: AppContext): AppHandle {
   // Beta queue: drain the next queued message into the PTY when a turn ends.
   tty.setTurnCompleteHandler((sid, finalText, turnKey) => sessions.handleTtyTurnComplete(sid, finalText, turnKey));
   // gian-task durability: re-drive any action rows a prior crash/restart left
-  // non-terminal (no-op unless GIAN_TASK_ROLES is on and rows are pending).
+  // non-terminal. Manager actions are always-on; coding/subtask actions still
+  // respect GIAN_TASK_ROLES inside SessionManager.
   sessions.resumePendingTaskActions();
 
   // Codex CLI runtime coordinator. No hooks (codex has no `--settings`
@@ -554,14 +561,23 @@ export function createApp(ctx: AppContext): AppHandle {
   });
 
   app.post('/api/tasks', async c => {
-    const body = await c.req.json<{ name?: string; description?: string | null }>();
+    const body = await c.req.json<{ name?: string; description?: string | null; executor?: Executor }>();
     if (typeof body.name !== 'string' || body.name.trim() === '') {
       return c.json({ error: 'name required' }, 400);
+    }
+    if (
+      body.executor !== undefined
+      && body.executor !== 'claude'
+      && body.executor !== 'codex'
+      && body.executor !== 'kimi'
+    ) {
+      return c.json({ error: 'executor must be claude, codex, or kimi' }, 400);
     }
     try {
       const task = tasks.createTask({
         name: body.name,
         ...(body.description !== undefined ? { description: body.description } : {}),
+        ...(body.executor !== undefined ? { manager_executor: body.executor } : {}),
       });
       broadcaster.broadcast({ type: 'task:created', task });
       return c.json(task);
@@ -594,11 +610,11 @@ export function createApp(ctx: AppContext): AppHandle {
     }
   });
 
-  app.delete('/api/tasks/:id', c => {
+  app.delete('/api/tasks/:id', async c => {
     const id = c.req.param('id');
     if (!tasks.getTask(id)) return c.json({ error: 'task not found' }, 404);
     try {
-      tasks.deleteTask(id);
+      await deleteTaskCascade(tasks, sessions, id);
       broadcaster.broadcast({ type: 'task:deleted', task_id: id });
       return c.json({ ok: true });
     } catch (err) {
@@ -626,8 +642,8 @@ export function createApp(ctx: AppContext): AppHandle {
     if (typeof body.workspace_id !== 'string' || body.workspace_id === '') {
       return c.json({ error: 'workspace_id required' }, 400);
     }
-    if (body.executor !== 'claude' && body.executor !== 'codex') {
-      return c.json({ error: 'executor must be claude or codex' }, 400);
+    if (body.executor !== 'claude' && body.executor !== 'codex' && body.executor !== 'kimi') {
+      return c.json({ error: 'executor must be claude, codex, or kimi' }, 400);
     }
     try {
       const session = await sessions.createSession({
@@ -764,7 +780,7 @@ export function createApp(ctx: AppContext): AppHandle {
     }
   });
 
-  // PRD-v3 P3 — per-Task Manager. The Manager is a read-only Codex session
+  // PRD-v3 P3 — per-Task Manager. The Manager is an executor-backed session
   // (type='manager') bound to the hidden root workspace. These routes avoid a
   // new shared WS message: ensure-manager returns the session (also broadcast
   // as `session:created` so state_sync picks it up), and the web then renders
@@ -959,6 +975,24 @@ export function createApp(ctx: AppContext): AppHandle {
     }
   });
 
+  app.get('/api/sessions/:id/native-config', async c => {
+    try {
+      return c.json(await sessions.getNativeConfig(c.req.param('id')));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return c.json({ error: message }, 400);
+    }
+  });
+
+  app.get('/api/sessions/:id/slash', async c => {
+    try {
+      return c.json(await sessions.listSessionSlashCommands(c.req.param('id')));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return c.json({ error: message }, 400);
+    }
+  });
+
   // Files browser — scoped to a workspace's root path. Path traversal outside
   // the workspace is rejected.
   app.get('/api/workspaces/:id/tree', async c => {
@@ -1069,9 +1103,9 @@ export function createApp(ctx: AppContext): AppHandle {
   });
 
   // Adopt a native session as a new Gian session. Body: {executor,
-  // native_session_id, name?, approval_mode?}. Creates a Gian session row
-  // bound to the native UUID, replays the on-disk JSONL into the events
-  // table for transcript display, and lets the proxy resume from there.
+  // native_session_id, name?, approval_mode?}. Claude/Codex replay JSONL;
+  // Kimi loads through ACP and atomically persists its provisional replay.
+  // approval_mode must be omitted for Kimi.
   app.post('/api/workspaces/:id/native-sessions/adopt', async c => {
     const id = c.req.param('id');
     const ws = ctx.db.prepare('SELECT id, path FROM workspaces WHERE id = ?').get(id) as
@@ -1080,15 +1114,15 @@ export function createApp(ctx: AppContext): AppHandle {
     if (!ws) return c.json({ error: 'workspace not found' }, 404);
 
     const body = await c.req.json<{
-      executor?: 'claude' | 'codex';
+      executor?: Executor;
       native_session_id?: string;
       name?: string;
-      approval_mode?: 'plan' | 'ask' | 'auto';
+      approval_mode?: ApprovalMode;
     }>();
     const executor = body.executor;
     const nativeId = body.native_session_id;
-    if (executor !== 'claude' && executor !== 'codex') {
-      return c.json({ error: 'executor must be claude or codex' }, 400);
+    if (executor !== 'claude' && executor !== 'codex' && executor !== 'kimi') {
+      return c.json({ error: 'executor must be claude, codex, or kimi' }, 400);
     }
     if (!nativeId) {
       return c.json({ error: 'native_session_id required' }, 400);
@@ -1108,6 +1142,35 @@ export function createApp(ctx: AppContext): AppHandle {
       }, 409);
     }
 
+    if (executor === 'kimi') {
+      if (body.approval_mode !== undefined) {
+        return c.json({
+          error: 'Kimi uses executor-native mode; approval_mode must be omitted',
+        }, 400);
+      }
+      try {
+        const result = await sessions.adoptKimiNativeSession({
+          workspaceId: ws.id,
+          cwd: ws.path,
+          nativeSessionId: nativeId,
+          ...(body.name ? { name: body.name } : {}),
+        });
+        return c.json(result);
+      } catch (error) {
+        const value = error as { code?: unknown; sessionId?: unknown; message?: unknown };
+        const message = typeof value.message === 'string' ? value.message : String(error);
+        if (value.code === 'SESSION_ALREADY_EXISTS') {
+          return c.json({
+            error: message,
+            ...(typeof value.sessionId === 'string'
+              ? { gian_session_id: value.sessionId }
+              : {}),
+          }, 409);
+        }
+        return c.json({ error: message }, value.code === 'AUTH_REQUIRED' ? 401 : 400);
+      }
+    }
+
     // Verify the native session actually exists by scanning.
     const { scanNativeSessions } = await import('../native/scanner.js');
     const candidates = await scanNativeSessions(ws.path);
@@ -1119,6 +1182,9 @@ export function createApp(ctx: AppContext): AppHandle {
     const sessionId = (await import('node:crypto')).randomUUID();
     const now = new Date().toISOString();
     const approvalMode = body.approval_mode ?? 'ask';
+    if ((approvalMode === 'custom' || approvalMode === 'full-access') && executor !== 'codex') {
+      return c.json({ error: `${approvalMode} approval mode is codex-only` }, 400);
+    }
     const sessionName = body.name?.trim() || `adopted ${nativeId.slice(0, 8)}`;
 
     ctx.db
@@ -1147,31 +1213,30 @@ export function createApp(ctx: AppContext): AppHandle {
     const { clearNativeSessionsCache } = await import('../native/scanner.js');
     clearNativeSessionsCache();
 
-    const session = ctx.db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+    const session = sessions.getSession(sessionId);
 
     // Broadcast to all WS clients so the Coding view sidebar picks up the
     // newly adopted session immediately. Without this the user would have
     // to refresh to see it.
-    if (session) {
-      broadcaster.broadcast({
-        type: 'session:created',
-        session: session as import('@gian/shared').Session,
-      });
-    }
+    broadcaster.broadcast({ type: 'session:created', session });
 
     return c.json({ session, replay });
   });
 
-  // Delete a native session from disk. cc: rm the .jsonl file. codex: TODO
-  // archive RPC (for now we also rm to keep symmetry; archive can be added
-  // when codex-proxy exposes a method for it). Refuses if the session is
-  // currently adopted as a Gian session.
+  // Delete a Claude/Codex native session from disk. Kimi does not advertise a
+  // destructive ACP session method, so its rows are intentionally read-only.
+  // Refuses if the session is currently adopted as a Gian session.
   app.delete('/api/workspaces/:id/native-sessions/:nativeId', async c => {
     const id = c.req.param('id');
     const nativeId = c.req.param('nativeId');
-    const executor = c.req.query('executor') as 'claude' | 'codex' | undefined;
-    if (executor !== 'claude' && executor !== 'codex') {
-      return c.json({ error: 'executor query param must be claude or codex' }, 400);
+    const executor = c.req.query('executor') as Executor | undefined;
+    if (executor !== 'claude' && executor !== 'codex' && executor !== 'kimi') {
+      return c.json({ error: 'executor query param must be claude, codex, or kimi' }, 400);
+    }
+    if (executor === 'kimi') {
+      return c.json({
+        error: 'Kimi ACP does not expose destructive native-session deletion.',
+      }, 400);
     }
     const ws = ctx.db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
       | { path: string }
@@ -1213,9 +1278,8 @@ export function createApp(ctx: AppContext): AppHandle {
     return c.json({ ok: true });
   });
 
-  // List native sessions (claude / codex JSONL files on disk) that ran inside
-  // this workspace's path. Cross-references the sessions table to mark which
-  // ones are already adopted as Gian sessions.
+  // List Claude/Codex sessions from JSONL and Kimi sessions through ACP.
+  // Cross-reference Gian bindings to mark sessions that are already adopted.
   app.get('/api/workspaces/:id/native-sessions', async c => {
     const id = c.req.param('id');
     const ws = ctx.db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
@@ -1224,7 +1288,14 @@ export function createApp(ctx: AppContext): AppHandle {
     if (!ws) return c.json({ error: 'workspace not found' }, 404);
 
     const { scanNativeSessions } = await import('../native/scanner.js');
-    const sessions = await scanNativeSessions(ws.path);
+    const diskSessions = await scanNativeSessions(ws.path);
+    let kimiSessions: import('@gian/shared').NativeSession[] = [];
+    try {
+      kimiSessions = await sessions.listKimiNativeSessions(ws.path);
+    } catch (error) {
+      console.warn(`[native-sessions] Kimi discovery unavailable: ${String(error)}`);
+    }
+    const nativeSessions = [...diskSessions, ...kimiSessions];
 
     // Cross-reference: which native sessions are already adopted?
     const adoptedRows = ctx.db
@@ -1236,7 +1307,7 @@ export function createApp(ctx: AppContext): AppHandle {
       .all(id) as Array<{
         gianSessionId: string;
         gianSessionName: string | null;
-        executor: 'claude' | 'codex';
+        executor: Executor;
         native_session_id: string;
       }>;
 
@@ -1249,7 +1320,7 @@ export function createApp(ctx: AppContext): AppHandle {
     }
 
     return c.json({
-      sessions: sessions.map(s => {
+      sessions: nativeSessions.map(s => {
         const adopted = adoptedMap.get(`${s.executor}:${s.id}`);
         return adopted ? { ...s, adoptedBy: adopted } : s;
       }),
@@ -2695,6 +2766,7 @@ function bootJsonlWatchers(db: Db, watcher: NativeJsonlWatcher): void {
          FROM sessions s
          JOIN workspaces w ON w.id = s.workspace_id
         WHERE s.archived = 0
+          AND s.executor IN ('claude', 'codex')
           AND s.native_session_id IS NOT NULL
           AND s.worktree_outcome IS NULL`,
     )
@@ -2735,6 +2807,7 @@ async function fanIMEvent(
     try { return sessions.getSession(e.session_id); } catch { return null; }
   })();
   if (!session) return;
+  if (session.executor === 'kimi') return;
   const rvcSession = gianSessionToRvcRecord(session);
 
   if (e.type === 'turn_completed') {
@@ -2905,4 +2978,3 @@ function contentTypeFor(path: string): Record<string, string> {
   };
   return { 'Content-Type': map[ext] ?? 'application/octet-stream' };
 }
-

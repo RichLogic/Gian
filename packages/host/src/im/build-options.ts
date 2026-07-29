@@ -61,6 +61,9 @@ export const LOCAL_USER: UserRecord = {
  *  status, activeTurnId, archivedAt, lastIssue, origin, botId,
  *  executionMode, reasoningEffort, model, approvalMode. */
 export function gianSessionToRvcRecord(s: Session): SessionRecord {
+  if (s.executor === 'kimi') {
+    throw new Error('Kimi sessions are not exposed through IM.');
+  }
   return {
     id: s.id,
     ownerUserId: LOCAL_USER.id,
@@ -74,9 +77,12 @@ export function gianSessionToRvcRecord(s: Session): SessionRecord {
     workspaceId: s.workspace_id,
     archivedAt: s.archived === 1 ? s.updated_at : null,
     securityProfile: 'repo-write',
-    // IM module's ApprovalMode is now realigned to Gian's three modes
-    // (plan / ask / auto) — see im/types.ts. No translation needed.
-    approvalMode: s.approval_mode,
+    // IM module's ApprovalMode models only Gian's three interactive modes
+    // (plan / ask / auto) — see im/types.ts. Codex-only permission presets
+    // have no IM analogue (IM has no approval UI), so narrow them to auto.
+    approvalMode: s.approval_mode === 'full-access' || s.approval_mode === 'custom'
+      ? 'auto'
+      : (s.approval_mode ?? 'ask'),
     networkEnabled: true,
     fullHostEnabled: false,
     status: gianSessionStatusToRvc(s.status),
@@ -242,7 +248,7 @@ export function buildIMOptions(
     listSessionsForWorkspace: async (_userId: string, workspaceId: string) => {
       return sessions
         .listSessions()
-        .filter(s => s.workspace_id === workspaceId)
+        .filter(s => s.workspace_id === workspaceId && s.executor !== 'kimi')
         .map(gianSessionToRvcRecord);
     },
 
@@ -275,6 +281,7 @@ export function buildIMOptions(
 
     getApprovals: (sessionId: string) => {
       const session = trySessionForId(sessions, sessionId);
+      if (session?.executor === 'kimi') return [];
       const executor = session?.executor ?? 'claude';
       return approvals
         .listPending()

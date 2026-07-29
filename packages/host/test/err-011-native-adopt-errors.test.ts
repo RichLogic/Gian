@@ -78,7 +78,7 @@ test('ERR-011: adopt rejects unsupported executor with 400', async () => {
     const res = await adoptBody(ctx, { executor: 'gemini', native_session_id: 'x' });
     assert.equal(res.status, 400);
     const body = await res.json() as { error: string };
-    assert.match(body.error, /executor must be claude or codex/);
+    assert.match(body.error, /executor must be claude, codex, or kimi/);
   } finally {
     await ctx.cleanup();
   }
@@ -223,7 +223,7 @@ test('ERR-011: delete rejects unsupported executor query param with 400', async 
     const res = await deleteNative(ctx, 'gemini', 'whatever');
     assert.equal(res.status, 400);
     const body = await res.json() as { error: string };
-    assert.match(body.error, /executor query param must be claude or codex/);
+    assert.match(body.error, /executor query param must be claude, codex, or kimi/);
   } finally {
     await ctx.cleanup();
   }

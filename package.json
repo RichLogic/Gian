@@ -14,6 +14,9 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r --if-present test",
     "test:e2e": "pnpm -r build && playwright test",
+    "desktop:dev": "pnpm -F @gian/desktop dev",
+    "desktop:pack": "pnpm -F @gian/desktop package:mac",
+    "desktop:dmg": "pnpm -F @gian/desktop make:mac",
     "quality:traceability": "node scripts/check-traceability.js",
     "clean": "pnpm -r clean && rm -rf node_modules"
   },
@@ -21,12 +24,5 @@
     "@playwright/test": "^1.49.0",
     "@types/node": "^22.10.0",
     "typescript": "^5.7.2"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild",
-      "node-pty"
-    ]
   }
 }

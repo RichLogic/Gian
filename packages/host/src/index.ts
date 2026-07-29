@@ -7,6 +7,8 @@ import { loadConfig } from './storage/config.js';
 import { resolveDataDir } from './storage/paths.js';
 import { TunnelManager } from './tunnel/index.js';
 import { sweepColdEvents } from './events/lifecycle.js';
+import { CliRuntimeManager } from './runtime/manager.js';
+import { KimiRuntimeProvider } from './runtime/kimi-provider.js';
 
 // Vendored proxies live under packages/proxies/{cc,codex}-proxy in the
 // monorepo. At runtime this file resolves from packages/host/{src or
@@ -46,7 +48,17 @@ async function main(): Promise<void> {
     process.env.GIAN_CODEX_PROXY_ENTRY ??
     join(PACKAGES_DIR, 'proxies', 'codex-proxy', 'dist', 'src', 'cli', 'spawn.js');
 
+  const kimiProxyEntry =
+    process.env.GIAN_KIMI_PROXY_ENTRY ??
+    join(PACKAGES_DIR, 'proxies', 'kimi-proxy', 'dist', 'src', 'cli', 'spawn.js');
+
   const codexBin = process.env.CODEX_BIN;
+  const runtimeManager = new CliRuntimeManager([
+    new KimiRuntimeProvider({
+      dataDir,
+      overridePath: process.env.KIMI_BIN,
+    }),
+  ]);
 
   const handle = createApp({
     db,
@@ -54,7 +66,9 @@ async function main(): Promise<void> {
     dataDir,
     ccProxyEntry,
     codexProxyEntry,
+    kimiProxyEntry,
     codexBin,
+    runtimeManager,
   });
 
   const server = serve({ fetch: handle.app.fetch, hostname: config.host, port: config.port }, info => {

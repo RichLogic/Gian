@@ -1,4 +1,4 @@
-import type { EventEnvelope } from '@gian/shared';
+import type { EventEnvelope, Executor } from '@gian/shared';
 import { stripManagerSystemPrefix, stripGianRolePrefix, stripGianActionBlocks, GIAN_ACTION_CLOSE } from '@gian/shared';
 
 /** Strip complete gian:action blocks from accumulating assistant text — only
@@ -19,7 +19,6 @@ import type {
   FileSearchItem,
   MsgItem,
   ReasoningItem,
-  TokenUsage,
   TranscriptItem,
   WebSearchItem,
 } from '../types.js';
@@ -29,6 +28,28 @@ const IMAGE_EXT_MIME: Record<string, string> = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
   webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', heic: 'image/heic',
 };
+
+const TOOL_ITEM_KINDS = new Set<TranscriptItem['kind']>([
+  'command',
+  'tool',
+  'file-read',
+  'file-search',
+  'web-search',
+  'diff',
+]);
+
+function upsertToolItem(
+  items: TranscriptItem[],
+  item: TranscriptItem,
+): TranscriptItem[] {
+  const index = items.findIndex(
+    current => current.id === item.id && TOOL_ITEM_KINDS.has(current.kind),
+  );
+  if (index < 0) return [...items, item];
+  const next = items.slice();
+  next[index] = item;
+  return next;
+}
 
 /**
  * Beta/TTY image sends arrive as a JSONL echo with NO structured attachments —
@@ -88,7 +109,7 @@ function dismissStalePendingQuestions(items: TranscriptItem[]): TranscriptItem[]
 export function applyEnvelope(
   items: TranscriptItem[],
   env: EventEnvelope,
-  executor: 'claude' | 'codex',
+  executor: Executor,
 ): TranscriptItem[] {
   const data = (env.data ?? {}) as Record<string, unknown>;
   const ev = env.event;
@@ -202,7 +223,25 @@ export function applyEnvelope(
       stderr: data.stderr !== undefined ? String(data.stderr) : undefined,
       ts: env.ts, turn: env.turn,
     };
-    return [...items, item];
+    return upsertToolItem(items, item);
+  }
+
+  if (ev === 'tool_execution') {
+    const itemId = String(data.itemId ?? env.call_id);
+    const summary = data.input === undefined
+      ? ''
+      : typeof data.input === 'string'
+        ? data.input
+        : JSON.stringify(data.input);
+    const nextItem = {
+      kind: 'tool' as const,
+      id: itemId,
+      name: String(data.title ?? data.kind ?? 'Tool'),
+      summary,
+      ts: env.ts,
+      turn: env.turn,
+    };
+    return upsertToolItem(items, nextItem);
   }
 
   // ── file_read (unified) ──
@@ -214,7 +253,7 @@ export function applyEnvelope(
       endLine: data.endLine !== undefined ? Number(data.endLine) : undefined,
       ts: env.ts, turn: env.turn,
     };
-    return [...items, item];
+    return upsertToolItem(items, item);
   }
 
   // ── file_search (unified) ──
@@ -230,7 +269,7 @@ export function applyEnvelope(
       matches,
       ts: env.ts, turn: env.turn,
     };
-    return [...items, item];
+    return upsertToolItem(items, item);
   }
 
   // ── web_search (unified) ──
@@ -241,7 +280,7 @@ export function applyEnvelope(
       resultCount: data.resultCount !== undefined ? Number(data.resultCount) : undefined,
       ts: env.ts, turn: env.turn,
     };
-    return [...items, item];
+    return upsertToolItem(items, item);
   }
 
   // ── agent_spawn (unified) ──
@@ -295,6 +334,9 @@ export function applyEnvelope(
       ...existing,
       status: mapApprovalDecision(decision),
       ...(answeredWith ? { answeredWith } : {}),
+      ...(typeof data.nativeOptionId === 'string'
+        ? { nativeOptionId: data.nativeOptionId }
+        : {}),
     };
     return next;
   }
@@ -302,7 +344,7 @@ export function applyEnvelope(
   // ── file_change / diff.updated (legacy codex) ──
   if (ev === 'file_change' || ev === 'diff.updated') {
     const item = parseDiffUpdated(env);
-    return item ? [...items, item] : items;
+    return item ? upsertToolItem(items, item) : items;
   }
 
   // ── auto_classifier_denied (cc auto-mode) ──
@@ -429,7 +471,7 @@ export function applyEnvelope(
 export function createOptimisticEcho(params: {
   sessionId: string;
   text: string;
-  exec: 'claude' | 'codex';
+  exec: Executor;
   /** Defaults to `Date.now`. Tests pass a frozen value for stable ids. */
   now?: () => number;
   /** Attachments to render in the pending bubble. `url` should be a blob
@@ -573,6 +615,18 @@ export function parseApprovalRequested(env: EventEnvelope): ApprovalItem | null 
   const planActions = Array.isArray(data.planActions)
     ? (data.planActions as unknown[]).filter(isPlanAction)
     : undefined;
+  const nativeOptions = Array.isArray(data.nativeOptions)
+    ? (data.nativeOptions as unknown[]).flatMap(option => {
+        if (!option || typeof option !== 'object') return [];
+        const value = option as Record<string, unknown>;
+        if (typeof value.optionId !== 'string' || typeof value.label !== 'string') return [];
+        return [{
+          optionId: value.optionId,
+          label: value.label,
+          kind: typeof value.kind === 'string' ? value.kind : 'unknown',
+        }];
+      })
+    : undefined;
   return {
     kind: 'approval',
     id: env.call_id,
@@ -586,6 +640,7 @@ export function parseApprovalRequested(env: EventEnvelope): ApprovalItem | null 
     ...(questions ? { questions } : {}),
     ...(scopeOptions ? { scopeOptions } : {}),
     ...(planActions && planActions.length > 0 ? { planActions } : {}),
+    ...(nativeOptions && nativeOptions.length > 0 ? { nativeOptions } : {}),
     ts: env.ts,
     turn: env.turn,
   };
@@ -684,55 +739,4 @@ export function parseUnifiedDiff(text: string): DiffFile[] {
 
     return { path: path || '(unknown)', add, del, hunks };
   });
-}
-
-/**
- * Pulls token usage out of a `token_usage.updated` event. Both proxies wrap
- * usage as `{ params: { tokenUsage: { total, [last], modelContextWindow } } }`
- * but the meaning of `total` differs:
- *   - codex `total` = cumulative session lifetime (grows past contextWindow)
- *   - codex `last`  = last turn (last.inputTokens ≈ current context window
- *                     usage, since each turn ships the whole prior history;
- *                     drops after /compact)
- *   - cc    `total` = last turn (inputTokens excludes cache; full prompt
- *                     size is inputTokens + cachedInputTokens)
- *
- * `contextUsed` reconciles these into one "what's in the window right now"
- * number that the context bar can divide by `contextWindow`. Returns null
- * if the shape doesn't match — UI just won't render a chip.
- */
-export function parseTokenUsage(data: unknown): TokenUsage | null {
-  if (!data || typeof data !== 'object') return null;
-  const root = data as Record<string, unknown>;
-  const params = (root.params ?? root) as Record<string, unknown>;
-  const tu = params.tokenUsage as Record<string, unknown> | undefined;
-  if (!tu) return null;
-  const total = tu.total as Record<string, number> | undefined;
-  if (!total) return null;
-  const last = tu.last as Record<string, number> | undefined;
-  const cw = tu.modelContextWindow;
-  // codex emits `last` (per-turn breakdown alongside cumulative `total`); cc
-  // doesn't, so fall back to per-turn `total` where inputTokens excludes the
-  // cached portion — add them back to recover the prompt size that was sent.
-  const contextUsed = last
-    ? Number(last.inputTokens ?? 0)
-    : Number(total.inputTokens ?? 0) + Number(total.cachedInputTokens ?? 0);
-  // Self-correct when the recorded window is obviously smaller than the
-  // observed usage — happens for sessions started before cc-proxy learned
-  // to read the real model id from `system init`, where the stored model id
-  // could say 200k even though CLI was running the 1M variant. Bump to the
-  // next plausible ceiling so the bar stops
-  // showing "771k / 200k · compact soon".
-  let contextWindow = typeof cw === 'number' ? cw : undefined;
-  if (contextWindow && contextUsed > contextWindow) {
-    contextWindow = contextUsed > 200_000 ? 1_000_000 : contextWindow;
-  }
-  return {
-    total: Number(total.totalTokens ?? 0),
-    input: Number(total.inputTokens ?? 0),
-    output: Number(total.outputTokens ?? 0),
-    cached: Number(total.cachedInputTokens ?? 0),
-    contextUsed,
-    contextWindow,
-  };
 }

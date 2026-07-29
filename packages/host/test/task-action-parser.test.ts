@@ -126,6 +126,16 @@ test('ACTION-PARSE-006: create_subtask bad executor → invalid-params', () => {
   assert.equal(res.reason, 'invalid-params');
 });
 
+test('ACTION-PARSE-006: create_subtask accepts the Kimi executor', () => {
+  const res = parseGianAction(block(JSON.stringify({
+    method: 'create_subtask',
+    params: { workspace: 'repoA', executor: 'kimi', brief: 'x' },
+  })));
+  assert.equal(res.ok, true);
+  if (!res.ok || res.action.method !== 'create_subtask') return;
+  assert.equal(res.action.params.executor, 'kimi');
+});
+
 test('ACTION-PARSE-006: message_subtask requires subtask_id and text', () => {
   const ok = parseGianAction(block(JSON.stringify({
     method: 'message_subtask',

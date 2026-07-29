@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import type { Session, Task } from '@gian/shared';
+import type { Executor, Session, Task, ThinkingEffort } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 import { loadConfig } from '../storage/config.js';
 import { expandHome } from '../workspace/index.js';
@@ -10,9 +10,8 @@ import { expandHome } from '../workspace/index.js';
  *
  * The Manager is a `Session` with `type='manager'` + `task_id`, bound to a
  * hidden "root" workspace that points at the configured `workspace_root`
- * (`~/Coding`). It runs Codex (`gpt-5.5` / `xhigh`), is forced to read-only
- * every turn (enforced in SessionManager.sendMessage), has no worktree, and is
- * persistent — one per Task.
+ * (`~/Coding`). Its executor is selected per Task, it has no worktree, and it
+ * is persistent — one per Task.
  *
  * This module owns the bits that don't need the live proxy: resolving /
  * creating the root workspace row, and building the Manager's system prompt.
@@ -20,10 +19,36 @@ import { expandHome } from '../workspace/index.js';
  * it reuses the existing proxy + native-session machinery.
  */
 
-/** Locked Manager runtime defaults (PRD-v3 §85-106). */
-export const MANAGER_EXECUTOR = 'codex' as const;
-export const MANAGER_MODEL = 'gpt-5.5';
-export const MANAGER_EFFORT = 'xhigh';
+/**
+ * Manager (PM) runtime, resolved per executor (gian-task-pm-engineer §4.2 —
+ * "PM 可选 claude / codex / kimi"). The executor is chosen per-Task at creation
+ * (tasks.manager_executor); the model/effort follow from it:
+ *
+ *  - codex → pinned to `gpt-5.5` / `xhigh` (the original locked PRD-v3 runtime).
+ *  - claude → left unpinned so SessionManager.createSession resolves the
+ *    session default (`default_claude_model` / `default_claude_effort`, empty →
+ *    the CLI/proxy default). Subscription-priced TTY controller.
+ *  - kimi → left unpinned; ACP config options, including mode, stay native.
+ *
+ * `null` model/effort mean "let createSession pick" — it must NOT pass codex's
+ * `gpt-5.5` to a Claude or Kimi session.
+ */
+export interface ManagerRuntime {
+  executor: Executor;
+  model: string | null;
+  effort: ThinkingEffort | null;
+}
+
+/** Fallback when a Task has no `manager_executor` and config is unreadable. */
+export const DEFAULT_MANAGER_EXECUTOR: Executor = 'claude';
+
+export function managerRuntimeFor(executor: Executor): ManagerRuntime {
+  if (executor === 'codex') {
+    return { executor, model: 'gpt-5.5', effort: 'xhigh' };
+  }
+  // Claude/Kimi: never inherit Codex's pinned model or effort.
+  return { executor, model: null, effort: null };
+}
 
 /** Stable name for the hidden workspace that points at `workspace_root`. The
  *  Manager binds to it because `sessions.workspace_id` has a NOT NULL FK and
@@ -110,17 +135,26 @@ export function buildManagerSystemPrompt(args: {
     '',
     'You can read, grep, write files, and run commands anywhere under the',
     'project root with your native tools. But you do NOT do the coding work',
-    'yourself: to get a unit of work done you PROPOSE a Subtask and the user',
-    'confirms it. Emit each proposal as exactly this ASCII-delimited block:',
+    'yourself: to get a unit of work done you spin up a Subtask (an ENGINEER',
+    'session) and hand it a brief.',
     '',
-    '<<gian:create_subtask>>',
-    '{ "name": "<short title>", "workspace": "<workspace name or absolute path>", "executor": "codex|claude", "prompt": "<initial instruction for the subtask>" }',
-    '<</gian:create_subtask>>',
+    '## How to create a Subtask (natural-language confirm, then act)',
     '',
-    'The user reviews/edits that card and creates the Subtask; it then runs with',
-    'your `prompt` as its first message. Do NOT create, start, or complete',
-    'Subtasks yourself (e.g. by calling the API) — always propose and let the',
-    'user confirm.',
+    'FIRST align with the user in plain language: what the subtask should do,',
+    'which workspace, which executor. Ask; let them agree. Only AFTER the user',
+    'has agreed, end that reply with EXACTLY ONE action envelope as the LAST',
+    'line — nothing after it, no code fence:',
+    '',
+    '<<gian:action>>{"method":"create_subtask","params":{"workspace":"<workspace name or absolute path>","executor":"claude|codex|kimi","brief":"<the brief: goal / why / boundaries / where to look>","name":"<short title>"}}<</gian:action>>',
+    '',
+    'Gian reads that envelope straight from your reply and creates + starts the',
+    'Subtask with your `brief` as its first message — there is NO card, NO extra',
+    'confirm dialog (you already confirmed in the conversation). So do NOT emit',
+    'the envelope until the user has agreed; a bare reply with no envelope does',
+    'nothing. Routing default: build/edit → claude, review/audit → codex.',
+    'Do NOT create/start Subtasks any other way (no API calls) and do NOT write',
+    'the code yourself. Preserve the executor the user selected; do not map',
+    'one CLI onto another CLI\'s mode or model vocabulary.',
     '',
     `# Task: ${task.name}`,
     task.description ? task.description : '(no description)',

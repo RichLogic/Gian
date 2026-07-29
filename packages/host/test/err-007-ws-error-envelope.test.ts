@@ -181,13 +181,15 @@ test('ERR-007: ws dispatch sends type=error with code=MESSAGE_SEND_FAILED when s
 
     const sent = ctx.broadcaster.sentTo(ctx.ws as never);
     const err = sent.find(m => m.type === 'error') as
-      | { type: 'error'; code: string; message: string; session_id?: string }
+      | { type: 'error'; code: string; message: string; session_id?: string; request_type?: string }
       | undefined;
     assert.ok(err, 'an error envelope must be sent to the originating WS client');
     assert.equal(err!.code, 'MESSAGE_SEND_FAILED',
       'code must be MESSAGE_SEND_FAILED so the UI can render "send failed" with a retry');
     assert.equal(err!.session_id, session.id,
       'session_id must be echoed back so the UI can route the error to the right transcript');
+    assert.equal(err!.request_type, 'message:send',
+      'request_type must identify which client operation failed');
     assert.match(err!.message, /proxy went sideways/,
       'error message must surface the underlying cause (proxy stderr / runtime error)');
   } finally {
@@ -228,10 +230,12 @@ test('ERR-007: ws dispatch maps each known message:* type to a stable error code
       const sentAfter = ctx.broadcaster.sentTo(ctx.ws as never);
       const newMsgs = sentAfter.slice(sentBefore);
       const err = newMsgs.find(m => m.type === 'error') as
-        | { type: 'error'; code: string } | undefined;
+        | { type: 'error'; code: string; request_type?: string } | undefined;
       assert.ok(err, `error envelope must be sent for ${msg.type}`);
       assert.equal(err!.code, expectedCode,
         `${msg.type} must map to ${expectedCode}, got ${err!.code}`);
+      assert.equal(err!.request_type, msg.type,
+        'request_type must survive even when the error code is operation-specific');
     }
   } finally {
     teardown(ctx);

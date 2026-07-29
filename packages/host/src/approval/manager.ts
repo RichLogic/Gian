@@ -15,6 +15,7 @@ export interface ApprovalRequest {
   description: string;
   subject?: string;
   payload?: Record<string, unknown>;
+  nativeOptions?: import('@gian/shared').NativeApprovalOption[];
 }
 
 export interface ApprovalRecord extends ApprovalRequest {
@@ -36,7 +37,9 @@ export type RespondApprovalFn = (
   decision: ApprovalDecision,
 ) => Promise<void>;
 
-export type GetApprovalModeFn = (sessionId: string) => import('@gian/shared').ApprovalMode;
+export type GetApprovalModeFn = (
+  sessionId: string,
+) => import('@gian/shared').ApprovalMode | null;
 
 export class ApprovalManager {
   private pending = new Map<string, ApprovalRecord>();
@@ -73,7 +76,9 @@ export class ApprovalManager {
     // an auto allow_once would short-circuit the question and ship an empty
     // `answers` payload to cc-proxy, dropping the user's selection on the
     // floor. Always register these as pending regardless of mode/risk.
-    const requiresUser = req.category === 'question' || req.category === 'exit_plan_mode';
+    const requiresUser = req.category === 'question'
+      || req.category === 'exit_plan_mode'
+      || (req.nativeOptions?.length ?? 0) > 0;
 
     if (
       !requiresUser
@@ -107,6 +112,7 @@ export class ApprovalManager {
         category: record.category,
         description: record.description,
         status: 'auto-approved',
+        ...(record.nativeOptions ? { native_options: record.nativeOptions } : {}),
       },
     });
 
@@ -138,6 +144,7 @@ export class ApprovalManager {
         category: record.category,
         description: record.description,
         status: 'pending',
+        ...(record.nativeOptions ? { native_options: record.nativeOptions } : {}),
       },
     });
 

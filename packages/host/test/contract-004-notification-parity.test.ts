@@ -1,8 +1,8 @@
 // Coverage for traceability row:
 //   CONTRACT-004 — `PROXY_NOTIFICATION_METHODS` in `shared/src/proxy.ts`
-//                  must list every notification method either cc-proxy or
-//                  codex-proxy emits, AND every normalizer in
-//                  `host/src/event/normalize-{cc,codex}.ts` must either
+//                  must list every notification method any proxy emits, AND
+//                  every normalizer in `host/src/event/normalize-*.ts` must
+//                  either
 //                  map or explicitly drop each listed method.
 //
 // Drift in this triangle (proxy emits / shared registers / host
@@ -27,8 +27,10 @@ import { PROXY_NOTIFICATION_METHODS } from '@gian/shared';
 
 const CC_SERVICE = resolve('../proxies/cc-proxy/src/core/service.ts');
 const CODEX_SERVICE = resolve('../proxies/codex-proxy/src/core/service.ts');
+const KIMI_SERVICE = resolve('../proxies/kimi-proxy/src/core/service.ts');
 const NORMALIZE_CC = resolve('src/event/normalize-cc.ts');
 const NORMALIZE_CODEX = resolve('src/event/normalize-codex.ts');
+const NORMALIZE_KIMI = resolve('src/event/normalize-kimi.ts');
 
 // ---------------------------------------------------------------------------
 // Out-of-scope notifications. Document why each one is excluded so future
@@ -72,9 +74,13 @@ function normalizedMethods(normalizerPath: string): Set<string> {
   const methods = new Set<string>();
   for (const m of text.matchAll(/case\s+'([^']+)'\s*:/g)) {
     const name = m[1]!;
-    // Skip PascalCase tool-name cases — they don't represent wire methods.
-    if (/^[A-Z]/.test(name)) continue;
+    // Wire methods are dotted names, except for the explicit `debug` stream.
+    // This excludes nested switches over tool names and ACP statuses.
+    if (!name.includes('.') && name !== 'debug') continue;
     methods.add(name);
+  }
+  for (const m of text.matchAll(/raw\.method\s*===\s*'([^']+)'/g)) {
+    methods.add(m[1]!);
   }
   return methods;
 }
@@ -123,6 +129,19 @@ test('CONTRACT-004: every notification codex-proxy emits is registered in shared
     `Add them to shared/src/proxy.ts OR document the exclusion in DEFERRED_NOTIFICATION_METHODS.`);
 });
 
+test('CONTRACT-004: every notification kimi-proxy emits is registered in shared/proxy.ts (or deferred)', () => {
+  const emitted = emittedMethods(KIMI_SERVICE);
+  const missing: string[] = [];
+  for (const m of emitted) {
+    if (sharedRegistry.has(m)) continue;
+    if (deferred.has(m)) continue;
+    missing.push(m);
+  }
+  assert.deepEqual(missing, [],
+    `kimi-proxy emits notifications absent from PROXY_NOTIFICATION_METHODS: ${missing.join(', ')}.\n` +
+    `Add them to shared/src/proxy.ts OR document the exclusion in DEFERRED_NOTIFICATION_METHODS.`);
+});
+
 test('CONTRACT-004: every registered notification has at least one normalizer arm or is debug/lifecycle', () => {
   // `session.rotated` is consumed by SessionManager.handleLifecycle before
   // it reaches the normalizer; same for `turn.started` (only Codex
@@ -131,16 +150,17 @@ test('CONTRACT-004: every registered notification has at least one normalizer ar
   // normalizers.
   const ccCases = normalizedMethods(NORMALIZE_CC);
   const codexCases = normalizedMethods(NORMALIZE_CODEX);
+  const kimiCases = normalizedMethods(NORMALIZE_KIMI);
   const handledByLifecycle = new Set(['session.rotated']);
 
   const missing: string[] = [];
   for (const m of sharedRegistry) {
     if (handledByLifecycle.has(m)) continue;
-    if (ccCases.has(m) || codexCases.has(m)) continue;
+    if (ccCases.has(m) || codexCases.has(m) || kimiCases.has(m)) continue;
     missing.push(m);
   }
   assert.deepEqual(missing, [],
-    `Registered notifications missing from both normalize-cc and normalize-codex: ${missing.join(', ')}.\n` +
+    `Registered notifications missing from normalize-cc, normalize-codex, and normalize-kimi: ${missing.join(', ')}.\n` +
     `Either add a mapping case (or an explicit drop case) or remove the entry from PROXY_NOTIFICATION_METHODS.`);
 });
 
@@ -150,7 +170,8 @@ test('CONTRACT-004: every normalizer arm corresponds to a registered notificatio
   // depends on it.
   const ccCases = normalizedMethods(NORMALIZE_CC);
   const codexCases = normalizedMethods(NORMALIZE_CODEX);
-  const allCases = new Set<string>([...ccCases, ...codexCases]);
+  const kimiCases = normalizedMethods(NORMALIZE_KIMI);
+  const allCases = new Set<string>([...ccCases, ...codexCases, ...kimiCases]);
 
   const orphaned: string[] = [];
   for (const m of allCases) {

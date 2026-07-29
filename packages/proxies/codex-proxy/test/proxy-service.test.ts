@@ -11,7 +11,11 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
   nextTurnId = 1;
   compactCalls: string[] = [];
   setThreadNameCalls: Array<{ threadId: string; name: string }> = [];
-  startTurnCalls: Array<{ threadId: string; input: InputItem[] }> = [];
+  startTurnCalls: Array<{
+    threadId: string;
+    input: InputItem[];
+    options: NonNullable<Parameters<CodexRuntime['startTurn']>[2]>;
+  }> = [];
   readonly responses: Array<{ id: number | string; payload: unknown }> = [];
   readonly threads = new Map<string, unknown>();
 
@@ -29,11 +33,25 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
       cwd: options.cwd,
       turns: [],
     });
-    return { thread: { id: threadId } };
+    return {
+      thread: { id: threadId },
+      configuredPermissions: {
+        approvalPolicy: 'on-request' as const,
+        approvalsReviewer: 'user' as const,
+        permissions: ':workspace',
+      },
+    };
   }
 
-  async resumeThread(_threadId: string) {
-    return {};
+  async resumeThread(threadId: string) {
+    return {
+      thread: { id: threadId },
+      configuredPermissions: {
+        approvalPolicy: 'on-request' as const,
+        approvalsReviewer: 'user' as const,
+        permissions: ':workspace',
+      },
+    };
   }
 
   async readThread(threadId: string) {
@@ -44,8 +62,12 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
     return { thread };
   }
 
-  async startTurn(threadId: string, _input: InputItem[]) {
-    this.startTurnCalls.push({ threadId, input: _input });
+  async startTurn(
+    threadId: string,
+    _input: InputItem[],
+    options: NonNullable<Parameters<CodexRuntime['startTurn']>[2]> = {},
+  ) {
+    this.startTurnCalls.push({ threadId, input: _input, options });
     const turnId = `turn-${this.nextTurnId++}`;
     const thread = this.threads.get(threadId) as { turns: unknown[] };
     thread.turns.push({
@@ -232,13 +254,102 @@ test('session.create binds a session to a thread and returns id + threadId', asy
   }
 });
 
+test('capabilities preserve new Codex effort ids from model/list', async () => {
+  const harness = await createHarness();
+  try {
+    harness.runtime.listAllModels = async () => [{
+      id: 'gpt-future',
+      model: 'gpt-future',
+      displayName: 'GPT Future',
+      description: 'future effort coverage',
+      hidden: false,
+      isDefault: true,
+      defaultReasoningEffort: 'ultra',
+      supportedReasoningEfforts: [
+        { reasoningEffort: 'medium' },
+        { reasoningEffort: 'max' },
+        { reasoningEffort: 'ultra' },
+      ],
+    }];
+
+    const capabilities = await harness.service.listCapabilities();
+    assert.deepEqual(capabilities.models[0]?.supportedThinking, ['medium', 'max', 'ultra']);
+    assert.equal(capabilities.models[0]?.defaultThinking, 'ultra');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('Custom permission mode restores the config-derived policy after an explicit preset', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+    const fullAccessTurn = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'full access turn' }],
+      sandbox: 'danger-full-access',
+      approvalPolicy: 'never',
+      approvalsReviewer: 'auto_review',
+    });
+    assert.deepEqual(harness.runtime.startTurnCalls[0]?.options, {
+      model: null,
+      thinking: null,
+      sandbox: 'danger-full-access',
+      sandboxPolicy: null,
+      permissions: null,
+      approvalPolicy: 'never',
+      approvalsReviewer: 'auto_review',
+      collaborationMode: null,
+      reasoningSummary: null,
+      serviceTier: null,
+    });
+
+    harness.runtime.setCompletedTurn(created.session.threadId, fullAccessTurn.turn.id);
+    harness.runtime.emitNotification({
+      method: 'turn/completed',
+      params: {
+        threadId: created.session.threadId,
+        turn: { id: fullAccessTurn.turn.id, status: 'completed' },
+      },
+    });
+    await waitFor(() => harness.events.some(entry => entry.method === 'turn.completed'));
+
+    await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'custom turn' }],
+      useConfiguredPermissions: true,
+    });
+    assert.deepEqual(harness.runtime.startTurnCalls[1]?.options, {
+      model: null,
+      thinking: null,
+      sandbox: null,
+      sandboxPolicy: null,
+      permissions: ':workspace',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
+      collaborationMode: null,
+      reasoningSummary: null,
+      serviceTier: null,
+    });
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('session.create with threadId resumes the existing codex thread', async () => {
   const harness = await createHarness();
   try {
     let resumed: string | null = null;
     harness.runtime.resumeThread = async (threadId: string) => {
       resumed = threadId;
-      return {};
+      return {
+        thread: { id: threadId },
+        configuredPermissions: {
+          approvalPolicy: 'on-request',
+          approvalsReviewer: 'user',
+          permissions: ':workspace',
+        },
+      };
     };
 
     const created = await harness.service.createSession({
@@ -270,9 +381,88 @@ test('Codex native /compact uses app-server thread/compact/start', async () => {
     assert.equal(harness.runtime.startTurnCalls.length, 0, '/compact must not leak as prompt text');
     assert.equal(started.turn.status, 'running');
 
+    const invalidated = harness.events.find((entry) => entry.method === 'token_usage.updated');
+    assert.deepEqual(invalidated?.params.data, {
+      context: null,
+      reason: 'compact_started',
+    });
     const startedEvent = harness.events.find((entry) => entry.method === 'turn.started');
     assert.equal((startedEvent?.params.data as { command?: string } | undefined)?.command, '/compact');
+    assert.ok(
+      harness.events.indexOf(invalidated!) < harness.events.indexOf(startedEvent!),
+      'context must invalidate before compact starts',
+    );
     assert.equal(harness.service.getSession({ sessionId: created.session.id }).session.status, 'running');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('Codex auto-compaction replaces context only after the compaction item completes', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({
+      cwd: '/tmp/work',
+    });
+    const started = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'long running turn' }],
+    }, 43);
+
+    const usageNotification = (used: number): RuntimeNotification => ({
+      method: 'thread/tokenUsage/updated',
+      params: {
+        threadId: created.session.threadId,
+        turnId: started.turn.id,
+        tokenUsage: {
+          last: { totalTokens: used },
+          total: { totalTokens: 900_000 + used },
+          modelContextWindow: 200_000,
+        },
+      },
+    });
+    harness.runtime.emitNotification(usageNotification(180_000));
+
+    harness.runtime.emitNotification({
+      method: 'item/started',
+      params: {
+        threadId: created.session.threadId,
+        turnId: started.turn.id,
+        item: { id: 'compact-auto-1', type: 'contextCompaction' },
+      },
+    });
+    const afterInvalidation = harness.events.filter(
+      entry => entry.method === 'token_usage.updated',
+    );
+    assert.deepEqual(afterInvalidation.at(-1)?.params.data, {
+      context: null,
+      reason: 'compact_started',
+    });
+
+    harness.runtime.emitNotification(usageNotification(190_000));
+    assert.equal(
+      harness.events.filter(entry => entry.method === 'token_usage.updated').length,
+      afterInvalidation.length,
+      'summarization usage must remain suppressed',
+    );
+
+    harness.runtime.emitNotification({
+      method: 'item/completed',
+      params: {
+        threadId: created.session.threadId,
+        turnId: started.turn.id,
+        item: { id: 'compact-auto-1', type: 'contextCompaction' },
+      },
+    });
+    harness.runtime.emitNotification(usageNotification(32_000));
+    const afterFreshUsage = harness.events.filter(
+      entry => entry.method === 'token_usage.updated',
+    );
+    assert.equal(afterFreshUsage.length, afterInvalidation.length + 1);
+    assert.deepEqual(
+      (afterFreshUsage.at(-1)?.params.data as { params?: unknown }).params,
+      usageNotification(32_000).params,
+    );
   } finally {
     await harness.cleanup();
   }
@@ -306,6 +496,49 @@ test('Codex thread/compacted notification completes intercepted /compact turn', 
     assert.equal(completedEvent?.params.turnId, compactTurnId);
     assert.equal((completedEvent?.params.data as { compacted?: boolean } | undefined)?.compacted, true);
     assert.equal(harness.service.getSession({ sessionId: created.session.id }).session.status, 'idle');
+
+    const usageCountAfterCompact = harness.events.filter(
+      entry => entry.method === 'token_usage.updated',
+    ).length;
+    harness.runtime.emitNotification({
+      method: 'thread/tokenUsage/updated',
+      params: {
+        threadId: created.session.threadId,
+        turnId: compactTurnId,
+        tokenUsage: {
+          last: { totalTokens: 190_000 },
+          total: { totalTokens: 900_000 },
+          modelContextWindow: 200_000,
+        },
+      },
+    });
+    assert.equal(
+      harness.events.filter(entry => entry.method === 'token_usage.updated').length,
+      usageCountAfterCompact,
+      'late compact usage must not refill the invalidated context',
+    );
+
+    const next = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'next turn' }],
+    }, 45);
+    harness.runtime.emitNotification({
+      method: 'thread/tokenUsage/updated',
+      params: {
+        threadId: created.session.threadId,
+        turnId: next.turn.id,
+        tokenUsage: {
+          last: { totalTokens: 31_000 },
+          total: { totalTokens: 910_000 },
+          modelContextWindow: 200_000,
+        },
+      },
+    });
+    assert.equal(
+      harness.events.filter(entry => entry.method === 'token_usage.updated').length,
+      usageCountAfterCompact + 1,
+      'the next ordinary turn supplies the first authoritative context sample',
+    );
   } finally {
     await harness.cleanup();
   }

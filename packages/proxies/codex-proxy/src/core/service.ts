@@ -32,6 +32,12 @@ interface ActiveTurnContext {
   requestId?: number | string;
   turnId: string;
   outputText: string;
+  isCompact: boolean;
+}
+
+interface ContextCompactionUsageGuard {
+  stage: 'running' | 'completed';
+  manual: boolean;
 }
 
 interface ServiceOptions {
@@ -40,9 +46,7 @@ interface ServiceOptions {
 }
 
 function normalizeThinking(value: unknown): ThinkingLevel | null {
-  return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh'
-    ? value
-    : null;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 function normalizeNonEmptyString(value: unknown, field: string) {
@@ -258,12 +262,20 @@ function firstSlashToken(text: string): string | null {
   return first ? first.toLowerCase() : null;
 }
 
+function isContextCompactionItem(params: unknown): boolean {
+  if (!params || typeof params !== 'object') return false;
+  const item = (params as { item?: unknown }).item;
+  if (!item || typeof item !== 'object') return false;
+  const type = (item as { type?: unknown }).type;
+  return type === 'contextCompaction' || type === 'context_compaction';
+}
+
 function unsupportedNativeCommandMessage(command: string) {
   switch (command) {
     case '/model':
       return 'Codex native /model is a CLI picker. In Gian Chat mode, use the model selector in the composer header, or switch the session to CLI mode.';
     case '/permissions':
-      return 'Codex native /permissions is a CLI picker. In Gian Chat mode, use the PLAN / ASK / AUTO controls, or switch the session to CLI mode.';
+      return 'Codex native /permissions is a CLI picker. In Gian Chat mode, use the permission menu beside Send, or switch the session to CLI mode.';
     case '/plan':
       return 'Codex native /plan is handled by Gian mode controls in Chat mode. Select PLAN in the composer, or switch the session to CLI mode for the native picker.';
     case '/quit':
@@ -282,6 +294,8 @@ export class CodexProxyService {
   private readonly approvalsById = new Map<string, PendingApproval>();
   private readonly approvalsBySessionId = new Map<string, Map<string, PendingApproval>>();
   private readonly activeTurnsByThreadId = new Map<string, ActiveTurnContext>();
+  /** Compaction usage is untrustworthy until its replacement history is live. */
+  private readonly contextCompactionUsageGuards = new Map<string, ContextCompactionUsageGuard>();
 
   constructor(options: ServiceOptions) {
     this.runtime = options.runtime;
@@ -379,25 +393,28 @@ export class CodexProxyService {
     // thread instead of starting a fresh one. The on-disk rollout JSONL is
     // the source of truth — Gian's turns get appended to it by codex.
     let threadId: string;
+    let configuredPermissions: SessionRecord['configuredPermissions'];
     const adoptThreadId = typeof input.threadId === 'string' && input.threadId.trim().length > 0
       ? input.threadId.trim()
       : null;
     if (adoptThreadId) {
       try {
-        await this.runtime.resumeThread(adoptThreadId);
+        const resumed = await this.runtime.resumeThread(adoptThreadId);
         threadId = adoptThreadId;
+        configuredPermissions = resumed.configuredPermissions;
       } catch (err) {
         throw createAppError(404, 'THREAD_NOT_FOUND', `Could not resume codex thread ${adoptThreadId}: ${String(err)}`);
       }
     } else {
-      // Sandbox + approval policy live on `turn.start` (per-turn override). The
-      // thread starts with permissive defaults; whatever each turn passes wins.
+      // Let Codex resolve config.toml here. We retain the effective policy so
+      // the composer can restore it after an explicit permission preset.
       const thread = await this.runtime.startThread({
         cwd,
         model: typeof input.model === 'string' && input.model.trim() ? input.model.trim() : null,
         ephemeral: input.ephemeral === true,
       });
       threadId = thread.thread.id;
+      configuredPermissions = thread.configuredPermissions;
     }
 
     const createdAt = nowIso();
@@ -405,6 +422,7 @@ export class CodexProxyService {
       id: randomId('sess'),
       cwd,
       threadId,
+      configuredPermissions,
       model: typeof input.model === 'string' && input.model.trim() ? input.model.trim() : null,
       thinking,
       status: 'idle',
@@ -467,16 +485,24 @@ export class CodexProxyService {
       throw createAppError(400, 'INVALID_REQUEST', 'Unsupported thinking value.');
     }
 
+    const configuredPermissions = params.useConfiguredPermissions
+      ? session.configuredPermissions
+      : null;
     const turnResponse = await this.runtime.startTurn(session.threadId, input, {
       model: typeof params.model === 'string' && params.model.trim() ? params.model.trim() : session.model,
       thinking,
-      sandbox: params.sandbox ?? null,
-      approvalPolicy: params.approvalPolicy ?? null,
-      approvalsReviewer: params.approvalsReviewer ?? null,
+      sandbox: configuredPermissions ? null : params.sandbox ?? null,
+      sandboxPolicy: configuredPermissions?.sandboxPolicy ?? null,
+      permissions: configuredPermissions?.permissions ?? null,
+      approvalPolicy: configuredPermissions?.approvalPolicy ?? params.approvalPolicy ?? null,
+      approvalsReviewer: configuredPermissions?.approvalsReviewer ?? params.approvalsReviewer ?? null,
       collaborationMode: params.collaborationMode ?? null,
       reasoningSummary: params.reasoningSummary ?? null,
       serviceTier: params.serviceTier ?? null,
     });
+    // A non-compact turn's usage stream is the next authoritative context
+    // sample. Keep suppressing compact traffic until startTurn succeeds.
+    this.contextCompactionUsageGuards.delete(session.threadId);
 
     const turnId = turnResponse.turn.id;
     const updatedSession = this.updateSession(session, {
@@ -491,6 +517,7 @@ export class CodexProxyService {
       sessionId: updatedSession.id,
       turnId,
       outputText: '',
+      isCompact: false,
       ...(requestId === undefined ? {} : { requestId }),
     };
     this.activeTurnsByThreadId.set(updatedSession.threadId, context);
@@ -614,6 +641,18 @@ export class CodexProxyService {
       ...(requestId === undefined ? {} : { requestId }),
       turnId,
       outputText: '',
+      isCompact: true,
+    });
+    this.contextCompactionUsageGuards.set(updatedSession.threadId, {
+      stage: 'running',
+      manual: true,
+    });
+
+    this.emitEvent('token_usage.updated', {
+      requestId,
+      sessionId: updatedSession.id,
+      turnId,
+      data: { context: null, reason: 'compact_started' },
     });
 
     this.emitEvent('turn.started', {
@@ -659,11 +698,13 @@ export class CodexProxyService {
     const newThreadId = thread.thread.id;
     const updated = this.updateSession(session, {
       threadId: newThreadId,
+      configuredPermissions: thread.configuredPermissions,
       activeTurnId: null,
       status: 'idle',
       lastError: null,
     });
     this.activeTurnsByThreadId.delete(oldThreadId);
+    this.contextCompactionUsageGuards.delete(oldThreadId);
 
     this.emitEvent('session.rotated', {
       sessionId: updated.id,
@@ -742,6 +783,7 @@ export class CodexProxyService {
   private removeSession(session: SessionRecord) {
     this.sessionsById.delete(session.id);
     this.sessionsByThreadId.delete(session.threadId);
+    this.contextCompactionUsageGuards.delete(session.threadId);
     const approvals = this.approvalsBySessionId.get(session.id);
     if (approvals) {
       for (const approvalId of approvals.keys()) {
@@ -839,6 +881,7 @@ export class CodexProxyService {
       });
     }
     this.activeTurnsByThreadId.clear();
+    this.contextCompactionUsageGuards.clear();
   }
 
   private async handleRuntimeNotification(message: RuntimeNotification) {
@@ -988,7 +1031,43 @@ export class CodexProxyService {
       return;
     }
 
+    if (message.method === 'item/started' && isContextCompactionItem(message.params)) {
+      const existing = this.contextCompactionUsageGuards.get(threadId);
+      this.contextCompactionUsageGuards.set(threadId, {
+        stage: 'running',
+        manual: existing?.manual ?? context?.isCompact ?? false,
+      });
+      if (!existing) {
+        this.emitEvent('token_usage.updated', {
+          requestId,
+          sessionId: session.id,
+          turnId,
+          data: { context: null, reason: 'compact_started' },
+        });
+      }
+      return;
+    }
+
+    if (message.method === 'item/completed' && isContextCompactionItem(message.params)) {
+      const existing = this.contextCompactionUsageGuards.get(threadId);
+      this.contextCompactionUsageGuards.set(threadId, {
+        stage: 'completed',
+        manual: existing?.manual ?? context?.isCompact ?? false,
+      });
+      return;
+    }
+
     if (message.method === 'thread/tokenUsage/updated') {
+      // App-server can publish the compaction request's own (pre-summary)
+      // token sample and a heuristic replacement-history estimate. Do not
+      // mistake either for post-compact model usage. Auto-compaction resumes
+      // the ordinary turn, so the first sample after its item completes is
+      // authoritative; manual compaction waits for the next ordinary turn.
+      const guard = this.contextCompactionUsageGuards.get(threadId);
+      if (guard) {
+        if (guard.stage === 'running' || guard.manual) return;
+        this.contextCompactionUsageGuards.delete(threadId);
+      }
       this.emitEvent('token_usage.updated', {
         requestId,
         sessionId: session.id,

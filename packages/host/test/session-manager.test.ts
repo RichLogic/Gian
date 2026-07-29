@@ -4,7 +4,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { ProxyNotification, ServerToClientMessage } from '@gian/shared';
+import type {
+  ExecutorConfigState,
+  NativeConfigOption,
+  NativeConfigValue,
+  ProxyNotification,
+  ServerToClientMessage,
+} from '@gian/shared';
 import { openDatabase } from '../src/storage/db.js';
 import { SessionManager } from '../src/session/manager.js';
 import type { ProxyManager } from '../src/proxy/manager.js';
@@ -100,7 +106,166 @@ class FakeProxyManager {
   get(): ProxyClient {
     return this.client;
   }
+  async dispose(): Promise<void> {}
   async closeAll(): Promise<void> { /* no-op */ }
+}
+
+class StubKimiProxyClient implements ProxyClient {
+  readonly executor = 'kimi' as const;
+  notificationHandlers: NotificationHandler[] = [];
+  nativeListCalls: Array<{ cwd?: string; cursor?: string }> = [];
+  failNativeList = false;
+  replayUpdates: unknown[] = [];
+  createCalls = 0;
+  failNextCreate: Error | null = null;
+  readonly options: NativeConfigOption[] = [
+    {
+      id: 'mode',
+      name: 'Mode',
+      type: 'select',
+      currentValue: 'default',
+      scope: 'session',
+      choices: [
+        { value: 'default', label: 'Default' },
+        { value: 'yolo', label: 'YOLO' },
+      ],
+    },
+  ];
+
+  async initialize() {
+    return { mode: 'spawn' as const, protocolVersion: 'acp/1', methods: [] };
+  }
+  async capabilities() {
+    return {
+      protocolVersion: '1',
+      models: [] as [],
+      slashCommands: [] as [],
+      sessionCapabilities: {
+        load: true,
+        list: true,
+        resume: true,
+        close: false,
+      },
+    };
+  }
+  async listSlashCommands() {
+    return { commands: [] };
+  }
+  async listNativeSessions(params: { cwd?: string; cursor?: string } = {}) {
+    this.nativeListCalls.push(params);
+    if (this.failNativeList) throw new Error('Kimi login required');
+    if (params.cursor === 'page-2') {
+      return {
+        sessions: [{
+          sessionId: 'kimi-native-2',
+          cwd: params.cwd,
+          title: 'Older Kimi session',
+          updatedAt: '2026-07-28T00:00:00.000Z',
+        }],
+      };
+    }
+    return {
+      sessions: [{
+        sessionId: 'kimi-native-1',
+        cwd: params.cwd,
+        title: 'Recent Kimi session',
+        updatedAt: '2026-07-29T00:00:00.000Z',
+      }],
+      nextCursor: 'page-2',
+    };
+  }
+  async createSession(params: { cwd: string; nativeSessionId?: string; resumeMode?: string }) {
+    this.createCalls += 1;
+    if (this.failNextCreate) {
+      const error = this.failNextCreate;
+      this.failNextCreate = null;
+      throw error;
+    }
+    const nativeSessionId = params.nativeSessionId ?? 'kimi_native_1';
+    return {
+      session: {
+        id: `kimi_proxy_${randomUUID()}`,
+        cwd: params.cwd,
+        model: null,
+        status: 'idle' as const,
+        createdAt: '2026-07-29T00:00:00.000Z',
+        updatedAt: '2026-07-29T00:00:00.000Z',
+        lastError: null,
+        nativeSessionId,
+        configOptions: this.options,
+      },
+      nativeSessionId,
+      configOptions: this.options,
+      replayUpdates: this.replayUpdates,
+    };
+  }
+  async getNativeConfig() {
+    return this.snapshot();
+  }
+  async setNativeConfig(configId: string, value: NativeConfigValue) {
+    const option = this.options.find(item => item.id === configId);
+    if (!option) throw new Error(`unknown config: ${configId}`);
+    option.currentValue = value;
+    return this.snapshot();
+  }
+  async interruptTurn() {}
+  async respondApproval() {}
+  async startTurn() {
+    return {
+      session: {
+        id: 'kimi_proxy_1',
+        cwd: '/tmp',
+        model: null,
+        status: 'running' as const,
+        createdAt: '2026-07-29T00:00:00.000Z',
+        updatedAt: '2026-07-29T00:00:00.000Z',
+        lastError: null,
+      },
+      turn: { id: 'kimi_turn_1' },
+    };
+  }
+  async closeSession() {}
+  async shutdown() {}
+  forceKill() {}
+  onNotification(handler: NotificationHandler) {
+    this.notificationHandlers.push(handler);
+    return () => {
+      this.notificationHandlers = this.notificationHandlers.filter(item => item !== handler);
+    };
+  }
+  onExit() {
+    return () => {};
+  }
+
+  private snapshot(): {
+    state: ExecutorConfigState;
+    options: NativeConfigOption[];
+  } {
+    return {
+      state: {
+        schemaVersion: 1,
+        values: Object.fromEntries(
+          this.options.map(option => [option.id, option.currentValue]),
+        ),
+      },
+      options: this.options,
+    };
+  }
+}
+
+class FakeKimiProxyManager {
+  client = new StubKimiProxyClient();
+  disposeCalls: string[] = [];
+  async getOrCreate(): Promise<ProxyClient> {
+    return this.client;
+  }
+  get(): ProxyClient {
+    return this.client;
+  }
+  async dispose(sessionId: string): Promise<void> {
+    this.disposeCalls.push(sessionId);
+  }
+  async closeAll(): Promise<void> {}
 }
 
 class CapturingBroadcaster {
@@ -144,6 +309,233 @@ function setup() {
 
   return { dir, db, wsId, proxyMgr, broadcaster, sessions };
 }
+
+function setupKimi() {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-sm-kimi-test-'));
+  const db = openDatabase(dir);
+  const wsId = randomUUID();
+  db.prepare(
+    'INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)',
+  ).run(wsId, 'test', '/tmp/test-ws');
+  const proxyMgr = new FakeKimiProxyManager();
+  const broadcaster = new CapturingBroadcaster();
+  const approvals = new ApprovalManager(broadcaster as unknown as WsBroadcaster);
+  const queue = new QueueManager(db);
+  const sessions = new SessionManager(
+    db,
+    proxyMgr as unknown as ProxyManager,
+    broadcaster as unknown as WsBroadcaster,
+    approvals,
+    queue,
+    dir,
+  );
+  approvals.setRespondFn((sid, aid, dec) => sessions.respondApproval(sid, aid, dec));
+  approvals.setGetModeFn(sid => sessions.getSession(sid).approval_mode);
+  return { dir, db, wsId, proxyMgr, broadcaster, sessions };
+}
+
+test('Kimi session persists native config and never invents a Gian approval mode', async () => {
+  const { dir, db, wsId, broadcaster, sessions } = setupKimi();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'kimi',
+      name: 'native-kimi',
+    });
+    assert.equal(session.approval_mode, null);
+    assert.deepEqual(session.executor_config, {
+      schemaVersion: 1,
+      values: { mode: 'default' },
+    });
+    assert.equal(session.native_config_options[0]?.id, 'mode');
+
+    const updated = await sessions.setNativeConfig(session.id, 'mode', 'yolo');
+    assert.equal(updated.state.values.mode, 'yolo');
+    const row = db.prepare(
+      'SELECT approval_mode, executor_config_json FROM sessions WHERE id = ?',
+    ).get(session.id) as {
+      approval_mode: string | null;
+      executor_config_json: string;
+    };
+    assert.equal(row.approval_mode, null);
+    assert.equal(JSON.parse(row.executor_config_json).values.mode, 'yolo');
+    assert.ok(
+      broadcaster.messages.some(message => (
+        message.type === 'session:native-config'
+        && message.session_id === session.id
+        && message.state.values.mode === 'yolo'
+      )),
+    );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi session creation rejects legacy Gian approval_mode', async () => {
+  const { dir, db, wsId, sessions } = setupKimi();
+  try {
+    await assert.rejects(
+      sessions.createSession({
+        workspace_id: wsId,
+        executor: 'kimi',
+        approval_mode: 'full-access',
+      }),
+      /approval_mode must be omitted/,
+    );
+    const count = db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as {
+      count: number;
+    };
+    assert.equal(count.count, 0);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi native session discovery follows ACP cursors', async () => {
+  const { dir, db, proxyMgr, sessions } = setupKimi();
+  try {
+    const native = await sessions.listKimiNativeSessions('/tmp/test-ws');
+    assert.deepEqual(native.map(item => item.id), [
+      'kimi-native-1',
+      'kimi-native-2',
+    ]);
+    assert.deepEqual(proxyMgr.client.nativeListCalls, [
+      { cwd: '/tmp/test-ws' },
+      { cwd: '/tmp/test-ws', cursor: 'page-2' },
+    ]);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('failed Kimi native discovery disposes its unattached facade for retry', async () => {
+  const { dir, db, proxyMgr, sessions } = setupKimi();
+  proxyMgr.client.failNativeList = true;
+  try {
+    await assert.rejects(
+      sessions.listKimiNativeSessions('/tmp/test-ws'),
+      /login required/,
+    );
+    assert.deepEqual(proxyMgr.disposeCalls, ['__native_sessions_kimi__']);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi adoption coalesces replay chunks and keeps assistant IDs turn-local', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi();
+  proxyMgr.client.replayUpdates = [
+    {
+      sessionId: 'kimi-history',
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'hel' },
+      },
+    },
+    {
+      sessionId: 'kimi-history',
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'lo' },
+      },
+    },
+    {
+      sessionId: 'kimi-history',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'first answer' },
+      },
+    },
+    {
+      sessionId: 'kimi-history',
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'second' },
+      },
+    },
+    {
+      sessionId: 'kimi-history',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'second answer' },
+      },
+    },
+  ];
+
+  try {
+    const adopted = await sessions.adoptKimiNativeSession({
+      workspaceId: wsId,
+      cwd: '/tmp/test-ws',
+      nativeSessionId: 'kimi-history',
+    });
+    assert.deepEqual(adopted.replay, { turns: 2, events: 4 });
+
+    const events = sessions.listEvents(adopted.session.id);
+    assert.deepEqual(
+      events.filter(event => event.event === 'user_message').map(event => event.data.text),
+      ['hello', 'second'],
+    );
+    const assistantIds = events
+      .filter(event => event.event === 'assistant_text')
+      .map(event => event.data.itemId);
+    assert.equal(new Set(assistantIds).size, 2);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi lazy reattach is single-flight and recycles after auth failure', async () => {
+  const first = setupKimi();
+  let sessionId: string;
+  try {
+    const session = await first.sessions.createSession({
+      workspace_id: first.wsId,
+      executor: 'kimi',
+    });
+    sessionId = session.id;
+  } finally {
+    first.db.close();
+  }
+
+  const db = openDatabase(first.dir);
+  const proxyMgr = new FakeKimiProxyManager();
+  const broadcaster = new CapturingBroadcaster();
+  const approvals = new ApprovalManager(broadcaster as unknown as WsBroadcaster);
+  const queue = new QueueManager(db);
+  const sessions = new SessionManager(
+    db,
+    proxyMgr as unknown as ProxyManager,
+    broadcaster as unknown as WsBroadcaster,
+    approvals,
+    queue,
+    first.dir,
+  );
+  proxyMgr.client.failNextCreate = new Error(
+    "Kimi Code is not logged in. Run '/managed/kimi' login in a terminal, then retry.",
+  );
+
+  try {
+    const failed = await Promise.allSettled([
+      sessions.getNativeConfig(sessionId),
+      sessions.listSessionSlashCommands(sessionId),
+    ]);
+    assert.deepEqual(failed.map(result => result.status), ['rejected', 'rejected']);
+    assert.equal(proxyMgr.client.createCalls, 1);
+    assert.deepEqual(proxyMgr.disposeCalls, [sessionId]);
+
+    const retried = await sessions.getNativeConfig(sessionId);
+    assert.equal(retried.state.values.mode, 'default');
+    assert.equal(proxyMgr.client.createCalls, 2);
+  } finally {
+    db.close();
+    rmSync(first.dir, { recursive: true, force: true });
+  }
+});
 
 test('createSession persists row with native_session_id from proxy response', async () => {
   const { dir, db, wsId, sessions } = setup();
@@ -346,6 +738,94 @@ test('proxy notification persists event and broadcasts; turn.completed updates s
         m.type === 'session:updated' && (m as { session: { status?: string } }).session.status === 'done',
     );
     assert.ok(doneUpdate && doneUpdate.session.unread === 1, 'turn.completed broadcasts unread:1');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('session usage survives compact invalidation, deduplicates deltas, and resets on rotation', async () => {
+  const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    await sessions.sendMessage(session.id, 'measure usage');
+    const initialUpdatedAt = sessions.getSession(session.id).updated_at;
+
+    const sample: ProxyNotification = {
+      method: 'token_usage.updated',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'native-turn-1',
+        data: {
+          context: { used: 63_000, window: 258_000 },
+          conversation: {
+            mode: 'delta',
+            inputTokens: 70_000,
+            outputTokens: 2_000,
+            cachedInputTokens: 55_000,
+            totalTokens: 72_000,
+          },
+        },
+      },
+    };
+    proxyMgr.client.fire(sample);
+    proxyMgr.client.fire(sample);
+
+    let current = sessions.getSession(session.id);
+    assert.equal(current.context_tokens_used, 63_000);
+    assert.equal(current.context_window_tokens, 258_000);
+    assert.equal(current.conversation_total_tokens, 72_000, 'duplicate turn delta applied once');
+    assert.equal(current.conversation_usage_complete, 1, 'fresh Gian session has complete totals');
+    assert.equal(current.updated_at, initialUpdatedAt, 'usage must not reorder the session');
+
+    proxyMgr.client.fire({
+      method: 'token_usage.updated',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'native-compact-1',
+        data: { context: null, reason: 'compact_started' },
+      },
+    });
+    current = sessions.getSession(session.id);
+    assert.equal(current.context_tokens_used, null);
+    assert.equal(current.context_window_tokens, 258_000, 'known window survives compact');
+    assert.equal(current.conversation_total_tokens, 72_000, 'compact preserves conversation total');
+    assert.ok(current.context_usage_updated_at, 'invalidation is distinguishable from never sampled');
+
+    proxyMgr.client.fire({
+      method: 'token_usage.updated',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'native-compact-1',
+        data: { context: { used: 8_500, window: 258_000 } },
+      },
+    });
+    assert.equal(sessions.getSession(session.id).context_tokens_used, 8_500);
+
+    broadcaster.messages.length = 0;
+    proxyMgr.client.fire({
+      method: 'session.rotated',
+      params: {
+        sessionId: 'proxy_x',
+        data: {
+          oldNativeSessionId: session.native_session_id,
+          newNativeSessionId: 'cc_usage_reset',
+        },
+      },
+    });
+    current = sessions.getSession(session.id);
+    assert.equal(current.context_tokens_used, null);
+    assert.equal(current.context_window_tokens, null);
+    assert.equal(current.context_usage_updated_at, null);
+    assert.equal(current.conversation_total_tokens, null);
+    assert.equal(current.conversation_usage_complete, 1);
+    assert.ok(
+      broadcaster.messages.some(message => (
+        message.type === 'session:updated'
+        && message.session.id === session.id
+        && message.session.conversation_total_tokens === null
+      )),
+    );
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

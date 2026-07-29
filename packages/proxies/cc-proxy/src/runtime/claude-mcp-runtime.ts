@@ -16,12 +16,143 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
+import type { TokenUsageUpdate } from '@gian/shared';
 import { ApprovalServer, APPROVAL_PROMPT_TOOL } from '../mcp/approval-server.js';
 import type { EffortLevel, ModelCapabilities, PermissionMode } from '../core/types.js';
 import type { ClaudeRuntime, ClaudeRuntimeEvents } from './types.js';
 
 const NO_SESSION_PERSISTENCE_FLAG = '--no-session-persistence';
 const CLAUDE_DEFAULT_MODEL_ID = 'claude-default';
+
+function nonNegativeInteger(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
+}
+
+function optionalNonNegativeInteger(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+}
+
+export interface ClaudeAssistantUsageSample {
+  context: { used: number };
+  model: string | null;
+}
+
+export function isClaudeCompactBoundary(event: Record<string, unknown>): boolean {
+  return event.type === 'system' && event.subtype === 'compact_boundary';
+}
+
+/** A top-level assistant event is the only stream-json sample that describes
+ * the prompt currently occupying Claude's context. `result.usage` is an
+ * aggregate across API calls and must never be used as this numerator. */
+export function parseClaudeAssistantUsage(
+  event: Record<string, unknown>,
+): ClaudeAssistantUsageSample | null {
+  if (event.type !== 'assistant' || !event.message || typeof event.message !== 'object') {
+    return null;
+  }
+  const message = event.message as Record<string, unknown>;
+  if (!message.usage || typeof message.usage !== 'object') return null;
+  const usage = message.usage as Record<string, unknown>;
+  const used = nonNegativeInteger(usage.input_tokens)
+    + nonNegativeInteger(usage.cache_read_input_tokens)
+    + nonNegativeInteger(usage.cache_creation_input_tokens);
+  return {
+    context: { used },
+    model: typeof message.model === 'string' ? message.model : null,
+  };
+}
+
+export function parseClaudeResultUsage(
+  event: Record<string, unknown>,
+  currentContext: { used: number } | null,
+  currentModel: string | null,
+): TokenUsageUpdate | null {
+  if (event.type !== 'result') return null;
+
+  let contextWindow: number | undefined;
+  if (event.modelUsage && typeof event.modelUsage === 'object') {
+    const entries = Object.entries(event.modelUsage as Record<string, unknown>);
+    const selected = entries.find(([model]) => model === currentModel)?.[1]
+      ?? (entries.length === 1 ? entries[0]?.[1] : undefined);
+    if (selected && typeof selected === 'object') {
+      const rawWindow = (selected as Record<string, unknown>).contextWindow
+        ?? (selected as Record<string, unknown>).context_window;
+      const parsedWindow = nonNegativeInteger(rawWindow);
+      if (parsedWindow > 0) contextWindow = parsedWindow;
+    }
+  }
+
+  let conversation: TokenUsageUpdate['conversation'];
+  if (event.modelUsage && typeof event.modelUsage === 'object') {
+    let sawTokenUsage = false;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cachedInputTokens = 0;
+    for (const value of Object.values(event.modelUsage as Record<string, unknown>)) {
+      if (!value || typeof value !== 'object') continue;
+      const usage = value as Record<string, unknown>;
+      const input = optionalNonNegativeInteger(usage.inputTokens ?? usage.input_tokens);
+      const output = optionalNonNegativeInteger(usage.outputTokens ?? usage.output_tokens);
+      const cacheRead = optionalNonNegativeInteger(
+        usage.cacheReadInputTokens ?? usage.cache_read_input_tokens,
+      );
+      const cacheCreation = optionalNonNegativeInteger(
+        usage.cacheCreationInputTokens ?? usage.cache_creation_input_tokens,
+      );
+      if (input === null && output === null && cacheRead === null && cacheCreation === null) {
+        continue;
+      }
+      sawTokenUsage = true;
+      const cached = (cacheRead ?? 0) + (cacheCreation ?? 0);
+      inputTokens += (input ?? 0) + cached;
+      outputTokens += output ?? 0;
+      cachedInputTokens += cached;
+    }
+    if (sawTokenUsage) {
+      conversation = {
+        mode: 'delta',
+        inputTokens,
+        outputTokens,
+        cachedInputTokens,
+        totalTokens: inputTokens + outputTokens,
+      };
+    }
+  }
+
+  // Older Claude CLI builds may expose only the top-level query aggregate.
+  // It excludes subagents but remains a valid per-invocation fallback.
+  if (!conversation && event.usage && typeof event.usage === 'object') {
+    const usage = event.usage as Record<string, unknown>;
+    const inputTokens = nonNegativeInteger(usage.input_tokens)
+      + nonNegativeInteger(usage.cache_read_input_tokens)
+      + nonNegativeInteger(usage.cache_creation_input_tokens);
+    const outputTokens = nonNegativeInteger(usage.output_tokens);
+    const cachedInputTokens = nonNegativeInteger(usage.cache_read_input_tokens)
+      + nonNegativeInteger(usage.cache_creation_input_tokens);
+    conversation = {
+      mode: 'delta',
+      inputTokens,
+      outputTokens,
+      cachedInputTokens,
+      totalTokens: inputTokens + outputTokens,
+    };
+  }
+
+  if (!currentContext && !conversation) return null;
+  return {
+    ...(currentContext
+      ? {
+          context: {
+            used: currentContext.used,
+            ...(contextWindow === undefined ? {} : { window: contextWindow }),
+          },
+        }
+      : {}),
+    ...(conversation ? { conversation } : {}),
+  };
+}
 
 function allowClaudePrintProbe(): boolean {
   return process.env.GIAN_ALLOW_CLAUDE_PRINT_PROBE === '1';
@@ -473,6 +604,8 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     // block. When this is true we suppress the result-side text and only
     // signal turn completion.
     let streamedAnyText = false;
+    let currentContext: { used: number } | null = null;
+    let currentModel: string | null = null;
 
     lines.on('line', (line) => {
       const trimmed = line.trim();
@@ -493,7 +626,25 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
           }
         }
 
+        if (isClaudeCompactBoundary(event)) {
+          // Any assistant usage retained above this boundary describes the old
+          // context. Clear it before result parsing; the next assistant sample
+          // (if this query continues) is the first post-compact replacement.
+          currentContext = null;
+          this.emit('tokenUsage', sessionId, {
+            context: null,
+            reason: 'compact_started',
+          });
+        }
+
         if (eventType === 'assistant') {
+          const usageSample = parseClaudeAssistantUsage(event);
+          if (usageSample) {
+            currentContext = usageSample.context;
+            currentModel = usageSample.model ?? session.detectedModelId ?? session.model;
+            this.emit('tokenUsage', sessionId, { context: usageSample.context });
+          }
+
           // Parse all content blocks from assistant messages — both `text`
           // (intermediate commentary) and `tool_use`. Without emitting the
           // text blocks the UI only sees the final `result` summary, missing
@@ -537,18 +688,12 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
           resultText = typeof event.result === 'string' ? event.result : '';
           this.emit('debug', `[runtime] Turn result for ${sessionId} (${resultSubtype}): ${resultText.slice(0, 120)}...`);
 
-          // Extract token usage from the result event. Claude CLI reports
-          // input_tokens (= context size into this turn) + output_tokens
-          // + cache_read_input_tokens + cache_creation_input_tokens.
-          const usage = event.usage as Record<string, unknown> | undefined;
-          if (usage && typeof usage === 'object') {
-            this.emit('tokenUsage', sessionId, {
-              inputTokens: Number(usage.input_tokens ?? 0),
-              outputTokens: Number(usage.output_tokens ?? 0),
-              cacheReadInputTokens: Number(usage.cache_read_input_tokens ?? 0),
-              cacheCreationInputTokens: Number(usage.cache_creation_input_tokens ?? 0),
-            });
-          }
+          const usageUpdate = parseClaudeResultUsage(
+            event,
+            currentContext,
+            currentModel ?? session.detectedModelId ?? session.model,
+          );
+          if (usageUpdate) this.emit('tokenUsage', sessionId, usageUpdate);
         }
 
         // Log non-system events.

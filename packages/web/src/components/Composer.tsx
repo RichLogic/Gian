@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import type { ApprovalMode, CcModelCapabilities, CodexModelCapabilities, MessageAttachment, RemoteControlState, Session, SlashCommand, SlashCommandSource, ThinkingEffort } from '@gian/shared';
-import { loadProxyModels, loadSlashCommands } from '../api.js';
+import type { ApprovalMode, CcModelCapabilities, CodexModelCapabilities, Executor, MessageAttachment, NativeConfigChoice, NativeConfigOption, NativeConfigValue, RemoteControlState, Session, SlashCommand, SlashCommandSource, ThinkingEffort } from '@gian/shared';
+import { loadNativeConfig, loadProxyModels, loadSessionSlashCommands, loadSlashCommands } from '../api.js';
 import { useT } from '../i18n/index.js';
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
@@ -86,11 +87,19 @@ function fetchModelsCached(executor: 'claude' | 'codex'): Promise<ProxyModel[]> 
   if (hit) return Promise.resolve(hit);
   const inflight = MODEL_PROMISES.get(executor);
   if (inflight) return inflight;
-  const p = loadProxyModels(executor).then(list => {
-    MODEL_CACHE.set(executor, list);
-    MODEL_PROMISES.delete(executor);
-    return list;
-  });
+  const p = loadProxyModels(executor)
+    .then(list => {
+      MODEL_CACHE.set(executor, list);
+      MODEL_PROMISES.delete(executor);
+      return list;
+    })
+    .catch(error => {
+      // A transient host/proxy outage must not poison this executor's cache.
+      // The mounted Composer handles the rejection and a later session open
+      // can retry capability discovery.
+      MODEL_PROMISES.delete(executor);
+      throw error;
+    });
   MODEL_PROMISES.set(executor, p);
   return p;
 }
@@ -104,6 +113,127 @@ function modelLabel(models: ProxyModel[], id: string): string {
   return models.find(m => m.model === id)?.displayName ?? id;
 }
 
+function formatTokenCount(value: number): string {
+  if (value >= 1_000_000) {
+    const scaled = value / 1_000_000;
+    return `${scaled >= 10 ? scaled.toFixed(0) : scaled.toFixed(1).replace(/\.0$/, '')}m`;
+  }
+  if (value >= 1_000) {
+    const scaled = value / 1_000;
+    return `${scaled >= 10 ? scaled.toFixed(0) : scaled.toFixed(1).replace(/\.0$/, '')}k`;
+  }
+  return String(value);
+}
+
+export function ContextUsageIndicator({ session }: { session: Session }) {
+  const t = useT();
+  const anchorRef = useRef<HTMLSpanElement>(null);
+  const [tooltipPosition, setTooltipPosition] = useState<{ left: number; top: number } | null>(null);
+  const used = typeof session.context_tokens_used === 'number'
+    ? session.context_tokens_used
+    : null;
+  const capacity = typeof session.context_window_tokens === 'number'
+    && session.context_window_tokens > 0
+    ? session.context_window_tokens
+    : null;
+  const hasRatio = used !== null && capacity !== null;
+  const percent = hasRatio
+    ? Math.round(Math.min(1, Math.max(0, used / capacity)) * 100)
+    : null;
+  const recalculating = used === null && Boolean(session.context_usage_updated_at);
+  const conversationVisible = session.conversation_usage_complete === 1
+    && typeof session.conversation_total_tokens === 'number';
+
+  const showTooltip = () => {
+    const rect = anchorRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const preferred = rect.left + rect.width / 2;
+    setTooltipPosition({
+      left: Math.min(Math.max(preferred, 132), window.innerWidth - 132),
+      top: rect.top - 8,
+    });
+  };
+
+  const ringStyle = {
+    '--context-progress': `${(percent ?? 0) * 3.6}deg`,
+  } as CSSProperties;
+  const stateClass = recalculating
+    ? ' is-recalculating'
+    : percent !== null && percent >= 90
+      ? ' is-danger'
+      : percent !== null && percent >= 75
+        ? ' is-warning'
+        : percent === null
+          ? ' is-unknown'
+          : '';
+  const ariaLabel = percent === null
+    ? t(recalculating ? 'composer.context.recalculating' : 'composer.context.afterResponse')
+    : `${t('composer.context.title')}: ${percent}% ${t('composer.context.used')}`;
+
+  return (
+    <>
+      <span
+        ref={anchorRef}
+        className={`context-usage-anchor${stateClass}`}
+        role="img"
+        tabIndex={0}
+        aria-label={ariaLabel}
+        onMouseEnter={showTooltip}
+        onMouseLeave={() => setTooltipPosition(null)}
+        onFocus={showTooltip}
+        onBlur={() => setTooltipPosition(null)}
+      >
+        <span className="context-usage-ring" style={ringStyle} aria-hidden="true" />
+      </span>
+      {tooltipPosition && createPortal(
+        <div
+          className="context-usage-tooltip"
+          role="tooltip"
+          style={{ left: tooltipPosition.left, top: tooltipPosition.top }}
+        >
+          <div className="context-usage-tooltip-title">{t('composer.context.title')}</div>
+          {hasRatio && percent !== null && (
+            <>
+              <div className="context-usage-tooltip-primary">
+                {percent}% {t('composer.context.used')} ({100 - percent}% {t('composer.context.left')})
+              </div>
+              <div className="context-usage-tooltip-detail">
+                {formatTokenCount(used)} / {formatTokenCount(capacity)} {t('composer.context.tokensUsed')}
+              </div>
+            </>
+          )}
+          {!hasRatio && used !== null && (
+            <div className="context-usage-tooltip-detail">
+              {formatTokenCount(used)} {t('composer.context.tokensUsed')}
+            </div>
+          )}
+          {used === null && (
+            <div className="context-usage-tooltip-state">
+              {t(recalculating ? 'composer.context.recalculating' : 'composer.context.afterResponse')}
+            </div>
+          )}
+          {conversationVisible && (
+            <div className="context-usage-conversation">
+              <div className="context-usage-tooltip-title">{t('composer.context.conversationTotal')}</div>
+              <div className="context-usage-tooltip-primary">
+                {session.conversation_total_tokens!.toLocaleString()} {t('composer.context.tokens')}
+              </div>
+              <div className="context-usage-breakdown">
+                <span>{t('composer.context.input')} {(session.conversation_input_tokens ?? 0).toLocaleString()}</span>
+                <span>{t('composer.context.output')} {(session.conversation_output_tokens ?? 0).toLocaleString()}</span>
+                {(session.conversation_cached_input_tokens ?? 0) > 0 && (
+                  <span>{t('composer.context.cached')} {(session.conversation_cached_input_tokens ?? 0).toLocaleString()}</span>
+                )}
+              </div>
+            </div>
+          )}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 /** A concrete Claude id like `claude-opus-4-8` (synced live from a TTY
  *  transcript) maps to its `opus`/`sonnet`/`haiku` alias family so the static
  *  alias menu can still highlight the matching row. Returns the input
@@ -111,10 +241,6 @@ function modelLabel(models: ProxyModel[], id: string): string {
 function claudeModelFamily(id: string): string {
   return /^claude-(opus|sonnet|haiku)\b/.exec(id)?.[1] ?? id;
 }
-
-const THINK_INDEX: Record<string, number> = {
-  off: 0, minimal: 1, low: 2, medium: 3, high: 4, max: 5, xhigh: 5,
-};
 
 function supportedEfforts(model: ProxyModel | undefined): ThinkingEffort[] {
   if (!model) return [];
@@ -132,15 +258,27 @@ function defaultEffort(model: ProxyModel | undefined): ThinkingEffort | null {
   return null;
 }
 
-function ThinkBars({ level }: { level: ThinkingEffort | null }) {
-  const n = level ? (THINK_INDEX[level] ?? 0) : 0;
+function BulbIcon() {
   return (
-    <span className="think-bars" data-level={level}>
-      <i className={n >= 1 ? 'on' : ''} />
-      <i className={n >= 2 ? 'on' : ''} />
-      <i className={n >= 3 ? 'on' : ''} />
-    </span>
+    <svg
+      className="cmp-bulb"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M9 18h6" />
+      <path d="M10 22h4" />
+      <path d="M8.5 14.5A6 6 0 1 1 15.5 14.5c-.9.7-1.5 1.5-1.5 2.5h-4c0-1-.6-1.8-1.5-2.5Z" />
+    </svg>
   );
+}
+
+function ExecutorMark({ executor }: { executor: Executor }) {
+  return <span className={`cmp-executor-mark ${executor}`} aria-hidden="true" />;
 }
 
 /** Module-scope cache keyed by `${executor}:${workspaceId ?? '_'}` */
@@ -157,11 +295,16 @@ function fetchSlashCached(executor: 'claude' | 'codex', workspaceId?: string): P
   if (hit) return Promise.resolve(hit);
   const inflight = SLASH_PROMISES.get(key);
   if (inflight) return inflight;
-  const p = loadSlashCommands(executor, workspaceId).then(list => {
-    SLASH_CACHE.set(key, list);
-    SLASH_PROMISES.delete(key);
-    return list;
-  });
+  const p = loadSlashCommands(executor, workspaceId)
+    .then(list => {
+      SLASH_CACHE.set(key, list);
+      SLASH_PROMISES.delete(key);
+      return list;
+    })
+    .catch(error => {
+      SLASH_PROMISES.delete(key);
+      throw error;
+    });
   SLASH_PROMISES.set(key, p);
   return p;
 }
@@ -186,17 +329,206 @@ function flatFiltered(groups: Array<{ source: SlashCommandSource; items: SlashCo
   return groups.flatMap(g => g.items);
 }
 
+/** A bottom-anchored ("up-drop") popover: a trigger button and a portaled panel
+ *  that opens upward from the button (composer sits at the bottom of the
+ *  viewport). Mirrors the model popover's positioning + click-outside. Used for
+ *  the codex Thinking and Approval up-drops. */
+function useUpDrop(popoverWidth: number) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!open) { setPos(null); return; }
+    const btn = btnRef.current;
+    if (!btn) return;
+    const rect = btn.getBoundingClientRect();
+    const fittedWidth = Math.min(popoverWidth, window.innerWidth - 16);
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - fittedWidth - 8));
+    setPos({ left, bottom: window.innerHeight - rect.top + 6 });
+  }, [open, popoverWidth]);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (
+        popRef.current && !popRef.current.contains(e.target as Node) &&
+        btnRef.current && !btnRef.current.contains(e.target as Node)
+      ) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+  return { open, setOpen, pos, btnRef, popRef };
+}
+
+/** Codex permission presets. Each is sent as a per-turn native policy. */
+const CODEX_APPROVALS: Array<{
+  key: string;
+  mode: ApprovalMode;
+  titleKey: string;
+  descKey: string;
+}> = [
+  { key: 'ask', mode: 'ask', titleKey: 'composer.approval.ask.title', descKey: 'composer.approval.ask.desc' },
+  { key: 'approve', mode: 'auto', titleKey: 'composer.approval.approve.title', descKey: 'composer.approval.approve.desc' },
+  { key: 'full', mode: 'full-access', titleKey: 'composer.approval.full.title', descKey: 'composer.approval.full.desc' },
+  { key: 'custom', mode: 'custom', titleKey: 'composer.approval.custom.title', descKey: 'composer.approval.custom.desc' },
+];
+
+/** i18n key for the codex approval button's current-selection label. Legacy
+ *  'plan' (no longer offered for codex) falls back to a generic label. */
+function codexApprovalLabelKey(mode: ApprovalMode): string {
+  switch (mode) {
+    case 'ask': return 'composer.approval.ask.title';
+    case 'auto': return 'composer.approval.approve.title';
+    case 'custom': return 'composer.approval.custom.title';
+    case 'full-access': return 'composer.approval.full.title';
+    default: return 'composer.approval.title';
+  }
+}
+
+/** Codex's own display names for reasoning-effort levels (the API values are
+ *  minimal/low/medium/high/xhigh; Codex shows Light/Medium/High/Extra High).
+ *  Plain text, no icons, no "Default" — Codex always has one concrete level. */
+const CODEX_EFFORT_LABELS: Record<string, string> = {
+  minimal: 'Minimal',
+  low: 'Light',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra High',
+  max: 'Max',
+  ultra: 'Ultra',
+};
+function codexEffortLabel(level: ThinkingEffort | null): string {
+  if (!level) return '';
+  return CODEX_EFFORT_LABELS[level] ?? level;
+}
+
+function effortLabel(executor: Exclude<Executor, 'kimi'>, level: ThinkingEffort | null): string {
+  if (!level) return '';
+  return executor === 'codex'
+    ? codexEffortLabel(level)
+    : level.replace(/(^|[-_])(\w)/g, (_match, separator: string, letter: string) =>
+      `${separator ? ' ' : ''}${letter.toUpperCase()}`);
+}
+
+type NativeOptionRole = 'model' | 'effort' | 'mode';
+
+function nativeOptionRole(option: NativeConfigOption): NativeOptionRole | null {
+  const category = option.category?.trim().toLowerCase();
+  const id = option.id.trim().toLowerCase();
+  if (category === 'model' || id === 'model') return 'model';
+  if (
+    category === 'thought_level'
+    || category === 'thought'
+    || category === 'thinking'
+    || category === 'effort'
+    || id === 'thought_level'
+    || id === 'thought'
+    || id === 'thinking'
+    || id === 'effort'
+    || id === 'reasoning_effort'
+  ) return 'effort';
+  if (category === 'mode' || id === 'mode') return 'mode';
+  return null;
+}
+
+function nativeChoiceDisplayLabel(
+  role: NativeOptionRole,
+  choice: NativeConfigChoice,
+): string {
+  const value = String(choice.value ?? '').toLowerCase();
+  if (role === 'mode' && (value === 'plan' || value === 'auto' || value === 'yolo')) {
+    return value;
+  }
+  return choice.label;
+}
+
+function nativeChoiceLabel(option: NativeConfigOption, role: NativeOptionRole): string {
+  const current = option.choices?.find(choice =>
+    String(choice.value ?? '') === String(option.currentValue ?? ''));
+  return current
+    ? nativeChoiceDisplayLabel(role, current)
+    : String(option.currentValue ?? option.name);
+}
+
+function NativeOptionDrop({
+  option,
+  role,
+  disabled,
+  onChange,
+}: {
+  option: NativeConfigOption;
+  role: NativeOptionRole;
+  disabled: boolean;
+  onChange: (value: NativeConfigValue) => void;
+}) {
+  const drop = useUpDrop(260);
+  const currentLabel = nativeChoiceLabel(option, role);
+  return (
+    <>
+      <button
+        ref={drop.btnRef}
+        type="button"
+        className={`composer-opt cmp-native-${role}${drop.open ? ' open' : ''}`}
+        title={option.description ?? option.name}
+        disabled={disabled}
+        onClick={() => drop.setOpen(open => !open)}
+      >
+        {role === 'model' && <ExecutorMark executor="kimi" />}
+        {role === 'effort' && <BulbIcon />}
+        <span className="name">{currentLabel}</span>
+        <span className="caret cmp-caret" aria-hidden="true">▾</span>
+      </button>
+      {drop.open && drop.pos && createPortal(
+        <div
+          ref={drop.popRef}
+          className={`popover native-option-pop native-option-${role}-pop`}
+          role="dialog"
+          style={{ left: drop.pos.left, bottom: drop.pos.bottom }}
+        >
+          <div className="mp-section-head">
+            <span className="mp-section-title">{option.name}</span>
+          </div>
+          <div className="mp-list">
+            {(option.choices ?? []).map(choice => {
+              const active = String(choice.value ?? '') === String(option.currentValue ?? '');
+              return (
+                <button
+                  key={String(choice.value)}
+                  type="button"
+                  className={`mp-row${active ? ' active' : ''}`}
+                  onClick={() => {
+                    onChange(choice.value);
+                    drop.setOpen(false);
+                  }}
+                >
+                  <span className="mp-check">{active ? '✓' : ''}</span>
+                  <span className="mp-row-body">
+                    <span className="mp-row-title">
+                      {nativeChoiceDisplayLabel(role, choice)}
+                    </span>
+                    {choice.description && <span className="mp-row-hint">{choice.description}</span>}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 export function Composer({
   session,
-  onSend, onSendSkill, onStop, onQueueAdd, onSetMode, onSetModel, onSetEffort, onJumpToCli,
+  onSend, onSendSkill, onStop, onQueueAdd, onSetMode, onSetModel, onSetEffort,
+  onSetNativeConfig, onSetServiceTier, onJumpToCli,
   disabled, running, executor,
   workspaceId,
   footer,
   armedRemote = false,
-  onRequestRemote,
   onCancelRemote,
-  remoteControl,
-  onToggleRemoteControl,
   disabledSubmitBehavior = 'queue',
   variant = 'full',
   placeholder,
@@ -227,6 +559,10 @@ export function Composer({
   onSetMode: (mode: ApprovalMode, turns?: number) => void;
   onSetModel: (model: string) => void;
   onSetEffort: (effort: ThinkingEffort | null) => void;
+  onSetNativeConfig?: (configId: string, value: NativeConfigValue) => void;
+  /** codex only: toggle the Fast service tier. Passing this (and executor===
+   *  'codex') renders the Fast button. Omitted for claude / minimal composers. */
+  onSetServiceTier?: (tier: 'fast' | null) => void;
   /** TTY only: jump to the CLI surface. In TTY, model/effort/mode are
    *  display-only — clicking them sends the user to the CLI to change them. */
   onJumpToCli?: () => void;
@@ -235,7 +571,7 @@ export function Composer({
    *  from `disabled`, which also covers lock-out / pending-question. */
   running: boolean;
   disabledSubmitBehavior?: 'queue' | 'block';
-  executor: 'claude' | 'codex';
+  executor: Executor;
   workspaceId?: string;
   footer?: import('react').ReactNode;
   /** True when user clicked Remote while a turn was still running. The
@@ -255,7 +591,7 @@ export function Composer({
   /** Toggle Remote Control in TTY mode by sending `/remote-control` into the
    *  live PTY. Only meaningful when `session.runtime_mode === 'tty'`. */
   onToggleRemoteControl?: () => void;
-  /** `'minimal'` strips the model / approval-mode / slash / attachment / bypass
+  /** `'minimal'` strips the model / approval-mode / attachment / bypass
    *  controls down to a bare textarea + Send/Stop. Used by the read-only Task
    *  Manager composer: the Manager is a fixed-config Codex session (forced model/policy), so those
    *  affordances would expose abilities it doesn't have. The draft-persistence,
@@ -267,6 +603,7 @@ export function Composer({
 }) {
   const t = useT();
   const minimal = variant === 'minimal';
+  const legacyExecutor = executor === 'kimi' ? null : executor;
   const [text, setText] = useState(() => readDraft(session.id));
 
   // Session swap: snapshot current draft under the OUTGOING session's key,
@@ -287,26 +624,63 @@ export function Composer({
   const [slashIdx, setSlashIdx] = useState(0);
   const [slashLoading, setSlashLoading] = useState(false);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>(
-    () => SLASH_CACHE.get(slashCacheKey(executor, workspaceId)) ?? [],
+    () => legacyExecutor
+      ? (SLASH_CACHE.get(slashCacheKey(legacyExecutor, workspaceId)) ?? [])
+      : [],
   );
   const [slashPopPos, setSlashPopPos] = useState<{ left: number; bottom: number; width: number } | null>(null);
   const [modelPopOpen, setModelPopOpen] = useState(false);
   const [modelPopPos, setModelPopPos] = useState<{ left: number; bottom: number } | null>(null);
-  const [models, setModels] = useState<ProxyModel[]>(MODEL_CACHE.get(executor) ?? []);
+  // codex-only up-drops (Thinking / Approval get their own modules per the
+  // codex composer redesign; on claude these stay folded into the model popover
+  // + segmented control below).
+  const thinkDrop = useUpDrop(210);
+  const approvalDrop = useUpDrop(340);
+  const [models, setModels] = useState<ProxyModel[]>(
+    legacyExecutor ? (MODEL_CACHE.get(legacyExecutor) ?? []) : [],
+  );
+  const sessionNativeOptions = session.native_config_options ?? [];
+  const [nativeOptions, setNativeOptions] = useState(sessionNativeOptions);
 
   // Fetch model list lazily per executor; cached.
   useEffect(() => {
-    if (MODEL_CACHE.has(executor)) {
-      setModels(MODEL_CACHE.get(executor)!);
+    if (!legacyExecutor) {
+      setModels([]);
+      return;
+    }
+    if (MODEL_CACHE.has(legacyExecutor)) {
+      setModels(MODEL_CACHE.get(legacyExecutor)!);
       return;
     }
     let alive = true;
-    void fetchModelsCached(executor).then(list => { if (alive) setModels(list); });
+    void fetchModelsCached(legacyExecutor)
+      .then(list => { if (alive) setModels(list); })
+      .catch(() => {
+        // Keep rendering the session with its persisted model/effort. The
+        // capability menu can retry the next time this executor is mounted.
+        if (alive) setModels([]);
+      });
     return () => { alive = false; };
-  }, [executor]);
+  }, [legacyExecutor]);
 
   // Fetch slash commands lazily; keyed by (executor, workspaceId); cached.
   useEffect(() => {
+    if (executor === 'kimi') {
+      let alive = true;
+      setSlashLoading(true);
+      void loadSessionSlashCommands(session.id)
+        .then(list => {
+          if (!alive) return;
+          setSlashCommands(list);
+          setSlashLoading(false);
+        })
+        .catch(() => {
+          if (!alive) return;
+          setSlashCommands([]);
+          setSlashLoading(false);
+        });
+      return () => { alive = false; };
+    }
     const key = slashCacheKey(executor, workspaceId);
     const cached = SLASH_CACHE.get(key);
     if (cached) {
@@ -315,15 +689,52 @@ export function Composer({
     }
     let alive = true;
     setSlashLoading(true);
-    void fetchSlashCached(executor, workspaceId).then(list => {
-      if (!alive) return;
-      setSlashCommands(list);
-      setSlashLoading(false);
-    });
+    void fetchSlashCached(executor, workspaceId)
+      .then(list => {
+        if (!alive) return;
+        setSlashCommands(list);
+        setSlashLoading(false);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setSlashCommands([]);
+        setSlashLoading(false);
+      });
     return () => { alive = false; };
-  }, [executor, workspaceId]);
+  }, [executor, session.id, workspaceId]);
 
-  const currentModel = session.model ?? (models.length > 0 ? defaultModel(models, executor) : '');
+  useEffect(() => {
+    if (executor !== 'kimi') return;
+    const update = (event: Event) => {
+      const detail = (event as CustomEvent).detail as
+        | { sessionId?: unknown; commands?: unknown }
+        | undefined;
+      if (detail?.sessionId !== session.id || !Array.isArray(detail.commands)) return;
+      setSlashCommands(detail.commands as SlashCommand[]);
+    };
+    window.addEventListener('gian:session-slash-commands', update);
+    return () => window.removeEventListener('gian:session-slash-commands', update);
+  }, [executor, session.id]);
+
+  useEffect(() => {
+    setNativeOptions(sessionNativeOptions);
+  }, [session.id, session.native_config_options]);
+
+  useEffect(() => {
+    if (executor !== 'kimi' || sessionNativeOptions.length > 0) return;
+    let alive = true;
+    void loadNativeConfig(session.id)
+      .then(snapshot => {
+        if (alive && snapshot) setNativeOptions(snapshot.options);
+      })
+      .catch(() => {
+        // Session content remains usable while native config is unavailable.
+      });
+    return () => { alive = false; };
+  }, [executor, session.id, sessionNativeOptions.length]);
+
+  const currentModel = session.model
+    ?? (models.length > 0 && legacyExecutor ? defaultModel(models, legacyExecutor) : '');
   // Fall back to the default (or first) entry when the active model isn't in
   // the menu — e.g. a concrete id like `claude-opus-4-8` synced from a TTY hook
   // that the static alias list doesn't enumerate. Without this the effort grid
@@ -333,12 +744,23 @@ export function Composer({
     ?? models[0];
   const explicitThinkLevel = session.thinking_effort;
   const thinkLevel = explicitThinkLevel ?? defaultEffort(currentModelMeta);
+  const nativeModelOption = nativeOptions.find(option =>
+    nativeOptionRole(option) === 'model' && option.type === 'select');
+  const nativeEffortOption = nativeOptions.find(option =>
+    nativeOptionRole(option) === 'effort' && option.type === 'select');
+  const nativeModeOption = nativeOptions.find(option =>
+    nativeOptionRole(option) === 'mode' && option.type === 'select');
+  const semanticNativeIds = new Set(
+    [nativeModelOption, nativeEffortOption, nativeModeOption]
+      .filter((option): option is NativeConfigOption => Boolean(option))
+      .map(option => option.id),
+  );
+  const nativeExtraOptions = nativeOptions.filter(option => !semanticNativeIds.has(option.id));
   // Pending file attachments — UI only; not yet sent with messages
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
-  const slashBtnRef = useRef<HTMLButtonElement>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
   const modelPopRef = useRef<HTMLDivElement>(null);
 
@@ -386,9 +808,8 @@ export function Composer({
     // Minimal variant has no slash UI — never auto-open the popover.
     if (minimal) return;
     // Auto-open / auto-filter the popover based on what the user types.
-    // Empty input is a no-op — the slash button click is what controls the
-    // popover when there's no `/` text — otherwise an async slashCommands
-    // refresh would close a manually-opened popover.
+    // Empty input is a no-op. Typing `/` is the only entry point; the visible
+    // slash button was intentionally removed from the composer.
     if (text === '/') {
       setSlashOpen(true);
       setSlashIdx(0);
@@ -411,7 +832,6 @@ export function Composer({
     function onPointerDown(e: PointerEvent) {
       if (
         popRef.current && !popRef.current.contains(e.target as Node) &&
-        slashBtnRef.current && !slashBtnRef.current.contains(e.target as Node) &&
         ref.current && !ref.current.contains(e.target as Node)
       ) {
         setSlashOpen(false);
@@ -539,10 +959,10 @@ export function Composer({
     onSetMode(mode, mode === 'auto' ? (turns > 1 ? turns : 1) : undefined);
   }
 
-  function adjustTurns(delta: number) {
-    if (ttyDisplayOnly) { onJumpToCli?.(); return; }
-    const next = Math.max(1, turns + delta);
-    onSetMode('auto', next);
+  function setNativeConfigValue(configId: string, value: NativeConfigValue) {
+    setNativeOptions(current => current.map(option =>
+      option.id === configId ? { ...option, currentValue: value } : option));
+    onSetNativeConfig?.(configId, value);
   }
 
   // Check if there are ready attachments (uploaded, no errors).
@@ -675,7 +1095,7 @@ export function Composer({
         />
 
         {oneShotBypass && (
-          <div className="composer-bypass-banner">
+          <div className="composer-bypass-banner" role="status">
             <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor"
                  strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M12 2L1 22h22z" />
@@ -791,10 +1211,10 @@ export function Composer({
               />
               <span className="ctm-model">{modelLabel(models, activeModel) || activeModel}</span>
               <span className="ctm-effort">
-                <ThinkBars level={thinkLevel} />
+                <BulbIcon />
                 {thinkLevel && <span className="ctm-effort-label">{thinkLevel}</span>}
               </span>
-              <span className="ctm-mode">{t(`mode.${approvalMode}`)}</span>
+              <span className="ctm-mode">{t(`mode.${approvalMode ?? 'ask'}`)}</span>
               <button
                 type="button"
                 className="ctm-edit"
@@ -805,7 +1225,95 @@ export function Composer({
               </button>
             </div>
           )}
-          {!ttyDisplayOnly && !minimal && (<>
+          {!ttyDisplayOnly && !minimal && executor === 'kimi' && (
+            <div className="composer-native-config">
+              {nativeModelOption && (
+                <NativeOptionDrop
+                  option={nativeModelOption}
+                  role="model"
+                  disabled={disabled || !onSetNativeConfig}
+                  onChange={value => setNativeConfigValue(nativeModelOption.id, value)}
+                />
+              )}
+              {nativeEffortOption && (
+                <NativeOptionDrop
+                  option={nativeEffortOption}
+                  role="effort"
+                  disabled={disabled || !onSetNativeConfig}
+                  onChange={value => setNativeConfigValue(nativeEffortOption.id, value)}
+                />
+              )}
+              {nativeExtraOptions.map(option => (
+                option.type === 'boolean' ? (
+                  <label
+                    key={option.id}
+                    className="composer-native-toggle"
+                    title={option.description}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={option.currentValue === true}
+                      disabled={disabled || !onSetNativeConfig}
+                      onChange={event => setNativeConfigValue(option.id, event.target.checked)}
+                    />
+                    <span>{option.name}</span>
+                  </label>
+                ) : option.type === 'select' ? (
+                  <label
+                    key={option.id}
+                    className="composer-native-select"
+                    title={option.description}
+                  >
+                    <span>{option.name}</span>
+                    <select
+                      value={String(option.currentValue ?? '')}
+                      disabled={disabled || !onSetNativeConfig}
+                      aria-label={option.name}
+                      onChange={event => {
+                        const selected = option.choices?.find(
+                          choice => String(choice.value ?? '') === event.target.value,
+                        );
+                        setNativeConfigValue(
+                          option.id,
+                          selected ? selected.value : event.target.value,
+                        );
+                      }}
+                    >
+                      {(option.choices ?? []).map(choice => (
+                        <option
+                          key={String(choice.value)}
+                          value={String(choice.value ?? '')}
+                        >
+                          {choice.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <label
+                    key={option.id}
+                    className="composer-native-input"
+                    title={option.description}
+                  >
+                    <span>{option.name}</span>
+                    <input
+                      key={`${option.id}:${String(option.currentValue)}`}
+                      type={option.type === 'number' ? 'number' : 'text'}
+                      defaultValue={String(option.currentValue ?? '')}
+                      disabled={disabled || !onSetNativeConfig}
+                      onBlur={event => setNativeConfigValue(
+                        option.id,
+                        option.type === 'number'
+                          ? Number(event.target.value)
+                          : event.target.value,
+                      )}
+                    />
+                  </label>
+                )
+              ))}
+            </div>
+          )}
+          {!ttyDisplayOnly && !minimal && executor !== 'kimi' && (<>
           {/* Model picker — opens custom model+thinking popover */}
           <div className="composer-model">
           <button
@@ -815,16 +1323,9 @@ export function Composer({
             title={ttyDisplayOnly ? t('composer.model.titleTty') : t('composer.model.title')}
             onClick={() => { if (ttyDisplayOnly) { onJumpToCli?.(); return; } setModelPopOpen(v => !v); }}
           >
-            <span
-              style={{ width: 7, height: 7, borderRadius: 2, display: 'inline-block',
-                       background: executor === 'codex' ? 'var(--codex)' : 'var(--claude)' }}
-              aria-hidden="true"
-            />
+            <ExecutorMark executor={executor} />
             <span className="name cmp-model">{modelLabel(models, activeModel) || activeModel}</span>
             <span className="caret cmp-caret" aria-hidden="true">▾</span>
-            <span className="think cmp-think" aria-hidden="true">
-              <ThinkBars level={thinkLevel} />
-            </span>
           </button>
           </div>
           {modelPopOpen && modelPopPos && createPortal(
@@ -858,103 +1359,77 @@ export function Composer({
                         <span className="mp-check">{active ? '✓' : ''}</span>
                         <span className="mp-row-body">
                           <span className="mp-row-title">{m.displayName}</span>
-                          {m.description && <span className="mp-row-hint">{m.description}</span>}
+                          {/* codex model list stays plain — name only, like the
+                              real Codex app. claude keeps its descriptions. */}
+                          {m.description && executor !== 'codex' && <span className="mp-row-hint">{m.description}</span>}
                         </span>
                       </button>
                     );
                   })}
                 </div>
               </div>
-              <div className="mp-section">
-                <div className="mp-section-head">
-                  <span className="mp-section-title">{t('composer.reasoning.effort')}</span>
-                </div>
-                <div className="mp-think-grid">
-                  <button
-                    type="button"
-                    className={`mp-think${explicitThinkLevel === null ? ' active' : ''}`}
-                    onClick={() => onSetEffort(null)}
-                  >
-                    <ThinkBars level={null} />
-                    <span>{t('common.default')}</span>
-                  </button>
-                  {supportedEfforts(currentModelMeta).map(lvl => (
-                    <button
-                      key={lvl}
-                      type="button"
-                      className={`mp-think${explicitThinkLevel === lvl ? ' active' : ''}`}
-                      onClick={() => onSetEffort(lvl)}
-                    >
-                      <ThinkBars level={lvl} />
-                      <span style={{ textTransform: 'capitalize' }}>{lvl}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
             </div>,
             document.body
           )}
 
-          {/* Approval mode — V2 segmented control */}
-          <div
-            className="composer-mode"
-            role="tablist"
-            aria-label="Approval mode"
-            title={t('composer.mode.title')}
-          >
-            <button
-              type="button"
-              className={`cmode-item${approvalMode === 'plan' ? ' active' : ''}`}
-              data-mode="plan"
-              onClick={() => setMode('plan')}
-            >
-              {t('mode.plan')}
-            </button>
-            <button
-              type="button"
-              className={`cmode-item${approvalMode === 'ask' ? ' active' : ''}`}
-              data-mode="ask"
-              onClick={() => setMode('ask')}
-            >
-              {t('mode.ask')}
-            </button>
-            <button
-              type="button"
-              className={`cmode-item${approvalMode === 'auto' ? ' active' : ''}`}
-              data-mode="auto"
-              onClick={() => setMode('auto')}
-            >
-              {t('mode.auto')}
-            </button>
-            {/* Single-turn bypass — 4th segm. Toggling arms the next send
-                with all approvals skipped (regardless of session.approval_mode);
-                auto-clears after that turn. */}
-            <button
-              type="button"
-              className={`cmode-item${oneShotBypass ? ' active' : ''}`}
-              data-mode="bypass"
-              title={t('composer.bypass.title')}
-              aria-pressed={oneShotBypass}
-              onClick={() => setOneShotBypass(v => !v)}
-            >
-              <span className="cmode-warn" aria-hidden="true">⚠</span>
-              {t('composer.bypass.button')}
-            </button>
-          </div>
-          {oneShotBypass && (
-            <span className="bypass-hint" role="status">⚠ {t('composer.bypass.hint')}</span>
+          {/* Effort is always its own CLI-backed control. */}
+          {legacyExecutor && (
+            <>
+              <button
+                ref={thinkDrop.btnRef}
+                type="button"
+                className={`composer-opt cmp-think-btn${thinkDrop.open ? ' open' : ''}`}
+                title={t('composer.reasoning.effort')}
+                onClick={() => thinkDrop.setOpen(o => !o)}
+              >
+                <BulbIcon />
+                <span className="name">{effortLabel(legacyExecutor, thinkLevel)}</span>
+                <span className="caret cmp-caret" aria-hidden="true">▾</span>
+              </button>
+              {thinkDrop.open && thinkDrop.pos && createPortal(
+                <div
+                  ref={thinkDrop.popRef}
+                  className="popover think-pop"
+                  role="dialog"
+                  style={{ left: thinkDrop.pos.left, bottom: thinkDrop.pos.bottom }}
+                >
+                  <div className="mp-section-head">
+                    <span className="mp-section-title">{t('composer.reasoning.effort')}</span>
+                  </div>
+                  <div className="mp-list">
+                    {supportedEfforts(currentModelMeta).map(lvl => {
+                      const active = thinkLevel === lvl;
+                      return (
+                        <button
+                          key={lvl}
+                          type="button"
+                          className={`mp-row${active ? ' active' : ''}`}
+                          onClick={() => { onSetEffort(lvl); thinkDrop.setOpen(false); }}
+                        >
+                          <span className="mp-check">{active ? '✓' : ''}</span>
+                          <span className="mp-row-body">
+                            <span className="mp-row-title">{effortLabel(legacyExecutor, lvl)}</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>,
+                document.body
+              )}
+            </>
           )}
 
-          {/* Plan-mode exit button — codex only. cc emits ExitPlanMode as a
-              tool call which surfaces through the approval card flow. */}
-          {approvalMode === 'plan' && session.executor === 'codex' && (
+          {/* Fast is a Codex-only service tier, not a shared executor mode. */}
+          {executor === 'codex' && onSetServiceTier && (
             <button
               type="button"
-              className="cmode-exit-plan"
-              title={t('plan.exit.help')}
-              onClick={() => setMode('ask')}
+              className={`composer-opt cmp-fast${session.service_tier === 'fast' ? ' on' : ''}`}
+              title={t('composer.fast.title')}
+              aria-pressed={session.service_tier === 'fast'}
+              onClick={() => onSetServiceTier(session.service_tier === 'fast' ? null : 'fast')}
             >
-              {t('plan.exit.button')}
+              {t('composer.fast.button')}
             </button>
           )}
 
@@ -964,75 +1439,101 @@ export function Composer({
 
           <span className="spacer" />
 
-          {/* Remote control — Claude only.
-              · Structured mode: click → switch to TTY w/ --remote-control
-                (arms while a turn runs; banner + input lock; App.tsx fires the
-                switch when the turn finishes).
-              · TTY mode: click → toggle Remote Control live by sending
-                `/remote-control` into the PTY; the antenna reflects the synced
-                connection state (off / connecting / connected). */}
-          {executor === 'claude' && session.runtime_mode === 'tty'
-            ? onToggleRemoteControl && (
-              <button
-                type="button"
-                className={`composer-act${remoteControl === 'connected' ? ' active' : ''}${remoteControl === 'connecting' ? ' is-connecting' : ''}`}
-                title={
-                  remoteControl === 'connected' ? t('composer.remote.on')
-                  : remoteControl === 'connecting' ? t('composer.remote.connecting')
-                  : t('composer.remote.off')
-                }
-                aria-label={t('composer.remote.control')}
-                aria-pressed={remoteControl === 'connected'}
-                onClick={() => onToggleRemoteControl()}
-              >
-                <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor"
-                     strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M5 12a7 7 0 0 1 14 0" />
-                  <path d="M2 12a10 10 0 0 1 20 0" />
-                  <circle cx="12" cy="18" r="1.6" fill="currentColor" />
-                </svg>
-              </button>
-            )
-            : executor === 'claude' && onRequestRemote && (
-              <button
-                type="button"
-                className={`composer-act${armedRemote ? ' active' : ''}`}
-                title={armedRemote
-                  ? t('composer.remote.cancelSwitch')
-                  : t('composer.remote.open')}
-                aria-label={t('composer.remote.control')}
-                aria-pressed={armedRemote}
-                onClick={() => {
-                  if (armedRemote) onCancelRemote?.();
-                  else onRequestRemote();
-                }}
-              >
-                <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor"
-                     strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M5 12a7 7 0 0 1 14 0" />
-                  <path d="M2 12a10 10 0 0 1 20 0" />
-                  <circle cx="12" cy="18" r="1.6" fill="currentColor" />
-                </svg>
-              </button>
-            )}
+          {!ttyDisplayOnly && !minimal && <ContextUsageIndicator session={session} />}
 
-          {/* Slash command — framed [/] glyph. Hidden in TTY: the live CLI
-              has its own native slash UI, so this would only duplicate it.
-              Hidden in minimal: the Manager composer has no slash surface. */}
-          {!ttyDisplayOnly && !minimal && (
-            <button
-              ref={slashBtnRef}
-              type="button"
-              className={`composer-act slash-box${slashOpen ? ' active' : ''}`}
-              title={t('composer.slash.title')}
-              onClick={() => {
-                setSlashOpen(v => !v);
-                setSlashIdx(0);
-                ref.current?.focus();
-              }}
-            >
-              <span className="glyph composer-slash-glyph">/</span>
-            </button>
+          {!ttyDisplayOnly && !minimal && executor === 'kimi' && nativeModeOption && (
+            <NativeOptionDrop
+              option={nativeModeOption}
+              role="mode"
+              disabled={disabled || !onSetNativeConfig}
+              onChange={value => setNativeConfigValue(nativeModeOption.id, value)}
+            />
+          )}
+
+          {/* Permission mode stays beside Send for every legacy CLI. */}
+          {!ttyDisplayOnly && !minimal && legacyExecutor && (
+            <>
+              <button
+                ref={approvalDrop.btnRef}
+                type="button"
+                className={`composer-opt cmp-approval-btn${approvalDrop.open ? ' open' : ''}`}
+                title={t('composer.approval.title')}
+                onClick={() => approvalDrop.setOpen(o => !o)}
+              >
+                <span className="name">
+                  {legacyExecutor === 'codex'
+                    ? t(codexApprovalLabelKey(approvalMode ?? 'ask'))
+                    : oneShotBypass
+                      ? t('composer.bypass.button')
+                      : t(`mode.${approvalMode ?? 'ask'}`)}
+                </span>
+                <span className="caret cmp-caret" aria-hidden="true">▾</span>
+              </button>
+              {approvalDrop.open && approvalDrop.pos && createPortal(
+                <div
+                  ref={approvalDrop.popRef}
+                  className="popover approval-pop"
+                  role="dialog"
+                  style={{ left: approvalDrop.pos.left, bottom: approvalDrop.pos.bottom }}
+                >
+                  <div className="mp-section-head">
+                    <span className="mp-section-title">
+                      {legacyExecutor === 'codex'
+                        ? t('composer.approval.section')
+                        : t('composer.mode.title')}
+                    </span>
+                  </div>
+                  <div className="mp-list">
+                    {(legacyExecutor === 'codex'
+                      ? CODEX_APPROVALS
+                      : [
+                          { key: 'plan', mode: 'plan' as const, titleKey: 'mode.plan' },
+                          { key: 'ask', mode: 'ask' as const, titleKey: 'mode.ask' },
+                          { key: 'auto', mode: 'auto' as const, titleKey: 'mode.auto' },
+                        ]).map(opt => {
+                      const active = !oneShotBypass && approvalMode === opt.mode;
+                      return (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          className={`mp-row${active ? ' active' : ''}`}
+                          onClick={() => {
+                            setOneShotBypass(false);
+                            setMode(opt.mode);
+                            approvalDrop.setOpen(false);
+                          }}
+                        >
+                          <span className="mp-check">{active ? '✓' : ''}</span>
+                          <span className="mp-row-body">
+                            <span className="mp-row-title">{t(opt.titleKey)}</span>
+                            {'descKey' in opt && opt.descKey && (
+                              <span className="mp-row-hint">{t(opt.descKey)}</span>
+                            )}
+                          </span>
+                        </button>
+                      );
+                    })}
+                    {legacyExecutor === 'claude' && (
+                      <button
+                        type="button"
+                        className={`mp-row danger-option${oneShotBypass ? ' active' : ''}`}
+                        onClick={() => {
+                          setOneShotBypass(active => !active);
+                          approvalDrop.setOpen(false);
+                        }}
+                      >
+                        <span className="mp-check">{oneShotBypass ? '✓' : ''}</span>
+                        <span className="mp-row-body">
+                          <span className="mp-row-title">{t('composer.bypass.button')}</span>
+                          <span className="mp-row-hint">{t('composer.bypass.title')}</span>
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                </div>,
+                document.body
+              )}
+            </>
           )}
 
           {/* Attach files — plus glyph (VS Code style) — picker not supported in v1.

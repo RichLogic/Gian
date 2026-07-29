@@ -28,21 +28,19 @@ export function stripManagerSystemPrefix(text: string): string {
 }
 
 /** Wrap an out-of-band context note that the web prepends to a Manager user
- *  message — e.g. "the user created subtask X from your proposal". Reuses the
+ *  message — e.g. "the user manually created subtask X". Reuses the
  *  system-prefix sentinels so `stripManagerSystemPrefix` hides it from the
- *  transcript while the raw text still reaches codex. Only ever prepended to a
- *  NON-first message (a proposal must have preceded it), so it never collides
- *  with the first-turn system prompt. Returns `userText` unchanged when there
- *  are no notes. */
+ *  transcript while the raw text still reaches the Manager. Returns `userText`
+ *  unchanged when there are no notes. */
 export function wrapManagerContextNote(notes: string[], userText: string): string {
   if (notes.length === 0) return userText;
   return `${MANAGER_SYS_OPEN}\n${notes.join('\n')}\n${MANAGER_SYS_CLOSE}\n\n${userText}`;
 }
 
-// ── Manager `create_subtask` proposal protocol (spec 2026-06-28 §A2) ──
-// codex-proxy has no tool/schema channel for the Manager, so it PROPOSES a
-// subtask by emitting an ASCII-delimited block in its reply; the web parses it
-// into an editable confirm card and hides the raw block from the transcript.
+// ── Legacy Manager `create_subtask` proposal protocol (spec 2026-06-28 §A2) ──
+// Kept only to strip/parse older transcripts. Current Manager-authored subtasks
+// use the surface-agnostic `<<gian:action>>` envelope, executed by the host after
+// natural-language confirmation in the conversation.
 export const CREATE_SUBTASK_OPEN = '<<gian:create_subtask>>';
 export const CREATE_SUBTASK_CLOSE = '<</gian:create_subtask>>';
 
@@ -51,15 +49,14 @@ export interface CreateSubtaskProposal {
   name?: string;
   /** Workspace name or absolute path — resolved to a workspace_id on the web. */
   workspace?: string;
-  executor?: 'claude' | 'codex';
+  executor?: import('./model.js').Executor;
   /** Initial instruction for the subtask; required (empty proposals ignored). */
   prompt: string;
 }
 
-/** Parse the LAST `<<gian:create_subtask>> {json} <</gian:create_subtask>>`
+/** Parse the LAST legacy `<<gian:create_subtask>> {json} <</gian:create_subtask>>`
  *  block from Manager assistant text. Returns null when absent, malformed, or
- *  missing a non-empty `prompt` (so half-typed/streaming blocks don't render a
- *  card prematurely). */
+ *  missing a non-empty `prompt`. */
 export function parseCreateSubtaskProposal(text: string): CreateSubtaskProposal | null {
   const open = text.lastIndexOf(CREATE_SUBTASK_OPEN);
   if (open === -1) return null;
@@ -74,7 +71,11 @@ export function parseCreateSubtaskProposal(text: string): CreateSubtaskProposal 
   }
   const prompt = typeof obj.prompt === 'string' ? obj.prompt : '';
   if (!prompt.trim()) return null;
-  const executor = obj.executor === 'claude' || obj.executor === 'codex' ? obj.executor : undefined;
+  const executor = obj.executor === 'claude'
+    || obj.executor === 'codex'
+    || obj.executor === 'kimi'
+    ? obj.executor
+    : undefined;
   return {
     prompt,
     ...(typeof obj.name === 'string' && obj.name.trim() ? { name: obj.name } : {}),
@@ -83,8 +84,8 @@ export function parseCreateSubtaskProposal(text: string): CreateSubtaskProposal 
   };
 }
 
-/** Remove every create_subtask block from Manager assistant text so the user
- *  sees clean prose, not the raw JSON block. */
+/** Remove every legacy create_subtask block from Manager assistant text so the
+ *  user sees clean prose, not the raw JSON block. */
 export function stripCreateSubtaskBlocks(text: string): string {
   let out = text;
   for (;;) {

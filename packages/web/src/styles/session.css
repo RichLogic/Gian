@@ -374,7 +374,7 @@
 }
 
 /* Executor picker cards */
-.exec-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.exec-picker { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .exec-card {
   display: flex; align-items: flex-start; gap: 10px;
   padding: 12px;
@@ -391,6 +391,7 @@
 .exec-card:hover { background: var(--surface-3); }
 .exec-card.active.codex  { box-shadow: 0 0 0 2px var(--codex); background: var(--codex-soft); }
 .exec-card.active.claude { box-shadow: 0 0 0 2px var(--claude); background: var(--claude-soft); }
+.exec-card.active.kimi { box-shadow: 0 0 0 2px var(--kimi); background: var(--kimi-soft); }
 .exec-card-dot {
   width: 20px; height: 20px;
   border-radius: var(--r-2);
@@ -398,6 +399,10 @@
 }
 .exec-card.codex  .exec-card-dot { background: var(--codex); }
 .exec-card.claude .exec-card-dot { background: var(--claude); }
+.exec-card.kimi .exec-card-dot {
+  background: var(--kimi);
+  box-shadow: 0 0 0 1px oklch(0.65 0 0 / 0.55);
+}
 .exec-card-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .exec-card-name { font-size: var(--fz-13); font-weight: 600; color: var(--text); }
 .exec-card-desc { font-size: var(--fz-11); color: var(--text-3); font-family: var(--font-mono); }

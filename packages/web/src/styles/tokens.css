@@ -53,6 +53,8 @@
   --claude-h: 36;
   --claude: oklch(0.70 0.15 var(--claude-h));
   --claude-soft: oklch(0.70 0.15 var(--claude-h) / 0.14);
+  --kimi: #0c0c0c;
+  --kimi-soft: rgb(12 12 12 / 0.12);
 
   /* Platform */
   --discord:      oklch(0.58 0.16 280);

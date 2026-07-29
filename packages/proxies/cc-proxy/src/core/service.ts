@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 
+import type { TokenUsageUpdate } from '@gian/shared';
 import { createAppError } from './errors.js';
 import { normalizeInputItems } from './input.js';
 import { listAllSlashCommands } from './slash.js';
@@ -72,14 +73,10 @@ export function formatQuestionAnswers(answers: Record<string, string | string[]>
   return lines.join('\n');
 }
 
-/** Best-guess context window for a Claude model ID. Claude CLI doesn't
- *  expose this via stream-json, so we go off the model name. `[1m]` suffix =
- *  1M token variant; everything else falls back to 200k (the standard ceiling
- *  for Sonnet/Opus/Haiku 4.x). */
-function inferContextWindow(modelId: string | null): number {
-  if (!modelId) return 200_000;
-  if (modelId.includes('[1m]')) return 1_000_000;
-  return 200_000;
+/** Older Claude CLI builds may omit `contextWindow`; only infer it when the
+ * detected model id carries an explicit capacity marker. */
+function inferContextWindow(modelId: string | null): number | undefined {
+  return modelId?.includes('[1m]') ? 1_000_000 : undefined;
 }
 
 export class CcProxyService {
@@ -89,7 +86,11 @@ export class CcProxyService {
   private readonly approvalsById = new Map<string, PendingApproval>();
   private readonly approvalsBySessionId = new Map<string, Map<string, PendingApproval>>();
   /** Tracks the current turn and upstream requestId per session. */
-  private readonly activeTurns = new Map<string, { turnId: string; requestId: number | string | undefined }>();
+  private readonly activeTurns = new Map<string, {
+    turnId: string;
+    requestId: number | string | undefined;
+    isCompact: boolean;
+  }>();
 
   constructor(options: ServiceOptions) {
     this.runtime = options.runtime;
@@ -256,7 +257,20 @@ export class CcProxyService {
     await this.ensureProcess(session, requestedModel);
 
     const turnId = randomId('turn');
-    this.activeTurns.set(session.id, { turnId, requestId });
+    const isCompact = prompt.trim().split(/\s+/, 1)[0]?.toLowerCase() === '/compact';
+    this.activeTurns.set(session.id, { turnId, requestId, isCompact });
+
+    if (isCompact) {
+      // The pre-compact numerator is now invalid. Clear it before Claude can
+      // stream a post-compact assistant usage sample; never wait for a
+      // transcript heuristic or reuse the stale value.
+      this.emitEvent('token_usage.updated', {
+        requestId,
+        sessionId: session.id,
+        turnId,
+        data: { context: null, reason: 'compact_started' },
+      });
+    }
 
     // Send the user message. `thinking` is the host-side abstraction; Claude
     // CLI calls it `--effort`. Validate against the levels discovered from
@@ -543,52 +557,45 @@ export class CcProxyService {
     });
   }
 
-  /**
-   * Per-turn token usage from Claude CLI's `result.usage`. Wrapped in codex's
-   * `token_usage.updated` shape so the host's existing parseTokenUsage works
-   * unchanged. `total` is input + output (same convention codex uses).
-   *
-   * Context-window estimate: model IDs ending with `[1m]` get 1M; otherwise
-   * 200k (Anthropic's standard ceiling). Better than nothing — the actual
-   * runtime context isn't exposed via `claude -p` stream-json today.
-   */
-  private handleTokenUsage(
-    sessionId: string,
-    usage: {
-      inputTokens: number;
-      outputTokens: number;
-      cacheReadInputTokens: number;
-      cacheCreationInputTokens: number;
-    },
-  ) {
+  private handleTokenUsage(sessionId: string, usage: TokenUsageUpdate) {
     const session = this.sessionsById.get(sessionId);
     if (!session) return;
 
     const context = this.activeTurns.get(sessionId);
-    const totalTokens = usage.inputTokens + usage.outputTokens;
-    // Prefer the model id claude CLI reported on `system init` — this is the
-    // first billing-honest moment when cc-proxy can know the concrete model.
-    // Falls back to the stored session model for first-turn / pre-init paths.
     const effectiveModelId = this.runtime.getDetectedModelId(sessionId) ?? session.model;
-    const modelContextWindow = inferContextWindow(effectiveModelId);
+    // Claude may report the summarization request's large, pre-compact input
+    // as an assistant usage sample. Keep its conversation delta, but never
+    // let that sample refill the context numerator we just invalidated.
+    const { context: reportedContext, ...usageWithoutContext } = usage;
+    const contextSafeUsage: TokenUsageUpdate = context?.isCompact
+      ? usageWithoutContext
+      : {
+          ...usageWithoutContext,
+          ...(reportedContext === undefined ? {} : { context: reportedContext }),
+        };
+    const inferredContextWindow = contextSafeUsage.context?.window === undefined
+      ? inferContextWindow(effectiveModelId)
+      : undefined;
+    const normalized: TokenUsageUpdate = {
+      ...contextSafeUsage,
+      ...(contextSafeUsage.context && inferredContextWindow !== undefined
+        ? {
+            context: {
+              ...contextSafeUsage.context,
+              window: inferredContextWindow,
+            },
+          }
+        : {}),
+    };
+    if (normalized.context === undefined && normalized.conversation === undefined && normalized.reason === undefined) {
+      return;
+    }
 
     this.emitEvent('token_usage.updated', {
       requestId: context?.requestId,
       sessionId: session.id,
       turnId: context?.turnId ?? session.activeTurnId,
-      data: {
-        params: {
-          tokenUsage: {
-            total: {
-              totalTokens,
-              inputTokens: usage.inputTokens,
-              outputTokens: usage.outputTokens,
-              cachedInputTokens: usage.cacheReadInputTokens,
-            },
-            modelContextWindow,
-          },
-        },
-      },
+      data: normalized,
     });
   }
 

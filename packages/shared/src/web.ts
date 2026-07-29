@@ -98,6 +98,9 @@ export interface TaskCreateMessage {
   type: 'task:create';
   name: string;
   description?: string;
+  /** Which executor the Task's Manager (PM) runs on. Omitted → host uses the
+   *  `default_task_executor` config default. */
+  executor?: Executor;
 }
 
 export interface TaskUpdateMessage {
@@ -124,6 +127,7 @@ export interface ApprovalCreatedMessage {
     category: ApprovalCategory;
     description: string;
     status: ApprovalStatus;
+    native_options?: import('./model.js').NativeApprovalOption[];
   };
 }
 
@@ -170,6 +174,10 @@ export interface ErrorMessage {
   type: 'error';
   /** Optional — the session the failing operation referenced. */
   session_id?: string;
+  /** Original client message type. Lets the UI settle operation-specific
+   *  loading state even when `code` is an executor-native error such as
+   *  `AUTH_REQUIRED`. */
+  request_type?: ClientToServerMessage['type'];
   /** Short machine-readable code, e.g. `MESSAGE_SEND_FAILED`. */
   code: string;
   /** Human-readable message; safe to surface in UI. */
@@ -311,6 +319,8 @@ export type ServerToClientMessage =
   | TermReplayMessage
   | TermExitedMessage
   | SessionRuntimeSwitchedMessage
+  | SessionNativeConfigMessage
+  | SessionSlashCommandsMessage
   | TtyLockMessage
   | TtyRemoteControlMessage
   | WorkspaceGitUpdatedMessage
@@ -322,7 +332,8 @@ export interface SessionCreateMessage {
   workspace_id: string;
   executor: Executor;
   model?: string;
-  approval_mode: ApprovalMode;
+  /** Required for Claude/Codex. Kimi uses executor-native configuration. */
+  approval_mode?: ApprovalMode;
   /** When 'worktree', host creates a dedicated branch + working directory
    *  before spawning the proxy. */
   mode?: 'regular' | 'worktree';
@@ -403,6 +414,8 @@ export interface ApprovalResolveMessage {
    * piggybacks on the Claude SDK `updatedInput.answers` channel.
    */
   answers?: Record<string, string | string[]>;
+  /** Exact executor option for ACP-native approvals. */
+  native_option_id?: string;
 }
 
 export interface SessionStopMessage {
@@ -472,6 +485,33 @@ export interface SessionSetEffortMessage {
   session_id: string;
   /** Null clears (use model default). See `ThinkingEffort`. */
   effort: import('./model.js').ThinkingEffort | null;
+}
+
+export interface SessionSetServiceTierMessage {
+  type: 'session:set_service_tier';
+  session_id: string;
+  /** 'fast' turns the codex Fast tier on; null turns it off. codex-only. */
+  service_tier: 'fast' | null;
+}
+
+export interface SessionSetNativeConfigMessage {
+  type: 'session:set_native_config';
+  session_id: string;
+  config_id: string;
+  value: import('./model.js').NativeConfigValue;
+}
+
+export interface SessionNativeConfigMessage {
+  type: 'session:native-config';
+  session_id: string;
+  state: import('./model.js').ExecutorConfigState;
+  options: import('./model.js').NativeConfigOption[];
+}
+
+export interface SessionSlashCommandsMessage {
+  type: 'session:slash-commands';
+  session_id: string;
+  commands: import('./proxy.js').SlashCommand[];
 }
 
 export interface SessionTakeoverMessage {
@@ -656,6 +696,8 @@ export type ClientToServerMessage =
   | SessionSetModeMessage
   | SessionSetModelMessage
   | SessionSetEffortMessage
+  | SessionSetServiceTierMessage
+  | SessionSetNativeConfigMessage
   | SessionTakeoverMessage
   | SlashExecuteMessage
   | QueueAddMessage

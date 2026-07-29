@@ -386,6 +386,23 @@ function SettingsBodyInner({
               onSetModel={v => patch({ default_codex_model: v })}
               onSetEffort={v => patch({ default_codex_effort: v })}
             />
+            <div className="s2-taskpm">
+              <div className="s2-taskpm-head">
+                <span className="s2-taskpm-label">{t('settings.executors.taskDefault')}</span>
+                <div className="segm">
+                  {(['claude', 'codex', 'kimi'] as const).map(ex => (
+                    <button
+                      key={ex}
+                      className={`segm-item ${config.default_task_executor === ex ? 'active' : ''}`}
+                      onClick={() => patch({ default_task_executor: ex })}
+                    >
+                      {ex === 'claude' ? 'Claude' : ex === 'codex' ? 'Codex' : 'Kimi'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <p className="s2-help">{t('settings.executors.taskDefault.help')}</p>
+            </div>
           </div>
         </section>
 

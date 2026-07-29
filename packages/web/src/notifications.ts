@@ -70,7 +70,10 @@ export async function requestDesktopNotificationPermission(): Promise<BrowserNot
 function sessionLabel(session: Pick<Session, 'name' | 'executor'> | null | undefined): string {
   if (!session) return 'Session';
   const name = session.name?.trim();
-  return name || (session.executor === 'codex' ? 'Codex session' : 'Claude session');
+  if (name) return name;
+  if (session.executor === 'codex') return 'Codex session';
+  if (session.executor === 'kimi') return 'Kimi session';
+  return 'Claude session';
 }
 
 function notificationForEnvelope(

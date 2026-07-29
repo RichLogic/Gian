@@ -1,4 +1,4 @@
-import type { Session } from './model.js';
+import type { ApprovalMode, Executor, Session } from './model.js';
 
 /**
  * NativeSession represents a session that exists on disk in the underlying
@@ -15,7 +15,7 @@ import type { Session } from './model.js';
 export interface NativeSession {
   /** Native session UUID (cc session id or codex thread id). */
   id: string;
-  executor: 'claude' | 'codex';
+  executor: Executor;
   /** Absolute path of the .jsonl file on disk. */
   filePath: string;
   /** Working directory the session ran in. For cc this is decoded from the
@@ -45,12 +45,12 @@ export interface ListNativeSessionsResponse {
 }
 
 export interface AdoptNativeSessionRequest {
-  executor: 'claude' | 'codex';
+  executor: Executor;
   native_session_id: string;
   /** Optional Gian session name. Auto-generated if absent. */
   name?: string;
-  /** Optional approval mode. Defaults to 'ask' if omitted. */
-  approval_mode?: 'plan' | 'ask' | 'auto';
+  /** Claude/Codex only. Defaults to 'ask' if omitted; Kimi must omit it. */
+  approval_mode?: ApprovalMode;
 }
 
 export interface AdoptNativeSessionResponse {
@@ -59,6 +59,6 @@ export interface AdoptNativeSessionResponse {
 }
 
 export interface DeleteNativeSessionRequest {
-  executor: 'claude' | 'codex';
+  executor: Executor;
   native_session_id: string;
 }

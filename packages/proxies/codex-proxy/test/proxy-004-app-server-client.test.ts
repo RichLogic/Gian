@@ -298,3 +298,53 @@ test('PROXY-004: nextId starts at 1 and increments monotonically', () => {
   // We can't directly call requestInternal without a socket, but we can
   // assert the starting state is the contract.
 });
+
+test('thread/start inherits config.toml and captures the effective permission profile', async () => {
+  const client = new CodexAppServerClient();
+  const calls: Array<{ method: string; params: unknown }> = [];
+  (client as unknown as { request(method: string, params: unknown): Promise<unknown> }).request =
+    async (method, params) => {
+      calls.push({ method, params });
+      return {
+        thread: { id: 'thread-configured' },
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user',
+        sandbox: { type: 'workspaceWrite', writableRoots: ['/repo'], networkAccess: false },
+        activePermissionProfile: { id: 'my-profile', extends: ':workspace' },
+      };
+    };
+
+  const result = await client.startThread({ cwd: '/repo' });
+  assert.deepEqual(calls, [{
+    method: 'thread/start',
+    params: { cwd: '/repo', experimentalRawEvents: false },
+  }]);
+  assert.deepEqual(result.configuredPermissions, {
+    approvalPolicy: 'on-request',
+    approvalsReviewer: 'user',
+    permissions: 'my-profile',
+  });
+});
+
+test('turn/start sends an exact configured profile without a conflicting sandbox policy', async () => {
+  const client = new CodexAppServerClient();
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  (client as unknown as { request(method: string, params: unknown): Promise<unknown> }).request =
+    async (method, params) => {
+      calls.push({ method, params: params as Record<string, unknown> });
+      return { turn: { id: 'turn-1', status: 'inProgress' } };
+    };
+
+  await client.startTurn(
+    'thread-1',
+    [{ type: 'text', text: 'hello' }],
+    {
+      permissions: 'my-profile',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
+      sandbox: 'danger-full-access',
+    },
+  );
+  assert.equal(calls[0]?.params.permissions, 'my-profile');
+  assert.equal('sandboxPolicy' in (calls[0]?.params ?? {}), false);
+});

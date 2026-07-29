@@ -28,7 +28,7 @@ vi.mock('../src/api.js', () => ({
 
 function mockHandlers(): ManagerComposerHandlers {
   return {
-    onSetModel: vi.fn(), onSetMode: vi.fn(), onSetEffort: vi.fn(), onSendSkill: vi.fn(),
+    onSetModel: vi.fn(), onSetMode: vi.fn(), onSetEffort: vi.fn(), onSetServiceTier: vi.fn(), onSendSkill: vi.fn(),
     onQueueAdd: vi.fn(), onQueueRemove: vi.fn(), onQueueReorder: vi.fn(), onQueueClear: vi.fn(),
     onQueueSendNow: vi.fn(), onApprove: vi.fn(),
   };
@@ -89,8 +89,10 @@ function renderTasks(opts: {
   onManagerStop?: () => void;
   cards?: ManagerSubtaskCard[];
   sessions?: Session[];
+  wsSend?: ReturnType<typeof vi.fn>;
 } = { session: managerSession() }) {
   const onManagerStop = opts.onManagerStop ?? vi.fn();
+  const wsSend = opts.wsSend ?? vi.fn();
   const sessions = opts.sessions ?? (opts.session ? [opts.session] : []);
   render(
     <LocaleProvider locale="en">
@@ -98,13 +100,13 @@ function renderTasks(opts: {
         tasks={[TASK]}
         sessions={sessions}
         workspaces={[WORKSPACE]}
-        ws={{ send: vi.fn() } as never}
+        ws={{ send: wsSend } as never}
+        defaultTaskExecutor="claude"
         activeTaskId="task-1"
         activeSubtaskId={null}
         managerSession={opts.session}
         managerItems={[]}
         managerPending={opts.pending ?? false}
-        managerProposal={null}
         managerCards={opts.cards ?? []}
         managerHandlers={opts.session ? mockHandlers() : null}
         managerQueue={[]}
@@ -118,11 +120,10 @@ function renderTasks(opts: {
         onManagerSend={vi.fn()}
         onManagerStop={onManagerStop}
         onCreateSubtask={vi.fn()}
-        onDismissSubtaskProposal={vi.fn()}
       />
     </LocaleProvider>,
   );
-  return { onManagerStop };
+  return { onManagerStop, wsSend };
 }
 
 describe('Manager composer reuses the shared session composer', () => {
@@ -138,9 +139,12 @@ describe('Manager composer reuses the shared session composer', () => {
     expect(document.querySelector('.tasks-manager-composer')).toBeNull();
 
     // Full variant: the Manager is a first-class session, so it exposes the
-    // model picker and the PLAN/ASK/AUTO control — same as a normal session.
+    // model picker and an approval control + Send — same as a normal session.
+    // The approval control differs by executor: claude keeps the PLAN/ASK/AUTO
+    // segmented control (.composer-mode); codex uses the 4-preset up-drop
+    // (.cmp-approval-btn). Accept either so the test is executor-agnostic.
     expect(document.querySelector('.cmp-model-wrap')).not.toBeNull(); // model picker
-    expect(document.querySelector('.composer-mode')).not.toBeNull();  // PLAN/ASK/AUTO
+    expect(document.querySelector('.composer-mode, .cmp-approval-btn')).not.toBeNull();
     expect(screen.getByRole('button', { name: 'Send' })).toBeTruthy();
   });
 
@@ -186,6 +190,32 @@ describe('Manager composer reuses the shared session composer', () => {
   });
 });
 
+describe('Task executor picker', () => {
+  beforeEach(() => { localStorage.clear(); });
+
+  it('closes after selecting Kimi and creates the Task with executor=kimi', async () => {
+    const user = userEvent.setup();
+    const wsSend = vi.fn();
+    renderTasks({ session: managerSession(), wsSend });
+
+    const newButton = screen.getByRole('button', { name: 'New' });
+    await user.hover(newButton);
+    expect(newButton).toHaveAttribute('aria-expanded', 'true');
+
+    await user.click(screen.getByRole('menuitem', { name: 'Kimi Code' }));
+    expect(newButton).toHaveAttribute('aria-expanded', 'false');
+    expect(document.querySelector('.sb-newtask.open')).toBeNull();
+
+    await user.type(screen.getByRole('textbox', { name: 'Task name' }), 'Kimi task');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+    expect(wsSend).toHaveBeenCalledWith({
+      type: 'task:create',
+      name: 'Kimi task',
+      executor: 'kimi',
+    });
+  });
+});
+
 describe('Manager status on the parent task row (row-end StatusIcon)', () => {
   beforeEach(() => { localStorage.clear(); });
 
@@ -208,16 +238,12 @@ describe('Manager status on the parent task row (row-end StatusIcon)', () => {
   });
 });
 
-describe('Inline subtask-action cards (issue #2)', () => {
+describe('Inline manual subtask-created cards', () => {
   beforeEach(() => { localStorage.clear(); });
 
   const createdCard: ManagerSubtaskCard = {
     id: 'sub-1', status: 'created', name: 'Wire the thing',
     workspaceLabel: 'Gian-Dev', executor: 'codex', prompt: 'do the wiring', ts: 1000, acked: false,
-  };
-  const dismissedCard: ManagerSubtaskCard = {
-    id: 'dismissed:task-1:x', status: 'dismissed', name: 'Skip this',
-    workspaceLabel: 'Gian-Dev', executor: 'claude', prompt: 'nope', ts: 1000, acked: true,
   };
 
   it('renders a static "created" card inline in the conversation', () => {
@@ -229,13 +255,6 @@ describe('Inline subtask-action cards (issue #2)', () => {
     // Non-interactive: it's a plain div, no buttons/inputs.
     expect(card!.querySelector('button')).toBeNull();
     expect(card!.querySelector('input')).toBeNull();
-  });
-
-  it('renders a static "dismissed" card too', () => {
-    renderTasks({ session: managerSession(), cards: [dismissedCard] });
-    const card = document.querySelector('.manager-subtask-card.dismissed');
-    expect(card).not.toBeNull();
-    expect(card!.textContent).toContain('Proposal dismissed');
   });
 });
 

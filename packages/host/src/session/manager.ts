@@ -1,8 +1,11 @@
 import type {
   ApprovalMode,
+  ExecutorConfigState,
   EventEnvelope,
   Executor,
   MessageAttachment,
+  NativeConfigOption,
+  NativeConfigValue,
   ProxyNotification,
   RuntimeMode,
   Session,
@@ -29,7 +32,17 @@ import { locateNativeJsonl, locateCcJsonl, appendCcCustomTitle } from '../native
 import {
   normalizeCcNotification,
   normalizeCodexNotification,
+  normalizeKimiNotification,
 } from '../event/index.js';
+import {
+  normalizeKimiConfigOptions,
+  normalizeKimiSlashCommands,
+} from '../proxy/kimi-proxy-client.js';
+import {
+  parseAcpUsageUpdate,
+  parseTokenUsageUpdate,
+  type ParsedTokenUsageUpdate,
+} from './token-usage.js';
 import {
   createWorktree,
   detectDefaultBranch,
@@ -42,9 +55,8 @@ import { join } from 'node:path';
 import {
   getOrCreateRootWorkspace,
   buildManagerSystemPrompt,
-  MANAGER_EXECUTOR,
-  MANAGER_MODEL,
-  MANAGER_EFFORT,
+  managerRuntimeFor,
+  DEFAULT_MANAGER_EXECUTOR,
 } from '../task/manager-session.js';
 import {
   summarizeCompletedSubtask,
@@ -79,8 +91,8 @@ export interface CreateSessionInput {
   /** Override for worktree mode (defaults to worktree/<short-id>). */
   branch?: string;
   /** PRD-v3 Task abstraction. Defaults to 'coding' for standalone sessions.
-   *  A Subtask is created with type='subtask'; the per-Task read-only Codex
-   *  Manager with type='manager'. */
+   *  A Subtask is created with type='subtask'; the executor-selectable
+   *  per-Task Manager with type='manager'. */
   type?: SessionType;
   /** The Task this session belongs to (PRD-v3). Null/absent = a standalone
    *  ("scattered") session. */
@@ -98,20 +110,23 @@ export interface CreateSessionInput {
  *   ask   — every risky action surfaces as a user approval
  *   auto  — agent runs autonomously with executor-side safety classifier
  *
- * The two executors expose different primitives:
+ * The two legacy-mode executors expose different primitives:
  *   - cc-proxy: a single `permissionMode` flag (Claude CLI native)
  *   - codex-proxy: four orthogonal fields (sandbox / approvalPolicy /
  *                  approvalsReviewer / collaborationMode)
+ * Kimi is intentionally excluded: its ACP config options are passed through
+ * by stable option id and never mapped onto Gian's ApprovalMode.
  *
  * Each field is omitted when the proxy doesn't need it; both proxies tolerate
  * unknown extra fields (other proxy's params just get ignored).
  */
 function proxyTurnParamsFor(
-  executor: Executor,
+  executor: Exclude<Executor, 'kimi'>,
   mode: ApprovalMode,
 ): {
   permissionMode?: 'plan' | 'default' | 'auto' | 'bypassPermissions';
   sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  useConfiguredPermissions?: boolean;
   approvalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
   approvalsReviewer?: 'user' | 'auto_review';
   collaborationMode?: 'plan' | 'default';
@@ -124,6 +139,11 @@ function proxyTurnParamsFor(
         return { permissionMode: 'default' };
       case 'auto':
         return { permissionMode: 'auto' };
+      case 'full-access':
+      case 'custom':
+        // This should be rejected before persistence. If an older/bad row leaks
+        // through, fail safe: Ask/default, never persistent bypassPermissions.
+        return { permissionMode: 'default' };
     }
   }
   // codex
@@ -147,8 +167,73 @@ function proxyTurnParamsFor(
         approvalPolicy: 'on-request',
         approvalsReviewer: 'auto_review',
       };
+    case 'custom':
+      return { useConfiguredPermissions: true };
+    case 'full-access':
+      // "Full access" in the codex composer — persistent, replaces the old
+      // per-turn one-shot bypass.
+      return {
+        sandbox: 'danger-full-access',
+        approvalPolicy: 'never',
+        approvalsReviewer: 'auto_review',
+      };
   }
 }
+
+function assertApprovalModeAllowed(executor: Executor, mode: ApprovalMode): void {
+  if ((mode === 'custom' || mode === 'full-access') && executor !== 'codex') {
+    throw new Error(`${mode} approval mode is codex-only`);
+  }
+}
+
+const EMPTY_EXECUTOR_CONFIG: ExecutorConfigState = {
+  schemaVersion: 1,
+  values: {},
+};
+
+type SessionRow = Omit<Session, 'executor_config' | 'native_config_options'> & {
+  executor_config_json?: string | null;
+};
+
+function parseExecutorConfig(value: string | null | undefined): ExecutorConfigState {
+  if (!value) return { ...EMPTY_EXECUTOR_CONFIG, values: {} };
+  try {
+    const parsed = JSON.parse(value) as {
+      schemaVersion?: unknown;
+      values?: unknown;
+    };
+    if (
+      parsed.schemaVersion === 1
+      && parsed.values
+      && typeof parsed.values === 'object'
+      && !Array.isArray(parsed.values)
+    ) {
+      return {
+        schemaVersion: 1,
+        values: parsed.values as ExecutorConfigState['values'],
+      };
+    }
+  } catch {
+    // Fall through to an empty, forward-compatible state.
+  }
+  return { ...EMPTY_EXECUTOR_CONFIG, values: {} };
+}
+
+function stateFromOptions(options: NativeConfigOption[]): ExecutorConfigState {
+  return {
+    schemaVersion: 1,
+    values: Object.fromEntries(options.map(option => [option.id, option.currentValue])),
+  };
+}
+
+function kimiContentText(value: unknown): string {
+  if (!value || typeof value !== 'object') return '';
+  const content = value as { type?: unknown; text?: unknown };
+  return content.type === 'text' && typeof content.text === 'string'
+    ? content.text
+    : '';
+}
+
 /**
  * Map shared InputItem[] to the items the target executor accepts.
  *   - codex: passes everything through (skill / text / localImage all native)
@@ -213,6 +298,9 @@ export class SessionManager {
   private activeTurns = new Map<string, { id: string; number: number }>();
   /** Proxy session ids returned by session.create per Gian session. */
   private proxySessionIds = new Map<string, string>();
+  /** Deduplicates concurrent lazy reattachment (for example config refresh
+   *  racing the first send after a host restart). */
+  private proxyBringUps = new Map<string, Promise<string>>();
   /** Job Mode state keyed by session id. Present only while a job is active. */
   private jobs = new Map<string, JobState>();
   /** Subscribers added via onEvent — receives every dispatched UnifiedEvent. */
@@ -220,6 +308,12 @@ export class SessionManager {
   /** Capabilities cached on first proxy session create per executor.
    *  GET /api/proxy/:executor/models reads this. */
   private capsByExecutor = new Map<string, import('@gian/shared').ProxyCapabilities>();
+  /** Dynamic executor options are not DB columns; exact current values live in
+   *  executor_config_json while choices are refreshed from the live proxy. */
+  private nativeConfigOptions = new Map<string, NativeConfigOption[]>();
+  /** Claude reports conversation totals as per-turn deltas. A proxy reconnect
+   *  can replay a terminal notification, so remember which turns were applied. */
+  private conversationUsageTurns = new Map<string, Set<string>>();
   /** Gian action executor (lazy — bound to this manager's side effects). */
   private _actionExecutor: ActionExecutor | null = null;
 
@@ -261,7 +355,13 @@ export class SessionManager {
 
     const id = randomUUID();
     const now = new Date().toISOString();
-    const approvalMode: ApprovalMode = input.approval_mode ?? 'auto';
+    if (input.executor === 'kimi' && input.approval_mode !== undefined) {
+      throw new Error('Kimi uses executor-native mode; approval_mode must be omitted');
+    }
+    const approvalMode: ApprovalMode | null = input.executor === 'kimi'
+      ? null
+      : (input.approval_mode ?? 'auto');
+    if (approvalMode) assertApprovalModeAllowed(input.executor, approvalMode);
 
     // Resolve session defaults from system config when the caller didn't pin
     // them. The Settings panel writes `default_{claude,codex}_{model,effort}`
@@ -270,10 +370,14 @@ export class SessionManager {
     const cfg = loadConfig(this.db);
     const defaultModel = input.executor === 'claude'
       ? cfg.default_claude_model.trim()
-      : cfg.default_codex_model.trim();
+      : input.executor === 'codex'
+        ? cfg.default_codex_model.trim()
+        : '';
     const defaultEffort = input.executor === 'claude'
       ? cfg.default_claude_effort.trim()
-      : cfg.default_codex_effort.trim();
+      : input.executor === 'codex'
+        ? cfg.default_codex_effort.trim()
+        : '';
     const explicitModel = typeof input.model === 'string' ? input.model.trim() : '';
     const effectiveModel: string | null = explicitModel
       ? explicitModel
@@ -310,10 +414,14 @@ export class SessionManager {
     const cwd = worktreePath ?? workspace.path;
 
     // Bring up the proxy and create the upstream session FIRST so we can
-    // capture the native session id (cc claudeSessionId / codex threadId)
-    // and persist it on the row. Failure here rolls back the worktree we
-    // may have just created — no half-row is ever inserted.
-    let proxyResult: { proxySessionId: string; nativeSessionId: string };
+    // capture its native session id and persist it on the row. Failure here
+    // rolls back the worktree we may have just created — no half-row is ever
+    // inserted.
+    let proxyResult: {
+      proxySessionId: string;
+      nativeSessionId: string;
+      configOptions: NativeConfigOption[];
+    };
     try {
       proxyResult = await this.bringUpProxySession({
         sessionId: id,
@@ -323,6 +431,8 @@ export class SessionManager {
         displayName: input.name ?? null,
       });
     } catch (err) {
+      await this.proxy.dispose(id).catch(() => undefined);
+      this.proxySessionIds.delete(id);
       if (worktreePath && branch) {
         try {
           removeWorktree(workspace.path, worktreePath, branch);
@@ -335,8 +445,8 @@ export class SessionManager {
 
     this.db
       .prepare(
-        `INSERT INTO sessions (id, name, type, task_id, workspace_id, executor, model, approval_mode, thinking_effort, turns, active_channel, status, archived, worktree_path, branch, base_branch, worktree_outcome, native_session_id, runtime_mode, created_at, updated_at)
-         VALUES (@id, @name, @type, @task_id, @workspace_id, @executor, @model, @approval_mode, @thinking_effort, 1, 'web', 'new', 0, @worktree_path, @branch, @base_branch, NULL, @native_session_id, 'structured', @now, @now)`,
+        `INSERT INTO sessions (id, name, type, task_id, workspace_id, executor, model, approval_mode, executor_config_json, thinking_effort, turns, active_channel, status, archived, worktree_path, branch, base_branch, worktree_outcome, native_session_id, runtime_mode, conversation_usage_complete, created_at, updated_at)
+         VALUES (@id, @name, @type, @task_id, @workspace_id, @executor, @model, @approval_mode, @executor_config_json, @thinking_effort, 1, 'web', 'new', 0, @worktree_path, @branch, @base_branch, NULL, @native_session_id, 'structured', 1, @now, @now)`,
       )
       .run({
         id,
@@ -347,6 +457,7 @@ export class SessionManager {
         executor: input.executor,
         model: effectiveModel,
         approval_mode: approvalMode,
+        executor_config_json: JSON.stringify(stateFromOptions(proxyResult.configOptions)),
         thinking_effort: effectiveEffort,
         worktree_path: worktreePath,
         branch,
@@ -354,6 +465,8 @@ export class SessionManager {
         native_session_id: proxyResult.nativeSessionId,
         now,
       });
+
+    this.nativeConfigOptions.set(id, proxyResult.configOptions);
 
     if (worktreePath) {
       this.broadcastWorkspaceGitUpdated(input.workspace_id, 'worktree-created');
@@ -370,17 +483,16 @@ export class SessionManager {
   getManagerSession(taskId: string): Session | null {
     const row = this.db
       .prepare(`SELECT * FROM sessions WHERE task_id = ? AND type = 'manager' LIMIT 1`)
-      .get(taskId) as Session | undefined;
-    return row ?? null;
+      .get(taskId) as SessionRow | undefined;
+    return row ? this.hydrateSession(row) : null;
   }
 
   /**
    * Get-or-create the per-Task Manager session (PRD-v3 P3). The Manager is a
-   * `type='manager'` Codex session bound to the hidden root workspace
-   * (`workspace_root`), running `gpt-5.5` / `xhigh`, with NO worktree and
-   * persistent across turns. It honors its `approval_mode` per-turn like any
-   * session (default 'plan' → read-only + on-request); the user escalates via
-   * the composer's mode picker. No policy is forced here.
+   * `type='manager'` session bound to the hidden root workspace
+   * (`workspace_root`), with an executor chosen per Task, NO worktree, and
+   * persistence across turns. Claude/Codex use `approval_mode`; Kimi keeps its
+   * ACP-provided mode/config vocabulary. No cross-executor policy is forced.
    *
    * Idempotent: returns the existing Manager when one already exists for the
    * Task. Lazy creation — called on the first manager message (or eagerly by
@@ -397,17 +509,27 @@ export class SessionManager {
 
     const root = getOrCreateRootWorkspace(this.db);
 
+    // The PM's executor is a per-Task choice (gian-task-pm-engineer §4.2): the
+    // Task row carries `manager_executor` (picked at creation via the sidebar
+    // "+"). Legacy tasks (NULL) fall back to the `default_task_executor` config
+    // default, then to the compile-time default. The model/effort follow from
+    // the executor — Codex pins gpt-5.5/xhigh, while Claude/Kimi defer to
+    // their own defaults/native config (managerRuntimeFor).
+    const executor = task.manager_executor
+      ?? loadConfig(this.db).default_task_executor
+      ?? DEFAULT_MANAGER_EXECUTOR;
+    const runtime = managerRuntimeFor(executor);
+
     // Reuse the standard create path so the Manager gets the same proxy
-    // bring-up + native-session capture as any other session. `approval_mode`
-    // is irrelevant for the Manager (read-only is forced per-turn) but the
-    // column is NOT NULL, so set a benign value. No worktree.
+    // bring-up + native-session capture as any other session. Legacy
+    // executors start in plan; Kimi omits Gian approval_mode entirely.
     return this.createSession({
       workspace_id: root.id,
-      executor: MANAGER_EXECUTOR,
+      executor: runtime.executor,
       name: `Manager · ${task.name}`,
-      model: MANAGER_MODEL,
-      thinking_effort: MANAGER_EFFORT,
-      approval_mode: 'plan',
+      model: runtime.model,
+      thinking_effort: runtime.effort,
+      ...(runtime.executor === 'kimi' ? {} : { approval_mode: 'plan' as const }),
       type: 'manager',
       task_id: taskId,
       mode: 'regular',
@@ -485,7 +607,29 @@ export class SessionManager {
   private async ensureProxySession(session: Session): Promise<string> {
     const cached = this.proxySessionIds.get(session.id);
     if (cached) return cached;
+    const existing = this.proxyBringUps.get(session.id);
+    if (existing) return existing;
 
+    const pending = this.rehydrateProxySession(session);
+    this.proxyBringUps.set(session.id, pending);
+    try {
+      return await pending;
+    } catch (error) {
+      // In particular, release an unattached Kimi facade after AUTH_REQUIRED
+      // so an external `kimi login` followed by Retry can start fresh.
+      if (session.executor === 'kimi') {
+        await this.proxy.dispose(session.id).catch(() => undefined);
+        this.proxySessionIds.delete(session.id);
+      }
+      throw error;
+    } finally {
+      if (this.proxyBringUps.get(session.id) === pending) {
+        this.proxyBringUps.delete(session.id);
+      }
+    }
+  }
+
+  private async rehydrateProxySession(session: Session): Promise<string> {
     const workspace = this.db
       .prepare('SELECT path FROM workspaces WHERE id = ?')
       .get(session.workspace_id) as { path: string } | undefined;
@@ -499,6 +643,7 @@ export class SessionManager {
       cwd: session.worktree_path ?? workspace.path,
       model: session.model,
       nativeSessionId: session.native_session_id,
+      executorConfig: session.executor_config,
       displayName: session.name,
     });
     return result.proxySessionId;
@@ -507,13 +652,12 @@ export class SessionManager {
   /**
    * Spin up (or attach to) the proxy client for a session and call
    * session.create on it. Returns both the proxy-side session id (used as
-   * sessionId in subsequent RPC calls) and the native session id (cc
-   * claudeSessionId or codex threadId — the JSONL on disk is the source of
-   * truth, this id is what host stores in `sessions.native_session_id`).
+   * sessionId in subsequent RPC calls) and the executor-native session id
+   * stored in `sessions.native_session_id`.
    *
    * If `nativeSessionId` is provided the proxy treats it as an adoption /
-   * resume — cc uses `--resume <id>`, codex calls `thread/resume <id>`,
-   * and the existing on-disk session is reused. Otherwise the proxy
+   * resume — cc uses `--resume <id>`, Codex calls `thread/resume <id>`, and
+   * Kimi uses ACP `session/load` or `session/resume`. Otherwise the executor
    * generates a fresh native id and we capture it for storage.
    */
   private async bringUpProxySession(args: {
@@ -522,12 +666,19 @@ export class SessionManager {
     cwd: string;
     model: string | null;
     nativeSessionId?: string | null;
+    executorConfig?: ExecutorConfigState;
+    resumeMode?: 'load' | 'resume';
     /** SESSION-NAME-001: Gian session name to stamp onto the native session at
      *  bring-up. codex applies it via `thread/name/set` (covers create-with-name
      *  and idle-rename-then-next-bringup). claude ignores it here — its name is
      *  set via `--name` on the first turn / TTY spawn. */
     displayName?: string | null;
-  }): Promise<{ proxySessionId: string; nativeSessionId: string }> {
+  }): Promise<{
+    proxySessionId: string;
+    nativeSessionId: string;
+    configOptions: NativeConfigOption[];
+    replayUpdates: unknown[];
+  }> {
     const client = await this.proxy.getOrCreate(args.sessionId, args.executor);
     client.onNotification(notification => this.handleNotification(args.sessionId, notification));
     // If the proxy dies mid-turn (cc-proxy crash, codex host exit, …) the
@@ -539,17 +690,30 @@ export class SessionManager {
     const caps = await client.capabilities();
     this.capsByExecutor.set(args.executor, caps);
 
-    const adoptParams: { claudeSessionId?: string; threadId?: string } = {};
+    const adoptParams: {
+      claudeSessionId?: string;
+      threadId?: string;
+      nativeSessionId?: string;
+      resumeMode?: 'load' | 'resume';
+    } = {};
     if (args.nativeSessionId) {
       if (args.executor === 'claude') adoptParams.claudeSessionId = args.nativeSessionId;
       else if (args.executor === 'codex') adoptParams.threadId = args.nativeSessionId;
+      else {
+        adoptParams.nativeSessionId = args.nativeSessionId;
+        adoptParams.resumeMode = args.resumeMode ?? 'resume';
+      }
     }
 
     // PR2: proxies are stateless across restarts (no state.json). Adoption is
-    // expressed via `claudeSessionId` / `threadId` — the proxy resumes the
-    // on-disk native session. There's no SESSION_ALREADY_EXISTS recovery path
-    // anymore.
-    let created: { session: import('@gian/shared').ProxySession; nativeSessionId: string };
+    // expressed through an executor-native id; the proxy resumes or loads the
+    // native session. There's no SESSION_ALREADY_EXISTS recovery path anymore.
+    let created: {
+      session: import('@gian/shared').ProxySession;
+      nativeSessionId: string;
+      configOptions?: NativeConfigOption[];
+      replayUpdates?: unknown[];
+    };
     try {
       created = await client.createSession({
         cwd: args.cwd,
@@ -569,7 +733,7 @@ export class SessionManager {
         || message.includes('Could not resume')
       );
       const turnCount = isMissing ? this.persistedTurnCount(args.sessionId) : -1;
-      if (!isMissing || turnCount > 0) throw err;
+      if (!isMissing || turnCount > 0 || args.executor === 'kimi') throw err;
 
       created = await client.createSession({
         cwd: args.cwd,
@@ -587,9 +751,54 @@ export class SessionManager {
 
     this.proxySessionIds.set(args.sessionId, created.session.id);
 
+    let configOptions = created.configOptions ?? created.session.configOptions ?? [];
+    if (
+      args.executor === 'kimi'
+      && args.executorConfig
+      && client.setNativeConfig
+    ) {
+      const current = new Map(configOptions.map(option => [option.id, option.currentValue]));
+      const saved = args.executorConfig.values;
+      const ids = Object.keys(saved).sort((left, right) => {
+        const order = ['model', 'thinking', 'thought_level', 'mode'];
+        const leftIndex = order.indexOf(left);
+        const rightIndex = order.indexOf(right);
+        if (leftIndex !== -1 || rightIndex !== -1) {
+          return (leftIndex === -1 ? order.length : leftIndex)
+            - (rightIndex === -1 ? order.length : rightIndex);
+        }
+        return left.localeCompare(right);
+      });
+      for (const id of ids) {
+        const value = saved[id];
+        if (value === undefined || Object.is(current.get(id), value)) continue;
+        const updated = await client.setNativeConfig(id, value);
+        configOptions = updated.options;
+        current.clear();
+        for (const option of configOptions) current.set(option.id, option.currentValue);
+      }
+    }
+    this.nativeConfigOptions.set(args.sessionId, configOptions);
+
+    const persisted = this.db
+      .prepare('SELECT id FROM sessions WHERE id = ?')
+      .get(args.sessionId) as { id: string } | undefined;
+    if (persisted) {
+      const state = stateFromOptions(configOptions);
+      const now = new Date().toISOString();
+      this.db
+        .prepare('UPDATE sessions SET executor_config_json = ?, updated_at = ? WHERE id = ?')
+        .run(JSON.stringify(state), now, args.sessionId);
+      this.broadcastSessionUpdated(args.sessionId, {
+        executor_config: state,
+        native_config_options: configOptions,
+        updated_at: now,
+      });
+    }
+
     // Live Sync v2: start watching the on-disk JSONL so external `claude
     // --resume` / `codex resume` appends sync into events + WS.
-    if (this.watcher) {
+    if (this.watcher && args.executor !== 'kimi') {
       const filePath = locateNativeJsonl(args.executor, created.nativeSessionId, args.cwd);
       if (filePath) this.watcher.start(args.sessionId, filePath, args.executor);
     }
@@ -609,7 +818,138 @@ export class SessionManager {
     return {
       proxySessionId: created.session.id,
       nativeSessionId: created.nativeSessionId,
+      configOptions,
+      replayUpdates: created.replayUpdates ?? [],
     };
+  }
+
+  async listKimiNativeSessions(cwd: string): Promise<import('@gian/shared').NativeSession[]> {
+    const cacheKey = '__native_sessions_kimi__';
+    const client = await this.proxy.getOrCreate(cacheKey, 'kimi');
+    try {
+      await client.initialize();
+      if (!client.listNativeSessions) return [];
+      const rows: unknown[] = [];
+      const seenCursors = new Set<string>();
+      let cursor: string | undefined;
+      for (let pageIndex = 0; pageIndex < 100; pageIndex += 1) {
+        const result = await client.listNativeSessions({
+          cwd,
+          ...(cursor ? { cursor } : {}),
+        });
+        if (!result || typeof result !== 'object') break;
+        const page = result as { sessions?: unknown; nextCursor?: unknown };
+        if (Array.isArray(page.sessions)) rows.push(...page.sessions);
+        const nextCursor = typeof page.nextCursor === 'string' && page.nextCursor
+          ? page.nextCursor
+          : undefined;
+        if (!nextCursor || seenCursors.has(nextCursor)) break;
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      }
+      return rows.flatMap(row => {
+        if (!row || typeof row !== 'object') return [];
+        const item = row as Record<string, unknown>;
+        if (typeof item.sessionId !== 'string' || !item.sessionId) return [];
+        const title = typeof item.title === 'string' ? item.title : '';
+        return [{
+          id: item.sessionId,
+          executor: 'kimi' as const,
+          filePath: '',
+          cwd: typeof item.cwd === 'string' ? item.cwd : cwd,
+          updatedAt: typeof item.updatedAt === 'string'
+            ? item.updatedAt
+            : new Date(0).toISOString(),
+          fileSize: 0,
+          turnCount: 0,
+          firstUserMessage: title,
+        }];
+      });
+    } catch (error) {
+      // An unauthenticated discovery facade has no native session to protect.
+      // Dispose it so external `kimi login` followed by Retry gets a fresh ACP
+      // process instead of a permanently stale cached lister.
+      await this.proxy.dispose(cacheKey).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async adoptKimiNativeSession(input: {
+    workspaceId: string;
+    cwd: string;
+    nativeSessionId: string;
+    name?: string;
+  }): Promise<{
+    session: Session;
+    replay: { turns: number; events: number };
+  }> {
+    const duplicate = this.db
+      .prepare(
+        `SELECT id FROM sessions
+         WHERE executor = 'kimi' AND native_session_id = ?`,
+      )
+      .get(input.nativeSessionId) as { id: string } | undefined;
+    if (duplicate) {
+      throw Object.assign(
+        new Error(`Kimi session is already adopted as ${duplicate.id}`),
+        { code: 'SESSION_ALREADY_EXISTS', sessionId: duplicate.id },
+      );
+    }
+
+    const sessionId = randomUUID();
+    let broughtUp: Awaited<ReturnType<SessionManager['bringUpProxySession']>>;
+    try {
+      broughtUp = await this.bringUpProxySession({
+        sessionId,
+        executor: 'kimi',
+        cwd: input.cwd,
+        model: null,
+        nativeSessionId: input.nativeSessionId,
+        resumeMode: 'load',
+      });
+    } catch (error) {
+      await this.proxy.dispose(sessionId).catch(() => undefined);
+      this.proxySessionIds.delete(sessionId);
+      throw error;
+    }
+
+    const now = new Date().toISOString();
+    const name = input.name?.trim() || `adopted ${input.nativeSessionId.slice(0, 8)}`;
+    let replay = { turns: 0, events: 0 };
+    try {
+      this.db.transaction(() => {
+        this.db
+          .prepare(
+            `INSERT INTO sessions
+              (id, name, type, workspace_id, executor, model, approval_mode,
+               executor_config_json, turns, active_channel, status, archived,
+               worktree_path, branch, base_branch, worktree_outcome,
+               native_session_id, runtime_mode, created_at, updated_at)
+             VALUES
+              (?, ?, 'coding', ?, 'kimi', NULL, NULL, ?, 1, 'web', 'new', 0,
+               NULL, NULL, NULL, NULL, ?, 'structured', ?, ?)`,
+          )
+          .run(
+            sessionId,
+            name,
+            input.workspaceId,
+            JSON.stringify(stateFromOptions(broughtUp.configOptions)),
+            input.nativeSessionId,
+            now,
+            now,
+          );
+        replay = this.persistKimiReplay(sessionId, broughtUp.replayUpdates, now);
+      })();
+    } catch (error) {
+      await this.proxy.dispose(sessionId).catch(() => undefined);
+      this.proxySessionIds.delete(sessionId);
+      this.nativeConfigOptions.delete(sessionId);
+      throw error;
+    }
+
+    const session = this.getSession(sessionId);
+    this.broadcaster.broadcast({ type: 'session:created', session });
+    return { session, replay };
   }
 
   async stopTurn(sessionId: string): Promise<void> {
@@ -793,6 +1133,9 @@ export class SessionManager {
         // CLI flag. Codex has no equivalent so we silently drop the bit
         // for codex sessions.
         const extraArgs = opts.remoteControl ? ['--remote-control'] : undefined;
+        if (!fresh.approval_mode) {
+          throw new Error('claude session is missing approval_mode');
+        }
         const { permissionMode } = proxyTurnParamsFor(fresh.executor, fresh.approval_mode);
         await this.ttyMgr!.start(fresh, cwd, {
           cols: 120,
@@ -817,7 +1160,9 @@ export class SessionManager {
     approvalId: string,
     decision: import('@gian/shared').ApprovalDecision,
     answers?: Record<string, string | string[]>,
+    nativeOptionId?: string,
   ): Promise<void> {
+    const gianSession = this.getSession(sessionId);
     const proxySessionId = this.proxySessionIds.get(sessionId);
     if (!proxySessionId) throw new Error(`session not initialized: ${sessionId}`);
     const client = this.proxy.get(sessionId);
@@ -826,6 +1171,30 @@ export class SessionManager {
     // Snapshot the pending record before resolving so we can inspect category
     // for plan-mode-exit ceremony below.
     const pending = this.approvals.getPending(approvalId);
+
+    if (gianSession.executor === 'kimi') {
+      const option = pending?.nativeOptions?.find(item => item.optionId === nativeOptionId);
+      if (!option) {
+        throw Object.assign(
+          new Error('Select one of the approval options supplied by Kimi.'),
+          { code: 'INVALID_APPROVAL_OPTION' },
+        );
+      }
+      const rejected = option.kind.startsWith('reject');
+      await client.respondApproval({
+        sessionId: proxySessionId,
+        approvalId,
+        decision: rejected ? 'decline' : 'accept',
+        nativeOptionId: option.optionId,
+      });
+      const resolvedDecision: import('@gian/shared').ApprovalDecision = rejected
+        ? 'decline'
+        : option.kind === 'allow_always'
+          ? 'allow_session'
+          : 'allow_once';
+      this.approvals.resolve(approvalId, resolvedDecision, 'web');
+      return;
+    }
 
     // Plan-mode-exit decisions get mapped to plain allow/deny on the proxy
     // wire; the auto/ask flip happens in the ceremony below. `keep_planning`
@@ -892,6 +1261,9 @@ export class SessionManager {
     // first. See spec §3.4.
     if (session.runtime_mode === 'tty') {
       throw new Error(`session is in CLI mode; switch to Chat before sending structured messages`);
+    }
+    if (session.executor === 'kimi' && oneShotBypass) {
+      throw new Error('Kimi uses its native mode and does not support Gian one-shot bypass.');
     }
     // Reject before any optimistic writes if a turn is already in flight.
     // The downstream `startTurn` would return SESSION_BUSY, and the catch
@@ -1028,15 +1400,22 @@ export class SessionManager {
     // escalates it to 'auto' for writes. It still binds the root workspace
     // (`~/Coding`, spanning all projects), so 'auto' there is broad — the mode
     // picker is the gate.
-    const policyParams = oneShotBypass
-      ? (session.executor === 'claude'
-        ? { permissionMode: 'bypassPermissions' as const }
-        : {
-            sandbox: 'danger-full-access' as const,
-            approvalPolicy: 'never' as const,
-            approvalsReviewer: 'auto_review' as const,
-          })
-      : proxyTurnParamsFor(session.executor, session.approval_mode);
+    const policyParams = session.executor === 'kimi'
+      ? {}
+      : oneShotBypass
+        ? (session.executor === 'claude'
+          ? { permissionMode: 'bypassPermissions' as const }
+          : {
+              sandbox: 'danger-full-access' as const,
+              approvalPolicy: 'never' as const,
+              approvalsReviewer: 'auto_review' as const,
+            })
+        : proxyTurnParamsFor(
+            session.executor,
+            session.approval_mode ?? (() => {
+              throw new Error(`${session.executor} session is missing approval_mode`);
+            })(),
+          );
     // Use structured items when caller supplied them (e.g. codex skill
     // dispatch), fall back to wrapping plain text. cc-proxy doesn't have
     // skill semantics — host translates skill→text for cc just below.
@@ -1049,6 +1428,11 @@ export class SessionManager {
         input: dispatchItems,
         ...(session.model ? { model: session.model } : {}),
         ...(session.thinking_effort ? { thinking: session.thinking_effort } : {}),
+        // codex Fast service tier — set from the composer's Fast toggle. The
+        // one-shot bypass path never sets it; only a persisted 'fast' rides here.
+        ...(session.executor === 'codex' && session.service_tier
+          ? { serviceTier: session.service_tier }
+          : {}),
         // SESSION-NAME-001: carry the Gian name so cc-proxy can stamp it onto a
         // brand-new Claude session via `--name` on its first (--session-id) turn.
         // cc-proxy ignores it on resume turns; codex ignores the field entirely.
@@ -1086,6 +1470,11 @@ export class SessionManager {
   // -------------------------------------------------------------------------
 
   setApprovalMode(sessionId: string, mode: ApprovalMode, turns?: number): void {
+    const session = this.getSession(sessionId);
+    if (session.executor === 'kimi') {
+      throw new Error('Kimi mode is executor-native; use session:set_native_config.');
+    }
+    assertApprovalModeAllowed(session.executor, mode);
     const now = new Date().toISOString();
     this.db
       .prepare(
@@ -1113,6 +1502,53 @@ export class SessionManager {
    *  executor yet (in which case the caller should warm by spawning). */
   getCapabilities(executor: string): import('@gian/shared').ProxyCapabilities | null {
     return this.capsByExecutor.get(executor) ?? null;
+  }
+
+  async getNativeConfig(sessionId: string): Promise<{
+    state: ExecutorConfigState;
+    options: NativeConfigOption[];
+  }> {
+    const session = this.getSession(sessionId);
+    await this.ensureProxySession(session);
+    const client = this.proxy.get(sessionId);
+    if (!client?.getNativeConfig) {
+      return {
+        state: session.executor_config,
+        options: session.native_config_options,
+      };
+    }
+    const snapshot = await client.getNativeConfig();
+    this.persistNativeConfigSnapshot(sessionId, snapshot.state, snapshot.options);
+    return snapshot;
+  }
+
+  async setNativeConfig(
+    sessionId: string,
+    configId: string,
+    value: NativeConfigValue,
+  ): Promise<{
+    state: ExecutorConfigState;
+    options: NativeConfigOption[];
+  }> {
+    const session = this.getSession(sessionId);
+    await this.ensureProxySession(session);
+    const client = this.proxy.get(sessionId);
+    if (!client?.setNativeConfig) {
+      throw new Error(`${session.executor} does not expose executor-native session config`);
+    }
+    const snapshot = await client.setNativeConfig(configId, value);
+    this.persistNativeConfigSnapshot(sessionId, snapshot.state, snapshot.options);
+    return snapshot;
+  }
+
+  async listSessionSlashCommands(
+    sessionId: string,
+  ): Promise<import('@gian/shared').SlashListResult> {
+    const session = this.getSession(sessionId);
+    await this.ensureProxySession(session);
+    const client = this.proxy.get(sessionId);
+    if (!client) throw new Error(`no proxy for session: ${sessionId}`);
+    return client.listSlashCommands(this.cwdForSession(session) ?? undefined);
   }
 
   /** Force-fetch capabilities by spawning a proxy if not cached.
@@ -1156,6 +1592,17 @@ export class SessionManager {
     this.broadcastSessionUpdated(sessionId, { thinking_effort: effort, updated_at: now });
   }
 
+  /** codex Fast service tier. 'fast' arms the next codex turn with the Fast
+   *  tier; null clears it. Persisted so it survives reloads and rides every
+   *  subsequent turn (applies next turn, like /fast). */
+  setServiceTier(sessionId: string, tier: 'fast' | null): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(`UPDATE sessions SET service_tier = ?, updated_at = ? WHERE id = ?`)
+      .run(tier, now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { service_tier: tier, updated_at: now });
+  }
+
   renameSession(sessionId: string, name: string): void {
     const trimmed = name.trim();
     const stored = trimmed.length > 0 ? trimmed : null;
@@ -1166,10 +1613,10 @@ export class SessionManager {
     this.broadcastSessionUpdated(sessionId, { name: stored, updated_at: now });
 
     // SESSION-NAME-001: propagate the new name down to the underlying native
-    // session so it's distinguishable in Claude/Codex own listings (remote
-    // control, `--resume`/`codex resume`). Best-effort + fire-and-forget — the
-    // rename itself already succeeded above. We never clear a native name when
-    // the Gian name is emptied (cleared name → no-op).
+    // session so it's distinguishable in the executor's own listings (remote
+    // control, resume commands, or ACP session/list). Best-effort +
+    // fire-and-forget — the rename itself already succeeded above. We never
+    // clear a native name when the Gian name is emptied (cleared name → no-op).
     if (stored) {
       void this.applyNativeSessionName(sessionId, stored).catch(err => {
         console.warn(`[session] native name sync failed for ${sessionId}: ${String(err)}`);
@@ -1369,18 +1816,19 @@ export class SessionManager {
   getSession(id: string): Session {
     const row = this.db
       .prepare('SELECT * FROM sessions WHERE id = ?')
-      .get(id) as Session | undefined;
+      .get(id) as SessionRow | undefined;
     if (!row) throw new Error(`session not found: ${id}`);
-    return row;
+    return this.hydrateSession(row);
   }
 
   listSessions(opts: { includeArchived?: boolean; archivedOnly?: boolean } = {}): Session[] {
     let where = 'archived = 0';
     if (opts.archivedOnly) where = 'archived = 1';
     else if (opts.includeArchived) where = '1=1';
-    return this.db
+    const rows = this.db
       .prepare(`SELECT * FROM sessions WHERE ${where} ORDER BY updated_at DESC`)
-      .all() as Session[];
+      .all() as SessionRow[];
+    return rows.map(row => this.hydrateSession(row));
   }
 
   // -------------------------------------------------------------------------
@@ -1532,15 +1980,26 @@ export class SessionManager {
    * gian-task feature is on, parse the Stop hook's final assistant text for a
    * trailing gian:action. Wired as the TtyManager turn-complete handler.
    */
+  /** The gian-task action pipeline (parse a trailing `<<gian:action>>` from a
+   *  completed turn's final text) is env-gated by GIAN_TASK_ROLES for
+   *  INDIVIDUAL / ENGINEER sessions. The Task Manager's path is ALWAYS on: it
+   *  replaces the manager's older `<<gian:create_subtask>>` proposal→card
+   *  mechanism with the surface-agnostic action envelope, which works in web AND
+   *  Claude TTY (where no confirm chip can render). */
+  private taskActionsEnabled(session: Session): boolean {
+    return process.env.GIAN_TASK_ROLES === '1' || session.type === 'manager';
+  }
+
   handleTtyTurnComplete(sessionId: string, finalText?: string, turnKey?: string): void {
     this.drainTtyQueue(sessionId);
-    if (process.env.GIAN_TASK_ROLES !== '1' || !finalText) return;
+    if (!finalText) return;
     let session: Session;
     try {
       session = this.getSession(sessionId);
     } catch {
       return;
     }
+    if (!this.taskActionsEnabled(session)) return;
     if (!session.task_id) return;
     // Per-turn ordinal → two turns with identical text are distinct actions,
     // while a re-fired Stop for the same turn dedups. Text hash only as a
@@ -1562,6 +2021,7 @@ export class SessionManager {
     } catch {
       return;
     }
+    if (!this.taskActionsEnabled(session)) return;
     if (!session.task_id) return; // actions only mean something inside a Task
     const finalText = explicitFinalText ?? this.finalAssistantTextForTurn(turnId);
     if (!finalText) return;
@@ -1599,10 +2059,10 @@ export class SessionManager {
    * Startup reconciliation (durability): re-drive any action rows a crash/restart
    * left non-terminal (parsed/validated/authorized/executing). Idempotent — the
    * executor's guards mark an interrupted `executing` failed and re-authorize the
-   * rest. Call once at boot (app.ts) when the feature is enabled.
+   * rest. Call once at boot (app.ts). The Task Manager path is always-on; coding
+   * / subtask action rows still respect GIAN_TASK_ROLES through taskActionsEnabled.
    */
   resumePendingTaskActions(): void {
-    if (process.env.GIAN_TASK_ROLES !== '1') return;
     const rows = this.db
       .prepare("SELECT action_id, session_id FROM task_actions WHERE status IN ('parsed','validated','authorized','executing')")
       .all() as { action_id: string; session_id: string }[];
@@ -1613,6 +2073,7 @@ export class SessionManager {
       } catch {
         continue;
       }
+      if (!this.taskActionsEnabled(session)) continue;
       void this.actionExecutor().resume(r.action_id, session).catch(err =>
         console.error(`[gian-task] resume failed action=${r.action_id}: ${(err as Error).message}`),
       );
@@ -1999,6 +2460,15 @@ export class SessionManager {
    * (no outcome yet), drop the worktree first to avoid orphaning the dir
    * on disk. Then teardown proxy + cascade-delete via FK constraints.
    */
+  /** Ids of every session owned by a Task (its PM manager + all subtasks).
+   *  Used by the cascade delete path in ws-handler `task:delete`. */
+  listSessionIdsForTask(taskId: string): string[] {
+    const rows = this.db
+      .prepare('SELECT id FROM sessions WHERE task_id = ?')
+      .all(taskId) as Array<{ id: string }>;
+    return rows.map(r => r.id);
+  }
+
   async deleteSession(sessionId: string): Promise<void> {
     const session = this.getSession(sessionId);
     if (session.branch && !session.worktree_outcome && session.worktree_path) {
@@ -2013,6 +2483,7 @@ export class SessionManager {
       }
     }
     await this.teardownProxy(sessionId);
+    this.conversationUsageTurns.delete(sessionId);
     // Drop any pending approvals before the session row goes away — otherwise
     // they linger in approvals.pending and re-surface on next state_sync.
     this.approvals.clearSession(sessionId);
@@ -2071,12 +2542,264 @@ export class SessionManager {
     return row?.n ?? 0;
   }
 
+  private hydrateSession(row: SessionRow): Session {
+    const {
+      executor_config_json: executorConfigJson,
+      ...stored
+    } = row;
+    return {
+      ...stored,
+      executor_config: parseExecutorConfig(executorConfigJson),
+      native_config_options: this.nativeConfigOptions.get(row.id) ?? [],
+    } as Session;
+  }
+
+  private persistNativeConfigSnapshot(
+    sessionId: string,
+    state: ExecutorConfigState,
+    options: NativeConfigOption[],
+  ): void {
+    const now = new Date().toISOString();
+    this.nativeConfigOptions.set(sessionId, options);
+    this.db
+      .prepare('UPDATE sessions SET executor_config_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(state), now, sessionId);
+    this.broadcaster.broadcast({
+      type: 'session:native-config',
+      session_id: sessionId,
+      state,
+      options,
+    });
+    this.broadcastSessionUpdated(sessionId, {
+      executor_config: state,
+      native_config_options: options,
+      updated_at: now,
+    });
+  }
+
+  private persistKimiReplay(
+    sessionId: string,
+    updates: unknown[],
+    timestamp: string,
+  ): { turns: number; events: number } {
+    let turnNumber = 0;
+    let turnId: string | null = null;
+    let eventCount = 0;
+    let pendingUserText = '';
+
+    const ensureTurn = (): string => {
+      if (turnId) return turnId;
+      turnNumber += 1;
+      turnId = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO turns
+            (id, session_id, turn_number, status, created_at, completed_at)
+           VALUES (?, ?, ?, 'completed', ?, ?)`,
+        )
+        .run(turnId, sessionId, turnNumber, timestamp, timestamp);
+      return turnId;
+    };
+
+    const insert = (
+      activeTurnId: string,
+      callId: string,
+      type: string,
+      data: Record<string, unknown>,
+    ): void => {
+      this.db
+        .prepare(
+          `INSERT INTO events
+            (id, session_id, turn_id, call_id, type, data, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          randomUUID(),
+          sessionId,
+          activeTurnId,
+          callId,
+          type,
+          JSON.stringify(data),
+          timestamp,
+        );
+      eventCount += 1;
+    };
+
+    const flushUserMessage = (): void => {
+      if (!pendingUserText) return;
+      turnId = null;
+      insert(ensureTurn(), randomUUID(), 'user_message', { text: pendingUserText });
+      pendingUserText = '';
+    };
+
+    for (const raw of updates) {
+      if (!raw || typeof raw !== 'object') continue;
+      const notification = raw as { update?: unknown };
+      if (!notification.update || typeof notification.update !== 'object') continue;
+      const update = notification.update as Record<string, unknown>;
+      const kind = update.sessionUpdate;
+      if (kind === 'config_option_update' || kind === 'available_commands_update') {
+        continue;
+      }
+      if (kind === 'user_message_chunk') {
+        const text = kimiContentText(update.content);
+        if (!text) continue;
+        // ACP history is chunked. Coalesce consecutive chunks so one original
+        // user message becomes one Gian transcript row and one turn boundary.
+        pendingUserText += text;
+        continue;
+      }
+
+      flushUserMessage();
+      const activeTurnId = ensureTurn();
+      const normalized = normalizeKimiNotification(
+        {
+          method: 'acp.sessionUpdate',
+          params: {
+            sessionId,
+            turnId: activeTurnId,
+            data: { update },
+          },
+        },
+        sessionId,
+        turnNumber,
+      );
+      for (const event of normalized) {
+        insert(
+          activeTurnId,
+          event.call_id,
+          event.type,
+          event.data as unknown as Record<string, unknown>,
+        );
+      }
+    }
+    flushUserMessage();
+
+    if (turnNumber > 0) {
+      this.db
+        .prepare(`UPDATE sessions SET status = 'done' WHERE id = ?`)
+        .run(sessionId);
+    }
+    return { turns: turnNumber, events: eventCount };
+  }
+
   /** Task display name, or null if unknown. */
   private taskNameFor(taskId: string): string | null {
     const row = this.db
       .prepare('SELECT name FROM tasks WHERE id = ?')
       .get(taskId) as { name: string } | undefined;
     return row?.name ?? null;
+  }
+
+  private persistTokenUsage(
+    sessionId: string,
+    turnId: string | undefined,
+    update: ParsedTokenUsageUpdate,
+  ): void {
+    const session = this.getSession(sessionId);
+    const now = new Date().toISOString();
+    let contextUsed = session.context_tokens_used ?? null;
+    let contextWindow = session.context_window_tokens ?? null;
+    let contextUpdatedAt = session.context_usage_updated_at ?? null;
+    let conversationInput = session.conversation_input_tokens ?? null;
+    let conversationOutput = session.conversation_output_tokens ?? null;
+    let conversationCached = session.conversation_cached_input_tokens ?? null;
+    let conversationTotal = session.conversation_total_tokens ?? null;
+    let conversationComplete = session.conversation_usage_complete ?? 0;
+    let changed = false;
+
+    if (update.hasContext) {
+      contextUpdatedAt = now;
+      if (update.context === null) {
+        // Preserve the known window while compacting; only the numerator is
+        // stale. The next real provider sample replaces it.
+        contextUsed = null;
+      } else if (update.context) {
+        contextUsed = update.context.used;
+        if (update.context.window !== undefined) {
+          contextWindow = update.context.window;
+        }
+      }
+      changed = true;
+    }
+
+    const conversation = update.conversation;
+    let applyConversation = Boolean(conversation);
+    if (conversation?.mode === 'delta' && turnId) {
+      let turns = this.conversationUsageTurns.get(sessionId);
+      if (!turns) {
+        turns = new Set<string>();
+        this.conversationUsageTurns.set(sessionId, turns);
+      }
+      if (turns.has(turnId)) {
+        applyConversation = false;
+      } else {
+        turns.add(turnId);
+      }
+    }
+
+    if (conversation && applyConversation) {
+      const input = conversation.inputTokens ?? 0;
+      const output = conversation.outputTokens ?? 0;
+      const cached = conversation.cachedInputTokens ?? 0;
+      const total = conversation.totalTokens ?? input + output;
+      if (conversation.mode === 'reset') {
+        conversationInput = null;
+        conversationOutput = null;
+        conversationCached = null;
+        conversationTotal = null;
+        conversationComplete = 1;
+      } else if (conversation.mode === 'absolute') {
+        conversationInput = input;
+        conversationOutput = output;
+        conversationCached = cached;
+        conversationTotal = total;
+        conversationComplete = 1;
+      } else {
+        conversationInput = (conversationInput ?? 0) + input;
+        conversationOutput = (conversationOutput ?? 0) + output;
+        conversationCached = (conversationCached ?? 0) + cached;
+        conversationTotal = (conversationTotal ?? 0) + total;
+      }
+      changed = true;
+    }
+
+    if (!changed) return;
+
+    this.db
+      .prepare(
+        `UPDATE sessions
+         SET context_tokens_used = @context_tokens_used,
+             context_window_tokens = @context_window_tokens,
+             context_usage_updated_at = @context_usage_updated_at,
+             conversation_input_tokens = @conversation_input_tokens,
+             conversation_output_tokens = @conversation_output_tokens,
+             conversation_cached_input_tokens = @conversation_cached_input_tokens,
+             conversation_total_tokens = @conversation_total_tokens,
+             conversation_usage_complete = @conversation_usage_complete
+         WHERE id = @id`,
+      )
+      .run({
+        id: sessionId,
+        context_tokens_used: contextUsed,
+        context_window_tokens: contextWindow,
+        context_usage_updated_at: contextUpdatedAt,
+        conversation_input_tokens: conversationInput,
+        conversation_output_tokens: conversationOutput,
+        conversation_cached_input_tokens: conversationCached,
+        conversation_total_tokens: conversationTotal,
+        conversation_usage_complete: conversationComplete,
+      });
+    this.broadcastSessionUpdated(sessionId, {
+      context_tokens_used: contextUsed,
+      context_window_tokens: contextWindow,
+      context_usage_updated_at: contextUpdatedAt,
+      conversation_input_tokens: conversationInput,
+      conversation_output_tokens: conversationOutput,
+      conversation_cached_input_tokens: conversationCached,
+      conversation_total_tokens: conversationTotal,
+      conversation_usage_complete: conversationComplete as 0 | 1,
+    });
   }
 
   private handleNotification(
@@ -2089,6 +2812,41 @@ export class SessionManager {
     if (notification.method === 'session.rotated') {
       this.handleSessionRotated(sessionId, notification);
       return;
+    }
+
+    if (notification.method === 'token_usage.updated') {
+      const session = this.getSession(sessionId);
+      const update = parseTokenUsageUpdate(notification.params?.data, session.executor);
+      if (update) this.persistTokenUsage(sessionId, notification.params?.turnId, update);
+      return;
+    }
+
+    if (notification.method === 'acp.sessionUpdate') {
+      const payload = notification.params?.data as { update?: unknown } | undefined;
+      const usage = parseAcpUsageUpdate(payload);
+      if (usage) {
+        this.persistTokenUsage(sessionId, notification.params?.turnId, usage);
+        return;
+      }
+      const update = payload?.update as
+        | { sessionUpdate?: unknown; configOptions?: unknown }
+        | undefined;
+      if (update?.sessionUpdate === 'config_option_update') {
+        const options = normalizeKimiConfigOptions(update.configOptions);
+        this.persistNativeConfigSnapshot(sessionId, stateFromOptions(options), options);
+        return;
+      }
+      if (update?.sessionUpdate === 'available_commands_update') {
+        const commands = normalizeKimiSlashCommands(
+          (update as { availableCommands?: unknown }).availableCommands,
+        );
+        this.broadcaster.broadcast({
+          type: 'session:slash-commands',
+          session_id: sessionId,
+          commands,
+        });
+        return;
+      }
     }
 
     // TTY runtime notifications get re-broadcast as binary-ish ws messages
@@ -2159,13 +2917,33 @@ export class SessionManager {
       return;
     }
     const now = new Date().toISOString();
+    this.conversationUsageTurns.delete(gianSessionId);
     this.db
       .prepare(
-        'UPDATE sessions SET native_session_id = ?, updated_at = ? WHERE id = ?',
+        `UPDATE sessions
+         SET native_session_id = ?,
+             context_tokens_used = NULL,
+             context_window_tokens = NULL,
+             context_usage_updated_at = NULL,
+             conversation_input_tokens = NULL,
+             conversation_output_tokens = NULL,
+             conversation_cached_input_tokens = NULL,
+             conversation_total_tokens = NULL,
+             conversation_usage_complete = 1,
+             updated_at = ?
+         WHERE id = ?`,
       )
       .run(newNativeSessionId, now, gianSessionId);
     this.broadcastSessionUpdated(gianSessionId, {
       native_session_id: newNativeSessionId,
+      context_tokens_used: null,
+      context_window_tokens: null,
+      context_usage_updated_at: null,
+      conversation_input_tokens: null,
+      conversation_output_tokens: null,
+      conversation_cached_input_tokens: null,
+      conversation_total_tokens: null,
+      conversation_usage_complete: 1,
       updated_at: now,
     });
 
@@ -2174,6 +2952,7 @@ export class SessionManager {
     if (this.watcher) {
       this.watcher.stop(gianSessionId);
       const session = this.getSession(gianSessionId);
+      if (session.executor === 'kimi') return;
       const workspace = this.db
         .prepare('SELECT path FROM workspaces WHERE id = ?')
         .get(session.workspace_id) as { path: string } | undefined;
@@ -2213,9 +2992,13 @@ export class SessionManager {
   ): UnifiedEvent[] {
     const session = this.getSession(sessionId);
     const turn = this.activeTurns.get(sessionId)?.number ?? 0;
-    return session.executor === 'codex'
-      ? normalizeCodexNotification(notification, sessionId, turn)
-      : normalizeCcNotification(notification, sessionId, turn);
+    if (session.executor === 'codex') {
+      return normalizeCodexNotification(notification, sessionId, turn);
+    }
+    if (session.executor === 'kimi') {
+      return normalizeKimiNotification(notification, sessionId, turn);
+    }
+    return normalizeCcNotification(notification, sessionId, turn);
   }
 
   /** Persist + broadcast a UnifiedEvent. */
@@ -2252,6 +3035,7 @@ export class SessionManager {
         description: d.description,
         subject: d.subject,
         payload: { approvalId: d.approvalId },
+        nativeOptions: d.nativeOptions,
       }).catch(err => {
         console.error('[approval] request failed', err);
       });
@@ -2408,7 +3192,9 @@ export class SessionManager {
     // final assistant text for a trailing <<gian:action>> block; the row is
     // recorded SYNCHRONOUSLY here (durability), then executed async so
     // completion never blocks. Only clean completions.
-    if (process.env.GIAN_TASK_ROLES === '1' && status === 'completed') {
+    if (status === 'completed') {
+      // processCompletedTurnAction gates on taskActionsEnabled (env flag OR the
+      // Task Manager, whose action path is always-on — see the helper).
       this.processCompletedTurnAction(sessionId, active.id, finalText);
     }
     this.activeTurns.delete(sessionId);

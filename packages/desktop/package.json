@@ -1,0 +1,51 @@
+{
+  "name": "@gian/desktop",
+  "productName": "Gian",
+  "version": "0.1.0",
+  "private": true,
+  "description": "macOS desktop shell for the Gian coding agent workspace",
+  "author": "RichLogic",
+  "type": "module",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --import tsx test/*.test.ts",
+    "test:smoke": "pnpm run build && node test/electron-smoke.mjs",
+    "dev": "pnpm run build && electron .",
+    "start": "electron .",
+    "package:mac": "pnpm run build && electron-builder --mac dir",
+    "make:mac": "pnpm run build && electron-builder --mac dmg zip",
+    "clean": "rm -rf dist release"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "43.2.0",
+    "electron-builder": "^26.15.3",
+    "playwright": "^1.49.0",
+    "tsx": "^4.19.2"
+  },
+  "build": {
+    "appId": "com.gian.desktop",
+    "productName": "Gian",
+    "asar": true,
+    "artifactName": "Gian-${version}-${arch}.${ext}",
+    "directories": {
+      "buildResources": "resources",
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "resources/icon.icns",
+      "hardenedRuntime": true
+    },
+    "dmg": {
+      "title": "Gian ${version}"
+    }
+  }
+}

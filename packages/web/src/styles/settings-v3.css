@@ -134,6 +134,22 @@
   border-top: 1px solid var(--hairline);
 }
 
+/* Default task-PM executor picker (sits under the two exec rows). */
+.s2-taskpm {
+  margin-top: 15px;
+  padding-top: 15px;
+  border-top: 1px solid var(--hairline);
+}
+.s2-taskpm-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 8px;
+}
+.s2-taskpm-label {
+  font: var(--fz-13)/1.4 var(--font-sans);
+  color: var(--text);
+}
+.s2-taskpm .s2-help { margin: 0; }
+
 /* Executor caption — "applies to claude -p only". */
 .exec-note {
   margin: 9px 0 0;

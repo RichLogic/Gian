@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
+import type { Executor } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 
 export type PathSegmentKind = 'workspace' | 'branch' | 'session';
@@ -25,7 +26,7 @@ export interface SessionMenuActions {
    *  label ("Pin" ↔ "Unpin") and the toggle behaviour. */
   onPin?: () => void;
   pinned?: boolean;
-  onFork?: (executor: 'claude' | 'codex') => void;
+  onFork?: (executor: Executor) => void;
   onArchive?: () => void;
   onDelete?: () => void;
   /** Subtask only (spec §B): toggle the user completion flag. `completed`
@@ -119,7 +120,7 @@ interface MenuItemDesc {
  * layouts (decided 2026-06-29) — they differ in order, grouping and which
  * actions are destructive, so a single fixed template can't express them:
  *
- *  session : Rename · Copy · Unread ┊ Fork×2 · Recover(red) ┊ Archive · Delete(red)
+ *  session : Rename · Copy · Unread ┊ Fork×3 · Recover(red) ┊ Archive · Delete(red)
  *  subtask : Rename · Copy ┊ Unread · Complete ┊ Recover(red)
  *  task    : Rename · Copy ┊ Unread ┊ Recover(red) · Remove(red)
  */
@@ -160,6 +161,7 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
   if (m.onFork) {
     items.push({ key: 'fork-claude', icon: ICON.fork, label: t('path.menu.forkClaude'), onClick: () => m.onFork!('claude'), ruleBefore: true });
     items.push({ key: 'fork-codex', icon: ICON.fork, label: t('path.menu.forkCodex'), onClick: () => m.onFork!('codex') });
+    items.push({ key: 'fork-kimi', icon: ICON.fork, label: t('path.menu.forkKimi'), onClick: () => m.onFork!('kimi') });
   }
   if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true });
   if (m.onArchive) items.push({ key: 'archive', icon: ICON.folder, label: t('common.archive'), onClick: m.onArchive, ruleBefore: true });

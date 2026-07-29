@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ApprovalMode, NativeSession, Session, SystemConfig, Workspace } from '@gian/shared';
+import type { ApprovalMode, Executor, NativeSession, Session, SystemConfig, Workspace } from '@gian/shared';
 import {
   abortPendingGitOp,
   adoptNativeSession,
@@ -196,7 +196,7 @@ export function NewWorkspacePanel({
 
 export interface CreateWorktreeSessionInput {
   workspaceId: string;
-  executor: 'claude' | 'codex';
+  executor: Executor;
   baseBranch?: string;
   branch?: string;
 }
@@ -1540,7 +1540,7 @@ function NativeSessionsPane({
 }) {
   const [sessions, setSessions] = useState<NativeSession[]>([]);
   const [loading, setLoading] = useState(true);
-  const [executor, setExecutor] = useState<'all' | 'claude' | 'codex'>('all');
+  const [executor, setExecutor] = useState<'all' | Executor>('all');
   const [status, setStatus] = useState<'all' | 'adopted' | 'available'>('all');
   const [adoptingFor, setAdoptingFor] = useState<NativeSession | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1582,12 +1582,12 @@ function NativeSessionsPane({
     <>
       <div style={{ font: 'var(--fz-12)/1.5 var(--font-sans)', color: 'var(--text-2)', marginTop: -4, marginBottom: 14, display: 'inline-flex', alignItems: 'flex-start', gap: 4, flexWrap: 'wrap' }}>
         <span>
-          Sessions discovered on disk under <span className="mono">~/.claude</span> / <span className="mono">~/.codex</span>. <b>Adopt</b> a session to manage it from Gian.
+          Sessions discovered through Claude, Codex, and Kimi Code. <b>Adopt</b> a session to manage it from Gian.
         </span>
         <HelpHint>
-          The Claude / Codex CLIs each keep their own session history. Gian
-          can <b>adopt</b> them — import the transcript and start tracking
-          new turns — without changing where the CLI writes them.
+          Claude and Codex keep JSONL history; Kimi exposes history through
+          ACP. Gian can <b>adopt</b> either form without changing the
+          executor-owned source.
         </HelpHint>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
@@ -1595,6 +1595,7 @@ function NativeSessionsPane({
           <button className={`segm-item${executor === 'all' ? ' active' : ''}`} onClick={() => setExecutor('all')}>All</button>
           <button className={`segm-item${executor === 'claude' ? ' active' : ''}`} onClick={() => setExecutor('claude')}>Claude</button>
           <button className={`segm-item${executor === 'codex' ? ' active' : ''}`} onClick={() => setExecutor('codex')}>Codex</button>
+          <button className={`segm-item${executor === 'kimi' ? ' active' : ''}`} onClick={() => setExecutor('kimi')}>Kimi</button>
         </div>
         <div className="segm">
           <button className={`segm-item${status === 'all' ? ' active' : ''}`} onClick={() => setStatus('all')}>All</button>
@@ -1691,7 +1692,11 @@ function NativeSessionRow({
             width: 8,
             height: 8,
             borderRadius: '50%',
-            background: session.executor === 'claude' ? 'var(--claude)' : 'var(--codex)',
+            background: session.executor === 'claude'
+              ? 'var(--claude)'
+              : session.executor === 'codex'
+                ? 'var(--codex)'
+                : 'var(--kimi, #29a86b)',
           }}
         />
       </span>
@@ -1738,14 +1743,16 @@ function NativeSessionRow({
             >
               {copied ? 'Copied!' : 'Copy native session ID'}
             </button>
-            <button
-              className="ws-kebab-item danger"
-              disabled={adopted}
-              title={adopted ? 'Unbind the Gian session before deleting the underlying native session' : ''}
-              onClick={() => { setMenuOpen(false); onDelete(); }}
-            >
-              Delete native session
-            </button>
+            {session.executor !== 'kimi' && (
+              <button
+                className="ws-kebab-item danger"
+                disabled={adopted}
+                title={adopted ? 'Unbind the Gian session before deleting the underlying native session' : ''}
+                onClick={() => { setMenuOpen(false); onDelete(); }}
+              >
+                Delete native session
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -1772,7 +1779,7 @@ function AdoptDialog({
     const result = await adoptNativeSession(workspaceId, {
       executor: source.executor,
       native_session_id: source.id,
-      approval_mode: mode,
+      ...(source.executor === 'kimi' ? {} : { approval_mode: mode }),
       ...(name.trim() ? { name: name.trim() } : {}),
     });
     setSubmitting(false);
@@ -1789,7 +1796,7 @@ function AdoptDialog({
         <header className="adopt-dialog-head">
           <h2 className="adopt-dialog-title">Adopt as Gian session</h2>
           <p className="adopt-dialog-sub">
-            Continue this conversation in Gian. Both sides write to the same on-disk session — you can switch back to the CLI at any time.
+            Continue this conversation in Gian using the same executor-owned native session. You can switch back to the CLI at any time.
           </p>
         </header>
         <div className="adopt-dialog-body">
@@ -1817,21 +1824,34 @@ function AdoptDialog({
             />
           </div>
 
-          <div className="adopt-field">
+          {source.executor !== 'kimi' && <div className="adopt-field">
             <label className="adopt-label">Approval mode</label>
             <div className="segm" style={{ width: 'fit-content' }}>
-              {(['plan', 'ask', 'auto'] as ApprovalMode[]).map(m => (
+              {(source.executor === 'codex'
+                ? ['custom', 'ask', 'auto', 'full-access']
+                : ['plan', 'ask', 'auto']
+              ).map(m => (
                 <button
                   key={m}
                   type="button"
                   className={`segm-item${mode === m ? ' active' : ''}`}
-                  onClick={() => setMode(m)}
+                  onClick={() => setMode(m as ApprovalMode)}
                 >
-                  {m === 'plan' ? 'Plan' : m === 'ask' ? 'Ask' : 'Auto'}
+                  {m === 'custom'
+                    ? 'Custom'
+                    : m === 'full-access'
+                      ? 'Full access'
+                      : m === 'auto' && source.executor === 'codex'
+                        ? 'Approve for me'
+                        : m === 'plan'
+                          ? 'Plan'
+                          : m === 'ask'
+                            ? 'Ask'
+                            : 'Auto'}
                 </button>
               ))}
             </div>
-          </div>
+          </div>}
 
           {error && <p className="spaces-error">{error}</p>}
         </div>
@@ -1864,12 +1884,12 @@ function NewWorktreeDialog({
   remoteBranches: RemoteBranch[];
   onCancel: () => void;
   onCreate: (input: {
-    executor: 'claude' | 'codex';
+    executor: Executor;
     baseBranch?: string;
     branch?: string;
   }) => void;
 }) {
-  const [executor, setExecutor] = useState<'claude' | 'codex'>('codex');
+  const [executor, setExecutor] = useState<Executor>('codex');
   const t = useT();
   const existingLocalNames = useMemo(() => new Set(branches.map(b => b.name)), [branches]);
   // Seed base branch with the workspace default if it exists locally and
@@ -1950,14 +1970,14 @@ function NewWorktreeDialog({
           <div className="adopt-field">
             <label className="adopt-label">{t('coding.new.executor')}</label>
             <div className="segm" style={{ width: 'fit-content' }}>
-              {(['claude', 'codex'] as const).map(x => (
+              {(['claude', 'codex', 'kimi'] as const).map(x => (
                 <button
                   key={x}
                   type="button"
                   className={`segm-item${executor === x ? ' active' : ''}`}
                   onClick={() => setExecutor(x)}
                 >
-                  {x === 'claude' ? 'Claude Code' : 'Codex'}
+                  {x === 'claude' ? 'Claude Code' : x === 'codex' ? 'Codex' : 'Kimi Code'}
                 </button>
               ))}
             </div>
