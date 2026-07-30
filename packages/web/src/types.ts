@@ -88,8 +88,19 @@ export interface WebSearchItem {
 export interface AgentSpawnItem {
   kind: 'agent-spawn';
   id: string;
+  /** Executor remains presentation metadata; provider-native roles/statuses
+   *  are not collapsed into a global agent protocol. */
+  provider: import('@gian/shared').Executor;
+  agentId?: string;
   description: string;
   status: 'running' | 'done' | 'error';
+  agentType?: string;
+  model?: string;
+  output?: string;
+  outputFile?: string;
+  startedAt: number;
+  updatedAt: number;
+  completedAt?: number;
   ts: number;
   turn: number;
 }

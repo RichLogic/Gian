@@ -89,6 +89,63 @@ test('event smoke · Claude -p maps text, tools, approvals, auto notices, and li
   assert.equal(planData?.subject, '1. Inspect\n2. Edit');
 });
 
+test('Claude native task notifications update the original Agent transcript anchor', () => {
+  const started = cc({
+    method: 'claude.task',
+    params: {
+      sessionId: 'proxy',
+      data: {
+        taskId: 'native-task-1',
+        toolUseId: 'tool-agent-1',
+        description: 'Inspect tests',
+        agentType: 'general-purpose',
+        status: 'running',
+        startedAt: 100,
+      },
+    },
+  });
+  const completed = cc({
+    method: 'claude.task',
+    params: {
+      sessionId: 'proxy',
+      data: {
+        taskId: 'native-task-1',
+        toolUseId: 'tool-agent-1',
+        status: 'done',
+        summary: 'Tests are clean.',
+        completedAt: 200,
+      },
+    },
+  });
+
+  assert.equal(started[0]?.type, 'agent_spawn');
+  assert.equal(started[0]?.call_id, 'tool-agent-1');
+  assert.equal((started[0]?.data as { agentId?: unknown }).agentId, 'native-task-1');
+  assert.equal(completed[0]?.call_id, 'tool-agent-1');
+  assert.equal((completed[0]?.data as { status?: unknown }).status, 'done');
+  assert.equal((completed[0]?.data as { output?: unknown }).output, 'Tests are clean.');
+});
+
+test('Claude-mix plan-file Write also projects the latest plan display object', () => {
+  const events = cc({
+    method: 'tool.use',
+    params: {
+      sessionId: 'proxy',
+      data: {
+        callId: 'write-plan-1',
+        toolName: 'Write',
+        input: {
+          file_path: '/Users/demo/.claude-mix/plans/quiet-harbor.md',
+          content: '## Plan\n1. Inspect\n2. Edit',
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(events.map(item => item.type), ['file_change', 'plan_update']);
+  assert.equal((events[1]?.data as { text?: unknown }).text, '## Plan\n1. Inspect\n2. Edit');
+});
+
 test('event smoke · Codex maps live events and preserves approval reason/category metadata', () => {
   const events = [
     ...codex({ method: 'output.text.delta', params: { sessionId: 'proxy', data: { itemId: 'msg-1', delta: 'hello' } } }),
@@ -143,6 +200,36 @@ test('event smoke · Codex maps live events and preserves approval reason/catego
   assert.equal(networkApprovalData?.category, 'network');
   assert.equal(networkApprovalData?.risk, 'low');
   assert.equal(networkApprovalData?.description, 'Need docs');
+});
+
+test('Codex native collab agent updates retain child thread identity', () => {
+  const events = codex({
+    method: 'codex.agent',
+    params: {
+      sessionId: 'proxy',
+      data: {
+        updates: [
+          {
+            agentId: 'child-thread-1',
+            description: 'Review reducer behavior',
+            status: 'running',
+            model: 'gpt-5.6',
+          },
+          {
+            agentId: 'child-thread-2',
+            description: 'Inspect tests',
+            status: 'done',
+            output: 'Tests are clean.',
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(events.length, 2);
+  assert.deepEqual(events.map(event => event.call_id), ['child-thread-1', 'child-thread-2']);
+  assert.equal((events[0]?.data as { model?: unknown }).model, 'gpt-5.6');
+  assert.equal((events[1]?.data as { output?: unknown }).output, 'Tests are clean.');
 });
 
 test('event smoke · interaction approvals never auto-approve without a user choice', async () => {

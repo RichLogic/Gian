@@ -4,6 +4,8 @@ import { toast } from '../feedback.js';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import { Composer } from '../components/Composer.js';
+import { ModeDropdown } from '../components/ModeDropdown.js';
+import type { Mode } from '../components/Topbar.js';
 import { QueueList } from '../components/QueueList.js';
 import { Transcript } from '../transcript/Transcript.js';
 import { StatusIcon, statusGlyphShown, relTime } from './CodingView.js';
@@ -133,6 +135,9 @@ function compareOpenTasks(a: Task, b: Task): number {
 
 
 export function TasksView({
+  mode,
+  onSetMode,
+  onOpenSearch,
   tasks,
   sessions,
   workspaces,
@@ -157,6 +162,11 @@ export function TasksView({
   onManagerStop,
   onCreateSubtask,
 }: {
+  /** Top-level app mode — the sidebar's mode dropdown reads/drives this. */
+  mode: Mode;
+  onSetMode: (mode: Mode) => void;
+  /** Open the global CommandPalette (sidebar search button). */
+  onOpenSearch: () => void;
   tasks: Task[];
   sessions: Session[];
   workspaces: Workspace[];
@@ -232,21 +242,22 @@ export function TasksView({
       className={`view${rail.collapsed ? ' rail-collapsed' : ''}`}
       style={{ '--rail-w': `${rail.width}px` } as React.CSSProperties}
     >
-      {!rail.collapsed && (
-        <>
-          <TasksList
-            tasks={tasks}
-            sessions={sessions}
-            ws={ws}
-            defaultTaskExecutor={defaultTaskExecutor}
-            activeTaskId={activeTaskId}
-            activeSubtaskId={activeSubtaskId}
-            onSelectTask={onSelectTask}
-            onSelectSubtask={onSelectSubtask}
-          />
-          <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize tasks list" />
-        </>
-      )}
+      {/* The rail stays mounted while collapsed so its width can transition
+          (phase 6); `.view.rail-collapsed` shrinks it to zero. */}
+      <TasksList
+        mode={mode}
+        onSetMode={onSetMode}
+        onOpenSearch={onOpenSearch}
+        tasks={tasks}
+        sessions={sessions}
+        ws={ws}
+        defaultTaskExecutor={defaultTaskExecutor}
+        activeTaskId={activeTaskId}
+        activeSubtaskId={activeSubtaskId}
+        onSelectTask={onSelectTask}
+        onSelectSubtask={onSelectSubtask}
+      />
+      <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize tasks list" />
       <TaskDetail
         task={activeTask}
         subtask={activeSubtask}
@@ -322,6 +333,9 @@ function NewTaskForm({
 }
 
 function TasksList({
+  mode,
+  onSetMode,
+  onOpenSearch,
   tasks,
   sessions,
   ws,
@@ -331,6 +345,9 @@ function TasksList({
   onSelectTask,
   onSelectSubtask,
 }: {
+  mode: Mode;
+  onSetMode: (mode: Mode) => void;
+  onOpenSearch: () => void;
   tasks: Task[];
   sessions: Session[];
   ws: GianWs;
@@ -460,6 +477,20 @@ function TasksList({
   return (
     <aside className="sidebar">
       <div className="sb-head">
+        <div className="sb-toprow">
+          <ModeDropdown mode={mode} onSetMode={onSetMode} />
+          <span className="sb-toprow-spacer" />
+          <button
+            type="button"
+            className="sb-iconbtn"
+            data-testid="sb-open-search"
+            aria-label={t('coding.sidebar.search.label')}
+            title={t('coding.sidebar.search.label')}
+            onClick={onOpenSearch}
+          >
+            <Icon d={I.search} />
+          </button>
+        </div>
         <div className="sb-search-row">
           <div className="sb-search">
             <Icon d={I.search} />

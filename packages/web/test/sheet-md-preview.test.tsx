@@ -20,7 +20,7 @@ const md = [
 
 function mdTab(): SheetTab {
   return {
-    id: 't1', pane: 0, name: 'report.md', kind: 'file', icoKind: 'md', ico: 'MD',
+    id: 't1', group: 'files', name: 'report.md', kind: 'file', icoKind: 'md', ico: 'MD',
     lines: md.split('\n').map((l, i) => [String(i + 1), l] as [string, string]),
     fullPath: '/tmp/demo/report.md', viewMode: 'preview',
   };
@@ -35,7 +35,7 @@ afterEach(() => cleanup());
 describe('Sheet markdown preview', () => {
   it('renders GFM tables as real <table> markup, not flattened text', () => {
     const { container } = render(
-      <Sheet tabs={[mdTab()]} active={{ 0: 't1', 1: null }} actions={actions} />,
+      <Sheet tabs={[mdTab()]} activeByGroup={{ files: 't1' }} activeGroup="files" actions={actions} />,
     );
     expect(container.querySelector('.md-preview table')).toBeTruthy();
     expect(container.querySelectorAll('.md-preview thead th').length).toBe(3);

@@ -20,7 +20,7 @@ import type {
   StartTurnParams,
 } from './types.js';
 import { nowIso, randomId } from './utils.js';
-import type { ClaudeRuntime } from '../runtime/types.js';
+import type { ClaudeAgentTaskUpdate, ClaudeRuntime } from '../runtime/types.js';
 
 type ProxyEventSink = (method: string, params: Record<string, unknown>) => void;
 
@@ -112,8 +112,12 @@ export class CcProxyService {
       this.handlePermissionRequest(sessionId, requestId, toolName, description, inputPreview);
     });
 
-    this.runtime.on('toolUse', (sessionId, toolName, input) => {
-      this.handleToolUse(sessionId, toolName, input);
+    this.runtime.on('toolUse', (sessionId, toolName, input, callId) => {
+      this.handleToolUse(sessionId, toolName, input, callId);
+    });
+
+    this.runtime.on('agentTask', (sessionId, update) => {
+      this.handleAgentTask(sessionId, update);
     });
 
     this.runtime.on('autoClassifierDenied', (sessionId, action, reason, consecutive, total) => {
@@ -517,7 +521,12 @@ export class CcProxyService {
     });
   }
 
-  private handleToolUse(sessionId: string, toolName: string, input: Record<string, unknown>) {
+  private handleToolUse(
+    sessionId: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    callId: string,
+  ) {
     const session = this.sessionsById.get(sessionId);
     if (!session) return;
 
@@ -528,7 +537,20 @@ export class CcProxyService {
       requestId: context?.requestId,
       sessionId: session.id,
       turnId,
-      data: { toolName, input },
+      data: { callId, toolName, input },
+    });
+  }
+
+  private handleAgentTask(sessionId: string, update: ClaudeAgentTaskUpdate) {
+    const session = this.sessionsById.get(sessionId);
+    if (!session) return;
+
+    const context = this.activeTurns.get(sessionId);
+    this.emitEvent('claude.task', {
+      requestId: context?.requestId,
+      sessionId: session.id,
+      turnId: context?.turnId ?? session.activeTurnId,
+      data: update,
     });
   }
 

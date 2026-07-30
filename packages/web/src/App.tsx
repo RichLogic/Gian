@@ -5,7 +5,7 @@ import { EN } from './i18n/en.js';
 import { ZH } from './i18n/zh.js';
 import type { WsState } from './ws.js';
 import { GianWs } from './ws.js';
-import { makeWsUrl, loadWorkspaces, loadSessions, loadTasks, loadEvents, loadSettings, loadWorkingTrees, loadBots, loadFile, loadDiff, fetchWsToken, loadRepoInfo, loadApps, loadAllFiles, openFileWith, openFileWithApp, openFileBuiltin } from './api.js';
+import { makeWsUrl, loadWorkspaces, loadSessions, loadTasks, loadEvents, loadSettings, loadWorkingTrees, loadBots, loadFile, loadDiff, loadChanged, fetchWsToken, loadRepoInfo, loadApps, loadAllFiles, openFileWith, openFileWithApp, openFileBuiltin } from './api.js';
 import type { ChangeScope } from './api.js';
 import { injectComposerDraft } from './components/Composer.js';
 import type { WorkingTree } from './api.js';
@@ -19,12 +19,9 @@ import {
   applyApprovalCreated,
   clearSessionError,
   ingestEnvelope,
-  markAllRead,
-  markSessionRead,
   reconcileFromSync,
   removeApproval,
   removeSession as removeInboxSession,
-  clearFyi as clearInboxFyi,
   type InboxItem,
 } from './inbox.js';
 import { PendingTtySwitch } from './tty-switch.js';
@@ -37,13 +34,15 @@ import { Dock } from './components/Dock.js';
 import { Toaster } from './components/Toaster.js';
 import { confirm as confirmDialog, toast } from './feedback.js';
 import { Sheet, IMAGE_EXTS, openCategoryFor, resolveOpenTarget } from './components/Sheet.js';
-import type { SheetTab, FileViewMode } from './components/Sheet.js';
+import type { SheetTab, SheetGroup, RailId, FileViewMode } from './components/Sheet.js';
 import { Splitter } from './components/Splitter.js';
 import { Inspector } from './components/Inspector.js';
-import type { InspectorTab } from './components/Inspector.js';
 import { WorkspacesInspector, WorkspaceDetailBody } from './components/WorkspacesPanel.js';
-import { SettingsBody } from './components/SettingsBody.js';
+import { SettingsBody, SettingsNavInspector } from './components/SettingsBody.js';
+import type { NavKey } from './components/SettingsBody.js';
 import { Terminal, makeWorkbenchWire } from './components/Terminal.js';
+import { BrowserBody, browserHostOf } from './components/BrowserBody.js';
+import { SidechatPicker } from './components/SidechatPicker.js';
 import { CodingView, SessionMain } from './views/CodingView.js';
 import { SpacesView, NewWorkspacePanel } from './views/SpacesView.js';
 import { TasksView, ManagerInspector, managerCardContextNote, type NewSubtaskDraft, type ManagerSubtaskCard, type ManagerComposerHandlers } from './views/TasksView.js';
@@ -53,6 +52,7 @@ import { CommandPalette } from './components/CommandPalette.js';
 import type { SystemConfig } from '@gian/shared';
 import { stripManagerSystemPrefix, stripCreateSubtaskBlocks, wrapManagerContextNote, stripGianRolePrefix, stripGianActionBlocks } from '@gian/shared';
 import type { QueueEntry, TranscriptItem } from './types.js';
+import { applyGianIconAppearance } from './brand-icon.js';
 import {
   isSessionCreateDispatchError,
   planBetaComposerSend,
@@ -114,14 +114,29 @@ export function App() {
   const [apps, setApps] = useState<string[]>([]);
   // ─── V2 Workbench (Sheet) state ─────────────────────────────────────────
   const [wbTabs, setWbTabs] = useState<SheetTab[]>([]);
-  const [wbActive, setWbActive] = useState<{ 0: string | null; 1: string | null }>({ 0: null, 1: null });
+  // Active tab per Sheet group — each dock rail remembers its own selection,
+  // so switching rails never loses your place. Terminals (and later browser
+  // iframes) stay mounted in their hidden group, keeping the tty alive.
+  const [activeTabByGroup, setActiveTabByGroup] = useState<Partial<Record<SheetGroup, string | null>>>({});
   const [viewState, setViewState] = useState<ViewState>('main');
-  // Dock's terminal button toggles this; existing terminals stay mounted
-  // (ttys keep running) while hidden. Reset to false when no term tabs
-  // remain so the next dock click creates a fresh, visible terminal.
-  const [termHidden, setTermHidden] = useState(false);
-  // ─── V2 Inspector state ─────────────────────────────────────────────────
-  const [inspectorTab, setInspectorTab] = useState<InspectorTab | null>(null);
+  // ─── Dock rail state ────────────────────────────────────────────────────
+  // The right dock is a set of mutually-exclusive rails; each declares its
+  // panel combo (panel 2 = Sheet group, panel 3 = Inspector). Clicking the
+  // active rail collapses its panels and snapshots the scene into railMemory;
+  // clicking again restores it.
+  const [activeRail, setActiveRail] = useState<RailId | null>(null);
+  const [railMemory, setRailMemory] = useState<Partial<Record<RailId, { tabId: string | null }>>>({});
+  // ─── Panel-2 navigation history (Topbar back/forward) ───────────────────
+  // Pushed on rail switches and Sheet active-tab changes (consecutive dupes
+  // skipped); back/forward restore (rail, tab) without re-pushing.
+  const [navStack, setNavStack] = useState<Array<{ rail: RailId | null; tabId: string | null }>>([{ rail: null, tabId: null }]);
+  const [navIdx, setNavIdx] = useState(0);
+  const navSkipRef = useRef(false);
+  // Active Settings section — owned here (controlled into SettingsBody +
+  // SettingsNavInspector) so it survives rail collapse/restore.
+  const [settingsSection, setSettingsSection] = useState<NavKey>('appearance');
+  // Sidechat session-picker popover (the sidechat tab strip's "+" button).
+  const [sidechatPickerOpen, setSidechatPickerOpen] = useState(false);
   const [bots, setBots] = useState<Bot[]>([]);
   const [systemConfig, setSystemConfig] = useState<SystemConfig | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -166,6 +181,7 @@ export function App() {
     document.body.setAttribute('data-scale-chat', systemConfig.font_scale_chat);
     document.body.setAttribute('data-scale-code', systemConfig.font_scale_code);
     document.documentElement.setAttribute('lang', systemConfig.locale);
+    applyGianIconAppearance(systemConfig.theme, systemConfig.accent);
   }, [systemConfig?.theme, systemConfig?.accent, systemConfig?.density,
       systemConfig?.font_scale_chrome, systemConfig?.font_scale_chat,
       systemConfig?.font_scale_code, systemConfig?.locale]);
@@ -619,7 +635,16 @@ export function App() {
         (acc, e) => applyEnvelope(acc, e, exec),
         [],
       );
+      const plan = events.reduce<string | undefined>(
+        (acc, event) => event.event === 'plan_update'
+          ? applyPlanUpdate(acc, event)
+          : acc,
+        undefined,
+      );
       setItemsBySession(prev => ({ ...prev, [activeSessionId]: items }));
+      if (plan !== undefined) {
+        setPlanBySession(prev => ({ ...prev, [activeSessionId]: plan }));
+      }
     });
   }, [activeSessionId, itemsBySession, sessions, archivedSessions]);
 
@@ -718,17 +743,12 @@ export function App() {
     }
   }, [viewState, wbTabs.length]);
 
-  // Drop the hide flag once the last terminal is gone — otherwise the
-  // next dock click would create a terminal that's immediately hidden.
-  useEffect(() => {
-    if (termHidden && !wbTabs.some(t => t.kind === 'term')) {
-      setTermHidden(false);
-    }
-  }, [termHidden, wbTabs]);
-
   const sheetActions = useMemo(() => ({
-    activateTab: (pane: 0 | 1, id: string) =>
-      setWbActive(a => ({ ...a, [pane]: id })),
+    activateTab: (id: string) => {
+      const tab = wbTabs.find(t => t.id === id);
+      if (!tab) return;
+      setActiveTabByGroup(a => ({ ...a, [tab.group]: id }));
+    },
     closeTab: (id: string) => {
       const tab = wbTabs.find(t => t.id === id);
       if (tab?.kind === 'term') {
@@ -738,10 +758,10 @@ export function App() {
         const closing = prev.find(t => t.id === id);
         const next = prev.filter(t => t.id !== id);
         if (closing) {
-          setWbActive(a => {
-            if (a[closing.pane] !== id) return a;
-            const sib = next.find(t => t.pane === closing.pane);
-            return { ...a, [closing.pane]: sib ? sib.id : null };
+          setActiveTabByGroup(a => {
+            if (a[closing.group] !== id) return a;
+            const sib = next.find(t => t.group === closing.group);
+            return { ...a, [closing.group]: sib ? sib.id : null };
           });
         }
         return next;
@@ -751,7 +771,79 @@ export function App() {
       setWbTabs(prev => prev.map(t => t.id === id ? { ...t, preview: false } : t)),
     setTabViewMode: (id: string, viewMode: FileViewMode) =>
       setWbTabs(prev => prev.map(t => t.id === id ? { ...t, viewMode } : t)),
+    setTabName: (id: string, name: string) =>
+      setWbTabs(prev => prev.map(t => (t.id === id && t.name !== name) ? { ...t, name } : t)),
   }), [wbTabs, ws]);
+
+  /** Rail → Sheet group mapping. 'manager' has no tab group — its panel 2 is
+   *  the compact Manager panel rendered inline by App. */
+  const GROUP_OF_RAIL: Record<RailId, SheetGroup | null> = {
+    files: 'files',
+    diffs: 'diffs',
+    manager: null,
+    sidechat: 'sidechat',
+    terminal: 'term',
+    browser: 'browser',
+    workspaces: 'workspaces',
+    settings: 'settings',
+  };
+
+  /** Activate a tab in its group and make sure the Sheet is visible. */
+  function revealSheetTab(group: SheetGroup, id: string): void {
+    setActiveTabByGroup(a => ({ ...a, [group]: id }));
+    setViewState(v => v === 'main' ? 'both' : v);
+  }
+
+  /** Open a rail (no-op if already active). Lazily seeds the singleton
+   *  content some rails need: the first terminal, the settings tab, the
+   *  diffs rail's flat all-files diff. */
+  function activateRail(rail: RailId): void {
+    setActiveRail(rail);
+    if (rail === 'terminal' && !wbTabs.some(t => t.group === 'term')) {
+      const id = 'tab-term-' + Date.now();
+      const tab: SheetTab = { id, group: 'term', name: terminalTabName(), kind: 'term', icoKind: 'term', ico: '$' };
+      setWbTabs(prev => [...prev, tab]);
+      revealSheetTab('term', id);
+      return;
+    }
+    if (rail === 'settings' && !wbTabs.some(t => t.group === 'settings')) {
+      const tab: SheetTab = { id: 'tab-settings', group: 'settings', name: appT('sheet.tab.settings'), kind: 'settings', icoKind: 'gear', ico: '⚙' };
+      setWbTabs(prev => [...prev, tab]);
+      revealSheetTab('settings', tab.id);
+      return;
+    }
+    if (rail === 'diffs' && !wbTabs.some(t => t.group === 'diffs')) {
+      // Panel 2's default content is the flat scope='all' diff; it reveals
+      // the sheet itself once loaded.
+      void openAllDiffInSheet();
+      return;
+    }
+    if (rail === 'browser' && !wbTabs.some(t => t.group === 'browser')) {
+      addBrowserTab();
+      return;
+    }
+    const group = GROUP_OF_RAIL[rail];
+    if (rail === 'manager' || rail === 'sidechat' || (group && wbTabs.some(t => t.group === group))) {
+      setViewState(v => v === 'main' ? 'both' : v);
+    }
+  }
+
+  /** Dock click: re-clicking the active rail collapses its panels and
+   *  snapshots the scene into railMemory; clicking a rail opens/restores it. */
+  function toggleRail(rail: RailId): void {
+    if (activeRail === rail) {
+      const group = GROUP_OF_RAIL[rail];
+      setRailMemory(m => ({ ...m, [rail]: { tabId: group ? (activeTabByGroup[group] ?? null) : null } }));
+      setActiveRail(null);
+      return;
+    }
+    const group = GROUP_OF_RAIL[rail];
+    const snap = railMemory[rail];
+    if (group && snap?.tabId && wbTabs.some(t => t.id === snap.tabId)) {
+      setActiveTabByGroup(a => ({ ...a, [group]: snap.tabId! }));
+    }
+    activateRail(rail);
+  }
 
   function fileToLines(content: string): Array<[string, string]> {
     return content.split('\n').map((line, i) => [String(i + 1), line]);
@@ -762,11 +854,6 @@ export function App() {
     const ext = (m?.[1] ?? '').toLowerCase();
     if (ext === 'md' || ext === 'ts' || ext === 'tsx' || ext === 'json' || ext === 'css') return ext;
     return 'ts';
-  }
-  function icoTextOf(name: string): string {
-    const map: Record<string, string> = { md: 'M', ts: 'TS', tsx: 'TS', json: '{}', css: '#' };
-    const m = name.match(/\.([a-z0-9]+)$/i);
-    return map[(m?.[1] ?? '').toLowerCase()] ?? 'F';
   }
 
   /** Open a file in the Sheet workbench (Phase 3+ replacement for the old
@@ -788,7 +875,6 @@ export function App() {
     const name = rel.split('/').pop() || rel;
     const fullPath = absPath;
     const icoKind = extOf(name);
-    const ico = icoTextOf(name);
     const ext = (name.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase();
     const rawUrl = `/api/working_trees/${encodeURIComponent(wt.id)}/raw?path=${encodeURIComponent(rel)}`;
     const isImage = IMAGE_EXTS.has(ext);
@@ -806,11 +892,11 @@ export function App() {
 
     // Try to promote existing tab. Re-set scrollLine so a fresh click on a
     // file-link (possibly a different line) re-jumps in the already-open tab.
-    const existingPerm = wbTabs.find(t => t.kind === 'file' && t.fullPath === fullPath && !t.preview);
+    const existingPerm = wbTabs.find(t => t.group === 'files' && t.kind === 'file' && t.fullPath === fullPath && !t.preview);
     if (existingPerm) {
       setWbTabs(prev => prev.map(t => t.id === existingPerm.id ? { ...t, scrollLine: line } : t));
-      setWbActive(a => ({ ...a, [existingPerm.pane]: existingPerm.id }));
-      setViewState(v => v === 'main' ? 'both' : v);
+      setActiveRail('files');
+      revealSheetTab('files', existingPerm.id);
       return;
     }
 
@@ -825,45 +911,35 @@ export function App() {
       // Preview-capable files (md) open with the rendered view by default —
       // but a line jump forces source view so the target line is visible.
       const initialViewMode: FileViewMode = line != null ? 'source' : icoKind === 'md' ? 'preview' : 'source';
-      tabContent = { name, kind: 'file' as const, icoKind, ico, lines, viewMode: initialViewMode, fullPath, scrollLine: line, workingTreeId: wt.id };
+      tabContent = { name, kind: 'file' as const, icoKind, ico: '', lines, viewMode: initialViewMode, fullPath, scrollLine: line, workingTreeId: wt.id };
     }
 
+    setActiveRail('files');
     setWbTabs(prev => {
-      const existingPrev = prev.find(t => t.kind === 'file' && t.preview);
+      const existingPrev = prev.find(t => t.group === 'files' && t.kind === 'file' && t.preview);
       let tabs = [...prev];
       // Replace preview tab in place.
       if (existingPrev) {
         if (permanent && existingPrev.fullPath === fullPath) {
           tabs = tabs.map(t => t.id === existingPrev.id ? { ...t, preview: false, scrollLine: line } : t);
-          setWbActive(a => ({ ...a, [existingPrev.pane]: existingPrev.id }));
-          setViewState(v => v === 'main' ? 'both' : v);
+          revealSheetTab('files', existingPrev.id);
           return tabs;
         }
         if (!permanent) {
           // Replace the preview tab's content WITHOUT spreading the old tab —
           // otherwise stale fields (e.g. an image tab's `rawSrc` or a text
           // tab's `lines`) leak into the new content and the body mis-renders.
-          tabs = tabs.map(t => t.id === existingPrev.id ? { ...tabContent, id: t.id, pane: t.pane, preview: true } : t);
-          setWbActive(a => ({ ...a, [existingPrev.pane]: existingPrev.id }));
-          setViewState(v => v === 'main' ? 'both' : v);
+          tabs = tabs.map(t => t.id === existingPrev.id ? { ...tabContent, id: t.id, group: t.group, preview: true } : t);
+          revealSheetTab('files', existingPrev.id);
           return tabs;
         }
         // Permanent open of a different file: drop preview tab.
         tabs = tabs.filter(t => t.id !== existingPrev.id);
       }
-      // If terminal sits in pane 0 alone, push it to pane 1 when a file arrives.
-      const hasTermInUpper = tabs.some(t => t.pane === 0 && t.kind === 'term');
-      const hasFileAlready = tabs.some(t => t.kind === 'file');
-      if (hasTermInUpper && !hasFileAlready) {
-        const moved = tabs.filter(t => t.pane === 0 && t.kind === 'term').map(t => t.id);
-        tabs = tabs.map(t => moved.includes(t.id) ? { ...t, pane: 1 as 0 | 1 } : t);
-        setWbActive(a => ({ ...a, 1: a[0], 0: null }));
-      }
       const id = 'tab-' + Date.now();
-      const tab: SheetTab = { id, pane: 0, ...tabContent, preview: !permanent };
+      const tab: SheetTab = { id, group: 'files', ...tabContent, preview: !permanent };
       tabs.push(tab);
-      setWbActive(a => ({ ...a, 0: id }));
-      setViewState(v => v === 'main' ? 'both' : v);
+      revealSheetTab('files', id);
       return tabs;
     });
   }
@@ -880,24 +956,24 @@ export function App() {
     const fullPath = `${wt.path}/${rel}`;
     const diffText = await loadDiff(wt.id, rel, scope);
 
+    setActiveRail('diffs');
     setWbTabs(prev => {
       let tabs = [...prev];
       // If a non-permanent diff preview tab is already open, replace it in place.
-      const existingPreview = tabs.find(t => t.kind === 'diff' && t.preview);
+      const existingPreview = tabs.find(t => t.group === 'diffs' && t.kind === 'diff' && t.preview);
       if (existingPreview) {
         tabs = tabs.filter(t => t.id !== existingPreview.id);
       }
       // Promote: if a permanent diff tab for this exact path exists, just activate.
-      const existingPerm = tabs.find(t => t.kind === 'diff' && t.fullPath === fullPath && !t.preview);
+      const existingPerm = tabs.find(t => t.group === 'diffs' && t.kind === 'diff' && t.fullPath === fullPath && !t.preview);
       if (existingPerm) {
-        setWbActive(a => ({ ...a, [existingPerm.pane]: existingPerm.id }));
-        setViewState(v => v === 'main' ? 'both' : v);
+        revealSheetTab('diffs', existingPerm.id);
         return tabs;
       }
       const id = 'tab-diff-' + Date.now();
       const tab: SheetTab = {
         id,
-        pane: 0,
+        group: 'diffs',
         name,
         kind: 'diff',
         icoKind: 'diff',
@@ -908,110 +984,120 @@ export function App() {
         preview: !permanent,
       };
       tabs.push(tab);
-      setWbActive(a => ({ ...a, 0: id }));
-      setViewState(v => v === 'main' ? 'both' : v);
+      revealSheetTab('diffs', id);
       return tabs;
     });
   }
 
-  /** Open a plan in the Sheet (D1). */
+  /** The diffs rail's default panel-2 content: one flat scope='all' diff with
+   *  every changed file stacked (DiffBody splits it into per-file blocks).
+   *  The host's diff endpoint is per-file, so the flat diff is composed
+   *  client-side from the changed-file list. Singleton tab — re-opening the
+   *  rail refreshes it in place. While this tab is active, Changes-tree
+   *  clicks anchor-scroll it instead of opening single-file diffs. */
+  async function openAllDiffInSheet(): Promise<void> {
+    const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
+    const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
+    const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
+    if (!wt) return;
+    const changed = await loadChanged(wt.id, 'all');
+    const diffs = await Promise.all(changed.map(f => loadDiff(wt.id, f.path, 'all')));
+    const diffText = diffs.filter(Boolean).join('\n');
+    const id = 'tab-diff-all';
+    setActiveRail('diffs');
+    setWbTabs(prev => {
+      const existing = prev.find(t => t.id === id);
+      if (existing) {
+        return prev.map(t => t.id === id ? { ...t, diffText } : t);
+      }
+      const tab: SheetTab = {
+        id,
+        group: 'diffs',
+        name: appT('sheet.tab.allChanges'),
+        kind: 'diff',
+        icoKind: 'diff',
+        ico: '±',
+        diffText,
+        workingTreeId: wt.id,
+        diffAll: true,
+      };
+      return [...prev, tab];
+    });
+    revealSheetTab('diffs', id);
+  }
+
+  /** Open a plan in the Sheet (D1). Plans ride the 'files' group — they open
+   *  from chat like a document preview. */
   function openPlanInSheet(approvalId: string, planMarkdown: string): void {
+    setActiveRail('files');
     setWbTabs(prev => {
       const existing = prev.find(t => t.kind === 'plan');
       if (existing) {
         const next = prev.map(t => t.id === existing.id ? { ...t, planBody: planMarkdown } : t);
-        setWbActive(a => ({ ...a, [existing.pane]: existing.id }));
-        setViewState(v => v === 'main' ? 'both' : v);
+        revealSheetTab('files', existing.id);
         return next;
       }
       const id = 'plan-' + approvalId;
-      const tab: SheetTab = { id, pane: 0, name: appT('sheet.tab.plan'), kind: 'plan', icoKind: 'plan', ico: '✓', planBody: planMarkdown };
-      setWbActive(a => ({ ...a, 0: id }));
-      setViewState(v => v === 'main' ? 'both' : v);
+      const tab: SheetTab = { id, group: 'files', name: appT('sheet.tab.plan'), kind: 'plan', icoKind: 'plan', ico: '✓', planBody: planMarkdown };
+      revealSheetTab('files', id);
       return [...prev, tab];
     });
   }
 
-  /** Dock workbench buttons.
-   *  - 'term': lifecycle is split from visibility. With no terminals,
-   *    creates the first one. With terminals present, toggles a hide
-   *    flag so the xterm stays mounted (tty keeps running) across
-   *    show/hide cycles. The only paths that destroy a tty are the
-   *    per-tab `×` button and closing the last tab.
-   *  - 'settings': singleton toggle (open / close the one settings tab). */
-  function toggleWbTabKind(kind: 'term' | 'settings'): void {
-    if (kind === 'term') {
-      const hasTerm = wbTabs.some(t => t.kind === 'term');
-      if (hasTerm) {
-        // The workbench sheet renders in ANY workbench-active view — Sessions
-        // AND Tasks (the Manager view and subtasks alike) — so toggling the
-        // terminal should just show/hide it in place. The old check only
-        // counted Sessions + subtasks as "session view", so toggling from the
-        // Tasks Manager view wrongly yanked the user into Sessions mode.
-        const wbActiveNow = mode === 'sessions' || mode === 'tasks';
-        const terminalVisible = wbActiveNow && viewState !== 'main' && !termHidden;
-        if (terminalVisible) {
-          setTermHidden(true);
-        } else {
-          // Only fall back to Sessions from a non-workbench view (spaces/bots),
-          // where the sheet can't render anyway. The dock button is disabled
-          // there, so this is just a safety net.
-          if (!wbActiveNow) setMode('sessions');
-          setTermHidden(false);
-          setViewState(v => v === 'main' ? 'both' : v);
-        }
-        return;
-      }
-      setTermHidden(false);
-      setWbTabs(prev => {
-        const id = 'tab-term-' + Date.now();
-        const tab: SheetTab = { id, pane: 1, name: terminalTabName(), kind: 'term', icoKind: 'term', ico: '$' };
-        setWbActive(a => ({ ...a, 1: id }));
-        setViewState(v => v === 'main' ? 'both' : v);
-        return [...prev, tab];
-      });
-      return;
-    }
-    setWbTabs(prev => {
-      const existing = prev.filter(t => t.kind === kind);
-      if (existing.length > 0) {
-        const next = prev.filter(t => t.kind !== kind);
-        setWbActive(a => {
-          const newA = { ...a };
-          [0, 1].forEach(p => {
-            const pn = p as 0 | 1;
-            if (existing.some(t => t.id === newA[pn])) {
-              const sib = next.find(t => t.pane === pn);
-              newA[pn] = sib ? sib.id : null;
-            }
-          });
-          return newA;
-        });
-        return next;
-      }
-      const id = 'tab-settings';
-      const tab: SheetTab = { id, pane: 0, name: appT('sheet.tab.settings'), kind: 'settings', icoKind: 'gear', ico: '⚙' };
-      const next = [...prev, tab];
-      setWbActive(a => ({ ...a, [tab.pane]: tab.id }));
-      setViewState(v => v === 'main' ? 'both' : v);
-      return next;
-    });
-  }
-
-  /** Add a new terminal tab to the terminal pane (pane 1). Called by the
-   *  `+` button at the right end of the terminal tabs strip. Always
-   *  additive — does not toggle off existing terminals, and always
-   *  surfaces the pane (un-hiding if the dock had collapsed it). */
+  /** Add a new terminal tab to the terminal group. Called by the `+` button
+   *  at the right end of the terminal tabs strip. Always additive, and
+   *  surfaces the terminal rail (un-collapsing it if needed). */
   function addTerminalTab(): void {
-    setTermHidden(false);
+    setActiveRail('terminal');
     setWbTabs(prev => {
       const existingTerms = prev.filter(t => t.kind === 'term').length;
       const id = 'tab-term-' + Date.now();
       const base = terminalTabName();
       const name = existingTerms === 0 ? base : `${base} #${existingTerms + 1}`;
-      const tab: SheetTab = { id, pane: 1, name, kind: 'term', icoKind: 'term', ico: '$' };
-      setWbActive(a => ({ ...a, 1: id }));
-      setViewState(v => v === 'main' ? 'both' : v);
+      const tab: SheetTab = { id, group: 'term', name, kind: 'term', icoKind: 'term', ico: '$' };
+      revealSheetTab('term', id);
+      return [...prev, tab];
+    });
+  }
+
+  /** Open a session as a sidechat tab (kind 'chat', group 'sidechat'). One
+   *  tab per session, keyed by session id — re-picking re-activates. The
+   *  picker disables sessions that already have a chat surface mounted, so
+   *  two panels onto the same session can't happen. */
+  function openSidechatTab(sessionId: string): void {
+    const sess = sessionsRef.current.find(s => s.id === sessionId)
+      ?? archivedSessions.find(s => s.id === sessionId);
+    if (!sess) return;
+    setSidechatPickerOpen(false);
+    setActiveRail('sidechat');
+    const id = `tab-chat-${sessionId}`;
+    setWbTabs(prev => {
+      if (prev.some(t => t.id === id)) return prev;
+      const tab: SheetTab = {
+        id,
+        group: 'sidechat',
+        name: sess.name || `session ${sessionId.slice(0, 6)}`,
+        kind: 'chat',
+        icoKind: 'chat',
+        ico: '',
+        sessionId,
+      };
+      return [...prev, tab];
+    });
+    revealSheetTab('sidechat', id);
+  }
+
+  /** Add a browser tab (group 'browser'). Additive like terminal tabs; each
+   *  keeps its own address/history in the mounted BrowserBody. */
+  function addBrowserTab(): void {
+    setActiveRail('browser');
+    setWbTabs(prev => {
+      const existing = prev.filter(t => t.kind === 'browser').length;
+      const id = 'tab-browser-' + Date.now();
+      const base = appT('dock.browser');
+      const name = existing === 0 ? base : `${base} #${existing + 1}`;
+      const tab: SheetTab = { id, group: 'browser', name, kind: 'browser', icoKind: 'browser', ico: '' };
+      revealSheetTab('browser', id);
       return [...prev, tab];
     });
   }
@@ -1040,47 +1126,25 @@ export function App() {
     return `zsh · ${seg}`;
   }
 
-  function toggleInspector(kind: InspectorTab): void {
-    setInspectorTab(curr => curr === kind ? null : kind);
-  }
-
   /** Open a workspace's detail as a Workbench tab (zone 3). The list lives in
-   *  the Inspector (zone 4); clicking a row opens/activates its detail tab here.
-   *  One tab per workspace, keyed by id, so re-clicking re-activates. Mirrors
-   *  design/gian-design-v2/js/app.jsx → openWorkspaceInSheet. */
+   *  the Inspector (zone 4); clicking a row replaces the group's single detail
+   *  tab here (singleton — no stacking). */
   function openWorkspaceInSheet(wsId: string): void {
     const ws = workspaces.find(w => w.id === wsId);
     if (!ws) return;
-    const id = `tab-ws-${wsId}`;
-    setWbTabs(prev => {
-      const existing = prev.find(t => t.id === id);
-      if (existing) {
-        setWbActive(a => ({ ...a, [existing.pane]: id }));
-        setViewState(v => v === 'main' ? 'both' : v);
-        return prev;
-      }
-      const tab: SheetTab = { id, pane: 0, name: ws.name, kind: 'workspace', icoKind: 'grid', ico: '▣', wsId };
-      setWbActive(a => ({ ...a, 0: id }));
-      setViewState(v => v === 'main' ? 'both' : v);
-      return [...prev, tab];
-    });
+    setActiveRail('workspaces');
+    const tab: SheetTab = { id: `tab-ws-${wsId}`, group: 'workspaces', name: ws.name, kind: 'workspace', icoKind: 'grid', ico: '▣', wsId };
+    setWbTabs(prev => [...prev.filter(t => t.group !== 'workspaces'), tab]);
+    revealSheetTab('workspaces', tab.id);
   }
 
-  /** Open the "new workspace" form as a Workbench tab (singleton) instead of
-   *  jumping to the now-hidden `spaces` mode. */
+  /** Open the "new workspace" form as a Workbench tab (singleton in the
+   *  workspaces group) instead of jumping to the now-hidden `spaces` mode. */
   function openNewWorkspaceInSheet(): void {
-    const id = 'tab-new-workspace';
-    setWbTabs(prev => {
-      if (prev.some(t => t.id === id)) {
-        setWbActive(a => ({ ...a, 0: id }));
-        setViewState(v => v === 'main' ? 'both' : v);
-        return prev;
-      }
-      const tab: SheetTab = { id, pane: 0, name: 'New workspace', kind: 'new-workspace', icoKind: 'grid', ico: '+' };
-      setWbActive(a => ({ ...a, 0: id }));
-      setViewState(v => v === 'main' ? 'both' : v);
-      return [...prev, tab];
-    });
+    setActiveRail('workspaces');
+    const tab: SheetTab = { id: 'tab-new-workspace', group: 'workspaces', name: 'New workspace', kind: 'new-workspace', icoKind: 'grid', ico: '+' };
+    setWbTabs(prev => [...prev.filter(t => t.group !== 'workspaces'), tab]);
+    revealSheetTab('workspaces', tab.id);
   }
 
   const locale = systemConfig?.locale ?? 'en';
@@ -1093,6 +1157,7 @@ export function App() {
     setWbTabs(prev => prev.map(tab => {
       if (tab.kind === 'settings') return { ...tab, name: appT('sheet.tab.settings') };
       if (tab.kind === 'plan') return { ...tab, name: appT('sheet.tab.plan') };
+      if (tab.diffAll) return { ...tab, name: appT('sheet.tab.allChanges') };
       return tab;
     }));
   }, [appT]);
@@ -1682,7 +1747,7 @@ export function App() {
   // is never the `activeSessionId` that markSessionViewed clears.
   const managerPanelVisible = mode === 'tasks' && (
     (!activeSubtaskId && !!activeTaskId) ||
-    (!!activeSubtaskId && inspectorTab === 'manager')
+    (!!activeSubtaskId && activeRail === 'manager')
   );
   // Clear ONCE per view, on the transition into the panel (mark-read-on-open).
   // Re-runs while the same Manager stays on screen are no-ops, so an unread the
@@ -1820,14 +1885,6 @@ export function App() {
     });
   }, []);
 
-  // ─── Dock state (Phase 1: only Search + Inbox are wired) ─────────────────
-  const onJumpToSessionFromInbox = (sid: string) => {
-    setActiveSessionId(sid);
-    setMode('sessions');
-    setInboxItems(prev => markSessionRead(prev, sid));
-    markSessionViewed(sid);
-  };
-
   // URL-param driven Files view: /?view=files&wt=<id>&path=<rel>
   // Opened by FilesView's "Open in new tab" href for non-renderable file types.
   const urlParams = new URLSearchParams(window.location.search);
@@ -1842,14 +1899,12 @@ export function App() {
           onPickWorkingTree={id => { window.location.search = `?view=files&wt=${encodeURIComponent(id)}`; }}
           initialPath={filesPath}
           externalEditors={systemConfig?.external_editors ?? []}
-          onOpenSettings={() => toggleWbTabKind('settings')}
+          onOpenSettings={() => activateRail('settings')}
         />
       </LocaleProvider>
     );
   }
 
-  const hasWbTermTabs = wbTabs.some(t => t.kind === 'term');
-  const hasWbNonTermTabs = wbTabs.some(t => t.kind !== 'term');
   // A Subtask IS a Session: when one is selected in Tasks mode the main area
   // renders the full SessionMain view, so the workbench Sheet / Inspector /
   // terminal must work there exactly as they do in Sessions mode. We treat
@@ -1857,36 +1912,87 @@ export function App() {
   // "session view active" condition for every gate below.
   const subtaskActive = mode === 'tasks' && !!activeSubtaskId && !!activeSession;
   const sessionViewActive = mode === 'sessions' || subtaskActive;
-  // The Manager inspector tab only makes sense for a subtask. If the subtask
-  // context is lost (deselected, or you leave Tasks mode) while it's open,
-  // close the rail rather than leave an empty splitter behind.
+  // The Manager rail only makes sense for a subtask. If the subtask context
+  // is lost (deselected, or you leave Tasks mode) while it's open, collapse
+  // the rail rather than leave an empty panel behind.
   useEffect(() => {
-    if (inspectorTab === 'manager' && !subtaskActive) setInspectorTab(null);
-  }, [inspectorTab, subtaskActive]);
-  // Keep terminal tabs mounted even when the workbench is hidden by the
-  // main/session view toggle or by switching to another top-level section.
+    if (activeRail === 'manager' && !subtaskActive) setActiveRail(null);
+  }, [activeRail, subtaskActive]);
+  // Keep terminal tabs mounted even when their group is hidden — the Sheet
+  // keeps every group in the DOM under display:none, so ttys survive rail
+  // switches, the main/workbench view toggle, and top-level mode switches.
   // The PTY is closed only by the tab close action above.
-  // Global workbench tools (Settings, Terminal, Workspaces inspector) are
-  // available in BOTH Sessions and Tasks (incl. the Manager view) — they aren't
-  // tied to an active session. Only the Files / Changes inspector is
-  // session-specific (gated on sessionViewActive below).
+  // Global workbench rails (Settings, Terminal, Workspaces) are available in
+  // BOTH Sessions and Tasks (incl. the Manager view) — they aren't tied to an
+  // active session. Only the Files / Diffs rails are session-specific (gated
+  // on sessionViewActive below).
   const workbenchActive = mode === 'sessions' || mode === 'tasks';
-  const sheetMounted = wbTabs.length > 0 && (hasWbTermTabs || (workbenchActive && viewState !== 'main'));
+  const activeGroup = activeRail ? GROUP_OF_RAIL[activeRail] : null;
+  const railGroupHasTabs = activeGroup ? wbTabs.some(t => t.group === activeGroup) : false;
+  const managerP2 = activeRail === 'manager' && subtaskActive && !!activeManagerTask;
+  const sheetMounted = wbTabs.length > 0;
+  // The sidechat rail always has panel-2 content to show: chat tabs when they
+  // exist, otherwise the inline session picker as its empty state.
   const sheetVisible = workbenchActive
     && viewState !== 'main'
-    && (hasWbNonTermTabs || (hasWbTermTabs && !termHidden));
-  const terminalDockActive = hasWbTermTabs && workbenchActive && viewState !== 'main' && !termHidden;
+    && activeRail !== null
+    && (railGroupHasTabs || managerP2 || activeRail === 'sidechat');
 
-  // Workspace tabs in the Workbench (zone 3) drive the active-row highlight in
-  // the WorkspacesInspector (zone 4). Derived from wbTabs/wbActive so it can't
-  // drift out of sync with the tab strip.
+  // Panel 3 (Inspector) is derived from the active rail: files→files tree,
+  // diffs→changes tree, workspaces→workspace list, settings→section nav.
+  // The Manager / Sidechat / Terminal / Browser rails have no panel 3.
+  const inspectorKind: 'files' | 'changes' | 'workspaces' | 'settings' | null =
+    activeRail === 'files' ? 'files'
+    : activeRail === 'diffs' ? 'changes'
+    : activeRail === 'workspaces' ? 'workspaces'
+    : activeRail === 'settings' ? 'settings'
+    : null;
+  const inspectorVisible = workbenchActive && inspectorKind !== null
+    && ((inspectorKind === 'files' || inspectorKind === 'changes') ? sessionViewActive : true);
+
+  // The workspace tab in the Workbench (zone 3) drives the active-row
+  // highlight in the WorkspacesInspector (zone 4). Derived from
+  // wbTabs/activeTabByGroup so it can't drift out of sync with the tab strip.
   const openWsIds = new Set(
     wbTabs.filter(t => t.kind === 'workspace' && t.wsId).map(t => t.wsId as string),
   );
-  const activeWorkspaceTab = ([wbActive[0], wbActive[1]] as Array<string | null>)
-    .map(id => wbTabs.find(t => t.id === id))
-    .find(t => t?.kind === 'workspace');
-  const selectedWsId = activeWorkspaceTab?.wsId ?? null;
+  const selectedWsId = wbTabs.find(t => t.id === activeTabByGroup['workspaces'])?.wsId ?? null;
+
+  // ─── Panel-2 navigation history (Topbar back/forward) ───────────────────
+  // Record (rail, active tab) on every rail switch / tab activation, skipping
+  // consecutive duplicates and the entries we restore ourselves.
+  const navTabId = activeGroup ? (activeTabByGroup[activeGroup] ?? null) : null;
+  useEffect(() => {
+    if (navSkipRef.current) { navSkipRef.current = false; return; }
+    const cur = navStack[navIdx];
+    if (cur && cur.rail === activeRail && cur.tabId === navTabId) return;
+    const next = [...navStack.slice(0, navIdx + 1), { rail: activeRail, tabId: navTabId }];
+    setNavStack(next);
+    setNavIdx(next.length - 1);
+  }, [activeRail, navTabId, navStack, navIdx]);
+
+  function navGo(delta: -1 | 1): void {
+    const entry = navStack[navIdx + delta];
+    if (!entry) return;
+    navSkipRef.current = true;
+    setNavIdx(navIdx + delta);
+    if (entry.rail === null) {
+      setActiveRail(null);
+      return;
+    }
+    activateRail(entry.rail);
+    const group = GROUP_OF_RAIL[entry.rail];
+    if (group && entry.tabId && wbTabs.some(t => t.id === entry.tabId)) {
+      revealSheetTab(group, entry.tabId);
+    }
+  }
+
+  /** Panel-3 settings nav click: make sure the settings tab exists and is
+   *  visible, then switch panel 2 to the chosen section. */
+  function onSettingsNavSelect(key: NavKey): void {
+    activateRail('settings');
+    setSettingsSection(key);
+  }
 
   // A Subtask IS a Session. When one is selected in Tasks mode we render the
   // exact same <SessionMain> that CodingView renders in Sessions mode — wired
@@ -1939,7 +2045,7 @@ export function App() {
         onRecover={() => sessionMainHandlers.onRecover(subtask.id)}
         onReopen={() => { void import('./api.js').then(m => m.reopenSubtask(subtask.id)); }}
         onRename={name => sessionMainHandlers.onRename(subtask.id, name)}
-        onShowChanges={() => { toggleInspector('changes'); }}
+        onShowChanges={() => { activateRail('diffs'); }}
         workingTreeId={subtaskWorkingTreeId}
         branch={workingTrees.find(wt => wt.id === subtaskWorkingTreeId)?.branch ?? null}
         ws={ws}
@@ -1957,13 +2063,87 @@ export function App() {
     </FileLinkOpenContext.Provider>
   ) : null;
 
+  /** Sidechat tab body (Sheet kind 'chat'): the same SessionMain the main
+   *  column uses, rebound to the picked session, with primary={false} so
+   *  document-level shortcuts and the runtime-align one-shot stay with the
+   *  main column. v1 simplification (plan 阶段 5): the panel follows the
+   *  MAIN session's working-tree context (GitBadge + file-link routing via
+   *  openFileInSheet, which resolves against activeSessionId) instead of
+   *  plumbing a separate defaultWorkingTreeId chain. */
+  function renderSidechatPanel(sess: Session) {
+    const mainWtId = defaultWorkingTreeIdFor(activeSession);
+    return (
+      <div className="sheet-chat">
+      <FileLinkOpenContext.Provider value={(absPath, line) => { void openFileInSheet(absPath, false, line); }}>
+      <FileRefRehypeContext.Provider value={fileRehype}>
+      <DiffOpenContext.Provider value={() => { /* §C — diff not clickable */ }}>
+      <PlanOpenContext.Provider value={(payload) => openPlanInSheet(payload.id, payload.markdown)}>
+        <SessionMain
+          primary={false}
+          session={sess}
+          chatView={resolveChatView(systemConfig)}
+          workspace={workspaces.find(w => w.id === sess.workspace_id) ?? null}
+          items={itemsBySession[sess.id] ?? []}
+          pending={pendingBySession[sess.id] ?? false}
+          ttyLock={ttyLockBySession[sess.id]}
+          queue={queueBySession[sess.id] ?? []}
+          codexPlanText={planBySession[sess.id]}
+          onSend={(text, opts) => sessionMainHandlers.onSend(sess.id, text, opts)}
+          onBetaSend={(text, opts) => sessionMainHandlers.onBetaSend(sess.id, text, opts)}
+          onSendSkill={(name, path) => sessionMainHandlers.onSendSkill(sess.id, name, path)}
+          onStop={() => sessionMainHandlers.onStop(sess.id)}
+          onApprove={(approvalId, decision, answers, context) =>
+            sessionMainHandlers.onApprove(sess.id, approvalId, decision, answers, context)}
+          onLocalApprovalResolve={(approvalId, decision, answers) => sessionMainHandlers.onLocalApprovalResolve(sess.id, approvalId, decision, answers)}
+          onQueueAdd={text => sessionMainHandlers.onQueueAdd(sess.id, text)}
+          onQueueRemove={queueId => sessionMainHandlers.onQueueRemove(sess.id, queueId)}
+          onQueueReorder={order => sessionMainHandlers.onQueueReorder(sess.id, order)}
+          onQueueClear={() => sessionMainHandlers.onQueueClear(sess.id)}
+          onQueueSendNow={() => sessionMainHandlers.onQueueSendNow(sess.id)}
+          onSetMode={(approvalMode, turns) => sessionMainHandlers.onSetMode(sess.id, approvalMode, turns)}
+          onSetModel={model => sessionMainHandlers.onSetModel(sess.id, model)}
+          onSetEffort={effort => sessionMainHandlers.onSetEffort(sess.id, effort)}
+          onSetServiceTier={tier => sessionMainHandlers.onSetServiceTier(sess.id, tier)}
+          onSetNativeConfig={(configId, value) =>
+            sessionMainHandlers.onSetNativeConfig(sess.id, configId, value)}
+          onMerge={() => sessionMainHandlers.onMerge(sess.id)}
+          onDrop={() => sessionMainHandlers.onDrop(sess.id)}
+          onArchive={archived => sessionMainHandlers.onArchive(sess.id, archived)}
+          onDelete={() => sessionMainHandlers.onDelete(sess.id)}
+          onRecover={() => sessionMainHandlers.onRecover(sess.id)}
+          onRename={name => sessionMainHandlers.onRename(sess.id, name)}
+          onShowChanges={() => { activateRail('diffs'); }}
+          workingTreeId={mainWtId}
+          branch={mainWtId ? (workingTrees.find(wt => wt.id === mainWtId)?.branch ?? null) : null}
+          ws={ws}
+          onSwitchRuntime={(target, surface, opts) => sessionMainHandlers.onSwitchRuntime(sess.id, target, surface, opts)}
+          onClaimTty={(surface, takeover) => sessionMainHandlers.onClaimTty(sess.id, surface, takeover)}
+          armedRemote={armedRemoteSwitch.has(sess.id)}
+          onRequestRemote={() => sessionMainHandlers.onRequestRemote(sess.id)}
+          onCancelRemote={() => sessionMainHandlers.onCancelRemote(sess.id)}
+          remoteControl={remoteControlBySession[sess.id]}
+          onToggleRemoteControl={() => sessionMainHandlers.onToggleRemoteControl(sess.id)}
+        />
+      </PlanOpenContext.Provider>
+      </DiffOpenContext.Provider>
+      </FileRefRehypeContext.Provider>
+      </FileLinkOpenContext.Provider>
+      </div>
+    );
+  }
+
+  // Sessions that already have a chat surface mounted — the sidechat picker
+  // lists them disabled (tty claims are exclusive per session).
+  const sidechatExcludeIds = new Set<string>([
+    ...wbTabs.filter(t => t.kind === 'chat' && t.sessionId).map(t => t.sessionId as string),
+    ...(activeSessionId ? [activeSessionId] : []),
+  ]);
+
   return (
     <LocaleProvider locale={locale}>
     <ImageZoomContext.Provider value={(src, alt) => setZoomImage({ src, alt })}>
     <div className="app">
       <Topbar
-        mode={mode}
-        onSetMode={(m) => { setMode(m); }}
         pathSegments={pathSegments}
         sessionMenu={sessionMenu}
         onRenameSubmit={handleRenameSubmit}
@@ -1971,6 +2151,10 @@ export function App() {
         showViewSeg={workbenchActive && wbTabs.length > 0}
         viewState={viewState}
         onSetViewState={setViewState}
+        canGoBack={navIdx > 0}
+        canGoForward={navIdx < navStack.length - 1}
+        onGoBack={() => navGo(-1)}
+        onGoForward={() => navGo(1)}
       />
       <ImageLightbox image={zoomImage} onClose={() => setZoomImage(null)} />
       <CommandPalette
@@ -1992,6 +2176,9 @@ export function App() {
           <DiffOpenContext.Provider value={() => { /* §C — diff not clickable */ }}>
           <PlanOpenContext.Provider value={(payload) => openPlanInSheet(payload.id, payload.markdown)}>
             <CodingView
+              mode={mode}
+              onSetAppMode={(m) => { setMode(m); }}
+              onOpenSearch={() => setPaletteOpen(true)}
               workspaces={workspaces}
               workspaceBranches={workspaceBranches}
               sessions={sessions}
@@ -2054,7 +2241,7 @@ export function App() {
               onSetServiceTier={sessionMainHandlers.onSetServiceTier}
               onSetNativeConfig={sessionMainHandlers.onSetNativeConfig}
               onRename={sessionMainHandlers.onRename}
-              onShowChanges={() => { toggleInspector('changes'); }}
+              onShowChanges={() => { activateRail('diffs'); }}
               activeWorkingTreeId={defaultWorkingTreeIdFor(activeSession)}
               activeBranch={
                 workingTrees.find(wt => wt.id === defaultWorkingTreeIdFor(activeSession))?.branch
@@ -2097,6 +2284,9 @@ export function App() {
           )}
           {mode === 'tasks' && (
             <TasksView
+              mode={mode}
+              onSetMode={(m) => { setMode(m); }}
+              onOpenSearch={() => setPaletteOpen(true)}
               tasks={tasks}
               sessions={sessions}
               workspaces={workspaces}
@@ -2136,23 +2326,36 @@ export function App() {
               onChange={() => void loadBots().then(setBots)}
             />
           )}
-        {sheetMounted && (() => {
-          return (
+        {(sheetMounted || managerP2 || (activeRail === 'sidechat' && workbenchActive)) && (
           <>
             {sheetVisible && viewState !== 'workbench' && (
               <Splitter side="right" varName="--sheet-w" base={600} min={420} max={1080} invert />
             )}
+            {sheetMounted && (
             <Sheet
               tabs={wbTabs}
-              active={wbActive}
+              activeByGroup={activeTabByGroup}
+              activeGroup={managerP2 ? null : activeGroup}
               actions={sheetActions}
-              onAddTab={() => addTerminalTab()}
-              hideTerm={termHidden}
-              hidden={!sheetVisible}
+              onAddTab={(g) => {
+                if (g === 'term') addTerminalTab();
+                else if (g === 'browser') addBrowserTab();
+                else if (g === 'sidechat') setSidechatPickerOpen(o => !o);
+              }}
+              addMenu={sidechatPickerOpen ? (
+                <SidechatPicker
+                  sessions={sessions}
+                  workspaces={workspaces}
+                  excludeIds={sidechatExcludeIds}
+                  onPick={openSidechatTab}
+                />
+              ) : null}
+              addMenuFor="sidechat"
+              hidden={!sheetVisible || managerP2}
               externalEditors={systemConfig?.external_editors ?? []}
               openApps={systemConfig?.open_apps}
               onOpenWith={handleOpenWith}
-              onConfigureEditors={() => toggleWbTabKind('settings')}
+              onConfigureEditors={() => activateRail('settings')}
               renderTab={(t) => {
                 if (t.kind === 'settings') {
                   return (
@@ -2160,6 +2363,7 @@ export function App() {
                       config={systemConfig}
                       apps={apps}
                       onChange={cfg => setSystemConfig(cfg)}
+                      activeSection={settingsSection}
                     />
                   );
                 }
@@ -2214,29 +2418,61 @@ export function App() {
                     />
                   );
                 }
+                if (t.kind === 'chat') {
+                  const chatSession = sessions.find(s => s.id === t.sessionId)
+                    ?? archivedSessions.find(s => s.id === t.sessionId)
+                    ?? null;
+                  if (!chatSession) {
+                    return <div className="sheet-chat-missing">{appT('sidechat.sessionGone')}</div>;
+                  }
+                  return renderSidechatPanel(chatSession);
+                }
+                if (t.kind === 'browser') {
+                  return (
+                    <BrowserBody
+                      onNavigate={url => sheetActions.setTabName(t.id, browserHostOf(url))}
+                    />
+                  );
+                }
                 return null;
               }}
             />
+            )}
+            {managerP2 && activeManagerTask && (
+              <div className="sheet-manager" style={sheetVisible ? undefined : { display: 'none' }}>
+                <ManagerInspector
+                  task={activeManagerTask}
+                  session={activeManagerSession}
+                  workspaces={workspaces}
+                  items={managerItems}
+                  pending={managerPending}
+                  handlers={managerHandlers}
+                  queue={managerQueue}
+                  onMount={onManagerMount}
+                  onSend={onManagerSend}
+                  onStop={onManagerStop}
+                />
+              </div>
+            )}
+            {/* Sidechat rail with no chat tabs yet — the session picker IS
+                the panel-2 empty state. */}
+            {activeRail === 'sidechat' && !wbTabs.some(t => t.group === 'sidechat') && (
+              <div className="sheet-group sidechat-empty" style={sheetVisible ? undefined : { display: 'none' }}>
+                <SidechatPicker
+                  inline
+                  sessions={sessions}
+                  workspaces={workspaces}
+                  excludeIds={sidechatExcludeIds}
+                  onPick={openSidechatTab}
+                />
+              </div>
+            )}
           </>
-          );
-        })()}
-        {((sessionViewActive || inspectorTab === 'workspaces' || inspectorTab === 'manager') && workbenchActive) && inspectorTab !== null && (
+        )}
+        {inspectorVisible && inspectorKind !== null && (
           <>
             <Splitter side="right" varName="--inspector-w" base={280} min={220} max={500} invert />
-            {inspectorTab === 'manager' && subtaskActive && activeManagerTask ? (
-              <ManagerInspector
-                task={activeManagerTask}
-                session={activeManagerSession}
-                workspaces={workspaces}
-                items={managerItems}
-                pending={managerPending}
-                handlers={managerHandlers}
-                queue={managerQueue}
-                onMount={onManagerMount}
-                onSend={onManagerSend}
-                onStop={onManagerStop}
-              />
-            ) : inspectorTab === 'workspaces' ? (
+            {inspectorKind === 'workspaces' ? (
               <WorkspacesInspector
                 workspaces={workspaces}
                 selectedWsId={selectedWsId}
@@ -2245,13 +2481,11 @@ export function App() {
                 onChange={() => void loadWorkspaces().then(setWorkspaces)}
                 onNewWorkspace={openNewWorkspaceInSheet}
               />
-            ) : inspectorTab === 'manager' ? (
-              // Manager tab but no subtask/task context yet — render nothing
-              // (the dock button only appears for subtasks, so this is rare).
-              null
+            ) : inspectorKind === 'settings' ? (
+              <SettingsNavInspector active={settingsSection} onSelect={onSettingsNavSelect} />
             ) : (
               <Inspector
-                tab={inspectorTab}
+                tab={inspectorKind}
                 workingTreeId={defaultWorkingTreeIdFor(activeSession)}
                 workingTrees={workingTrees}
                 onOpenFile={(rel, perm) => {
@@ -2262,7 +2496,18 @@ export function App() {
                   const abs = `${wt.path}/${rel}`;
                   void openFileInSheet(abs, perm);
                 }}
-                onOpenDiff={(rel, perm, scope) => { void openDiffInSheet(rel, perm, scope); }}
+                onOpenDiff={(rel, perm, scope) => {
+                  // While the flat all-diff tab is the active diffs tab, a
+                  // tree click anchor-scrolls panel 2 to that file's block
+                  // instead of opening a single-file diff.
+                  const activeDiffTab = wbTabs.find(t => t.id === activeTabByGroup['diffs']);
+                  if (activeRail === 'diffs' && activeDiffTab?.diffAll) {
+                    const ts = Date.now();
+                    setWbTabs(prev => prev.map(t => t.id === activeDiffTab.id ? { ...t, scrollToPath: rel, scrollToPathTs: ts } : t));
+                    return;
+                  }
+                  void openDiffInSheet(rel, perm, scope);
+                }}
                 canCommit={!!activeSession}
                 onComposePrompt={text => { if (activeSessionId) injectComposerDraft(activeSessionId, text); }}
               />
@@ -2270,24 +2515,11 @@ export function App() {
           </>
         )}
         <Dock
-          inspectorTab={inspectorTab}
-          onToggleInspector={toggleInspector}
-          inspectorDisabled={!sessionViewActive}
-          workspacesDisabled={!workbenchActive}
+          activeRail={activeRail}
+          onToggleRail={toggleRail}
+          sessionRailsDisabled={!sessionViewActive}
+          workbenchDisabled={!workbenchActive}
           managerVisible={subtaskActive}
-          hasTerminal={terminalDockActive}
-          hasSettings={wbTabs.some(t => t.kind === 'settings')}
-          onToggleWbTab={toggleWbTabKind}
-          wbDisabled={!workbenchActive}
-          onOpenSearch={() => setPaletteOpen(true)}
-          inboxItems={inboxItems}
-          sessionName={sid => {
-            const s = sessions.find(x => x.id === sid) ?? archivedSessions.find(x => x.id === sid);
-            return s?.name?.trim() || `session ${sid.slice(0, 6)}`;
-          }}
-          onJumpToSession={onJumpToSessionFromInbox}
-          onMarkInboxRead={() => setInboxItems(prev => markAllRead(prev))}
-          onClearInboxDone={() => setInboxItems(prev => clearInboxFyi(prev))}
           wsState={wsState}
           wsAttempt={wsAttempt}
           authed={authed}

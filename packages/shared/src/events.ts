@@ -80,13 +80,12 @@ export interface ReasoningData {
 }
 
 /**
- * Plan content update — codex's plan-mode output. Streams in over the turn
- * and finalizes on `turn/plan/updated`. Replaces the previous value each time
- * (cumulative `text`, not delta).
+ * Page-level plan content update. Provider adapters keep their native
+ * protocols and project only the latest displayable plan text here.
  *
- * from: codex (item/plan/delta + turn/plan/updated)
- * cc:   exit_plan_mode is a tool-call approval flow, not a discrete event —
- *       still routed through `approval_requested` with category=exit_plan_mode.
+ * from: codex (item/plan/delta + structured turn/plan/updated steps)
+ *       kimi (ACP TodoList plan snapshot)
+ *       cc (plan-file Write fallback; ExitPlanMode remains an approval)
  */
 export interface PlanUpdateData {
   /** Full plan markdown so far. UI replaces in place. */
@@ -184,14 +183,28 @@ export interface ToolExecutionData {
 }
 
 /**
- * Sub-agent spawned by the AI.
+ * Persistent sub-agent run display state.
  *
- * from: cc only (Agent tool_use)
- * codex: not supported.
+ * from: cc (Agent/Task tool_use + native task lifecycle)
+ *       codex (collabAgentToolCall / subAgentActivity)
+ *       kimi (ACP Agent tool lifecycle)
  */
 export interface AgentSpawnData {
+  /** Executor-native agent identity when one exists (Claude task id, Codex
+   *  child thread id). `call_id` remains the stable display-row identity. */
+  agentId?: string;
   description: string;
   status: 'running' | 'done' | 'error';
+  /** Executor-native agent kind / role, kept as display metadata rather than
+   *  forced into a cross-provider enum. */
+  agentType?: string;
+  /** Model requested or resolved for this agent, when the CLI reports it. */
+  model?: string;
+  /** Terminal native summary. Full child transcripts stay provider-owned. */
+  output?: string;
+  outputFile?: string;
+  startedAt?: number;
+  completedAt?: number;
   /** tool_use input block for reference. */
   input?: Record<string, unknown>;
 }

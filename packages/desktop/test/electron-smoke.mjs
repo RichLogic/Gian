@@ -113,6 +113,23 @@ try {
     await window.evaluate(() => typeof window.gianDesktop?.retryConnection),
     'function',
   );
+  assert.equal(
+    await window.evaluate(() => typeof window.gianDesktop?.setDockIcon),
+    'function',
+  );
+  assert.equal(
+    await window.evaluate(async () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 32;
+      canvas.height = 32;
+      const context = canvas.getContext('2d');
+      if (!context || !window.gianDesktop?.setDockIcon) return false;
+      context.fillStyle = 'oklch(0.7 0.18 230)';
+      context.fillRect(0, 0, 32, 32);
+      return window.gianDesktop.setDockIcon(canvas.toDataURL('image/png'));
+    }),
+    true,
+  );
   const titlebarChrome = await window.getByTestId('desktop-topbar').evaluate(element => {
     const topbarStyle = getComputedStyle(element);
     const actionStyle = getComputedStyle(element.querySelector('button'));

@@ -268,6 +268,7 @@ export const PROXY_NOTIFICATION_METHODS = [
   // cc-proxy event stream
   'output.text',
   'tool.use',
+  'claude.task',
   'auto.classifier_denied',
   'auto.circuit_breaker',
   'session.rotated',
@@ -278,6 +279,7 @@ export const PROXY_NOTIFICATION_METHODS = [
   'output.plan.delta',
   'output.plan.final',
   'diff.updated',
+  'codex.agent',
   // Stats and runtime (both proxies)
   'token_usage.updated',
   'runtime.error',

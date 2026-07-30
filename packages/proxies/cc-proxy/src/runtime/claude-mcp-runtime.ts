@@ -606,6 +606,11 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     let streamedAnyText = false;
     let currentContext: { used: number } | null = null;
     let currentModel: string | null = null;
+    const agentTasks = new Map<string, {
+      toolUseId: string;
+      description?: string;
+      agentType?: string;
+    }>();
 
     lines.on('line', (line) => {
       const trimmed = line.trim();
@@ -623,6 +628,55 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
         if (eventType === 'system' && event.subtype === 'init') {
           if (typeof event.model === 'string') {
             session.detectedModelId = event.model;
+          }
+        }
+
+        // Claude -p exposes subagents as a native task lifecycle. Keep the
+        // native task id and the parent Agent tool_use id separate: the latter
+        // is the stable transcript anchor, while task_id is what later
+        // SendMessage/TaskOutput calls address.
+        if (eventType === 'system' && event.subtype === 'task_started') {
+          const taskId = typeof event.task_id === 'string' ? event.task_id : '';
+          const toolUseId = typeof event.tool_use_id === 'string' ? event.tool_use_id : '';
+          if (taskId && toolUseId) {
+            const description = typeof event.description === 'string' ? event.description : undefined;
+            const agentType = typeof event.subagent_type === 'string' ? event.subagent_type : undefined;
+            agentTasks.set(taskId, {
+              toolUseId,
+              ...(description ? { description } : {}),
+              ...(agentType ? { agentType } : {}),
+            });
+            this.emit('agentTask', sessionId, {
+              taskId,
+              toolUseId,
+              status: 'running',
+              ...(description ? { description } : {}),
+              ...(agentType ? { agentType } : {}),
+              startedAt: Date.now(),
+            });
+          }
+        }
+
+        if (eventType === 'system' && event.subtype === 'task_notification') {
+          const taskId = typeof event.task_id === 'string' ? event.task_id : '';
+          const known = taskId ? agentTasks.get(taskId) : undefined;
+          const toolUseId = typeof event.tool_use_id === 'string'
+            ? event.tool_use_id
+            : known?.toolUseId ?? '';
+          if (taskId && toolUseId) {
+            const nativeStatus = typeof event.status === 'string' ? event.status : '';
+            const summary = typeof event.summary === 'string' ? event.summary : undefined;
+            const outputFile = typeof event.output_file === 'string' ? event.output_file : undefined;
+            this.emit('agentTask', sessionId, {
+              taskId,
+              toolUseId,
+              status: nativeStatus === 'completed' ? 'done' : 'error',
+              ...(known?.description ? { description: known.description } : {}),
+              ...(known?.agentType ? { agentType: known.agentType } : {}),
+              ...(summary ? { summary } : {}),
+              ...(outputFile ? { outputFile } : {}),
+              completedAt: Date.now(),
+            });
           }
         }
 
@@ -670,6 +724,9 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
               const toolInput = typeof b.input === 'object' && b.input !== null
                 ? b.input as Record<string, unknown>
                 : {};
+              const callId = typeof b.id === 'string' && b.id
+                ? b.id
+                : `${messageId}_${blockIdx}`;
 
               // ExitPlanMode permission request flows through the approval
               // MCP bridge (Claude SDK calls canUseTool before invoking the
@@ -677,7 +734,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
               // event and tags it as exit_plan_mode for special UI rendering.
               // No synthesized event needed here.
 
-              this.emit('toolUse', sessionId, toolName, toolInput);
+              this.emit('toolUse', sessionId, toolName, toolInput, callId);
             }
             blockIdx++;
           }

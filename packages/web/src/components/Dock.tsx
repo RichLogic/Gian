@@ -1,22 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RunnerInfo } from '@gian/shared';
-import { blockingCount, tierOf, type InboxItem } from '../inbox.js';
 import { useT } from '../i18n/index.js';
 import type { WsState } from '../ws.js';
+import type { RailId } from './Sheet.js';
 
-type Group = 'panel' | 'wb' | 'popout';
+type Group = 'panel' | 'wb';
 
 interface DockBtnProps {
   group: Group;
   label: string;
   active?: boolean;
   disabled?: boolean;
-  badge?: number;
   onClick?: () => void;
   children: React.ReactNode;
 }
 
-function DockBtn({ group, label, active, disabled, badge, onClick, children }: DockBtnProps) {
+function DockBtn({ group, label, active, disabled, onClick, children }: DockBtnProps) {
   const testId = `dock-${label.toLowerCase().replace(/\s+/g, '-')}`;
   return (
     <button
@@ -30,83 +29,46 @@ function DockBtn({ group, label, active, disabled, badge, onClick, children }: D
       title={label}
     >
       {children}
-      {badge != null && badge > 0 && (
-        <span className="dock-badge">{badge > 9 ? '9+' : badge}</span>
-      )}
       <span className="lbl">{label}</span>
     </button>
   );
 }
 
 const ICONS = {
-  // `grid` mirrors the design prototype's Dock "Workspaces" button glyph.
-  grid: 'M4 4h7v7H4z M13 4h7v7h-7z M4 13h7v7H4z M13 13h7v7h-7z',
-  // `chat` — the Tasks-mode "Manager" panel toggle (subtask context only).
-  chat: 'M21 12c0 4.4-4 8-9 8-1.2 0-2.3-.2-3.4-.6L3 21l1.5-4.4A7.8 7.8 0 0 1 3 12c0-4.4 4-8 9-8s9 3.6 9 8z',
-  folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
-  diff: 'M9 4v12 M9 4l-3 3 M9 4l3 3 M15 20V8 M15 20l3-3 M15 20l-3-3',
-  terminal: 'M5 7l5 5-5 5 M12 19h8',
-  gear: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z M19 12a7 7 0 0 0-.2-1.6l2-1.6-2-3.4-2.4.9a7 7 0 0 0-2.8-1.6L13.2 2H10.8l-.4 2.7a7 7 0 0 0-2.8 1.6L5.2 5.4l-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .6.1 1.1.2 1.6l-2 1.6 2 3.4 2.4-.9a7 7 0 0 0 2.8 1.6l.4 2.7h2.4l.4-2.7a7 7 0 0 0 2.8-1.6l2.4.9 2-3.4-2-1.6c.1-.5.2-1 .2-1.6z',
-  search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-4.3-4.3',
-  inbox: 'M3 13l3-8h12l3 8 M3 13v6h18v-6 M3 13h5l1 3h6l1-3h5',
+  // Redrawn on a shared 24-grid (phase 6): 1.5px stroke, round caps/joins,
+  // Codex-style minimal geometry, optically centered.
+  grid: 'M4 5.5A1.5 1.5 0 0 1 5.5 4h4A1.5 1.5 0 0 1 11 5.5v4A1.5 1.5 0 0 1 9.5 11h-4A1.5 1.5 0 0 1 4 9.5z M13 5.5A1.5 1.5 0 0 1 14.5 4h4A1.5 1.5 0 0 1 20 5.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 13 9.5z M4 14.5A1.5 1.5 0 0 1 5.5 13h4a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 4 18.5z M13 14.5a1.5 1.5 0 0 1 1.5-1.5h4a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5h-4a1.5 1.5 0 0 1-1.5-1.5z',
+  chat: 'M12 4.5c-4.7 0-8.5 3.13-8.5 7 0 1.5.57 2.9 1.58 4.05L3.6 19.6l4.2-1.43c1.24.58 2.62.83 4.2.83 4.7 0 8.5-3.13 8.5-7s-3.8-7-8.5-7z',
+  sidechat: 'M9.2 15.8 6 18.4v-2.6H4.8A1.8 1.8 0 0 1 3 14V6.8A1.8 1.8 0 0 1 4.8 5h8.4A1.8 1.8 0 0 1 15 6.8v.7 M15.6 9.5h3.6A1.8 1.8 0 0 1 21 11.3v4.2a1.8 1.8 0 0 1-1.8 1.8h-.6v2.6l-3.2-2.6h-4.6a1.8 1.8 0 0 1-1.8-1.8v-.7',
+  folder: 'M3.5 7A2.5 2.5 0 0 1 6 4.5h3.4a2 2 0 0 1 1.6.8l1.2 1.7H18A2.5 2.5 0 0 1 20.5 9.5v8A2.5 2.5 0 0 1 18 20H6a2.5 2.5 0 0 1-2.5-2.5z',
+  diff: 'M8.5 4v13 M8.5 4l-3 3 M8.5 4l3 3 M15.5 20V7 M15.5 20l3-3 M15.5 20l-3-3',
+  terminal: 'M5.5 7.5l4.5 4.5-4.5 4.5 M12.5 18.5h6',
+  browser: 'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17z M3.5 12h17 M12 3.5c2.3 2.4 3.6 5.3 3.6 8.5s-1.3 6.1-3.6 8.5c-2.3-2.4-3.6-5.3-3.6-8.5S9.7 5.9 12 3.5z',
+  gear: 'M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z M18.7 12a6 6 0 0 0-.1-1.2l1.8-1.4-1.8-3.1-2.1.8a6.2 6.2 0 0 0-2.1-1.2L14 3.5h-4l-.4 2.4a6.2 6.2 0 0 0-2.1 1.2l-2.1-.8-1.8 3.1 1.8 1.4a6 6 0 0 0 0 2.4l-1.8 1.4 1.8 3.1 2.1-.8a6.2 6.2 0 0 0 2.1 1.2l.4 2.4h4l.4-2.4a6.2 6.2 0 0 0 2.1-1.2l2.1.8 1.8-3.1-1.8-1.4c.07-.4.1-.8.1-1.2z',
 };
 
 function Icon({ d, size = 17 }: { d: string; size?: number }) {
   return (
-    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
       <path d={d} />
     </svg>
   );
 }
 
-function InboxRow({ item, name, kindLabel, onClick }: {
-  item: InboxItem;
-  name: string;
-  kindLabel: string;
-  onClick: () => void;
-}) {
-  return (
-    <button className={`row ${item.kind}${item.read ? '' : ' unread'}`} onClick={onClick}>
-      <span className={`cat ${item.kind}`}>{kindLabel}</span>
-      <span className="desc">
-        <span className="inbox-sess">{name}</span>
-        {item.subject && <span className="inbox-sub">{item.subject}</span>}
-      </span>
-    </button>
-  );
-}
-
 interface Props {
-  // Panel group (inspector toggles) — Phase 4 wiring; for now buttons can be disabled.
-  inspectorTab: 'files' | 'changes' | 'workspaces' | 'manager' | null;
-  onToggleInspector: (kind: 'files' | 'changes' | 'workspaces' | 'manager') => void;
-  inspectorDisabled?: boolean;
-  /** Workspaces is a global tool (not session-specific), so it has its own
-   *  disabled flag — enabled in Tasks mode too, unlike Files / Changes. */
-  workspacesDisabled?: boolean;
-  /** The Tasks-mode Manager panel toggle. Only meaningful while a subtask is
+  /** Currently open rail; null = all dock panels collapsed. */
+  activeRail: RailId | null;
+  /** Toggle a rail open/closed (re-clicking the active rail collapses it). */
+  onToggleRail: (rail: RailId) => void;
+  /** Session-scoped rails (Files / Diffs) need an active session. */
+  sessionRailsDisabled?: boolean;
+  /** Global workbench rails (Terminal / Workspaces / Settings) need
+   *  Sessions or Tasks mode. */
+  workbenchDisabled?: boolean;
+  /** The Tasks-mode Manager rail toggle. Only meaningful while a subtask is
    *  selected (the Manager is the parent Task's), so the button is rendered
    *  only when `managerVisible` — matching the design's subtask-only affordance. */
   managerVisible?: boolean;
-
-  // Workbench group — Phase 3 wiring.
-  hasTerminal: boolean;
-  hasSettings: boolean;
-  onToggleWbTab: (kind: 'term' | 'settings') => void;
-  wbDisabled?: boolean;
-
-  // Popout group — fully wired in Phase 1.
-  onOpenSearch: () => void;
-  /** Cross-session attention center: pending approvals, errors, and completed
-   *  turns of sessions you're not watching. */
-  inboxItems: InboxItem[];
-  /** Resolve a session id to a display label for inbox rows. */
-  sessionName: (sessionId: string) => string;
-  onJumpToSession: (sessionId: string) => void;
-  /** Mark every inbox item read (fired when the popout opens). */
-  onMarkInboxRead: () => void;
-  /** Drop all FYI (completed) items. */
-  onClearInboxDone: () => void;
 
   // Runner chip (V1-style clickable status pill anchored bottom-right).
   wsState: WsState;
@@ -116,48 +78,19 @@ interface Props {
 }
 
 export function Dock({
-  inspectorTab,
-  onToggleInspector,
-  inspectorDisabled,
-  workspacesDisabled,
+  activeRail,
+  onToggleRail,
+  sessionRailsDisabled,
+  workbenchDisabled,
   managerVisible,
-  hasTerminal,
-  hasSettings,
-  onToggleWbTab,
-  wbDisabled,
-  onOpenSearch,
-  inboxItems,
-  sessionName,
-  onJumpToSession,
-  onMarkInboxRead,
-  onClearInboxDone,
   wsState,
   wsAttempt,
   authed,
   runner,
 }: Props) {
   const t = useT();
-  const [inboxOpen, setInboxOpen] = useState(false);
   const [runnerOpen, setRunnerOpen] = useState(false);
-  const anchorRef = useRef<HTMLSpanElement>(null);
   const runnerRef = useRef<HTMLSpanElement>(null);
-
-  useEffect(() => {
-    if (!inboxOpen) return;
-    function onDown(e: PointerEvent) {
-      if (anchorRef.current?.contains(e.target as Node)) return;
-      setInboxOpen(false);
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setInboxOpen(false);
-    }
-    document.addEventListener('pointerdown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('pointerdown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [inboxOpen]);
 
   useEffect(() => {
     if (!runnerOpen) return;
@@ -176,18 +109,6 @@ export function Dock({
     };
   }, [runnerOpen]);
 
-  // Badge nags on actionable items only (approvals + errors); completed-turn
-  // FYIs accumulate in the list but don't drive the badge.
-  const badge = blockingCount(inboxItems);
-  const total = inboxItems.length;
-  const blocking = inboxItems.filter(i => tierOf(i.kind) === 'blocking');
-  const fyi = inboxItems.filter(i => tierOf(i.kind) === 'fyi');
-
-  function openInbox(open: boolean) {
-    setInboxOpen(open);
-    if (open) onMarkInboxRead();
-  }
-
   const runnerState: 'ok' | 'reconnecting' | 'offline' =
     wsState === 'open' && authed ? 'ok'
     : wsState === 'connecting' ? 'reconnecting'
@@ -199,43 +120,50 @@ export function Dock({
 
   return (
     <aside className="dock">
-      <div className="dock-group" data-dock-group-label={t('dock.group.panel')}>
-        {managerVisible && (
-          <DockBtn
-            group="panel"
-            label={t('dock.manager')}
-            active={inspectorTab === 'manager'}
-            onClick={() => onToggleInspector('manager')}
-          >
-            <Icon d={ICONS.chat} />
-          </DockBtn>
-        )}
-        <DockBtn
-          group="panel"
-          label={t('topbar.mode.workspaces')}
-          active={inspectorTab === 'workspaces'}
-          disabled={workspacesDisabled}
-          onClick={() => onToggleInspector('workspaces')}
-        >
-          <Icon d={ICONS.grid} />
-        </DockBtn>
+      <div className="dock-group" data-dock-group-label={t('dock.group.files')}>
         <DockBtn
           group="panel"
           label={t('dock.files')}
-          active={inspectorTab === 'files'}
-          disabled={inspectorDisabled}
-          onClick={() => onToggleInspector('files')}
+          active={activeRail === 'files'}
+          disabled={sessionRailsDisabled}
+          onClick={() => onToggleRail('files')}
         >
           <Icon d={ICONS.folder} />
         </DockBtn>
         <DockBtn
           group="panel"
-          label={t('dock.changes')}
-          active={inspectorTab === 'changes'}
-          disabled={inspectorDisabled}
-          onClick={() => onToggleInspector('changes')}
+          label={t('dock.diffs')}
+          active={activeRail === 'diffs'}
+          disabled={sessionRailsDisabled}
+          onClick={() => onToggleRail('diffs')}
         >
           <Icon d={ICONS.diff} />
+        </DockBtn>
+      </div>
+
+      <div className="dock-divider" aria-hidden />
+
+      <div className="dock-group" data-dock-group-label={t('dock.group.chat')}>
+        {managerVisible && (
+          <DockBtn
+            group="panel"
+            label={t('dock.manager')}
+            active={activeRail === 'manager'}
+            onClick={() => onToggleRail('manager')}
+          >
+            <Icon d={ICONS.chat} />
+          </DockBtn>
+        )}
+        {/* Sidechat rail — chat tabs onto other sessions, added via the
+            tab strip's "+" session picker. */}
+        <DockBtn
+          group="panel"
+          label={t('dock.sidechat')}
+          active={activeRail === 'sidechat'}
+          disabled={workbenchDisabled}
+          onClick={() => onToggleRail('sidechat')}
+        >
+          <Icon d={ICONS.sidechat} />
         </DockBtn>
       </div>
 
@@ -245,79 +173,46 @@ export function Dock({
         <DockBtn
           group="wb"
           label={t('dock.terminal')}
-          active={hasTerminal}
-          disabled={wbDisabled}
-          onClick={() => onToggleWbTab('term')}
+          active={activeRail === 'terminal'}
+          disabled={workbenchDisabled}
+          onClick={() => onToggleRail('terminal')}
         >
           <Icon d={ICONS.terminal} />
         </DockBtn>
+        {/* Browser rail — iframe preview tabs, added via the tab strip's "+". */}
         <DockBtn
           group="wb"
-          label={t('dock.settings')}
-          active={hasSettings}
-          disabled={wbDisabled}
-          onClick={() => onToggleWbTab('settings')}
+          label={t('dock.browser')}
+          active={activeRail === 'browser'}
+          disabled={workbenchDisabled}
+          onClick={() => onToggleRail('browser')}
         >
-          <Icon d={ICONS.gear} />
+          <Icon d={ICONS.browser} />
         </DockBtn>
       </div>
 
       <span className="dock-spacer" />
       <div className="dock-divider" aria-hidden />
 
-      <div className="dock-group" data-dock-group-label={t('dock.group.popout')}>
-        <DockBtn group="popout" label={t('dock.search')} onClick={onOpenSearch}>
-          <Icon d={ICONS.search} />
-        </DockBtn>
-        <span
-          ref={anchorRef}
-          className="inbox-anchor"
-          style={{ position: 'relative', width: '100%', display: 'flex', justifyContent: 'center' }}
+      <div className="dock-group" data-dock-group-label={t('dock.group.system')}>
+        <DockBtn
+          group="panel"
+          label={t('topbar.mode.workspaces')}
+          active={activeRail === 'workspaces'}
+          disabled={workbenchDisabled}
+          onClick={() => onToggleRail('workspaces')}
         >
-          <DockBtn
-            group="popout"
-            label={t('dock.inbox')}
-            active={inboxOpen}
-            badge={badge}
-            disabled={total === 0}
-            onClick={() => total > 0 && openInbox(!inboxOpen)}
-          >
-            <Icon d={ICONS.inbox} />
-          </DockBtn>
-          {inboxOpen && total > 0 && (
-            <div className="inbox-pop dock-side">
-              <div className="head">
-                <span>{t('dock.inbox')}</span>
-                <span className="head-actions">
-                  {fyi.length > 0 && (
-                    <button className="clear-all" onClick={onClearInboxDone}>{t('dock.inbox.clearDone')}</button>
-                  )}
-                  <button className="clear-all" onClick={() => setInboxOpen(false)}>{t('common.close')}</button>
-                </span>
-              </div>
-              {blocking.length > 0 && (
-                <>
-                  <div className="inbox-section">{t('dock.inbox.needsYou')}</div>
-                  {blocking.map(item => (
-                    <InboxRow key={item.id} item={item} name={sessionName(item.sessionId)}
-                      kindLabel={t(`dock.inbox.kind.${item.kind}`)}
-                      onClick={() => { setInboxOpen(false); onJumpToSession(item.sessionId); }} />
-                  ))}
-                </>
-              )}
-              {fyi.length > 0 && (
-                <>
-                  <div className="inbox-section">{t('dock.inbox.recent')}</div>
-                  {fyi.map(item => (
-                    <InboxRow key={item.id} item={item} name={sessionName(item.sessionId)}
-                      kindLabel={t(`dock.inbox.kind.${item.kind}`)}
-                      onClick={() => { setInboxOpen(false); onJumpToSession(item.sessionId); }} />
-                  ))}
-                </>
-              )}
-            </div>
-          )}
-        </span>
+          <Icon d={ICONS.grid} />
+        </DockBtn>
+        <DockBtn
+          group="wb"
+          label={t('dock.settings')}
+          active={activeRail === 'settings'}
+          disabled={workbenchDisabled}
+          onClick={() => onToggleRail('settings')}
+        >
+          <Icon d={ICONS.gear} />
+        </DockBtn>
       </div>
 
       {/* Connection chip: hidden while healthy (a static green dot is noise);

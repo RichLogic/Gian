@@ -11,7 +11,7 @@ import { useT } from '../i18n/index.js';
 // right rail when a subtask is selected in Tasks mode.
 export type InspectorTab = 'files' | 'changes' | 'workspaces' | 'manager';
 
-function Icon({ d, size = 13, stroke = 1.6 }: { d: string; size?: number; stroke?: number }) {
+function Icon({ d, size = 13, stroke = 1.5 }: { d: string; size?: number; stroke?: number }) {
   return (
     <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor"
          strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">
@@ -21,9 +21,9 @@ function Icon({ d, size = 13, stroke = 1.6 }: { d: string; size?: number; stroke
 }
 
 const I = {
-  refresh: 'M3 12a9 9 0 0 1 15.5-6.3L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15.5 6.3L3 16 M3 21v-5h5',
-  folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
-  search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-4.3-4.3',
+  refresh: 'M20 12a8 8 0 1 1-2.34-5.66 M20 4v4h-4',
+  folder: 'M3.5 7A2.5 2.5 0 0 1 6 4.5h3.4a2 2 0 0 1 1.6.8l1.2 1.7H18A2.5 2.5 0 0 1 20.5 9.5v8A2.5 2.5 0 0 1 18 20H6a2.5 2.5 0 0 1-2.5-2.5z',
+  search: 'M10.5 4.5a6 6 0 1 0 0 12 6 6 0 0 0 0-12z M19.5 19.5l-4.6-4.6',
 };
 
 // Per-extension badge swatch shared by the tree files and the search hits.

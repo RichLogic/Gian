@@ -3,6 +3,18 @@ import { EventEmitter } from 'node:events';
 import type { TokenUsageUpdate } from '@gian/shared';
 import type { EffortLevel, ModelCapabilities, PermissionMode } from '../core/types.js';
 
+export interface ClaudeAgentTaskUpdate {
+  taskId: string;
+  toolUseId: string;
+  description?: string;
+  agentType?: string;
+  status: 'running' | 'done' | 'error';
+  summary?: string;
+  outputFile?: string;
+  startedAt?: number;
+  completedAt?: number;
+}
+
 /**
  * Events emitted by the runtime:
  *
@@ -26,7 +38,14 @@ export interface ClaudeRuntimeEvents {
   permissionRequest: [sessionId: string, requestId: string, toolName: string, description: string, inputPreview: string];
   autoClassifierDenied: [sessionId: string, action: string, reason: string, consecutive: number, total: number];
   autoCircuitBreaker: [sessionId: string, trigger: 'consecutive' | 'total', consecutive: number, total: number];
-  toolUse: [sessionId: string, toolName: string, input: Record<string, unknown>];
+  toolUse: [
+    sessionId: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    callId: string,
+  ];
+  /** Claude -p's native task_started / task_notification lifecycle. */
+  agentTask: [sessionId: string, update: ClaudeAgentTaskUpdate];
   /** Current context samples from assistant events plus the result event's
    *  per-invocation conversation delta and authoritative context-window size. */
   tokenUsage: [sessionId: string, usage: TokenUsageUpdate];

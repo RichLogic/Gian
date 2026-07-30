@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { CcModelCapabilities, CodexModelCapabilities, ExternalEditor, OpenFileCategory, SystemConfig } from '@gian/shared';
 import { THEME_DEFAULT_ACCENT } from '@gian/shared';
@@ -26,7 +26,7 @@ import {
   type NotificationPrefs,
 } from '../notifications.js';
 
-type NavKey = 'appearance' | 'notifications' | 'shortcuts' | 'executors' | 'chatview' | 'openwith';
+export type NavKey = 'appearance' | 'notifications' | 'shortcuts' | 'executors' | 'chatview' | 'openwith';
 
 /** Left-nav groups (locator). `labelKey` is an i18n key; `items` map a
  *  section anchor id (`sec-<key>`) to its nav label key. */
@@ -90,62 +90,36 @@ interface Props {
   /** Installed apps (macOS) for the "Add application" picker. */
   apps?: string[];
   onChange: (cfg: SystemConfig) => void;
+  /** Which section to render — controlled by App (driven by the panel-3
+   *  SettingsNavInspector; the state survives rail collapse/restore).
+   *  Defaults to 'appearance'. */
+  activeSection?: NavKey;
 }
 
-/** Settings v3 — left-nav scrollspy locator + vertically-stacked section
- *  cards (ported 1:1 from design/gian-design-v2). Two nav groups:
- *  Preferences (Appearance / Notifications / Shortcuts) and Runtime
- *  (Executors / Chat view / Open with). The nav is a locator, not a
- *  switcher — clicking scrolls to a section and the active highlight
- *  follows scroll position. Account/Auth/Public/System/About stay out of
- *  this compact workbench surface; locale lives here because the app only
- *  supports Chinese/English UI. */
-export function SettingsBody({ config, apps, onChange }: Props) {
+/** Settings v3 — single-section switcher (dock Settings rail, phase 4).
+ *  The nav lives in panel 3 (SettingsNavInspector); this panel-2 body renders
+ *  ONLY the active section. Two nav groups: Preferences (Appearance /
+ *  Notifications / Shortcuts) and Runtime (Executors / Chat view / Open
+ *  with). Account/Auth/Public/System/About stay out of this compact
+ *  workbench surface; locale lives here because the app only supports
+ *  Chinese/English UI. */
+export function SettingsBody({ config, apps, onChange, activeSection = 'appearance' }: Props) {
   const t = useT();
   if (!config) return <div style={{ padding: 20, color: 'var(--text-3)' }}>{t('common.loading')}</div>;
-  return <SettingsBodyInner config={config} apps={apps ?? []} onChange={onChange} />;
+  return <SettingsBodyInner config={config} apps={apps ?? []} onChange={onChange} activeSection={activeSection} />;
 }
 
 function SettingsBodyInner({
-  config, apps, onChange,
+  config, apps, onChange, activeSection,
 }: {
   config: SystemConfig;
   apps: string[];
   onChange: (cfg: SystemConfig) => void;
+  activeSection: NavKey;
 }) {
   const t = useT();
   const minimapOn = useMinimapEnabled();
   const [editors, setEditors] = useState<ExternalEditor[]>(config.external_editors);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const [activeNav, setActiveNav] = useState<NavKey>('appearance');
-
-  // Nav is a locator, not a switcher: clicking scrolls to the section; the
-  // active highlight follows the scroll position (scrollspy). The scroller is
-  // the enclosing `.sheet-content` island (matches the design prototype).
-  function goTo(key: NavKey) {
-    setActiveNav(key);
-    const el = document.getElementById(`sec-${key}`);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }
-
-  useEffect(() => {
-    const root = rootRef.current;
-    const scroller = root?.closest('.sheet-content') as HTMLElement | null;
-    if (!scroller) return;
-    const keys = NAV_GROUPS.flatMap(g => g.items.map(([k]) => k));
-    const onScroll = () => {
-      const top = scroller.getBoundingClientRect().top;
-      let cur: NavKey = keys[0]!;
-      for (const k of keys) {
-        const el = document.getElementById(`sec-${k}`);
-        if (el && el.getBoundingClientRect().top - top <= 56) cur = k;
-      }
-      setActiveNav(cur);
-    };
-    scroller.addEventListener('scroll', onScroll, { passive: true });
-    onScroll();
-    return () => scroller.removeEventListener('scroll', onScroll);
-  }, []);
 
   // Sync local editor state when config is replaced from outside (e.g. initial load).
   useEffect(() => {
@@ -195,30 +169,11 @@ function SettingsBodyInner({
   const editorAppNames = [...new Set(editors.map(e => e.name.trim()).filter(Boolean))];
 
   return (
-    <div className="settings2" data-testid="settings-body" ref={rootRef}>
-      <nav className="settings2-nav">
-        <div className="settings2-title">{t('settings.title')}</div>
-        {NAV_GROUPS.map(group => (
-          <div className="s2-group" key={group.labelKey}>
-            <div className="s2-grouplabel">{t(group.labelKey)}</div>
-            {group.items.map(([key, labelKey]) => (
-              <button
-                key={key}
-                type="button"
-                className={`s2-navitem ${activeNav === key ? 'active' : ''}`}
-                onClick={() => goTo(key)}
-              >
-                {t(labelKey)}
-              </button>
-            ))}
-          </div>
-        ))}
-        <div className="s2-foot mono">{t('settings.foot')}</div>
-      </nav>
-
+    <div className="settings2" data-testid="settings-body">
       <div className="settings2-main">
         {/* ── Appearance ── */}
-        <section id="sec-appearance" className="s2-section">
+        {activeSection === 'appearance' && (
+        <section className="s2-section">
           <h3 className="s2-sectiontitle">{t('settings.section.appearance')}</h3>
           <div className="s2-card">
             <dl className="kv-grid">
@@ -337,17 +292,21 @@ function SettingsBodyInner({
             </dl>
           </div>
         </section>
+        )}
 
         {/* ── Notifications ── */}
-        <section id="sec-notifications" className="s2-section">
+        {activeSection === 'notifications' && (
+        <section className="s2-section">
           <h3 className="s2-sectiontitle">{t('settings.section.notifications')}</h3>
           <div className="s2-card">
             <NotificationsBlock />
           </div>
         </section>
+        )}
 
         {/* ── Shortcuts ── */}
-        <section id="sec-shortcuts" className="s2-section">
+        {activeSection === 'shortcuts' && (
+        <section className="s2-section">
           <h3 className="s2-sectiontitle">{t('settings.section.shortcuts')}</h3>
           <div className="s2-card">
             <dl className="kv-grid shortcuts">
@@ -362,9 +321,11 @@ function SettingsBodyInner({
             </dl>
           </div>
         </section>
+        )}
 
         {/* ── Executors ── */}
-        <section id="sec-executors" className="s2-section">
+        {activeSection === 'executors' && (
+        <section className="s2-section">
           <h3 className="s2-sectiontitle">{t('settings.section.executor')}</h3>
           <div className="s2-card">
             <ExecutorRow
@@ -405,9 +366,11 @@ function SettingsBodyInner({
             </div>
           </div>
         </section>
+        )}
 
         {/* ── Chat view ── */}
-        <section id="sec-chatview" className="s2-section">
+        {activeSection === 'chatview' && (
+        <section className="s2-section">
           <h3 className="s2-sectiontitle">{t('settings.section.chatview')}</h3>
           <div className="s2-card">
             <p className="s2-help">{t('settings.chatview.help')}</p>
@@ -432,9 +395,11 @@ function SettingsBodyInner({
             </dl>
           </div>
         </section>
+        )}
 
         {/* ── Open with (merged: external editors + default app by file type) ── */}
-        <section id="sec-openwith" className="s2-section">
+        {activeSection === 'openwith' && (
+        <section className="s2-section">
           <h3 className="s2-sectiontitle">{t('settings.section.openwith')}</h3>
           <div className="s2-card">
             <p className="s2-help">{t('settings.openwith.help')}</p>
@@ -515,6 +480,7 @@ function SettingsBodyInner({
             </div>
           </div>
         </section>
+        )}
       </div>
     </div>
   );
@@ -734,5 +700,40 @@ function NotificationsBlock() {
         </label>
       </dd>
     </dl>
+  );
+}
+
+
+/** Panel-3 nav for the dock Settings rail: renders the same NAV_GROUPS the
+ *  panel-2 SettingsBody switches on. Clicking an item replaces panel 2's
+ *  content with that section (single-section switcher — the in-body nav and
+ *  scrollspy were removed in phase 4). `active` is controlled by App so the
+ *  selection survives rail collapse/restore. */
+export function SettingsNavInspector({ active, onSelect }: { active: NavKey; onSelect: (key: NavKey) => void }) {
+  const t = useT();
+  return (
+    <aside className="inspector settings-nav-inspector">
+      <div className="insp-head">
+        <span className="label">{t('settings.title')}</span>
+      </div>
+      <div className="settings-nav-body">
+        {NAV_GROUPS.map(group => (
+          <div className="s2-group" key={group.labelKey}>
+            <div className="s2-grouplabel">{t(group.labelKey)}</div>
+            {group.items.map(([key, labelKey]) => (
+              <button
+                key={key}
+                type="button"
+                className={`s2-navitem ${active === key ? 'active' : ''}`}
+                onClick={() => onSelect(key)}
+              >
+                {t(labelKey)}
+              </button>
+            ))}
+          </div>
+        ))}
+        <div className="s2-foot settings-nav-foot">{t('settings.foot')}</div>
+      </div>
+    </aside>
   );
 }

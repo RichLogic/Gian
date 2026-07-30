@@ -4,11 +4,11 @@ import { Sheet } from '../src/components/Sheet.js';
 import type { SheetTab } from '../src/components/Sheet.js';
 
 const fileTab: SheetTab = {
-  id: 'f1', pane: 0, name: 'foo.ts', kind: 'file', icoKind: 'ts', ico: 'TS',
+  id: 'f1', group: 'files', name: 'foo.ts', kind: 'file', icoKind: 'ts', ico: 'TS',
   lines: [['1', 'const a = 1']], fullPath: '/tmp/foo.ts', viewMode: 'source',
 };
 const termTab: SheetTab = {
-  id: 'term1', pane: 1, name: 'zsh', kind: 'term', icoKind: 'term', ico: '$',
+  id: 'term1', group: 'term', name: 'zsh', kind: 'term', icoKind: 'term', ico: '$',
 };
 
 const actions = {
@@ -19,7 +19,8 @@ function renderSheet(props: Partial<React.ComponentProps<typeof Sheet>>) {
   return render(
     <Sheet
       tabs={[fileTab, termTab]}
-      active={{ 0: 'f1', 1: 'term1' }}
+      activeByGroup={{ files: 'f1', term: 'term1' }}
+      activeGroup="files"
       actions={actions}
       renderTab={() => <div>term-body</div>}
       {...props}
@@ -27,35 +28,30 @@ function renderSheet(props: Partial<React.ComponentProps<typeof Sheet>>) {
   );
 }
 
-describe('Sheet pane sizing', () => {
-  it('pins the top pane to a fixed split height when the terminal pane is visible', () => {
-    const { container } = renderSheet({ hideTerm: false });
-    const panes = container.querySelectorAll<HTMLElement>('.sheet-pane');
-    expect(panes.length).toBe(2);
-    // Top (file) pane is the fixed-height split; terminal pane fills the rest.
-    // (jsdom normalizes `flex: none` to its longhand `0 0 auto`.)
-    expect(panes[0]!.style.flex).toBe('0 0 auto');
-    expect(panes[0]!.style.height).toBe('var(--sheet-top-h, 320px)');
-    expect(panes[1]!.style.display).not.toBe('none');
+describe('Sheet tab groups', () => {
+  it('renders one .sheet-group per tab group, sized to fill the sheet', () => {
+    const { container } = renderSheet({});
+    const groups = container.querySelectorAll<HTMLElement>('.sheet-group');
+    expect(groups.length).toBe(2);
+    // Groups fill via CSS (.sheet-group flex: 1 1 0) — no inline sizing.
+    expect(groups[0]!.style.flex).toBe('');
+    expect(groups[0]!.style.height).toBe('');
   });
 
-  it('lets the top pane fill when the terminal pane is hidden via the dock toggle', () => {
-    const { container } = renderSheet({ hideTerm: true });
-    const panes = container.querySelectorAll<HTMLElement>('.sheet-pane');
-    expect(panes.length).toBe(2);
-    // The hidden terminal pane keeps xterm mounted (display:none, not removed)…
-    expect(panes[1]!.style.display).toBe('none');
-    // …but the top pane must drop its fixed height so it fills the sheet,
-    // matching the all-tabs-closed path (regression: it used to stay 320px).
-    expect(panes[0]!.style.flex).toBe('');
-    expect(panes[0]!.style.height).toBe('');
+  it('shows only the active rail group; others stay mounted display:none', () => {
+    const { container } = renderSheet({ activeGroup: 'files' });
+    const groups = container.querySelectorAll<HTMLElement>('.sheet-group');
+    expect(groups.length).toBe(2);
+    // files group visible, term group hidden but mounted (xterm keep-alive).
+    expect(groups[0]!.style.display).not.toBe('none');
+    expect(groups[1]!.style.display).toBe('none');
   });
 
-  it('lets the lone file pane fill when the terminal is closed entirely (×)', () => {
-    const { container } = renderSheet({ tabs: [fileTab], active: { 0: 'f1', 1: null } });
-    const panes = container.querySelectorAll<HTMLElement>('.sheet-pane');
-    expect(panes.length).toBe(1);
-    expect(panes[0]!.style.flex).toBe('');
-    expect(panes[0]!.style.height).toBe('');
+  it('keeps every group mounted when the whole sheet is hidden', () => {
+    const { container } = renderSheet({ hidden: true });
+    const sheet = container.querySelector<HTMLElement>('.sheet')!;
+    expect(sheet.style.display).toBe('none');
+    // Groups (and their terminals) stay in the DOM across visibility flips.
+    expect(sheet.querySelectorAll('.sheet-group').length).toBe(2);
   });
 });

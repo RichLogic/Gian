@@ -33,12 +33,16 @@ describe('SettingsBody "Open with" apps', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
   it('renders the empty-state hint when no apps are configured', () => {
-    render(<SettingsBody config={baseConfig()} onChange={() => {}} />);
+    render(<SettingsBody
+        activeSection="openwith"
+        config={baseConfig()} onChange={() => {}} />);
     expect(screen.getByText(/no apps configured/i)).toBeTruthy();
   });
 
   it('picking an installed app appends an `open -a` opener', async () => {
-    render(<SettingsBody config={baseConfig()} apps={['VS Code', 'Sublime Text']} onChange={() => {}} />);
+    render(<SettingsBody
+        activeSection="openwith"
+        config={baseConfig()} apps={['VS Code', 'Sublime Text']} onChange={() => {}} />);
     const picker = screen.getByLabelText('Add application') as HTMLSelectElement;
     fireEvent.change(picker, { target: { value: 'VS Code' } });
     await new Promise(r => setTimeout(r, 600));
@@ -53,6 +57,7 @@ describe('SettingsBody "Open with" apps', () => {
   it('a configured app shows as a row and is filtered out of the picker', () => {
     render(
       <SettingsBody
+        activeSection="openwith"
         config={baseConfig({ external_editors: [vscodeOpener] })}
         apps={['VS Code', 'Sublime Text']}
         onChange={() => {}}
@@ -71,6 +76,7 @@ describe('SettingsBody "Open with" apps', () => {
   it('Remove (✕) drops the app', async () => {
     render(
       <SettingsBody
+        activeSection="openwith"
         config={baseConfig({ external_editors: [vscodeOpener] })}
         apps={['VS Code']}
         onChange={() => {}}
@@ -94,6 +100,7 @@ describe('SettingsBody "Default apps"', () => {
   it('offers only the system targets + the curated "Open with" apps — never the full scanned catalog', () => {
     render(
       <SettingsBody
+        activeSection="openwith"
         config={baseConfig({ external_editors: [vscodeOpener] })}
         // Scanned catalog includes apps the user did NOT add to "Open with".
         apps={['VS Code', 'Photoshop', 'Xcode', 'Sublime Text']}
@@ -117,6 +124,7 @@ describe('SettingsBody "Default apps"', () => {
     // so the <select> has a matching option (not a blank value).
     render(
       <SettingsBody
+        activeSection="openwith"
         config={baseConfig({ external_editors: [], open_apps: { code: 'TextEdit' } })}
         apps={['Photoshop']}
         onChange={() => {}}
@@ -129,6 +137,7 @@ describe('SettingsBody "Default apps"', () => {
   it('changing a category default saves the picked app', async () => {
     render(
       <SettingsBody
+        activeSection="openwith"
         config={baseConfig({ external_editors: [vscodeOpener] })}
         apps={['VS Code']}
         onChange={() => {}}

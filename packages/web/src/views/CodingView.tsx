@@ -8,6 +8,8 @@ import { BranchPicker } from '../components/BranchPicker.js';
 import { Composer } from '../components/Composer.js';
 import { FilePreviewDrawer } from '../components/FilePreviewDrawer.js';
 import { GitBadge } from '../components/GitBadge.js';
+import { ModeDropdown } from '../components/ModeDropdown.js';
+import type { Mode } from '../components/Topbar.js';
 import { PlanChip } from '../components/PlanChip.js';
 import { QueueList } from '../components/QueueList.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
@@ -27,8 +29,8 @@ import {
   type SessionSurface,
 } from '../session-routing.js';
 
-// ─── V2 inline icons (copied verbatim from design/gian-design-v2/js/data.jsx) ─
-function SvgIcon({ d, size = 16, stroke = 1.6 }: { d: string; size?: number; stroke?: number }) {
+// ─── V2 inline icons (24-grid, 1.5px stroke, round caps — phase 6 grid) ────
+function SvgIcon({ d, size = 16, stroke = 1.5 }: { d: string; size?: number; stroke?: number }) {
   return (
     <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor"
          strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">
@@ -41,9 +43,7 @@ function SvgIcon({ d, size = 16, stroke = 1.6 }: { d: string; size?: number; str
 
 const ICON = {
   search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-4.3-4.3',
-  filter: 'M4 5h16l-6 8v6l-4-2v-4z',
   plus:   'M12 5v14 M5 12h14',
-  x:      'M5 5l14 14 M5 19L19 5',
   kebabV: 'M12 5.01v-.02 M12 12.01v-.02 M12 19.01v-.02',
   branch: 'M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
   eyeOff: 'M2 2l12 12M6.5 6.5a2 2 0 0 0 2.8 2.8M3.5 4.5a8 8 0 0 0-1.5 3.5C3 11.5 5.5 13 8 13a8 8 0 0 0 4-1.1M9 3a8 8 0 0 1 5 5 8 8 0 0 1-1 2',
@@ -127,6 +127,11 @@ export function buildSessionCreatePayload(form: SessionCreateFormState): CreateS
 }
 
 export interface CodingViewProps {
+  /** Top-level app mode — the sidebar's mode dropdown reads/drives this. */
+  mode: Mode;
+  onSetAppMode: (mode: Mode) => void;
+  /** Open the global CommandPalette (sidebar search button). */
+  onOpenSearch: () => void;
   workspaces: Workspace[];
   /** Map of workspace_id → current HEAD branch name. Used as a fallback
    *  by SessionRow when session.branch itself is null (non-worktree
@@ -269,24 +274,27 @@ export function CodingView(p: CodingViewProps) {
       className={`view${rail.collapsed ? ' rail-collapsed' : ''}`}
       style={{ '--rail-w': `${rail.width}px` } as React.CSSProperties}
     >
-      {!rail.collapsed && (
-        <>
-          <Sidebar
-            workspaces={p.workspaces}
-            workspaceBranches={p.workspaceBranches}
-            sessions={p.sessions}
-            archivedSessions={p.archivedSessions}
-            archivedLoaded={p.archivedLoaded}
-            activeSessionId={p.activeSessionId}
-            showNew={showNew}
-            onToggleNew={() => setShowNew(v => !v)}
-            onSelect={id => { setShowNew(false); p.onSelectSession(id); }}
-            onLoadArchived={p.onLoadArchived}
-            onOpenSpaces={p.onOpenSpaces}
-          />
-          <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize sidebar" />
-        </>
-      )}
+      {/* The rail stays mounted while collapsed so its width can transition
+          (phase 6); `.view.rail-collapsed` shrinks it to zero and disables
+          interaction. As a side benefit, sidebar state (collapsed groups,
+          archived toggle) survives a hide/show cycle. */}
+      <Sidebar
+        mode={p.mode}
+        onSetMode={p.onSetAppMode}
+        onOpenSearch={p.onOpenSearch}
+        workspaces={p.workspaces}
+        workspaceBranches={p.workspaceBranches}
+        sessions={p.sessions}
+        archivedSessions={p.archivedSessions}
+        archivedLoaded={p.archivedLoaded}
+        activeSessionId={p.activeSessionId}
+        showNew={showNew}
+        onToggleNew={() => setShowNew(v => !v)}
+        onSelect={id => { setShowNew(false); p.onSelectSession(id); }}
+        onLoadArchived={p.onLoadArchived}
+        onOpenSpaces={p.onOpenSpaces}
+      />
+      <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize sidebar" />
       {showNew ? (
         <NewSessionView
           workspaces={p.workspaces}
@@ -373,6 +381,9 @@ function CodingViewEmpty() {
 }
 
 function Sidebar({
+  mode,
+  onSetMode,
+  onOpenSearch,
   workspaces,
   workspaceBranches,
   sessions,
@@ -384,6 +395,9 @@ function Sidebar({
   onLoadArchived,
   onOpenSpaces,
 }: {
+  mode: Mode;
+  onSetMode: (mode: Mode) => void;
+  onOpenSearch: () => void;
   workspaces: Workspace[];
   workspaceBranches: Record<string, string | null>;
   sessions: Session[];
@@ -398,12 +412,6 @@ function Sidebar({
 }) {
   const t = useT();
   const [archivedOpen, setArchivedOpen] = useState(false);
-  const [wsFilter, setWsFilter] = useState('all');
-  // V2 sidebar state — search box + popover.
-  const [search, setSearch] = useState('');
-  const [filterExec, setFilterExec] = useState<Executor | null>(null);
-  const [filterOpen, setFilterOpen] = useState(false);
-  const headRef = useRef<HTMLDivElement>(null);
 
   const collapsedKey = 'gian.sidebar.collapsed.workspace';
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
@@ -426,25 +434,6 @@ function Sidebar({
     });
   }
 
-  // Close filter popover on outside click / Escape.
-  useEffect(() => {
-    if (!filterOpen) return;
-    function onDown(e: MouseEvent) {
-      const target = e.target as Element | null;
-      if (target?.closest('.sb-search-row')) return;
-      setFilterOpen(false);
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setFilterOpen(false);
-    }
-    document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [filterOpen]);
-
   function toggleArchived() {
     void onLoadArchived();
     setArchivedOpen(o => !o);
@@ -461,29 +450,17 @@ function Sidebar({
 
   const active = sessions.filter(s => s.archived === 0);
 
-  function matchesSearch(s: Session, wsName: string): boolean {
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return (
-      (s.name ?? '').toLowerCase().includes(q) ||
-      (s.branch ?? '').toLowerCase().includes(q) ||
-      wsName.toLowerCase().includes(q)
-    );
-  }
-
   const filtered = active.filter(s => {
     // The per-Task Manager (type='manager') lives in Tasks mode only — it is
     // never a row in the Sessions list. Subtasks (type='subtask') DO appear
     // here: a subtask is a 1:1 session.
     if (s.type === 'manager') return false;
-    if (wsFilter !== 'all' && s.workspace_id !== wsFilter) return false;
-    if (filterExec && s.executor !== filterExec) return false;
     const ws = wsById.get(s.workspace_id);
     // Sessions whose workspace is hidden disappear from the list — UNLESS
     // they're the currently active session, in which case we keep the row
     // visible with a "wsHidden" badge so the user has a route back.
     if (ws?.hidden && s.id !== activeSessionId) return false;
-    return matchesSearch(s, ws?.name ?? '');
+    return true;
   });
 
   // Every session groups by workspace — no "needs you" section pinned to the
@@ -542,31 +519,22 @@ function Sidebar({
     });
   }
 
-  const hasFilter = wsFilter !== 'all' || filterExec !== null;
-
   return (
     <aside className="sidebar">
-      <div className="sb-head" ref={headRef}>
-        <div className="sb-search-row">
-          <div className="sb-search">
-            <SvgIcon d={ICON.search} />
-            <input
-              aria-label={t('coding.sidebar.search.label')}
-              placeholder={t('coding.sidebar.search.placeholder')}
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-            />
-          </div>
+      <div className="sb-head">
+        <div className="sb-toprow">
+          <ModeDropdown mode={mode} onSetMode={onSetMode} />
+          <span className="sb-toprow-spacer" />
           <button
             type="button"
-            className={`sb-iconbtn${hasFilter ? ' has-active' : ''}`}
-            aria-label={t('coding.sidebar.filter.label')}
-            title={t('coding.sidebar.filter.title')}
-            onClick={() => setFilterOpen(o => !o)}
+            className="sb-iconbtn"
+            data-testid="sb-open-search"
+            aria-label={t('coding.sidebar.search.label')}
+            title={t('coding.sidebar.search.label')}
+            onClick={onOpenSearch}
           >
-            <SvgIcon d={ICON.filter} />
+            <SvgIcon d={ICON.search} />
           </button>
-          <span className="sb-sep" />
           <button
             type="button"
             className="sb-iconbtn"
@@ -576,91 +544,7 @@ function Sidebar({
           >
             <SvgIcon d={ICON.plus} />
           </button>
-
-          {filterOpen && (
-            <div className="filter-pop">
-              <div>
-                <div className="lbl">{t('coding.sidebar.filter.workspace')}</div>
-                <select
-                  className="select"
-                  style={{ width: '100%' }}
-                  value={wsFilter === 'all' ? '' : wsFilter}
-                  onChange={e => setWsFilter(e.target.value || 'all')}
-                >
-                  <option value="">{t('coding.sidebar.filter.allWorkspaces')}</option>
-                  {workspaces.map(w => (
-                    <option key={w.id} value={w.id}>{w.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <div className="lbl">{t('coding.sidebar.filter.executor')}</div>
-                <div className="segm" style={{ width: '100%' }}>
-                  {([
-                    ['', t('coding.sidebar.filter.all')],
-                    ['claude', 'Claude'],
-                    ['codex', 'Codex'],
-                    ['kimi', 'Kimi'],
-                  ] as const).map(([v, lbl]) => (
-                    <button
-                      key={v || 'all'}
-                      type="button"
-                      className={`segm-item${(filterExec ?? '') === v ? ' active' : ''}`}
-                      style={{ flex: 1 }}
-                      onClick={() => setFilterExec(v === '' ? null : v)}
-                    >
-                      {lbl}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <button
-                type="button"
-                className="btn ghost sm"
-                style={{ alignSelf: 'flex-start' }}
-                onClick={() => { setWsFilter('all'); setFilterExec(null); }}
-              >
-                {t('common.reset')}
-              </button>
-            </div>
-          )}
         </div>
-
-        {hasFilter && (
-          <div className="sb-chips">
-            {wsFilter !== 'all' && (
-              <span className="sb-chip">
-                <span className="dot" />{wsById.get(wsFilter)?.name ?? wsFilter}
-                <button
-                  type="button"
-                  className="x"
-                  onClick={() => setWsFilter('all')}
-                >
-                  <SvgIcon d={ICON.x} size={9} stroke={2.4} />
-                </button>
-              </span>
-            )}
-            {filterExec && (
-              <span className={`sb-chip ${filterExec}`}>
-                <span className="dot" />{filterExec === 'claude' ? 'Claude' : 'Codex'}
-                <button
-                  type="button"
-                  className="x"
-                  onClick={() => setFilterExec(null)}
-                >
-                  <SvgIcon d={ICON.x} size={9} stroke={2.4} />
-                </button>
-              </span>
-            )}
-            <button
-              type="button"
-              className="sb-chip clear"
-              onClick={() => { setWsFilter('all'); setFilterExec(null); }}
-            >
-              {t('coding.sidebar.clear')}
-            </button>
-          </div>
-        )}
       </div>
 
       <div className="sb-scroll">
@@ -668,13 +552,10 @@ function Sidebar({
 
         {(() => {
           const visible = archivedSessions
-            .filter(s => wsFilter === 'all' || s.workspace_id === wsFilter)
-            .filter(s => !filterExec || s.executor === filterExec)
             .filter(s => {
               const ws = wsById.get(s.workspace_id);
               return !ws?.hidden || s.id === activeSessionId;
             })
-            .filter(s => matchesSearch(s, wsById.get(s.workspace_id)?.name ?? ''))
             .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
           return (
             <>
@@ -1360,8 +1241,16 @@ export function SessionMain({
   onCancelRemote,
   remoteControl,
   onToggleRemoteControl,
+  primary = true,
 }: {
   session: Session;
+  /** True for the main chat column (Sessions view, or the inline subtask
+   *  panel). Sidechat tabs pass false: document-level keyboard shortcuts
+   *  (⌘/⌃1/2 surface toggle) and the one-shot "align runtime to the
+   *  configured chat surface" effect belong to the primary instance only —
+   *  a sidechat tab must not register a second handler or force a runtime
+   *  switch just by mounting. */
+  primary?: boolean;
   chatView: ChatViewConfig;
   workspace: Workspace | null;
   items: TranscriptItem[];
@@ -1471,6 +1360,7 @@ export function SessionMain({
   // the switch keeps history (`--resume`). After this one-shot, tab clicks own
   // runtime switching, so a later force-recover isn't fought.
   useEffect(() => {
+    if (!primary) return;
     if (session.executor !== 'claude') return;
     if (alignedSessionRef.current === session.id) return;
     if (pending || terminal) return;
@@ -1480,7 +1370,7 @@ export function SessionMain({
     if (session.runtime_mode !== wantRuntime) {
       onSwitchRuntime(wantRuntime, want === 'beta' ? 'beta' : undefined);
     }
-  }, [session.id, session.executor, session.runtime_mode, pending, terminal, chatView.claude_chat_surface, onSwitchRuntime]);
+  }, [primary, session.id, session.executor, session.runtime_mode, pending, terminal, chatView.claude_chat_surface, onSwitchRuntime]);
 
   useEffect(() => {
     if (
@@ -1541,6 +1431,9 @@ export function SessionMain({
     }
   };
   useEffect(() => {
+    // Sidechat panels (primary=false) never register this — ⌘/⌃1/2 must
+    // reach only the main column's handler, once.
+    if (!primary) return;
     const onKey = (e: KeyboardEvent) => {
       // Ctrl/Cmd+1 → chat view, Ctrl/Cmd+2 → CLI. Capture phase so xterm never
       // sees the digit. claude TTY only. (Replaces the old Ctrl+` toggle, which
@@ -1558,7 +1451,7 @@ export function SessionMain({
     };
     document.addEventListener('keydown', onKey, true);
     return () => document.removeEventListener('keydown', onKey, true);
-  }, [session.executor, session.runtime_mode, surface, handleSelectSurface]);
+  }, [primary, session.executor, session.runtime_mode, surface, handleSelectSurface]);
 
   // Beta: a Claude question's interactive selector lives ONLY in the PTY — the
   // beta surface can't answer it. So when one appears, nudge with a toast and

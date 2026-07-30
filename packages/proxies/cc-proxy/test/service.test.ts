@@ -222,6 +222,72 @@ test('Claude auto-compaction clears the pre-boundary context before result parsi
   }
 });
 
+test('Claude -p native task lifecycle keeps Agent tool id and terminal summary', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-proxy-agent-task-'));
+  const fakeClaude = join(dir, 'claude');
+  writeFileSync(fakeClaude, [
+    '#!/usr/bin/env node',
+    "console.log(JSON.stringify({ type: 'assistant', message: { id: 'msg-1', content: [{ type: 'tool_use', id: 'tool-agent-1', name: 'Agent', input: { description: 'Inspect tests', prompt: 'Read tests' } }] } }));",
+    "console.log(JSON.stringify({ type: 'system', subtype: 'task_started', task_id: 'task-1', tool_use_id: 'tool-agent-1', description: 'Inspect tests', subagent_type: 'general-purpose' }));",
+    "console.log(JSON.stringify({ type: 'system', subtype: 'task_notification', task_id: 'task-1', tool_use_id: 'tool-agent-1', status: 'completed', summary: 'Tests are clean.', output_file: '/tmp/task-1.output' }));",
+    "console.log(JSON.stringify({ type: 'result', subtype: 'success', result: '' }));",
+  ].join('\n'));
+  chmodSync(fakeClaude, 0o755);
+
+  const oldClaudeBin = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = fakeClaude;
+  const runtime = new ClaudeMcpRuntime();
+  const toolUses: Array<{ name: string; callId: string }> = [];
+  const agentUpdates: Array<Record<string, unknown>> = [];
+  runtime.on('toolUse', (_sessionId, name, _input, callId) => {
+    toolUses.push({ name, callId });
+  });
+  runtime.on('agentTask', (_sessionId, update) => {
+    agentUpdates.push(update as unknown as Record<string, unknown>);
+  });
+  const exited = new Promise<void>(resolve => runtime.once('processExited', () => resolve()));
+
+  try {
+    await runtime.spawnSession({
+      sessionId: 'session-agent',
+      claudeSessionId: '00000000-0000-4000-8000-000000000002',
+      cwd: dir,
+      model: null,
+      isResume: false,
+    });
+    await runtime.sendMessage('session-agent', 'delegate', {
+      permissionMode: 'bypassPermissions',
+    });
+    await exited;
+
+    assert.deepEqual(toolUses, [{ name: 'Agent', callId: 'tool-agent-1' }]);
+    assert.equal(agentUpdates.length, 2);
+    assert.deepEqual(agentUpdates[0], {
+      taskId: 'task-1',
+      toolUseId: 'tool-agent-1',
+      status: 'running',
+      description: 'Inspect tests',
+      agentType: 'general-purpose',
+      startedAt: agentUpdates[0]!.startedAt,
+    });
+    assert.deepEqual(agentUpdates[1], {
+      taskId: 'task-1',
+      toolUseId: 'tool-agent-1',
+      status: 'done',
+      description: 'Inspect tests',
+      agentType: 'general-purpose',
+      summary: 'Tests are clean.',
+      outputFile: '/tmp/task-1.output',
+      completedAt: agentUpdates[1]!.completedAt,
+    });
+  } finally {
+    await runtime.stop();
+    if (oldClaudeBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = oldClaudeBin;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('Claude stream usage keeps current context separate from result aggregates', () => {
   const assistant = parseClaudeAssistantUsage({
     type: 'assistant',
@@ -452,6 +518,46 @@ test('service starts turns with the requested model and emits completion events'
     }
     assert.equal((events[1]!.params.data as { text: string }).text, 'done');
     assert.equal((events[2]!.params.data as { status: string }).status, 'completed');
+  });
+});
+
+test('service forwards native Agent lifecycle without changing provider metadata', async () => {
+  await withService(async ({ runtime, service, events }) => {
+    const created = await service.createSession({ cwd: '/tmp' });
+    await service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'delegate' }],
+    }, 'req-agent');
+
+    runtime.emit('toolUse', created.session.id, 'Agent', {
+      description: 'Inspect tests',
+    }, 'tool-agent-1');
+    runtime.emit('agentTask', created.session.id, {
+      taskId: 'task-1',
+      toolUseId: 'tool-agent-1',
+      description: 'Inspect tests',
+      agentType: 'general-purpose',
+      status: 'running',
+      startedAt: 100,
+    });
+    runtime.emit('agentTask', created.session.id, {
+      taskId: 'task-1',
+      toolUseId: 'tool-agent-1',
+      status: 'done',
+      summary: 'Tests are clean.',
+      completedAt: 200,
+    });
+
+    const tool = events.find(event => event.method === 'tool.use');
+    assert.deepEqual(tool?.params.data, {
+      callId: 'tool-agent-1',
+      toolName: 'Agent',
+      input: { description: 'Inspect tests' },
+    });
+    const updates = events.filter(event => event.method === 'claude.task');
+    assert.equal(updates.length, 2);
+    assert.equal((updates[0]!.params.data as { agentType?: unknown }).agentType, 'general-purpose');
+    assert.equal((updates[1]!.params.data as { summary?: unknown }).summary, 'Tests are clean.');
   });
 });
 

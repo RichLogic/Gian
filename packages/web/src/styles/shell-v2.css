@@ -622,8 +622,9 @@
 
 /* components.css `.sheet` was the LEGACY SettingsPanel overlay panel — width
    380, padding 18, shadow + radius + animation. V2 Sheet (Workbench) uses
-   `.sheet` as a transparent column whose children are `.sheet-pane` islands.
-   Hard-reset the leaked properties. */
+   `.sheet` as a transparent column whose children are `.sheet-group` islands.
+   Hard-reset the leaked properties. (The legacy animation is overridden by
+   the phase-6 `.sheet` entry animation at the end of this file.) */
 .sheet {
   padding: 0 !important;
   gap: 0 !important;
@@ -631,7 +632,6 @@
   border-radius: 0 !important;
   box-shadow: none !important;
   overflow: visible !important;
-  animation: none !important;
 }
 
 /* CSS class name collision: V2's `.sheet-tab.preview` (italic preview-tab
@@ -899,3 +899,59 @@
 .msg-copy:hover { background: var(--surface-2); color: var(--text-2); }
 .msg-copy.copied { opacity: 1; color: var(--success, var(--accent-text)); }
 
+
+/* ---------- Motion (phase 6) ----------
+   Soft, short UI animation built on the tokens in tokens.css
+   (--ease-soft / --dur-fast / --dur-med). Panels keep their display:none
+   keep-alive — a display:none→flex flip restarts CSS animations, so the
+   entry animation replays every time a panel or tab group is shown again,
+   while hiding stays instant (no layout jitter for terminals/iframes). */
+@keyframes gian-pop-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes gian-panel-in {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes gian-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Panel 2 / panel 3 entry (rail open, or tab-group switch inside the sheet). */
+.sheet { animation: gian-panel-in var(--dur-med) var(--ease-soft); }
+.inspector,
+.sheet-manager { animation: gian-panel-in var(--dur-med) var(--ease-soft); }
+.sheet-group { animation: gian-fade-in var(--dur-fast) var(--ease-soft); }
+
+/* Popovers & dropdowns (mode switcher, pickers, menus). */
+.mode-pop,
+.sidechat-picker:not(.inline),
+.sheet-act-menu,
+.runner-pop,
+.sb-newtask-menu { animation: gian-pop-in var(--dur-fast) var(--ease-soft); }
+
+/* Chrome buttons — soft hover/active instead of instant color flips. */
+.dock-btn,
+.tb-toggle,
+.sb-iconbtn,
+.sb-mode,
+.view-seg-item {
+  transition: background var(--dur-fast) var(--ease-soft), color var(--dur-fast) var(--ease-soft);
+}
+
+/* Sidebar collapse — the rail stays mounted (state preserved) and its width
+   transitions. --dur-fast (not --dur-med) because the same width property is
+   drag-resized live; a longer transition would trail the pointer. */
+.sidebar {
+  transition: width var(--dur-fast) var(--ease-soft), opacity var(--dur-fast) var(--ease-soft);
+}
+.view.rail-collapsed { gap: 0; }
+.view.rail-collapsed .sidebar {
+  width: 0 !important;
+  min-width: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.view.rail-collapsed .view-splitter { display: none; }

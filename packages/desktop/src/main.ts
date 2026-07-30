@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   ipcMain,
   Menu,
+  nativeImage,
   shell,
   type MenuItemConstructorOptions,
   type WebContents,
@@ -272,6 +273,26 @@ ipcMain.handle('desktop:retry-connection', async event => {
 ipcMain.handle('desktop:open-logs', async event => {
   if (!mainWindow || event.sender !== mainWindow.webContents) return 'denied';
   return shell.openPath(logDirectory());
+});
+
+ipcMain.handle('desktop:set-dock-icon', (event, dataUrl: unknown) => {
+  const dock = app.dock;
+  if (
+    process.platform !== 'darwin'
+    || !dock
+    || !mainWindow
+    || event.sender !== mainWindow.webContents
+    || typeof dataUrl !== 'string'
+    || dataUrl.length > 4_000_000
+    || !dataUrl.startsWith('data:image/png;base64,')
+  ) {
+    return false;
+  }
+
+  const icon = nativeImage.createFromDataURL(dataUrl);
+  if (icon.isEmpty()) return false;
+  dock.setIcon(icon);
+  return true;
 });
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();

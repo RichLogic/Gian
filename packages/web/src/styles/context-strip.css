@@ -1,0 +1,320 @@
+/* Persistent Plan / Agent context. Isolated from CodingView so concurrent
+ * page work can move the existing PlanChip slot without merging this UI. */
+.context-strip-shell {
+  position: relative;
+  align-self: stretch;
+  min-width: 0;
+  margin: 4px 12px 6px;
+}
+
+.context-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+}
+
+.context-strip .plan-chip,
+.context-chip {
+  min-width: 0;
+  min-height: 30px;
+  margin: 0;
+  padding: 5px 9px;
+  border: 1px solid var(--hairline-1);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.context-strip .plan-chip:hover,
+.context-chip:hover {
+  border-color: var(--hairline-2, var(--hairline-1));
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.context-strip .plan-chip:focus-visible,
+.context-chip:focus-visible,
+.context-panel-close:focus-visible,
+.context-agent-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+
+.context-chip-meta {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.context-chip-count {
+  min-width: 16px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.context-chip-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+}
+
+.plan-chip-dot--active,
+.context-chip-dot--running {
+  background: var(--accent);
+}
+
+.context-chip-dot--done {
+  background: var(--ok);
+}
+
+.context-chip-dot--error {
+  background: var(--danger);
+}
+
+.context-agent-panel {
+  width: min(520px, 100%);
+  max-height: min(320px, 42vh);
+  margin-bottom: 6px;
+  overflow: hidden;
+  border: 1px solid var(--hairline-1);
+  border-radius: 7px;
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+
+.context-agent-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 42px;
+  padding: 7px 8px 7px 12px;
+  border-bottom: 1px solid var(--hairline-1);
+}
+
+.context-agent-panel-head > div {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: 8px;
+}
+
+.context-agent-panel-head strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.context-agent-panel-head > div > span {
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+.context-panel-close {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.context-panel-close:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.context-agent-list {
+  max-height: min(262px, 34vh);
+  overflow-y: auto;
+}
+
+.context-agent-row {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  min-height: 54px;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 9px;
+  padding: 9px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--hairline-1);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.context-agent-row:last-child {
+  border-bottom: 0;
+}
+
+.context-agent-row:hover {
+  background: var(--surface-2);
+}
+
+.context-provider-mark {
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  border-radius: 2px;
+  background: var(--text-3);
+}
+
+.context-agent-row[data-provider="claude"] .context-provider-mark {
+  background: var(--claude);
+}
+
+.context-agent-row[data-provider="codex"] .context-provider-mark {
+  background: var(--codex);
+}
+
+.context-agent-row[data-provider="kimi"] .context-provider-mark {
+  background: var(--text);
+}
+
+/* Transcript rows remain lightweight anchors, but their source color follows
+ * the CLI rather than making every subagent look like Claude. */
+.evt.agent[data-provider="codex"] {
+  background: var(--codex-soft);
+}
+
+.evt.agent[data-provider="codex"] .evt-verb {
+  color: var(--codex);
+}
+
+.evt.agent[data-provider="kimi"] {
+  background: oklch(from var(--text) l c h / 0.08);
+}
+
+.evt.agent[data-provider="kimi"] .evt-verb {
+  color: var(--text);
+}
+
+.context-agent-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.context-agent-title {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.context-agent-title strong {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.context-agent-title > span {
+  overflow: hidden;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-agent-description,
+.context-agent-output {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-agent-description {
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+
+.context-agent-output {
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+.context-agent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 1px;
+  color: var(--text-3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.context-agent-status > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+
+.context-agent-status--running > span {
+  background: var(--accent);
+}
+
+.context-agent-status--done > span {
+  background: var(--ok);
+}
+
+.context-agent-status--error > span {
+  background: var(--danger);
+}
+
+.context-agent-more {
+  padding: 6px 12px;
+  border-top: 1px solid var(--hairline-1);
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+@media (max-width: 640px) {
+  .context-strip-shell {
+    margin-right: 8px;
+    margin-left: 8px;
+  }
+
+  .context-strip {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .context-strip::-webkit-scrollbar {
+    display: none;
+  }
+
+  .context-agent-panel {
+    max-height: 38vh;
+  }
+
+  .context-agent-title > span,
+  .context-agent-output {
+    display: none;
+  }
+}

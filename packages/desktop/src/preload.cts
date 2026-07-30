@@ -5,5 +5,6 @@ contextBridge.exposeInMainWorld(
   Object.freeze({
     retryConnection: () => ipcRenderer.invoke('desktop:retry-connection'),
     openLogs: () => ipcRenderer.invoke('desktop:open-logs'),
+    setDockIcon: (dataUrl: string) => ipcRenderer.invoke('desktop:set-dock-icon', dataUrl),
   }),
 );

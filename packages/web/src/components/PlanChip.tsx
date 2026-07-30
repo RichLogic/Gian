@@ -1,17 +1,17 @@
-import { useContext, useMemo } from 'react';
-import type { ApprovalItem, TranscriptItem } from '../types.js';
+import { useContext, useEffect, useMemo, useState } from 'react';
+import { useT } from '../i18n/index.js';
+import { projectSessionContext, type AgentRunDisplayItem } from '../presentation/session-context.js';
+import type { TranscriptItem } from '../types.js';
 import { PlanOpenContext } from '../transcript/items.js';
+import '../styles/context-strip.css';
 
 /**
- * "Plan" pill that sits directly above the composer. Two source paths:
+ * Persistent context strip above the composer.
  *
- *   - cc: surfaces the latest `exit_plan_mode` approval. Dot color tracks the
- *     approval status (pending / accepted / declined).
- *   - codex: surfaces the live `plan_update` markdown for the current session.
- *     No approval ceremony — the chip is just a "view the plan" affordance.
- *
- * Click → fires the `PlanOpenContext` callback with `{ id, title, markdown }`,
- * which the host routes into the 4th-level Sheet tab.
+ * Plan and subagent events still keep their compact transcript anchors. This
+ * component projects only their durable page-level state: the latest plan and
+ * the current/recent agent runs. It intentionally does not turn every native
+ * CLI event into another card.
  */
 export function PlanChip({
   items,
@@ -19,71 +19,165 @@ export function PlanChip({
   sessionId,
 }: {
   items: TranscriptItem[];
-  /** Latest plan markdown from codex's plan_update stream, if any. */
+  /** Latest streamed plan text. Kept under the old prop name for compatibility. */
   codexPlanText?: string;
-  /** Used to derive a stable Sheet tab id for the codex plan. */
   sessionId: string;
 }) {
+  const t = useT();
   const openPlan = useContext(PlanOpenContext);
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  const context = useMemo(
+    () => projectSessionContext({ items, planText: codexPlanText, sessionId }),
+    [items, codexPlanText, sessionId],
+  );
 
-  // Walk items from the end so we land on the most recent plan first. Plans
-  // are rare (one per planning round) — the linear scan is cheap.
-  const latestPlan = useMemo<ApprovalItem | null>(() => {
-    for (let i = items.length - 1; i >= 0; i--) {
-      const it = items[i];
-      if (it && it.kind === 'approval' && it.category === 'exit_plan_mode') {
-        return it;
-      }
-    }
-    return null;
-  }, [items]);
+  useEffect(() => {
+    setAgentsOpen(false);
+  }, [sessionId]);
 
-  if (latestPlan) {
-    // Map approval status → chip status dot. `approved-once` / `approved-session`
-    // both mean "user accepted" from the proxy's perspective. `declined` covers
-    // both literal Decline and "keep_planning" — both come back as decline on
-    // the wire.
-    const dotClass =
-      latestPlan.status === 'pending' ? 'plan-chip-dot--pending' :
-      latestPlan.status === 'declined' ? 'plan-chip-dot--declined' :
-      'plan-chip-dot--accepted';
-    return (
-      <button
-        type="button"
-        className="plan-chip"
-        onClick={() => openPlan?.({
-          id: latestPlan.approvalId,
-          title: 'Plan',
-          markdown: latestPlan.cmd,
-        })}
-        title="View the latest plan"
-      >
-        <span className="plan-chip-label">Plan</span>
-        <span className={`plan-chip-dot ${dotClass}`} aria-hidden />
-      </button>
-    );
-  }
+  if (!context.plan && context.agents.length === 0) return null;
 
-  // Codex plan: no approval ceremony, just live markdown. Show the chip once
-  // there's any content; dot stays neutral (accepted-style) since codex's
-  // plan is an in-progress artifact, not a yes/no gate.
-  if (codexPlanText && codexPlanText.trim()) {
-    return (
-      <button
-        type="button"
-        className="plan-chip"
-        onClick={() => openPlan?.({
-          id: `codex-plan-${sessionId}`,
-          title: 'Plan',
-          markdown: codexPlanText,
-        })}
-        title="View the latest plan"
-      >
-        <span className="plan-chip-label">Plan</span>
-        <span className="plan-chip-dot plan-chip-dot--accepted" aria-hidden />
-      </button>
-    );
-  }
+  const visibleAgents = context.agents.slice(0, 8);
+  const hiddenAgentCount = Math.max(0, context.agents.length - visibleAgents.length);
+  const agentStateClass = context.failedAgents > 0
+    ? 'context-chip-dot--error'
+    : context.runningAgents > 0
+      ? 'context-chip-dot--running'
+      : 'context-chip-dot--done';
 
-  return null;
+  return (
+    <div className="context-strip-shell">
+      {agentsOpen && (
+        <section className="context-agent-panel" aria-label={t('transcript.agentRuns')}>
+          <header className="context-agent-panel-head">
+            <div>
+              <strong>{t('transcript.agentRuns')}</strong>
+              <span>
+                {context.runningAgents > 0
+                  ? `${context.runningAgents} ${t('coding.status.running').toLowerCase()}`
+                  : `${context.agents.length} ${t('coding.status.done').toLowerCase()}`}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="context-panel-close"
+              aria-label={t('common.close')}
+              title={t('common.close')}
+              onClick={() => setAgentsOpen(false)}
+            >
+              <span aria-hidden>&times;</span>
+            </button>
+          </header>
+          <div className="context-agent-list">
+            {visibleAgents.map(agent => (
+              <AgentRunRow key={agent.id} agent={agent} onSelect={() => jumpToAgent(agent.id)} />
+            ))}
+          </div>
+          {hiddenAgentCount > 0 && (
+            <div className="context-agent-more">
+              +{hiddenAgentCount} {t('transcript.agentPrevious')}
+            </div>
+          )}
+        </section>
+      )}
+
+      <div className="context-strip" aria-label={t('transcript.sessionContext')}>
+        {context.plan && (
+          <button
+            type="button"
+            className="plan-chip"
+            onClick={() => openPlan?.({
+              id: context.plan!.id,
+              title: 'Plan',
+              markdown: context.plan!.markdown,
+            })}
+            title={t('transcript.planViewLatest')}
+          >
+            <span className="plan-chip-label">Plan</span>
+            {context.plan.totalSteps > 0 && (
+              <span className="context-chip-meta">
+                {context.plan.completedSteps}/{context.plan.totalSteps}
+              </span>
+            )}
+            <span
+              className={`plan-chip-dot ${planDotClass(context.plan.status)}`}
+              aria-hidden
+            />
+          </button>
+        )}
+
+        {context.agents.length > 0 && (
+          <button
+            type="button"
+            className="context-chip context-agent-trigger"
+            aria-expanded={agentsOpen}
+            onClick={() => setAgentsOpen(open => !open)}
+            title={t('transcript.agentViewRuns')}
+          >
+            <span>{t('transcript.agent')}</span>
+            <span className="context-chip-count">{context.agents.length}</span>
+            <span className={`context-chip-dot ${agentStateClass}`} aria-hidden />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AgentRunRow({
+  agent,
+  onSelect,
+}: {
+  agent: AgentRunDisplayItem;
+  onSelect: () => void;
+}) {
+  const t = useT();
+  const providerName =
+    agent.provider === 'claude' ? 'Claude' :
+    agent.provider === 'codex' ? 'Codex' :
+    'Kimi';
+  const statusLabel =
+    agent.status === 'running' ? t('coding.status.running') :
+    agent.status === 'error' ? t('coding.status.error') :
+    t('coding.status.done');
+  const detail = [agent.agentType, agent.model].filter(Boolean).join(' · ');
+
+  return (
+    <button
+      type="button"
+      className="context-agent-row"
+      data-provider={agent.provider}
+      onClick={onSelect}
+      title={t('transcript.agentJump')}
+    >
+      <span className="context-provider-mark" aria-hidden />
+      <span className="context-agent-copy">
+        <span className="context-agent-title">
+          <strong>{providerName}</strong>
+          {detail && <span>{detail}</span>}
+        </span>
+        <span className="context-agent-description">{agent.description}</span>
+        {agent.output && agent.status !== 'running' && (
+          <span className="context-agent-output">{agent.output}</span>
+        )}
+      </span>
+      <span className={`context-agent-status context-agent-status--${agent.status}`}>
+        <span aria-hidden />
+        {statusLabel}
+      </span>
+    </button>
+  );
+}
+
+function planDotClass(status: 'active' | 'awaiting-review' | 'accepted' | 'revision-requested') {
+  if (status === 'awaiting-review') return 'plan-chip-dot--pending';
+  if (status === 'revision-requested') return 'plan-chip-dot--declined';
+  if (status === 'active') return 'plan-chip-dot--active';
+  return 'plan-chip-dot--accepted';
+}
+
+function jumpToAgent(agentId: string) {
+  const anchors = document.querySelectorAll<HTMLElement>('[data-agent-id]');
+  const target = [...anchors].find(anchor => anchor.dataset.agentId === agentId);
+  target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }

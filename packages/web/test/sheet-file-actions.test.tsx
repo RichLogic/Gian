@@ -4,7 +4,7 @@ import { Sheet } from '../src/components/Sheet.js';
 import type { SheetTab, SheetOpenWith } from '../src/components/Sheet.js';
 
 const fileTab: SheetTab = {
-  id: 't1', pane: 0, name: 'foo.ts', kind: 'file', icoKind: 'ts', ico: 'TS',
+  id: 't1', group: 'files', name: 'foo.ts', kind: 'file', icoKind: 'ts', ico: 'TS',
   lines: [['1', 'const a = 1'], ['2', 'const b = 2']],
   fullPath: '/tmp/demo/src/foo.ts', viewMode: 'source',
 };
@@ -15,7 +15,7 @@ const actions = {
 
 function renderSheet(props: Partial<React.ComponentProps<typeof Sheet>> = {}) {
   return render(
-    <Sheet tabs={[fileTab]} active={{ 0: 't1', 1: null }} actions={actions} {...props} />,
+    <Sheet tabs={[fileTab]} activeByGroup={{ files: 't1' }} activeGroup="files" actions={actions} {...props} />,
   );
 }
 
@@ -80,7 +80,7 @@ describe('Sheet file actions', () => {
   it('middle-truncates a long tab name (tail kept, head ellipsizes)', () => {
     const longTab: SheetTab = { ...fileTab, id: 't2', name: 'apr-001-approval-card.test.tsx' };
     const { container } = render(
-      <Sheet tabs={[longTab]} active={{ 0: 't2', 1: null }} actions={actions} />,
+      <Sheet tabs={[longTab]} activeByGroup={{ files: 't2' }} activeGroup="files" actions={actions} />,
     );
     const head = container.querySelector('.sheet-tab .name-head')?.textContent ?? '';
     const tail = container.querySelector('.sheet-tab .name-tail')?.textContent ?? '';
@@ -91,7 +91,7 @@ describe('Sheet file actions', () => {
   it('preview tab has no pin element — italic name is the only indicator', () => {
     const previewTab: SheetTab = { ...fileTab, id: 't3', preview: true };
     const { container } = render(
-      <Sheet tabs={[previewTab]} active={{ 0: 't3', 1: null }} actions={actions} />,
+      <Sheet tabs={[previewTab]} activeByGroup={{ files: 't3' }} activeGroup="files" actions={actions} />,
     );
     expect(container.querySelector('.tab-pin-inline')).toBeNull();
     expect(container.querySelector('.sheet-tab.preview')).toBeTruthy();
@@ -132,7 +132,7 @@ describe('Sheet file actions', () => {
     cleanup(); // unmount any previous render so there's a single Open button
     const onOpenWith = vi.fn<(tab: SheetTab, target: SheetOpenWith) => void>();
     const tab: SheetTab = { ...fileTab, id, name, fullPath: `/tmp/demo/${name}` };
-    render(<Sheet tabs={[tab]} active={{ 0: id, 1: null }} actions={actions} onOpenWith={onOpenWith} onConfigureEditors={() => {}} />);
+    render(<Sheet tabs={[tab]} activeByGroup={{ files: id }} activeGroup="files" actions={actions} onOpenWith={onOpenWith} onConfigureEditors={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: /^Open$/ }));
     return { onOpenWith, tab };
   }
@@ -158,19 +158,19 @@ describe('Sheet file actions', () => {
   it('smart Open: honours a per-category app override (Settings)', () => {
     const onOpenWith = vi.fn<(tab: SheetTab, target: SheetOpenWith) => void>();
     const tab: SheetTab = { ...fileTab, id: 'o1', name: 'util.ts', fullPath: '/tmp/demo/util.ts' };
-    render(<Sheet tabs={[tab]} active={{ 0: 'o1', 1: null }} actions={actions} onOpenWith={onOpenWith} openApps={{ code: 'Visual Studio Code' }} onConfigureEditors={() => {}} />);
+    render(<Sheet tabs={[tab]} activeByGroup={{ files: 'o1' }} activeGroup="files" actions={actions} onOpenWith={onOpenWith} openApps={{ code: 'Visual Studio Code' }} onConfigureEditors={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: /^Open$/ }));
     expect(onOpenWith).toHaveBeenCalledWith(tab, { kind: 'app', app: 'Visual Studio Code' });
   });
 
   it('an image tab renders the file via <img> from /raw (not as text)', () => {
     const imgTab: SheetTab = {
-      id: 'i1', pane: 0, name: 'logo.png', kind: 'file', icoKind: 'img', ico: '',
+      id: 'i1', group: 'files', name: 'logo.png', kind: 'file', icoKind: 'img', ico: '',
       previewKind: 'image', rawSrc: '/api/working_trees/ws%3Ademo/raw?path=logo.png',
       fullPath: '/tmp/demo/logo.png',
     };
     const { container } = render(
-      <Sheet tabs={[imgTab]} active={{ 0: 'i1', 1: null }} actions={actions} />,
+      <Sheet tabs={[imgTab]} activeByGroup={{ files: 'i1' }} activeGroup="files" actions={actions} />,
     );
     const img = container.querySelector('.sheet-image img') as HTMLImageElement | null;
     expect(img).toBeTruthy();
@@ -180,7 +180,7 @@ describe('Sheet file actions', () => {
   it('the "Open with…" menu shows app icons for Finder/Terminal + configured apps', () => {
     const onOpenWith = vi.fn<(tab: SheetTab, target: SheetOpenWith) => void>();
     const { container } = render(
-      <Sheet tabs={[fileTab]} active={{ 0: 't1', 1: null }} actions={actions}
+      <Sheet tabs={[fileTab]} activeByGroup={{ files: 't1' }} activeGroup="files" actions={actions}
              onOpenWith={onOpenWith} externalEditors={[{ id: 'vsc', name: 'VS Code' }]} onConfigureEditors={() => {}} />,
     );
     fireEvent.click(screen.getByRole('button', { name: 'Open with…' }));

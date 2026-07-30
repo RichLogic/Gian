@@ -1022,7 +1022,7 @@ export function AgentSpawnRow({ item }: { item: AgentSpawnItem }) {
   const t = useT();
   const statusClass = item.status === 'running' ? 'running' : item.status === 'done' ? 'success' : 'error';
   return (
-    <div className="evt agent">
+    <div className="evt agent" data-agent-id={item.id} data-provider={item.provider}>
       <div className="evt-head">
         <span className="evt-verb">{t('transcript.agent')}</span>
         <span className="evt-subject" title={item.description}>{item.description}</span>

@@ -94,6 +94,27 @@ function normalizeTool(
     : [];
   const status = toolStatus(update.status);
 
+  if (isAgentTool(title, kind, input)) {
+    const description = String(
+      input.description
+      ?? input.prompt
+      ?? input.task
+      ?? title,
+    );
+    return [event(sessionId, turn, itemId, 'agent_spawn', {
+      agentId: typeof input.agentId === 'string' ? input.agentId : undefined,
+      description,
+      status: status === 'error'
+        ? 'error'
+        : status === 'success' ? 'done' : 'running',
+      agentType: typeof input.subagent_type === 'string'
+        ? input.subagent_type
+        : typeof input.agent_type === 'string' ? input.agent_type : undefined,
+      ...(typeof update.rawOutput === 'string' ? { output: update.rawOutput } : {}),
+      ...(Object.keys(input).length > 0 ? { input } : {}),
+    })];
+  }
+
   if (kind === 'execute') {
     return [event(sessionId, turn, itemId, 'command_execution', {
       command: typeof input.command === 'string' ? input.command : title,
@@ -185,12 +206,19 @@ export function normalizeKimiNotification(
   if (raw.method === 'approval.requested') {
     const approvalId = String(data.approvalId ?? crypto.randomUUID());
     const options = nativeOptions(data.nativeOptions);
+    const payload = record(data.payload);
+    const toolCall = record(payload.toolCall);
+    const input = record(toolCall.rawInput);
+    const toolTitle = String(toolCall.title ?? data.title ?? '');
+    const isPlanApproval = toolTitle === 'ExitPlanMode';
+    const plan = String(input.plan ?? input.content ?? '').trim();
     return [event(sessionId, turn, approvalId, 'approval_requested', {
       approvalId,
-      category: 'other',
+      category: isPlanApproval ? 'exit_plan_mode' : 'other',
       risk: data.severity === 'high' ? 'high' : data.severity === 'low' ? 'low' : 'medium',
       title: String(data.title ?? 'Kimi permission'),
       description: String(data.reason ?? data.title ?? 'Kimi requested a decision.'),
+      ...(isPlanApproval && plan ? { subject: plan } : {}),
       scopeOptions: [],
       nativeOptions: options,
     })];
@@ -226,4 +254,18 @@ export function normalizeKimiNotification(
   // transcript event to synthesize for runtime.stopped itself.
   if (raw.method === 'runtime.stopped') return [];
   return [];
+}
+
+function isAgentTool(
+  title: string,
+  kind: string,
+  input: Record<string, unknown>,
+): boolean {
+  const normalized = title.trim().toLowerCase();
+  return kind.toLowerCase() === 'agent'
+    || normalized === 'agent'
+    || normalized.startsWith('agent:')
+    || normalized.startsWith('agent ')
+    || typeof input.subagent_type === 'string'
+    || typeof input.agent_type === 'string';
 }

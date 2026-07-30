@@ -85,7 +85,7 @@
   max-width: 760px;
 }
 
-/* Stacked sections — the nav is a scrollspy locator, not a switcher. */
+/* Single-section switcher — the nav lives in the panel-3 SettingsNavInspector. */
 .s2-section { scroll-margin-top: 16px; }
 .s2-section + .s2-section { margin-top: 26px; }
 .s2-sectiontitle {

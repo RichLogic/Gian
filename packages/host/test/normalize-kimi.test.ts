@@ -98,6 +98,53 @@ test('Kimi known and unknown tool kinds map without dropping updates', () => {
   });
 });
 
+test('Kimi Agent tool lifecycle projects to one persistent agent run', () => {
+  const running = normalizeKimiNotification(
+    notification('acp.sessionUpdate', {
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'agent-tool-1',
+        title: 'Agent',
+        kind: 'other',
+        status: 'in_progress',
+        rawInput: {
+          description: 'Inspect the reducer',
+          prompt: 'Read the reducer and report risks',
+          subagent_type: 'Explore',
+        },
+      },
+    }),
+    'gian-1',
+    1,
+  );
+  const completed = normalizeKimiNotification(
+    notification('acp.sessionUpdate', {
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-tool-1',
+        title: 'Agent',
+        kind: 'other',
+        status: 'completed',
+        rawInput: {
+          description: 'Inspect the reducer',
+          subagent_type: 'Explore',
+        },
+        rawOutput: 'No reducer risks found.',
+      },
+    }),
+    'gian-1',
+    1,
+  );
+
+  assert.equal(running[0]?.type, 'agent_spawn');
+  assert.equal(running[0]?.call_id, 'agent-tool-1');
+  assert.equal((running[0]?.data as { status?: unknown }).status, 'running');
+  assert.equal((running[0]?.data as { agentType?: unknown }).agentType, 'Explore');
+  assert.equal(completed[0]?.type, 'agent_spawn');
+  assert.equal((completed[0]?.data as { status?: unknown }).status, 'done');
+  assert.equal((completed[0]?.data as { output?: unknown }).output, 'No reducer risks found.');
+});
+
 test('Kimi approval events preserve exact opaque option IDs', () => {
   const requested = normalizeKimiNotification(
     notification('approval.requested', {
@@ -134,6 +181,35 @@ test('Kimi approval events preserve exact opaque option IDs', () => {
   assert.equal(
     (resolved[0]?.data as { nativeOptionId?: unknown }).nativeOptionId,
     'kimi-once-42',
+  );
+});
+
+test('Kimi ExitPlanMode permission keeps native options and plan content', () => {
+  const requested = normalizeKimiNotification(
+    notification('approval.requested', {
+      approvalId: 'approval-plan',
+      title: 'Review implementation plan',
+      reason: 'Kimi wants to leave plan mode',
+      nativeOptions: [
+        { optionId: 'approve', name: 'Approve', kind: 'allow_once' },
+        { optionId: 'revise', name: 'Revise', kind: 'reject_once' },
+      ],
+      payload: {
+        toolCall: {
+          title: 'ExitPlanMode',
+          rawInput: { plan: '1. Inspect\n2. Edit\n3. Test' },
+        },
+      },
+    }),
+    'gian-1',
+    2,
+  );
+
+  assert.equal(requested[0]?.type, 'approval_requested');
+  assert.equal((requested[0]?.data as { category?: unknown }).category, 'exit_plan_mode');
+  assert.equal(
+    (requested[0]?.data as { subject?: unknown }).subject,
+    '1. Inspect\n2. Edit\n3. Test',
   );
 });
 

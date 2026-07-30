@@ -285,10 +285,47 @@ export function applyEnvelope(
 
   // ── agent_spawn (unified) ──
   if (ev === 'agent_spawn') {
+    const itemId = String(env.call_id);
+    const status: AgentSpawnItem['status'] =
+      data.status === 'done' || data.status === 'error' ? data.status : 'running';
+    const description = typeof data.description === 'string' ? data.description : '';
+    const idx = items.findIndex(i => i.kind === 'agent-spawn' && i.id === itemId);
+    if (idx >= 0) {
+      const existing = items[idx] as AgentSpawnItem;
+      const next = items.slice();
+      next[idx] = {
+        ...existing,
+        provider: executor,
+        description: description || existing.description,
+        status,
+        agentId: typeof data.agentId === 'string' ? data.agentId : existing.agentId,
+        agentType: typeof data.agentType === 'string' ? data.agentType : existing.agentType,
+        model: typeof data.model === 'string' ? data.model : existing.model,
+        output: typeof data.output === 'string' ? data.output : existing.output,
+        outputFile: typeof data.outputFile === 'string' ? data.outputFile : existing.outputFile,
+        updatedAt: env.ts,
+        completedAt: typeof data.completedAt === 'number'
+          ? data.completedAt
+          : status === 'running' ? existing.completedAt : env.ts,
+      };
+      return next;
+    }
     const item: AgentSpawnItem = {
-      kind: 'agent-spawn', id: env.call_id,
-      description: String(data.description ?? ''),
-      status: (data.status as AgentSpawnItem['status']) ?? 'running',
+      kind: 'agent-spawn',
+      id: itemId,
+      provider: executor,
+      agentId: typeof data.agentId === 'string' ? data.agentId : undefined,
+      description,
+      status,
+      agentType: typeof data.agentType === 'string' ? data.agentType : undefined,
+      model: typeof data.model === 'string' ? data.model : undefined,
+      output: typeof data.output === 'string' ? data.output : undefined,
+      outputFile: typeof data.outputFile === 'string' ? data.outputFile : undefined,
+      startedAt: typeof data.startedAt === 'number' ? data.startedAt : env.ts,
+      updatedAt: env.ts,
+      completedAt: typeof data.completedAt === 'number'
+        ? data.completedAt
+        : status === 'running' ? undefined : env.ts,
       ts: env.ts, turn: env.turn,
     };
     return [...items, item];

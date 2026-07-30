@@ -1,4 +1,3 @@
-import { useEffect, useRef, useState } from 'react';
 import { useT } from '../i18n/index.js';
 import { PathBreadcrumb } from './PathBreadcrumb.js';
 import type { PathSegment, SessionMenuActions } from './PathBreadcrumb.js';
@@ -6,20 +5,16 @@ import type { PathSegment, SessionMenuActions } from './PathBreadcrumb.js';
 export type Mode = 'sessions' | 'tasks' | 'spaces' | 'bots';
 export type ViewState = 'main' | 'both' | 'workbench';
 
-// Per the design: only Sessions + Tasks are top-level modes. Workspaces moved
-// into the Inspector rail (dock "Workspaces" button) + Workbench detail; Bots
-// are hidden. The 'spaces'/'bots' modes still exist as routes (e.g. the
-// workspace-create flow opens 'spaces'), just not as dropdown entries.
-const MODE_OPTIONS: ReadonlyArray<readonly [Mode, string]> = [
-  ['tasks', 'topbar.mode.tasks'],
-  ['sessions', 'topbar.mode.sessions'],
-];
+const I = {
+  sidebar: 'M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z M9 3v18',
+  back: 'M15 18l-6-6 6-6',
+  forward: 'M9 18l6-6-6-6',
+};
 
-function GianMark({ size = 18 }: { size?: number }) {
+function Icon({ d, size = 16 }: { d: string; size?: number }) {
   return (
-    <svg className="brand-mark" viewBox="0 0 24 24" width={size} height={size} fill="none">
-      <path d="M3 6h18 M3 12h18 M3 18h12" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
-      <circle cx="20" cy="18" r="1.6" fill="currentColor" />
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+      <path d={d} />
     </svg>
   );
 }
@@ -49,8 +44,6 @@ function ViewIcon({ variant }: { variant: 'main' | 'both' | 'wb' }) {
 }
 
 interface Props {
-  mode: Mode;
-  onSetMode: (mode: Mode) => void;
   pathSegments: PathSegment[];
   sessionMenu?: SessionMenuActions | null;
   onRenameSubmit?: (value: string) => void;
@@ -60,11 +53,15 @@ interface Props {
   viewState?: ViewState;
   onSetViewState?: (v: ViewState) => void;
   showViewSeg?: boolean;
+
+  // Panel-2 navigation history (rail + tab), driven by App's navStack.
+  canGoBack: boolean;
+  canGoForward: boolean;
+  onGoBack: () => void;
+  onGoForward: () => void;
 }
 
 export function Topbar({
-  mode,
-  onSetMode,
   pathSegments,
   sessionMenu,
   onRenameSubmit,
@@ -72,74 +69,46 @@ export function Topbar({
   viewState = 'main',
   onSetViewState,
   showViewSeg = false,
+  canGoBack,
+  canGoForward,
+  onGoBack,
+  onGoForward,
 }: Props) {
   const t = useT();
-  const [modeOpen, setModeOpen] = useState(false);
-  const modeRef = useRef<HTMLSpanElement>(null);
-
-  useEffect(() => {
-    if (!modeOpen) return;
-    function onDown(e: PointerEvent) {
-      if (modeRef.current?.contains(e.target as Node)) return;
-      setModeOpen(false);
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setModeOpen(false);
-    }
-    document.addEventListener('pointerdown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('pointerdown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [modeOpen]);
-
-  const modeLabelKey = MODE_OPTIONS.find(([k]) => k === mode)?.[1] ?? 'topbar.mode.sessions';
-  const modeLabel = t(modeLabelKey);
 
   return (
     <header className="topbar">
       <button
         type="button"
-        className="brand"
+        className="tb-toggle"
         title={t('topbar.toggleSidebar')}
+        aria-label={t('topbar.toggleSidebar')}
         onClick={() => window.dispatchEvent(new CustomEvent('gian.toggle-rail'))}
       >
-        <GianMark size={18} />
-        <span className="brand-word">Gian</span>
+        <Icon d={I.sidebar} />
       </button>
-
-      <span className="mode-anchor" ref={modeRef}>
-        <button
-          type="button"
-          className="mode-btn"
-          data-testid="mode-button"
-          aria-label={`${t('topbar.currentView')}: ${modeLabel}`}
-          aria-expanded={modeOpen}
-          onClick={() => setModeOpen(o => !o)}
-        >
-          {modeLabel}
-          <span className="caret">▾</span>
-        </button>
-        {modeOpen && (
-          <div className="mode-pop" role="menu" aria-label={t('topbar.switchView')}>
-            {MODE_OPTIONS.map(([key, labelKey]) => (
-              <button
-                key={key}
-                type="button"
-                className={`mode-pop-item ${mode === key ? 'active' : ''}`}
-                data-testid={`mode-option-${key}`}
-                role="menuitemradio"
-                aria-checked={mode === key}
-                onClick={() => { onSetMode(key); setModeOpen(false); }}
-              >
-                <span className="check">{mode === key ? '✓' : ''}</span>
-                {t(labelKey)}
-              </button>
-            ))}
-          </div>
-        )}
-      </span>
+      <button
+        type="button"
+        className="tb-toggle"
+        data-testid="topbar-back"
+        title={t('topbar.back')}
+        aria-label={t('topbar.back')}
+        disabled={!canGoBack}
+        onClick={onGoBack}
+      >
+        <Icon d={I.back} />
+      </button>
+      <button
+        type="button"
+        className="tb-toggle"
+        data-testid="topbar-forward"
+        title={t('topbar.forward')}
+        aria-label={t('topbar.forward')}
+        disabled={!canGoForward}
+        onClick={onGoForward}
+      >
+        <Icon d={I.forward} />
+      </button>
 
       <PathBreadcrumb
         segments={pathSegments}

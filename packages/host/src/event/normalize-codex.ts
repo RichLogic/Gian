@@ -1,5 +1,6 @@
 import type { ProxyNotification } from '@gian/shared';
 import type {
+  AgentSpawnData,
   ApprovalRequestedData,
   ApprovalResolvedData,
   FileChangeSummary,
@@ -16,6 +17,7 @@ import type {
  *   output.plan.final       → plan_update     (delta:false)
  *   output.command.delta    → command_execution (stdoutDelta stream)
  *   diff.updated            → file_change     (unified diff parsed)
+ *   codex.agent             → agent_spawn     (native subagent lifecycle)
  *   approval.requested      → approval_requested
  *   approval.resolved       → approval_resolved
  *   turn.started            → (no transcript event — only flips pending UI state
@@ -26,9 +28,9 @@ import type {
  *   token_usage.updated     → (no unified event — M2 session stats layer)
  *   debug                   → (discard)
  *
- * Per-tool slots (`file_read`, `file_search`, `web_search`, `agent_spawn`) stay
- * cc-only for now — codex emits a generic `item/tool/call` that would need a
- * unified `tool_call` slot to map cleanly. Deferred.
+ * Generic tool items remain executor-native. Subagents are the exception:
+ * Codex exposes explicit collabAgentToolCall / subAgentActivity variants, so
+ * the proxy projects those into the page's persistent agent-run view.
  */
 export function normalizeCodexNotification(
   raw: ProxyNotification,
@@ -141,6 +143,34 @@ export function normalizeCodexNotification(
           data: { files, diff: diffText },
         },
       ];
+    }
+
+    case 'codex.agent': {
+      if (!Array.isArray(data.updates)) return [];
+      return data.updates.flatMap(value => {
+        if (!value || typeof value !== 'object') return [];
+        const update = value as Record<string, unknown>;
+        const agentId = typeof update.agentId === 'string' ? update.agentId : '';
+        if (!agentId) return [];
+        const payload: AgentSpawnData = {
+          agentId,
+          description: typeof update.description === 'string' ? update.description : '',
+          status: update.status === 'done' || update.status === 'error'
+            ? update.status
+            : 'running',
+          agentType: typeof update.agentType === 'string' ? update.agentType : undefined,
+          model: typeof update.model === 'string' ? update.model : undefined,
+          output: typeof update.output === 'string' ? update.output : undefined,
+        };
+        return [{
+          session_id: sessionId,
+          turn,
+          call_id: agentId,
+          ts: Date.now(),
+          type: 'agent_spawn' as const,
+          data: payload,
+        }];
+      });
     }
 
     case 'approval.requested': {

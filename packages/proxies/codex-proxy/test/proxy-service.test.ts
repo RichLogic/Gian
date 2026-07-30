@@ -468,6 +468,120 @@ test('Codex auto-compaction replaces context only after the compaction item comp
   }
 });
 
+test('Codex plan snapshots keep the native step statuses as checklist markdown', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+    const started = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'make a plan' }],
+    }, 44);
+
+    harness.runtime.emitNotification({
+      method: 'turn/plan/updated',
+      params: {
+        threadId: created.session.threadId,
+        turnId: started.turn.id,
+        explanation: 'Implementation order',
+        plan: [
+          { step: 'Inspect', status: 'completed' },
+          { step: 'Edit', status: 'inProgress' },
+          { step: 'Test', status: 'pending' },
+        ],
+      },
+    });
+    await waitFor(() => harness.events.some(event => event.method === 'output.plan.final'));
+
+    const plan = harness.events.find(event => event.method === 'output.plan.final');
+    assert.equal(
+      (plan?.params.data as { text?: unknown }).text,
+      'Implementation order\n\n- [x] Inspect\n- [ ] Edit (in progress)\n- [ ] Test',
+    );
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('Codex collabAgentToolCall items preserve child thread identity and lifecycle', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+    const started = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'delegate review' }],
+    }, 45);
+
+    harness.runtime.emitNotification({
+      method: 'item/started',
+      params: {
+        threadId: created.session.threadId,
+        turnId: started.turn.id,
+        item: {
+          type: 'collabAgentToolCall',
+          id: 'collab-call-1',
+          tool: 'spawnAgent',
+          status: 'inProgress',
+          senderThreadId: created.session.threadId,
+          receiverThreadIds: ['child-thread-1'],
+          prompt: 'Review the event reducer',
+          model: 'gpt-5.6',
+          reasoningEffort: 'medium',
+          agentsStates: {
+            'child-thread-1': { status: 'running', message: null },
+          },
+        },
+      },
+    });
+    await waitFor(() => harness.events.some(event => event.method === 'codex.agent'));
+
+    harness.runtime.emitNotification({
+      method: 'item/completed',
+      params: {
+        threadId: created.session.threadId,
+        turnId: started.turn.id,
+        item: {
+          type: 'collabAgentToolCall',
+          id: 'collab-wait-1',
+          tool: 'wait',
+          status: 'completed',
+          senderThreadId: created.session.threadId,
+          receiverThreadIds: ['child-thread-1'],
+          prompt: null,
+          model: null,
+          reasoningEffort: null,
+          agentsStates: {
+            'child-thread-1': {
+              status: 'completed',
+              message: 'Reducer review complete.',
+            },
+          },
+        },
+      },
+    });
+    await waitFor(() => (
+      harness.events.filter(event => event.method === 'codex.agent').length === 2
+    ));
+
+    const updates = harness.events
+      .filter(event => event.method === 'codex.agent')
+      .map(event => (event.params.data as { updates: unknown }).updates);
+    assert.deepEqual(updates[0], [{
+      agentId: 'child-thread-1',
+      description: 'Review the event reducer',
+      status: 'running',
+      model: 'gpt-5.6',
+    }]);
+    assert.deepEqual(updates[1], [{
+      agentId: 'child-thread-1',
+      description: '',
+      status: 'done',
+      output: 'Reducer review complete.',
+    }]);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('Codex thread/compacted notification completes intercepted /compact turn', async () => {
   const harness = await createHarness();
   try {

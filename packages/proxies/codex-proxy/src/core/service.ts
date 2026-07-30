@@ -270,6 +270,100 @@ function isContextCompactionItem(params: unknown): boolean {
   return type === 'contextCompaction' || type === 'context_compaction';
 }
 
+interface CodexAgentUpdate {
+  agentId: string;
+  description: string;
+  status: 'running' | 'done' | 'error';
+  agentType?: string;
+  model?: string;
+  output?: string;
+}
+
+function codexAgentStatus(value: unknown, fallback: unknown): CodexAgentUpdate['status'] {
+  switch (value) {
+    case 'completed':
+    case 'shutdown':
+      return 'done';
+    case 'errored':
+    case 'interrupted':
+    case 'notFound':
+      return 'error';
+    case 'pendingInit':
+    case 'running':
+      return 'running';
+    default:
+      return fallback === 'failed' ? 'error' : 'running';
+  }
+}
+
+/** Project only Codex's native subagent ThreadItem variants. The proxy keeps
+ * every executor-specific field it can; the host decides how to display it. */
+function codexAgentUpdates(params: unknown): CodexAgentUpdate[] {
+  if (!params || typeof params !== 'object') return [];
+  const item = (params as { item?: unknown }).item;
+  if (!item || typeof item !== 'object') return [];
+  const record = item as Record<string, unknown>;
+
+  if (record.type === 'subAgentActivity') {
+    const agentId = typeof record.agentThreadId === 'string' ? record.agentThreadId : '';
+    if (!agentId) return [];
+    const path = typeof record.agentPath === 'string' ? record.agentPath : '';
+    return [{
+      agentId,
+      description: '',
+      status: record.kind === 'interrupted' ? 'error' : 'running',
+      ...(path ? { agentType: path } : {}),
+    }];
+  }
+
+  if (record.type !== 'collabAgentToolCall') return [];
+  const states = record.agentsStates && typeof record.agentsStates === 'object'
+    ? record.agentsStates as Record<string, unknown>
+    : {};
+  const receiverIds = Array.isArray(record.receiverThreadIds)
+    ? record.receiverThreadIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : [];
+  const agentIds = [...new Set([...receiverIds, ...Object.keys(states)])];
+  if (agentIds.length === 0) return [];
+
+  const prompt = typeof record.prompt === 'string' ? record.prompt : '';
+  const model = typeof record.model === 'string' ? record.model : undefined;
+  return agentIds.map(agentId => {
+    const state = states[agentId] && typeof states[agentId] === 'object'
+      ? states[agentId] as Record<string, unknown>
+      : {};
+    return {
+      agentId,
+      description: record.tool === 'spawnAgent' ? prompt : '',
+      status: codexAgentStatus(state.status, record.status),
+      ...(model ? { model } : {}),
+      ...(typeof state.message === 'string' && state.message ? { output: state.message } : {}),
+    };
+  });
+}
+
+function codexPlanText(params: unknown): string {
+  if (!params || typeof params !== 'object') return '';
+  const record = params as Record<string, unknown>;
+  if (typeof record.plan === 'string') return record.plan;
+  if (typeof record.text === 'string') return record.text;
+  if (!Array.isArray(record.plan)) return '';
+
+  const explanation = typeof record.explanation === 'string'
+    ? record.explanation.trim()
+    : '';
+  const steps = record.plan.flatMap(step => {
+    if (!step || typeof step !== 'object') return [];
+    const item = step as Record<string, unknown>;
+    const text = typeof item.step === 'string' ? item.step.trim() : '';
+    if (!text) return [];
+    const checked = item.status === 'completed' ? 'x' : ' ';
+    const suffix = item.status === 'inProgress' ? ' (in progress)' : '';
+    return [`- [${checked}] ${text}${suffix}`];
+  });
+  return [explanation, steps.join('\n')].filter(Boolean).join('\n\n');
+}
+
 function unsupportedNativeCommandMessage(command: string) {
   switch (command) {
     case '/model':
@@ -987,12 +1081,7 @@ export class CodexProxyService {
     }
 
     if (message.method === 'turn/plan/updated') {
-      const params = message.params as { plan?: unknown; text?: unknown } | undefined;
-      const text = typeof params?.plan === 'string'
-        ? params.plan
-        : typeof params?.text === 'string'
-          ? params.text
-          : '';
+      const text = codexPlanText(message.params);
       this.emitEvent('output.plan.final', {
         requestId,
         sessionId: session.id,
@@ -1001,6 +1090,20 @@ export class CodexProxyService {
         rawRuntimeEvent: message,
       });
       return;
+    }
+
+    if (message.method === 'item/started' || message.method === 'item/completed') {
+      const updates = codexAgentUpdates(message.params);
+      if (updates.length > 0) {
+        this.emitEvent('codex.agent', {
+          requestId,
+          sessionId: session.id,
+          turnId,
+          data: { updates },
+          rawRuntimeEvent: message,
+        });
+        return;
+      }
     }
 
     // Turn lifecycle. Codex's runtime emits `turn/started` but the proxy was

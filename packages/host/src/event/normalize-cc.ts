@@ -1,5 +1,6 @@
 import type { ProxyNotification } from '@gian/shared';
 import type {
+  AgentSpawnData,
   ApprovalRequestedData,
   ApprovalResolvedData,
   AskQuestion,
@@ -18,7 +19,8 @@ import type {
  *   tool.use (toolName=Glob)           → file_search (kind:'glob')
  *   tool.use (toolName=Grep)           → file_search (kind:'grep')
  *   tool.use (toolName=WebSearch)      → web_search
- *   tool.use (toolName=Agent)          → agent_spawn
+ *   tool.use (toolName=Agent|Task)     → agent_spawn
+ *   claude.task                        → agent_spawn (lifecycle upsert)
  *   approval.requested                 → approval_requested
  *   approval.resolved                  → approval_resolved
  *   turn.completed                     → turn_completed
@@ -27,8 +29,8 @@ import type {
  * cc does NOT emit: output.text.delta (non-streaming), diff.updated,
  *   output.command.delta, runtime.error, token_usage.updated.
  *
- * thinking: intentionally absent — cc exposes effort as model setting only,
- *   not as streaming thinking content through the proxy boundary.
+ * thinking is present in Claude -p stream-json, but the current cc-proxy
+ * boundary does not forward it yet.
  *
  * approval.resolved field-name divergence:
  *   cc  uses data.behavior ('allow'|'deny') + no explicit scope
@@ -95,7 +97,7 @@ export function normalizeCcNotification(
           // unified diff so DiffCard can render real hunks instead of just
           // path + stat. Without this the diff body would render empty.
           const diff = buildCcSyntheticDiff(toolName, file.path, input);
-          return [
+          const events: UnifiedEvent[] = [
             {
               session_id: sessionId,
               turn,
@@ -107,6 +109,18 @@ export function normalizeCcNotification(
                 : { files: [file] },
             },
           ];
+          const plan = claudePlanWrite(toolName, input);
+          if (plan) {
+            events.push({
+              session_id: sessionId,
+              turn,
+              call_id: `${callId}:plan`,
+              ts: Date.now(),
+              type: 'plan_update',
+              data: { text: plan, delta: false },
+            });
+          }
+          return events;
         }
 
         case 'Read': {
@@ -174,7 +188,8 @@ export function normalizeCcNotification(
           ];
         }
 
-        case 'Agent': {
+        case 'Agent':
+        case 'Task': {
           return [
             {
               session_id: sessionId,
@@ -183,7 +198,7 @@ export function normalizeCcNotification(
               ts: Date.now(),
               type: 'agent_spawn',
               data: {
-                description: String(input.prompt ?? input.description ?? ''),
+                description: String(input.description ?? input.prompt ?? ''),
                 status: 'running',
                 input: Object.keys(input).length > 0 ? input : undefined,
               },
@@ -195,6 +210,29 @@ export function normalizeCcNotification(
           // Unknown tool — fall through to legacy raw passthrough
           return [];
       }
+    }
+
+    case 'claude.task': {
+      const toolUseId = String(data.toolUseId ?? data.callId ?? '');
+      if (!toolUseId) return [];
+      const update: AgentSpawnData = {
+        agentId: typeof data.taskId === 'string' ? data.taskId : undefined,
+        description: typeof data.description === 'string' ? data.description : '',
+        status: data.status === 'done' || data.status === 'error' ? data.status : 'running',
+        agentType: typeof data.agentType === 'string' ? data.agentType : undefined,
+        output: typeof data.summary === 'string' ? data.summary : undefined,
+        outputFile: typeof data.outputFile === 'string' ? data.outputFile : undefined,
+        startedAt: typeof data.startedAt === 'number' ? data.startedAt : undefined,
+        completedAt: typeof data.completedAt === 'number' ? data.completedAt : undefined,
+      };
+      return [{
+        session_id: sessionId,
+        turn,
+        call_id: toolUseId,
+        ts: Date.now(),
+        type: 'agent_spawn',
+        data: update,
+      }];
     }
 
     case 'approval.requested': {
@@ -680,4 +718,15 @@ function buildCcFileChangeSummary(
   }
 
   return { path, kind: 'update' };
+}
+
+function claudePlanWrite(
+  toolName: string,
+  input: Record<string, unknown>,
+): string | null {
+  if (toolName !== 'Write' || typeof input.content !== 'string') return null;
+  const path = String(input.file_path ?? input.path ?? '').replaceAll('\\', '/');
+  if (!/(^|\/)\.claude(?:-[^/]+)?\/plans\//.test(path)) return null;
+  const content = input.content.trim();
+  return content || null;
 }

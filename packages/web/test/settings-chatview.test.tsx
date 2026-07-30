@@ -52,7 +52,9 @@ describe('CHATVIEW-001: chat-view settings confirm-then-reload', () => {
 
   it('cancelling the confirm persists nothing and does not reload', async () => {
     confirmMock.mockResolvedValue(false);
-    render(<SettingsBody config={baseConfig()} onChange={() => {}} />);
+    render(<SettingsBody
+        activeSection="chatview"
+        config={baseConfig()} onChange={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: 'claude -p' }));
     await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1));
     expect(api.saveSettings).not.toHaveBeenCalled();
@@ -61,7 +63,9 @@ describe('CHATVIEW-001: chat-view settings confirm-then-reload', () => {
 
   it('confirming saves the surface, then reloads (CLI tab is now runtime-derived)', async () => {
     confirmMock.mockResolvedValue(true);
-    render(<SettingsBody config={baseConfig()} onChange={() => {}} />);
+    render(<SettingsBody
+        activeSection="chatview"
+        config={baseConfig()} onChange={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: 'claude -p' }));
     await waitFor(() => {
       expect(api.saveSettings).toHaveBeenCalledWith({ claude_chat_surface: 'structured' });
@@ -70,7 +74,9 @@ describe('CHATVIEW-001: chat-view settings confirm-then-reload', () => {
   });
 
   it('no longer renders the Claude / Codex CLI-tab toggles', () => {
-    render(<SettingsBody config={baseConfig()} onChange={() => {}} />);
+    render(<SettingsBody
+        activeSection="chatview"
+        config={baseConfig()} onChange={() => {}} />);
     expect(screen.queryByText('Show a CLI (terminal) tab for Claude sessions')).toBeNull();
     expect(screen.queryByText('Show a CLI (terminal) tab for Codex sessions')).toBeNull();
   });

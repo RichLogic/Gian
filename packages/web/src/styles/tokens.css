@@ -42,9 +42,16 @@
   --topbar-h: 42px;
   --nav-w: 56px;
   --rail-w: 272px;
+  /* Unified panel header height (main head / sheet tab strip / inspector
+   * head / sidebar top row) — density variants below. */
+  --panel-header-h: 36px;
 
   /* Motion */
   --ease: cubic-bezier(.2,.7,.2,1);
+  /* Soft UI motion (phase 6): panels, dock, tabs, popovers, sidebar. */
+  --ease-soft: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-fast: 140ms;
+  --dur-med: 240ms;
 
   /* Executor brand (same across themes) */
   --codex-h: 270;
@@ -285,9 +292,9 @@ body[data-theme="dark"] {
 }
 
 /* ---------- Density ---------- */
-body[data-density="compact"] { --rail-w: 250px; --topbar-h: 38px; --nav-w: 52px; }
-body[data-density="cozy"]    { --rail-w: 272px; --topbar-h: 42px; --nav-w: 56px; }
-body[data-density="roomy"]   { --rail-w: 300px; --topbar-h: 48px; --nav-w: 64px; }
+body[data-density="compact"] { --rail-w: 250px; --topbar-h: 38px; --nav-w: 52px; --panel-header-h: 32px; }
+body[data-density="cozy"]    { --rail-w: 272px; --topbar-h: 42px; --nav-w: 56px; --panel-header-h: 36px; }
+body[data-density="roomy"]   { --rail-w: 300px; --topbar-h: 48px; --nav-w: 64px; --panel-header-h: 40px; }
 
 /* ---------- Base ---------- */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
