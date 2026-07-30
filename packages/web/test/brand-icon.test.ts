@@ -18,13 +18,15 @@ describe('accent-aware Gian icon', () => {
     ]);
   });
 
-  it('builds the selected eye-free Voice-G mark over the accent gradient', () => {
+  it('builds the selected eye-free Dragon-G mark', () => {
     const svg = buildGianIconSvg('dark', 'plum');
     expect(svg).toContain('oklch(0.7 0.18 274)');
     expect(svg).toContain('oklch(0.8 0.20 328)');
     expect(svg).toContain('oklch(0.62 0.18 380)');
+    expect(svg).toContain('<stop offset="100%" stop-color="oklch(0.62 0.18 380)"/>');
+    expect(svg).not.toContain('offset="78%"');
     expect(svg).toContain('fill-rule="evenodd"');
-    expect(svg).not.toMatch(/ellipse|circle|eye/i);
+    expect(svg).not.toMatch(/eye|<ellipse|<circle/i);
   });
 
   it('updates the browser favicon when appearance changes', () => {

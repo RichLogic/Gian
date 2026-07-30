@@ -56,14 +56,20 @@ export function WorkspacesInspector({
   onNewWorkspace: () => void;
 }) {
   const t = useT();
+  // The synthetic root workspace is a container, not a real project — never
+  // list it. Reordering still round-trips the FULL id list (positions of the
+  // two swapped visible rows), so the hidden root keeps its slot.
+  const rows = workspaces.filter(w => w.name !== '__gian_root__');
 
   async function move(idx: number, dir: -1 | 1) {
     const j = idx + dir;
-    if (j < 0 || j >= workspaces.length) return;
+    if (j < 0 || j >= rows.length) return;
     const ids = workspaces.map(w => w.id);
-    const tmp = ids[idx]!;
-    ids[idx] = ids[j]!;
-    ids[j] = tmp;
+    const a = ids.indexOf(rows[idx]!.id);
+    const b = ids.indexOf(rows[j]!.id);
+    const tmp = ids[a]!;
+    ids[a] = ids[b]!;
+    ids[b] = tmp;
     await reorderWorkspaces(ids);
     onChange();
   }
@@ -83,7 +89,7 @@ export function WorkspacesInspector({
       </div>
       <div className="insp-scroll">
         <div className="ws-list">
-          {workspaces.map((w, idx) => {
+          {rows.map((w, idx) => {
             const open = openWsIds.has(w.id);
             const isHidden = w.hidden === 1;
             const active = w.id === selectedWsId && open;
@@ -121,7 +127,7 @@ export function WorkspacesInspector({
                     className="ws-act"
                     title={t('spaces.movedown.title')}
                     aria-label={t('spaces.movedown.title')}
-                    disabled={idx === workspaces.length - 1}
+                    disabled={idx === rows.length - 1}
                     onClick={() => void move(idx, 1)}
                   >
                     <Icon d={I.arrowDown} size={14} />
@@ -130,7 +136,7 @@ export function WorkspacesInspector({
               </div>
             );
           })}
-          {workspaces.length === 0 && (
+          {rows.length === 0 && (
             <p className="spaces-empty">{t('spaces.empty')}</p>
           )}
         </div>

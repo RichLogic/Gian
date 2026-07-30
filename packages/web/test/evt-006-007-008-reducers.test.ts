@@ -201,12 +201,12 @@ describe('EVT-008: turn_started / turn_completed do not produce transcript rows'
 });
 
 // ---------------------------------------------------------------------------
-// CLAUDE-TTY-002 — approval_requested dedupe by approvalId
+// approval_requested dedupe by approvalId
 //
-// In TTY mode a single AskUserQuestion surfaces twice: the live PreToolUse
-// hook broadcasts it while the tool is pending, and the JSONL watcher
-// re-emits the same approvalId once the tool_use lands in the transcript.
-// Both carry the same approvalId, so the reducer must render ONE card.
+// A single AskUserQuestion can surface twice: the live PreToolUse hook
+// broadcasts it while the tool is pending, and the JSONL watcher re-emits
+// the same approvalId once the tool_use lands in the transcript. Both carry
+// the same approvalId, so the reducer must render ONE card.
 // ---------------------------------------------------------------------------
 
 function approvalRequested(
@@ -232,7 +232,7 @@ function approvalRequested(
   };
 }
 
-describe('CLAUDE-TTY-002: approval_requested dedupe by approvalId', () => {
+describe('approval_requested dedupe by approvalId', () => {
   it('renders a single card when the same approvalId arrives twice (live PreToolUse + JSONL watcher)', () => {
     let items: TranscriptItem[] = [];
     items = applyEnvelope(items, approvalRequested('toolu_q1', { ts: 1 }), 'claude');

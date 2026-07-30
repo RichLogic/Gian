@@ -36,9 +36,19 @@ class StubProxyClient implements ProxyClient {
   failNextCreate: Error | null = null;
 
   /** Captures the last createSession params so tests can assert on adoption. */
-  lastCreateParams: { cwd: string; claudeSessionId?: string; threadId?: string } | null = null;
+  lastCreateParams: {
+    cwd: string;
+    claudeSessionId?: string;
+    forkFromClaudeSessionId?: string;
+    threadId?: string;
+  } | null = null;
 
-  async createSession(params: { cwd: string; claudeSessionId?: string; threadId?: string }) {
+  async createSession(params: {
+    cwd: string;
+    claudeSessionId?: string;
+    forkFromClaudeSessionId?: string;
+    threadId?: string;
+  }) {
     this.lastCreateParams = params;
     if (this.failNextCreate) {
       const err = this.failNextCreate;
@@ -559,6 +569,111 @@ test('createSession persists row with native_session_id from proxy response', as
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sidechat creation forwards the Claude parent and persists a pending fork', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const parent = {
+      id: randomUUID(),
+      native_session_id: 'claude-parent-1',
+    };
+    db.prepare(
+      `INSERT INTO sessions
+        (id, workspace_id, executor, native_session_id, worktree_path)
+       VALUES (?, ?, 'claude', ?, ?)`,
+    ).run(parent.id, wsId, parent.native_session_id, '/tmp/parent-worktree');
+
+    const child = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+      name: 'side question',
+      fork_from: parent.id,
+    });
+
+    assert.equal(proxyMgr.client.lastCreateParams?.cwd, '/tmp/parent-worktree');
+    assert.equal(
+      proxyMgr.client.lastCreateParams?.forkFromClaudeSessionId,
+      parent.native_session_id,
+    );
+    const pending = db
+      .prepare('SELECT fork_from_session_id FROM sessions WHERE id = ?')
+      .get(child.id) as { fork_from_session_id: string | null };
+    assert.equal(pending.fork_from_session_id, parent.id);
+
+    proxyMgr.client.fire({
+      method: 'session.rotated',
+      params: {
+        sessionId: child.id,
+        data: {
+          oldNativeSessionId: child.native_session_id,
+          newNativeSessionId: 'claude-sidechat-1',
+        },
+      },
+    });
+    const adopted = db
+      .prepare(
+        'SELECT native_session_id, fork_from_session_id FROM sessions WHERE id = ?',
+      )
+      .get(child.id) as {
+        native_session_id: string;
+        fork_from_session_id: string | null;
+      };
+    assert.equal(adopted.native_session_id, 'claude-sidechat-1');
+    assert.equal(adopted.fork_from_session_id, null);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unstarted sidechat restores its pending fork after host restart', async () => {
+  const first = setup();
+  let parentNativeId: string;
+  let childId: string;
+  try {
+    const parent = await first.sessions.createSession({
+      workspace_id: first.wsId,
+      executor: 'claude',
+    });
+    parentNativeId = parent.native_session_id!;
+    first.db.prepare('UPDATE sessions SET worktree_path = ? WHERE id = ?')
+      .run('/tmp/restart-parent-worktree', parent.id);
+    const child = await first.sessions.createSession({
+      workspace_id: first.wsId,
+      executor: 'claude',
+      fork_from: parent.id,
+    });
+    childId = child.id;
+  } finally {
+    first.db.close();
+  }
+
+  const db = openDatabase(first.dir);
+  const proxyMgr = new FakeProxyManager();
+  const broadcaster = new CapturingBroadcaster();
+  const approvals = new ApprovalManager(broadcaster as unknown as WsBroadcaster);
+  const queue = new QueueManager(db);
+  const sessions = new SessionManager(
+    db,
+    proxyMgr as unknown as ProxyManager,
+    broadcaster as unknown as WsBroadcaster,
+    approvals,
+    queue,
+    first.dir,
+  );
+  try {
+    await sessions.listSessionSlashCommands(childId);
+    assert.equal(proxyMgr.client.lastCreateParams?.cwd, '/tmp/restart-parent-worktree');
+    assert.equal(
+      proxyMgr.client.lastCreateParams?.forkFromClaudeSessionId,
+      parentNativeId,
+    );
+    assert.equal(proxyMgr.client.lastCreateParams?.claudeSessionId, undefined);
+  } finally {
+    db.close();
+    rmSync(first.dir, { recursive: true, force: true });
   }
 });
 

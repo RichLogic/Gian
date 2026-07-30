@@ -22,7 +22,7 @@ function Icon({ d, size = 13, stroke = 1.5 }: { d: string; size?: number; stroke
 
 const I = {
   refresh: 'M20 12a8 8 0 1 1-2.34-5.66 M20 4v4h-4',
-  folder: 'M3.5 7A2.5 2.5 0 0 1 6 4.5h3.4a2 2 0 0 1 1.6.8l1.2 1.7H18A2.5 2.5 0 0 1 20.5 9.5v8A2.5 2.5 0 0 1 18 20H6a2.5 2.5 0 0 1-2.5-2.5z',
+  chev: 'M9 5l7 7-7 7',
   search: 'M10.5 4.5a6 6 0 1 0 0 12 6 6 0 0 0 0-12z M19.5 19.5l-4.6-4.6',
 };
 
@@ -231,8 +231,7 @@ function TreeFolder({
       <div className={`tree-item folder ${open ? 'open' : ''}`}
            style={{ paddingLeft: 6 + depth * 12 }}
            onClick={() => setOpen(o => !o)}>
-        <span className="tree-caret">▶</span>
-        <Icon d={I.folder} size={13} />
+        <span className="tree-caret"><Icon d={I.chev} size={10} /></span>
         <span className="tree-name">{name}</span>
       </div>
       {open && entries && (
@@ -358,8 +357,7 @@ function ChangeFolder({ node, depth, ctx }: { node: ChangeNode; depth: number; c
         onClick={() => setOpen(o => !o)}
         title={node.path}
       >
-        <span className="tree-caret">▶</span>
-        <Icon d={I.folder} size={13} />
+        <span className="tree-caret"><Icon d={I.chev} size={10} /></span>
         <span className="tree-name">{node.name}</span>
       </div>
       {open && node.children.map(ch => (

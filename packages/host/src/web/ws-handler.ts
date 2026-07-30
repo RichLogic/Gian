@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ClientToServerMessage, StateSyncMessage, TtySurface } from '@gian/shared';
+import type { ClientToServerMessage, StateSyncMessage } from '@gian/shared';
 import type { WSContext, WSMessageReceive } from 'hono/ws';
 import type { SessionManager } from '../session/manager.js';
 import type { TaskManager } from '../task/manager.js';
@@ -8,7 +8,6 @@ import type { WsBroadcaster } from './ws-broadcast.js';
 // notifies it on web message:send. Takeover state will be revisited when
 // the rvc-shaped managers land.
 import type { ApprovalManager } from '../approval/index.js';
-import type { TtyManager } from '../tty/manager.js';
 import type { CodexTtyManager } from '../tty/codex-manager.js';
 import type { WorkbenchTerminalManager } from '../term/manager.js';
 import type { Db } from '../storage/db.js';
@@ -33,7 +32,6 @@ export interface WsHandlerDeps {
   tasks?: TaskManager;
   broadcaster: WsBroadcaster;
   approvals?: ApprovalManager;
-  tty?: TtyManager;
   codexTty?: CodexTtyManager;
   term?: WorkbenchTerminalManager;
   db?: Db;
@@ -44,7 +42,7 @@ interface ClientState {
   clientId: string;
 }
 
-export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, tty, codexTty, term, db }: WsHandlerDeps) {
+export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, codexTty, term, db }: WsHandlerDeps) {
   const states = new WeakMap<WSContext, ClientState>();
 
   function sendStateSync(ws: WSContext): void {
@@ -92,8 +90,6 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, tty, c
     },
 
     onClose(_evt: WsCloseEvent, ws: WSContext) {
-      const state = states.get(ws);
-      if (state) tty?.releaseClient(state.clientId);
       broadcaster.remove(ws);
       states.delete(ws);
     },
@@ -139,7 +135,7 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, tty, c
       }
 
       try {
-        await dispatch(parsed, sessions, tasks, broadcaster, ws, state, tty, codexTty, term);
+        await dispatch(parsed, sessions, tasks, broadcaster, ws, codexTty, term);
       } catch (err) {
         console.error('[ws] dispatch error', err);
         // Surface the failure to the client. Without this, errors inside
@@ -192,27 +188,16 @@ async function dispatch(
   tasks: TaskManager | undefined,
   broadcaster: WsBroadcaster,
   ws: WSContext,
-  state: ClientState,
-  tty?: TtyManager,
   codexTty?: CodexTtyManager,
   term?: WorkbenchTerminalManager,
 ): Promise<void> {
-  // Resolve TTY routing target for `pty:*` messages by session executor.
-  // Centralized so each pty:* case stays terse.
-  const ttyManagerFor = (sessionId: string): TtyManager | CodexTtyManager | undefined => {
+  // Resolve TTY routing target for `pty:*` messages. Only codex sessions
+  // have a PTY runtime now (Claude TTY mode was removed), so this always
+  // resolves to the CodexTtyManager.
+  const ttyManagerFor = (sessionId: string): CodexTtyManager | undefined => {
     let session;
     try { session = sessions.getSession(sessionId); } catch { return undefined; }
-    return session.executor === 'codex' ? codexTty : tty;
-  };
-  const requireClaudeTtyOwner = (sessionId: string): void => {
-    const session = sessions.getSession(sessionId);
-    if (session.executor !== 'claude') return;
-    if (session.runtime_mode !== 'tty') {
-      throw Object.assign(new Error('session is not in Claude CLI mode'), { code: 'SWITCH_BLOCKED' });
-    }
-    if (!tty?.owns(sessionId, state.clientId)) {
-      throw Object.assign(new Error('Claude CLI is open in another window'), { code: 'TTY_LOCKED' });
-    }
+    return session.executor === 'codex' ? codexTty : undefined;
   };
   switch (msg.type) {
     case 'session:create': {
@@ -225,8 +210,13 @@ async function dispatch(
         ...(msg.mode !== undefined ? { mode: msg.mode } : {}),
         ...(msg.base_branch !== undefined ? { base_branch: msg.base_branch } : {}),
         ...(msg.branch !== undefined ? { branch: msg.branch } : {}),
+        ...(msg.fork_from !== undefined ? { fork_from: msg.fork_from } : {}),
       });
-      broadcaster.send(ws, { type: 'session:created', session });
+      broadcaster.send(ws, {
+        type: 'session:created',
+        session,
+        ...(msg.client_tag !== undefined ? { client_tag: msg.client_tag } : {}),
+      });
       return;
     }
     case 'session:rename': {
@@ -337,107 +327,16 @@ async function dispatch(
       return;
     }
     case 'session:switch-runtime': {
-      const session = sessions.getSession(msg.session_id);
-      if (session.executor === 'claude' && tty) {
-        if (msg.target === 'tty') {
-          const claimed = tty.claim(
-            msg.session_id,
-            state.clientId,
-            ws,
-            msg.surface === 'beta' ? 'beta' : 'cli',
-          );
-          if (!claimed) {
-            throw Object.assign(new Error('Claude CLI is open in another window'), { code: 'TTY_LOCKED' });
-          }
-          try {
-            await sessions.switchRuntime(msg.session_id, msg.target, {
-              remoteControl: msg.remote_control === true,
-              force: msg.force === true,
-            });
-          } catch (err) {
-            tty.release(msg.session_id, state.clientId);
-            throw err;
-          }
-          // After (re)spawning, report the live PTY state so a stale "TTY not
-          // running" banner clears. A force re-spawn leaves runtime_mode='tty'
-          // unchanged, so the client's claim effect won't re-probe on its own.
-          void tty.replay(msg.session_id)
-            .then(({ alive }) => {
-              broadcaster.send(ws, {
-                type: 'tty:lock',
-                session_id: msg.session_id,
-                locked: true,
-                owner: true,
-                surface: msg.surface === 'beta' ? 'beta' : 'cli',
-                alive,
-              });
-            })
-            .catch(() => { /* best-effort liveness probe */ });
-          return;
-        }
-        if (tty.isLockedByOther(msg.session_id, state.clientId)) {
-          throw Object.assign(new Error('Claude CLI is open in another window'), { code: 'TTY_LOCKED' });
-        }
-        await sessions.switchRuntime(msg.session_id, msg.target, {
-          remoteControl: msg.remote_control === true,
-          force: msg.force === true,
-        });
-        tty.release(msg.session_id, state.clientId);
-        return;
-      }
+      // Codex-only path — Claude TTY mode was removed; claude sessions
+      // fail inside SessionManager.switchRuntime with SWITCH_BLOCKED.
       await sessions.switchRuntime(msg.session_id, msg.target, {
-        remoteControl: msg.remote_control === true,
+        force: msg.force === true,
       });
-      return;
-    }
-    case 'session:remote-control': {
-      // Toggle Claude Remote Control by injecting `/remote-control` into the
-      // live PTY. Host-trusted: no TTY-owner check, since the button can be
-      // clicked from the composer on any surface. No-op unless the session is
-      // a claude session currently in TTY mode.
-      const session = sessions.getSession(msg.session_id);
-      if (session.executor !== 'claude' || session.runtime_mode !== 'tty' || !tty) return;
-      await tty.toggleRemoteControl(msg.session_id);
-      return;
-    }
-    case 'tty:claim': {
-      const session = sessions.getSession(msg.session_id);
-      if (session.executor !== 'claude') return;
-      if (!tty) {
-        throw Object.assign(new Error('claude TTY runtime not configured'), { code: 'SWITCH_BLOCKED' });
-      }
-      if (session.runtime_mode !== 'tty') {
-        throw Object.assign(new Error('session is not in Claude CLI mode'), { code: 'SWITCH_BLOCKED' });
-      }
-      const surface: TtySurface = msg.surface === 'beta' ? 'beta' : 'cli';
-      const claimed = tty.claim(msg.session_id, state.clientId, ws, surface, {
-        takeover: msg.takeover === true,
-      });
-      if (!claimed) {
-        throw Object.assign(new Error('Claude CLI is open in another window'), { code: 'TTY_LOCKED' });
-      }
-      // Report whether the underlying PTY is actually alive. After a host
-      // restart the session is still runtime_mode='tty' but no PTY was
-      // respawned — the chat is dead until the user re-opens it. Fire-and-forget
-      // (the lock-owner broadcast above already happened).
-      void tty.replay(msg.session_id)
-        .then(({ alive }) => {
-          broadcaster.send(ws, {
-            type: 'tty:lock',
-            session_id: msg.session_id,
-            locked: true,
-            owner: true,
-            surface,
-            alive,
-          });
-        })
-        .catch(() => { /* best-effort liveness probe */ });
       return;
     }
     case 'pty:input': {
       const mgr = ttyManagerFor(msg.session_id);
       if (!mgr) return;
-      requireClaudeTtyOwner(msg.session_id);
       const payload: { data?: string; text?: string } = {};
       if (typeof msg.data === 'string') payload.data = msg.data;
       if (typeof msg.text === 'string') payload.text = msg.text;
@@ -447,14 +346,12 @@ async function dispatch(
     case 'pty:resize': {
       const mgr = ttyManagerFor(msg.session_id);
       if (!mgr) return;
-      requireClaudeTtyOwner(msg.session_id);
       await mgr.resize(msg.session_id, msg.cols, msg.rows);
       return;
     }
     case 'pty:replay-request': {
       const mgr = ttyManagerFor(msg.session_id);
       if (!mgr) return;
-      requireClaudeTtyOwner(msg.session_id);
       const result = await mgr.replay(msg.session_id);
       broadcaster.send(ws, {
         type: 'pty:replay',

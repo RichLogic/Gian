@@ -87,6 +87,9 @@ export interface CreateSessionParams {
   /** Adopt an existing native session: claudeSessionId for cc, threadId for
    *  Codex, or nativeSessionId for ACP-backed executors. */
   claudeSessionId?: string;
+  /** Claude-only: fork this native session on the first turn. The proxy
+   *  adopts the fork's real native id from Claude's init event. */
+  forkFromClaudeSessionId?: string;
   threadId?: string;
   /** Generic native id for executors whose protocol is not cc/codex. */
   nativeSessionId?: string;

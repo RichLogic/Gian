@@ -135,4 +135,26 @@ describe('PlanChip persistent Agent runs panel', () => {
     expect(screen.getByText('Codex')).toBeInTheDocument();
     expect(screen.getByText('Reducer is stable.')).toBeInTheDocument();
   });
+
+  it('keeps the inline Plan and Agent panels mutually exclusive', async () => {
+    const user = userEvent.setup();
+    render(
+      <PlanChip
+        sessionId="session-1"
+        codexPlanText={'## Plan\n- [ ] inspect'}
+        items={[agent()]}
+      />,
+    );
+
+    const planTrigger = screen.getByRole('button', { name: /Plan/i });
+    const agentTrigger = screen.getByRole('button', { name: /Agent/i });
+    await user.click(planTrigger);
+    expect(screen.getByRole('region', { name: 'Plan' })).toBeInTheDocument();
+
+    await user.click(agentTrigger);
+    expect(screen.queryByRole('region', { name: 'Plan' })).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Agent runs' })).toBeInTheDocument();
+    expect(planTrigger).toHaveAttribute('aria-expanded', 'false');
+    expect(agentTrigger).toHaveAttribute('aria-expanded', 'true');
+  });
 });

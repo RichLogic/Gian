@@ -86,7 +86,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 12px 0 8px;
+  /* Right inset centers the trailing panel-3 toggle over the dock column
+     below it (dock-w 38px → center at 19px; tb-toggle is 26px → 19−13=6). */
+  padding: 0 6px 0 8px;
   background: var(--surface-2);
 }
 
@@ -925,9 +927,8 @@
 .sheet-manager { animation: gian-panel-in var(--dur-med) var(--ease-soft); }
 .sheet-group { animation: gian-fade-in var(--dur-fast) var(--ease-soft); }
 
-/* Popovers & dropdowns (mode switcher, pickers, menus). */
+/* Popovers & dropdowns (mode switcher, menus). */
 .mode-pop,
-.sidechat-picker:not(.inline),
 .sheet-act-menu,
 .runner-pop,
 .sb-newtask-menu { animation: gian-pop-in var(--dur-fast) var(--ease-soft); }

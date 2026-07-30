@@ -157,8 +157,8 @@ export interface ApprovalItem {
   questions?: import('@gian/shared').AskQuestion[];
   /** Human-readable summary of what the user picked, set when a `question`
    *  approval resolves. Drives the resolved card's "answered with …" line.
-   *  TTY-mode answers arrive via the synthetic local resolve; the later JSONL
-   *  watcher resolve has no answers and must not clobber this. */
+   *  In the removed TTY mode, answers arrived via the synthetic local resolve;
+   *  the later JSONL watcher resolve had no answers and must not clobber this. */
   answeredWith?: string;
   /** Which scope buttons to surface — drives whether `Allow session` appears.
    *  Defaults to `['once']` (only "Allow once"). */

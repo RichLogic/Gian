@@ -50,6 +50,10 @@ export interface ClaudeRuntimeEvents {
    *  per-invocation conversation delta and authoritative context-window size. */
   tokenUsage: [sessionId: string, usage: TokenUsageUpdate];
   processExited: [sessionId: string, code: number | null, signal: string | null];
+  /** Fork adoption (Gian sidechat): after a `--fork-session` spawn, Claude
+   *  mints the fork's native id; the runtime learns it from the stream-json
+   *  init event and reports it here so the service can swap its placeholder. */
+  nativeSessionIdAdopted: [sessionId: string, newClaudeSessionId: string];
   debug: [message: string];
 }
 
@@ -64,6 +68,10 @@ export interface ClaudeRuntime extends EventEmitter<ClaudeRuntimeEvents> {
     cwd: string;
     model?: string | null;
     isResume: boolean;
+    /** Gian sidechat: fork this parent Claude session on the first turn
+     *  (`claude -p --resume <parent> --fork-session`). The fork's real native
+     *  id is adopted from the init event — see nativeSessionIdAdopted. */
+    forkFromClaudeSessionId?: string;
   }): Promise<void>;
 
   /** Send a user message to Claude Code. */

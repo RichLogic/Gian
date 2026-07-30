@@ -78,6 +78,20 @@ function permissionReason(request: RequestPermissionRequest): string {
     : 'Kimi requested a user decision.';
 }
 
+/** Kimi's ACP adapter sends AskUserQuestion with a bare `title:
+ *  'AskUserQuestion'` and the actual question text inside a toolCall content
+ *  block — surface that text as the approval reason so the card shows the
+ *  question, not just the tool name next to the answer options. */
+function permissionContentText(request: RequestPermissionRequest): string | null {
+  for (const block of request.toolCall.content ?? []) {
+    if (block.type === 'content' && block.content.type === 'text') {
+      const text = block.content.text.trim();
+      if (text) return text;
+    }
+  }
+  return null;
+}
+
 function commandName(value: string): string {
   return value.trim().replace(/^\/+/, '').toLowerCase();
 }
@@ -626,7 +640,7 @@ export class KimiProxyService {
       this.emitEvent('approval.requested', this.eventEnvelope(session, {
         approvalId,
         title: permissionReason(request),
-        reason: permissionReason(request),
+        reason: permissionContentText(request) ?? permissionReason(request),
         severity: 'medium',
         nativeOptions: request.options,
         payload: request,

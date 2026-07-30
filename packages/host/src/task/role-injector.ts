@@ -6,8 +6,8 @@
 // tools), not injected — keeping the injection surface bounded and small.
 //
 // Pure and side-effect-free. The live wiring (structured = prepend to the first
-// message; Claude TTY = SessionStart hook additionalContext) lives in the
-// session/tty managers and calls into here.
+// message; historically Claude TTY = SessionStart hook additionalContext before
+// that mode was removed) lives in the session manager and calls into here.
 
 import { GIAN_ROLE_OPEN, GIAN_ROLE_CLOSE, type Role } from '@gian/shared';
 import type { SessionType } from '@gian/shared';

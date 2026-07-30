@@ -3,8 +3,6 @@ import type { ReactNode } from 'react';
 import type { CcModelCapabilities, CodexModelCapabilities, ExternalEditor, OpenFileCategory, SystemConfig } from '@gian/shared';
 import { THEME_DEFAULT_ACCENT } from '@gian/shared';
 import { loadProxyModels, saveSettings } from '../api.js';
-import { type ClaudeChatSurface } from '../session-routing.js';
-import { confirm } from '../feedback.js';
 import { useMinimapEnabled, setMinimapEnabled } from '../display-prefs.js';
 import { AppIcon } from './AppIcon.js';
 import { DEFAULT_OPEN_TARGET } from './Sheet.js';
@@ -26,7 +24,7 @@ import {
   type NotificationPrefs,
 } from '../notifications.js';
 
-export type NavKey = 'appearance' | 'notifications' | 'shortcuts' | 'executors' | 'chatview' | 'openwith';
+export type NavKey = 'appearance' | 'notifications' | 'shortcuts' | 'executors' | 'openwith';
 
 /** Left-nav groups (locator). `labelKey` is an i18n key; `items` map a
  *  section anchor id (`sec-<key>`) to its nav label key. */
@@ -46,7 +44,6 @@ const NAV_GROUPS: Array<{
     labelKey: 'settings.nav.group.runtime',
     items: [
       ['executors', 'settings.section.executor'],
-      ['chatview', 'settings.section.chatview'],
       ['openwith', 'settings.section.openwith'],
     ],
   },
@@ -99,8 +96,7 @@ interface Props {
 /** Settings v3 — single-section switcher (dock Settings rail, phase 4).
  *  The nav lives in panel 3 (SettingsNavInspector); this panel-2 body renders
  *  ONLY the active section. Two nav groups: Preferences (Appearance /
- *  Notifications / Shortcuts) and Runtime (Executors / Chat view / Open
- *  with). Account/Auth/Public/System/About stay out of this compact
+ *  Notifications / Shortcuts) and Runtime (Executors / Open with). Account/Auth/Public/System/About stay out of this compact
  *  workbench surface; locale lives here because the app only supports
  *  Chinese/English UI. */
 export function SettingsBody({ config, apps, onChange, activeSection = 'appearance' }: Props) {
@@ -139,25 +135,6 @@ function SettingsBodyInner({
   function patch(partial: Partial<SystemConfig>) {
     void saveSettings(partial).then(cfg => { if (cfg) onChange(cfg); });
   }
-
-  // Chat-view prefs restructure the runtime tablist for every session, applied
-  // with a hard reload (rather than reactively propagating into all mounted
-  // session views). Confirm first so the reload isn't abrupt; on cancel nothing
-  // is persisted and the control stays at its current value (it's config-driven).
-  async function patchChatView(partial: Partial<SystemConfig>) {
-    const ok = await confirm({
-      title: t('settings.chatview.reload.title'),
-      message: t('settings.chatview.reload.message'),
-      confirmLabel: t('settings.chatview.reload.confirm'),
-      cancelLabel: t('common.cancel'),
-    });
-    if (!ok) return;
-    const cfg = await saveSettings(partial);
-    if (cfg) onChange(cfg);
-    try { window.location.reload(); } catch { /* jsdom / non-browser */ }
-  }
-
-  const claudeSurface: ClaudeChatSurface = config.claude_chat_surface ?? 'tty';
 
   function patchEditors(next: ExternalEditor[]) {
     setEditors(next);
@@ -316,8 +293,6 @@ function SettingsBodyInner({
               <dt>{t('settings.shortcuts.createCodexChild')}</dt><dd><kbd>⌘</kbd><kbd>K</kbd></dd>
               <dt>{t('settings.shortcuts.markUnread')}</dt><dd><kbd>⌘</kbd><kbd>U</kbd></dd>
               <dt>{t('settings.shortcuts.approveDecline')}</dt><dd><kbd>⏎</kbd>&nbsp;<kbd>⌫</kbd></dd>
-              <dt>{t('settings.shortcuts.showChat')}</dt><dd><kbd>⌃/⌘</kbd><kbd>1</kbd></dd>
-              <dt>{t('settings.shortcuts.showCli')}</dt><dd><kbd>⌃/⌘</kbd><kbd>2</kbd></dd>
             </dl>
           </div>
         </section>
@@ -364,35 +339,6 @@ function SettingsBodyInner({
               </div>
               <p className="s2-help">{t('settings.executors.taskDefault.help')}</p>
             </div>
-          </div>
-        </section>
-        )}
-
-        {/* ── Chat view ── */}
-        {activeSection === 'chatview' && (
-        <section className="s2-section">
-          <h3 className="s2-sectiontitle">{t('settings.section.chatview')}</h3>
-          <div className="s2-card">
-            <p className="s2-help">{t('settings.chatview.help')}</p>
-            <dl className="kv-grid">
-              <dt>{t('settings.chatview.claudeSurface')}</dt>
-              <dd>
-                <div className="segm">
-                  {([
-                    ['structured', 'settings.chatview.claudep'],
-                    ['tty', 'settings.chatview.tty'],
-                  ] as const).map(([val, labelKey]) => (
-                    <button
-                      key={val}
-                      className={`segm-item ${claudeSurface === val ? 'active' : ''}`}
-                      onClick={() => { void patchChatView({ claude_chat_surface: val }); }}
-                    >
-                      {t(labelKey)}
-                    </button>
-                  ))}
-                </div>
-              </dd>
-            </dl>
           </div>
         </section>
         )}
@@ -732,7 +678,6 @@ export function SettingsNavInspector({ active, onSelect }: { active: NavKey; onS
             ))}
           </div>
         ))}
-        <div className="s2-foot settings-nav-foot">{t('settings.foot')}</div>
       </div>
     </aside>
   );

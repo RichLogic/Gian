@@ -27,8 +27,8 @@ export type Role = 'individual' | 'engineer' | 'pm';
 // Gian injects a small ROLE header at the top of a session. On the Codex /
 // Claude-structured "prepend to first message" path it is wrapped in these
 // sentinels so the web can strip it from the visible transcript (the text still
-// reaches the model). On the Claude-TTY SessionStart-hook path it never enters
-// the visible conversation, so no stripping is needed there.
+// reaches the model). On the historical Claude-TTY SessionStart-hook path it
+// never entered the visible conversation, so no stripping was needed there.
 export const GIAN_ROLE_OPEN = '<<gian:role>>';
 export const GIAN_ROLE_CLOSE = '<</gian:role>>';
 
@@ -163,11 +163,11 @@ export interface TaskAction {
   action_id: string;
   task_id: string;
   session_id: string;
-  /** Host DB turn UUID. Nullable — a TTY Stop may not carry one. */
+  /** Host DB turn UUID. Nullable — historical Claude TTY Stop hooks had none. */
   host_turn_id: string | null;
   /** Runtime-native key of the assistant output the block parsed from
-   *  (Codex `turn_completed.turnId`; Claude structured message/turn id; Claude
-   *  TTY: JSONL message id / offset / hook seq, §7). */
+   *  (Codex `turn_completed.turnId`; Claude structured message/turn id;
+   *  historical Claude TTY: JSONL message id / offset / hook seq, §7). */
   source_turn_key: string | null;
   method: GianActionMethod;
   /** Hash of the verbatim action block text (stable — Codex final text is a

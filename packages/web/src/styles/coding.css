@@ -671,7 +671,7 @@
 }
 .approval-plan-md hr {
   border: none;
-  border-top: 1px solid var(--hairline-1);
+  border-top: 1px solid var(--hairline);
   margin: 12px 0;
 }
 .approval-plan-md a { color: var(--accent-text); text-decoration: underline; text-underline-offset: 2px; }
@@ -688,7 +688,7 @@
 }
 .approval-plan-md th,
 .approval-plan-md td {
-  border: 1px solid var(--hairline-1);
+  border: 1px solid var(--hairline);
   padding: 4px 8px;
   text-align: left;
 }
@@ -717,7 +717,7 @@
   align-self: flex-start;
   margin: 4px 12px 6px;
   padding: 4px 10px;
-  border: 1px solid var(--hairline-1);
+  border: 1px solid var(--hairline);
   border-radius: 999px;
   background: var(--surface);
   color: var(--text-2);
@@ -1796,10 +1796,11 @@
 }
 .tree-item.folder .tree-name { color: var(--text); font-weight: 500; }
 .tree-item .tree-caret {
+  width: 12px;
   color: var(--text-3);
-  font-size: 9px;
   transition: transform 120ms var(--ease);
-  display: inline-block;
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none;
 }
 .tree-item.open .tree-caret { transform: rotate(90deg); }
 .tree-item .tree-ico {

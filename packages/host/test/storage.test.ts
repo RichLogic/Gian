@@ -228,6 +228,36 @@ test('migration 034 adds nullable context state and incomplete legacy totals', (
   }
 });
 
+test('migration 036 adds the pending sidechat fork reference', () => {
+  const dir = makeTempDir();
+  try {
+    const db = openDatabase(dir);
+    const columns = db.prepare('PRAGMA table_info(sessions)').all() as Array<{
+      name: string;
+    }>;
+    assert.ok(
+      columns.some(column => column.name === 'fork_from_session_id'),
+      'sessions missing fork_from_session_id',
+    );
+    const foreignKeys = db.prepare('PRAGMA foreign_key_list(sessions)').all() as Array<{
+      from: string;
+      table: string;
+      on_delete: string;
+    }>;
+    assert.ok(
+      foreignKeys.some(key => (
+        key.from === 'fork_from_session_id'
+        && key.table === 'sessions'
+        && key.on_delete === 'SET NULL'
+      )),
+      'sidechat fork must clear when its parent session is deleted',
+    );
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('loadConfig returns defaults from seeded config rows', () => {
   const dir = makeTempDir();
   try {

@@ -2,18 +2,17 @@
 //   EVT-006 — Codex reasoning must default to a collapsed
 //             ReasoningCard with summary/full label and line count.
 //   EVT-007 — Codex plan_update + cc exit_plan_mode approval must
-//             surface a `PlanChip` that opens the plan Sheet on click.
+//             surface a `PlanChip` that expands the plan inline on click.
 //
 // The reducer side is already pinned by
 // `evt-006-007-008-reducers.test.ts`. This file closes the rendering
 // dimension so the matrix rows can leave GAP.
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ApprovalItem, ReasoningItem, TranscriptItem } from '../src/types.js';
 import { ReasoningCard } from '../src/transcript/items.js';
-import { PlanOpenContext } from '../src/transcript/items.js';
 import { PlanChip } from '../src/components/PlanChip.js';
 
 function reasoningItem(overrides: Partial<ReasoningItem> = {}): ReasoningItem {
@@ -129,26 +128,28 @@ describe('EVT-007: PlanChip from cc exit_plan_mode approval', () => {
     expect(chip.querySelector('.plan-chip-dot--declined')).not.toBeNull();
   });
 
-  it('EVT-007: clicking the chip fires PlanOpenContext callback with the approval markdown', async () => {
+  it('EVT-007: clicking the chip toggles an inline panel with the approval markdown', async () => {
     const user = userEvent.setup();
-    const onOpen = vi.fn();
     const items: TranscriptItem[] = [planApproval({ cmd: '## Plan\n- step a\n- step b' })];
-    render(
-      <PlanOpenContext.Provider value={onOpen}>
-        <PlanChip items={items} sessionId="sess-1" />
-      </PlanOpenContext.Provider>,
-    );
-    await user.click(screen.getByRole('button', { name: /Plan/i }));
-    expect(onOpen).toHaveBeenCalledWith({
-      id: 'appr-plan',
-      title: 'Plan',
-      markdown: '## Plan\n- step a\n- step b',
-    });
+    render(<PlanChip items={items} sessionId="sess-1" />);
+
+    const chip = screen.getByRole('button', { name: /Plan/i });
+    expect(chip).toHaveAttribute('aria-expanded', 'false');
+    await user.click(chip);
+
+    expect(chip).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('region', { name: 'Plan' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Plan' })).toBeInTheDocument();
+    expect(screen.getByText('step a')).toBeInTheDocument();
+    expect(screen.getByText('step b')).toBeInTheDocument();
+
+    await user.click(chip);
+    expect(chip).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('region', { name: 'Plan' })).not.toBeInTheDocument();
   });
 
   it('EVT-007: picks the MOST RECENT exit_plan_mode approval when multiple exist', async () => {
     const user = userEvent.setup();
-    const onOpen = vi.fn();
     const items: TranscriptItem[] = [
       planApproval({ approvalId: 'old', cmd: 'old plan' }),
       // Some unrelated approvals in between
@@ -160,17 +161,10 @@ describe('EVT-007: PlanChip from cc exit_plan_mode approval', () => {
       },
       planApproval({ approvalId: 'new', cmd: 'new plan' }),
     ];
-    render(
-      <PlanOpenContext.Provider value={onOpen}>
-        <PlanChip items={items} sessionId="sess-1" />
-      </PlanOpenContext.Provider>,
-    );
+    render(<PlanChip items={items} sessionId="sess-1" />);
     await user.click(screen.getByRole('button', { name: /Plan/i }));
-    expect(onOpen).toHaveBeenCalledWith({
-      id: 'new',
-      title: 'Plan',
-      markdown: 'new plan',
-    });
+    expect(screen.getByRole('region', { name: 'Plan' })).toHaveTextContent('new plan');
+    expect(screen.queryByText('old plan')).not.toBeInTheDocument();
   });
 });
 
@@ -185,20 +179,14 @@ describe('EVT-007: PlanChip from codex plan_update', () => {
     expect(screen.getByRole('button', { name: /Plan/i })).toBeInTheDocument();
   });
 
-  it('EVT-007: clicking the codex chip fires PlanOpenContext with the live plan markdown', async () => {
+  it('EVT-007: clicking the codex chip expands the live plan markdown inline', async () => {
     const user = userEvent.setup();
-    const onOpen = vi.fn();
-    render(
-      <PlanOpenContext.Provider value={onOpen}>
-        <PlanChip items={[]} sessionId="sess-2" codexPlanText={LIVE_PLAN} />
-      </PlanOpenContext.Provider>,
-    );
-    await user.click(screen.getByRole('button', { name: /Plan/i }));
-    expect(onOpen).toHaveBeenCalledWith({
-      id: 'codex-plan-sess-2',
-      title: 'Plan',
-      markdown: LIVE_PLAN,
-    });
+    render(<PlanChip items={[]} sessionId="sess-2" codexPlanText={LIVE_PLAN} />);
+
+    const chip = screen.getByRole('button', { name: /Plan/i });
+    await user.click(chip);
+    expect(screen.getByRole('region', { name: 'Plan' })).toHaveTextContent('Live plan');
+    expect(screen.getByRole('region', { name: 'Plan' })).toHaveTextContent('step');
   });
 
   it('EVT-007: renders nothing when both items have no plan approval AND codexPlanText is empty', () => {

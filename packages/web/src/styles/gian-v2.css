@@ -76,7 +76,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 12px 0 8px;
+  /* Right inset centers the trailing panel-3 toggle over the dock column
+     below it (dock-w 38px → center at 19px; tb-toggle is 26px → 19−13=6). */
+  padding: 0 6px 0 8px;
   background: var(--surface-2);
 }
 .tb-toggle {
@@ -651,24 +653,11 @@
 }
 .sb-group:first-child { margin-top: 2px; }
 .sb-group:hover { background: var(--surface-2); }
-.sb-group .caret {
-  width: 10px;
+.sb-group-ico {
+  width: 14px;
   color: var(--text-3);
-  font-size: 9px;
   flex: none;
   display: inline-flex; align-items: center; justify-content: center;
-}
-/* Folder glyph ahead of the workspace name (the name span is the 2nd child —
-   no JSX hook, so it rides in via CSS). */
-.sb-group > span:nth-child(2)::before {
-  content: '';
-  display: inline-block;
-  width: 13px; height: 13px;
-  margin-right: 6px;
-  vertical-align: -2.5px;
-  background: var(--text-3);
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 .sb-group .count {
   margin-left: auto;
@@ -721,7 +710,7 @@
   text-align: left;
   background: transparent; border: 0;
   cursor: pointer;
-  transition: background 80ms var(--ease);
+  transition: background var(--dur-fast) var(--ease-soft);
 }
 .rail-item:hover { background: var(--surface-2); }
 .rail-item.active { background: var(--accent-soft); }
@@ -1015,7 +1004,11 @@
 
 /* Prev/next "your messages" jump control — a labelled pill pinned to the scroll
    area's bottom-right (top set by JS, pulled up by its own height). The caption
-   makes the two arrows self-explanatory at a glance. */
+   makes the two arrows self-explanatory at a glance. When the layout is too
+   narrow for the pill to sit beside the transcript without covering text, JS
+   switches it to `is-compact`: caption dropped, arrows stacked vertically and
+   docked to the right edge (vertically centered), where they ride the padding
+   + scrollbar strip instead of the messages. */
 .transcript-navbtns {
   position: absolute;
   right: 14px;
@@ -1033,6 +1026,24 @@
   transition: opacity .12s ease;
 }
 .transcript-navbtns:hover { opacity: 1; }
+.transcript-navbtns.is-compact {
+  right: 6px;
+  flex-direction: column;
+  padding: 4px 3px;
+  transform: translateY(-50%);
+}
+.transcript-navbtns.is-compact .tn-caption { display: none; }
+
+/* Compact-dock gutter (JS toggles this on `.transcript` in narrow layouts):
+   the text column yields 40px on the right so the vertically-centred dock
+   rides an empty strip — transcript padding + scroll-container padding —
+   instead of overlapping message text. The padding sits INSIDE the
+   transcript box, so the JS width measurement that picks the mode is
+   unaffected by the toggle. The sticky user-header backdrop and hairline
+   are re-extended to keep masking scrolled content across the gutter. */
+.transcript.nav-docked { padding-right: 40px; }
+.transcript.nav-docked .msg.user::before,
+.transcript.nav-docked .msg.user::after { right: -40px; }
 .tn-caption {
   font-size: 11px;
   color: var(--text-2, var(--text));
@@ -1485,36 +1496,6 @@
 .composer-model .think i:nth-child(3) { height: 10px; }
 .composer-model .think i.on { background: var(--accent-text); opacity: 1; }
 
-/* TTY read-only readout — model / effort / mode are owned by the live CLI, so
-   they show as muted, non-interactive text. Only the trailing "edit in CLI"
-   link is actionable (jumps to the terminal). Replaces the interactive model
-   button + mode segmented control while in TTY. */
-.composer-tty-meta {
-  display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px;
-  padding: 4px 8px;
-  font: 500 var(--fz-11)/1 var(--font-mono);
-  color: var(--text-3);
-}
-.composer-tty-meta .ctm-dot {
-  width: 7px; height: 7px; border-radius: 2px; display: inline-block; opacity: 0.7;
-}
-.composer-tty-meta .ctm-model { color: var(--text-2); }
-.composer-tty-meta .ctm-effort { display: inline-flex; align-items: center; gap: 4px; }
-.composer-tty-meta .ctm-effort .think-bars { opacity: 0.85; }
-.composer-tty-meta .ctm-effort-label { text-transform: capitalize; }
-.composer-tty-meta .ctm-mode {
-  text-transform: none; letter-spacing: 0.04em;
-  padding-left: 6px; margin-left: 1px;
-  border-left: 1px solid var(--hairline);
-}
-.composer-tty-meta .ctm-edit {
-  margin-left: 2px; padding: 2px 4px;
-  background: transparent; border: 0; border-radius: var(--r-2);
-  font: inherit; color: var(--accent-text);
-  cursor: pointer; opacity: 0.85;
-}
-.composer-tty-meta .ctm-edit:hover { opacity: 1; text-decoration: underline; }
-
 .composer-mode {
   display: inline-flex;
   padding: 2px;
@@ -1698,12 +1679,11 @@
 }
 
 /* tab-strip "+" popover anchor (sidechat session picker) */
-.tab-add-anchor { position: relative; display: inline-flex; }
 
 /* Sidechat — the chat tab body fills the sheet island without the main
    column's island chrome; the sheet-content scroller is stopped because
    SessionMain scrolls its own .main-scroll. */
-.sheet-content:has(> .sheet-chat) { overflow: hidden; }
+.sheet-content:has(.sheet-chat) { overflow: hidden; }
 .sheet-chat {
   flex: 1; min-height: 0;
   display: flex; flex-direction: column;
@@ -1717,60 +1697,19 @@
 }
 .sheet-chat-missing { padding: 20px; color: var(--text-3); font-size: var(--fz-13); }
 
-/* Sidechat session picker — popover (tab strip "+") + inline empty state */
-.sidechat-picker {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  width: 260px;
-  max-height: 320px;
-  overflow-y: auto;
-  background: var(--surface);
-  border-radius: var(--r-2);
-  box-shadow: var(--shadow-2);
-  padding: 6px;
-  z-index: 60;
-  display: flex; flex-direction: column; gap: 2px;
-}
-.sidechat-picker.inline {
-  position: static;
-  width: 300px;
-  max-height: none;
-  box-shadow: none;
-  border: 1px solid var(--hairline);
-}
+/* Sidechat empty state — intro + fork-current-session action */
 .sidechat-empty {
   align-items: center;
   justify-content: center;
   padding: 24px;
 }
-.sidechat-picker-head {
-  font: 600 10.5px/1 var(--font-mono);
-  color: var(--text-3);
-  padding: 4px 8px 6px;
+.sidechat-intro {
+  max-width: 320px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
 }
-.sidechat-picker-empty { padding: 8px; color: var(--text-3); font-size: var(--fz-12); }
-.sidechat-picker-ws {
-  font: 600 10px/1 var(--font-mono);
-  letter-spacing: 0.08em;
-  color: var(--text-3);
-  padding: 6px 8px 3px;
-}
-.sidechat-picker-row {
-  display: flex; align-items: center; gap: 6px;
-  width: 100%;
-  padding: 6px 8px;
-  background: transparent; border: 0;
-  border-radius: var(--r-1);
-  text-align: left;
-  font-size: var(--fz-13);
-  color: var(--text);
-  cursor: pointer;
-}
-.sidechat-picker-row:hover:not(:disabled) { background: var(--surface-2); }
-.sidechat-picker-row:disabled { opacity: 0.45; cursor: not-allowed; }
-.sidechat-picker-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sidechat-picker-row .exec { flex: none; font: 10px var(--font-mono); color: var(--text-3); }
+.sidechat-intro-title { font-size: var(--fz-15, 15px); font-weight: 600; color: var(--text); }
+.sidechat-intro-desc { font-size: var(--fz-13); color: var(--text-2); line-height: 1.5; }
+.sidechat-intro-note { font-size: var(--fz-12); color: var(--text-3); }
 
 /* Browser tab body — address bar + iframe preview */
 .browser-body {
@@ -1814,30 +1753,35 @@
   color: var(--text-3);
   font-size: var(--fz-13);
 }
-/* Sheet tab strip — Codex pill style (phase 6): capsule tabs on the unified
-   panel-header height, no visible divider under the strip. */
+/* Sheet tab strip — Codex-style compact tabs: the app's standard small-
+   control radius (not full pills), tight icon+name rows, no visible divider
+   under the strip. */
 .sheet-tabs {
   flex: none;
   display: flex; align-items: center;
   height: var(--panel-header-h);
   padding: 0 6px;
-  gap: 4px;
+  gap: 2px;
   overflow-x: auto;
   background: var(--surface);
 }
 .sheet-content, .sheet-term, .sheet-empty { background: var(--surface); }
-.sheet-terminal-slot {
+/* Keep-alive slot for host-rendered tab bodies (term/sidechat/browser/
+   workspaces/settings): every tab stays mounted, inactive slots hide with
+   display:none — this is what isolates per-tab state (xterm, iframe history). */
+.sheet-tab-slot {
   display: flex;
+  flex-direction: column;
   flex: 1;
   min-width: 0;
   min-height: 0;
 }
 .sheet-tabs::-webkit-scrollbar { display: none; }
 .sheet-tab {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 0 10px;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 0 8px;
   height: 26px;
-  border-radius: var(--r-pill);
+  border-radius: var(--r-2);
   font: var(--fz-12)/1 var(--font-mono);
   color: var(--text-3);
   background: transparent;
@@ -3504,7 +3448,6 @@
 .session-menu .rule { height: 1px; background: var(--hairline); margin: 4px 4px; }
 
 /* ---------- tab-add popover (for the + on sheet tab bar) ---------- */
-.tab-add-anchor { position: relative; display: inline-flex; }
 .tab-add-pop {
   position: fixed;
   min-width: 200px;
@@ -3628,31 +3571,6 @@
 }
 .composer-bypass-banner svg { flex: none; }
 
-.composer-remote-banner {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 12px;
-  font: 500 11px/1.3 var(--font-sans);
-  color: var(--text-1);
-  background: oklch(from var(--accent) l c h / 0.08);
-  border-bottom: 1px solid oklch(from var(--accent) l c h / 0.20);
-}
-.composer-remote-banner .spinner { flex: none; }
-.composer-remote-cancel {
-  margin-left: auto;
-  padding: 2px 8px;
-  font: 600 10px/1.4 var(--font-mono);
-  color: var(--text-2);
-  background: transparent;
-  border: 1px solid var(--border-2);
-  border-radius: var(--r-pill);
-  cursor: pointer;
-  letter-spacing: 0.04em;
-}
-.composer-remote-cancel:hover {
-  color: var(--text-1);
-  border-color: var(--text-2);
-}
-
 .cmode-warn {
   display: inline-block;
   margin-right: 3px;
@@ -3772,17 +3690,18 @@
 .approval-inbox-link:hover { border-bottom-color: var(--accent); }
 
 /* ---------- Inspector eyebrow label ---------- */
+/* Phase 6 unification: every panel-3 head is exactly --panel-header-h with
+   vertically-centered content (a previous baseline/wrap override here made
+   some heads — worst: the settings nav — render tall and off-center). */
 .insp-head {
-  align-items: baseline;
-  flex-wrap: wrap;
+  align-items: center;
+  flex-wrap: nowrap;
 }
 .insp-eyebrow {
-  width: 100%;
   font: 600 9.5px/1 var(--font-mono);
   color: var(--text-3);
   text-transform: none;
   letter-spacing: 0.08em;
-  margin-bottom: 2px;
   opacity: 0.75;
 }
 
@@ -3848,22 +3767,22 @@
 .gian-mascot .ink { fill: currentColor; }
 .gian-mascot * { transform-box: view-box; }
 
-/* The selected Voice-G keeps its shape while the two voice strokes breathe. */
+/* The selected Dragon-G keeps its shape while the two whiskers breathe. */
 .gian-mascot.working .g-body {
   transform-origin: 627px 680px;
   animation: gian-bob 1.5s var(--ease) infinite;
 }
-.gian-mascot.working .g-voice-line {
+.gian-mascot.working .g-whisker {
   transform-origin: 970px 390px;
-  animation: gian-voice 0.9s ease-in-out infinite;
+  animation: gian-whisker 0.9s ease-in-out infinite;
 }
-.gian-mascot.working .g-voice-line.second { animation-delay: 0.18s; }
+.gian-mascot.working .g-whisker.second { animation-delay: 0.18s; }
 
 @keyframes gian-bob {
   0%, 100% { transform: translateY(0) rotate(-1deg); }
   50% { transform: translateY(-18px) rotate(1deg); }
 }
-@keyframes gian-voice {
+@keyframes gian-whisker {
   0%, 100% { transform: translate(0, 0) scale(0.92); opacity: 0.42; }
   50% { transform: translate(18px, -8px) scale(1.06); opacity: 1; }
 }

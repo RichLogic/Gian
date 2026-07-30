@@ -71,6 +71,10 @@ export interface SessionUpdatedMessage {
 export interface SessionCreatedMessage {
   type: 'session:created';
   session: Session;
+  /** Echo of SessionCreateMessage.client_tag — lets the creating client
+   *  correlate this row with its request (e.g. sidechat binds the new side
+   *  thread to its tab instead of switching the main chat to it). */
+  client_tag?: string;
 }
 
 export interface SessionDeletedMessage {
@@ -222,36 +226,6 @@ export interface SessionRuntimeSwitchedMessage {
   runtime_mode: RuntimeMode;
 }
 
-export type TtySurface = 'beta' | 'cli';
-
-export interface TtyLockMessage {
-  type: 'tty:lock';
-  session_id: string;
-  locked: boolean;
-  owner: boolean;
-  surface?: TtySurface;
-  reason?: string;
-  /** Whether the underlying PTY is actually alive. After a host restart a
-   *  session can still be `runtime_mode='tty'` with no PTY (it isn't auto-
-   *  respawned), so the client shows a "TTY not running — open it" affordance
-   *  when this is explicitly `false`. Omitted by the lock-only broadcasts. */
-  alive?: boolean;
-}
-
-/**
- * Claude Code "Remote Control" connection state for a TTY session, parsed
- * from the status line the CLI prints into the PTY (`Remote Control
- * connecting… / connected / disconnected`). Ephemeral, PTY-scoped — the host
- * tracks it in memory and re-emits `disconnected` when the PTY exits.
- */
-export type RemoteControlState = 'connecting' | 'connected' | 'disconnected';
-
-export interface TtyRemoteControlMessage {
-  type: 'tty:remote-control';
-  session_id: string;
-  state: RemoteControlState;
-}
-
 /**
  * Coarse-grained "the workspace's git state may have changed" ping. Sent
  * after fetch / branch create / merge / drop / worktree teardown — anything
@@ -321,8 +295,6 @@ export type ServerToClientMessage =
   | SessionRuntimeSwitchedMessage
   | SessionNativeConfigMessage
   | SessionSlashCommandsMessage
-  | TtyLockMessage
-  | TtyRemoteControlMessage
   | WorkspaceGitUpdatedMessage
   | ErrorMessage;
 
@@ -341,6 +313,13 @@ export interface SessionCreateMessage {
   base_branch?: string;
   /** Override the auto-generated branch name. Worktree mode only. */
   branch?: string;
+  /** Fork an existing Gian session's native thread into the new session
+   *  (Gian sidechat, claude-only): the new session's first turn runs
+   *  `claude -p --resume <parent native> --fork-session`, carrying the
+   *  parent's history without writing back into it. */
+  fork_from?: string;
+  /** Opaque client correlation token, echoed back on session:created. */
+  client_tag?: string;
 }
 
 export interface SessionSelectMessage {
@@ -554,10 +533,10 @@ export interface QueueClearMessage {
 }
 
 /**
- * Request a runtime-mode switch for a session (Structured ↔ TTY). Allowed
- * only while the session is idle (no in-flight turn, no pending approval,
- * no TTY-side permission prompt). On success the host emits
- * `session:runtime-switched` and a follow-up `session:updated`.
+ * Request a runtime-mode switch for a session (Structured ↔ TTY). Codex-only
+ * now — Claude sessions are always `structured`. Allowed only while the
+ * session is idle (no in-flight turn, no pending approval). On success the
+ * host emits `session:runtime-switched` and a follow-up `session:updated`.
  *
  * Failure cases (busy / closed / unsupported) come back as a regular
  * `ErrorMessage` with `code = 'SWITCH_BLOCKED'`.
@@ -566,43 +545,11 @@ export interface SessionSwitchRuntimeMessage {
   type: 'session:switch-runtime';
   session_id: string;
   target: RuntimeMode;
-  /** Claude-only UI surface requesting the TTY lock. `beta` is the
-   *  TTY-backed chat surface; `cli` is the raw xterm surface. */
-  surface?: TtySurface;
-  /** When true and target='tty' and executor='claude', spawn the PTY
-   *  with Claude Code's `--remote-control` flag so the session can also
-   *  be driven from claude.ai / Claude app. Requires Claude Code ≥
-   *  2.1.52; older binaries will surface a spawn error. Ignored for
-   *  non-claude / non-tty switches. */
-  remote_control?: boolean;
   /** Force the switch even when the session is already in `target` mode. Used
    *  to re-spawn a dead PTY (e.g. after a host restart the session is still
    *  `runtime_mode='tty'` but no PTY exists). Without this, switchRuntime
    *  no-ops when already in the target mode. */
   force?: boolean;
-}
-
-/**
- * Toggle Claude Code Remote Control on a session that's already in TTY mode by
- * sending the `/remote-control` slash command into the live PTY. Host-trusted
- * (no web TTY-owner check) — the host writes it via the same input path as
- * keystrokes. No-op unless executor='claude' and runtime_mode='tty'. The
- * resulting state change comes back as a `tty:remote-control` broadcast parsed
- * from the PTY status line, not as a direct reply.
- */
-export interface SessionRemoteControlMessage {
-  type: 'session:remote-control';
-  session_id: string;
-}
-
-export interface TtyClaimMessage {
-  type: 'tty:claim';
-  session_id: string;
-  surface: TtySurface;
-  /** Explicit user action from a locked-out window. When true, host
-   *  transfers the TTY owner lock to this client and notifies the previous
-   *  owner that it has been kicked off the session TTY. */
-  takeover?: boolean;
 }
 
 /**
@@ -706,8 +653,6 @@ export type ClientToServerMessage =
   | QueueSendNowMessage
   | QueueClearMessage
   | SessionSwitchRuntimeMessage
-  | SessionRemoteControlMessage
-  | TtyClaimMessage
   | PtyInputMessage
   | PtyResizeMessage
   | PtyReplayRequestMessage

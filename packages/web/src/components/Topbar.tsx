@@ -6,7 +6,6 @@ export type Mode = 'sessions' | 'tasks' | 'spaces' | 'bots';
 export type ViewState = 'main' | 'both' | 'workbench';
 
 const I = {
-  sidebar: 'M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z M9 3v18',
   back: 'M15 18l-6-6 6-6',
   forward: 'M9 18l6-6-6-6',
 };
@@ -19,26 +18,19 @@ function Icon({ d, size = 16 }: { d: string; size?: number }) {
   );
 }
 
-function ViewIcon({ variant }: { variant: 'main' | 'both' | 'wb' }) {
-  if (variant === 'main') {
-    return (
-      <svg viewBox="0 0 20 14" width="20" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
-        <rect x="2.2" y="2" width="15.6" height="10" rx="1.6" fill="currentColor" fillOpacity="0.25" />
-      </svg>
-    );
-  }
-  if (variant === 'both') {
-    return (
-      <svg viewBox="0 0 20 14" width="20" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
-        <rect x="2.2" y="2" width="9" height="10" rx="1.6" fill="currentColor" fillOpacity="0.25" />
-        <rect x="12.6" y="2" width="5.2" height="10" rx="1.6" fill="currentColor" fillOpacity="0.55" />
-      </svg>
-    );
-  }
+/** Panel toggle glyph: outer frame + side divider; the side section is tinted
+ *  while the panel is open, empty when collapsed (same visual language for
+ *  the left sidebar and the right panel-3 buttons, mirrored). */
+function PanelIcon({ side, active }: { side: 'left' | 'right'; active: boolean }) {
+  const dividerX = side === 'left' ? 9 : 15;
+  const fill = side === 'left'
+    ? 'M6 3.5h3v17H6a2.5 2.5 0 0 1-2.5-2.5V6A2.5 2.5 0 0 1 6 3.5z'
+    : 'M18 3.5h-3v17h3a2.5 2.5 0 0 0 2.5-2.5V6A2.5 2.5 0 0 0 18 3.5z';
   return (
-    <svg viewBox="0 0 20 14" width="20" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
-      <rect x="2.2" y="2" width="2.4" height="10" rx="1.2" fill="currentColor" fillOpacity="0.18" strokeOpacity="0.6" />
-      <rect x="6.2" y="2" width="11.6" height="10" rx="1.6" fill="currentColor" fillOpacity="0.55" />
+    <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+      {active && <path d={fill} fill="currentColor" fillOpacity={0.28} stroke="none" />}
+      <path d="M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
+      <path d={`M${dividerX} 3v18`} />
     </svg>
   );
 }
@@ -49,10 +41,15 @@ interface Props {
   onRenameSubmit?: (value: string) => void;
   onRenameCancel?: () => void;
 
-  // View-seg (Phase 2+): only visible when sessions mode + workbench has tabs.
-  viewState?: ViewState;
-  onSetViewState?: (v: ViewState) => void;
-  showViewSeg?: boolean;
+  /** Left sidebar collapse toggle — icon mirrors the current state. */
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
+
+  /** Panel-3 (inspector) toggle. `p3Available` gates the button for rails
+   *  that have no panel 3; `p3Visible` drives the icon state. */
+  p3Available: boolean;
+  p3Visible: boolean;
+  onToggleP3: () => void;
 
   // Panel-2 navigation history (rail + tab), driven by App's navStack.
   canGoBack: boolean;
@@ -66,9 +63,11 @@ export function Topbar({
   sessionMenu,
   onRenameSubmit,
   onRenameCancel,
-  viewState = 'main',
-  onSetViewState,
-  showViewSeg = false,
+  sidebarCollapsed,
+  onToggleSidebar,
+  p3Available,
+  p3Visible,
+  onToggleP3,
   canGoBack,
   canGoForward,
   onGoBack,
@@ -81,11 +80,12 @@ export function Topbar({
       <button
         type="button"
         className="tb-toggle"
+        data-testid="topbar-toggle-sidebar"
         title={t('topbar.toggleSidebar')}
         aria-label={t('topbar.toggleSidebar')}
-        onClick={() => window.dispatchEvent(new CustomEvent('gian.toggle-rail'))}
+        onClick={onToggleSidebar}
       >
-        <Icon d={I.sidebar} />
+        <PanelIcon side="left" active={!sidebarCollapsed} />
       </button>
       <button
         type="button"
@@ -119,34 +119,17 @@ export function Topbar({
 
       <span className="topbar-spacer" />
 
-      {showViewSeg && onSetViewState && (
-        <div className="view-seg" title={t('topbar.view.title')}>
-          <button
-            type="button"
-            className={`view-seg-item ${viewState === 'main' ? 'active' : ''}`}
-            onClick={() => onSetViewState('main')}
-            title={t('topbar.view.chatOnly')}
-          >
-            <ViewIcon variant="main" />
-          </button>
-          <button
-            type="button"
-            className={`view-seg-item ${viewState === 'both' ? 'active' : ''}`}
-            onClick={() => onSetViewState('both')}
-            title={t('topbar.view.split')}
-          >
-            <ViewIcon variant="both" />
-          </button>
-          <button
-            type="button"
-            className={`view-seg-item ${viewState === 'workbench' ? 'active' : ''}`}
-            onClick={() => onSetViewState('workbench')}
-            title={t('topbar.view.workbenchOnly')}
-          >
-            <ViewIcon variant="wb" />
-          </button>
-        </div>
-      )}
+      <button
+        type="button"
+        className="tb-toggle"
+        data-testid="topbar-toggle-p3"
+        title={t('topbar.toggleInspector')}
+        aria-label={t('topbar.toggleInspector')}
+        disabled={!p3Available}
+        onClick={onToggleP3}
+      >
+        <PanelIcon side="right" active={p3Visible} />
+      </button>
     </header>
   );
 }

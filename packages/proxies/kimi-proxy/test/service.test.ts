@@ -601,6 +601,64 @@ test('round-trips the exact opaque permission option', async () => {
   await service.close();
 });
 
+test('surfaces the AskUserQuestion text from the toolCall content block', async () => {
+  const permissionIssued = deferred<void>();
+  const events: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory((remote) => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({ sessionId: 'native-question' }),
+      prompt: async (params: { sessionId: string }) => {
+        // Mirror the real ACP adapter shape: title is the bare tool name and
+        // the question text lives in a toolCall content block.
+        const response = remote.requestPermission({
+          sessionId: params.sessionId,
+          toolCall: {
+            toolCallId: 'ask-user-1',
+            title: 'AskUserQuestion',
+            content: [
+              { type: 'content', content: { type: 'text', text: 'Which approach do you prefer?' } },
+            ],
+          },
+          options: [
+            { optionId: 'q0_opt_0', name: 'Option A', kind: 'allow_once' },
+            { optionId: 'q0_opt_1', name: 'Option B', kind: 'allow_once' },
+            { optionId: 'q0_skip', name: 'Skip', kind: 'reject_once' },
+          ],
+        });
+        permissionIssued.resolve();
+        await response;
+        return { stopReason: 'end_turn' };
+      },
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({
+    runtime,
+    emitEvent(method, params) {
+      events.push({ method, params });
+    },
+  });
+  const created = await service.createSession({ cwd: '/workspace/question' });
+  await service.startTurn({
+    sessionId: created.session.id,
+    input: [{ type: 'text', text: 'ask me' }],
+  });
+  await permissionIssued.promise;
+  await waitFor(
+    () => events.some((event) => event.method === 'approval.requested'),
+    'approval event was not emitted',
+  );
+
+  const approval = events.find((event) => event.method === 'approval.requested');
+  const data = approval?.params.data as { title: string; reason: string };
+  assert.equal(data.title, 'AskUserQuestion');
+  assert.equal(data.reason, 'Which approach do you prefer?');
+
+  await service.close();
+});
+
 test('resumes the same native session after the shared ACP process restarts', async () => {
   let generation = 0;
   let resumeCount = 0;

@@ -52,9 +52,9 @@ function upsertToolItem(
 }
 
 /**
- * Beta/TTY image sends arrive as a JSONL echo with NO structured attachments —
+ * Beta/TTY image sends arrived as a JSONL echo with NO structured attachments —
  * the image is referenced inline as `[Attached image: <abs path>]` (the framing
- * `planBetaComposerSend` injects so the PTY's `claude` reads it). Recover any
+ * the composer used to inject so the PTY's `claude` would read it). Recover any
  * host-served per-session attachment (`…/attachments/<sid>/<file>`) into a real
  * `MessageAttachment` so the bubble shows a thumbnail like Chat, and strip the
  * framing from the displayed text. Non-attachment paths / non-images are left
@@ -355,7 +355,7 @@ export function applyEnvelope(
     const idx = items.findIndex(i => i.kind === 'approval' && i.approvalId === approvalId);
     if (idx < 0) return items;
     const existing = items[idx] as ApprovalItem;
-    // A late auto-decline (TtyManager clears stranded question cards on
+    // A late auto-decline (TtyManager used to clear stranded question cards on
     // SessionEnd / tty.exited / stop) must NOT clobber a card the user already
     // answered. Once an approval is non-pending, ignore any `auto:true` resolve.
     if (data.auto === true && existing.status !== 'pending') {
@@ -363,9 +363,9 @@ export function applyEnvelope(
     }
     const next = items.slice();
     // Capture the picked answer(s) for a question resolve so the resolved card
-    // can show "answered with …". Only the synthetic local resolve (TTY paste)
-    // carries answers; the later JSONL watcher resolve does not, so preserve
-    // any value we already have rather than blanking it.
+    // can show "answered with …". Only the synthetic local resolve (the old TTY
+    // paste path) carried answers; the later JSONL watcher resolve did not, so
+    // preserve any value we already have rather than blanking it.
     const answeredWith = formatAnsweredWith(data.answers) ?? existing.answeredWith;
     next[idx] = {
       ...existing,

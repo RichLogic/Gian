@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import type { ApprovalMode, CcModelCapabilities, CodexModelCapabilities, Executor, MessageAttachment, NativeConfigChoice, NativeConfigOption, NativeConfigValue, RemoteControlState, Session, SlashCommand, SlashCommandSource, ThinkingEffort } from '@gian/shared';
+import type { ApprovalMode, CcModelCapabilities, CodexModelCapabilities, Executor, MessageAttachment, NativeConfigChoice, NativeConfigOption, NativeConfigValue, Session, SlashCommand, SlashCommandSource, ThinkingEffort } from '@gian/shared';
 import { loadNativeConfig, loadProxyModels, loadSessionSlashCommands, loadSlashCommands } from '../api.js';
 import { useT } from '../i18n/index.js';
 
@@ -523,12 +523,10 @@ function NativeOptionDrop({
 export function Composer({
   session,
   onSend, onSendSkill, onStop, onQueueAdd, onSetMode, onSetModel, onSetEffort,
-  onSetNativeConfig, onSetServiceTier, onJumpToCli,
+  onSetNativeConfig, onSetServiceTier,
   disabled, running, executor,
   workspaceId,
   footer,
-  armedRemote = false,
-  onCancelRemote,
   disabledSubmitBehavior = 'queue',
   variant = 'full',
   placeholder,
@@ -563,9 +561,6 @@ export function Composer({
   /** codex only: toggle the Fast service tier. Passing this (and executor===
    *  'codex') renders the Fast button. Omitted for claude / minimal composers. */
   onSetServiceTier?: (tier: 'fast' | null) => void;
-  /** TTY only: jump to the CLI surface. In TTY, model/effort/mode are
-   *  display-only — clicking them sends the user to the CLI to change them. */
-  onJumpToCli?: () => void;
   disabled: boolean;
   /** A turn is actually in flight — drives the Send→Stop toggle. Distinct
    *  from `disabled`, which also covers lock-out / pending-question. */
@@ -574,23 +569,6 @@ export function Composer({
   executor: Executor;
   workspaceId?: string;
   footer?: import('react').ReactNode;
-  /** True when user clicked Remote while a turn was still running. The
-   *  composer locks the textarea + send + queue-add and shows a banner.
-   *  Only meaningful for claude sessions in structured mode. */
-  armedRemote?: boolean;
-  /** Called when the Remote icon button is clicked. Parent decides
-   *  whether to fire the switch immediately or arm-for-later. */
-  onRequestRemote?: () => void;
-  /** Called when user clicks Cancel on the armed banner — or clicks the
-   *  Remote button again while armed. */
-  onCancelRemote?: () => void;
-  /** Live Claude Remote Control state for this session when in TTY mode
-   *  (undefined = never observed / off). Drives the in-TTY toggle's on/off
-   *  appearance. */
-  remoteControl?: RemoteControlState;
-  /** Toggle Remote Control in TTY mode by sending `/remote-control` into the
-   *  live PTY. Only meaningful when `session.runtime_mode === 'tty'`. */
-  onToggleRemoteControl?: () => void;
   /** `'minimal'` strips the model / approval-mode / attachment / bypass
    *  controls down to a bare textarea + Send/Stop. Used by the read-only Task
    *  Manager composer: the Manager is a fixed-config Codex session (forced model/policy), so those
@@ -908,9 +886,6 @@ export function Composer({
   }
 
   function submit() {
-    // Hard block while armed for Remote — the input is locked and the
-    // banner is showing. User must Cancel before sending.
-    if (armedRemote) return;
     const trimmed = text.trim();
     // Wait for in-flight uploads to land before sending. We allow the send if
     // there's any text OR at least one ready attachment.
@@ -950,12 +925,7 @@ export function Composer({
     setText('');
   }
 
-  // In TTY mode model/effort/mode are display-only — changing them needs the
-  // CLI selector. Clicking any of these controls jumps to the CLI instead.
-  const ttyDisplayOnly = session.runtime_mode === 'tty';
-
   function setMode(mode: ApprovalMode) {
-    if (ttyDisplayOnly) { onJumpToCli?.(); return; }
     onSetMode(mode, mode === 'auto' ? (turns > 1 ? turns : 1) : undefined);
   }
 
@@ -1106,20 +1076,6 @@ export function Composer({
           </div>
         )}
 
-        {armedRemote && (
-          <div className="composer-remote-banner" role="status" aria-live="polite">
-            <span className="spinner" />
-            <span>{t('composer.remote.banner')}</span>
-            <button
-              type="button"
-              className="composer-remote-cancel"
-              onClick={() => onCancelRemote?.()}
-            >
-              {t('composer.remote.cancel')}
-            </button>
-          </div>
-        )}
-
         <div className="composer-input-wrap">
           <textarea
             ref={ref}
@@ -1129,13 +1085,10 @@ export function Composer({
             onChange={e => setText(e.target.value)}
             onKeyDown={handleTextareaKeyDown}
             onPaste={handlePaste}
-            disabled={armedRemote}
             placeholder={
-              armedRemote
-                ? t('composer.remote.waiting')
-                : disabled
-                  ? t('composer.placeholder.busy')
-                  : (placeholder ?? t('composer.placeholder.idle'))
+              disabled
+                ? t('composer.placeholder.busy')
+                : (placeholder ?? t('composer.placeholder.idle'))
             }
           />
         </div>
@@ -1199,33 +1152,7 @@ export function Composer({
         )}
 
         <div className="composer-bar">
-          {/* TTY: model / effort / mode are owned by the live CLI, so here they
-              are a read-only readout, not interactive pills. A single
-              "edit in CLI" link jumps to the terminal to change them. */}
-          {!minimal && ttyDisplayOnly && (
-            <div className="composer-tty-meta">
-              <span
-                className="ctm-dot"
-                style={{ background: executor === 'codex' ? 'var(--codex)' : 'var(--claude)' }}
-                aria-hidden="true"
-              />
-              <span className="ctm-model">{modelLabel(models, activeModel) || activeModel}</span>
-              <span className="ctm-effort">
-                <BulbIcon />
-                {thinkLevel && <span className="ctm-effort-label">{thinkLevel}</span>}
-              </span>
-              <span className="ctm-mode">{t(`mode.${approvalMode ?? 'ask'}`)}</span>
-              <button
-                type="button"
-                className="ctm-edit"
-                onClick={() => onJumpToCli?.()}
-                title={t('composer.tty.jumpToCli')}
-              >
-                {t('composer.tty.jumpToCli')} <span aria-hidden="true">↗</span>
-              </button>
-            </div>
-          )}
-          {!ttyDisplayOnly && !minimal && executor === 'kimi' && (
+          {!minimal && executor === 'kimi' && (
             <div className="composer-native-config">
               {nativeModelOption && (
                 <NativeOptionDrop
@@ -1313,15 +1240,15 @@ export function Composer({
               ))}
             </div>
           )}
-          {!ttyDisplayOnly && !minimal && executor !== 'kimi' && (<>
+          {!minimal && executor !== 'kimi' && (<>
           {/* Model picker — opens custom model+thinking popover */}
           <div className="composer-model">
           <button
             ref={modelBtnRef}
             type="button"
             className="composer-opt cmp-model-wrap"
-            title={ttyDisplayOnly ? t('composer.model.titleTty') : t('composer.model.title')}
-            onClick={() => { if (ttyDisplayOnly) { onJumpToCli?.(); return; } setModelPopOpen(v => !v); }}
+            title={t('composer.model.title')}
+            onClick={() => setModelPopOpen(v => !v)}
           >
             <ExecutorMark executor={executor} />
             <span className="name cmp-model">{modelLabel(models, activeModel) || activeModel}</span>
@@ -1439,9 +1366,9 @@ export function Composer({
 
           <span className="spacer" />
 
-          {!ttyDisplayOnly && !minimal && <ContextUsageIndicator session={session} />}
+          {!minimal && <ContextUsageIndicator session={session} />}
 
-          {!ttyDisplayOnly && !minimal && executor === 'kimi' && nativeModeOption && (
+          {!minimal && executor === 'kimi' && nativeModeOption && (
             <NativeOptionDrop
               option={nativeModeOption}
               role="mode"
@@ -1451,7 +1378,7 @@ export function Composer({
           )}
 
           {/* Permission mode stays beside Send for every legacy CLI. */}
-          {!ttyDisplayOnly && !minimal && legacyExecutor && (
+          {!minimal && legacyExecutor && (
             <>
               <button
                 ref={approvalDrop.btnRef}
@@ -1537,9 +1464,8 @@ export function Composer({
           )}
 
           {/* Attach files — plus glyph (VS Code style) — picker not supported in v1.
-              Hidden in TTY (it's a no-op there; paste-to-upload still works).
               Hidden in minimal: the Manager composer has no attachment pipeline. */}
-          {!ttyDisplayOnly && !minimal && (
+          {!minimal && (
             <button
               type="button"
               className={`composer-act${pendingFiles.length > 0 ? ' active' : ''}`}
@@ -1571,7 +1497,7 @@ export function Composer({
             <button
               type="button"
               className="composer-act primary"
-              disabled={armedRemote || (!text.trim() && !canSendAttachmentOnly)}
+              disabled={!text.trim() && !canSendAttachmentOnly}
               onClick={submit}
               title={t('composer.send.button')}
               aria-label={t('composer.send.button')}

@@ -202,10 +202,7 @@ describe('CLI-aligned composer controls', () => {
 
   it('removes slash and Remote buttons while keeping typed slash discovery', async () => {
     const user = userEvent.setup();
-    renderComposer(makeSession('claude'), {
-      onRequestRemote: vi.fn(),
-      onToggleRemoteControl: vi.fn(),
-    });
+    renderComposer(makeSession('claude'));
 
     expect(document.querySelector('.slash-box')).toBeNull();
     expect(screen.queryByRole('button', { name: /Remote Control/i })).toBeNull();

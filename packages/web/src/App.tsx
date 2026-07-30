@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ApprovalDecision, ApprovalMode, Bot, EventEnvelope, Executor, RemoteControlState, RunnerInfo, RuntimeMode, ServerToClientMessage, Session, Task, TtySurface, Workspace } from '@gian/shared';
+import type { ApprovalDecision, ApprovalMode, Bot, EventEnvelope, Executor, RunnerInfo, RuntimeMode, ServerToClientMessage, Session, Task, Workspace } from '@gian/shared';
 import { LocaleProvider } from './i18n/index.js';
 import { EN } from './i18n/en.js';
 import { ZH } from './i18n/zh.js';
 import type { WsState } from './ws.js';
 import { GianWs } from './ws.js';
-import { makeWsUrl, loadWorkspaces, loadSessions, loadTasks, loadEvents, loadSettings, loadWorkingTrees, loadBots, loadFile, loadDiff, loadChanged, fetchWsToken, loadRepoInfo, loadApps, loadAllFiles, openFileWith, openFileWithApp, openFileBuiltin } from './api.js';
+import { makeWsUrl, loadWorkspaces, loadSessions, loadTasks, loadEvents, loadSettings, loadWorkingTrees, loadBots, loadFile, loadDiff, fetchWsToken, loadRepoInfo, loadApps, loadAllFiles, openFileWith, openFileWithApp, openFileBuiltin } from './api.js';
 import type { ChangeScope } from './api.js';
 import { injectComposerDraft } from './components/Composer.js';
 import type { WorkingTree } from './api.js';
@@ -24,7 +24,6 @@ import {
   removeSession as removeInboxSession,
   type InboxItem,
 } from './inbox.js';
-import { PendingTtySwitch } from './tty-switch.js';
 import { DiffOpenContext, FileLinkOpenContext, ImageZoomContext, PlanOpenContext } from './transcript/items.js';
 import { ImageLightbox, type ZoomImage } from './components/ImageLightbox.js';
 import { Topbar } from './components/Topbar.js';
@@ -42,7 +41,6 @@ import { SettingsBody, SettingsNavInspector } from './components/SettingsBody.js
 import type { NavKey } from './components/SettingsBody.js';
 import { Terminal, makeWorkbenchWire } from './components/Terminal.js';
 import { BrowserBody, browserHostOf } from './components/BrowserBody.js';
-import { SidechatPicker } from './components/SidechatPicker.js';
 import { CodingView, SessionMain } from './views/CodingView.js';
 import { SpacesView, NewWorkspacePanel } from './views/SpacesView.js';
 import { TasksView, ManagerInspector, managerCardContextNote, type NewSubtaskDraft, type ManagerSubtaskCard, type ManagerComposerHandlers } from './views/TasksView.js';
@@ -55,9 +53,7 @@ import type { QueueEntry, TranscriptItem } from './types.js';
 import { applyGianIconAppearance } from './brand-icon.js';
 import {
   isSessionCreateDispatchError,
-  planBetaComposerSend,
   planCreatedSessionFirstMessage,
-  resolveChatView,
 } from './session-routing.js';
 
 export function App() {
@@ -105,8 +101,6 @@ export function App() {
   const [itemsBySession, setItemsBySession] = useState<Record<string, TranscriptItem[]>>({});
   const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
   const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
-  const [ttyLockBySession, setTtyLockBySession] = useState<Record<string, { owner: boolean; reason?: string; alive?: boolean }>>({});
-  const [remoteControlBySession, setRemoteControlBySession] = useState<Record<string, RemoteControlState>>({});
   const [mode, setMode] = useState<Mode>('tasks');
   const [workingTrees, setWorkingTrees] = useState<WorkingTree[]>([]);
   // Installed apps for the Sheet's "Open with…" menu (macOS; [] elsewhere).
@@ -135,8 +129,13 @@ export function App() {
   // Active Settings section — owned here (controlled into SettingsBody +
   // SettingsNavInspector) so it survives rail collapse/restore.
   const [settingsSection, setSettingsSection] = useState<NavKey>('appearance');
-  // Sidechat session-picker popover (the sidechat tab strip's "+" button).
-  const [sidechatPickerOpen, setSidechatPickerOpen] = useState(false);
+  // Manual panel-3 collapse (Topbar right button) — hides only the inspector,
+  // panel 2 stays. Persists across rail switches until toggled back.
+  const [p3Collapsed, setP3Collapsed] = useState(false);
+  // Mirror of the left sidebar's collapsed state for the Topbar icon. The
+  // views own the real state and listen for `gian.toggle-rail`; this button
+  // is the only dispatcher, so the mirror can't drift.
+  const [sidebarCollapsedUi, setSidebarCollapsedUi] = useState(false);
   const [bots, setBots] = useState<Bot[]>([]);
   const [systemConfig, setSystemConfig] = useState<SystemConfig | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -149,10 +148,6 @@ export function App() {
   const [pathRenameActive, setPathRenameActive] = useState(false);
   const [runner, setRunner] = useState<RunnerInfo | null>(null);
   const pendingFirstMessageRef = useRef<string | null>(null);
-  // Tracks the "switch to TTY + flush staged first message" dance for the Beta
-  // surface. Lifecycle methods make the stale-ref leak that broke post-recover
-  // sends impossible — see PendingTtySwitch.
-  const ttySwitchRef = useRef<PendingTtySwitch>(new PendingTtySwitch());
   // True from `session:create` dispatch until `session:created` arrives. Drives
   // the "Creating…" busy state in NewSessionView so the form doesn't look dead
   // while the host spins up a session + worktree.
@@ -161,12 +156,6 @@ export function App() {
   // global "Forking session…" toast — the user is mid-session when they
   // fork, so without feedback the click looks like a no-op.
   const [forkingSession, setForkingSession] = useState(false);
-  // Sessions for which the user clicked "Remote" while a turn was still
-  // running. The Composer locks input + shows a banner while the id is
-  // here; an effect listens to session:updated and fires the actual
-  // switch-runtime dispatch when status leaves 'running'. Keyed on
-  // session id so two sessions can be armed independently.
-  const [armedRemoteSwitch, setArmedRemoteSwitch] = useState<Set<string>>(() => new Set());
   // Codex plan-mode plan markdown per session — populated by plan_update
   // events. PlanChip reads from here when there's no exit_plan_mode approval
   // to surface (the codex flow doesn't go through approval cards).
@@ -333,6 +322,13 @@ export function App() {
           return;
         case 'session:created': {
           setSessions(prev => [msg.session, ...prev.filter(s => s.id !== msg.session.id)]);
+          // Sidechat fork (client_tag 'sidechat'): bind the new side thread to
+          // a sidechat tab — never hijack the main chat's active session.
+          if (msg.client_tag === 'sidechat') {
+            setCreatingSession(false);
+            openSidechatTab(msg.session.id, msg.session);
+            return;
+          }
           setActiveSessionId(msg.session.id);
           setCreatingSession(false);
           setForkingSession(false);
@@ -341,15 +337,7 @@ export function App() {
           const firstMessagePlan = planCreatedSessionFirstMessage(
             msg.session.executor,
             pendingMsg,
-            resolveChatView(systemConfigRef.current).claude_chat_surface,
           );
-          if (firstMessagePlan.switchToTty) {
-            setItemsBySession(prev => ({ ...prev, [msg.session.id]: [] }));
-            setPendingBySession(p => ({ ...p, [msg.session.id]: false }));
-            ttySwitchRef.current.stage(msg.session.id, firstMessagePlan.ttyText);
-            ws.send({ type: 'session:switch-runtime', session_id: msg.session.id, target: 'tty', surface: 'beta' });
-            return;
-          }
           if (firstMessagePlan.structuredText) {
             // Seed the transcript with an optimistic echo of the first message
             // so the user sees it immediately — the real `user_message` event
@@ -390,19 +378,6 @@ export function App() {
           } else if (partial.status === 'done' || partial.status === 'error') {
             setPendingBySession(p => ({ ...p, [partial.id]: false }));
             if (partial.status === 'done') setInboxItems(prev => clearSessionError(prev, partial.id));
-          }
-          if (partial.runtime_mode === 'tty') {
-            const { flush } = ttySwitchRef.current.onTty(partial.id);
-            if (flush !== null) {
-              setPendingBySession(p => ({ ...p, [partial.id]: true }));
-              ws.send({ type: 'pty:input', session_id: partial.id, text: flush });
-            }
-          } else if (partial.runtime_mode === 'structured') {
-            // Back to structured (force-recover, or manual switch to Chat).
-            // Any pending switch-to-TTY for this session is now moot — drop the
-            // bookkeeping so the next Beta send re-initiates a fresh switch
-            // instead of being silently suppressed by a stale in-flight flag.
-            ttySwitchRef.current.clear(partial.id);
           }
           // archive flag flipping moves the row between active and archived
           // lists. We don't have the full session shape on partial updates,
@@ -459,21 +434,6 @@ export function App() {
             },
           }));
           return;
-        case 'tty:lock':
-          setTtyLockBySession(prev => ({
-            ...prev,
-            [msg.session_id]: {
-              owner: msg.owner,
-              ...(msg.reason ? { reason: msg.reason } : {}),
-              // The claim broadcasts owner first, then a follow-up with `alive`.
-              // Carry the last-known aliveness forward across owner-only updates.
-              alive: msg.alive !== undefined ? msg.alive : prev[msg.session_id]?.alive,
-            },
-          }));
-          return;
-        case 'tty:remote-control':
-          setRemoteControlBySession(prev => ({ ...prev, [msg.session_id]: msg.state }));
-          return;
         case 'session:deleted':
           setSessions(prev => prev.filter(s => s.id !== msg.session_id));
           setArchivedSessions(prev => prev.filter(s => s.id !== msg.session_id));
@@ -523,7 +483,6 @@ export function App() {
           // the transcript reflects the reject state.
           if (msg.session_id) {
             const sid = msg.session_id;
-            ttySwitchRef.current.clear(sid);
             setItemsBySession(prev => {
               const delta = applyErrorEnvelopeToSession(prev[sid], sid);
               if (!delta || delta.items === prev[sid]) return prev;
@@ -582,45 +541,12 @@ export function App() {
   // cards to fold into the next message's hidden context).
   const managerCardsByTaskRef = useRef(managerCardsByTask);
   useEffect(() => { managerCardsByTaskRef.current = managerCardsByTask; }, [managerCardsByTask]);
-  // Latest config for the create handler — it reads the Claude chat surface to
-  // decide whether a new Claude session switches to TTY or stays structured.
-  const systemConfigRef = useRef<SystemConfig | null>(systemConfig);
-  useEffect(() => { systemConfigRef.current = systemConfig; }, [systemConfig]);
   const archivedSessionsRef = useRef<Session[]>([]);
   useEffect(() => { archivedSessionsRef.current = archivedSessions; }, [archivedSessions]);
   // Latest active session id for the inbox's "don't ping the session you're
   // watching" rule — read inside the stable handleEnvelope callback.
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
   useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);
-
-  // Fire queued remote-control switches once their turn lands. Watches the
-  // `sessions` list — when an armed session's status leaves 'running' /
-  // 'pending', dispatch session:switch-runtime with remote_control=true and
-  // drop the armed flag. SWITCH_BLOCKED errors come back through the normal
-  // 'error' message channel; we don't silence them.
-  useEffect(() => {
-    if (armedRemoteSwitch.size === 0) return;
-    const toFire: string[] = [];
-    for (const id of armedRemoteSwitch) {
-      const s = sessions.find(x => x.id === id);
-      if (!s) { toFire.push(id); continue; } // session vanished — clear
-      if (s.status === 'running' || s.status === 'pending') continue;
-      toFire.push(id);
-      ws.send({
-        type: 'session:switch-runtime',
-        session_id: id,
-        target: 'tty',
-        remote_control: true,
-      });
-    }
-    if (toFire.length > 0) {
-      setArmedRemoteSwitch(prev => {
-        const next = new Set(prev);
-        for (const id of toFire) next.delete(id);
-        return next;
-      });
-    }
-  }, [sessions, armedRemoteSwitch, ws]);
 
   // Hydrate transcript on first session view.
   useEffect(() => {
@@ -812,12 +738,6 @@ export function App() {
       revealSheetTab('settings', tab.id);
       return;
     }
-    if (rail === 'diffs' && !wbTabs.some(t => t.group === 'diffs')) {
-      // Panel 2's default content is the flat scope='all' diff; it reveals
-      // the sheet itself once loaded.
-      void openAllDiffInSheet();
-      return;
-    }
     if (rail === 'browser' && !wbTabs.some(t => t.group === 'browser')) {
       addBrowserTab();
       return;
@@ -989,43 +909,6 @@ export function App() {
     });
   }
 
-  /** The diffs rail's default panel-2 content: one flat scope='all' diff with
-   *  every changed file stacked (DiffBody splits it into per-file blocks).
-   *  The host's diff endpoint is per-file, so the flat diff is composed
-   *  client-side from the changed-file list. Singleton tab — re-opening the
-   *  rail refreshes it in place. While this tab is active, Changes-tree
-   *  clicks anchor-scroll it instead of opening single-file diffs. */
-  async function openAllDiffInSheet(): Promise<void> {
-    const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
-    const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
-    const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
-    if (!wt) return;
-    const changed = await loadChanged(wt.id, 'all');
-    const diffs = await Promise.all(changed.map(f => loadDiff(wt.id, f.path, 'all')));
-    const diffText = diffs.filter(Boolean).join('\n');
-    const id = 'tab-diff-all';
-    setActiveRail('diffs');
-    setWbTabs(prev => {
-      const existing = prev.find(t => t.id === id);
-      if (existing) {
-        return prev.map(t => t.id === id ? { ...t, diffText } : t);
-      }
-      const tab: SheetTab = {
-        id,
-        group: 'diffs',
-        name: appT('sheet.tab.allChanges'),
-        kind: 'diff',
-        icoKind: 'diff',
-        ico: '±',
-        diffText,
-        workingTreeId: wt.id,
-        diffAll: true,
-      };
-      return [...prev, tab];
-    });
-    revealSheetTab('diffs', id);
-  }
-
   /** Open a plan in the Sheet (D1). Plans ride the 'files' group — they open
    *  from chat like a document preview. */
   function openPlanInSheet(approvalId: string, planMarkdown: string): void {
@@ -1061,14 +944,13 @@ export function App() {
   }
 
   /** Open a session as a sidechat tab (kind 'chat', group 'sidechat'). One
-   *  tab per session, keyed by session id — re-picking re-activates. The
-   *  picker disables sessions that already have a chat surface mounted, so
-   *  two panels onto the same session can't happen. */
-  function openSidechatTab(sessionId: string): void {
-    const sess = sessionsRef.current.find(s => s.id === sessionId)
+   *  tab per session, keyed by session id. `known` lets the session:created
+   *  handler pass the fresh row before `sessionsRef` has caught up. */
+  function openSidechatTab(sessionId: string, known?: Session): void {
+    const sess = known
+      ?? sessionsRef.current.find(s => s.id === sessionId)
       ?? archivedSessions.find(s => s.id === sessionId);
     if (!sess) return;
-    setSidechatPickerOpen(false);
     setActiveRail('sidechat');
     const id = `tab-chat-${sessionId}`;
     setWbTabs(prev => {
@@ -1085,6 +967,32 @@ export function App() {
       return [...prev, tab];
     });
     revealSheetTab('sidechat', id);
+  }
+
+  /** btw-style sidechat: fork the CURRENT session's context into a new side
+   *  thread (host runs `claude -p --resume <parent> --fork-session` on the
+   *  first turn — claude-only). The `client_tag: 'sidechat'` echo on
+   *  session:created binds the fork to a sidechat tab instead of switching
+   *  the main chat. No-op for non-claude sessions. */
+  function createSidechat(): void {
+    const parent = activeSessionId
+      ? sessionsRef.current.find(s => s.id === activeSessionId) ?? null
+      : null;
+    if (!parent || parent.executor !== 'claude') return;
+    setActiveRail('sidechat');
+    setCreatingSession(true);
+    const baseName = parent.name && parent.name.length > 0
+      ? parent.name
+      : `session ${parent.id.slice(0, 6)}`;
+    ws.send({
+      type: 'session:create',
+      workspace_id: parent.workspace_id,
+      executor: 'claude',
+      ...(parent.approval_mode ? { approval_mode: parent.approval_mode } : {}),
+      name: `${baseName} · side`,
+      fork_from: parent.id,
+      client_tag: 'sidechat',
+    });
   }
 
   /** Add a browser tab (group 'browser'). Additive like terminal tabs; each
@@ -1157,7 +1065,6 @@ export function App() {
     setWbTabs(prev => prev.map(tab => {
       if (tab.kind === 'settings') return { ...tab, name: appT('sheet.tab.settings') };
       if (tab.kind === 'plan') return { ...tab, name: appT('sheet.tab.plan') };
-      if (tab.diffAll) return { ...tab, name: appT('sheet.tab.allChanges') };
       return tab;
     }));
   }, [appT]);
@@ -1262,7 +1169,6 @@ export function App() {
         onForceRecover: () => {
           const mgr = sessionsRef.current.find(s => s.type === 'manager' && s.task_id === task.id);
           if (!mgr) return;
-          ttySwitchRef.current.clear(mgr.id);
           ws.send({ type: 'session:recover', session_id: mgr.id });
         },
         onDelete: async () => {
@@ -1292,10 +1198,6 @@ export function App() {
         try { void navigator.clipboard?.writeText(activeSession.name || ''); } catch (_) { /* ignore */ }
       },
       onForceRecover: () => {
-        // Recover is the unwedge path — a TTY switch that hung is the common
-        // reason to reach for it. Clear stale switch/staged-message bookkeeping
-        // so the next send isn't suppressed (see PendingTtySwitch).
-        ttySwitchRef.current.clear(activeSession.id);
         ws.send({ type: 'session:recover', session_id: activeSession.id });
       },
       onMarkUnread: () => {
@@ -1476,25 +1378,6 @@ export function App() {
         ...(opts?.oneShotBypass ? { oneShotBypass: true } : {}),
       });
     },
-    onBetaSend: (
-      sessionId: string,
-      text: string,
-      opts?: { attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }> },
-    ) => {
-      const attachments = opts?.attachments ?? [];
-      const session = sessionsRef.current.find(s => s.id === sessionId);
-      const plan = planBetaComposerSend(session?.runtime_mode ?? 'structured', text, attachments);
-      if (plan.channel === 'noop') return;
-      setPendingBySession(p => ({ ...p, [sessionId]: true }));
-      if (plan.channel === 'stage_for_tty') {
-        const { sendSwitch } = ttySwitchRef.current.stage(sessionId, plan.text);
-        if (sendSwitch) {
-          ws.send({ type: 'session:switch-runtime', session_id: sessionId, target: 'tty', surface: 'beta' });
-        }
-        return;
-      }
-      ws.send({ type: 'pty:input', session_id: sessionId, text: plan.text });
-    },
     onSendSkill: (sessionId: string, name: string, path: string) =>
       ws.send({
         type: 'message:send',
@@ -1553,28 +1436,6 @@ export function App() {
       ws.send({ type: 'queue:reorder', session_id: sessionId, order }),
     onQueueClear: (sessionId: string) => ws.send({ type: 'queue:clear', session_id: sessionId }),
     onQueueSendNow: (sessionId: string) => {
-      // Beta/TTY (claude): send_now pastes the queue head straight
-      // into the PTY. Mid-turn, Claude's TUI holds it as a queued
-      // message and only writes it to the JSONL — where the watcher
-      // can surface it in Beta — once the running turn ends. So the
-      // bubble would vanish from the queue yet not appear in the
-      // transcript until much later. Seed an optimistic echo of the
-      // head so it shows immediately; the watcher's `user_message`
-      // reconciles it by text (apply.ts), so no duplicate. Structured
-      // send_now already echoes via the host-broadcast user_message,
-      // so we only patch the TTY gap here.
-      const session = sessionsRef.current.find(s => s.id === sessionId);
-      if (session?.executor === 'claude' && session.runtime_mode === 'tty') {
-        const head = (queueBySession[sessionId] ?? [])[0];
-        if (head) {
-          const optimistic = createOptimisticEcho({ sessionId, text: head.text, exec: 'claude' });
-          setItemsBySession(prev => ({
-            ...prev,
-            [sessionId]: [...(prev[sessionId] ?? []), optimistic],
-          }));
-          setPendingBySession(p => ({ ...p, [sessionId]: true }));
-        }
-      }
       ws.send({ type: 'queue:send_now', session_id: sessionId });
     },
     onSetMode: (sessionId: string, approvalMode: ApprovalMode, turns?: number) =>
@@ -1599,7 +1460,7 @@ export function App() {
     onArchive: (id: string, archived: boolean) =>
       ws.send({ type: 'session:archive', session_id: id, archived }),
     onDelete: (id: string) => ws.send({ type: 'session:delete', session_id: id }),
-    onRecover: (id: string) => { ttySwitchRef.current.clear(id); ws.send({ type: 'session:recover', session_id: id }); },
+    onRecover: (id: string) => ws.send({ type: 'session:recover', session_id: id }),
     onMerge: async (id: string) => {
       const { mergeSession } = await import('./api.js');
       const r = await mergeSession(id);
@@ -1612,51 +1473,13 @@ export function App() {
     },
     onRename: (id: string, name: string) =>
       ws.send({ type: 'session:rename', session_id: id, name }),
-    onSwitchRuntime: (sessionId: string, target: RuntimeMode, surface?: TtySurface, opts?: { force?: boolean }) =>
+    onSwitchRuntime: (sessionId: string, target: RuntimeMode, opts?: { force?: boolean }) =>
       ws.send({
         type: 'session:switch-runtime',
         session_id: sessionId,
         target,
-        ...(surface ? { surface } : {}),
         ...(opts?.force ? { force: true } : {}),
       }),
-    onClaimTty: (sessionId: string, surface: TtySurface, takeover?: boolean) =>
-      ws.send({
-        type: 'tty:claim',
-        session_id: sessionId,
-        surface,
-        ...(takeover ? { takeover: true } : {}),
-      }),
-    onRequestRemote: (sessionId: string) => {
-      const s = sessionsRef.current.find(x => x.id === sessionId);
-      const busy = s?.status === 'running' || s?.status === 'pending';
-      if (busy) {
-        // Arm; the effect above fires the switch when status flips.
-        setArmedRemoteSwitch(prev => {
-          const next = new Set(prev);
-          next.add(sessionId);
-          return next;
-        });
-        return;
-      }
-      ws.send({
-        type: 'session:switch-runtime',
-        session_id: sessionId,
-        target: 'tty',
-        remote_control: true,
-      });
-    },
-    onCancelRemote: (sessionId: string) => {
-      setArmedRemoteSwitch(prev => {
-        if (!prev.has(sessionId)) return prev;
-        const next = new Set(prev);
-        next.delete(sessionId);
-        return next;
-      });
-    },
-    onToggleRemoteControl: (sessionId: string) => {
-      ws.send({ type: 'session:remote-control', session_id: sessionId });
-    },
   };
 
   // ─── Per-Task Manager (PRD-v3 P3) ────────────────────────────────────────
@@ -1691,8 +1514,8 @@ export function App() {
           : it,
       );
   // The Manager no longer proposes subtasks into a card/chip. It aligns in
-  // natural language and emits a `<<gian:action>>` the host executes directly
-  // (surface-agnostic — works in web AND Claude TTY). Manual creation still uses
+  // natural language and emits a `<<gian:action>>` the host executes directly.
+  // Manual creation still uses
   // the NewSubtaskForm (header "Create subtask from this" button).
   const managerPending = activeManagerSession
     ? (pendingBySession[activeManagerSession.id] ?? activeManagerSession.status === 'running')
@@ -1947,8 +1770,9 @@ export function App() {
     : activeRail === 'workspaces' ? 'workspaces'
     : activeRail === 'settings' ? 'settings'
     : null;
-  const inspectorVisible = workbenchActive && inspectorKind !== null
+  const inspectorAvailable = workbenchActive && inspectorKind !== null
     && ((inspectorKind === 'files' || inspectorKind === 'changes') ? sessionViewActive : true);
+  const inspectorVisible = inspectorAvailable && !p3Collapsed;
 
   // The workspace tab in the Workbench (zone 3) drives the active-row
   // highlight in the WorkspacesInspector (zone 4). Derived from
@@ -2013,15 +1837,12 @@ export function App() {
     <PlanOpenContext.Provider value={(payload) => openPlanInSheet(payload.id, payload.markdown)}>
       <SessionMain
         session={subtask}
-        chatView={resolveChatView(systemConfig)}
         workspace={subtaskWorkspace}
         items={itemsBySession[subtask.id] ?? []}
         pending={pendingBySession[subtask.id] ?? false}
-        ttyLock={ttyLockBySession[subtask.id]}
         queue={queueBySession[subtask.id] ?? []}
         codexPlanText={planBySession[subtask.id]}
         onSend={(text, opts) => sessionMainHandlers.onSend(subtask.id, text, opts)}
-        onBetaSend={(text, opts) => sessionMainHandlers.onBetaSend(subtask.id, text, opts)}
         onSendSkill={(name, path) => sessionMainHandlers.onSendSkill(subtask.id, name, path)}
         onStop={() => sessionMainHandlers.onStop(subtask.id)}
         onApprove={(approvalId, decision, answers, context) =>
@@ -2049,13 +1870,7 @@ export function App() {
         workingTreeId={subtaskWorkingTreeId}
         branch={workingTrees.find(wt => wt.id === subtaskWorkingTreeId)?.branch ?? null}
         ws={ws}
-        onSwitchRuntime={(target, surface, opts) => sessionMainHandlers.onSwitchRuntime(subtask.id, target, surface, opts)}
-        onClaimTty={(surface, takeover) => sessionMainHandlers.onClaimTty(subtask.id, surface, takeover)}
-        armedRemote={armedRemoteSwitch.has(subtask.id)}
-        onRequestRemote={() => sessionMainHandlers.onRequestRemote(subtask.id)}
-        onCancelRemote={() => sessionMainHandlers.onCancelRemote(subtask.id)}
-        remoteControl={remoteControlBySession[subtask.id]}
-        onToggleRemoteControl={() => sessionMainHandlers.onToggleRemoteControl(subtask.id)}
+        onSwitchRuntime={(target, opts) => sessionMainHandlers.onSwitchRuntime(subtask.id, target, opts)}
       />
     </PlanOpenContext.Provider>
     </DiffOpenContext.Provider>
@@ -2064,9 +1879,8 @@ export function App() {
   ) : null;
 
   /** Sidechat tab body (Sheet kind 'chat'): the same SessionMain the main
-   *  column uses, rebound to the picked session, with primary={false} so
-   *  document-level shortcuts and the runtime-align one-shot stay with the
-   *  main column. v1 simplification (plan 阶段 5): the panel follows the
+   *  column uses, rebound to the picked session. v1 simplification
+   *  (plan 阶段 5): the panel follows the
    *  MAIN session's working-tree context (GitBadge + file-link routing via
    *  openFileInSheet, which resolves against activeSessionId) instead of
    *  plumbing a separate defaultWorkingTreeId chain. */
@@ -2079,17 +1893,13 @@ export function App() {
       <DiffOpenContext.Provider value={() => { /* §C — diff not clickable */ }}>
       <PlanOpenContext.Provider value={(payload) => openPlanInSheet(payload.id, payload.markdown)}>
         <SessionMain
-          primary={false}
           session={sess}
-          chatView={resolveChatView(systemConfig)}
           workspace={workspaces.find(w => w.id === sess.workspace_id) ?? null}
           items={itemsBySession[sess.id] ?? []}
           pending={pendingBySession[sess.id] ?? false}
-          ttyLock={ttyLockBySession[sess.id]}
           queue={queueBySession[sess.id] ?? []}
           codexPlanText={planBySession[sess.id]}
           onSend={(text, opts) => sessionMainHandlers.onSend(sess.id, text, opts)}
-          onBetaSend={(text, opts) => sessionMainHandlers.onBetaSend(sess.id, text, opts)}
           onSendSkill={(name, path) => sessionMainHandlers.onSendSkill(sess.id, name, path)}
           onStop={() => sessionMainHandlers.onStop(sess.id)}
           onApprove={(approvalId, decision, answers, context) =>
@@ -2116,13 +1926,7 @@ export function App() {
           workingTreeId={mainWtId}
           branch={mainWtId ? (workingTrees.find(wt => wt.id === mainWtId)?.branch ?? null) : null}
           ws={ws}
-          onSwitchRuntime={(target, surface, opts) => sessionMainHandlers.onSwitchRuntime(sess.id, target, surface, opts)}
-          onClaimTty={(surface, takeover) => sessionMainHandlers.onClaimTty(sess.id, surface, takeover)}
-          armedRemote={armedRemoteSwitch.has(sess.id)}
-          onRequestRemote={() => sessionMainHandlers.onRequestRemote(sess.id)}
-          onCancelRemote={() => sessionMainHandlers.onCancelRemote(sess.id)}
-          remoteControl={remoteControlBySession[sess.id]}
-          onToggleRemoteControl={() => sessionMainHandlers.onToggleRemoteControl(sess.id)}
+          onSwitchRuntime={(target, opts) => sessionMainHandlers.onSwitchRuntime(sess.id, target, opts)}
         />
       </PlanOpenContext.Provider>
       </DiffOpenContext.Provider>
@@ -2131,13 +1935,6 @@ export function App() {
       </div>
     );
   }
-
-  // Sessions that already have a chat surface mounted — the sidechat picker
-  // lists them disabled (tty claims are exclusive per session).
-  const sidechatExcludeIds = new Set<string>([
-    ...wbTabs.filter(t => t.kind === 'chat' && t.sessionId).map(t => t.sessionId as string),
-    ...(activeSessionId ? [activeSessionId] : []),
-  ]);
 
   return (
     <LocaleProvider locale={locale}>
@@ -2148,9 +1945,14 @@ export function App() {
         sessionMenu={sessionMenu}
         onRenameSubmit={handleRenameSubmit}
         onRenameCancel={handleRenameCancel}
-        showViewSeg={workbenchActive && wbTabs.length > 0}
-        viewState={viewState}
-        onSetViewState={setViewState}
+        sidebarCollapsed={sidebarCollapsedUi}
+        onToggleSidebar={() => {
+          window.dispatchEvent(new CustomEvent('gian.toggle-rail'));
+          setSidebarCollapsedUi(c => !c);
+        }}
+        p3Available={inspectorAvailable}
+        p3Visible={inspectorVisible}
+        onToggleP3={() => setP3Collapsed(c => !c)}
         canGoBack={navIdx > 0}
         canGoForward={navIdx < navStack.length - 1}
         onGoBack={() => navGo(-1)}
@@ -2187,11 +1989,8 @@ export function App() {
               activeSession={activeSession}
               activeWorkspace={activeWorkspace}
               activeSessionId={activeSessionId}
-              chatView={resolveChatView(systemConfig)}
               itemsBySession={itemsBySession}
               pendingBySession={pendingBySession}
-              ttyLockBySession={ttyLockBySession}
-              remoteControlBySession={remoteControlBySession}
               queueBySession={queueBySession}
               planBySession={planBySession}
               onLoadArchived={async () => {
@@ -2225,7 +2024,6 @@ export function App() {
               onMerge={sessionMainHandlers.onMerge}
               onDrop={sessionMainHandlers.onDrop}
               onSend={sessionMainHandlers.onSend}
-              onBetaSend={sessionMainHandlers.onBetaSend}
               onSendSkill={sessionMainHandlers.onSendSkill}
               onStop={sessionMainHandlers.onStop}
               onApprove={sessionMainHandlers.onApprove}
@@ -2251,11 +2049,6 @@ export function App() {
               onClosePreview={() => { /* no-op — replaced by Sheet */ }}
               ws={ws}
               onSwitchRuntime={sessionMainHandlers.onSwitchRuntime}
-              onClaimTty={sessionMainHandlers.onClaimTty}
-              armedRemoteSwitch={armedRemoteSwitch}
-              onRequestRemote={sessionMainHandlers.onRequestRemote}
-              onCancelRemote={sessionMainHandlers.onCancelRemote}
-              onToggleRemoteControl={sessionMainHandlers.onToggleRemoteControl}
               onOpenSpaces={() => setMode('spaces')}
             />
           </PlanOpenContext.Provider>
@@ -2340,18 +2133,9 @@ export function App() {
               onAddTab={(g) => {
                 if (g === 'term') addTerminalTab();
                 else if (g === 'browser') addBrowserTab();
-                else if (g === 'sidechat') setSidechatPickerOpen(o => !o);
+                else if (g === 'sidechat') createSidechat();
               }}
-              addMenu={sidechatPickerOpen ? (
-                <SidechatPicker
-                  sessions={sessions}
-                  workspaces={workspaces}
-                  excludeIds={sidechatExcludeIds}
-                  onPick={openSidechatTab}
-                />
-              ) : null}
-              addMenuFor="sidechat"
-              hidden={!sheetVisible || managerP2}
+              hidden={!sheetVisible || managerP2 || (activeRail === 'sidechat' && !wbTabs.some(t => t.group === 'sidechat'))}
               externalEditors={systemConfig?.external_editors ?? []}
               openApps={systemConfig?.open_apps}
               onOpenWith={handleOpenWith}
@@ -2454,17 +2238,26 @@ export function App() {
                 />
               </div>
             )}
-            {/* Sidechat rail with no chat tabs yet — the session picker IS
-                the panel-2 empty state. */}
+            {/* Sidechat rail with no chat tabs yet: intro + fork-current-
+                session action (claude-only). */}
             {activeRail === 'sidechat' && !wbTabs.some(t => t.group === 'sidechat') && (
               <div className="sheet-group sidechat-empty" style={sheetVisible ? undefined : { display: 'none' }}>
-                <SidechatPicker
-                  inline
-                  sessions={sessions}
-                  workspaces={workspaces}
-                  excludeIds={sidechatExcludeIds}
-                  onPick={openSidechatTab}
-                />
+                <div className="sidechat-intro">
+                  <div className="sidechat-intro-title">{appT('sidechat.intro.title')}</div>
+                  <div className="sidechat-intro-desc">{appT('sidechat.intro.desc')}</div>
+                  {activeSession?.executor === 'claude' ? (
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={creatingSession}
+                      onClick={createSidechat}
+                    >
+                      {appT('sheet.newChat')}
+                    </button>
+                  ) : (
+                    <div className="sidechat-intro-note">{appT('sidechat.claudeOnly')}</div>
+                  )}
+                </div>
               </div>
             )}
           </>
@@ -2496,18 +2289,7 @@ export function App() {
                   const abs = `${wt.path}/${rel}`;
                   void openFileInSheet(abs, perm);
                 }}
-                onOpenDiff={(rel, perm, scope) => {
-                  // While the flat all-diff tab is the active diffs tab, a
-                  // tree click anchor-scrolls panel 2 to that file's block
-                  // instead of opening a single-file diff.
-                  const activeDiffTab = wbTabs.find(t => t.id === activeTabByGroup['diffs']);
-                  if (activeRail === 'diffs' && activeDiffTab?.diffAll) {
-                    const ts = Date.now();
-                    setWbTabs(prev => prev.map(t => t.id === activeDiffTab.id ? { ...t, scrollToPath: rel, scrollToPathTs: ts } : t));
-                    return;
-                  }
-                  void openDiffInSheet(rel, perm, scope);
-                }}
+                onOpenDiff={(rel, perm, scope) => { void openDiffInSheet(rel, perm, scope); }}
                 canCommit={!!activeSession}
                 onComposePrompt={text => { if (activeSessionId) injectComposerDraft(activeSessionId, text); }}
               />

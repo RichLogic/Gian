@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { ApprovalDecision, ApprovalMode, Executor, NativeConfigValue, RemoteControlState, RuntimeMode, Session, TtySurface, Workspace } from '@gian/shared';
+import type { ApprovalDecision, ApprovalMode, Executor, NativeConfigValue, RuntimeMode, Session, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
-import { confirm, toast } from '../feedback.js';
+import { confirm } from '../feedback.js';
 import { createWorkspace, loadBranches, loadRemoteBranches, loadRepoInfo } from '../api.js';
 import type { LocalBranch, RemoteBranch } from '../api.js';
 import { BranchPicker } from '../components/BranchPicker.js';
@@ -16,18 +16,9 @@ import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import { Terminal, makeSessionWire } from '../components/Terminal.js';
 import { Transcript } from '../transcript/Transcript.js';
 import { TranscriptMinimap } from '../transcript/TranscriptMinimap.js';
-import type { ApprovalActionContext, ApprovalItem, QueueEntry, TranscriptItem } from '../types.js';
+import type { ApprovalActionContext, QueueEntry, TranscriptItem } from '../types.js';
 import type { GianWs } from '../ws.js';
-import {
-  betaComposerSubmitBehavior,
-  isTurnRunning,
-  planApprovalResponseDispatch,
-  runtimeTabs,
-  runtimeChatSurface,
-  runtimeForSurface,
-  type ChatViewConfig,
-  type SessionSurface,
-} from '../session-routing.js';
+import { isTurnRunning } from '../session-routing.js';
 
 // ─── V2 inline icons (24-grid, 1.5px stroke, round caps — phase 6 grid) ────
 function SvgIcon({ d, size = 16, stroke = 1.5 }: { d: string; size?: number; stroke?: number }) {
@@ -47,6 +38,8 @@ const ICON = {
   kebabV: 'M12 5.01v-.02 M12 12.01v-.02 M12 19.01v-.02',
   branch: 'M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
   eyeOff: 'M2 2l12 12M6.5 6.5a2 2 0 0 0 2.8 2.8M3.5 4.5a8 8 0 0 0-1.5 3.5C3 11.5 5.5 13 8 13a8 8 0 0 0 4-1.1M9 3a8 8 0 0 1 5 5 8 8 0 0 1-1 2',
+  folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+  folderOpen: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2.5 M3 7v10a2 2 0 0 0 2 2h12.5a2 2 0 0 0 1.9-1.4L21.8 11H7.5a2 2 0 0 0-1.9 1.4L4 17.5',
 };
 
 // 8 hex chars, matches the host's `gian/<8-char-uuid>` default convention.
@@ -143,11 +136,8 @@ export interface CodingViewProps {
   activeSession: Session | null;
   activeWorkspace: Workspace | null;
   activeSessionId: string | null;
-  /** Resolved chat-view prefs (which runtime tabs to show). From SystemConfig. */
-  chatView: ChatViewConfig;
   itemsBySession: Record<string, TranscriptItem[]>;
   pendingBySession: Record<string, boolean>;
-  ttyLockBySession: Record<string, { owner: boolean; reason?: string }>;
   queueBySession: Record<string, QueueEntry[]>;
   /** Codex plan-mode plan markdown per session, populated by plan_update. */
   planBySession: Record<string, string>;
@@ -163,13 +153,6 @@ export interface CodingViewProps {
     text: string,
     opts?: {
       oneShotBypass?: boolean;
-      attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
-    },
-  ) => void;
-  onBetaSend: (
-    sessionId: string,
-    text: string,
-    opts?: {
       attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
     },
   ) => void;
@@ -224,22 +207,7 @@ export interface CodingViewProps {
   ws: GianWs;
   /** Flip the active runtime for a session. Caller forwards to
    *  `session:switch-runtime` WS message. */
-  onSwitchRuntime: (sessionId: string, target: RuntimeMode, surface?: TtySurface, opts?: { force?: boolean }) => void;
-  onClaimTty: (sessionId: string, surface: TtySurface, takeover?: boolean) => void;
-  /** Sessions that have been "armed" for a remote-control switch — i.e.
-   *  the user clicked Remote while a turn was running. Composer reads
-   *  this to lock the input + show a banner. */
-  armedRemoteSwitch: Set<string>;
-  /** User clicked Remote. App decides whether to fire immediately or
-   *  arm for after the current turn. */
-  onRequestRemote: (sessionId: string) => void;
-  /** User clicked Cancel on the armed banner. */
-  onCancelRemote: (sessionId: string) => void;
-  /** Live Claude Remote Control state per session (TTY mode). */
-  remoteControlBySession: Record<string, RemoteControlState>;
-  /** User clicked the antenna while in TTY mode → toggle Remote Control by
-   *  sending `/remote-control` into the live PTY. */
-  onToggleRemoteControl: (sessionId: string) => void;
+  onSwitchRuntime: (sessionId: string, target: RuntimeMode, opts?: { force?: boolean }) => void;
   /** Switch app mode to Spaces (workspace management). Triggered from
    *  the sidebar's "N hidden workspaces · manage" footer link. */
   onOpenSpaces: () => void;
@@ -308,15 +276,12 @@ export function CodingView(p: CodingViewProps) {
       ) : p.activeSession ? (
         <SessionMain
           session={p.activeSession}
-          chatView={p.chatView}
           workspace={p.activeWorkspace}
           items={p.itemsBySession[p.activeSession.id] ?? []}
           pending={p.pendingBySession[p.activeSession.id] ?? false}
-          ttyLock={p.ttyLockBySession[p.activeSession.id]}
           queue={p.queueBySession[p.activeSession.id] ?? []}
           codexPlanText={p.planBySession[p.activeSession.id]}
           onSend={(text, opts) => p.onSend(p.activeSession!.id, text, opts)}
-          onBetaSend={(text, opts) => p.onBetaSend(p.activeSession!.id, text, opts)}
           onSendSkill={(name, path) => p.onSendSkill(p.activeSession!.id, name, path)}
           onStop={() => p.onStop(p.activeSession!.id)}
           onApprove={(approvalId, decision, answers, context) => p.onApprove(p.activeSession!.id, approvalId, decision, answers, context)}
@@ -342,13 +307,7 @@ export function CodingView(p: CodingViewProps) {
           workingTreeId={p.activeWorkingTreeId}
           branch={p.activeBranch}
           ws={p.ws}
-          onSwitchRuntime={(target, surface, opts) => p.onSwitchRuntime(p.activeSession!.id, target, surface, opts)}
-          onClaimTty={(surface, takeover) => p.onClaimTty(p.activeSession!.id, surface, takeover)}
-          armedRemote={p.armedRemoteSwitch.has(p.activeSession.id)}
-          onRequestRemote={() => p.onRequestRemote(p.activeSession!.id)}
-          onCancelRemote={() => p.onCancelRemote(p.activeSession!.id)}
-          remoteControl={p.remoteControlBySession[p.activeSession.id]}
-          onToggleRemoteControl={() => p.onToggleRemoteControl(p.activeSession!.id)}
+          onSwitchRuntime={(target, opts) => p.onSwitchRuntime(p.activeSession!.id, target, opts)}
         />
       ) : (
         <CodingViewEmpty />
@@ -509,7 +468,7 @@ function Sidebar({
       return (
         <div key={wsId}>
           <div className="sb-group" onClick={() => toggleGroup(wsId)}>
-            <span className="caret">{isCollapsed ? '▸' : '▾'}</span>
+            <span className="sb-group-ico"><SvgIcon d={isCollapsed ? ICON.folder : ICON.folderOpen} size={14} /></span>
             <span>{name}</span>
             <span className="count">{list.length}</span>
           </div>
@@ -1200,15 +1159,12 @@ function NewSessionView({
 
 export function SessionMain({
   session,
-  chatView,
   workspace,
   items,
   pending,
-  ttyLock,
   queue,
   codexPlanText,
   onSend,
-  onBetaSend,
   onSendSkill,
   onStop,
   onApprove,
@@ -1235,47 +1191,19 @@ export function SessionMain({
   branch,
   ws,
   onSwitchRuntime,
-  onClaimTty,
-  armedRemote,
-  onRequestRemote,
-  onCancelRemote,
-  remoteControl,
-  onToggleRemoteControl,
-  primary = true,
 }: {
   session: Session;
-  /** True for the main chat column (Sessions view, or the inline subtask
-   *  panel). Sidechat tabs pass false: document-level keyboard shortcuts
-   *  (⌘/⌃1/2 surface toggle) and the one-shot "align runtime to the
-   *  configured chat surface" effect belong to the primary instance only —
-   *  a sidechat tab must not register a second handler or force a runtime
-   *  switch just by mounting. */
-  primary?: boolean;
-  chatView: ChatViewConfig;
   workspace: Workspace | null;
   items: TranscriptItem[];
   pending: boolean;
-  ttyLock?: { owner: boolean; reason?: string; alive?: boolean };
   queue: QueueEntry[];
   codexPlanText?: string;
   ws: GianWs;
-  onSwitchRuntime: (target: RuntimeMode, surface?: TtySurface, opts?: { force?: boolean }) => void;
-  onClaimTty: (surface: TtySurface, takeover?: boolean) => void;
-  armedRemote: boolean;
-  onRequestRemote: () => void;
-  onCancelRemote: () => void;
-  remoteControl?: RemoteControlState;
-  onToggleRemoteControl: () => void;
+  onSwitchRuntime: (target: RuntimeMode, opts?: { force?: boolean }) => void;
   onSend: (
     text: string,
     opts?: {
       oneShotBypass?: boolean;
-      attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
-    },
-  ) => void;
-  onBetaSend: (
-    text: string,
-    opts?: {
       attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
     },
   ) => void;
@@ -1322,180 +1250,7 @@ export function SessionMain({
   // UI until it's reopened (the turn machinery still works, but a "done" subtask
   // shouldn't accept new messages). Regular sessions never hit this.
   const subtaskCompleted = session.type === 'subtask' && session.completed_at != null;
-  const visibleTabs = runtimeTabs(session.executor, chatView);
-  const tabKey = visibleTabs.map(tb => tb.surface).join(',');
-
-  // The surface a session opens on. Claude follows the configured chat surface
-  // (structured→'chat', tty→'beta'); Codex always opens on 'chat' (it has no
-  // CLI tab anymore).
-  const defaultSurfaceFor = (): SessionSurface => {
-    if (session.executor === 'claude') return runtimeChatSurface('claude', chatView);
-    return 'chat';
-  };
-  const [surface, setSurface] = useState<SessionSurface>(defaultSurfaceFor);
-  const surfaceSessionRef = useRef(session.id);
-  const lastClaimRef = useRef('');
-  const alignedSessionRef = useRef('');
-
-  // Keep `surface` within the currently-visible tabs: reset to the primary
-  // chat surface on session change, or when the active surface is no longer
-  // offered (config changed via reload, or runtime flipped underneath us).
-  useEffect(() => {
-    if (surfaceSessionRef.current !== session.id) {
-      surfaceSessionRef.current = session.id;
-      setSurface(defaultSurfaceFor());
-      return;
-    }
-    if (!tabKey.split(',').includes(surface)) {
-      setSurface(defaultSurfaceFor());
-    }
-    // defaultSurfaceFor reads the latest session / chatView via closure.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.id, session.executor, session.runtime_mode, surface, tabKey]);
-
-  // Honor the global Claude chat-surface setting for already-existing sessions:
-  // once per open, when idle, align the stored runtime to the configured chat
-  // surface via the same switch-runtime path a tab click uses. Claude only —
-  // Codex's CLI toggle never forces a runtime change. Shared session id means
-  // the switch keeps history (`--resume`). After this one-shot, tab clicks own
-  // runtime switching, so a later force-recover isn't fought.
-  useEffect(() => {
-    if (!primary) return;
-    if (session.executor !== 'claude') return;
-    if (alignedSessionRef.current === session.id) return;
-    if (pending || terminal) return;
-    alignedSessionRef.current = session.id;
-    const want = runtimeChatSurface('claude', chatView);
-    const wantRuntime = runtimeForSurface(want);
-    if (session.runtime_mode !== wantRuntime) {
-      onSwitchRuntime(wantRuntime, want === 'beta' ? 'beta' : undefined);
-    }
-  }, [primary, session.id, session.executor, session.runtime_mode, pending, terminal, chatView.claude_chat_surface, onSwitchRuntime]);
-
-  useEffect(() => {
-    if (
-      session.executor === 'claude'
-      && session.runtime_mode === 'tty'
-      && (surface === 'beta' || surface === 'cli')
-    ) {
-      const key = `${session.id}:${surface}:${session.runtime_mode}`;
-      if (lastClaimRef.current === key) return;
-      lastClaimRef.current = key;
-      onClaimTty(surface);
-    }
-  }, [session.id, session.executor, session.runtime_mode, surface, onClaimTty]);
-
-  const isTty = surface === 'cli' && session.runtime_mode === 'tty';
-  const isBeta = surface === 'beta' && session.executor === 'claude';
-  let pendingQuestion: ApprovalItem | undefined;
-  for (let i = items.length - 1; i >= 0; i--) {
-    const item = items[i]!;
-    if (
-      item.kind === 'approval'
-      && item.status === 'pending'
-      && item.category === 'question'
-      && (item.questions?.length ?? 0) > 0
-    ) {
-      pendingQuestion = item;
-      break;
-    }
-  }
-  const ttyLockedOut = session.executor === 'claude'
-    && session.runtime_mode === 'tty'
-    && (surface === 'beta' || surface === 'cli')
-    && ttyLock?.owner === false;
-  // Claude TTY chat opened but the underlying PTY isn't running — after a host
-  // restart the session stays runtime_mode='tty' yet no PTY was respawned. We
-  // own the lock (not locked out) but the host reported alive===false.
-  const ttyDead = session.executor === 'claude'
-    && session.runtime_mode === 'tty'
-    && (surface === 'beta' || surface === 'cli')
-    && ttyLock?.owner !== false
-    && ttyLock?.alive === false;
-  const ttySupported = session.executor === 'claude' || session.executor === 'codex';
-  const canSwitchClaudeTtySurface = session.executor === 'claude' && session.runtime_mode === 'tty';
-  const runtimeSwitchDisabled = pending || terminal;
-  const betaDisabled = terminal || (pending && !canSwitchClaudeTtySurface);
-  const cliDisabled = terminal || !ttySupported || (pending && !canSwitchClaudeTtySurface);
-  const handleSelectSurface = (next: SessionSurface) => {
-    setSurface(next);
-    if (next === 'chat') {
-      if (session.runtime_mode !== 'structured') onSwitchRuntime('structured');
-    } else if (next === 'beta') {
-      if (session.runtime_mode !== 'tty') onSwitchRuntime('tty', 'beta');
-      else onClaimTty('beta');
-    } else {
-      if (!ttySupported) return;
-      if (session.runtime_mode !== 'tty') onSwitchRuntime('tty', 'cli');
-      else if (session.executor === 'claude') onClaimTty('cli');
-    }
-  };
-  useEffect(() => {
-    // Sidechat panels (primary=false) never register this — ⌘/⌃1/2 must
-    // reach only the main column's handler, once.
-    if (!primary) return;
-    const onKey = (e: KeyboardEvent) => {
-      // Ctrl/Cmd+1 → chat view, Ctrl/Cmd+2 → CLI. Capture phase so xterm never
-      // sees the digit. claude TTY only. (Replaces the old Ctrl+` toggle, which
-      // was awkward to reach on many keyboard layouts.)
-      const mod = e.ctrlKey || e.metaKey;
-      if (!mod || e.altKey || e.shiftKey) return;
-      const wantChat = e.key === '1' || e.code === 'Digit1';
-      const wantCli = e.key === '2' || e.code === 'Digit2';
-      if (!wantChat && !wantCli) return;
-      if (session.executor !== 'claude' || session.runtime_mode !== 'tty') return;
-      if (surface !== 'beta' && surface !== 'cli') return;
-      e.preventDefault();
-      e.stopPropagation();
-      handleSelectSurface(wantChat ? 'beta' : 'cli');
-    };
-    document.addEventListener('keydown', onKey, true);
-    return () => document.removeEventListener('keydown', onKey, true);
-  }, [primary, session.executor, session.runtime_mode, surface, handleSelectSurface]);
-
-  // Beta: a Claude question's interactive selector lives ONLY in the PTY — the
-  // beta surface can't answer it. So when one appears, nudge with a toast and
-  // jump straight to the CLI where the selector is blocking. Once per question;
-  // if the user manually returns to beta the dock still shows the reminder.
-  const autoJumpedQRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (isBeta && pendingQuestion) {
-      if (autoJumpedQRef.current !== pendingQuestion.approvalId) {
-        autoJumpedQRef.current = pendingQuestion.approvalId;
-        toast({ kind: 'info', message: t('coding.beta.questionToast'), duration: 6000 });
-        handleSelectSurface('cli');
-      }
-    } else if (!pendingQuestion) {
-      autoJumpedQRef.current = null;
-    }
-    // handleSelectSurface is recreated each render; the ref guards re-firing.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isBeta, pendingQuestion]);
-
-  const handleTranscriptApprove = (
-    approvalId: string,
-    decision: ApprovalDecision,
-    answers?: Record<string, string | string[]>,
-    context?: ApprovalActionContext,
-  ) => {
-    const plan = planApprovalResponseDispatch({
-      executor: session.executor,
-      runtimeMode: session.runtime_mode,
-      surface,
-      decision,
-      answers,
-      context,
-    });
-    if (plan.channel === 'cli') {
-      // TTY questions can't be answered by pasting into the blocking selector
-      // (it cancels). Jump to the CLI where Claude's own selector is waiting;
-      // the JSONL watcher resolves the card once the user picks there. No
-      // paste, no local resolve — the card stays pending until the real pick.
-      handleSelectSurface('cli');
-      return;
-    }
-    onApprove(approvalId, decision, answers, context);
-  };
+  const isTty = session.executor === 'codex' && session.runtime_mode === 'tty';
 
   // Bump on pending → idle transition so GitBadge refetches at turn end.
   const [gitRefreshKey, setGitRefreshKey] = useState(0);
@@ -1522,43 +1277,6 @@ export function SessionMain({
               panel's "Manager" eyebrow) so its top-left identifies it. */}
           {session.type === 'subtask' && (
             <span className="manager-eyebrow">{t('tasks.subtask.title')}</span>
-          )}
-          {/* Runtime tabs are configurable (Settings → 聊天视图). Claude shows a
-              single chat surface — `claude -p` or tty — never both; CLI is an
-              optional extra. The whole bar hides when only one tab is offered. */}
-          {visibleTabs.length > 1 && (
-            <div className="chat-toggle" role="tablist" aria-label={t('coding.runtime.label')}>
-              {visibleTabs.map(tab => {
-                const active = surface === tab.surface;
-                const isChat = tab.label === 'chat';
-                const disabled = isChat
-                  ? (tab.surface === 'beta' ? betaDisabled : runtimeSwitchDisabled)
-                  : cliDisabled;
-                const title = isChat
-                  ? (tab.surface === 'beta'
-                      ? t('coding.runtime.betaTitle')
-                      : (session.executor === 'claude'
-                          ? t('coding.runtime.chatClaudeTitle')
-                          : t('coding.runtime.chatTitle')))
-                  : (session.executor === 'claude'
-                      ? t('coding.runtime.claudeCliTitle')
-                      : t('coding.runtime.cliTitle'));
-                return (
-                  <button
-                    key={tab.surface}
-                    type="button"
-                    role="tab"
-                    aria-selected={active}
-                    className={active ? 'active' : ''}
-                    onClick={() => handleSelectSurface(tab.surface)}
-                    disabled={disabled}
-                    title={title}
-                  >
-                    {isChat ? t('coding.runtime.chat') : 'CLI'}
-                  </button>
-                );
-              })}
-            </div>
           )}
         </div>
         <div className="main-head-r">
@@ -1587,32 +1305,6 @@ export function SessionMain({
           <button className="btn xs danger-ghost" onClick={onDelete}>{t('common.delete')}</button>
         </div>
       )}
-      {ttyLockedOut && (
-        <div className="session-banner warning">
-          <span>{ttyLock?.reason ?? 'Claude CLI is open in another window.'}</span>
-          <span className="session-banner-spacer" />
-          <button
-            type="button"
-            className="btn xs secondary"
-            onClick={() => onClaimTty(surface === 'beta' ? 'beta' : 'cli', true)}
-          >
-            {t('coding.banner.takeOver')}
-          </button>
-        </div>
-      )}
-      {ttyDead && (
-        <div className="session-banner warning">
-          <span>{t('coding.banner.ttyNotRunning')}</span>
-          <span className="session-banner-spacer" />
-          <button
-            type="button"
-            className="btn xs secondary"
-            onClick={() => { setSurface('cli'); onSwitchRuntime('tty', 'cli', { force: true }); }}
-          >
-            {t('coding.banner.openTty')}
-          </button>
-        </div>
-      )}
       {subtaskCompleted && (
         <div className="session-banner">
           <span>{t('coding.banner.subtaskCompleted')}</span>
@@ -1624,12 +1316,11 @@ export function SessionMain({
           )}
         </div>
       )}
-      {isTty && !ttyLockedOut ? (
+      {isTty ? (
         <div className="main-scroll tty-pane">
           <Terminal
             instanceKey={`session:${session.id}`}
             wire={makeSessionWire(ws, session.id)}
-            shiftEnterNewline={session.executor === 'claude'}
           />
         </div>
       ) : (
@@ -1638,8 +1329,7 @@ export function SessionMain({
             <Transcript
               items={items}
               pending={pending || session.status === 'running' || session.status === 'pending'}
-              onApprove={handleTranscriptApprove}
-              hiddenApprovalId={isBeta && pendingQuestion ? pendingQuestion.approvalId : undefined}
+              onApprove={onApprove}
             />
           </div>
           {/* Overlay rail — sibling of `.main-scroll` so it stays fixed while
@@ -1647,20 +1337,9 @@ export function SessionMain({
           <TranscriptMinimap items={items} />
           <QueueList queue={queue} onRemove={onQueueRemove} onReorder={onQueueReorder} onClear={onQueueClear} onSendNow={onQueueSendNow} />
           <PlanChip items={items} codexPlanText={codexPlanText} sessionId={session.id} />
-          {isBeta && pendingQuestion && (
-            <div className="beta-question-dock">
-              <div className="beta-question-dock-label">{t('coding.beta.waiting')}</div>
-              <button
-                className="btn primary sm beta-question-cli"
-                onClick={() => handleSelectSurface('cli')}
-              >
-                {t('transcript.question.answerInCli')}
-              </button>
-            </div>
-          )}
           <Composer
             session={session}
-            onSend={isBeta ? onBetaSend : onSend}
+            onSend={onSend}
             onSendSkill={onSendSkill}
             onStop={onStop}
             onQueueAdd={onQueueAdd}
@@ -1669,17 +1348,11 @@ export function SessionMain({
             onSetEffort={onSetEffort}
             onSetServiceTier={onSetServiceTier}
             onSetNativeConfig={onSetNativeConfig}
-            onJumpToCli={() => handleSelectSurface('cli')}
-            disabled={pending || terminal || subtaskCompleted || ttyLockedOut || ttyDead || (isBeta && !!pendingQuestion)}
+            disabled={pending || terminal || subtaskCompleted}
             running={isTurnRunning(session.status, pending)}
-            disabledSubmitBehavior={subtaskCompleted ? 'block' : betaComposerSubmitBehavior(isBeta, !!pendingQuestion)}
+            disabledSubmitBehavior={subtaskCompleted ? 'block' : 'queue'}
             executor={session.executor}
             workspaceId={workspace?.id}
-            armedRemote={armedRemote}
-            onRequestRemote={onRequestRemote}
-            onCancelRemote={onCancelRemote}
-            remoteControl={remoteControl}
-            onToggleRemoteControl={onToggleRemoteControl}
           />
         </>
       )}

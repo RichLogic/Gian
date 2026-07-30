@@ -397,7 +397,7 @@ test('deleteTask cascade: listSessionIdsForTask enumerates PM+subtasks; deleting
 test('manager action path is always-on (no GIAN_TASK_ROLES): a create_subtask envelope builds a subtask directly', async () => {
   const prevFlag = process.env.GIAN_TASK_ROLES;
   delete process.env.GIAN_TASK_ROLES; // prove it works with the global feature OFF
-  const { dir, db, sessions, tasks } = setup();
+  const { dir, db, proxyMgr, sessions, tasks } = setup();
   try {
     const wsId = randomUUID();
     db.prepare(`INSERT INTO workspaces (id, name, path, hidden) VALUES (?, 'Repo', ?, 0)`).run(wsId, dir);
@@ -405,9 +405,16 @@ test('manager action path is always-on (no GIAN_TASK_ROLES): a create_subtask en
     const mgr = await sessions.ensureManagerSession(task.id);
 
     // The manager aligned in NL and ended its reply with the action envelope.
+    // Drive the structured action path: run one manager turn, then complete it
+    // with a final text carrying the envelope (codex carries the authoritative
+    // final text on the turn.completed notification).
     const finalText = 'Sounds good — spinning that up.\n\n'
       + '<<gian:action>>{"method":"create_subtask","params":{"workspace":"Repo","executor":"kimi","brief":"do the thing","name":"Wire it"}}<</gian:action>>';
-    sessions.handleTtyTurnComplete(mgr.id, finalText, `${mgr.id}:1`);
+    await sessions.sendMessage(mgr.id, 'build it');
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: { sessionId: 'proxy_x', data: { status: 'completed', summary: { assistantText: finalText } } },
+    });
 
     // recordParsed is synchronous → the action row exists immediately even with
     // GIAN_TASK_ROLES unset (the manager path is exempt from the gate).

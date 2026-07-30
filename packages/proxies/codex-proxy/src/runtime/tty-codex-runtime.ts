@@ -5,7 +5,7 @@
  * raw bytes both ways, and keeps a per-session ring buffer so reconnects
  * can replay the last screen.
  *
- * Mirrors `packages/proxies/cc-proxy/src/runtime/tty-claude-runtime.ts`
+ * This is now Gian's only executor-backed interactive TTY runtime.
  * in shape, but:
  *
  *   - **No hooks.** Codex has no Claude-style `--settings` / HTTP hook

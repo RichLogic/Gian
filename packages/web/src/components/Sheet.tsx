@@ -75,16 +75,6 @@ export interface SheetTab {
   planBody?: string;
   /** Raw unified diff text (for kind === 'diff'). */
   diffText?: string;
-  /** True for the scope='all' flat-diff tab (all changed files stacked) —
-   *  the diffs rail's default panel-2 content. Changes-tree clicks scroll to
-   *  the file's block instead of opening a single-file diff while this tab
-   *  is active. */
-  diffAll?: boolean;
-  /** Anchor jump inside a diff tab: scroll the `.sheet-diff-file` block with
-   *  matching `data-path` into view. `scrollToPathTs` re-fires the jump when
-   *  the same file is clicked repeatedly. */
-  scrollToPath?: string;
-  scrollToPathTs?: number;
   /** `/raw` URL for image tabs — rendered inline with an `<img>` (no `lines`). */
   rawSrc?: string;
 }
@@ -138,12 +128,8 @@ interface Props {
    *  data sources. */
   renderTab?: (tab: SheetTab) => React.ReactNode | null;
   /** Called when the user clicks the trailing "+" in the tab strip. App
-   *  decides what to add (terminal / sidechat picker / browser tab). */
+   *  decides what to add (terminal / sidechat fork / browser tab). */
   onAddTab?: (group: SheetGroup) => void;
-  /** Popover rendered next to the "+" of one group's tab strip (the sidechat
-   *  session picker). App owns its open state and content. */
-  addMenu?: React.ReactNode;
-  addMenuFor?: SheetGroup | null;
   /** Whole-sheet display:none — element stays in the DOM so child
    *  terminals stay mounted across visibility flips. */
   hidden?: boolean;
@@ -316,20 +302,10 @@ function splitHunkRows(header: string, lines: Array<{ kind: 'add' | 'del' | 'ctx
  *  `parseUnifiedDiff` so the format matches DiffCard / Changes events.
  *  `split` swaps the single-column unified view for a side-by-side
  *  (old | new) view; `wrap` mirrors the sheet's word-wrap preference.
- *  Each file block carries `data-path` so the Changes tree can anchor-jump
- *  to it (`scrollPath`/`scrollPathTs`) — the all-diff tab's answer to
- *  FileBody's `data-ln` line jump. */
-function DiffBody({ diffText, path, split, wrap, scrollPath, scrollPathTs }: { diffText: string; path?: string; split?: boolean; wrap?: boolean; scrollPath?: string; scrollPathTs?: number }) {
+ *  Each file block carries `data-path` (kept from the anchor-jump
+ *  experiment — harmless, useful for future cross-linking). */
+function DiffBody({ diffText, path, split, wrap }: { diffText: string; path?: string; split?: boolean; wrap?: boolean }) {
   const t = useT();
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!scrollPath || !ref.current) return;
-    // Attribute-selector escaping for arbitrary paths is fragile — match by
-    // reading the attribute instead.
-    const el = Array.from(ref.current.querySelectorAll<HTMLElement>('.sheet-diff-file'))
-      .find(node => node.dataset['path'] === scrollPath);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [scrollPath, scrollPathTs]);
   const files = parseUnifiedDiff(diffText);
   if (files.length === 0 || files.every(f => f.hunks.length === 0)) {
     return (
@@ -340,7 +316,7 @@ function DiffBody({ diffText, path, split, wrap, scrollPath, scrollPathTs }: { d
   }
   const rootClass = `sheet-diff${split ? ' split' : ''}${wrap ? '' : ' nowrap'}`;
   return (
-    <div className={rootClass} ref={ref}>
+    <div className={rootClass}>
       {files.map((f, fi) => (
         <div key={fi} className="sheet-diff-file" data-path={f.path}>
           {files.length > 1 && (
@@ -602,7 +578,7 @@ function FileActions({
   );
 }
 
-export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, onAddTab, addMenu, addMenuFor, hidden, externalEditors, openApps, onOpenWith, onConfigureEditors }: Props) {
+export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, onAddTab, hidden, externalEditors, openApps, onOpenWith, onConfigureEditors }: Props) {
   const tr = useT();
   // Word-wrap preference for file/diff bodies. Wrap is the historical default
   // (`.txt { white-space: pre-wrap }`); toggling off switches to `pre` +
@@ -657,12 +633,24 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
         const pathSlash = tab.fullPath ? tab.fullPath.lastIndexOf('/') : -1;
         const pathDir = pathSlash >= 0 ? tab.fullPath!.slice(0, pathSlash + 1) : '';
         const pathFile = tab.fullPath ? (pathSlash >= 0 ? tab.fullPath.slice(pathSlash + 1) : tab.fullPath) : '';
+        // Host-rendered groups (renderTab bodies with their own live state —
+        // xterm, sidechat panels, browser iframes) keep EVERY tab mounted in
+        // its own slot, hidden with display:none when inactive. That's both
+        // the keep-alive mechanism and what isolates per-tab state (e.g. each
+        // browser tab's URL/history). File/diff/plan bodies are stateless
+        // renders of tab data, so those groups render only the active tab.
+        const slotGroup = g === 'term' || g === 'sidechat' || g === 'browser' || g === 'workspaces' || g === 'settings';
+        // Singleton groups (workspaces/settings) can only ever hold one tab —
+        // the tab strip would be a one-tab header of pure noise, so their
+        // content renders headerless (items carry their own headers).
+        const hideTabStrip = g === 'workspaces' || g === 'settings';
         return (
           <div
             className="sheet-group"
             key={g}
             style={g === activeGroup ? undefined : { display: 'none' }}
           >
+            {!hideTabStrip && (
             <div className="sheet-tabs">
               {gTabs.map(t => (
                 <button
@@ -691,30 +679,28 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
                 </button>
               ))}
               {onAddTab && (g === 'term' || g === 'sidechat' || g === 'browser') && (
-                <span className="tab-add-anchor">
-                  <button
-                    className="tab-add"
-                    type="button"
-                    title={g === 'term' ? tr('sheet.newTerminal') : g === 'sidechat' ? tr('sheet.newChat') : tr('sheet.newBrowserTab')}
-                    onClick={() => onAddTab(g)}
-                  >
-                    <Icon d={I.plus} size={12} stroke={1.8} />
-                  </button>
-                  {addMenu && g === addMenuFor && addMenu}
-                </span>
+                <button
+                  className="tab-add"
+                  type="button"
+                  title={g === 'term' ? tr('sheet.newTerminal') : g === 'sidechat' ? tr('sheet.newChat') : tr('sheet.newBrowserTab')}
+                  onClick={() => onAddTab(g)}
+                >
+                  <Icon d={I.plus} size={12} stroke={1.8} />
+                </button>
               )}
               <span className="sheet-tabs-spacer" />
             </div>
+            )}
             <div className={`sheet-content${wrap ? '' : ' nowrap'}`}>
-              {g === 'term'
-                ? gTabs.map(termTab => (
+              {slotGroup
+                ? gTabs.map(slotTab => (
                     <div
-                      className="sheet-terminal-slot"
-                      data-terminal-tab-id={termTab.id}
-                      key={termTab.id}
-                      style={termTab.id === activeId ? undefined : { display: 'none' }}
+                      className="sheet-tab-slot"
+                      data-tab-id={slotTab.id}
+                      key={slotTab.id}
+                      style={slotTab.id === activeId ? undefined : { display: 'none' }}
                     >
-                      {renderTab?.(termTab)}
+                      {renderTab?.(slotTab)}
                     </div>
                   ))
                 : (
@@ -750,7 +736,7 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
                           : tab.kind === 'plan' && tab.planBody
                             ? <PlanBody source={tab.planBody} />
                             : tab.kind === 'diff' && tab.diffText !== undefined
-                              ? <DiffBody diffText={tab.diffText} path={tab.diffAll ? undefined : (tab.fullPath ?? tab.name)} split={split} wrap={wrap} scrollPath={tab.scrollToPath} scrollPathTs={tab.scrollToPathTs} />
+                              ? <DiffBody diffText={tab.diffText} path={tab.fullPath ?? tab.name} split={split} wrap={wrap} />
                               : renderTab
                                 ? renderTab(tab)
                                 : null}

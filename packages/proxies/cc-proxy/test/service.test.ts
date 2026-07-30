@@ -25,6 +25,7 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
     cwd: string;
     model?: string | null;
     isResume: boolean;
+    forkFromClaudeSessionId?: string;
   }> = [];
   readonly messages: Array<{
     sessionId: string;
@@ -57,6 +58,7 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
     cwd: string;
     model?: string | null;
     isResume: boolean;
+    forkFromClaudeSessionId?: string;
   }): Promise<void> {
     this.spawnCalls.push(options);
     this.aliveSessions.add(options.sessionId);
@@ -518,6 +520,25 @@ test('service starts turns with the requested model and emits completion events'
     }
     assert.equal((events[1]!.params.data as { text: string }).text, 'done');
     assert.equal((events[2]!.params.data as { status: string }).status, 'completed');
+  });
+});
+
+test('service forwards a sidechat parent into the first Claude fork spawn', async () => {
+  await withService(async ({ runtime, service }) => {
+    const created = await service.createSession({
+      cwd: '/tmp/parent-worktree',
+      forkFromClaudeSessionId: 'claude-parent-1',
+    });
+
+    await service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'side question' }],
+    }, 'req-sidechat');
+
+    assert.equal(runtime.spawnCalls.length, 1);
+    assert.equal(runtime.spawnCalls[0]!.cwd, '/tmp/parent-worktree');
+    assert.equal(runtime.spawnCalls[0]!.forkFromClaudeSessionId, 'claude-parent-1');
+    assert.equal(runtime.spawnCalls[0]!.isResume, false);
   });
 });
 

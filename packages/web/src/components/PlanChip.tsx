@@ -1,8 +1,8 @@
-import { useContext, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useT } from '../i18n/index.js';
 import { projectSessionContext, type AgentRunDisplayItem } from '../presentation/session-context.js';
 import type { TranscriptItem } from '../types.js';
-import { PlanOpenContext } from '../transcript/items.js';
+import { MarkdownText } from '../transcript/items.js';
 import '../styles/context-strip.css';
 
 /**
@@ -24,7 +24,7 @@ export function PlanChip({
   sessionId: string;
 }) {
   const t = useT();
-  const openPlan = useContext(PlanOpenContext);
+  const [planOpen, setPlanOpen] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
   const context = useMemo(
     () => projectSessionContext({ items, planText: codexPlanText, sessionId }),
@@ -32,6 +32,7 @@ export function PlanChip({
   );
 
   useEffect(() => {
+    setPlanOpen(false);
     setAgentsOpen(false);
   }, [sessionId]);
 
@@ -47,6 +48,37 @@ export function PlanChip({
 
   return (
     <div className="context-strip-shell">
+      {planOpen && context.plan && (
+        <section
+          id={`context-plan-${sessionId}`}
+          className="context-plan-panel"
+          aria-label="Plan"
+        >
+          <header className="context-plan-panel-head">
+            <div>
+              <strong>Plan</strong>
+              {context.plan.totalSteps > 0 && (
+                <span>
+                  {context.plan.completedSteps}/{context.plan.totalSteps}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              className="context-panel-close"
+              aria-label={t('common.close')}
+              title={t('common.close')}
+              onClick={() => setPlanOpen(false)}
+            >
+              <span aria-hidden>&times;</span>
+            </button>
+          </header>
+          <div className="context-plan-body approval-plan-md">
+            <MarkdownText>{context.plan.markdown}</MarkdownText>
+          </div>
+        </section>
+      )}
+
       {agentsOpen && (
         <section className="context-agent-panel" aria-label={t('transcript.agentRuns')}>
           <header className="context-agent-panel-head">
@@ -86,11 +118,12 @@ export function PlanChip({
           <button
             type="button"
             className="plan-chip"
-            onClick={() => openPlan?.({
-              id: context.plan!.id,
-              title: 'Plan',
-              markdown: context.plan!.markdown,
-            })}
+            aria-expanded={planOpen}
+            aria-controls={`context-plan-${sessionId}`}
+            onClick={() => {
+              setPlanOpen(open => !open);
+              setAgentsOpen(false);
+            }}
             title={t('transcript.planViewLatest')}
           >
             <span className="plan-chip-label">Plan</span>
@@ -111,7 +144,10 @@ export function PlanChip({
             type="button"
             className="context-chip context-agent-trigger"
             aria-expanded={agentsOpen}
-            onClick={() => setAgentsOpen(open => !open)}
+            onClick={() => {
+              setAgentsOpen(open => !open);
+              setPlanOpen(false);
+            }}
             title={t('transcript.agentViewRuns')}
           >
             <span>{t('transcript.agent')}</span>

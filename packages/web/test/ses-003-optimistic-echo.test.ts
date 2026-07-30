@@ -241,15 +241,15 @@ describe('WS-003: error-envelope reducer surface (App-level wiring is a remainin
 });
 
 // ---------------------------------------------------------------------------
-// Beta/TTY image previews — recover `[Attached image: …]` framing into
-// structured attachments so the bubble renders a thumbnail like Chat.
+// Image previews — recover `[Attached image: …]` framing into structured
+// attachments so the bubble renders a thumbnail.
 // ---------------------------------------------------------------------------
 
 function userMsgWithData(data: Record<string, unknown>, call_id = 'u-img'): EventEnvelope {
   return { session_id: 'sess-1', turn: 1, call_id, event: 'user_message', ts: 1, data };
 }
 
-describe('Beta image attachment recovery', () => {
+describe('image attachment recovery', () => {
   it('recovers an inline [Attached image: …] reference into a thumbnail attachment and strips the framing', () => {
     const text = 'look at this\n\n[Attached image: /Users/me/.config/gian/attachments/sess-1/shot.png]';
     const after = applyEnvelope([], userMsgWithData({ text }), 'claude');

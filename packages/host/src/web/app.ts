@@ -68,7 +68,6 @@ import {
 // shot at startup) — REST endpoints now go through `im/bots-api` against the
 // rvc-shaped per-platform tables.
 import { initWorkspace, expandHome } from '../workspace/index.js';
-import { TtyManager } from '../tty/manager.js';
 import { CodexTtyManager } from '../tty/codex-manager.js';
 import { WorkbenchTerminalManager } from '../term/manager.js';
 import { CcProxyClient } from '../proxy/cc-proxy-client.js';
@@ -120,16 +119,6 @@ export function createApp(ctx: AppContext): AppHandle {
   const sessions = new SessionManager(ctx.db, proxy, broadcaster, approvals, queue, ctx.dataDir, watcher);
   const tasks = new TaskManager(ctx.db);
 
-  // TTY runtime coordinator. The hook base URL must match what the
-  // in-PTY `claude` can actually reach — for now this is hard-locked to
-  // 127.0.0.1:<port>. The per-session `settings.json` allowlists exactly
-  // this prefix via `allowedHttpHookUrls`.
-  const hookPort = ctx.config.port || 8990;
-  const hookBaseUrl = `http://127.0.0.1:${hookPort}`;
-  const tty = new TtyManager(ctx.db, proxy, broadcaster, hookBaseUrl);
-  sessions.setTtyManager(tty);
-  // Beta queue: drain the next queued message into the PTY when a turn ends.
-  tty.setTurnCompleteHandler((sid, finalText, turnKey) => sessions.handleTtyTurnComplete(sid, finalText, turnKey));
   // gian-task durability: re-drive any action rows a prior crash/restart left
   // non-terminal. Manager actions are always-on; coding/subtask actions still
   // respect GIAN_TASK_ROLES inside SessionManager.
@@ -230,7 +219,7 @@ export function createApp(ctx: AppContext): AppHandle {
     })));
   });
 
-  const handlers = makeWsHandlers({ sessions, tasks, broadcaster, approvals, tty, codexTty, term, db: ctx.db });
+  const handlers = makeWsHandlers({ sessions, tasks, broadcaster, approvals, codexTty, term, db: ctx.db });
 
   if (AUTH_REQUIRED) {
     ensurePasswordHash(ctx.db);
@@ -244,26 +233,6 @@ export function createApp(ctx: AppContext): AppHandle {
   if (webDist) {
     app.use('*', staticFiles(webDist));
   }
-
-  // Hook receivers — registered BEFORE requireAuth() because the in-PTY
-  // `claude` carries no web session cookie. Auth here is:
-  //   1. server binds to 127.0.0.1 (loopback only) — see scripts/install
-  //   2. per-spawn token in `?t=` (one-shot, rotated on every mode flip)
-  // The token namespace is the TTY registry — see packages/host/src/tty.
-  app.post('/internal/hooks/claude/:sessionId/:event', async c => {
-    const sessionIdParam = c.req.param('sessionId');
-    const event = c.req.param('event');
-    const token = c.req.query('t') ?? '';
-    if (!token) return c.json({ error: 'missing token' }, 401);
-    const resolvedSession = tty.registry.resolve(token);
-    if (!resolvedSession || resolvedSession !== sessionIdParam) {
-      return c.json({ error: 'invalid token' }, 401);
-    }
-    let body: unknown = null;
-    try { body = await c.req.json(); } catch { /* empty body is fine */ }
-    const result = await tty.handleHook(sessionIdParam, event, body);
-    return c.json({ ok: true }, result.status === 200 ? 200 : (result.status as 200));
-  });
 
   app.use('*', requireAuth());
 

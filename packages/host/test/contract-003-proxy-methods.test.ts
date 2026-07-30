@@ -5,13 +5,12 @@
 //                  AND every method must be call-able from at least
 //                  one host client (cc-proxy-client / codex-proxy-client).
 //
-// The `tty.*` family is live on both cc-proxy (claude CLI runtime) and
-// codex-proxy (codex CLI runtime) but routes through separate
-// per-executor managers (TtyManager / CodexTtyManager) rather than
-// through the shared structured PROXY_METHODS registry. Keep them in
-// `DEFERRED_PROXY_METHODS` so the registry stays focused on the
-// structured RPC family while the whitelist documents the parallel
-// channel.
+// The `tty.*` family is live on codex-proxy (codex CLI runtime) only —
+// cc-proxy no longer offers it (Claude TTY mode was removed). It routes
+// through CodexTtyManager rather than through the shared structured
+// PROXY_METHODS registry. Keep the family in `DEFERRED_PROXY_METHODS` so
+// the registry stays focused on the structured RPC family while the
+// whitelist documents the parallel channel.
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
@@ -27,15 +26,14 @@ const CC_CLI = resolve('../proxies/cc-proxy/src/cli/spawn.ts');
 const CODEX_CLI = resolve('../proxies/codex-proxy/src/cli/spawn.ts');
 
 const DEFERRED_PROXY_METHODS: ReadonlyArray<{ method: string; reason: string }> = [
-  // The TTY runtime is currently out-of-scope per the matrix prune (see
-  // `docs/runtime-modes/`). cc-proxy still exposes the methods so a
-  // future re-enable doesn't need an initialize-payload migration. The
-  // shared registry intentionally omits them.
-  { method: 'tty.start', reason: 'TTY runtime — direct routing via TtyManager (claude) / CodexTtyManager (codex), not via structured PROXY_METHODS registry.' },
-  { method: 'tty.input', reason: 'TTY runtime — direct routing via TtyManager (claude) / CodexTtyManager (codex), not via structured PROXY_METHODS registry.' },
-  { method: 'tty.resize', reason: 'TTY runtime — direct routing via TtyManager (claude) / CodexTtyManager (codex), not via structured PROXY_METHODS registry.' },
-  { method: 'tty.replay', reason: 'TTY runtime — direct routing via TtyManager (claude) / CodexTtyManager (codex), not via structured PROXY_METHODS registry.' },
-  { method: 'tty.kill', reason: 'TTY runtime — direct routing via TtyManager (claude) / CodexTtyManager (codex), not via structured PROXY_METHODS registry.' },
+  // Codex-only TTY runtime; cc-proxy no longer offers this family (Claude
+  // TTY mode was removed), so nothing needs an initialize-payload migration
+  // on the claude side. The shared registry intentionally omits them.
+  { method: 'tty.start', reason: 'TTY runtime — codex-only, direct routing via CodexTtyManager, not via structured PROXY_METHODS registry; cc-proxy no longer offers this family.' },
+  { method: 'tty.input', reason: 'TTY runtime — codex-only, direct routing via CodexTtyManager, not via structured PROXY_METHODS registry; cc-proxy no longer offers this family.' },
+  { method: 'tty.resize', reason: 'TTY runtime — codex-only, direct routing via CodexTtyManager, not via structured PROXY_METHODS registry; cc-proxy no longer offers this family.' },
+  { method: 'tty.replay', reason: 'TTY runtime — codex-only, direct routing via CodexTtyManager, not via structured PROXY_METHODS registry; cc-proxy no longer offers this family.' },
+  { method: 'tty.kill', reason: 'TTY runtime — codex-only, direct routing via CodexTtyManager, not via structured PROXY_METHODS registry; cc-proxy no longer offers this family.' },
 ];
 
 // ---------------------------------------------------------------------------

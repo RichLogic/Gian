@@ -78,17 +78,15 @@ export type ActiveChannel = 'web' | 'im';
  * Which CLI runtime drives a session right now.
  *
  * - `structured` — `claude -p --output-format stream-json` (cc) or `codex
- *                  proto` (codex). Today's default — emits structured events
- *                  the host renders as transcript cards. Counts against the
- *                  Agent SDK monthly credit on/after 2026-06-15.
+ *                  proto` (codex). Emits structured events the host renders
+ *                  as transcript cards.
  * - `tty`        — interactive CLI inside a PTY, surfaced to the user as
- *                  xterm.js. Continues to count against the Claude/Codex
- *                  subscription quota. Lifecycle events arrive via HTTP
- *                  hooks (cc) or session JSONL tail + fs.watch (codex);
- *                  cards are not rendered.
+ *                  xterm.js. Codex-only: the Claude TTY runtime was removed,
+ *                  Claude sessions always run `structured`. Lifecycle events
+ *                  arrive via session JSONL tail + fs.watch; cards are not
+ *                  rendered.
  *
- * Mode is session-scoped and mutable — the user toggles in the header
- * (precondition: session idle). New sessions default to `structured`.
+ * Mode is session-scoped. New sessions default to `structured`.
  */
 export type RuntimeMode = 'structured' | 'tty';
 
@@ -187,8 +185,7 @@ export interface Session {
    *  Kimi loads or resumes the corresponding ACP session. */
   native_session_id: string | null;
   /** Active CLI runtime — `structured` (`claude -p`, Codex app-server, or
-   *  Kimi ACP) or `tty` (interactive Claude/Codex in a PTY). Mutable where
-   *  the executor supports runtime switching. */
+   *  Kimi ACP) or `tty` (interactive Codex in a PTY; Codex-only). */
   runtime_mode: RuntimeMode;
   /** Tokens occupying the executor's current context window. Null after an
    *  invalidation (for example `/compact`) until the executor reports again.
@@ -400,14 +397,6 @@ export interface SystemConfig {
    *  Optional so older configs / test fixtures stay valid; loadConfig always
    *  returns at least `{}`. */
   open_apps?: OpenAppPrefs;
-  /** Claude chat main-area surface: 'structured' (`claude -p` / Agent SDK) or
-   *  'tty' (interactive Claude). The non-selected surface is not shown as a
-   *  tab. Optional so older configs / fixtures stay valid; loadConfig defaults
-   *  to 'tty'. */
-  claude_chat_surface?: 'structured' | 'tty';
-  /** Whether Claude sessions show a CLI tab alongside the chat surface.
-   *  loadConfig defaults to true (matches the 'tty' surface default). */
-  claude_chat_cli?: boolean;
   /** Whether Codex sessions show a CLI tab alongside the chat surface.
    *  loadConfig defaults to false. */
   codex_chat_cli?: boolean;

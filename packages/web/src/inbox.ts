@@ -13,8 +13,8 @@ import type { NotificationPrefs } from './notifications.js';
  *
  * It is fed entirely from the live `event` envelope stream plus a `state_sync`
  * snapshot — no extra host plumbing. Crucially this is the *envelope* stream
- * (`approval_requested`/`approval_resolved`), which fires for BOTH structured
- * and TTY/Beta runtimes, so TTY approvals finally show up here (the old inbox
+ * (`approval_requested`/`approval_resolved`), which fired for BOTH structured
+ * and TTY/Beta runtimes, so TTY approvals showed up here too (the old inbox
  * only read the structured `approval:created` channel and was empty for TTY).
  *
  * Dedup id uses `approvalId`, the one key carried by every approval signal
@@ -102,7 +102,7 @@ export interface IngestCtx {
 
 /** Fold one live `event` envelope into the inbox list. */
 export function ingestEnvelope(items: InboxItem[], env: EventEnvelope, ctx: IngestCtx): InboxItem[] {
-  // Resolutions clear the matching approval (works for structured + TTY).
+  // Resolutions clear the matching approval (worked for structured + TTY).
   if (env.event === 'approval_resolved') {
     const approvalId = str(env.data.approvalId) || env.call_id;
     return items.filter(i => i.id !== approvalKey(approvalId));

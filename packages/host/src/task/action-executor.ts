@@ -64,7 +64,8 @@ export interface ActionContext {
   blockText: string;
   /** Host DB turn UUID the action was parsed from. */
   hostTurnId: string | null;
-  /** Runtime-native turn key (Codex turnId / Claude message id / TTY key).
+  /** Runtime-native turn key (Codex turnId / Claude message id; historically
+   *  also a Claude-TTY `tty:`-prefixed key before that mode was removed).
    *  Falls back to hostTurnId for structured where they are 1:1. */
   sourceTurnKey: string | null;
 }

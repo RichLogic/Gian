@@ -20,7 +20,7 @@ function isCodexTtyClient(client: unknown): client is CodexTtyClient {
 /**
  * Coordinator for the TTY runtime on the codex executor.
  *
- * Mirrors `packages/host/src/tty/manager.ts` (the claude TTY coordinator)
+ * Coordinates the Codex-only interactive TTY runtime
  * but deliberately drops the entire hook subsystem — codex has no
  * `--settings` / HTTP hook surface, so no token registry, no per-spawn
  * settings.json, no `/internal/hooks/codex/*` route. Notification parity

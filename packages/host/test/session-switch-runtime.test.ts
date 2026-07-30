@@ -1,14 +1,16 @@
 // Coverage for traceability rows:
-//   CODEX-TTY-001 — switchRuntime dispatches by executor (claude / codex)
-//                   and enforces idle / terminal / native-id preconditions.
+//   CODEX-TTY-001 — switchRuntime dispatches to the codex TTY manager and
+//                   enforces idle / terminal / native-id preconditions.
+//                   Claude TTY mode was removed: claude sessions always fail
+//                   with SWITCH_BLOCKED.
 //   CODEX-TTY-001 — CLI-mode `message:send` / queue draining guards:
 //                   sessions in runtime_mode='tty' reject structured turns
 //                   so we don't create ghost turns or race the PTY for the
 //                   same on-disk codex thread.
 //
-// Stubs both executors' proxy clients + both TTY managers so the test
-// exercises SessionManager's dispatch + guard logic without a real
-// cc-proxy or codex-proxy subprocess.
+// Stubs the proxy clients + the codex TTY manager so the test exercises
+// SessionManager's dispatch + guard logic without a real cc-proxy or
+// codex-proxy subprocess.
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
@@ -24,7 +26,6 @@ import type { ProxyClient, NotificationHandler } from '../src/proxy/types.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import { ApprovalManager } from '../src/approval/index.js';
 import { QueueManager } from '../src/queue/index.js';
-import type { TtyManager } from '../src/tty/manager.js';
 import type { CodexTtyManager } from '../src/tty/codex-manager.js';
 
 // ---------------------------------------------------------------------------
@@ -101,28 +102,21 @@ class CapturingBroadcaster {
 }
 
 interface ManagerSpy {
-  start: Array<{ sessionId: string; cwd: string; cols: number; rows: number; permissionMode?: string; effort?: string }>;
+  start: Array<{ sessionId: string; cwd: string; cols: number; rows: number }>;
   stop: Array<{ sessionId: string }>;
 }
 
-function makeFakeTtyManager(spy: ManagerSpy, db: ReturnType<typeof openDatabase>) {
-  // Mirror the real managers' side effect on runtime_mode so subsequent
+function makeFakeCodexTtyManager(spy: ManagerSpy, db: ReturnType<typeof openDatabase>) {
+  // Mirror the real manager's side effect on runtime_mode so subsequent
   // SessionManager guards (sendMessage CLI check, target===current no-op)
-  // see the post-switch state. The real claude/codex managers update this
-  // column in `persistMode`; the test fakes do the same one-liner.
+  // see the post-switch state. The real CodexTtyManager updates this column
+  // in `persistMode`; the test fake does the same one-liner.
   const persist = (sessionId: string, mode: 'tty' | 'structured') => {
     db.prepare('UPDATE sessions SET runtime_mode = ? WHERE id = ?').run(mode, sessionId);
   };
   return {
-    async start(session: Session, cwd: string, opts: { cols: number; rows: number; permissionMode?: string }) {
-      spy.start.push({
-        sessionId: session.id,
-        cwd,
-        cols: opts.cols,
-        rows: opts.rows,
-        ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
-        ...(session.thinking_effort ? { effort: session.thinking_effort } : {}),
-      });
+    async start(session: Session, cwd: string, opts: { cols: number; rows: number }) {
+      spy.start.push({ sessionId: session.id, cwd, cols: opts.cols, rows: opts.rows });
       persist(session.id, 'tty');
       return { replay: [], alive: true };
     },
@@ -155,12 +149,10 @@ function setup() {
   approvals.setRespondFn((sid, aid, dec) => sessions.respondApproval(sid, aid, dec));
   approvals.setGetModeFn(sid => sessions.getSession(sid).approval_mode);
 
-  const claudeSpy: ManagerSpy = { start: [], stop: [] };
   const codexSpy: ManagerSpy = { start: [], stop: [] };
-  sessions.setTtyManager(makeFakeTtyManager(claudeSpy, db) as unknown as TtyManager);
-  sessions.setCodexTtyManager(makeFakeTtyManager(codexSpy, db) as unknown as CodexTtyManager);
+  sessions.setCodexTtyManager(makeFakeCodexTtyManager(codexSpy, db) as unknown as CodexTtyManager);
 
-  return { dir, db, wsId, proxyMgr, broadcaster, sessions, claudeSpy, codexSpy };
+  return { dir, db, wsId, proxyMgr, broadcaster, sessions, codexSpy };
 }
 
 function teardown(ctx: { dir: string; db: ReturnType<typeof openDatabase> }) {
@@ -169,50 +161,25 @@ function teardown(ctx: { dir: string; db: ReturnType<typeof openDatabase> }) {
 }
 
 // ---------------------------------------------------------------------------
-// CODEX-TTY-001 — switchRuntime dispatches by executor
+// CODEX-TTY-001 — switchRuntime dispatches to the codex TTY manager
 // ---------------------------------------------------------------------------
 
-test('CODEX-TTY-001: switchRuntime(target=tty) on a CLAUDE session calls claude TtyManager.start', async () => {
+test('CODEX-TTY-001: switchRuntime on a CLAUDE session always fails with SWITCH_BLOCKED (Claude TTY removed)', async () => {
   const ctx = setup();
   try {
     const session = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
-    await ctx.sessions.switchRuntime(session.id, 'tty');
-    assert.equal(ctx.claudeSpy.start.length, 1);
+    await assert.rejects(
+      ctx.sessions.switchRuntime(session.id, 'tty'),
+      (err: Error & { code?: string }) =>
+        err.code === 'SWITCH_BLOCKED' && /not available for executor/.test(err.message),
+    );
+    await assert.rejects(
+      ctx.sessions.switchRuntime(session.id, 'structured', { force: true }),
+      (err: Error & { code?: string }) => err.code === 'SWITCH_BLOCKED',
+    );
     assert.equal(ctx.codexSpy.start.length, 0,
-      'codex manager must NOT see a claude session switch');
-    assert.equal(ctx.claudeSpy.start[0]!.sessionId, session.id);
+      'codex manager must NOT see a claude session switch attempt');
   } finally { teardown(ctx); }
-});
-
-test('CODEX-TTY-001: switchRuntime(target=tty) carries Claude effort into TTY start', async () => {
-  const ctx = setup();
-  try {
-    const session = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
-    ctx.sessions.setEffort(session.id, 'dynamic-effort');
-    await ctx.sessions.switchRuntime(session.id, 'tty');
-    assert.equal(ctx.claudeSpy.start.length, 1);
-    assert.equal(ctx.claudeSpy.start[0]!.effort, 'dynamic-effort');
-  } finally { teardown(ctx); }
-});
-
-test('CODEX-TTY-001: switchRuntime(target=tty) carries Claude approval mode into TTY permissionMode', async () => {
-  for (const [approvalMode, expectedPermissionMode] of [
-    ['plan', 'plan'],
-    ['ask', 'default'],
-    ['auto', 'auto'],
-  ] as const) {
-    const ctx = setup();
-    try {
-      const session = await ctx.sessions.createSession({
-        workspace_id: ctx.wsId,
-        executor: 'claude',
-        approval_mode: approvalMode,
-      });
-      await ctx.sessions.switchRuntime(session.id, 'tty');
-      assert.equal(ctx.claudeSpy.start.length, 1);
-      assert.equal(ctx.claudeSpy.start[0]!.permissionMode, expectedPermissionMode);
-    } finally { teardown(ctx); }
-  }
 });
 
 test('CODEX-TTY-001: switchRuntime(target=tty) on a CODEX session calls codex CodexTtyManager.start', async () => {
@@ -221,8 +188,6 @@ test('CODEX-TTY-001: switchRuntime(target=tty) on a CODEX session calls codex Co
     const session = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'codex' });
     await ctx.sessions.switchRuntime(session.id, 'tty');
     assert.equal(ctx.codexSpy.start.length, 1);
-    assert.equal(ctx.claudeSpy.start.length, 0,
-      'claude manager must NOT see a codex session switch');
     assert.equal(ctx.codexSpy.start[0]!.sessionId, session.id);
   } finally { teardown(ctx); }
 });
@@ -234,7 +199,6 @@ test('CODEX-TTY-001: switchRuntime(target=structured) on a CODEX session calls c
     await ctx.sessions.switchRuntime(session.id, 'tty');
     await ctx.sessions.switchRuntime(session.id, 'structured');
     assert.equal(ctx.codexSpy.stop.length, 1);
-    assert.equal(ctx.claudeSpy.stop.length, 0);
   } finally { teardown(ctx); }
 });
 
@@ -297,18 +261,6 @@ test('CODEX-TTY-001: sendMessage rejects when session is in runtime_mode=tty (co
   } finally { teardown(ctx); }
 });
 
-test('CODEX-TTY-001: sendMessage rejects when session is in runtime_mode=tty (claude)', async () => {
-  const ctx = setup();
-  try {
-    const session = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
-    await ctx.sessions.switchRuntime(session.id, 'tty');
-    await assert.rejects(
-      ctx.sessions.sendMessage(session.id, 'hello'),
-      /CLI mode/,
-    );
-  } finally { teardown(ctx); }
-});
-
 test('CODEX-TTY-001: sendQueuedNow rejects in tty mode AND preserves the queue head', async () => {
   const ctx = setup();
   try {
@@ -344,26 +296,13 @@ test('CODEX-TTY-001: deleteSession on a CODEX session in tty mode calls CodexTty
   } finally { teardown(ctx); }
 });
 
-test('CODEX-TTY-001: deleteSession on a CLAUDE session in tty mode calls TtyManager.stop', async () => {
-  const ctx = setup();
-  try {
-    const session = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
-    await ctx.sessions.switchRuntime(session.id, 'tty');
-    ctx.claudeSpy.stop.length = 0;
-    await ctx.sessions.deleteSession(session.id);
-    assert.equal(ctx.claudeSpy.stop.length, 1,
-      'teardownProxy must call TtyManager.stop so the claude PTY is killed before cc-proxy.closeSession');
-  } finally { teardown(ctx); }
-});
-
-test('CODEX-TTY-001: deleteSession on a structured session does NOT call either tty manager stop', async () => {
+test('CODEX-TTY-001: deleteSession on a structured session does NOT call CodexTtyManager.stop', async () => {
   const ctx = setup();
   try {
     const session = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'codex' });
     // never switch to tty
     await ctx.sessions.deleteSession(session.id);
     assert.equal(ctx.codexSpy.stop.length, 0);
-    assert.equal(ctx.claudeSpy.stop.length, 0);
   } finally { teardown(ctx); }
 });
 

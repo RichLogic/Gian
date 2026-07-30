@@ -363,7 +363,6 @@ function TasksList({
   // Which executor the new Task's PM runs on. Set by the "+" (plain click →
   // the config default; hover menu → an explicit pick), rides into task:create.
   const [createExecutor, setCreateExecutor] = useState<Executor>(defaultTaskExecutor);
-  const [search, setSearch] = useState('');
   const [doneOpen, setDoneOpen] = useState(false); // Done group collapsed by default (spec §G)
   // Per-task subtask collapse (Codex-style, 2026-07-01). Default = expanded
   // (empty set); a hover caret on the TaskRow toggles it. Persisted so the
@@ -384,17 +383,7 @@ function TasksList({
   };
 
   // Archived tasks are hidden from the list (they're a soft-delete state).
-  const visible = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return tasks.filter(task => {
-      if (task.status === 'archived') return false;
-      if (!q) return true;
-      return (
-        task.name.toLowerCase().includes(q) ||
-        (task.description ?? '').toLowerCase().includes(q)
-      );
-    });
-  }, [tasks, search]);
+  const visible = useMemo(() => tasks.filter(task => task.status !== 'archived'), [tasks]);
   // Sort on render (not by array order) so live pin/unpin re-orders instantly
   // and matches the host snapshot after a refresh — no more "jump on reload".
   const open = useMemo(
@@ -490,17 +479,6 @@ function TasksList({
           >
             <Icon d={I.search} />
           </button>
-        </div>
-        <div className="sb-search-row">
-          <div className="sb-search">
-            <Icon d={I.search} />
-            <input
-              placeholder={t('tasks.search')}
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-            />
-          </div>
-          <span className="sb-sep" />
           {/* "+" — plain click creates a Task whose PM runs on the config
               default executor; hover/focus reveals the native executor choices
               (gian-task-pm-engineer §4.2 — PM executor is per-Task). */}
@@ -920,7 +898,7 @@ function ManagerPanel({
   // The new-subtask FORM is now manual only — opened by the header "Create
   // subtask from this" button or the ⌘J/⌘K shortcut. The Manager no longer
   // proposes into a card/chip; it aligns in natural language and emits a
-  // `<<gian:action>>` the host executes directly (surface-agnostic, TTY-safe).
+  // `<<gian:action>>` the host executes directly (surface-agnostic).
   const [showNewSubtask, setShowNewSubtask] = useState(false);
   // Executor preset from the ⌘J/⌘K shortcut (Claude / Codex). Null = form default.
   const [presetExecutor, setPresetExecutor] = useState<Executor | null>(null);

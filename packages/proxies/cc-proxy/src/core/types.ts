@@ -32,6 +32,11 @@ export interface SessionRecord {
    *  `--resume <id>` to pick up the existing on-disk JSONL; later spawns
    *  also use `--resume`. Never persisted — the proxy is stateless. */
   wasResumed: boolean;
+  /** Runtime-only fork hint (Gian sidechat): when set, the first spawn is
+   *  `claude -p --resume <parent> --fork-session` and `claudeSessionId` is a
+   *  placeholder until the stream-json init event reports the fork's real
+   *  native id (adopted, then this field is cleared). */
+  forkFromClaudeSessionId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -91,6 +96,13 @@ export interface CreateSessionParams {
    *  When omitted, the proxy generates a fresh UUID and the next spawn
    *  uses `--session-id <new>` for a clean conversation. */
   claudeSessionId?: string;
+  /** When set, this session is a FORK of the given Claude Code session id
+   *  (Gian sidechat): the first turn spawns
+   *  `claude -p --resume <parent> --fork-session`, which copies the parent's
+   *  history into a brand-new native session. Claude generates the fork's id
+   *  itself; the proxy adopts the id reported by the stream-json init event
+   *  and notifies the host via `session.rotated`. */
+  forkFromClaudeSessionId?: string;
 }
 
 export interface GetSessionParams {

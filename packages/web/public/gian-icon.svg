@@ -3,8 +3,7 @@
     <linearGradient id="accent" x1="0%" y1="26.65%" x2="100%" y2="73.35%">
       <stop offset="0%" stop-color="oklch(0.64 0.18 -11)"/>
       <stop offset="42%" stop-color="oklch(0.73 0.20 43)"/>
-      <stop offset="78%" stop-color="oklch(0.56 0.18 95)"/>
-      <stop offset="100%" stop-color="oklch(0.64 0.18 -11)"/>
+      <stop offset="100%" stop-color="oklch(0.56 0.18 95)"/>
     </linearGradient>
   </defs>
   <rect width="1254" height="1254" rx="276" fill="url(#accent)"/>

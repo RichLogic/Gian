@@ -27,7 +27,8 @@ import { expandHome } from '../workspace/index.js';
  *  - codex → pinned to `gpt-5.5` / `xhigh` (the original locked PRD-v3 runtime).
  *  - claude → left unpinned so SessionManager.createSession resolves the
  *    session default (`default_claude_model` / `default_claude_effort`, empty →
- *    the CLI/proxy default). Subscription-priced TTY controller.
+ *    the CLI/proxy default). Subscription-priced controller (structured-only
+ *    since Claude TTY mode was removed).
  *  - kimi → left unpinned; ACP config options, including mode, stay native.
  *
  * `null` model/effort mean "let createSession pick" — it must NOT pass codex's

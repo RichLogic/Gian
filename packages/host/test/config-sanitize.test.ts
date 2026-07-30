@@ -102,30 +102,16 @@ test('CHATVIEW-001 · chat-view defaults when nothing is set', async () => {
   const ctx = await makeTestApp();
   ctx.db.prepare('DELETE FROM config').run();
   const cfg = loadConfig(ctx.db);
-  assert.equal(cfg.claude_chat_surface, 'tty');  // preserves today's behavior
-  assert.equal(cfg.claude_chat_cli, true);       // tty → CLI on
   assert.equal(cfg.codex_chat_cli, false);
-  await ctx.cleanup?.();
-});
-
-test('CHATVIEW-001 · invalid claude_chat_surface falls back to tty', async () => {
-  const ctx = await makeTestApp();
-  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('claude_chat_surface', 'banana')`).run();
-  const cfg = loadConfig(ctx.db);
-  assert.equal(cfg.claude_chat_surface, 'tty');
   await ctx.cleanup?.();
 });
 
 test('CHATVIEW-001 · chat-view prefs round-trip through saveConfig', async () => {
   const ctx = await makeTestApp();
   saveConfig(ctx.db, {
-    claude_chat_surface: 'structured',
-    claude_chat_cli: false,
     codex_chat_cli: true,
   });
   const cfg = loadConfig(ctx.db);
-  assert.equal(cfg.claude_chat_surface, 'structured');
-  assert.equal(cfg.claude_chat_cli, false);
   assert.equal(cfg.codex_chat_cli, true);
   await ctx.cleanup?.();
 });

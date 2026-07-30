@@ -28,12 +28,10 @@ export const ImageZoomContext = createContext<
  *  itself stays compact (just file path + +/- stats). */
 export const DiffOpenContext = createContext<((item: DiffItem) => void) | null>(null);
 
-/** Provided by App.tsx to push plan markdown into the 4th-level inspector.
- *  Fires from two places:
- *   - cc's `exit_plan_mode` approval card / PlanChip (plan markdown lives on
- *     the approval payload as `cmd`).
- *   - codex's plan-mode plan_update stream (plan markdown lives in App-level
- *     `planBySession` state). PlanChip wraps either source into this shape. */
+/** Compatibility path for callers that explicitly push plan markdown into the
+ *  4th-level inspector. The persistent PlanChip now expands inline; keeping
+ *  this provider leaves the Sheet capability available to other plan entry
+ *  points without coupling the status strip back to the panel. */
 export interface PlanOpenPayload {
   /** Stable id used as the Sheet tab key. */
   id: string;
@@ -437,12 +435,13 @@ export function ApprovalCard({
 
 /**
  * Pending AskUserQuestion approval. It can originate from the structured
- * cc-proxy approval bridge or from the Claude TTY JSONL watcher; both
- * normalizers tag it with `category='question'` plus parsed questions.
+ * cc-proxy approval bridge or (historically) from the Claude TTY JSONL
+ * watcher; both normalizers tag it with `category='question'` plus parsed
+ * questions.
  *
  * Submit serializes selections as an `answers` map keyed by question text.
- * The parent view decides whether this should be a structured
- * `approval:resolve` or a Beta TTY input, based on the active runtime.
+ * The parent view decides the resolve path based on the active runtime
+ * (historically: structured `approval:resolve` vs a Beta TTY input).
  */
 function QuestionCard({
   item,
