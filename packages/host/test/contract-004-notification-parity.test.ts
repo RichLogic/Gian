@@ -9,12 +9,7 @@
 // normalizes) historically went unnoticed for the reasoning + plan event
 // chain. The test makes future drift loud.
 //
-// The TTY family (`tty.output`, `tty.exited`) is live on codex-proxy
-// (codex CLI) only — cc-proxy no longer emits it (Claude TTY mode was
-// removed). It routes through CodexTtyManager directly, bypassing the
-// shared normalizer pipeline. It stays in
-// `DEFERRED_NOTIFICATION_METHODS` so the normalizer-coverage matrix
-// remains focused on the structured event family. `protocol.error` is a
+// `protocol.error` is a
 // CLI-level transport notification (CLI emits it for malformed JSON),
 // not a session-scoped event, so it is also deferred and not part of
 // the proxy→normalizer pipeline.
@@ -38,11 +33,6 @@ const NORMALIZE_KIMI = resolve('src/event/normalize-kimi.ts');
 // ---------------------------------------------------------------------------
 
 const DEFERRED_NOTIFICATION_METHODS: ReadonlyArray<{ method: string; reason: string }> = [
-  // Codex-only TTY runtime; cc-proxy no longer emits this family (Claude
-  // TTY mode was removed). CodexTtyManager routes these directly without
-  // going through the shared registry → normalizer pipeline.
-  { method: 'tty.output', reason: 'TTY runtime — codex-only, direct routing via CodexTtyManager, not via normalizer; cc-proxy no longer offers this family.' },
-  { method: 'tty.exited', reason: 'TTY runtime — codex-only, direct routing via CodexTtyManager, not via normalizer; cc-proxy no longer offers this family.' },
   // CLI transport-level error; not session-scoped. cc-proxy and codex-proxy
   // both emit it when stdin parsing fails. It exits via the host's child
   // process handler, not the normalizer pipeline.

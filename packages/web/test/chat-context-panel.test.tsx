@@ -40,7 +40,7 @@ describe('chat-owned Plan and Agent detail', () => {
       <ChatPanelOpenContext.Provider value={open}>
         <PlanChip
           sessionId="session-1"
-          codexPlanText={'## Plan\n- [ ] inspect'}
+          planText={'## Plan\n- [ ] inspect'}
           items={[]}
         />
       </ChatPanelOpenContext.Provider>,

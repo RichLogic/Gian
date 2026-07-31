@@ -63,10 +63,8 @@ export function authorizeAction(input: AuthorizeInput): AuthResult {
   // 3. create_subtask / message_subtask (PM-only, past the role gate).
   //    No active loop → EXECUTE directly. The PM's playbook makes it align with
   //    the user in natural language BEFORE emitting the envelope, so the human
-  //    checkpoint already happened in the conversation — this was what let the
-  //    flow work on a Claude-TTY PM, where there was no UI to render a confirm
-  //    chip (user decision 2026-07-03, overrides the earlier staged-chip design;
-  //    Claude TTY mode has since been removed).
+  //    checkpoint already happened in the conversation (user decision
+  //    2026-07-03, overriding the earlier staged-chip design).
   //    A paused/finished loop is treated the same as no loop here.
   if (!loop || loop.status !== 'active') {
     return { decision: 'execute', reason: loop ? `loop is ${loop.status} — PM direct build` : 'no active loop — PM aligned in conversation' };

@@ -52,7 +52,7 @@ function upsertToolItem(
 }
 
 /**
- * Beta/TTY image sends arrived as a JSONL echo with NO structured attachments —
+ * Older image sends arrived as a JSONL echo with NO structured attachments —
  * the image is referenced inline as `[Attached image: <abs path>]` (the framing
  * the composer used to inject so the PTY's `claude` would read it). Recover any
  * host-served per-session attachment (`…/attachments/<sid>/<file>`) into a real
@@ -80,7 +80,7 @@ function recoverInlineImageAttachments(text: string): {
 /**
  * A `question` approval still `pending` once the conversation has moved on (a
  * new user turn arrived) was answered/cancelled out-of-band — its resolution
- * just wasn't recorded (e.g. a cancelled TTY question whose JSONL has no
+ * just wasn't recorded (e.g. a cancelled legacy question whose JSONL has no
  * tool_result, leaving an orphaned `approval_requested`). Dismiss it as
  * `declined` so it stops rendering as an actionable pending card on reload.
  * Only the genuinely-live question at the tail (no later user turn) stays
@@ -349,10 +349,8 @@ export function applyEnvelope(
   if (ev === 'approval_requested' || ev === 'approval.requested') {
     const item = parseApprovalRequested(env);
     if (!item) return items;
-    // A single AskUserQuestion can surface twice in TTY mode: the live
-    // PreToolUse hook broadcasts it while the tool is pending, then the JSONL
-    // watcher re-emits the same approvalId once the tool_use lands in the
-    // transcript. Dedupe by approvalId so it renders one card — and keep the
+    // A single AskUserQuestion can arrive through both the live proxy and a
+    // native-history replay. Dedupe by approvalId so it renders one card and keep the
     // existing item (and its status) so a late duplicate request can't
     // resurrect an already-resolved card.
     if (items.some(i => i.kind === 'approval' && i.approvalId === item.approvalId)) {
@@ -369,15 +367,14 @@ export function applyEnvelope(
     const idx = items.findIndex(i => i.kind === 'approval' && i.approvalId === approvalId);
     if (idx < 0) return items;
     const existing = items[idx] as ApprovalItem;
-    // A late auto-decline (TtyManager used to clear stranded question cards on
-    // SessionEnd / tty.exited / stop) must NOT clobber a card the user already
+    // A late auto-decline during session shutdown must NOT clobber a card the user already
     // answered. Once an approval is non-pending, ignore any `auto:true` resolve.
     if (data.auto === true && existing.status !== 'pending') {
       return items;
     }
     const next = items.slice();
     // Capture the picked answer(s) for a question resolve so the resolved card
-    // can show "answered with …". Only the synthetic local resolve (the old TTY
+    // can show "answered with …". Only the synthetic local resolve (the legacy
     // paste path) carried answers; the later JSONL watcher resolve did not, so
     // preserve any value we already have rather than blanking it.
     const answeredWith = formatAnsweredWith(data.answers) ?? existing.answeredWith;
@@ -469,7 +466,7 @@ export function applyEnvelope(
         url: a.url,
         ...(a.size !== undefined ? { size: a.size } : {}),
       }));
-    // No structured attachments (Beta/TTY JSONL echo) → recover inline
+    // No structured attachments (older JSONL echo) → recover inline
     // `[Attached image: …]` references into thumbnails, Chat-style.
     if (attachments.length === 0) {
       const recovered = recoverInlineImageAttachments(text);

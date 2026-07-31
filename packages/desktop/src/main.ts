@@ -17,6 +17,7 @@ import { promisify } from 'node:util';
 import {
   isSafeExternalUrl,
   isTrustedDesktopUrl,
+  resolveDesktopApplicationIdentity,
   resolveDesktopTargets,
   resolveDesktopWindowChrome,
 } from './config.js';
@@ -30,7 +31,18 @@ const titlebarCss = readFileSync(
   'utf8',
 );
 
-app.setName('Gian');
+const applicationIdentity = resolveDesktopApplicationIdentity(
+  app.isPackaged,
+  app.getPath('appData'),
+);
+const applicationName = applicationIdentity.name;
+
+app.setName(applicationName);
+if (applicationIdentity.userDataPath) {
+  // Keep the dev shell's Chromium profile and single-instance lock isolated
+  // from the installed production app so both can run at the same time.
+  app.setPath('userData', applicationIdentity.userDataPath);
+}
 
 const targets = resolveDesktopTargets({
   isPackaged: app.isPackaged,
@@ -161,7 +173,7 @@ async function loadGianSurface(window: BrowserWindow): Promise<boolean> {
 function buildApplicationMenu(): void {
   const template: MenuItemConstructorOptions[] = [
     {
-      label: 'Gian',
+      label: applicationName,
       submenu: [
         { role: 'about' },
         { type: 'separator' },
@@ -236,7 +248,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
     minWidth: 960,
     minHeight: 640,
     show: false,
-    title: 'Gian',
+    title: applicationName,
     backgroundColor: '#f7f7f5',
     webPreferences: {
       preload: preloadPath,

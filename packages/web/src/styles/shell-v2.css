@@ -114,18 +114,6 @@
   border: 0;
 }
 .brand:hover { background: var(--surface-3); }
-.brand-mark {
-  width: 18px; height: 18px;
-  color: var(--accent);
-  flex: none;
-}
-.brand-word {
-  font-family: var(--font-serif);
-  font-style: italic;
-  font-size: 19px;
-  letter-spacing: -0.02em;
-  line-height: 1;
-}
 
 /* mode dropdown — switches Sessions / Spaces / Bots */
 .mode-anchor { position: relative; }
@@ -314,35 +302,29 @@
   font: 10px/1 var(--font-mono);
   color: var(--text-3);
 }
+/* Branch (worktree) menu: the active tree is bold + carries a check glyph;
+   the detail (branch name) right-aligns, dimmed, like the `.sub` hint. */
+.session-menu .item.active { font-weight: 600; }
+.session-menu .item .item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-menu .item .item-detail {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 11px;
+  padding-left: 12px;
+  flex: none;
+}
 .session-menu .rule { height: 1px; background: var(--hairline); margin: 4px 4px; }
 
 /* ---------- View-seg (3-state main/both/workbench toggle in topbar) ---------- */
-.view-seg {
-  display: inline-flex;
-  align-items: center;
-  background: var(--surface);
-  border-radius: var(--r-2);
-  padding: 2px;
-  gap: 1px;
-  margin-left: 4px;
-}
-.view-seg-item {
-  width: 30px; height: 22px;
-  display: inline-flex; align-items: center; justify-content: center;
-  border-radius: var(--r-1);
-  background: transparent;
-  border: 1px solid transparent;
-  cursor: pointer;
-  color: var(--text-3);
-  transition: color 100ms var(--ease), background 100ms var(--ease), border-color 100ms var(--ease);
-}
-.view-seg-item:hover:not(:disabled) { color: var(--text); background: var(--surface-2); border-color: var(--hairline); }
 .view-seg-item.active {
   color: var(--accent-text);
   background: var(--accent-soft);
 }
-.view-seg-item:disabled { display: none; }
-.view-seg-item svg { display: block; }
 
 /* ---------- Dock (right icon strip) — frame surface ---------- */
 .dock {
@@ -424,86 +406,6 @@
 .dock-btn.popout.active  { background: var(--surface-3); color: var(--text); }
 /* Slightly rounder corners on popout group so it visually reads as "ephemeral" */
 .dock-btn.popout { border-radius: 10px; }
-
-/* ---------- Inbox popover (V2 visual; anchored to dock right side) ---------- */
-.inbox-anchor { position: relative; }
-.inbox-pop {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  min-width: 320px;
-  max-width: 380px;
-  background: var(--surface);
-  border-radius: var(--r-3);
-  box-shadow: var(--shadow-2);
-  z-index: 80;
-  overflow: hidden;
-}
-.inbox-pop .head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px 6px;
-  font: 700 10px/1 var(--font-mono);
-  text-transform: none;
-  letter-spacing: 0.07em;
-  color: var(--text-3);
-  border-bottom: 1px solid var(--hairline);
-}
-.inbox-pop .head .clear-all {
-  margin-left: auto;
-  font: 500 10.5px/1 var(--font-sans);
-  letter-spacing: 0;
-  text-transform: none;
-  color: var(--accent-text);
-  background: transparent;
-  border: 0;
-  padding: 2px 4px;
-  border-radius: var(--r-1);
-  cursor: pointer;
-}
-.inbox-pop .head .clear-all:hover { background: var(--accent-soft); }
-.inbox-pop .row {
-  display: flex; align-items: baseline; gap: 8px;
-  width: 100%;
-  padding: 8px 12px;
-  background: transparent; border: 0;
-  text-align: left;
-  cursor: pointer;
-}
-.inbox-pop .row:hover { background: var(--surface-2); }
-.inbox-pop .cat {
-  flex: none;
-  font: 700 9.5px/1 var(--font-mono);
-  text-transform: none;
-  letter-spacing: 0.05em;
-  padding: 2px 5px;
-  border-radius: var(--r-1);
-  background: var(--warn-soft);
-  color: var(--warn);
-}
-.inbox-pop .cat.high { background: var(--danger-soft); color: var(--danger); }
-.inbox-pop .desc {
-  flex: 1;
-  font: var(--fz-12)/1.4 var(--font-sans);
-  color: var(--text);
-  overflow: hidden; text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-.inbox-pop .at {
-  font: 10.5px/1.3 var(--font-mono);
-  color: var(--text-3);
-}
-/* when anchored from a dock button (right edge), flies left */
-.inbox-pop.dock-side {
-  position: absolute;
-  top: auto;
-  bottom: 0;
-  right: calc(100% + 8px);
-  left: auto;
-}
 
 /* ---------- Runner chip (V1-style, anchored bottom of the Dock) ----------
    Clicking the chip pops out a V1-style runner-pop panel to the left of the
@@ -631,7 +533,7 @@
   width: var(--rail-w, 272px) !important;
 }
 
-/* components.css `.sheet` was the LEGACY SettingsPanel overlay panel — width
+/* components.css `.sheet` was the legacy settings overlay panel — width
    380, padding 18, shadow + radius + animation. V2 Sheet (Workbench) uses
    `.sheet` as a transparent column whose children are `.sheet-group` islands.
    Hard-reset the leaked properties. (The legacy animation is overridden by
@@ -647,7 +549,7 @@
 
 /* CSS class name collision: V2's `.sheet-tab.preview` (italic preview-tab
    indicator) and shell.css `.preview` (the legacy 400px right-column
-   FilePreviewDrawer) share the `.preview` class. The legacy `.preview` rule
+   file preview drawers) share the `.preview` class. The legacy `.preview` rule
    sets width:400px + display:flex + flex-direction:column, which leaks onto
    the tab button and makes a single preview tab fill the whole row. Restore
    V2 tab layout explicitly. */
@@ -723,15 +625,6 @@
 }
 
 /* Notice for non-previewable files (PDF, …) — centered card + open buttons. */
-.sheet-binary {
-  flex: 1; min-height: 0;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 12px; padding: 24px;
-  text-align: center;
-}
-.sheet-binary-ico { color: var(--text-3); }
-.sheet-binary-msg { color: var(--text-2); font: var(--fz-13)/1.4 var(--font-sans); margin: 0; }
-.sheet-binary-acts { display: inline-flex; gap: 8px; }
 
 /* ---------- Diff tab body (Changes inspector → Sheet) ---------- */
 .sheet-tab .ext-ico.diff { background: oklch(0.55 0.12 145); }
@@ -829,8 +722,8 @@
 .rail-item.active .ri-status { opacity: 1; }
 
 /* Status icon — gradient disc + knockout glyph (spec 2026-06-28 §H).
-   Rendered INSIDE the .ri-status positioning wrapper, so session-row +
-   subtask-row placement is unchanged; only the visual is new. Colours are
+   Rendered INSIDE the .ri-status positioning wrapper, so session-row
+   placement is unchanged; only the visual is new. Colours are
    computed from --g1/2/3 (tokens.css) and re-tint per accent + theme. */
 .gico { position: relative; display: inline-flex; flex: 0 0 auto; width: 16px; height: 16px; }
 .gico .gfill {

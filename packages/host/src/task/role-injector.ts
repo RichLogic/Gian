@@ -5,9 +5,8 @@
 // the role playbook and workspace views are READ by the agent (native file
 // tools), not injected — keeping the injection surface bounded and small.
 //
-// Pure and side-effect-free. The live wiring (structured = prepend to the first
-// message; historically Claude TTY = SessionStart hook additionalContext before
-// that mode was removed) lives in the session manager and calls into here.
+// Pure and side-effect-free. The live wiring prepends the header to the first
+// structured message in SessionManager.
 
 import { GIAN_ROLE_OPEN, GIAN_ROLE_CLOSE, type Role } from '@gian/shared';
 import type { SessionType } from '@gian/shared';

@@ -42,7 +42,7 @@ async function patch(ctx: TestAppCtx, path: string, body: unknown) {
 // Create — input validation
 // ---------------------------------------------------------------------------
 
-// The rvc-shaped `BotExtra` shape:
+// The legacy `BotExtra` shape:
 //   discord → { token, application_id, bot_user_id?, direct_channel_id? }
 //   slack   → { bot_token, app_token, config_token, team_id, ... }
 // See `packages/shared/src/model.ts` for the canonical definitions.

@@ -1,15 +1,10 @@
-/**
- * IM-side config shim. rvc has a `config.ts` at host root with constants
- * like `DISCORD_SECRET_KEY_FILE` + an `ensureDataDir()` helper. Gian's data
- * dir lives under `~/.config/gian/` (see `host/src/storage/paths.ts`); the
- * IM-specific keys live under that.
- */
+/** Paths for encrypted IM credentials in Gian's data directory. */
 
 import { mkdir } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { resolveDataDir } from '../storage/paths.js';
 
-const GIAN_DATA_DIR = join(homedir(), '.config', 'gian');
+const GIAN_DATA_DIR = resolveDataDir();
 
 export const DISCORD_SECRET_KEY_FILE = join(GIAN_DATA_DIR, 'discord.key');
 export const SLACK_SECRET_KEY_FILE = join(GIAN_DATA_DIR, 'slack.key');

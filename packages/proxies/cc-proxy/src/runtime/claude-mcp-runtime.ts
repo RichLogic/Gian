@@ -165,73 +165,6 @@ export function shouldRetryWithoutNoSessionPersistence(stderr: string): boolean 
 }
 
 /**
- * Probe the slash commands available in this Claude environment by spawning
- * a throwaway `claude -p` and reading the `init` event's `slash_commands`
- * array — this is the authoritative list of what works in non-interactive
- * (`-p`) mode, including user-installed skills and plugins. Falls back to
- * an empty list on probe failure.
- */
-export function probeSlashCommands(cwd?: string): Promise<string[]> {
-  const run = (includeNoSessionPersistence: boolean): Promise<string[] | null> => new Promise((resolve) => {
-    const args = [
-      '-p', 'x',
-      '--output-format', 'stream-json',
-      '--verbose',
-      ...(includeNoSessionPersistence ? [NO_SESSION_PERSISTENCE_FLAG] : []),
-      '--dangerously-skip-permissions',
-    ];
-    const proc = spawn(claudeExecutable(), args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      ...(cwd ? { cwd } : {}),
-    });
-    proc.stdin.end();
-
-    let resolved = false;
-    let stderrBuf = '';
-    const finish = (list: string[] | null) => {
-      if (resolved) return;
-      resolved = true;
-      resolve(list);
-      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
-    };
-
-    proc.stderr?.on('data', d => { stderrBuf += d.toString(); });
-    const lines = createInterface({ input: proc.stdout! });
-    lines.on('line', (line) => {
-      if (resolved) return;
-      try {
-        const event = JSON.parse(line.trim()) as Record<string, unknown>;
-        if (event.type === 'system' && event.subtype === 'init' && Array.isArray(event.slash_commands)) {
-          finish((event.slash_commands as unknown[]).filter((s): s is string => typeof s === 'string'));
-        }
-      } catch { /* ignore */ }
-    });
-    // Without an 'error' handler an ENOENT (claude binary missing) raises
-    // an unhandled exception and crashes the proxy process. Treat it as a
-    // probe failure → empty list, same as the timeout path.
-    proc.on('error', () => finish([]));
-    proc.on('exit', () => {
-      if (includeNoSessionPersistence && shouldRetryWithoutNoSessionPersistence(stderrBuf)) {
-        finish(null);
-      } else {
-        finish([]);
-      }
-    });
-    setTimeout(() => finish([]), 15_000);
-  });
-
-  return new Promise((resolve) => {
-    void run(true).then(first => {
-      if (first !== null) {
-        resolve(first);
-        return;
-      }
-      void run(false).then(second => resolve(second ?? []));
-    });
-  });
-}
-
-/**
  * Ask Claude Code what model it would use by spawning a throwaway print-mode
  * process and reading the `system init` event. The process is killed as soon
  * as init arrives, before a real assistant turn is needed.
@@ -285,7 +218,7 @@ function probeCurrentModel(): Promise<string | null> {
       }
     });
 
-    // Same reason as probeSlashCommands — survive a missing `claude` binary.
+    // Survive a missing `claude` binary without crashing the proxy process.
     proc.on('error', (err) => {
       if (!resolved) {
         console.error(`[cc-proxy:probe model] spawn error: ${err.message}`);
@@ -930,7 +863,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     //
     // For non-bypass modes we attach the in-process approval MCP server so
     // CLI's permission requests are relayed to host instead of denied
-    // outright (which is what `claude -p` does without an interactive TTY).
+    // outright (which is how the non-interactive `claude -p` process behaves).
     const mode = options?.permissionMode ?? 'default';
     if (mode === 'bypassPermissions') {
       args.push('--dangerously-skip-permissions');

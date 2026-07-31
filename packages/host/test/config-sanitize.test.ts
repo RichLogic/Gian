@@ -97,21 +97,3 @@ test('UI-ACCENT-001 · defaults when nothing is set', async () => {
   assert.equal(cfg.font_scale_code, 'md');
   await ctx.cleanup?.();
 });
-
-test('CHATVIEW-001 · chat-view defaults when nothing is set', async () => {
-  const ctx = await makeTestApp();
-  ctx.db.prepare('DELETE FROM config').run();
-  const cfg = loadConfig(ctx.db);
-  assert.equal(cfg.codex_chat_cli, false);
-  await ctx.cleanup?.();
-});
-
-test('CHATVIEW-001 · chat-view prefs round-trip through saveConfig', async () => {
-  const ctx = await makeTestApp();
-  saveConfig(ctx.db, {
-    codex_chat_cli: true,
-  });
-  const cfg = loadConfig(ctx.db);
-  assert.equal(cfg.codex_chat_cli, true);
-  await ctx.cleanup?.();
-});

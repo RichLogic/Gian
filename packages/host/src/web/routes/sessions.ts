@@ -1,0 +1,132 @@
+import type { Hono } from 'hono';
+import type { SessionManager } from '../../session/manager.js';
+import {
+  FALLBACK_ATTACHMENT_MIME,
+  MAX_ATTACHMENT_BYTES,
+  mimeForAttachment,
+  readAttachment,
+  writeAttachment,
+} from '../../storage/attachments.js';
+import type { Db } from '../../storage/db.js';
+import { ensureEventsRebuilt } from '../../events/lazy-rebuild.js';
+import { markAccessed } from '../../events/lifecycle.js';
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function registerSessionRoutes(app: Hono, db: Db, sessions: SessionManager): void {
+  app.get('/api/sessions', c => {
+    const archived = c.req.query('archived');
+    if (archived === 'true') return c.json(sessions.listSessions({ archivedOnly: true }));
+    if (archived === 'all') return c.json(sessions.listSessions({ includeArchived: true }));
+    return c.json(sessions.listSessions());
+  });
+
+  app.post('/api/sessions/:id/merge', async c => {
+    try {
+      await sessions.mergeWorktree(c.req.param('id'));
+      return c.json({ ok: true });
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
+  app.post('/api/sessions/:id/drop', async c => {
+    try {
+      await sessions.dropWorktree(c.req.param('id'));
+      return c.json({ ok: true });
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
+  app.post('/api/sessions/:id/attachments', async c => {
+    const sessionId = c.req.param('id');
+    if (!db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId)) {
+      return c.json({ error: 'session not found' }, 404);
+    }
+    const file = (await c.req.parseBody())['file'];
+    if (!(file instanceof File)) return c.json({ error: 'file field required' }, 400);
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      return c.json({ error: `file too large: ${file.size} bytes` }, 413);
+    }
+    const mime = file.type.trim() || FALLBACK_ATTACHMENT_MIME;
+    const path = await writeAttachment(
+      sessionId,
+      Buffer.from(await file.arrayBuffer()),
+      mime,
+      file.name,
+    );
+    return c.json({ path, name: file.name, size: file.size, mime });
+  });
+
+  app.get('/api/sessions/:id/attachments/:filename', async c => {
+    const sessionId = c.req.param('id');
+    if (!db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId)) {
+      return c.json({ error: 'session not found' }, 404);
+    }
+    const filename = c.req.param('filename');
+    const bytes = await readAttachment(sessionId, filename);
+    if (!bytes) return c.json({ error: 'attachment not found' }, 404);
+    const mime = mimeForAttachment(filename);
+    return c.body(new Uint8Array(bytes), 200, {
+      'content-type': mime,
+      'cache-control': 'private, max-age=31536000, immutable',
+      'x-content-type-options': 'nosniff',
+      ...(mime === FALLBACK_ATTACHMENT_MIME
+        ? { 'content-disposition': 'attachment' }
+        : {}),
+    });
+  });
+
+  app.post('/api/sessions/:id/archive', async c => {
+    const body = await c.req.json<{ archived: boolean }>().catch(() => ({ archived: true }));
+    try {
+      sessions.archiveSession(c.req.param('id'), body.archived !== false);
+      return c.json({ ok: true });
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
+  app.delete('/api/sessions/:id', async c => {
+    try {
+      await sessions.deleteSession(c.req.param('id'));
+      return c.json({ ok: true });
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
+  app.get('/api/sessions/:id/events', c => {
+    const id = c.req.param('id');
+    try {
+      try {
+        ensureEventsRebuilt(db, id, c.req.query('rebuild') === '1');
+      } catch (error) {
+        console.warn(`[gian] failed to rebuild events for session ${id}:`, error);
+      }
+      markAccessed(db, id);
+      return c.json(sessions.listEvents(id));
+    } catch (error) {
+      return c.json({ error: String(error) }, 404);
+    }
+  });
+
+  app.get('/api/sessions/:id/native-config', async c => {
+    try {
+      return c.json(await sessions.getNativeConfig(c.req.param('id')));
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
+  app.get('/api/sessions/:id/slash', async c => {
+    try {
+      return c.json(await sessions.listSessionSlashCommands(c.req.param('id')));
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+}

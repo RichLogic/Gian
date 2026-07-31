@@ -33,7 +33,6 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     model: null,
     approval_mode: 'ask',
     thinking_effort: 'medium',
-    turns: 1,
     active_channel: 'web',
     status: 'idle',
     archived: 0,
@@ -42,7 +41,6 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     base_branch: null,
     worktree_outcome: null,
     native_session_id: null,
-    runtime_mode: 'structured',
     created_at: '2026-05-17T00:00:00.000Z',
     updated_at: '2026-05-17T00:00:00.000Z',
     ...overrides,
@@ -338,7 +336,10 @@ describe('PAL-001: empty result handling', () => {
 describe('PAL-001: initialQuery seeding', () => {
   it('seeds the input with `initialQuery` when the palette opens', async () => {
     openPalette({
-      sessions: [makeSession({ name: 'alpha' }), makeSession({ name: 'beta' })],
+      sessions: [
+        makeSession({ id: 'sess-alpha', name: 'alpha' }),
+        makeSession({ id: 'sess-beta', name: 'beta' }),
+      ],
       initialQuery: 'beta',
     });
     const input = screen.getByPlaceholderText(/Search sessions/) as HTMLInputElement;

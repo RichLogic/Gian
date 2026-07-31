@@ -4,57 +4,18 @@ import type { ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
-import type { GianWs } from '../ws.js';
-
-/**
- * Adapter that lets the Terminal component send/receive PTY bytes
- * without caring about which channel they're routed through. Two
- * concrete wires today:
- *
- *   - sessionWire(ws, sessionId)   — `pty:*` family, cc-proxy backed
- *   - workbenchWire(ws, termId)    — `term:*` family, host-backed shell
- *
- * Each `subscribe()` is called once on mount and returns an
- * unsubscribe function; the component does not assume anything about
- * how chunks are framed past "raw bytes."
- */
-export interface TerminalWire {
-  sendInput(bytes: Uint8Array): void;
-  sendResize(cols: number, rows: number): void;
-  requestReplay(): void;
-  /**
-   * Optional spawn step — workbench wire uses this to ask the host to
-   * actually start a shell on mount. Session wire spawns elsewhere
-   * (via the runtime-mode switch), so this is a no-op there.
-   */
-  spawn?(cols: number, rows: number): void;
-  /** Hand back unsubscribe. Implementations decide which WS messages
-   *  to listen for; both onChunk and onReplay receive raw bytes. */
-  subscribe(handlers: {
-    onChunk: (bytes: Uint8Array) => void;
-    onReplay: (chunks: Uint8Array[]) => void;
-  }): () => void;
-  /** Optional: tear down the server-side resource. Owners that want
-   *  unmount to kill the PTY can provide this; workbench terminals
-   *  close explicitly from the tab action instead. */
-  dispose?(): void;
-}
+import type { TerminalWire } from './terminal-wire.js';
 
 export interface TerminalProps {
   wire: TerminalWire;
-  /** Stable key so React unmounts the xterm when the bound resource
-   *  changes (different sessionId / termId). */
+  /** Stable key so React unmounts xterm when the terminal id changes. */
   instanceKey: string;
-  /** Claude Code terminal-setup maps Shift+Enter to backslash+Return
-   *  in VS Code/Cursor-style terminals. Browser xterm does not do that
-   *  by default, so session TTY can opt into the same sequence. */
-  shiftEnterNewline?: boolean;
 }
 
 /**
  * xterm.js panel — channel-agnostic. The owner picks the wire.
  */
-export function Terminal({ wire, instanceKey, shiftEnterNewline = false }: TerminalProps) {
+export function Terminal({ wire, instanceKey }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -126,24 +87,6 @@ export function Terminal({ wire, instanceKey, shiftEnterNewline = false }: Termi
       wire.sendInput(encoder.encode(data));
     };
 
-    if (shiftEnterNewline) {
-      term.attachCustomKeyEventHandler(event => {
-        if (
-          event.type === 'keydown'
-          && event.key === 'Enter'
-          && event.shiftKey
-          && !event.altKey
-          && !event.ctrlKey
-          && !event.metaKey
-        ) {
-          event.preventDefault();
-          sendInput('\\\r');
-          return false;
-        }
-        return true;
-      });
-    }
-
     const dataDisp = term.onData(data => {
       sendInput(data);
     });
@@ -176,6 +119,10 @@ export function Terminal({ wire, instanceKey, shiftEnterNewline = false }: Termi
       onReplay: chunks => {
         term.reset();
         for (const c of chunks) term.write(c);
+      },
+      onExit: (exitCode, signal) => {
+        const detail = signal ? `signal ${signal}` : `exit ${exitCode ?? 'unknown'}`;
+        term.write(`\r\n[terminal ${detail}]\r\n`);
       },
     });
 
@@ -210,11 +157,9 @@ export function Terminal({ wire, instanceKey, shiftEnterNewline = false }: Termi
       wire.dispose?.();
     };
     // `wire` is recreated on every parent render, so we deliberately
-    // ignore it in deps — the parent passes a stable `instanceKey` to
-    // signal genuine resource changes. `shiftEnterNewline` is part of
-    // the terminal keymap, so it does remount when that policy changes.
+    // ignore it in deps. `instanceKey` signals genuine resource changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instanceKey, shiftEnterNewline]);
+  }, [instanceKey]);
 
   return <div className="gian-terminal" ref={containerRef} />;
 }
@@ -264,88 +209,5 @@ function readThemeFromCss(host: HTMLElement): ITheme {
     // Dim variants used by xterm's "faint" attribute. Falling back to
     // --text-3 keeps low-priority output legible against the surface.
     brightBlack: muted,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Wire factories
-// ---------------------------------------------------------------------------
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const sub = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode.apply(null, sub as unknown as number[]);
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
-  return out;
-}
-
-/** Wire for the per-session TTY mode (cc-proxy backed). */
-export function makeSessionWire(ws: GianWs, sessionId: string): TerminalWire {
-  return {
-    sendInput(bytes) {
-      ws.send({ type: 'pty:input', session_id: sessionId, data: bytesToBase64(bytes) });
-    },
-    sendResize(cols, rows) {
-      ws.send({ type: 'pty:resize', session_id: sessionId, cols, rows });
-    },
-    requestReplay() {
-      ws.send({ type: 'pty:replay-request', session_id: sessionId });
-    },
-    subscribe(handlers) {
-      return ws.onMessage(msg => {
-        if (msg.type === 'pty:output' && msg.session_id === sessionId) {
-          handlers.onChunk(base64ToBytes(msg.data));
-        } else if (msg.type === 'pty:replay' && msg.session_id === sessionId) {
-          handlers.onReplay(msg.chunks.map(base64ToBytes));
-        }
-      });
-    },
-  };
-}
-
-/** Wire for a workbench shell terminal (host-backed). */
-export function makeWorkbenchWire(
-  ws: GianWs,
-  termId: string,
-  opts: { cwd?: string; shell?: string } = {},
-): TerminalWire {
-  return {
-    sendInput(bytes) {
-      ws.send({ type: 'term:input', term_id: termId, data: bytesToBase64(bytes) });
-    },
-    sendResize(cols, rows) {
-      ws.send({ type: 'term:resize', term_id: termId, cols, rows });
-    },
-    requestReplay() {
-      ws.send({ type: 'term:replay-request', term_id: termId });
-    },
-    spawn(cols, rows) {
-      ws.send({
-        type: 'term:spawn',
-        term_id: termId,
-        cols,
-        rows,
-        ...(opts.cwd ? { cwd: opts.cwd } : {}),
-        ...(opts.shell ? { shell: opts.shell } : {}),
-      });
-    },
-    subscribe(handlers) {
-      return ws.onMessage(msg => {
-        if (msg.type === 'term:output' && msg.term_id === termId) {
-          handlers.onChunk(base64ToBytes(msg.data));
-        } else if (msg.type === 'term:replay' && msg.term_id === termId) {
-          handlers.onReplay(msg.chunks.map(base64ToBytes));
-        }
-      });
-    },
   };
 }

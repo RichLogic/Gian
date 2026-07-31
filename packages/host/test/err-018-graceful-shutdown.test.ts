@@ -94,9 +94,9 @@ test('ERR-018: shutdown after a session is created still completes (no leftover 
     const now = new Date().toISOString();
     ctx.db.prepare(`
       INSERT INTO sessions
-        (id, name, type, workspace_id, executor, model, approval_mode, turns,
+        (id, name, type, workspace_id, executor, model, approval_mode,
          active_channel, status, archived, native_session_id, created_at, updated_at)
-      VALUES (?, 'demo', 'coding', ?, 'claude', NULL, 'ask', 1,
+      VALUES (?, 'demo', 'coding', ?, 'claude', NULL, 'ask',
               'web', 'new', 0, 'fake-native-id', ?, ?)
     `).run('sess-y', 'ws-y', now, now);
 

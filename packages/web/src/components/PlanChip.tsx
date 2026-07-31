@@ -16,13 +16,13 @@ import '../styles/context-strip.css';
  */
 export function PlanChip({
   items,
-  codexPlanText,
+  planText,
   planCompleted,
   sessionId,
 }: {
   items: TranscriptItem[];
-  /** Latest streamed plan text. Kept under the old prop name for compatibility. */
-  codexPlanText?: string;
+  /** Latest streamed plan text from the active executor. */
+  planText?: string;
   /** Successful turn-end has confirmed that every streamed step is complete. */
   planCompleted?: boolean;
   sessionId: string;
@@ -34,11 +34,11 @@ export function PlanChip({
   const context = useMemo(
     () => projectSessionContext({
       items,
-      planText: codexPlanText,
+      planText: planText,
       planCompleted,
       sessionId,
     }),
-    [items, codexPlanText, planCompleted, sessionId],
+    [items, planText, planCompleted, sessionId],
   );
 
   useEffect(() => {

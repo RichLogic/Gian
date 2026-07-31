@@ -8,9 +8,7 @@
  *
  * Keyed by an opaque client-minted `term_id` (uuid-ish) — one PTY per
  * id, ring buffer per PTY for replay-on-reconnect. WS frames are JSON
- * with base64-encoded payloads, same shape as the session TTY path
- * (see `pty:output` in cc-proxy land) so the xterm component on the
- * client can stay one mostly-shared piece of code.
+ * with base64-encoded payloads over the dedicated `term:*` protocol.
  */
 
 import { EventEmitter } from 'node:events';
@@ -26,9 +24,7 @@ async function loadNodePty(): Promise<typeof import('node-pty')> {
   return nodePtyPromise;
 }
 
-/** Default ring-buffer cap per terminal (~1 MiB). Mirrors the session
- *  TTY runtime so xterm reconnects feel the same regardless of which
- *  surface the user is in. */
+/** Default ring-buffer cap per terminal (~1 MiB). */
 const DEFAULT_RING_BUFFER_BYTES = 1024 * 1024;
 
 interface WorkbenchTerminalRec {

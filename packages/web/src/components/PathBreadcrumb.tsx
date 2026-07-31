@@ -26,8 +26,12 @@ export interface SessionMenuActions {
    *  label ("Pin" ↔ "Unpin") and the toggle behaviour. */
   onPin?: () => void;
   pinned?: boolean;
+  /** Task only: mark the task done / reopen it (moved off the rail row onto
+   *  this menu when the Tasks rail aligned with the Sessions rail, 2026-07-31).
+   *  `taskDone` drives the label ("Mark done" ↔ "Reopen"). */
+  onToggleDone?: () => void;
+  taskDone?: boolean;
   onFork?: (executor: Executor) => void;
-  onArchive?: () => void;
   onDelete?: () => void;
   /** Subtask only (spec §B): toggle the user completion flag. `completed`
    *  drives the label ("Mark complete" ↔ "Reopen"). */
@@ -35,11 +39,21 @@ export interface SessionMenuActions {
   completed?: boolean;
 }
 
+/** The branch segment's worktree dropdown (view-level working-tree switch).
+ *  Items are the workspace's working trees; `onPick` selects one, `onCopy`
+ *  (optional) appends a "Copy branch name" item after a divider. */
+export interface BranchMenuActions {
+  items: Array<{ id: string; label: string; detail?: string | null; active?: boolean }>;
+  onPick: (id: string) => void;
+  onCopy?: () => void;
+}
+
 interface Props {
   segments: PathSegment[];
   onRenameSubmit?: (value: string) => void;
   onRenameCancel?: () => void;
   sessionMenu?: SessionMenuActions | null;
+  branchMenu?: BranchMenuActions | null;
 }
 
 function BranchIcon({ size = 11 }: { size?: number }) {
@@ -136,6 +150,12 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
     copy();
     if (m.onMarkUnread) items.push({ key: 'unread', icon: ICON.mail, label: t('path.menu.markUnread'), onClick: m.onMarkUnread, ruleBefore: true });
     if (m.onPin) items.push({ key: 'pin', icon: ICON.pin, label: t(m.pinned ? 'path.menu.unpin' : 'path.menu.pin'), onClick: m.onPin });
+    if (m.onToggleDone) items.push({
+      key: 'done',
+      icon: m.taskDone ? ICON.refresh : ICON.check,
+      label: m.taskDone ? t('tasks.reopen') : t('tasks.markDone'),
+      onClick: m.onToggleDone,
+    });
     if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, ruleBefore: true });
     if (m.onDelete) items.push({ key: 'remove', icon: ICON.trash, label: t('path.menu.removeTask'), onClick: m.onDelete, danger: true });
     return items;
@@ -164,28 +184,35 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
     items.push({ key: 'fork-kimi', icon: ICON.fork, label: t('path.menu.forkKimi'), onClick: () => m.onFork!('kimi') });
   }
   if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true });
-  if (m.onArchive) items.push({ key: 'archive', icon: ICON.folder, label: t('common.archive'), onClick: m.onArchive, ruleBefore: true });
   if (m.onDelete) items.push({ key: 'delete', icon: ICON.trash, label: t('path.menu.deleteSession'), onClick: m.onDelete, danger: true });
   return items;
 }
 
-export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessionMenu }: Props) {
+export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessionMenu, branchMenu }: Props) {
   const t = useT();
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLSpanElement>(null);
+  // Branch segment worktree dropdown — mirrors the session menu above (own
+  // open state + anchor/menu refs so an outside click or Escape closes it).
+  const [branchMenuOpen, setBranchMenuOpen] = useState(false);
+  const branchMenuRef = useRef<HTMLDivElement>(null);
+  const branchAnchorRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!menuOpen && !branchMenuOpen) return;
     function onDown(e: PointerEvent) {
       const t = e.target as Node;
       if (menuRef.current?.contains(t)) return;
       if (anchorRef.current?.contains(t)) return;
+      if (branchMenuRef.current?.contains(t)) return;
+      if (branchAnchorRef.current?.contains(t)) return;
       setMenuOpen(false);
+      setBranchMenuOpen(false);
     }
     function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setMenuOpen(false);
+      if (e.key === 'Escape') { setMenuOpen(false); setBranchMenuOpen(false); }
     }
     document.addEventListener('pointerdown', onDown);
     document.addEventListener('keydown', onKey);
@@ -193,7 +220,7 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
       document.removeEventListener('pointerdown', onDown);
       document.removeEventListener('keydown', onKey);
     };
-  }, [menuOpen]);
+  }, [menuOpen, branchMenuOpen]);
 
   function copy(idx: number, text: string) {
     try { void navigator.clipboard?.writeText(text); } catch (_) { /* ignore */ }
@@ -206,6 +233,10 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
   function handleSegClick(idx: number, seg: PathSegment) {
     if (seg.kind === 'session' && sessionMenu) {
       setMenuOpen(o => !o);
+    } else if (seg.kind === 'branch' && branchMenu) {
+      // With a branch menu wired up, clicking the branch switches worktree
+      // instead of copying (copying stays available as a menu item).
+      setBranchMenuOpen(o => !o);
     } else {
       copy(idx, seg.label);
     }
@@ -219,6 +250,7 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
     <div className="path">
       {segments.map((seg, i) => {
         const showMenu = seg.kind === 'session' && menuOpen && sessionMenu;
+        const showBranchMenu = seg.kind === 'branch' && branchMenuOpen && branchMenu;
         const isCopied = copiedIdx === i;
         return (
           <SegmentFragment key={i} idx={i} seg={seg} showSep={i > 0}>
@@ -238,15 +270,18 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                 }}
               />
             ) : (
-              <span className="path-seg-anchor" ref={seg.kind === 'session' ? anchorRef : undefined}>
+              <span
+                className="path-seg-anchor"
+                ref={seg.kind === 'session' ? anchorRef : seg.kind === 'branch' ? branchAnchorRef : undefined}
+              >
                 <button
                   className={`path-seg ${seg.kind} ${isCopied ? 'copied' : ''}`}
-                  title={seg.copyHint}
+                  title={seg.kind === 'branch' && branchMenu ? t('path.branch.switch') : seg.copyHint}
                   onClick={e => { e.stopPropagation(); handleSegClick(i, seg); }}
                 >
                   {seg.kind === 'branch' && <BranchIcon />}
                   <span className="path-seg-label">{seg.label}</span>
-                  {seg.kind === 'session' && (
+                  {(seg.kind === 'session' || (seg.kind === 'branch' && branchMenu)) && (
                     <span className="path-seg-affordance caret" aria-hidden>
                       <CaretDown size={11} />
                     </span>
@@ -272,6 +307,32 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                         </button>
                       </Fragment>
                     ))}
+                  </div>
+                )}
+                {showBranchMenu && branchMenu && (
+                  <div className="session-menu" ref={branchMenuRef} onClick={e => e.stopPropagation()}>
+                    {branchMenu.items.map(it => (
+                      <button
+                        key={it.id}
+                        className={`item${it.active ? ' active' : ''}`}
+                        onClick={() => { setBranchMenuOpen(false); branchMenu.onPick(it.id); }}
+                      >
+                        {it.active && <CheckIcon size={11} />}
+                        <span className="item-label">{it.label}</span>
+                        {it.detail && <span className="item-detail">{it.detail}</span>}
+                      </button>
+                    ))}
+                    {branchMenu.onCopy && (
+                      <>
+                        <div className="rule" />
+                        <button
+                          className="item"
+                          onClick={() => { setBranchMenuOpen(false); branchMenu.onCopy!(); }}
+                        >
+                          <MenuIcon d={ICON.copy} /> {t('path.menu.copyBranch')}
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
               </span>

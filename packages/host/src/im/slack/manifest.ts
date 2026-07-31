@@ -27,25 +27,6 @@ export function slackCommandNames(prefix: string): string[] {
   return SLACK_COMMANDS.map((cmd) => `/${prefix}-${cmd}`);
 }
 
-/**
- * Given a full slash command string (e.g. "/eva00-new"), extract the action
- * suffix by matching against known command suffixes.
- *
- * The prefix itself may contain dashes, so we match from the end.
- */
-export function parseSlackCommandAction(
-  command: string,
-  prefix: string,
-): typeof SLACK_COMMANDS[number] | null {
-  const normalized = command.startsWith('/') ? command.slice(1) : command;
-  const expectedPrefix = `${prefix}-`;
-  if (!normalized.startsWith(expectedPrefix)) return null;
-  const action = normalized.slice(expectedPrefix.length);
-  return (SLACK_COMMANDS as readonly string[]).includes(action)
-    ? (action as typeof SLACK_COMMANDS[number])
-    : null;
-}
-
 // ---------------------------------------------------------------------------
 // Manifest API
 // ---------------------------------------------------------------------------
@@ -106,41 +87,6 @@ export async function registerSlackCommands(params: {
   }
 
   log?.info(`Registered Slack commands for prefix "${prefix}": ${slackCommandNames(prefix).join(', ')}`);
-}
-
-/**
- * Remove all commands with the given prefix from the Slack app manifest.
- */
-export async function unregisterSlackCommands(params: {
-  configToken: string;
-  appId: string;
-  prefix: string;
-  log?: { info(msg: string): unknown; warn(msg: string): unknown };
-}): Promise<void> {
-  const { configToken, appId, prefix, log } = params;
-
-  const exportRes = await slackApi('apps.manifest.export', configToken, { app_id: appId });
-  if (!exportRes.ok) {
-    throw new Error(`Failed to export Slack manifest: ${exportRes.error ?? 'unknown'}`);
-  }
-
-  const manifest = exportRes.manifest as Record<string, unknown>;
-  const features = (manifest.features ?? {}) as Record<string, unknown>;
-  const existingCommands = (features.slash_commands ?? []) as ManifestSlashCommand[];
-  const prefixedPattern = `/${prefix}-`;
-  features.slash_commands = existingCommands.filter((c) => !c.command.startsWith(prefixedPattern));
-  manifest.features = features;
-
-  const updateRes = await slackApi('apps.manifest.update', configToken, {
-    app_id: appId,
-    manifest,
-  });
-  if (!updateRes.ok) {
-    const errors = updateRes.errors ? JSON.stringify(updateRes.errors) : '';
-    throw new Error(`Failed to update Slack manifest: ${updateRes.error ?? 'unknown'}${errors ? ` — ${errors}` : ''}`);
-  }
-
-  log?.info(`Unregistered Slack commands for prefix "${prefix}"`);
 }
 
 // ---------------------------------------------------------------------------

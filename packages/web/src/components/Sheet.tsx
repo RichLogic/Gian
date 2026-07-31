@@ -1,97 +1,35 @@
 import { useContext, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { OpenFileCategory, OpenAppPrefs } from '@gian/shared';
+import type { OpenAppPrefs } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { parseUnifiedDiff } from '../transcript/apply.js';
 import { BrowserLinkOpenContext } from '../presentation/chat-panel.js';
 import { AppIcon } from './AppIcon.js';
-
-export type SheetTabKind = 'file' | 'term' | 'settings' | 'plan' | 'diff' | 'workspace' | 'new-workspace' | 'chat' | 'browser';
-export type FileViewMode = 'source' | 'preview';
-
-/** Right-dock rails. Each rail declares which Sheet group (panel 2) and which
- *  Inspector (panel 3) it drives; 'manager' has no tab group — its panel 2 is
- *  the compact Manager panel rendered by App. 'sidechat' / 'browser' are
- *  placeholders until phases 4–5 wire their content. */
-export type RailId =
-  | 'files' | 'diffs' | 'manager' | 'sidechat'
-  | 'terminal' | 'browser' | 'workspaces' | 'settings';
-
-/** Tab groups rendered by the Sheet. Only the active rail's group is visible;
- *  the others stay mounted under display:none so xterm/iframes stay alive. */
-export type SheetGroup =
-  | 'files' | 'diffs' | 'sidechat' | 'term' | 'browser' | 'workspaces' | 'settings';
-
-/** Fixed render order for tab groups inside the Sheet. */
-export const SHEET_GROUP_ORDER: readonly SheetGroup[] = [
-  'files', 'diffs', 'sidechat', 'term', 'browser', 'workspaces', 'settings',
-];
-
-/** Target chosen from a file tab's "Open with…" menu, or via the smart Open
- *  button. `system` names: `default` (OS default app) / `finder` (reveal) /
- *  `browser` (raw in a new tab) / `terminal` (at folder). `default` + `browser`
- *  are no longer listed in the menu — they're the two outcomes of the smart
- *  Open main button — but remain valid targets. `editor` = a configured app. */
-export type SheetOpenWith =
-  | { kind: 'system'; name: 'default' | 'finder' | 'browser' | 'terminal' }
-  | { kind: 'app'; app: string }
-  | { kind: 'editor'; id: string };
-
-export interface SheetTab {
-  id: string;
-  /** Rail group this tab belongs to — only the active rail's group renders
-   *  visibly; the rest stay mounted display:none (xterm keep-alive pattern). */
-  group: SheetGroup;
-  name: string;
-  kind: SheetTabKind;
-  icoKind: 'md' | 'ts' | 'tsx' | 'json' | 'css' | 'term' | 'gear' | 'plan' | 'diff' | 'img' | 'grid' | 'chat' | 'browser';
-  ico: string;
-  /** Workspace id this tab renders (for kind === 'workspace'). The body is
-   *  provided by the host via `renderTab` (it needs workspace data + ws conn). */
-  wsId?: string;
-  /** Session id this tab renders (for kind === 'chat' — a sidechat panel).
-   *  The body is provided by the host via `renderTab` (it needs the session
-   *  data + handler stack only App has). */
-  sessionId?: string;
-  /** Start URL (for kind === 'browser'). The body is provided by the host
-   *  via `renderTab` so tab renames (url host) route through sheetActions. */
-  url?: string;
-  /** When true, this tab is a "preview" (italic name, replaced by next preview).
-   *  Double-click or pin to promote to permanent. */
-  preview?: boolean;
-  /** Source code lines (for file tabs). Each row: [number, text, syntaxClass?, diffClass?]. */
-  lines?: Array<[string, string, string?, string?]>;
-  /** For md file tabs, toggles source vs rendered preview. */
-  viewMode?: FileViewMode;
-  /** 1-based line to scroll to + highlight when the tab opens (file-link jump). */
-  scrollLine?: number;
-  /** Optional full path shown on hover (§3.14). */
-  fullPath?: string;
-  /** Working tree this file/diff belongs to — authoritative for routing
-   *  "open with" back to the host (avoids re-deriving from the abs path, which
-   *  mis-handles sibling roots like `/…/Gian` vs `/…/Gian-Dev`). */
-  workingTreeId?: string;
-  /** Plan markdown body (for kind === 'plan'). */
-  planBody?: string;
-  /** Raw unified diff text (for kind === 'diff'). */
-  diffText?: string;
-  /** `/raw` URL for image tabs — rendered inline with an `<img>` (no `lines`). */
-  rawSrc?: string;
-  /** Relative path only when this file is present in the current Files tree. */
-  fileTreePath?: string;
-  /** File could not be loaded into the in-app preview. */
-  loadError?: string;
-}
-
-export interface SheetActions {
-  activateTab: (id: string) => void;
-  closeTab: (id: string) => void;
-  pinTab: (id: string) => void;
-  setTabViewMode: (id: string, mode: FileViewMode) => void;
-  /** Rename a tab (e.g. a browser tab adopts the navigated url's host). */
-  setTabName: (id: string, name: string) => void;
-}
+import {
+  SHEET_GROUP_ORDER,
+  openCategoryFor,
+  resolveOpenTarget,
+  type SheetActions,
+  type SheetGroup,
+  type SheetOpenWith,
+  type SheetTab,
+} from './sheet-model.js';
+export {
+  DEFAULT_OPEN_TARGET,
+  IMAGE_EXTS,
+  openCategoryFor,
+  resolveOpenTarget,
+} from './sheet-model.js';
+export type {
+  FileViewMode,
+  RailId,
+  SheetActions,
+  SheetGroup,
+  SheetOpenWith,
+  SheetTab,
+  SheetTabKind,
+} from './sheet-model.js';
 
 /** File preview capability matrix.
  *  - canPreviewInApp: shows the eye/code toggle inside the sheet. Only
@@ -401,44 +339,6 @@ const SYSTEM_OPENERS: Array<{ name: 'finder' | 'terminal'; key: string; app: str
   { name: 'finder', key: 'sheet.openWith.finder', app: 'Finder' },
   { name: 'terminal', key: 'sheet.openWith.terminal', app: 'Terminal' },
 ];
-
-/** Images we render inline (`<img src=/raw>`). Also used to decide image tabs. */
-export const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico']);
-
-// "Open" routes a file into one of a few broad categories; the target for each
-// category (an installed app, a new browser tab, or reveal in Finder) is
-// user-configurable in Settings (SystemConfig.open_apps), with these built-in
-// defaults. Categories: code/text → TextEdit; web/images/pdf → new tab; else → Finder.
-const IMAGE_PREVIEW_EXTS = new Set([...IMAGE_EXTS, 'tiff', 'tif', 'heic', 'heif']);
-const TEXT_EXTS = new Set([
-  'txt', 'text', 'log', 'csv', 'tsv', 'md', 'markdown', 'mdx', 'rst',
-  'json', 'json5', 'jsonc', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'env', 'properties', 'xml', 'plist',
-  'js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx', 'css', 'scss', 'sass', 'less', 'vue', 'svelte', 'astro',
-  'py', 'rb', 'go', 'rs', 'java', 'kt', 'kts', 'scala', 'c', 'h', 'cc', 'cpp', 'cxx', 'hpp', 'hxx', 'm', 'mm', 'swift',
-  'php', 'pl', 'pm', 'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat', 'lua', 'r', 'sql', 'graphql', 'gql', 'proto',
-  'dockerfile', 'makefile', 'gitignore', 'gitattributes', 'editorconfig', 'lock',
-]);
-export function openCategoryFor(name: string): OpenFileCategory {
-  const ext = (name.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase();
-  if (ext === 'pdf') return 'pdf';
-  if (IMAGE_PREVIEW_EXTS.has(ext)) return 'images';
-  if (ext === 'html' || ext === 'htm') return 'web';
-  if (TEXT_EXTS.has(ext)) return 'code';
-  return 'other';
-}
-
-/** Built-in per-category default target (sentinels: `@newtab` / `@finder`). */
-export const DEFAULT_OPEN_TARGET: Record<OpenFileCategory, string> = {
-  code: 'TextEdit', web: '@newtab', images: '@newtab', pdf: '@newtab', other: '@finder',
-};
-
-/** Resolve a category + the user's prefs into a concrete open target. */
-export function resolveOpenTarget(cat: OpenFileCategory, openApps?: OpenAppPrefs): SheetOpenWith {
-  const v = (openApps?.[cat]) || DEFAULT_OPEN_TARGET[cat];
-  if (v === '@newtab') return { kind: 'system', name: 'browser' };
-  if (v === '@finder') return { kind: 'system', name: 'finder' };
-  return { kind: 'app', app: v };
-}
 
 function FileActions({
   tab, caps, actions, tr, wrap, onToggleWrap, split, onToggleSplit, externalEditors, openApps, onOpenWith, onConfigureEditors,

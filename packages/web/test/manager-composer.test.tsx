@@ -64,7 +64,6 @@ function managerSession(overrides: Partial<Session> = {}): Session {
     model: 'gpt-5.5',
     approval_mode: 'ask',
     thinking_effort: 'xhigh',
-    turns: 1,
     active_channel: 'web',
     status: 'done',
     archived: 0,
@@ -74,7 +73,6 @@ function managerSession(overrides: Partial<Session> = {}): Session {
     base_branch: null,
     worktree_outcome: null,
     native_session_id: null,
-    runtime_mode: 'structured',
     summary: null,
     completed_at: null,
     created_at: '2026-06-29T00:00:00.000Z',
@@ -216,20 +214,21 @@ describe('Task executor picker', () => {
   });
 });
 
-describe('Manager status on the parent task row (row-end StatusIcon)', () => {
+describe('Manager status on the Manager child row (row-end StatusIcon)', () => {
   beforeEach(() => { localStorage.clear(); });
 
-  it('shows the running spinner on the task row when the Manager is running', () => {
-    // The task row's row-end glyph IS the Manager-as-session StatusIcon.
+  it('shows the running spinner on the Manager row when the Manager is running', () => {
+    // The Manager child row's row-end glyph IS the Manager-as-session
+    // StatusIcon (moved off the retired parent task row, 2026-07-31).
     renderTasks({ session: managerSession({ status: 'running' }), pending: true });
-    const taskRow = document.querySelector('.task-row');
-    expect(taskRow).not.toBeNull();
-    expect(taskRow!.querySelector('.ri-status.running')).not.toBeNull();
+    const managerRow = document.querySelector('.manager-row');
+    expect(managerRow).not.toBeNull();
+    expect(managerRow!.querySelector('.ri-status.running')).not.toBeNull();
   });
 
-  it('shows no running spinner on the task row when the Manager is idle', () => {
+  it('shows no running spinner on the Manager row when the Manager is idle', () => {
     renderTasks({ session: managerSession({ status: 'done' }) });
-    expect(document.querySelector('.task-row .ri-status.running')).toBeNull();
+    expect(document.querySelector('.manager-row .ri-status.running')).toBeNull();
   });
 
   it('shows a running pill in the Manager panel head when running', () => {

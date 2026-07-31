@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -19,6 +19,8 @@ import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import { ApprovalManager } from '../src/approval/index.js';
 import { QueueManager } from '../src/queue/index.js';
 import { writeAttachment } from '../src/storage/attachments.js';
+import { listGitWorktrees } from '../src/workspace/git.js';
+import { createGitRepo } from './fixtures/git-repo.js';
 
 class StubProxyClient implements ProxyClient {
   readonly executor = 'claude' as const;
@@ -1200,5 +1202,111 @@ test('session.rotated notification updates native_session_id and broadcasts sess
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('command_execution with `git worktree add` records detected_worktree_path and broadcasts', async () => {
+  const { dir, db, sessions, proxyMgr, broadcaster } = setup();
+  const repo = createGitRepo({ initialBranch: 'main' });
+  try {
+    // Workspace backed by a REAL git repo so membership validation passes.
+    const wsPath = realpathSync(repo.path);
+    const repoWsId = randomUUID();
+    db.prepare('INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)')
+      .run(repoWsId, 'repo-ws', wsPath);
+
+    // The agent "already ran" the command: the worktree exists on disk.
+    repo.git(['worktree', 'add', '-b', 'feature/agent', `${repo.path}-agent`, 'main']);
+    const wtPath = listGitWorktrees(wsPath).find(w => w.branch === 'feature/agent')!.path;
+
+    const session = await sessions.createSession({ workspace_id: repoWsId, executor: 'claude' });
+    await sessions.sendMessage(session.id, 'make a worktree');
+    broadcaster.messages.length = 0;
+
+    const fireBash = (command: string): void => proxyMgr.client.fire({
+      method: 'tool.use',
+      params: {
+        sessionId: 'proxy_x',
+        data: { toolName: 'Bash', input: { command }, callId: randomUUID() },
+      },
+    });
+
+    fireBash(`git worktree add -b feature/agent ${wtPath} main`);
+
+    const row = db
+      .prepare('SELECT detected_worktree_path FROM sessions WHERE id = ?')
+      .get(session.id) as { detected_worktree_path: string | null };
+    assert.equal(row.detected_worktree_path, wtPath, 'detected path persisted on the session row');
+
+    const updates = broadcaster.messages.filter(
+      m => m.type === 'session:updated'
+        && (m as { session: { detected_worktree_path?: string | null } }).session.detected_worktree_path,
+    );
+    assert.equal(updates.length, 1, 'one session:updated broadcast carries the detected path');
+
+    // Idempotent: the completion event re-carries the same command — no
+    // second write, no second broadcast.
+    fireBash(`git worktree add -b feature/agent ${wtPath} main`);
+    const updatesAfter = broadcaster.messages.filter(
+      m => m.type === 'session:updated'
+        && (m as { session: { detected_worktree_path?: string | null } }).session.detected_worktree_path,
+    );
+    assert.equal(updatesAfter.length, 1, 'same path again does not rebroadcast');
+
+    // Guards: a path that is NOT a worktree of the workspace repo is ignored…
+    fireBash('git worktree add /not/a/real/worktree');
+    // …and so is a non-worktree-add command.
+    fireBash('git worktree list');
+    const rowAfter = db
+      .prepare('SELECT detected_worktree_path FROM sessions WHERE id = ?')
+      .get(session.id) as { detected_worktree_path: string | null };
+    assert.equal(rowAfter.detected_worktree_path, wtPath, 'guards reject bogus detections');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+    repo.cleanup();
+  }
+});
+
+test('worktree detection never disturbs Gian-owned worktree sessions', async () => {
+  const { dir, db, sessions, proxyMgr } = setup();
+  const repo = createGitRepo({ initialBranch: 'main' });
+  try {
+    const wsPath = realpathSync(repo.path);
+    const repoWsId = randomUUID();
+    db.prepare('INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)')
+      .run(repoWsId, 'repo-ws', wsPath);
+
+    repo.git(['worktree', 'add', '-b', 'feature/agent', `${repo.path}-agent`, 'main']);
+    const wtPath = listGitWorktrees(wsPath).find(w => w.branch === 'feature/agent')!.path;
+
+    const session = await sessions.createSession({ workspace_id: repoWsId, executor: 'claude' });
+    // Simulate a Gian-owned worktree session (managed by merge/discard).
+    db.prepare('UPDATE sessions SET worktree_path = ? WHERE id = ?')
+      .run('/data/worktrees/owned', session.id);
+    await sessions.sendMessage(session.id, 'ping');
+
+    proxyMgr.client.fire({
+      method: 'tool.use',
+      params: {
+        sessionId: 'proxy_x',
+        data: {
+          toolName: 'Bash',
+          input: { command: `git worktree add ${wtPath}` },
+          callId: randomUUID(),
+        },
+      },
+    });
+
+    const row = db
+      .prepare('SELECT detected_worktree_path, worktree_path FROM sessions WHERE id = ?')
+      .get(session.id) as { detected_worktree_path: string | null; worktree_path: string | null };
+    assert.equal(row.detected_worktree_path, null,
+      'Gian-owned worktree sessions never get a detected path');
+    assert.equal(row.worktree_path, '/data/worktrees/owned', 'owned worktree untouched');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+    repo.cleanup();
   }
 });

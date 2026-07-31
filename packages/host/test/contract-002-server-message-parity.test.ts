@@ -21,32 +21,10 @@ const WEB_TS = resolve('../shared/src/web.ts');
 const WEB_SRC_ROOT = resolve('../web/src');
 
 // ---------------------------------------------------------------------------
-// Whitelist — server message types intentionally not consumed today.
-// Update together with the matrix when a consumer is added.
+// Every declared server message has a consumer.
 // ---------------------------------------------------------------------------
 
-const NOT_DISPLAYED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> = [
-  // `bot:updated` is fan-out for Bots view live state; the BotsView
-  // component currently re-fetches `/api/bots` on focus instead of
-  // subscribing, so this server-side push is unused. Kept declared so
-  // the WS layer can start emitting it without a type-error storm when
-  // BotsView gains live updates.
-  { type: 'bot:updated', reason: 'BotsView refetches on focus; live push not wired yet.' },
-  // `transcript:history` was M2 history paging plumbing. The Transcript
-  // component currently loads via REST + WS streaming live; back-paging
-  // is not implemented client-side.
-  { type: 'transcript:history', reason: 'M2 paging plumbing; Transcript loads live + REST only.' },
-  // `term:exited` carries exit code + signal for a closed workbench
-  // PTY. Terminal.tsx renders the buffer until the next spawn; it
-  // doesn't visually distinguish a clean exit from a crash. Kept for
-  // future "PTY died" badge.
-  { type: 'term:exited', reason: 'Terminal.tsx shows buffer until next spawn; exit-badge UI not yet present.' },
-  // `session:runtime-switched` ships when Claude flips Structured ↔ TTY.
-  // The runtime-switching feature is currently out-of-scope (TTY runtime
-  // pruned from the matrix). Kept declared so it can be re-enabled
-  // without a type churn.
-  { type: 'session:runtime-switched', reason: 'TTY runtime switching pruned from current scope.' },
-];
+const NOT_DISPLAYED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> = [];
 
 // ---------------------------------------------------------------------------
 // Parsers
@@ -106,7 +84,7 @@ function consumedServerMessageTypes(): Set<string> {
     for (const m of text.matchAll(/case\s+'([a-z][a-z0-9:_-]*)'\s*:/g)) {
       consumed.add(m[1]!);
     }
-    for (const m of text.matchAll(/msg\.type\s*===\s*'([a-z][a-z0-9:_-]*)'/g)) {
+    for (const m of text.matchAll(/\b\w+\.type\s*===\s*'([a-z][a-z0-9:_-]*)'/g)) {
       consumed.add(m[1]!);
     }
   }
@@ -159,7 +137,7 @@ test('CONTRACT-002: every wire-shaped consumer arm matches a declared ServerToCl
   // Catch the case where a refactor renames a wire shape but leaves a
   // dangling consumer arm. We narrow the candidate set to "looks like a
   // wire message type":
-  //   • contains ':' (e.g. `session:created`, `term:output`, `pty:replay`)
+  //   • contains ':' (e.g. `session:created`, `term:output`)
   //   • OR is one of the bare-name wire shapes (`state_sync`, `auth_ok`,
   //     `event`, `error`)
   // This filters out the long tail of UI-local literals — file

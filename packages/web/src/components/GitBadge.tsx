@@ -16,13 +16,11 @@ function fmtCount(n: number): string {
 export function GitBadge({
   workingTreeId,
   branch,
-  isWorktree,
   refreshKey,
   onClick,
 }: {
   workingTreeId: string | null;
   branch: string | null;
-  isWorktree: boolean;
   refreshKey: number;
   onClick: () => void;
 }) {

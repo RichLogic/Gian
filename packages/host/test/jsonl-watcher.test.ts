@@ -72,9 +72,9 @@ function setupCcHarness(): Harness {
   // Migration set added: insert a complete session row with required cols.
   db.prepare(
     `INSERT INTO sessions
-       (id, name, type, workspace_id, executor, approval_mode, turns,
+       (id, name, type, workspace_id, executor, approval_mode,
         active_channel, status, archived, native_session_id, created_at, updated_at)
-     VALUES (?, ?, 'coding', ?, 'claude', 'auto', 1, 'web', 'new', 0, ?, ?, ?)`,
+     VALUES (?, ?, 'coding', ?, 'claude', 'auto', 'web', 'new', 0, ?, ?, ?)`,
   ).run(sessionId, 'test', wsId, sessionId, now, now);
 
   const filePath = join(dir, `${sessionId}.jsonl`);
@@ -255,9 +255,9 @@ test('two sessions watched independently — neither cross-contaminates', async 
     const now = new Date().toISOString();
     h.db.prepare(
       `INSERT INTO sessions
-         (id, name, type, workspace_id, executor, approval_mode, turns,
+         (id, name, type, workspace_id, executor, approval_mode,
           active_channel, status, archived, native_session_id, created_at, updated_at)
-       VALUES (?, ?, 'coding', ?, 'claude', 'auto', 1, 'web', 'new', 0, ?, ?, ?)`,
+       VALUES (?, ?, 'coding', ?, 'claude', 'auto', 'web', 'new', 0, ?, ?, ?)`,
     ).run(sessionId2, 'two', wsId, sessionId2, now, now);
     const filePath2 = join(h.dir, `${sessionId2}.jsonl`);
     writeFileSync(filePath2, '');

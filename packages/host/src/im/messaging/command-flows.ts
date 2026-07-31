@@ -5,8 +5,8 @@
  * receives user reply strings, and returns a completion message.
  */
 
-import type { AgentExecutor, ModelOption, ReasoningEffort, SessionRecord, WorkspaceSummary } from '../types.js';
-import { messagingSessionModeFromRecord, messagingSessionModePreferences } from './mode.js';
+import type { AgentExecutor, ModelOption, ReasoningEffort, MessagingSession, WorkspaceSummary } from '../types.js';
+import { messagingSessionModeFromRecord } from './mode.js';
 import type { MessagingSessionMode } from './types.js';
 import type { FlowGenerator } from './interactive-flow.js';
 
@@ -19,19 +19,19 @@ export interface CommandFlowContext {
   availableExecutors: AgentExecutor[];
 
   /** Current selected session (for /alter). */
-  currentSession: SessionRecord | null;
+  currentSession: MessagingSession | null;
 
   // Queries
   listWorkspaces(): Promise<WorkspaceSummary[]>;
-  listSessions(workspaceId: string): Promise<SessionRecord[]>;
+  listSessions(workspaceId: string): Promise<MessagingSession[]>;
   listModels(executor?: AgentExecutor): ModelOption[];
-  currentModelOption(session: SessionRecord): ModelOption | null;
-  currentReasoningEffort(session: SessionRecord): ReasoningEffort;
+  currentModelOption(session: MessagingSession): ModelOption | null;
+  currentReasoningEffort(session: MessagingSession): ReasoningEffort;
   preferredReasoningEffortForModel(model: ModelOption): ReasoningEffort;
 
   // Mutations
-  createSession(executor: AgentExecutor, workspace: WorkspaceSummary, title?: string): Promise<SessionRecord>;
-  switchToSession(workspace: WorkspaceSummary, session: SessionRecord): Promise<void>;
+  createSession(executor: AgentExecutor, workspace: WorkspaceSummary, title?: string): Promise<MessagingSession>;
+  switchToSession(workspace: WorkspaceSummary, session: MessagingSession): Promise<void>;
   updateSessionModel(model: string, reasoningEffort: ReasoningEffort): Promise<void>;
   updateSessionMode(mode: MessagingSessionMode): Promise<void>;
   updateSessionReasoning(level: ReasoningEffort): Promise<void>;
@@ -66,12 +66,12 @@ export function workspaceDisplayName(workspace: Pick<WorkspaceSummary, 'name' | 
   return last || workspace.path;
 }
 
-export function sessionDisplayName(session: Pick<SessionRecord, 'title' | 'id'>): string {
+export function sessionDisplayName(session: Pick<MessagingSession, 'title' | 'id'>): string {
   const title = session.title.trim();
   return title || `Session ${session.id.slice(0, 8)}`;
 }
 
-function sessionStatusLabel(session: Pick<SessionRecord, 'status' | 'activeTurnId'>): string {
+function sessionStatusLabel(session: Pick<MessagingSession, 'status' | 'activeTurnId'>): string {
   if (session.activeTurnId) return 'running';
   return session.status;
 }
@@ -193,7 +193,7 @@ export async function* alterSessionFlow(ctx: CommandFlowContext): FlowGenerator 
   return yield* alterThinking(ctx, session);
 }
 
-async function* alterModel(ctx: CommandFlowContext, session: SessionRecord): FlowGenerator {
+async function* alterModel(ctx: CommandFlowContext, session: MessagingSession): FlowGenerator {
   const models = ctx.listModels(session.executor).filter((m) => !m.hidden);
   if (models.length === 0) return '没有可用的 Model。';
 
@@ -218,10 +218,10 @@ async function* alterModel(ctx: CommandFlowContext, session: SessionRecord): Flo
 
 async function* alterMode(
   _ctx: CommandFlowContext,
-  session: SessionRecord,
+  session: MessagingSession,
 ): FlowGenerator {
   const currentMode = messagingSessionModeFromRecord(session);
-  // Three Gian modes — rvc-derived flow originally listed only two.
+  // Keep the same three modes exposed by Gian's web UI.
   const modes: MessagingSessionMode[] = ['plan', 'ask', 'auto'];
   const labels: Record<MessagingSessionMode, string> = {
     plan: 'Plan (read-only / planning)',
@@ -248,7 +248,7 @@ async function* alterMode(
 
 async function* alterThinking(
   ctx: CommandFlowContext,
-  session: SessionRecord,
+  session: MessagingSession,
 ): FlowGenerator {
   const modelOption = ctx.currentModelOption(session);
   if (!modelOption) return '无法获取当前 Model 信息。';

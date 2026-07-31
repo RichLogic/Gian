@@ -1,5 +1,3 @@
-import { basename } from 'node:path';
-
 import {
   ActivityType,
   ChannelType,
@@ -15,33 +13,46 @@ import {
 } from 'discord.js';
 
 import type {
-  ApprovalScope,
   CodexThread,
-  ModelOption,
   PendingApproval,
-  SessionRecord,
-  UserRecord,
+  MessagingSession,
   WorkspaceSummary,
 } from '../types.js';
-import { stripJobStatusBlock } from '../app/job-mode.js';
 import type {
   InboundPromptInput,
   MessagingPlatform,
   MessagingPlatformOptions,
   MessagingSessionCreateInput,
 } from '../messaging/types.js';
-import {
-  messagingSessionModeFromRecord,
-  messagingSessionModePreferences,
-} from '../messaging/mode.js';
+import { messagingSessionModeFromRecord } from '../messaging/mode.js';
 import { InteractiveFlowManager, type FlowGenerator } from '../messaging/interactive-flow.js';
 import {
-  type CommandFlowContext,
   executorLabel,
   newSessionFlow,
   switchSessionFlow,
   alterSessionFlow,
 } from '../messaging/command-flows.js';
+import {
+  approvalMessageBody,
+  approvalReplyAction,
+  approvalSupportsSessionScope,
+  chunkMessage,
+  isBusySession,
+  isInterruptedMessage,
+  sessionDisplayName,
+  sessionStatusLabel,
+  sessionWorkspaceDisplayName,
+  summarizeTurn,
+  trimPrompt,
+  workspaceDisplayName,
+} from '../messaging/presentation.js';
+import {
+  buildMessagingCommandFlowContext,
+  currentModelOption,
+  currentReasoningEffort,
+  loadCurrentMessagingContext,
+  ownerForBot as findOwnerForBot,
+} from '../messaging/session-context.js';
 import type { DiscordBotRecord, DiscordCodingRepository } from './repository.js';
 
 const DISCORD_MESSAGE_LIMIT = 1900;
@@ -83,25 +94,6 @@ const STATUS_COMMAND = new SlashCommandBuilder()
   .setName('status')
   .setDescription('显示当前状态。');
 
-function isBusySession(session: SessionRecord | null) {
-  if (!session) {
-    return false;
-  }
-  return Boolean(session.activeTurnId) || session.status === 'running' || session.status === 'needs-approval';
-}
-
-function trimPrompt(value: string) {
-  return value.replace(/\s+/g, ' ').trim();
-}
-
-function workspaceDisplayName(workspace: Pick<WorkspaceSummary, 'name' | 'path'>) {
-  return workspace.name || basename(workspace.path) || workspace.path;
-}
-
-function sessionWorkspaceDisplayName(session: Pick<SessionRecord, 'workspace'>) {
-  return basename(session.workspace) || session.workspace;
-}
-
 function discordWorkspaceLine(workspaceName: string) {
   return `工作目录：${workspaceName}`;
 }
@@ -131,59 +123,6 @@ function interactionCommandLabel(interaction: ChatInputCommandInteraction) {
   return `/${parts.join(' ')}`;
 }
 
-function assistantTextFromTurn(thread: CodexThread, turnId: string) {
-  const turn = thread.turns.find((entry) => entry.id === turnId);
-  if (!turn) {
-    return null;
-  }
-
-  const text = turn.items
-    .filter((item): item is Extract<typeof turn.items[number], { type: 'agentMessage' }> => item.type === 'agentMessage')
-    .map((item) => item.text)
-    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-    .join('\n\n')
-    .trim();
-  const visibleText = stripJobStatusBlock(text);
-  return visibleText || null;
-}
-
-function summarizeTurn(thread: CodexThread, turnId: string) {
-  const turn = thread.turns.find((entry) => entry.id === turnId);
-  if (!turn) {
-    return {
-      assistantText: null as string | null,
-      errorMessage: null as string | null,
-    };
-  }
-
-  return {
-    assistantText: assistantTextFromTurn(thread, turnId),
-    errorMessage: turn.error?.message ?? null,
-  };
-}
-
-function chunkDiscordMessage(content: string) {
-  const normalized = content.trim();
-  if (normalized.length <= DISCORD_MESSAGE_LIMIT) {
-    return [normalized];
-  }
-
-  const chunks: string[] = [];
-  let remaining = normalized;
-  while (remaining.length > DISCORD_MESSAGE_LIMIT) {
-    const boundary = remaining.lastIndexOf('\n', DISCORD_MESSAGE_LIMIT);
-    const nextIndex = boundary > Math.floor(DISCORD_MESSAGE_LIMIT * 0.5)
-      ? boundary
-      : DISCORD_MESSAGE_LIMIT;
-    chunks.push(remaining.slice(0, nextIndex).trimEnd());
-    remaining = remaining.slice(nextIndex).trimStart();
-  }
-  if (remaining) {
-    chunks.push(remaining);
-  }
-  return chunks;
-}
-
 function discordGatewayCloseReason(closeEvent: { code: number }) {
   return `Discord gateway disconnected (code=${closeEvent.code}).`;
 }
@@ -202,90 +141,9 @@ function truncateDiscordPresenceName(value: string) {
   return `${normalized.slice(0, DISCORD_PRESENCE_NAME_LIMIT - 1).trimEnd()}…`;
 }
 
-function isInterruptedMessage(value: string) {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-  return normalized.includes('interrupt')
-    || normalized.includes('interrupted')
-    || normalized.includes('stopped')
-    || normalized.includes('cancelled')
-    || normalized.includes('canceled')
-    || normalized.includes('停止')
-    || normalized.includes('中断')
-    || normalized.includes('取消');
-}
-
-function sessionStatusLabel(session: SessionRecord | null) {
-  return session?.status ?? 'not-started';
-}
-
-function sessionDisplayName(session: Pick<SessionRecord, 'title' | 'id'>) {
-  const title = session.title.trim();
-  return title || `Session ${session.id.slice(0, 8)}`;
-}
-
-function approvalSupportsSessionScope(approval: Pick<PendingApproval, 'scopeOptions'>) {
-  return approval.scopeOptions.includes('session');
-}
-
-function approvalReplyAction(prompt: string): { decision: 'approve' | 'decline'; scope?: ApprovalScope } | null {
-  const trimmed = prompt.trim().toLowerCase();
-  if (!trimmed) {
-    return null;
-  }
-  const normalized = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
-  switch (normalized) {
-    case '1':
-    case 'a':
-      return { decision: 'approve', scope: 'once' };
-    case '2':
-    case 'b':
-      return { decision: 'approve', scope: 'session' };
-    case '3':
-    case 'c':
-      return { decision: 'decline', scope: 'once' };
-    default:
-      return null;
-  }
-}
-
-function approvalInstructionLines(approval: Pick<PendingApproval, 'scopeOptions'>) {
-  const lines = ['回复 1 或 a：批准一次'];
-  if (approvalSupportsSessionScope(approval)) {
-    lines.push('回复 2 或 b：当前 session 持续批准');
-  }
-  lines.push('回复 3 或 c：拒绝');
-  return lines;
-}
-
-function approvalMessageBody(approval: PendingApproval, summary?: string | null) {
-  const nextSummary = summary?.trim() ?? '';
-  const title = approval.title.trim();
-  const risk = approval.risk.trim();
-  const lines: string[] = [];
-
-  if (nextSummary && nextSummary !== risk) {
-    lines.push(nextSummary);
-  }
-  if (title) {
-    lines.push(`审批请求：${title}`);
-  }
-  if (risk && risk !== title) {
-    lines.push(risk);
-  }
-  lines.push('', ...approvalInstructionLines(approval));
-  return lines.join('\n').trim();
-}
-
-function canAttachSessionToBot(session: SessionRecord, botId: string) {
-  return session.botId === botId || !isBusySession(session);
-}
-
 function selectionDisplayName(
   workspace: Pick<WorkspaceSummary, 'name' | 'path'> | null,
-  session: Pick<SessionRecord, 'title' | 'id'> | null,
+  session: Pick<MessagingSession, 'title' | 'id'> | null,
 ) {
   if (workspace && session) {
     return `${workspaceDisplayName(workspace)} / ${sessionDisplayName(session)}`;
@@ -466,7 +324,7 @@ export class DiscordCodingManager implements MessagingPlatform {
   }
 
   private ownerForBot(bot: DiscordBotRecord) {
-    return this.options.listUsers().find((entry) => entry.id === bot.ownerUserId) ?? null;
+    return findOwnerForBot(this.options, bot);
   }
 
   private async syncBotSelection(
@@ -484,143 +342,12 @@ export class DiscordCodingManager implements MessagingPlatform {
     return nextBot;
   }
 
-  private async attachSessionToBot(bot: DiscordBotRecord, session: SessionRecord) {
-    if (session.botId === bot.id) {
-      return session;
-    }
-    return (await this.options.repository.updateSession(session.id, {
-      botId: bot.id,
-      updatedAt: new Date().toISOString(),
-    })) ?? {
-      ...session,
-      botId: bot.id,
-    };
-  }
-
-  private resolveModelOption(query: string | null | undefined, executor?: SessionRecord['executor']) {
-    if (!query?.trim()) {
-      return null;
-    }
-
-    const direct = this.options.findModelOption(query.trim(), executor);
-    if (direct) {
-      return direct;
-    }
-
-    const normalizedQuery = query.trim().toLowerCase();
-    const models = this.options.listModelOptions(executor);
-    const exact = models.find((entry) => (
-      entry.model.toLowerCase() === normalizedQuery
-      || entry.id.toLowerCase() === normalizedQuery
-      || entry.displayName.toLowerCase() === normalizedQuery
-    ));
-    if (exact) {
-      return exact;
-    }
-
-    const fuzzy = models.filter((entry) => (
-      entry.model.toLowerCase().includes(normalizedQuery)
-      || entry.id.toLowerCase().includes(normalizedQuery)
-      || entry.displayName.toLowerCase().includes(normalizedQuery)
-    ));
-    return fuzzy.length === 1 ? (fuzzy[0] ?? null) : null;
-  }
-
-  private currentModelOption(session: SessionRecord | null) {
-    const executor = session?.executor;
-    const requestedModel = session?.model ?? this.options.currentDefaultModel(executor);
-    return this.resolveModelOption(requestedModel, executor)
-      ?? this.options.listModelOptions(executor)[0]
-      ?? null;
-  }
-
-  private currentReasoningEffort(session: SessionRecord | null, modelOption: ModelOption | null) {
-    if (session?.reasoningEffort) {
-      return session.reasoningEffort;
-    }
-    if (!modelOption) {
-      return 'xhigh';
-    }
-    return this.options.preferredReasoningEffortForModel(modelOption);
-  }
-
   private async loadCurrentWorkspaceContext(bot: DiscordBotRecord) {
-    const owner = this.ownerForBot(bot);
-    if (!owner || !bot.selectedWorkspaceId) {
-      return {
-        bot,
-        owner,
-        workspace: null as WorkspaceSummary | null,
-        session: null as SessionRecord | null,
-        sessions: [] as SessionRecord[],
-        queuedTurnCount: 0,
-        workspaceMissing: false,
-        sessionMissing: false,
-      };
-    }
-
-    const workspace = await this.options.getWorkspaceForUser(bot.selectedWorkspaceId, owner.id);
-    if (!workspace) {
-      const nextBot = await this.syncBotSelection(bot, {
-        selectedWorkspaceId: null,
-        selectedSessionId: null,
-      });
-      return {
-        bot: nextBot,
-        owner,
-        workspace: null as WorkspaceSummary | null,
-        session: null as SessionRecord | null,
-        sessions: [] as SessionRecord[],
-        queuedTurnCount: 0,
-        workspaceMissing: true,
-        sessionMissing: false,
-      };
-    }
-
-    const sessions = await this.options.repository.listSessionsForOwnerWorkspace(owner.id, workspace.id);
-    let nextBot = bot;
-    let session = bot.selectedSessionId
-      ? (await this.options.repository.getSessionForUser(bot.selectedSessionId, owner.id))
-      : null;
-    let sessionMissing = false;
-
-    if (session && (session.archivedAt || session.workspaceId !== workspace.id)) {
-      session = null;
-      sessionMissing = true;
-    }
-    if (!session && bot.selectedSessionId) {
-      sessionMissing = true;
-    }
-    if (session && canAttachSessionToBot(session, bot.id)) {
-      session = await this.attachSessionToBot(bot, session);
-    } else if (session && session.botId !== bot.id) {
-      session = null;
-    }
-    if (!session && sessions.length === 1) {
-      const candidate = sessions[0] ?? null;
-      if (candidate && canAttachSessionToBot(candidate, bot.id)) {
-        session = await this.attachSessionToBot(bot, candidate);
-      }
-    }
-    if (nextBot.selectedSessionId !== (session?.id ?? null)) {
-      nextBot = await this.syncBotSelection(nextBot, {
-        selectedSessionId: session?.id ?? null,
-      });
-    }
-
-    const queuedTurnCount = session
-      ? await this.options.repository.countQueuedTurns(session.id)
-      : 0;
-    return {
-      bot: nextBot,
-      owner,
-      workspace,
-      session,
-      sessions,
-      queuedTurnCount,
-      workspaceMissing: false,
-      sessionMissing,
-    };
+    return loadCurrentMessagingContext(
+      this.options,
+      bot,
+      (current, patch) => this.syncBotSelection(current, patch),
+    );
   }
 
   private async syncBotPresence(bot: DiscordBotRecord) {
@@ -630,10 +357,10 @@ export class DiscordCodingManager implements MessagingPlatform {
     }
 
     const workspace = bot.selectedWorkspaceId
-      ? await this.options.getWorkspaceForUser(bot.selectedWorkspaceId, bot.ownerUserId)
+      ? await this.options.getWorkspace(bot.selectedWorkspaceId)
       : null;
     const session = bot.selectedSessionId
-      ? await this.options.repository.getSessionForBot(bot.id, bot.selectedSessionId)
+      ? await this.options.getSession(bot.selectedSessionId)
       : null;
     const activeSession = session && !session.archivedAt && (!workspace || session.workspaceId === workspace.id)
       ? session
@@ -716,7 +443,7 @@ export class DiscordCodingManager implements MessagingPlatform {
 
     try {
       let sentMessageId: string | null = null;
-      for (const chunk of chunkDiscordMessage(content)) {
+      for (const chunk of chunkMessage(content, DISCORD_MESSAGE_LIMIT)) {
         const sent = await channel.send(
           options?.replyToMessageId
             ? {
@@ -776,13 +503,14 @@ export class DiscordCodingManager implements MessagingPlatform {
     return workspaceName ? decorateDiscordStatusWithWorkspace(status, workspaceName) : status;
   }
 
-  private async startRunIndicator(session: SessionRecord, channelId: string, statusMessageId: string | null) {
-    if (!session.botId) {
-      return;
-    }
+  private async startRunIndicator(
+    botId: string,
+    session: MessagingSession,
+    channelId: string,
+    statusMessageId: string | null,
+  ) {
     await this.finishRunIndicator(session.id, null);
 
-    const botId = session.botId;
     const workspaceName = sessionWorkspaceDisplayName(session);
     const indicator = {
       botId,
@@ -829,62 +557,19 @@ export class DiscordCodingManager implements MessagingPlatform {
 
   // ---- Flow infrastructure --------------------------------------------------
 
-  private buildFlowContext(bot: DiscordBotRecord, owner: UserRecord): CommandFlowContext {
-    return {
-      availableExecutors: this.options.availableExecutors(),
-      currentSession: null, // overridden by alter handler
-      listWorkspaces: () => this.options.listUserWorkspaces(owner.username, owner.id),
-      listSessions: (wsId) => this.options.listSessionsForWorkspace(owner.id, wsId),
-      listModels: (executor) => this.options.listModelOptions(executor),
-      currentModelOption: (session) => this.currentModelOption(session),
-      currentReasoningEffort: (session) => {
-        const model = this.currentModelOption(session);
-        return this.currentReasoningEffort(session, model) ?? 'xhigh';
-      },
-      preferredReasoningEffortForModel: (model) => this.options.preferredReasoningEffortForModel(model) ?? 'xhigh',
+  private buildFlowContext(bot: DiscordBotRecord) {
+    return buildMessagingCommandFlowContext(this.options, {
       createSession: async (executor, workspace, title) => {
         return this.createSession(bot, workspace, { executor, ...(title ? { title } : {}) });
       },
       switchToSession: async (workspace, session) => {
-        if (canAttachSessionToBot(session, bot.id)) {
-          await this.attachSessionToBot(bot, session);
-        }
         await this.syncBotSelection(bot, {
           selectedWorkspaceId: workspace.id,
           selectedSessionId: session.id,
         });
       },
-      updateSessionModel: async (model, reasoning) => {
-        const context = await this.loadCurrentWorkspaceContext(bot);
-        if (context.session) {
-          await this.options.repository.updateSession(context.session.id, {
-            model,
-            reasoningEffort: reasoning,
-            updatedAt: new Date().toISOString(),
-          });
-        }
-      },
-      updateSessionMode: async (mode) => {
-        const context = await this.loadCurrentWorkspaceContext(bot);
-        if (context.session) {
-          const prefs = messagingSessionModePreferences(mode);
-          await this.options.repository.updateSession(context.session.id, {
-            ...prefs,
-            job: null,
-            updatedAt: new Date().toISOString(),
-          });
-        }
-      },
-      updateSessionReasoning: async (level) => {
-        const context = await this.loadCurrentWorkspaceContext(bot);
-        if (context.session) {
-          await this.options.repository.updateSession(context.session.id, {
-            reasoningEffort: level,
-            updatedAt: new Date().toISOString(),
-          });
-        }
-      },
-    };
+      getCurrentSession: async () => (await this.loadCurrentWorkspaceContext(bot)).session,
+    });
   }
 
   private async startInteractiveFlow(
@@ -912,14 +597,14 @@ export class DiscordCodingManager implements MessagingPlatform {
   private async handleCommandNew(bot: DiscordBotRecord, channelId: string) {
     const owner = this.ownerForBot(bot);
     if (!owner) { await this.sendText(bot.id, channelId, 'Bot owner no longer exists.'); return; }
-    const ctx = this.buildFlowContext(bot, owner);
+    const ctx = this.buildFlowContext(bot);
     await this.startInteractiveFlow(bot, channelId, newSessionFlow(ctx));
   }
 
   private async handleCommandSwitch(bot: DiscordBotRecord, channelId: string) {
     const owner = this.ownerForBot(bot);
     if (!owner) { await this.sendText(bot.id, channelId, 'Bot owner no longer exists.'); return; }
-    const ctx = this.buildFlowContext(bot, owner);
+    const ctx = this.buildFlowContext(bot);
     await this.startInteractiveFlow(bot, channelId, switchSessionFlow(ctx));
   }
 
@@ -927,7 +612,7 @@ export class DiscordCodingManager implements MessagingPlatform {
     const owner = this.ownerForBot(bot);
     if (!owner) { await this.sendText(bot.id, channelId, 'Bot owner no longer exists.'); return; }
     const context = await this.loadCurrentWorkspaceContext(bot);
-    const ctx = this.buildFlowContext(bot, owner);
+    const ctx = this.buildFlowContext(bot);
     ctx.currentSession = context.session;
     await this.startInteractiveFlow(bot, channelId, alterSessionFlow(ctx));
   }
@@ -939,29 +624,23 @@ export class DiscordCodingManager implements MessagingPlatform {
       return;
     }
     const session = context.session;
-    if (!session.activeTurnId && context.queuedTurnCount === 0) {
+    if (!isBusySession(session) && context.queuedTurnCount === 0) {
       await this.sendText(bot.id, channelId, '当前没有正在执行的任务。');
       return;
     }
     // Stop active turn
-    if (session.activeTurnId) {
+    if (isBusySession(session)) {
       try {
-        await this.options.interruptTurn(session, session.threadId, session.activeTurnId);
-        await this.options.repository.updateSession(session.id, {
-          activeTurnId: null, status: 'idle', lastIssue: 'Stopped by user.', updatedAt: new Date().toISOString(),
-        });
+        await this.options.interruptTurn(session, session.threadId, session.activeTurnId ?? session.id);
       } catch (error) {
-        if (this.options.isThreadUnavailableError(error)) {
-          await this.options.repository.updateSession(session.id, {
-            activeTurnId: null, status: 'stale', lastIssue: this.options.staleSessionMessage,
-            networkEnabled: false, updatedAt: new Date().toISOString(),
-          });
+        if (!this.options.isThreadUnavailableError(error)) {
+          throw error;
         }
       }
     }
     // Clear queue
     if (context.queuedTurnCount > 0) {
-      await this.options.repository.deleteAllQueuedTurns(session.id);
+      this.options.clearQueue(session.id);
     }
     await this.sendText(bot.id, channelId, '✅ 已停止所有活动任务，队列已清空。');
   }
@@ -972,8 +651,8 @@ export class DiscordCodingManager implements MessagingPlatform {
       await this.sendText(bot.id, channelId, 'This bot owner no longer exists locally.');
       return;
     }
-    const modelOption = this.currentModelOption(context.session);
-    const reasoningEffort = this.currentReasoningEffort(context.session, modelOption);
+    const modelOption = currentModelOption(this.options, context.session);
+    const reasoningEffort = currentReasoningEffort(this.options, context.session, modelOption);
     const lines = [
       `Bot: ${context.bot.status}`,
       `Workspace: ${context.workspace ? workspaceDisplayName(context.workspace) : 'not selected'}`,
@@ -1052,7 +731,7 @@ export class DiscordCodingManager implements MessagingPlatform {
     if (!owner) {
       throw new Error('Bot owner no longer exists locally.');
     }
-    const session = await this.options.createSession(owner, workspace, bot.id, input);
+    const session = await this.options.createSession(workspace, input);
     await this.syncBotSelection(bot, {
       selectedWorkspaceId: workspace.id,
       selectedSessionId: session.id,
@@ -1171,8 +850,8 @@ export class DiscordCodingManager implements MessagingPlatform {
       }
 
       const statusReply = await input.reply(decorateDiscordStatusWithWorkspace('🛠️ 正在处理...', workspaceDisplayName(workspace)));
-      await this.options.startTurnWithAutoRestart(session, prompt, []);
-      await this.startRunIndicator(session, input.channelId, statusReply.messageId);
+      await this.options.startTurn(session, prompt);
+      await this.startRunIndicator(input.botId, session, input.channelId, statusReply.messageId);
     } catch (error) {
       await this.finishRunIndicator(session.id, decorateDiscordStatusWithWorkspace('❌ 启动失败', workspaceDisplayName(workspace)));
       await input.reply(`❌ 启动失败\n${discordWorkspaceLine(workspaceDisplayName(workspace))}\n\n${this.options.errorMessage(error)}`);
@@ -1468,16 +1147,12 @@ export class DiscordCodingManager implements MessagingPlatform {
     }));
   }
 
-  async sendTurnCompletion(session: SessionRecord, thread: CodexThread | null, turnId: string | null) {
-    if (session.origin !== 'discord' || !session.botId || !turnId) {
-      return;
-    }
-    const bot = await this.options.repository.getBotRecord(session.botId);
-    if (!bot?.directChannelId || !thread) {
-      return;
-    }
+  async sendTurnCompletion(session: MessagingSession, thread: CodexThread | null, turnId: string | null) {
+    if (!turnId || !thread) return;
+    const bots = await this.options.repository.listBotRecordsForSession(session.id);
+    if (bots.length === 0) return;
 
-    const currentSession = await this.options.repository.getSession(session.id) ?? session;
+    const currentSession = await this.options.getSession(session.id) ?? session;
     const workspaceName = sessionWorkspaceDisplayName(currentSession);
     const summary = summarizeTurn(thread, turnId);
     const pendingApproval = this.options.getApprovals(currentSession.id)[0] ?? null;
@@ -1485,38 +1160,12 @@ export class DiscordCodingManager implements MessagingPlatform {
       return;
     }
 
-    const currentJob = currentSession.job;
     let heading = '✅ 已完成';
-    let body = currentJob?.finalOutput ?? summary.assistantText ?? null;
+    let body = summary.assistantText ?? null;
 
-    if (currentJob) {
-      switch (currentJob.state) {
-        case 'waiting-approval':
-          heading = '⏸️ 等待审批';
-          body = pendingApproval
-            ? approvalMessageBody(pendingApproval, currentJob.waitingReason ?? body)
-            : currentJob.waitingReason ?? body;
-          break;
-        case 'waiting-input':
-          heading = '⏸️ 需要补充信息';
-          body = currentJob.waitingReason ?? body;
-          break;
-        case 'budget-exhausted':
-          heading = '⚠️ 已达到轮数上限';
-          body = currentJob.waitingReason ?? currentJob.finalOutput ?? body;
-          break;
-        case 'failed':
-          heading = '❌ 执行失败';
-          body = currentJob.waitingReason ?? currentJob.finalOutput ?? summary.errorMessage ?? body;
-          break;
-        case 'completed':
-          heading = '✅ 已完成';
-          body = currentJob.finalOutput ?? body;
-          break;
-        default:
-          heading = '✅ 已完成';
-          break;
-      }
+    if (pendingApproval) {
+      heading = '⏸️ 等待审批';
+      body = approvalMessageBody(pendingApproval, body);
     } else if (summary.errorMessage) {
       heading = '❌ 执行失败';
       body = summary.errorMessage;
@@ -1526,39 +1175,33 @@ export class DiscordCodingManager implements MessagingPlatform {
     if (!body?.trim()) {
       return;
     }
-    await this.sendText(bot.id, bot.directChannelId, decorateDiscordMessageWithWorkspace(heading, body, workspaceName));
+    await Promise.all(bots.flatMap(bot => bot.directChannelId
+      ? [this.sendText(bot.id, bot.directChannelId, decorateDiscordMessageWithWorkspace(heading, body, workspaceName))]
+      : []));
   }
 
-  async sendApprovalRequested(session: SessionRecord, approval: PendingApproval) {
-    if (session.origin !== 'discord' || !session.botId || (session.executionMode ?? 'interactive') === 'job') {
-      return;
-    }
-    const bot = await this.options.repository.getBotRecord(session.botId);
-    if (!bot?.directChannelId) {
-      return;
-    }
-    const currentSession = await this.options.repository.getSession(session.id) ?? session;
+  async sendApprovalRequested(session: MessagingSession, approval: PendingApproval) {
+    const bots = await this.options.repository.listBotRecordsForSession(session.id);
+    const currentSession = await this.options.getSession(session.id) ?? session;
     const workspaceName = sessionWorkspaceDisplayName(currentSession);
     await this.finishRunIndicator(session.id, decorateDiscordStatusWithWorkspace('⏸️ 等待审批', workspaceName));
-    await this.sendText(
-      bot.id,
-      bot.directChannelId,
-      decorateDiscordMessageWithWorkspace('⏸️ 等待审批', approvalMessageBody(approval), workspaceName),
-    );
+    await Promise.all(bots.flatMap(bot => bot.directChannelId
+      ? [this.sendText(
+          bot.id,
+          bot.directChannelId,
+          decorateDiscordMessageWithWorkspace('⏸️ 等待审批', approvalMessageBody(approval), workspaceName),
+        )]
+      : []));
   }
 
-  async sendSessionError(session: SessionRecord, message: string) {
-    if (session.origin !== 'discord' || !session.botId) {
-      return;
-    }
-    const bot = await this.options.repository.getBotRecord(session.botId);
-    if (!bot?.directChannelId) {
-      return;
-    }
+  async sendSessionError(session: MessagingSession, message: string) {
+    const bots = await this.options.repository.listBotRecordsForSession(session.id);
     const interrupted = isInterruptedMessage(message);
     const heading = interrupted ? '🛑 已停止' : '❌ 执行失败';
     const workspaceName = sessionWorkspaceDisplayName(session);
     await this.finishRunIndicator(session.id, decorateDiscordStatusWithWorkspace(heading, workspaceName));
-    await this.sendText(bot.id, bot.directChannelId, decorateDiscordMessageWithWorkspace(heading, message, workspaceName));
+    await Promise.all(bots.flatMap(bot => bot.directChannelId
+      ? [this.sendText(bot.id, bot.directChannelId, decorateDiscordMessageWithWorkspace(heading, message, workspaceName))]
+      : []));
   }
 }

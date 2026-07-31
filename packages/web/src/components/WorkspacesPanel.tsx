@@ -80,10 +80,16 @@ export function WorkspacesInspector({
   }
 
   return (
-    <aside className="inspector">
+    <aside className="inspector" data-testid="workspaces-inspector">
       <div className="insp-head">
         <span className="label">{t('topbar.mode.workspaces')}</span>
-        <button className="iconbtn" title={t('spaces.new')} onClick={onNewWorkspace}>
+        <button
+          className="iconbtn"
+          data-testid="workspaces-new"
+          title={t('spaces.new')}
+          aria-label={t('spaces.new')}
+          onClick={onNewWorkspace}
+        >
           <Icon d={I.plus} />
         </button>
       </div>

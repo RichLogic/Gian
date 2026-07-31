@@ -287,11 +287,11 @@ test('buildManagerSystemPrompt inlines subtask metadata and signposts', () => {
       {
         id: 's1', name: 'login flow', type: 'subtask', task_id: 't1',
         workspace_id: 'w1', executor: 'claude', model: null,
-        approval_mode: 'auto', thinking_effort: null, turns: 1,
+        approval_mode: 'auto', thinking_effort: null,
         active_channel: 'web', status: 'done', archived: 0, unread: 0,
         worktree_path: null, branch: null, base_branch: null,
         worktree_outcome: null, native_session_id: null,
-        runtime_mode: 'structured', summary: null,
+        summary: null,
         completed_at: '2026-06-28T00:00:00Z', created_at: '', updated_at: '',
       },
     ],

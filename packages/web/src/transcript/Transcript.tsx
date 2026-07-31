@@ -67,10 +67,6 @@ function groupIntoBlocks(items: TranscriptItem[]): RenderableItem[] {
   return out;
 }
 
-function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n).trimEnd() + '…' : s;
-}
-
 export function renderItem(
   item: TranscriptItem,
   onApprove: (
@@ -89,11 +85,11 @@ export function renderItem(
       if (isCurrentUser && currentUserRef) {
         return (
           <div key={item.id} ref={currentUserRef} data-current-user="true">
-            <UserMessage item={item} hideAvatar={hideAvatar} />
+            <UserMessage item={item} />
           </div>
         );
       }
-      return <UserMessage key={item.id} item={item} hideAvatar={hideAvatar} />;
+      return <UserMessage key={item.id} item={item} />;
     case 'assistant':
       return <AssistantMessage key={item.id} item={item} hideAvatar={hideAvatar} showFooter={showFooter} />;
     case 'reasoning':

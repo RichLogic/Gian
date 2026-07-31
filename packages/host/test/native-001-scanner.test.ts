@@ -253,9 +253,9 @@ test('NATIVE-002: replayNativeJsonl creates turn rows + events for an adopted cc
     const now = new Date().toISOString();
     ctx.db.prepare(`
       INSERT INTO sessions
-        (id, name, type, workspace_id, executor, model, approval_mode, turns,
+        (id, name, type, workspace_id, executor, model, approval_mode,
          active_channel, status, archived, native_session_id, created_at, updated_at)
-      VALUES (?, 'adopted', 'coding', ?, 'claude', NULL, 'ask', 1,
+      VALUES (?, 'adopted', 'coding', ?, 'claude', NULL, 'ask',
               'web', 'new', 0, ?, ?, ?)
     `).run(gianSessionId, wsId, sid, now, now);
 
@@ -295,9 +295,9 @@ test('NATIVE-002: replayNativeJsonl throws on missing file — the adopt endpoin
     const now = new Date().toISOString();
     ctx.db.prepare(`
       INSERT INTO sessions
-        (id, name, type, workspace_id, executor, model, approval_mode, turns,
+        (id, name, type, workspace_id, executor, model, approval_mode,
          active_channel, status, archived, native_session_id, created_at, updated_at)
-      VALUES (?, 'adopted', 'coding', ?, 'claude', NULL, 'ask', 1,
+      VALUES (?, 'adopted', 'coding', ?, 'claude', NULL, 'ask',
               'web', 'new', 0, 'missing-id', ?, ?)
     `).run(gianSessionId, wsId, now, now);
 

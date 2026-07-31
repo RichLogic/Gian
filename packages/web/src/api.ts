@@ -380,12 +380,6 @@ export async function reopenSubtask(sessionId: string): Promise<void> {
   }
 }
 
-export async function loadArchivedSessions(): Promise<Session[]> {
-  const res = await fetch('/api/sessions?archived=true');
-  if (!res.ok) return [];
-  return (await res.json()) as Session[];
-}
-
 export async function mergeSession(id: string): Promise<{ ok: boolean; error?: string }> {
   const res = await fetch(`/api/sessions/${id}/merge`, { method: 'POST' });
   if (!res.ok) {
@@ -545,19 +539,6 @@ export async function changePassword(
     return { ok: true };
   } catch (err) {
     return { error: String(err) };
-  }
-}
-
-export type ReconnectComponent = 'codex' | 'claude' | 'discord' | 'slack';
-
-export async function reconnectComponent(component: ReconnectComponent): Promise<{ ok: boolean; error?: string }> {
-  try {
-    const res = await fetch(`/api/reconnect/${component}`, { method: 'POST' });
-    const body = (await res.json()) as { ok?: boolean; error?: string };
-    if (!res.ok) return { ok: false, error: body.error ?? `${res.status}` };
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: String(err) };
   }
 }
 

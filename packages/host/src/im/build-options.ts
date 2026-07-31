@@ -1,33 +1,22 @@
-/**
- * Adapter that constructs the rvc-shaped `MessagingPlatformOptions` from
- * Gian's domain services (SessionManager, ApprovalManager, DB). All
- * impedance between Gian's types and rvc's `SessionRecord` /
- * `PendingApproval` / `WorkspaceSummary` / etc. is contained here so the
- * copied IM code can run unchanged.
- *
- * Gian is single-user; rvc has a multi-user model. We hardcode a
- * `LOCAL_USER` constant and ignore userId everywhere it would otherwise
- * filter results.
- */
+/** Build the shared Slack/Discord adapter from Gian's domain services. */
 
-import { randomUUID } from 'node:crypto';
 import type { Session, Workspace } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 import type { SessionManager } from '../session/manager.js';
 import type { ApprovalManager, ApprovalRecord } from '../approval/manager.js';
 import type {
   AgentExecutor,
-  ApprovalScope,
   ModelOption,
   PendingApproval,
   ReasoningEffort,
-  SessionRecord,
+  MessagingSession,
   UserRecord,
   WorkspaceSummary,
 } from './types.js';
 import type {
   MessagingPlatformOptions,
   MessagingSessionCreateInput,
+  MessagingSessionPatch,
 } from './messaging/types.js';
 import type { DiscordCodingRepository } from './discord/repository.js';
 import type { SlackCodingRepository } from './slack/repository.js';
@@ -35,32 +24,23 @@ import { decryptDiscordSecret } from './discord/secrets.js';
 import { decryptSlackSecret } from './slack/secrets.js';
 
 // ---------------------------------------------------------------------------
-// Single-user placeholder — Gian doesn't have multi-user, so wire a stable
-// stub so rvc's per-user routing compiles.
+// Bot rows retain an owner key for persistence, while Gian runs as one local
+// authenticated user.
 // ---------------------------------------------------------------------------
 
 export const LOCAL_USER: UserRecord = {
   id: 'local',
   username: 'local',
-  roles: ['admin', 'developer', 'user'],
-  preferredMode: 'developer',
-  isAdmin: true,
-  allowedSessionTypes: ['code'],
-  canUseFullHost: true,
-  createdAt: '2025-01-01T00:00:00.000Z',
-  updatedAt: '2025-01-01T00:00:00.000Z',
 };
 
 // ---------------------------------------------------------------------------
-// Type translators (Gian → rvc). Manager.ts only reads the fields listed in
-// the comments next to each helper, so we synthesize sensible defaults for
-// the rvc fields Gian doesn't track.
+// Shared projections used by both platform managers.
 // ---------------------------------------------------------------------------
 
-/** Manager reads: id, threadId, title, workspace, workspaceId, executor,
- *  status, activeTurnId, archivedAt, lastIssue, origin, botId,
- *  executionMode, reasoningEffort, model, approvalMode. */
-export function gianSessionToRvcRecord(s: Session): SessionRecord {
+export function toMessagingSession(
+  s: Session,
+  workspacePath = s.workspace_id,
+): MessagingSession {
   if (s.executor === 'kimi') {
     throw new Error('Kimi sessions are not exposed through IM.');
   }
@@ -70,37 +50,31 @@ export function gianSessionToRvcRecord(s: Session): SessionRecord {
     ownerUsername: LOCAL_USER.username,
     sessionType: 'code',
     threadId: s.native_session_id ?? s.id,
-    activeTurnId: null,
+    activeTurnId: s.status === 'running' || s.status === 'pending'
+      ? (s.native_session_id ?? s.id)
+      : null,
     title: s.name ?? '(unnamed)',
     autoTitle: !s.name,
-    workspace: s.workspace_id,
+    workspace: workspacePath,
     workspaceId: s.workspace_id,
     archivedAt: s.archived === 1 ? s.updated_at : null,
-    securityProfile: 'repo-write',
     // IM module's ApprovalMode models only Gian's three interactive modes
     // (plan / ask / auto) — see im/types.ts. Codex-only permission presets
     // have no IM analogue (IM has no approval UI), so narrow them to auto.
     approvalMode: s.approval_mode === 'full-access' || s.approval_mode === 'custom'
       ? 'auto'
       : (s.approval_mode ?? 'ask'),
-    networkEnabled: true,
-    fullHostEnabled: false,
-    status: gianSessionStatusToRvc(s.status),
+    status: toMessagingStatus(s.status),
     lastIssue: null,
-    hasTranscript: true,
     model: s.model,
-    reasoningEffort: gianEffortToRvc(s.thinking_effort),
+    reasoningEffort: toReasoningEffort(s.thinking_effort),
     executor: s.executor,
-    origin: s.active_channel === 'im' ? 'discord' : 'web',
-    botId: null,
-    executionMode: 'interactive',
-    job: null,
     createdAt: s.created_at,
     updatedAt: s.updated_at,
   };
 }
 
-export function gianWorkspaceToRvcSummary(w: Workspace): WorkspaceSummary {
+export function toWorkspaceSummary(w: Workspace): WorkspaceSummary {
   return {
     id: w.id,
     name: w.name,
@@ -110,7 +84,7 @@ export function gianWorkspaceToRvcSummary(w: Workspace): WorkspaceSummary {
   };
 }
 
-export function gianApprovalToRvcPending(a: ApprovalRecord, executor: AgentExecutor): PendingApproval {
+export function toPendingApproval(a: ApprovalRecord, executor: AgentExecutor): PendingApproval {
   return {
     id: a.id,
     sessionId: a.sessionId,
@@ -125,7 +99,7 @@ export function gianApprovalToRvcPending(a: ApprovalRecord, executor: AgentExecu
   };
 }
 
-export function gianModelToRvcOption(m: {
+export function toModelOption(m: {
   id: string;
   model?: string;
   displayName?: string;
@@ -151,18 +125,15 @@ export function gianModelToRvcOption(m: {
     description: m.description ?? '',
     isDefault: m.isDefault ?? false,
     hidden: m.hidden ?? false,
-    defaultReasoningEffort: gianEffortToRvc(defaultRaw) ?? 'medium',
+    defaultReasoningEffort: toReasoningEffort(defaultRaw) ?? 'medium',
     supportedReasoningEfforts: supportedRaw.flatMap(e => {
-      const r = gianEffortToRvc(e);
+      const r = toReasoningEffort(e);
       return r ? [r] : [];
     }),
   };
 }
 
-// Mode translation funcs removed — IM types.ts now uses Gian's
-// 'plan' | 'ask' | 'auto' natively, no rvc dialect to translate.
-
-function gianSessionStatusToRvc(s: Session['status']): SessionRecord['status'] {
+function toMessagingStatus(s: Session['status']): MessagingSession['status'] {
   switch (s) {
     case 'running': return 'running';
     case 'pending': return 'needs-approval';
@@ -173,7 +144,7 @@ function gianSessionStatusToRvc(s: Session['status']): SessionRecord['status'] {
   }
 }
 
-function gianEffortToRvc(value: unknown): ReasoningEffort | null {
+function toReasoningEffort(value: unknown): ReasoningEffort | null {
   if (typeof value !== 'string') return null;
   switch (value) {
     case 'off': return 'none';
@@ -189,7 +160,7 @@ function gianEffortToRvc(value: unknown): ReasoningEffort | null {
 }
 
 // ---------------------------------------------------------------------------
-// The big one — build all 20+ injection points
+// Dependency bundle
 // ---------------------------------------------------------------------------
 
 export interface BuildIMOptionsDeps {
@@ -224,6 +195,11 @@ export function buildIMOptions(
     info: (m: string) => console.log(`[im] ${m}`),
     warn: (m: string) => console.warn(`[im] ${m}`),
   };
+  const toSession = (session: Session) => {
+    const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?')
+      .get(session.workspace_id) as { path: string } | undefined;
+    return toMessagingSession(session, workspace?.path);
+  };
 
   const shared: MessagingPlatformOptions = {
     log,
@@ -235,49 +211,77 @@ export function buildIMOptions(
     // Single-user stubs — Gian has no multi-user routing.
     listUsers: () => [LOCAL_USER],
 
-    listUserWorkspaces: async () => {
+    listWorkspaces: async () => {
       const rows = db.prepare('SELECT * FROM workspaces ORDER BY sort_order, name').all() as Workspace[];
-      return rows.map(gianWorkspaceToRvcSummary);
+      return rows.map(toWorkspaceSummary);
     },
 
-    getWorkspaceForUser: async (workspaceId: string) => {
+    getWorkspace: async (workspaceId: string) => {
       const row = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as Workspace | undefined;
-      return row ? gianWorkspaceToRvcSummary(row) : null;
+      return row ? toWorkspaceSummary(row) : null;
     },
 
-    listSessionsForWorkspace: async (_userId: string, workspaceId: string) => {
+    listSessionsForWorkspace: async (workspaceId: string) => {
       return sessions
         .listSessions()
         .filter(s => s.workspace_id === workspaceId && s.executor !== 'kimi')
-        .map(gianSessionToRvcRecord);
+        .map(toSession);
     },
 
-    createSession: async (_user, workspace, _botId, input?: MessagingSessionCreateInput) => {
+    getSession: async (sessionId: string) => {
+      const session = trySessionForId(sessions, sessionId);
+      return session && session.executor !== 'kimi'
+        ? toSession(session)
+        : null;
+    },
+
+    updateSession: async (sessionId: string, patch: MessagingSessionPatch) => {
+      if (patch.model !== undefined && patch.model !== null) {
+        sessions.setModel(sessionId, patch.model);
+      }
+      if (patch.reasoningEffort !== undefined) {
+        sessions.setEffort(sessionId, patch.reasoningEffort === 'none'
+          ? null
+          : patch.reasoningEffort);
+      }
+      if (patch.approvalMode !== undefined) {
+        sessions.setApprovalMode(sessionId, patch.approvalMode);
+      }
+      if (patch.archivedAt) {
+        sessions.archiveSession(sessionId, true);
+      }
+      if (patch.title) {
+        sessions.renameSession(sessionId, patch.title);
+      }
+      const updated = trySessionForId(sessions, sessionId);
+      return updated && updated.executor !== 'kimi'
+        ? toSession(updated)
+        : null;
+    },
+
+    createSession: async (workspace, input?: MessagingSessionCreateInput) => {
       const created = await sessions.createSession({
         workspace_id: workspace.id,
         executor: input?.executor ?? 'claude',
         // IM channels can't surface approvals interactively yet, so default
-        // to `auto` regardless of the rvc `mode` hint. Phase 8 may revisit.
+        // to `auto` regardless of the optional mode hint.
         approval_mode: 'auto',
         ...(input?.title ? { name: input.title } : {}),
       });
-      return gianSessionToRvcRecord(created);
+      return toSession(created);
     },
 
-    startTurnWithAutoRestart: async (session, prompt) => {
+    startTurn: async (session, prompt) => {
       await sessions.sendMessage(session.id, prompt ?? '');
-      const updated = sessions.getSession(session.id);
-      return {
-        // rvc treats `turn` as opaque (`unknown`); manager only checks
-        // truthiness. Synthesize a minimal placeholder.
-        turn: { id: randomUUID(), status: 'running' },
-        session: gianSessionToRvcRecord(updated),
-      };
     },
 
     queueTurn: async (session, prompt) => {
       sessions.enqueueMessage(session.id, prompt ?? '');
     },
+
+    getQueueLength: (sessionId) => sessions.getQueueLength(sessionId),
+
+    clearQueue: (sessionId) => sessions.clearQueue(sessionId),
 
     getApprovals: (sessionId: string) => {
       const session = trySessionForId(sessions, sessionId);
@@ -286,7 +290,7 @@ export function buildIMOptions(
       return approvals
         .listPending()
         .filter(a => a.sessionId === sessionId && a.status === 'pending')
-        .map(a => gianApprovalToRvcPending(a, executor));
+        .map(a => toPendingApproval(a, executor));
     },
 
     resolveApproval: async (session, approvalId, input) => {
@@ -311,7 +315,7 @@ export function buildIMOptions(
         void sessions.warmCapabilities(exec).catch(() => undefined);
         return [];
       }
-      return caps.models.map(m => gianModelToRvcOption(m as never));
+      return caps.models.map(m => toModelOption(m as never));
     },
 
     currentDefaultModel: (executor) => {
@@ -334,26 +338,11 @@ export function buildIMOptions(
         return null;
       }
       const m = caps.models.find(x => x.id === model || x.model === model);
-      return m ? gianModelToRvcOption(m as never) : null;
+      return m ? toModelOption(m as never) : null;
     },
-
-    normalizeReasoningEffort: gianEffortToRvc,
 
     preferredReasoningEffortForModel: (modelOption) =>
       modelOption.defaultReasoningEffort ?? 'medium',
-
-    restartSessionThread: async (session) => {
-      // rvc concept: rotate the underlying thread but keep the session row.
-      // Gian equivalent: send `/clear` which causes cc-proxy to emit
-      // `session.rotated` and update native_session_id. Codex sessions don't
-      // honor /clear the same way; for them we just no-op (next message
-      // reuses the existing thread).
-      const gianSession = sessions.getSession(session.id);
-      if (gianSession.executor === 'claude') {
-        await sessions.sendMessage(session.id, '/clear');
-      }
-      return gianSessionToRvcRecord(sessions.getSession(session.id));
-    },
 
     interruptTurn: async (session) => {
       await sessions.stopTurn(session.id);
@@ -364,8 +353,6 @@ export function buildIMOptions(
       const msg = err instanceof Error ? err.message : String(err);
       return /THREAD_NOT_FOUND|SESSION_NOT_FOUND|stale|not\s+available/i.test(msg);
     },
-
-    staleSessionMessage: 'Session is no longer available. Use /new to start a fresh one.',
 
     errorMessage: (err) =>
       err instanceof Error ? err.message : typeof err === 'string' ? err : JSON.stringify(err),

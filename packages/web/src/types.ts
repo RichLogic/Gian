@@ -157,9 +157,7 @@ export interface ApprovalItem {
   /** Structured questions when `category === 'question'`. */
   questions?: import('@gian/shared').AskQuestion[];
   /** Human-readable summary of what the user picked, set when a `question`
-   *  approval resolves. Drives the resolved card's "answered with …" line.
-   *  In the removed TTY mode, answers arrived via the synthetic local resolve;
-   *  the later JSONL watcher resolve had no answers and must not clobber this. */
+   *  approval resolves. Drives the resolved card's "answered with …" line. */
   answeredWith?: string;
   /** Which scope buttons to surface — drives whether `Allow session` appears.
    *  Defaults to `['once']` (only "Allow once"). */
@@ -210,8 +208,6 @@ export type TranscriptItem =
   | WebSearchItem
   | AgentSpawnItem
   | AutoNoticeItem;
-
-export type View = 'coding' | 'files' | 'workspaces' | 'bots';
 
 /** Queue entry mirror of QueueUpdatedMessage payload (host/src/queue). */
 export interface QueueEntry {

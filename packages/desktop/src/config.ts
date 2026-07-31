@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+
 export const PROD_HOST_URL = 'http://127.0.0.1:8990';
 export const DEV_HOST_URL = 'http://127.0.0.1:8991';
 export const DEV_WEB_URL = 'http://127.0.0.1:5191';
@@ -12,6 +14,11 @@ export interface DesktopTargets {
 export interface DesktopWindowChrome {
   titleBarStyle?: 'hiddenInset';
   titleBarOverlay?: true;
+}
+
+export interface DesktopApplicationIdentity {
+  name: 'Gian' | 'GianDev';
+  userDataPath: string | null;
 }
 
 export interface ResolveDesktopTargetsOptions {
@@ -88,4 +95,13 @@ export function resolveDesktopWindowChrome(
     titleBarStyle: 'hiddenInset',
     titleBarOverlay: true,
   };
+}
+
+export function resolveDesktopApplicationIdentity(
+  isPackaged: boolean,
+  appDataPath: string,
+): DesktopApplicationIdentity {
+  return isPackaged
+    ? { name: 'Gian', userDataPath: null }
+    : { name: 'GianDev', userDataPath: join(appDataPath, 'GianDev') };
 }

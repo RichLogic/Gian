@@ -164,18 +164,6 @@ export function updateBot(db: Db, id: string, input: UpdateBotInput): Bot | null
   return getBot(db, id);
 }
 
-export function setEnabled(db: Db, id: string, enabled: boolean): Bot | null {
-  const now = new Date().toISOString();
-  const status = enabled ? 'connecting' : 'disabled';
-  db.prepare(`UPDATE bots SET enabled = ?, status = ?, updated_at = ? WHERE id = ?`).run(
-    enabled ? 1 : 0,
-    status,
-    now,
-    id,
-  );
-  return getBot(db, id);
-}
-
 export function deleteBot(db: Db, id: string): boolean {
   const result = db.prepare('DELETE FROM bots WHERE id = ?').run(id);
   return result.changes > 0;

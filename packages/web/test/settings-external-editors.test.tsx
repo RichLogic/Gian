@@ -15,8 +15,7 @@ vi.mock('../src/api.js', async () => {
 
 function baseConfig(overrides: Partial<SystemConfig> = {}): SystemConfig {
   return {
-    host: '127.0.0.1', port: 8990, workspace_root: '~/Coding', public_url: '',
-    tunnel_mode: 'none', tunnel_id: '', force_https: false,
+    host: '127.0.0.1', port: 8990, workspace_root: '~/Coding',
     theme: 'warm', accent: 'plum', density: 'cozy', locale: 'en',
     font_scale_chrome: 'md', font_scale_chat: 'md', font_scale_code: 'md',
     default_claude_model: '', default_claude_effort: '',

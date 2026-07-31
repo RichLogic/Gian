@@ -7,7 +7,6 @@ import type {
   Bot,
   Executor,
   QueueEntry,
-  RuntimeMode,
   Session,
   SystemConfig,
   Task,
@@ -15,8 +14,6 @@ import type {
   Workspace,
 } from './model.js';
 import type { InputItem } from './proxy.js';
-
-export type WsClose = 4001 | 4002 | 4003;
 
 export interface AuthMessage {
   type: 'auth';
@@ -151,21 +148,9 @@ export interface QueueUpdatedMessage {
   queue: Array<Pick<QueueEntry, 'id' | 'text'>>;
 }
 
-export interface BotUpdatedMessage {
-  type: 'bot:updated';
-  bot: Pick<Bot, 'id'> & Partial<Bot> & { online?: boolean; last_msg?: string };
-}
-
 export interface RunnerUpdatedMessage {
   type: 'runner:updated';
   runner: Partial<RunnerInfo>;
-}
-
-export interface TranscriptHistoryMessage {
-  type: 'transcript:history';
-  session_id: string;
-  events: EventEnvelope[];
-  has_more: boolean;
 }
 
 /**
@@ -189,44 +174,6 @@ export interface ErrorMessage {
 }
 
 /**
- * Server-pushed PTY output chunk. Sent every time the underlying CLI writes
- * to stdout/stderr while the session is in `tty` runtime mode. `data` is
- * base64-encoded raw bytes — the xterm side decodes and writes(uint8).
- *
- * Base64 (not binary frames) so this rides the same JSON broadcast pipe as
- * every other ws message — no separate binary plumbing through
- * `WsBroadcaster`. The overhead is ~33%, acceptable for human-typing TTY.
- */
-export interface PtyOutputMessage {
-  type: 'pty:output';
-  session_id: string;
-  /** Base64-encoded chunk. */
-  data: string;
-}
-
-/**
- * Replay buffer for a session that just connected (or just switched to TTY).
- * `chunks` are appended in order, each base64-encoded. The client writes
- * them to xterm before subscribing to live `pty:output`. Truncated to the
- * runtime ring buffer cap (default ~1MB).
- */
-export interface PtyReplayMessage {
-  type: 'pty:replay';
-  session_id: string;
-  chunks: string[];
-  /** True when the live PTY process is actually running. False means the
-   *  buffer is historical (e.g. process died) so the UI can show a
-   *  reconnect hint. */
-  alive: boolean;
-}
-
-export interface SessionRuntimeSwitchedMessage {
-  type: 'session:runtime-switched';
-  session_id: string;
-  runtime_mode: RuntimeMode;
-}
-
-/**
  * Coarse-grained "the workspace's git state may have changed" ping. Sent
  * after fetch / branch create / merge / drop / worktree teardown — anything
  * that could shift the branches table, ahead-behind counts, or worktree
@@ -247,8 +194,7 @@ export interface WorkspaceGitUpdatedMessage {
 /**
  * Workbench-terminal channel — independent of any Gian session. Each tab
  * in the workbench terminal pane has a client-minted `term_id` that
- * scopes its PTY. Shape is intentionally close to `pty:*` so the xterm
- * component on the client can share most of its plumbing.
+ * scopes its PTY.
  */
 export interface TermOutputMessage {
   type: 'term:output';
@@ -284,15 +230,10 @@ export type ServerToClientMessage =
   | ApprovalCreatedMessage
   | ApprovalUpdatedMessage
   | QueueUpdatedMessage
-  | BotUpdatedMessage
   | RunnerUpdatedMessage
-  | TranscriptHistoryMessage
-  | PtyOutputMessage
-  | PtyReplayMessage
   | TermOutputMessage
   | TermReplayMessage
   | TermExitedMessage
-  | SessionRuntimeSwitchedMessage
   | SessionNativeConfigMessage
   | SessionSlashCommandsMessage
   | WorkspaceGitUpdatedMessage
@@ -320,17 +261,6 @@ export interface SessionCreateMessage {
   fork_from?: string;
   /** Opaque client correlation token, echoed back on session:created. */
   client_tag?: string;
-}
-
-export interface SessionSelectMessage {
-  type: 'session:select';
-  session_id: string;
-}
-
-export interface TranscriptLoadMoreMessage {
-  type: 'transcript:load_more';
-  session_id: string;
-  before: string;
 }
 
 export interface MessageSendMessage {
@@ -412,11 +342,6 @@ export interface SessionRecoverMessage {
   session_id: string;
 }
 
-export interface SessionResetMessage {
-  type: 'session:reset';
-  session_id: string;
-}
-
 export interface SessionRenameMessage {
   type: 'session:rename';
   session_id: string;
@@ -450,7 +375,6 @@ export interface SessionSetModeMessage {
   type: 'session:set_mode';
   session_id: string;
   approval_mode: ApprovalMode;
-  turns?: number;
 }
 
 export interface SessionSetModelMessage {
@@ -491,17 +415,6 @@ export interface SessionSlashCommandsMessage {
   type: 'session:slash-commands';
   session_id: string;
   commands: import('./proxy.js').SlashCommand[];
-}
-
-export interface SessionTakeoverMessage {
-  type: 'session:takeover';
-  session_id: string;
-}
-
-export interface SlashExecuteMessage {
-  type: 'slash:execute';
-  session_id: string;
-  command: string;
 }
 
 export interface QueueAddMessage {
@@ -546,61 +459,8 @@ export interface MessageSteerMessage {
 }
 
 /**
- * Request a runtime-mode switch for a session (Structured ↔ TTY). Codex-only
- * now — Claude sessions are always `structured`. Allowed only while the
- * session is idle (no in-flight turn, no pending approval). On success the
- * host emits `session:runtime-switched` and a follow-up `session:updated`.
- *
- * Failure cases (busy / closed / unsupported) come back as a regular
- * `ErrorMessage` with `code = 'SWITCH_BLOCKED'`.
- */
-export interface SessionSwitchRuntimeMessage {
-  type: 'session:switch-runtime';
-  session_id: string;
-  target: RuntimeMode;
-  /** Force the switch even when the session is already in `target` mode. Used
-   *  to re-spawn a dead PTY (e.g. after a host restart the session is still
-   *  `runtime_mode='tty'` but no PTY exists). Without this, switchRuntime
-   *  no-ops when already in the target mode. */
-  force?: boolean;
-}
-
-/**
- * Keystroke (or paste) headed for the PTY stdin. `data` is base64-encoded
- * raw bytes for live terminal input; `text` asks the backend to wrap a full
- * message in bracketed paste + Enter. Ignored when the session is not
- * currently in `tty` mode.
- */
-export interface PtyInputMessage {
-  type: 'pty:input';
-  session_id: string;
-  data?: string;
-  text?: string;
-}
-
-/**
- * Terminal size change. Cols and rows in character cells.
- */
-export interface PtyResizeMessage {
-  type: 'pty:resize';
-  session_id: string;
-  cols: number;
-  rows: number;
-}
-
-/**
- * Replay-buffer request. Sent after a fresh socket connects or the user
- * navigates back to a TTY session. Server replies with `PtyReplayMessage`.
- */
-export interface PtyReplayRequestMessage {
-  type: 'pty:replay-request';
-  session_id: string;
-}
-
-/**
- * Workbench terminal — client → server messages. Mirror of the
- * session-side `pty:*` shapes, keyed by `term_id` instead of session id
- * and routed to the host's WorkbenchTerminalManager (not cc-proxy).
+ * Workbench terminal — client → server messages, keyed by `term_id` and
+ * routed to the host's WorkbenchTerminalManager.
  */
 export interface TermSpawnMessage {
   type: 'term:spawn';
@@ -639,14 +499,11 @@ export interface TermCloseMessage {
 export type ClientToServerMessage =
   | AuthMessage
   | SessionCreateMessage
-  | SessionSelectMessage
-  | TranscriptLoadMoreMessage
   | MessageSendMessage
   | MessageSteerMessage
   | ApprovalResolveMessage
   | SessionStopMessage
   | SessionRecoverMessage
-  | SessionResetMessage
   | SessionRenameMessage
   | SessionArchiveMessage
   | SessionDeleteMessage
@@ -659,17 +516,11 @@ export type ClientToServerMessage =
   | SessionSetEffortMessage
   | SessionSetServiceTierMessage
   | SessionSetNativeConfigMessage
-  | SessionTakeoverMessage
-  | SlashExecuteMessage
   | QueueAddMessage
   | QueueRemoveMessage
   | QueueReorderMessage
   | QueueSendNowMessage
   | QueueClearMessage
-  | SessionSwitchRuntimeMessage
-  | PtyInputMessage
-  | PtyResizeMessage
-  | PtyReplayRequestMessage
   | TermSpawnMessage
   | TermInputMessage
   | TermResizeMessage

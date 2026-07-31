@@ -1,6 +1,6 @@
 import { useT } from '../i18n/index.js';
 import { PathBreadcrumb } from './PathBreadcrumb.js';
-import type { PathSegment, SessionMenuActions } from './PathBreadcrumb.js';
+import type { BranchMenuActions, PathSegment, SessionMenuActions } from './PathBreadcrumb.js';
 
 export type Mode = 'sessions' | 'tasks' | 'spaces' | 'bots';
 export type ViewState = 'main' | 'both' | 'workbench';
@@ -18,9 +18,10 @@ function Icon({ d, size = 16 }: { d: string; size?: number }) {
   );
 }
 
-/** Panel toggle glyph: outer frame + side divider; the side section is tinted
- *  while the panel is open, empty when collapsed (same visual language for
- *  the left sidebar and the right panel-3 buttons, mirrored). */
+/** Panel toggle glyph: outer frame + side divider; the side section is filled
+ *  solid while the panel is open (Air's `sidebar.right` idiom), empty when
+ *  collapsed (same visual language for the left sidebar and the right
+ *  panel-3 buttons, mirrored). */
 function PanelIcon({ side, active }: { side: 'left' | 'right'; active: boolean }) {
   const dividerX = side === 'left' ? 9 : 15;
   const fill = side === 'left'
@@ -28,7 +29,7 @@ function PanelIcon({ side, active }: { side: 'left' | 'right'; active: boolean }
     : 'M18 3.5h-3v17h3a2.5 2.5 0 0 0 2.5-2.5V6A2.5 2.5 0 0 0 18 3.5z';
   return (
     <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
-      {active && <path d={fill} fill="currentColor" fillOpacity={0.28} stroke="none" />}
+      {active && <path d={fill} fill="currentColor" stroke="none" />}
       <path d="M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
       <path d={`M${dividerX} 3v18`} />
     </svg>
@@ -38,6 +39,7 @@ function PanelIcon({ side, active }: { side: 'left' | 'right'; active: boolean }
 interface Props {
   pathSegments: PathSegment[];
   sessionMenu?: SessionMenuActions | null;
+  branchMenu?: BranchMenuActions | null;
   onRenameSubmit?: (value: string) => void;
   onRenameCancel?: () => void;
 
@@ -61,6 +63,7 @@ interface Props {
 export function Topbar({
   pathSegments,
   sessionMenu,
+  branchMenu,
   onRenameSubmit,
   onRenameCancel,
   sidebarCollapsed,
@@ -117,6 +120,7 @@ export function Topbar({
         onRenameSubmit={onRenameSubmit}
         onRenameCancel={onRenameCancel}
         sessionMenu={sessionMenu ?? null}
+        branchMenu={branchMenu ?? null}
       />
 
       <span className="topbar-spacer" />

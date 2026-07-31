@@ -74,27 +74,7 @@ export interface NativeApprovalOption {
 
 export type ActiveChannel = 'web' | 'im';
 
-/**
- * Which CLI runtime drives a session right now.
- *
- * - `structured` — `claude -p --output-format stream-json` (cc) or `codex
- *                  proto` (codex). Emits structured events the host renders
- *                  as transcript cards.
- * - `tty`        — interactive CLI inside a PTY, surfaced to the user as
- *                  xterm.js. Codex-only: the Claude TTY runtime was removed,
- *                  Claude sessions always run `structured`. Lifecycle events
- *                  arrive via session JSONL tail + fs.watch; cards are not
- *                  rendered.
- *
- * Mode is session-scoped. New sessions default to `structured`.
- */
-export type RuntimeMode = 'structured' | 'tty';
-
 export type SessionStatus = 'new' | 'running' | 'pending' | 'error' | 'done';
-
-export type TurnStatus = 'running' | 'completed' | 'error' | 'stopped';
-
-export type RiskLevel = 'low' | 'medium' | 'high';
 
 export type ApprovalCategory =
   | 'command'
@@ -160,7 +140,6 @@ export interface Session {
    *  null. Rides every Codex turn (applies next turn); null for other
    *  executors. */
   service_tier: 'fast' | 'flex' | null;
-  turns: number;
   active_channel: ActiveChannel | null;
   status: SessionStatus;
   archived: 0 | 1;
@@ -173,6 +152,12 @@ export interface Session {
   /** Absolute path to the live worktree dir. Null when not in worktree mode
    *  OR when the worktree was removed (merged/discarded). */
   worktree_path: string | null;
+  /** Absolute path of a worktree the AGENT created itself mid-session via
+   *  `git worktree add` (detected from command_execution events). Null until
+   *  detected; never set on Gian-owned worktree sessions. View-only: the web
+   *  auto-switches the diff/files view to it; execution stays put.
+   *  Optional for compatibility with hosts predating migration 040. */
+  detected_worktree_path?: string | null;
   /** Branch name, e.g. 'worktree/abc123' (or legacy 'gian/abc123' from
    *  earlier versions). Set on worktree creation; survives merge/discard
    *  for history. Null for regular sessions. */
@@ -184,9 +169,6 @@ export interface Session {
   /** Native executor session id. Claude/Codex resume their on-disk history;
    *  Kimi loads or resumes the corresponding ACP session. */
   native_session_id: string | null;
-  /** Active CLI runtime — `structured` (`claude -p`, Codex app-server, or
-   *  Kimi ACP) or `tty` (interactive Codex in a PTY; Codex-only). */
-  runtime_mode: RuntimeMode;
   /** Tokens occupying the executor's current context window. Null after an
    *  invalidation (for example `/compact`) until the executor reports again.
    *  Optional for compatibility with hosts predating migration 034. */
@@ -238,37 +220,6 @@ export interface Task {
    *  the sidebar "+". NULL on legacy tasks → falls back to the config default
    *  (`default_task_executor`) when the Manager session is first ensured. */
   manager_executor: Executor | null;
-}
-
-/**
- * A Subtask IS a Session — one with `type === 'subtask'` and a non-null
- * `task_id`. It reuses the full Session machinery (proxy, worktree, runtime
- * mode, …); the Task layer only groups and orders them. Kept as an alias so
- * call sites can read intent without a parallel type.
- */
-export type Subtask = Session;
-
-export interface Turn {
-  id: string;
-  session_id: string;
-  turn_number: number;
-  status: TurnStatus;
-  summary: string | null;
-  ops: number;
-  tokens: number;
-  duration_ms: number | null;
-  created_at: string;
-  completed_at: string | null;
-}
-
-export interface EventRecord {
-  id: string;
-  session_id: string;
-  turn_id: string;
-  call_id: string;
-  type: string;
-  data: string;
-  created_at: string;
 }
 
 export interface Approval {
@@ -368,10 +319,6 @@ export interface SystemConfig {
   host: string;
   port: number;
   workspace_root: string;
-  public_url: string;
-  tunnel_mode: 'none' | 'cloudflare-tunnel' | 'tailscale-funnel' | 'reverse-proxy';
-  tunnel_id: string;
-  force_https: boolean;
   theme: 'light' | 'warm' | 'dark';
   accent: Accent;
   density: 'compact' | 'cozy' | 'roomy';
@@ -397,7 +344,4 @@ export interface SystemConfig {
    *  Optional so older configs / test fixtures stay valid; loadConfig always
    *  returns at least `{}`. */
   open_apps?: OpenAppPrefs;
-  /** Whether Codex sessions show a CLI tab alongside the chat surface.
-   *  loadConfig defaults to false. */
-  codex_chat_cli?: boolean;
 }

@@ -1,25 +1,18 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { ApprovalDecision, ApprovalMode, Executor, NativeConfigValue, RuntimeMode, Session, Workspace } from '@gian/shared';
+import { useEffect, useRef, useState } from 'react';
+import type { ApprovalDecision, ApprovalMode, NativeConfigValue, Session, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
-import { confirm } from '../feedback.js';
-import { createWorkspace, loadBranches, loadRemoteBranches, loadRepoInfo } from '../api.js';
-import type { LocalBranch, RemoteBranch } from '../api.js';
-import { BranchPicker } from '../components/BranchPicker.js';
-import { Composer } from '../components/Composer.js';
-import { FilePreviewDrawer } from '../components/FilePreviewDrawer.js';
-import { GitBadge } from '../components/GitBadge.js';
 import { ModeDropdown } from '../components/ModeDropdown.js';
 import type { Mode } from '../components/Topbar.js';
-import { PlanChip } from '../components/PlanChip.js';
-import { QueueList } from '../components/QueueList.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
-import { Terminal, makeSessionWire } from '../components/Terminal.js';
-import { Transcript } from '../transcript/Transcript.js';
-import { TranscriptMinimap } from '../transcript/TranscriptMinimap.js';
 import type { PlanLifecycleState } from '../transcript/apply.js';
 import type { ApprovalActionContext, QueueEntry, TranscriptItem } from '../types.js';
-import type { GianWs } from '../ws.js';
-import { isTurnRunning } from '../session-routing.js';
+import { sessionNeedsAttention } from '../session-routing.js';
+import { SessionMain } from './SessionMain.js';
+import { relTime, statusGlyphShown, StatusIcon } from './session-list-status.js';
+import { NewSessionView } from './new-session-view.js';
+import type { CreateSessionInput } from './new-session-view.js';
+export { buildSessionCreatePayload } from './new-session-view.js';
+export type { CreateSessionInput, SessionCreateFormState } from './new-session-view.js';
 
 // ─── V2 inline icons (24-grid, 1.5px stroke, round caps — phase 6 grid) ────
 function SvgIcon({ d, size = 16, stroke = 1.5 }: { d: string; size?: number; stroke?: number }) {
@@ -43,82 +36,6 @@ const ICON = {
   folderOpen: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2.5 M3 7v10a2 2 0 0 0 2 2h12.5a2 2 0 0 0 1.9-1.4L21.8 11H7.5a2 2 0 0 0-1.9 1.4L4 17.5',
 };
 
-// 8 hex chars, matches the host's `gian/<8-char-uuid>` default convention.
-function shortHexId(): string {
-  return Math.random().toString(16).slice(2, 10).padEnd(8, '0');
-}
-
-/** Compact relative age (Codex sidebar style): now / 5m / 3h / 2d / 3w / 2mo /
- *  1y. Shown at a row-end when there is no status glyph. Exported so the Tasks
- *  rows use the exact same format. */
-export function relTime(iso: string): string {
-  const ms = Date.now() - Date.parse(iso);
-  if (Number.isNaN(ms)) return '';
-  const m = Math.floor(ms / 60000);
-  if (m < 1) return 'now';
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d`;
-  const w = Math.floor(d / 7);
-  if (w < 5) return `${w}w`;
-  const mo = Math.floor(d / 30);
-  if (mo < 12) return `${mo}mo`;
-  return `${Math.floor(d / 365)}y`;
-}
-
-export interface CreateSessionInput {
-  workspaceId: string;
-  name: string;
-  executor: Executor;
-  approvalMode?: ApprovalMode;
-  mode?: 'regular' | 'worktree';
-  baseBranch?: string;
-  /** User-chosen name for the branch the worktree will create. Optional —
-   *  when omitted the host falls back to `gian/<short-uuid>`. The web form
-   *  pre-fills with that pattern but lets the user override. */
-  branch?: string;
-  /** Optional first message to send right after the session is created. */
-  firstMessage?: string;
-}
-
-/**
- * Inputs the form has visible to it. Extracted from the inline submit()
- * closure so SES-001 / WT-001 can be exercised as a pure function.
- */
-export interface SessionCreateFormState {
-  workspaceId: string;
-  sessionName: string;
-  executor: Executor;
-  approvalMode: ApprovalMode;
-  mode: 'regular' | 'worktree';
-  baseBranch: string;
-  /** Already-composed full branch name (e.g. `worktree/feature-x`).
-   *  Empty string means "let the host auto-generate". */
-  composedBranch: string;
-  firstMessage: string;
-}
-
-/**
- * Map the new-session form state to the payload sent to the host. WT-001
- * + SES-001 contract: regular mode omits `baseBranch` / `branch`;
- * worktree mode includes them only when the user supplied non-empty
- * trimmed values; `firstMessage` is included only when non-empty.
- */
-export function buildSessionCreatePayload(form: SessionCreateFormState): CreateSessionInput {
-  const trimmedFirst = form.firstMessage.trim();
-  return {
-    workspaceId: form.workspaceId,
-    name: form.sessionName.trim(),
-    executor: form.executor,
-    ...(form.executor === 'kimi' ? {} : { approvalMode: form.approvalMode }),
-    mode: form.mode,
-    ...(form.mode === 'worktree' && form.baseBranch.trim() ? { baseBranch: form.baseBranch.trim() } : {}),
-    ...(form.mode === 'worktree' && form.composedBranch ? { branch: form.composedBranch } : {}),
-    ...(trimmedFirst ? { firstMessage: trimmedFirst } : {}),
-  };
-}
 
 export interface CodingViewProps {
   /** Top-level app mode — the sidebar's mode dropdown reads/drives this. */
@@ -127,13 +44,7 @@ export interface CodingViewProps {
   /** Open the global CommandPalette (sidebar search button). */
   onOpenSearch: () => void;
   workspaces: Workspace[];
-  /** Map of workspace_id → current HEAD branch name. Used as a fallback
-   *  by SessionRow when session.branch itself is null (non-worktree
-   *  sessions ride on the workspace's HEAD). Populated by App. */
-  workspaceBranches: Record<string, string | null>;
   sessions: Session[];
-  archivedSessions: Session[];
-  archivedLoaded: boolean;
   activeSession: Session | null;
   activeWorkspace: Workspace | null;
   activeSessionId: string | null;
@@ -142,7 +53,6 @@ export interface CodingViewProps {
   queueBySession: Record<string, QueueEntry[]>;
   /** Streamed plan text and whether a successful turn finalized it. */
   planStateBySession: Record<string, PlanLifecycleState>;
-  onLoadArchived: () => void | Promise<void>;
   onSelectSession: (id: string) => void;
   onWorkspaceCreated: (ws: Workspace) => void;
   onCreateSession: (input: CreateSessionInput) => void;
@@ -166,14 +76,6 @@ export interface CodingViewProps {
     answers?: Record<string, string | string[]>,
     context?: ApprovalActionContext,
   ) => void;
-  /** Local-only approval resolution for TTY questions, which paste their
-   *  answers into the PTY rather than going through the structured bridge. */
-  onLocalApprovalResolve: (
-    sessionId: string,
-    approvalId: string,
-    decision: ApprovalDecision,
-    answers?: Record<string, string | string[]>,
-  ) => void;
   onQueueAdd: (sessionId: string, text: string, attachments?: Array<{ path: string; name: string; mime: string; size?: number }>) => void;
   onQueueRemove: (sessionId: string, queueId: string) => void;
   onQueueReorder: (sessionId: string, order: string[]) => void;
@@ -182,7 +84,7 @@ export interface CodingViewProps {
   /** Codex-only mid-turn injection (`turn/steer`) — the composer's Ctrl+Enter
    *  path while a turn is running. Other executors never call it. */
   onSteer: (sessionId: string, text: string, attachments?: Array<{ path: string; name: string; mime: string; size?: number }>) => void;
-  onSetMode: (sessionId: string, approvalMode: ApprovalMode, turns?: number) => void;
+  onSetMode: (sessionId: string, approvalMode: ApprovalMode) => void;
   onSetModel: (sessionId: string, model: string) => void;
   onSetEffort: (sessionId: string, effort: import('@gian/shared').ThinkingEffort | null) => void;
   onSetServiceTier: (sessionId: string, tier: 'fast' | null) => void;
@@ -191,27 +93,13 @@ export interface CodingViewProps {
     configId: string,
     value: NativeConfigValue,
   ) => void;
-  onArchive: (sessionId: string, archived: boolean) => void;
   onDelete: (sessionId: string) => void;
-  onRecover: (sessionId: string) => void;
-  onMerge: (sessionId: string) => void | Promise<void>;
-  onDrop: (sessionId: string) => void | Promise<void>;
-  onRename: (sessionId: string, name: string) => void;
   /** Open the Files view in Changed mode for this session's working tree. */
   onShowChanges: (session: Session) => void;
   /** Active session's working tree id (`wt:<id>` or `ws:<id>`), null if none. */
   activeWorkingTreeId: string | null;
   /** Branch name for the active session's working tree. */
   activeBranch: string | null;
-  /** Inline file preview drawer target — set when user clicks a transcript
-   *  FileLink. Null = drawer closed. */
-  previewTarget?: import('../components/FilePreviewDrawer.js').PreviewTarget | null;
-  onClosePreview?: () => void;
-  /** Live WS handle — passed to <Terminal /> for TTY-mode I/O. */
-  ws: GianWs;
-  /** Flip the active runtime for a session. Caller forwards to
-   *  `session:switch-runtime` WS message. */
-  onSwitchRuntime: (sessionId: string, target: RuntimeMode, opts?: { force?: boolean }) => void;
   /** Switch app mode to Spaces (workspace management). Triggered from
    *  the sidebar's hidden-workspace footer link. */
   onOpenSpaces: () => void;
@@ -248,22 +136,18 @@ export function CodingView(p: CodingViewProps) {
     >
       {/* The rail stays mounted while collapsed so its width can transition
           (phase 6); `.view.rail-collapsed` shrinks it to zero and disables
-          interaction. As a side benefit, sidebar state (collapsed groups,
-          archived toggle) survives a hide/show cycle. */}
+          interaction. As a side benefit, sidebar state (collapsed groups)
+          survives a hide/show cycle. */}
       <Sidebar
         mode={p.mode}
         onSetMode={p.onSetAppMode}
         onOpenSearch={p.onOpenSearch}
         workspaces={p.workspaces}
-        workspaceBranches={p.workspaceBranches}
         sessions={p.sessions}
-        archivedSessions={p.archivedSessions}
-        archivedLoaded={p.archivedLoaded}
         activeSessionId={p.activeSessionId}
         showNew={showNew}
         onToggleNew={() => setShowNew(v => !v)}
         onSelect={id => { setShowNew(false); p.onSelectSession(id); }}
-        onLoadArchived={p.onLoadArchived}
         onOpenSpaces={p.onOpenSpaces}
       />
       <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize sidebar" />
@@ -284,45 +168,32 @@ export function CodingView(p: CodingViewProps) {
           items={p.itemsBySession[p.activeSession.id] ?? []}
           pending={p.pendingBySession[p.activeSession.id] ?? false}
           queue={p.queueBySession[p.activeSession.id] ?? []}
-          codexPlanText={p.planStateBySession[p.activeSession.id]?.text}
+          planText={p.planStateBySession[p.activeSession.id]?.text}
           codexPlanCompleted={p.planStateBySession[p.activeSession.id]?.completed}
           onSend={(text, opts) => p.onSend(p.activeSession!.id, text, opts)}
           onSendSkill={(name, path) => p.onSendSkill(p.activeSession!.id, name, path)}
           onStop={() => p.onStop(p.activeSession!.id)}
           onApprove={(approvalId, decision, answers, context) => p.onApprove(p.activeSession!.id, approvalId, decision, answers, context)}
-          onLocalApprovalResolve={(approvalId, decision, answers) => p.onLocalApprovalResolve(p.activeSession!.id, approvalId, decision, answers)}
           onQueueAdd={(text, items) => p.onQueueAdd(p.activeSession!.id, text, items)}
           onQueueRemove={queueId => p.onQueueRemove(p.activeSession!.id, queueId)}
           onQueueReorder={order => p.onQueueReorder(p.activeSession!.id, order)}
           onQueueClear={() => p.onQueueClear(p.activeSession!.id)}
           onQueueSendNow={() => p.onQueueSendNow(p.activeSession!.id)}
           onSteer={(text, opts) => p.onSteer(p.activeSession!.id, text, opts?.attachments)}
-          onSetMode={(mode, turns) => p.onSetMode(p.activeSession!.id, mode, turns)}
+          onSetMode={mode => p.onSetMode(p.activeSession!.id, mode)}
           onSetModel={model => p.onSetModel(p.activeSession!.id, model)}
           onSetEffort={effort => p.onSetEffort(p.activeSession!.id, effort)}
           onSetServiceTier={tier => p.onSetServiceTier(p.activeSession!.id, tier)}
           onSetNativeConfig={(configId, value) =>
             p.onSetNativeConfig(p.activeSession!.id, configId, value)}
-          onMerge={() => p.onMerge(p.activeSession!.id)}
-          onDrop={() => p.onDrop(p.activeSession!.id)}
-          onArchive={archived => p.onArchive(p.activeSession!.id, archived)}
           onDelete={() => p.onDelete(p.activeSession!.id)}
-          onRecover={() => p.onRecover(p.activeSession!.id)}
-          onRename={name => p.onRename(p.activeSession!.id, name)}
           onShowChanges={() => p.onShowChanges(p.activeSession!)}
           workingTreeId={p.activeWorkingTreeId}
           branch={p.activeBranch}
-          ws={p.ws}
-          onSwitchRuntime={(target, opts) => p.onSwitchRuntime(p.activeSession!.id, target, opts)}
         />
       ) : (
         <CodingViewEmpty />
       )}
-      {/* 4th-level Inspector — sibling of `.main` per the design's
-       *  rail | main | preview three-column layout. Hidden via CSS until
-       *  either a transcript FileLink (file mode) or a DiffCard click
-       *  (diff mode) populates `previewTarget`. */}
-      <FilePreviewDrawer target={p.previewTarget ?? null} onClose={p.onClosePreview ?? (() => {})} />
     </div>
   );
 }
@@ -350,33 +221,24 @@ function Sidebar({
   onSetMode,
   onOpenSearch,
   workspaces,
-  workspaceBranches,
   sessions,
-  archivedSessions,
-  archivedLoaded,
   activeSessionId,
   onToggleNew,
   onSelect,
-  onLoadArchived,
   onOpenSpaces,
 }: {
   mode: Mode;
   onSetMode: (mode: Mode) => void;
   onOpenSearch: () => void;
   workspaces: Workspace[];
-  workspaceBranches: Record<string, string | null>;
   sessions: Session[];
-  archivedSessions: Session[];
-  archivedLoaded: boolean;
   activeSessionId: string | null;
   showNew: boolean;
   onToggleNew: () => void;
   onSelect: (id: string) => void;
-  onLoadArchived: () => void | Promise<void>;
   onOpenSpaces: () => void;
 }) {
   const t = useT();
-  const [archivedOpen, setArchivedOpen] = useState(false);
 
   const collapsedKey = 'gian.sidebar.collapsed.workspace';
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
@@ -406,11 +268,6 @@ function Sidebar({
     };
   }
 
-  function toggleArchived() {
-    void onLoadArchived();
-    setArchivedOpen(open => !open);
-  }
-
   const wsById = new Map(workspaces.map(w => [w.id, w]));
 
   const active = sessions.filter(s => s.archived === 0);
@@ -433,14 +290,12 @@ function Sidebar({
   // StatusIcon (pending/error/unread), not by reordering.
   const rest = filtered;
 
-  function renderRow(s: Session, isArchived = false) {
+  function renderRow(s: Session) {
     return (
       <SessionRow
         key={s.id}
         session={s}
-        archived={isArchived}
         wsHidden={wsById.get(s.workspace_id)?.hidden === 1}
-        branchFallback={workspaceBranches[s.workspace_id] ?? null}
         {...makeRowHandlers(s)}
       />
     );
@@ -471,12 +326,15 @@ function Sidebar({
       const name = ws?.name ?? wsId;
       const sorted = list.slice().sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
       const isCollapsed = collapsed.has(wsId);
+      // Group count = sessions that NEED the user (待处理), not the raw total —
+      // the total says nothing actionable (2026-07-31). Hidden when zero.
+      const attn = list.filter(sessionNeedsAttention).length;
       return (
         <div key={wsId}>
           <div className="sb-group" onClick={() => toggleGroup(wsId)}>
             <span className="sb-group-ico"><SvgIcon d={isCollapsed ? ICON.folder : ICON.folderOpen} size={14} /></span>
             <span>{name}</span>
-            <span className="count">{list.length}</span>
+            {attn > 0 && <span className="count">{attn}</span>}
           </div>
           {!isCollapsed && sorted.map(s => renderRow(s))}
         </div>
@@ -503,6 +361,7 @@ function Sidebar({
           <button
             type="button"
             className="sb-iconbtn"
+            data-testid="sb-new-session"
             aria-label={t('coding.sidebar.new')}
             title={t('coding.sidebar.new')}
             onClick={onToggleNew}
@@ -514,34 +373,6 @@ function Sidebar({
 
       <div className="sb-scroll">
         {renderGroups()}
-
-        {(() => {
-          const visible = archivedSessions
-            .filter(session => {
-              const workspace = wsById.get(session.workspace_id);
-              return !workspace?.hidden || session.id === activeSessionId;
-            })
-            .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
-          return (
-            <>
-              <button className="sb-archived" onClick={toggleArchived}>
-                <span className="caret">{archivedOpen ? '▾' : '▸'}</span>{' '}
-                {t('coding.sidebar.archived')}
-                {archivedLoaded && <span className="count">{visible.length}</span>}
-              </button>
-              {archivedOpen && (
-                <>
-                  {visible.map(session => renderRow(session, true))}
-                  {archivedLoaded && visible.length === 0 && (
-                    <span style={{ padding: '4px 10px', color: 'var(--text-3)', fontSize: 11 }}>
-                      {t('coding.sidebar.noArchived')}
-                    </span>
-                  )}
-                </>
-              )}
-            </>
-          );
-        })()}
 
         {(() => {
           const hiddenCount = workspaces.filter(workspace => workspace.hidden === 1).length;
@@ -563,21 +394,17 @@ function Sidebar({
 }
 
 function SessionRow({
-  session, active, archived, wsHidden, onSelect,
+  session, active, wsHidden, onSelect,
 }: {
   session: Session;
   active: boolean;
-  archived?: boolean;
   wsHidden?: boolean;
-  /** Accepted for compatibility (renderRow still passes it); the single-line
-   *  Codex-style row no longer renders the branch. */
-  branchFallback?: string | null;
   onSelect: () => void;
 }) {
   const t = useT();
   return (
     <div
-      className={`rail-item session-row${active ? ' active' : ''}${archived ? ' archived' : ''}`}
+      className={`rail-item session-row${active ? ' active' : ''}`}
       data-testid={`session-row-${session.id}`}
       role="button"
       tabIndex={0}
@@ -607,777 +434,5 @@ function SessionRow({
         </span>
       )}
     </div>
-  );
-}
-
-// Status icon — gradient disc + knockout glyph (spec 2026-06-28 §H). The glyph
-// is a CSS-mask knockout of a gradient/accent disc (✅-emoji style). Built as
-// data-URI masks set via React style props (avoids the inline-attribute quote
-// pitfall). `mask-composite: subtract` carves the glyph out of the disc.
-const GICO_DISC = "<circle cx='8' cy='8' r='7.4' fill='#fff'/>";
-function gicoGlyph(kind: 'done' | 'err' | 'pend'): string {
-  if (kind === 'done') return "<path d='M5 8l2 2 4-4' fill='none' stroke='#fff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/>";
-  // error = ❗ exclamation (was pending's glyph until 2026-07-01 — moved here so
-  // a bare "!" reads as a genuine failure, not a routine approval pause).
-  if (kind === 'err') return "<rect x='7.05' y='3.8' width='1.9' height='5.3' rx='.95' fill='#fff'/><circle cx='8' cy='11.4' r='1.05' fill='#fff'/>";
-  // pending = ⏸ two pause bars — "I've paused, awaiting your approval" reads
-  // calmer than the old exclamation and never alarms.
-  return "<rect x='5.5' y='4.8' width='1.7' height='6.4' rx='.85' fill='#fff'/><rect x='8.8' y='4.8' width='1.7' height='6.4' rx='.85' fill='#fff'/>";
-}
-function gicoMaskUrl(inner: string): string {
-  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>${inner}</svg>`;
-  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
-}
-function gicoMaskStyle(kind: 'done' | 'err' | 'pend'): CSSProperties {
-  const layers = `${gicoMaskUrl(GICO_DISC)}, ${gicoMaskUrl(gicoGlyph(kind))}`;
-  return { maskImage: layers, WebkitMaskImage: layers };
-}
-
-/** §#7 status indicator (spec 2026-06-28 §H). Nothing for 'new'; a spinning
- *  gradient ring for running; ⏸ pause bars for pending (always "待处理"); ✓ for
- *  done and ❗ for error rendered as a flowing gradient while `unread` ("待处理") and a
- *  solid-accent knockout once read. Exported so Tasks-mode subtask rows reuse
- *  the exact same indicator + unread semantics as session rows. */
-/** Whether StatusIcon renders a glyph at all for this state. Mirrors StatusIcon's
- *  null-returns: nothing for 'new' or a completed-and-read turn. Callers use this
- *  to decide whether to show the time instead (single-line rows). */
-export function statusGlyphShown(status: import('@gian/shared').SessionStatus, unread: boolean): boolean {
-  if (status === 'running' || status === 'pending' || status === 'error') return true;
-  if (status === 'done') return unread;
-  return false;
-}
-
-export function StatusIcon({ status, unread = false }: {
-  status: import('@gian/shared').SessionStatus;
-  /** Merged unread/"待处理" signal — drives the gradient-vs-solid look on
-   *  terminal (done/error) states. Pending is always treated as 待处理. */
-  unread?: boolean;
-}) {
-  const t = useT();
-  if (status === 'new') return null;
-  if (status === 'running') {
-    return (
-      <span className="ri-status running" title={t('coding.status.running')} aria-label="running">
-        <span className="gico ring"><span className="gring" /></span>
-      </span>
-    );
-  }
-  const kind: 'done' | 'err' | 'pend' =
-    status === 'pending' ? 'pend' : status === 'error' ? 'err' : 'done';
-  const attention = status === 'pending' || unread;
-  // Spec change (2026-06-30): a normally-completed-and-read turn shows NO icon.
-  // Only "needs you" (pending / error / unread) and running surface a glyph.
-  if (kind === 'done' && !attention) return null;
-  const wrapClass = kind === 'err' ? 'err' : kind === 'pend' ? 'pending' : 'done';
-  const label = status === 'pending'
-    ? t('coding.status.awaitingApproval')
-    : status === 'error'
-    ? t('coding.status.error')
-    : t('coding.status.done');
-  return (
-    <span className={`ri-status ${wrapClass}`} title={label} aria-label={status}>
-      <span className={`gico ${attention ? 'unread' : 'read'} ${kind}`}>
-        <span className="gfill" style={gicoMaskStyle(kind)} />
-      </span>
-    </span>
-  );
-}
-
-function SessionRowKebab({
-  archived,
-  onResetContext,
-  onArchive,
-  onUnarchive,
-  onDelete,
-}: {
-  archived: boolean;
-  onResetContext: () => void;
-  onArchive: () => void;
-  onUnarchive?: () => void;
-  onDelete: () => void;
-}) {
-  const t = useT();
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (e: PointerEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('pointerdown', onPointerDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
-
-  async function confirmDelete() {
-    const ok = await confirm({
-      message: t('coding.session.deleteConfirm'),
-      danger: true,
-      confirmLabel: t('common.delete'),
-    });
-    if (ok) onDelete();
-  }
-
-  return (
-    <div className="ws-kebab-anchor session-row-kebab" ref={ref}>
-      <button
-        type="button"
-        className="ws-kebab-btn"
-        onClick={e => { e.stopPropagation(); setOpen(o => !o); }}
-        title="Session menu"
-        aria-label="Session menu"
-      >
-        ⋯
-      </button>
-      {open && (
-        <div className="ws-kebab-pop" onClick={e => e.stopPropagation()}>
-          {archived ? (
-            <>
-              <button
-                className="ws-kebab-item"
-                onClick={() => { setOpen(false); onUnarchive?.(); }}
-              >
-                Unarchive
-              </button>
-              <div className="ws-kebab-divider" />
-              <button
-                className="ws-kebab-item danger"
-                onClick={() => { setOpen(false); confirmDelete(); }}
-              >
-                Delete session
-              </button>
-            </>
-          ) : (
-            <>
-              <button
-                className="ws-kebab-item"
-                onClick={() => { setOpen(false); onResetContext(); }}
-              >
-                Reset context
-              </button>
-              <div className="ws-kebab-divider" />
-              <button
-                className="ws-kebab-item danger"
-                onClick={() => { setOpen(false); onArchive(); }}
-              >
-                Archive session
-              </button>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function NewSessionView({
-  workspaces,
-  onWorkspaceCreated,
-  onCreate,
-  onCancel,
-  creating,
-}: {
-  workspaces: Workspace[];
-  onWorkspaceCreated: (ws: Workspace) => void;
-  onCreate: (input: CreateSessionInput) => void;
-  onCancel: () => void;
-  creating: boolean;
-}) {
-  const t = useT();
-  const [selectedWs, setSelectedWs] = useState(
-    workspaces.find(w => w.hidden !== 1)?.id ?? workspaces[0]?.id ?? ''
-  );
-  const [sessionName, setSessionName] = useState('');
-  const [executor, setExecutor] = useState<Executor>('codex');
-  const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask');
-  const [mode, setMode] = useState<'regular' | 'worktree'>('regular');
-  const [baseBranch, setBaseBranch] = useState('');
-  // Suffix-only — the `worktree/` prefix is fixed and rendered as a
-  // non-editable decoration. An auto-generated hex id is the default;
-  // user can clear and type their own.
-  const [branchSuffix, setBranchSuffix] = useState<string>(() => shortHexId());
-  const [firstMessage, setFirstMessage] = useState('');
-  // Branch picker data — loaded lazily once worktree mode is selected. The
-  // dropdown options mirror NewWorktreeDialog in SpacesView: occupied
-  // branches are filtered out (a branch can only live in one worktree at a
-  // time) and remote refs without a local tracking branch are surfaced as
-  // standalone options.
-  const [branches, setBranches] = useState<LocalBranch[]>([]);
-  const [remoteBranches, setRemoteBranches] = useState<RemoteBranch[]>([]);
-  const [branchesLoaded, setBranchesLoaded] = useState(false);
-  // Resolved workspace default branch (e.g. `main`) — surfaced in the
-  // BranchPicker so it floats to the top with a `default` tag.
-  const [defaultBranchHint, setDefaultBranchHint] = useState<string | null>(null);
-
-  // Inline workspace create (used when there are no workspaces, or the user
-  // picks "+ create new workspace" from the select).
-  const [wsName, setWsName] = useState('');
-  const [wsRemote, setWsRemote] = useState('');
-  const [wsBusy, setWsBusy] = useState(false);
-  const [wsError, setWsError] = useState<string | null>(null);
-
-  async function createWs() {
-    if (!wsName) return;
-    setWsBusy(true);
-    setWsError(null);
-    const result = await createWorkspace(wsName, { gitRemote: wsRemote.trim() || undefined });
-    setWsBusy(false);
-    if (!result.workspace) {
-      setWsError(result.error ?? 'workspace create failed');
-      return;
-    }
-    onWorkspaceCreated(result.workspace);
-    setSelectedWs(result.workspace.id);
-    setWsName('');
-    setWsRemote('');
-  }
-
-  const showInlineCreate = workspaces.length === 0 || selectedWs === '__new__';
-  const canCreate = !!selectedWs && selectedWs !== '__new__';
-
-  // Fetch branch lists once worktree mode is selected for a real workspace.
-  // Inline-create selections (__new__) have no repo on disk yet. Re-run if
-  // the user switches workspaces while still in worktree mode.
-  useEffect(() => {
-    if (mode !== 'worktree' || !canCreate) {
-      setBranches([]);
-      setRemoteBranches([]);
-      setBranchesLoaded(false);
-      return;
-    }
-    let cancelled = false;
-    setBranchesLoaded(false);
-    void Promise.all([
-      loadBranches(selectedWs),
-      loadRemoteBranches(selectedWs),
-      loadRepoInfo(selectedWs),
-    ]).then(([b, rb, info]) => {
-      if (cancelled) return;
-      setBranches(b);
-      setRemoteBranches(rb);
-      setBranchesLoaded(true);
-      const def = info?.git.defaultBranch ?? null;
-      setDefaultBranchHint(def);
-      // Pre-pick the workspace's default branch if it shows up in the list
-      // and the user hasn't already chosen anything else.
-      if (def && !baseBranch && b.some(x => x.name === def && !x.worktreePath)) {
-        setBaseBranch(def);
-      }
-    });
-    return () => { cancelled = true; };
-    // baseBranch intentionally omitted: we only want to seed it once per
-    // workspace selection, not re-run when the user picks a different option.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, selectedWs, canCreate]);
-
-  // Suffix → full branch name. An empty suffix falls back to the host's
-  // own auto-id behavior (omit `branch` from the payload), but we always
-  // prefer the form's pre-filled suggestion so the user can see what name
-  // is being committed before they hit Create.
-  const trimmedSuffix = branchSuffix.trim();
-  const composedBranch = trimmedSuffix ? `worktree/${trimmedSuffix}` : '';
-
-  // Collisions are checked against the composed `worktree/<suffix>` name.
-  // The host runs `git check-ref-format` on POST for syntactic issues, so
-  // we only handle the common-case "name already exists" here.
-  const existingLocalNames = new Set(branches.map(b => b.name));
-  const branchNameError: string | null =
-    mode !== 'worktree' || !branchesLoaded || !composedBranch
-      ? null
-      : existingLocalNames.has(composedBranch)
-        ? `${composedBranch} ${t('coding.form.branchExists')}`
-        : null;
-
-  const canSubmit = canCreate
-    && !creating
-    && (mode === 'regular' || (!!composedBranch && !branchNameError));
-
-  function submit() {
-    if (!canSubmit) return;
-    onCreate(buildSessionCreatePayload({
-      workspaceId: selectedWs,
-      sessionName,
-      executor,
-      approvalMode,
-      mode,
-      baseBranch,
-      composedBranch,
-      firstMessage,
-    }));
-  }
-
-  return (
-    <main className="main">
-      <div className="main-head">
-        <div className="main-head-l">
-          <span className="main-title">{t('coding.new.title')}</span>
-        </div>
-        <div className="main-head-r">
-          <button className="btn ghost sm" onClick={onCancel}>{t('coding.new.cancel')}</button>
-        </div>
-      </div>
-      <div className="ns-wrap">
-        <div className="ns-card">
-          <div className="ns-head">
-            <div className="ns-title">{t('coding.new.heading')}</div>
-            <div className="ns-sub">{t('coding.new.sub')}</div>
-          </div>
-          <div className="ns-body">
-            <div className="field">
-              <div className="field-lbl">
-                <span>{t('coding.new.workspace')}</span>
-                <span className="field-hint">{t('coding.new.workspace.hint')}</span>
-              </div>
-              {workspaces.length > 0 && (
-                <select
-                  className="select"
-                  aria-label="Workspace"
-                  value={selectedWs}
-                  onChange={e => setSelectedWs(e.target.value)}
-                >
-                  {workspaces.map(w => (
-                    <option key={w.id} value={w.id} disabled={w.hidden === 1}>
-                      {w.name}{w.hidden === 1 ? ` (${t('coding.session.workspaceHidden.aria')})` : ''}
-                    </option>
-                  ))}
-                  <option value="__new__">{t('coding.form.ws.createnew')}</option>
-                </select>
-              )}
-              {showInlineCreate && (
-                <div className="ns-inline-ws">
-                  <input
-                    className="input"
-                    aria-label={t('coding.form.ws.name.placeholder')}
-                    placeholder={t('coding.form.ws.name.placeholder')}
-                    value={wsName}
-                    onChange={e => setWsName(e.target.value)}
-                  />
-                  <input
-                    className="input"
-                    aria-label={t('coding.form.ws.gitremote.label')}
-                    placeholder={t('coding.form.ws.gitremote.placeholder')}
-                    value={wsRemote}
-                    onChange={e => setWsRemote(e.target.value)}
-                  />
-                  {wsError && <p className="spaces-error">{wsError}</p>}
-                  <button
-                    className="btn primary sm"
-                    onClick={() => void createWs()}
-                    disabled={wsBusy || !wsName}
-                  >
-                    {wsBusy ? (
-                      <span className="ns-busy"><span className="ns-spinner" aria-hidden="true" />{t('common.creating')}</span>
-                    ) : t('coding.form.ws.create')}
-                  </button>
-                </div>
-              )}
-            </div>
-
-            <div className="field">
-              <div className="field-lbl">
-                <span>{t('coding.new.executor')}</span>
-                <span className="field-hint">{t('coding.new.executor.hint')}</span>
-              </div>
-              <div className="exec-picker">
-                <button
-                  type="button"
-                  className={`exec-card codex${executor === 'codex' ? ' active' : ''}`}
-                  onClick={() => {
-                    setExecutor('codex');
-                    if (approvalMode === 'plan') setApprovalMode('ask');
-                  }}
-                >
-                  <div className="exec-card-dot" />
-                  <div className="exec-card-body">
-                    <div className="exec-card-name">Codex</div>
-                    <div className="exec-card-desc">OpenAI · gpt-5-codex</div>
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  className={`exec-card claude${executor === 'claude' ? ' active' : ''}`}
-                  onClick={() => {
-                    setExecutor('claude');
-                    if (approvalMode === 'custom' || approvalMode === 'full-access') {
-                      setApprovalMode('ask');
-                    }
-                  }}
-                >
-                  <div className="exec-card-dot" />
-                  <div className="exec-card-body">
-                    <div className="exec-card-name">Claude Code</div>
-                    <div className="exec-card-desc">CLI plan</div>
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  className={`exec-card kimi${executor === 'kimi' ? ' active' : ''}`}
-                  onClick={() => setExecutor('kimi')}
-                >
-                  <div className="exec-card-dot" />
-                  <div className="exec-card-body">
-                    <div className="exec-card-name">Kimi Code</div>
-                    <div className="exec-card-desc">Moonshot AI · ACP</div>
-                  </div>
-                </button>
-              </div>
-            </div>
-
-            {executor !== 'kimi' && <div className="field">
-              <div className="field-lbl">
-                <span>{t('coding.new.approval')}</span>
-                <span className="field-hint">{t('coding.new.approval.hint')}</span>
-              </div>
-              <div className="segm" style={{ width: 'fit-content' }}>
-                {(executor === 'codex'
-                  ? [
-                      ['custom', t('mode.custom')],
-                      ['ask', t('composer.approval.ask.title')],
-                      ['auto', t('composer.approval.approve.title')],
-                      ['full-access', t('mode.full-access')],
-                    ] as Array<[ApprovalMode, string]>
-                  : [
-                      ['plan', t('mode.plan')],
-                      ['ask', t('mode.ask')],
-                      ['auto', t('mode.auto')],
-                    ] as Array<[ApprovalMode, string]>
-                ).map(([approval, label]) => (
-                  <button
-                    key={approval}
-                    type="button"
-                    className={`segm-item${approvalMode === approval ? ' active' : ''}`}
-                    onClick={() => setApprovalMode(approval)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              <div className="field-hint">{t('coding.new.approval.help')}</div>
-            </div>}
-
-            <div className="field">
-              <div className="field-lbl">
-                <span>{t('coding.new.mode')}</span>
-                <span className="field-hint">{t('coding.new.mode.hint')}</span>
-              </div>
-              <div className="segm" style={{ width: 'fit-content' }}>
-                <button
-                  type="button"
-                  className={`segm-item${mode === 'regular' ? ' active' : ''}`}
-                  onClick={() => setMode('regular')}
-                >
-                  {t('coding.form.mode.regular')}
-                </button>
-                <button
-                  type="button"
-                  className={`segm-item${mode === 'worktree' ? ' active' : ''}`}
-                  onClick={() => setMode('worktree')}
-                >
-                  {t('coding.form.mode.worktree')}
-                </button>
-              </div>
-              {mode === 'worktree' && (
-                <div className="ns-worktree-fields">
-                  {/* Base branch — popover picker with search + grouped
-                     local/remote sections. Workspace default branch (when
-                     known) auto-seeds the value in the useEffect above. */}
-                  <label className="ns-sublabel">{t('coding.form.baseBranch')}</label>
-                  <BranchPicker
-                    branches={branches}
-                    remoteBranches={remoteBranches}
-                    value={baseBranch}
-                    defaultBranch={defaultBranchHint}
-                    disabled={!branchesLoaded}
-                    placeholder={branchesLoaded ? t('coding.form.baseBranch.pick') : t('coding.form.baseBranch.loading')}
-                    onChange={setBaseBranch}
-                    ariaLabel={t('coding.form.baseBranch')}
-                  />
-
-                  {/* New branch name — fixed `worktree/` prefix + suffix
-                     input. Suffix is pre-filled with an 8-char hex id so a
-                     one-click create still works; user can replace it with
-                     a meaningful slug. Collisions with existing local refs
-                     block submit. */}
-                  <label className="ns-sublabel">{t('coding.form.newBranch')}</label>
-                  <div className="branch-name-field">
-                    <span className="prefix">worktree/</span>
-                    <input
-                      aria-label={t('coding.form.newBranchSuffix')}
-                      placeholder="short-id"
-                      value={branchSuffix}
-                      onChange={e => setBranchSuffix(e.target.value)}
-                      spellCheck={false}
-                    />
-                  </div>
-                  {branchNameError && (
-                    <p className="spaces-error" style={{ marginTop: 4 }}>{branchNameError}</p>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="field">
-              <div className="field-lbl">
-                <span>{t('coding.new.name')}</span>
-                <span className="field-hint">{t('coding.new.name.hint')}</span>
-              </div>
-              <input
-                className="input"
-                aria-label={t('coding.form.session.name.label')}
-                placeholder={t('coding.new.name.placeholder')}
-                value={sessionName}
-                onChange={e => setSessionName(e.target.value)}
-              />
-            </div>
-
-            <div className="field">
-              <div className="field-lbl">
-                <span>{t('coding.new.first')}</span>
-              </div>
-              <textarea
-                className="input"
-                aria-label={t('coding.form.first.label')}
-                rows={4}
-                placeholder={t('coding.new.first.placeholder')}
-                value={firstMessage}
-                onChange={e => setFirstMessage(e.target.value)}
-              />
-            </div>
-          </div>
-          <div className="ns-foot">
-            <button className="btn ghost sm" onClick={onCancel} disabled={creating}>
-              {t('coding.new.cancel')}
-            </button>
-            <button className="btn primary sm" disabled={!canSubmit} onClick={submit}>
-              {creating ? (
-                <span className="ns-busy"><span className="ns-spinner" aria-hidden="true" />{t('common.creating')}</span>
-              ) : t('coding.new.create')}
-            </button>
-          </div>
-        </div>
-      </div>
-    </main>
-  );
-}
-
-export function SessionMain({
-  session,
-  workspace,
-  items,
-  pending,
-  queue,
-  codexPlanText,
-  codexPlanCompleted,
-  onSend,
-  onSendSkill,
-  onStop,
-  onApprove,
-  onLocalApprovalResolve,
-  onQueueAdd,
-  onQueueRemove,
-  onQueueReorder,
-  onQueueClear,
-  onQueueSendNow,
-  onSteer,
-  onSetMode,
-  onSetModel,
-  onSetEffort,
-  onSetServiceTier,
-  onSetNativeConfig,
-  onMerge,
-  onDrop,
-  onArchive,
-  onDelete,
-  onRecover,
-  onReopen,
-  onRename,
-  onShowChanges,
-  workingTreeId,
-  branch,
-  ws,
-  onSwitchRuntime,
-}: {
-  session: Session;
-  workspace: Workspace | null;
-  items: TranscriptItem[];
-  pending: boolean;
-  queue: QueueEntry[];
-  codexPlanText?: string;
-  codexPlanCompleted?: boolean;
-  ws: GianWs;
-  onSwitchRuntime: (target: RuntimeMode, opts?: { force?: boolean }) => void;
-  onSend: (
-    text: string,
-    opts?: {
-      oneShotBypass?: boolean;
-      attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
-    },
-  ) => void;
-  onSendSkill: (name: string, path: string) => void;
-  onStop: () => void;
-  onApprove: (
-    approvalId: string,
-    decision: ApprovalDecision,
-    answers?: Record<string, string | string[]>,
-    context?: ApprovalActionContext,
-  ) => void;
-  onLocalApprovalResolve: (
-    approvalId: string,
-    decision: ApprovalDecision,
-    answers?: Record<string, string | string[]>,
-  ) => void;
-  onQueueAdd: (text: string, attachments?: Array<{ path: string; name: string; mime: string; size?: number }>) => void;
-  onQueueRemove: (queueId: string) => void;
-  onQueueReorder: (order: string[]) => void;
-  onQueueClear: () => void;
-  onQueueSendNow: () => void;
-  onSteer: (text: string, opts?: { attachments?: Array<{ path: string; name: string; mime: string; size?: number }> }) => void;
-  onSetMode: (mode: ApprovalMode, turns?: number) => void;
-  onSetModel: (model: string) => void;
-  onSetEffort: (effort: import('@gian/shared').ThinkingEffort | null) => void;
-  onSetServiceTier: (tier: 'fast' | null) => void;
-  onSetNativeConfig: (configId: string, value: NativeConfigValue) => void;
-  onMerge: () => void | Promise<void>;
-  onDrop: () => void | Promise<void>;
-  onArchive: (archived: boolean) => void;
-  onDelete: () => void;
-  onRecover: () => void;
-  /** Reopen a completed subtask (clears `completed_at`). Subtask-only — the
-   *  completed banner's affordance; absent for regular sessions. */
-  onReopen?: () => void;
-  onRename: (name: string) => void;
-  onShowChanges: () => void;
-  workingTreeId: string | null;
-  branch: string | null;
-}) {
-  const t = useT();
-  const isWorktree = session.branch !== null;
-  const terminal = session.worktree_outcome !== null;
-  // A user-completed subtask is read-only in the chat: sending is blocked in the
-  // UI until it's reopened (the turn machinery still works, but a "done" subtask
-  // shouldn't accept new messages). Regular sessions never hit this.
-  const subtaskCompleted = session.type === 'subtask' && session.completed_at != null;
-  const isTty = session.executor === 'codex' && session.runtime_mode === 'tty';
-
-  // Bump on pending → idle transition so GitBadge refetches at turn end.
-  const [gitRefreshKey, setGitRefreshKey] = useState(0);
-  const prevPendingRef = useRef(pending);
-  useEffect(() => {
-    if (prevPendingRef.current && !pending) setGitRefreshKey(k => k + 1);
-    prevPendingRef.current = pending;
-  }, [pending]);
-
-  // Map our session.status → V2 status label + dot variant.
-  const statusLabel =
-    session.status === 'running' ? t('coding.status.running').toUpperCase()
-    : session.status === 'pending' ? t('coding.status.awaitingApproval').toUpperCase()
-    : session.status === 'error' ? t('coding.status.error').toUpperCase()
-    : t('coding.status.done').toUpperCase();
-  const statusDotCls = session.status === 'running' ? 'status-dot run' : 'status-dot';
-
-  return (
-    <main className="main">
-      <div className="main-head">
-        <div className="main-head-l">
-          {/* A Subtask IS a session; this same SessionMain renders both. Tag the
-              subtask variant with a "Subtask" eyebrow (mirrors the Manager
-              panel's "Manager" eyebrow) so its top-left identifies it. */}
-          {session.type === 'subtask' && (
-            <span className="manager-eyebrow">{t('tasks.subtask.title')}</span>
-          )}
-        </div>
-        <div className="main-head-r">
-          {/* §B2 — only +N/−M (no branch, hidden when clean). Status indicator
-              now lives in the sidebar row (§#7), not the main header. */}
-          <GitBadge
-            workingTreeId={workingTreeId}
-            branch={branch}
-            isWorktree={isWorktree}
-            refreshKey={gitRefreshKey}
-            onClick={onShowChanges}
-          />
-        </div>
-      </div>
-      {terminal && (
-        <div className={`session-banner ${session.worktree_outcome}`}>
-          <span>
-            {session.worktree_outcome === 'merged'
-              ? `${t('coding.banner.merged')} ${session.base_branch}. ${t('coding.banner.readonly')}`
-              : t('coding.banner.discarded')}
-          </span>
-          <span className="session-banner-spacer" />
-          <button className="btn xs ghost" onClick={() => onArchive(session.archived !== 1)}>
-            {session.archived === 1 ? t('common.unarchive') : t('common.archive')}
-          </button>
-          <button className="btn xs danger-ghost" onClick={onDelete}>{t('common.delete')}</button>
-        </div>
-      )}
-      {subtaskCompleted && (
-        <div className="session-banner">
-          <span>{t('coding.banner.subtaskCompleted')}</span>
-          <span className="session-banner-spacer" />
-          {onReopen && (
-            <button className="btn xs secondary" onClick={onReopen}>
-              {t('tasks.subtask.reopen')}
-            </button>
-          )}
-        </div>
-      )}
-      {isTty ? (
-        <div className="main-scroll tty-pane">
-          <Terminal
-            instanceKey={`session:${session.id}`}
-            wire={makeSessionWire(ws, session.id)}
-          />
-        </div>
-      ) : (
-        <>
-          <div className="main-scroll">
-            <Transcript
-              items={items}
-              pending={pending || session.status === 'running' || session.status === 'pending'}
-              onApprove={onApprove}
-            />
-          </div>
-          {/* The minimap rail is an absolute overlay anchored to `.main`; the
-              nav arrows render inline in the underbar below. */}
-          <QueueList queue={queue} onRemove={onQueueRemove} onReorder={onQueueReorder} onClear={onQueueClear} onSendNow={session.executor === 'codex' ? onQueueSendNow : undefined} />
-          {/* Underbar: Plan/Agent context chips left, prev/next message nav
-              flush right — one row at any width. */}
-          <div className="main-underbar">
-            <PlanChip
-              items={items}
-              codexPlanText={codexPlanText}
-              planCompleted={codexPlanCompleted}
-              sessionId={session.id}
-            />
-            <TranscriptMinimap items={items} />
-          </div>
-          <Composer
-            session={session}
-            onSend={onSend}
-            onSendSkill={onSendSkill}
-            onStop={onStop}
-            onQueueAdd={onQueueAdd}
-            onSteer={onSteer}
-            onSetMode={onSetMode}
-            onSetModel={onSetModel}
-            onSetEffort={onSetEffort}
-            onSetServiceTier={onSetServiceTier}
-            onSetNativeConfig={onSetNativeConfig}
-            disabled={pending || terminal || subtaskCompleted}
-            running={isTurnRunning(session.status, pending)}
-            disabledSubmitBehavior={subtaskCompleted ? 'block' : 'queue'}
-            executor={session.executor}
-            workspaceId={workspace?.id}
-          />
-        </>
-      )}
-    </main>
   );
 }

@@ -4,8 +4,7 @@
 // JSONL and cc-proxy notifications, then compare the stable normalized
 // transcript signature against golden JSON. When Claude Code moves fields or
 // renames tools, this suite should fail loudly before Beta silently loses
-// events. (The hook-payload half of this corpus was removed together with
-// Claude TTY mode.)
+// events.
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';

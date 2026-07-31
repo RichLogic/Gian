@@ -10,9 +10,10 @@
   "scripts": {
     "preinstall": "node scripts/check-node.js",
     "build": "pnpm -r build",
-    "dev": "pnpm -r --parallel dev",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "node scripts/dev.mjs --no-desktop",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r --if-present test",
+    "test": "node --test scripts/*.test.mjs && pnpm -r --if-present test",
     "test:e2e": "pnpm -r build && playwright test",
     "desktop:dev": "pnpm -F @gian/desktop dev",
     "desktop:pack": "pnpm -F @gian/desktop package:mac",

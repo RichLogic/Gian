@@ -255,7 +255,7 @@ describe('PlanChip persistent Agent runs panel', () => {
     render(
       <PlanChip
         sessionId="session-1"
-        codexPlanText={'## Plan\n- [ ] inspect'}
+        planText={'## Plan\n- [ ] inspect'}
         items={[agent()]}
       />,
     );

@@ -48,27 +48,21 @@ describe('isTurnRunning', () => {
 
 describe('planCreatedSessionFirstMessage: first message stays on structured message:send', () => {
   it('routes first-turn text to structured message:send with an optimistic echo', () => {
-    expect(planCreatedSessionFirstMessage('claude', '  hello  ')).toEqual({
-      switchToTty: false,
-      ttyText: null,
+    expect(planCreatedSessionFirstMessage('  hello  ')).toEqual({
       structuredText: 'hello',
       seedOptimisticEcho: true,
     });
   });
 
   it('does not seed an echo when there is no pending message', () => {
-    expect(planCreatedSessionFirstMessage('claude', '   ')).toEqual({
-      switchToTty: false,
-      ttyText: null,
+    expect(planCreatedSessionFirstMessage('   ')).toEqual({
       structuredText: null,
       seedOptimisticEcho: false,
     });
   });
 
   it('keeps Codex on structured message:send with an optimistic echo', () => {
-    expect(planCreatedSessionFirstMessage('codex', '  implement it  ')).toEqual({
-      switchToTty: false,
-      ttyText: null,
+    expect(planCreatedSessionFirstMessage('  implement it  ')).toEqual({
       structuredText: 'implement it',
       seedOptimisticEcho: true,
     });

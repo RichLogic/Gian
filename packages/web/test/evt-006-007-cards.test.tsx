@@ -176,8 +176,8 @@ describe('EVT-007: PlanChip from codex plan_update', () => {
   // through verbatim without escape processing).
   const LIVE_PLAN = '## Live plan\nstep';
 
-  it('renders the chip when codexPlanText is non-empty even without any approval', () => {
-    render(<PlanChip items={[]} sessionId="sess-2" codexPlanText={LIVE_PLAN} />);
+  it('renders the chip when planText is non-empty even without any approval', () => {
+    render(<PlanChip items={[]} sessionId="sess-2" planText={LIVE_PLAN} />);
     expect(screen.getByRole('button', { name: /Plan/i })).toBeInTheDocument();
   });
 
@@ -186,7 +186,7 @@ describe('EVT-007: PlanChip from codex plan_update', () => {
       <PlanChip
         items={[]}
         sessionId="sess-2"
-        codexPlanText={'- [x] inspect\n- [x] test'}
+        planText={'- [x] inspect\n- [x] test'}
         planCompleted
       />,
     );
@@ -195,7 +195,7 @@ describe('EVT-007: PlanChip from codex plan_update', () => {
 
   it('EVT-007: clicking the codex chip expands the live plan markdown inline', async () => {
     const user = userEvent.setup();
-    render(<PlanChip items={[]} sessionId="sess-2" codexPlanText={LIVE_PLAN} />);
+    render(<PlanChip items={[]} sessionId="sess-2" planText={LIVE_PLAN} />);
 
     const chip = screen.getByRole('button', { name: /Plan/i });
     await user.click(chip);
@@ -203,19 +203,19 @@ describe('EVT-007: PlanChip from codex plan_update', () => {
     expect(screen.getByRole('region', { name: 'Plan' })).toHaveTextContent('step');
   });
 
-  it('EVT-007: renders nothing when both items have no plan approval AND codexPlanText is empty', () => {
+  it('EVT-007: renders nothing when both items have no plan approval AND planText is empty', () => {
     const { container } = render(<PlanChip items={[]} sessionId="sess-3" />);
     expect(container).toBeEmptyDOMElement();
   });
 
   it('EVT-007: renders nothing for whitespace-only codex plan text', () => {
     const { container } = render(
-      <PlanChip items={[]} sessionId="sess-3" codexPlanText={'   \n  '} />,
+      <PlanChip items={[]} sessionId="sess-3" planText={'   \n  '} />,
     );
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('EVT-007: cc exit_plan_mode approval takes precedence over codex codexPlanText when both exist', () => {
+  it('EVT-007: cc exit_plan_mode approval takes precedence over codex planText when both exist', () => {
     // The component checks approval first; codex text is the fallback.
     // We can't directly observe "which one rendered" via the dot alone
     // because pending also exists for codex if approval is pending, but
@@ -224,7 +224,7 @@ describe('EVT-007: PlanChip from codex plan_update', () => {
       <PlanChip
         items={[planApproval({ approvalId: 'cc-plan' })]}
         sessionId="sess-1"
-        codexPlanText="codex backup plan"
+        planText="codex backup plan"
       />,
     );
     const chip = screen.getByRole('button', { name: /Plan/i });

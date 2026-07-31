@@ -1,10 +1,34 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import type { ApprovalMode, CcModelCapabilities, CodexModelCapabilities, Executor, MessageAttachment, NativeConfigChoice, NativeConfigOption, NativeConfigValue, Session, SlashCommand, SlashCommandSource, ThinkingEffort } from '@gian/shared';
+import type { ApprovalMode, Executor, NativeConfigOption, NativeConfigValue, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
 import { isNativeImageMime } from '../attachments.js';
-import { loadNativeConfig, loadProxyModels, loadSessionSlashCommands, loadSlashCommands } from '../api.js';
+import {
+  loadNativeConfig,
+  loadSessionSlashCommands,
+  uploadAttachment,
+} from '../api.js';
 import { useT } from '../i18n/index.js';
+import { ContextUsageIndicator } from './composer/context-usage-indicator.js';
+import {
+  CODEX_APPROVALS,
+  claudeModelFamily,
+  codexApprovalLabelKey,
+  defaultEffort,
+  defaultModel,
+  effortLabel,
+  fetchModelsCached,
+  fetchSlashCached,
+  flatFiltered,
+  getModelsCached,
+  getSlashCached,
+  modelLabel,
+  nativeOptionRole,
+  slashFilterGrouped,
+  supportedEfforts,
+} from './composer/capabilities.js';
+import type { ProxyModel } from './composer/capabilities.js';
+import { BulbIcon, ExecutorMark, NativeOptionDrop, useUpDrop } from './composer/option-drops.js';
+export { ContextUsageIndicator } from './composer/context-usage-indicator.js';
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
 
@@ -76,451 +100,10 @@ function fmtBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-type ProxyModel = CcModelCapabilities | CodexModelCapabilities;
-
-/** Cached per executor across Composer instances — capabilities don't
- *  change at runtime so a single fetch is enough. */
-const MODEL_CACHE: Map<'claude' | 'codex', ProxyModel[]> = new Map();
-const MODEL_PROMISES: Map<'claude' | 'codex', Promise<ProxyModel[]>> = new Map();
-
-function fetchModelsCached(executor: 'claude' | 'codex'): Promise<ProxyModel[]> {
-  const hit = MODEL_CACHE.get(executor);
-  if (hit) return Promise.resolve(hit);
-  const inflight = MODEL_PROMISES.get(executor);
-  if (inflight) return inflight;
-  const p = loadProxyModels(executor)
-    .then(list => {
-      MODEL_CACHE.set(executor, list);
-      MODEL_PROMISES.delete(executor);
-      return list;
-    })
-    .catch(error => {
-      // A transient host/proxy outage must not poison this executor's cache.
-      // The mounted Composer handles the rejection and a later session open
-      // can retry capability discovery.
-      MODEL_PROMISES.delete(executor);
-      throw error;
-    });
-  MODEL_PROMISES.set(executor, p);
-  return p;
-}
-
-function defaultModel(models: ProxyModel[], executor: 'claude' | 'codex'): string {
-  const def = models.find(m => m.isDefault) ?? models[0];
-  return def?.model ?? (executor === 'codex' ? 'gpt-5-codex' : '');
-}
-
-function modelLabel(models: ProxyModel[], id: string): string {
-  return models.find(m => m.model === id)?.displayName ?? id;
-}
-
-function formatTokenCount(value: number): string {
-  if (value >= 1_000_000) {
-    const scaled = value / 1_000_000;
-    return `${scaled >= 10 ? scaled.toFixed(0) : scaled.toFixed(1).replace(/\.0$/, '')}m`;
-  }
-  if (value >= 1_000) {
-    const scaled = value / 1_000;
-    return `${scaled >= 10 ? scaled.toFixed(0) : scaled.toFixed(1).replace(/\.0$/, '')}k`;
-  }
-  return String(value);
-}
-
-export function ContextUsageIndicator({ session }: { session: Session }) {
-  const t = useT();
-  const anchorRef = useRef<HTMLSpanElement>(null);
-  const [tooltipPosition, setTooltipPosition] = useState<{ left: number; top: number } | null>(null);
-  const used = typeof session.context_tokens_used === 'number'
-    ? session.context_tokens_used
-    : null;
-  const capacity = typeof session.context_window_tokens === 'number'
-    && session.context_window_tokens > 0
-    ? session.context_window_tokens
-    : null;
-  const hasRatio = used !== null && capacity !== null;
-  const percent = hasRatio
-    ? Math.round(Math.min(1, Math.max(0, used / capacity)) * 100)
-    : null;
-  const recalculating = used === null && Boolean(session.context_usage_updated_at);
-  const conversationVisible = session.conversation_usage_complete === 1
-    && typeof session.conversation_total_tokens === 'number';
-
-  const showTooltip = () => {
-    const rect = anchorRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const preferred = rect.left + rect.width / 2;
-    setTooltipPosition({
-      left: Math.min(Math.max(preferred, 132), window.innerWidth - 132),
-      top: rect.top - 8,
-    });
-  };
-
-  const ringStyle = {
-    '--context-progress': `${(percent ?? 0) * 3.6}deg`,
-  } as CSSProperties;
-  const stateClass = recalculating
-    ? ' is-recalculating'
-    : percent !== null && percent >= 90
-      ? ' is-danger'
-      : percent !== null && percent >= 75
-        ? ' is-warning'
-        : percent === null
-          ? ' is-unknown'
-          : '';
-  const ariaLabel = percent === null
-    ? t(recalculating ? 'composer.context.recalculating' : 'composer.context.afterResponse')
-    : `${t('composer.context.title')}: ${percent}% ${t('composer.context.used')}`;
-
-  return (
-    <>
-      <span
-        ref={anchorRef}
-        className={`context-usage-anchor${stateClass}`}
-        role="img"
-        tabIndex={0}
-        aria-label={ariaLabel}
-        onMouseEnter={showTooltip}
-        onMouseLeave={() => setTooltipPosition(null)}
-        onFocus={showTooltip}
-        onBlur={() => setTooltipPosition(null)}
-      >
-        <span className="context-usage-ring" style={ringStyle} aria-hidden="true" />
-      </span>
-      {tooltipPosition && createPortal(
-        <div
-          className="context-usage-tooltip"
-          role="tooltip"
-          style={{ left: tooltipPosition.left, top: tooltipPosition.top }}
-        >
-          <div className="context-usage-tooltip-title">{t('composer.context.title')}</div>
-          {hasRatio && percent !== null && (
-            <>
-              <div className="context-usage-tooltip-primary">
-                {percent}% {t('composer.context.used')} ({100 - percent}% {t('composer.context.left')})
-              </div>
-              <div className="context-usage-tooltip-detail">
-                {formatTokenCount(used)} / {formatTokenCount(capacity)} {t('composer.context.tokensUsed')}
-              </div>
-            </>
-          )}
-          {!hasRatio && used !== null && (
-            <div className="context-usage-tooltip-detail">
-              {formatTokenCount(used)} {t('composer.context.tokensUsed')}
-            </div>
-          )}
-          {used === null && (
-            <div className="context-usage-tooltip-state">
-              {t(recalculating ? 'composer.context.recalculating' : 'composer.context.afterResponse')}
-            </div>
-          )}
-          {conversationVisible && (
-            <div className="context-usage-conversation">
-              <div className="context-usage-tooltip-title">{t('composer.context.conversationTotal')}</div>
-              <div className="context-usage-tooltip-primary">
-                {session.conversation_total_tokens!.toLocaleString()} {t('composer.context.tokens')}
-              </div>
-              <div className="context-usage-breakdown">
-                <span>{t('composer.context.input')} {(session.conversation_input_tokens ?? 0).toLocaleString()}</span>
-                <span>{t('composer.context.output')} {(session.conversation_output_tokens ?? 0).toLocaleString()}</span>
-                {(session.conversation_cached_input_tokens ?? 0) > 0 && (
-                  <span>{t('composer.context.cached')} {(session.conversation_cached_input_tokens ?? 0).toLocaleString()}</span>
-                )}
-              </div>
-            </div>
-          )}
-        </div>,
-        document.body,
-      )}
-    </>
-  );
-}
-
-/** A concrete Claude id like `claude-opus-4-8` (synced live from a TTY
- *  transcript) maps to its `opus`/`sonnet`/`haiku` alias family so the static
+/** A concrete Claude id like `claude-opus-4-8` (synced from the native
+ *  session) maps to its `opus`/`sonnet`/`haiku` alias family so the static
  *  alias menu can still highlight the matching row. Returns the input
  *  unchanged when it isn't a recognizable concrete claude id. */
-function claudeModelFamily(id: string): string {
-  return /^claude-(opus|sonnet|haiku)\b/.exec(id)?.[1] ?? id;
-}
-
-function supportedEfforts(model: ProxyModel | undefined): ThinkingEffort[] {
-  if (!model) return [];
-  if ('supportedEfforts' in model) return model.supportedEfforts;
-  if ('supportedThinking' in model) {
-    return model.supportedThinking.map(e => e === null ? 'off' : e) as ThinkingEffort[];
-  }
-  return [];
-}
-
-function defaultEffort(model: ProxyModel | undefined): ThinkingEffort | null {
-  if (!model) return null;
-  if ('defaultEffort' in model) return model.defaultEffort;
-  if ('defaultThinking' in model) return (model.defaultThinking ?? 'off') as ThinkingEffort;
-  return null;
-}
-
-function BulbIcon() {
-  return (
-    <svg
-      className="cmp-bulb"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M9 18h6" />
-      <path d="M10 22h4" />
-      <path d="M8.5 14.5A6 6 0 1 1 15.5 14.5c-.9.7-1.5 1.5-1.5 2.5h-4c0-1-.6-1.8-1.5-2.5Z" />
-    </svg>
-  );
-}
-
-function ExecutorMark({ executor }: { executor: Executor }) {
-  return <span className={`cmp-executor-mark ${executor}`} aria-hidden="true" />;
-}
-
-/** Module-scope cache keyed by `${executor}:${workspaceId ?? '_'}` */
-const SLASH_CACHE = new Map<string, SlashCommand[]>();
-const SLASH_PROMISES = new Map<string, Promise<SlashCommand[]>>();
-
-function slashCacheKey(executor: 'claude' | 'codex', workspaceId: string | undefined): string {
-  return `${executor}:${workspaceId ?? '_'}`;
-}
-
-function fetchSlashCached(executor: 'claude' | 'codex', workspaceId?: string): Promise<SlashCommand[]> {
-  const key = slashCacheKey(executor, workspaceId);
-  const hit = SLASH_CACHE.get(key);
-  if (hit) return Promise.resolve(hit);
-  const inflight = SLASH_PROMISES.get(key);
-  if (inflight) return inflight;
-  const p = loadSlashCommands(executor, workspaceId)
-    .then(list => {
-      SLASH_CACHE.set(key, list);
-      SLASH_PROMISES.delete(key);
-      return list;
-    })
-    .catch(error => {
-      SLASH_PROMISES.delete(key);
-      throw error;
-    });
-  SLASH_PROMISES.set(key, p);
-  return p;
-}
-
-const SOURCE_ORDER: SlashCommandSource[] = ['builtin', 'project', 'user'];
-function slashFilterGrouped(
-  commands: SlashCommand[],
-  prefix: string,
-): Array<{ source: SlashCommandSource; items: SlashCommand[] }> {
-  const lc = prefix && prefix !== '/' ? prefix.toLowerCase() : null;
-  const groups: Array<{ source: SlashCommandSource; items: SlashCommand[] }> = [];
-  for (const source of SOURCE_ORDER) {
-    let items = commands.filter(c => c.source === source);
-    if (lc) items = items.filter(c => c.name.toLowerCase().startsWith(lc));
-    if (items.length > 0) groups.push({ source, items });
-  }
-  return groups;
-}
-
-/** Flat list of all filtered commands (for keyboard nav index tracking). */
-function flatFiltered(groups: Array<{ source: SlashCommandSource; items: SlashCommand[] }>): SlashCommand[] {
-  return groups.flatMap(g => g.items);
-}
-
-/** A bottom-anchored ("up-drop") popover: a trigger button and a portaled panel
- *  that opens upward from the button (composer sits at the bottom of the
- *  viewport). Mirrors the model popover's positioning + click-outside. Used for
- *  the codex Thinking and Approval up-drops. */
-function useUpDrop(popoverWidth: number) {
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    if (!open) { setPos(null); return; }
-    const btn = btnRef.current;
-    if (!btn) return;
-    const rect = btn.getBoundingClientRect();
-    const fittedWidth = Math.min(popoverWidth, window.innerWidth - 16);
-    const left = Math.max(8, Math.min(rect.left, window.innerWidth - fittedWidth - 8));
-    setPos({ left, bottom: window.innerHeight - rect.top + 6 });
-  }, [open, popoverWidth]);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (
-        popRef.current && !popRef.current.contains(e.target as Node) &&
-        btnRef.current && !btnRef.current.contains(e.target as Node)
-      ) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [open]);
-  return { open, setOpen, pos, btnRef, popRef };
-}
-
-/** Codex permission presets. Each is sent as a per-turn native policy. */
-const CODEX_APPROVALS: Array<{
-  key: string;
-  mode: ApprovalMode;
-  titleKey: string;
-  descKey: string;
-}> = [
-  { key: 'ask', mode: 'ask', titleKey: 'composer.approval.ask.title', descKey: 'composer.approval.ask.desc' },
-  { key: 'approve', mode: 'auto', titleKey: 'composer.approval.approve.title', descKey: 'composer.approval.approve.desc' },
-  { key: 'full', mode: 'full-access', titleKey: 'composer.approval.full.title', descKey: 'composer.approval.full.desc' },
-  { key: 'custom', mode: 'custom', titleKey: 'composer.approval.custom.title', descKey: 'composer.approval.custom.desc' },
-];
-
-/** i18n key for the codex approval button's current-selection label. Legacy
- *  'plan' (no longer offered for codex) falls back to a generic label. */
-function codexApprovalLabelKey(mode: ApprovalMode): string {
-  switch (mode) {
-    case 'ask': return 'composer.approval.ask.title';
-    case 'auto': return 'composer.approval.approve.title';
-    case 'custom': return 'composer.approval.custom.title';
-    case 'full-access': return 'composer.approval.full.title';
-    default: return 'composer.approval.title';
-  }
-}
-
-/** Codex's own display names for reasoning-effort levels (the API values are
- *  minimal/low/medium/high/xhigh; Codex shows Light/Medium/High/Extra High).
- *  Plain text, no icons, no "Default" — Codex always has one concrete level. */
-const CODEX_EFFORT_LABELS: Record<string, string> = {
-  minimal: 'Minimal',
-  low: 'Light',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'Extra High',
-  max: 'Max',
-  ultra: 'Ultra',
-};
-function codexEffortLabel(level: ThinkingEffort | null): string {
-  if (!level) return '';
-  return CODEX_EFFORT_LABELS[level] ?? level;
-}
-
-function effortLabel(executor: Exclude<Executor, 'kimi'>, level: ThinkingEffort | null): string {
-  if (!level) return '';
-  return executor === 'codex'
-    ? codexEffortLabel(level)
-    : level.replace(/(^|[-_])(\w)/g, (_match, separator: string, letter: string) =>
-      `${separator ? ' ' : ''}${letter.toUpperCase()}`);
-}
-
-type NativeOptionRole = 'model' | 'effort' | 'mode';
-
-function nativeOptionRole(option: NativeConfigOption): NativeOptionRole | null {
-  const category = option.category?.trim().toLowerCase();
-  const id = option.id.trim().toLowerCase();
-  if (category === 'model' || id === 'model') return 'model';
-  if (
-    category === 'thought_level'
-    || category === 'thought'
-    || category === 'thinking'
-    || category === 'effort'
-    || id === 'thought_level'
-    || id === 'thought'
-    || id === 'thinking'
-    || id === 'effort'
-    || id === 'reasoning_effort'
-  ) return 'effort';
-  if (category === 'mode' || id === 'mode') return 'mode';
-  return null;
-}
-
-function nativeChoiceDisplayLabel(
-  role: NativeOptionRole,
-  choice: NativeConfigChoice,
-): string {
-  const value = String(choice.value ?? '').toLowerCase();
-  if (role === 'mode' && (value === 'plan' || value === 'auto' || value === 'yolo')) {
-    return value;
-  }
-  return choice.label;
-}
-
-function nativeChoiceLabel(option: NativeConfigOption, role: NativeOptionRole): string {
-  const current = option.choices?.find(choice =>
-    String(choice.value ?? '') === String(option.currentValue ?? ''));
-  return current
-    ? nativeChoiceDisplayLabel(role, current)
-    : String(option.currentValue ?? option.name);
-}
-
-function NativeOptionDrop({
-  option,
-  role,
-  disabled,
-  onChange,
-}: {
-  option: NativeConfigOption;
-  role: NativeOptionRole;
-  disabled: boolean;
-  onChange: (value: NativeConfigValue) => void;
-}) {
-  const drop = useUpDrop(260);
-  const currentLabel = nativeChoiceLabel(option, role);
-  return (
-    <>
-      <button
-        ref={drop.btnRef}
-        type="button"
-        className={`composer-opt cmp-native-${role}${drop.open ? ' open' : ''}`}
-        title={option.description ?? option.name}
-        disabled={disabled}
-        onClick={() => drop.setOpen(open => !open)}
-      >
-        {role === 'model' && <ExecutorMark executor="kimi" />}
-        {role === 'effort' && <BulbIcon />}
-        <span className="name">{currentLabel}</span>
-        <span className="caret cmp-caret" aria-hidden="true">▾</span>
-      </button>
-      {drop.open && drop.pos && createPortal(
-        <div
-          ref={drop.popRef}
-          className={`popover native-option-pop native-option-${role}-pop`}
-          role="dialog"
-          style={{ left: drop.pos.left, bottom: drop.pos.bottom }}
-        >
-          <div className="mp-section-head">
-            <span className="mp-section-title">{option.name}</span>
-          </div>
-          <div className="mp-list">
-            {(option.choices ?? []).map(choice => {
-              const active = String(choice.value ?? '') === String(option.currentValue ?? '');
-              return (
-                <button
-                  key={String(choice.value)}
-                  type="button"
-                  className={`mp-row${active ? ' active' : ''}`}
-                  onClick={() => {
-                    onChange(choice.value);
-                    drop.setOpen(false);
-                  }}
-                >
-                  <span className="mp-check">{active ? '✓' : ''}</span>
-                  <span className="mp-row-body">
-                    <span className="mp-row-title">
-                      {nativeChoiceDisplayLabel(role, choice)}
-                    </span>
-                    {choice.description && <span className="mp-row-hint">{choice.description}</span>}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>,
-        document.body,
-      )}
-    </>
-  );
-}
-
 export function Composer({
   session,
   onSend, onSendSkill, onStop, onQueueAdd, onSteer, onSetMode, onSetModel, onSetEffort,
@@ -565,7 +148,7 @@ export function Composer({
     text: string,
     opts?: { attachments?: Array<{ path: string; name: string; mime: string; size?: number }> },
   ) => void;
-  onSetMode: (mode: ApprovalMode, turns?: number) => void;
+  onSetMode: (mode: ApprovalMode) => void;
   onSetModel: (model: string) => void;
   onSetEffort: (effort: ThinkingEffort | null) => void;
   onSetNativeConfig?: (configId: string, value: NativeConfigValue) => void;
@@ -592,7 +175,7 @@ export function Composer({
 }) {
   const t = useT();
   const minimal = variant === 'minimal';
-  const legacyExecutor = executor === 'kimi' ? null : executor;
+  const cliExecutor = executor === 'kimi' ? null : executor;
   const [text, setText] = useState(() => readDraft(session.id));
 
   // Session swap: snapshot current draft under the OUTGOING session's key,
@@ -613,8 +196,8 @@ export function Composer({
   const [slashIdx, setSlashIdx] = useState(0);
   const [slashLoading, setSlashLoading] = useState(false);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>(
-    () => legacyExecutor
-      ? (SLASH_CACHE.get(slashCacheKey(legacyExecutor, workspaceId)) ?? [])
+    () => cliExecutor
+      ? (getSlashCached(cliExecutor, workspaceId) ?? [])
       : [],
   );
   const [slashPopPos, setSlashPopPos] = useState<{ left: number; bottom: number; width: number } | null>(null);
@@ -626,23 +209,24 @@ export function Composer({
   const thinkDrop = useUpDrop(210);
   const approvalDrop = useUpDrop(340);
   const [models, setModels] = useState<ProxyModel[]>(
-    legacyExecutor ? (MODEL_CACHE.get(legacyExecutor) ?? []) : [],
+    cliExecutor ? (getModelsCached(cliExecutor) ?? []) : [],
   );
   const sessionNativeOptions = session.native_config_options ?? [];
   const [nativeOptions, setNativeOptions] = useState(sessionNativeOptions);
 
   // Fetch model list lazily per executor; cached.
   useEffect(() => {
-    if (!legacyExecutor) {
+    if (!cliExecutor) {
       setModels([]);
       return;
     }
-    if (MODEL_CACHE.has(legacyExecutor)) {
-      setModels(MODEL_CACHE.get(legacyExecutor)!);
+    const cached = getModelsCached(cliExecutor);
+    if (cached) {
+      setModels(cached);
       return;
     }
     let alive = true;
-    void fetchModelsCached(legacyExecutor)
+    void fetchModelsCached(cliExecutor)
       .then(list => { if (alive) setModels(list); })
       .catch(() => {
         // Keep rendering the session with its persisted model/effort. The
@@ -650,7 +234,7 @@ export function Composer({
         if (alive) setModels([]);
       });
     return () => { alive = false; };
-  }, [legacyExecutor]);
+  }, [cliExecutor]);
 
   // Fetch slash commands lazily; keyed by (executor, workspaceId); cached.
   useEffect(() => {
@@ -670,8 +254,7 @@ export function Composer({
         });
       return () => { alive = false; };
     }
-    const key = slashCacheKey(executor, workspaceId);
-    const cached = SLASH_CACHE.get(key);
+    const cached = getSlashCached(executor, workspaceId);
     if (cached) {
       setSlashCommands(cached);
       return;
@@ -723,9 +306,9 @@ export function Composer({
   }, [executor, session.id, sessionNativeOptions.length]);
 
   const currentModel = session.model
-    ?? (models.length > 0 && legacyExecutor ? defaultModel(models, legacyExecutor) : '');
+    ?? (models.length > 0 && cliExecutor ? defaultModel(models, cliExecutor) : '');
   // Fall back to the default (or first) entry when the active model isn't in
-  // the menu — e.g. a concrete id like `claude-opus-4-8` synced from a TTY hook
+  // the menu — e.g. a concrete id like `claude-opus-4-8` synced from native state
   // that the static alias list doesn't enumerate. Without this the effort grid
   // (keyed off the matched row's supportedEfforts) would render empty.
   const currentModelMeta = models.find(m => m.model === currentModel)
@@ -791,7 +374,6 @@ export function Composer({
 
   const activeModel = currentModel;
   const approvalMode = session.approval_mode;
-  const turns = session.turns;
 
   const slashPrefix = text.startsWith('/') ? text : '';
   const filteredGroups = slashOpen ? slashFilterGrouped(slashCommands, slashPrefix) : [];
@@ -972,7 +554,7 @@ export function Composer({
   }
 
   function setMode(mode: ApprovalMode) {
-    onSetMode(mode, mode === 'auto' ? (turns > 1 ? turns : 1) : undefined);
+    onSetMode(mode);
   }
 
   function setNativeConfigValue(configId: string, value: NativeConfigValue) {
@@ -1019,7 +601,6 @@ export function Composer({
     if (file.size > MAX_FILE_BYTES) return;
 
     try {
-      const { uploadAttachment } = await import('../api.js');
       const result = await uploadAttachment(session.id, file, file.name);
       setPendingFiles(prev =>
         prev.map(f => f.id === id
@@ -1354,7 +935,7 @@ export function Composer({
           )}
 
           {/* Effort is always its own CLI-backed control. */}
-          {legacyExecutor && (
+          {cliExecutor && (
             <>
               <button
                 ref={thinkDrop.btnRef}
@@ -1364,7 +945,7 @@ export function Composer({
                 onClick={() => thinkDrop.setOpen(o => !o)}
               >
                 <BulbIcon />
-                <span className="name">{effortLabel(legacyExecutor, thinkLevel)}</span>
+                <span className="name">{effortLabel(cliExecutor, thinkLevel)}</span>
                 <span className="caret cmp-caret" aria-hidden="true">▾</span>
               </button>
               {thinkDrop.open && thinkDrop.pos && createPortal(
@@ -1389,7 +970,7 @@ export function Composer({
                         >
                           <span className="mp-check">{active ? '✓' : ''}</span>
                           <span className="mp-row-body">
-                            <span className="mp-row-title">{effortLabel(legacyExecutor, lvl)}</span>
+                            <span className="mp-row-title">{effortLabel(cliExecutor, lvl)}</span>
                           </span>
                         </button>
                       );
@@ -1414,8 +995,6 @@ export function Composer({
             </button>
           )}
 
-          {/* Turns stepper hidden — multi-turn auto-job UI deferred (PR5/#6).
-              State + handlers retained so re-enabling is one toggle. */}
           </>)}
 
           <span className="spacer" />
@@ -1431,8 +1010,8 @@ export function Composer({
             />
           )}
 
-          {/* Permission mode stays beside Send for every legacy CLI. */}
-          {!minimal && legacyExecutor && (
+          {/* Permission mode stays beside Send for Claude and Codex. */}
+          {!minimal && cliExecutor && (
             <>
               <button
                 ref={approvalDrop.btnRef}
@@ -1442,7 +1021,7 @@ export function Composer({
                 onClick={() => approvalDrop.setOpen(o => !o)}
               >
                 <span className="name">
-                  {legacyExecutor === 'codex'
+                  {cliExecutor === 'codex'
                     ? t(codexApprovalLabelKey(approvalMode ?? 'ask'))
                     : oneShotBypass
                       ? t('composer.bypass.button')
@@ -1459,13 +1038,13 @@ export function Composer({
                 >
                   <div className="mp-section-head">
                     <span className="mp-section-title">
-                      {legacyExecutor === 'codex'
+                      {cliExecutor === 'codex'
                         ? t('composer.approval.section')
                         : t('composer.mode.title')}
                     </span>
                   </div>
                   <div className="mp-list">
-                    {(legacyExecutor === 'codex'
+                    {(cliExecutor === 'codex'
                       ? CODEX_APPROVALS
                       : [
                           { key: 'plan', mode: 'plan' as const, titleKey: 'mode.plan' },
@@ -1494,7 +1073,7 @@ export function Composer({
                         </button>
                       );
                     })}
-                    {legacyExecutor === 'claude' && (
+                    {cliExecutor === 'claude' && (
                       <button
                         type="button"
                         className={`mp-row danger-option${oneShotBypass ? ' active' : ''}`}

@@ -2,8 +2,7 @@
 //   SEC-001 — `GIAN_AUTH_REQUIRED=true` must verify scrypt password hashes
 //             before issuing a session token. Hashes are salt:scrypt pairs.
 //   SEC-002 — session tokens are high-entropy, in-memory, invalidated on
-//             logout; API tokens are stored as hashes only and update
-//             last_used_at on verify.
+//             logout.
 //   ERR-008 — wrong / missing inputs must be rejected (400/401 surface),
 //             change password must verify the current password.
 //
@@ -12,13 +11,8 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { openDatabase } from '../src/storage/db.js';
 import { hashPassword, verifyPassword } from '../src/auth/passwords.js';
 import {
-  TokenManager,
   createSessionToken,
   getUsernameForToken,
   deleteToken,
@@ -80,112 +74,6 @@ test('SEC-001: verifyPassword is constant-time across length-equal candidates (n
 });
 
 // ---------------------------------------------------------------------------
-// API tokens — TokenManager (SEC-002).
-// ---------------------------------------------------------------------------
-
-function makeDbCtx() {
-  const dir = mkdtempSync(join(tmpdir(), 'gian-auth-test-'));
-  const db = openDatabase(dir);
-  return {
-    db,
-    dispose: () => {
-      db.close();
-      rmSync(dir, { recursive: true, force: true });
-    },
-  };
-}
-
-test('SEC-002: createToken returns plaintext exactly once; DB row stores only the hash', () => {
-  const { db, dispose } = makeDbCtx();
-  try {
-    const mgr = new TokenManager(db);
-    const { token, record } = mgr.createToken('my laptop');
-
-    // Plaintext token is 32 random bytes → 64 hex chars.
-    assert.match(token, /^[0-9a-f]{64}$/);
-    assert.equal(record.label, 'my laptop');
-
-    // The DB column `hash` must NOT contain the plaintext anywhere — searching
-    // for the substring is the strongest assertion against accidental
-    // round-trip storage regressions.
-    const row = db.prepare('SELECT hash, label FROM tokens WHERE id = ?').get(record.id) as
-      | { hash: string; label: string } | undefined;
-    assert.ok(row);
-    assert.notEqual(row!.hash, token,
-      'stored hash must not equal the plaintext token');
-    assert.ok(!row!.hash.includes(token),
-      'stored hash must not contain the plaintext as a substring');
-    assert.match(row!.hash, /^[0-9a-f]{64}$/,
-      'sha256 hash → 64 hex chars');
-  } finally {
-    dispose();
-  }
-});
-
-test('SEC-002: verifyToken accepts the original plaintext, rejects unknown, updates last_used_at', () => {
-  const { db, dispose } = makeDbCtx();
-  try {
-    const mgr = new TokenManager(db);
-    const { token, record } = mgr.createToken('cli');
-
-    // last_used_at starts NULL.
-    const before = db.prepare('SELECT last_used_at FROM tokens WHERE id = ?').get(record.id) as
-      { last_used_at: string | null };
-    assert.equal(before.last_used_at, null);
-
-    const verified = mgr.verifyToken(token);
-    assert.ok(verified, 'verify must return the token record');
-    assert.equal(verified!.id, record.id);
-
-    const after = db.prepare('SELECT last_used_at FROM tokens WHERE id = ?').get(record.id) as
-      { last_used_at: string | null };
-    assert.ok(after.last_used_at, 'last_used_at must be set on first verify');
-
-    // Unknown plaintext → null.
-    assert.equal(mgr.verifyToken('definitely-not-a-real-token'), null);
-    assert.equal(mgr.verifyToken(''), null, 'empty plaintext must not vacuously succeed');
-  } finally {
-    dispose();
-  }
-});
-
-test('SEC-002: revokeToken removes the row — subsequent verify returns null', () => {
-  const { db, dispose } = makeDbCtx();
-  try {
-    const mgr = new TokenManager(db);
-    const { token, record } = mgr.createToken('temp');
-    assert.ok(mgr.verifyToken(token));
-    mgr.revokeToken(record.id);
-    assert.equal(mgr.verifyToken(token), null,
-      'revoked token must no longer authenticate');
-    const row = db.prepare('SELECT COUNT(*) AS c FROM tokens WHERE id = ?').get(record.id) as
-      { c: number };
-    assert.equal(row.c, 0, 'row physically deleted, not just flagged');
-  } finally {
-    dispose();
-  }
-});
-
-test('SEC-002: listTokens returns metadata without exposing the hash to callers', () => {
-  const { db, dispose } = makeDbCtx();
-  try {
-    const mgr = new TokenManager(db);
-    mgr.createToken('a');
-    mgr.createToken('b');
-    const tokens = mgr.listTokens();
-    assert.equal(tokens.length, 2);
-    for (const t of tokens) {
-      // Token shape exposed to callers — no `hash` field.
-      assert.ok(t.id);
-      assert.ok(t.label === 'a' || t.label === 'b');
-      assert.ok(!('hash' in t), 'public token shape must not leak hash');
-    }
-  } finally {
-    dispose();
-  }
-});
-
-// ---------------------------------------------------------------------------
 // Session tokens — in-memory store (SEC-002).
 // ---------------------------------------------------------------------------
 
@@ -241,15 +129,8 @@ test('ERR-008: empty / missing inputs must not authenticate', async () => {
   const stored = await hashPassword('the-pass');
   assert.equal(await verifyPassword('', stored), false,
     'empty password must not authenticate (HTTP layer returns 401)');
-  // Token verification of an unknown plaintext returns null (→ 401 at HTTP layer).
-  const { db, dispose } = makeDbCtx();
-  try {
-    const mgr = new TokenManager(db);
-    assert.equal(mgr.verifyToken(''), null);
-    assert.equal(mgr.verifyToken('garbage'), null);
-  } finally {
-    dispose();
-  }
+  assert.equal(getUsernameForToken(''), null);
+  assert.equal(getUsernameForToken('garbage'), null);
 });
 
 test('ERR-008: session-token lifecycle — logout invalidates, re-login mints a fresh token', async () => {

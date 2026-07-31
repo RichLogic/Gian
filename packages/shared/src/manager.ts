@@ -38,51 +38,11 @@ export function wrapManagerContextNote(notes: string[], userText: string): strin
 }
 
 // ── Legacy Manager `create_subtask` proposal protocol (spec 2026-06-28 §A2) ──
-// Kept only to strip/parse older transcripts. Current Manager-authored subtasks
+// Kept only to strip older transcripts. Current Manager-authored subtasks
 // use the surface-agnostic `<<gian:action>>` envelope, executed by the host after
 // natural-language confirmation in the conversation.
 export const CREATE_SUBTASK_OPEN = '<<gian:create_subtask>>';
 export const CREATE_SUBTASK_CLOSE = '<</gian:create_subtask>>';
-
-export interface CreateSubtaskProposal {
-  /** Short title (optional). */
-  name?: string;
-  /** Workspace name or absolute path — resolved to a workspace_id on the web. */
-  workspace?: string;
-  executor?: import('./model.js').Executor;
-  /** Initial instruction for the subtask; required (empty proposals ignored). */
-  prompt: string;
-}
-
-/** Parse the LAST legacy `<<gian:create_subtask>> {json} <</gian:create_subtask>>`
- *  block from Manager assistant text. Returns null when absent, malformed, or
- *  missing a non-empty `prompt`. */
-export function parseCreateSubtaskProposal(text: string): CreateSubtaskProposal | null {
-  const open = text.lastIndexOf(CREATE_SUBTASK_OPEN);
-  if (open === -1) return null;
-  const close = text.indexOf(CREATE_SUBTASK_CLOSE, open);
-  if (close === -1) return null;
-  const json = text.slice(open + CREATE_SUBTASK_OPEN.length, close).trim();
-  let obj: Record<string, unknown>;
-  try {
-    obj = JSON.parse(json) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-  const prompt = typeof obj.prompt === 'string' ? obj.prompt : '';
-  if (!prompt.trim()) return null;
-  const executor = obj.executor === 'claude'
-    || obj.executor === 'codex'
-    || obj.executor === 'kimi'
-    ? obj.executor
-    : undefined;
-  return {
-    prompt,
-    ...(typeof obj.name === 'string' && obj.name.trim() ? { name: obj.name } : {}),
-    ...(typeof obj.workspace === 'string' && obj.workspace.trim() ? { workspace: obj.workspace } : {}),
-    ...(executor ? { executor } : {}),
-  };
-}
 
 /** Remove every legacy create_subtask block from Manager assistant text so the
  *  user sees clean prose, not the raw JSON block. */

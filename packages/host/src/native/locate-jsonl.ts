@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -106,25 +106,4 @@ export function appendCcCustomTitle(
   }) + '\n';
   appendFileSync(filePath, line, 'utf8');
   return true;
-}
-
-/**
- * Read the cwd from a codex rollout's session_meta header. Used by the host
- * during boot when only the threadId is known but we want to verify the
- * file matches the workspace (defensive — currently unused, exported for
- * possible future use).
- */
-export function readCodexCwdFromJsonl(filePath: string): string | null {
-  try {
-    const content = readFileSync(filePath, 'utf8');
-    const firstLine = content.split('\n', 1)[0];
-    if (!firstLine) return null;
-    const meta = JSON.parse(firstLine) as Record<string, unknown>;
-    if (meta.type !== 'session_meta') return null;
-    const payload = meta.payload as Record<string, unknown> | undefined;
-    if (!payload) return null;
-    return typeof payload.cwd === 'string' ? payload.cwd : null;
-  } catch {
-    return null;
-  }
 }

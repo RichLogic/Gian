@@ -92,8 +92,6 @@ systemctl --user status gian.service
 
 After installing, open `http://localhost:8990` in your browser.
 
-- Tunnel mode (Cloudflare / Tailscale / reverse proxy) is configured via
-  **Settings → Remote**.
 - Authentication is opt-in; set `GIAN_AUTH_REQUIRED=true` in
   `EnvironmentVariables` (plist) or `Environment=` (service unit) and restart
   the daemon.

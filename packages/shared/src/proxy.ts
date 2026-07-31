@@ -1,5 +1,3 @@
-import type { Executor } from './model.js';
-
 export type ProxySessionStatus =
   | 'idle'
   | 'running'
@@ -179,17 +177,6 @@ export interface ProxySession {
   slashCommands?: SlashCommand[];
 }
 
-export interface ProxyTurn {
-  id: string;
-  status: ProxySessionStatus | 'completed' | 'failed';
-}
-
-export interface JsonRpcRequest<P = unknown> {
-  id: number | string;
-  method: string;
-  params?: P;
-}
-
 export interface JsonRpcSuccessResponse<R = unknown> {
   id: number | string;
   result: R;
@@ -239,20 +226,6 @@ export interface TokenUsageUpdate {
   reason?: 'compact_started' | 'session_reset';
 }
 
-export type ProxyErrorCode =
-  | 'INVALID_REQUEST'
-  | 'SESSION_NOT_FOUND'
-  | 'APPROVAL_NOT_FOUND'
-  | 'SESSION_ALREADY_EXISTS'
-  | 'SESSION_BUSY'
-  | 'SESSION_CLOSED'
-  | 'SESSION_STALE'
-  | 'SESSION_ERROR'
-  | 'PROCESS_SPAWN_FAILED'
-  | 'AUTH_REQUIRED'
-  | 'INVALID_APPROVAL_OPTION'
-  | 'INTERNAL_ERROR';
-
 export const PROXY_METHODS = [
   'initialize',
   'capabilities.list',
@@ -267,8 +240,6 @@ export const PROXY_METHODS = [
   'session.close',
   'shutdown',
 ] as const;
-
-export type ProxyMethod = (typeof PROXY_METHODS)[number];
 
 export const PROXY_NOTIFICATION_METHODS = [
   // Turn lifecycle (both proxies)
@@ -302,11 +273,3 @@ export const PROXY_NOTIFICATION_METHODS = [
   'acp.sessionUpdate',
   'runtime.stopped',
 ] as const;
-
-export type ProxyNotificationMethod = (typeof PROXY_NOTIFICATION_METHODS)[number];
-
-export interface ProxyExecutorBinding {
-  executor: Executor;
-  binPath: string;
-  dataDir: string;
-}

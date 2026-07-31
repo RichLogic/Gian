@@ -140,6 +140,7 @@ export function buildTemplateSummary(input: {
     '',
   ].filter(seg => seg !== undefined).join('\n').replace(/\n{3,}/g, '\n\n');
 
+  const priorHandoff = currentHandoff.trim();
   const handoff = [
     note,
     '',
@@ -149,6 +150,7 @@ export function buildTemplateSummary(input: {
       'No machine-written handoff is available (template fallback) — ' +
       'review the workspace and SESSION_LOG.md before continuing.',
     '',
+    ...(priorHandoff ? ['## Previous handoff', '', priorHandoff, ''] : []),
   ].join('\n');
 
   const summary = line;

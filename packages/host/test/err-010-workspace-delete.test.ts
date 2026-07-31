@@ -33,20 +33,20 @@ async function setupWs(opts?: {
   if (opts?.withSession) {
     appCtx.db.prepare(`
       INSERT INTO sessions
-        (id, name, type, workspace_id, executor, model, approval_mode, turns,
+        (id, name, type, workspace_id, executor, model, approval_mode,
          active_channel, status, archived, native_session_id, created_at, updated_at)
-      VALUES (?, 'live', 'coding', ?, 'claude', NULL, 'ask', 1,
+      VALUES (?, 'live', 'coding', ?, 'claude', NULL, 'ask',
               'web', 'new', 0, ?, ?, ?)
     `).run(randomUUID(), workspaceId, `native-${randomUUID()}`, now, now);
   }
   if (opts?.withLiveWorktree) {
     appCtx.db.prepare(`
       INSERT INTO sessions
-        (id, name, type, workspace_id, executor, model, approval_mode, turns,
+        (id, name, type, workspace_id, executor, model, approval_mode,
          active_channel, status, archived,
          worktree_path, branch, base_branch, worktree_outcome,
          native_session_id, created_at, updated_at)
-      VALUES (?, 'wt', 'coding', ?, 'claude', NULL, 'ask', 1,
+      VALUES (?, 'wt', 'coding', ?, 'claude', NULL, 'ask',
               'web', 'new', 0,
               '/tmp/demo-ws-wt', 'worktree/abc12345', 'main', NULL,
               ?, ?, ?)
@@ -59,11 +59,11 @@ async function setupWs(opts?: {
     // hit the live-worktree blocker if no sessions remain.
     appCtx.db.prepare(`
       INSERT INTO sessions
-        (id, name, type, workspace_id, executor, model, approval_mode, turns,
+        (id, name, type, workspace_id, executor, model, approval_mode,
          active_channel, status, archived,
          worktree_path, branch, base_branch, worktree_outcome,
          native_session_id, created_at, updated_at)
-      VALUES (?, 'wt-finalized', 'coding', ?, 'claude', NULL, 'ask', 1,
+      VALUES (?, 'wt-finalized', 'coding', ?, 'claude', NULL, 'ask',
               'web', 'done', 1,
               NULL, 'worktree/zzz99999', 'main', 'merged',
               ?, ?, ?)

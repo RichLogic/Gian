@@ -4,17 +4,15 @@ import type { WSContext, WSMessageReceive } from 'hono/ws';
 import type { SessionManager } from '../session/manager.js';
 import type { TaskManager } from '../task/manager.js';
 import type { WsBroadcaster } from './ws-broadcast.js';
-// IMRouter is removed during the IM transplant — ws-handler no longer
-// notifies it on web message:send. Takeover state will be revisited when
-// the rvc-shaped managers land.
+// Platform managers subscribe to SessionManager events directly; web sends
+// need no separate IM router callback.
 import type { ApprovalManager } from '../approval/index.js';
-import type { CodexTtyManager } from '../tty/codex-manager.js';
 import type { WorkbenchTerminalManager } from '../term/manager.js';
 import type { Db } from '../storage/db.js';
 import { getUsernameForToken } from '../auth/tokens.js';
 import { AUTH_REQUIRED } from '../auth/middleware.js';
 import { loadConfig } from '../storage/config.js';
-import { listBots } from '../storage/bots.js';
+import { listAllBots } from '../im/bots-api.js';
 import { deleteTaskCascade } from '../task/delete-cascade.js';
 
 interface WsMessageEvent {
@@ -32,7 +30,6 @@ export interface WsHandlerDeps {
   tasks?: TaskManager;
   broadcaster: WsBroadcaster;
   approvals?: ApprovalManager;
-  codexTty?: CodexTtyManager;
   term?: WorkbenchTerminalManager;
   db?: Db;
 }
@@ -42,10 +39,10 @@ interface ClientState {
   clientId: string;
 }
 
-export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, codexTty, term, db }: WsHandlerDeps) {
+export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db }: WsHandlerDeps) {
   const states = new WeakMap<WSContext, ClientState>();
 
-  function sendStateSync(ws: WSContext): void {
+  async function sendStateSync(ws: WSContext): Promise<void> {
     if (!db) return;
     const config = loadConfig(db);
     const sync: StateSyncMessage = {
@@ -63,7 +60,7 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, codexT
       sessions: sessions.listSessions(),
       tasks: tasks?.listTasks() ?? [],
       workspaces: db.prepare('SELECT * FROM workspaces ORDER BY sort_order, name').all() as StateSyncMessage['workspaces'],
-      bots: listBots(db),
+      bots: await listAllBots(db),
       approvals: (approvals?.listPending() ?? []).map(r => ({
         id: r.id,
         session_id: r.sessionId,
@@ -130,23 +127,19 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, codexT
         }
         // Send authoritative state immediately after auth so the client can
         // skip REST fetches and re-sync after reconnect.
-        sendStateSync(ws);
+        await sendStateSync(ws);
         return;
       }
 
       try {
-        await dispatch(parsed, sessions, tasks, broadcaster, ws, codexTty, term);
+        await dispatch(parsed, sessions, tasks, broadcaster, ws, term);
       } catch (err) {
         console.error('[ws] dispatch error', err);
         // Surface the failure to the client. Without this, errors inside
         // sendMessage / respondApproval / etc. are invisible — the user sees
         // "no reply" with no clue why.
         const sessionIdField = (parsed as { session_id?: unknown }).session_id;
-        // Prefer an explicit `code` on the thrown error (e.g.
-        // SessionManager.switchRuntime throws { code: 'SWITCH_BLOCKED' }
-        // for idle / approval / finalized-worktree refusals). The
-        // per-message-type fallback below is only for legacy throws
-        // that don't tag a code.
+        // Prefer an explicit error code when the domain layer provides one.
         const explicitCode = (err && typeof err === 'object'
           && typeof (err as { code?: unknown }).code === 'string')
           ? (err as { code: string }).code
@@ -190,17 +183,8 @@ async function dispatch(
   tasks: TaskManager | undefined,
   broadcaster: WsBroadcaster,
   ws: WSContext,
-  codexTty?: CodexTtyManager,
   term?: WorkbenchTerminalManager,
 ): Promise<void> {
-  // Resolve TTY routing target for `pty:*` messages. Only codex sessions
-  // have a PTY runtime now (Claude TTY mode was removed), so this always
-  // resolves to the CodexTtyManager.
-  const ttyManagerFor = (sessionId: string): CodexTtyManager | undefined => {
-    let session;
-    try { session = sessions.getSession(sessionId); } catch { return undefined; }
-    return session.executor === 'codex' ? codexTty : undefined;
-  };
   switch (msg.type) {
     case 'session:create': {
       const session = await sessions.createSession({
@@ -293,7 +277,7 @@ async function dispatch(
       return;
     }
     case 'session:set_mode': {
-      sessions.setApprovalMode(msg.session_id, msg.approval_mode, msg.turns);
+      sessions.setApprovalMode(msg.session_id, msg.approval_mode);
       return;
     }
     case 'session:set_effort': {
@@ -330,41 +314,6 @@ async function dispatch(
     }
     case 'queue:send_now': {
       await sessions.sendQueuedNow(msg.session_id);
-      return;
-    }
-    case 'session:switch-runtime': {
-      // Codex-only path — Claude TTY mode was removed; claude sessions
-      // fail inside SessionManager.switchRuntime with SWITCH_BLOCKED.
-      await sessions.switchRuntime(msg.session_id, msg.target, {
-        force: msg.force === true,
-      });
-      return;
-    }
-    case 'pty:input': {
-      const mgr = ttyManagerFor(msg.session_id);
-      if (!mgr) return;
-      const payload: { data?: string; text?: string } = {};
-      if (typeof msg.data === 'string') payload.data = msg.data;
-      if (typeof msg.text === 'string') payload.text = msg.text;
-      await mgr.input(msg.session_id, payload);
-      return;
-    }
-    case 'pty:resize': {
-      const mgr = ttyManagerFor(msg.session_id);
-      if (!mgr) return;
-      await mgr.resize(msg.session_id, msg.cols, msg.rows);
-      return;
-    }
-    case 'pty:replay-request': {
-      const mgr = ttyManagerFor(msg.session_id);
-      if (!mgr) return;
-      const result = await mgr.replay(msg.session_id);
-      broadcaster.send(ws, {
-        type: 'pty:replay',
-        session_id: msg.session_id,
-        chunks: result.chunks,
-        alive: result.alive,
-      });
       return;
     }
     case 'term:spawn': {

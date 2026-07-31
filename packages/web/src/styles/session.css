@@ -432,7 +432,6 @@
 
 /* Thinking row: rendered without avatar/author so only the ticker shows.
    Indent to match the .msg-body column (24px avatar + 10px gap from .msg). */
-.msg-thinking { padding-left: 34px; }
 
 /* Mascot variant — same indentation, more breathing room above/below
    since the SVG itself is larger than the ticker text. */
@@ -446,21 +445,6 @@
 /* Live ticker for "thinking…" while a turn runs.
    Overrides coding.css .ticker with session-specific sizing.
    Uses the same dot animation keyframe from coding.css. */
-.ticker {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-family: var(--font-mono);
-  font-size: var(--fz-11);
-  color: var(--text-3);
-}
-.ticker .dots { display: inline-flex; gap: 3px; }
-.ticker .dots span {
-  width: 4px; height: 4px; border-radius: 50%;
-  background: var(--accent);
-  animation: dot 1.4s infinite ease-in-out both;
-}
-.ticker .dots span:nth-child(1) { animation-delay: -0.32s; }
-.ticker .dots span:nth-child(2) { animation-delay: -0.16s; }
-.ticker .dots span:nth-child(3) { animation-delay: 0s; }
 
 /* Files view: Open split button + dropdown menu */
 .files-open-group {
@@ -536,30 +520,6 @@
 }
 
 /* Settings: External editors section */
-.external-editor-row {
-  display: grid;
-  grid-template-columns: 1fr 1.4fr 1.4fr auto;
-  gap: 8px;
-  align-items: end;
-  margin-bottom: 8px;
-}
-.external-editor-row label {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.ee-label {
-  font-size: 11px;
-  color: var(--text-3);
-}
-.external-editor-row input {
-  padding: 4px 8px;
-  font-size: 12px;
-  border: 1px solid var(--border-1);
-  border-radius: 4px;
-  background: var(--surface);
-  color: var(--text-1);
-}
 .ee-remove {
   width: 28px;
   height: 28px;
@@ -574,12 +534,6 @@
   color: var(--text-1);
 }
 /* "Add editor" button + "Add application" picker sit on one row. */
-.ee-add-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
 .ee-add-app {
   display: inline-flex;
   align-items: center;

@@ -124,9 +124,9 @@ test('ERR-011: adopt rejects a native session that is already adopted with 409 a
     const now = new Date().toISOString();
     ctx.appCtx.db.prepare(`
       INSERT INTO sessions
-        (id, name, type, workspace_id, executor, model, approval_mode, turns,
+        (id, name, type, workspace_id, executor, model, approval_mode,
          active_channel, status, archived, native_session_id, created_at, updated_at)
-      VALUES (?, 'already-bound', 'coding', ?, 'claude', NULL, 'ask', 1,
+      VALUES (?, 'already-bound', 'coding', ?, 'claude', NULL, 'ask',
               'web', 'new', 0, 'taken', ?, ?)
     `).run(existing, ctx.workspaceId, now, now);
 

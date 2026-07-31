@@ -49,11 +49,6 @@ export interface SessionRecord {
   updatedAt: string;
 }
 
-export interface ToolUseRecord {
-  toolName: string;
-  input: Record<string, unknown>;
-}
-
 export interface PendingApproval {
   approvalId: string;
   sessionId: string;

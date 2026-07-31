@@ -3,7 +3,27 @@ import type { Bot, BotExtra, BotMode, DiscordBotExtra, IMPlatform, Session, Slac
 import { createBot, deleteBot, toggleBot, updateBot } from '../api.js';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
-import { Icon } from './SpacesView.js';
+
+function Icon({ d, size = 16, stroke = 1.6 }: {
+  d: string;
+  size?: number;
+  stroke?: number;
+}) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={stroke}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d={d} />
+    </svg>
+  );
+}
 
 // ── V2 icon paths used in BotsView (copied verbatim from
 //    design/gian-design-v2/js/data.jsx). ──

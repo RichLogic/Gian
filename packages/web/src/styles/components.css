@@ -22,7 +22,6 @@
 /* Executor identity lives in the row2 text chip (ri-exec-name) now —
    the tiny avatar square was redundant with it. Keep the class as a
    no-op so any stray markup doesn't reserve space. */
-.ri-avatar { display: none; }
 
 .ri-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .ri-row1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -35,33 +34,9 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   flex: 1; min-width: 0;
 }
-.ri-row2 {
-  display: flex; align-items: center; gap: 6px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-3);
-  white-space: nowrap;
-  overflow: hidden;
-  min-width: 0;
-}
-.ri-row2 > * { white-space: nowrap; flex-shrink: 0; }
-.ri-row2 > .ri-sub { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.ri-exec-name {
-  color: var(--codex);
-  font-weight: 600;
-}
 .ri-exec-name.claude { color: var(--claude); }
 .ri-exec-name.codex { color: var(--codex); }
 .ri-dot-sep { color: var(--text-3); opacity: 0.5; }
-.ri-sub {
-  color: var(--text-3);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.ri-turn {
-  color: var(--accent-text);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
 .ri-age {
   position: absolute;
   right: 10px;
@@ -74,7 +49,6 @@
 }
 .rail-item.active .ri-age { color: var(--text-2); }
 /* Reserve room on row2 so the absolute-positioned age never overlaps text */
-.ri-row2 { padding-right: 36px; }
 /* Single-line session rows: the title is now on row1 with the age/status at the
    right, so row1 needs the same right gap (row2 is gone). */
 .session-row .ri-row1 { padding-right: 38px; }
@@ -135,12 +109,6 @@
   to   { opacity: 1; transform: translate(-50%, 0); }
 }
 
-.cfg-wt-loading {
-  display: flex; align-items: center; gap: 8px;
-  color: var(--text-3);
-  font-size: var(--fz-12);
-}
-
 .pill::before {
   content: "";
   width: 5px; height: 5px; border-radius: 50%;
@@ -180,16 +148,6 @@
 @keyframes breath { 0%,100% { opacity: 0.55; transform: scale(0.85); } 50% { opacity: 1; transform: scale(1.1); } }
 
 /* Waiting-on-you flag (important for approval UX) */
-.ri-flag {
-  font-family: var(--font-mono);
-  font-size: 9.5px; font-weight: 600;
-  color: var(--warn);
-  padding: 1px 5px;
-  background: var(--warn-soft);
-  border-radius: var(--r-1);
-  letter-spacing: 0.02em;
-  text-transform: none;
-}
 
 /* ---------- Buttons ---------- */
 .btn {
@@ -260,20 +218,6 @@
 .btn.icon { width: 26px; padding: 0; }
 .btn.sm.icon { width: 22px; }
 
-/* Chips / tags */
-.chip {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 2px 7px;
-  border-radius: var(--r-pill);
-  background: var(--surface-2);
-  color: var(--text-2);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 500;
-}
-.chip.codex  { background: var(--codex-soft);  color: var(--codex); }
-.chip.claude { background: var(--claude-soft); color: var(--claude); }
-
 /* Select */
 .select {
   appearance: none;
@@ -341,22 +285,6 @@
 }
 
 /* Form card */
-.fcard {
-  background: var(--surface-2);
-  border-radius: var(--r-3);
-  overflow: hidden;
-}
-.fcard-head {
-  padding: 10px 14px;
-  font-family: var(--font-mono);
-  font-size: 10.5px; font-weight: 600;
-  color: var(--text-3);
-  text-transform: none; letter-spacing: 0.08em;
-}
-.fcard-body {
-  padding: 4px 14px 14px;
-  display: flex; flex-direction: column; gap: 12px;
-}
 
 /* Popovers */
 .popover {
@@ -410,15 +338,6 @@
 }
 
 /* Sheets */
-.sheet-overlay {
-  position: fixed; inset: 0;
-  background: oklch(0 0 0 / 0.32);
-  backdrop-filter: blur(4px);
-  display: none;
-  align-items: stretch; justify-content: flex-end;
-  padding: var(--gutter);
-  z-index: 70;
-}
 .sheet-overlay.open { display: flex; }
 .sheet {
   width: 380px;
@@ -453,7 +372,6 @@
 @keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 .toast-ico { width: 14px; height: 14px; flex-shrink: 0; color: var(--ok); }
 .toast-title { font-weight: 600; }
-.toast-desc { color: var(--text-3); font-size: var(--fz-11); }
 
 /* Empty state */
 .empty {
@@ -464,10 +382,3 @@
   font-size: var(--fz-12);
   text-align: center;
 }
-.empty-ico {
-  width: 44px; height: 44px;
-  border-radius: var(--r-3);
-  background: var(--surface-2);
-  display: flex; align-items: center; justify-content: center;
-}
-.empty-ico svg { width: 20px; height: 20px; color: var(--text-3); }

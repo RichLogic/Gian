@@ -66,12 +66,6 @@
   background: var(--accent-soft);
   color: var(--accent-text);
 }
-.s2-foot {
-  margin-top: auto;
-  padding: 8px;
-  font-size: 10.5px;
-  color: var(--text-3);
-}
 
 /* The prototype leans on a `.mono` utility that the web app never defined as a
    bare class. Scope a local one to this surface so the footer + the `claude -p`

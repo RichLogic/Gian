@@ -8,10 +8,9 @@ import type { SlashCommand, SlashCommandSource } from '@gian/shared';
 // Native commands
 //
 // The authoritative native/plugin list is the `slash_commands` array on
-// Claude CLI's `init` event (see `probeSlashCommands`), but collecting it
-// requires `claude -p`. Default production listing avoids that billing path
-// and only scans local command files; tests and explicit callers can inject
-// a probe when they really want native discovery.
+// Claude CLI's `init` event, but collecting it requires `claude -p`. Default
+// production listing avoids that billing path and only scans local command
+// files; tests can inject a probe without adding a production billing path.
 //
 // The map below is descriptions-only — when probe returns a name, we look it
 // up here for human-readable text. Names not in this map still appear (with

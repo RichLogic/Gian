@@ -87,7 +87,7 @@ export class GianWs {
       for (const listener of this.listeners) listener(parsed);
     });
 
-    ws.addEventListener('close', evt => {
+    ws.addEventListener('close', () => {
       this.authed = false;
       this.ws = null;
       if (this.intentionalClose) {

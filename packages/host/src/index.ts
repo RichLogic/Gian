@@ -5,7 +5,6 @@ import { createApp } from './web/app.js';
 import { openDatabase } from './storage/db.js';
 import { loadConfig } from './storage/config.js';
 import { resolveDataDir } from './storage/paths.js';
-import { TunnelManager } from './tunnel/index.js';
 import { sweepColdEvents } from './events/lifecycle.js';
 import { CliRuntimeManager } from './runtime/manager.js';
 import { KimiRuntimeProvider } from './runtime/kimi-provider.js';
@@ -21,7 +20,6 @@ async function main(): Promise<void> {
   const dataDir = resolveDataDir();
   const db = openDatabase(dataDir);
   const config = loadConfig(db);
-  const tunnel = new TunnelManager();
 
   // Sweep cold events on every boot. Sessions whose events haven't been
   // touched in 30 days (or that are archived) get their events / turns
@@ -77,11 +75,8 @@ async function main(): Promise<void> {
 
   handle.injectWebSocket(server);
 
-  await tunnel.start(config);
-
   const shutdown = async (): Promise<void> => {
     console.log('[gian] shutting down…');
-    await tunnel.stop();
     await handle.shutdown();
     db.close();
     server.close();

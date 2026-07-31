@@ -1,12 +1,12 @@
 /**
- * Thin compatibility layer over the rvc-shaped `discord_bots` / `slack_bots`
+ * Thin compatibility layer over the `discord_bots` / `slack_bots`
  * tables that preserves the original Gian `Bot` / `BotExtra` wire format
  * exposed by `/api/bots*`. Web UI doesn't need to change.
  *
  * Reads decrypt per-token ciphertexts back into the union `BotExtra` JSON;
  * writes split `extra` apart into the per-platform columns and re-encrypt
  * each token separately. `Bot.mode` (read-only/full-control) is fabricated
- * because rvc dropped that concept — we always return `'full-control'`.
+ * because platform bot rows no longer store that concept.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -78,7 +78,7 @@ async function discordRowToBot(row: DiscordBotRow): Promise<Bot> {
     label: row.label,
     platform: 'discord',
     workspace_id: row.selected_workspace_id,
-    // rvc dropped per-bot mode; always present 'full-control' so the web UI
+    // Preserve the legacy wire value so the web UI
     // doesn't show an empty pill.
     mode: 'full-control',
     allowed_user_id: row.allowed_discord_user_id,

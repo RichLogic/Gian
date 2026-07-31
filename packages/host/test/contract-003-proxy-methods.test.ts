@@ -5,12 +5,7 @@
 //                  AND every method must be call-able from at least
 //                  one host client (cc-proxy-client / codex-proxy-client).
 //
-// The `tty.*` family is live on codex-proxy (codex CLI runtime) only —
-// cc-proxy no longer offers it (Claude TTY mode was removed). It routes
-// through CodexTtyManager rather than through the shared structured
-// PROXY_METHODS registry. Keep the family in `DEFERRED_PROXY_METHODS` so
-// the registry stays focused on the structured RPC family while the
-// whitelist documents the parallel channel.
+// There is one structured proxy RPC family; session TTY methods were removed.
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
@@ -25,16 +20,7 @@ const CODEX_CLIENT = resolve('src/proxy/codex-proxy-client.ts');
 const CC_CLI = resolve('../proxies/cc-proxy/src/cli/spawn.ts');
 const CODEX_CLI = resolve('../proxies/codex-proxy/src/cli/spawn.ts');
 
-const DEFERRED_PROXY_METHODS: ReadonlyArray<{ method: string; reason: string }> = [
-  // Codex-only TTY runtime; cc-proxy no longer offers this family (Claude
-  // TTY mode was removed), so nothing needs an initialize-payload migration
-  // on the claude side. The shared registry intentionally omits them.
-  { method: 'tty.start', reason: 'TTY runtime — codex-only, direct routing via CodexTtyManager, not via structured PROXY_METHODS registry; cc-proxy no longer offers this family.' },
-  { method: 'tty.input', reason: 'TTY runtime — codex-only, direct routing via CodexTtyManager, not via structured PROXY_METHODS registry; cc-proxy no longer offers this family.' },
-  { method: 'tty.resize', reason: 'TTY runtime — codex-only, direct routing via CodexTtyManager, not via structured PROXY_METHODS registry; cc-proxy no longer offers this family.' },
-  { method: 'tty.replay', reason: 'TTY runtime — codex-only, direct routing via CodexTtyManager, not via structured PROXY_METHODS registry; cc-proxy no longer offers this family.' },
-  { method: 'tty.kill', reason: 'TTY runtime — codex-only, direct routing via CodexTtyManager, not via structured PROXY_METHODS registry; cc-proxy no longer offers this family.' },
-];
+const DEFERRED_PROXY_METHODS: ReadonlyArray<{ method: string; reason: string }> = [];
 
 // ---------------------------------------------------------------------------
 // Parsers
@@ -48,9 +34,7 @@ function methodsFromInitializePayload(servicePath: string): Set<string> {
   const match = text.match(/initializePayload\(\)[\s\S]*?methods:\s*\[([\s\S]*?)\]/);
   assert.ok(match, `failed to locate initializePayload methods array in ${servicePath}`);
   let block = match![1]!;
-  // Strip line + block comments so quoted strings inside comments
-  // (e.g. `runtime_mode === 'tty'` in a doc-comment) don't get parsed
-  // as advertised methods.
+  // Strip comments so quoted strings there do not parse as methods.
   block = block.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
   const out = new Set<string>();
   // Method entries are `'<id>',` — anchor on the trailing comma so we
@@ -109,7 +93,7 @@ test('CONTRACT-003: parser locates the canonical methods in both proxies', () =>
 
 test('CONTRACT-003: shared PROXY_METHODS contains the canonical structured-method set', () => {
   // The exact list of structured methods is the union of what both
-  // proxies expose, minus the deferred TTY group. Pin the list so a
+  // proxies expose. Pin the list so a
   // future "let's add foo.bar" in shared/proxy.ts must update the
   // service files too.
   const canonical = new Set([

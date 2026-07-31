@@ -1,14 +1,14 @@
 /**
- * One-shot migration:把 Gian 老 `bots` 表里的 Discord/Slack 行迁到 rvc 形态的
+ * One-shot migration:把 Gian 老 `bots` 表里的 Discord/Slack 行迁到
  * `discord_bots` / `slack_bots`。运行时机:host 启动时调一次,幂等
  * (新表里已有同 id 的行就跳过)。
  *
  * 不兼容点处理:
  *   - **加密格式**:老 `extra` 列是 `iv:tag:cipher` (hex) 形式,scrypt(env GIAN_SECRET) 派生 key,
- *     整个 BotExtra JSON 一起加密。这里读出来 → 拆字段 → 用 rvc 形态的
+ *     整个 BotExtra JSON 一起加密。这里读出来 → 拆字段 → 用平台独立的
  *     per-token base64url 加密(key 来自 ~/.config/gian/{discord,slack}.key)重写。
- *   - **mode 字段** (read-only/full-control):rvc 设计上把 mode 概念改到了
- *     per-session `approval_mode`,bot 自身不再有 mode。这一列直接丢弃。
+ *   - **mode 字段** (read-only/full-control):平台模型不再保存 bot mode,
+ *     session 使用自己的 `approval_mode`。这一列直接丢弃。
  *
  * 老 `bots` 表保留不删 —— 留作 rollback 锚点。第一次迁完之后正常路径都
  * 走新表。

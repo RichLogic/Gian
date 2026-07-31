@@ -6,9 +6,21 @@ import {
   isSafeExternalUrl,
   isTrustedDesktopUrl,
   PROD_HOST_URL,
+  resolveDesktopApplicationIdentity,
   resolveDesktopTargets,
   resolveDesktopWindowChrome,
 } from '../src/config.js';
+
+test('development shell uses a distinct application identity and profile', () => {
+  assert.deepEqual(resolveDesktopApplicationIdentity(false, '/tmp/app-data'), {
+    name: 'GianDev',
+    userDataPath: '/tmp/app-data/GianDev',
+  });
+  assert.deepEqual(resolveDesktopApplicationIdentity(true, '/tmp/app-data'), {
+    name: 'Gian',
+    userDataPath: null,
+  });
+});
 
 test('development targets use the isolated GianDev ports', () => {
   assert.deepEqual(

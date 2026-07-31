@@ -31,8 +31,8 @@ test('ACTION-AUTH-001: create_subtask from a non-PM is rejected (role gate)', ()
 
 test('ACTION-AUTH-001: create_subtask from PM with no loop executes (PM aligned in conversation)', () => {
   // No loop → execute directly: the PM confirms in natural language before
-  // emitting, so the human checkpoint is the conversation (works on Claude TTY
-  // where no confirm chip can render). Overrides the earlier staged-chip design.
+  // emitting, so the human checkpoint is the conversation. This overrides the
+  // earlier staged-chip design.
   const r = authorizeAction({ action: createSubtask, senderRole: 'pm', senderSessionId: 'm1', loop: null, workspaceId: 'w1' });
   assert.equal(r.decision, 'execute');
 });

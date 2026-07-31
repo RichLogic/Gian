@@ -1,15 +1,11 @@
 # Gian
 
-> Self-hosted Web UI for Codex and Claude Code.
+> Self-hosted workspace for Codex, Claude Code, and Kimi Code.
 
-Gian is a single-user, self-hosted browser front-end that lets you drive
-[Codex](https://github.com/openai/codex) and
-[Claude Code](https://github.com/anthropics/claude-code) from any device.
-It wraps your local AI coding tools in a structured session interface —
-real-time event cards, an approval workflow for sensitive operations, a message
-queue, Job Mode for multi-turn autonomous runs, Discord/Slack bots, and remote
-access via Cloudflare Tunnel or Tailscale Funnel — without replacing the
-underlying CLI tools.
+Gian is a single-user browser and desktop interface for local AI coding
+tools. It wraps Codex, Claude Code, and Kimi Code in structured sessions with
+real-time transcripts, approvals, message queues, tasks, worktrees, files,
+bots, and a workspace terminal without replacing the underlying tools.
 
 ## Features
 
@@ -20,25 +16,28 @@ underlying CLI tools.
   `auto_circuit_breaker`, `turn_started`, `turn_completed`, `session_error`
 - **Approval workflow** — default (risk-level gated) and auto modes; `Allow
   Once`, `Allow Session`, `Decline`; keyboard shortcuts A / ⇧A / D
-- **Job Mode** — set turns > 1 to run multi-turn autonomous tasks; global
-  progress bar with stop button
 - **Message queue** — queue messages while the AI is running; reorder, edit,
   Send Now, or Clear
-- **Files Tab** — Changed (session diff) and Tree views with unified diff
+- **Tasks and worktrees** — Manager-led subtasks, explicit approval gates,
+  branch/worktree isolation, and merge/drop workflows
+- **Files view** — Changed (session diff) and Tree views with unified diff
   rendering and "Open in new tab"
 - **IM bridge** — Discord and Slack bots in read-only mirror or full-control
-  mode; guided slash commands (`/new`, `/switch`, `/alter`, `/stop`,
-  `/status`)
-- **Command Palette** — ⌘K fuzzy search across sessions, changed files, and
+  mode
+- **Workbench Terminal** — a workspace shell over the dedicated `term:*`
+  protocol; it is independent of AI session execution
+- **Command Palette** — ⌘⇧K fuzzy search across sessions, changed files, and
   commands
 - **Spaces page** — workspace management with per-workspace approval risk
   levels
 - **Settings panel** — theme (light / warm / dark), accent, density, locale,
-  remote access, all at runtime; no restart required
+  executor defaults, shortcuts, and auth settings
 - **Daemon mode** — launchd (macOS) and systemd (Linux) user-service install
   scripts; crash-restart included
-- **Remote access** — Cloudflare Tunnel, Tailscale Funnel, or reverse-proxy;
-  opt-in HTTP basic auth
+
+AI sessions are structured-only: Claude uses `claude -p`, Codex uses
+app-server, and Kimi uses ACP. Session TTY modes were retired in ADR-0008;
+the Workbench Terminal is Gian's only PTY.
 
 ## Architecture
 
@@ -48,7 +47,7 @@ communicates over a persistent WebSocket; IM adapters run inside the same Host
 process.
 
 ```
-Proxy (subprocess) ◁── stdio JSON-RPC ──▷ Host ◁── WebSocket ──▷ Web (Browser)
+Proxy (subprocess) ◁── stdio JSON-RPC ──▷ Host ◁── WebSocket ──▷ Web / Desktop
                                            │
                                            ├──▷ Discord (Bot API)
                                            └──▷ Slack (Bot API)
@@ -56,7 +55,9 @@ Proxy (subprocess) ◁── stdio JSON-RPC ──▷ Host ◁── WebSocket �
 
 - **codex-proxy** — single shared process for all Codex sessions
 - **cc-proxy** — one process per Claude Code session
+- **kimi-proxy** — single shared ACP process for all Kimi sessions
 - Host is the sole state owner; Web and IM are stateless consumers
+- Electron is a thin shell over the independent Host
 - Persistence: SQLite at `$GIAN_DATA_DIR/gian.db`
 
 See [`docs/architecture.md`](docs/architecture.md) for full details including
@@ -69,9 +70,8 @@ the proxy protocol and data model.
 - **Node.js v22** — `better-sqlite3` native bindings break on Node v25; stay
   on v22 LTS until an upstream fix lands
 - **pnpm 10+**
-- Both `cc-proxy` and `codex-proxy` are vendored under
+- All executor proxies are vendored under
   `packages/proxies/`; no separate install needed
-- Optional: `cloudflared` or `tailscale` for remote access
 
 ### Steps
 
@@ -83,26 +83,27 @@ cd gian
 # 2. Install dependencies
 pnpm install
 
-# 3. Build packages (order matters)
-pnpm -F @gian/shared build
-pnpm -F @gian/host build
-pnpm -F @gian/web build
+# 3. Build all packages
+pnpm build
 
 # 4a. Daemon mode (auto-start at login, crash-restart)
 ./scripts/install.sh
 
-# 4b. Dev mode (hot-reload frontend)
+# 4b. Dev mode (isolated host/web plus the GianDev desktop app)
 pnpm dev
 ```
 
-Open **http://localhost:5190** in your browser.
+`pnpm dev` opens a separate **GianDev** Electron app after the development
+host and web UI are ready on `8991` / `5191`. Use `pnpm dev:web` only when a
+browser-only stack is preferable. Production `8990` / `5190` and the installed
+Gian app are not touched.
 
 > Daemon logs live at `~/.config/gian/logs/`. Run `./scripts/uninstall.sh` to
 > remove the daemon (data is preserved; add `--purge` to delete everything).
 
 ## Configuration
 
-Most settings are available at runtime in **Settings** (gear icon, top-right).
+Most settings are available at runtime in **Settings** from the Dock.
 Boot-time values can be set via environment variables before starting the
 daemon.
 
@@ -117,14 +118,15 @@ daemon.
 | `GIAN_SECRET` | — | AES-256-GCM key seed for bot token encryption |
 | `GIAN_CC_PROXY_ENTRY` | — | Absolute path to the cc-proxy executable |
 | `GIAN_CODEX_PROXY_ENTRY` | — | Absolute path to the codex-proxy executable |
+| `GIAN_KIMI_PROXY_ENTRY` | — | Absolute path to the kimi-proxy executable |
 | `GIAN_CC_BIN` | system PATH | Claude Code CLI path |
 | `GIAN_CODEX_BIN` | system PATH | Codex CLI path |
 
 ## Usage
 
 1. **Create a workspace** — go to **Spaces**, add a local directory (e.g.
-   `~/Coding/my-project`), set the default executor (Codex or Claude Code) and
-   per-category approval risk levels.
+   `~/Coding/my-project`), set the default executor and per-category approval
+   risk levels.
 
 2. **Create a session** — click **+ New** in the Coding tab, pick a workspace
    and executor, optionally name the session.
@@ -141,15 +143,14 @@ daemon.
    it is queued. Reorder with ↑↓, remove, or hit **Send Now** to flush
    immediately.
 
-6. **Job Mode** — switch Composer to AUTO and set turns > 1. The AI runs
-   autonomously until the task is complete, the turn limit is reached, or you
-   hit **Stop**.
-
-7. **Slash commands** — type `/` in the Composer to pop up the executor's
+6. **Slash commands** — type `/` in the Composer to pop up the executor's
    native command list (`/clear`, `/compact`, etc.) for transparent
    pass-through.
 
-8. **Command Palette** — ⌘K to search sessions, changed files, and commands
+7. **Workbench Terminal** — open Terminal from the session Workbench to run
+   shell commands in that workspace.
+
+8. **Command Palette** — ⌘⇧K to search sessions, changed files, and commands
    from anywhere.
 
 ## Known limits
@@ -165,8 +166,7 @@ daemon.
 
 ## Status
 
-**Phase 2 vertical slice** — all 6 milestones complete (M0 → M5 + M6 polish).
-Not yet released; API and config schema may change before v1.0.
+Active development. API, protocol, and config schemas may change before v1.0.
 
 ## License
 

@@ -1,4 +1,4 @@
-import { isAbsolute, relative, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
 import { buildCapabilitiesPayload } from './capabilities.js';
 import { createAppError } from './errors.js';
@@ -172,71 +172,6 @@ function requestedPermissionsFromParams(params: unknown) {
   return permissions && typeof permissions === 'object'
     ? permissions as Record<string, unknown>
     : {};
-}
-
-function isNetworkOnlyPermissionRequest(permissions: Record<string, unknown>) {
-  const entries = Object.entries(permissions);
-  return entries.length > 0 && entries.every(([key, value]) => (
-    (key === 'web' || key === 'network' || key === 'internet')
-    && isTruthyPermissionValue(value)
-  ));
-}
-
-function collectRequestedPaths(value: unknown, result: string[] = []) {
-  if (!value || typeof value !== 'object') {
-    return result;
-  }
-
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      collectRequestedPaths(entry, result);
-    }
-    return result;
-  }
-
-  const record = value as Record<string, unknown>;
-  if (typeof record.path === 'string') {
-    result.push(record.path);
-  }
-
-  if (Array.isArray(record.paths)) {
-    for (const entry of record.paths) {
-      if (typeof entry === 'string') {
-        result.push(entry);
-      } else {
-        collectRequestedPaths(entry, result);
-      }
-    }
-  }
-
-  if (Array.isArray(record.changes)) {
-    for (const entry of record.changes) {
-      collectRequestedPaths(entry, result);
-    }
-  }
-
-  for (const [key, entry] of Object.entries(record)) {
-    if (key === 'path' || key === 'paths' || key === 'changes') {
-      continue;
-    }
-    collectRequestedPaths(entry, result);
-  }
-
-  return result;
-}
-
-function isWorkspacePath(workspace: string, filePath: string) {
-  const normalizedWorkspace = resolve(workspace);
-  const normalizedPath = isAbsolute(filePath)
-    ? resolve(filePath)
-    : resolve(normalizedWorkspace, filePath);
-  const relativePath = relative(normalizedWorkspace, normalizedPath);
-  return relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath));
-}
-
-function isWorkspaceScopedFileChangeRequest(params: unknown, cwd: string) {
-  const paths = collectRequestedPaths(params);
-  return paths.length > 0 && paths.every((path) => isWorkspacePath(cwd, path));
 }
 
 function currentTurnStatus(params: unknown) {
@@ -446,15 +381,6 @@ export class CodexProxyService {
         'approval.respond',
         'session.snapshot',
         'session.close',
-        // TTY family — codex CLI runtime mode. Routed through
-        // TtyCodexService (separate from this structured service); kept
-        // in DEFERRED_PROXY_METHODS on the host side because they don't
-        // belong in the structured shared PROXY_METHODS registry.
-        'tty.start',
-        'tty.input',
-        'tty.resize',
-        'tty.replay',
-        'tty.kill',
         'shutdown',
       ],
     };
@@ -1351,20 +1277,6 @@ export class CodexProxyService {
       turnId: context?.turnId,
       data: approval,
       rawRuntimeEvent: message,
-    });
-  }
-
-  private async respondAutomatically(session: SessionRecord, message: RuntimeServerRequest, accepted: boolean) {
-    if (message.method === 'item/permissions/requestApproval') {
-      await this.runtime.respond(message.id, {
-        permissions: accepted ? requestedPermissionsFromParams(message.params) : {},
-        scope: 'turn',
-      });
-      return;
-    }
-
-    await this.runtime.respond(message.id, {
-      decision: accepted ? 'accept' : 'decline',
     });
   }
 

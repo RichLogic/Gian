@@ -10,7 +10,7 @@
  * so it is NOT styled here. No shared tokens or global rules touched.
  * ==========================================================================*/
 
-/* ---- Sidebar: Task / Subtask rows (prototype: app.css .task-row/.subtask-row) ---- */
+/* ---- Sidebar: Task rows (prototype: app.css .task-row) ---- */
 .task-row {
   display: flex;
   align-items: center; /* single-line: circle + title on the same baseline */
@@ -19,43 +19,16 @@
 }
 .task-row .ri-body { flex: 1 1 auto; min-width: 0; }
 
-.subtask-row {
-  display: flex;
-  align-items: flex-start;
-  /* left indent = task content start (8 pad + 18 toggle + 6 gap = 32) so the
-     subtask title lines up exactly under the parent task's title. */
-  padding: 5px 8px 6px 32px;
-  gap: 6px;
-  position: relative;
-}
-.subtask-row .ri-body { flex: 1 1 auto; min-width: 0; }
-/* Vertical guide line connecting nested subtasks to their parent. */
-.subtask-row::before {
-  content: "";
-  position: absolute;
-  left: 14px; top: 0; bottom: 0;
-  width: 1px;
-  background: var(--hairline);
-}
-.subtask-row .ri-title { font-weight: 500; }
-.subtask-row .ri-row2 { padding-right: 8px; }
-.subtask-row.active { background: var(--accent-soft); }
-.subtask-row.active .ri-title { color: var(--accent-text); }
+/* Subtask (child) rows are plain `.session-row`s — identical to Projects
+   session rows by construction (components.css), so nothing is styled here.
+   `.session-row .ri-row1` already reserves 38px for the row-end glyph; a done
+   task row carries no row-end glyph, so it needs no reservation. */
 
-/* Reserve room on the title row for the absolutely-positioned status indicator
-   (.ri-status: 16px at top:8/right:8) so a long title ellipsizes cleanly
-   instead of sliding under the spinner. Subtask rows always carry a StatusIcon;
-   task rows show the Manager running spinner (issue #1). */
-/* Reserve room for the row-end status glyph OR the compact time (shortAge). */
-.subtask-row .ri-row1,
-.task-row .ri-row1 { padding-right: 34px; }
-
-/* Inline empty-state for a selected task with no subtasks yet. */
-.tasks-empty-subs {
-  padding: 4px 8px 8px 28px;
-  font: var(--fz-12)/1.4 var(--font-sans);
-  color: var(--text-3);
-}
+/* Task group header — modeled on the Sessions rail's `.sb-group` (gian-v2.css):
+   the pin glyph stays faint (text-3) while collapsed and goes dark once the
+   group is open (未展开透明，展开深色). */
+.task-group .task-group-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-group.open .sb-group-ico { color: var(--text); }
 
 /* ---- Done toggle (Reminders-style checkbox at row start) ---- */
 .done-toggle {
@@ -88,21 +61,6 @@
 }
 /* Extra hover animation on the circle — a gentle pulse signalling it's actionable. */
 @keyframes dt-hover-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.14); } }
-/* Open task with N subtasks that need you: the circle carries the count in the
-   accent colour, overlaid on the (invisible) check glyph. On hover the count
-   fades and the check reveals — preserving the "click to mark done" affordance. */
-.done-toggle.has-count {
-  border-color: var(--accent);
-}
-.done-toggle .dt-count {
-  position: absolute;
-  inset: 0;
-  display: flex; align-items: center; justify-content: center;
-  font: 700 10px/1 var(--font-mono);
-  color: var(--accent);
-  transition: opacity 120ms var(--ease);
-}
-.done-toggle.has-count:hover .dt-count { opacity: 0; }
 
 /* Hover the circle = preview "mark done": strike the task title left→right.
    Open tasks only (done tasks already show a static strike). */
@@ -123,32 +81,6 @@
 }
 .task-row:not(.status-done) .done-toggle:hover ~ .ri-body .ri-title::after { width: 100%; }
 
-/* Pinned-task badge: a small accent pushpin before the title (pinned tasks sort
-   to the top; the badge says why). flex:none so it never shrinks. */
-.task-pin-badge {
-  display: inline-flex; align-items: center; flex: none;
-  margin-right: 4px;
-  color: var(--accent);
-}
-
-/* Codex-style collapse caret: after the title, revealed on row hover. When the
-   task is COLLAPSED it stays faintly visible so the row advertises it can be
-   expanded even without hovering. */
-.task-collapse-toggle {
-  flex: none;
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 18px; height: 18px;
-  padding: 0; margin: 0 0 0 2px;
-  border: none; background: none; cursor: pointer;
-  color: var(--text-3);
-  opacity: 0;
-  transition: opacity 120ms var(--ease), color 120ms var(--ease);
-}
-.task-row:hover .task-collapse-toggle { opacity: 0.6; }
-.task-collapse-toggle:hover { opacity: 1; color: var(--text); }
-.task-collapse-toggle[aria-expanded="false"] { opacity: 0.5; }
-.task-row:hover .task-collapse-toggle[aria-expanded="false"] { opacity: 0.85; }
-
 @media (prefers-reduced-motion: reduce) {
   .done-toggle:hover { animation: none; }
   .task-row .ri-title::after { transition: none; }
@@ -158,9 +90,7 @@
  * A subtask IS a session; completing it (POST /api/sessions/:id/complete) is
  * one-way — there is no reopen endpoint — so the done toggle is disabled once
  * done and must NOT show the parent task's hover/revert affordance. The toggle
- * is slightly smaller than a task's and sits INSIDE the row's 28px left indent
- * (see `.subtask-row` above) so the subtask stays visibly nested under its
- * parent — its toggle starts ~20px to the right of the parent task's toggle. */
+ * is slightly smaller than a task's. */
 .subtask-done-toggle {
   width: 16px; height: 16px;
   /* Square (vs the parent task's round toggle) so subtask vs task reads at a
@@ -175,17 +105,6 @@
   background: var(--ok);
   color: var(--surface);
 }
-
-/* Strikethrough + muted title for done TASK rows in the sidebar. Scoped to
-   exclude subtask rows: a subtask whose *turn* finished (status-done) is NOT
-   "completed" and must never be struck through (completion is a separate user
-   flag, and even that no longer strikes — see `.subtask-row.subtask-done`). */
-.rail-item.status-done:not(.subtask-row) .ri-title {
-  text-decoration: line-through;
-  text-decoration-thickness: 1px;
-  color: var(--text-3);
-}
-.rail-item.status-done:not(.subtask-row).active .ri-title { color: var(--accent-text); }
 
 /* ---- Manager main pane chrome (prototype: .manager-eyebrow / .manager-task-name) ---- */
 .manager-eyebrow {
@@ -419,9 +338,10 @@
 
 /* §B — user-completed subtask (completed_at set via "Mark complete"): struck
    through + greyed. This is the *user completion* flag only — a finished TURN
-   (status-done) is NOT struck (that rule is scoped `:not(.subtask-row)` above). */
-.rail-item.subtask-row.subtask-done { opacity: 0.6; }
-.rail-item.subtask-row.subtask-done .ri-title {
+   (status-done) is NOT struck; subtask rows no longer carry a `status-*`
+   class at all. */
+.rail-item.subtask-done { opacity: 0.6; }
+.rail-item.subtask-done .ri-title {
   text-decoration: line-through;
   color: var(--text-3);
 }

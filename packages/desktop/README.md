@@ -17,8 +17,11 @@ web UI. It does not embed or replace the Gian host:
 ## Commands
 
 ```sh
-# Start the full GianDev stack, including Electron.
+# Start the isolated 8991/5191 stack, wait for readiness, then open GianDev.app.
 pnpm dev
+
+# Start the same hot-reload stack without opening Electron.
+pnpm dev:web
 
 # Start only the Electron shell after 8991/5191 are already running.
 pnpm desktop:dev

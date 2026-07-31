@@ -128,10 +128,6 @@ export function loadConfig(db: Db): SystemConfig {
     host: process.env.GIAN_HOST ?? map.get('host') ?? '127.0.0.1',
     port: Number(process.env.GIAN_PORT ?? map.get('port') ?? 8990),
     workspace_root: map.get('workspace_root') ?? '~/Coding',
-    public_url: map.get('public_url') ?? '',
-    tunnel_mode: (map.get('tunnel_mode') ?? 'none') as SystemConfig['tunnel_mode'],
-    tunnel_id: map.get('tunnel_id') ?? '',
-    force_https: map.get('force_https') === 'true',
     theme,
     accent,
     density: (map.get('density') ?? 'cozy') as SystemConfig['density'],
@@ -151,6 +147,5 @@ export function loadConfig(db: Db): SystemConfig {
     auth_username: map.get('auth_username') ?? '',
     external_editors: externalEditors,
     open_apps: openApps,
-    codex_chat_cli: map.get('codex_chat_cli') === 'true',
   };
 }

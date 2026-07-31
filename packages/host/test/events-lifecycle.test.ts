@@ -36,13 +36,13 @@ function seedSession(
   const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO sessions
-      (id, name, type, workspace_id, executor, model, approval_mode, turns,
+      (id, name, type, workspace_id, executor, model, approval_mode,
        active_channel, status, archived,
        worktree_path, branch, base_branch, worktree_outcome,
        native_session_id, last_accessed_at,
        created_at, updated_at)
      VALUES
-      (?, ?, 'coding', ?, 'claude', NULL, 'ask', 1,
+      (?, ?, 'coding', ?, 'claude', NULL, 'ask',
        'web', 'idle', ?,
        NULL, NULL, NULL, NULL,
        ?, ?,

@@ -1,22 +1,20 @@
 // Coverage for traceability row:
-//   ERR-016 — Slack manifest register/unregister must preserve commands
-//             outside the bot's prefix and must surface Slack API errors
-//             as named exceptions instead of swallowing them.
+//   ERR-016 — Slack manifest registration must preserve commands outside the
+//             bot's prefix and surface Slack API errors as named exceptions
+//             instead of swallowing them.
 //
 // Pure unit + a `globalThis.fetch` stub so we never reach api.slack.com.
 // We assert two things:
 //   1. The manifest the proxy POSTs back contains the preserved + new
-//      command set (register) and only the preserved set (unregister).
-//   2. Non-ok responses cause register/unregister to throw with the
+//      command set.
+//   2. Non-ok responses cause registration to throw with the
 //      operator-visible error text from the Slack response payload.
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
   registerSlackCommands,
-  unregisterSlackCommands,
   slackCommandNames,
-  parseSlackCommandAction,
 } from '../src/im/slack/manifest.ts';
 
 interface RecordedCall {
@@ -86,25 +84,6 @@ test('ERR-016: slackCommandNames produces the full /<prefix>-<action> list', () 
     '/eva00-stop',
     '/eva00-status',
   ]);
-});
-
-test('ERR-016: parseSlackCommandAction returns null for non-prefix or non-action commands', () => {
-  assert.equal(parseSlackCommandAction('/help', 'eva00'), null,
-    'non-prefix slash commands must not be misclassified');
-  assert.equal(parseSlackCommandAction('/eva00-mystery', 'eva00'), null,
-    'unknown action under a known prefix must still be rejected');
-  assert.equal(parseSlackCommandAction('/other-new', 'eva00'), null,
-    'matching prefix is required, not just the suffix');
-});
-
-test('ERR-016: parseSlackCommandAction recognizes each declared action', () => {
-  for (const action of ['new', 'switch', 'alter', 'stop', 'status'] as const) {
-    assert.equal(parseSlackCommandAction(`/eva00-${action}`, 'eva00'), action);
-  }
-});
-
-test('ERR-016: parseSlackCommandAction tolerates commands without leading slash', () => {
-  assert.equal(parseSlackCommandAction('eva00-new', 'eva00'), 'new');
 });
 
 // ---------------------------------------------------------------------------
@@ -229,73 +208,5 @@ test('ERR-016: registerSlackCommands surfaces HTTP error from the underlying fet
     );
   } finally {
     globalThis.fetch = original;
-  }
-});
-
-// ---------------------------------------------------------------------------
-// unregisterSlackCommands
-// ---------------------------------------------------------------------------
-
-test('ERR-016: unregisterSlackCommands strips only this prefix and keeps everything else', async () => {
-  const stub = installFetchStub({
-    exportResponse: {
-      ok: true,
-      manifest: {
-        features: {
-          slash_commands: [
-            { command: '/help', description: 'Show help' },
-            { command: '/eva00-new', description: 'Eva' },
-            { command: '/other-status', description: 'Other status' },
-            { command: '/eva00-stop', description: 'Stop' },
-          ],
-        },
-      },
-    },
-    updateResponse: { ok: true },
-  });
-  try {
-    await unregisterSlackCommands({ configToken: 'x', appId: 'A1', prefix: 'eva00' });
-    const update = stub.calls.find((c) => c.url.endsWith('apps.manifest.update'));
-    const features = ((update!.body.manifest as Record<string, unknown>).features) as Record<string, unknown>;
-    const commands = features.slash_commands as Array<{ command: string }>;
-    const names = commands.map((c) => c.command).sort();
-    assert.deepEqual(names, ['/help', '/other-status'].sort(),
-      'unregister keeps everything that does not start with /<prefix>-');
-  } finally {
-    stub.restore();
-  }
-});
-
-test('ERR-016: unregisterSlackCommands surfaces export AND update failures as named errors', async () => {
-  // export fails
-  {
-    const stub = installFetchStub({
-      exportResponse: { ok: false, error: 'missing_scope' },
-      updateResponse: { ok: true },
-    });
-    try {
-      await assert.rejects(
-        () => unregisterSlackCommands({ configToken: 'x', appId: 'A1', prefix: 'eva00' }),
-        /Failed to export Slack manifest:.*missing_scope/,
-      );
-    } finally {
-      stub.restore();
-    }
-  }
-
-  // update fails
-  {
-    const stub = installFetchStub({
-      exportResponse: { ok: true, manifest: { features: { slash_commands: [] } } },
-      updateResponse: { ok: false, error: 'denied' },
-    });
-    try {
-      await assert.rejects(
-        () => unregisterSlackCommands({ configToken: 'x', appId: 'A1', prefix: 'eva00' }),
-        /Failed to update Slack manifest:.*denied/,
-      );
-    } finally {
-      stub.restore();
-    }
   }
 });

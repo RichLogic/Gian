@@ -56,7 +56,7 @@ export interface ProxyClient {
    * codex-proxy implements this via the app-server `thread/name/set` RPC so
    * the name shows in `codex resume` / Codex app listings. cc-proxy does NOT
    * implement it — Claude's display name is set host-side (a `--name` flag on
-   * the first turn / TTY spawn, or by appending a `custom-title` line to the
+   * the first turn, or by appending a `custom-title` line to the
    * session JSONL on rename), so the method is optional.
    */
   setName?(name: string): Promise<void>;

@@ -24,7 +24,7 @@ test('openDatabase runs migrations and creates expected tables', () => {
       'turns',
       'events',
       'approvals',
-      'queue',
+      'queue_entries',
       'bots',
       'config',
       'migrations',
@@ -33,6 +33,13 @@ test('openDatabase runs migrations and creates expected tables', () => {
       'task_actions',
     ]) {
       assert.ok(names.includes(expected), `missing table ${expected}`);
+    }
+    assert.ok(!names.includes('queue'), 'legacy queue table should be removed');
+    assert.ok(!names.includes('tokens'), 'unused API-token table should be removed');
+    const sessionColumns = (db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>)
+      .map(column => column.name);
+    for (const retired of ['runtime_mode', 'turns', 'tty_turn_seq']) {
+      assert.ok(!sessionColumns.includes(retired), `retired session column still exists: ${retired}`);
     }
     db.close();
   } finally {
@@ -76,7 +83,7 @@ test('migration 028 creates task_loops / task_actions with expected columns and 
     // action_id is the primary key → duplicate insert rejected (idempotency floor).
     db.exec("INSERT INTO tasks(id,name,status,created_at,updated_at) VALUES('t1','T','open',datetime('now'),datetime('now'))");
     db.exec("INSERT INTO workspaces(id,name,path,sort_order,hidden,created_at,updated_at) VALUES('w1','w','/tmp',0,0,datetime('now'),datetime('now'))");
-    db.exec("INSERT INTO sessions(id,name,type,task_id,workspace_id,executor,approval_mode,turns,status,archived,unread,native_session_id,runtime_mode,created_at,updated_at) VALUES('s1',NULL,'subtask','t1','w1','claude','plan',0,'new',0,0,'','structured',datetime('now'),datetime('now'))");
+    db.exec("INSERT INTO sessions(id,name,type,task_id,workspace_id,executor,approval_mode,status,archived,unread,native_session_id,created_at,updated_at) VALUES('s1',NULL,'subtask','t1','w1','claude','plan','new',0,0,'',datetime('now'),datetime('now'))");
     db.exec("INSERT INTO task_loops(id,task_id,current_step_session_id) VALUES('l1','t1','s1')");
     db.exec("INSERT INTO task_actions(action_id,task_id,session_id,method,payload_hash,payload) VALUES('a1','t1','s1','submit_step','ph','{}')");
     assert.throws(
@@ -268,8 +275,6 @@ test('loadConfig returns defaults from seeded config rows', () => {
     assert.equal(cfg.theme, 'warm');
     assert.equal(cfg.density, 'cozy');
     assert.equal(cfg.locale, 'zh-CN');
-    assert.equal(cfg.force_https, false);
-    assert.equal(cfg.tunnel_mode, 'none');
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -282,11 +287,9 @@ test('loadConfig reads overridden values', () => {
     const db = openDatabase(dir);
     db.prepare('UPDATE config SET value = ? WHERE key = ?').run('0.0.0.0', 'host');
     db.prepare('UPDATE config SET value = ? WHERE key = ?').run('9999', 'port');
-    db.prepare('UPDATE config SET value = ? WHERE key = ?').run('true', 'force_https');
     const cfg = loadConfig(db);
     assert.equal(cfg.host, '0.0.0.0');
     assert.equal(cfg.port, 9999);
-    assert.equal(cfg.force_https, true);
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

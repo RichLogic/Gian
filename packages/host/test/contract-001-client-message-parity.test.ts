@@ -11,9 +11,7 @@
 // — either the handler stopped getting touched, or someone added a wire
 // type without wiring its server side.
 //
-// The whitelist is the bridge for known-deferred messages; updating it
-// requires the same review as updating the matrix row, which is why this
-// test exists.
+// There are no deferred client messages: every declared shape is handled.
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
@@ -24,24 +22,10 @@ const WEB_TS = resolve('../shared/src/web.ts');
 const WS_HANDLER_TS = resolve('src/web/ws-handler.ts');
 
 // ---------------------------------------------------------------------------
-// Whitelist — message types declared in shared but intentionally not yet
-// wired in ws-handler. Update this together with the matrix.
+// Keep the empty whitelist machinery so any future exception is explicit.
 // ---------------------------------------------------------------------------
 
-const UNIMPLEMENTED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> = [
-  // `session:select` is a client-side UX hint; the host doesn't track per-
-  // client selection and the wire frame is a no-op. Kept declared so the
-  // client can still send it during navigation without warnings.
-  { type: 'session:select', reason: 'client-side selection hint; host has no per-client cursor.' },
-  // The next four are explicit GAPs in the CONTRACT-001 matrix row. They
-  // have a wire shape because the original M2 plan included them; the
-  // handler stubs were never written. They stay declared so the contract
-  // test fails loud if someone implements them without updating the matrix.
-  { type: 'session:reset', reason: 'M2 stub; not implemented in ws-handler.' },
-  { type: 'session:takeover', reason: 'M3 IM router relic; not implemented in ws-handler.' },
-  { type: 'slash:execute', reason: 'M2 slash plumbing stub; not implemented in ws-handler.' },
-  { type: 'transcript:load_more', reason: 'M2 history paging stub; not implemented in ws-handler.' },
-];
+const UNIMPLEMENTED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> = [];
 
 // ---------------------------------------------------------------------------
 // Extractors

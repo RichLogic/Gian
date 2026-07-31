@@ -1,81 +1,83 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ApprovalDecision, ApprovalMode, Bot, EventEnvelope, Executor, InputItem, RunnerInfo, RuntimeMode, ServerToClientMessage, Session, Task, Workspace } from '@gian/shared';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { Bot, RunnerInfo, Session, Task, Workspace } from '@gian/shared';
 import { LocaleProvider } from './i18n/index.js';
 import { EN } from './i18n/en.js';
 import { ZH } from './i18n/zh.js';
 import type { WsState } from './ws.js';
 import { GianWs } from './ws.js';
-import { makeWsUrl, loadWorkspaces, loadSessions, loadTasks, loadEvents, loadSettings, loadWorkingTrees, loadBots, loadFile, loadDiff, fetchWsToken, loadRepoInfo, loadApps, loadAllFiles, openFileWith, openFileWithApp, openFileBuiltin } from './api.js';
-import type { ChangeScope } from './api.js';
+import {
+  fetchWsToken,
+  loadBots,
+  loadSettings,
+  loadWorkingTrees,
+  loadWorkspaces,
+  makeWsUrl,
+  reopenSubtask,
+} from './api.js';
 import { injectComposerDraft } from './components/Composer.js';
 import type { WorkingTree } from './api.js';
-import type { SheetOpenWith } from './components/Sheet.js';
-import { buildFileRefIndex, makeFileLinkifyRehype } from './transcript/linkify-files.js';
 import { FileRefRehypeContext } from './transcript/items.js';
-import { longestRootMatch } from './utils/paths.js';
-import {
-  applyEnvelope,
-  applyErrorEnvelopeToSession,
-  applyPlanLifecycle,
-  createOptimisticEcho,
-  nextPendingFromEnvelope,
-  type PlanLifecycleState,
-} from './transcript/apply.js';
-import { loadNotificationPrefs, maybeNotifyForEnvelope } from './notifications.js';
-import {
-  applyApprovalCreated,
-  clearSessionError,
-  ingestEnvelope,
-  reconcileFromSync,
-  removeApproval,
-  removeSession as removeInboxSession,
-  type InboxItem,
-} from './inbox.js';
+import type { PlanLifecycleState } from './transcript/apply.js';
 import { DiffOpenContext, FileLinkOpenContext, ImageZoomContext, PlanOpenContext } from './transcript/items.js';
 import { ImageLightbox, type ZoomImage } from './components/ImageLightbox.js';
 import { Topbar } from './components/Topbar.js';
-import type { Mode, ViewState } from './components/Topbar.js';
-import type { PathSegment, SessionMenuActions } from './components/PathBreadcrumb.js';
+import type { Mode } from './components/Topbar.js';
 import { Dock } from './components/Dock.js';
 import { Toaster } from './components/Toaster.js';
-import { confirm as confirmDialog, toast } from './feedback.js';
-import { Sheet, IMAGE_EXTS, openCategoryFor } from './components/Sheet.js';
-import type { SheetTab, SheetGroup, RailId, FileViewMode } from './components/Sheet.js';
+import { toast } from './feedback.js';
 import { Splitter } from './components/Splitter.js';
 import { Inspector } from './components/Inspector.js';
-import { WorkspacesInspector, WorkspaceDetailBody } from './components/WorkspacesPanel.js';
 import { SettingsBody, SettingsNavInspector } from './components/SettingsBody.js';
 import type { NavKey } from './components/SettingsBody.js';
-import { Terminal, makeWorkbenchWire } from './components/Terminal.js';
+import { makeWorkbenchWire } from './components/terminal-wire.js';
 import { BrowserBody, browserHostOf } from './components/BrowserBody.js';
 import { ChatContextPanel } from './components/ChatContextPanel.js';
-import { CodingView, SessionMain } from './views/CodingView.js';
-import { SpacesView, NewWorkspacePanel } from './views/SpacesView.js';
-import { TasksView, ManagerInspector, managerCardContextNote, type NewSubtaskDraft, type ManagerSubtaskCard, type ManagerComposerHandlers } from './views/TasksView.js';
-import { BotsView } from './views/BotsView.js';
-import { FilesView } from './views/FilesView.js';
-import { CommandPalette } from './components/CommandPalette.js';
+import { SessionSurface } from './views/SessionSurface.js';
+import { NewWorkspacePanel } from './views/workspace-create.js';
+import { TasksView, ManagerInspector } from './views/TasksView.js';
 import type { SystemConfig } from '@gian/shared';
-import { stripManagerSystemPrefix, stripCreateSubtaskBlocks, wrapManagerContextNote, stripGianRolePrefix, stripGianActionBlocks } from '@gian/shared';
-import type { DiffItem, QueueEntry, TranscriptItem } from './types.js';
+import type { QueueEntry, TranscriptItem } from './types.js';
 import { applyGianIconAppearance } from './brand-icon.js';
 import {
   BrowserLinkOpenContext,
   ChatPanelOpenContext,
-  type ChatPanelRequest,
-  type ChatPanelTarget,
 } from './presentation/chat-panel.js';
-import {
-  isSessionCreateDispatchError,
-  planCreatedSessionFirstMessage,
-} from './session-routing.js';
-import { resolveFilePanelRoute } from './presentation/file-panel.js';
-import { attachmentInputItem, type ComposerAttachmentPayload } from './attachments.js';
+import { useSessionCommands } from './controllers/use-session-commands.js';
+import { useAppAuth } from './controllers/use-app-auth.js';
+import { useAppSocket } from './controllers/use-app-socket.js';
+import { useTranscriptHydration } from './controllers/use-transcript-hydration.js';
+import { useTopbarModel } from './controllers/use-topbar-model.js';
+import { useTaskManager } from './controllers/use-task-manager.js';
+import { useWorkbench } from './controllers/use-workbench.js';
+import { useAppShortcuts } from './controllers/use-app-shortcuts.js';
+import { useSessionSelection } from './controllers/use-session-selection.js';
+import { useWorkbenchLayout } from './controllers/use-workbench-layout.js';
+
+const CodingView = lazy(() =>
+  import('./views/CodingView.js').then(module => ({ default: module.CodingView })));
+const SpacesView = lazy(() =>
+  import('./views/SpacesView.js').then(module => ({ default: module.SpacesView })));
+const BotsView = lazy(() =>
+  import('./views/BotsView.js').then(module => ({ default: module.BotsView })));
+const FilesView = lazy(() =>
+  import('./views/FilesView.js').then(module => ({ default: module.FilesView })));
+const CommandPalette = lazy(() =>
+  import('./components/CommandPalette.js').then(module => ({ default: module.CommandPalette })));
+const Sheet = lazy(() =>
+  import('./components/Sheet.js').then(module => ({ default: module.Sheet })));
+const Terminal = lazy(() =>
+  import('./components/Terminal.js').then(module => ({ default: module.Terminal })));
+const WorkspacesInspector = lazy(() =>
+  import('./components/WorkspacesPanel.js').then(module => ({ default: module.WorkspacesInspector })));
+const WorkspaceDetailBody = lazy(() =>
+  import('./components/WorkspacesPanel.js').then(module => ({ default: module.WorkspaceDetailBody })));
+const LoginView = lazy(() =>
+  import('./views/LoginView.js').then(module => ({ default: module.LoginView })));
 
 export function App() {
-  // The token getter runs every reconnect. With Auth dropped in Phase 1, this
-  // always returns 'dev-token' (the WS handler accepts any non-empty token in
-  // unauthenticated mode).
+  const { status: authStatus, onLoginOk } = useAppAuth();
+  // The token getter runs every reconnect, after the HTTP login boundary has
+  // admitted the app shell.
   const ws = useMemo(
     () => new GianWs(makeWsUrl(), async () => (await fetchWsToken()) ?? ''),
     [],
@@ -88,7 +90,6 @@ export function App() {
   // workspace. Regular (non-worktree) sessions ride on the workspace's HEAD,
   // so SessionRow falls through to this when session.branch itself is null.
   // Refreshed on `workspace:git-updated` so external branch switches show up.
-  const [workspaceBranches, setWorkspaceBranches] = useState<Record<string, string | null>>({});
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   // ─── Tasks (PRD-v3) ───────────────────────────────────────────────────────
@@ -102,61 +103,14 @@ export function App() {
   // ManagerPanel unmount when you navigate between tasks/subtasks. Each card's
   // `acked` flag tracks whether its context note has been folded into a Manager
   // message yet.
-  const [managerCardsByTask, setManagerCardsByTask] = useState<Record<string, ManagerSubtaskCard[]>>({});
-  // Debug switch (early Manager bring-up): when ON, the Manager transcript shows
-  // the raw "plumbing" — the first-turn system prompt plus legacy
-  // create_subtask blocks / current action envelopes — instead of stripping
-  // them. Defaults ON; flip OFF once the Manager UX is trusted to restore the
-  // clean render. Persisted in localStorage.
-  const [showManagerRaw, setShowManagerRaw] = useState<boolean>(() => {
-    try { return localStorage.getItem('gian.manager.debugRaw') !== '0'; } catch { return true; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem('gian.manager.debugRaw', showManagerRaw ? '1' : '0'); } catch { /* ignore */ }
-  }, [showManagerRaw]);
   const [itemsBySession, setItemsBySession] = useState<Record<string, TranscriptItem[]>>({});
   const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
   const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
   const [mode, setMode] = useState<Mode>('tasks');
   const [workingTrees, setWorkingTrees] = useState<WorkingTree[]>([]);
-  // Installed apps for the Sheet's "Open with…" menu (macOS; [] elsewhere).
-  // Fetched once — the list is stable for a session.
-  const [apps, setApps] = useState<string[]>([]);
-  // ─── V2 Workbench (Sheet) state ─────────────────────────────────────────
-  const [wbTabs, setWbTabs] = useState<SheetTab[]>([]);
-  // Active tab per Sheet group — each dock rail remembers its own selection,
-  // so switching rails never loses your place. Terminals (and later browser
-  // iframes) stay mounted in their hidden group, keeping the tty alive.
-  const [activeTabByGroup, setActiveTabByGroup] = useState<Partial<Record<SheetGroup, string | null>>>({});
-  const [viewState, setViewState] = useState<ViewState>('main');
-  // ─── Dock rail state ────────────────────────────────────────────────────
-  // The right dock is a set of mutually-exclusive rails; each declares its
-  // panel combo (panel 2 = Sheet group, panel 3 = Inspector). Clicking the
-  // active rail collapses its panels and snapshots the scene into railMemory;
-  // clicking again restores it.
-  const [activeRail, setActiveRail] = useState<RailId | null>(null);
-  const [railMemory, setRailMemory] = useState<Partial<Record<RailId, { tabId: string | null }>>>({});
-  // ─── Panel-2 navigation history (Topbar back/forward) ───────────────────
-  // Pushed on rail switches and Sheet active-tab changes (consecutive dupes
-  // skipped); back/forward restore (rail, tab) without re-pushing.
-  const [navStack, setNavStack] = useState<Array<{ rail: RailId | null; tabId: string | null }>>([{ rail: null, tabId: null }]);
-  const [navIdx, setNavIdx] = useState(0);
-  const navSkipRef = useRef(false);
   // Active Settings section — owned here (controlled into SettingsBody +
   // SettingsNavInspector) so it survives rail collapse/restore.
   const [settingsSection, setSettingsSection] = useState<NavKey>('appearance');
-  // Manual panel-3 collapse (Topbar right button) — hides only the inspector,
-  // panel 2 stays. Persists across rail switches until toggled back.
-  const [p3Collapsed, setP3Collapsed] = useState(false);
-  // A file omitted from the current Files tree still uses the Files Sheet,
-  // but must not imply that it can be located in the inspector.
-  const [filesInspectorSuppressed, setFilesInspectorSuppressed] = useState(false);
-  const [fileReveal, setFileReveal] = useState<{
-    workingTreeId: string;
-    path: string;
-    requestId: number;
-  } | null>(null);
-  const fileRevealSeqRef = useRef(0);
   // Mirror of the left sidebar's collapsed state for the Topbar icon. The
   // views own the real state and listen for `gian.toggle-rail`; this button
   // is the only dispatcher, so the mirror can't drift.
@@ -168,9 +122,6 @@ export function App() {
   // Image tapped in a transcript bubble → shown in the in-app lightbox
   // (ImageZoomContext below), instead of opening a new browser tab.
   const [zoomImage, setZoomImage] = useState<ZoomImage | null>(null);
-  const [archivedSessions, setArchivedSessions] = useState<Session[]>([]);
-  const [archivedLoaded, setArchivedLoaded] = useState(false);
-  const [pathRenameActive, setPathRenameActive] = useState(false);
   const [runner, setRunner] = useState<RunnerInfo | null>(null);
   const pendingFirstMessageRef = useRef<string | null>(null);
   // True from `session:create` dispatch until `session:created` arrives. Drives
@@ -187,22 +138,6 @@ export function App() {
   const [planStateBySession, setPlanStateBySession] = useState<
     Record<string, PlanLifecycleState>
   >({});
-  // Plan/Agent detail belongs to a chat. It temporarily takes the panel-2
-  // slot without mutating the active dock rail, so closing it restores the
-  // rail's exact tabs and inspector.
-  const [chatPanel, setChatPanel] = useState<ChatPanelTarget | null>(null);
-
-  // Detail is owned by the chat it was opened from. Any primary chat
-  // navigation closes it; sidechat detail remains stable because opening a
-  // sidechat tab does not rewrite the primary session identity.
-  useEffect(() => {
-    setChatPanel(null);
-  }, [mode, activeSessionId, activeSubtaskId]);
-
-  useEffect(() => {
-    setFilesInspectorSuppressed(false);
-    setFileReveal(null);
-  }, [activeSessionId]);
 
   useEffect(() => {
     if (!systemConfig) return;
@@ -219,415 +154,48 @@ export function App() {
       systemConfig?.font_scale_code, systemConfig?.locale]);
 
   useEffect(() => {
+    if (authStatus !== 'authenticated') return;
     void loadSettings().then(cfg => { if (cfg) setSystemConfig(cfg); });
-  }, []);
+  }, [authStatus]);
 
   useEffect(() => {
+    if (authStatus !== 'authenticated') return;
     void loadBots().then(setBots);
-  }, []);
+  }, [authStatus]);
 
-  const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
-
-  useEffect(() => {
-    // ⌘⇧K toggles the command palette (plain ⌘K was reassigned to "create Codex
-    // child" — see the action-shortcuts effect below).
-    function onKeyDown(e: KeyboardEvent) {
-      const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.shiftKey && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        setPaletteOpen(o => !o);
-      }
-      if (e.key === 'Escape' && paletteOpen) {
-        setPaletteOpen(false);
-      }
-    }
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [paletteOpen]);
-
-  // Action shortcuts (documented in Settings → Shortcuts):
-  //   ⌘⏎  send the queued message now (active session, or the Task's Manager)
-  //   ⌘U  mark the active session as unread
-  //   ⌘J  spawn a Claude child — a subtask (Tasks/Manager view) or a fork of the
-  //   ⌘K  spawn a Codex child  active session ("fork from" semantics) otherwise
-  useEffect(() => {
-    // Fork the active session into a child of `executor`, OR (in the Manager
-    // view) open the create-subtask form preset to that executor.
-    function spawnChild(executor: 'claude' | 'codex') {
-      if (mode === 'tasks' && activeTaskId && !activeSubtaskId) {
-        window.dispatchEvent(new CustomEvent('gian:new-subtask', { detail: { executor } }));
-        return;
-      }
-      const session = activeSessionId
-        ? sessionsRef.current.find(s => s.id === activeSessionId) ?? null
-        : null;
-      if (!session) return;
-      const baseName = session.name && session.name.length > 0
-        ? session.name
-        : `session ${session.id.slice(0, 6)}`;
-      const isWorktree = session.worktree_path !== null;
-      setCreatingSession(true);
-      setForkingSession(true);
-      ws.send({
-        type: 'session:create',
-        workspace_id: session.workspace_id,
-        executor,
-        ...(session.approval_mode ? { approval_mode: session.approval_mode } : {}),
-        name: `${baseName} copy`,
-        ...(isWorktree
-          ? { mode: 'worktree', ...(session.base_branch ? { base_branch: session.base_branch } : {}) }
-          : { mode: 'regular' }),
-      });
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.defaultPrevented) return;
-      const mod = e.metaKey || e.ctrlKey;
-      if (!mod || e.shiftKey || e.altKey) return;
-      if (e.key === 'Enter') {
-        const sid = activeSessionId
-          ?? (mode === 'tasks' && activeTaskId && !activeSubtaskId
-            ? (sessionsRef.current.find(s => s.type === 'manager' && s.task_id === activeTaskId)?.id ?? null)
-            : null);
-        // ⌘/Ctrl+Enter drains the queue — Codex only. Claude/Kimi have no
-        // mid-turn injection, so "send now" while busy can't work and the
-        // button/shortcut is hidden for them.
-        const session = sid ? sessionsRef.current.find(s => s.id === sid) : undefined;
-        if (sid && session?.executor === 'codex') { e.preventDefault(); ws.send({ type: 'queue:send_now', session_id: sid }); }
-        return;
-      }
-      const k = e.key.toLowerCase();
-      if (k === 'u') {
-        if (activeSessionId) { e.preventDefault(); ws.send({ type: 'session:set_unread', session_id: activeSessionId, unread: true }); }
-      } else if (k === 'j') {
-        e.preventDefault(); spawnChild('claude');
-      } else if (k === 'k') {
-        e.preventDefault(); spawnChild('codex');
-      }
-    }
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [mode, activeSessionId, activeTaskId, activeSubtaskId, ws]);
-
-  const handleEnvelope = useCallback((env: EventEnvelope, executor: Executor) => {
-    const notifyingSession = sessionsRef.current.find(s => s.id === env.session_id) ?? null;
-    maybeNotifyForEnvelope(env, {
-      session: notifyingSession,
-      onClick: () => setActiveSessionId(env.session_id),
-    });
-    // Persistent in-app mirror of the same taxonomy: approval / error / done.
-    // Reads live prefs so Settings toggles take effect immediately; skips
-    // `done` for the session you're already looking at.
-    setInboxItems(prev => ingestEnvelope(prev, env, {
-      prefs: loadNotificationPrefs(),
-      activeSessionId: activeSessionIdRef.current,
-    }));
-
-    const nextPending = nextPendingFromEnvelope(env);
-    if (nextPending !== null) {
-      setPendingBySession(p => ({ ...p, [env.session_id]: nextPending }));
-    }
-    // Plan lifecycle is finalized by the same successful turn-end signal that
-    // closes terminal Agent runs. A later plan_update starts a fresh lifecycle.
-    if (env.event === 'plan_update' || env.event === 'turn_completed') {
-      setPlanStateBySession(prev => {
-        const current = prev[env.session_id] ?? { completed: false };
-        const next = applyPlanLifecycle(current, env);
-        return next === current ? prev : { ...prev, [env.session_id]: next };
-      });
-    }
-    setItemsBySession(prev => {
-      const list = prev[env.session_id] ?? [];
-      const next = applyEnvelope(list, env, executor);
-      return next === list ? prev : { ...prev, [env.session_id]: next };
-    });
-  }, []);
-
-  useEffect(() => {
-    ws.connect();
-
-    const offState = ws.onState((state, attempt) => {
-      setWsState(state);
-      setWsAttempt(attempt);
-      if (state !== 'open') setAuthed(false);
-    });
-
-    const off = ws.onMessage((msg: ServerToClientMessage) => {
-      switch (msg.type) {
-        case 'auth_ok':
-          setAuthed(true);
-          return;
-        case 'state_sync':
-          // Replaces the separate loadWorkspaces/loadSessions/loadBots/loadSettings
-          // initial fetches. On reconnect this also refreshes all app state.
-          setWorkspaces(msg.workspaces);
-          setSessions(msg.sessions);
-          setTasks(msg.tasks);
-          setBots(msg.bots);
-          setSystemConfig(msg.config);
-          setRunner(msg.runner);
-          // Rebuild actionable inbox items (pending approvals + errored
-          // sessions) from the snapshot. `done` is FYI and not reconstructed.
-          setInboxItems(reconcileFromSync(msg.approvals, msg.sessions));
-          return;
-        case 'session:created': {
-          setSessions(prev => [msg.session, ...prev.filter(s => s.id !== msg.session.id)]);
-          // Sidechat fork (client_tag 'sidechat'): bind the new side thread to
-          // a sidechat tab — never hijack the main chat's active session.
-          if (msg.client_tag === 'sidechat') {
-            setCreatingSession(false);
-            openSidechatTab(msg.session.id, msg.session);
-            return;
-          }
-          setActiveSessionId(msg.session.id);
-          setCreatingSession(false);
-          setForkingSession(false);
-          const pendingMsg = pendingFirstMessageRef.current;
-          pendingFirstMessageRef.current = null;
-          const firstMessagePlan = planCreatedSessionFirstMessage(
-            msg.session.executor,
-            pendingMsg,
-          );
-          if (firstMessagePlan.structuredText) {
-            // Seed the transcript with an optimistic echo of the first message
-            // so the user sees it immediately — the real `user_message` event
-            // reconciles it via applyEnvelope.
-            const optimistic = createOptimisticEcho({
-              sessionId: msg.session.id,
-              text: firstMessagePlan.structuredText,
-              exec: msg.session.executor,
-            });
-            setItemsBySession(prev => ({ ...prev, [msg.session.id]: [optimistic] }));
-            setPendingBySession(p => ({ ...p, [msg.session.id]: true }));
-            ws.send({ type: 'message:send', session_id: msg.session.id, text: firstMessagePlan.structuredText });
-          } else {
-            setItemsBySession(prev => ({ ...prev, [msg.session.id]: [] }));
-          }
-          return;
-        }
-        case 'session:updated': {
-          const partial = msg.session;
-          // A background turn that finished while the user is already viewing
-          // this session shouldn't stay unread — clear it straight back. (The
-          // sidebar dot is also suppressed for the active row, but this keeps
-          // the persisted DB flag correct after a reload.) The resulting
-          // unread:0 broadcast merges harmlessly and doesn't re-trigger.
-          //
-          // Gate on a terminal status so this ONLY undoes auto-unread from turn
-          // completion (which always carries status). A manual "Mark as unread"
-          // broadcasts `unread:1` alone — that must persist on the active
-          // session so the dot appears once the user navigates away.
-          const fromTurnEnd = partial.status === 'done' || partial.status === 'error';
-          if (partial.unread === 1 && fromTurnEnd && partial.id === activeSessionIdRef.current) {
-            ws.send({ type: 'session:set_unread', session_id: partial.id, unread: false });
-          }
-          if (partial.status === 'running' || partial.status === 'pending') {
-            setPendingBySession(p => ({ ...p, [partial.id]: true }));
-            // Recovered out of the error state — drop its inbox error row.
-            setInboxItems(prev => clearSessionError(prev, partial.id));
-          } else if (partial.status === 'done' || partial.status === 'error') {
-            setPendingBySession(p => ({ ...p, [partial.id]: false }));
-            if (partial.status === 'done') setInboxItems(prev => clearSessionError(prev, partial.id));
-          }
-          // archive flag flipping moves the row between active and archived
-          // lists. We don't have the full session shape on partial updates,
-          // so when archived flips we re-fetch the list it's joining.
-          const archivingNow = partial.archived === 1;
-          const unarchivingNow = partial.archived === 0;
-          if (archivingNow) {
-            const moved = sessionsRef.current.find(s => s.id === partial.id);
-            setSessions(prev => prev.filter(s => s.id !== partial.id));
-            if (moved) {
-              setArchivedSessions(prev => {
-                const merged = { ...moved, ...partial };
-                const others = prev.filter(s => s.id !== merged.id);
-                return [merged, ...others];
-              });
-            }
-          } else if (unarchivingNow) {
-            setArchivedSessions(prev => prev.filter(s => s.id !== partial.id));
-            setSessions(prev => {
-              const existing = prev.find(s => s.id === partial.id);
-              if (existing) return prev.map(s => (s.id === partial.id ? { ...s, ...partial } : s));
-              const fromArchived = archivedSessionsRef.current.find(s => s.id === partial.id);
-              return fromArchived ? [{ ...fromArchived, ...partial }, ...prev] : prev;
-            });
-          } else {
-            setSessions(prev => prev.map(s => (s.id === partial.id ? { ...s, ...partial } : s)));
-            setArchivedSessions(prev => prev.map(s => (s.id === partial.id ? { ...s, ...partial } : s)));
-          }
-          return;
-        }
-        case 'session:native-config':
-          setSessions(prev => prev.map(session =>
-            session.id === msg.session_id
-              ? {
-                  ...session,
-                  executor_config: msg.state,
-                  native_config_options: msg.options,
-                }
-              : session));
-          setArchivedSessions(prev => prev.map(session =>
-            session.id === msg.session_id
-              ? {
-                  ...session,
-                  executor_config: msg.state,
-                  native_config_options: msg.options,
-                }
-              : session));
-          return;
-        case 'session:slash-commands':
-          window.dispatchEvent(new CustomEvent('gian:session-slash-commands', {
-            detail: {
-              sessionId: msg.session_id,
-              commands: msg.commands,
-            },
-          }));
-          return;
-        case 'session:deleted':
-          setSessions(prev => prev.filter(s => s.id !== msg.session_id));
-          setArchivedSessions(prev => prev.filter(s => s.id !== msg.session_id));
-          setActiveSessionId(prev => (prev === msg.session_id ? null : prev));
-          setInboxItems(prev => removeInboxSession(prev, msg.session_id));
-          return;
-        // ── Tasks (PRD-v3) — mirror the session:* handlers above. ──
-        case 'task:created':
-          setTasks(prev => [msg.task, ...prev.filter(t => t.id !== msg.task.id)]);
-          setActiveTaskId(msg.task.id);
-          setActiveSubtaskId(null);
-          return;
-        case 'task:updated': {
-          const partial = msg.task;
-          setTasks(prev => prev.map(t => (t.id === partial.id ? { ...t, ...partial } : t)));
-          return;
-        }
-        case 'task:deleted':
-          setTasks(prev => prev.filter(t => t.id !== msg.task_id));
-          setActiveTaskId(prev => (prev === msg.task_id ? null : prev));
-          setActiveSubtaskId(null);
-          return;
-        case 'queue:updated':
-          setQueueBySession(prev => ({ ...prev, [msg.session_id]: msg.queue }));
-          return;
-        case 'approval:created':
-          // Structured approvals also flow as `approval_requested` envelopes;
-          // both converge on the same approvalId so this self-dedups. Carries
-          // the authoritative status so auto-approved ones don't linger.
-          setInboxItems(prev => applyApprovalCreated(prev, msg.approval, loadNotificationPrefs(), Date.now()));
-          return;
-        case 'approval:updated':
-          setInboxItems(prev => removeApproval(prev, msg.approval.id));
-          return;
-        case 'event': {
-          const sess = sessionsRef.current.find(s => s.id === msg.session_id);
-          handleEnvelope(msg, sess?.executor ?? 'claude');
-          return;
-        }
-        case 'runner:updated':
-          setRunner(prev => prev ? { ...prev, ...msg.runner } : (msg.runner as RunnerInfo));
-          return;
-        case 'error':
-          // Server-side dispatch failure (e.g. message:send threw before any
-          // turn was persisted). Alert the user so the failure isn't silent,
-          // and mark any optimistic user echo for this session as failed so
-          // the transcript reflects the reject state.
-          // Only a rejected normal send owns an optimistic echo and starts a
-          // new pending turn. Steer/queue/approval failures happen while the
-          // existing turn may still be running, so clearing pending there
-          // would hide a live spinner.
-          if (msg.session_id && msg.code === 'MESSAGE_SEND_FAILED') {
-            const sid = msg.session_id;
-            setItemsBySession(prev => {
-              const delta = applyErrorEnvelopeToSession(prev[sid], sid);
-              if (!delta || delta.items === prev[sid]) return prev;
-              return { ...prev, [sid]: delta.items };
-            });
-            setPendingBySession(p => ({ ...p, [sid]: false }));
-          }
-          if (isSessionCreateDispatchError(msg)) {
-            setCreatingSession(false);
-            setForkingSession(false);
-          }
-          toast({ kind: 'error', title: msg.code, message: msg.message });
-          return;
-      }
-    });
-    // Fallback: if state_sync doesn't arrive (old host), keep REST fetches.
-    void Promise.all([loadWorkspaces(), loadSessions(), loadTasks()]).then(([w, ss, ts]) => {
-      setWorkspaces(prev => prev.length > 0 ? prev : w);
-      setSessions(prev => prev.length > 0 ? prev : ss);
-      setTasks(prev => prev.length > 0 ? prev : ts);
-    });
-    return () => { off(); offState(); };
-  }, [ws, handleEnvelope]);
-
-  // Workspace current_branch fetcher — hits /repo-info for each workspace and
-  // caches into workspaceBranches. Used by SessionRow as a fallback when the
-  // session itself isn't a worktree.
-  const fetchWorkspaceBranch = useCallback(async (wsId: string) => {
-    const info = await loadRepoInfo(wsId);
-    setWorkspaceBranches(prev => ({ ...prev, [wsId]: info?.git?.currentBranch ?? null }));
-  }, []);
-
-  // Backfill branches for every known workspace whenever the list changes.
-  // The fetcher itself deduplicates by overwriting, so re-runs are cheap.
-  useEffect(() => {
-    for (const w of workspaces) void fetchWorkspaceBranch(w.id);
-  }, [workspaces, fetchWorkspaceBranch]);
-
-  // Refresh on `workspace:git-updated` (fetch / branch-created / merge / drop /
-  // session-deleted / worktree-created). Any of those can change HEAD.
-  useEffect(() => {
-    const off = ws.onMessage(msg => {
-      if (msg.type === 'workspace:git-updated') {
-        void fetchWorkspaceBranch(msg.workspace_id);
-      }
-    });
-    return off;
-  }, [ws, fetchWorkspaceBranch]);
 
   // We need the latest sessions list when handling events (to look up executor).
   const sessionsRef = useRef<Session[]>([]);
   useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
   const workspacesRef = useRef<Workspace[]>([]);
   useEffect(() => { workspacesRef.current = workspaces; }, [workspaces]);
-  // Latest Manager cards for the stable onManagerSend callback (reads unacked
-  // cards to fold into the next message's hidden context).
-  const managerCardsByTaskRef = useRef(managerCardsByTask);
-  useEffect(() => { managerCardsByTaskRef.current = managerCardsByTask; }, [managerCardsByTask]);
-  const archivedSessionsRef = useRef<Session[]>([]);
-  useEffect(() => { archivedSessionsRef.current = archivedSessions; }, [archivedSessions]);
-  // Latest active session id for the inbox's "don't ping the session you're
-  // watching" rule — read inside the stable handleEnvelope callback.
+  // Latest active session id for stable event and unread handlers.
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
   useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);
 
-  // Hydrate transcript on first session view.
-  useEffect(() => {
-    if (!activeSessionId) return;
-    if (itemsBySession[activeSessionId] !== undefined) return;
-    const sess =
-      sessions.find(s => s.id === activeSessionId)
-      ?? archivedSessions.find(s => s.id === activeSessionId);
-    const exec = sess?.executor ?? 'claude';
-    void loadEvents(activeSessionId).then(events => {
-      const items = events.reduce<TranscriptItem[]>(
-        (acc, e) => applyEnvelope(acc, e, exec),
-        [],
-      );
-      const planState = events.reduce<PlanLifecycleState>(
-        (acc, event) => applyPlanLifecycle(acc, event),
-        { completed: false },
-      );
-      setItemsBySession(prev => ({ ...prev, [activeSessionId]: items }));
-      if (planState.text !== undefined) {
-        setPlanStateBySession(prev => ({ ...prev, [activeSessionId]: planState }));
-      }
-    });
-  }, [activeSessionId, itemsBySession, sessions, archivedSessions]);
+  useAppShortcuts({
+    authenticated: authStatus === 'authenticated',
+    mode,
+    activeSessionId,
+    activeTaskId,
+    activeSubtaskId,
+    sessionsRef,
+    ws,
+    paletteOpen,
+    setPaletteOpen,
+    setCreatingSession,
+    setForkingSession,
+  });
+  const hydrateTranscript = useTranscriptHydration({
+    activeSessionId,
+    sessions,
+    itemsBySession,
+    setItemsBySession,
+    setPlanStateBySession,
+  });
 
   const activeSession =
     sessions.find(s => s.id === activeSessionId)
-    ?? archivedSessions.find(s => s.id === activeSessionId)
     ?? null;
   const activeWorkspace = activeSession
     ? workspaces.find(w => w.id === activeSession.workspace_id) ?? null
@@ -636,645 +204,132 @@ export function App() {
   // Refresh working trees whenever the workspace or session set changes —
   // a new session with a worktree, or a merged/dropped one, changes the list.
   useEffect(() => {
+    if (authStatus !== 'authenticated') return;
     void loadWorkingTrees().then(setWorkingTrees);
-  }, [workspaces, sessions]);
+  }, [workspaces, sessions, authStatus]);
+
+  // Tracks the last auto-applied worktree detection — see the auto-switch
+  // effect next to appT below (appT is declared late in this component).
+  const wtAutoAppliedRef = useRef<{ sessionId: string; path: string } | null>(null);
 
   // Default working tree for the Files view: follow the focused session.
   // If a session has a live worktree, use it; otherwise use that session's
   // workspace primary tree; otherwise the first workspace.
-  function defaultWorkingTreeIdFor(sess: Session | null): string | null {
-    if (sess) {
-      if (sess.worktree_path) return `wt:${sess.id}`;
-      return `ws:${sess.workspace_id}`;
-    }
-    if (workspaces.length > 0) return `ws:${workspaces[0]!.id}`;
-    return null;
-  }
-
-  // Load the installed-apps list once for the Sheet "Open with…" menu.
-  useEffect(() => { void loadApps().then(setApps); }, []);
-
-  // Resolve a Sheet file tab's absolute path back to a (working tree, rel)
-  // pair, then route it to the host's open endpoint. Falls back to the
-  // `vscode://` handler for paths outside any known tree (mirrors
-  // openFileInSheet's own fallback).
-  // Dispatch a resolved open target for a known (wt, rel).
-  function dispatchOpen(wt: { id: string }, rel: string, target: SheetOpenWith): void {
-    if (target.kind === 'editor') { void openFileWith(wt.id, rel, target.id); return; }
-    if (target.kind === 'app') { void openFileWithApp(wt.id, rel, target.app); return; }
-    if (target.name === 'browser') {
-      window.open(`/api/working_trees/${encodeURIComponent(wt.id)}/raw?path=${encodeURIComponent(rel)}`, '_blank', 'noopener');
-      return;
-    }
-    void openFileBuiltin(wt.id, rel, target.name); // 'default' | 'finder' | 'terminal'
-  }
-
-  function handleOpenWith(tab: SheetTab, target: SheetOpenWith): void {
-    const abs = tab.fullPath;
-    if (!abs) return;
-    // Authoritative: the tab's own working tree id. Fallback: the longest root
-    // that actually contains `abs` (boundary-aware, longest wins) so a sibling
-    // root can never shadow the real one.
-    const wt = (tab.workingTreeId ? workingTrees.find(w => w.id === tab.workingTreeId) : undefined)
-      ?? longestRootMatch(workingTrees, abs);
-    if (!wt) {
-      window.open(`vscode://file/${encodeURI(abs)}`, '_blank', 'noopener');
-      return;
-    }
-    const rel = abs.slice(wt.path.replace(/\/+$/, '').length).replace(/^\/+/, '');
-    dispatchOpen(wt, rel, target);
-  }
-
-  // File index for the active working tree — powers auto-linkification of file
-  // mentions in transcript prose. Loaded once per working tree (the list is
-  // stable enough within a session; created/deleted files refresh on switch).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [fileIndexAbs, setFileIndexAbs] = useState<{
-    wtId: string;
-    paths: ReadonlySet<string>;
-    rehype: () => (tree: any) => void;
-  } | null>(null);
-  const fileIndexWtRef = useRef<string | null>(null);
-  useEffect(() => {
-    const wtId = defaultWorkingTreeIdFor(activeSession);
-    const wt = wtId ? workingTrees.find(w => w.id === wtId) : null;
-    if (!wtId || !wt) { fileIndexWtRef.current = null; setFileIndexAbs(null); return; }
-    if (fileIndexWtRef.current === wtId) return;
-    fileIndexWtRef.current = wtId;
-    const base = wt.path.replace(/\/+$/, '');
-    let cancelled = false;
-    void loadAllFiles(wtId).then(files => {
-      if (cancelled || fileIndexWtRef.current !== wtId) return;
-      const index = buildFileRefIndex(files, base);
-      setFileIndexAbs({
-        wtId,
-        paths: new Set(files),
-        rehype: makeFileLinkifyRehype(index, rel => `${base}/${rel}`),
-      });
-    });
-    return () => { cancelled = true; };
-  }, [activeSessionId, workingTrees]);
-  const fileRehype = fileIndexAbs?.rehype ?? null;
-
-  // ─── Sheet (Workbench) actions ──────────────────────────────────────────
-  // V2's openFileInSheet from design/gian-design-v2/js/app.jsx: single-click
-  // a file = preview tab (one at a time, italic name); double-click or pin =
-  // permanent. Settings/Terminal are singleton tabs.
-
-  // Force viewState back to 'main' when wbTabs goes empty.
-  useEffect(() => {
-    if (viewState !== 'main' && wbTabs.length === 0) {
-      setViewState('main');
-    }
-  }, [viewState, wbTabs.length]);
-
-  const sheetActions = useMemo(() => {
-    function syncFilesInspectorToTab(tab: SheetTab | undefined): void {
-      if (tab?.group !== 'files' || tab.kind !== 'file') return;
-      const currentWtId = defaultWorkingTreeIdFor(activeSession);
-      const locatable = !!tab.fileTreePath && tab.workingTreeId === currentWtId;
-      setFilesInspectorSuppressed(!locatable);
-      if (locatable && tab.fileTreePath && currentWtId) {
-        setFileReveal({
-          workingTreeId: currentWtId,
-          path: tab.fileTreePath,
-          requestId: ++fileRevealSeqRef.current,
-        });
-      } else {
-        setFileReveal(null);
-      }
-    }
-
-    return {
-      activateTab: (id: string) => {
-        const tab = wbTabs.find(t => t.id === id);
-        if (!tab) return;
-        syncFilesInspectorToTab(tab);
-        setActiveTabByGroup(a => ({ ...a, [tab.group]: id }));
-      },
-      closeTab: (id: string) => {
-        const tab = wbTabs.find(t => t.id === id);
-        if (tab?.kind === 'term') {
-          ws.send({ type: 'term:close', term_id: id });
-        }
-        if (tab?.group === 'files' && activeTabByGroup.files === id) {
-          const sibling = wbTabs.find(t => t.group === 'files' && t.id !== id);
-          if (sibling) syncFilesInspectorToTab(sibling);
-          else {
-            setFilesInspectorSuppressed(false);
-            setFileReveal(null);
-          }
-        }
-        setWbTabs(prev => {
-          const closing = prev.find(t => t.id === id);
-          const next = prev.filter(t => t.id !== id);
-          if (closing) {
-            setActiveTabByGroup(a => {
-              if (a[closing.group] !== id) return a;
-              const sib = next.find(t => t.group === closing.group);
-              return { ...a, [closing.group]: sib ? sib.id : null };
-            });
-          }
-          return next;
-        });
-      },
-      pinTab: (id: string) =>
-        setWbTabs(prev => prev.map(t => t.id === id ? { ...t, preview: false } : t)),
-      setTabViewMode: (id: string, viewMode: FileViewMode) =>
-        setWbTabs(prev => prev.map(t => t.id === id ? { ...t, viewMode } : t)),
-      setTabName: (id: string, name: string) =>
-        setWbTabs(prev => prev.map(t => (t.id === id && t.name !== name) ? { ...t, name } : t)),
-    };
-  }, [activeSession, activeTabByGroup.files, wbTabs, workspaces, ws]);
-
-  /** Rail → Sheet group mapping. 'manager' has no tab group — its panel 2 is
-   *  the compact Manager panel rendered inline by App. */
-  const GROUP_OF_RAIL: Record<RailId, SheetGroup | null> = {
-    files: 'files',
-    diffs: 'diffs',
-    manager: null,
-    sidechat: 'sidechat',
-    terminal: 'term',
-    browser: 'browser',
-    workspaces: 'workspaces',
-    settings: 'settings',
-  };
-
-  /** Activate a tab in its group and make sure the Sheet is visible. */
-  function revealSheetTab(group: SheetGroup, id: string): void {
-    setActiveTabByGroup(a => ({ ...a, [group]: id }));
-    setViewState(v => v === 'main' ? 'both' : v);
-  }
-
-  /** Open a rail (no-op if already active). Lazily seeds the singleton
-   *  content some rails need: the first terminal, the settings tab, the
-   *  diffs rail's flat all-files diff. */
-  function activateRail(rail: RailId): void {
-    setChatPanel(null);
-    if (rail === 'files') setFilesInspectorSuppressed(false);
-    setActiveRail(rail);
-    if (rail === 'terminal' && !wbTabs.some(t => t.group === 'term')) {
-      const id = 'tab-term-' + Date.now();
-      const tab: SheetTab = { id, group: 'term', name: terminalTabName(), kind: 'term', icoKind: 'term', ico: '$' };
-      setWbTabs(prev => [...prev, tab]);
-      revealSheetTab('term', id);
-      return;
-    }
-    if (rail === 'settings' && !wbTabs.some(t => t.group === 'settings')) {
-      const tab: SheetTab = { id: 'tab-settings', group: 'settings', name: appT('sheet.tab.settings'), kind: 'settings', icoKind: 'gear', ico: '⚙' };
-      setWbTabs(prev => [...prev, tab]);
-      revealSheetTab('settings', tab.id);
-      return;
-    }
-    if (rail === 'browser' && !wbTabs.some(t => t.group === 'browser')) {
-      addBrowserTab();
-      return;
-    }
-    const group = GROUP_OF_RAIL[rail];
-    if (rail === 'manager' || rail === 'sidechat' || (group && wbTabs.some(t => t.group === group))) {
-      setViewState(v => v === 'main' ? 'both' : v);
-    }
-  }
-
-  /** Dock click: re-clicking the active rail collapses its panels and
-   *  snapshots the scene into railMemory; clicking a rail opens/restores it. */
-  function toggleRail(rail: RailId): void {
-    if (chatPanel) {
-      setChatPanel(null);
-      if (activeRail !== rail) activateRail(rail);
-      else setViewState(v => v === 'main' ? 'both' : v);
-      return;
-    }
-    if (activeRail === rail) {
-      if (rail === 'files' && filesInspectorSuppressed) {
-        setFilesInspectorSuppressed(false);
-        setP3Collapsed(false);
-        return;
-      }
-      const group = GROUP_OF_RAIL[rail];
-      setRailMemory(m => ({ ...m, [rail]: { tabId: group ? (activeTabByGroup[group] ?? null) : null } }));
-      setActiveRail(null);
-      return;
-    }
-    const group = GROUP_OF_RAIL[rail];
-    const snap = railMemory[rail];
-    if (group && snap?.tabId && wbTabs.some(t => t.id === snap.tabId)) {
-      setActiveTabByGroup(a => ({ ...a, [group]: snap.tabId! }));
-    }
-    activateRail(rail);
-  }
-
-  function fileToLines(content: string): Array<[string, string]> {
-    return content.split('\n').map((line, i) => [String(i + 1), line]);
-  }
-
-  function extOf(name: string): SheetTab['icoKind'] {
-    const m = name.match(/\.([a-z0-9]+)$/i);
-    const ext = (m?.[1] ?? '').toLowerCase();
-    if (ext === 'md' || ext === 'ts' || ext === 'tsx' || ext === 'json' || ext === 'css') return ext;
-    return 'ts';
-  }
-
-  /** Open a file in the Sheet workbench (Phase 3+ replacement for the old
-   *  preview drawer). Files in the current Files index also reveal their tree
-   *  row; hidden/other-tree/unknown files keep the inspector closed. */
-  async function openFileInSheet(absPath: string, permanent: boolean = false, line?: number): Promise<void> {
-    setChatPanel(null);
-    const sess = activeSessionId
-      ? sessions.find(s => s.id === activeSessionId) ?? null
-      : null;
-    const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
-    const currentWt = wtId ? workingTrees.find(t => t.id === wtId) ?? null : null;
-    let currentFiles: ReadonlySet<string> = new Set();
-    if (currentWt) {
-      currentFiles = fileIndexAbs?.wtId === currentWt.id
-        ? fileIndexAbs.paths
-        : new Set(await loadAllFiles(currentWt.id));
-    }
-    let route = resolveFilePanelRoute(absPath, currentWt, workingTrees, currentFiles);
-    // Agent turns commonly create a file after the transcript link index was
-    // first loaded. A cached miss inside the current tree gets one fresh check
-    // before we classify it as panel-only.
-    if (
-      currentWt
-      && fileIndexAbs?.wtId === currentWt.id
-      && route.sourceTree?.id === currentWt.id
-      && !route.inCurrentFiles
-    ) {
-      const files = await loadAllFiles(currentWt.id);
-      currentFiles = new Set(files);
-      const base = currentWt.path.replace(/\/+$/, '');
-      const index = buildFileRefIndex(files, base);
-      setFileIndexAbs({
-        wtId: currentWt.id,
-        paths: currentFiles,
-        rehype: makeFileLinkifyRehype(index, fileRel => `${base}/${fileRel}`),
-      });
-      route = resolveFilePanelRoute(absPath, currentWt, workingTrees, currentFiles);
-    }
-    const wt = route.sourceTree;
-    const rel = route.sourceRel;
-    const name = (rel ?? absPath).split('/').pop() || absPath;
-    const fullPath = absPath;
-    const icoKind = extOf(name);
-    const ext = (name.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase();
-    const rawUrl = wt && rel
-      ? `/api/working_trees/${encodeURIComponent(wt.id)}/raw?path=${encodeURIComponent(rel)}`
-      : null;
-    const isImage = IMAGE_EXTS.has(ext);
-
-    setFilesInspectorSuppressed(!route.inCurrentFiles);
-    if (route.inCurrentFiles && currentWt && route.revealRel) {
-      setP3Collapsed(false);
-      setFileReveal({
-        workingTreeId: currentWt.id,
-        path: route.revealRel,
-        requestId: ++fileRevealSeqRef.current,
-      });
-    } else {
-      setFileReveal(null);
-    }
-
-    // Try to promote existing tab. Re-set scrollLine so a fresh click on a
-    // file-link (possibly a different line) re-jumps in the already-open tab.
-    const existingPerm = wbTabs.find(t => t.group === 'files' && t.kind === 'file' && t.fullPath === fullPath && !t.preview);
-    if (existingPerm) {
-      setWbTabs(prev => prev.map(t => t.id === existingPerm.id ? {
-        ...t,
-        scrollLine: line,
-        fileTreePath: route.revealRel ?? undefined,
-      } : t));
-      setActiveRail('files');
-      revealSheetTab('files', existingPerm.id);
-      return;
-    }
-
-    // Images render straight from `/raw` via an <img> (no text load); everything
-    // else loads its source lines.
-    let tabContent;
-    if (!wt || !rel || openCategoryFor(name) === 'pdf') {
-      tabContent = {
-        name,
-        kind: 'file' as const,
-        icoKind,
-        ico: '',
-        fullPath,
-        fileTreePath: route.revealRel ?? undefined,
-        workingTreeId: wt?.id,
-        loadError: appT('sheet.binary.notice'),
-      };
-    } else if (isImage && rawUrl) {
-      tabContent = {
-        name,
-        kind: 'file' as const,
-        icoKind: 'img' as const,
-        ico: '',
-        rawSrc: rawUrl,
-        fullPath,
-        fileTreePath: route.revealRel ?? undefined,
-        workingTreeId: wt.id,
-      };
-    } else {
-      const file = await loadFile(wt.id, rel);
-      // Preview-capable files (md) open with the rendered view by default —
-      // but a line jump forces source view so the target line is visible.
-      const initialViewMode: FileViewMode = line != null ? 'source' : icoKind === 'md' ? 'preview' : 'source';
-      tabContent = {
-        name,
-        kind: 'file' as const,
-        icoKind,
-        ico: '',
-        lines: file ? fileToLines(file.content) : undefined,
-        viewMode: initialViewMode,
-        fullPath,
-        scrollLine: line,
-        fileTreePath: route.revealRel ?? undefined,
-        workingTreeId: wt.id,
-        loadError: file ? undefined : appT('sheet.binary.notice'),
-      };
-    }
-
-    setActiveRail('files');
-    setWbTabs(prev => {
-      const existingPrev = prev.find(t => t.group === 'files' && t.kind === 'file' && t.preview);
-      let tabs = [...prev];
-      // Replace preview tab in place.
-      if (existingPrev) {
-        if (permanent && existingPrev.fullPath === fullPath) {
-          tabs = tabs.map(t => t.id === existingPrev.id ? { ...t, preview: false, scrollLine: line } : t);
-          revealSheetTab('files', existingPrev.id);
-          return tabs;
-        }
-        if (!permanent) {
-          // Replace the preview tab's content WITHOUT spreading the old tab —
-          // otherwise stale fields (e.g. an image tab's `rawSrc` or a text
-          // tab's `lines`) leak into the new content and the body mis-renders.
-          tabs = tabs.map(t => t.id === existingPrev.id ? { ...tabContent, id: t.id, group: t.group, preview: true } : t);
-          revealSheetTab('files', existingPrev.id);
-          return tabs;
-        }
-        // Permanent open of a different file: drop preview tab.
-        tabs = tabs.filter(t => t.id !== existingPrev.id);
-      }
-      const id = 'tab-' + Date.now();
-      const tab: SheetTab = { id, group: 'files', ...tabContent, preview: !permanent };
-      tabs.push(tab);
-      revealSheetTab('files', id);
-      return tabs;
-    });
-  }
-
-  /** Open a unified diff for a changed file in the Sheet workbench. The
-   *  Changes inspector routes row clicks here so the diff lands in the
-   *  workbench (full width) rather than crammed into the narrow inspector. */
-  async function openDiffInSheet(rel: string, permanent: boolean = false, scope: ChangeScope = 'all'): Promise<void> {
-    setChatPanel(null);
-    const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
-    const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
-    const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
-    if (!wt) return;
-    const name = rel.split('/').pop() || rel;
-    const fullPath = `${wt.path}/${rel}`;
-    const diffText = await loadDiff(wt.id, rel, scope);
-
-    setActiveRail('diffs');
-    setWbTabs(prev => {
-      let tabs = [...prev];
-      // If a non-permanent diff preview tab is already open, replace it in place.
-      const existingPreview = tabs.find(t => t.group === 'diffs' && t.kind === 'diff' && t.preview);
-      if (existingPreview) {
-        tabs = tabs.filter(t => t.id !== existingPreview.id);
-      }
-      // Promote: if a permanent diff tab for this exact path exists, just activate.
-      const existingPerm = tabs.find(t => t.group === 'diffs' && t.kind === 'diff' && t.fullPath === fullPath && !t.preview);
-      if (existingPerm) {
-        revealSheetTab('diffs', existingPerm.id);
-        return tabs;
-      }
-      const id = 'tab-diff-' + Date.now();
-      const tab: SheetTab = {
-        id,
-        group: 'diffs',
-        name,
-        kind: 'diff',
-        icoKind: 'diff',
-        ico: '±',
-        diffText,
-        fullPath,
-        workingTreeId: wt.id,
-        preview: !permanent,
-      };
-      tabs.push(tab);
-      revealSheetTab('diffs', id);
-      return tabs;
-    });
-  }
-
-  /** Route a transcript diff to the Diffs rail. Native file_change events may
-   *  contain full hunks or only changed paths; load missing text from the
-   *  working tree so both shapes land in the same diff viewer. */
-  async function openTranscriptDiffInSheet(item: DiffItem): Promise<void> {
-    setChatPanel(null);
-    const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
-    const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
-    const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
-    if (!wt || item.files.length === 0) return;
-
-    const chunks = await Promise.all(item.files.map(async file => {
-      if (file.hunks.length === 0) return loadDiff(wt.id, file.path, 'all');
-      return [
-        `diff --git a/${file.path} b/${file.path}`,
-        `--- a/${file.path}`,
-        `+++ b/${file.path}`,
-        ...file.hunks.flatMap(hunk => [
-          hunk.header,
-          ...hunk.lines.map(line =>
-            `${line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}${line.text}`),
-        ]),
-      ].join('\n');
-    }));
-    const diffText = chunks.filter(Boolean).join('\n');
-    const single = item.files.length === 1 ? item.files[0]! : null;
-    const fullPath = single ? `${wt.path}/${single.path}` : undefined;
-    const name = single
-      ? single.path.split('/').pop() || single.path
-      : `${item.files.length} files`;
-
-    setActiveRail('diffs');
-    setWbTabs(prev => {
-      const preview = prev.find(tab =>
-        tab.group === 'diffs' && tab.kind === 'diff' && tab.preview);
-      const tabs = preview ? prev.filter(tab => tab.id !== preview.id) : [...prev];
-      const id = `tab-diff-event-${item.id}`;
-      const tab: SheetTab = {
-        id,
-        group: 'diffs',
-        name,
-        kind: 'diff',
-        icoKind: 'diff',
-        ico: '±',
-        diffText,
-        fullPath,
-        workingTreeId: wt.id,
-        preview: true,
-      };
-      revealSheetTab('diffs', id);
-      return [...tabs, tab];
-    });
-  }
-
-  function openChatPanel(
-    sessionId: string,
-    request: ChatPanelRequest,
-  ): void {
-    setChatPanel({ ...request, sessionId });
-    setViewState(v => v === 'workbench' ? 'both' : v);
-  }
-
-  /** Add a new terminal tab to the terminal group. Called by the `+` button
-   *  at the right end of the terminal tabs strip. Always additive, and
-   *  surfaces the terminal rail (un-collapsing it if needed). */
-  function addTerminalTab(): void {
-    setActiveRail('terminal');
-    setWbTabs(prev => {
-      const existingTerms = prev.filter(t => t.kind === 'term').length;
-      const id = 'tab-term-' + Date.now();
-      const base = terminalTabName();
-      const name = existingTerms === 0 ? base : `${base} #${existingTerms + 1}`;
-      const tab: SheetTab = { id, group: 'term', name, kind: 'term', icoKind: 'term', ico: '$' };
-      revealSheetTab('term', id);
-      return [...prev, tab];
-    });
-  }
-
-  /** Open a session as a sidechat tab (kind 'chat', group 'sidechat'). One
-   *  tab per session, keyed by session id. `known` lets the session:created
-   *  handler pass the fresh row before `sessionsRef` has caught up. */
-  function openSidechatTab(sessionId: string, known?: Session): void {
-    const sess = known
-      ?? sessionsRef.current.find(s => s.id === sessionId)
-      ?? archivedSessions.find(s => s.id === sessionId);
-    if (!sess) return;
-    setActiveRail('sidechat');
-    const id = `tab-chat-${sessionId}`;
-    setWbTabs(prev => {
-      if (prev.some(t => t.id === id)) return prev;
-      const tab: SheetTab = {
-        id,
-        group: 'sidechat',
-        name: sess.name || `session ${sessionId.slice(0, 6)}`,
-        kind: 'chat',
-        icoKind: 'chat',
-        ico: '',
-        sessionId,
-      };
-      return [...prev, tab];
-    });
-    revealSheetTab('sidechat', id);
-  }
-
-  /** btw-style sidechat: fork the CURRENT session's context into a new side
-   *  thread (host runs `claude -p --resume <parent> --fork-session` on the
-   *  first turn — claude-only). The `client_tag: 'sidechat'` echo on
-   *  session:created binds the fork to a sidechat tab instead of switching
-   *  the main chat. No-op for non-claude sessions. */
-  function createSidechat(): void {
-    const parent = activeSessionId
-      ? sessionsRef.current.find(s => s.id === activeSessionId) ?? null
-      : null;
-    if (!parent || parent.executor !== 'claude') return;
-    setActiveRail('sidechat');
-    setCreatingSession(true);
-    const baseName = parent.name && parent.name.length > 0
-      ? parent.name
-      : `session ${parent.id.slice(0, 6)}`;
-    ws.send({
-      type: 'session:create',
-      workspace_id: parent.workspace_id,
-      executor: 'claude',
-      ...(parent.approval_mode ? { approval_mode: parent.approval_mode } : {}),
-      name: `${baseName} · side`,
-      fork_from: parent.id,
-      client_tag: 'sidechat',
-    });
-  }
-
-  /** Add a browser tab (group 'browser'). Additive like terminal tabs; each
-   *  keeps its own address/history in the mounted BrowserBody. */
-  function addBrowserTab(initialUrl?: string): void {
-    setChatPanel(null);
-    setActiveRail('browser');
-    setWbTabs(prev => {
-      const existing = prev.filter(t => t.kind === 'browser').length;
-      const id = 'tab-browser-' + Date.now();
-      const base = appT('dock.browser');
-      const name = initialUrl
-        ? browserHostOf(initialUrl)
-        : existing === 0 ? base : `${base} #${existing + 1}`;
-      const tab: SheetTab = {
-        id,
-        group: 'browser',
-        name,
-        kind: 'browser',
-        icoKind: 'browser',
-        ico: '',
-        ...(initialUrl ? { url: initialUrl } : {}),
-      };
-      revealSheetTab('browser', id);
-      return [...prev, tab];
-    });
-  }
-
-  /**
-   * Compute a tab label for a new terminal. Picks the most-specific
-   * known cwd (worktree path → workspace path → first workspace) and
-   * shows its basename, falling back to the shell name when nothing is
-   * known. Stays parallel to the actual cwd we send to the server in
-   * the `term:spawn` payload below.
-   */
-  function terminalTabName(): string {
-    const wtId = defaultWorkingTreeIdFor(activeSession);
-    const wtPath = wtId ? workingTrees.find(w => w.id === wtId)?.path : null;
-    const cwd = wtPath ?? activeWorkspace?.path ?? workspaces[0]?.path ?? null;
-    if (!cwd) return 'zsh';
-    // Tilde-collapse $HOME for prettier display (heuristic — server is
-    // the authority on the actual env, but for the tab label this is
-    // a reasonable best-effort).
-    const home = '/Users/';
-    const idx = cwd.indexOf(home);
-    const display = idx === 0
-      ? cwd.replace(/^\/Users\/[^/]+/, '~')
-      : cwd;
-    const seg = display.split('/').filter(Boolean).pop() ?? display;
-    return `zsh · ${seg}`;
-  }
-
-  /** Open a workspace's detail as a Workbench tab (zone 3). The list lives in
-   *  the Inspector (zone 4); clicking a row replaces the group's single detail
-   *  tab here (singleton — no stacking). */
-  function openWorkspaceInSheet(wsId: string): void {
-    const ws = workspaces.find(w => w.id === wsId);
-    if (!ws) return;
-    setActiveRail('workspaces');
-    const tab: SheetTab = { id: `tab-ws-${wsId}`, group: 'workspaces', name: ws.name, kind: 'workspace', icoKind: 'grid', ico: '▣', wsId };
-    setWbTabs(prev => [...prev.filter(t => t.group !== 'workspaces'), tab]);
-    revealSheetTab('workspaces', tab.id);
-  }
-
-  /** Open the "new workspace" form as a Workbench tab (singleton in the
-   *  workspaces group) instead of jumping to the now-hidden `spaces` mode. */
-  function openNewWorkspaceInSheet(): void {
-    setActiveRail('workspaces');
-    const tab: SheetTab = { id: 'tab-new-workspace', group: 'workspaces', name: 'New workspace', kind: 'new-workspace', icoKind: 'grid', ico: '+' };
-    setWbTabs(prev => [...prev.filter(t => t.group !== 'workspaces'), tab]);
-    revealSheetTab('workspaces', tab.id);
-  }
-
   const locale = systemConfig?.locale ?? 'en';
   const appT = useCallback((key: string) => {
     const messages = locale === 'zh-CN' ? ZH : EN;
     return messages[key] ?? EN[key] ?? key;
   }, [locale]);
+
+  const {
+    wtView,
+    setWtView,
+    apps,
+    wbTabs,
+    setWbTabs,
+    activeTabByGroup,
+    viewState,
+    activeRail,
+    setActiveRail,
+    p3Collapsed,
+    setP3Collapsed,
+    filesInspectorSuppressed,
+    fileReveal,
+    chatPanel,
+    setChatPanel,
+    fileRehype,
+    sheetActions,
+    GROUP_OF_RAIL,
+    defaultWorkingTreeIdFor,
+    viewedWorkingTreeId,
+    handleOpenWith,
+    revealSheetTab,
+    activateRail,
+    toggleRail,
+    openFileInSheet,
+    openDiffInSheet,
+    openTranscriptDiffInSheet,
+    openChatPanel,
+    addTerminalTab,
+    openSidechatTab,
+    createSidechat,
+    addBrowserTab,
+    openWorkspaceInSheet,
+    openNewWorkspaceInSheet,
+  } = useWorkbench({
+    authStatus,
+    ws,
+    sessions,
+    sessionsRef,
+    activeSessionId,
+    activeSession,
+    activeWorkspace,
+    workspaces,
+    workingTrees,
+    setCreatingSession,
+    mode,
+    activeSubtaskId,
+    t: appT,
+  });
+
+  useAppSocket({
+    authStatus,
+    ws,
+    sessionsRef,
+    activeSessionIdRef,
+    pendingFirstMessageRef,
+    openSidechat: openSidechatTab,
+    setWsState,
+    setWsAttempt,
+    setAuthed,
+    setWorkspaces,
+    setSessions,
+    setTasks,
+    setBots,
+    setSystemConfig,
+    setRunner,
+    setActiveSessionId,
+    setActiveTaskId,
+    setActiveSubtaskId,
+    setItemsBySession,
+    setPendingBySession,
+    setQueueBySession,
+    setPlanStateBySession,
+    setCreatingSession,
+    setForkingSession,
+  });
+
+  const selectSession = useSessionSelection({
+    mode,
+    activeSubtaskId,
+    sessionsRef,
+    activeSessionIdRef,
+    setActiveSessionId,
+    setChatPanel,
+    ws,
+  });
+
+  // Worktree auto-switch: when the host detects the agent created its own
+  // worktree mid-session (`git worktree add` → session.detected_worktree_path),
+  // switch the VIEW-level working tree to it. The ref makes this fire exactly
+  // once per (session, detected path) pair — the host only updates the stored
+  // path when it changes — so a later manual pick in the branch dropdown wins
+  // until the next detection. workingTrees is a dep so a listing refresh that
+  // discovers the new tree re-fires the effect.
+  useEffect(() => {
+    const detected = activeSession?.detected_worktree_path;
+    if (!activeSession || !detected) return;
+    const last = wtAutoAppliedRef.current;
+    if (last && last.sessionId === activeSession.id && last.path === detected) return;
+    const tree = workingTrees.find(t => t.path === detected);
+    if (!tree) return;
+    wtAutoAppliedRef.current = { sessionId: activeSession.id, path: detected };
+    setWtView({ sessionId: activeSession.id, wtId: tree.id });
+    toast({
+      kind: 'success',
+      message: appT('worktree.autoSwitched').replace('{name}', tree.branch ?? tree.label),
+    });
+  }, [activeSession?.id, activeSession?.detected_worktree_path, workingTrees, appT]);
 
   useEffect(() => {
     setWbTabs(prev => prev.map(tab => {
@@ -1285,761 +340,123 @@ export function App() {
   }, [appT]);
 
   // ─── Path breadcrumb (V2 topbar) ─────────────────────────────────────────
+  // The breadcrumb (and the Diffs/Files rails) follow the VIEWED working tree
+  // — the branch picker's override included.
   const activeWtForSession = activeSession
-    ? workingTrees.find(t => t.id === defaultWorkingTreeIdFor(activeSession))
+    ? workingTrees.find(t => t.id === viewedWorkingTreeId(activeSession))
     : null;
-  const activeBranch = activeWtForSession?.branch ?? null;
-  // For Phase 1, Spaces/Bots views manage their own selection internally —
-  // the path breadcrumb in those modes falls back to the session-derived
-  // workspace (sessions mode) or shows empty. Phase 5/6 lifts selection up.
-  const activeBot = null as Bot | null;
-  const activeListedWs = activeWorkspace;
+  // An overridden tree may have no branch (detached / primary); fall back to
+  // its label so the segment still has something to show.
+  const activeBranch = activeWtForSession?.branch ?? activeWtForSession?.label ?? null;
+  const {
+    pathSegments,
+    sessionMenu,
+    branchMenu,
+    onRenameSubmit: handleRenameSubmit,
+    onRenameCancel: handleRenameCancel,
+  } = useTopbarModel({
+    mode,
+    activeTaskId,
+    activeSubtaskId,
+    activeSession,
+    activeWorkspace,
+    activeBranch,
+    tasks,
+    setTasks,
+    sessions,
+    sessionsRef,
+    workingTrees,
+    wtView,
+    setWtView,
+    viewedWorkingTreeId,
+    activateDiffsRail: () => activateRail('diffs'),
+    setCreatingSession,
+    setForkingSession,
+    ws,
+    t: appT,
+  });
 
-  const pathSegments: PathSegment[] = useMemo(() => {
-    // Subtasks reuse the session breadcrumb (Workspace › Branch › Subtask):
-    // a subtask IS a session and activeSession is already synced to it.
-    if (mode === 'sessions' || (mode === 'tasks' && activeSubtaskId)) {
-      if (!activeSession) return [];
-      const segs: PathSegment[] = [];
-      segs.push({
-        kind: 'workspace',
-        label: activeWorkspace?.name ?? activeSession.workspace_id,
-        copyHint: `${appT('common.copy')} "${activeWorkspace?.name ?? activeSession.workspace_id}"`,
-      });
-      if (activeBranch) {
-        segs.push({
-          kind: 'branch',
-          label: activeBranch,
-          copyHint: `${appT('common.copy')} "${activeBranch}"`,
-        });
-      }
-      segs.push({
-        kind: 'session',
-        label: activeSession.name || appT('coding.session.untitled'),
-        copyHint: appT('coding.session.actions'),
-        editing: pathRenameActive,
-      });
-      return segs;
-    }
-    // Task (Manager view): a single-level breadcrumb — just the task name ▾.
-    if (mode === 'tasks' && activeTaskId) {
-      const task = tasks.find(t => t.id === activeTaskId);
-      if (!task) return [];
-      return [{
-        kind: 'session',
-        label: task.name || appT('coding.session.untitled'),
-        copyHint: appT('coding.session.actions'),
-        editing: pathRenameActive,
-      }];
-    }
-    if (mode === 'spaces') {
-      if (!activeListedWs) return [];
-      return [{
-        kind: 'workspace',
-        label: activeListedWs.name,
-        copyHint: `${appT('common.copy')} "${activeListedWs.name}"`,
-      }];
-    }
-    if (mode === 'bots') {
-      if (!activeBot) return [];
-      return [{
-        kind: 'session',
-        label: activeBot.label,
-        copyHint: `${appT('common.copy')} "${activeBot.label}"`,
-      }];
-    }
-    return [];
-  }, [mode, activeTaskId, tasks, activeSubtaskId, activeSession, activeWorkspace, activeBranch, activeListedWs, activeBot, pathRenameActive, appT]);
 
-  // Session-menu actions (Rename / Copy / Recover / Archive / Delete)
-  const sessionMenu: SessionMenuActions | null = useMemo(() => {
-    // Task (Manager view): a one-level menu — Rename / Copy name ┊ Remove (red).
-    if (mode === 'tasks' && !activeSubtaskId && activeTaskId) {
-      const task = tasks.find(t => t.id === activeTaskId);
-      if (!task) return null;
-      return {
-        kind: 'task' as const,
-        onRename: () => setPathRenameActive(true),
-        onCopyName: () => {
-          try { void navigator.clipboard?.writeText(task.name || ''); } catch (_) { /* ignore */ }
-        },
-        // A task's "unread" is its Manager session's unread (the task row-end
-        // shows the Manager StatusIcon), so mark the Manager unread.
-        onMarkUnread: () => {
-          const mgr = sessionsRef.current.find(s => s.type === 'manager' && s.task_id === task.id);
-          if (mgr) ws.send({ type: 'session:set_unread', session_id: mgr.id, unread: true });
-        },
-        // Pin toggles `tasks.pinned_at` on the host (task:update{pinned}). We
-        // optimistically stamp/clear it locally so the row re-sorts instantly
-        // (the host echoes task:updated with the authoritative timestamp).
-        pinned: task.pinned_at != null,
-        onPin: () => {
-          const willPin = task.pinned_at == null;
-          const optimistic = willPin ? new Date().toISOString() : null;
-          setTasks(prev => prev.map(x => (x.id === task.id ? { ...x, pinned_at: optimistic } : x)));
-          ws.send({ type: 'task:update', task_id: task.id, pinned: willPin });
-        },
-        // Force recover = unwedge the Task's Manager session (it's headless, so
-        // its recover lives on the Task menu).
-        onForceRecover: () => {
-          const mgr = sessionsRef.current.find(s => s.type === 'manager' && s.task_id === task.id);
-          if (!mgr) return;
-          ws.send({ type: 'session:recover', session_id: mgr.id });
-        },
-        onDelete: async () => {
-          // Cascade: the host deletes the task's PM + subtask sessions too, so
-          // warn with the count (the delete is permanent, no orphaning).
-          const ownedCount = sessions.filter(s => s.task_id === task.id).length;
-          const cascade = ownedCount > 0
-            ? ` ${appT('tasks.remove.cascade').replace('{n}', String(ownedCount))}`
-            : '';
-          const ok = await confirmDialog({
-            message: `${appT('tasks.remove.confirmPrefix')} "${task.name || appT('tasks.untitled')}"? ${appT('tasks.remove.confirmSuffix')}${cascade}`,
-            danger: true,
-            confirmLabel: appT('common.delete'),
-          });
-          if (ok) ws.send({ type: 'task:delete', task_id: task.id });
-        },
-      };
-    }
-    // Subtasks get the same menu MINUS fork / archive / delete — a subtask's
-    // lifecycle is managed via its parent Task, not its own session.
-    const isSubtask = mode === 'tasks' && !!activeSubtaskId;
-    if ((mode !== 'sessions' && !isSubtask) || !activeSession) return null;
-    return {
-      kind: (isSubtask ? 'subtask' : 'session') as 'subtask' | 'session',
-      onRename: () => setPathRenameActive(true),
-      onCopyName: () => {
-        try { void navigator.clipboard?.writeText(activeSession.name || ''); } catch (_) { /* ignore */ }
-      },
-      onForceRecover: () => {
-        ws.send({ type: 'session:recover', session_id: activeSession.id });
-      },
-      onMarkUnread: () => {
-        ws.send({ type: 'session:set_unread', session_id: activeSession.id, unread: true });
-      },
-      // Delete is available for both subtasks and sessions (a subtask IS a
-      // session). Fork / archive stay session-only (below).
-      onDelete: async () => {
-        const ok = await confirmDialog({
-          message: `${appT('coding.session.deleteConfirmPrefix')} "${activeSession.name || appT('coding.session.untitled')}"? ${appT('coding.session.deleteConfirmSuffix')}`,
-          danger: true,
-          confirmLabel: appT('common.delete'),
-        });
-        if (ok) ws.send({ type: 'session:delete', session_id: activeSession.id });
-      },
-      // Subtask completion (spec §B) lives here now (the row's square toggle was
-      // removed). Toggles the user `completed_at` flag, separate from turn status.
-      ...(isSubtask ? {
-        completed: activeSession.completed_at != null,
-        onToggleComplete: () => {
-          const done = activeSession.completed_at != null;
-          void import('./api.js').then(m =>
-            done ? m.reopenSubtask(activeSession.id) : m.completeSubtask(activeSession.id),
-          );
-        },
-      } : {}),
-      ...(isSubtask ? {} : {
-      onFork: (executor: Executor) => {
-        // Clone every property the host accepts on session:create except
-        // `branch` (worktrees must own a unique branch — let the host
-        // auto-generate). Name = original + " copy". Executor is the
-        // user's choice from the menu.
-        const baseName = activeSession.name && activeSession.name.length > 0
-          ? activeSession.name
-          : `session ${activeSession.id.slice(0, 6)}`;
-        const isWorktree = activeSession.worktree_path !== null;
-        setCreatingSession(true);
-        setForkingSession(true);
-        ws.send({
-          type: 'session:create',
-          workspace_id: activeSession.workspace_id,
-          executor,
-          ...(executor !== 'kimi' && activeSession.approval_mode
-            ? { approval_mode: activeSession.approval_mode }
-            : {}),
-          name: `${baseName} copy`,
-          ...(isWorktree
-            ? {
-                mode: 'worktree',
-                ...(activeSession.base_branch ? { base_branch: activeSession.base_branch } : {}),
-              }
-            : { mode: 'regular' }
-          ),
-        });
-      },
-      onArchive: () => {
-        const next = activeSession.archived !== 1;
-        ws.send({ type: 'session:archive', session_id: activeSession.id, archived: next });
-      },
-      }),
-    };
-  }, [mode, activeTaskId, tasks, activeSubtaskId, activeSession, ws, appT]);
+  const sessionMainHandlers = useSessionCommands({
+    ws,
+    sessionsRef,
+    setItemsBySession,
+    setPendingBySession,
+  });
 
-  const handleRenameSubmit = useCallback((value: string) => {
-    setPathRenameActive(false);
-    const trimmed = value.trim();
-    if (!trimmed) return;
-    // Task rename (Manager view) vs session/subtask rename.
-    if (mode === 'tasks' && !activeSubtaskId && activeTaskId) {
-      const task = tasks.find(t => t.id === activeTaskId);
-      if (!task || trimmed === task.name) return;
-      ws.send({ type: 'task:update', task_id: activeTaskId, name: trimmed });
-      return;
-    }
-    if (!activeSession || trimmed === activeSession.name) return;
-    ws.send({ type: 'session:rename', session_id: activeSession.id, name: trimmed });
-  }, [mode, activeTaskId, activeSubtaskId, tasks, activeSession, ws]);
-
-  const handleRenameCancel = useCallback(() => setPathRenameActive(false), []);
-
-  // Opening/viewing a session clears its unread marker (mark-read). Guarded on
-  // the current flag so we don't spam the host with no-op set_unread on every
-  // click. Looks in both active and archived lists.
-  const markSessionViewed = useCallback((id: string) => {
-    const s = sessionsRef.current.find(x => x.id === id)
-      ?? archivedSessionsRef.current.find(x => x.id === id);
-    if (s?.unread === 1) ws.send({ type: 'session:set_unread', session_id: id, unread: false });
-  }, [ws]);
-
-  const selectSession = useCallback((id: string) => {
-    setChatPanel(null);
-    setActiveSessionId(id);
-    markSessionViewed(id);
-  }, [markSessionViewed]);
-
-  // A Subtask IS a Session. When a subtask is selected in Tasks mode we render
-  // the full SessionMain view for it inline, which means `activeSession`,
-  // `itemsBySession[id]`, the workbench Sheet, and the Inspector must all
-  // resolve to that subtask's session. Sync `activeSessionId` to the active
-  // subtask (and mark it viewed) so all of that machinery — shared with
-  // Sessions mode — targets the subtask. When no subtask is selected the
-  // Manager panel is shown and we leave `activeSessionId` untouched.
-  useEffect(() => {
-    if (mode !== 'tasks' || !activeSubtaskId) return;
-    if (activeSessionIdRef.current === activeSubtaskId) return;
-    setActiveSessionId(activeSubtaskId);
-    markSessionViewed(activeSubtaskId);
-  }, [mode, activeSubtaskId, markSessionViewed]);
-
-  // Tasks-mode Manager view (no subtask selected) views no session. If
-  // `activeSessionId` still points at a subtask from an earlier visit, clear it
-  // — otherwise that stale subtask stays falsely "active", which (a) auto-clears
-  // its unread when a background turn finishes there (so a finished subtask
-  // wrongly shows as read) and (b) makes re-selecting it skip mark-read (the
-  // sync effect's `=== activeSubtaskId` guard short-circuits). Only resets when
-  // the lingering active session is itself a subtask, so a normal session
-  // selected in Sessions mode is preserved across a mode switch.
-  useEffect(() => {
-    if (mode !== 'tasks' || activeSubtaskId) return;
-    const cur = activeSessionIdRef.current;
-    if (cur && sessionsRef.current.find(s => s.id === cur)?.type === 'subtask') {
-      setActiveSessionId(null);
-    }
-  }, [mode, activeSubtaskId]);
-
-  // ─── Per-session SessionMain callbacks (shared) ──────────────────────────
-  // These are the App-level handlers <SessionMain> needs, each keyed by an
-  // explicit session id. CodingView (Sessions mode) and the inline subtask
-  // SessionMain (Tasks mode) both bind to these identical handlers — the only
-  // difference is which session id they're bound to. Defining them once here
-  // (instead of inline in the CodingView JSX) is what lets the Tasks-mode
-  // subtask view reuse the exact same wiring.
-  const sessionMainHandlers = {
-    onSend: (
-      sessionId: string,
-      text: string,
-      opts?: {
-        oneShotBypass?: boolean;
-        attachments?: Array<ComposerAttachmentPayload & { previewUrl: string }>;
-      },
-    ) => {
-      // Optimistic echo: append a pending user msg to the transcript
-      // and arm the thinking ticker before the server confirms. The
-      // real `user_message` event reconciles in applyEnvelope.
-      const exec = sessionsRef.current.find(s => s.id === sessionId)?.executor ?? 'claude';
-      const attachments = opts?.attachments ?? [];
-      const optimistic = createOptimisticEcho({
-        sessionId,
-        text,
-        exec,
-        // Reuse the composer's blob URL as the <img src> for the
-        // pending bubble — ownership transferred on send; the
-        // user_message reconciler revokes it after swapping in
-        // the server URL.
-        attachments: attachments.length > 0
-          ? attachments.map(a => ({
-              name: a.name,
-              mime: a.mime,
-              url: a.previewUrl,
-              ...(a.size !== undefined ? { size: a.size } : {}),
-            }))
-          : undefined,
-      });
-      setItemsBySession(prev => ({
-        ...prev,
-        [sessionId]: [...(prev[sessionId] ?? []), optimistic],
-      }));
-      setPendingBySession(p => ({ ...p, [sessionId]: true }));
-
-      const items: InputItem[] = [];
-      if (text.trim()) items.push({ type: 'text', text });
-      for (const attachment of attachments) items.push(attachmentInputItem(attachment));
-
-      ws.send({
-        type: 'message:send',
-        session_id: sessionId,
-        text,
-        ...(items.length > 0 ? { items } : {}),
-        ...(opts?.oneShotBypass ? { oneShotBypass: true } : {}),
-      });
-    },
-    onSendSkill: (sessionId: string, name: string, path: string) =>
-      ws.send({
-        type: 'message:send',
-        session_id: sessionId,
-        text: `/${name}`,
-        items: [{ type: 'skill', name, path }],
-      }),
-    onStop: (sessionId: string) => ws.send({ type: 'session:stop', session_id: sessionId }),
-    onApprove: (
-      sessionId: string,
-      approvalId: string,
-      decision: ApprovalDecision,
-      answers?: Record<string, string | string[]>,
-      context?: import('./types.js').ApprovalActionContext,
-    ) =>
-      ws.send({
-        type: 'approval:resolve',
-        session_id: sessionId,
-        approval_id: approvalId,
-        decision,
-        ...(answers ? { answers } : {}),
-        ...(context?.nativeOptionId
-          ? { native_option_id: context.nativeOptionId }
-          : {}),
-      }),
-    onLocalApprovalResolve: (
-      sessionId: string,
-      approvalId: string,
-      decision: ApprovalDecision,
-      answers?: Record<string, string | string[]>,
-    ) => {
-      // TTY-mode AskUserQuestion answers are pasted into the PTY
-      // rather than resolved over the structured approval bridge —
-      // the bridge isn't wired in TTY (cc-proxy would 404). Synthesize
-      // an approval_resolved envelope so the QuestionCard transitions
-      // out of `pending` immediately. Carry the picked answers so the
-      // resolved card can show "answered with …". Any later duplicate
-      // from the JSONL watcher is harmless: apply.ts dedupes by
-      // approvalId, preserves status, and won't blank answeredWith.
-      const session = sessionsRef.current.find(s => s.id === sessionId);
-      const executor = session?.executor ?? 'claude';
-      handleEnvelope({
-        session_id: sessionId,
-        turn: 0,
-        call_id: approvalId,
-        event: 'approval_resolved',
-        ts: Date.now(),
-        data: { approvalId, decision, auto: false, ...(answers ? { answers } : {}) },
-      }, executor);
-    },
-    onQueueAdd: (sessionId: string, text: string, attachments?: ComposerAttachmentPayload[]) => {
-      const items: InputItem[] = [];
-      if (text.trim()) items.push({ type: 'text', text });
-      for (const attachment of attachments ?? []) items.push(attachmentInputItem(attachment));
-      ws.send({ type: 'queue:add', session_id: sessionId, text, ...(items.length > 0 ? { items } : {}) });
-    },
-    onQueueRemove: (sessionId: string, queueId: string) =>
-      ws.send({ type: 'queue:remove', session_id: sessionId, queue_id: queueId }),
-    onQueueReorder: (sessionId: string, order: string[]) =>
-      ws.send({ type: 'queue:reorder', session_id: sessionId, order }),
-    onQueueClear: (sessionId: string) => ws.send({ type: 'queue:clear', session_id: sessionId }),
-    onQueueSendNow: (sessionId: string) => {
-      ws.send({ type: 'queue:send_now', session_id: sessionId });
-    },
-    onSteer: (sessionId: string, text: string, attachments?: ComposerAttachmentPayload[]) => {
-      const items: InputItem[] = [];
-      if (text.trim()) items.push({ type: 'text', text });
-      for (const attachment of attachments ?? []) items.push(attachmentInputItem(attachment));
-      ws.send({ type: 'message:steer', session_id: sessionId, text, ...(items.length > 0 ? { items } : {}) });
-    },
-    onSetMode: (sessionId: string, approvalMode: ApprovalMode, turns?: number) =>
-      ws.send({ type: 'session:set_mode', session_id: sessionId, approval_mode: approvalMode, turns }),
-    onSetModel: (sessionId: string, model: string) =>
-      ws.send({ type: 'session:set_model', session_id: sessionId, model }),
-    onSetEffort: (sessionId: string, effort: import('@gian/shared').ThinkingEffort | null) =>
-      ws.send({ type: 'session:set_effort', session_id: sessionId, effort }),
-    onSetServiceTier: (sessionId: string, tier: 'fast' | null) =>
-      ws.send({ type: 'session:set_service_tier', session_id: sessionId, service_tier: tier }),
-    onSetNativeConfig: (
-      sessionId: string,
-      configId: string,
-      value: import('@gian/shared').NativeConfigValue,
-    ) =>
-      ws.send({
-        type: 'session:set_native_config',
-        session_id: sessionId,
-        config_id: configId,
-        value,
-      }),
-    onArchive: (id: string, archived: boolean) =>
-      ws.send({ type: 'session:archive', session_id: id, archived }),
-    onDelete: (id: string) => ws.send({ type: 'session:delete', session_id: id }),
-    onRecover: (id: string) => ws.send({ type: 'session:recover', session_id: id }),
-    onMerge: async (id: string) => {
-      const { mergeSession } = await import('./api.js');
-      const r = await mergeSession(id);
-      if (!r.ok) toast({ kind: 'error', message: r.error ?? 'merge failed' });
-    },
-    onDrop: async (id: string) => {
-      const { dropSession } = await import('./api.js');
-      const r = await dropSession(id);
-      if (!r.ok) toast({ kind: 'error', message: r.error ?? 'drop failed' });
-    },
-    onRename: (id: string, name: string) =>
-      ws.send({ type: 'session:rename', session_id: id, name }),
-    onSwitchRuntime: (sessionId: string, target: RuntimeMode, opts?: { force?: boolean }) =>
-      ws.send({
-        type: 'session:switch-runtime',
-        session_id: sessionId,
-        target,
-        ...(opts?.force ? { force: true } : {}),
-      }),
-  };
-
-  // ─── Per-Task Manager (PRD-v3 P3) ────────────────────────────────────────
-  // The Manager is a session (type='manager') bound to a Task. Its transcript
-  // lives in the same itemsBySession map as any session, keyed by its session
-  // id. We resolve the active Task's Manager session, hand its items/pending
-  // down to TasksView, and provide ensure/send/create-subtask callbacks.
-  const activeManagerSession = useMemo(
-    () => (activeTaskId
-      ? sessions.find(s => s.type === 'manager' && s.task_id === activeTaskId) ?? null
-      : null),
-    [sessions, activeTaskId],
-  );
-  // The Task object behind the active Manager — fed to the compact
-  // ManagerInspector (zone 4) shown while a subtask is selected.
-  const activeManagerTask = useMemo(
-    () => (activeTaskId ? tasks.find(t => t.id === activeTaskId) ?? null : null),
-    [tasks, activeTaskId],
-  );
-  const rawManagerItems = activeManagerSession
-    ? (itemsBySession[activeManagerSession.id] ?? [])
-    : [];
-  // Display: strip the system prefix (user msg) and legacy create_subtask blocks
-  // / current action envelopes (assistant msg) so the transcript reads as clean prose —
-  // UNLESS the debug `showManagerRaw` switch is on, which surfaces the raw
-  // plumbing for early bring-up.
-  const managerItems = showManagerRaw
-    ? rawManagerItems
-    : rawManagerItems.map(it =>
-        it.kind === 'user' ? { ...it, text: stripGianRolePrefix(stripManagerSystemPrefix(it.text)) }
-          : it.kind === 'assistant' ? { ...it, text: stripGianActionBlocks(stripCreateSubtaskBlocks(it.text)) }
-          : it,
-      );
-  // The Manager no longer proposes subtasks into a card/chip. It aligns in
-  // natural language and emits a `<<gian:action>>` the host executes directly.
-  // Manual creation still uses
-  // the NewSubtaskForm (header "Create subtask from this" button).
-  const managerPending = activeManagerSession
-    ? (pendingBySession[activeManagerSession.id] ?? activeManagerSession.status === 'running')
-    : false;
-  // The Manager IS a session, so its (now full) composer reuses the exact same
-  // App-level session handlers, bound to the manager session id — model / mode /
-  // effort / slash / queue / approvals all work like a normal session.
-  const managerSessionId = activeManagerSession?.id ?? null;
-  const managerQueue = managerSessionId ? (queueBySession[managerSessionId] ?? []) : [];
-  const managerHandlers = useMemo<ManagerComposerHandlers | null>(() => {
-    if (!managerSessionId) return null;
-    return {
-      onSetModel: (model) => sessionMainHandlers.onSetModel(managerSessionId, model),
-      onSetMode: (mode, turns) => sessionMainHandlers.onSetMode(managerSessionId, mode, turns),
-      onSetEffort: (effort) => sessionMainHandlers.onSetEffort(managerSessionId, effort),
-      onSetServiceTier: (tier) => sessionMainHandlers.onSetServiceTier(managerSessionId, tier),
-      onSetNativeConfig: (configId, value) =>
-        sessionMainHandlers.onSetNativeConfig(managerSessionId, configId, value),
-      onSendSkill: (name, path) => sessionMainHandlers.onSendSkill(managerSessionId, name, path),
-      onQueueAdd: (t, attachments) => sessionMainHandlers.onQueueAdd(managerSessionId, t, attachments),
-      onQueueRemove: (queueId) => sessionMainHandlers.onQueueRemove(managerSessionId, queueId),
-      onQueueReorder: (order) => sessionMainHandlers.onQueueReorder(managerSessionId, order),
-      onQueueClear: () => sessionMainHandlers.onQueueClear(managerSessionId),
-      onQueueSendNow: () => sessionMainHandlers.onQueueSendNow(managerSessionId),
-      onApprove: (approvalId, decision, answers, context) =>
-        sessionMainHandlers.onApprove(managerSessionId, approvalId, decision, answers, context),
-    };
-    // sessionMainHandlers is a fresh object each render but closes only over
-    // stable refs/setters, so keying the memo on the session id is sufficient.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [managerSessionId]);
-
-  // Hydrate a session's transcript from the REST event log if not loaded yet.
-  // Shared shape with the activeSessionId hydration effect above.
-  const hydrateTranscript = useCallback((sessionId: string, exec: Executor) => {
-    if (itemsBySession[sessionId] !== undefined) return;
-    void loadEvents(sessionId).then(events => {
-      const items = events.reduce<TranscriptItem[]>(
-        (acc, e) => applyEnvelope(acc, e, exec),
-        [],
-      );
-      setItemsBySession(prev =>
-        prev[sessionId] !== undefined ? prev : { ...prev, [sessionId]: items });
-    });
-  }, [itemsBySession]);
-
-  // Ensure the Manager session exists for a Task, then hydrate its transcript.
-  // Clear the Manager's unread once its panel is actually on screen — the full
-  // panel (task open, no subtask) or the compact inspector (subtask open with
-  // the Manager rail showing). Without this the task row's row-end StatusIcon
-  // (driven by the Manager's unread) would stay lit forever, since the Manager
-  // is never the `activeSessionId` that markSessionViewed clears.
-  const managerPanelVisible = mode === 'tasks' && (
-    (!activeSubtaskId && !!activeTaskId) ||
-    (!!activeSubtaskId && activeRail === 'manager')
-  );
-  // Clear ONCE per view, on the transition into the panel (mark-read-on-open).
-  // Re-runs while the same Manager stays on screen are no-ops, so an unread the
-  // user sets via the task menu's "Mark as unread" — or a turn that completes
-  // while they watch — is not auto-cleared out from under them. Reset when the
-  // panel hides so re-opening the task reads it again.
-  const mgrViewClearedRef = useRef<string | null>(null);
-  useEffect(() => {
-    const mgr = activeManagerSession;
-    if (!managerPanelVisible || !mgr) { mgrViewClearedRef.current = null; return; }
-    if (mgrViewClearedRef.current === mgr.id) return;
-    mgrViewClearedRef.current = mgr.id;
-    if (mgr.unread === 1) ws.send({ type: 'session:set_unread', session_id: mgr.id, unread: false });
-  }, [managerPanelVisible, activeManagerSession, ws]);
-
-  const onManagerMount = useCallback((taskId: string) => {
-    const existing = sessionsRef.current.find(
-      s => s.type === 'manager' && s.task_id === taskId,
-    );
-    if (existing) {
-      hydrateTranscript(existing.id, existing.executor);
-      return;
-    }
-    void import('./api.js').then(m => m.ensureManagerSession(taskId)).then(session => {
-      // session:created arrives via WS and updates `sessions`; seed an empty
-      // transcript so the panel renders the placeholder until the user sends.
-      if (session) {
-        setItemsBySession(prev =>
-          prev[session.id] !== undefined ? prev : { ...prev, [session.id]: [] });
-      }
-    });
-  }, [hydrateTranscript]);
-
-  const onManagerSend = useCallback((
-    taskId: string,
-    text: string,
-    opts?: { attachments?: Array<ComposerAttachmentPayload & { previewUrl: string }> },
-  ) => {
-    // §A2 follow-up: fold any not-yet-acknowledged subtask-action notes into a
-    // hidden, sentinel-wrapped context block prepended to the message — so the
-    // Manager learns "the user created manual subtask X" without a separate
-    // turn. The optimistic echo uses the BARE text; the reconciler strips the
-    // wrapper (and so does managerItems unless showManagerRaw is on).
-    const cards = managerCardsByTaskRef.current[taskId] ?? [];
-    const unacked = cards.filter(c => !c.acked);
-    const sentText = wrapManagerContextNote(unacked.map(managerCardContextNote), text);
-    const mgr = sessionsRef.current.find(
-      s => s.type === 'manager' && s.task_id === taskId,
-    );
-    if (!mgr) return;
-    const attachments = opts?.attachments ?? [];
-    // Optimistic echo against the manager session. The real user_message
-    // reconciles via applyEnvelope (stripped-text match).
-    const echo = createOptimisticEcho({
-      sessionId: mgr.id,
-      text,
-      exec: mgr.executor,
-      attachments: attachments.length > 0
-        ? attachments.map(a => ({
-            name: a.name,
-            mime: a.mime,
-            url: a.previewUrl,
-            ...(a.size !== undefined ? { size: a.size } : {}),
-          }))
-        : undefined,
-    });
-    setItemsBySession(prev => ({ ...prev, [mgr.id]: [...(prev[mgr.id] ?? []), echo] }));
-    setPendingBySession(p => ({ ...p, [mgr.id]: true }));
-    // Send over the SAME structured message:send the session composer uses —
-    // the host prepends the Manager system prompt on the first turn (keyed on
-    // type==='manager'), so the Manager composer no longer needs the bespoke
-    // REST path. Carries text + attachments as structured items.
-    const items: InputItem[] = [];
-    if (sentText.trim()) items.push({ type: 'text', text: sentText });
-    for (const attachment of attachments) items.push(attachmentInputItem(attachment));
-    ws.send({
-      type: 'message:send',
-      session_id: mgr.id,
-      text: sentText,
-      ...(items.length > 0 ? { items } : {}),
-    });
-    // Ack the folded cards (best-effort — the structured send is reliable, and
-    // unlike the old REST call there's no response to await).
-    if (unacked.length > 0) {
-      const ackedIds = new Set(unacked.map(c => c.id));
-      setManagerCardsByTask(prev => ({
-        ...prev,
-        [taskId]: (prev[taskId] ?? []).map(c => ackedIds.has(c.id) ? { ...c, acked: true } : c),
-      }));
-    }
-  }, [ws]);
-
-  // Stop the Manager's in-flight turn — same `session:stop` path a normal
-  // session's Composer Stop button uses, resolved to the manager session id.
-  const onManagerStop = useCallback((taskId: string) => {
-    const mgr = sessionsRef.current.find(
-      s => s.type === 'manager' && s.task_id === taskId,
-    );
-    if (mgr) ws.send({ type: 'session:stop', session_id: mgr.id });
-  }, [ws]);
-
-  const onCreateSubtask = useCallback((taskId: string, draft: NewSubtaskDraft) => {
-    void import('./api.js').then(m => m.createSubtask(taskId, {
-      workspace_id: draft.workspace_id,
-      executor: draft.executor,
-      ...(draft.name ? { name: draft.name } : {}),
-    })).then(session => {
-      if (!session) {
-        toast({ kind: 'error', message: 'create subtask failed' });
-        return;
-      }
-      const prompt = draft.prompt?.trim() ?? '';
-      // Issue #5: prefill the first prompt into the new subtask's composer draft
-      // instead of auto-sending it. Robust for Claude (whose first turn must go
-      // through the TTY, where the staged-first-message routing was unreliable)
-      // and lets the user review before pressing Enter. Works even though the
-      // subtask's Composer isn't mounted yet — injectComposerDraft persists to
-      // localStorage, which the Composer reads on mount.
-      if (prompt) injectComposerDraft(session.id, prompt);
-      // §A2 follow-up: leave a static "created" card in the Manager conversation
-      // and queue its context for the Manager's next turn.
-      const wsLabel = workspacesRef.current.find(w => w.id === draft.workspace_id)?.name;
-      setManagerCardsByTask(prev => ({
-        ...prev,
-        [taskId]: [...(prev[taskId] ?? []), {
-          id: session.id,
-          status: 'created',
-          executor: draft.executor,
-          prompt,
-          ...(draft.name ? { name: draft.name } : {}),
-          ...(wsLabel ? { workspaceLabel: wsLabel } : {}),
-          ts: Date.now(),
-          acked: false,
-        }],
-      }));
-      setActiveSubtaskId(session.id);
-    });
-  }, []);
+  const {
+    activeManagerSession,
+    activeManagerTask,
+    managerItems,
+    managerPending,
+    managerQueue,
+    managerHandlers,
+    managerCardsByTask,
+    showManagerRaw,
+    setShowManagerRaw,
+    onManagerMount,
+    onManagerSend,
+    onManagerStop,
+    onCreateSubtask,
+  } = useTaskManager({
+    mode,
+    activeTaskId,
+    activeSubtaskId,
+    activeRail,
+    tasks,
+    sessions,
+    sessionsRef,
+    workspacesRef,
+    itemsBySession,
+    setItemsBySession,
+    pendingBySession,
+    setPendingBySession,
+    queueBySession,
+    sessionCommands: sessionMainHandlers,
+    hydrateTranscript,
+    setActiveSubtaskId,
+    ws,
+  });
 
   // URL-param driven Files view: /?view=files&wt=<id>&path=<rel>
   // Opened by FilesView's "Open in new tab" href for non-renderable file types.
   const urlParams = new URLSearchParams(window.location.search);
-  if (urlParams.get('view') === 'files') {
-    const filesWtId = urlParams.get('wt');
-    const filesPath = urlParams.get('path');
-    return (
-      <LocaleProvider locale={locale}>
-        <FilesView
-          workingTrees={workingTrees}
-          workingTreeId={filesWtId}
-          onPickWorkingTree={id => { window.location.search = `?view=files&wt=${encodeURIComponent(id)}`; }}
-          initialPath={filesPath}
-          externalEditors={systemConfig?.external_editors ?? []}
-          onOpenSettings={() => activateRail('settings')}
-        />
-      </LocaleProvider>
-    );
-  }
+  const filesRouteActive = urlParams.get('view') === 'files';
+  const filesWtId = urlParams.get('wt');
+  const filesPath = urlParams.get('path');
 
-  // A Subtask IS a Session: when one is selected in Tasks mode the main area
-  // renders the full SessionMain view, so the workbench Sheet / Inspector /
-  // terminal must work there exactly as they do in Sessions mode. We treat
-  // "Sessions mode" OR "Tasks mode with an active subtask" as a single
-  // "session view active" condition for every gate below.
   const subtaskActive = mode === 'tasks' && !!activeSubtaskId && !!activeSession;
-  const sessionViewActive = mode === 'sessions' || subtaskActive;
-  // The Manager rail only makes sense for a subtask. If the subtask context
-  // is lost (deselected, or you leave Tasks mode) while it's open, collapse
-  // the rail rather than leave an empty panel behind.
-  useEffect(() => {
-    if (activeRail === 'manager' && !subtaskActive) setActiveRail(null);
-  }, [activeRail, subtaskActive]);
-  // Keep terminal tabs mounted even when their group is hidden — the Sheet
-  // keeps every group in the DOM under display:none, so ttys survive rail
-  // switches, the main/workbench view toggle, and top-level mode switches.
-  // The PTY is closed only by the tab close action above.
-  // Global workbench rails (Settings, Terminal, Workspaces) are available in
-  // BOTH Sessions and Tasks (incl. the Manager view) — they aren't tied to an
-  // active session. Only the Files / Diffs rails are session-specific (gated
-  // on sessionViewActive below).
-  const workbenchActive = mode === 'sessions' || mode === 'tasks';
-  const activeGroup = activeRail ? GROUP_OF_RAIL[activeRail] : null;
-  const railGroupHasTabs = activeGroup ? wbTabs.some(t => t.group === activeGroup) : false;
-  const managerP2 = activeRail === 'manager' && subtaskActive && !!activeManagerTask;
-  const sheetMounted = wbTabs.length > 0;
-  // The sidechat rail always has panel-2 content to show: chat tabs when they
-  // exist, otherwise the inline session picker as its empty state.
-  const sheetVisible = workbenchActive
-    && chatPanel === null
-    && viewState !== 'main'
-    && activeRail !== null
-    && (railGroupHasTabs || managerP2 || activeRail === 'sidechat');
-
-  // Panel 3 (Inspector) is derived from the active rail: files→files tree,
-  // diffs→changes tree, workspaces→workspace list, settings→section nav.
-  // The Manager / Sidechat / Terminal / Browser rails have no panel 3.
-  const inspectorKind: 'files' | 'changes' | 'workspaces' | 'settings' | null =
-    activeRail === 'files' ? 'files'
-    : activeRail === 'diffs' ? 'changes'
-    : activeRail === 'workspaces' ? 'workspaces'
-    : activeRail === 'settings' ? 'settings'
-    : null;
-  const inspectorAvailable = workbenchActive && chatPanel === null && inspectorKind !== null
-    && !(inspectorKind === 'files' && filesInspectorSuppressed)
-    && ((inspectorKind === 'files' || inspectorKind === 'changes') ? sessionViewActive : true);
-  const inspectorVisible = inspectorAvailable && !p3Collapsed;
-
-  // The workspace tab in the Workbench (zone 3) drives the active-row
-  // highlight in the WorkspacesInspector (zone 4). Derived from
-  // wbTabs/activeTabByGroup so it can't drift out of sync with the tab strip.
-  const openWsIds = new Set(
-    wbTabs.filter(t => t.kind === 'workspace' && t.wsId).map(t => t.wsId as string),
-  );
-  const selectedWsId = wbTabs.find(t => t.id === activeTabByGroup['workspaces'])?.wsId ?? null;
-
-  // ─── Panel-2 navigation history (Topbar back/forward) ───────────────────
-  // Record (rail, active tab) on every rail switch / tab activation, skipping
-  // consecutive duplicates and the entries we restore ourselves.
-  const navTabId = activeGroup ? (activeTabByGroup[activeGroup] ?? null) : null;
-  useEffect(() => {
-    if (navSkipRef.current) { navSkipRef.current = false; return; }
-    const cur = navStack[navIdx];
-    if (cur && cur.rail === activeRail && cur.tabId === navTabId) return;
-    const next = [...navStack.slice(0, navIdx + 1), { rail: activeRail, tabId: navTabId }];
-    setNavStack(next);
-    setNavIdx(next.length - 1);
-  }, [activeRail, navTabId, navStack, navIdx]);
-
-  function navGo(delta: -1 | 1): void {
-    const entry = navStack[navIdx + delta];
-    if (!entry) return;
-    navSkipRef.current = true;
-    setNavIdx(navIdx + delta);
-    if (entry.rail === null) {
-      setActiveRail(null);
-      return;
-    }
-    activateRail(entry.rail);
-    const group = GROUP_OF_RAIL[entry.rail];
-    if (group && entry.tabId && wbTabs.some(t => t.id === entry.tabId)) {
-      revealSheetTab(group, entry.tabId);
-    }
-  }
+  const {
+    sessionViewActive,
+    workbenchActive,
+    activeGroup,
+    managerPanelVisible: managerP2,
+    sheetMounted,
+    sheetVisible,
+    inspectorKind,
+    inspectorVisible,
+    openWorkspaceIds: openWsIds,
+    selectedWorkspaceId: selectedWsId,
+    canGoBack,
+    canGoForward,
+    navigate: navGo,
+  } = useWorkbenchLayout({
+    mode,
+    subtaskActive,
+    hasManagerTask: !!activeManagerTask,
+    activeRail,
+    setActiveRail,
+    tabs: wbTabs,
+    activeTabByGroup,
+    viewState,
+    chatPanel,
+    filesInspectorSuppressed,
+    p3Collapsed,
+    setP3Collapsed,
+    groupOfRail: GROUP_OF_RAIL,
+    activateRail,
+    revealTab: revealSheetTab,
+  });
 
   /** Panel-3 settings nav click: make sure the settings tab exists and is
    *  visible, then switch panel 2 to the chosen section. */
@@ -2061,55 +478,25 @@ export function App() {
     : null;
   const subtaskWorkingTreeId = defaultWorkingTreeIdFor(subtask);
   const subtaskMain = subtask ? (
-    <FileLinkOpenContext.Provider value={(absPath, line) => { void openFileInSheet(absPath, false, line); }}>
-    <FileRefRehypeContext.Provider value={fileRehype}>
-    <DiffOpenContext.Provider value={(item) => { void openTranscriptDiffInSheet(item); }}>
-    <PlanOpenContext.Provider value={(payload) => openChatPanel(subtask.id, { kind: 'plan', id: payload.id })}>
-    <ChatPanelOpenContext.Provider value={(request) => openChatPanel(subtask.id, request)}>
-      <SessionMain
-        session={subtask}
-        workspace={subtaskWorkspace}
-        items={itemsBySession[subtask.id] ?? []}
-        pending={pendingBySession[subtask.id] ?? false}
-        queue={queueBySession[subtask.id] ?? []}
-        codexPlanText={planStateBySession[subtask.id]?.text}
-        codexPlanCompleted={planStateBySession[subtask.id]?.completed}
-        onSend={(text, opts) => sessionMainHandlers.onSend(subtask.id, text, opts)}
-        onSendSkill={(name, path) => sessionMainHandlers.onSendSkill(subtask.id, name, path)}
-        onStop={() => sessionMainHandlers.onStop(subtask.id)}
-        onApprove={(approvalId, decision, answers, context) =>
-          sessionMainHandlers.onApprove(subtask.id, approvalId, decision, answers, context)}
-        onLocalApprovalResolve={(approvalId, decision, answers) => sessionMainHandlers.onLocalApprovalResolve(subtask.id, approvalId, decision, answers)}
-        onQueueAdd={(text, attachments) => sessionMainHandlers.onQueueAdd(subtask.id, text, attachments)}
-        onQueueRemove={queueId => sessionMainHandlers.onQueueRemove(subtask.id, queueId)}
-        onQueueReorder={order => sessionMainHandlers.onQueueReorder(subtask.id, order)}
-        onQueueClear={() => sessionMainHandlers.onQueueClear(subtask.id)}
-        onQueueSendNow={() => sessionMainHandlers.onQueueSendNow(subtask.id)}
-        onSteer={(text, opts) => sessionMainHandlers.onSteer(subtask.id, text, opts?.attachments)}
-        onSetMode={(approvalMode, turns) => sessionMainHandlers.onSetMode(subtask.id, approvalMode, turns)}
-        onSetModel={model => sessionMainHandlers.onSetModel(subtask.id, model)}
-        onSetEffort={effort => sessionMainHandlers.onSetEffort(subtask.id, effort)}
-        onSetServiceTier={tier => sessionMainHandlers.onSetServiceTier(subtask.id, tier)}
-        onSetNativeConfig={(configId, value) =>
-          sessionMainHandlers.onSetNativeConfig(subtask.id, configId, value)}
-        onMerge={() => sessionMainHandlers.onMerge(subtask.id)}
-        onDrop={() => sessionMainHandlers.onDrop(subtask.id)}
-        onArchive={archived => sessionMainHandlers.onArchive(subtask.id, archived)}
-        onDelete={() => sessionMainHandlers.onDelete(subtask.id)}
-        onRecover={() => sessionMainHandlers.onRecover(subtask.id)}
-        onReopen={() => { void import('./api.js').then(m => m.reopenSubtask(subtask.id)); }}
-        onRename={name => sessionMainHandlers.onRename(subtask.id, name)}
-        onShowChanges={() => { activateRail('diffs'); }}
-        workingTreeId={subtaskWorkingTreeId}
-        branch={workingTrees.find(wt => wt.id === subtaskWorkingTreeId)?.branch ?? null}
-        ws={ws}
-        onSwitchRuntime={(target, opts) => sessionMainHandlers.onSwitchRuntime(subtask.id, target, opts)}
-      />
-    </ChatPanelOpenContext.Provider>
-    </PlanOpenContext.Provider>
-    </DiffOpenContext.Provider>
-    </FileRefRehypeContext.Provider>
-    </FileLinkOpenContext.Provider>
+    <SessionSurface
+      session={subtask}
+      workspace={subtaskWorkspace}
+      items={itemsBySession[subtask.id] ?? []}
+      pending={pendingBySession[subtask.id] ?? false}
+      queue={queueBySession[subtask.id] ?? []}
+      planText={planStateBySession[subtask.id]?.text}
+      planCompleted={planStateBySession[subtask.id]?.completed}
+      commands={sessionMainHandlers}
+      workingTreeId={subtaskWorkingTreeId}
+      branch={workingTrees.find(tree => tree.id === subtaskWorkingTreeId)?.branch ?? null}
+      onOpenFile={(absolutePath, line) => { void openFileInSheet(absolutePath, false, line); }}
+      onOpenDiff={item => { void openTranscriptDiffInSheet(item); }}
+      onOpenPlan={payload => openChatPanel(subtask.id, { kind: 'plan', id: payload.id })}
+      onOpenChat={request => openChatPanel(subtask.id, request)}
+      fileRehype={fileRehype}
+      onReopen={() => { void reopenSubtask(subtask.id); }}
+      onShowChanges={() => activateRail('diffs')}
+    />
   ) : null;
 
   /** Sidechat tab body (Sheet kind 'chat'): the same SessionMain the main
@@ -2118,70 +505,84 @@ export function App() {
    *  MAIN session's working-tree context (GitBadge + file-link routing via
    *  openFileInSheet, which resolves against activeSessionId) instead of
    *  plumbing a separate defaultWorkingTreeId chain. */
-  function renderSidechatPanel(sess: Session) {
-    const mainWtId = defaultWorkingTreeIdFor(activeSession);
+  function renderSidechatPanel(session: Session) {
+    const mainWorkingTreeId = defaultWorkingTreeIdFor(activeSession);
     return (
-      <div className="sheet-chat">
-      <FileLinkOpenContext.Provider value={(absPath, line) => { void openFileInSheet(absPath, false, line); }}>
-      <FileRefRehypeContext.Provider value={fileRehype}>
-      <DiffOpenContext.Provider value={(item) => { void openTranscriptDiffInSheet(item); }}>
-      <PlanOpenContext.Provider value={(payload) => openChatPanel(sess.id, { kind: 'plan', id: payload.id })}>
-      <ChatPanelOpenContext.Provider value={(request) => openChatPanel(sess.id, request)}>
-        <SessionMain
-          session={sess}
-          workspace={workspaces.find(w => w.id === sess.workspace_id) ?? null}
-          items={itemsBySession[sess.id] ?? []}
-          pending={pendingBySession[sess.id] ?? false}
-          queue={queueBySession[sess.id] ?? []}
-          codexPlanText={planStateBySession[sess.id]?.text}
-          codexPlanCompleted={planStateBySession[sess.id]?.completed}
-          onSend={(text, opts) => sessionMainHandlers.onSend(sess.id, text, opts)}
-          onSendSkill={(name, path) => sessionMainHandlers.onSendSkill(sess.id, name, path)}
-          onStop={() => sessionMainHandlers.onStop(sess.id)}
-          onApprove={(approvalId, decision, answers, context) =>
-            sessionMainHandlers.onApprove(sess.id, approvalId, decision, answers, context)}
-          onLocalApprovalResolve={(approvalId, decision, answers) => sessionMainHandlers.onLocalApprovalResolve(sess.id, approvalId, decision, answers)}
-          onQueueAdd={(text, attachments) => sessionMainHandlers.onQueueAdd(sess.id, text, attachments)}
-          onQueueRemove={queueId => sessionMainHandlers.onQueueRemove(sess.id, queueId)}
-          onQueueReorder={order => sessionMainHandlers.onQueueReorder(sess.id, order)}
-          onQueueClear={() => sessionMainHandlers.onQueueClear(sess.id)}
-          onQueueSendNow={() => sessionMainHandlers.onQueueSendNow(sess.id)}
-          onSteer={(text, opts) => sessionMainHandlers.onSteer(sess.id, text, opts?.attachments)}
-          onSetMode={(approvalMode, turns) => sessionMainHandlers.onSetMode(sess.id, approvalMode, turns)}
-          onSetModel={model => sessionMainHandlers.onSetModel(sess.id, model)}
-          onSetEffort={effort => sessionMainHandlers.onSetEffort(sess.id, effort)}
-          onSetServiceTier={tier => sessionMainHandlers.onSetServiceTier(sess.id, tier)}
-          onSetNativeConfig={(configId, value) =>
-            sessionMainHandlers.onSetNativeConfig(sess.id, configId, value)}
-          onMerge={() => sessionMainHandlers.onMerge(sess.id)}
-          onDrop={() => sessionMainHandlers.onDrop(sess.id)}
-          onArchive={archived => sessionMainHandlers.onArchive(sess.id, archived)}
-          onDelete={() => sessionMainHandlers.onDelete(sess.id)}
-          onRecover={() => sessionMainHandlers.onRecover(sess.id)}
-          onRename={name => sessionMainHandlers.onRename(sess.id, name)}
-          onShowChanges={() => { activateRail('diffs'); }}
-          workingTreeId={mainWtId}
-          branch={mainWtId ? (workingTrees.find(wt => wt.id === mainWtId)?.branch ?? null) : null}
-          ws={ws}
-          onSwitchRuntime={(target, opts) => sessionMainHandlers.onSwitchRuntime(sess.id, target, opts)}
-        />
-      </ChatPanelOpenContext.Provider>
-      </PlanOpenContext.Provider>
-      </DiffOpenContext.Provider>
-      </FileRefRehypeContext.Provider>
-      </FileLinkOpenContext.Provider>
-      </div>
+      <SessionSurface
+        containerClassName="sheet-chat"
+        session={session}
+        workspace={workspaces.find(workspace => workspace.id === session.workspace_id) ?? null}
+        items={itemsBySession[session.id] ?? []}
+        pending={pendingBySession[session.id] ?? false}
+        queue={queueBySession[session.id] ?? []}
+        planText={planStateBySession[session.id]?.text}
+        planCompleted={planStateBySession[session.id]?.completed}
+        commands={sessionMainHandlers}
+        workingTreeId={mainWorkingTreeId}
+        branch={mainWorkingTreeId
+          ? (workingTrees.find(tree => tree.id === mainWorkingTreeId)?.branch ?? null)
+          : null}
+        onOpenFile={(absolutePath, line) => { void openFileInSheet(absolutePath, false, line); }}
+        onOpenDiff={item => { void openTranscriptDiffInSheet(item); }}
+        onOpenPlan={payload => openChatPanel(session.id, { kind: 'plan', id: payload.id })}
+        onOpenChat={request => openChatPanel(session.id, request)}
+        fileRehype={fileRehype}
+        onShowChanges={() => activateRail('diffs')}
+      />
+    );
+  }
+
+  if (authStatus === 'checking') {
+    return (
+      <LocaleProvider locale={locale}>
+        <div className="app-loading" role="status" data-testid="auth-checking" />
+      </LocaleProvider>
+    );
+  }
+
+  if (authStatus === 'login') {
+    return (
+      <LocaleProvider locale={locale}>
+        <Suspense fallback={<div className="app-loading" role="status" />}>
+          <LoginView onLoginOk={onLoginOk} />
+        </Suspense>
+      </LocaleProvider>
+    );
+  }
+
+  if (filesRouteActive) {
+    return (
+      <LocaleProvider locale={locale}>
+        <Suspense fallback={<div className="app-loading" role="status" />}>
+          <FilesView
+            workingTrees={workingTrees}
+            workingTreeId={filesWtId}
+            onPickWorkingTree={id => {
+              window.location.search = `?view=files&wt=${encodeURIComponent(id)}`;
+            }}
+            initialPath={filesPath}
+            externalEditors={systemConfig?.external_editors ?? []}
+            onOpenSettings={() => activateRail('settings')}
+          />
+        </Suspense>
+      </LocaleProvider>
     );
   }
 
   return (
     <LocaleProvider locale={locale}>
+    <Suspense fallback={<div className="app-loading" role="status" />}>
     <ImageZoomContext.Provider value={(src, alt) => setZoomImage({ src, alt })}>
     <BrowserLinkOpenContext.Provider value={(url) => addBrowserTab(url)}>
-    <div className="app">
+    <div
+      className="app"
+      data-testid="app-shell"
+      data-connection={wsState === 'open' && authed ? 'ready' : wsState}
+    >
       <Topbar
         pathSegments={pathSegments}
         sessionMenu={sessionMenu}
+        branchMenu={branchMenu}
         onRenameSubmit={handleRenameSubmit}
         onRenameCancel={handleRenameCancel}
         sidebarCollapsed={sidebarCollapsedUi}
@@ -2189,16 +590,16 @@ export function App() {
           window.dispatchEvent(new CustomEvent('gian.toggle-rail'));
           setSidebarCollapsedUi(c => !c);
         }}
-        p3Available={inspectorAvailable}
+        p3Available={sheetVisible && inspectorVisible}
         p3Visible={inspectorVisible}
         onToggleP3={() => setP3Collapsed(c => !c)}
-        canGoBack={navIdx > 0}
-        canGoForward={navIdx < navStack.length - 1}
+        canGoBack={canGoBack}
+        canGoForward={canGoForward}
         onGoBack={() => navGo(-1)}
         onGoForward={() => navGo(1)}
       />
       <ImageLightbox image={zoomImage} onClose={() => setZoomImage(null)} />
-      <CommandPalette
+      {paletteOpen && <CommandPalette
         open={paletteOpen}
         onClose={() => { setPaletteOpen(false); setPaletteInitialQuery(undefined); }}
         sessions={sessions}
@@ -2209,7 +610,7 @@ export function App() {
         onJumpToSession={sid => { setActiveSessionId(sid); setMode('sessions'); setPaletteOpen(false); }}
         onOpenFile={() => { setPaletteOpen(false); }}
         initialQuery={paletteInitialQuery}
-      />
+      />}
       <div className={`body ${viewState === 'workbench' ? 'wb-only' : ''}`}>
           {mode === 'sessions' && (
           <FileLinkOpenContext.Provider value={(absPath, line) => { void openFileInSheet(absPath, false, line); }}>
@@ -2226,10 +627,7 @@ export function App() {
               onSetAppMode={(m) => { setMode(m); }}
               onOpenSearch={() => setPaletteOpen(true)}
               workspaces={workspaces}
-              workspaceBranches={workspaceBranches}
               sessions={sessions}
-              archivedSessions={archivedSessions}
-              archivedLoaded={archivedLoaded}
               activeSession={activeSession}
               activeWorkspace={activeWorkspace}
               activeSessionId={activeSessionId}
@@ -2237,12 +635,6 @@ export function App() {
               pendingBySession={pendingBySession}
               queueBySession={queueBySession}
               planStateBySession={planStateBySession}
-              onLoadArchived={async () => {
-                if (archivedLoaded) return;
-                const list = await import('./api.js').then(m => m.loadArchivedSessions());
-                setArchivedSessions(list);
-                setArchivedLoaded(true);
-              }}
               onSelectSession={selectSession}
               onWorkspaceCreated={w => setWorkspaces(prev => [...prev, w])}
               onCreateSession={(input) => {
@@ -2262,16 +654,11 @@ export function App() {
                 });
               }}
               creatingSession={creatingSession}
-              onArchive={sessionMainHandlers.onArchive}
               onDelete={sessionMainHandlers.onDelete}
-              onRecover={sessionMainHandlers.onRecover}
-              onMerge={sessionMainHandlers.onMerge}
-              onDrop={sessionMainHandlers.onDrop}
               onSend={sessionMainHandlers.onSend}
               onSendSkill={sessionMainHandlers.onSendSkill}
               onStop={sessionMainHandlers.onStop}
               onApprove={sessionMainHandlers.onApprove}
-              onLocalApprovalResolve={sessionMainHandlers.onLocalApprovalResolve}
               onQueueAdd={sessionMainHandlers.onQueueAdd}
               onQueueRemove={sessionMainHandlers.onQueueRemove}
               onQueueReorder={sessionMainHandlers.onQueueReorder}
@@ -2283,17 +670,12 @@ export function App() {
               onSetEffort={sessionMainHandlers.onSetEffort}
               onSetServiceTier={sessionMainHandlers.onSetServiceTier}
               onSetNativeConfig={sessionMainHandlers.onSetNativeConfig}
-              onRename={sessionMainHandlers.onRename}
               onShowChanges={() => { activateRail('diffs'); }}
-              activeWorkingTreeId={defaultWorkingTreeIdFor(activeSession)}
+              activeWorkingTreeId={viewedWorkingTreeId(activeSession)}
               activeBranch={
-                workingTrees.find(wt => wt.id === defaultWorkingTreeIdFor(activeSession))?.branch
+                workingTrees.find(wt => wt.id === viewedWorkingTreeId(activeSession))?.branch
                 ?? null
               }
-              previewTarget={null}
-              onClosePreview={() => { /* no-op — replaced by Sheet */ }}
-              ws={ws}
-              onSwitchRuntime={sessionMainHandlers.onSwitchRuntime}
               onOpenSpaces={() => setMode('spaces')}
             />
           </ChatPanelOpenContext.Provider>
@@ -2348,13 +730,6 @@ export function App() {
               onSelectTask={(taskId) => { setActiveTaskId(taskId); setActiveSubtaskId(null); }}
               onSelectSubtask={(taskId, subtaskId) => { setActiveTaskId(taskId); setActiveSubtaskId(subtaskId); }}
               subtaskMain={subtaskMain}
-              onOpenSubtaskSession={(subtaskId) => {
-                // Secondary affordance: pop the subtask out into full Sessions
-                // mode. The default is the inline SessionMain (`subtaskMain`).
-                setActiveSessionId(subtaskId);
-                markSessionViewed(subtaskId);
-                setMode('sessions');
-              }}
             />
           )}
           {mode === 'bots' && (
@@ -2488,7 +863,6 @@ export function App() {
                 }
                 if (t.kind === 'chat') {
                   const chatSession = sessions.find(s => s.id === t.sessionId)
-                    ?? archivedSessions.find(s => s.id === t.sessionId)
                     ?? null;
                   if (!chatSession) {
                     return <div className="sheet-chat-missing">{appT('sidechat.sessionGone')}</div>;
@@ -2542,7 +916,7 @@ export function App() {
             ) : (
               <Inspector
                 tab={inspectorKind}
-                workingTreeId={defaultWorkingTreeIdFor(activeSession)}
+                workingTreeId={viewedWorkingTreeId(activeSession)}
                 workingTrees={workingTrees}
                 revealFile={fileReveal}
                 onOpenFile={(rel, perm) => {
@@ -2582,6 +956,7 @@ export function App() {
     </div>
     </BrowserLinkOpenContext.Provider>
     </ImageZoomContext.Provider>
+    </Suspense>
     </LocaleProvider>
   );
 }

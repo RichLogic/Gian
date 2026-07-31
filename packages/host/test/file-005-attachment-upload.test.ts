@@ -86,8 +86,8 @@ async function withApp(): Promise<{ ctx: Awaited<ReturnType<typeof makeTestApp>>
   const sessionId = 'sess-test-1';
   const now = new Date().toISOString();
   ctx.db.prepare(
-    `INSERT INTO sessions (id, name, type, workspace_id, executor, model, approval_mode, turns, active_channel, status, archived, native_session_id, created_at, updated_at)
-     VALUES (?, 'test', 'coding', ?, 'claude', NULL, 'ask', 1, 'web', 'idle', 0, 'native-test-1', ?, ?)`,
+    `INSERT INTO sessions (id, name, type, workspace_id, executor, model, approval_mode, active_channel, status, archived, native_session_id, created_at, updated_at)
+     VALUES (?, 'test', 'coding', ?, 'claude', NULL, 'ask', 'web', 'idle', 0, 'native-test-1', ?, ?)`,
   ).run(sessionId, workspaceId, now, now);
   return { ctx, sessionId };
 }

@@ -8,7 +8,7 @@
   "type": "module",
   "main": "./dist/main.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "pnpm run clean && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --import tsx test/*.test.ts",
     "test:smoke": "pnpm run build && node test/electron-smoke.mjs",
@@ -16,7 +16,7 @@
     "start": "electron .",
     "package:mac": "pnpm run build && electron-builder --mac dir",
     "make:mac": "pnpm run build && electron-builder --mac dmg zip",
-    "clean": "rm -rf dist release"
+    "clean": "rm -rf dist release *.tsbuildinfo"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

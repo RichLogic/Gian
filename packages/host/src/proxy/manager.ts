@@ -152,7 +152,7 @@ export class ProxyManager {
     });
   }
 
-  private createCodexClient(sessionId: string): ProxyClient {
+  private createCodexClient(_sessionId: string): ProxyClient {
     if (!this.cfg.codexProxyEntry) {
       throw new Error(
         'codex executor requested but codexProxyEntry is not configured',

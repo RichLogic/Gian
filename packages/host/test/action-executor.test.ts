@@ -31,9 +31,9 @@ interface Fixture {
 
 function insertSession(db: Db, id: string, type: string): Session {
   db.prepare(
-    `INSERT INTO sessions(id,name,type,task_id,workspace_id,executor,approval_mode,turns,status,archived,unread,native_session_id,runtime_mode,created_at,updated_at)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`,
-  ).run(id, null, type, 't1', 'w1', 'claude', 'plan', 0, 'new', 0, 0, `nat-${id}`, 'structured');
+    `INSERT INTO sessions(id,name,type,task_id,workspace_id,executor,approval_mode,status,archived,unread,native_session_id,created_at,updated_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`,
+  ).run(id, null, type, 't1', 'w1', 'claude', 'plan', 'new', 0, 0, `nat-${id}`);
   return db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as Session;
 }
 
@@ -67,7 +67,7 @@ test('ACTION-EXEC-001: create_subtask from PM with no loop → executed directly
   const f = setup();
   try {
     // No loop → execute. The PM aligns in natural language before emitting, so
-    // the human checkpoint already happened (works on Claude TTY, no chip).
+    // the human checkpoint already happened.
     const r = await f.ex.handle({ session: f.mgr, action: CREATE, blockText: 'B1', hostTurnId: 'ta', sourceTurnKey: 'ta' });
     assert.equal(r?.status, 'done');
     assert.equal(f.calls.createSubtask.length, 1);

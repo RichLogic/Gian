@@ -65,7 +65,7 @@ export interface ActionContext {
   /** Host DB turn UUID the action was parsed from. */
   hostTurnId: string | null;
   /** Runtime-native turn key (Codex turnId / Claude message id; historically
-   *  also a Claude-TTY `tty:`-prefixed key before that mode was removed).
+   *  also used a runtime-prefixed key before legacy session modes were removed).
    *  Falls back to hostTurnId for structured where they are 1:1. */
   sourceTurnKey: string | null;
 }

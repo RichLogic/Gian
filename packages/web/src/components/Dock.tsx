@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import type { RunnerInfo } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import type { WsState } from '../ws.js';
-import type { RailId } from './Sheet.js';
+import type { RailId } from './sheet-model.js';
 
 type Group = 'panel' | 'wb';
 
 interface DockBtnProps {
   group: Group;
+  testId: string;
   label: string;
   active?: boolean;
   disabled?: boolean;
@@ -15,14 +16,13 @@ interface DockBtnProps {
   children: React.ReactNode;
 }
 
-function DockBtn({ group, label, active, disabled, onClick, children }: DockBtnProps) {
-  const testId = `dock-${label.toLowerCase().replace(/\s+/g, '-')}`;
+function DockBtn({ group, testId, label, active, disabled, onClick, children }: DockBtnProps) {
   return (
     <button
       type="button"
       className={`dock-btn ${group} ${active ? 'active' : ''}`}
       data-dock-group={group}
-      data-testid={testId}
+      data-testid={`dock-${testId}`}
       aria-label={label}
       onClick={onClick}
       disabled={disabled}
@@ -123,6 +123,7 @@ export function Dock({
       <div className="dock-group" data-dock-group-label={t('dock.group.files')}>
         <DockBtn
           group="panel"
+          testId="files"
           label={t('dock.files')}
           active={activeRail === 'files'}
           disabled={sessionRailsDisabled}
@@ -132,6 +133,7 @@ export function Dock({
         </DockBtn>
         <DockBtn
           group="panel"
+          testId="diffs"
           label={t('dock.diffs')}
           active={activeRail === 'diffs'}
           disabled={sessionRailsDisabled}
@@ -147,6 +149,7 @@ export function Dock({
         {managerVisible && (
           <DockBtn
             group="panel"
+            testId="manager"
             label={t('dock.manager')}
             active={activeRail === 'manager'}
             onClick={() => onToggleRail('manager')}
@@ -158,6 +161,7 @@ export function Dock({
             tab strip's "+" session picker. */}
         <DockBtn
           group="panel"
+          testId="sidechat"
           label={t('dock.sidechat')}
           active={activeRail === 'sidechat'}
           disabled={workbenchDisabled}
@@ -172,6 +176,7 @@ export function Dock({
       <div className="dock-group" data-dock-group-label={t('dock.group.workbench')}>
         <DockBtn
           group="wb"
+          testId="terminal"
           label={t('dock.terminal')}
           active={activeRail === 'terminal'}
           disabled={workbenchDisabled}
@@ -182,6 +187,7 @@ export function Dock({
         {/* Browser rail — iframe preview tabs, added via the tab strip's "+". */}
         <DockBtn
           group="wb"
+          testId="browser"
           label={t('dock.browser')}
           active={activeRail === 'browser'}
           disabled={workbenchDisabled}
@@ -196,6 +202,7 @@ export function Dock({
       <div className="dock-group" data-dock-group-label={t('dock.group.system')}>
         <DockBtn
           group="panel"
+          testId="workspaces"
           label={t('topbar.mode.workspaces')}
           active={activeRail === 'workspaces'}
           disabled={workbenchDisabled}
@@ -205,6 +212,7 @@ export function Dock({
         </DockBtn>
         <DockBtn
           group="wb"
+          testId="settings"
           label={t('dock.settings')}
           active={activeRail === 'settings'}
           disabled={workbenchDisabled}

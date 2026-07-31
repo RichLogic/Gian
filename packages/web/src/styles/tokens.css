@@ -106,7 +106,7 @@ body {
 body,
 .sidebar, .topbar, .inspector, .settings-tab-body,
 .transcript, .composer, .composer-wrap, .approval, .evt,
-.sheet, .tty, .gian-terminal, .sheet-file, .md-preview {
+.sheet, .gian-terminal, .sheet-file, .md-preview {
   --fz-11: calc(11px * var(--zone-scale, 1));
   --fz-12: calc(12px * var(--zone-scale, 1));
   --fz-13: calc(13px * var(--zone-scale, 1));
@@ -153,19 +153,16 @@ body[data-scale-chat="xl"] .composer-wrap,
 body[data-scale-chat="xl"] .approval,
 body[data-scale-chat="xl"] .evt                                    { --zone-scale: 1.25;  }
 
-.sheet, .tty, .gian-terminal, .sheet-file, .md-preview             { --zone-scale: 1; }
+.sheet, .gian-terminal, .sheet-file, .md-preview                   { --zone-scale: 1; }
 body[data-scale-code="sm"] .sheet,
-body[data-scale-code="sm"] .tty,
 body[data-scale-code="sm"] .gian-terminal,
 body[data-scale-code="sm"] .sheet-file,
 body[data-scale-code="sm"] .md-preview                             { --zone-scale: 0.875; }
 body[data-scale-code="lg"] .sheet,
-body[data-scale-code="lg"] .tty,
 body[data-scale-code="lg"] .gian-terminal,
 body[data-scale-code="lg"] .sheet-file,
 body[data-scale-code="lg"] .md-preview                             { --zone-scale: 1.125; }
 body[data-scale-code="xl"] .sheet,
-body[data-scale-code="xl"] .tty,
 body[data-scale-code="xl"] .gian-terminal,
 body[data-scale-code="xl"] .sheet-file,
 body[data-scale-code="xl"] .md-preview                             { --zone-scale: 1.25;  }

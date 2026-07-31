@@ -5,7 +5,7 @@ import type {
   CodexThread,
   ModelOption,
   PendingApproval,
-  SessionRecord,
+  MessagingSession,
   UserRecord,
   WorkspaceSummary,
 } from '../types.js';
@@ -22,46 +22,7 @@ export type MessagingBotStatus = 'disabled' | 'connecting' | 'connected' | 'erro
 // Session mode (shared across platforms)
 // ---------------------------------------------------------------------------
 
-// MessagingSessionMode == ApprovalMode 1:1. Originally rvc's IM only
-// surfaced 'detailed' / 'full-auto' (a 3→2 projection); we realigned to
-// Gian's three-mode vocabulary ('plan'|'ask'|'auto') so the IM `/alter`
-// flow can offer the same modes the web UI does. See im/types.ts.
 export type MessagingSessionMode = ApprovalMode;
-
-// ---------------------------------------------------------------------------
-// Bot record — base fields every platform stores
-// ---------------------------------------------------------------------------
-
-export interface MessagingBotRecord {
-  id: string;
-  ownerUserId: string;
-  ownerUsername: string;
-  label: string;
-  tokenCiphertext: string;
-  selectedWorkspaceId: string | null;
-  selectedSessionId: string | null;
-  enabled: boolean;
-  status: MessagingBotStatus;
-  lastError: string | null;
-  lastConnectedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface AdminMessagingBotRecord {
-  id: string;
-  ownerUserId: string;
-  ownerUsername: string;
-  label: string;
-  selectedWorkspaceId: string | null;
-  enabled: boolean;
-  hasToken: boolean;
-  status: MessagingBotStatus;
-  lastError: string | null;
-  lastConnectedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
 
 // ---------------------------------------------------------------------------
 // Session create input (platform managers call this to create sessions)
@@ -70,8 +31,13 @@ export interface AdminMessagingBotRecord {
 export interface MessagingSessionCreateInput {
   title?: string;
   mode?: MessagingSessionMode;
-  executor?: SessionRecord['executor'];
+  executor?: MessagingSession['executor'];
 }
+
+export type MessagingSessionPatch = Partial<Pick<
+  MessagingSession,
+  'approvalMode' | 'archivedAt' | 'model' | 'reasoningEffort' | 'title'
+>>;
 
 // ---------------------------------------------------------------------------
 // Inbound prompt — normalized message from any platform
@@ -109,20 +75,20 @@ export interface MessagingPlatform {
 
   /** Notify the platform user that a turn has completed. */
   sendTurnCompletion(
-    session: SessionRecord,
+    session: MessagingSession,
     thread: CodexThread | null,
     turnId: string | null,
   ): Promise<void>;
 
   /** Notify the platform user that an approval is needed. */
   sendApprovalRequested(
-    session: SessionRecord,
+    session: MessagingSession,
     approval: PendingApproval,
   ): Promise<void>;
 
   /** Notify the platform user of a session error. */
   sendSessionError(
-    session: SessionRecord,
+    session: MessagingSession,
     message: string,
   ): Promise<void>;
 }
@@ -138,36 +104,34 @@ export interface MessagingPlatformOptions {
   };
   decryptToken: (ciphertext: string) => Promise<string>;
   listUsers: () => UserRecord[];
-  listUserWorkspaces: (username: string, userId: string) => Promise<WorkspaceSummary[]>;
-  listSessionsForWorkspace: (userId: string, workspaceId: string) => Promise<SessionRecord[]>;
-  getWorkspaceForUser: (workspaceId: string, userId: string) => Promise<WorkspaceSummary | null>;
+  listWorkspaces: () => Promise<WorkspaceSummary[]>;
+  listSessionsForWorkspace: (workspaceId: string) => Promise<MessagingSession[]>;
+  getSession: (sessionId: string) => Promise<MessagingSession | null>;
+  updateSession: (sessionId: string, patch: MessagingSessionPatch) => Promise<MessagingSession | null>;
+  getWorkspace: (workspaceId: string) => Promise<WorkspaceSummary | null>;
   createSession: (
-    currentUser: UserRecord,
     workspace: WorkspaceSummary,
-    botId: string,
     input?: MessagingSessionCreateInput,
-  ) => Promise<SessionRecord>;
-  startTurnWithAutoRestart: (
-    session: SessionRecord,
+  ) => Promise<MessagingSession>;
+  startTurn: (
+    session: MessagingSession,
     prompt: string | null,
-    attachments: [],
-  ) => Promise<{ turn: unknown; session: SessionRecord }>;
-  queueTurn: (session: SessionRecord, prompt: string | null) => Promise<void>;
+  ) => Promise<void>;
+  queueTurn: (session: MessagingSession, prompt: string | null) => Promise<void>;
+  getQueueLength: (sessionId: string) => number;
+  clearQueue: (sessionId: string) => void;
   getApprovals: (sessionId: string) => PendingApproval[];
   resolveApproval: (
-    session: SessionRecord,
+    session: MessagingSession,
     approvalId: string,
     input: { decision: 'approve' | 'decline'; scope?: ApprovalScope },
   ) => Promise<void>;
-  listModelOptions: (executor?: SessionRecord['executor']) => ModelOption[];
-  currentDefaultModel: (executor?: SessionRecord['executor']) => string;
-  findModelOption: (model: string | null | undefined, executor?: SessionRecord['executor']) => ModelOption | null;
-  normalizeReasoningEffort: (value: unknown) => SessionRecord['reasoningEffort'] | null;
-  preferredReasoningEffortForModel: (modelOption: ModelOption) => SessionRecord['reasoningEffort'];
-  restartSessionThread: (session: SessionRecord, summary?: string) => Promise<SessionRecord>;
-  interruptTurn: (session: SessionRecord, threadId: string, turnId: string) => Promise<unknown>;
+  listModelOptions: (executor?: MessagingSession['executor']) => ModelOption[];
+  currentDefaultModel: (executor?: MessagingSession['executor']) => string;
+  findModelOption: (model: string | null | undefined, executor?: MessagingSession['executor']) => ModelOption | null;
+  preferredReasoningEffortForModel: (modelOption: ModelOption) => MessagingSession['reasoningEffort'];
+  interruptTurn: (session: MessagingSession, threadId: string, turnId: string) => Promise<unknown>;
   isThreadUnavailableError: (error: unknown) => boolean;
-  staleSessionMessage: string;
   errorMessage: (error: unknown) => string;
   availableExecutors: () => AgentExecutor[];
   normalizeExecutor: (value: unknown) => AgentExecutor;

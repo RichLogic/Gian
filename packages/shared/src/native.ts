@@ -1,4 +1,4 @@
-import type { ApprovalMode, Executor, Session } from './model.js';
+import type { ApprovalMode, Executor } from './model.js';
 
 /**
  * NativeSession represents a session that exists on disk in the underlying
@@ -51,14 +51,4 @@ export interface AdoptNativeSessionRequest {
   name?: string;
   /** Claude/Codex only. Defaults to 'ask' if omitted; Kimi must omit it. */
   approval_mode?: ApprovalMode;
-}
-
-export interface AdoptNativeSessionResponse {
-  /** The newly created Gian session (full row, like POST /sessions). */
-  session: Session;
-}
-
-export interface DeleteNativeSessionRequest {
-  executor: Executor;
-  native_session_id: string;
 }

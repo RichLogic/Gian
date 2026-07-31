@@ -395,7 +395,7 @@ export type EventDataByType = {
 // ---------------------------------------------------------------------------
 
 /**
- * The canonical event shape that flows through EventRouter and out to the
+ * The canonical event shape that flows through SessionManager and out to the
  * WebSocket layer. Replaces the untyped EventEnvelope for all internal usage.
  * EventEnvelope in web.ts remains the wire format sent to the browser.
  */

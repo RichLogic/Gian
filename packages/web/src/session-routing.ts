@@ -1,13 +1,10 @@
 import type {
   ErrorMessage,
-  Executor,
-  RuntimeMode,
+  Session,
   SessionStatus,
 } from '@gian/shared';
 
 export interface CreatedSessionFirstMessagePlan {
-  switchToTty: boolean;
-  ttyText: string | null;
   structuredText: string | null;
   seedOptimisticEcho: boolean;
 }
@@ -27,43 +24,29 @@ export function isSessionCreateDispatchError(
  * Both executors stay on the structured path (`message:send`).
  */
 export function planCreatedSessionFirstMessage(
-  _executor: Executor,
   pendingMessage: string | null | undefined,
 ): CreatedSessionFirstMessagePlan {
   const text = pendingMessage?.trim() || null;
   return {
-    switchToTty: false,
-    ttyText: null,
     structuredText: text,
     seedOptimisticEcho: text !== null,
   };
 }
-
-export type SessionSurface = 'chat' | 'cli';
-
-/** The runtime a given surface implies. 'chat' is structured; 'cli' is TTY. */
-export function runtimeForSurface(surface: SessionSurface): RuntimeMode {
-  return surface === 'chat' ? 'structured' : 'tty';
-}
-
-export interface RuntimeTab {
-  surface: SessionSurface;
-  /** i18n label kind: 'chat' (the primary surface) or 'cli'. */
-  label: 'chat' | 'cli';
-}
-
-/** Tabs to render in the chat-area tablist. Always a single primary chat
- *  tab — the caller hides the tab bar entirely for a single entry. */
-export function runtimeTabs(_executor: Executor): RuntimeTab[] {
-  return [{ surface: 'chat', label: 'chat' }];
-}
-
 /**
  * Whether the Stop button should show (a turn is actually in flight) — NOT
- * merely because the composer is blocked on a pending question. Hook-driven
- * `status==='running'` gives this for TTY sessions; structured turns set
- * status='running' too, and `pending` covers the structured in-flight window.
+ * merely because the composer is blocked on a pending question.
+ * `status==='running'` covers proxy lifecycle and `pending` covers the
+ * structured in-flight window.
  */
 export function isTurnRunning(status: SessionStatus, pending: boolean): boolean {
   return pending || status === 'running';
+}
+
+/** A session needs the user's attention when it is waiting for input, or when
+ * its completed/failed turn has not been read yet. */
+export function sessionNeedsAttention(
+  session: Pick<Session, 'status' | 'unread'>,
+): boolean {
+  return session.status === 'pending'
+    || ((session.status === 'done' || session.status === 'error') && session.unread === 1);
 }

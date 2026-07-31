@@ -75,7 +75,6 @@ export function BranchPicker({
 
   const localFiltered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const localNames = new Set(branches.map(b => b.name));
     return branches
       // A branch can only be checked out in one worktree at a time; we hide
       // already-occupied ones so the user doesn't pick something git will

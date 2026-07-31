@@ -51,7 +51,6 @@ function makeSession(executor: Executor, overrides: Partial<Session> = {}): Sess
     model: executor === 'codex' ? 'gpt-5.6-sol' : executor === 'claude' ? 'sonnet' : null,
     approval_mode: executor === 'kimi' ? null : 'ask',
     thinking_effort: executor === 'kimi' ? null : executor === 'codex' ? 'ultra' : 'high',
-    turns: 1,
     active_channel: 'web',
     status: 'idle',
     archived: 0,
@@ -60,7 +59,6 @@ function makeSession(executor: Executor, overrides: Partial<Session> = {}): Sess
     base_branch: null,
     worktree_outcome: null,
     native_session_id: `native-${executor}`,
-    runtime_mode: 'structured',
     service_tier: null,
     executor_config: { schemaVersion: 1, values: {} },
     native_config_options: [],
@@ -128,7 +126,7 @@ describe('CLI-aligned composer controls', () => {
     const custom = await screen.findByText('Custom (config.toml)', { selector: '.mp-row-title' });
     expect(custom.closest('button')).not.toBeDisabled();
     await user.click(custom.closest('button')!);
-    expect(callbacks.onSetMode).toHaveBeenCalledWith('custom', undefined);
+    expect(callbacks.onSetMode).toHaveBeenCalledWith('custom');
   });
 
   it('renders Kimi model, effort, and mode from opaque ACP config choices', async () => {

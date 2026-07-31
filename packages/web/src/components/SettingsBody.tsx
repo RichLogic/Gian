@@ -5,7 +5,7 @@ import { THEME_DEFAULT_ACCENT } from '@gian/shared';
 import { loadProxyModels, saveSettings } from '../api.js';
 import { useMinimapEnabled, setMinimapEnabled } from '../display-prefs.js';
 import { AppIcon } from './AppIcon.js';
-import { DEFAULT_OPEN_TARGET } from './Sheet.js';
+import { DEFAULT_OPEN_TARGET } from './sheet-model.js';
 import { useT } from '../i18n/index.js';
 
 const OPEN_CATEGORIES: Array<{ key: OpenFileCategory; labelKey: string }> = [
