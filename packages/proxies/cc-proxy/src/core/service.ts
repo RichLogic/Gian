@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
 import type { TokenUsageUpdate } from '@gian/shared';
 import { createAppError } from './errors.js';
@@ -44,6 +44,8 @@ export function buildPrompt(input: InputItem[]): string {
       parts.push(item.text);
     } else if (item.type === 'localImage' && typeof item.path === 'string' && item.path.length > 0) {
       parts.push(`[Attached image: ${item.path}]`);
+    } else if (item.type === 'localFile' && typeof item.path === 'string' && item.path.length > 0) {
+      parts.push(`[Attached file: ${item.path}]`);
     }
   }
   return parts.join('\n\n');
@@ -308,10 +310,17 @@ export class CcProxyService {
       const supportedEfforts = new Set(modelCapabilities?.supportedEfforts ?? []);
       effort = supportedEfforts.has(requestedEffort) ? requestedEffort : null;
     }
+    const additionalDirectories = [...new Set(
+      input
+        .filter((item): item is Extract<InputItem, { type: 'localFile' }> =>
+          item.type === 'localFile')
+        .map(item => dirname(item.path)),
+    )];
     await this.runtime.sendMessage(session.id, prompt, {
       permissionMode: params.permissionMode ?? null,
       effort,
       displayName: params.displayName ?? null,
+      additionalDirectories,
     });
 
     const updatedSession = this.updateSession(session, {

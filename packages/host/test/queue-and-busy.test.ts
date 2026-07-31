@@ -101,7 +101,10 @@ class FakeProxyClient implements ProxyClient {
 }
 
 class FakeProxyManager {
-  client = new FakeProxyClient();
+  client: FakeProxyClient;
+  constructor(client?: FakeProxyClient) {
+    this.client = client ?? new FakeProxyClient();
+  }
   async getOrCreate(): Promise<ProxyClient> {
     return this.client;
   }
@@ -109,6 +112,22 @@ class FakeProxyManager {
     return this.client;
   }
   async closeAll(): Promise<void> { /* no-op */ }
+}
+
+/** Codex variant: carries the optional `steerTurn` (codex `turn/steer`). */
+class FakeCodexProxyClient extends FakeProxyClient {
+  readonly executor = 'codex' as const;
+  steerCalls: Array<{ sessionId: string; input: unknown[] }> = [];
+  failNextSteer: Error | null = null;
+  async steerTurn(params: { sessionId: string; input: unknown[] }) {
+    this.steerCalls.push(params);
+    if (this.failNextSteer) {
+      const error = this.failNextSteer;
+      this.failNextSteer = null;
+      throw error;
+    }
+    return { ok: true as const, turnId: 'proxy_turn' };
+  }
 }
 
 class CapturingBroadcaster {
@@ -124,14 +143,14 @@ class CapturingBroadcaster {
   }
 }
 
-function setup() {
+function setup(client?: FakeProxyClient) {
   const dir = mkdtempSync(join(tmpdir(), 'gian-queue-test-'));
   const db = openDatabase(dir);
   const wsId = randomUUID();
   db.prepare('INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)')
     .run(wsId, 'test', '/tmp/test-ws');
 
-  const proxyMgr = new FakeProxyManager();
+  const proxyMgr = new FakeProxyManager(client);
   const broadcaster = new CapturingBroadcaster();
   const approvals = new ApprovalManager(broadcaster as unknown as WsBroadcaster);
   const queue = new QueueManager(db);
@@ -482,6 +501,185 @@ test('ERR-005: non-busy startTurn failure rolls back AND marks the turn as error
     const sessionRow = db.prepare('SELECT status FROM sessions WHERE id = ?').get(session.id) as { status: string };
     assert.equal(sessionRow.status, 'error',
       'session.status flipped to error on real startTurn failure (not SESSION_BUSY)');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// QUEUE-004 — attachments ride the queue; send-now semantics per executor.
+// ---------------------------------------------------------------------------
+
+test('QUEUE-004: queued image attachments drain with the message (not dropped)', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'turn-B with image', [
+      { type: 'text', text: 'turn-B with image' },
+      { type: 'localImage', path: '/tmp/att/abc123.png', name: 'shot.png', mime: 'image/png' },
+    ]);
+
+    // Drain on turn.completed → sendMessage must receive the stored items.
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: { sessionId: 'proxy_x', data: { status: 'completed' } },
+    });
+    await tick();
+
+    assert.equal(proxyMgr.client.startTurnCalls.length, 2, 'queued entry drained');
+    const drainedInput = (proxyMgr.client.startTurnCalls[1]!.input as { input: Array<{ type: string }> }).input;
+    assert.ok(
+      drainedInput.some(it => it.type === 'localImage'),
+      'drained startTurn input must include the queued localImage attachment',
+    );
+
+    // The echoed user_message carries the attachment URL so the UI renders it.
+    const msg = db
+      .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid DESC LIMIT 1")
+      .get(session.id) as { data: string };
+    const payload = JSON.parse(msg.data) as { attachments?: Array<{ url: string }> };
+    assert.ok(payload.attachments?.[0]?.url.includes('abc123.png'),
+      'persisted user_message must carry the attachment for rendering');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: sendQueuedNow while busy on claude rejects WITHOUT popping the queue', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, queue } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'later');
+
+    await assert.rejects(
+      sessions.sendQueuedNow(session.id),
+      /turn is already running/,
+      'busy send-now on a non-steer executor must refuse',
+    );
+    assert.equal(queue.list(session.id).length, 1,
+      'queue entry preserved — the old pop-then-SESSION_BUSY path lost the message');
+    assert.equal(proxyMgr.client.startTurnCalls.length, 1, 'no second turn started');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: sendQueuedNow while busy on codex steers every entry into the active turn', async () => {
+  const codexClient = new FakeCodexProxyClient();
+  const ctx = setup(codexClient);
+  try {
+    const { sessions, queue, db } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'codex',
+      approval_mode: 'auto',
+    });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    const startParams = codexClient.startTurnCalls[0]!.input as {
+      additionalWorkspaceRoots?: string[];
+    };
+    assert.equal(startParams.additionalWorkspaceRoots?.length, 1);
+    assert.match(
+      startParams.additionalWorkspaceRoots![0]!,
+      new RegExp(`/attachments/${session.id}$`),
+      'every Codex turn exposes its session-owned attachment root for later steers',
+    );
+    sessions.enqueueMessage(session.id, 'later-1');
+    sessions.enqueueMessage(session.id, 'later-2');
+
+    await sessions.sendQueuedNow(session.id);
+
+    assert.equal(codexClient.steerCalls.length, 2, 'both queued entries steered');
+    const firstInput = codexClient.steerCalls[0]!.input as Array<{ type: string; text?: string }>;
+    assert.equal(firstInput[0]?.type, 'text');
+    assert.equal(firstInput[0]?.text, 'later-1', 'FIFO steer order');
+    assert.equal(queue.list(session.id).length, 0, 'queue drained');
+    assert.equal(codexClient.startTurnCalls.length, 1, 'no new turn started');
+
+    // Steered messages are recorded on the SAME active turn, in order.
+    const msgs = db
+      .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid")
+      .all(session.id) as Array<{ data: string }>;
+    assert.deepEqual(msgs.map(m => (JSON.parse(m.data) as { text: string }).text),
+      ['turn-A', 'later-1', 'later-2']);
+    const turns = db.prepare('SELECT COUNT(*) AS c FROM turns WHERE session_id = ?').get(session.id) as { c: number };
+    assert.equal(turns.c, 1, 'steered messages must not mint new turns');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: rejected steer does not persist a user message and restores the queue', async () => {
+  const codexClient = new FakeCodexProxyClient();
+  const ctx = setup(codexClient);
+  try {
+    const { sessions, queue, db } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'codex',
+      approval_mode: 'auto',
+    });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'later');
+    codexClient.failNextSteer = new Error('steer rejected');
+
+    await assert.rejects(sessions.sendQueuedNow(session.id), /steer rejected/);
+    assert.deepEqual(queue.list(session.id).map(entry => entry.text), ['later']);
+
+    const messages = db
+      .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid")
+      .all(session.id) as Array<{ data: string }>;
+    assert.deepEqual(
+      messages.map(message => (JSON.parse(message.data) as { text: string }).text),
+      ['turn-A'],
+      'the rejected steer must not leave a transcript row that looks delivered',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: steerMessage without an active turn rejects; with one it records and steers', async () => {
+  const codexClient = new FakeCodexProxyClient();
+  const ctx = setup(codexClient);
+  try {
+    const { sessions, db } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'codex',
+      approval_mode: 'auto',
+    });
+
+    await assert.rejects(
+      sessions.steerMessage(session.id, 'too early'),
+      /no active turn/,
+      'steer requires an in-flight turn',
+    );
+    assert.equal(codexClient.steerCalls.length, 0);
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    await sessions.steerMessage(session.id, 'steer this', [
+      { type: 'text', text: 'steer this' },
+      { type: 'localImage', path: '/tmp/att/def456.png', name: 'shot2.png', mime: 'image/png' },
+    ]);
+
+    assert.equal(codexClient.steerCalls.length, 1);
+    const input = codexClient.steerCalls[0]!.input as Array<{ type: string }>;
+    assert.ok(input.some(it => it.type === 'localImage'), 'steer carries attachments');
+    const msg = db
+      .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid DESC LIMIT 1")
+      .get(session.id) as { data: string };
+    const payload = JSON.parse(msg.data) as { text: string; attachments?: unknown[] };
+    assert.equal(payload.text, 'steer this');
+    assert.equal(payload.attachments?.length, 1, 'steered message echo carries the attachment');
   } finally {
     teardown(ctx);
   }

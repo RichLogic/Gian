@@ -22,3 +22,11 @@ test('cc-proxy buildPrompt handles image-only input', () => {
   const out = buildPrompt([{ type: 'localImage', path: '/tmp/x.png' }]);
   assert.equal(out, '[Attached image: /tmp/x.png]');
 });
+
+test('cc-proxy buildPrompt appends a generic file reference', () => {
+  const out = buildPrompt([
+    { type: 'text', text: 'summarize this' },
+    { type: 'localFile', path: '/tmp/attachments/report.pdf', name: 'report.pdf' },
+  ]);
+  assert.equal(out, 'summarize this\n\n[Attached file: /tmp/attachments/report.pdf]');
+});

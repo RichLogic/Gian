@@ -21,15 +21,16 @@
   min-height: 30px;
 }
 
-/* Strip triggers — pills, matching the legacy `.plan-chip` shape. */
+/* Strip triggers — shared chrome with the underbar nav (same height, border,
+   background, and the app's standard radius — no pills). */
 .context-strip .plan-chip,
 .context-chip {
   min-width: 0;
-  min-height: 28px;
+  height: 28px;
   margin: 0;
   padding: 4px 11px;
   border: 1px solid var(--hairline);
-  border-radius: var(--r-pill);
+  border-radius: var(--r-2);
   background: var(--surface);
   color: var(--text-2);
   font: inherit;
@@ -58,6 +59,7 @@
 .context-strip .plan-chip:focus-visible,
 .context-chip:focus-visible,
 .context-panel-close:focus-visible,
+.context-panel-open:focus-visible,
 .context-agent-row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -121,24 +123,29 @@
 /* Panels — composer-family containers: surface-2, r-3, flat. */
 .context-plan-panel,
 .context-agent-panel {
+  /* Overlay above the underbar row (not in-flow): opening a panel must not
+     push the transcript up. The underbar is the positioned ancestor, so
+     16px insets keep the panel exactly the composer's width. */
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 16px;
+  right: 16px;
+  z-index: 20;
   display: flex;
-  margin-bottom: 6px;
   overflow: hidden;
   flex-direction: column;
   border: 0;
   border-radius: var(--r-3);
-  background: var(--surface-2);
-  box-shadow: none;
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
   animation: context-panel-in 180ms var(--ease-soft);
 }
 
 .context-plan-panel {
-  width: 100%;
   max-height: min(480px, 52vh);
 }
 
 .context-agent-panel {
-  width: min(520px, 100%);
   max-height: min(320px, 42vh);
 }
 
@@ -178,6 +185,13 @@
   font-size: 10.5px;
 }
 
+.context-panel-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.context-panel-open,
 .context-panel-close {
   display: grid;
   width: 22px;
@@ -194,9 +208,14 @@
   transition: background 120ms var(--ease), color 120ms var(--ease);
 }
 
+.context-panel-open:hover,
 .context-panel-close:hover {
   background: var(--surface-3);
   color: var(--text);
+}
+
+.context-panel-open svg {
+  display: block;
 }
 
 /* Plan body — markdown on an inner `surface` card, like `.approval-plan`. */

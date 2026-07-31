@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import type { InputItem } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 
 export interface QueueEntry {
   id: string;
   sessionId: string;
   text: string;
+  /** Structured input items (e.g. localImage attachments) carried with the
+   *  message — drained entries pass them straight to sendMessage. */
+  items?: InputItem[];
   createdAt: number;
 }
 
@@ -12,15 +16,26 @@ interface QueueRow {
   id: string;
   session_id: string;
   text: string;
+  items_json: string | null;
   sort_order: number;
   created_at: string;
 }
 
 function rowToEntry(row: QueueRow): QueueEntry {
+  let items: InputItem[] | undefined;
+  if (row.items_json) {
+    try {
+      const parsed = JSON.parse(row.items_json) as unknown;
+      if (Array.isArray(parsed)) items = parsed as InputItem[];
+    } catch {
+      // Corrupt payload — degrade to text-only rather than losing the entry.
+    }
+  }
   return {
     id: row.id,
     sessionId: row.session_id,
     text: row.text,
+    ...(items ? { items } : {}),
     createdAt: Date.parse(row.created_at),
   };
 }
@@ -36,20 +51,21 @@ function rowToEntry(row: QueueRow): QueueEntry {
 export class QueueManager {
   constructor(private db: Db) {}
 
-  add(sessionId: string, text: string): QueueEntry {
+  add(sessionId: string, text: string, items?: InputItem[]): QueueEntry {
     const id = randomUUID();
     const now = new Date().toISOString();
     const maxRow = this.db
       .prepare('SELECT MAX(sort_order) AS m FROM queue_entries WHERE session_id = ?')
       .get(sessionId) as { m: number | null };
     const sortOrder = (maxRow.m ?? -1) + 1;
+    const itemsJson = items && items.length > 0 ? JSON.stringify(items) : null;
     this.db
       .prepare(
-        `INSERT INTO queue_entries (id, session_id, text, sort_order, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO queue_entries (id, session_id, text, items_json, sort_order, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, sessionId, text, sortOrder, now);
-    return rowToEntry({ id, session_id: sessionId, text, sort_order: sortOrder, created_at: now });
+      .run(id, sessionId, text, itemsJson, sortOrder, now);
+    return rowToEntry({ id, session_id: sessionId, text, items_json: itemsJson, sort_order: sortOrder, created_at: now });
   }
 
   list(sessionId: string): QueueEntry[] {

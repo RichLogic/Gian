@@ -44,6 +44,11 @@ export interface ProxyClient {
   }>;
   startTurn(params: StartTurnParams): Promise<{ session: ProxySession; turn: { id: string } }>;
   interruptTurn(sessionId: string): Promise<void>;
+  /** Append user input to the in-flight turn (codex `turn/steer`). Only
+   *  executors with a native non-interrupting steer primitive implement it;
+   *  absent means "busy sessions can only queue". `input` follows the same
+   *  InputItem shape as StartTurnParams. */
+  steerTurn?(params: { sessionId: string; input: import('@gian/shared').InputItem[] }): Promise<{ ok: true; turnId: string }>;
   respondApproval(params: RespondApprovalParams): Promise<void>;
   closeSession(sessionId: string): Promise<void>;
   /**
@@ -115,6 +120,9 @@ export interface CreateSessionParams {
 export interface StartTurnParams {
   sessionId: string;
   input: InputItem[];
+  /** Codex runtime workspace roots in addition to the session cwd. The Host
+   *  uses this for the session-owned attachment directory. */
+  additionalWorkspaceRoots?: string[];
   model?: string | null;
   /** Reasoning effort. Proxies translate this to their native effort flag. */
   thinking?: import('@gian/shared').ThinkingEffort | null;

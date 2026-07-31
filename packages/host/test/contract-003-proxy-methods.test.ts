@@ -115,7 +115,7 @@ test('CONTRACT-003: shared PROXY_METHODS contains the canonical structured-metho
   const canonical = new Set([
     'initialize', 'capabilities.list', 'slash.list',
     'session.create', 'session.get',
-    'turn.start', 'turn.interrupt',
+    'turn.start', 'turn.interrupt', 'turn.steer',
     'approval.respond',
     'session.snapshot', 'session.close',
     'shutdown',

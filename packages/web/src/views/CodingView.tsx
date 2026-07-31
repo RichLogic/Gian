@@ -16,6 +16,7 @@ import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import { Terminal, makeSessionWire } from '../components/Terminal.js';
 import { Transcript } from '../transcript/Transcript.js';
 import { TranscriptMinimap } from '../transcript/TranscriptMinimap.js';
+import type { PlanLifecycleState } from '../transcript/apply.js';
 import type { ApprovalActionContext, QueueEntry, TranscriptItem } from '../types.js';
 import type { GianWs } from '../ws.js';
 import { isTurnRunning } from '../session-routing.js';
@@ -139,8 +140,8 @@ export interface CodingViewProps {
   itemsBySession: Record<string, TranscriptItem[]>;
   pendingBySession: Record<string, boolean>;
   queueBySession: Record<string, QueueEntry[]>;
-  /** Codex plan-mode plan markdown per session, populated by plan_update. */
-  planBySession: Record<string, string>;
+  /** Streamed plan text and whether a successful turn finalized it. */
+  planStateBySession: Record<string, PlanLifecycleState>;
   onLoadArchived: () => void | Promise<void>;
   onSelectSession: (id: string) => void;
   onWorkspaceCreated: (ws: Workspace) => void;
@@ -173,11 +174,14 @@ export interface CodingViewProps {
     decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
   ) => void;
-  onQueueAdd: (sessionId: string, text: string) => void;
+  onQueueAdd: (sessionId: string, text: string, attachments?: Array<{ path: string; name: string; mime: string; size?: number }>) => void;
   onQueueRemove: (sessionId: string, queueId: string) => void;
   onQueueReorder: (sessionId: string, order: string[]) => void;
   onQueueClear: (sessionId: string) => void;
   onQueueSendNow: (sessionId: string) => void;
+  /** Codex-only mid-turn injection (`turn/steer`) — the composer's Ctrl+Enter
+   *  path while a turn is running. Other executors never call it. */
+  onSteer: (sessionId: string, text: string, attachments?: Array<{ path: string; name: string; mime: string; size?: number }>) => void;
   onSetMode: (sessionId: string, approvalMode: ApprovalMode, turns?: number) => void;
   onSetModel: (sessionId: string, model: string) => void;
   onSetEffort: (sessionId: string, effort: import('@gian/shared').ThinkingEffort | null) => void;
@@ -209,7 +213,7 @@ export interface CodingViewProps {
    *  `session:switch-runtime` WS message. */
   onSwitchRuntime: (sessionId: string, target: RuntimeMode, opts?: { force?: boolean }) => void;
   /** Switch app mode to Spaces (workspace management). Triggered from
-   *  the sidebar's "N hidden workspaces · manage" footer link. */
+   *  the sidebar's hidden-workspace footer link. */
   onOpenSpaces: () => void;
 }
 
@@ -280,17 +284,19 @@ export function CodingView(p: CodingViewProps) {
           items={p.itemsBySession[p.activeSession.id] ?? []}
           pending={p.pendingBySession[p.activeSession.id] ?? false}
           queue={p.queueBySession[p.activeSession.id] ?? []}
-          codexPlanText={p.planBySession[p.activeSession.id]}
+          codexPlanText={p.planStateBySession[p.activeSession.id]?.text}
+          codexPlanCompleted={p.planStateBySession[p.activeSession.id]?.completed}
           onSend={(text, opts) => p.onSend(p.activeSession!.id, text, opts)}
           onSendSkill={(name, path) => p.onSendSkill(p.activeSession!.id, name, path)}
           onStop={() => p.onStop(p.activeSession!.id)}
           onApprove={(approvalId, decision, answers, context) => p.onApprove(p.activeSession!.id, approvalId, decision, answers, context)}
           onLocalApprovalResolve={(approvalId, decision, answers) => p.onLocalApprovalResolve(p.activeSession!.id, approvalId, decision, answers)}
-          onQueueAdd={text => p.onQueueAdd(p.activeSession!.id, text)}
+          onQueueAdd={(text, items) => p.onQueueAdd(p.activeSession!.id, text, items)}
           onQueueRemove={queueId => p.onQueueRemove(p.activeSession!.id, queueId)}
           onQueueReorder={order => p.onQueueReorder(p.activeSession!.id, order)}
           onQueueClear={() => p.onQueueClear(p.activeSession!.id)}
           onQueueSendNow={() => p.onQueueSendNow(p.activeSession!.id)}
+          onSteer={(text, opts) => p.onSteer(p.activeSession!.id, text, opts?.attachments)}
           onSetMode={(mode, turns) => p.onSetMode(p.activeSession!.id, mode, turns)}
           onSetModel={model => p.onSetModel(p.activeSession!.id, model)}
           onSetEffort={effort => p.onSetEffort(p.activeSession!.id, effort)}
@@ -393,16 +399,16 @@ function Sidebar({
     });
   }
 
-  function toggleArchived() {
-    void onLoadArchived();
-    setArchivedOpen(o => !o);
-  }
-
   function makeRowHandlers(s: Session) {
     return {
       active: s.id === activeSessionId,
       onSelect: () => onSelect(s.id),
     };
+  }
+
+  function toggleArchived() {
+    void onLoadArchived();
+    setArchivedOpen(open => !open);
   }
 
   const wsById = new Map(workspaces.map(w => [w.id, w]));
@@ -511,20 +517,21 @@ function Sidebar({
 
         {(() => {
           const visible = archivedSessions
-            .filter(s => {
-              const ws = wsById.get(s.workspace_id);
-              return !ws?.hidden || s.id === activeSessionId;
+            .filter(session => {
+              const workspace = wsById.get(session.workspace_id);
+              return !workspace?.hidden || session.id === activeSessionId;
             })
             .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
           return (
             <>
               <button className="sb-archived" onClick={toggleArchived}>
-                <span className="caret">{archivedOpen ? '▾' : '▸'}</span> {t('coding.sidebar.archived')}
+                <span className="caret">{archivedOpen ? '▾' : '▸'}</span>{' '}
+                {t('coding.sidebar.archived')}
                 {archivedLoaded && <span className="count">{visible.length}</span>}
               </button>
               {archivedOpen && (
                 <>
-                  {visible.map(s => renderRow(s, true))}
+                  {visible.map(session => renderRow(session, true))}
                   {archivedLoaded && visible.length === 0 && (
                     <span style={{ padding: '4px 10px', color: 'var(--text-3)', fontSize: 11 }}>
                       {t('coding.sidebar.noArchived')}
@@ -537,15 +544,16 @@ function Sidebar({
         })()}
 
         {(() => {
-          const hiddenCount = workspaces.filter(w => w.hidden === 1).length;
+          const hiddenCount = workspaces.filter(workspace => workspace.hidden === 1).length;
           if (hiddenCount === 0) return null;
           return (
-            <button
-              type="button"
-              className="sb-hidden-link"
-              onClick={onOpenSpaces}
-            >
-              ↳ {hiddenCount} {t(hiddenCount === 1 ? 'coding.sidebar.hiddenOne' : 'coding.sidebar.hiddenMany')} · {t('coding.sidebar.manage')}
+            <button type="button" className="sb-hidden-link" onClick={onOpenSpaces}>
+              ↳ {hiddenCount}{' '}
+              {t(hiddenCount === 1
+                ? 'coding.sidebar.hiddenOne'
+                : 'coding.sidebar.hiddenMany')}
+              {' · '}
+              {t('coding.sidebar.manage')}
             </button>
           );
         })()}
@@ -1164,6 +1172,7 @@ export function SessionMain({
   pending,
   queue,
   codexPlanText,
+  codexPlanCompleted,
   onSend,
   onSendSkill,
   onStop,
@@ -1174,6 +1183,7 @@ export function SessionMain({
   onQueueReorder,
   onQueueClear,
   onQueueSendNow,
+  onSteer,
   onSetMode,
   onSetModel,
   onSetEffort,
@@ -1198,6 +1208,7 @@ export function SessionMain({
   pending: boolean;
   queue: QueueEntry[];
   codexPlanText?: string;
+  codexPlanCompleted?: boolean;
   ws: GianWs;
   onSwitchRuntime: (target: RuntimeMode, opts?: { force?: boolean }) => void;
   onSend: (
@@ -1220,11 +1231,12 @@ export function SessionMain({
     decision: ApprovalDecision,
     answers?: Record<string, string | string[]>,
   ) => void;
-  onQueueAdd: (text: string) => void;
+  onQueueAdd: (text: string, attachments?: Array<{ path: string; name: string; mime: string; size?: number }>) => void;
   onQueueRemove: (queueId: string) => void;
   onQueueReorder: (order: string[]) => void;
   onQueueClear: () => void;
   onQueueSendNow: () => void;
+  onSteer: (text: string, opts?: { attachments?: Array<{ path: string; name: string; mime: string; size?: number }> }) => void;
   onSetMode: (mode: ApprovalMode, turns?: number) => void;
   onSetModel: (model: string) => void;
   onSetEffort: (effort: import('@gian/shared').ThinkingEffort | null) => void;
@@ -1332,17 +1344,27 @@ export function SessionMain({
               onApprove={onApprove}
             />
           </div>
-          {/* Overlay rail — sibling of `.main-scroll` so it stays fixed while
-              the conversation scrolls underneath it. */}
-          <TranscriptMinimap items={items} />
-          <QueueList queue={queue} onRemove={onQueueRemove} onReorder={onQueueReorder} onClear={onQueueClear} onSendNow={onQueueSendNow} />
-          <PlanChip items={items} codexPlanText={codexPlanText} sessionId={session.id} />
+          {/* The minimap rail is an absolute overlay anchored to `.main`; the
+              nav arrows render inline in the underbar below. */}
+          <QueueList queue={queue} onRemove={onQueueRemove} onReorder={onQueueReorder} onClear={onQueueClear} onSendNow={session.executor === 'codex' ? onQueueSendNow : undefined} />
+          {/* Underbar: Plan/Agent context chips left, prev/next message nav
+              flush right — one row at any width. */}
+          <div className="main-underbar">
+            <PlanChip
+              items={items}
+              codexPlanText={codexPlanText}
+              planCompleted={codexPlanCompleted}
+              sessionId={session.id}
+            />
+            <TranscriptMinimap items={items} />
+          </div>
           <Composer
             session={session}
             onSend={onSend}
             onSendSkill={onSendSkill}
             onStop={onStop}
             onQueueAdd={onQueueAdd}
+            onSteer={onSteer}
             onSetMode={onSetMode}
             onSetModel={onSetModel}
             onSetEffort={onSetEffort}

@@ -75,7 +75,7 @@ import { writeFile } from 'node:fs/promises';
 import { ensureEventsRebuilt } from '../events/lazy-rebuild.js';
 import { markAccessed } from '../events/lifecycle.js';
 import {
-  ALLOWED_MIME,
+  FALLBACK_ATTACHMENT_MIME,
   MAX_ATTACHMENT_BYTES,
   mimeForAttachment,
   readAttachment,
@@ -875,15 +875,13 @@ export function createApp(ctx: AppContext): AppHandle {
     if (!(file instanceof File)) {
       return c.json({ error: 'file field required' }, 400);
     }
-    if (!ALLOWED_MIME.has(file.type)) {
-      return c.json({ error: `unsupported mime: ${file.type}` }, 415);
-    }
     if (file.size > MAX_ATTACHMENT_BYTES) {
       return c.json({ error: `file too large: ${file.size} bytes` }, 413);
     }
+    const mime = file.type.trim() || FALLBACK_ATTACHMENT_MIME;
     const bytes = Buffer.from(await file.arrayBuffer());
-    const path = await writeAttachment(sessionId, bytes, file.type);
-    return c.json({ path, name: file.name, size: file.size, mime: file.type });
+    const path = await writeAttachment(sessionId, bytes, mime, file.name);
+    return c.json({ path, name: file.name, size: file.size, mime });
   });
 
   app.get('/api/sessions/:id/attachments/:filename', async c => {
@@ -892,12 +890,15 @@ export function createApp(ctx: AppContext): AppHandle {
     const row = ctx.db.prepare('SELECT id FROM sessions WHERE id = ?').get(sessionId);
     if (!row) return c.json({ error: 'session not found' }, 404);
     const mime = mimeForAttachment(filename);
-    if (!mime) return c.json({ error: 'unsupported filename' }, 415);
     const bytes = await readAttachment(sessionId, filename);
     if (!bytes) return c.json({ error: 'attachment not found' }, 404);
     return c.body(new Uint8Array(bytes), 200, {
       'content-type': mime,
       'cache-control': 'private, max-age=31536000, immutable',
+      'x-content-type-options': 'nosniff',
+      ...(mime === FALLBACK_ATTACHMENT_MIME
+        ? { 'content-disposition': 'attachment' }
+        : {}),
     });
   });
 

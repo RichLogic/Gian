@@ -323,6 +323,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
       thinking?: ThinkingLevel | null;
       sandbox?: SandboxMode | null;
       sandboxPolicy?: SandboxPolicy | null;
+      runtimeWorkspaceRoots?: string[] | null;
       permissions?: string | null;
       approvalPolicy?: ApprovalPolicy | null;
       approvalsReviewer?: ApprovalsReviewer | null;
@@ -343,6 +344,9 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
       input,
       ...(options.model ? { model: options.model } : {}),
       ...(options.thinking ? { effort: options.thinking } : {}),
+      ...(options.runtimeWorkspaceRoots?.length
+        ? { runtimeWorkspaceRoots: options.runtimeWorkspaceRoots }
+        : {}),
       ...sandboxParams,
       ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
       ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {}),
@@ -353,6 +357,13 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
 
   async interruptTurn(threadId: string, turnId: string) {
     return this.request('turn/interrupt', { threadId, turnId });
+  }
+
+  /** `turn/steer` — append user input to the in-flight turn without starting
+   *  a new one. `expectedTurnId` is required by the server and must match the
+   *  active turn, otherwise the request fails with an invalid-request error. */
+  async steerTurn(threadId: string, turnId: string, input: unknown[]) {
+    return this.request('turn/steer', { threadId, input, expectedTurnId: turnId }) as Promise<{ turnId: string }>;
   }
 
   async respond(id: number | string, result: unknown) {

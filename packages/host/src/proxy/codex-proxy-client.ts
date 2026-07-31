@@ -136,6 +136,10 @@ export class CodexProxyHost {
     return this.request<void>('turn.interrupt', { sessionId });
   }
 
+  steerTurn(params: { sessionId: string; input: unknown[] }): Promise<{ ok: true; turnId: string }> {
+    return this.request<{ ok: true; turnId: string }>('turn.steer', params);
+  }
+
   /** SESSION-NAME-001: set the codex thread's display name. `sessionId` is the
    *  proxy-side session id (== threadId). Works on the shared connection
    *  without resuming the thread. */
@@ -403,6 +407,10 @@ export class CodexProxySessionClient implements ProxyClient {
 
   interruptTurn(sessionId: string): Promise<void> {
     return this.host.interruptTurn(sessionId);
+  }
+
+  steerTurn(params: { sessionId: string; input: import('@gian/shared').InputItem[] }): Promise<{ ok: true; turnId: string }> {
+    return this.host.steerTurn(params);
   }
 
   /** SESSION-NAME-001: set the codex thread's display name via the shared

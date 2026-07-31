@@ -103,7 +103,7 @@ describe('approval_resolved reducer behavior for question cards', () => {
 
   function resolveEnvelope(
     approvalId: string,
-    decision: 'allow_once' | 'decline',
+    decision: 'allow_once' | 'decline' | 'keep_planning',
     answers?: Record<string, string | string[]>,
   ): EventEnvelope {
     return {
@@ -126,6 +126,15 @@ describe('approval_resolved reducer behavior for question cards', () => {
     const items = applyEnvelope([pendingQuestion()], resolveEnvelope('toolu_question_1', 'decline'), 'claude');
     const after = items[0] as ApprovalItem;
     expect(after.status).toBe('declined');
+  });
+
+  it('keep_planning keeps the Claude plan in revision-requested state', () => {
+    const items = applyEnvelope(
+      [pendingQuestion()],
+      resolveEnvelope('toolu_question_1', 'keep_planning'),
+      'claude',
+    );
+    expect((items[0] as ApprovalItem).status).toBe('declined');
   });
 
   it('a resolve is idempotent against later watcher duplicates', () => {

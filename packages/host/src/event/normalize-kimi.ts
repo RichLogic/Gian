@@ -73,6 +73,69 @@ function planText(update: Record<string, unknown>): string {
   }).join('\n');
 }
 
+interface KimiAgentOutput {
+  agentId?: string;
+  taskId?: string;
+  agentType?: string;
+  status?: 'running' | 'done' | 'error';
+  body?: string;
+}
+
+/**
+ * Kimi's Agent tool returns a provider-native header followed by an optional
+ * `[summary]` block. The outer ACP tool can report `completed` while a
+ * background child is still running, so the child header is authoritative.
+ */
+function parseAgentOutput(value: unknown): KimiAgentOutput {
+  if (typeof value !== 'string' || !value.trim()) return {};
+  const lines = value.replace(/\r\n?/g, '\n').split('\n');
+  const parsed: KimiAgentOutput = {};
+  const body: string[] = [];
+  let sawHeader = false;
+
+  for (const line of lines) {
+    const header = /^(task_id|agent_id|actual_subagent_type|status)\s*:\s*(.*?)\s*$/i.exec(line);
+    if (header) {
+      sawHeader = true;
+      const key = header[1]!.toLowerCase();
+      const v = header[2]!;
+      if (key === 'task_id' && v) parsed.taskId = v;
+      else if (key === 'agent_id' && v) parsed.agentId = v;
+      else if (key === 'actual_subagent_type' && v) parsed.agentType = v;
+      else if (key === 'status') {
+        const status = v.toLowerCase();
+        parsed.status =
+          status === 'running' || status === 'pending' ? 'running'
+          : status === 'failed' || status === 'error' ? 'error'
+          : status === 'completed' || status === 'done' || status === 'success' ? 'done'
+          : undefined;
+      }
+      continue;
+    }
+    if (/^\s*\[summary\]\s*$/i.test(line)) {
+      sawHeader = true;
+      continue;
+    }
+    body.push(line);
+  }
+
+  const cleaned = body.join('\n').trim();
+  if (cleaned && (!sawHeader || parsed.status !== 'running')) parsed.body = cleaned;
+  return parsed;
+}
+
+function kimiAgentDescription(input: Record<string, unknown>, title: string): string {
+  for (const value of [input.description, input.task, input.title]) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  const launched = /^Launching\s+\S+\s+agent\s*:\s*(.+)$/i.exec(title);
+  if (launched?.[1]) return launched[1].trim();
+  if (typeof input.prompt === 'string' && input.prompt.trim()) {
+    return input.prompt.trim().split('\n')[0]!.slice(0, 180);
+  }
+  return title || 'Agent';
+}
+
 function normalizeTool(
   update: Record<string, unknown>,
   sessionId: string,
@@ -95,22 +158,28 @@ function normalizeTool(
   const status = toolStatus(update.status);
 
   if (isAgentTool(title, kind, input)) {
-    const description = String(
-      input.description
-      ?? input.prompt
-      ?? input.task
-      ?? title,
-    );
+    const child = parseAgentOutput(update.rawOutput);
+    const agentStatus =
+      child.status
+      ?? (status === 'error' ? 'error' : status === 'success' ? 'done' : 'running');
     return [event(sessionId, turn, itemId, 'agent_spawn', {
-      agentId: typeof input.agentId === 'string' ? input.agentId : undefined,
-      description,
-      status: status === 'error'
-        ? 'error'
-        : status === 'success' ? 'done' : 'running',
-      agentType: typeof input.subagent_type === 'string'
+      agentId:
+        child.agentId
+        ?? (typeof input.agent_id === 'string' ? input.agent_id : undefined)
+        ?? (typeof input.agentId === 'string' ? input.agentId : undefined),
+      taskId:
+        child.taskId
+        ?? (typeof input.task_id === 'string' ? input.task_id : undefined),
+      description: kimiAgentDescription(input, title),
+      status: agentStatus,
+      agentType: child.agentType
+        ?? (typeof input.subagent_type === 'string'
         ? input.subagent_type
-        : typeof input.agent_type === 'string' ? input.agent_type : undefined,
-      ...(typeof update.rawOutput === 'string' ? { output: update.rawOutput } : {}),
+        : typeof input.agent_type === 'string' ? input.agent_type : undefined),
+      ...(typeof input.run_in_background === 'boolean'
+        ? { background: input.run_in_background }
+        : {}),
+      ...(child.body ? { output: child.body } : {}),
       ...(Object.keys(input).length > 0 ? { input } : {}),
     })];
   }

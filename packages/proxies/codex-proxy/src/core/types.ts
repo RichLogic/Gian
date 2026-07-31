@@ -173,6 +173,9 @@ export interface SetNameParams {
 export interface StartTurnParams {
   sessionId: string;
   input: InputItem[];
+  /** Absolute roots that participate in Codex's runtime workspace for this
+   *  turn and subsequent steers (for Gian, the session attachment store). */
+  additionalWorkspaceRoots?: string[];
   model?: string | null;
   thinking?: ThinkingLevel | null;
   /** Sandbox layer (filesystem / network access boundary). */
@@ -194,6 +197,11 @@ export interface StartTurnParams {
 
 export interface InterruptTurnParams {
   sessionId: string;
+}
+
+export interface SteerTurnParams {
+  sessionId: string;
+  input: InputItem[];
 }
 
 export interface ApprovalResponseParams {

@@ -12,6 +12,7 @@ import type {
   JsonRpcLikeRequest,
   SessionSnapshotParams,
   StartTurnParams,
+  SteerTurnParams,
 } from '../core/types.js';
 import type {
   TtyInputParams,
@@ -164,6 +165,9 @@ async function main() {
           break;
         case 'turn.interrupt':
           writer.result(message.id, await service.interruptTurn((message.params ?? {}) as InterruptTurnParams));
+          break;
+        case 'turn.steer':
+          writer.result(message.id, await service.steerTurn((message.params ?? {}) as SteerTurnParams));
           break;
         case 'approval.respond':
           writer.result(message.id, await service.respondApproval((message.params ?? {}) as ApprovalResponseParams));

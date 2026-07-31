@@ -49,6 +49,8 @@ export interface CodexRuntime extends RuntimeEventSource {
       sandbox?: SandboxMode | null;
       /** Exact sandbox policy captured from the thread response. */
       sandboxPolicy?: SandboxPolicy | null;
+      /** Codex v2 `turn/start.runtimeWorkspaceRoots`. */
+      runtimeWorkspaceRoots?: string[] | null;
       /** Named permissions profile captured from the thread response. */
       permissions?: string | null;
       /** Per-turn approval policy override. */
@@ -64,6 +66,9 @@ export interface CodexRuntime extends RuntimeEventSource {
     },
   ): Promise<{ turn: { id: string; status: string } }>;
   interruptTurn(threadId: string, turnId: string): Promise<unknown>;
+  /** `turn/steer` — append user input to the in-flight turn (non-interrupting).
+   *  Optional so the TTY runtime needn't implement it. */
+  steerTurn?(threadId: string, turnId: string, input: InputItem[]): Promise<{ turnId: string }>;
   /** Set a thread's user-facing display name (SESSION-NAME-001). Maps to the
    *  app-server `thread/name/set` RPC so the name shows in `codex resume` /
    *  Codex app listings. Optional so the TTY runtime needn't implement it. */

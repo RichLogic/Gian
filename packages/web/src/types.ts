@@ -9,11 +9,9 @@ export interface MsgItem {
   pending?: boolean;
   /** Server rejected the send (e.g. `MESSAGE_SEND_FAILED`). */
   failed?: boolean;
-  /** Image attachments to render inline in the bubble. For pending echoes
-   *  the `url` is an `URL.createObjectURL` blob URL the composer handed off
-   *  (App owns it from that point and revokes when the server confirms); for
-   *  confirmed messages it's a `/api/sessions/:id/attachments/:filename` URL
-   *  that the host serves. */
+  /** Attachments to render in the bubble. Images use inline thumbnails;
+   *  other files use download chips. Pending echoes carry a blob URL until
+   *  the server confirms with its permanent attachment URL. */
   attachments?: import('@gian/shared').MessageAttachment[];
 }
 
@@ -98,6 +96,9 @@ export interface AgentSpawnItem {
   model?: string;
   output?: string;
   outputFile?: string;
+  taskId?: string;
+  background?: boolean;
+  input?: Record<string, unknown>;
   startedAt: number;
   updatedAt: number;
   completedAt?: number;
@@ -170,6 +171,8 @@ export interface ApprovalItem {
   /** Exact executor-owned buttons for ACP-native permission requests. */
   nativeOptions?: import('@gian/shared').NativeApprovalOption[];
   nativeOptionId?: string;
+  /** Timestamp of the lifecycle event that resolved this approval. */
+  resolvedAt?: number;
   ts: number;
   turn: number;
 }

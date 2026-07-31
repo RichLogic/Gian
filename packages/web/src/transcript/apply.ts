@@ -292,17 +292,26 @@ export function applyEnvelope(
     const idx = items.findIndex(i => i.kind === 'agent-spawn' && i.id === itemId);
     if (idx >= 0) {
       const existing = items[idx] as AgentSpawnItem;
+      const nextDescription =
+        description && description.toLowerCase() !== 'agent'
+          ? description
+          : existing.description || description;
       const next = items.slice();
       next[idx] = {
         ...existing,
         provider: executor,
-        description: description || existing.description,
+        description: nextDescription,
         status,
         agentId: typeof data.agentId === 'string' ? data.agentId : existing.agentId,
+        taskId: typeof data.taskId === 'string' ? data.taskId : existing.taskId,
         agentType: typeof data.agentType === 'string' ? data.agentType : existing.agentType,
         model: typeof data.model === 'string' ? data.model : existing.model,
         output: typeof data.output === 'string' ? data.output : existing.output,
         outputFile: typeof data.outputFile === 'string' ? data.outputFile : existing.outputFile,
+        background: typeof data.background === 'boolean' ? data.background : existing.background,
+        input: data.input && typeof data.input === 'object'
+          ? { ...(existing.input ?? {}), ...(data.input as Record<string, unknown>) }
+          : existing.input,
         updatedAt: env.ts,
         completedAt: typeof data.completedAt === 'number'
           ? data.completedAt
@@ -317,10 +326,15 @@ export function applyEnvelope(
       agentId: typeof data.agentId === 'string' ? data.agentId : undefined,
       description,
       status,
+      taskId: typeof data.taskId === 'string' ? data.taskId : undefined,
       agentType: typeof data.agentType === 'string' ? data.agentType : undefined,
       model: typeof data.model === 'string' ? data.model : undefined,
       output: typeof data.output === 'string' ? data.output : undefined,
       outputFile: typeof data.outputFile === 'string' ? data.outputFile : undefined,
+      background: typeof data.background === 'boolean' ? data.background : undefined,
+      input: data.input && typeof data.input === 'object'
+        ? data.input as Record<string, unknown>
+        : undefined,
       startedAt: typeof data.startedAt === 'number' ? data.startedAt : env.ts,
       updatedAt: env.ts,
       completedAt: typeof data.completedAt === 'number'
@@ -370,6 +384,7 @@ export function applyEnvelope(
     next[idx] = {
       ...existing,
       status: mapApprovalDecision(decision),
+      resolvedAt: env.ts,
       ...(answeredWith ? { answeredWith } : {}),
       ...(typeof data.nativeOptionId === 'string'
         ? { nativeOptionId: data.nativeOptionId }
@@ -438,13 +453,22 @@ export function applyEnvelope(
     let text = String(data.text ?? '');
     const rawAttachments = Array.isArray(data.attachments) ? data.attachments : [];
     let attachments = rawAttachments
-      .filter((a): a is { name: string; mime: string; url: string } =>
+      .filter((a): a is { name: string; mime: string; url: string; size?: number } =>
         typeof a === 'object' && a !== null
         && typeof (a as Record<string, unknown>).name === 'string'
         && typeof (a as Record<string, unknown>).mime === 'string'
-        && typeof (a as Record<string, unknown>).url === 'string',
+        && typeof (a as Record<string, unknown>).url === 'string'
+        && (
+          (a as Record<string, unknown>).size === undefined
+          || typeof (a as Record<string, unknown>).size === 'number'
+        ),
       )
-      .map(a => ({ name: a.name, mime: a.mime, url: a.url }));
+      .map(a => ({
+        name: a.name,
+        mime: a.mime,
+        url: a.url,
+        ...(a.size !== undefined ? { size: a.size } : {}),
+      }));
     // No structured attachments (Beta/TTY JSONL echo) → recover inline
     // `[Attached image: …]` references into thumbnails, Chat-style.
     if (attachments.length === 0) {
@@ -581,8 +605,7 @@ export function nextPendingFromEnvelope(env: EventEnvelope): boolean | null {
  * that PlanChip / PlanSheet subscribe to. `data.delta === true` means an
  * append; anything else replaces.
  *
- * Pure over its inputs — App.tsx uses this inside a `setPlanBySession`
- * functional updater so EVT-007 can be exercised without mounting the
+ * Pure over its inputs so EVT-007 can be exercised without mounting the
  * full App.
  */
 export function applyPlanUpdate(prev: string | undefined, env: EventEnvelope): string {
@@ -590,6 +613,38 @@ export function applyPlanUpdate(prev: string | undefined, env: EventEnvelope): s
   const text = String(data.text ?? '');
   const isDelta = data.delta === true;
   return isDelta ? (prev ?? '') + text : text;
+}
+
+/** True only for a structured checklist whose every step is complete. */
+export function isPlanChecklistComplete(plan: string | undefined): boolean {
+  if (!plan) return false;
+  const steps = plan.match(/^\s*[-*]\s+\[([ xX])\]\s+/gm) ?? [];
+  return steps.length > 0 && steps.every(step => /\[[xX]\]/.test(step));
+}
+
+export interface PlanLifecycleState {
+  text?: string;
+  completed: boolean;
+}
+
+/**
+ * Fold plan updates and successful turn endings into the page-level lifecycle.
+ * Completion is evaluated only at `turn_completed`, never mid-stream.
+ */
+export function applyPlanLifecycle(
+  prev: PlanLifecycleState,
+  env: EventEnvelope,
+): PlanLifecycleState {
+  if (env.event === 'plan_update') {
+    return {
+      text: applyPlanUpdate(prev.text, env),
+      completed: false,
+    };
+  }
+  if (env.event === 'turn_completed' && isPlanChecklistComplete(prev.text)) {
+    return { ...prev, completed: true };
+  }
+  return prev;
 }
 
 /**
@@ -691,7 +746,7 @@ export function normalizeRisk(v: unknown): 'low' | 'medium' | 'high' {
 }
 
 export function mapApprovalDecision(d: string): ApprovalItem['status'] {
-  if (d === 'declined' || d === 'decline') return 'declined';
+  if (d === 'declined' || d === 'decline' || d === 'keep_planning') return 'declined';
   if (d.includes('session')) return 'approved-session';
   return 'approved-once';
 }

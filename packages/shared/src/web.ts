@@ -508,6 +508,9 @@ export interface QueueAddMessage {
   type: 'queue:add';
   session_id: string;
   text: string;
+  /** Structured input items (image attachments) carried with the message —
+   *  same shape as MessageSendMessage.items. */
+  items?: InputItem[];
 }
 
 export interface QueueRemoveMessage {
@@ -530,6 +533,16 @@ export interface QueueSendNowMessage {
 export interface QueueClearMessage {
   type: 'queue:clear';
   session_id: string;
+}
+
+/** Codex-only mid-turn injection: append the message to the session's ACTIVE
+ *  turn via `turn/steer` instead of queueing it for the next one. Other
+ *  executors reject — they have no native steer primitive. */
+export interface MessageSteerMessage {
+  type: 'message:steer';
+  session_id: string;
+  text: string;
+  items?: InputItem[];
 }
 
 /**
@@ -629,6 +642,7 @@ export type ClientToServerMessage =
   | SessionSelectMessage
   | TranscriptLoadMoreMessage
   | MessageSendMessage
+  | MessageSteerMessage
   | ApprovalResolveMessage
   | SessionStopMessage
   | SessionRecoverMessage

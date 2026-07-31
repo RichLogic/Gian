@@ -3,7 +3,7 @@ import { isAbsolute, relative, resolve } from 'node:path';
 import { buildCapabilitiesPayload } from './capabilities.js';
 import { createAppError } from './errors.js';
 import { isCodexNativeCommandName, listCodexSlashCommands } from './slash.js';
-import { normalizeInputItems } from './input.js';
+import { localFileDirectories, normalizeInputItems } from './input.js';
 import type {
   ApprovalResponseParams,
   CapabilitiesPayload,
@@ -20,6 +20,7 @@ import type {
   SessionRecord,
   SessionSnapshotParams,
   StartTurnParams,
+  SteerTurnParams,
   ThinkingLevel,
 } from './types.js';
 import { nowIso, randomId } from './utils.js';
@@ -441,6 +442,7 @@ export class CodexProxyService {
         'session.get',
         'turn.start',
         'turn.interrupt',
+        'turn.steer',
         'approval.respond',
         'session.snapshot',
         'session.close',
@@ -561,6 +563,7 @@ export class CodexProxyService {
       throw createAppError(409, 'SESSION_BUSY', 'This session already has an active turn.');
     }
 
+    const localFileDirs = localFileDirectories(params.input, session.cwd);
     const input = normalizeInputItems(params.input, session.cwd);
     const text = singleTextInput(input);
     const nativeCommand = text ? firstSlashToken(text) : null;
@@ -582,11 +585,17 @@ export class CodexProxyService {
     const configuredPermissions = params.useConfiguredPermissions
       ? session.configuredPermissions
       : null;
+    const runtimeWorkspaceRoots = [...new Set([
+      session.cwd,
+      ...(params.additionalWorkspaceRoots ?? []).map(root => resolve(session.cwd, root)),
+      ...localFileDirs,
+    ])];
     const turnResponse = await this.runtime.startTurn(session.threadId, input, {
       model: typeof params.model === 'string' && params.model.trim() ? params.model.trim() : session.model,
       thinking,
       sandbox: configuredPermissions ? null : params.sandbox ?? null,
       sandboxPolicy: configuredPermissions?.sandboxPolicy ?? null,
+      runtimeWorkspaceRoots,
       permissions: configuredPermissions?.permissions ?? null,
       approvalPolicy: configuredPermissions?.approvalPolicy ?? params.approvalPolicy ?? null,
       approvalsReviewer: configuredPermissions?.approvalsReviewer ?? params.approvalsReviewer ?? null,
@@ -640,6 +649,20 @@ export class CodexProxyService {
 
     await this.runtime.interruptTurn(session.threadId, session.activeTurnId);
     return { ok: true };
+  }
+
+  async steerTurn(params: SteerTurnParams) {
+    const session = await this.ensureSessionUsable(this.requireSessionById(params.sessionId));
+    if (!session.activeTurnId) {
+      throw createAppError(409, 'NO_ACTIVE_TURN', 'Steering requires an active turn; send a normal message instead.');
+    }
+    if (!this.runtime.steerTurn) {
+      throw createAppError(400, 'UNSUPPORTED', 'This runtime does not support steering.');
+    }
+
+    const input = normalizeInputItems(params.input, session.cwd);
+    const result = await this.runtime.steerTurn(session.threadId, session.activeTurnId, input);
+    return { ok: true, turnId: result.turnId };
   }
 
   async respondApproval(params: ApprovalResponseParams) {

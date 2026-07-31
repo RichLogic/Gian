@@ -33,6 +33,8 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
     options?: {
       permissionMode?: import('../src/core/types.js').PermissionMode | null;
       effort?: import('../src/core/types.js').EffortLevel | null;
+      displayName?: string | null;
+      additionalDirectories?: string[];
     };
   }> = [];
   readonly permissionResponses: Array<{
@@ -70,6 +72,8 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
     options?: {
       permissionMode?: import('../src/core/types.js').PermissionMode | null;
       effort?: import('../src/core/types.js').EffortLevel | null;
+      displayName?: string | null;
+      additionalDirectories?: string[];
     },
   ): Promise<void> {
     const entry: {
@@ -78,6 +82,8 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
       options?: {
         permissionMode?: import('../src/core/types.js').PermissionMode | null;
         effort?: import('../src/core/types.js').EffortLevel | null;
+        displayName?: string | null;
+        additionalDirectories?: string[];
       };
     } = { sessionId, content };
     if (options !== undefined) entry.options = options;
@@ -520,6 +526,25 @@ test('service starts turns with the requested model and emits completion events'
     }
     assert.equal((events[1]!.params.data as { text: string }).text, 'done');
     assert.equal((events[2]!.params.data as { status: string }).status, 'completed');
+  });
+});
+
+test('service grants Claude read access to session attachment directories', async () => {
+  await withService(async ({ runtime, service }) => {
+    const created = await service.createSession({ cwd: '/workdir' });
+    await service.startTurn({
+      sessionId: created.session.id,
+      input: [
+        { type: 'text', text: 'read these' },
+        { type: 'localFile', path: '/tmp/gian/attachments/a/notes.txt' },
+        { type: 'localImage', path: '/tmp/gian/attachments/images/shot.png' },
+      ],
+    });
+
+    assert.deepEqual(
+      runtime.messages[0]!.options?.additionalDirectories,
+      ['/tmp/gian/attachments/a'],
+    );
   });
 });
 

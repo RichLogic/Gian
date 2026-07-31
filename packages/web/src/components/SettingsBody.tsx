@@ -288,7 +288,7 @@ function SettingsBodyInner({
           <div className="s2-card">
             <dl className="kv-grid shortcuts">
               <dt>{t('settings.shortcuts.commandPalette')}</dt><dd><kbd>⌘</kbd><kbd>⇧</kbd><kbd>K</kbd></dd>
-              <dt>{t('settings.shortcuts.sendNow')}</dt><dd><kbd>⌘</kbd><kbd>⏎</kbd></dd>
+              <dt>{t('settings.shortcuts.steerOrSendNow')}</dt><dd><kbd>⌘</kbd><kbd>⏎</kbd></dd>
               <dt>{t('settings.shortcuts.createClaudeChild')}</dt><dd><kbd>⌘</kbd><kbd>J</kbd></dd>
               <dt>{t('settings.shortcuts.createCodexChild')}</dt><dd><kbd>⌘</kbd><kbd>K</kbd></dd>
               <dt>{t('settings.shortcuts.markUnread')}</dt><dd><kbd>⌘</kbd><kbd>U</kbd></dd>

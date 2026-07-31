@@ -24,3 +24,17 @@ test('cc-proxy normalizeInputItems rejects empty localImage path', () => {
     /path/,
   );
 });
+
+test('cc-proxy normalizeInputItems accepts localFile metadata and resolves its path', () => {
+  const out = normalizeInputItems(
+    [{ type: 'localFile', path: 'attachments/notes.txt', name: 'notes.txt', mime: 'text/plain', size: 12 }],
+    '/workdir',
+  );
+  assert.deepEqual(out, [{
+    type: 'localFile',
+    path: '/workdir/attachments/notes.txt',
+    name: 'notes.txt',
+    mime: 'text/plain',
+    size: 12,
+  }]);
+});

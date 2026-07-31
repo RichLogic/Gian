@@ -32,6 +32,26 @@ export function normalizeInputItems(input: unknown, cwd: string): InputItem[] {
       } satisfies InputItem;
     }
 
+    if (record.type === 'localFile') {
+      const path = typeof record.path === 'string' ? record.path.trim() : '';
+      if (!path) {
+        throw createAppError(400, 'INVALID_REQUEST', 'localFile items require a path.');
+      }
+      return {
+        type: 'localFile',
+        path: resolve(cwd, path),
+        ...(typeof record.name === 'string' && record.name.trim()
+          ? { name: record.name.trim() }
+          : {}),
+        ...(typeof record.mime === 'string' && record.mime.trim()
+          ? { mime: record.mime.trim() }
+          : {}),
+        ...(typeof record.size === 'number' && Number.isFinite(record.size) && record.size >= 0
+          ? { size: record.size }
+          : {}),
+      } satisfies InputItem;
+    }
+
     throw createAppError(400, 'INVALID_REQUEST', `Unsupported input item type "${String(record.type)}".`);
   });
 }

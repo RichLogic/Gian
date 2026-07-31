@@ -51,11 +51,12 @@ function planApproval(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
 // ---------------------------------------------------------------------------
 
 describe('EVT-006: ReasoningCard component', () => {
-  it('renders a <details> shell that is closed by default (folded reasoning card)', () => {
+  it('renders a folded .evt.thinking shell that is closed by default', () => {
     render(<ReasoningCard item={reasoningItem()} />);
-    const details = screen.getByText('Reasoning').closest('details');
-    expect(details).toBeInTheDocument();
-    expect(details).not.toHaveAttribute('open');
+    const shell = screen.getByText('Reasoning').closest('.evt');
+    expect(shell).toBeInTheDocument();
+    expect(shell).toHaveClass('thinking');
+    expect(shell).not.toHaveClass('open');
   });
 
   it('EVT-006: variant=full carries the "Reasoning" label; summary carries "Reasoning summary"', () => {
@@ -68,10 +69,10 @@ describe('EVT-006: ReasoningCard component', () => {
 
   it('EVT-006: data-variant attribute encodes the variant for CSS styling', () => {
     const { rerender } = render(<ReasoningCard item={reasoningItem({ variant: 'full' })} />);
-    expect(screen.getByText('Reasoning').closest('details')).toHaveAttribute('data-variant', 'full');
+    expect(screen.getByText('Reasoning').closest('.evt')).toHaveAttribute('data-variant', 'full');
 
     rerender(<ReasoningCard item={reasoningItem({ variant: 'summary' })} />);
-    expect(screen.getByText('Reasoning summary').closest('details')).toHaveAttribute('data-variant', 'summary');
+    expect(screen.getByText('Reasoning summary').closest('.evt')).toHaveAttribute('data-variant', 'summary');
   });
 
   it('EVT-006: surfaces a line count in the header', () => {
@@ -89,14 +90,15 @@ describe('EVT-006: ReasoningCard component', () => {
     expect(screen.getByText('1 line')).toBeInTheDocument();
   });
 
-  it('EVT-006: clicking the summary toggles open (user can drill into the trace)', async () => {
+  it('EVT-006: clicking the head toggles open and reveals the trace', async () => {
     const user = userEvent.setup();
     render(<ReasoningCard item={reasoningItem()} />);
-    const summary = screen.getByText('Reasoning');
-    const details = summary.closest('details') as HTMLDetailsElement;
-    expect(details.open).toBe(false);
-    await user.click(summary);
-    expect(details.open).toBe(true);
+    const shell = screen.getByText('Reasoning').closest('.evt') as HTMLElement;
+    expect(shell).not.toHaveClass('open');
+    expect(shell.querySelector('.evt-body')).toBeNull();
+    await user.click(screen.getByText('Reasoning'));
+    expect(shell).toHaveClass('open');
+    expect(shell.querySelector('.evt-body')?.textContent).toContain('first line');
   });
 });
 
@@ -177,6 +179,18 @@ describe('EVT-007: PlanChip from codex plan_update', () => {
   it('renders the chip when codexPlanText is non-empty even without any approval', () => {
     render(<PlanChip items={[]} sessionId="sess-2" codexPlanText={LIVE_PLAN} />);
     expect(screen.getByRole('button', { name: /Plan/i })).toBeInTheDocument();
+  });
+
+  it('hides a streamed plan after turn-end completion finalizes it', () => {
+    const { container } = render(
+      <PlanChip
+        items={[]}
+        sessionId="sess-2"
+        codexPlanText={'- [x] inspect\n- [x] test'}
+        planCompleted
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
   });
 
   it('EVT-007: clicking the codex chip expands the live plan markdown inline', async () => {

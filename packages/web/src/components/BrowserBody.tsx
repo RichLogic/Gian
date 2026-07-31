@@ -60,10 +60,19 @@ function Icon({ d, size = 14 }: { d: string; size?: number }) {
  *  via a key bump. Sites that send X-Frame-Options / frame-ancestors will
  *  refuse to render here; upgrading to an Electron <webview> is the planned
  *  escape hatch (no main-process change needed for the iframe v1). */
-export function BrowserBody({ onNavigate }: { onNavigate?: (url: string) => void }) {
+export function BrowserBody({
+  onNavigate,
+  initialUrl,
+}: {
+  onNavigate?: (url: string) => void;
+  initialUrl?: string;
+}) {
   const t = useT();
-  const [nav, setNav] = useState<BrowserNavState>({ history: [], idx: -1 });
-  const [address, setAddress] = useState('');
+  const initial = normalizeBrowserUrl(initialUrl ?? '');
+  const [nav, setNav] = useState<BrowserNavState>(() => initial
+    ? { history: [initial], idx: 0 }
+    : { history: [], idx: -1 });
+  const [address, setAddress] = useState(initial ?? '');
   const [reloadKey, setReloadKey] = useState(0);
   const current = nav.idx >= 0 ? nav.history[nav.idx]! : null;
 

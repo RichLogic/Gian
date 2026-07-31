@@ -64,6 +64,59 @@ describe('session persistent context projection', () => {
     });
   });
 
+  it('removes a completed streamed plan shortcut while preserving history projection', () => {
+    const current = projectSessionContext({
+      items: [],
+      planText: '- [x] inspect\n- [x] test',
+      planCompleted: true,
+      sessionId: 'session-1',
+    });
+    expect(current.plan).toBeNull();
+
+    const history = projectSessionContext({
+      items: [],
+      planText: '- [x] inspect\n- [x] test',
+      planCompleted: true,
+      sessionId: 'session-1',
+      includePlanHistory: true,
+    });
+    expect(history.plan?.totalSteps).toBe(2);
+  });
+
+  it('removes an accepted Claude plan after its successful turn ends', () => {
+    const approval: ApprovalItem = {
+      kind: 'approval',
+      id: 'approval-row',
+      approvalId: 'approval-plan',
+      title: 'Review plan',
+      reason: '',
+      cmd: 'Native plan',
+      risk: 'low',
+      status: 'approved-once',
+      category: 'exit_plan_mode',
+      resolvedAt: 120,
+      ts: 100,
+      turn: 1,
+    };
+    const turnEnd: TranscriptItem = {
+      kind: 'turn-end',
+      id: 'turn-end-1',
+      text: 'Turn 1 · complete',
+      ts: 200,
+      turn: 1,
+    };
+
+    expect(projectSessionContext({
+      items: [approval, turnEnd],
+      sessionId: 'session-1',
+    }).plan).toBeNull();
+    expect(projectSessionContext({
+      items: [approval, turnEnd],
+      sessionId: 'session-1',
+      includePlanHistory: true,
+    }).plan?.status).toBe('accepted');
+  });
+
   it('upserts agent lifecycle events instead of adding duplicate transcript rows', () => {
     const running: EventEnvelope = {
       session_id: 'session-1',
@@ -73,9 +126,12 @@ describe('session persistent context projection', () => {
       ts: 100,
       data: {
         agentId: 'native-agent-1',
+        taskId: 'task-1',
         description: 'Inspect tests',
         status: 'running',
         agentType: 'Explore',
+        background: true,
+        input: { prompt: 'Inspect every reducer test.' },
       },
     };
     const done: EventEnvelope = {
@@ -97,11 +153,69 @@ describe('session persistent context projection', () => {
       kind: 'agent-spawn',
       id: 'tool-agent-1',
       provider: 'claude',
+      agentId: 'native-agent-1',
+      taskId: 'task-1',
       description: 'Inspect tests',
       status: 'done',
       output: 'No failures found.',
+      background: true,
+      input: { prompt: 'Inspect every reducer test.' },
       completedAt: 200,
     });
+  });
+
+  it('removes terminal agents when their turn ends but keeps running agents', () => {
+    const completed = agent({ status: 'done', turn: 1, updatedAt: 150 });
+    const stillRunning = agent({
+      id: 'agent-running',
+      status: 'running',
+      turn: 1,
+      updatedAt: 160,
+    });
+    const turnEnd: TranscriptItem = {
+      kind: 'turn-end',
+      id: 'turn-end-1',
+      text: 'Turn 1 · complete',
+      ts: 200,
+      turn: 1,
+    };
+
+    const sameTurn = projectSessionContext({
+      items: [completed, stillRunning],
+      sessionId: 'session-1',
+    });
+    expect(sameTurn.agents.map(item => item.id)).toEqual([
+      'agent-running',
+      'agent-1',
+    ]);
+
+    const nextTurnWithoutCompletion: TranscriptItem = {
+      kind: 'user',
+      id: 'user-turn-2',
+      text: 'Retry after an interrupted turn',
+      ts: 180,
+      turn: 2,
+    };
+    expect(projectSessionContext({
+      items: [completed, stillRunning, nextTurnWithoutCompletion],
+      sessionId: 'session-1',
+    }).agents.map(item => item.id)).toEqual([
+      'agent-running',
+      'agent-1',
+    ]);
+
+    const afterTurn = projectSessionContext({
+      items: [completed, stillRunning, turnEnd],
+      sessionId: 'session-1',
+    });
+    expect(afterTurn.agents.map(item => item.id)).toEqual(['agent-running']);
+
+    const history = projectSessionContext({
+      items: [completed, stillRunning, turnEnd],
+      sessionId: 'session-1',
+      includeAgentHistory: true,
+    });
+    expect(history.agents).toHaveLength(2);
   });
 });
 

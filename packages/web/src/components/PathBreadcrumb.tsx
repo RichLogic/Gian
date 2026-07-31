@@ -295,7 +295,7 @@ function SegmentFragment({
 }) {
   return (
     <>
-      {showSep && <span className="path-sep">›</span>}
+      {showSep && <span className="path-sep">/</span>}
       {children}
     </>
   );

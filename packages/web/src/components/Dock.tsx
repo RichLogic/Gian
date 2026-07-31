@@ -191,7 +191,6 @@ export function Dock({
         </DockBtn>
       </div>
 
-      <span className="dock-spacer" />
       <div className="dock-divider" aria-hidden />
 
       <div className="dock-group" data-dock-group-label={t('dock.group.system')}>
@@ -214,6 +213,8 @@ export function Dock({
           <Icon d={ICONS.gear} />
         </DockBtn>
       </div>
+
+      <span className="dock-spacer" />
 
       {/* Connection chip: hidden while healthy (a static green dot is noise);
           only surfaces when reconnecting/offline so it actually means something. */}

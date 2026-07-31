@@ -3,15 +3,12 @@ import type { MsgItem, TranscriptItem } from '../types.js';
 import { useT } from '../i18n/index.js';
 import { useMinimapEnabled } from '../display-prefs.js';
 
-/** Side room (scroll width minus transcript width, halved) needed for the full
- *  pill — caption + arrows ≈ 170px — to sit beside the centered transcript
- *  without covering message text. Below it the pill collapses to a compact
- *  edge dock and the rail stays hidden so the two never collide. */
+/** Side room (scroll width minus transcript width, halved) needed for the
+ *  minimap rail to sit beside the centered transcript without covering
+ *  message text. Below it the rail stays hidden. */
 const PILL_MIN_GUTTER_PX = 190;
-/** Not worth a navigator below this many of the user's own messages. */
+/** Not worth a minimap rail below this many of the user's own messages. */
 const MIN_MESSAGES = 3;
-/** Prev/next jump only needs two messages to be useful. */
-const MIN_NAV_MESSAGES = 2;
 /** A jumped-to message lands this far below the viewport top. */
 const LANDING_PX = 24;
 
@@ -43,20 +40,20 @@ function isMsgVisible(scrollEl: HTMLElement, id: string | undefined): boolean {
 
 /**
  * Navigation for your own messages in the transcript:
- *  - prev/next buttons (always available) jump to the message above/below the
- *    current scroll position — the primary, low-clutter way to walk your turns.
- *    Wide layouts get a labelled pill at the scroll area's bottom-right; tight
- *    ones get a compact vertical dock at mid-right-edge, parked over a gutter
- *    the transcript reserves for it, so it never covers message text;
+ *  - prev/next arrow buttons (always available) jump to the message above/below
+ *    the current scroll position. They render INLINE in the underbar row the
+ *    caller places this component in (next to the Plan/Agent chips, flush
+ *    right) — no caption, no floating pill, same layout at any width;
  *  - an optional right-gutter minimap rail (toggled in Settings, off by
- *    default, only when the layout is wide enough for the pill) modelled on
- *    the ChatGPT "scrollbar/outline" extensions: one tick per message, spaced
- *    evenly by turn order, hover reveals the text, the current message stays
+ *    default, only when the layout is wide enough) modelled on the ChatGPT
+ *    "scrollbar/outline" extensions: one tick per message, spaced evenly by
+ *    turn order, hover reveals the text, the current message stays
  *    highlighted.
  *
- * Both are absolute overlays anchored to `.main` (NOT children of the scroll
- * container) so they stay put while the conversation scrolls. Works for Chat
- * and Beta. The only layout coupling is `data-msg-id` on user message rows.
+ * The rail is an absolute overlay anchored to `.main` (NOT a child of the
+ * scroll container) so it stays put while the conversation scrolls. The nav
+ * row is plain inline content. The only layout coupling is `data-msg-id` on
+ * user message rows.
  */
 export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
   const t = useT();
@@ -67,9 +64,10 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
   const [markers, setMarkers] = useState<{ id: string; label: string }[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [roomy, setRoomy] = useState(false);
+  const [navVisible, setNavVisible] = useState(false);
   const [canPrev, setCanPrev] = useState(false);
   const [canNext, setCanNext] = useState(false);
-  const offsetsRef = useRef<{ id: string; offset: number }[]>([]);
+  const offsetsRef = useRef<{ id: string; offset: number; height: number }[]>([]);
 
   useEffect(() => {
     setScrollEl((railRef.current?.closest('.main')?.querySelector('.main-scroll') as HTMLElement | null) ?? null);
@@ -87,14 +85,7 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
     const layout = () => {
       const content = scrollEl.querySelector('.transcript') as HTMLElement | null;
       const contentW = content?.offsetWidth ?? scrollEl.clientWidth;
-      const isRoomy = (scrollEl.clientWidth - contentW) / 2 >= PILL_MIN_GUTTER_PX;
-      setRoomy(isRoomy);
-      // Compact mode parks the dock over a reserved strip: the transcript's own
-      // right padding (added here) plus the scroll container's. Padding lives
-      // INSIDE the transcript box, so `contentW` — and therefore `isRoomy` —
-      // does not change when the class toggles, and the two modes can't
-      // oscillate through the ResizeObserver.
-      content?.classList.toggle('nav-docked', !isRoomy && offsetsRef.current.length >= MIN_NAV_MESSAGES);
+      setRoomy((scrollEl.clientWidth - contentW) / 2 >= PILL_MIN_GUTTER_PX);
       if (mainEl) {
         const sr = scrollEl.getBoundingClientRect();
         const mr = mainEl.getBoundingClientRect();
@@ -103,21 +94,17 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
           rail.style.top = `${sr.top - mr.top}px`;
           rail.style.height = `${scrollEl.clientHeight}px`;
         }
-        const nav = navRef.current;
-        if (nav) {
-          nav.style.top = isRoomy
-            // Pill: just inside the scroll area's bottom-right (NOT `.main`'s
-            // bottom, which is the composer).
-            ? `${sr.bottom - mr.top - 14}px`
-            // Compact dock: vertically centered on the right edge, over the
-            // reserved gutter so it covers no message text.
-            : `${sr.top - mr.top + scrollEl.clientHeight / 2}px`;
-        }
       }
     };
     const updateNav = () => {
       const offs = offsetsRef.current;
-      const i = anchorIndexOf(offs, scrollEl.scrollTop);
+      const top = scrollEl.scrollTop;
+      const bottom = top + scrollEl.clientHeight;
+      // The nav earns its place only when one of your messages is actually
+      // off-screen (above the viewport top or below the bottom); when every
+      // message fits on screen there is nothing to jump to.
+      setNavVisible(offs.some(o => o.offset + o.height <= top || o.offset >= bottom));
+      const i = anchorIndexOf(offs, top);
       const cur = offs[i];
       setActiveId(cur?.id ?? null);
       // "prev" can also re-show the current message when it has scrolled off the
@@ -127,12 +114,12 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
       setCanNext(offs.length > 0 && i < offs.length - 1);
     };
     const measure = () => {
-      const offs: { id: string; offset: number }[] = [];
+      const offs: { id: string; offset: number; height: number }[] = [];
       const labels: { id: string; label: string }[] = [];
       for (const u of userMsgs) {
         const node = scrollEl.querySelector(`[data-msg-id="${u.id}"]`) as HTMLElement | null;
         if (!node) continue;
-        offs.push({ id: u.id, offset: node.offsetTop });
+        offs.push({ id: u.id, offset: node.offsetTop, height: node.offsetHeight });
         labels.push({ id: u.id, label: snippet(u.text) });
       }
       offsetsRef.current = offs;
@@ -162,7 +149,6 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
     return () => {
       scrollEl.removeEventListener('scroll', onScroll);
       ro.disconnect();
-      scrollEl.querySelector('.transcript')?.classList.remove('nav-docked');
       cancelAnimationFrame(initial);
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
       if (measureRaf) cancelAnimationFrame(measureRaf);
@@ -199,7 +185,7 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
 
   const n = markers.length;
   const showRail = !!scrollEl && minimapOn && roomy && n >= MIN_MESSAGES;
-  const showNav = !!scrollEl && n >= MIN_NAV_MESSAGES;
+  const showNav = !!scrollEl && navVisible;
 
   return (
     <>
@@ -219,8 +205,7 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
         ))}
       </div>
       {showNav && (
-        <div className={`transcript-navbtns${roomy ? '' : ' is-compact'}`} ref={navRef}>
-          <span className="tn-caption">{t('minimap.myMessages')}</span>
+        <div className="transcript-navbtns" ref={navRef}>
           <button type="button" className="tn-btn" onClick={goPrev} disabled={!canPrev} title={t('minimap.prev')} aria-label={t('minimap.prev')}>
             <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M4 10l4-4 4 4" />

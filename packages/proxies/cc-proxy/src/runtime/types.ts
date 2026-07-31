@@ -84,6 +84,8 @@ export interface ClaudeRuntime extends EventEmitter<ClaudeRuntimeEvents> {
     /** Session display name (SESSION-NAME-001). Applied as `--name` only on
      *  the first (`--session-id`) spawn. */
     displayName?: string | null;
+    /** Session-owned attachment directories that Claude may read this turn. */
+    additionalDirectories?: string[];
   }): Promise<void>;
 
   /** Rotate the underlying Claude session id (used by Gian's `/clear`

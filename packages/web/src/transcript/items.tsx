@@ -2,7 +2,12 @@ import { createContext, isValidElement, useContext, useEffect, useMemo, useRef, 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ApprovalDecision } from '@gian/shared';
+import { isNativeImageMime } from '../attachments.js';
 import { useT } from '../i18n/index.js';
+import {
+  BrowserLinkOpenContext,
+  ChatPanelOpenContext,
+} from '../presentation/chat-panel.js';
 import type { AgentSpawnItem, ApprovalActionContext, ApprovalItem, AutoNoticeItem, CommandItem, DiffItem, FileReadItem, FileSearchItem, MsgItem, ReasoningItem, ToolItem, WebSearchItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
 
@@ -61,13 +66,28 @@ function MarkdownAnchor(props: {
   href?: string;
   children?: React.ReactNode;
 }) {
+  const openBrowser = useContext(BrowserLinkOpenContext);
   const p = props.node?.properties ?? {};
   const abs = typeof p.dataFileAbs === 'string' ? p.dataFileAbs : null;
   if (abs) {
     const line = p.dataFileLine ? Number(p.dataFileLine) : undefined;
     return <FileLink path={abs} line={line} className="file-link-auto">{props.children}</FileLink>;
   }
-  return <a href={props.href} target="_blank" rel="noreferrer noopener">{props.children}</a>;
+  const routesToBrowser = !!props.href && /^https?:\/\//i.test(props.href);
+  return (
+    <a
+      href={props.href}
+      target={routesToBrowser && openBrowser ? undefined : '_blank'}
+      rel="noreferrer noopener"
+      onClick={event => {
+        if (!routesToBrowser || !openBrowser || !props.href) return;
+        event.preventDefault();
+        openBrowser(props.href);
+      }}
+    >
+      {props.children}
+    </a>
+  );
 }
 
 /** Recursively flatten a React node tree to its text — used to recover the raw
@@ -764,24 +784,45 @@ export function UserMessage({ item }: { item: MsgItem; hideAvatar?: boolean }) {
         {attachments.length > 0 && (
           <div className="msg-attachments user-attachments">
             {attachments.map((a, i) => (
-              <a
-                key={`${a.url}-${i}`}
-                className={`msg-att${zoom ? ' zoomable' : ''}`}
-                href={a.url}
-                target="_blank"
-                rel="noreferrer"
-                title={a.name}
-                onClick={zoom ? (e) => {
-                  // Plain left-click → in-app lightbox. Leave modified clicks
-                  // (⌘/ctrl/shift/alt, middle button) to the browser so
-                  // "open in new tab" still works via the underlying href.
-                  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
-                  e.preventDefault();
-                  zoom(a.url, a.name);
-                } : undefined}
-              >
-                <img src={a.url} alt={a.name} />
-              </a>
+              isNativeImageMime(a.mime) ? (
+                <a
+                  key={`${a.url}-${i}`}
+                  className={`msg-att${zoom ? ' zoomable' : ''}`}
+                  href={a.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={a.name}
+                  onClick={zoom ? (e) => {
+                    // Plain left-click → in-app lightbox. Leave modified clicks
+                    // (⌘/ctrl/shift/alt, middle button) to the browser so
+                    // "open in new tab" still works via the underlying href.
+                    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+                    e.preventDefault();
+                    zoom(a.url, a.name);
+                  } : undefined}
+                >
+                  <img src={a.url} alt={a.name} />
+                </a>
+              ) : (
+                <a
+                  key={`${a.url}-${i}`}
+                  className="msg-file-att"
+                  href={a.url}
+                  download={a.name}
+                  title={a.name}
+                >
+                  <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="M4 1.75h5l3 3V14.25H4z" stroke="currentColor" strokeWidth="1.2" />
+                    <path d="M9 1.75v3h3" stroke="currentColor" strokeWidth="1.2" />
+                  </svg>
+                  <span className="msg-file-meta">
+                    <span className="msg-file-name">{a.name}</span>
+                    {a.size !== undefined && (
+                      <span className="msg-file-size">{formatAttachmentSize(a.size)}</span>
+                    )}
+                  </span>
+                </a>
+              )
             ))}
           </div>
         )}
@@ -794,6 +835,12 @@ export function UserMessage({ item }: { item: MsgItem; hideAvatar?: boolean }) {
       </div>
     </div>
   );
+}
+
+function formatAttachmentSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function AssistantMessage({ item, hideAvatar, showFooter }: { item: MsgItem; hideAvatar?: boolean; showFooter?: boolean }) {
@@ -821,24 +868,30 @@ export function AssistantMessage({ item, hideAvatar, showFooter }: { item: MsgIt
 
 /**
  * Reasoning content from codex (full trace or summary). Default-collapsed
- * card with a `<details>` toggle — clicking expands it to show the markdown
- * body. Both `variant: 'summary'` and `variant: 'full'` use the same shell,
- * differentiated only by the header label.
+ * row on the shared `.evt` shell (`.evt.thinking` variant) — same caret,
+ * gutter, fonts and hover as every other action row so it folds naturally
+ * into a turn-actions block. Both `variant: 'summary'` and `variant: 'full'`
+ * use the same shell, differentiated only by the header label and the
+ * summary accent.
  */
 export function ReasoningCard({ item }: { item: ReasoningItem }) {
   const t = useT();
+  const [open, setOpen] = useState(false);
   const lineCount = item.text ? item.text.split('\n').length : 0;
   const label = item.variant === 'summary' ? t('transcript.reasoning.summary') : t('transcript.reasoning.full');
   return (
-    <details className="reasoning-card" data-variant={item.variant}>
-      <summary className="reasoning-card-head">
-        <span className="reasoning-card-label">{label}</span>
-        <span className="reasoning-card-meta">{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>
-      </summary>
-      <div className="reasoning-card-body md">
-        <MarkdownText>{item.text}</MarkdownText>
+    <div className={`evt thinking${open ? ' open' : ''}`} data-variant={item.variant}>
+      <div className="evt-head" onClick={() => setOpen(o => !o)}>
+        <Caret />
+        <span className="evt-verb">{label}</span>
+        <span className="evt-meta">{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>
       </div>
-    </details>
+      {open && (
+        <div className="evt-body md">
+          <MarkdownText>{item.text}</MarkdownText>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1019,9 +1072,24 @@ export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
 
 export function AgentSpawnRow({ item }: { item: AgentSpawnItem }) {
   const t = useT();
+  const openChatPanel = useContext(ChatPanelOpenContext);
   const statusClass = item.status === 'running' ? 'running' : item.status === 'done' ? 'success' : 'error';
   return (
-    <div className="evt agent" data-agent-id={item.id} data-provider={item.provider}>
+    <div
+      className="evt agent"
+      data-agent-id={item.id}
+      data-provider={item.provider}
+      role="button"
+      tabIndex={0}
+      title={t('transcript.agentOpen')}
+      onClick={() => openChatPanel?.({ kind: 'agent', id: item.id })}
+      onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          openChatPanel?.({ kind: 'agent', id: item.id });
+        }
+      }}
+    >
       <div className="evt-head">
         <span className="evt-verb">{t('transcript.agent')}</span>
         <span className="evt-subject" title={item.description}>{item.description}</span>

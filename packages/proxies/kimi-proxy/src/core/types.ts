@@ -24,7 +24,15 @@ export interface LocalImageInputItem {
   mimeType?: string;
 }
 
-export type InputItem = TextInputItem | LocalImageInputItem;
+export interface LocalFileInputItem {
+  type: 'localFile';
+  path: string;
+  name?: string;
+  mimeType?: string;
+  size?: number;
+}
+
+export type InputItem = TextInputItem | LocalImageInputItem | LocalFileInputItem;
 
 export interface SessionRecord {
   id: string;

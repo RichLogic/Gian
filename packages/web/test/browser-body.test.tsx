@@ -76,6 +76,17 @@ describe('browserHostOf', () => {
   });
 });
 
+describe('BrowserBody initial URL', () => {
+  it('opens a routed link immediately', () => {
+    const { container } = render(
+      <BrowserBody initialUrl="https://example.com/docs" />,
+    );
+
+    expect(container.querySelector('input')).toHaveValue('https://example.com/docs');
+    expect(container.querySelector('iframe')?.getAttribute('src')).toBe('https://example.com/docs');
+  });
+});
+
 
 // ─── Per-tab isolation via the Sheet's keep-alive slots (fix 6.1.5) ────────
 

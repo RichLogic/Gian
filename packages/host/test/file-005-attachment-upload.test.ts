@@ -30,6 +30,31 @@ test('writeAttachment writes a PNG into $GIAN_DATA_DIR/attachments/<session>/<uu
   } finally { cleanup(); }
 });
 
+test('writeAttachment preserves a safe extension for generic files', async () => {
+  const { dataDir, cleanup } = withDataDir();
+  try {
+    const bytes = Buffer.from('hello');
+    const path = await writeAttachment('sess-text', bytes, 'text/plain', 'notes.txt');
+    assert.ok(path.startsWith(join(dataDir, 'attachments', 'sess-text')));
+    assert.ok(path.endsWith('.txt'));
+    assert.deepEqual(readFileSync(path), bytes);
+  } finally { cleanup(); }
+});
+
+test('writeAttachment does not let a generic upload masquerade as an inline image', async () => {
+  const { dataDir, cleanup } = withDataDir();
+  try {
+    const path = await writeAttachment(
+      'sess-spoof',
+      Buffer.from('<script>bad()</script>'),
+      'text/html',
+      'not-really.png',
+    );
+    assert.ok(path.startsWith(join(dataDir, 'attachments', 'sess-spoof')));
+    assert.ok(path.endsWith('.bin'));
+  } finally { cleanup(); }
+});
+
 test('purgeSessionAttachments removes the session subdir', async () => {
   const { dataDir, cleanup } = withDataDir();
   try {
@@ -83,13 +108,18 @@ test('POST /api/sessions/:id/attachments writes the body to disk and returns {pa
   } finally { await ctx.cleanup(); }
 });
 
-test('POST /api/sessions/:id/attachments rejects unsupported mime with 415', async () => {
+test('POST /api/sessions/:id/attachments accepts a generic file snapshot', async () => {
   const { ctx, sessionId } = await withApp();
   try {
     const form = new FormData();
     form.set('file', new Blob([Buffer.from('hello')], { type: 'text/plain' }), 'a.txt');
     const res = await ctx.fetch(`/api/sessions/${sessionId}/attachments`, { method: 'POST', body: form });
-    assert.equal(res.status, 415);
+    assert.equal(res.status, 200);
+    const body = await res.json() as { path: string; name: string; size: number; mime: string };
+    assert.match(body.path, /\/attachments\/.+\.txt$/);
+    assert.equal(body.name, 'a.txt');
+    assert.equal(body.mime, 'text/plain');
+    assert.equal(body.size, 5);
   } finally { await ctx.cleanup(); }
 });
 
@@ -127,8 +157,44 @@ test('GET /api/sessions/:id/attachments/:filename serves the upload back with it
     const res = await ctx.fetch(`/api/sessions/${sessionId}/attachments/${filename}`);
     assert.equal(res.status, 200);
     assert.equal(res.headers.get('content-type'), 'image/png');
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
     const bytes = Buffer.from(await res.arrayBuffer());
     assert.deepEqual(bytes, png);
+  } finally { await ctx.cleanup(); }
+});
+
+test('GET generic attachment forces an opaque download instead of inline same-origin content', async () => {
+  const { ctx, sessionId } = await withApp();
+  try {
+    const form = new FormData();
+    form.set('file', new Blob([Buffer.from('<script>bad()</script>')], { type: 'text/html' }), 'page.html');
+    const upload = await ctx.fetch(`/api/sessions/${sessionId}/attachments`, { method: 'POST', body: form });
+    const body = await upload.json() as { path: string };
+    const filename = body.path.split('/').pop()!;
+
+    const res = await ctx.fetch(`/api/sessions/${sessionId}/attachments/${filename}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'application/octet-stream');
+    assert.equal(res.headers.get('content-disposition'), 'attachment');
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+  } finally { await ctx.cleanup(); }
+});
+
+test('GET generic attachment with an image-looking name still forces an opaque download', async () => {
+  const { ctx, sessionId } = await withApp();
+  try {
+    const form = new FormData();
+    form.set('file', new Blob([Buffer.from('<script>bad()</script>')], { type: 'text/html' }), 'page.png');
+    const upload = await ctx.fetch(`/api/sessions/${sessionId}/attachments`, { method: 'POST', body: form });
+    const body = await upload.json() as { path: string };
+    const filename = body.path.split('/').pop()!;
+    assert.match(filename, /\.bin$/);
+
+    const res = await ctx.fetch(`/api/sessions/${sessionId}/attachments/${filename}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'application/octet-stream');
+    assert.equal(res.headers.get('content-disposition'), 'attachment');
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
   } finally { await ctx.cleanup(); }
 });
 
@@ -136,18 +202,15 @@ test('GET /api/sessions/:id/attachments/:filename refuses path traversal', async
   const { ctx, sessionId } = await withApp();
   try {
     const res = await ctx.fetch(`/api/sessions/${sessionId}/attachments/..%2F..%2Fetc%2Fpasswd`);
-    // 415 because the synthesized filename ends with `passwd` (no known ext)
-    // → mime guess returns null and we short-circuit before touching disk.
-    // Either 4xx is acceptable; what matters is "not 200 + not the secret".
-    assert.ok(res.status === 415 || res.status === 404);
+    assert.equal(res.status, 404);
   } finally { await ctx.cleanup(); }
 });
 
-test('GET /api/sessions/:id/attachments/:filename rejects unknown extension with 415', async () => {
+test('GET /api/sessions/:id/attachments/:filename returns 404 for a missing generic file', async () => {
   const { ctx, sessionId } = await withApp();
   try {
     const res = await ctx.fetch(`/api/sessions/${sessionId}/attachments/whatever.txt`);
-    assert.equal(res.status, 415);
+    assert.equal(res.status, 404);
   } finally { await ctx.cleanup(); }
 });
 

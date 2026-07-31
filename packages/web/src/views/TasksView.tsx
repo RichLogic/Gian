@@ -23,7 +23,7 @@ export interface ManagerComposerHandlers {
   onSetServiceTier: (tier: 'fast' | null) => void;
   onSetNativeConfig: (configId: string, value: NativeConfigValue) => void;
   onSendSkill: (name: string, path: string) => void;
-  onQueueAdd: (text: string) => void;
+  onQueueAdd: (text: string, attachments?: Array<{ path: string; name: string; mime: string }>) => void;
   onQueueRemove: (queueId: string) => void;
   onQueueReorder: (order: string[]) => void;
   onQueueClear: () => void;
@@ -1044,7 +1044,7 @@ function ManagerPanel({
             onRemove={id => handlers?.onQueueRemove(id)}
             onReorder={order => handlers?.onQueueReorder(order)}
             onClear={() => handlers?.onQueueClear()}
-            onSendNow={() => handlers?.onQueueSendNow()}
+            onSendNow={session.executor === 'codex' ? () => handlers?.onQueueSendNow() : undefined}
           />
           <Composer
             session={session}
@@ -1052,7 +1052,7 @@ function ManagerPanel({
             onSend={(text, opts) => onSend(task.id, text, opts)}
             onSendSkill={(name, path) => handlers?.onSendSkill(name, path)}
             onStop={() => onStop(task.id)}
-            onQueueAdd={text => handlers?.onQueueAdd(text)}
+            onQueueAdd={(text, attachments) => handlers?.onQueueAdd(text, attachments)}
             onSetMode={(mode, turns) => handlers?.onSetMode(mode, turns)}
             onSetModel={model => handlers?.onSetModel(model)}
             onSetEffort={effort => handlers?.onSetEffort(effort)}

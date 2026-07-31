@@ -15,9 +15,13 @@ import type {
   WorktreeOutcome,
 } from '@gian/shared';
 import { MANAGER_SYS_OPEN, MANAGER_SYS_CLOSE } from '@gian/shared';
-import { basename } from 'node:path';
+import { basename, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
-import { mimeForAttachment } from '../storage/attachments.js';
+import {
+  ensureSessionAttachmentDir,
+  mimeForAttachment,
+  resolveAttachmentPath,
+} from '../storage/attachments.js';
 import type { Db } from '../storage/db.js';
 import { loadConfig } from '../storage/config.js';
 import { purgeSessionAttachments } from '../storage/attachments.js';
@@ -241,7 +245,7 @@ function kimiContentText(value: unknown): string {
 
 /**
  * Map shared InputItem[] to the items the target executor accepts.
- *   - codex: passes everything through (skill / text / localImage all native)
+ *   - codex: passes everything through (skill / text / attachments)
  *   - cc:    has no skill concept — translate skill → `/<name>` text so the
  *            existing slash text path runs (cc-proxy does its own intercepts
  *            for known native commands like `/clear` / `/compact`)
@@ -258,7 +262,7 @@ function translateItemsForExecutor(
 }
 
 /** Build the attachments payload echoed back in `user_message` events from
- *  the `localImage` items the client supplied. Filenames stored under
+ *  the attachment items the client supplied. Filenames stored under
  *  `~/.gian/attachments/<sid>/` are UUIDs assigned by writeAttachment, so the
  *  basename of the absolute path is the URL-safe identifier. Falls back to
  *  the on-disk extension when the client doesn't echo a name/mime. */
@@ -269,17 +273,34 @@ function buildAttachmentsFromItems(
   if (!items) return [];
   const out: MessageAttachment[] = [];
   for (const it of items) {
-    if (it.type !== 'localImage') continue;
+    if (it.type !== 'localImage' && it.type !== 'localFile') continue;
     const filename = basename(it.path);
     const mime = it.mime ?? mimeForAttachment(filename);
-    if (!mime) continue; // unknown extension — skip rather than serve an unreadable URL
     out.push({
       name: it.name ?? filename,
       mime,
       url: `/api/sessions/${sessionId}/attachments/${filename}`,
+      ...(typeof it.size === 'number' ? { size: it.size } : {}),
     });
   }
   return out;
+}
+
+/** Generic files are a more powerful primitive than images because every
+ *  executor can read their contents. Only accept files created by this
+ *  session's upload route; never let a web client smuggle an arbitrary host
+ *  path into an agent prompt. */
+function assertLocalFilesBelongToSession(
+  sessionId: string,
+  items: import('@gian/shared').InputItem[] | undefined,
+): void {
+  for (const item of items ?? []) {
+    if (item.type !== 'localFile') continue;
+    const expected = resolveAttachmentPath(sessionId, basename(item.path));
+    if (!expected || resolve(item.path) !== expected || !existsSync(expected)) {
+      throw new Error(`invalid local file attachment for session ${sessionId}`);
+    }
+  }
 }
 
 /**
@@ -1267,6 +1288,7 @@ export class SessionManager {
     oneShotBypass?: boolean,
   ): Promise<void> {
     const session = this.getSession(sessionId);
+    assertLocalFilesBelongToSession(sessionId, items);
     if (session.worktree_outcome) {
       throw new Error(`session is ${session.worktree_outcome}; create a new session to continue`);
     }
@@ -1293,6 +1315,9 @@ export class SessionManager {
     const proxySessionId = await this.ensureProxySession(session);
     const client = this.proxy.get(sessionId);
     if (!client) throw new Error(`no proxy for session: ${sessionId}`);
+    const codexAttachmentRoot = session.executor === 'codex'
+      ? await ensureSessionAttachmentDir(sessionId, this.dataDir)
+      : null;
 
     // Per-Task Manager: neither proxy has a system/instructions channel for a
     // persistent chat session, so the Manager's system prompt is prepended to
@@ -1443,6 +1468,9 @@ export class SessionManager {
       await client.startTurn({
         sessionId: proxySessionId,
         input: dispatchItems,
+        ...(codexAttachmentRoot
+          ? { additionalWorkspaceRoots: [codexAttachmentRoot] }
+          : {}),
         ...(session.model ? { model: session.model } : {}),
         ...(session.thinking_effort ? { thinking: session.thinking_effort } : {}),
         // codex Fast service tier — set from the composer's Fast toggle. The
@@ -1688,8 +1716,9 @@ export class SessionManager {
   // call site and the broadcast/popNext machinery lives next to SessionManager.
   // -------------------------------------------------------------------------
 
-  enqueueMessage(sessionId: string, text: string): void {
-    this.queue.add(sessionId, text);
+  enqueueMessage(sessionId: string, text: string, items?: import('@gian/shared').InputItem[]): void {
+    assertLocalFilesBelongToSession(sessionId, items);
+    this.queue.add(sessionId, text, items);
     this.broadcastQueueUpdated(sessionId);
   }
 
@@ -1716,15 +1745,82 @@ export class SessionManager {
       // the CODEX-TTY-001 contract holds.
       throw new Error(`session is in CLI mode; switch to Chat before draining the queue`);
     }
-    // Pop only the head entry. Awaiting sendMessage just unblocks the proxy's
-    // startTurn (the turn itself is async); kicking off the next entry from
-    // here would race with turn 1 still running and trip SESSION_BUSY,
-    // burning the queued text. Let `maybeAutoSendNext` walk the rest of the
-    // queue on every turn.completed/failed instead — it's already wired.
+    if (this.activeTurns.has(sessionId)) {
+      if (session.executor !== 'codex') {
+        // Claude/Kimi have no mid-turn injection — "send now" can't beat the
+        // auto-drain. Refuse WITHOUT popping: the old pop-then-SESSION_BUSY
+        // path lost the message from both the queue and the transcript.
+        throw new Error(`a turn is already running; the queue drains automatically when it completes`);
+      }
+      // Codex: steer every queued message into the in-flight turn. If the
+      // turn completes mid-drain, re-queue whatever hasn't been steered so
+      // nothing is lost (auto-drain picks it up next turn).
+      const drained = this.queue.sendNow(sessionId);
+      if (drained.length === 0) return;
+      this.broadcastQueueUpdated(sessionId);
+      for (let i = 0; i < drained.length; i++) {
+        try {
+          await this.steerMessage(sessionId, drained[i]!.text, drained[i]!.items);
+        } catch (err) {
+          for (let j = i; j < drained.length; j++) {
+            this.queue.add(sessionId, drained[j]!.text, drained[j]!.items);
+          }
+          this.broadcastQueueUpdated(sessionId);
+          throw err;
+        }
+      }
+      return;
+    }
+    // Idle: pop only the head entry. Awaiting sendMessage just unblocks the
+    // proxy's startTurn (the turn itself is async); kicking off the next
+    // entry from here would race with turn 1 still running and trip
+    // SESSION_BUSY, burning the queued text. Let `maybeAutoSendNext` walk the
+    // rest of the queue on every turn.completed/failed instead — it's
+    // already wired.
     const next = this.queue.popNext(sessionId);
     if (!next) return;
     this.broadcastQueueUpdated(sessionId);
-    await this.sendMessage(sessionId, next.text);
+    await this.sendMessage(sessionId, next.text, next.items);
+  }
+
+  /** Codex-only mid-turn injection (`turn/steer`): append the message to the
+   *  session's ACTIVE turn instead of queueing it for the next one. The user
+   *  message is recorded on the active turn so the transcript shows it inline
+   *  with the work it steered. */
+  async steerMessage(
+    sessionId: string,
+    text: string,
+    items?: import('@gian/shared').InputItem[],
+  ): Promise<void> {
+    const session = this.getSession(sessionId);
+    assertLocalFilesBelongToSession(sessionId, items);
+    if (session.runtime_mode === 'tty') {
+      throw new Error(`session is in CLI mode; switch to Chat before steering`);
+    }
+    const client = this.proxy.get(sessionId);
+    if (!client?.steerTurn) {
+      throw new Error(`${session.executor} does not support steering`);
+    }
+    const active = this.activeTurns.get(sessionId);
+    if (!active) {
+      throw new Error(`no active turn for session ${sessionId}; send a normal message instead`);
+    }
+    const proxySessionId = await this.ensureProxySession(session);
+
+    const dispatchItems = items && items.length > 0
+      ? translateItemsForExecutor(session.executor, items)
+      : [{ type: 'text' as const, text }];
+    const attachments = buildAttachmentsFromItems(sessionId, items);
+    const userMessagePayload: Record<string, unknown> = { text };
+    if (attachments.length > 0) userMessagePayload.attachments = attachments;
+
+    await client.steerTurn({ sessionId: proxySessionId, input: dispatchItems });
+
+    // Only record the message after Codex accepted the steer. Persisting it
+    // before the RPC made a rejected steer look successful and caused a
+    // re-queued entry to appear twice when it later drained normally.
+    this.persistEvent(sessionId, active.id, randomUUID(), 'user_message', userMessagePayload);
+    this.broadcastEvent(sessionId, active.number, randomUUID(), 'user_message', userMessagePayload);
   }
 
   // -------------------------------------------------------------------------
@@ -2954,7 +3050,7 @@ export class SessionManager {
     const next = this.queue.popNext(sessionId);
     if (!next) return false;
     this.broadcastQueueUpdated(sessionId);
-    void this.sendMessage(sessionId, next.text).catch(err => {
+    void this.sendMessage(sessionId, next.text, next.items).catch(err => {
       console.error('[queue] auto-send failed', err);
     });
     return true;

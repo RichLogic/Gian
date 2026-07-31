@@ -228,56 +228,6 @@
   word-break: break-word;
 }
 
-/* Reasoning card — codex "thinking" content. Default-collapsed via the
-   native <details> element; muted styling so reasoning recedes visually
-   compared to assistant text. */
-.reasoning-card {
-  margin: 4px 0;
-  padding: 6px 10px;
-  border-left: 2px solid var(--hairline);
-  background: transparent;
-  font-size: var(--fz-12);
-  color: var(--text-3);
-}
-.reasoning-card[open] { background: var(--surface-2); border-radius: var(--r-1); }
-.reasoning-card-head {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-}
-.reasoning-card-head::-webkit-details-marker { display: none; }
-.reasoning-card-head::before {
-  content: '▸';
-  font-size: 9px;
-  color: var(--text-3);
-  transition: transform 80ms;
-}
-.reasoning-card[open] .reasoning-card-head::before { transform: rotate(90deg); }
-.reasoning-card-label {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: none;
-  color: var(--text-2);
-}
-.reasoning-card[data-variant="summary"] .reasoning-card-label { color: var(--accent-text); }
-.reasoning-card-meta {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-3);
-}
-.reasoning-card-body {
-  margin-top: 6px;
-  padding-left: 0;
-  font-style: italic;
-  line-height: 1.55;
-  color: var(--text-2);
-}
-
 /* Optimistic echo: muted until the server confirms with `user_message`. */
 .msg.user.pending .msg-text { opacity: 0.6; }
 .msg.user.failed .msg-text {
@@ -765,12 +715,6 @@
   flex-shrink: 0;
   padding: 8px 16px 12px;
   position: relative;
-}
-.composer-wrap::before {
-  content: "";
-  position: absolute; left: 24px; right: 24px; top: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--hairline), transparent);
 }
 
 .queue-drawer {
@@ -1529,6 +1473,18 @@
   border-radius: var(--r-1);
   flex-shrink: 0;
 }
+.att-file-icon {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-2);
+  background: var(--surface-3);
+  border-radius: var(--r-1);
+  flex-shrink: 0;
+}
+.att-file-icon svg { width: 16px; height: 16px; }
 .att-name {
   white-space: nowrap;
   overflow: hidden;

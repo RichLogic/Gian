@@ -343,8 +343,13 @@ test('turn/start sends an exact configured profile without a conflicting sandbox
       approvalPolicy: 'on-request',
       approvalsReviewer: 'user',
       sandbox: 'danger-full-access',
+      runtimeWorkspaceRoots: ['/repo', '/tmp/gian/attachments/session'],
     },
   );
   assert.equal(calls[0]?.params.permissions, 'my-profile');
+  assert.deepEqual(
+    calls[0]?.params.runtimeWorkspaceRoots,
+    ['/repo', '/tmp/gian/attachments/session'],
+  );
   assert.equal('sandboxPolicy' in (calls[0]?.params ?? {}), false);
 });

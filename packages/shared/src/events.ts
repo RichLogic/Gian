@@ -203,6 +203,10 @@ export interface AgentSpawnData {
   /** Terminal native summary. Full child transcripts stay provider-owned. */
   output?: string;
   outputFile?: string;
+  /** Provider-native task identity, when distinct from the child agent id. */
+  taskId?: string;
+  /** Whether the provider launched the child without blocking its parent. */
+  background?: boolean;
   startedAt?: number;
   completedAt?: number;
   /** tool_use input block for reference. */

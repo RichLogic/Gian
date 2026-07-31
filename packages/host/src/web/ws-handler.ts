@@ -167,6 +167,8 @@ function dispatchErrorCode(messageType: string): string {
   switch (messageType) {
     case 'message:send':
       return 'MESSAGE_SEND_FAILED';
+    case 'message:steer':
+      return 'MESSAGE_STEER_FAILED';
     case 'approval:resolve':
       return 'APPROVAL_RESOLVE_FAILED';
     case 'session:create':
@@ -268,6 +270,10 @@ async function dispatch(
       await sessions.sendMessage(msg.session_id, msg.text, msg.items, msg.oneShotBypass);
       return;
     }
+    case 'message:steer': {
+      await sessions.steerMessage(msg.session_id, msg.text, msg.items);
+      return;
+    }
     case 'approval:resolve': {
       await sessions.respondApproval(
         msg.session_id,
@@ -307,7 +313,7 @@ async function dispatch(
       return;
     }
     case 'queue:add': {
-      sessions.enqueueMessage(msg.session_id, msg.text);
+      sessions.enqueueMessage(msg.session_id, msg.text, msg.items);
       return;
     }
     case 'queue:remove': {

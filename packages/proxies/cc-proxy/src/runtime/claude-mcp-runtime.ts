@@ -551,6 +551,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     permissionMode?: PermissionMode | null;
     effort?: EffortLevel | null;
     displayName?: string | null;
+    additionalDirectories?: string[];
   }): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -910,6 +911,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       permissionMode?: PermissionMode | null;
       effort?: EffortLevel | null;
       displayName?: string | null;
+      additionalDirectories?: string[];
     },
   ): string[] {
     const args: string[] = [
@@ -917,6 +919,10 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       '--verbose',
       '--output-format', 'stream-json',
     ];
+
+    if (options?.additionalDirectories?.length) {
+      args.push('--add-dir', ...options.additionalDirectories);
+    }
 
     // Pass through host's permissionMode directly to Claude CLI. The host's
     // SessionManager translates ApprovalMode (plan/ask/auto) → PermissionMode

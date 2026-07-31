@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import type { ApprovalMode, CcModelCapabilities, CodexModelCapabilities, Executor, MessageAttachment, NativeConfigChoice, NativeConfigOption, NativeConfigValue, Session, SlashCommand, SlashCommandSource, ThinkingEffort } from '@gian/shared';
+import { isNativeImageMime } from '../attachments.js';
 import { loadNativeConfig, loadProxyModels, loadSessionSlashCommands, loadSlashCommands } from '../api.js';
 import { useT } from '../i18n/index.js';
 
@@ -522,7 +523,7 @@ function NativeOptionDrop({
 
 export function Composer({
   session,
-  onSend, onSendSkill, onStop, onQueueAdd, onSetMode, onSetModel, onSetEffort,
+  onSend, onSendSkill, onStop, onQueueAdd, onSteer, onSetMode, onSetModel, onSetEffort,
   onSetNativeConfig, onSetServiceTier,
   disabled, running, executor,
   workspaceId,
@@ -536,14 +537,14 @@ export function Composer({
     text: string,
     opts?: {
       oneShotBypass?: boolean;
-      /** Uploaded images for this turn. App owns the `previewUrl`s from
+      /** Uploaded attachments for this turn. App owns the `previewUrl`s from
        *  this point — Composer must NOT revoke them; the optimistic echo
-       *  reuses them as the `<img src>` until the server confirms with
-       *  permanent URLs. */
+       *  reuses them until the server confirms with permanent URLs. */
       attachments?: Array<{
         path: string;
         name: string;
         mime: string;
+        size: number;
         previewUrl: string;
       }>;
     },
@@ -553,7 +554,17 @@ export function Composer({
    *  rather than being sent as text). */
   onSendSkill: (name: string, path: string) => void;
   onStop: () => void;
-  onQueueAdd: (text: string) => void;
+  onQueueAdd: (
+    text: string,
+    attachments?: Array<{ path: string; name: string; mime: string; size?: number }>,
+  ) => void;
+  /** Codex-only mid-turn injection (`turn/steer`): Ctrl+Enter while a turn is
+   *  running appends the draft to the ACTIVE turn instead of queueing it.
+   *  Omitted for claude / kimi composers — they have no steer primitive. */
+  onSteer?: (
+    text: string,
+    opts?: { attachments?: Array<{ path: string; name: string; mime: string; size?: number }> },
+  ) => void;
   onSetMode: (mode: ApprovalMode, turns?: number) => void;
   onSetModel: (model: string) => void;
   onSetEffort: (effort: ThinkingEffort | null) => void;
@@ -734,8 +745,10 @@ export function Composer({
       .map(option => option.id),
   );
   const nativeExtraOptions = nativeOptions.filter(option => !semanticNativeIds.has(option.id));
-  // Pending file attachments — UI only; not yet sent with messages
+  // Files are uploaded into the host-owned per-session attachment store before
+  // send, so queued turns and restored sessions never depend on the original.
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const attachmentSessionRef = useRef(session.id);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
@@ -749,6 +762,15 @@ export function Composer({
   useEffect(() => {
     writeDraft(session.id, text);
   }, [session.id, text]);
+
+  useEffect(() => {
+    if (attachmentSessionRef.current === session.id) return;
+    attachmentSessionRef.current = session.id;
+    setPendingFiles(previous => {
+      for (const file of previous) URL.revokeObjectURL(file.previewUrl);
+      return [];
+    });
+  }, [session.id]);
 
   // External draft injection (Changes inspector → "commit / push / create PR"
   // prompts). The dispatcher has already written the appended draft to
@@ -897,17 +919,18 @@ export function Composer({
       path: f.path!,
       name: f.name,
       mime: f.mime,
+      size: f.size,
       previewUrl: f.previewUrl,
     }));
     if (disabled) {
       if (disabledSubmitBehavior === 'block') return;
-      onQueueAdd(trimmed); // queue ignores images for now (out of scope)
+      onQueueAdd(trimmed, attachments.map(({ path, name, mime, size }) => ({ path, name, mime, size })));
       // Queue path doesn't transfer ownership — revoke previews now.
       for (const f of pendingFiles) URL.revokeObjectURL(f.previewUrl);
     } else {
       const opts: {
         oneShotBypass?: true;
-        attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
+        attachments?: Array<{ path: string; name: string; mime: string; size: number; previewUrl: string }>;
       } = {};
       if (oneShotBypass) opts.oneShotBypass = true;
       if (attachments.length > 0) opts.attachments = attachments;
@@ -921,6 +944,29 @@ export function Composer({
         if (!sentIds.has(f.id)) URL.revokeObjectURL(f.previewUrl);
       }
     }
+    setPendingFiles([]);
+    setText('');
+  }
+
+  /** Codex ⌘/Ctrl+Enter-while-running: append the draft to the ACTIVE turn via
+   *  `turn/steer` instead of queueing it for the next one. Same payload
+   *  discipline as submit() — wait for uploads, carry attachments, clear the
+   *  draft. No optimistic echo; the host records the user message on the
+   *  active turn and broadcasts it back. */
+  function steerSubmit() {
+    if (!onSteer) return;
+    const trimmed = text.trim();
+    const ready = pendingFiles.filter(f => !f.uploading && !f.error && f.path);
+    if (!trimmed && ready.length === 0) return;
+    if (pendingFiles.some(f => f.uploading)) return;
+    const attachments = ready.map(f => ({
+      path: f.path!,
+      name: f.name,
+      mime: f.mime,
+      size: f.size,
+    }));
+    onSteer(trimmed, attachments.length > 0 ? { attachments } : undefined);
+    for (const f of pendingFiles) URL.revokeObjectURL(f.previewUrl);
     setPendingFiles([]);
     setText('');
   }
@@ -940,24 +986,7 @@ export function Composer({
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const chosen = Array.from(e.target.files ?? []);
-    const valid = chosen.filter(f => f.size <= MAX_FILE_BYTES);
-    setPendingFiles(prev => {
-      const existing = new Set(prev.map(p => p.name));
-      const added = valid
-        .filter(f => !existing.has(f.name))
-        .map(f => ({
-          id: crypto.randomUUID(),
-          name: f.name,
-          mime: f.type,
-          size: f.size,
-          sizeLabel: fmtBytes(f.size),
-          previewUrl: URL.createObjectURL(f),
-          path: null,
-          uploading: false,
-          error: undefined,
-        }));
-      return [...prev, ...added];
-    });
+    for (const file of chosen) void uploadOne(file);
     // Reset input so the same file can be re-selected
     e.target.value = '';
   }
@@ -981,15 +1010,21 @@ export function Composer({
       sizeLabel: fmtBytes(file.size),
       previewUrl,
       path: null,
-      uploading: true,
+      uploading: file.size <= MAX_FILE_BYTES,
+      ...(file.size > MAX_FILE_BYTES
+        ? { error: t('composer.attachment.tooLarge') }
+        : {}),
     };
     setPendingFiles(prev => [...prev, entry]);
+    if (file.size > MAX_FILE_BYTES) return;
 
     try {
       const { uploadAttachment } = await import('../api.js');
       const result = await uploadAttachment(session.id, file, file.name);
       setPendingFiles(prev =>
-        prev.map(f => f.id === id ? { ...f, path: result.path, uploading: false } : f),
+        prev.map(f => f.id === id
+          ? { ...f, path: result.path, mime: result.mime, size: result.size, sizeLabel: fmtBytes(result.size), uploading: false }
+          : f),
       );
     } catch (err) {
       setPendingFiles(prev =>
@@ -1039,8 +1074,18 @@ export function Composer({
         return;
       }
     }
-    // ⌘/Ctrl+Enter is the global "send now" shortcut — let it bubble to the
-    // document handler instead of submitting/queuing the current draft here.
+    // ⌘/Ctrl+Enter: with a draft it steers the draft into the ACTIVE turn
+    // (codex `turn/steer`) instead of queueing it; on other executors or when
+    // idle it submits like plain Enter. With no draft it bubbles to the
+    // document-level queue-drain handler.
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && (e.metaKey || e.ctrlKey)) {
+      const hasDraft = text.trim().length > 0 || pendingFiles.some(f => !f.uploading && !f.error && f.path);
+      if (!hasDraft) return;
+      e.preventDefault();
+      if (onSteer && executor === 'codex' && disabled) steerSubmit();
+      else submit();
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
       submit();
@@ -1053,7 +1098,7 @@ export function Composer({
         className="composer"
         style={{ position: 'relative' }}
       >
-        {/* Hidden file input — triggered by the paperclip button */}
+        {/* Hidden file input — triggered by the plus button */}
         <input
           ref={fileInputRef}
           type="file"
@@ -1098,7 +1143,16 @@ export function Composer({
           <div className="composer-attachments">
             {pendingFiles.map(f => (
               <div key={f.id} className={`att-chip${f.error ? ' is-error' : ''}${f.uploading ? ' is-uploading' : ''}`}>
-                <img className="att-thumb" src={f.previewUrl} alt="" />
+                {isNativeImageMime(f.mime) ? (
+                  <img className="att-thumb" src={f.previewUrl} alt="" />
+                ) : (
+                  <span className="att-file-icon" aria-hidden="true">
+                    <svg viewBox="0 0 16 16" fill="none">
+                      <path d="M4 1.75h5l3 3V14.25H4z" stroke="currentColor" strokeWidth="1.2" />
+                      <path d="M9 1.75v3h3" stroke="currentColor" strokeWidth="1.2" />
+                    </svg>
+                  </span>
+                )}
                 <span className="att-name" title={f.error ?? f.name}>{f.name}</span>
                 <span className="att-size">{f.sizeLabel}</span>
                 <button className="att-remove" type="button" onClick={() => removeFile(f.id)} aria-label={t('composer.attachment.remove')}>✕</button>
@@ -1463,16 +1517,15 @@ export function Composer({
             </>
           )}
 
-          {/* Attach files — plus glyph (VS Code style) — picker not supported in v1.
-              Hidden in minimal: the Manager composer has no attachment pipeline. */}
+          {/* Attach files — plus glyph (VS Code style). Hidden in minimal:
+              the Manager placeholder composer has no attachment pipeline. */}
           {!minimal && (
             <button
               type="button"
               className={`composer-act${pendingFiles.length > 0 ? ' active' : ''}`}
-              title={t('composer.attachment.pasteImagesHint')}
-              disabled
+              title={t('composer.attachment.addFiles')}
               onClick={() => fileInputRef.current?.click()}
-              aria-label={t('composer.attachment.pasteImages')}
+              aria-label={t('composer.attachment.addFiles')}
             >
               <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />

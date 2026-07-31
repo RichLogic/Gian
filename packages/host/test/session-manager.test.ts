@@ -18,6 +18,7 @@ import type { ProxyClient, NotificationHandler } from '../src/proxy/types.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import { ApprovalManager } from '../src/approval/index.js';
 import { QueueManager } from '../src/queue/index.js';
+import { writeAttachment } from '../src/storage/attachments.js';
 
 class StubProxyClient implements ProxyClient {
   readonly executor = 'claude' as const;
@@ -765,6 +766,52 @@ test('sendMessage with localImage items echoes attachments in user_message paylo
     assert.ok(broadcastUser, 'broadcast user_message present');
     assert.equal((broadcastUser!.data.attachments ?? []).length, 1);
   } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sendMessage accepts only session-owned localFile snapshots and echoes their metadata', async () => {
+  const { dir, db, wsId, sessions } = setup();
+  const previousDataDir = process.env.GIAN_DATA_DIR;
+  process.env.GIAN_DATA_DIR = dir;
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    const path = await writeAttachment(
+      session.id,
+      Buffer.from('hello'),
+      'text/plain',
+      'notes.txt',
+    );
+
+    await sessions.sendMessage(session.id, 'read this', [
+      { type: 'text', text: 'read this' },
+      { type: 'localFile', path, name: 'notes.txt', mime: 'text/plain', size: 5 },
+    ]);
+
+    const userRow = db.prepare(
+      "SELECT data FROM events WHERE session_id = ? AND type = 'user_message'",
+    ).get(session.id) as { data: string };
+    const payload = JSON.parse(userRow.data) as {
+      attachments?: Array<{ name: string; mime: string; size?: number; url: string }>;
+    };
+    assert.deepEqual(payload.attachments, [{
+      name: 'notes.txt',
+      mime: 'text/plain',
+      size: 5,
+      url: `/api/sessions/${session.id}/attachments/${path.split('/').pop()}`,
+    }]);
+
+    const forged = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    await assert.rejects(
+      sessions.sendMessage(forged.id, 'read host file', [
+        { type: 'localFile', path: '/etc/hosts', name: 'hosts', mime: 'text/plain' },
+      ]),
+      /invalid local file attachment/,
+    );
+  } finally {
+    if (previousDataDir === undefined) delete process.env.GIAN_DATA_DIR;
+    else process.env.GIAN_DATA_DIR = previousDataDir;
     db.close();
     rmSync(dir, { recursive: true, force: true });
   }

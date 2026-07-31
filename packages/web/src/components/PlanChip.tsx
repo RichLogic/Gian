@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useContext, useEffect, useMemo, useState } from 'react';
 import { useT } from '../i18n/index.js';
+import { ChatPanelOpenContext } from '../presentation/chat-panel.js';
 import { projectSessionContext, type AgentRunDisplayItem } from '../presentation/session-context.js';
 import type { TranscriptItem } from '../types.js';
 import { MarkdownText } from '../transcript/items.js';
@@ -16,25 +17,39 @@ import '../styles/context-strip.css';
 export function PlanChip({
   items,
   codexPlanText,
+  planCompleted,
   sessionId,
 }: {
   items: TranscriptItem[];
   /** Latest streamed plan text. Kept under the old prop name for compatibility. */
   codexPlanText?: string;
+  /** Successful turn-end has confirmed that every streamed step is complete. */
+  planCompleted?: boolean;
   sessionId: string;
 }) {
   const t = useT();
+  const openChatPanel = useContext(ChatPanelOpenContext);
   const [planOpen, setPlanOpen] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
   const context = useMemo(
-    () => projectSessionContext({ items, planText: codexPlanText, sessionId }),
-    [items, codexPlanText, sessionId],
+    () => projectSessionContext({
+      items,
+      planText: codexPlanText,
+      planCompleted,
+      sessionId,
+    }),
+    [items, codexPlanText, planCompleted, sessionId],
   );
 
   useEffect(() => {
     setPlanOpen(false);
     setAgentsOpen(false);
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!context.plan) setPlanOpen(false);
+    if (context.agents.length === 0) setAgentsOpen(false);
+  }, [context.plan, context.agents.length]);
 
   if (!context.plan && context.agents.length === 0) return null;
 
@@ -63,15 +78,17 @@ export function PlanChip({
                 </span>
               )}
             </div>
-            <button
-              type="button"
-              className="context-panel-close"
-              aria-label={t('common.close')}
-              title={t('common.close')}
-              onClick={() => setPlanOpen(false)}
-            >
-              <span aria-hidden>&times;</span>
-            </button>
+            <div className="context-panel-actions">
+              <button
+                type="button"
+                className="context-panel-close"
+                aria-label={t('common.close')}
+                title={t('common.close')}
+                onClick={() => setPlanOpen(false)}
+              >
+                <span aria-hidden>&times;</span>
+              </button>
+            </div>
           </header>
           <div className="context-plan-body approval-plan-md">
             <MarkdownText>{context.plan.markdown}</MarkdownText>
@@ -102,7 +119,15 @@ export function PlanChip({
           </header>
           <div className="context-agent-list">
             {visibleAgents.map(agent => (
-              <AgentRunRow key={agent.id} agent={agent} onSelect={() => jumpToAgent(agent.id)} />
+              <AgentRunRow
+                key={agent.id}
+                agent={agent}
+                onSelect={() => {
+                  setAgentsOpen(false);
+                  if (openChatPanel) openChatPanel({ kind: 'agent', id: agent.id });
+                  else jumpToAgent(agent.id);
+                }}
+              />
             ))}
           </div>
           {hiddenAgentCount > 0 && (
@@ -184,7 +209,7 @@ function AgentRunRow({
       className="context-agent-row"
       data-provider={agent.provider}
       onClick={onSelect}
-      title={t('transcript.agentJump')}
+      title={t('transcript.agentOpen')}
     >
       <span className="context-provider-mark" aria-hidden />
       <span className="context-agent-copy">

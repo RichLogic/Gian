@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ApprovalDecision, ApprovalMode, Bot, EventEnvelope, Executor, RunnerInfo, RuntimeMode, ServerToClientMessage, Session, Task, Workspace } from '@gian/shared';
+import type { ApprovalDecision, ApprovalMode, Bot, EventEnvelope, Executor, InputItem, RunnerInfo, RuntimeMode, ServerToClientMessage, Session, Task, Workspace } from '@gian/shared';
 import { LocaleProvider } from './i18n/index.js';
 import { EN } from './i18n/en.js';
 import { ZH } from './i18n/zh.js';
@@ -12,8 +12,15 @@ import type { WorkingTree } from './api.js';
 import type { SheetOpenWith } from './components/Sheet.js';
 import { buildFileRefIndex, makeFileLinkifyRehype } from './transcript/linkify-files.js';
 import { FileRefRehypeContext } from './transcript/items.js';
-import { isWithinRoot, longestRootMatch } from './utils/paths.js';
-import { applyEnvelope, applyErrorEnvelopeToSession, applyPlanUpdate, createOptimisticEcho, nextPendingFromEnvelope } from './transcript/apply.js';
+import { longestRootMatch } from './utils/paths.js';
+import {
+  applyEnvelope,
+  applyErrorEnvelopeToSession,
+  applyPlanLifecycle,
+  createOptimisticEcho,
+  nextPendingFromEnvelope,
+  type PlanLifecycleState,
+} from './transcript/apply.js';
 import { loadNotificationPrefs, maybeNotifyForEnvelope } from './notifications.js';
 import {
   applyApprovalCreated,
@@ -32,7 +39,7 @@ import type { PathSegment, SessionMenuActions } from './components/PathBreadcrum
 import { Dock } from './components/Dock.js';
 import { Toaster } from './components/Toaster.js';
 import { confirm as confirmDialog, toast } from './feedback.js';
-import { Sheet, IMAGE_EXTS, openCategoryFor, resolveOpenTarget } from './components/Sheet.js';
+import { Sheet, IMAGE_EXTS, openCategoryFor } from './components/Sheet.js';
 import type { SheetTab, SheetGroup, RailId, FileViewMode } from './components/Sheet.js';
 import { Splitter } from './components/Splitter.js';
 import { Inspector } from './components/Inspector.js';
@@ -41,6 +48,7 @@ import { SettingsBody, SettingsNavInspector } from './components/SettingsBody.js
 import type { NavKey } from './components/SettingsBody.js';
 import { Terminal, makeWorkbenchWire } from './components/Terminal.js';
 import { BrowserBody, browserHostOf } from './components/BrowserBody.js';
+import { ChatContextPanel } from './components/ChatContextPanel.js';
 import { CodingView, SessionMain } from './views/CodingView.js';
 import { SpacesView, NewWorkspacePanel } from './views/SpacesView.js';
 import { TasksView, ManagerInspector, managerCardContextNote, type NewSubtaskDraft, type ManagerSubtaskCard, type ManagerComposerHandlers } from './views/TasksView.js';
@@ -49,12 +57,20 @@ import { FilesView } from './views/FilesView.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import type { SystemConfig } from '@gian/shared';
 import { stripManagerSystemPrefix, stripCreateSubtaskBlocks, wrapManagerContextNote, stripGianRolePrefix, stripGianActionBlocks } from '@gian/shared';
-import type { QueueEntry, TranscriptItem } from './types.js';
+import type { DiffItem, QueueEntry, TranscriptItem } from './types.js';
 import { applyGianIconAppearance } from './brand-icon.js';
+import {
+  BrowserLinkOpenContext,
+  ChatPanelOpenContext,
+  type ChatPanelRequest,
+  type ChatPanelTarget,
+} from './presentation/chat-panel.js';
 import {
   isSessionCreateDispatchError,
   planCreatedSessionFirstMessage,
 } from './session-routing.js';
+import { resolveFilePanelRoute } from './presentation/file-panel.js';
+import { attachmentInputItem, type ComposerAttachmentPayload } from './attachments.js';
 
 export function App() {
   // The token getter runs every reconnect. With Auth dropped in Phase 1, this
@@ -132,6 +148,15 @@ export function App() {
   // Manual panel-3 collapse (Topbar right button) — hides only the inspector,
   // panel 2 stays. Persists across rail switches until toggled back.
   const [p3Collapsed, setP3Collapsed] = useState(false);
+  // A file omitted from the current Files tree still uses the Files Sheet,
+  // but must not imply that it can be located in the inspector.
+  const [filesInspectorSuppressed, setFilesInspectorSuppressed] = useState(false);
+  const [fileReveal, setFileReveal] = useState<{
+    workingTreeId: string;
+    path: string;
+    requestId: number;
+  } | null>(null);
+  const fileRevealSeqRef = useRef(0);
   // Mirror of the left sidebar's collapsed state for the Topbar icon. The
   // views own the real state and listen for `gian.toggle-rail`; this button
   // is the only dispatcher, so the mirror can't drift.
@@ -156,10 +181,28 @@ export function App() {
   // global "Forking session…" toast — the user is mid-session when they
   // fork, so without feedback the click looks like a no-op.
   const [forkingSession, setForkingSession] = useState(false);
-  // Codex plan-mode plan markdown per session — populated by plan_update
-  // events. PlanChip reads from here when there's no exit_plan_mode approval
-  // to surface (the codex flow doesn't go through approval cards).
-  const [planBySession, setPlanBySession] = useState<Record<string, string>>({});
+  // Streamed plan text plus its turn-end lifecycle. Keeping completion beside
+  // the text lets a successful turn hide the shortcut without deleting the
+  // plan that an already-open/history detail view may still need.
+  const [planStateBySession, setPlanStateBySession] = useState<
+    Record<string, PlanLifecycleState>
+  >({});
+  // Plan/Agent detail belongs to a chat. It temporarily takes the panel-2
+  // slot without mutating the active dock rail, so closing it restores the
+  // rail's exact tabs and inspector.
+  const [chatPanel, setChatPanel] = useState<ChatPanelTarget | null>(null);
+
+  // Detail is owned by the chat it was opened from. Any primary chat
+  // navigation closes it; sidechat detail remains stable because opening a
+  // sidechat tab does not rewrite the primary session identity.
+  useEffect(() => {
+    setChatPanel(null);
+  }, [mode, activeSessionId, activeSubtaskId]);
+
+  useEffect(() => {
+    setFilesInspectorSuppressed(false);
+    setFileReveal(null);
+  }, [activeSessionId]);
 
   useEffect(() => {
     if (!systemConfig) return;
@@ -237,6 +280,7 @@ export function App() {
       });
     }
     function onKey(e: KeyboardEvent) {
+      if (e.defaultPrevented) return;
       const mod = e.metaKey || e.ctrlKey;
       if (!mod || e.shiftKey || e.altKey) return;
       if (e.key === 'Enter') {
@@ -244,7 +288,11 @@ export function App() {
           ?? (mode === 'tasks' && activeTaskId && !activeSubtaskId
             ? (sessionsRef.current.find(s => s.type === 'manager' && s.task_id === activeTaskId)?.id ?? null)
             : null);
-        if (sid) { e.preventDefault(); ws.send({ type: 'queue:send_now', session_id: sid }); }
+        // ⌘/Ctrl+Enter drains the queue — Codex only. Claude/Kimi have no
+        // mid-turn injection, so "send now" while busy can't work and the
+        // button/shortcut is hidden for them.
+        const session = sid ? sessionsRef.current.find(s => s.id === sid) : undefined;
+        if (sid && session?.executor === 'codex') { e.preventDefault(); ws.send({ type: 'queue:send_now', session_id: sid }); }
         return;
       }
       const k = e.key.toLowerCase();
@@ -278,13 +326,14 @@ export function App() {
     if (nextPending !== null) {
       setPendingBySession(p => ({ ...p, [env.session_id]: nextPending }));
     }
-    // Codex plan-mode: plan_update either streams (delta:true → append) or
-    // finalizes (delta:false → replace). PlanChip subscribes to this state.
-    if (env.event === 'plan_update') {
-      setPlanBySession(prev => ({
-        ...prev,
-        [env.session_id]: applyPlanUpdate(prev[env.session_id], env),
-      }));
+    // Plan lifecycle is finalized by the same successful turn-end signal that
+    // closes terminal Agent runs. A later plan_update starts a fresh lifecycle.
+    if (env.event === 'plan_update' || env.event === 'turn_completed') {
+      setPlanStateBySession(prev => {
+        const current = prev[env.session_id] ?? { completed: false };
+        const next = applyPlanLifecycle(current, env);
+        return next === current ? prev : { ...prev, [env.session_id]: next };
+      });
     }
     setItemsBySession(prev => {
       const list = prev[env.session_id] ?? [];
@@ -481,7 +530,11 @@ export function App() {
           // turn was persisted). Alert the user so the failure isn't silent,
           // and mark any optimistic user echo for this session as failed so
           // the transcript reflects the reject state.
-          if (msg.session_id) {
+          // Only a rejected normal send owns an optimistic echo and starts a
+          // new pending turn. Steer/queue/approval failures happen while the
+          // existing turn may still be running, so clearing pending there
+          // would hide a live spinner.
+          if (msg.session_id && msg.code === 'MESSAGE_SEND_FAILED') {
             const sid = msg.session_id;
             setItemsBySession(prev => {
               const delta = applyErrorEnvelopeToSession(prev[sid], sid);
@@ -561,15 +614,13 @@ export function App() {
         (acc, e) => applyEnvelope(acc, e, exec),
         [],
       );
-      const plan = events.reduce<string | undefined>(
-        (acc, event) => event.event === 'plan_update'
-          ? applyPlanUpdate(acc, event)
-          : acc,
-        undefined,
+      const planState = events.reduce<PlanLifecycleState>(
+        (acc, event) => applyPlanLifecycle(acc, event),
+        { completed: false },
       );
       setItemsBySession(prev => ({ ...prev, [activeSessionId]: items }));
-      if (plan !== undefined) {
-        setPlanBySession(prev => ({ ...prev, [activeSessionId]: plan }));
+      if (planState.text !== undefined) {
+        setPlanStateBySession(prev => ({ ...prev, [activeSessionId]: planState }));
       }
     });
   }, [activeSessionId, itemsBySession, sessions, archivedSessions]);
@@ -638,7 +689,11 @@ export function App() {
   // mentions in transcript prose. Loaded once per working tree (the list is
   // stable enough within a session; created/deleted files refresh on switch).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [fileIndexAbs, setFileIndexAbs] = useState<{ wtId: string; rehype: () => (tree: any) => void } | null>(null);
+  const [fileIndexAbs, setFileIndexAbs] = useState<{
+    wtId: string;
+    paths: ReadonlySet<string>;
+    rehype: () => (tree: any) => void;
+  } | null>(null);
   const fileIndexWtRef = useRef<string | null>(null);
   useEffect(() => {
     const wtId = defaultWorkingTreeIdFor(activeSession);
@@ -651,7 +706,11 @@ export function App() {
     void loadAllFiles(wtId).then(files => {
       if (cancelled || fileIndexWtRef.current !== wtId) return;
       const index = buildFileRefIndex(files, base);
-      setFileIndexAbs({ wtId, rehype: makeFileLinkifyRehype(index, rel => `${base}/${rel}`) });
+      setFileIndexAbs({
+        wtId,
+        paths: new Set(files),
+        rehype: makeFileLinkifyRehype(index, rel => `${base}/${rel}`),
+      });
     });
     return () => { cancelled = true; };
   }, [activeSessionId, workingTrees]);
@@ -669,37 +728,64 @@ export function App() {
     }
   }, [viewState, wbTabs.length]);
 
-  const sheetActions = useMemo(() => ({
-    activateTab: (id: string) => {
-      const tab = wbTabs.find(t => t.id === id);
-      if (!tab) return;
-      setActiveTabByGroup(a => ({ ...a, [tab.group]: id }));
-    },
-    closeTab: (id: string) => {
-      const tab = wbTabs.find(t => t.id === id);
-      if (tab?.kind === 'term') {
-        ws.send({ type: 'term:close', term_id: id });
+  const sheetActions = useMemo(() => {
+    function syncFilesInspectorToTab(tab: SheetTab | undefined): void {
+      if (tab?.group !== 'files' || tab.kind !== 'file') return;
+      const currentWtId = defaultWorkingTreeIdFor(activeSession);
+      const locatable = !!tab.fileTreePath && tab.workingTreeId === currentWtId;
+      setFilesInspectorSuppressed(!locatable);
+      if (locatable && tab.fileTreePath && currentWtId) {
+        setFileReveal({
+          workingTreeId: currentWtId,
+          path: tab.fileTreePath,
+          requestId: ++fileRevealSeqRef.current,
+        });
+      } else {
+        setFileReveal(null);
       }
-      setWbTabs(prev => {
-        const closing = prev.find(t => t.id === id);
-        const next = prev.filter(t => t.id !== id);
-        if (closing) {
-          setActiveTabByGroup(a => {
-            if (a[closing.group] !== id) return a;
-            const sib = next.find(t => t.group === closing.group);
-            return { ...a, [closing.group]: sib ? sib.id : null };
-          });
+    }
+
+    return {
+      activateTab: (id: string) => {
+        const tab = wbTabs.find(t => t.id === id);
+        if (!tab) return;
+        syncFilesInspectorToTab(tab);
+        setActiveTabByGroup(a => ({ ...a, [tab.group]: id }));
+      },
+      closeTab: (id: string) => {
+        const tab = wbTabs.find(t => t.id === id);
+        if (tab?.kind === 'term') {
+          ws.send({ type: 'term:close', term_id: id });
         }
-        return next;
-      });
-    },
-    pinTab: (id: string) =>
-      setWbTabs(prev => prev.map(t => t.id === id ? { ...t, preview: false } : t)),
-    setTabViewMode: (id: string, viewMode: FileViewMode) =>
-      setWbTabs(prev => prev.map(t => t.id === id ? { ...t, viewMode } : t)),
-    setTabName: (id: string, name: string) =>
-      setWbTabs(prev => prev.map(t => (t.id === id && t.name !== name) ? { ...t, name } : t)),
-  }), [wbTabs, ws]);
+        if (tab?.group === 'files' && activeTabByGroup.files === id) {
+          const sibling = wbTabs.find(t => t.group === 'files' && t.id !== id);
+          if (sibling) syncFilesInspectorToTab(sibling);
+          else {
+            setFilesInspectorSuppressed(false);
+            setFileReveal(null);
+          }
+        }
+        setWbTabs(prev => {
+          const closing = prev.find(t => t.id === id);
+          const next = prev.filter(t => t.id !== id);
+          if (closing) {
+            setActiveTabByGroup(a => {
+              if (a[closing.group] !== id) return a;
+              const sib = next.find(t => t.group === closing.group);
+              return { ...a, [closing.group]: sib ? sib.id : null };
+            });
+          }
+          return next;
+        });
+      },
+      pinTab: (id: string) =>
+        setWbTabs(prev => prev.map(t => t.id === id ? { ...t, preview: false } : t)),
+      setTabViewMode: (id: string, viewMode: FileViewMode) =>
+        setWbTabs(prev => prev.map(t => t.id === id ? { ...t, viewMode } : t)),
+      setTabName: (id: string, name: string) =>
+        setWbTabs(prev => prev.map(t => (t.id === id && t.name !== name) ? { ...t, name } : t)),
+    };
+  }, [activeSession, activeTabByGroup.files, wbTabs, workspaces, ws]);
 
   /** Rail → Sheet group mapping. 'manager' has no tab group — its panel 2 is
    *  the compact Manager panel rendered inline by App. */
@@ -724,6 +810,8 @@ export function App() {
    *  content some rails need: the first terminal, the settings tab, the
    *  diffs rail's flat all-files diff. */
   function activateRail(rail: RailId): void {
+    setChatPanel(null);
+    if (rail === 'files') setFilesInspectorSuppressed(false);
     setActiveRail(rail);
     if (rail === 'terminal' && !wbTabs.some(t => t.group === 'term')) {
       const id = 'tab-term-' + Date.now();
@@ -751,7 +839,18 @@ export function App() {
   /** Dock click: re-clicking the active rail collapses its panels and
    *  snapshots the scene into railMemory; clicking a rail opens/restores it. */
   function toggleRail(rail: RailId): void {
+    if (chatPanel) {
+      setChatPanel(null);
+      if (activeRail !== rail) activateRail(rail);
+      else setViewState(v => v === 'main' ? 'both' : v);
+      return;
+    }
     if (activeRail === rail) {
+      if (rail === 'files' && filesInspectorSuppressed) {
+        setFilesInspectorSuppressed(false);
+        setP3Collapsed(false);
+        return;
+      }
       const group = GROUP_OF_RAIL[rail];
       setRailMemory(m => ({ ...m, [rail]: { tabId: group ? (activeTabByGroup[group] ?? null) : null } }));
       setActiveRail(null);
@@ -777,44 +876,74 @@ export function App() {
   }
 
   /** Open a file in the Sheet workbench (Phase 3+ replacement for the old
-   *  preview drawer). Single click = preview tab; double click / context
-   *  promote = permanent. Falls back to `vscode://` for paths outside any
-   *  known working tree. */
+   *  preview drawer). Files in the current Files index also reveal their tree
+   *  row; hidden/other-tree/unknown files keep the inspector closed. */
   async function openFileInSheet(absPath: string, permanent: boolean = false, line?: number): Promise<void> {
+    setChatPanel(null);
     const sess = activeSessionId
       ? sessions.find(s => s.id === activeSessionId) ?? null
       : null;
     const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
-    const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
-    if (!wt || !isWithinRoot(wt.path, absPath)) {
-      const enc = encodeURI(absPath);
-      window.open(`vscode://file/${enc}${line ? ':' + line : ''}`, '_blank', 'noopener');
-      return;
+    const currentWt = wtId ? workingTrees.find(t => t.id === wtId) ?? null : null;
+    let currentFiles: ReadonlySet<string> = new Set();
+    if (currentWt) {
+      currentFiles = fileIndexAbs?.wtId === currentWt.id
+        ? fileIndexAbs.paths
+        : new Set(await loadAllFiles(currentWt.id));
     }
-    const rel = absPath.slice(wt.path.replace(/\/+$/, '').length).replace(/^\/+/, '');
-    const name = rel.split('/').pop() || rel;
+    let route = resolveFilePanelRoute(absPath, currentWt, workingTrees, currentFiles);
+    // Agent turns commonly create a file after the transcript link index was
+    // first loaded. A cached miss inside the current tree gets one fresh check
+    // before we classify it as panel-only.
+    if (
+      currentWt
+      && fileIndexAbs?.wtId === currentWt.id
+      && route.sourceTree?.id === currentWt.id
+      && !route.inCurrentFiles
+    ) {
+      const files = await loadAllFiles(currentWt.id);
+      currentFiles = new Set(files);
+      const base = currentWt.path.replace(/\/+$/, '');
+      const index = buildFileRefIndex(files, base);
+      setFileIndexAbs({
+        wtId: currentWt.id,
+        paths: currentFiles,
+        rehype: makeFileLinkifyRehype(index, fileRel => `${base}/${fileRel}`),
+      });
+      route = resolveFilePanelRoute(absPath, currentWt, workingTrees, currentFiles);
+    }
+    const wt = route.sourceTree;
+    const rel = route.sourceRel;
+    const name = (rel ?? absPath).split('/').pop() || absPath;
     const fullPath = absPath;
     const icoKind = extOf(name);
     const ext = (name.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase();
-    const rawUrl = `/api/working_trees/${encodeURIComponent(wt.id)}/raw?path=${encodeURIComponent(rel)}`;
+    const rawUrl = wt && rel
+      ? `/api/working_trees/${encodeURIComponent(wt.id)}/raw?path=${encodeURIComponent(rel)}`
+      : null;
     const isImage = IMAGE_EXTS.has(ext);
 
-    // Only pdf truly can't render in-app — it opens externally via its
-    // category target. Everything else (code, web, AND unknown extensions
-    // 'other') is shown as source text here: clicking an unknown-suffix file
-    // should preview it, not jump to Finder. The Open button still routes by
-    // category, so 'other' files default to "reveal in Finder" there. Images
-    // render inline below.
-    if (!isImage && openCategoryFor(name) === 'pdf') {
-      dispatchOpen(wt, rel, resolveOpenTarget('pdf', systemConfig?.open_apps));
-      return;
+    setFilesInspectorSuppressed(!route.inCurrentFiles);
+    if (route.inCurrentFiles && currentWt && route.revealRel) {
+      setP3Collapsed(false);
+      setFileReveal({
+        workingTreeId: currentWt.id,
+        path: route.revealRel,
+        requestId: ++fileRevealSeqRef.current,
+      });
+    } else {
+      setFileReveal(null);
     }
 
     // Try to promote existing tab. Re-set scrollLine so a fresh click on a
     // file-link (possibly a different line) re-jumps in the already-open tab.
     const existingPerm = wbTabs.find(t => t.group === 'files' && t.kind === 'file' && t.fullPath === fullPath && !t.preview);
     if (existingPerm) {
-      setWbTabs(prev => prev.map(t => t.id === existingPerm.id ? { ...t, scrollLine: line } : t));
+      setWbTabs(prev => prev.map(t => t.id === existingPerm.id ? {
+        ...t,
+        scrollLine: line,
+        fileTreePath: route.revealRel ?? undefined,
+      } : t));
       setActiveRail('files');
       revealSheetTab('files', existingPerm.id);
       return;
@@ -823,15 +952,46 @@ export function App() {
     // Images render straight from `/raw` via an <img> (no text load); everything
     // else loads its source lines.
     let tabContent;
-    if (isImage) {
-      tabContent = { name, kind: 'file' as const, icoKind: 'img' as const, ico: '', rawSrc: rawUrl, fullPath, workingTreeId: wt.id };
+    if (!wt || !rel || openCategoryFor(name) === 'pdf') {
+      tabContent = {
+        name,
+        kind: 'file' as const,
+        icoKind,
+        ico: '',
+        fullPath,
+        fileTreePath: route.revealRel ?? undefined,
+        workingTreeId: wt?.id,
+        loadError: appT('sheet.binary.notice'),
+      };
+    } else if (isImage && rawUrl) {
+      tabContent = {
+        name,
+        kind: 'file' as const,
+        icoKind: 'img' as const,
+        ico: '',
+        rawSrc: rawUrl,
+        fullPath,
+        fileTreePath: route.revealRel ?? undefined,
+        workingTreeId: wt.id,
+      };
     } else {
       const file = await loadFile(wt.id, rel);
-      const lines = fileToLines(file?.content ?? '');
       // Preview-capable files (md) open with the rendered view by default —
       // but a line jump forces source view so the target line is visible.
       const initialViewMode: FileViewMode = line != null ? 'source' : icoKind === 'md' ? 'preview' : 'source';
-      tabContent = { name, kind: 'file' as const, icoKind, ico: '', lines, viewMode: initialViewMode, fullPath, scrollLine: line, workingTreeId: wt.id };
+      tabContent = {
+        name,
+        kind: 'file' as const,
+        icoKind,
+        ico: '',
+        lines: file ? fileToLines(file.content) : undefined,
+        viewMode: initialViewMode,
+        fullPath,
+        scrollLine: line,
+        fileTreePath: route.revealRel ?? undefined,
+        workingTreeId: wt.id,
+        loadError: file ? undefined : appT('sheet.binary.notice'),
+      };
     }
 
     setActiveRail('files');
@@ -868,6 +1028,7 @@ export function App() {
    *  Changes inspector routes row clicks here so the diff lands in the
    *  workbench (full width) rather than crammed into the narrow inspector. */
   async function openDiffInSheet(rel: string, permanent: boolean = false, scope: ChangeScope = 'all'): Promise<void> {
+    setChatPanel(null);
     const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
     const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
     const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
@@ -909,22 +1070,65 @@ export function App() {
     });
   }
 
-  /** Open a plan in the Sheet (D1). Plans ride the 'files' group — they open
-   *  from chat like a document preview. */
-  function openPlanInSheet(approvalId: string, planMarkdown: string): void {
-    setActiveRail('files');
+  /** Route a transcript diff to the Diffs rail. Native file_change events may
+   *  contain full hunks or only changed paths; load missing text from the
+   *  working tree so both shapes land in the same diff viewer. */
+  async function openTranscriptDiffInSheet(item: DiffItem): Promise<void> {
+    setChatPanel(null);
+    const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
+    const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
+    const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
+    if (!wt || item.files.length === 0) return;
+
+    const chunks = await Promise.all(item.files.map(async file => {
+      if (file.hunks.length === 0) return loadDiff(wt.id, file.path, 'all');
+      return [
+        `diff --git a/${file.path} b/${file.path}`,
+        `--- a/${file.path}`,
+        `+++ b/${file.path}`,
+        ...file.hunks.flatMap(hunk => [
+          hunk.header,
+          ...hunk.lines.map(line =>
+            `${line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}${line.text}`),
+        ]),
+      ].join('\n');
+    }));
+    const diffText = chunks.filter(Boolean).join('\n');
+    const single = item.files.length === 1 ? item.files[0]! : null;
+    const fullPath = single ? `${wt.path}/${single.path}` : undefined;
+    const name = single
+      ? single.path.split('/').pop() || single.path
+      : `${item.files.length} files`;
+
+    setActiveRail('diffs');
     setWbTabs(prev => {
-      const existing = prev.find(t => t.kind === 'plan');
-      if (existing) {
-        const next = prev.map(t => t.id === existing.id ? { ...t, planBody: planMarkdown } : t);
-        revealSheetTab('files', existing.id);
-        return next;
-      }
-      const id = 'plan-' + approvalId;
-      const tab: SheetTab = { id, group: 'files', name: appT('sheet.tab.plan'), kind: 'plan', icoKind: 'plan', ico: '✓', planBody: planMarkdown };
-      revealSheetTab('files', id);
-      return [...prev, tab];
+      const preview = prev.find(tab =>
+        tab.group === 'diffs' && tab.kind === 'diff' && tab.preview);
+      const tabs = preview ? prev.filter(tab => tab.id !== preview.id) : [...prev];
+      const id = `tab-diff-event-${item.id}`;
+      const tab: SheetTab = {
+        id,
+        group: 'diffs',
+        name,
+        kind: 'diff',
+        icoKind: 'diff',
+        ico: '±',
+        diffText,
+        fullPath,
+        workingTreeId: wt.id,
+        preview: true,
+      };
+      revealSheetTab('diffs', id);
+      return [...tabs, tab];
     });
+  }
+
+  function openChatPanel(
+    sessionId: string,
+    request: ChatPanelRequest,
+  ): void {
+    setChatPanel({ ...request, sessionId });
+    setViewState(v => v === 'workbench' ? 'both' : v);
   }
 
   /** Add a new terminal tab to the terminal group. Called by the `+` button
@@ -997,14 +1201,25 @@ export function App() {
 
   /** Add a browser tab (group 'browser'). Additive like terminal tabs; each
    *  keeps its own address/history in the mounted BrowserBody. */
-  function addBrowserTab(): void {
+  function addBrowserTab(initialUrl?: string): void {
+    setChatPanel(null);
     setActiveRail('browser');
     setWbTabs(prev => {
       const existing = prev.filter(t => t.kind === 'browser').length;
       const id = 'tab-browser-' + Date.now();
       const base = appT('dock.browser');
-      const name = existing === 0 ? base : `${base} #${existing + 1}`;
-      const tab: SheetTab = { id, group: 'browser', name, kind: 'browser', icoKind: 'browser', ico: '' };
+      const name = initialUrl
+        ? browserHostOf(initialUrl)
+        : existing === 0 ? base : `${base} #${existing + 1}`;
+      const tab: SheetTab = {
+        id,
+        group: 'browser',
+        name,
+        kind: 'browser',
+        icoKind: 'browser',
+        ico: '',
+        ...(initialUrl ? { url: initialUrl } : {}),
+      };
       revealSheetTab('browser', id);
       return [...prev, tab];
     });
@@ -1288,6 +1503,7 @@ export function App() {
   }, [ws]);
 
   const selectSession = useCallback((id: string) => {
+    setChatPanel(null);
     setActiveSessionId(id);
     markSessionViewed(id);
   }, [markSessionViewed]);
@@ -1335,7 +1551,7 @@ export function App() {
       text: string,
       opts?: {
         oneShotBypass?: boolean;
-        attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
+        attachments?: Array<ComposerAttachmentPayload & { previewUrl: string }>;
       },
     ) => {
       // Optimistic echo: append a pending user msg to the transcript
@@ -1352,7 +1568,12 @@ export function App() {
         // user_message reconciler revokes it after swapping in
         // the server URL.
         attachments: attachments.length > 0
-          ? attachments.map(a => ({ name: a.name, mime: a.mime, url: a.previewUrl }))
+          ? attachments.map(a => ({
+              name: a.name,
+              mime: a.mime,
+              url: a.previewUrl,
+              ...(a.size !== undefined ? { size: a.size } : {}),
+            }))
           : undefined,
       });
       setItemsBySession(prev => ({
@@ -1361,14 +1582,9 @@ export function App() {
       }));
       setPendingBySession(p => ({ ...p, [sessionId]: true }));
 
-      const items: Array<
-        | { type: 'text'; text: string }
-        | { type: 'localImage'; path: string; name?: string; mime?: string }
-      > = [];
+      const items: InputItem[] = [];
       if (text.trim()) items.push({ type: 'text', text });
-      for (const a of attachments) {
-        items.push({ type: 'localImage', path: a.path, name: a.name, mime: a.mime });
-      }
+      for (const attachment of attachments) items.push(attachmentInputItem(attachment));
 
       ws.send({
         type: 'message:send',
@@ -1428,8 +1644,12 @@ export function App() {
         data: { approvalId, decision, auto: false, ...(answers ? { answers } : {}) },
       }, executor);
     },
-    onQueueAdd: (sessionId: string, text: string) =>
-      ws.send({ type: 'queue:add', session_id: sessionId, text }),
+    onQueueAdd: (sessionId: string, text: string, attachments?: ComposerAttachmentPayload[]) => {
+      const items: InputItem[] = [];
+      if (text.trim()) items.push({ type: 'text', text });
+      for (const attachment of attachments ?? []) items.push(attachmentInputItem(attachment));
+      ws.send({ type: 'queue:add', session_id: sessionId, text, ...(items.length > 0 ? { items } : {}) });
+    },
     onQueueRemove: (sessionId: string, queueId: string) =>
       ws.send({ type: 'queue:remove', session_id: sessionId, queue_id: queueId }),
     onQueueReorder: (sessionId: string, order: string[]) =>
@@ -1437,6 +1657,12 @@ export function App() {
     onQueueClear: (sessionId: string) => ws.send({ type: 'queue:clear', session_id: sessionId }),
     onQueueSendNow: (sessionId: string) => {
       ws.send({ type: 'queue:send_now', session_id: sessionId });
+    },
+    onSteer: (sessionId: string, text: string, attachments?: ComposerAttachmentPayload[]) => {
+      const items: InputItem[] = [];
+      if (text.trim()) items.push({ type: 'text', text });
+      for (const attachment of attachments ?? []) items.push(attachmentInputItem(attachment));
+      ws.send({ type: 'message:steer', session_id: sessionId, text, ...(items.length > 0 ? { items } : {}) });
     },
     onSetMode: (sessionId: string, approvalMode: ApprovalMode, turns?: number) =>
       ws.send({ type: 'session:set_mode', session_id: sessionId, approval_mode: approvalMode, turns }),
@@ -1535,7 +1761,7 @@ export function App() {
       onSetNativeConfig: (configId, value) =>
         sessionMainHandlers.onSetNativeConfig(managerSessionId, configId, value),
       onSendSkill: (name, path) => sessionMainHandlers.onSendSkill(managerSessionId, name, path),
-      onQueueAdd: (t) => sessionMainHandlers.onQueueAdd(managerSessionId, t),
+      onQueueAdd: (t, attachments) => sessionMainHandlers.onQueueAdd(managerSessionId, t, attachments),
       onQueueRemove: (queueId) => sessionMainHandlers.onQueueRemove(managerSessionId, queueId),
       onQueueReorder: (order) => sessionMainHandlers.onQueueReorder(managerSessionId, order),
       onQueueClear: () => sessionMainHandlers.onQueueClear(managerSessionId),
@@ -1607,7 +1833,7 @@ export function App() {
   const onManagerSend = useCallback((
     taskId: string,
     text: string,
-    opts?: { attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }> },
+    opts?: { attachments?: Array<ComposerAttachmentPayload & { previewUrl: string }> },
   ) => {
     // §A2 follow-up: fold any not-yet-acknowledged subtask-action notes into a
     // hidden, sentinel-wrapped context block prepended to the message — so the
@@ -1629,7 +1855,12 @@ export function App() {
       text,
       exec: mgr.executor,
       attachments: attachments.length > 0
-        ? attachments.map(a => ({ name: a.name, mime: a.mime, url: a.previewUrl }))
+        ? attachments.map(a => ({
+            name: a.name,
+            mime: a.mime,
+            url: a.previewUrl,
+            ...(a.size !== undefined ? { size: a.size } : {}),
+          }))
         : undefined,
     });
     setItemsBySession(prev => ({ ...prev, [mgr.id]: [...(prev[mgr.id] ?? []), echo] }));
@@ -1637,13 +1868,10 @@ export function App() {
     // Send over the SAME structured message:send the session composer uses —
     // the host prepends the Manager system prompt on the first turn (keyed on
     // type==='manager'), so the Manager composer no longer needs the bespoke
-    // REST path. Carries text + any image attachments as structured items.
-    const items: Array<
-      | { type: 'text'; text: string }
-      | { type: 'localImage'; path: string; name?: string; mime?: string }
-    > = [];
+    // REST path. Carries text + attachments as structured items.
+    const items: InputItem[] = [];
     if (sentText.trim()) items.push({ type: 'text', text: sentText });
-    for (const a of attachments) items.push({ type: 'localImage', path: a.path, name: a.name, mime: a.mime });
+    for (const attachment of attachments) items.push(attachmentInputItem(attachment));
     ws.send({
       type: 'message:send',
       session_id: mgr.id,
@@ -1757,6 +1985,7 @@ export function App() {
   // The sidechat rail always has panel-2 content to show: chat tabs when they
   // exist, otherwise the inline session picker as its empty state.
   const sheetVisible = workbenchActive
+    && chatPanel === null
     && viewState !== 'main'
     && activeRail !== null
     && (railGroupHasTabs || managerP2 || activeRail === 'sidechat');
@@ -1770,7 +1999,8 @@ export function App() {
     : activeRail === 'workspaces' ? 'workspaces'
     : activeRail === 'settings' ? 'settings'
     : null;
-  const inspectorAvailable = workbenchActive && inspectorKind !== null
+  const inspectorAvailable = workbenchActive && chatPanel === null && inspectorKind !== null
+    && !(inspectorKind === 'files' && filesInspectorSuppressed)
     && ((inspectorKind === 'files' || inspectorKind === 'changes') ? sessionViewActive : true);
   const inspectorVisible = inspectorAvailable && !p3Collapsed;
 
@@ -1833,26 +2063,29 @@ export function App() {
   const subtaskMain = subtask ? (
     <FileLinkOpenContext.Provider value={(absPath, line) => { void openFileInSheet(absPath, false, line); }}>
     <FileRefRehypeContext.Provider value={fileRehype}>
-    <DiffOpenContext.Provider value={() => { /* §C — diff not clickable */ }}>
-    <PlanOpenContext.Provider value={(payload) => openPlanInSheet(payload.id, payload.markdown)}>
+    <DiffOpenContext.Provider value={(item) => { void openTranscriptDiffInSheet(item); }}>
+    <PlanOpenContext.Provider value={(payload) => openChatPanel(subtask.id, { kind: 'plan', id: payload.id })}>
+    <ChatPanelOpenContext.Provider value={(request) => openChatPanel(subtask.id, request)}>
       <SessionMain
         session={subtask}
         workspace={subtaskWorkspace}
         items={itemsBySession[subtask.id] ?? []}
         pending={pendingBySession[subtask.id] ?? false}
         queue={queueBySession[subtask.id] ?? []}
-        codexPlanText={planBySession[subtask.id]}
+        codexPlanText={planStateBySession[subtask.id]?.text}
+        codexPlanCompleted={planStateBySession[subtask.id]?.completed}
         onSend={(text, opts) => sessionMainHandlers.onSend(subtask.id, text, opts)}
         onSendSkill={(name, path) => sessionMainHandlers.onSendSkill(subtask.id, name, path)}
         onStop={() => sessionMainHandlers.onStop(subtask.id)}
         onApprove={(approvalId, decision, answers, context) =>
           sessionMainHandlers.onApprove(subtask.id, approvalId, decision, answers, context)}
         onLocalApprovalResolve={(approvalId, decision, answers) => sessionMainHandlers.onLocalApprovalResolve(subtask.id, approvalId, decision, answers)}
-        onQueueAdd={text => sessionMainHandlers.onQueueAdd(subtask.id, text)}
+        onQueueAdd={(text, attachments) => sessionMainHandlers.onQueueAdd(subtask.id, text, attachments)}
         onQueueRemove={queueId => sessionMainHandlers.onQueueRemove(subtask.id, queueId)}
         onQueueReorder={order => sessionMainHandlers.onQueueReorder(subtask.id, order)}
         onQueueClear={() => sessionMainHandlers.onQueueClear(subtask.id)}
         onQueueSendNow={() => sessionMainHandlers.onQueueSendNow(subtask.id)}
+        onSteer={(text, opts) => sessionMainHandlers.onSteer(subtask.id, text, opts?.attachments)}
         onSetMode={(approvalMode, turns) => sessionMainHandlers.onSetMode(subtask.id, approvalMode, turns)}
         onSetModel={model => sessionMainHandlers.onSetModel(subtask.id, model)}
         onSetEffort={effort => sessionMainHandlers.onSetEffort(subtask.id, effort)}
@@ -1872,6 +2105,7 @@ export function App() {
         ws={ws}
         onSwitchRuntime={(target, opts) => sessionMainHandlers.onSwitchRuntime(subtask.id, target, opts)}
       />
+    </ChatPanelOpenContext.Provider>
     </PlanOpenContext.Provider>
     </DiffOpenContext.Provider>
     </FileRefRehypeContext.Provider>
@@ -1890,26 +2124,29 @@ export function App() {
       <div className="sheet-chat">
       <FileLinkOpenContext.Provider value={(absPath, line) => { void openFileInSheet(absPath, false, line); }}>
       <FileRefRehypeContext.Provider value={fileRehype}>
-      <DiffOpenContext.Provider value={() => { /* §C — diff not clickable */ }}>
-      <PlanOpenContext.Provider value={(payload) => openPlanInSheet(payload.id, payload.markdown)}>
+      <DiffOpenContext.Provider value={(item) => { void openTranscriptDiffInSheet(item); }}>
+      <PlanOpenContext.Provider value={(payload) => openChatPanel(sess.id, { kind: 'plan', id: payload.id })}>
+      <ChatPanelOpenContext.Provider value={(request) => openChatPanel(sess.id, request)}>
         <SessionMain
           session={sess}
           workspace={workspaces.find(w => w.id === sess.workspace_id) ?? null}
           items={itemsBySession[sess.id] ?? []}
           pending={pendingBySession[sess.id] ?? false}
           queue={queueBySession[sess.id] ?? []}
-          codexPlanText={planBySession[sess.id]}
+          codexPlanText={planStateBySession[sess.id]?.text}
+          codexPlanCompleted={planStateBySession[sess.id]?.completed}
           onSend={(text, opts) => sessionMainHandlers.onSend(sess.id, text, opts)}
           onSendSkill={(name, path) => sessionMainHandlers.onSendSkill(sess.id, name, path)}
           onStop={() => sessionMainHandlers.onStop(sess.id)}
           onApprove={(approvalId, decision, answers, context) =>
             sessionMainHandlers.onApprove(sess.id, approvalId, decision, answers, context)}
           onLocalApprovalResolve={(approvalId, decision, answers) => sessionMainHandlers.onLocalApprovalResolve(sess.id, approvalId, decision, answers)}
-          onQueueAdd={text => sessionMainHandlers.onQueueAdd(sess.id, text)}
+          onQueueAdd={(text, attachments) => sessionMainHandlers.onQueueAdd(sess.id, text, attachments)}
           onQueueRemove={queueId => sessionMainHandlers.onQueueRemove(sess.id, queueId)}
           onQueueReorder={order => sessionMainHandlers.onQueueReorder(sess.id, order)}
           onQueueClear={() => sessionMainHandlers.onQueueClear(sess.id)}
           onQueueSendNow={() => sessionMainHandlers.onQueueSendNow(sess.id)}
+          onSteer={(text, opts) => sessionMainHandlers.onSteer(sess.id, text, opts?.attachments)}
           onSetMode={(approvalMode, turns) => sessionMainHandlers.onSetMode(sess.id, approvalMode, turns)}
           onSetModel={model => sessionMainHandlers.onSetModel(sess.id, model)}
           onSetEffort={effort => sessionMainHandlers.onSetEffort(sess.id, effort)}
@@ -1928,6 +2165,7 @@ export function App() {
           ws={ws}
           onSwitchRuntime={(target, opts) => sessionMainHandlers.onSwitchRuntime(sess.id, target, opts)}
         />
+      </ChatPanelOpenContext.Provider>
       </PlanOpenContext.Provider>
       </DiffOpenContext.Provider>
       </FileRefRehypeContext.Provider>
@@ -1939,6 +2177,7 @@ export function App() {
   return (
     <LocaleProvider locale={locale}>
     <ImageZoomContext.Provider value={(src, alt) => setZoomImage({ src, alt })}>
+    <BrowserLinkOpenContext.Provider value={(url) => addBrowserTab(url)}>
     <div className="app">
       <Topbar
         pathSegments={pathSegments}
@@ -1975,8 +2214,13 @@ export function App() {
           {mode === 'sessions' && (
           <FileLinkOpenContext.Provider value={(absPath, line) => { void openFileInSheet(absPath, false, line); }}>
           <FileRefRehypeContext.Provider value={fileRehype}>
-          <DiffOpenContext.Provider value={() => { /* §C — diff not clickable */ }}>
-          <PlanOpenContext.Provider value={(payload) => openPlanInSheet(payload.id, payload.markdown)}>
+          <DiffOpenContext.Provider value={(item) => { void openTranscriptDiffInSheet(item); }}>
+          <PlanOpenContext.Provider value={(payload) => {
+            if (activeSessionId) openChatPanel(activeSessionId, { kind: 'plan', id: payload.id });
+          }}>
+          <ChatPanelOpenContext.Provider value={(request) => {
+            if (activeSessionId) openChatPanel(activeSessionId, request);
+          }}>
             <CodingView
               mode={mode}
               onSetAppMode={(m) => { setMode(m); }}
@@ -1992,7 +2236,7 @@ export function App() {
               itemsBySession={itemsBySession}
               pendingBySession={pendingBySession}
               queueBySession={queueBySession}
-              planBySession={planBySession}
+              planStateBySession={planStateBySession}
               onLoadArchived={async () => {
                 if (archivedLoaded) return;
                 const list = await import('./api.js').then(m => m.loadArchivedSessions());
@@ -2033,6 +2277,7 @@ export function App() {
               onQueueReorder={sessionMainHandlers.onQueueReorder}
               onQueueClear={sessionMainHandlers.onQueueClear}
               onQueueSendNow={sessionMainHandlers.onQueueSendNow}
+              onSteer={sessionMainHandlers.onSteer}
               onSetMode={sessionMainHandlers.onSetMode}
               onSetModel={sessionMainHandlers.onSetModel}
               onSetEffort={sessionMainHandlers.onSetEffort}
@@ -2051,6 +2296,7 @@ export function App() {
               onSwitchRuntime={sessionMainHandlers.onSwitchRuntime}
               onOpenSpaces={() => setMode('spaces')}
             />
+          </ChatPanelOpenContext.Provider>
           </PlanOpenContext.Provider>
           </DiffOpenContext.Provider>
           </FileRefRehypeContext.Provider>
@@ -2119,12 +2365,30 @@ export function App() {
               onChange={() => void loadBots().then(setBots)}
             />
           )}
+        {chatPanel && workbenchActive && (
+          <>
+            <Splitter side="right" varName="--sheet-w" base={600} min={360} max={1080} invert />
+            <FileLinkOpenContext.Provider value={(absPath, line) => {
+              void openFileInSheet(absPath, false, line);
+            }}>
+            <FileRefRehypeContext.Provider value={fileRehype}>
+              <ChatContextPanel
+                target={chatPanel}
+                items={itemsBySession[chatPanel.sessionId] ?? []}
+                planText={planStateBySession[chatPanel.sessionId]?.text}
+                planCompleted={planStateBySession[chatPanel.sessionId]?.completed}
+                onClose={() => setChatPanel(null)}
+              />
+            </FileRefRehypeContext.Provider>
+            </FileLinkOpenContext.Provider>
+          </>
+        )}
         {(sheetMounted || managerP2 || (activeRail === 'sidechat' && workbenchActive)) && (
           <>
             {sheetVisible && viewState !== 'workbench' && (
               <Splitter side="right" varName="--sheet-w" base={600} min={420} max={1080} invert />
             )}
-            {sheetMounted && (
+            {(sheetMounted || (activeRail === 'sidechat' && workbenchActive)) && (
             <Sheet
               tabs={wbTabs}
               activeByGroup={activeTabByGroup}
@@ -2135,7 +2399,27 @@ export function App() {
                 else if (g === 'browser') addBrowserTab();
                 else if (g === 'sidechat') createSidechat();
               }}
-              hidden={!sheetVisible || managerP2 || (activeRail === 'sidechat' && !wbTabs.some(t => t.group === 'sidechat'))}
+              renderEmpty={(g) => g === 'sidechat' ? (
+                <div className="sidechat-empty">
+                  <div className="sidechat-intro">
+                    <div className="sidechat-intro-title">{appT('sidechat.intro.title')}</div>
+                    <div className="sidechat-intro-desc">{appT('sidechat.intro.desc')}</div>
+                    {activeSession?.executor === 'claude' ? (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={creatingSession}
+                        onClick={createSidechat}
+                      >
+                        {appT('sheet.newChat')}
+                      </button>
+                    ) : (
+                      <div className="sidechat-intro-note">{appT('sidechat.claudeOnly')}</div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
+              hidden={!sheetVisible || managerP2}
               externalEditors={systemConfig?.external_editors ?? []}
               openApps={systemConfig?.open_apps}
               onOpenWith={handleOpenWith}
@@ -2214,6 +2498,7 @@ export function App() {
                 if (t.kind === 'browser') {
                   return (
                     <BrowserBody
+                      initialUrl={t.url}
                       onNavigate={url => sheetActions.setTabName(t.id, browserHostOf(url))}
                     />
                   );
@@ -2238,28 +2523,6 @@ export function App() {
                 />
               </div>
             )}
-            {/* Sidechat rail with no chat tabs yet: intro + fork-current-
-                session action (claude-only). */}
-            {activeRail === 'sidechat' && !wbTabs.some(t => t.group === 'sidechat') && (
-              <div className="sheet-group sidechat-empty" style={sheetVisible ? undefined : { display: 'none' }}>
-                <div className="sidechat-intro">
-                  <div className="sidechat-intro-title">{appT('sidechat.intro.title')}</div>
-                  <div className="sidechat-intro-desc">{appT('sidechat.intro.desc')}</div>
-                  {activeSession?.executor === 'claude' ? (
-                    <button
-                      type="button"
-                      className="btn"
-                      disabled={creatingSession}
-                      onClick={createSidechat}
-                    >
-                      {appT('sheet.newChat')}
-                    </button>
-                  ) : (
-                    <div className="sidechat-intro-note">{appT('sidechat.claudeOnly')}</div>
-                  )}
-                </div>
-              </div>
-            )}
           </>
         )}
         {inspectorVisible && inspectorKind !== null && (
@@ -2281,6 +2544,7 @@ export function App() {
                 tab={inspectorKind}
                 workingTreeId={defaultWorkingTreeIdFor(activeSession)}
                 workingTrees={workingTrees}
+                revealFile={fileReveal}
                 onOpenFile={(rel, perm) => {
                   const sess = activeSession;
                   const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
@@ -2297,7 +2561,7 @@ export function App() {
           </>
         )}
         <Dock
-          activeRail={activeRail}
+          activeRail={chatPanel ? null : activeRail}
           onToggleRail={toggleRail}
           sessionRailsDisabled={!sessionViewActive}
           workbenchDisabled={!workbenchActive}
@@ -2316,6 +2580,7 @@ export function App() {
       )}
       <Toaster />
     </div>
+    </BrowserLinkOpenContext.Provider>
     </ImageZoomContext.Provider>
     </LocaleProvider>
   );

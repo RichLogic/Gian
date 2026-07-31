@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { loadTree, loadChanged, loadAllFiles, stageFile, unstageFile } from '../api.js';
 import type { TreeEntry, ChangedEntry, WorkingTree, ChangeScope } from '../api.js';
@@ -49,6 +49,8 @@ interface Props {
   workingTrees: WorkingTree[];
   /** Files tab: open file source in Sheet. permanent=true for double-click. */
   onOpenFile: (path: string, permanent: boolean) => void;
+  /** Files tab: expand, select, and scroll to a file opened from elsewhere. */
+  revealFile?: { workingTreeId: string; path: string; requestId: number } | null;
   /** Changes tab: open the file's diff in Sheet, in the currently-selected
    *  scope so the diff matches what the row represents. */
   onOpenDiff: (path: string, permanent: boolean, scope: ChangeScope) => void;
@@ -60,11 +62,20 @@ interface Props {
   onComposePrompt: (text: string) => void;
 }
 
-export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, onOpenDiff, canCommit, onComposePrompt }: Props) {
+export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, revealFile, onOpenDiff, canCommit, onComposePrompt }: Props) {
   // 'workspaces' is handled upstream in App.tsx — this component only renders the
   // working-tree-scoped tabs.
   if (tab === 'workspaces') return null;
-  if (tab === 'files') return <FilesInspector workingTreeId={workingTreeId} workingTrees={workingTrees} onOpenFile={onOpenFile} />;
+  if (tab === 'files') {
+    return (
+      <FilesInspector
+        workingTreeId={workingTreeId}
+        workingTrees={workingTrees}
+        onOpenFile={onOpenFile}
+        revealFile={revealFile}
+      />
+    );
+  }
   return <ChangesInspector workingTreeId={workingTreeId} onOpenDiff={onOpenDiff} canCommit={canCommit} onComposePrompt={onComposePrompt} />;
 }
 
@@ -73,10 +84,12 @@ function FilesInspector({
   workingTreeId,
   workingTrees,
   onOpenFile,
+  revealFile,
 }: {
   workingTreeId: string | null;
   workingTrees: WorkingTree[];
   onOpenFile: (p: string, perm: boolean) => void;
+  revealFile?: { workingTreeId: string; path: string; requestId: number } | null;
 }) {
   const t = useT();
   const [reloadKey, setReloadKey] = useState(0);
@@ -88,6 +101,12 @@ function FilesInspector({
   const wt = workingTreeId ? workingTrees.find(w => w.id === workingTreeId) : null;
   const rootName = wt ? (wt.path.split('/').pop() || wt.path) : 'Root';
   const q = query.trim().toLowerCase();
+  const revealPath = revealFile?.workingTreeId === workingTreeId ? revealFile.path : null;
+
+  // Cross-panel reveals use the hierarchical tree, not a stale search result.
+  useEffect(() => {
+    if (revealPath) setQuery('');
+  }, [revealPath, revealFile?.requestId]);
 
   // Invalidate the cached index when the working tree changes or the user
   // hits refresh — the previous tree's paths no longer apply.
@@ -161,6 +180,8 @@ function FilesInspector({
               depth={0}
               openInitial
               onOpenFile={onOpenFile}
+              revealPath={revealPath}
+              revealRequestId={revealFile?.requestId}
             />
           </div>
         )}
@@ -200,6 +221,8 @@ function TreeFolder({
   depth,
   openInitial = false,
   onOpenFile,
+  revealPath,
+  revealRequestId,
 }: {
   workingTreeId: string;
   relPath: string;
@@ -207,9 +230,18 @@ function TreeFolder({
   depth: number;
   openInitial?: boolean;
   onOpenFile: (path: string, permanent: boolean) => void;
+  revealPath: string | null;
+  revealRequestId?: number;
 }) {
   const [open, setOpen] = useState(openInitial);
   const [entries, setEntries] = useState<TreeEntry[] | null>(null);
+  const containsReveal = !!revealPath && (
+    relPath === '' || revealPath.startsWith(`${relPath}/`)
+  );
+
+  useEffect(() => {
+    if (containsReveal) setOpen(true);
+  }, [containsReveal, revealRequestId]);
 
   useEffect(() => {
     if (!open || entries !== null) return;
@@ -229,7 +261,7 @@ function TreeFolder({
   return (
     <>
       <div className={`tree-item folder ${open ? 'open' : ''}`}
-           style={{ paddingLeft: 6 + depth * 12 }}
+           style={{ paddingLeft: 6 + depth * 10 }}
            onClick={() => setOpen(o => !o)}>
         <span className="tree-caret"><Icon d={I.chev} size={10} /></span>
         <span className="tree-name">{name}</span>
@@ -244,6 +276,8 @@ function TreeFolder({
               name={e.name}
               depth={depth + 1}
               onOpenFile={onOpenFile}
+              revealPath={revealPath}
+              revealRequestId={revealRequestId}
             />
           ) : (
             <TreeFile
@@ -252,6 +286,8 @@ function TreeFolder({
               path={e.path}
               depth={depth + 1}
               onOpenFile={onOpenFile}
+              selected={e.path === revealPath}
+              revealRequestId={revealRequestId}
             />
           ))}
         </div>
@@ -260,11 +296,33 @@ function TreeFolder({
   );
 }
 
-function TreeFile({ name, path, depth, onOpenFile }: { name: string; path: string; depth: number; onOpenFile: (p: string, perm: boolean) => void }) {
+function TreeFile({
+  name,
+  path,
+  depth,
+  onOpenFile,
+  selected,
+  revealRequestId,
+}: {
+  name: string;
+  path: string;
+  depth: number;
+  onOpenFile: (p: string, perm: boolean) => void;
+  selected: boolean;
+  revealRequestId?: number;
+}) {
   const { bg, label } = extBadge(name);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (selected) ref.current?.scrollIntoView({ block: 'nearest' });
+  }, [selected, revealRequestId]);
+
   return (
-    <div className="tree-item"
-         style={{ paddingLeft: 6 + depth * 12 }}
+    <div ref={ref}
+         className={`tree-item${selected ? ' active' : ''}`}
+         data-file-path={path}
+         style={{ paddingLeft: 6 + depth * 10 }}
          onClick={() => onOpenFile(path, false)}
          onDoubleClick={() => onOpenFile(path, true)}
          title={path}>
@@ -353,7 +411,7 @@ function ChangeFolder({ node, depth, ctx }: { node: ChangeNode; depth: number; c
     <>
       <div
         className={`tree-item folder ${open ? 'open' : ''}`}
-        style={{ paddingLeft: 6 + depth * 12 }}
+        style={{ paddingLeft: 6 + depth * 10 }}
         onClick={() => setOpen(o => !o)}
         title={node.path}
       >
@@ -372,7 +430,7 @@ function ChangeLeaf({ entry, name, depth, ctx }: { entry: ChangedEntry; name: st
   return (
     <div
       className={`tree-item changes-leaf ${entry.staged ? 'staged' : ''}`}
-      style={{ paddingLeft: 6 + depth * 12 }}
+      style={{ paddingLeft: 6 + depth * 10 }}
       title={entry.path}
       onClick={() => ctx.onOpenDiff(entry.path, false, ctx.scope)}
       onDoubleClick={() => ctx.onOpenDiff(entry.path, true, ctx.scope)}

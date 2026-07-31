@@ -110,6 +110,8 @@ export function Topbar({
         <Icon d={I.forward} />
       </button>
 
+      <span className="tb-divider" aria-hidden="true" />
+
       <PathBreadcrumb
         segments={pathSegments}
         onRenameSubmit={onRenameSubmit}

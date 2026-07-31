@@ -99,6 +99,12 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
     return {};
   }
 
+  readonly steerCalls: Array<{ threadId: string; turnId: string; input: InputItem[] }> = [];
+  async steerTurn(threadId: string, turnId: string, input: InputItem[]) {
+    this.steerCalls.push({ threadId, turnId, input });
+    return { turnId };
+  }
+
   async respond(id: number | string, result: unknown) {
     this.responses.push({ id, payload: result });
     return {};
@@ -232,6 +238,51 @@ test('session.setName routes to runtime.setThreadName with threadId+name (SESSIO
   }
 });
 
+test('turn.steer forwards input to turn/steer with the active turn id', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+    const started = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'do work' }],
+    });
+    const result = await harness.service.steerTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'actually focus on tests first' }],
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(harness.runtime.steerCalls, [
+      {
+        threadId: created.session.threadId,
+        turnId: started.turn.id,
+        input: [{ type: 'text', text: 'actually focus on tests first' }],
+      },
+    ]);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('turn.steer without an active turn rejects with NO_ACTIVE_TURN', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+    await assert.rejects(
+      () => harness.service.steerTurn({
+        sessionId: created.session.id,
+        input: [{ type: 'text', text: 'hi' }],
+      }),
+      (err: unknown) => {
+        assert.equal((err as { code?: string }).code, 'NO_ACTIVE_TURN');
+        return true;
+      },
+    );
+    assert.equal(harness.runtime.steerCalls.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('session.create binds a session to a thread and returns id + threadId', async () => {
   const harness = await createHarness();
   try {
@@ -296,6 +347,7 @@ test('Custom permission mode restores the config-derived policy after an explici
       thinking: null,
       sandbox: 'danger-full-access',
       sandboxPolicy: null,
+      runtimeWorkspaceRoots: ['/tmp/work'],
       permissions: null,
       approvalPolicy: 'never',
       approvalsReviewer: 'auto_review',
@@ -324,6 +376,7 @@ test('Custom permission mode restores the config-derived policy after an explici
       thinking: null,
       sandbox: null,
       sandboxPolicy: null,
+      runtimeWorkspaceRoots: ['/tmp/work'],
       permissions: ':workspace',
       approvalPolicy: 'on-request',
       approvalsReviewer: 'user',
@@ -331,6 +384,29 @@ test('Custom permission mode restores the config-derived policy after an explici
       reasoningSummary: null,
       serviceTier: null,
     });
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('turn.start carries attachment directories as runtime workspace roots', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+    await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{
+        type: 'localFile',
+        path: '/tmp/gian/attachments/session/report.pdf',
+        name: 'report.pdf',
+      }] as unknown as InputItem[],
+      additionalWorkspaceRoots: ['/tmp/gian/attachments/session'],
+    });
+
+    assert.deepEqual(
+      harness.runtime.startTurnCalls[0]?.options.runtimeWorkspaceRoots,
+      ['/tmp/work', '/tmp/gian/attachments/session'],
+    );
   } finally {
     await harness.cleanup();
   }

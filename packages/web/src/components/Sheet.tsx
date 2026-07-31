@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { OpenFileCategory, OpenAppPrefs } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { parseUnifiedDiff } from '../transcript/apply.js';
+import { BrowserLinkOpenContext } from '../presentation/chat-panel.js';
 import { AppIcon } from './AppIcon.js';
 
 export type SheetTabKind = 'file' | 'term' | 'settings' | 'plan' | 'diff' | 'workspace' | 'new-workspace' | 'chat' | 'browser';
@@ -77,6 +78,10 @@ export interface SheetTab {
   diffText?: string;
   /** `/raw` URL for image tabs — rendered inline with an `<img>` (no `lines`). */
   rawSrc?: string;
+  /** Relative path only when this file is present in the current Files tree. */
+  fileTreePath?: string;
+  /** File could not be loaded into the in-app preview. */
+  loadError?: string;
 }
 
 export interface SheetActions {
@@ -130,6 +135,10 @@ interface Props {
   /** Called when the user clicks the trailing "+" in the tab strip. App
    *  decides what to add (terminal / sidechat fork / browser tab). */
   onAddTab?: (group: SheetGroup) => void;
+  /** Content for the ACTIVE group when it has no tabs yet (e.g. the sidechat
+   *  intro). Rendered inside the normal `.sheet-group` so the panel keeps
+   *  its width (`--sheet-w`) and stays resizable in the empty state too. */
+  renderEmpty?: (group: SheetGroup) => React.ReactNode;
   /** Whole-sheet display:none — element stays in the DOM so child
    *  terminals stay mounted across visibility flips. */
   hidden?: boolean;
@@ -246,9 +255,33 @@ function FileBody({ lines, scrollLine }: { lines: Array<[string, string, string?
  *  (react-markdown's default: no rehype-raw) so previewed file contents can't
  *  inject markup. Styling hangs off the shared `.md-preview` class. */
 function MarkdownPreview({ source }: { source: string }) {
+  const openBrowser = useContext(BrowserLinkOpenContext);
   return (
     <div className="md-preview">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{source}</ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ href, children }) => {
+            const routesToBrowser = !!href && /^https?:\/\//i.test(href);
+            return (
+              <a
+                href={href}
+                target={routesToBrowser && openBrowser ? undefined : '_blank'}
+                rel="noreferrer noopener"
+                onClick={event => {
+                  if (!routesToBrowser || !openBrowser || !href) return;
+                  event.preventDefault();
+                  openBrowser(href);
+                }}
+              >
+                {children}
+              </a>
+            );
+          },
+        }}
+      >
+        {source}
+      </ReactMarkdown>
     </div>
   );
 }
@@ -578,7 +611,7 @@ function FileActions({
   );
 }
 
-export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, onAddTab, hidden, externalEditors, openApps, onOpenWith, onConfigureEditors }: Props) {
+export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, onAddTab, renderEmpty, hidden, externalEditors, openApps, onOpenWith, onConfigureEditors }: Props) {
   const tr = useT();
   // Word-wrap preference for file/diff bodies. Wrap is the historical default
   // (`.txt { white-space: pre-wrap }`); toggling off switches to `pre` +
@@ -608,13 +641,20 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
     list.push(t);
     byGroup.set(t.group, list);
   });
-  if (byGroup.size === 0) return null;
-
   // One section per group. Only the active rail's group is visible; the rest
   // stay mounted under display:none so xterm sessions (and later iframes)
-  // keep running across rail switches.
+  // keep running across rail switches. An active group with no tabs renders
+  // its `renderEmpty` content in the same slot (keeps the panel resizable).
+  const emptyActive = !!renderEmpty && !!activeGroup && !byGroup.has(activeGroup);
+  if (byGroup.size === 0 && !emptyActive) return null;
+
   return (
     <section className="sheet" data-testid="workbench-sheet" style={hidden ? { display: 'none' } : undefined}>
+      {emptyActive && (
+        <div className="sheet-group" key="__empty">
+          {renderEmpty!(activeGroup!)}
+        </div>
+      )}
       {SHEET_GROUP_ORDER.filter(g => byGroup.has(g)).map(g => {
         const gTabs = byGroup.get(g)!;
         const activeId = activeByGroup[g] || gTabs[0]?.id || null;
@@ -727,7 +767,9 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
                           />
                         </div>
                       )}
-                      {tab.kind === 'file' && tab.rawSrc
+                      {tab.kind === 'file' && tab.loadError
+                        ? <div className="sheet-empty">{tab.loadError}</div>
+                        : tab.kind === 'file' && tab.rawSrc
                         ? <ImageBody src={tab.rawSrc} name={tab.name} />
                         : tab.kind === 'file' && tab.icoKind === 'md' && tab.viewMode === 'preview' && tab.lines
                         ? <MarkdownPreview source={tab.lines.map(r => r[1]).join('\n')} />

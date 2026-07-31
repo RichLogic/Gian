@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
@@ -48,6 +49,29 @@ export function normalizeInputItems(input: unknown, cwd: string): InputItem[] {
       };
     }
 
+    if (record.type === 'localFile') {
+      const path = typeof record.path === 'string' ? record.path.trim() : '';
+      if (!path) {
+        throw createAppError(400, 'INVALID_REQUEST', 'localFile items require a path.');
+      }
+      const name = typeof record.name === 'string' && record.name.trim()
+        ? record.name.trim()
+        : undefined;
+      const mimeType = typeof record.mime === 'string' && record.mime.trim()
+        ? record.mime.trim()
+        : undefined;
+      const size = typeof record.size === 'number' && Number.isFinite(record.size) && record.size >= 0
+        ? record.size
+        : undefined;
+      return {
+        type: 'localFile',
+        path: resolve(cwd, path),
+        ...(name ? { name } : {}),
+        ...(mimeType ? { mimeType } : {}),
+        ...(size !== undefined ? { size } : {}),
+      };
+    }
+
     throw createAppError(
       400,
       'INVALID_REQUEST',
@@ -60,6 +84,16 @@ export async function toPromptBlocks(input: InputItem[]): Promise<ContentBlock[]
   return Promise.all(input.map(async (item): Promise<ContentBlock> => {
     if (item.type === 'text') {
       return { type: 'text', text: item.text };
+    }
+
+    if (item.type === 'localFile') {
+      return {
+        type: 'resource_link',
+        uri: pathToFileURL(item.path).href,
+        name: item.name ?? item.path.split(/[\\/]/).pop() ?? 'attachment',
+        ...(item.mimeType ? { mimeType: item.mimeType } : {}),
+        ...(item.size !== undefined ? { size: item.size } : {}),
+      };
     }
 
     const mimeType = item.mimeType

@@ -113,7 +113,7 @@ export interface InitializeResult {
   methods: string[];
 }
 
-export type InputItem = TextInputItem | LocalImageInputItem | SkillInputItem;
+export type InputItem = TextInputItem | LocalImageInputItem | LocalFileInputItem | SkillInputItem;
 
 export interface TextInputItem {
   type: 'text';
@@ -129,6 +129,19 @@ export interface LocalImageInputItem {
   name?: string;
   /** MIME type (e.g. `image/png`). Same rationale as `name`. */
   mime?: string;
+  /** Original byte size, used only for transcript metadata. */
+  size?: number;
+}
+
+/** A non-image file that the host has snapshotted into the session attachment
+ *  store. Proxies translate this provider-neutral item into the executor's
+ *  native file-reference shape. */
+export interface LocalFileInputItem {
+  type: 'localFile';
+  path: string;
+  name?: string;
+  mime?: string;
+  size?: number;
 }
 
 /** Per-attachment metadata echoed back in `user_message` event payloads.
@@ -138,6 +151,7 @@ export interface MessageAttachment {
   name: string;
   mime: string;
   url: string;
+  size?: number;
 }
 
 /**
@@ -247,6 +261,7 @@ export const PROXY_METHODS = [
   'session.get',
   'turn.start',
   'turn.interrupt',
+  'turn.steer',
   'approval.respond',
   'session.snapshot',
   'session.close',

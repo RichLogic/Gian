@@ -145,6 +145,103 @@ test('Kimi Agent tool lifecycle projects to one persistent agent run', () => {
   assert.equal((completed[0]?.data as { output?: unknown }).output, 'No reducer risks found.');
 });
 
+test('Kimi background Agent trusts child status and exposes native detail', () => {
+  const launched = normalizeKimiNotification(
+    notification('acp.sessionUpdate', {
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-tool-bg',
+        title: 'Launching coder agent: Repair the reducer',
+        kind: 'other',
+        // ACP says the launch tool returned, not that its child finished.
+        status: 'completed',
+        rawInput: {
+          description: 'Repair the reducer',
+          prompt: 'Inspect the reducer, implement the fix, and run tests.',
+          subagent_type: 'coder',
+          run_in_background: true,
+        },
+        rawOutput: [
+          'task_id: task-42',
+          'agent_id: agent-42',
+          'actual_subagent_type: coder',
+          'status: running',
+        ].join('\n'),
+      },
+    }),
+    'gian-1',
+    4,
+  );
+  const launchData = launched[0]?.data as Record<string, unknown>;
+
+  assert.equal(launchData.status, 'running');
+  assert.equal(launchData.agentId, 'agent-42');
+  assert.equal(launchData.taskId, 'task-42');
+  assert.equal(launchData.agentType, 'coder');
+  assert.equal(launchData.background, true);
+  assert.equal(launchData.output, undefined);
+  assert.equal(
+    (launchData.input as Record<string, unknown>).prompt,
+    'Inspect the reducer, implement the fix, and run tests.',
+  );
+
+  const finished = normalizeKimiNotification(
+    notification('acp.sessionUpdate', {
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-tool-bg',
+        title: 'Agent',
+        kind: 'other',
+        status: 'completed',
+        rawOutput: [
+          'task_id: task-42',
+          'agent_id: agent-42',
+          'actual_subagent_type: coder',
+          'status: completed',
+          '',
+          '[summary]',
+          'Reducer repaired and tests pass.',
+        ].join('\n'),
+      },
+    }),
+    'gian-1',
+    4,
+  );
+  const finishData = finished[0]?.data as Record<string, unknown>;
+
+  assert.equal(finishData.status, 'done');
+  assert.equal(finishData.output, 'Reducer repaired and tests pass.');
+  assert.equal(finishData.agentId, 'agent-42');
+  assert.equal(finishData.taskId, 'task-42');
+});
+
+test('Kimi Agent preserves a child failure summary', () => {
+  const failed = normalizeKimiNotification(
+    notification('acp.sessionUpdate', {
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-tool-failed',
+        title: 'Agent',
+        kind: 'other',
+        status: 'completed',
+        rawOutput: [
+          'agent_id: agent-failed',
+          'status: failed',
+          '',
+          '[summary]',
+          'The child could not read the requested path.',
+        ].join('\n'),
+      },
+    }),
+    'gian-1',
+    4,
+  );
+  const data = failed[0]?.data as Record<string, unknown>;
+
+  assert.equal(data.status, 'error');
+  assert.equal(data.output, 'The child could not read the requested path.');
+});
+
 test('Kimi approval events preserve exact opaque option IDs', () => {
   const requested = normalizeKimiNotification(
     notification('approval.requested', {

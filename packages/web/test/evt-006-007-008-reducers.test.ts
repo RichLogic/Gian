@@ -3,12 +3,12 @@
 //             by itemId, and emit a ReasoningItem the Transcript renders
 //             as a folded "reasoning card".
 //   EVT-007 — Codex plan_update must support delta append AND final
-//             replace via `applyPlanUpdate`, and must NOT add a row to
-//             the transcript list (PlanChip subscribes separately).
+//             replace via `applyPlanUpdate`; completed checklists disappear
+//             only after `turn_completed`.
 //   EVT-008 — `turn_started` must NOT produce a transcript row (it's a
 //             signal-only event); the App-level pending state flip is
-//             tested separately. `turn_completed` likewise leaves the
-//             transcript untouched.
+//             tested separately. `turn_completed` adds the turn-end separator
+//             used by Plan/Agent cleanup.
 //
 // All three are pure-function reducer tests against
 // `applyEnvelope` + `applyPlanUpdate`. App-level state hookup (which
@@ -18,7 +18,12 @@
 import { describe, it, expect } from 'vitest';
 import type { EventEnvelope } from '@gian/shared';
 import type { MsgItem, ReasoningItem, TranscriptItem } from '../src/types.js';
-import { applyEnvelope, applyPlanUpdate } from '../src/transcript/apply.js';
+import {
+  applyEnvelope,
+  applyPlanLifecycle,
+  applyPlanUpdate,
+  isPlanChecklistComplete,
+} from '../src/transcript/apply.js';
 
 function reasoning(
   kind: 'summary' | 'full',
@@ -47,6 +52,17 @@ function planUpdate(
     event: 'plan_update',
     ts: opts.ts ?? 1_700_000_000_000,
     data: { text, delta: opts.delta ?? true },
+  };
+}
+
+function turnEnvelope(event: 'turn_started' | 'turn_completed'): EventEnvelope {
+  return {
+    session_id: 'sess-1',
+    turn: 1,
+    call_id: 'turn-evt',
+    event,
+    ts: 1_700_000_000_000,
+    data: {},
   };
 }
 
@@ -154,6 +170,40 @@ describe('EVT-007: plan_update reducer surface', () => {
     expect(applyPlanUpdate(undefined, planUpdate('first', { delta: true }))).toBe('first');
     expect(applyPlanUpdate(undefined, planUpdate('first', { delta: false }))).toBe('first');
   });
+
+  it('recognizes only non-empty checklists whose every step is complete', () => {
+    expect(isPlanChecklistComplete('- [x] inspect\n- [X] test')).toBe(true);
+    expect(isPlanChecklistComplete('- [x] inspect\n- [ ] test')).toBe(false);
+    expect(isPlanChecklistComplete('Implementation complete.')).toBe(false);
+  });
+
+  it('finalizes a complete plan at turn_completed, not during plan streaming', () => {
+    const streamed = applyPlanLifecycle(
+      { completed: false },
+      planUpdate('- [x] inspect\n- [x] test', { delta: false }),
+    );
+    expect(streamed).toEqual({
+      text: '- [x] inspect\n- [x] test',
+      completed: false,
+    });
+
+    const finalized = applyPlanLifecycle(streamed, turnEnvelope('turn_completed'));
+    expect(finalized.completed).toBe(true);
+  });
+
+  it('keeps incomplete plans visible and lets a later update restart a finalized plan', () => {
+    const incomplete = applyPlanLifecycle(
+      { completed: false },
+      planUpdate('- [x] inspect\n- [ ] test', { delta: false }),
+    );
+    expect(applyPlanLifecycle(incomplete, turnEnvelope('turn_completed')).completed).toBe(false);
+
+    const restarted = applyPlanLifecycle(
+      { text: '- [x] old', completed: true },
+      planUpdate('- [ ] new', { delta: false }),
+    );
+    expect(restarted).toEqual({ text: '- [ ] new', completed: false });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -161,17 +211,6 @@ describe('EVT-007: plan_update reducer surface', () => {
 // ---------------------------------------------------------------------------
 
 describe('EVT-008: turn_started / turn_completed do not produce transcript rows', () => {
-  function turnEnvelope(event: 'turn_started' | 'turn_completed'): EventEnvelope {
-    return {
-      session_id: 'sess-1',
-      turn: 1,
-      call_id: 'turn-evt',
-      event,
-      ts: 1_700_000_000_000,
-      data: {},
-    };
-  }
-
   it('turn_started does NOT add an item to the transcript', () => {
     const out = applyEnvelope([], turnEnvelope('turn_started'), 'claude');
     expect(out).toEqual([]);

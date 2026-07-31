@@ -1,6 +1,7 @@
 import type { Accent, SystemConfig } from '@gian/shared';
 
 export const GIAN_ICON_VIEWBOX = 1254;
+export const GIAN_MACOS_ICON_SCALE = 0.84;
 
 export const GIAN_DRAGON_BODY_PATH = 'M 325.499 225.250 C 329.028 247.468, 341.226 276.934, 354.769 295.954 C 367.028 313.171, 388.739 334.063, 404.709 344.010 C 408.674 346.479, 411.906 348.725, 411.892 349 C 411.877 349.275, 406.466 354, 399.867 359.500 C 369.450 384.850, 340.500 418.634, 320.602 452 C 279.712 520.568, 262.617 600.138, 271.618 680 C 285.636 804.389, 362.679 911.766, 477.504 966.952 C 556.149 1004.750, 640.191 1014.162, 719.702 994.077 C 800.915 973.562, 870.472 922.786, 920.493 847.500 C 962.251 784.651, 983.945 714.695, 983.990 642.750 L 984 626 L 815 626 C 722.050 626, 646 626.381, 646 626.848 C 646 627.314, 652.792 637.326, 661.093 649.098 C 669.394 660.869, 685.694 684.337, 697.316 701.250 L 718.446 732 L 725.950 732 L 733.453 732 725.477 740.046 C 690.502 775.323, 634.367 787.766, 586.312 770.893 C 545.909 756.707, 512.586 722.928, 499.112 682.500 C 486.436 644.464, 490.870 608.746, 512.310 576.190 C 535.523 540.944, 573.204 517.021, 613.498 511.949 C 625.493 510.439, 647.396 511.185, 658.334 513.475 C 689.158 519.930, 718.909 538.889, 737.849 564.146 L 742.084 569.792 751.792 564.522 C 778.626 549.956, 832.551 521.153, 866 503.520 C 927.400 471.154, 934 467.570, 934 466.600 C 934 466.090, 930.076 459.142, 925.279 451.161 C 889.653 391.877, 837.262 343.273, 775.878 312.558 C 747.030 298.123, 720.436 288.964, 687.328 282.059 C 659.075 276.168, 655.115 275.874, 592 275 C 532.115 274.170, 517.485 273.350, 483.500 268.917 C 431.097 262.082, 382.468 248.242, 341.101 228.390 C 332.632 224.325, 325.505 221, 325.263 221 C 325.022 221, 325.128 222.912, 325.499 225.250';
 
@@ -90,20 +91,28 @@ function renderDockIcon(
   const context = canvas.getContext('2d');
   if (!context) return null;
 
+  const tileSize = size * GIAN_MACOS_ICON_SCALE;
+  const inset = (size - tileSize) / 2;
   const [g1, g2, g3] = gianIconGradient(theme, accent);
-  const gradient = context.createLinearGradient(0, size * 0.2665, size, size * 0.7335);
+  const gradient = context.createLinearGradient(
+    inset,
+    inset + tileSize * 0.2665,
+    inset + tileSize,
+    inset + tileSize * 0.7335,
+  );
   gradient.addColorStop(0, g1);
   gradient.addColorStop(0.42, g2);
   // Icon-only interpolation; status/loading gradients keep their g1 wrap.
   gradient.addColorStop(1, g3);
 
   context.beginPath();
-  context.roundRect(0, 0, size, size, size * 0.22);
+  context.roundRect(inset, inset, tileSize, tileSize, tileSize * 0.22);
   context.fillStyle = gradient;
   context.fill();
 
   context.save();
-  context.scale(size / GIAN_ICON_VIEWBOX, size / GIAN_ICON_VIEWBOX);
+  context.translate(inset, inset);
+  context.scale(tileSize / GIAN_ICON_VIEWBOX, tileSize / GIAN_ICON_VIEWBOX);
   context.fillStyle = '#101111';
   context.fill(new Path2D(GIAN_DRAGON_BODY_PATH), 'evenodd');
   context.fill(new Path2D(GIAN_DRAGON_WHISKER_TOP_PATH));

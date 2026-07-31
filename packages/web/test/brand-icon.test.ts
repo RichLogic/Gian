@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   applyGianIconAppearance,
   buildGianIconSvg,
+  GIAN_MACOS_ICON_SCALE,
   gianIconGradient,
 } from '../src/brand-icon.js';
 
@@ -35,5 +36,9 @@ describe('accent-aware Gian icon', () => {
     expect(link?.type).toBe('image/svg+xml');
     expect(link?.href).toContain('data:image/svg+xml');
     expect(decodeURIComponent(link?.href ?? '')).toContain('oklch(0.66 0.17 184)');
+  });
+
+  it('reserves the standard optical margin only for macOS icon canvases', () => {
+    expect(GIAN_MACOS_ICON_SCALE).toBe(0.84);
   });
 });

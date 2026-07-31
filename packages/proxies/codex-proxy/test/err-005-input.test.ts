@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { resolve } from 'node:path';
 
-import { normalizeInputItems } from '../src/core/input.js';
+import { localFileDirectories, normalizeInputItems } from '../src/core/input.js';
 
 interface AppError extends Error {
   statusCode?: number;
@@ -109,6 +109,27 @@ test('ERR-005: codex input localImage keeps already-absolute path as-is', () => 
   );
   // path.resolve preserves an absolute input.
   assert.deepEqual(out, [{ type: 'localImage', path: '/etc/hosts.png' }]);
+});
+
+test('ERR-005: codex input localFile becomes an explicit readable path reference', () => {
+  const out = normalizeInputItems(
+    [{ type: 'localFile', path: 'attachments/report.pdf', name: 'report.pdf' }],
+    '/home/me/proj',
+  );
+  assert.deepEqual(out, [{
+    type: 'text',
+    text: '[Attached file: /home/me/proj/attachments/report.pdf (report.pdf)]',
+  }]);
+  assert.deepEqual(
+    localFileDirectories(
+      [
+        { type: 'localFile', path: 'attachments/report.pdf' },
+        { type: 'localFile', path: 'attachments/notes.txt' },
+      ],
+      '/home/me/proj',
+    ),
+    ['/home/me/proj/attachments'],
+  );
 });
 
 // ---------------------------------------------------------------------------

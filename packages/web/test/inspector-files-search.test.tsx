@@ -86,4 +86,33 @@ describe('Inspector FILES search', () => {
     );
     await waitFor(() => expect(api.loadTree).toHaveBeenCalledWith('ws:other', ''));
   });
+
+  it('expands, selects, and scrolls to a file opened outside the inspector', async () => {
+    (api.loadTree as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_workingTreeId: string, path: string) => {
+        if (path === '') return [{ name: 'src', type: 'dir', path: 'src' }];
+        if (path === 'src') return [{ name: 'bar', type: 'dir', path: 'src/bar' }];
+        if (path === 'src/bar') return [{ name: 'baz.ts', type: 'file', path: 'src/bar/baz.ts' }];
+        return [];
+      },
+    );
+    const scrollSpy = vi.spyOn(HTMLElement.prototype, 'scrollIntoView');
+
+    render(
+      <Inspector
+        tab="files"
+        workingTreeId="ws:demo"
+        workingTrees={workingTrees}
+        revealFile={{ workingTreeId: 'ws:demo', path: 'src/bar/baz.ts', requestId: 1 }}
+        onOpenFile={vi.fn()}
+        onOpenDiff={() => {}}
+      />,
+    );
+
+    const file = await screen.findByText('baz.ts');
+    expect(file.closest('.tree-item')?.classList.contains('active')).toBe(true);
+    expect(api.loadTree).toHaveBeenCalledWith('ws:demo', 'src/bar');
+    await waitFor(() => expect(scrollSpy).toHaveBeenCalledWith({ block: 'nearest' }));
+    scrollSpy.mockRestore();
+  });
 });

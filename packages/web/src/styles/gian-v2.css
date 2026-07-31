@@ -75,11 +75,21 @@
 .topbar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   /* Right inset centers the trailing panel-3 toggle over the dock column
      below it (dock-w 38px → center at 19px; tb-toggle is 26px → 19−13=6). */
   padding: 0 6px 0 8px;
   background: var(--surface-2);
+}
+
+/* Hairline between the window-chrome button cluster and the path breadcrumb —
+ * same divider idiom as Air's titlebar. */
+.tb-divider {
+  width: 1px;
+  height: 16px;
+  flex: none;
+  margin: 0 4px;
+  background: var(--hairline);
 }
 .tb-toggle {
   width: 26px; height: 26px;
@@ -231,11 +241,10 @@
 .path-seg.branch {
   font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--text);
+  color: var(--text-2);
 }
 .path-seg.session {
   color: var(--text);
-  font-weight: 500;
 }
 .path-seg .branch-ico { color: var(--text-3); flex: none; }
 
@@ -713,6 +722,11 @@
   transition: background var(--dur-fast) var(--ease-soft);
 }
 .rail-item:hover { background: var(--surface-2); }
+/* Session rows: reserve the group header's icon width (2px group margin +
+   8px padding + 14px folder glyph + 6px gap) so the session title aligns
+   with the project name text, Codex-style. Hover/active backgrounds stay
+   full-width. */
+.rail-item.session-row { padding-left: 30px; }
 .rail-item.active { background: var(--accent-soft); }
 .rail-item.active .ri-title { color: var(--accent-text); }
 .ri-body {
@@ -1002,55 +1016,49 @@
   transform: translateY(-50%) translateX(0);
 }
 
-/* Prev/next "your messages" jump control — a labelled pill pinned to the scroll
-   area's bottom-right (top set by JS, pulled up by its own height). The caption
-   makes the two arrows self-explanatory at a glance. When the layout is too
-   narrow for the pill to sit beside the transcript without covering text, JS
-   switches it to `is-compact`: caption dropped, arrows stacked vertically and
-   docked to the right edge (vertically centered), where they ride the padding
-   + scrollbar strip instead of the messages. */
+/* Underbar row above the composer: Plan/Agent context chips on the left,
+   the prev/next message nav flush right — same row at any width. Mirrors
+   the composer's geometry (820px content + 16px gutters, centered) so the
+   row never extends past the input box's edges. position:relative makes the
+   row (not the shell) the anchor for pop-up panels, so they span the FULL
+   composer width, past the nav buttons. */
+.main-underbar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 852px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+/* Prev/next message jump — arrows only (no caption), rendered inline in the
+   underbar via margin-left:auto. Shares the chips' chrome (28px, --r-2). */
 .transcript-navbtns {
-  position: absolute;
-  right: 14px;
-  z-index: 7;
-  transform: translateY(-100%);
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 3px 4px 3px 11px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface-2, var(--surface));
-  box-shadow: 0 2px 10px oklch(from black l c h / 0.16);
-  opacity: 0.9;
-  transition: opacity .12s ease;
+  margin-left: auto;
+  height: 28px;
+  padding: 0 2px;
+  border-radius: var(--r-2);
+  border: 1px solid var(--hairline);
+  background: var(--surface);
 }
-.transcript-navbtns:hover { opacity: 1; }
-.transcript-navbtns.is-compact {
-  right: 6px;
-  flex-direction: column;
-  padding: 4px 3px;
-  transform: translateY(-50%);
-}
-.transcript-navbtns.is-compact .tn-caption { display: none; }
 
-/* Compact-dock gutter (JS toggles this on `.transcript` in narrow layouts):
-   the text column yields 40px on the right so the vertically-centred dock
-   rides an empty strip — transcript padding + scroll-container padding —
-   instead of overlapping message text. The padding sits INSIDE the
-   transcript box, so the JS width measurement that picks the mode is
-   unaffected by the toggle. The sticky user-header backdrop and hairline
-   are re-extended to keep masking scrolled content across the gutter. */
-.transcript.nav-docked { padding-right: 40px; }
-.transcript.nav-docked .msg.user::before,
-.transcript.nav-docked .msg.user::after { right: -40px; }
-.tn-caption {
-  font-size: 11px;
-  color: var(--text-2, var(--text));
-  margin-right: 4px;
-  white-space: nowrap;
-  user-select: none;
+/* The strip shell is built to stand alone (own width math + auto margins);
+   inside the underbar the ROW owns the geometry — shell stretches to fill it
+   (chips flush left, nav flush right, pop-up panels span the composer width). */
+.main-underbar .context-strip-shell {
+  flex: 1;
+  width: auto;
+  max-width: none;
+  margin: 0;
+  align-self: auto;
+  position: static; /* let pop-up panels anchor to the underbar row instead */
 }
+
 .tn-btn {
   width: 24px; height: 24px;
   display: grid; place-items: center;
@@ -1223,6 +1231,48 @@
   object-fit: cover;
 }
 .msg-att.zoomable { cursor: zoom-in; }
+.msg-file-att {
+  min-width: 0;
+  max-width: 280px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-2);
+  text-decoration: none;
+  line-height: 1.2;
+}
+.msg-file-att:hover {
+  background: var(--surface-3);
+  border-color: var(--border-2);
+}
+.msg-file-att > svg {
+  width: 18px;
+  height: 18px;
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+.msg-file-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.msg-file-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+.msg-file-size {
+  color: var(--text-3);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
 
 /* In-page image preview overlay (see components/ImageLightbox.tsx). Blows a
    transcript thumbnail up over the current page instead of a new browser tab.
@@ -1432,12 +1482,6 @@
   flex: none;
   padding: 8px 16px 12px;
   position: relative;
-}
-.composer-wrap::before {
-  content: "";
-  position: absolute; left: 24px; right: 24px; top: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--hairline), transparent);
 }
 .composer {
   max-width: 820px; margin: 0 auto;
@@ -1697,8 +1741,11 @@
 }
 .sheet-chat-missing { padding: 20px; color: var(--text-3); font-size: var(--fz-13); }
 
-/* Sidechat empty state — intro + fork-current-session action */
+/* Sidechat empty state — intro + fork-current-session action (rendered by
+   Sheet's renderEmpty inside the normal group slot, so it stays resizable) */
 .sidechat-empty {
+  flex: 1;
+  display: flex;
   align-items: center;
   justify-content: center;
   padding: 24px;
@@ -2224,6 +2271,9 @@
   user-select: none;
 }
 .tree-item:hover { background: var(--surface-2); }
+/* Folder rows have no icon column (chevron + name only) — without this the
+   name would land in the 14px icon track and ellipsize to nothing. */
+.tree-item.folder { grid-template-columns: 12px 1fr; }
 .tree-item.active { background: var(--accent-soft); color: var(--accent-text); }
 .tree-item.folder .tree-name { color: var(--text); font-weight: 500; }
 .tree-item .tree-caret {
@@ -2242,7 +2292,7 @@
 .tree-item .tree-name {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.tree-children { padding-left: 14px; }
+.tree-children { padding-left: 6px; }
 
 .changes-summary {
   display: flex; align-items: center; gap: 12px;
@@ -2461,6 +2511,10 @@
   padding: 6px 2px;
   gap: 2px;
   background: var(--surface-2);
+  /* Slim seam to the neighbouring panel — tighter than the 4px splitter gap,
+     since the dock's transparent strip already adds ~3px of optical space
+     before the first icon. */
+  margin-left: var(--sp-1);
 }
 .dock-btn {
   position: relative;
