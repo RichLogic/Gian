@@ -5,14 +5,6 @@
    grid, the workspace sidebar, and a few empty-states).
    ============================================================ */
 
-.session-app {
-  display: grid;
-  grid-template-rows: var(--topbar-h) 1fr;
-  height: 100vh;
-  background: var(--bg);
-  color: var(--text);
-}
-
 .runner-dot[data-state="bad"] {
   background: var(--danger);
   box-shadow: 0 0 0 3px var(--danger-soft, rgba(220, 60, 60, 0.18));
@@ -31,11 +23,6 @@
   overflow: hidden;
   min-height: 0;
 }
-.sidebar-head {
-  padding: 10px 12px 8px;
-  display: flex; align-items: center; justify-content: space-between;
-  flex-shrink: 0;
-}
 .sidebar-title {
   font-family: var(--font-mono);
   font-size: 10.5px;
@@ -44,50 +31,7 @@
   letter-spacing: 0.08em;
   text-transform: none;
 }
-.sidebar-action {
-  background: none;
-  border: 1px solid var(--surface-3);
-  border-radius: var(--r-1);
-  color: var(--text-2);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  padding: 2px 8px;
-  cursor: pointer;
-  text-transform: none;
-  letter-spacing: 0.06em;
-}
-.sidebar-action:hover { background: var(--surface-2); border-color: var(--text-3); color: var(--text); }
 
-.sidebar-scroll {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0 6px 10px;
-}
-
-.workspace-group { padding: 6px 0; }
-.workspace-name {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 6px 10px 4px;
-  font-family: var(--font-mono);
-  font-size: var(--fz-12);
-  font-weight: 600;
-  color: var(--text);
-}
-.workspace-name .ws-path {
-  font-weight: 400;
-  color: var(--text-3);
-  font-size: 10px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-}
-
-.session-list { display: flex; flex-direction: column; gap: 1px; }
-
-.session-row-wrap { position: relative; }
 .session-row {
   background: none;
   border: 0;
@@ -97,37 +41,12 @@
   text-align: left;
 }
 .session-row.active { color: var(--accent-text); }
-.session-row-menu {
-  position: absolute;
-  top: 6px;
-  right: 8px;
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: var(--r-1);
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 80ms;
-}
-.session-row-wrap:hover .session-row-menu,
-.session-row-wrap.active .session-row-menu { opacity: 1; }
-.session-row-menu:hover { background: var(--surface-3); color: var(--text); }
 
 @keyframes gian-pulse {
   0%, 100% { opacity: 0.4; transform: scale(0.8); }
   50% { opacity: 1; transform: scale(1.3); }
 }
 
-.session-menu-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 70;
-}
 .session-menu {
   position: absolute;
   top: 28px;
@@ -135,32 +54,12 @@
   z-index: 71;
   background: var(--surface);
   border-radius: var(--r-2);
-  box-shadow: 0 0 0 1px var(--hairline), 0 8px 24px oklch(0 0 0 / 0.15);
+  box-shadow: var(--shadow-2);
   padding: 4px;
   min-width: 160px;
   display: flex;
   flex-direction: column;
   gap: 1px;
-}
-.session-menu-item {
-  display: block;
-  width: 100%;
-  padding: 6px 10px;
-  border: 0;
-  background: transparent;
-  text-align: left;
-  border-radius: var(--r-1);
-  font-size: var(--fz-12);
-  color: var(--text-2);
-  cursor: pointer;
-}
-.session-menu-item:hover { background: var(--surface-2); color: var(--text); }
-.session-menu-item.danger { color: var(--danger); }
-.session-menu-item.danger:hover { background: var(--danger-soft); }
-.session-menu-rule {
-  height: 1px;
-  background: var(--hairline);
-  margin: 4px 4px;
 }
 
 /* New session — full-pane centered card (matches design/views-other.js renderNew) */
@@ -314,7 +213,7 @@
   background: var(--surface);
   border: 1px solid var(--hairline);
   border-radius: var(--r-2);
-  box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+  box-shadow: var(--shadow-2);
   max-height: 320px;
   display: flex; flex-direction: column;
   overflow: hidden;
@@ -362,7 +261,7 @@
   letter-spacing: 0.04em;
   color: var(--text-3);
   background: var(--surface-3);
-  border-radius: 3px;
+  border-radius: var(--r-1);
   padding: 2px 5px;
   flex: none;
 }
@@ -408,14 +307,6 @@
 .exec-card-desc { font-size: var(--fz-11); color: var(--text-3); font-family: var(--font-mono); }
 
 /* Empty states */
-.session-pane-empty {
-  flex: 1;
-  display: flex; align-items: center; justify-content: center;
-  text-align: center;
-  color: var(--text-3);
-  font-size: var(--fz-13);
-}
-.session-pane-empty p { max-width: 360px; line-height: 1.5; padding: 0 var(--sp-8); }
 
 .transcript-empty {
   align-self: center;
@@ -446,92 +337,19 @@
    Overrides coding.css .ticker with session-specific sizing.
    Uses the same dot animation keyframe from coding.css. */
 
-/* Files view: Open split button + dropdown menu */
-.files-open-group {
-  position: relative;
-  display: inline-flex;
-  align-items: stretch;
-  gap: 0;
-}
-.files-open-primary {
-  font-size: 11px;
-  padding: 3px 8px;
-  border-right: 1px solid var(--border-1);
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-}
-.files-open-caret {
-  font-size: 11px;
-  padding: 3px 6px;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-}
-.files-open-menu {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 4px;
-  background: var(--surface);
-  border: 1px solid var(--border-1);
-  border-radius: 6px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
-  min-width: 180px;
-  padding: 4px 0;
-  z-index: 20;
-}
-.files-open-menu-item {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 6px 12px;
-  font-size: 12px;
-  background: transparent;
-  border: none;
-  color: var(--text-1);
-  cursor: pointer;
-}
-.files-open-menu-item:hover {
-  background: var(--surface-2);
-}
-.files-open-menu-config {
-  color: var(--text-3);
-}
-.files-open-menu-sep {
-  height: 1px;
-  background: var(--border-1);
-  margin: 4px 0;
-}
-.files-open-error {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 12px;
-  font-size: 12px;
-  color: var(--text-1);
-  background: oklch(0.92 0.06 30);
-  border-bottom: 1px solid var(--border-1);
-}
-.files-open-error button {
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  color: var(--text-3);
-}
-
 /* Settings: External editors section */
 .ee-remove {
   width: 28px;
   height: 28px;
   background: transparent;
-  border: 1px solid var(--border-1);
-  border-radius: 4px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-1);
   color: var(--text-3);
   cursor: pointer;
 }
 .ee-remove:hover {
   background: var(--surface-2);
-  color: var(--text-1);
+  color: var(--text);
 }
 /* "Add editor" button + "Add application" picker sit on one row. */
 .ee-add-app {
@@ -541,10 +359,10 @@
 }
 .ee-add-app select {
   height: 28px;
-  border: 1px solid var(--border-1);
-  border-radius: 4px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-1);
   background: var(--surface);
-  color: var(--text-1);
+  color: var(--text);
   padding: 0 6px;
   max-width: 220px;
 }
@@ -555,7 +373,7 @@
   padding: 6px 4px 6px 10px;
   border-bottom: 1px solid var(--hairline);
 }
-.ee-app-name { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-1); }
+.ee-app-name { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
 
 /* Default apps: one row per file category, an icon + an app/target picker. */
 .open-cat-row {
@@ -563,14 +381,14 @@
   gap: 8px;
   padding: 5px 4px 5px 10px;
 }
-.open-cat-label { font-size: 13px; color: var(--text-1); }
+.open-cat-label { font-size: 13px; color: var(--text); }
 .open-cat-pick { display: inline-flex; align-items: center; gap: 8px; }
 .open-cat-pick select {
   height: 28px;
-  border: 1px solid var(--border-1);
-  border-radius: 4px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-1);
   background: var(--surface);
-  color: var(--text-1);
+  color: var(--text);
   padding: 0 6px;
   max-width: 220px;
 }
@@ -583,11 +401,6 @@
 }
 .ee-app-row + .ee-add-app,
 .settings-empty + .ee-add-app { margin-top: 10px; }
-.settings-section-help {
-  font-size: 11px;
-  color: var(--text-3);
-  margin: 0 0 12px 0;
-}
 .settings-empty {
   font-size: 12px;
   color: var(--text-3);

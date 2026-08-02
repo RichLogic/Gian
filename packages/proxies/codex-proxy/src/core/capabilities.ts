@@ -60,6 +60,13 @@ export function buildCapabilitiesPayload(models: unknown[]) {
   return {
     protocolVersion: '0.1.0',
     models: normalizedModels,
+    modes: [
+      { id: 'plan', label: 'Plan', description: 'Explore and plan without making changes.', isDefault: false },
+      { id: 'ask', label: 'Ask', description: 'Ask before risky actions.', isDefault: true },
+      { id: 'auto', label: 'Auto', description: 'Let Codex review actions automatically.', isDefault: false },
+      { id: 'custom', label: 'Custom', description: 'Use permissions from config.toml.', isDefault: false },
+      { id: 'full-access', label: 'Full access', description: 'Run without sandbox or approval prompts.', isDefault: false },
+    ],
     slashCommands: [],
   };
 }

@@ -129,7 +129,7 @@ export function registerWorkingTreeRoutes(
   }
 
   // Distinct file paths the agent edited in the session's most recent turn,
-  // pulled from `file_change` events. Powers the `lastturn` scope. Empty for a
+  // pulled from file-change display projections. Powers the `lastturn` scope. Empty for a
   // non-session (`ws:`) working tree or a session with no recorded turns.
   function lastTurnPaths(sessionId: string | null): Set<string> {
     const paths = new Set<string>();
@@ -139,12 +139,21 @@ export function registerWorkingTreeRoutes(
       .get(sessionId) as { id: string } | undefined;
     if (!turn) return paths;
     const rows = db
-      .prepare("SELECT data FROM events WHERE turn_id = ? AND type = 'file_change'")
+      .prepare(
+        `SELECT data FROM events
+         WHERE turn_id = ?
+           AND (type = 'file_change'
+                OR (json_valid(data) AND json_extract(data, '$.display.type') = 'activity.file-change'))`,
+      )
       .all(turn.id) as Array<{ data: string }>;
     for (const r of rows) {
       try {
-        const parsed = JSON.parse(r.data) as { files?: Array<{ path?: string }> };
-        for (const f of parsed.files ?? []) if (f.path) paths.add(f.path);
+        const parsed = JSON.parse(r.data) as {
+          files?: Array<{ path?: string }>;
+          display?: { data?: { files?: Array<{ path?: string }> } };
+        };
+        const files = parsed.display?.data?.files ?? parsed.files ?? [];
+        for (const f of files) if (f.path) paths.add(f.path);
       } catch {
         // malformed event payload — skip
       }
@@ -492,7 +501,10 @@ export function registerWorkingTreeRoutes(
     const todayIso = todayStart.toISOString().slice(0, 19).replace('T', ' ');
     const row = db
       .prepare(
-        `SELECT COUNT(*) as n FROM events WHERE type = 'file_change' AND data LIKE ? AND created_at >= ?`,
+        `SELECT COUNT(*) as n FROM events
+         WHERE (type = 'file_change'
+                OR (json_valid(data) AND json_extract(data, '$.display.type') = 'activity.file-change'))
+           AND data LIKE ? AND created_at >= ?`,
       )
       .get(`%"path":"${rel}"%`, todayIso) as { n: number };
 

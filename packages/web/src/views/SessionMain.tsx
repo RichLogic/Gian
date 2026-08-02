@@ -21,6 +21,9 @@ export interface SessionMainProps {
   session: Session;
   workspace: Workspace | null;
   items: TranscriptItem[];
+  /** False while the session's history is still loading — suppresses the
+   *  transcript empty state so switching sessions doesn't flash it. */
+  hydrated?: boolean;
   pending: boolean;
   queue: QueueEntry[];
   planText?: string;
@@ -70,6 +73,7 @@ export function SessionMain({
   session,
   workspace,
   items,
+  hydrated,
   pending,
   queue,
   planText,
@@ -152,6 +156,7 @@ export function SessionMain({
       <div className="main-scroll">
         <Transcript
           items={items}
+          hydrated={hydrated}
           pending={pending || session.status === 'running' || session.status === 'pending'}
           onApprove={onApprove}
         />

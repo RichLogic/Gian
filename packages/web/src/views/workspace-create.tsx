@@ -20,6 +20,10 @@ const EMPTY_FORM: NewWorkspaceFormState = {
   nameTouched: false,
 };
 
+export function managedWorkspaceDirectory(projectRoot: string): string {
+  return `${projectRoot.trim().replace(/\/$/, '') || '~/Coding'}/workspaces`;
+}
+
 export function useNewWorkspace(onChange: () => void) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<NewWorkspaceFormState>(EMPTY_FORM);

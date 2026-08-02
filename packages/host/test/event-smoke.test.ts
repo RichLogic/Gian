@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import type { ApprovalRequestedData, ProxyNotification, ServerToClientMessage } from '@gian/shared';
 import { ApprovalManager } from '../src/approval/index.js';
-import { normalizeCcNotification } from '../src/event/normalize-cc.js';
-import { normalizeCodexNotification } from '../src/event/normalize-codex.js';
+import { projectCcNotification } from '../src/event/normalize-cc.js';
+import { projectCodexNotification } from '../src/event/normalize-codex.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 
 class CapturingBroadcaster {
@@ -19,12 +19,12 @@ class CapturingBroadcaster {
   }
 }
 
-function cc(raw: ProxyNotification): ReturnType<typeof normalizeCcNotification> {
-  return normalizeCcNotification(raw, 'session-claude', 1);
+function cc(raw: ProxyNotification): ReturnType<typeof projectCcNotification> {
+  return projectCcNotification(raw, 'session-claude', 1);
 }
 
-function codex(raw: ProxyNotification): ReturnType<typeof normalizeCodexNotification> {
-  return normalizeCodexNotification(raw, 'session-codex', 1);
+function codex(raw: ProxyNotification): ReturnType<typeof projectCodexNotification> {
+  return projectCodexNotification(raw, 'session-codex', 1);
 }
 
 function tick() {
@@ -59,30 +59,30 @@ test('event smoke · Claude -p maps text, tools, approvals, auto notices, and li
   ];
 
   assert.deepEqual(events.map(e => e.type), [
-    'assistant_text',
-    'command_execution',
-    'file_read',
-    'file_search',
-    'web_search',
-    'agent_spawn',
-    'approval_requested',
-    'approval_requested',
-    'approval_requested',
-    'approval_resolved',
-    'auto_classifier_denied',
-    'auto_circuit_breaker',
-    'turn_completed',
-    'session_error',
+    'message',
+    'activity.command',
+    'activity.file-read',
+    'activity.file-search',
+    'activity.web-search',
+    'agent',
+    'interaction.approval',
+    'interaction.question',
+    'interaction.approval',
+    'interaction.resolved',
+    'activity.classifier-denied',
+    'activity.circuit-breaker',
+    'state.turn-completed',
+    'state.error',
   ]);
 
   const question = events.find(e => e.call_id === 'appr-question');
-  assert.equal(question?.type, 'approval_requested');
+  assert.equal(question?.type, 'interaction.question');
   const questionData = question?.data as ApprovalRequestedData | undefined;
   assert.equal(questionData?.category, 'question');
   assert.equal(questionData?.questions?.[0]?.question, 'Pick a branch');
 
   const plan = events.find(e => e.call_id === 'appr-plan');
-  assert.equal(plan?.type, 'approval_requested');
+  assert.equal(plan?.type, 'interaction.approval');
   const planData = plan?.data as ApprovalRequestedData | undefined;
   assert.equal(planData?.category, 'exit_plan_mode');
   assert.deepEqual(planData?.planActions, ['accept_with_auto', 'accept_with_ask', 'keep_planning']);
@@ -118,7 +118,7 @@ test('Claude native task notifications update the original Agent transcript anch
     },
   });
 
-  assert.equal(started[0]?.type, 'agent_spawn');
+  assert.equal(started[0]?.type, 'agent');
   assert.equal(started[0]?.call_id, 'tool-agent-1');
   assert.equal((started[0]?.data as { agentId?: unknown }).agentId, 'native-task-1');
   assert.equal(completed[0]?.call_id, 'tool-agent-1');
@@ -142,7 +142,7 @@ test('Claude-mix plan-file Write also projects the latest plan display object', 
     },
   });
 
-  assert.deepEqual(events.map(item => item.type), ['file_change', 'plan_update']);
+  assert.deepEqual(events.map(item => item.type), ['activity.file-change', 'plan']);
   assert.equal((events[1]?.data as { text?: unknown }).text, '## Plan\n1. Inspect\n2. Edit');
 });
 
@@ -176,18 +176,18 @@ test('event smoke · Codex maps live events and preserves approval reason/catego
   ];
 
   assert.deepEqual(events.map(e => e.type), [
-    'assistant_text',
-    'command_execution',
-    'file_change',
-    'approval_requested',
-    'approval_requested',
-    'approval_resolved',
-    'turn_completed',
-    'session_error',
+    'message',
+    'activity.command',
+    'activity.file-change',
+    'interaction.approval',
+    'interaction.approval',
+    'interaction.resolved',
+    'state.turn-completed',
+    'state.error',
   ]);
 
   const commandApproval = events.find(e => e.call_id === 'codex-cmd');
-  assert.equal(commandApproval?.type, 'approval_requested');
+  assert.equal(commandApproval?.type, 'interaction.approval');
   const commandApprovalData = commandApproval?.data as ApprovalRequestedData | undefined;
   assert.equal(commandApprovalData?.category, 'command');
   assert.equal(commandApprovalData?.risk, 'medium');
@@ -195,7 +195,7 @@ test('event smoke · Codex maps live events and preserves approval reason/catego
   assert.equal(commandApprovalData?.subject, 'npm test');
 
   const networkApproval = events.find(e => e.call_id === 'codex-net');
-  assert.equal(networkApproval?.type, 'approval_requested');
+  assert.equal(networkApproval?.type, 'interaction.approval');
   const networkApprovalData = networkApproval?.data as ApprovalRequestedData | undefined;
   assert.equal(networkApprovalData?.category, 'network');
   assert.equal(networkApprovalData?.risk, 'low');

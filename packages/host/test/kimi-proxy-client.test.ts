@@ -22,6 +22,7 @@ test('Kimi host normalizes capabilities, native config, slash and routing', asyn
       resume: true,
       close: false,
     });
+    assert.deepEqual(capabilities.modes, []);
 
     const facade = new KimiProxySessionClient(host);
     const notifications: string[] = [];

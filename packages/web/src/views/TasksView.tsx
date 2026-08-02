@@ -212,7 +212,7 @@ export function TasksView({
   /** Create a Subtask from the manual create form. */
   onCreateSubtask: (taskId: string, draft: NewSubtaskDraft) => void;
 }) {
-  const rail = useResizableWidth('tasks.rail.w', 300, 220, 480, 'left');
+  const rail = useResizableWidth('rail.w', 272, 200, 480, 'left');
 
   // The top-left "Gian" brand button broadcasts `gian.toggle-rail` (Topbar);
   // each view collapses its own rail. Sessions (CodingView) already listens —
@@ -635,7 +635,7 @@ function ManagerRow({
 
 /**
  * Subtask row (spec 2026-06-28 §B/§D). Renders as a plain `.session-row` —
- * identical to a Projects session row by construction (no indent, no guide
+ * identical to a Sessions session row by construction (no indent, no guide
  * line, same padding/weight/active styling from components.css). Completion
  * (`completed_at`) is a USER flag, separate from turn `status`, set from the
  * breadcrumb session menu; a completed subtask renders struck-through +

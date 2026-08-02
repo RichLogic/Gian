@@ -6,14 +6,10 @@ import type {
   NativeConfigOption,
   ProxyNotification,
   Session,
-  UnifiedEvent,
+  ChatEvent,
 } from '@gian/shared';
 import type { ApprovalManager } from '../approval/index.js';
-import {
-  normalizeCcNotification,
-  normalizeCodexNotification,
-  normalizeKimiNotification,
-} from '../event/index.js';
+import { projectNotification } from '../event/index.js';
 import { locateNativeJsonl } from '../native/locate-jsonl.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import {
@@ -46,7 +42,7 @@ interface EventCoordinatorCallbacks {
 }
 
 export class SessionEventCoordinator {
-  private eventSubscribers: Array<(event: UnifiedEvent) => void> = [];
+  private eventSubscribers: Array<(event: ChatEvent) => void> = [];
   private conversationUsageTurns = new Map<string, Set<string>>();
 
   constructor(
@@ -62,7 +58,7 @@ export class SessionEventCoordinator {
     private callbacks: EventCoordinatorCallbacks,
   ) {}
 
-  onEvent(subscriber: (event: UnifiedEvent) => void): () => void {
+  onEvent(subscriber: (event: ChatEvent) => void): () => void {
     this.eventSubscribers.push(subscriber);
     return () => {
       const index = this.eventSubscribers.indexOf(subscriber);
@@ -172,7 +168,8 @@ export class SessionEventCoordinator {
 
       flushUserMessage();
       const activeTurnId = ensureTurn();
-      const normalized = normalizeKimiNotification(
+      const projected = projectNotification(
+        'kimi',
         {
           method: 'acp.sessionUpdate',
           params: {
@@ -184,12 +181,17 @@ export class SessionEventCoordinator {
         sessionId,
         turnNumber,
       );
-      for (const event of normalized) {
+      for (const event of projected) {
         insert(
           activeTurnId,
           event.call_id,
-          event.type,
-          event.data as unknown as Record<string, unknown>,
+          event.event,
+          {
+            __gian_event: 2,
+            provider: event.provider,
+            raw: event.data,
+            ...(event.display ? { display: event.display } : {}),
+          },
         );
       }
     }
@@ -333,6 +335,9 @@ export class SessionEventCoordinator {
       return;
     }
 
+    // Provider debug chatter is intentionally neither history nor UI state.
+    if (notification.method === 'debug') return;
+
     if (notification.method === 'acp.sessionUpdate') {
       const payload = notification.params?.data as { update?: unknown } | undefined;
       const usage = parseAcpUsageUpdate(payload);
@@ -361,20 +366,13 @@ export class SessionEventCoordinator {
       }
     }
 
-    // Normalize/dispatch BEFORE handleLifecycle. handleLifecycle calls
+    // Project/dispatch BEFORE handleLifecycle. handleLifecycle calls
     // completeTurn on turn.completed/failed, which deletes the activeTurns
-    // map entry; if that runs first, dispatchUnified would persist the event
+    // map entry; if that runs first, dispatchChatEvent would persist the event
     // with a fresh random turn_id that doesn't exist in `turns` and trip the
     // FK constraint.
-    const unified = this.runNormalizer(sessionId, notification);
-    for (const e of unified) this.dispatchUnified(e);
-    if (unified.length === 0 && notification.method !== 'debug' && notification.method !== 'token_usage.updated') {
-      // Anything the normalizer doesn't recognize is a signal that a new
-      // proxy event was added without a unified mapping. Log loudly so we
-      // notice — but don't persist or broadcast the raw shape, which would
-      // leak proxy-specific names through to the WS/DB layer.
-      console.warn(`[session] no unified mapping for proxy event: ${notification.method}`);
-    }
+    const events = this.runProjector(sessionId, notification);
+    for (const event of events) this.dispatchChatEvent(event);
 
     this.handleLifecycle(sessionId, notification);
   }
@@ -452,7 +450,7 @@ export class SessionEventCoordinator {
     }
   }
 
-  /** Pre-normalization hook for turn lifecycle bookkeeping (status + queue). */
+  /** Provider lifecycle hook for turn bookkeeping (status + queue). */
   private handleLifecycle(sessionId: string, n: ProxyNotification): void {
     if (n.method === 'turn.completed') {
       // Codex carries the authoritative final text on the notification; Claude
@@ -474,40 +472,42 @@ export class SessionEventCoordinator {
     }
   }
 
-  private runNormalizer(
+  private runProjector(
     sessionId: string,
     notification: ProxyNotification,
-  ): UnifiedEvent[] {
+  ): ChatEvent[] {
     const session = this.sessions.get(sessionId);
     const turn = this.turns.get(sessionId)?.number ?? 0;
-    if (session.executor === 'codex') {
-      return normalizeCodexNotification(notification, sessionId, turn);
-    }
-    if (session.executor === 'kimi') {
-      return normalizeKimiNotification(notification, sessionId, turn);
-    }
-    return normalizeCcNotification(notification, sessionId, turn);
+    return projectNotification(session.executor, notification, sessionId, turn);
   }
 
-  /** Persist + broadcast a UnifiedEvent. */
-  private dispatchUnified(e: UnifiedEvent): void {
+  /** Persist the native event and broadcast its optional UI projection. */
+  private dispatchChatEvent(e: ChatEvent): void {
+    const storedData = {
+      __gian_event: 2,
+      provider: e.provider,
+      raw: e.data,
+      ...(e.display ? { display: e.display } : {}),
+    };
     this.history.appendEvent(
       e.session_id,
       this.activeTurnId(e.session_id),
       e.call_id,
-      e.type,
-      e.data as unknown as Record<string, unknown>,
+      e.event,
+      storedData,
     );
     this.broadcaster.broadcast({
       type: 'event',
       session_id: e.session_id,
       turn: e.turn,
       call_id: e.call_id,
-      event: e.type,
+      event: e.event,
       ts: e.ts,
-      data: e.data as unknown as Record<string, unknown>,
+      data: e.data,
+      provider: e.provider,
+      ...(e.display ? { display: e.display } : {}),
     });
-    this.afterUnified(e);
+    this.afterChatEvent(e);
     for (const fn of this.eventSubscribers) {
       try { fn(e); } catch {}
     }
@@ -518,9 +518,9 @@ export class SessionEventCoordinator {
    * specific event types — used by Approval (Track C) to register pending
    * approvals into the global list.
    */
-  private afterUnified(e: UnifiedEvent): void {
-    if (e.type === 'approval_requested') {
-      const d = e.data as import('@gian/shared').ApprovalRequestedData;
+  private afterChatEvent(e: ChatEvent): void {
+    if (e.display?.type === 'interaction.approval' || e.display?.type === 'interaction.question') {
+      const d = e.display.data as import('@gian/shared').ApprovalRequestedData;
       void this.approvals.request({
         sessionId: e.session_id,
         turnId: this.activeTurnId(e.session_id),
@@ -534,8 +534,8 @@ export class SessionEventCoordinator {
         console.error('[approval] request failed', err);
       });
     }
-    if (e.type === 'command_execution') {
-      const d = e.data as import('@gian/shared').CommandExecutionData;
+    if (e.display?.type === 'activity.command') {
+      const d = e.display.data as import('@gian/shared').CommandExecutionData;
       this.maybeDetectExternalWorktree(e.session_id, d.command);
     }
   }

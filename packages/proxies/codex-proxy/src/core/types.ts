@@ -143,6 +143,7 @@ export interface ModelCapabilities {
 export interface CapabilitiesPayload {
   protocolVersion: string;
   models: ModelCapabilities[];
+  modes: import('@gian/shared').ProxyModeCapabilities[];
   slashCommands: import('@gian/shared').SlashCommand[];
 }
 

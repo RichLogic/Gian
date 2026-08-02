@@ -326,6 +326,13 @@ test('capabilities preserve new Codex effort ids from model/list', async () => {
     const capabilities = await harness.service.listCapabilities();
     assert.deepEqual(capabilities.models[0]?.supportedThinking, ['medium', 'max', 'ultra']);
     assert.equal(capabilities.models[0]?.defaultThinking, 'ultra');
+    assert.deepEqual(capabilities.modes?.map(mode => mode.id), [
+      'plan',
+      'ask',
+      'auto',
+      'custom',
+      'full-access',
+    ]);
   } finally {
     await harness.cleanup();
   }

@@ -1,4 +1,17 @@
-import type { EventEnvelope, Executor, Session, SystemConfig, Task, Workspace } from '@gian/shared';
+import type {
+  AgentInstallResult,
+  AgentInstallStatus,
+  AgentProxyDefaults,
+  EventEnvelope,
+  Executor,
+  Session,
+  SystemConfig,
+  Task,
+  Workspace,
+  OnboardingState,
+  OnboardingWorkspaceResult,
+  ProxyCapabilities,
+} from '@gian/shared';
 
 export interface TreeEntry {
   name: string;
@@ -118,6 +131,89 @@ export async function loadProxyModels(executor: 'claude' | 'codex'): Promise<Arr
   return body.models ?? [];
 }
 
+export async function loadProxyCapabilities(executor: Executor): Promise<ProxyCapabilities> {
+  const response = await fetch(`/api/proxy/${executor}/capabilities`);
+  return agentResponse<ProxyCapabilities>(response);
+}
+
+async function agentResponse<T>(response: Response): Promise<T> {
+  const body = await response.json() as T & { error?: string };
+  if (!response.ok) throw new Error(body.error ?? `Agent request failed (${response.status})`);
+  return body;
+}
+
+export async function loadAgents(): Promise<AgentInstallStatus[]> {
+  const response = await fetch('/api/agents');
+  const body = await agentResponse<{ agents: AgentInstallStatus[] }>(response);
+  return body.agents;
+}
+
+export async function setAgentCliPath(
+  executor: Executor,
+  path: string | null,
+): Promise<AgentInstallStatus> {
+  const response = await fetch(`/api/agents/${executor}/cli-path`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  const body = await agentResponse<{ agent: AgentInstallStatus }>(response);
+  return body.agent;
+}
+
+export async function setAgentProxyDefaults(
+  executor: Executor,
+  defaults: Partial<AgentProxyDefaults>,
+): Promise<AgentInstallStatus> {
+  const response = await fetch(`/api/agents/${executor}/proxy-defaults`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(defaults),
+  });
+  const body = await agentResponse<{ agent: AgentInstallStatus }>(response);
+  return body.agent;
+}
+
+export async function installAgentCli(executor: Executor): Promise<AgentInstallResult> {
+  const response = await fetch(`/api/agents/${executor}/install-cli`, {
+    method: 'POST',
+  });
+  return agentResponse<AgentInstallResult>(response);
+}
+
+export async function installAgentProxy(executor: Executor): Promise<AgentInstallResult> {
+  const response = await fetch(`/api/agents/${executor}/install-proxy`, {
+    method: 'POST',
+  });
+  return agentResponse<AgentInstallResult>(response);
+}
+
+export async function loadOnboarding(): Promise<OnboardingState> {
+  const response = await fetch('/api/onboarding');
+  return agentResponse<OnboardingState>(response);
+}
+
+export async function saveOnboardingWorkspace(
+  path: string,
+): Promise<OnboardingWorkspaceResult> {
+  const response = await fetch('/api/onboarding/workspace', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  return agentResponse<OnboardingWorkspaceResult>(response);
+}
+
+export async function completeOnboarding(): Promise<OnboardingState> {
+  const response = await fetch('/api/onboarding/complete', { method: 'POST' });
+  return agentResponse<OnboardingState>(response);
+}
+
+export async function resetOnboarding(): Promise<void> {
+  const response = await fetch('/api/onboarding/reset', { method: 'POST' });
+  await agentResponse<{ ok: boolean }>(response);
+}
+
 export async function loadSlashCommands(
   executor: 'claude' | 'codex',
   workspaceId?: string,
@@ -170,6 +266,7 @@ export async function loadDiff(
 export interface WorkspacePatch {
   name?: string;
   hidden?: boolean;
+  pinned?: boolean;
 }
 
 export interface CreateWorkspaceResult {
@@ -314,25 +411,6 @@ export async function ensureManagerSession(taskId: string): Promise<Session | nu
   }
 }
 
-/** PRD-v3 P3 A1 — send a message to the Task's Manager. The reply streams back
- *  as transcript events on the returned Manager session id (via WS). */
-export async function sendManagerMessage(
-  taskId: string,
-  text: string,
-): Promise<{ session_id: string } | null> {
-  try {
-    const res = await fetch(`/api/tasks/${taskId}/manager/message`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as { session_id: string };
-  } catch {
-    return null;
-  }
-}
-
 /** PRD-v3 P3 A1 — create a Subtask (session with type='subtask' + task_id)
  *  under a Task. Returns the created session or null. The host broadcasts
  *  `session:created` so the global session list updates. */
@@ -414,75 +492,6 @@ export async function saveSettings(partial: Partial<SystemConfig>): Promise<Syst
   return (await res.json()) as SystemConfig;
 }
 
-export async function loadBots(): Promise<import('@gian/shared').Bot[]> {
-  try {
-    const res = await fetch('/api/bots');
-    if (!res.ok) return [];
-    return (await res.json()) as import('@gian/shared').Bot[];
-  } catch {
-    return [];
-  }
-}
-
-export async function createBot(
-  body: {
-    label: string;
-    platform: import('@gian/shared').IMPlatform;
-    workspace_id?: string | null;
-    mode: import('@gian/shared').BotMode;
-    allowed_user_id?: string | null;
-    extra: import('@gian/shared').BotExtra;
-  },
-): Promise<import('@gian/shared').Bot | null> {
-  try {
-    const res = await fetch('/api/bots', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as import('@gian/shared').Bot;
-  } catch {
-    return null;
-  }
-}
-
-export async function updateBot(
-  id: string,
-  patch: Partial<import('@gian/shared').Bot>,
-): Promise<import('@gian/shared').Bot | null> {
-  try {
-    const res = await fetch(`/api/bots/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as import('@gian/shared').Bot;
-  } catch {
-    return null;
-  }
-}
-
-export async function deleteBot(id: string): Promise<boolean> {
-  try {
-    const res = await fetch(`/api/bots/${id}`, { method: 'DELETE' });
-    return res.ok || res.status === 204;
-  } catch {
-    return false;
-  }
-}
-
-export async function toggleBot(id: string): Promise<import('@gian/shared').Bot | null> {
-  try {
-    const res = await fetch(`/api/bots/${id}/toggle`, { method: 'POST' });
-    if (!res.ok) return null;
-    return (await res.json()) as import('@gian/shared').Bot;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Fetch the WS auth token for the current login. The login cookie is
  * httpOnly so JS cannot read it directly; this endpoint echoes it back in
@@ -522,39 +531,6 @@ export async function login(username: string, password: string): Promise<{ user:
 
 export async function logout(): Promise<void> {
   await fetch('/api/auth/logout', { method: 'POST' });
-}
-
-export async function changePassword(
-  current_password: string,
-  new_password: string,
-): Promise<{ ok: true } | { error: string }> {
-  try {
-    const res = await fetch('/api/auth/password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ current_password, new_password }),
-    });
-    const body = (await res.json()) as { ok?: boolean; error?: string };
-    if (!res.ok) return { error: body.error ?? `${res.status}` };
-    return { ok: true };
-  } catch (err) {
-    return { error: String(err) };
-  }
-}
-
-export interface FileMeta {
-  uncommitted: boolean;
-  edit_count_today: number;
-}
-
-export async function loadFileMeta(workingTreeId: string, path: string): Promise<FileMeta | null> {
-  try {
-    const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/file_meta?path=${encodeURIComponent(path)}`);
-    if (!res.ok) return null;
-    return (await res.json()) as FileMeta;
-  } catch {
-    return null;
-  }
 }
 
 // ---------------------------------------------------------------------------

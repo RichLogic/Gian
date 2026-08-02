@@ -3,16 +3,16 @@ import type {
   NativeApprovalOption,
   ProxyNotification,
   ToolExecutionData,
-  UnifiedEvent,
+  DisplayEvent,
 } from '@gian/shared';
 
-function event<T extends UnifiedEvent['type']>(
+function event<T extends DisplayEvent['type']>(
   sessionId: string,
   turn: number,
   callId: string,
   type: T,
-  data: UnifiedEvent<T>['data'],
-): UnifiedEvent {
+  data: DisplayEvent<T>['data'],
+): DisplayEvent {
   return {
     session_id: sessionId,
     turn,
@@ -20,7 +20,7 @@ function event<T extends UnifiedEvent['type']>(
     ts: Date.now(),
     type,
     data,
-  } as UnifiedEvent;
+  } as DisplayEvent;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -136,11 +136,11 @@ function kimiAgentDescription(input: Record<string, unknown>, title: string): st
   return title || 'Agent';
 }
 
-function normalizeTool(
+function projectTool(
   update: Record<string, unknown>,
   sessionId: string,
   turn: number,
-): UnifiedEvent[] {
+): DisplayEvent[] {
   const itemId = String(update.toolCallId ?? crypto.randomUUID());
   const kind = typeof update.kind === 'string' ? update.kind : 'other';
   const title = typeof update.title === 'string' ? update.title : 'Tool';
@@ -162,7 +162,7 @@ function normalizeTool(
     const agentStatus =
       child.status
       ?? (status === 'error' ? 'error' : status === 'success' ? 'done' : 'running');
-    return [event(sessionId, turn, itemId, 'agent_spawn', {
+    return [event(sessionId, turn, itemId, 'agent', {
       agentId:
         child.agentId
         ?? (typeof input.agent_id === 'string' ? input.agent_id : undefined)
@@ -185,7 +185,7 @@ function normalizeTool(
   }
 
   if (kind === 'execute') {
-    return [event(sessionId, turn, itemId, 'command_execution', {
+    return [event(sessionId, turn, itemId, 'activity.command', {
       command: typeof input.command === 'string' ? input.command : title,
       status: status === 'running' || status === 'pending'
         ? 'running'
@@ -195,19 +195,19 @@ function normalizeTool(
     })];
   }
   if (kind === 'read' && locations[0]) {
-    return [event(sessionId, turn, itemId, 'file_read', {
+    return [event(sessionId, turn, itemId, 'activity.file-read', {
       path: locations[0].path,
       ...(locations[0].line ? { startLine: locations[0].line } : {}),
     })];
   }
   if (kind === 'search') {
-    return [event(sessionId, turn, itemId, 'file_search', {
+    return [event(sessionId, turn, itemId, 'activity.file-search', {
       pattern: String(input.pattern ?? input.query ?? title),
       kind: typeof input.glob === 'string' ? 'glob' : 'grep',
     })];
   }
   if (kind === 'fetch') {
-    return [event(sessionId, turn, itemId, 'web_search', {
+    return [event(sessionId, turn, itemId, 'activity.web-search', {
       query: String(input.query ?? input.url ?? title),
     })];
   }
@@ -216,10 +216,10 @@ function normalizeTool(
       path: location.path,
       kind: kind === 'delete' ? 'delete' : 'update',
     }));
-    return [event(sessionId, turn, itemId, 'file_change', { files })];
+    return [event(sessionId, turn, itemId, 'activity.file-change', { files })];
   }
 
-  return [event(sessionId, turn, itemId, 'tool_execution', {
+  return [event(sessionId, turn, itemId, 'activity.tool', {
     itemId,
     title,
     kind,
@@ -230,11 +230,11 @@ function normalizeTool(
   })];
 }
 
-export function normalizeKimiNotification(
+export function projectKimiNotification(
   raw: ProxyNotification,
   sessionId: string,
   turn: number,
-): UnifiedEvent[] {
+): DisplayEvent[] {
   const data = record(raw.params?.data);
   if (raw.method === 'acp.sessionUpdate') {
     const update = record(data.update);
@@ -243,7 +243,7 @@ export function normalizeKimiNotification(
       const text = contentText(update.content);
       if (!text) return [];
       const itemId = String(update._meta && record(update._meta).itemId || raw.params.turnId || 'kimi-message');
-      return [event(sessionId, turn, itemId, 'assistant_text', {
+      return [event(sessionId, turn, itemId, 'message', {
         text,
         delta: true,
         itemId,
@@ -253,7 +253,7 @@ export function normalizeKimiNotification(
       const text = contentText(update.content);
       if (!text) return [];
       const itemId = String(raw.params.turnId ?? 'kimi-thought');
-      return [event(sessionId, turn, itemId, 'reasoning', {
+      return [event(sessionId, turn, itemId, 'activity.reasoning', {
         text,
         delta: true,
         itemId,
@@ -261,13 +261,13 @@ export function normalizeKimiNotification(
       })];
     }
     if (kind === 'plan' || kind === 'plan_update') {
-      return [event(sessionId, turn, 'kimi-plan', 'plan_update', {
+      return [event(sessionId, turn, 'kimi-plan', 'plan', {
         text: planText(update),
         delta: kind === 'plan_update',
       })];
     }
     if (kind === 'tool_call' || kind === 'tool_call_update') {
-      return normalizeTool(update, sessionId, turn);
+      return projectTool(update, sessionId, turn);
     }
     return [];
   }
@@ -281,7 +281,7 @@ export function normalizeKimiNotification(
     const toolTitle = String(toolCall.title ?? data.title ?? '');
     const isPlanApproval = toolTitle === 'ExitPlanMode';
     const plan = String(input.plan ?? input.content ?? '').trim();
-    return [event(sessionId, turn, approvalId, 'approval_requested', {
+    return [event(sessionId, turn, approvalId, 'interaction.approval', {
       approvalId,
       category: isPlanApproval ? 'exit_plan_mode' : 'other',
       risk: data.severity === 'high' ? 'high' : data.severity === 'low' ? 'low' : 'medium',
@@ -295,7 +295,7 @@ export function normalizeKimiNotification(
 
   if (raw.method === 'approval.resolved') {
     const approvalId = String(data.approvalId ?? '');
-    return [event(sessionId, turn, approvalId || crypto.randomUUID(), 'approval_resolved', {
+    return [event(sessionId, turn, approvalId || crypto.randomUUID(), 'interaction.resolved', {
       approvalId,
       decision: data.cancelled ? 'decline' : 'allow_once',
       auto: false,
@@ -305,14 +305,14 @@ export function normalizeKimiNotification(
 
   if (raw.method === 'turn.started') {
     const turnId = String(data.turnId ?? raw.params.turnId ?? crypto.randomUUID());
-    return [event(sessionId, turn, turnId, 'turn_started', { turnId })];
+    return [event(sessionId, turn, turnId, 'state.turn-started', { turnId })];
   }
   if (raw.method === 'turn.completed') {
     const turnId = String(data.turnId ?? raw.params.turnId ?? crypto.randomUUID());
-    return [event(sessionId, turn, turnId, 'turn_completed', { turnId })];
+    return [event(sessionId, turn, turnId, 'state.turn-completed', { turnId })];
   }
   if (raw.method === 'turn.failed' || raw.method === 'runtime.error') {
-    return [event(sessionId, turn, String(raw.params.turnId ?? crypto.randomUUID()), 'session_error', {
+    return [event(sessionId, turn, String(raw.params.turnId ?? crypto.randomUUID()), 'state.error', {
       message: String(data.message ?? 'Kimi runtime failed.'),
       retryable: true,
       ...(data.code != null ? { code: String(data.code) } : {}),

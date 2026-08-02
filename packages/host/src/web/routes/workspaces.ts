@@ -69,7 +69,7 @@ export function registerWorkspaceRoutes(app: Hono, db: Db): void {
         return c.json({ error: `cannot adopt the workspace root itself (${root}) — pick a subdirectory or another path` }, 400);
       }
     } else {
-      path = resolve(root, body.name);
+      path = resolve(root, 'workspaces', body.name);
     }
 
     const existing = db
@@ -111,13 +111,18 @@ export function registerWorkspaceRoutes(app: Hono, db: Db): void {
     if ('hidden' in body && typeof body.hidden !== 'boolean') {
       return c.json({ error: 'hidden must be boolean' }, 400);
     }
+    if ('pinned' in body && typeof body.pinned !== 'boolean') {
+      return c.json({ error: 'pinned must be boolean' }, 400);
+    }
 
     const sets: string[] = [];
     const values: unknown[] = [];
-    for (const key of ['name', 'hidden'] as const) {
+    for (const key of ['name', 'hidden', 'pinned'] as const) {
       if (!(key in body)) continue;
       sets.push(`${key} = ?`);
-      values.push(key === 'hidden' ? (body.hidden ? 1 : 0) : body[key]);
+      values.push(
+        key === 'hidden' || key === 'pinned' ? (body[key] ? 1 : 0) : body[key],
+      );
     }
     if (sets.length === 0) return c.json({ error: 'no updatable fields' }, 400);
     sets.push("updated_at = datetime('now')");

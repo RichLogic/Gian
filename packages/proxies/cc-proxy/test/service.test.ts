@@ -422,6 +422,7 @@ test('capabilities discovery does not run claude -p unless explicitly opted in',
     assert.equal(caps.models[0]!.model, '');
     assert.equal(caps.models[0]!.isDefault, true);
     assert.deepEqual(caps.models.map(m => m.model), ['', 'opus', 'sonnet', 'haiku']);
+    assert.deepEqual(caps.modes.map(mode => mode.id), ['plan', 'ask', 'auto']);
     // Every entry carries the same billing-safe effort list parsed from --help.
     for (const m of caps.models) {
       assert.deepEqual(m.supportedEfforts, ['low', 'medium', 'max']);

@@ -9,6 +9,8 @@ import {
   isSessionCreateDispatchError,
   isTurnRunning,
   planCreatedSessionFirstMessage,
+  sortSessionsForRail,
+  sortWorkspacesForRail,
 } from '../src/session-routing.js';
 
 describe('session:create error correlation', () => {
@@ -211,5 +213,41 @@ describe('approval_resolved reducer behavior for question cards', () => {
     const after = applyEnvelope(answered, autoDecline, 'claude');
     expect((after[0] as ApprovalItem).status).toBe('approved-once');
     expect((after[0] as ApprovalItem).answeredWith).toBe('Rice');
+  });
+});
+
+describe('sortSessionsForRail: pinned first, then recent activity', () => {
+  function row(pinned_at: string | null, updated_at: string) {
+    return { pinned_at, updated_at };
+  }
+
+  it('pinned sessions sort above unpinned, most-recently-pinned first', () => {
+    const a = row(null, '2026-08-01T12:00:00Z');
+    const b = row('2026-08-01T10:00:00Z', '2026-07-01T00:00:00Z');
+    const c = row('2026-08-01T11:00:00Z', '2026-06-01T00:00:00Z');
+    expect(sortSessionsForRail([a, b, c])).toEqual([c, b, a]);
+  });
+
+  it('unpinned sessions keep updated_at DESC order', () => {
+    const a = row(null, '2026-08-01T10:00:00Z');
+    const b = row(null, '2026-08-01T12:00:00Z');
+    expect(sortSessionsForRail([a, b])).toEqual([b, a]);
+  });
+
+  it('does not mutate the input array', () => {
+    const input = [row(null, '2026-08-01T10:00:00Z'), row('2026-08-01T09:00:00Z', '2026-08-01T11:00:00Z')];
+    const copy = input.slice();
+    sortSessionsForRail(input);
+    expect(input).toEqual(copy);
+  });
+});
+
+describe('sortWorkspacesForRail: pinned groups first, stable otherwise', () => {
+  it('pinned workspaces lead, arrival order preserved within each group', () => {
+    const a = { id: 'a', pinned: 0 as const };
+    const b = { id: 'b', pinned: 1 as const };
+    const c = { id: 'c', pinned: 0 as const };
+    const d = { id: 'd', pinned: 1 as const };
+    expect(sortWorkspacesForRail([a, b, c, d]).map(w => w.id)).toEqual(['b', 'd', 'a', 'c']);
   });
 });

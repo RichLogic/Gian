@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../storage/db.js';
-import { normalizeCcNotification } from '../event/normalize-cc.js';
+import type { ChatDisplay, Executor } from '@gian/shared';
+import { projectCcNotification } from '../event/normalize-cc.js';
 
 /**
  * Replay a native (claude / codex) JSONL session into Gian's `turns` and
@@ -80,15 +81,18 @@ export function replayNativeJsonl(
       const turnCompletedAt = new Date(baseTime + i * 1000 + 500).toISOString();
       insertTurn.run(turnId, sessionId, turnNumber, turnStartedAt, turnCompletedAt);
 
-      // Bracket each turn with turn.started / turn.completed events so the
+      // Bracket each turn with Gian-owned lifecycle events so the
       // transcript renders the turn-divider line.
       insertEvent.run(
         randomUUID(),
         sessionId,
         turnId,
         randomUUID(),
-        'turn.started',
-        JSON.stringify({ turnId, status: 'running' }),
+        'gian.turn.started',
+        JSON.stringify(storedNativeEvent(executor, { turnId, status: 'running' }, {
+          type: 'state.turn-started',
+          data: { turnId },
+        })),
         turnStartedAt,
       );
       eventCount++;
@@ -114,8 +118,11 @@ export function replayNativeJsonl(
         sessionId,
         turnId,
         randomUUID(),
-        'turn.completed',
-        JSON.stringify({ turnId, status: 'completed' }),
+        'gian.turn.completed',
+        JSON.stringify(storedNativeEvent(executor, { turnId, status: 'completed' }, {
+          type: 'state.turn-completed',
+          data: { turnId },
+        })),
         turnCompletedAt,
       );
       eventCount++;
@@ -256,14 +263,18 @@ export function parseCcLine(line: string): ParsedLine | null {
 }
 
 function normalizeNativeCcEvent(method: string, data: Record<string, unknown>): NormalizedEvent[] {
-  return normalizeCcNotification(
+  return projectCcNotification(
     { method, params: { sessionId: 'native-jsonl', data } },
     'native-jsonl',
     0,
   ).map(ev => ({
     callId: ev.call_id,
-    type: ev.type,
-    data: ev.data as unknown as Record<string, unknown>,
+    type: method,
+    data: storedNativeEvent(
+      'claude',
+      data,
+      { type: ev.type, data: ev.data } as unknown as ChatDisplay,
+    ),
   }));
 }
 
@@ -365,10 +376,26 @@ export function parseCodexLine(line: string): ParsedLine | null {
       boundary: 'continue',
       events: [{
         callId: randomUUID(),
-        type: 'output.text',
-        data: { text, itemId: randomUUID() },
+        type: 'codex.event_msg.agent_message',
+        data: storedNativeEvent('codex', payload, {
+          type: 'message',
+          data: { text, delta: false, itemId: randomUUID() },
+        }),
       }],
     };
   }
   return null;
+}
+
+function storedNativeEvent(
+  provider: Executor,
+  raw: Record<string, unknown>,
+  display?: ChatDisplay,
+): Record<string, unknown> {
+  return {
+    __gian_event: 2,
+    provider,
+    raw,
+    ...(display ? { display } : {}),
+  };
 }

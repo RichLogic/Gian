@@ -1,7 +1,9 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { ProxyNotification } from '@gian/shared';
-import { normalizeKimiNotification } from '../src/event/normalize-kimi.js';
+import { projectKimiNotification } from '../src/event/normalize-kimi.js';
+
+const project = projectKimiNotification;
 
 function notification(method: string, data: unknown): ProxyNotification {
   return {
@@ -15,7 +17,7 @@ function notification(method: string, data: unknown): ProxyNotification {
 }
 
 test('Kimi text and thought chunks keep stable ACP item identities', () => {
-  const text = normalizeKimiNotification(
+  const text = project(
     notification('acp.sessionUpdate', {
       update: {
         sessionUpdate: 'agent_message_chunk',
@@ -26,7 +28,7 @@ test('Kimi text and thought chunks keep stable ACP item identities', () => {
     'gian-1',
     3,
   );
-  const thought = normalizeKimiNotification(
+  const thought = project(
     notification('acp.sessionUpdate', {
       update: {
         sessionUpdate: 'agent_thought_chunk',
@@ -37,19 +39,19 @@ test('Kimi text and thought chunks keep stable ACP item identities', () => {
     3,
   );
 
-  assert.equal(text[0]?.type, 'assistant_text');
+  assert.equal(text[0]?.type, 'message');
   assert.equal(text[0]?.call_id, 'message-7');
   assert.deepEqual(text[0]?.data, {
     text: 'hello',
     delta: true,
     itemId: 'message-7',
   });
-  assert.equal(thought[0]?.type, 'reasoning');
+  assert.equal(thought[0]?.type, 'activity.reasoning');
   assert.equal(thought[0]?.call_id, 'turn-native-1');
 });
 
 test('Kimi known and unknown tool kinds map without dropping updates', () => {
-  const command = normalizeKimiNotification(
+  const command = project(
     notification('acp.sessionUpdate', {
       update: {
         sessionUpdate: 'tool_call_update',
@@ -64,7 +66,7 @@ test('Kimi known and unknown tool kinds map without dropping updates', () => {
     'gian-1',
     1,
   );
-  const unknown = normalizeKimiNotification(
+  const unknown = project(
     notification('acp.sessionUpdate', {
       update: {
         sessionUpdate: 'tool_call',
@@ -79,7 +81,7 @@ test('Kimi known and unknown tool kinds map without dropping updates', () => {
     1,
   );
 
-  assert.equal(command[0]?.type, 'command_execution');
+  assert.equal(command[0]?.type, 'activity.command');
   assert.equal(command[0]?.call_id, 'tool-1');
   assert.deepEqual(command[0]?.data, {
     command: 'pnpm test',
@@ -87,7 +89,7 @@ test('Kimi known and unknown tool kinds map without dropping updates', () => {
     stdout: 'ok',
     itemId: 'tool-1',
   });
-  assert.equal(unknown[0]?.type, 'tool_execution');
+  assert.equal(unknown[0]?.type, 'activity.tool');
   assert.equal(unknown[0]?.call_id, 'tool-2');
   assert.deepEqual(unknown[0]?.data, {
     itemId: 'tool-2',
@@ -99,7 +101,7 @@ test('Kimi known and unknown tool kinds map without dropping updates', () => {
 });
 
 test('Kimi Agent tool lifecycle projects to one persistent agent run', () => {
-  const running = normalizeKimiNotification(
+  const running = project(
     notification('acp.sessionUpdate', {
       update: {
         sessionUpdate: 'tool_call',
@@ -117,7 +119,7 @@ test('Kimi Agent tool lifecycle projects to one persistent agent run', () => {
     'gian-1',
     1,
   );
-  const completed = normalizeKimiNotification(
+  const completed = project(
     notification('acp.sessionUpdate', {
       update: {
         sessionUpdate: 'tool_call_update',
@@ -136,17 +138,17 @@ test('Kimi Agent tool lifecycle projects to one persistent agent run', () => {
     1,
   );
 
-  assert.equal(running[0]?.type, 'agent_spawn');
+  assert.equal(running[0]?.type, 'agent');
   assert.equal(running[0]?.call_id, 'agent-tool-1');
   assert.equal((running[0]?.data as { status?: unknown }).status, 'running');
   assert.equal((running[0]?.data as { agentType?: unknown }).agentType, 'Explore');
-  assert.equal(completed[0]?.type, 'agent_spawn');
+  assert.equal(completed[0]?.type, 'agent');
   assert.equal((completed[0]?.data as { status?: unknown }).status, 'done');
   assert.equal((completed[0]?.data as { output?: unknown }).output, 'No reducer risks found.');
 });
 
 test('Kimi background Agent trusts child status and exposes native detail', () => {
-  const launched = normalizeKimiNotification(
+  const launched = project(
     notification('acp.sessionUpdate', {
       update: {
         sessionUpdate: 'tool_call_update',
@@ -185,7 +187,7 @@ test('Kimi background Agent trusts child status and exposes native detail', () =
     'Inspect the reducer, implement the fix, and run tests.',
   );
 
-  const finished = normalizeKimiNotification(
+  const finished = project(
     notification('acp.sessionUpdate', {
       update: {
         sessionUpdate: 'tool_call_update',
@@ -216,7 +218,7 @@ test('Kimi background Agent trusts child status and exposes native detail', () =
 });
 
 test('Kimi Agent preserves a child failure summary', () => {
-  const failed = normalizeKimiNotification(
+  const failed = project(
     notification('acp.sessionUpdate', {
       update: {
         sessionUpdate: 'tool_call_update',
@@ -243,7 +245,7 @@ test('Kimi Agent preserves a child failure summary', () => {
 });
 
 test('Kimi approval events preserve exact opaque option IDs', () => {
-  const requested = normalizeKimiNotification(
+  const requested = project(
     notification('approval.requested', {
       approvalId: 'approval-1',
       title: 'Run deployment',
@@ -256,7 +258,7 @@ test('Kimi approval events preserve exact opaque option IDs', () => {
     'gian-1',
     2,
   );
-  const resolved = normalizeKimiNotification(
+  const resolved = project(
     notification('approval.resolved', {
       approvalId: 'approval-1',
       nativeOptionId: 'kimi-once-42',
@@ -266,7 +268,7 @@ test('Kimi approval events preserve exact opaque option IDs', () => {
     2,
   );
 
-  assert.equal(requested[0]?.type, 'approval_requested');
+  assert.equal(requested[0]?.type, 'interaction.approval');
   assert.deepEqual(
     (requested[0]?.data as { nativeOptions?: unknown }).nativeOptions,
     [
@@ -274,7 +276,7 @@ test('Kimi approval events preserve exact opaque option IDs', () => {
       { optionId: 'kimi-no-42', label: 'Reject', kind: 'reject_once' },
     ],
   );
-  assert.equal(resolved[0]?.type, 'approval_resolved');
+  assert.equal(resolved[0]?.type, 'interaction.resolved');
   assert.equal(
     (resolved[0]?.data as { nativeOptionId?: unknown }).nativeOptionId,
     'kimi-once-42',
@@ -282,7 +284,7 @@ test('Kimi approval events preserve exact opaque option IDs', () => {
 });
 
 test('Kimi ExitPlanMode permission keeps native options and plan content', () => {
-  const requested = normalizeKimiNotification(
+  const requested = project(
     notification('approval.requested', {
       approvalId: 'approval-plan',
       title: 'Review implementation plan',
@@ -302,7 +304,7 @@ test('Kimi ExitPlanMode permission keeps native options and plan content', () =>
     2,
   );
 
-  assert.equal(requested[0]?.type, 'approval_requested');
+  assert.equal(requested[0]?.type, 'interaction.approval');
   assert.equal((requested[0]?.data as { category?: unknown }).category, 'exit_plan_mode');
   assert.equal(
     (requested[0]?.data as { subject?: unknown }).subject,
@@ -312,7 +314,7 @@ test('Kimi ExitPlanMode permission keeps native options and plan content', () =>
 
 test('Kimi process-wide runtime stop is an explicit transcript no-op', () => {
   assert.deepEqual(
-    normalizeKimiNotification(
+    project(
       notification('runtime.stopped', { expected: false, code: 1 }),
       'gian-1',
       0,

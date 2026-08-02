@@ -1,42 +1,45 @@
 # Gian Desktop
 
-The macOS desktop package is a hardened Electron shell over the existing Gian
-web UI. It does not embed or replace the Gian host:
+The production Electron package is the complete local Gian application. It
+ships the Gian Host and Web UI, starts the Host as a child process, waits for
+its health check, and stops it when the App quits. No LaunchAgent or separate
+Node.js installation is required.
 
-- development loads `http://127.0.0.1:5191` and checks the GianDev host on
-  `http://127.0.0.1:8991`;
-- a packaged app loads the production host-owned UI on
-  `http://127.0.0.1:8990`;
-- when the packaged production host is unavailable, the app may start the
-  existing `com.gian.host` LaunchAgent and then polls `/health`;
-- on macOS the web topbar shares the native titlebar row with the inset traffic
-  lights, while interactive controls remain clickable and the open area drags
-  the window;
-- quitting the desktop UI leaves the host and active agent sessions running.
+Production uses `http://127.0.0.1:8990` internally, but the Host requires a
+random per-launch credential injected by Electron and validates the Electron
+origin for WebSockets. Direct browser access is not a supported production
+surface.
+
+First-run initialization uses GitHub OAuth Device Flow. Register a GitHub
+OAuth App, enable Device Flow, and provide its public Client ID through
+`GIAN_GITHUB_CLIENT_ID`. Gian requests no OAuth scopes and stores the returned
+token encrypted with Electron/macOS secure storage. No client secret or Gian
+login server is required.
+
+Agent proxies are not baked into the App. Settings downloads the matching
+versioned proxy asset from the Gian GitHub Release, verifies its SHA-256 digest,
+and activates it under `~/.config/gian/plugins/`. Agent CLIs are detected from
+configured and common official paths or installed through vendor installers.
 
 ## Commands
 
 ```sh
-# Start the isolated 8991/5191 stack, wait for readiness, then open GianDev.app.
+# Start the isolated 8991/5191 development stack and open GianDev.
 pnpm dev
 
-# Start the same hot-reload stack without opening Electron.
-pnpm dev:web
+# Build an unpacked macOS Apple Silicon App.
+GIAN_GITHUB_CLIENT_ID=<your-oauth-client-id> pnpm desktop:pack
 
-# Start only the Electron shell after 8991/5191 are already running.
-pnpm desktop:dev
+# Build local DMG and ZIP artifacts.
+GIAN_GITHUB_CLIENT_ID=<your-oauth-client-id> pnpm desktop:dmg
 
-# Build an unpacked Gian.app under packages/desktop/release.
-pnpm desktop:pack
-
-# Build unsigned DMG and ZIP artifacts.
-pnpm desktop:dmg
+# Build the proxy assets uploaded alongside the App release.
+pnpm release:proxies
 ```
 
-The packaged shell expects the normal Gian host installation from
-`scripts/install.sh`. Signing, notarization, auto-update, and a combined
-host-plus-desktop installer are separate release work.
+The tag workflow builds, signs, notarizes, validates, checksums, and publishes
+the App and proxy assets. Local builds remain unsigned unless signing
+credentials are present.
 
-For isolated testing, `GIAN_DESKTOP_HOST_URL` and `GIAN_DESKTOP_WEB_URL` can
-override the two origins. Setting `GIAN_DESKTOP_DISABLE_HOST_MANAGEMENT=1`
-prevents launchd operations.
+For isolated development, `GIAN_DESKTOP_HOST_URL` and
+`GIAN_DESKTOP_WEB_URL` can override the two origins.

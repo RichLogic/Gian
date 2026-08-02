@@ -1,0 +1,307 @@
+.onboarding-shell {
+  min-height: 100vh;
+  padding: 42px 32px 32px;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  background:
+    radial-gradient(circle at 12% 8%, var(--accent-soft), transparent 32%),
+    var(--bg);
+}
+
+.onboarding-card {
+  width: min(760px, 100%);
+  border: 1px solid var(--hairline);
+  border-radius: 24px;
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+
+.onboarding-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 26px 30px 20px;
+}
+
+.onboarding-header .login-brand-mark {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.onboarding-header h1,
+.onboarding-panel h2,
+.onboarding-agent h3 {
+  margin: 0;
+  color: var(--text);
+}
+
+.onboarding-header h1 {
+  font: 650 var(--fz-24)/1.15 var(--font-sans);
+  letter-spacing: -0.02em;
+}
+
+.onboarding-header p,
+.onboarding-panel-heading p {
+  margin: 5px 0 0;
+  color: var(--text-3);
+  font: var(--fz-13)/1.5 var(--font-sans);
+}
+
+.onboarding-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0 30px 22px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.login-card .onboarding-steps {
+  padding: 0 0 4px;
+}
+
+.onboarding-steps li {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-3);
+  font: 550 var(--fz-11)/1.2 var(--font-sans);
+}
+
+.onboarding-steps li:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: 28px;
+  right: 2px;
+  top: 11px;
+  height: 1px;
+  background: var(--hairline);
+  z-index: 0;
+}
+
+.onboarding-step-dot {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  position: relative;
+  z-index: 1;
+  font: 650 var(--fz-11)/1 var(--font-mono);
+}
+
+.onboarding-steps li.active,
+.onboarding-steps li.done {
+  color: var(--text);
+}
+
+.onboarding-steps li.active .onboarding-step-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--text-inv);
+}
+
+.onboarding-steps li.done .onboarding-step-dot {
+  border-color: var(--accent);
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+.onboarding-panel {
+  padding: 28px 30px 26px;
+  border-top: 1px solid var(--hairline);
+  background: var(--surface-2);
+}
+
+.onboarding-panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.onboarding-panel h2 {
+  font: 650 var(--fz-20)/1.2 var(--font-sans);
+  letter-spacing: -0.015em;
+}
+
+.onboarding-eyebrow {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--ok);
+  font: 600 var(--fz-11)/1.2 var(--font-sans);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.onboarding-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+  font: 550 var(--fz-12)/1 var(--font-sans);
+}
+
+.onboarding-user img {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+}
+
+.onboarding-agent-list {
+  display: grid;
+  gap: 10px;
+}
+
+.onboarding-agent {
+  padding: 14px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-3);
+  background: var(--surface);
+}
+
+.onboarding-agent.ready {
+  border-color: color-mix(in oklch, var(--ok) 34%, var(--hairline));
+}
+
+.onboarding-agent-summary {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.onboarding-agent h3 {
+  font: 620 var(--fz-13)/1.25 var(--font-sans);
+}
+
+.onboarding-agent-summary p {
+  margin: 2px 0 0;
+  color: var(--text-3);
+  font: var(--fz-11)/1.3 var(--font-sans);
+}
+
+.onboarding-agent-components {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 12px 0 10px 20px;
+}
+
+.onboarding-agent-components span {
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--fz-10)/1.3 var(--font-mono);
+}
+
+.onboarding-agent-components b {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-2);
+  font-family: var(--font-sans);
+}
+
+.onboarding-agent-components .ready b::before {
+  content: '✓ ';
+  color: var(--ok);
+}
+
+.onboarding-agent-components .missing b::before {
+  content: '○ ';
+  color: var(--text-3);
+}
+
+.onboarding-cli-path,
+.onboarding-directory-input {
+  display: flex;
+  gap: 8px;
+}
+
+.onboarding-cli-path {
+  margin-left: 20px;
+}
+
+.onboarding-cli-path input,
+.onboarding-directory-input input {
+  min-width: 0;
+  flex: 1;
+}
+
+.onboarding-directory-label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--text-2);
+  font: 600 var(--fz-12)/1.2 var(--font-sans);
+}
+
+.onboarding-path-preview {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.onboarding-path-preview div {
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-3);
+  background: var(--surface);
+}
+
+.onboarding-path-preview span {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--text-3);
+  font: 550 var(--fz-11)/1.2 var(--font-sans);
+}
+
+.onboarding-path-preview code {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--fz-12)/1.4 var(--font-mono);
+}
+
+.onboarding-directory-note {
+  margin: 12px 0 0;
+  color: var(--text-3);
+  font: var(--fz-11)/1.5 var(--font-sans);
+}
+
+.onboarding-error {
+  margin: 14px 0 0;
+  color: var(--danger);
+  font: var(--fz-12)/1.45 var(--font-sans);
+}
+
+.onboarding-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+@media (max-width: 620px) {
+  .onboarding-shell { padding: 24px 14px 14px; place-items: start center; }
+  .onboarding-header, .onboarding-panel { padding-left: 20px; padding-right: 20px; }
+  .onboarding-steps { padding-left: 20px; padding-right: 20px; }
+  .onboarding-steps li > span:last-child { display: none; }
+  .onboarding-agent-components, .onboarding-path-preview { grid-template-columns: 1fr; }
+}

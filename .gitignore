@@ -40,6 +40,8 @@ output/playwright/
 
 # Desktop packaging
 /packages/desktop/release/
+/packages/desktop/runtime/
+/artifacts/
 
 # Local debug-driver runtime output (logs / pids / driver script)
 .gian-runtime/

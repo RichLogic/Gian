@@ -33,7 +33,10 @@ export interface ProxyManagerConfig {
 export class ProxyManager {
   private clients = new Map<string, ProxyClient>();
   private executorBySession = new Map<string, ProxyExecutor>();
+  private runtimeLeaseBySession = new Map<string, RuntimeLease>();
   private codexHost: CodexProxyHost | null = null;
+  private codexHostInit: Promise<CodexProxyHost> | null = null;
+  private codexLease: RuntimeLease | null = null;
   private kimiHost: KimiProxyHost | null = null;
   private kimiHostInit: Promise<KimiProxyHost> | null = null;
   private kimiLease: RuntimeLease | null = null;
@@ -45,10 +48,10 @@ export class ProxyManager {
     if (existing) return existing;
 
     const client = executor === 'codex'
-      ? this.createCodexClient(sessionId)
+      ? await this.createCodexClient()
       : executor === 'kimi'
         ? await this.createKimiClient()
-        : this.createClaudeClient(sessionId);
+        : await this.createClaudeClient(sessionId);
 
     this.clients.set(sessionId, client);
     this.executorBySession.set(sessionId, executor);
@@ -56,6 +59,7 @@ export class ProxyManager {
       console.log(`[proxy] session=${sessionId} exited code=${code}`);
       this.clients.delete(sessionId);
       this.executorBySession.delete(sessionId);
+      this.releaseSessionLease(sessionId);
     });
 
     return client;
@@ -83,6 +87,7 @@ export class ProxyManager {
     this.clients.delete(sessionId);
     this.executorBySession.delete(sessionId);
     try { await client.shutdown(); } catch { /* swallow — process may already be gone */ }
+    this.releaseSessionLease(sessionId);
     // A failed create (notably AUTH_REQUIRED) must not pin the old ACP process.
     // With no attached sessions it is safe to recycle, so `kimi login` in an
     // external terminal is picked up by the user's next Retry.
@@ -104,10 +109,14 @@ export class ProxyManager {
     this.clients.clear();
     this.executorBySession.clear();
     await Promise.allSettled(all.map(c => c.shutdown()));
+    for (const lease of this.runtimeLeaseBySession.values()) lease.release();
+    this.runtimeLeaseBySession.clear();
     if (this.codexHost) {
       await this.codexHost.shutdown();
       this.codexHost = null;
     }
+    this.codexHostInit = null;
+    this.releaseCodexLease();
     if (this.kimiHost) {
       await this.kimiHost.shutdown();
       this.kimiHost = null;
@@ -122,18 +131,25 @@ export class ProxyManager {
    */
   async closeByExecutor(executor: ProxyExecutor): Promise<void> {
     const toClose: ProxyClient[] = [];
+    const leaseSessionIds: string[] = [];
     for (const [sid, exec] of this.executorBySession) {
       if (exec === executor) {
         const client = this.clients.get(sid);
         if (client) toClose.push(client);
         this.clients.delete(sid);
         this.executorBySession.delete(sid);
+        leaseSessionIds.push(sid);
       }
     }
     await Promise.allSettled(toClose.map(c => c.shutdown()));
+    for (const sid of leaseSessionIds) this.releaseSessionLease(sid);
     if (executor === 'codex' && this.codexHost) {
       await this.codexHost.shutdown().catch(() => {});
       this.codexHost = null;
+    }
+    if (executor === 'codex') {
+      this.codexHostInit = null;
+      this.releaseCodexLease();
     }
     if (executor === 'kimi' && this.kimiHost) {
       await this.kimiHost.shutdown().catch(() => {});
@@ -142,33 +158,82 @@ export class ProxyManager {
     }
   }
 
-  private createClaudeClient(sessionId: string): ProxyClient {
+  private async createClaudeClient(sessionId: string): Promise<ProxyClient> {
     const dataDir = join(this.cfg.dataDir, 'proxy', sessionId);
     mkdirSync(dataDir, { recursive: true });
-    return new CcProxyClient({
-      entry: this.cfg.ccProxyEntry,
-      dataDir,
-      log: msg => console.log(msg),
-    });
+    const lease = this.cfg.runtimeManager
+      ? await this.cfg.runtimeManager.acquire('claude')
+      : null;
+    try {
+      const client = new CcProxyClient({
+        entry: this.cfg.ccProxyEntry,
+        dataDir,
+        ...(lease
+          ? {
+              env: {
+                ...lease.env,
+                CLAUDE_BIN: lease.binaryPath,
+              },
+            }
+          : {}),
+        log: msg => console.log(msg),
+      });
+      if (lease) this.runtimeLeaseBySession.set(sessionId, lease);
+      return client;
+    } catch (error) {
+      lease?.release();
+      throw error;
+    }
   }
 
-  private createCodexClient(_sessionId: string): ProxyClient {
+  private async createCodexClient(): Promise<ProxyClient> {
+    return new CodexProxySessionClient(await this.getOrCreateCodexHost());
+  }
+
+  private async getOrCreateCodexHost(): Promise<CodexProxyHost> {
     if (!this.cfg.codexProxyEntry) {
       throw new Error(
         'codex executor requested but codexProxyEntry is not configured',
       );
     }
-    if (!this.codexHost) {
+    if (this.codexHost) return this.codexHost;
+    let pending = this.codexHostInit;
+    if (!pending) {
+      pending = this.startCodexHost();
+      this.codexHostInit = pending;
+    }
+    try {
+      return await pending;
+    } finally {
+      if (this.codexHostInit === pending) this.codexHostInit = null;
+    }
+  }
+
+  private async startCodexHost(): Promise<CodexProxyHost> {
+    const lease = this.cfg.runtimeManager
+      ? await this.cfg.runtimeManager.acquire('codex')
+      : null;
+    try {
       const dataDir = join(this.cfg.dataDir, 'proxy', 'codex');
       mkdirSync(dataDir, { recursive: true });
-      this.codexHost = new CodexProxyHost({
-        entry: this.cfg.codexProxyEntry,
+      const host = new CodexProxyHost({
+        entry: this.cfg.codexProxyEntry!,
         dataDir,
-        codexBin: this.cfg.codexBin,
+        codexBin: lease?.binaryPath ?? this.cfg.codexBin,
+        ...(lease ? { env: lease.env } : {}),
         log: msg => console.log(msg),
       });
+      this.codexLease = lease;
+      this.codexHost = host;
+      host.onHostExit(() => {
+        if (this.codexHost === host) this.codexHost = null;
+        this.releaseCodexLease(lease ?? undefined);
+      });
+      return host;
+    } catch (error) {
+      lease?.release();
+      throw error;
     }
-    return new CodexProxySessionClient(this.codexHost);
   }
 
   private async createKimiClient(): Promise<ProxyClient> {
@@ -230,6 +295,20 @@ export class ProxyManager {
     const lease = this.kimiLease;
     if (!lease || (expected && lease !== expected)) return;
     this.kimiLease = null;
+    lease.release();
+  }
+
+  private releaseCodexLease(expected?: RuntimeLease): void {
+    const lease = this.codexLease;
+    if (!lease || (expected && lease !== expected)) return;
+    this.codexLease = null;
+    lease.release();
+  }
+
+  private releaseSessionLease(sessionId: string): void {
+    const lease = this.runtimeLeaseBySession.get(sessionId);
+    if (!lease) return;
+    this.runtimeLeaseBySession.delete(sessionId);
     lease.release();
   }
 }

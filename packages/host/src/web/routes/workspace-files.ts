@@ -115,7 +115,9 @@ export function registerWorkspaceFileRoutes(
     const todayIso = today.toISOString().slice(0, 19).replace('T', ' ');
     const row = db.prepare(
       `SELECT COUNT(*) as n FROM events
-       WHERE type = 'file_change' AND data LIKE ? AND created_at >= ?`,
+       WHERE (type = 'file_change'
+              OR (json_valid(data) AND json_extract(data, '$.display.type') = 'activity.file-change'))
+         AND data LIKE ? AND created_at >= ?`,
     ).get(`%"path":"${relativePath}"%`, todayIso) as { n: number };
     return c.json({ uncommitted, edit_count_today: row.n });
   });

@@ -2,7 +2,7 @@ import { useT } from '../i18n/index.js';
 import { PathBreadcrumb } from './PathBreadcrumb.js';
 import type { BranchMenuActions, PathSegment, SessionMenuActions } from './PathBreadcrumb.js';
 
-export type Mode = 'sessions' | 'tasks' | 'spaces' | 'bots';
+export type Mode = 'sessions' | 'tasks' | 'spaces';
 export type ViewState = 'main' | 'both' | 'workbench';
 
 const I = {

@@ -235,9 +235,9 @@ export class ProxySessionCoordinator {
     return this.capabilitiesByExecutor.get(executor) ?? null;
   }
 
-  async warmCapabilities(executor: 'codex' | 'claude'): Promise<ProxyCapabilities> {
+  async warmCapabilities(executor: Executor): Promise<ProxyCapabilities> {
     const cached = this.capabilitiesByExecutor.get(executor);
-    if (cached && cached.models.length > 0) return cached;
+    if (cached && (executor === 'kimi' || cached.models.length > 0)) return cached;
     const tempKey = `__caps__${executor}`;
     if (cached) {
       this.capabilitiesByExecutor.delete(executor);

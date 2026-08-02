@@ -37,7 +37,6 @@
 
   --gutter: 3px;
 
-
   /* Chrome dimensions */
   --topbar-h: 42px;
   --nav-w: 56px;
@@ -104,13 +103,15 @@ body {
    gets its own resolved --zone-scale baked into the result. */
 
 body,
-.sidebar, .topbar, .inspector, .settings-tab-body,
+.sidebar, .topbar, .inspector,
 .transcript, .composer, .composer-wrap, .approval, .evt,
 .sheet, .gian-terminal, .sheet-file, .md-preview {
+  --fz-10: calc(10px * var(--zone-scale, 1));
   --fz-11: calc(11px * var(--zone-scale, 1));
   --fz-12: calc(12px * var(--zone-scale, 1));
   --fz-13: calc(13px * var(--zone-scale, 1));
   --fz-14: calc(14px * var(--zone-scale, 1));
+  --fz-15: calc(15px * var(--zone-scale, 1));
   --fz-16: calc(16px * var(--zone-scale, 1));
   --fz-20: calc(20px * var(--zone-scale, 1));
   --fz-28: calc(28px * var(--zone-scale, 1));
@@ -122,19 +123,16 @@ body,
    the per-zone --fz-* recalculation above. */
 body { --zone-scale: 1; }
 
-.sidebar, .topbar, .inspector, .settings-tab-body                  { --zone-scale: 1; }
+.sidebar, .topbar, .inspector                                    { --zone-scale: 1; }
 body[data-scale-chrome="sm"] .sidebar,
 body[data-scale-chrome="sm"] .topbar,
-body[data-scale-chrome="sm"] .inspector,
-body[data-scale-chrome="sm"] .settings-tab-body                    { --zone-scale: 0.875; }
+body[data-scale-chrome="sm"] .inspector                          { --zone-scale: 0.875; }
 body[data-scale-chrome="lg"] .sidebar,
 body[data-scale-chrome="lg"] .topbar,
-body[data-scale-chrome="lg"] .inspector,
-body[data-scale-chrome="lg"] .settings-tab-body                    { --zone-scale: 1.125; }
+body[data-scale-chrome="lg"] .inspector                          { --zone-scale: 1.125; }
 body[data-scale-chrome="xl"] .sidebar,
 body[data-scale-chrome="xl"] .topbar,
-body[data-scale-chrome="xl"] .inspector,
-body[data-scale-chrome="xl"] .settings-tab-body                    { --zone-scale: 1.25;  }
+body[data-scale-chrome="xl"] .inspector                          { --zone-scale: 1.25;  }
 
 .transcript, .composer, .composer-wrap, .approval, .evt            { --zone-scale: 1; }
 body[data-scale-chat="sm"] .transcript,
@@ -322,11 +320,3 @@ kbd.kc {
 }
 
 /* Hairline separator using gradient — soft fade instead of hard line */
-.hairline {
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--hairline), transparent);
-}
-.hairline-v {
-  width: 1px;
-  background: linear-gradient(180deg, transparent, var(--hairline), transparent);
-}

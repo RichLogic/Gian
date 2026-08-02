@@ -4,11 +4,11 @@ import type {
   ApprovalRequestedData,
   ApprovalResolvedData,
   FileChangeSummary,
-  UnifiedEvent,
+  DisplayEvent,
 } from '@gian/shared';
 
 /**
- * Translate a raw codex-proxy notification into 0..N unified events.
+ * Project a raw codex-proxy notification into 0..N UI display records.
  *
  * Mapping coverage:
  *   output.text.delta       → assistant_text  (delta:true)
@@ -25,18 +25,18 @@ import type {
  *   turn.completed          → turn_completed
  *   turn.failed             → session_error
  *   runtime.error           → session_error
- *   token_usage.updated     → (no unified event — M2 session stats layer)
+ *   token_usage.updated     → (session stats side channel, no chat display)
  *   debug                   → (discard)
  *
  * Generic tool items remain executor-native. Subagents are the exception:
  * Codex exposes explicit collabAgentToolCall / subAgentActivity variants, so
  * the proxy projects those into the page's persistent agent-run view.
  */
-export function normalizeCodexNotification(
+export function projectCodexNotification(
   raw: ProxyNotification,
   sessionId: string,
   turn: number,
-): UnifiedEvent[] {
+): DisplayEvent[] {
   const data = (raw.params.data ?? {}) as Record<string, unknown>;
   const callId = (): string =>
     String((raw.params as Record<string, unknown>).itemId ?? data.itemId ?? crypto.randomUUID());
@@ -52,7 +52,7 @@ export function normalizeCodexNotification(
           turn,
           call_id: itemId,
           ts: Date.now(),
-          type: 'assistant_text',
+          type: 'message',
           data: { text, delta: true, itemId },
         },
       ];
@@ -69,7 +69,7 @@ export function normalizeCodexNotification(
           turn,
           call_id: itemId,
           ts: Date.now(),
-          type: 'reasoning',
+          type: 'activity.reasoning',
           data: { text, delta: true, itemId, kind },
         },
       ];
@@ -85,7 +85,7 @@ export function normalizeCodexNotification(
           turn,
           call_id: itemId,
           ts: Date.now(),
-          type: 'plan_update',
+          type: 'plan',
           data: { text, delta: true },
         },
       ];
@@ -99,7 +99,7 @@ export function normalizeCodexNotification(
           turn,
           call_id: 'plan',
           ts: Date.now(),
-          type: 'plan_update',
+          type: 'plan',
           data: { text, delta: false },
         },
       ];
@@ -114,7 +114,7 @@ export function normalizeCodexNotification(
           turn,
           call_id: itemId,
           ts: Date.now(),
-          type: 'command_execution',
+          type: 'activity.command',
           data: {
             command: String(data.command ?? ''),
             cwd: data.cwd != null ? String(data.cwd) : undefined,
@@ -139,7 +139,7 @@ export function normalizeCodexNotification(
           turn,
           call_id: callId(),
           ts: Date.now(),
-          type: 'file_change',
+          type: 'activity.file-change',
           data: { files, diff: diffText },
         },
       ];
@@ -167,7 +167,7 @@ export function normalizeCodexNotification(
           turn,
           call_id: agentId,
           ts: Date.now(),
-          type: 'agent_spawn' as const,
+          type: 'agent' as const,
           data: payload,
         }];
       });
@@ -197,7 +197,7 @@ export function normalizeCodexNotification(
           turn,
           call_id: approvalId,
           ts: Date.now(),
-          type: 'approval_requested',
+          type: 'interaction.approval',
           data: {
             approvalId,
             category: mapCodexMethodToCategory(method, permissionsKind),
@@ -224,7 +224,7 @@ export function normalizeCodexNotification(
           turn,
           call_id: approvalId,
           ts: Date.now(),
-          type: 'approval_resolved',
+          type: 'interaction.resolved',
           data: {
             approvalId,
             decision,
@@ -243,7 +243,7 @@ export function normalizeCodexNotification(
           turn,
           call_id: turnId,
           ts: Date.now(),
-          type: 'turn_completed',
+          type: 'state.turn-completed',
           data: {
             turnId,
             summary: summary.assistantText != null ? String(summary.assistantText) : undefined,
@@ -260,7 +260,7 @@ export function normalizeCodexNotification(
           turn,
           call_id: crypto.randomUUID(),
           ts: Date.now(),
-          type: 'session_error',
+          type: 'state.error',
           data: {
             message: msg,
             retryable: isRetryable(msg),
@@ -276,7 +276,7 @@ export function normalizeCodexNotification(
           turn,
           call_id: crypto.randomUUID(),
           ts: Date.now(),
-          type: 'session_error',
+          type: 'state.error',
           data: {
             message: String(data.message ?? 'runtime error'),
             retryable: false,
@@ -293,13 +293,13 @@ export function normalizeCodexNotification(
           turn,
           call_id: 'turn-start',
           ts: Date.now(),
-          type: 'turn_started',
+          type: 'state.turn-started',
           data: { turnId: String((raw.params as { turnId?: unknown }).turnId ?? '') },
         },
       ];
     }
 
-    // Intentionally dropped — no unified slot yet:
+    // Intentionally has no chat display:
     case 'token_usage.updated': // M2 session stats layer
     case 'debug':               // discard
     default:

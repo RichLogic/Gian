@@ -8,7 +8,7 @@ export interface DesktopTargets {
   hostUrl: string;
   healthUrl: string;
   webUrl: string;
-  manageLaunchAgent: boolean;
+  manageHost: boolean;
 }
 
 export interface DesktopWindowChrome {
@@ -19,6 +19,7 @@ export interface DesktopWindowChrome {
 export interface DesktopApplicationIdentity {
   name: 'Gian' | 'GianDev';
   userDataPath: string | null;
+  variant: 'production' | 'development';
 }
 
 export interface ResolveDesktopTargetsOptions {
@@ -58,7 +59,7 @@ export function resolveDesktopTargets({
     hostUrl,
     healthUrl: `${hostUrl}/health`,
     webUrl,
-    manageLaunchAgent:
+    manageHost:
       isPackaged &&
       platform === 'darwin' &&
       hostUrl === PROD_HOST_URL &&
@@ -76,6 +77,12 @@ export function isTrustedDesktopUrl(
   } catch {
     return false;
   }
+}
+
+export function desktopRequestBoundaryUrls(hostUrl: string): string[] {
+  const websocketUrl = new URL(hostUrl);
+  websocketUrl.protocol = websocketUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  return [`${hostUrl}/*`, `${websocketUrl.origin}/*`];
 }
 
 export function isSafeExternalUrl(candidate: string): boolean {
@@ -102,6 +109,10 @@ export function resolveDesktopApplicationIdentity(
   appDataPath: string,
 ): DesktopApplicationIdentity {
   return isPackaged
-    ? { name: 'Gian', userDataPath: null }
-    : { name: 'GianDev', userDataPath: join(appDataPath, 'GianDev') };
+    ? { name: 'Gian', userDataPath: null, variant: 'production' }
+    : {
+        name: 'GianDev',
+        userDataPath: join(appDataPath, 'GianDev'),
+        variant: 'development',
+      };
 }

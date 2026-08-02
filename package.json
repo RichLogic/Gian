@@ -2,7 +2,7 @@
   "name": "gian",
   "version": "0.1.0",
   "private": true,
-  "description": "Self-hosted single-user AI coding agent web frontend",
+  "description": "One local desktop app for Codex, Claude Code, and Kimi Code",
   "packageManager": "pnpm@10.33.2",
   "engines": {
     "node": ">=22 <25"
@@ -18,12 +18,14 @@
     "desktop:dev": "pnpm -F @gian/desktop dev",
     "desktop:pack": "pnpm -F @gian/desktop package:mac",
     "desktop:dmg": "pnpm -F @gian/desktop make:mac",
+    "release:proxies": "pnpm --filter @gian/shared build && pnpm --filter @gian/cc-proxy build && pnpm --filter @gian/codex-proxy build && pnpm --filter @gian/kimi-proxy build && node scripts/build-proxy-artifacts.mjs",
     "quality:traceability": "node scripts/check-traceability.js",
     "clean": "pnpm -r clean && rm -rf node_modules"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",
     "@types/node": "^22.10.0",
+    "esbuild": "^0.25.12",
     "typescript": "^5.7.2"
   }
 }

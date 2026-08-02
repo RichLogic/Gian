@@ -140,6 +140,16 @@ interface PendingRequest {
   reject: (error: unknown) => void;
 }
 
+export function buildInitializeParams() {
+  return {
+    clientInfo: { name: 'codex-proxy', version: '0.1.0' },
+    capabilities: {
+      experimentalApi: true,
+      requestAttestation: false,
+    },
+  };
+}
+
 export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
   private readonly codexBin: string;
   private process: ReturnType<typeof spawn> | null = null;
@@ -197,10 +207,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
 
     await waitForReady(`http://127.0.0.1:${port}/readyz`);
     await this.connectSocket();
-    await this.requestInternal('initialize', {
-      clientInfo: { name: 'codex-proxy', version: '0.1.0' },
-      capabilities: null,
-    });
+    await this.requestInternal('initialize', buildInitializeParams());
     this.send({ jsonrpc: '2.0', method: 'initialized' });
   }
 

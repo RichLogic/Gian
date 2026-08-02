@@ -118,6 +118,10 @@ try {
     'function',
   );
   assert.equal(
+    await window.evaluate(() => window.gianDesktop?.appVariant),
+    packagedSmoke ? 'production' : 'development',
+  );
+  assert.equal(
     await window.evaluate(async () => {
       const canvas = document.createElement('canvas');
       canvas.width = 32;

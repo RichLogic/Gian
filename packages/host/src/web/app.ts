@@ -27,6 +27,7 @@ import { migrateLegacyBots } from '../im/migrate-legacy-bots.js';
 // per-platform tables.
 import { WorkbenchTerminalManager } from '../term/manager.js';
 import type { CliRuntimeManager } from '../runtime/manager.js';
+import type { AgentManager } from '../agents/manager.js';
 import { ensureAuthConfigured, registerAuthRoutes } from './routes/auth.js';
 import { registerSettingsRoutes } from './routes/settings.js';
 import { registerWorkspaceRoutes } from './routes/workspaces.js';
@@ -38,9 +39,12 @@ import { registerReconnectRoutes } from './routes/reconnect.js';
 import { registerNativeSessionRoutes } from './routes/native-sessions.js';
 import { registerWorkspaceFileRoutes } from './routes/workspace-files.js';
 import { registerWorkingTreeRoutes } from './routes/working-trees.js';
+import { registerAgentRoutes } from './routes/agents.js';
+import { registerOnboardingRoutes } from './routes/onboarding.js';
 import { fanIMEvent } from './im-event-bridge.js';
 import { bootJsonlWatchers } from './watcher-bootstrap.js';
 import { resolveWebDistDir, staticFiles } from './static-files.js';
+import { requireDesktopClient } from './desktop-boundary.js';
 
 export interface AppContext {
   db: Db;
@@ -51,6 +55,7 @@ export interface AppContext {
   kimiProxyEntry?: string;
   codexBin?: string;
   runtimeManager?: CliRuntimeManager;
+  agentManager?: AgentManager;
 }
 
 export interface AppHandle {
@@ -75,7 +80,16 @@ export function createApp(ctx: AppContext): AppHandle {
   const approvals = new ApprovalManager(broadcaster);
   const queue = new QueueManager(ctx.db);
   const watcher = new NativeJsonlWatcher(ctx.db, broadcaster);
-  const sessions = new SessionManager(ctx.db, proxy, broadcaster, approvals, queue, ctx.dataDir, watcher);
+  const sessions = new SessionManager(
+    ctx.db,
+    proxy,
+    broadcaster,
+    approvals,
+    queue,
+    ctx.dataDir,
+    watcher,
+    ctx.agentManager ? executor => ctx.agentManager!.proxyDefaults(executor) : undefined,
+  );
   const tasks = new TaskManager(ctx.db);
 
   // gian-task durability: re-drive any action rows a prior crash/restart left
@@ -136,14 +150,16 @@ export function createApp(ctx: AppContext): AppHandle {
   // child. The fire-and-forget warmup would otherwise leak subprocesses
   // and a fixture tmp dir gets polluted with daemon logs.
   if (process.env['GIAN_SKIP_PROXY_WARMUP'] !== '1') {
-    void Promise.all([
-      sessions.warmCapabilities('claude').catch(err => {
-        console.warn('[im] warmCapabilities(claude) failed:', err instanceof Error ? err.message : err);
-      }),
-      sessions.warmCapabilities('codex').catch(err => {
-        console.warn('[im] warmCapabilities(codex) failed:', err instanceof Error ? err.message : err);
-      }),
-    ]);
+    const warm = (executor: 'claude' | 'codex') => {
+      const run = () => sessions.warmCapabilities(executor).catch(err => {
+        console.warn(`[im] warmCapabilities(${executor}) failed:`, err instanceof Error ? err.message : err);
+      });
+      if (!ctx.agentManager) return run();
+      return ctx.agentManager.status(executor).then(status => (
+        status.ready ? run() : undefined
+      ));
+    };
+    void Promise.all([warm('claude'), warm('codex')]);
   }
 
   // One-shot migration of legacy `bots` rows into platform tables. Idempotent:
@@ -170,6 +186,12 @@ export function createApp(ctx: AppContext): AppHandle {
 
   const handlers = makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db: ctx.db });
 
+  const desktopOrigin = `http://${ctx.config.host}:${ctx.config.port}`;
+  app.use('*', requireDesktopClient(
+    process.env['GIAN_DESKTOP_TOKEN']?.trim() ?? '',
+    desktopOrigin,
+  ));
+
   if (AUTH_REQUIRED) {
     ensureAuthConfigured(ctx.db);
   }
@@ -185,7 +207,13 @@ export function createApp(ctx: AppContext): AppHandle {
 
   app.use('*', requireAuth());
 
-  app.get('/health', c => c.json({ ok: true, version: '0.1.0' }));
+  app.get('/health', c => c.json({
+    ok: true,
+    version: '0.1.0',
+    ...(process.env['GIAN_DESKTOP_INSTANCE_ID']
+      ? { instanceId: process.env['GIAN_DESKTOP_INSTANCE_ID'] }
+      : {}),
+  }));
   registerAuthRoutes(app, ctx.db);
   registerSettingsRoutes(app, ctx.db);
   registerWorkspaceRoutes(app, ctx.db);
@@ -197,6 +225,18 @@ export function createApp(ctx: AppContext): AppHandle {
   registerWorkingTreeRoutes(app, ctx.db, broadcaster);
   registerReconnectRoutes(app, ctx.db, proxy, platforms);
   registerBotRoutes(app, ctx.db, platforms);
+  if (ctx.agentManager && ctx.runtimeManager) {
+    registerOnboardingRoutes(app, {
+      db: ctx.db,
+      agents: ctx.agentManager,
+    });
+    registerAgentRoutes(app, {
+      agents: ctx.agentManager,
+      runtimes: ctx.runtimeManager,
+      closeProxy: executor => proxy.closeByExecutor(executor),
+      capabilities: executor => sessions.warmCapabilities(executor),
+    });
+  }
 
   // -------------------------------------------------------------------------
   app.get(

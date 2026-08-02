@@ -24,7 +24,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
 
-import { CodexAppServerClient } from '../src/runtime/codex-app-server-client.js';
+import {
+  buildInitializeParams,
+  CodexAppServerClient,
+} from '../src/runtime/codex-app-server-client.js';
 
 // ---------------------------------------------------------------------------
 // Internal-surface helper. Keeps every cast localized so the production
@@ -56,6 +59,16 @@ function makePending(): { promise: Promise<unknown>; pending: PendingRequest } {
   const promise = new Promise<unknown>((res, rej) => { resolve = res; reject = rej; });
   return { promise, pending: { resolve, reject } };
 }
+
+test('PROXY-004: initialize opts into the experimental API required by runtimeWorkspaceRoots', () => {
+  assert.deepEqual(buildInitializeParams(), {
+    clientInfo: { name: 'codex-proxy', version: '0.1.0' },
+    capabilities: {
+      experimentalApi: true,
+      requestAttestation: false,
+    },
+  });
+});
 
 // ---------------------------------------------------------------------------
 // PROXY-004 — handleMessage dispatch

@@ -1,5 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Bot, RunnerInfo, Session, Task, Workspace } from '@gian/shared';
+import { lazy, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { RunnerInfo, Session, Task, Workspace } from '@gian/shared';
 import { LocaleProvider } from './i18n/index.js';
 import { EN } from './i18n/en.js';
 import { ZH } from './i18n/zh.js';
@@ -7,12 +7,12 @@ import type { WsState } from './ws.js';
 import { GianWs } from './ws.js';
 import {
   fetchWsToken,
-  loadBots,
   loadSettings,
   loadWorkingTrees,
   loadWorkspaces,
   makeWsUrl,
   reopenSubtask,
+  updateWorkspace,
 } from './api.js';
 import { injectComposerDraft } from './components/Composer.js';
 import type { WorkingTree } from './api.js';
@@ -33,8 +33,12 @@ import { makeWorkbenchWire } from './components/terminal-wire.js';
 import { BrowserBody, browserHostOf } from './components/BrowserBody.js';
 import { ChatContextPanel } from './components/ChatContextPanel.js';
 import { SessionSurface } from './views/SessionSurface.js';
-import { NewWorkspacePanel } from './views/workspace-create.js';
+import { managedWorkspaceDirectory, NewWorkspacePanel } from './views/workspace-create.js';
 import { TasksView, ManagerInspector } from './views/TasksView.js';
+// The primary view is imported statically: lazy-loading it served no purpose
+// (it renders on every launch) and its suspension used to tear down the whole
+// shell via the root Suspense boundary (the "full-screen flash" bug).
+import { CodingView } from './views/CodingView.js';
 import type { SystemConfig } from '@gian/shared';
 import type { QueueEntry, TranscriptItem } from './types.js';
 import { applyGianIconAppearance } from './brand-icon.js';
@@ -44,6 +48,7 @@ import {
 } from './presentation/chat-panel.js';
 import { useSessionCommands } from './controllers/use-session-commands.js';
 import { useAppAuth } from './controllers/use-app-auth.js';
+import { useOnboarding } from './controllers/use-onboarding.js';
 import { useAppSocket } from './controllers/use-app-socket.js';
 import { useTranscriptHydration } from './controllers/use-transcript-hydration.js';
 import { useTopbarModel } from './controllers/use-topbar-model.js';
@@ -53,14 +58,13 @@ import { useAppShortcuts } from './controllers/use-app-shortcuts.js';
 import { useSessionSelection } from './controllers/use-session-selection.js';
 import { useWorkbenchLayout } from './controllers/use-workbench-layout.js';
 
-const CodingView = lazy(() =>
-  import('./views/CodingView.js').then(module => ({ default: module.CodingView })));
+// Lazy surfaces each get their OWN Suspense boundary at the usage site below.
+// A single root boundary used to wrap the whole shell: the first render of
+// any of these after a click suspended it and unmounted everything (Topbar,
+// Dock, sidebar) in favor of an unstyled empty fallback — the full-screen
+// flash. Local boundaries confine the fallback to the surface that's loading.
 const SpacesView = lazy(() =>
   import('./views/SpacesView.js').then(module => ({ default: module.SpacesView })));
-const BotsView = lazy(() =>
-  import('./views/BotsView.js').then(module => ({ default: module.BotsView })));
-const FilesView = lazy(() =>
-  import('./views/FilesView.js').then(module => ({ default: module.FilesView })));
 const CommandPalette = lazy(() =>
   import('./components/CommandPalette.js').then(module => ({ default: module.CommandPalette })));
 const Sheet = lazy(() =>
@@ -73,9 +77,15 @@ const WorkspaceDetailBody = lazy(() =>
   import('./components/WorkspacesPanel.js').then(module => ({ default: module.WorkspaceDetailBody })));
 const LoginView = lazy(() =>
   import('./views/LoginView.js').then(module => ({ default: module.LoginView })));
+const OnboardingView = lazy(() =>
+  import('./views/OnboardingView.js').then(module => ({ default: module.OnboardingView })));
 
 export function App() {
-  const { status: authStatus, onLoginOk } = useAppAuth();
+  const { status: authStatus, identity, onLoginOk, signOut } = useAppAuth();
+  const onboarding = useOnboarding(authStatus);
+  const runtimeAuthStatus = authStatus === 'authenticated' && onboarding.status === 'complete'
+    ? 'authenticated'
+    : 'checking';
   // The token getter runs every reconnect, after the HTTP login boundary has
   // admitted the app shell.
   const ws = useMemo(
@@ -115,7 +125,6 @@ export function App() {
   // views own the real state and listen for `gian.toggle-rail`; this button
   // is the only dispatcher, so the mirror can't drift.
   const [sidebarCollapsedUi, setSidebarCollapsedUi] = useState(false);
-  const [bots, setBots] = useState<Bot[]>([]);
   const [systemConfig, setSystemConfig] = useState<SystemConfig | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteInitialQuery, setPaletteInitialQuery] = useState<string | undefined>(undefined);
@@ -158,11 +167,6 @@ export function App() {
     void loadSettings().then(cfg => { if (cfg) setSystemConfig(cfg); });
   }, [authStatus]);
 
-  useEffect(() => {
-    if (authStatus !== 'authenticated') return;
-    void loadBots().then(setBots);
-  }, [authStatus]);
-
 
   // We need the latest sessions list when handling events (to look up executor).
   const sessionsRef = useRef<Session[]>([]);
@@ -174,7 +178,7 @@ export function App() {
   useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);
 
   useAppShortcuts({
-    authenticated: authStatus === 'authenticated',
+    authenticated: runtimeAuthStatus === 'authenticated',
     mode,
     activeSessionId,
     activeTaskId,
@@ -204,9 +208,9 @@ export function App() {
   // Refresh working trees whenever the workspace or session set changes —
   // a new session with a worktree, or a merged/dropped one, changes the list.
   useEffect(() => {
-    if (authStatus !== 'authenticated') return;
+    if (runtimeAuthStatus !== 'authenticated') return;
     void loadWorkingTrees().then(setWorkingTrees);
-  }, [workspaces, sessions, authStatus]);
+  }, [workspaces, sessions, runtimeAuthStatus]);
 
   // Tracks the last auto-applied worktree detection — see the auto-switch
   // effect next to appT below (appT is declared late in this component).
@@ -257,7 +261,7 @@ export function App() {
     openWorkspaceInSheet,
     openNewWorkspaceInSheet,
   } = useWorkbench({
-    authStatus,
+    authStatus: runtimeAuthStatus,
     ws,
     sessions,
     sessionsRef,
@@ -273,7 +277,7 @@ export function App() {
   });
 
   useAppSocket({
-    authStatus,
+    authStatus: runtimeAuthStatus,
     ws,
     sessionsRef,
     activeSessionIdRef,
@@ -285,7 +289,6 @@ export function App() {
     setWorkspaces,
     setSessions,
     setTasks,
-    setBots,
     setSystemConfig,
     setRunner,
     setActiveSessionId,
@@ -418,13 +421,6 @@ export function App() {
     ws,
   });
 
-  // URL-param driven Files view: /?view=files&wt=<id>&path=<rel>
-  // Opened by FilesView's "Open in new tab" href for non-renderable file types.
-  const urlParams = new URLSearchParams(window.location.search);
-  const filesRouteActive = urlParams.get('view') === 'files';
-  const filesWtId = urlParams.get('wt');
-  const filesPath = urlParams.get('path');
-
   const subtaskActive = mode === 'tasks' && !!activeSubtaskId && !!activeSession;
   const {
     sessionViewActive,
@@ -482,6 +478,7 @@ export function App() {
       session={subtask}
       workspace={subtaskWorkspace}
       items={itemsBySession[subtask.id] ?? []}
+      hydrated={itemsBySession[subtask.id] !== undefined}
       pending={pendingBySession[subtask.id] ?? false}
       queue={queueBySession[subtask.id] ?? []}
       planText={planStateBySession[subtask.id]?.text}
@@ -513,6 +510,7 @@ export function App() {
         session={session}
         workspace={workspaces.find(workspace => workspace.id === session.workspace_id) ?? null}
         items={itemsBySession[session.id] ?? []}
+        hydrated={itemsBySession[session.id] !== undefined}
         pending={pendingBySession[session.id] ?? false}
         queue={queueBySession[session.id] ?? []}
         planText={planStateBySession[session.id]?.text}
@@ -550,19 +548,23 @@ export function App() {
     );
   }
 
-  if (filesRouteActive) {
+  if (onboarding.status === 'checking') {
+    return (
+      <LocaleProvider locale={locale}>
+        <div className="app-loading" role="status" data-testid="onboarding-checking" />
+      </LocaleProvider>
+    );
+  }
+
+  if (onboarding.status === 'required') {
     return (
       <LocaleProvider locale={locale}>
         <Suspense fallback={<div className="app-loading" role="status" />}>
-          <FilesView
-            workingTrees={workingTrees}
-            workingTreeId={filesWtId}
-            onPickWorkingTree={id => {
-              window.location.search = `?view=files&wt=${encodeURIComponent(id)}`;
-            }}
-            initialPath={filesPath}
-            externalEditors={systemConfig?.external_editors ?? []}
-            onOpenSettings={() => activateRail('settings')}
+          <OnboardingView
+            identity={identity}
+            initialState={onboarding.state}
+            initialError={onboarding.error}
+            onComplete={onboarding.complete}
           />
         </Suspense>
       </LocaleProvider>
@@ -571,7 +573,6 @@ export function App() {
 
   return (
     <LocaleProvider locale={locale}>
-    <Suspense fallback={<div className="app-loading" role="status" />}>
     <ImageZoomContext.Provider value={(src, alt) => setZoomImage({ src, alt })}>
     <BrowserLinkOpenContext.Provider value={(url) => addBrowserTab(url)}>
     <div
@@ -599,7 +600,7 @@ export function App() {
         onGoForward={() => navGo(1)}
       />
       <ImageLightbox image={zoomImage} onClose={() => setZoomImage(null)} />
-      {paletteOpen && <CommandPalette
+      {paletteOpen && <Suspense fallback={null}><CommandPalette
         open={paletteOpen}
         onClose={() => { setPaletteOpen(false); setPaletteInitialQuery(undefined); }}
         sessions={sessions}
@@ -608,9 +609,15 @@ export function App() {
         activeWorkingTreeId={defaultWorkingTreeIdFor(activeSession)}
         transcriptItems={activeSessionId ? (itemsBySession[activeSessionId] ?? []) : []}
         onJumpToSession={sid => { setActiveSessionId(sid); setMode('sessions'); setPaletteOpen(false); }}
-        onOpenFile={() => { setPaletteOpen(false); }}
+        onOpenFile={(wtId, rel) => {
+          const abs = rel.startsWith('/')
+            ? rel
+            : `${workingTrees.find(t => t.id === wtId)?.path ?? ''}/${rel}`;
+          void openFileInSheet(abs, false);
+          setPaletteOpen(false);
+        }}
         initialQuery={paletteInitialQuery}
-      />}
+      /></Suspense>}
       <div className={`body ${viewState === 'workbench' ? 'wb-only' : ''}`}>
           {mode === 'sessions' && (
           <FileLinkOpenContext.Provider value={(absPath, line) => { void openFileInSheet(absPath, false, line); }}>
@@ -624,7 +631,7 @@ export function App() {
           }}>
             <CodingView
               mode={mode}
-              onSetAppMode={(m) => { setMode(m); }}
+              onSetAppMode={(m) => { startTransition(() => setMode(m)); }}
               onOpenSearch={() => setPaletteOpen(true)}
               workspaces={workspaces}
               sessions={sessions}
@@ -638,23 +645,22 @@ export function App() {
               onSelectSession={selectSession}
               onWorkspaceCreated={w => setWorkspaces(prev => [...prev, w])}
               onCreateSession={(input) => {
-                pendingFirstMessageRef.current = input.firstMessage?.trim() || null;
                 setCreatingSession(true);
                 ws.send({
                   type: 'session:create',
                   workspace_id: input.workspaceId,
                   executor: input.executor,
-                  ...(input.executor !== 'kimi' && input.approvalMode
-                    ? { approval_mode: input.approvalMode }
-                    : {}),
                   ...(input.name ? { name: input.name } : {}),
-                  ...(input.mode ? { mode: input.mode } : {}),
-                  ...(input.baseBranch ? { base_branch: input.baseBranch } : {}),
-                  ...(input.branch ? { branch: input.branch } : {}),
                 });
               }}
               creatingSession={creatingSession}
               onDelete={sessionMainHandlers.onDelete}
+              onPinSession={sessionMainHandlers.onPin}
+              onArchiveSession={sessionId => sessionMainHandlers.onArchive(sessionId, true)}
+              onToggleWorkspacePin={(workspace) => {
+                void updateWorkspace(workspace.id, { pinned: workspace.pinned !== 1 })
+                  .then(() => loadWorkspaces().then(setWorkspaces));
+              }}
               onSend={sessionMainHandlers.onSend}
               onSendSkill={sessionMainHandlers.onSendSkill}
               onStop={sessionMainHandlers.onStop}
@@ -676,7 +682,6 @@ export function App() {
                 workingTrees.find(wt => wt.id === viewedWorkingTreeId(activeSession))?.branch
                 ?? null
               }
-              onOpenSpaces={() => setMode('spaces')}
             />
           </ChatPanelOpenContext.Provider>
           </PlanOpenContext.Provider>
@@ -685,6 +690,7 @@ export function App() {
           </FileLinkOpenContext.Provider>
           )}
           {mode === 'spaces' && (
+            <Suspense fallback={null}>
             <SpacesView
               workspaces={workspaces}
               systemConfig={systemConfig}
@@ -695,18 +701,18 @@ export function App() {
                   type: 'session:create',
                   workspace_id: input.workspaceId,
                   executor: input.executor,
-                  ...(input.executor === 'kimi' ? {} : { approval_mode: 'auto' as const }),
                   mode: 'worktree',
                   ...(input.baseBranch ? { base_branch: input.baseBranch } : {}),
                   ...(input.branch ? { branch: input.branch } : {}),
                 });
               }}
             />
+            </Suspense>
           )}
           {mode === 'tasks' && (
             <TasksView
               mode={mode}
-              onSetMode={(m) => { setMode(m); }}
+              onSetMode={(m) => { startTransition(() => setMode(m)); }}
               onOpenSearch={() => setPaletteOpen(true)}
               tasks={tasks}
               sessions={sessions}
@@ -730,14 +736,6 @@ export function App() {
               onSelectTask={(taskId) => { setActiveTaskId(taskId); setActiveSubtaskId(null); }}
               onSelectSubtask={(taskId, subtaskId) => { setActiveTaskId(taskId); setActiveSubtaskId(subtaskId); }}
               subtaskMain={subtaskMain}
-            />
-          )}
-          {mode === 'bots' && (
-            <BotsView
-              bots={bots}
-              sessions={sessions}
-              workspaces={workspaces}
-              onChange={() => void loadBots().then(setBots)}
             />
           )}
         {chatPanel && workbenchActive && (
@@ -764,6 +762,7 @@ export function App() {
               <Splitter side="right" varName="--sheet-w" base={600} min={420} max={1080} invert />
             )}
             {(sheetMounted || (activeRail === 'sidechat' && workbenchActive)) && (
+            <Suspense fallback={null}>
             <Sheet
               tabs={wbTabs}
               activeByGroup={activeTabByGroup}
@@ -807,6 +806,8 @@ export function App() {
                       apps={apps}
                       onChange={cfg => setSystemConfig(cfg)}
                       activeSection={settingsSection}
+                      identity={identity}
+                      onSignOut={signOut}
                     />
                   );
                 }
@@ -823,17 +824,19 @@ export function App() {
                   const wbCwd = wtPath ?? activeWorkspace?.path ?? workspaces[0]?.path ?? null;
                   return (
                     <div className="sheet-term">
+                      <Suspense fallback={null}>
                       <Terminal
                         instanceKey={`term:${t.id}`}
                         wire={makeWorkbenchWire(ws, t.id, wbCwd ? { cwd: wbCwd } : {})}
                       />
+                      </Suspense>
                     </div>
                   );
                 }
                 if (t.kind === 'new-workspace') {
                   return (
                     <NewWorkspacePanel
-                      workspaceRoot={systemConfig?.workspace_root ?? '~/Coding'}
+                      workspaceRoot={managedWorkspaceDirectory(systemConfig?.workspace_root ?? '~/Coding')}
                       onChange={() => void loadWorkspaces().then(setWorkspaces)}
                       onClose={() => sheetActions.closeTab(t.id)}
                     />
@@ -842,6 +845,7 @@ export function App() {
                 if (t.kind === 'workspace') {
                   const wsForTab = workspaces.find(w => w.id === t.wsId) ?? null;
                   return (
+                    <Suspense fallback={null}>
                     <WorkspaceDetailBody
                       workspace={wsForTab}
                       ws={ws}
@@ -852,13 +856,13 @@ export function App() {
                           type: 'session:create',
                           workspace_id: input.workspaceId,
                           executor: input.executor,
-                          ...(input.executor === 'kimi' ? {} : { approval_mode: 'auto' as const }),
                           mode: 'worktree',
                           ...(input.baseBranch ? { base_branch: input.baseBranch } : {}),
                           ...(input.branch ? { branch: input.branch } : {}),
                         });
                       }}
                     />
+                    </Suspense>
                   );
                 }
                 if (t.kind === 'chat') {
@@ -880,6 +884,7 @@ export function App() {
                 return null;
               }}
             />
+            </Suspense>
             )}
             {managerP2 && activeManagerTask && (
               <div className="sheet-manager" style={sheetVisible ? undefined : { display: 'none' }}>
@@ -903,6 +908,7 @@ export function App() {
           <>
             <Splitter side="right" varName="--inspector-w" base={280} min={220} max={500} invert />
             {inspectorKind === 'workspaces' ? (
+              <Suspense fallback={null}>
               <WorkspacesInspector
                 workspaces={workspaces}
                 selectedWsId={selectedWsId}
@@ -911,6 +917,7 @@ export function App() {
                 onChange={() => void loadWorkspaces().then(setWorkspaces)}
                 onNewWorkspace={openNewWorkspaceInSheet}
               />
+              </Suspense>
             ) : inspectorKind === 'settings' ? (
               <SettingsNavInspector active={settingsSection} onSelect={onSettingsNavSelect} />
             ) : (
@@ -956,7 +963,6 @@ export function App() {
     </div>
     </BrowserLinkOpenContext.Provider>
     </ImageZoomContext.Provider>
-    </Suspense>
     </LocaleProvider>
   );
 }

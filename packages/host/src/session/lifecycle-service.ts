@@ -1,6 +1,8 @@
 import type {
+  AgentProxyDefaults,
   ApprovalMode,
   Executor,
+  ExecutorConfigState,
   NativeConfigOption,
   Session,
   SessionType,
@@ -48,6 +50,7 @@ interface BringUpInput {
   model: string | null;
   displayName: string | null;
   forkFromClaudeSessionId: string | null;
+  executorConfig?: ExecutorConfigState;
 }
 
 interface BringUpResult {
@@ -63,6 +66,10 @@ interface LifecycleRuntime {
 }
 
 function assertApprovalModeAllowed(executor: Executor, mode: ApprovalMode): void {
+  const allowedModes = new Set<ApprovalMode>(['plan', 'ask', 'auto', 'custom', 'full-access']);
+  if (!allowedModes.has(mode)) {
+    throw new Error(`unsupported approval mode: ${mode}`);
+  }
   if ((mode === 'custom' || mode === 'full-access') && executor !== 'codex') {
     throw new Error(`${mode} approval mode is codex-only`);
   }
@@ -76,6 +83,7 @@ export class SessionLifecycleService {
     private approvals: ApprovalManager,
     private broadcaster: WsBroadcaster,
     private runtime: LifecycleRuntime,
+    private proxyDefaults?: (executor: Executor) => AgentProxyDefaults | undefined,
   ) {}
 
   async create(input: CreateSessionInput): Promise<Session> {
@@ -89,22 +97,29 @@ export class SessionLifecycleService {
     if (input.executor === 'kimi' && input.approval_mode !== undefined) {
       throw new Error('Kimi uses executor-native mode; approval_mode must be omitted');
     }
+    const managedDefaults = this.proxyDefaults?.(input.executor);
+    const configuredMode = managedDefaults?.mode.trim() ?? '';
+    const fallbackMode: ApprovalMode = managedDefaults ? 'ask' : 'auto';
     const approvalMode: ApprovalMode | null = input.executor === 'kimi'
       ? null
-      : (input.approval_mode ?? 'auto');
+      : (input.approval_mode ?? (configuredMode || fallbackMode) as ApprovalMode);
     if (approvalMode) assertApprovalModeAllowed(input.executor, approvalMode);
 
     const cfg = loadConfig(this.db);
-    const defaultModel = input.executor === 'claude'
-      ? cfg.default_claude_model.trim()
-      : input.executor === 'codex'
-        ? cfg.default_codex_model.trim()
-        : '';
-    const defaultEffort = input.executor === 'claude'
-      ? cfg.default_claude_effort.trim()
-      : input.executor === 'codex'
-        ? cfg.default_codex_effort.trim()
-        : '';
+    const defaultModel = managedDefaults
+      ? managedDefaults.model.trim()
+      : input.executor === 'claude'
+        ? cfg.default_claude_model.trim()
+        : input.executor === 'codex'
+          ? cfg.default_codex_model.trim()
+          : '';
+    const defaultEffort = managedDefaults
+      ? managedDefaults.thinking.trim()
+      : input.executor === 'claude'
+        ? cfg.default_claude_effort.trim()
+        : input.executor === 'codex'
+          ? cfg.default_codex_effort.trim()
+          : '';
     const explicitModel = typeof input.model === 'string' ? input.model.trim() : '';
     const effectiveModel = explicitModel || defaultModel || null;
     const explicitEffort = typeof input.thinking_effort === 'string'
@@ -177,6 +192,14 @@ export class SessionLifecycleService {
         model: effectiveModel,
         displayName: input.name ?? null,
         forkFromClaudeSessionId,
+        ...(input.executor === 'kimi' && configuredMode
+          ? {
+              executorConfig: {
+                schemaVersion: 1 as const,
+                values: { mode: configuredMode },
+              },
+            }
+          : {}),
       });
     } catch (error) {
       await this.runtime.discardProxy(id);
@@ -279,6 +302,16 @@ export class SessionLifecycleService {
       .prepare('UPDATE sessions SET unread = ? WHERE id = ?')
       .run(unread ? 1 : 0, sessionId);
     this.broadcastSessionUpdated(sessionId, { unread: unread ? 1 : 0 });
+  }
+
+  /** Toggle the pinned marker. Like unread, deliberately does NOT touch
+   *  `updated_at` — the sidebar orders pinned sessions by `pinned_at`. */
+  setPinned(sessionId: string, pinned: boolean): void {
+    const pinnedAt = pinned ? new Date().toISOString() : null;
+    this.db
+      .prepare('UPDATE sessions SET pinned_at = ? WHERE id = ?')
+      .run(pinnedAt, sessionId);
+    this.broadcastSessionUpdated(sessionId, { pinned_at: pinnedAt });
   }
 
   listSessionIdsForTask(taskId: string): string[] {

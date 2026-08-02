@@ -54,6 +54,10 @@ export interface EventEnvelope {
   event: string;
   ts: number;
   data: Record<string, unknown>;
+  /** Provider that emitted `event`. Omitted on historical Gian rows. */
+  provider?: Executor;
+  /** UI-only projection. Omitted on historical pre-projection rows. */
+  display?: import('./events.js').ChatDisplay;
 }
 
 export interface EventMessage extends EventEnvelope {
@@ -354,6 +358,12 @@ export interface SessionArchiveMessage {
   archived: boolean;
 }
 
+export interface SessionPinMessage {
+  type: 'session:pin';
+  session_id: string;
+  pinned: boolean;
+}
+
 export interface SessionDeleteMessage {
   type: 'session:delete';
   session_id: string;
@@ -506,6 +516,7 @@ export type ClientToServerMessage =
   | SessionRecoverMessage
   | SessionRenameMessage
   | SessionArchiveMessage
+  | SessionPinMessage
   | SessionDeleteMessage
   | TaskCreateMessage
   | TaskUpdateMessage

@@ -14,6 +14,14 @@ import type {
 import { ClaudeMcpRuntime } from '../runtime/claude-mcp-runtime.js';
 import { createProtocolWriter, protocolError } from '../transport/protocol.js';
 
+const SELF_TEST_FLAG = '--self-test';
+
+function runSelfTest(argv: string[]): boolean {
+  if (!argv.includes(SELF_TEST_FLAG)) return false;
+  process.stdout.write(`${JSON.stringify({ schemaVersion: 1, id: 'claude', ok: true })}\n`);
+  return true;
+}
+
 function parseArgs(argv: string[]) {
   // The proxy is fully stateless — the only flag we still accept is
   // `--data-dir` for backward compat with existing host wiring; it's
@@ -28,7 +36,9 @@ function parseArgs(argv: string[]) {
 }
 
 async function main() {
-  parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  if (runSelfTest(argv)) return;
+  parseArgs(argv);
   const writer = createProtocolWriter(process.stdout);
 
   // Crash safety net. Without these, any async error in event handlers

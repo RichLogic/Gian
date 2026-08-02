@@ -1,87 +1,87 @@
 import { useEffect, useState } from 'react';
-import type { ApprovalMode, Executor, Workspace } from '@gian/shared';
-import {
-  createWorkspace,
-  loadBranches,
-  loadRemoteBranches,
-  loadRepoInfo,
-} from '../api.js';
-import type { LocalBranch, RemoteBranch } from '../api.js';
-import { BranchPicker } from '../components/BranchPicker.js';
+import type { AgentInstallStatus, Executor, Workspace } from '@gian/shared';
+import { createWorkspace, loadAgents } from '../api.js';
 import { useT } from '../i18n/index.js';
-
-function shortHexId(): string {
-  return Math.random().toString(16).slice(2, 10).padEnd(8, '0');
-}
 
 export interface CreateSessionInput {
   workspaceId: string;
   name: string;
   executor: Executor;
-  approvalMode?: ApprovalMode;
-  mode?: 'regular' | 'worktree';
-  baseBranch?: string;
-  branch?: string;
-  firstMessage?: string;
 }
 
 export interface SessionCreateFormState {
   workspaceId: string;
   sessionName: string;
   executor: Executor;
-  approvalMode: ApprovalMode;
-  mode: 'regular' | 'worktree';
-  baseBranch: string;
-  composedBranch: string;
-  firstMessage: string;
 }
 
 export function buildSessionCreatePayload(form: SessionCreateFormState): CreateSessionInput {
-  const trimmedFirst = form.firstMessage.trim();
   return {
     workspaceId: form.workspaceId,
     name: form.sessionName.trim(),
     executor: form.executor,
-    ...(form.executor === 'kimi' ? {} : { approvalMode: form.approvalMode }),
-    mode: form.mode,
-    ...(form.mode === 'worktree' && form.baseBranch.trim() ? { baseBranch: form.baseBranch.trim() } : {}),
-    ...(form.mode === 'worktree' && form.composedBranch ? { branch: form.composedBranch } : {}),
-    ...(trimmedFirst ? { firstMessage: trimmedFirst } : {}),
   };
 }
 
+/** Display blurbs for the built-in agents. Temporary: once agents become
+ *  plugins, the manifest owns this metadata and this map goes away. */
+const AGENT_DESC: Record<string, string> = {
+  codex: 'OpenAI · gpt-5-codex',
+  claude: 'CLI plan',
+  kimi: 'Moonshot AI · ACP',
+};
+
 export function NewSessionView({
   workspaces,
+  initialWorkspaceId,
   onWorkspaceCreated,
   onCreate,
   onCancel,
   creating,
 }: {
   workspaces: Workspace[];
+  /** Preselected workspace (sidebar workspace-row "+" entry point). */
+  initialWorkspaceId?: string;
   onWorkspaceCreated: (workspace: Workspace) => void;
   onCreate: (input: CreateSessionInput) => void;
   onCancel: () => void;
   creating: boolean;
 }) {
   const t = useT();
-  const [selectedWs, setSelectedWs] = useState(
-    workspaces.find(workspace => workspace.hidden !== 1)?.id ?? workspaces[0]?.id ?? '',
-  );
+  const [selectedWs, setSelectedWs] = useState(() => {
+    const initial = initialWorkspaceId
+      ? workspaces.find(workspace => workspace.id === initialWorkspaceId && workspace.hidden !== 1)
+      : undefined;
+    return initial?.id
+      ?? workspaces.find(workspace => workspace.hidden !== 1)?.id
+      ?? workspaces[0]?.id
+      ?? '';
+  });
   const [sessionName, setSessionName] = useState('');
-  const [executor, setExecutor] = useState<Executor>('codex');
-  const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask');
-  const [mode, setMode] = useState<'regular' | 'worktree'>('regular');
-  const [baseBranch, setBaseBranch] = useState('');
-  const [branchSuffix, setBranchSuffix] = useState<string>(() => shortHexId());
-  const [firstMessage, setFirstMessage] = useState('');
-  const [branches, setBranches] = useState<LocalBranch[]>([]);
-  const [remoteBranches, setRemoteBranches] = useState<RemoteBranch[]>([]);
-  const [branchesLoaded, setBranchesLoaded] = useState(false);
-  const [defaultBranchHint, setDefaultBranchHint] = useState<string | null>(null);
+  /** Which agents exist and whether they're usable — driven by the host's
+   *  /api/agents install status so the picker follows Settings, not a
+   *  hardcoded list. Null while loading. */
+  const [agents, setAgents] = useState<AgentInstallStatus[] | null>(null);
+  const [executor, setExecutor] = useState<Executor | null>(null);
   const [wsName, setWsName] = useState('');
   const [wsRemote, setWsRemote] = useState('');
   const [wsBusy, setWsBusy] = useState(false);
   const [wsError, setWsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadAgents()
+      .then(list => { if (!cancelled) setAgents(list); })
+      .catch(() => { if (!cancelled) setAgents([]); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Default to the first ready agent once the install status lands.
+  useEffect(() => {
+    if (!agents || executor) return;
+    const first = agents.find(agent => agent.ready) ?? agents[0];
+    if (first) setExecutor(first.id);
+  }, [agents, executor]);
 
   async function createWs() {
     if (!wsName) return;
@@ -101,60 +101,15 @@ export function NewSessionView({
 
   const showInlineCreate = workspaces.length === 0 || selectedWs === '__new__';
   const canCreate = !!selectedWs && selectedWs !== '__new__';
-
-  useEffect(() => {
-    if (mode !== 'worktree' || !canCreate) {
-      setBranches([]);
-      setRemoteBranches([]);
-      setBranchesLoaded(false);
-      return;
-    }
-    let cancelled = false;
-    setBranchesLoaded(false);
-    void Promise.all([
-      loadBranches(selectedWs),
-      loadRemoteBranches(selectedWs),
-      loadRepoInfo(selectedWs),
-    ]).then(([localBranches, remotes, info]) => {
-      if (cancelled) return;
-      setBranches(localBranches);
-      setRemoteBranches(remotes);
-      setBranchesLoaded(true);
-      const defaultBranch = info?.git.defaultBranch ?? null;
-      setDefaultBranchHint(defaultBranch);
-      if (defaultBranch && !baseBranch && localBranches.some(branch => branch.name === defaultBranch && !branch.worktreePath)) {
-        setBaseBranch(defaultBranch);
-      }
-    });
-    return () => { cancelled = true; };
-    // Seed the base branch once per workspace selection, not after user picks.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, selectedWs, canCreate]);
-
-  const trimmedSuffix = branchSuffix.trim();
-  const composedBranch = trimmedSuffix ? `worktree/${trimmedSuffix}` : '';
-  const existingLocalNames = new Set(branches.map(branch => branch.name));
-  const branchNameError: string | null =
-    mode !== 'worktree' || !branchesLoaded || !composedBranch
-      ? null
-      : existingLocalNames.has(composedBranch)
-        ? `${composedBranch} ${t('coding.form.branchExists')}`
-        : null;
-  const canSubmit = canCreate
-    && !creating
-    && (mode === 'regular' || (!!composedBranch && !branchNameError));
+  const selectedAgent = agents?.find(agent => agent.id === executor) ?? null;
+  const canSubmit = canCreate && !creating && selectedAgent?.ready === true;
 
   function submit() {
-    if (!canSubmit) return;
+    if (!canSubmit || !executor) return;
     onCreate(buildSessionCreatePayload({
       workspaceId: selectedWs,
       sessionName,
       executor,
-      approvalMode,
-      mode,
-      baseBranch,
-      composedBranch,
-      firstMessage,
     }));
   }
 
@@ -231,130 +186,29 @@ export function NewSessionView({
                 <span className="field-hint">{t('coding.new.executor.hint')}</span>
               </div>
               <div className="exec-picker">
-                <button
-                  type="button"
-                  className={`exec-card codex${executor === 'codex' ? ' active' : ''}`}
-                  onClick={() => {
-                    setExecutor('codex');
-                    if (approvalMode === 'plan') setApprovalMode('ask');
-                  }}
-                >
-                  <div className="exec-card-dot" />
-                  <div className="exec-card-body">
-                    <div className="exec-card-name">Codex</div>
-                    <div className="exec-card-desc">OpenAI · gpt-5-codex</div>
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  className={`exec-card claude${executor === 'claude' ? ' active' : ''}`}
-                  onClick={() => {
-                    setExecutor('claude');
-                    if (approvalMode === 'custom' || approvalMode === 'full-access') setApprovalMode('ask');
-                  }}
-                >
-                  <div className="exec-card-dot" />
-                  <div className="exec-card-body">
-                    <div className="exec-card-name">Claude Code</div>
-                    <div className="exec-card-desc">CLI plan</div>
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  className={`exec-card kimi${executor === 'kimi' ? ' active' : ''}`}
-                  onClick={() => setExecutor('kimi')}
-                >
-                  <div className="exec-card-dot" />
-                  <div className="exec-card-body">
-                    <div className="exec-card-name">Kimi Code</div>
-                    <div className="exec-card-desc">Moonshot AI · ACP</div>
-                  </div>
-                </button>
-              </div>
-            </div>
-
-            {executor !== 'kimi' && <div className="field">
-              <div className="field-lbl">
-                <span>{t('coding.new.approval')}</span>
-                <span className="field-hint">{t('coding.new.approval.hint')}</span>
-              </div>
-              <div className="segm" style={{ width: 'fit-content' }}>
-                {(executor === 'codex'
-                  ? [
-                      ['custom', t('mode.custom')],
-                      ['ask', t('composer.approval.ask.title')],
-                      ['auto', t('composer.approval.approve.title')],
-                      ['full-access', t('mode.full-access')],
-                    ] as Array<[ApprovalMode, string]>
-                  : [
-                      ['plan', t('mode.plan')],
-                      ['ask', t('mode.ask')],
-                      ['auto', t('mode.auto')],
-                    ] as Array<[ApprovalMode, string]>
-                ).map(([approval, label]) => (
+                {(agents ?? []).map(agent => (
                   <button
-                    key={approval}
+                    key={agent.id}
                     type="button"
-                    className={`segm-item${approvalMode === approval ? ' active' : ''}`}
-                    onClick={() => setApprovalMode(approval)}
+                    className={`exec-card ${agent.id}${executor === agent.id ? ' active' : ''}`}
+                    disabled={!agent.ready}
+                    title={agent.ready ? undefined : t('coding.new.executor.notReady')}
+                    onClick={() => setExecutor(agent.id)}
                   >
-                    {label}
+                    <div className="exec-card-dot" />
+                    <div className="exec-card-body">
+                      <div className="exec-card-name">{agent.name}</div>
+                      <div className="exec-card-desc">
+                        {agent.ready ? (AGENT_DESC[agent.id] ?? '') : t('coding.new.executor.notReady')}
+                      </div>
+                    </div>
                   </button>
                 ))}
+                {agents === null && <div className="field-hint">{t('common.loading')}</div>}
+                {agents !== null && agents.length === 0 && (
+                  <div className="field-hint">{t('coding.new.executor.none')}</div>
+                )}
               </div>
-              <div className="field-hint">{t('coding.new.approval.help')}</div>
-            </div>}
-
-            <div className="field">
-              <div className="field-lbl">
-                <span>{t('coding.new.mode')}</span>
-                <span className="field-hint">{t('coding.new.mode.hint')}</span>
-              </div>
-              <div className="segm" style={{ width: 'fit-content' }}>
-                <button
-                  type="button"
-                  className={`segm-item${mode === 'regular' ? ' active' : ''}`}
-                  onClick={() => setMode('regular')}
-                >
-                  {t('coding.form.mode.regular')}
-                </button>
-                <button
-                  type="button"
-                  className={`segm-item${mode === 'worktree' ? ' active' : ''}`}
-                  onClick={() => setMode('worktree')}
-                >
-                  {t('coding.form.mode.worktree')}
-                </button>
-              </div>
-              {mode === 'worktree' && (
-                <div className="ns-worktree-fields">
-                  <label className="ns-sublabel">{t('coding.form.baseBranch')}</label>
-                  <BranchPicker
-                    branches={branches}
-                    remoteBranches={remoteBranches}
-                    value={baseBranch}
-                    defaultBranch={defaultBranchHint}
-                    disabled={!branchesLoaded}
-                    placeholder={branchesLoaded ? t('coding.form.baseBranch.pick') : t('coding.form.baseBranch.loading')}
-                    onChange={setBaseBranch}
-                    ariaLabel={t('coding.form.baseBranch')}
-                  />
-                  <label className="ns-sublabel">{t('coding.form.newBranch')}</label>
-                  <div className="branch-name-field">
-                    <span className="prefix">worktree/</span>
-                    <input
-                      aria-label={t('coding.form.newBranchSuffix')}
-                      placeholder="short-id"
-                      value={branchSuffix}
-                      onChange={event => setBranchSuffix(event.target.value)}
-                      spellCheck={false}
-                    />
-                  </div>
-                  {branchNameError && (
-                    <p className="spaces-error" style={{ marginTop: 4 }}>{branchNameError}</p>
-                  )}
-                </div>
-              )}
             </div>
 
             <div className="field">
@@ -368,20 +222,6 @@ export function NewSessionView({
                 placeholder={t('coding.new.name.placeholder')}
                 value={sessionName}
                 onChange={event => setSessionName(event.target.value)}
-              />
-            </div>
-
-            <div className="field">
-              <div className="field-lbl">
-                <span>{t('coding.new.first')}</span>
-              </div>
-              <textarea
-                className="input"
-                aria-label={t('coding.form.first.label')}
-                rows={4}
-                placeholder={t('coding.new.first.placeholder')}
-                value={firstMessage}
-                onChange={event => setFirstMessage(event.target.value)}
               />
             </div>
           </div>

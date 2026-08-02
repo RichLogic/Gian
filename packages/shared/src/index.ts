@@ -5,3 +5,6 @@ export * from './proxy.js';
 export * from './web.js';
 export * from './events.js';
 export * from './native.js';
+export * from './agents.js';
+export * from './github-auth.js';
+export * from './onboarding.js';

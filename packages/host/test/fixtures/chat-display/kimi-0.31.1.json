@@ -1,0 +1,26 @@
+{
+  "provider": "kimi",
+  "version": "0.31.1",
+  "cases": [
+    {
+      "name": "assistant chunk",
+      "notification": { "method": "acp.sessionUpdate", "params": { "sessionId": "native", "turnId": "t1", "data": { "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "done" }, "_meta": { "itemId": "m1" } } } } },
+      "displays": ["message"]
+    },
+    {
+      "name": "generic tool remains visible",
+      "notification": { "method": "acp.sessionUpdate", "params": { "sessionId": "native", "turnId": "t1", "data": { "update": { "sessionUpdate": "tool_call", "toolCallId": "tool-1", "title": "Custom action", "kind": "custom", "status": "in_progress" } } } },
+      "displays": ["activity.tool"]
+    },
+    {
+      "name": "plan snapshot",
+      "notification": { "method": "acp.sessionUpdate", "params": { "sessionId": "native", "turnId": "t1", "data": { "update": { "sessionUpdate": "plan", "entries": [{ "content": "Inspect", "status": "pending" }] } } } },
+      "displays": ["plan"]
+    },
+    {
+      "name": "native approval options",
+      "notification": { "method": "approval.requested", "params": { "sessionId": "native", "data": { "approvalId": "a1", "title": "Run tool", "nativeOptions": [{ "optionId": "allow-1", "name": "Allow", "kind": "allow_once" }] } } },
+      "displays": ["interaction.approval"]
+    }
+  ]
+}

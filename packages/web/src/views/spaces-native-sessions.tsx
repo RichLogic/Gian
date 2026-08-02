@@ -108,7 +108,7 @@ export function NativeSessionsPane({
           <button className={`segm-item${status === 'adopted' ? ' active' : ''}`} onClick={() => setStatus('adopted')}>Adopted</button>
           <button className={`segm-item${status === 'available' ? ' active' : ''}`} onClick={() => setStatus('available')}>Available</button>
         </div>
-        <span style={{ marginLeft: 'auto', font: '500 10.5px/1 var(--font-mono)', textTransform: 'none', letterSpacing: '0.06em', color: 'var(--text-3)' }}>
+        <span style={{ marginLeft: 'auto', font: '500 var(--fz-10)/1 var(--font-mono)', textTransform: 'none', letterSpacing: '0.06em', color: 'var(--text-3)' }}>
           {filtered.length} sessions
         </span>
       </div>
@@ -214,19 +214,19 @@ function NativeSessionRow({
             )}
           </span>
           {session.gitBranch && (
-            <span className="mono" style={{ color: 'var(--text-3)', fontSize: 11 }}>{session.gitBranch}</span>
+            <span className="mono" style={{ color: 'var(--text-3)', fontSize: 'var(--fz-11)' }}>{session.gitBranch}</span>
           )}
-          <span className="mono" style={{ color: 'var(--text-3)', fontSize: 11 }}>
+          <span className="mono" style={{ color: 'var(--text-3)', fontSize: 'var(--fz-11)' }}>
             · {relTime(session.updatedAt)} · {session.turnCount} turns · {fmtBytes(session.fileSize)}
           </span>
         </div>
-        <div style={{ color: 'var(--text-2)', fontSize: 12, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <div style={{ color: 'var(--text-2)', fontSize: 'var(--fz-12)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {session.firstUserMessage || '(no user message)'}
         </div>
       </div>
       <span />
       {adopted ? (
-        <span style={{ font: '500 12px/1.4 var(--font-sans)', color: 'var(--ok)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        <span style={{ font: '500 var(--fz-12)/1.4 var(--font-sans)', color: 'var(--ok)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
           <Icon d={I.check} size={12} stroke={2.4} /> Adopted
         </span>
       ) : (

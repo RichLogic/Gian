@@ -6,7 +6,7 @@ import type { Mode } from '../components/Topbar.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import type { PlanLifecycleState } from '../transcript/apply.js';
 import type { ApprovalActionContext, QueueEntry, TranscriptItem } from '../types.js';
-import { sessionNeedsAttention } from '../session-routing.js';
+import { sessionNeedsAttention, sortSessionsForRail, sortWorkspacesForRail } from '../session-routing.js';
 import { SessionMain } from './SessionMain.js';
 import { relTime, statusGlyphShown, StatusIcon } from './session-list-status.js';
 import { NewSessionView } from './new-session-view.js';
@@ -34,6 +34,9 @@ const ICON = {
   eyeOff: 'M2 2l12 12M6.5 6.5a2 2 0 0 0 2.8 2.8M3.5 4.5a8 8 0 0 0-1.5 3.5C3 11.5 5.5 13 8 13a8 8 0 0 0 4-1.1M9 3a8 8 0 0 1 5 5 8 8 0 0 1-1 2',
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   folderOpen: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2.5 M3 7v10a2 2 0 0 0 2 2h12.5a2 2 0 0 0 1.9-1.4L21.8 11H7.5a2 2 0 0 0-1.9 1.4L4 17.5',
+  // pushpin — pin / unpin rows (same glyph as the task pin in PathBreadcrumb)
+  pin: 'M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z',
+  archive: 'M3 4h18v4H3z M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8 M10 12h4',
 };
 
 
@@ -94,20 +97,26 @@ export interface CodingViewProps {
     value: NativeConfigValue,
   ) => void;
   onDelete: (sessionId: string) => void;
+  /** Toggle a session's pinned marker (sidebar ordering). */
+  onPinSession: (sessionId: string, pinned: boolean) => void;
+  /** Archive a session from the sidebar row. */
+  onArchiveSession: (sessionId: string) => void;
+  /** Toggle a workspace's pinned marker (sidebar group ordering). */
+  onToggleWorkspacePin: (workspace: Workspace) => void;
   /** Open the Files view in Changed mode for this session's working tree. */
   onShowChanges: (session: Session) => void;
   /** Active session's working tree id (`wt:<id>` or `ws:<id>`), null if none. */
   activeWorkingTreeId: string | null;
   /** Branch name for the active session's working tree. */
   activeBranch: string | null;
-  /** Switch app mode to Spaces (workspace management). Triggered from
-   *  the sidebar's hidden-workspace footer link. */
-  onOpenSpaces: () => void;
 }
 
 export function CodingView(p: CodingViewProps) {
   const [showNew, setShowNew] = useState(false);
-  const rail = useResizableWidth('coding.rail.w', 272, 200, 480, 'left');
+  /** Workspace preselected in NewSessionView when opened via a workspace
+   *  row's "+" action. Undefined when opened from the header "+" button. */
+  const [newForWs, setNewForWs] = useState<string | undefined>(undefined);
+  const rail = useResizableWidth('rail.w', 272, 200, 480, 'left');
 
   // Once the session lands (creatingSession flips back to false), close the
   // new-session form. Kept here — not on submit — so the form stays visible
@@ -146,14 +155,18 @@ export function CodingView(p: CodingViewProps) {
         sessions={p.sessions}
         activeSessionId={p.activeSessionId}
         showNew={showNew}
-        onToggleNew={() => setShowNew(v => !v)}
+        onToggleNew={() => { setNewForWs(undefined); setShowNew(v => !v); }}
+        onNewForWorkspace={id => { setNewForWs(id); setShowNew(true); }}
+        onToggleWorkspacePin={p.onToggleWorkspacePin}
+        onPinSession={p.onPinSession}
+        onArchiveSession={p.onArchiveSession}
         onSelect={id => { setShowNew(false); p.onSelectSession(id); }}
-        onOpenSpaces={p.onOpenSpaces}
       />
       <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize sidebar" />
       {showNew ? (
         <NewSessionView
           workspaces={p.workspaces}
+          initialWorkspaceId={newForWs}
           onCancel={() => setShowNew(false)}
           onWorkspaceCreated={p.onWorkspaceCreated}
           creating={p.creatingSession}
@@ -166,6 +179,7 @@ export function CodingView(p: CodingViewProps) {
           session={p.activeSession}
           workspace={p.activeWorkspace}
           items={p.itemsBySession[p.activeSession.id] ?? []}
+          hydrated={p.itemsBySession[p.activeSession.id] !== undefined}
           pending={p.pendingBySession[p.activeSession.id] ?? false}
           queue={p.queueBySession[p.activeSession.id] ?? []}
           planText={p.planStateBySession[p.activeSession.id]?.text}
@@ -224,8 +238,11 @@ function Sidebar({
   sessions,
   activeSessionId,
   onToggleNew,
+  onNewForWorkspace,
+  onToggleWorkspacePin,
+  onPinSession,
+  onArchiveSession,
   onSelect,
-  onOpenSpaces,
 }: {
   mode: Mode;
   onSetMode: (mode: Mode) => void;
@@ -235,8 +252,11 @@ function Sidebar({
   activeSessionId: string | null;
   showNew: boolean;
   onToggleNew: () => void;
+  onNewForWorkspace: (workspaceId: string) => void;
+  onToggleWorkspacePin: (workspace: Workspace) => void;
+  onPinSession: (sessionId: string, pinned: boolean) => void;
+  onArchiveSession: (sessionId: string) => void;
   onSelect: (id: string) => void;
-  onOpenSpaces: () => void;
 }) {
   const t = useT();
 
@@ -265,6 +285,8 @@ function Sidebar({
     return {
       active: s.id === activeSessionId,
       onSelect: () => onSelect(s.id),
+      onPin: (pinned: boolean) => onPinSession(s.id, pinned),
+      onArchive: () => onArchiveSession(s.id),
     };
   }
 
@@ -309,12 +331,13 @@ function Sidebar({
       list.push(s);
       byWs.set(s.workspace_id, list);
     }
-    // Iterate workspaces in the order they arrive from the host (sort_order).
+    // Iterate workspaces pinned-first, then in host order (sort_order; the
+    // sort is stable so relative order within each group is preserved).
     // Append any orphan workspace_ids (e.g. sessions whose ws isn't in the
     // workspaces prop yet) at the end so they stay visible.
     const orderedIds: string[] = [];
     const seen = new Set<string>();
-    for (const w of workspaces) {
+    for (const w of sortWorkspacesForRail(workspaces)) {
       if (byWs.has(w.id)) { orderedIds.push(w.id); seen.add(w.id); }
     }
     for (const wsId of byWs.keys()) {
@@ -324,7 +347,7 @@ function Sidebar({
       const list = byWs.get(wsId)!;
       const ws = wsById.get(wsId);
       const name = ws?.name ?? wsId;
-      const sorted = list.slice().sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
+      const sorted = sortSessionsForRail(list);
       const isCollapsed = collapsed.has(wsId);
       // Group count = sessions that NEED the user (待处理), not the raw total —
       // the total says nothing actionable (2026-07-31). Hidden when zero.
@@ -335,6 +358,28 @@ function Sidebar({
             <span className="sb-group-ico"><SvgIcon d={isCollapsed ? ICON.folder : ICON.folderOpen} size={14} /></span>
             <span>{name}</span>
             {attn > 0 && <span className="count">{attn}</span>}
+            <span className="sb-group-acts">
+              <button
+                type="button"
+                className="sb-act"
+                data-testid={`sb-new-session-${wsId}`}
+                aria-label={t('coding.sidebar.ws.new')}
+                title={t('coding.sidebar.ws.new')}
+                onClick={e => { e.stopPropagation(); onNewForWorkspace(wsId); }}
+              >
+                <SvgIcon d={ICON.plus} size={13} />
+              </button>
+              <button
+                type="button"
+                className={`sb-act${ws?.pinned === 1 ? ' on' : ''}`}
+                data-testid={`sb-pin-ws-${wsId}`}
+                aria-label={t(ws?.pinned === 1 ? 'coding.sidebar.ws.unpin' : 'coding.sidebar.ws.pin')}
+                title={t(ws?.pinned === 1 ? 'coding.sidebar.ws.unpin' : 'coding.sidebar.ws.pin')}
+                onClick={e => { e.stopPropagation(); if (ws) onToggleWorkspacePin(ws); }}
+              >
+                <SvgIcon d={ICON.pin} size={13} />
+              </button>
+            </span>
           </div>
           {!isCollapsed && sorted.map(s => renderRow(s))}
         </div>
@@ -373,38 +418,26 @@ function Sidebar({
 
       <div className="sb-scroll">
         {renderGroups()}
-
-        {(() => {
-          const hiddenCount = workspaces.filter(workspace => workspace.hidden === 1).length;
-          if (hiddenCount === 0) return null;
-          return (
-            <button type="button" className="sb-hidden-link" onClick={onOpenSpaces}>
-              ↳ {hiddenCount}{' '}
-              {t(hiddenCount === 1
-                ? 'coding.sidebar.hiddenOne'
-                : 'coding.sidebar.hiddenMany')}
-              {' · '}
-              {t('coding.sidebar.manage')}
-            </button>
-          );
-        })()}
       </div>
     </aside>
   );
 }
 
 function SessionRow({
-  session, active, wsHidden, onSelect,
+  session, active, wsHidden, onSelect, onPin, onArchive,
 }: {
   session: Session;
   active: boolean;
   wsHidden?: boolean;
   onSelect: () => void;
+  onPin: (pinned: boolean) => void;
+  onArchive: () => void;
 }) {
   const t = useT();
+  const pinned = session.pinned_at != null;
   return (
     <div
-      className={`rail-item session-row${active ? ' active' : ''}`}
+      className={`rail-item session-row${active ? ' active' : ''}${pinned ? ' pinned' : ''}`}
       data-testid={`session-row-${session.id}`}
       role="button"
       tabIndex={0}
@@ -433,6 +466,30 @@ function SessionRow({
           <SvgIcon d={ICON.eyeOff} size={11} />
         </span>
       )}
+      {/* Hover actions: pin / archive. The pin stays visible while pinned;
+          both cover the row-end glyph on hover (CSS). */}
+      <span className="ri-acts">
+        <button
+          type="button"
+          className={`ri-act${pinned ? ' on' : ''}`}
+          data-testid={`session-pin-${session.id}`}
+          aria-label={t(pinned ? 'coding.session.unpin' : 'coding.session.pin')}
+          title={t(pinned ? 'coding.session.unpin' : 'coding.session.pin')}
+          onClick={e => { e.stopPropagation(); onPin(!pinned); }}
+        >
+          <SvgIcon d={ICON.pin} size={13} />
+        </button>
+        <button
+          type="button"
+          className="ri-act"
+          data-testid={`session-archive-${session.id}`}
+          aria-label={t('coding.session.archive')}
+          title={t('coding.session.archive')}
+          onClick={e => { e.stopPropagation(); onArchive(); }}
+        >
+          <SvgIcon d={ICON.archive} size={13} />
+        </button>
+      </span>
     </div>
   );
 }

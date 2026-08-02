@@ -229,7 +229,7 @@ export interface TranscriptExtra {
 }
 
 export function Transcript({
-  items, pending, onApprove, hiddenApprovalId, extras,
+  items, pending, onApprove, hiddenApprovalId, extras, hydrated = true,
 }: {
   items: TranscriptItem[];
   pending: boolean;
@@ -244,6 +244,10 @@ export function Transcript({
   hiddenApprovalId?: string;
   /** Extra nodes interleaved among the items by timestamp (Manager subtask cards). */
   extras?: TranscriptExtra[];
+  /** False while the session's history is still being fetched. The empty
+   *  state is gated on this so switching to an unhydrated session doesn't
+   *  flash "no messages" before the history arrives. */
+  hydrated?: boolean;
 }) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
@@ -288,7 +292,7 @@ export function Transcript({
 
   return (
     <div className="transcript" ref={ref}>
-        {items.length === 0 && (extras?.length ?? 0) === 0 && !pending && (
+        {items.length === 0 && (extras?.length ?? 0) === 0 && !pending && hydrated && (
           <div className="transcript-empty">{t('transcript.empty')}</div>
         )}
         {(() => {

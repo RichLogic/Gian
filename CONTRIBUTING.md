@@ -2,10 +2,9 @@
 
 ## Branch model
 
-Development currently happens on `init/phase-2-vertical-slice`. Feature work
-is done on short-lived branches off that base; open a PR to merge back. There
-is no separate `main` yet — treat the base branch as `main` until a stable
-release.
+Development happens on `main`. Create a short-lived branch from the latest
+`main`, keep each pull request focused, and open the pull request back to
+`main`.
 
 ## Commit style
 
@@ -34,14 +33,15 @@ nvm use 22
 
 ## Checks before pushing
 
-Run both of these and fix any errors before opening a PR:
+Run these and fix any errors before opening a PR:
 
 ```bash
-pnpm -r typecheck
-pnpm -F @gian/web build
+pnpm typecheck
+pnpm test
+pnpm build
 ```
 
-There are no automated CI checks yet; these are the gate.
+Release tags also run the signed and notarized macOS packaging workflow.
 
 ## Monorepo layout
 
@@ -49,7 +49,9 @@ There are no automated CI checks yet; these are the gate.
 packages/shared/   shared TypeScript types — no business logic
 packages/host/     Hono API + WebSocket server + all backend subsystems
 packages/web/      React SPA (Vite)
-scripts/           daemon install/uninstall scripts
+packages/desktop/  Electron launcher and macOS packaging
+packages/proxies/  independently released Agent protocol adapters
+scripts/           development and release tooling
 docs/              architecture, protocol, roadmap, AI/quality/ADR docs
 ```
 

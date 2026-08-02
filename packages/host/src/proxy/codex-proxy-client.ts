@@ -25,6 +25,8 @@ export interface CodexProxyHostOptions {
   nodeBin?: string;
   /** Optional codex binary path; falls back to CODEX_BIN env. */
   codexBin?: string;
+  /** Runtime environment additions supplied by the CLI runtime provider. */
+  env?: Readonly<Record<string, string>>;
   /** Logger for stderr / lifecycle events. */
   log?: (msg: string) => void;
 }
@@ -65,7 +67,7 @@ export class CodexProxyHost {
 
     this.child = spawn(nodeBin, [opts.entry, ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
+      env: { ...process.env, ...opts.env },
     });
 
     this.bindStdout();

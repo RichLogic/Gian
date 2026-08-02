@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type {
   ExecutorConfigState,
+  AgentProxyDefaults,
+  Executor,
   NativeConfigOption,
   NativeConfigValue,
   ProxyNotification,
@@ -294,7 +296,7 @@ class CapturingBroadcaster {
   }
 }
 
-function setup() {
+function setup(proxyDefaults?: (executor: Executor) => AgentProxyDefaults) {
   const dir = mkdtempSync(join(tmpdir(), 'gian-sm-test-'));
   const db = openDatabase(dir);
 
@@ -316,6 +318,8 @@ function setup() {
     approvals,
     queue,
     dir,
+    null,
+    proxyDefaults,
   );
   approvals.setRespondFn((sid, aid, dec) => sessions.respondApproval(sid, aid, dec));
   approvals.setGetModeFn(sid => sessions.getSession(sid).approval_mode);
@@ -323,7 +327,7 @@ function setup() {
   return { dir, db, wsId, proxyMgr, broadcaster, sessions };
 }
 
-function setupKimi() {
+function setupKimi(proxyDefaults?: (executor: Executor) => AgentProxyDefaults) {
   const dir = mkdtempSync(join(tmpdir(), 'gian-sm-kimi-test-'));
   const db = openDatabase(dir);
   const wsId = randomUUID();
@@ -341,11 +345,49 @@ function setupKimi() {
     approvals,
     queue,
     dir,
+    null,
+    proxyDefaults,
   );
   approvals.setRespondFn((sid, aid, dec) => sessions.respondApproval(sid, aid, dec));
   approvals.setGetModeFn(sid => sessions.getSession(sid).approval_mode);
   return { dir, db, wsId, proxyMgr, broadcaster, sessions };
 }
+
+test('new sessions use defaults owned by their Proxy configuration', async () => {
+  const { dir, db, wsId, sessions } = setup(() => ({
+    model: 'claude-opus-4-1',
+    thinking: 'xhigh',
+    mode: 'ask',
+  }));
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+    });
+    assert.equal(session.model, 'claude-opus-4-1');
+    assert.equal(session.thinking_effort, 'xhigh');
+    assert.equal(session.approval_mode, 'ask');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi applies a Proxy-owned default mode through native config', async () => {
+  const { dir, db, wsId, sessions } = setupKimi(() => ({
+    model: '',
+    thinking: '',
+    mode: 'yolo',
+  }));
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'kimi' });
+    assert.equal(session.approval_mode, null);
+    assert.deepEqual(session.executor_config.values, { mode: 'yolo' });
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('Kimi session persists native config and never invents a Gian approval mode', async () => {
   const { dir, db, wsId, broadcaster, sessions } = setupKimi();
@@ -493,8 +535,8 @@ test('Kimi adoption coalesces replay chunks and keeps assistant IDs turn-local',
       ['hello', 'second'],
     );
     const assistantIds = events
-      .filter(event => event.event === 'assistant_text')
-      .map(event => event.data.itemId);
+      .filter(event => event.display?.type === 'message')
+      .map(event => event.display?.data.itemId);
     assert.equal(new Set(assistantIds).size, 2);
   } finally {
     db.close();
@@ -880,10 +922,9 @@ test('proxy notification persists event and broadcasts; turn.completed updates s
 
     const events = db.prepare('SELECT type FROM events WHERE session_id = ?').all(session.id) as Array<{ type: string }>;
     const types = events.map(e => e.type);
-    // Both output.text and turn.completed are covered by the cc normalizer
-    // and persisted under unified type names: assistant_text + turn_completed.
-    assert.ok(types.includes('assistant_text'));
-    assert.ok(types.includes('turn_completed'));
+    // Provider-native names remain the persisted source of truth.
+    assert.ok(types.includes('output.text'));
+    assert.ok(types.includes('turn.completed'));
 
     const sessionRow = db.prepare('SELECT status, unread FROM sessions WHERE id = ?').get(session.id) as { status: string; unread: number };
     assert.equal(sessionRow.status, 'done');
@@ -895,8 +936,8 @@ test('proxy notification persists event and broadcasts; turn.completed updates s
     assert.ok(turnRow.completed_at);
 
     const broadcastEvents = broadcaster.messages.filter(m => m.type === 'event') as Array<{ event: string }>;
-    assert.ok(broadcastEvents.some(e => e.event === 'assistant_text'));
-    assert.ok(broadcastEvents.some(e => e.event === 'turn_completed'));
+    assert.ok(broadcastEvents.some(e => e.event === 'output.text'));
+    assert.ok(broadcastEvents.some(e => e.event === 'turn.completed'));
     const doneUpdate = broadcaster.messages.find(
       (m): m is { type: 'session:updated'; session: { status?: string; unread?: number } } =>
         m.type === 'session:updated' && (m as { session: { status?: string } }).session.status === 'done',
@@ -1041,6 +1082,34 @@ test('setUnread toggles the flag, broadcasts, and does NOT bump updated_at', asy
   }
 });
 
+test('setPinned toggles pinned_at, broadcasts, and does NOT bump updated_at', async () => {
+  const { dir, db, wsId, sessions, broadcaster } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    const before = db.prepare('SELECT updated_at, pinned_at FROM sessions WHERE id = ?').get(session.id) as { updated_at: string; pinned_at: string | null };
+    assert.equal(before.pinned_at, null, 'fresh session starts unpinned');
+    broadcaster.messages.length = 0;
+
+    sessions.setPinned(session.id, true);
+    const marked = db.prepare('SELECT updated_at, pinned_at FROM sessions WHERE id = ?').get(session.id) as { updated_at: string; pinned_at: string | null };
+    assert.ok(marked.pinned_at, 'pin stamps pinned_at');
+    assert.equal(marked.updated_at, before.updated_at, 'pin must not reorder by updated_at');
+
+    const upd = broadcaster.messages.find(
+      (m): m is { type: 'session:updated'; session: { pinned_at?: string | null } } =>
+        m.type === 'session:updated',
+    );
+    assert.ok(upd && upd.session.pinned_at, 'broadcasts the pinned_at stamp');
+
+    sessions.setPinned(session.id, false);
+    const cleared = db.prepare('SELECT pinned_at FROM sessions WHERE id = ?').get(session.id) as { pinned_at: string | null };
+    assert.equal(cleared.pinned_at, null, 'unpin clears pinned_at');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('listEvents returns persisted events ordered chronologically with turn numbers', async () => {
   const { dir, db, wsId, sessions, proxyMgr } = setup();
   try {
@@ -1058,7 +1127,7 @@ test('listEvents returns persisted events ordered chronologically with turn numb
 
     const events = sessions.listEvents(session.id);
     const types = events.map(e => e.event);
-    assert.deepEqual(types, ['user_message', 'assistant_text', 'turn_completed']);
+    assert.deepEqual(types, ['user_message', 'output.text', 'turn.completed']);
     assert.equal(events[0]!.session_id, session.id);
     assert.equal(events[0]!.turn, 1);
     assert.equal((events[0]!.data as { text: string }).text, 'first');

@@ -1,12 +1,29 @@
 import { useEffect, useState } from 'react';
-import type { ReactNode } from 'react';
-import type { CcModelCapabilities, CodexModelCapabilities, ExternalEditor, OpenFileCategory, SystemConfig } from '@gian/shared';
+import type {
+  AgentInstallStatus,
+  AgentProxyDefaults,
+  Executor,
+  ExternalEditor,
+  OpenFileCategory,
+  ProxyCapabilities,
+  SystemConfig,
+} from '@gian/shared';
 import { THEME_DEFAULT_ACCENT } from '@gian/shared';
-import { loadProxyModels, saveSettings } from '../api.js';
+import {
+  installAgentCli,
+  installAgentProxy,
+  loadAgents,
+  loadProxyCapabilities,
+  resetOnboarding,
+  saveSettings,
+  setAgentCliPath,
+  setAgentProxyDefaults,
+} from '../api.js';
 import { useMinimapEnabled, setMinimapEnabled } from '../display-prefs.js';
 import { AppIcon } from './AppIcon.js';
 import { DEFAULT_OPEN_TARGET } from './sheet-model.js';
 import { useT } from '../i18n/index.js';
+import type { AppIdentity } from '../controllers/use-app-auth.js';
 
 const OPEN_CATEGORIES: Array<{ key: OpenFileCategory; labelKey: string }> = [
   { key: 'code', labelKey: 'settings.openapps.code' },
@@ -24,7 +41,7 @@ import {
   type NotificationPrefs,
 } from '../notifications.js';
 
-export type NavKey = 'appearance' | 'notifications' | 'shortcuts' | 'executors' | 'openwith';
+export type NavKey = 'appearance' | 'notifications' | 'shortcuts' | 'executors' | 'openwith' | 'account';
 
 /** Left-nav groups (locator). `labelKey` is an i18n key; `items` map a
  *  section anchor id (`sec-<key>`) to its nav label key. */
@@ -47,23 +64,11 @@ const NAV_GROUPS: Array<{
       ['openwith', 'settings.section.openwith'],
     ],
   },
+  {
+    labelKey: 'settings.nav.group.account',
+    items: [['account', 'settings.section.account']],
+  },
 ];
-
-/** Render the executor caption with the `claude -p` token in monospace,
- *  matching the design prototype's `.exec-note` (it wraps just that token in
- *  `.mono`). Splits the translated string on the literal so both locales work. */
-function renderExecNote(text: string): ReactNode {
-  const token = 'claude -p';
-  const idx = text.indexOf(token);
-  if (idx < 0) return text;
-  return (
-    <>
-      {text.slice(0, idx)}
-      <span className="mono">{token}</span>
-      {text.slice(idx + token.length)}
-    </>
-  );
-}
 
 function newEditorId(): string {
   return (globalThis.crypto?.randomUUID?.() ?? `ed-${Date.now()}-${Math.random().toString(16).slice(2)}`);
@@ -89,29 +94,48 @@ interface Props {
   onChange: (cfg: SystemConfig) => void;
   /** Which section to render — controlled by App (driven by the panel-3
    *  SettingsNavInspector; the state survives rail collapse/restore).
-   *  Defaults to 'appearance'. */
+  *  Defaults to 'appearance'. */
   activeSection?: NavKey;
+  identity?: AppIdentity | null;
+  onSignOut?: () => Promise<void>;
 }
 
 /** Settings v3 — single-section switcher (dock Settings rail, phase 4).
  *  The nav lives in panel 3 (SettingsNavInspector); this panel-2 body renders
- *  ONLY the active section. Two nav groups: Preferences (Appearance /
- *  Notifications / Shortcuts) and Runtime (Executors / Open with). Account/Auth/Public/System/About stay out of this compact
- *  workbench surface; locale lives here because the app only supports
- *  Chinese/English UI. */
-export function SettingsBody({ config, apps, onChange, activeSection = 'appearance' }: Props) {
+ *  ONLY the active section. Account is included because desktop GitHub login
+ *  is part of first-run initialization; unrelated Public/System/About panels
+ *  stay out of this compact workbench surface. */
+export function SettingsBody({
+  config,
+  apps,
+  onChange,
+  activeSection = 'appearance',
+  identity = null,
+  onSignOut,
+}: Props) {
   const t = useT();
   if (!config) return <div style={{ padding: 20, color: 'var(--text-3)' }}>{t('common.loading')}</div>;
-  return <SettingsBodyInner config={config} apps={apps ?? []} onChange={onChange} activeSection={activeSection} />;
+  return (
+    <SettingsBodyInner
+      config={config}
+      apps={apps ?? []}
+      onChange={onChange}
+      activeSection={activeSection}
+      identity={identity}
+      onSignOut={onSignOut}
+    />
+  );
 }
 
 function SettingsBodyInner({
-  config, apps, onChange, activeSection,
+  config, apps, onChange, activeSection, identity, onSignOut,
 }: {
   config: SystemConfig;
   apps: string[];
   onChange: (cfg: SystemConfig) => void;
   activeSection: NavKey;
+  identity: AppIdentity | null;
+  onSignOut?: () => Promise<void>;
 }) {
   const t = useT();
   const minimapOn = useMinimapEnabled();
@@ -303,25 +327,7 @@ function SettingsBodyInner({
         <section className="s2-section">
           <h3 className="s2-sectiontitle">{t('settings.section.executor')}</h3>
           <div className="s2-card">
-            <ExecutorRow
-              name="Claude Code"
-              executor="claude"
-              effortLabelKey="settings.executors.effort"
-              note={renderExecNote(t('settings.executors.note'))}
-              model={config.default_claude_model}
-              effort={config.default_claude_effort}
-              onSetModel={v => patch({ default_claude_model: v })}
-              onSetEffort={v => patch({ default_claude_effort: v })}
-            />
-            <ExecutorRow
-              name="Codex"
-              executor="codex"
-              effortLabelKey="settings.executors.thinking"
-              model={config.default_codex_model}
-              effort={config.default_codex_effort}
-              onSetModel={v => patch({ default_codex_model: v })}
-              onSetEffort={v => patch({ default_codex_effort: v })}
-            />
+            <AgentInstallBlock />
             <div className="s2-taskpm">
               <div className="s2-taskpm-head">
                 <span className="s2-taskpm-label">{t('settings.executors.taskDefault')}</span>
@@ -427,123 +433,362 @@ function SettingsBodyInner({
           </div>
         </section>
         )}
+
+        {activeSection === 'account' && (
+        <section className="s2-section">
+          <h3 className="s2-sectiontitle">{t('settings.section.account')}</h3>
+          <div className="s2-card">
+            <AccountBlock identity={identity} onSignOut={onSignOut} />
+          </div>
+        </section>
+        )}
       </div>
     </div>
   );
 }
 
-/** Renders one executor block (Claude or Codex). Model list comes from
- *  `loadProxyModels(executor)`; effort options derive from the selected
- *  model's capability struct — Cc exposes `supportedEfforts`, Codex exposes
- *  `supportedThinking`. Nothing about the list is hardcoded — when the proxy
- *  adds a model or adjusts its supported levels, this UI follows. */
-function ExecutorRow({
-  name, executor, model, effort, effortLabelKey, note, onSetModel, onSetEffort,
+function AccountBlock({
+  identity,
+  onSignOut,
 }: {
-  name: string;
-  executor: 'claude' | 'codex';
-  model: string;
-  effort: string;
-  /** i18n key for the effort/thinking row label (Claude → Effort, Codex → Thinking). */
-  effortLabelKey: string;
-  /** Optional muted caption under the row (e.g. the `claude -p` note). */
-  note?: ReactNode;
-  onSetModel: (v: string) => void;
-  onSetEffort: (v: string) => void;
+  identity: AppIdentity | null;
+  onSignOut?: () => Promise<void>;
 }) {
   const t = useT();
-  const [models, setModels] = useState<Array<CcModelCapabilities | CodexModelCapabilities>>([]);
+  const [busy, setBusy] = useState(false);
+  const [resettingSetup, setResettingSetup] = useState(false);
+  const githubUser = identity?.provider === 'github' ? identity.user : null;
+  const displayName = githubUser
+    ? githubUser.name || githubUser.login
+    : identity?.provider === 'host'
+      ? identity.username
+      : t('settings.account.signedIn');
+
+  async function signOut() {
+    if (!onSignOut) return;
+    setBusy(true);
+    try {
+      await onSignOut();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function restartSetup() {
+    setResettingSetup(true);
+    try {
+      await resetOnboarding();
+      window.location.reload();
+    } finally {
+      setResettingSetup(false);
+    }
+  }
+
+  return (
+    <div className="settings-account">
+      <div className="settings-account-user">
+        {githubUser ? (
+          <img
+            className="settings-account-avatar"
+            src={githubUser.avatarUrl}
+            alt=""
+            referrerPolicy="no-referrer"
+          />
+        ) : (
+          <div className="settings-account-avatar settings-account-avatar-fallback" aria-hidden>G</div>
+        )}
+        <div>
+          <div className="settings-account-name">{displayName}</div>
+          {githubUser && (
+            <a href={githubUser.profileUrl} target="_blank" rel="noreferrer">
+              @{githubUser.login}
+            </a>
+          )}
+        </div>
+      </div>
+      <p className="s2-help">{t('settings.account.local')}</p>
+      {githubUser && (
+        <button
+          className="btn secondary"
+          type="button"
+          disabled={busy || resettingSetup}
+          onClick={() => void restartSetup()}
+        >
+          {resettingSetup ? t('settings.account.reconfiguring') : t('settings.account.reconfigure')}
+        </button>
+      )}
+      <button
+        className="btn danger-ghost"
+        type="button"
+        disabled={busy || resettingSetup || !onSignOut}
+        onClick={() => void signOut()}
+      >
+        {busy ? t('settings.account.signingOut') : t('settings.account.signOut')}
+      </button>
+    </div>
+  );
+}
+
+function AgentInstallBlock() {
+  const t = useT();
+  const [agents, setAgents] = useState<AgentInstallStatus[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+  const [busy, setBusy] = useState<Executor | null>(null);
+  const [error, setError] = useState('');
+
+  async function refresh() {
+    setLoading(true);
+    try {
+      setAgents(await loadAgents());
+      setError('');
+    } catch (value) {
+      setError(value instanceof Error ? value.message : String(value));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
+    void refresh();
+  }, []);
+
+  async function run(id: Executor, operation: () => Promise<unknown>) {
+    setBusy(id);
+    setError('');
+    try {
+      await operation();
+      await refresh();
+    } catch (value) {
+      setError(value instanceof Error ? value.message : String(value));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function setup(agent: AgentInstallStatus) {
+    await run(agent.id, async () => {
+      if (agent.proxy.state !== 'ready') await installAgentProxy(agent.id);
+      if (agent.cli.state !== 'ready') await installAgentCli(agent.id);
+    });
+  }
+
+  if (loading && agents.length === 0) {
+    return <p className="s2-help">{t('settings.agents.loading')}</p>;
+  }
+
+  return (
+    <>
+      <p className="s2-help">{t('settings.agents.help')}</p>
+      {agents.map(agent => (
+        <AgentInstallRow
+          key={agent.id}
+          agent={agent}
+          busy={busy === agent.id}
+          onSetup={() => setup(agent)}
+          onInstallCli={() => run(agent.id, () => installAgentCli(agent.id))}
+          onInstallProxy={() => run(agent.id, () => installAgentProxy(agent.id))}
+          onSetPath={path => run(agent.id, () => setAgentCliPath(agent.id, path))}
+          onSetDefaults={defaults => run(
+            agent.id,
+            () => setAgentProxyDefaults(agent.id, defaults),
+          )}
+        />
+      ))}
+      {error && <p className="s2-help" role="alert">{error}</p>}
+    </>
+  );
+}
+
+function AgentInstallRow({
+  agent,
+  busy,
+  onSetup,
+  onInstallCli,
+  onInstallProxy,
+  onSetPath,
+  onSetDefaults,
+}: {
+  agent: AgentInstallStatus;
+  busy: boolean;
+  onSetup: () => void;
+  onInstallCli: () => void;
+  onInstallProxy: () => void;
+  onSetPath: (path: string | null) => void;
+  onSetDefaults: (defaults: Partial<AgentProxyDefaults>) => void;
+}) {
+  const t = useT();
+  const [path, setPath] = useState(agent.cli.path ?? '');
+  const [capabilities, setCapabilities] = useState<ProxyCapabilities | null>(null);
+  const [capabilityError, setCapabilityError] = useState(false);
+  useEffect(() => setPath(agent.cli.path ?? ''), [agent.cli.path]);
+  useEffect(() => {
     let alive = true;
-    setLoading(true);
-    setError(false);
-    loadProxyModels(executor)
-      .then(list => {
-        if (!alive) return;
-        setModels(list);
-        setLoading(false);
-        if (list.length === 0) setError(true);
+    setCapabilities(null);
+    setCapabilityError(false);
+    if (agent.proxy.state !== 'ready') return () => { alive = false; };
+    loadProxyCapabilities(agent.id)
+      .then(value => {
+        if (alive) setCapabilities(value);
       })
       .catch(() => {
-        if (!alive) return;
-        setLoading(false);
-        setError(true);
+        if (alive) setCapabilityError(true);
       });
     return () => { alive = false; };
-  }, [executor]);
+  }, [agent.id, agent.proxy.state, agent.proxy.version]);
 
-  const visible = models.filter(m => !m.hidden);
-  const selected = models.find(m => m.model === model.trim());
-  const efforts = selected
-    ? (executor === 'claude'
-        ? (selected as CcModelCapabilities).supportedEfforts
-        : (selected as CodexModelCapabilities).supportedThinking)
+  const defaults = agent.proxy.defaults ?? { model: '', thinking: '', mode: '' };
+  const models = capabilities?.models.filter(model => !model.hidden) ?? [];
+  const selectedModel = models.find(model => model.model === defaults.model)
+    ?? models.find(model => model.isDefault)
+    ?? models[0];
+  const thinkingLevels = selectedModel
+    ? ('supportedEfforts' in selectedModel
+        ? selectedModel.supportedEfforts
+        : selectedModel.supportedThinking)
     : [];
+  const modes = capabilities?.modes ?? [];
+  const selectedMode = modes.some(mode => mode.id === defaults.mode)
+    ? defaults.mode
+    : modes.find(mode => mode.isDefault)?.id ?? modes[0]?.id ?? '';
 
-  const status =
-    loading ? { cls: 'loading', label: t('settings.executors.status.loading') }
-    : error ? { cls: 'err', label: t('settings.executors.status.unavailable') }
-    : { cls: 'ok', label: t('settings.executors.status.ready') };
+  const state = agent.ready
+    ? { cls: 'ok', label: t('settings.agents.ready') }
+    : { cls: 'err', label: t('settings.agents.setupRequired') };
 
   return (
     <div className="exec-row">
       <div className="exec-head">
-        <span className={`exec-dot ${executor}`} />
-        <span className="exec-name">{name}</span>
-        <span className={`exec-status ${status.cls}`}>{status.label}</span>
+        <span className={`exec-dot ${agent.id}`} />
+        <span className="exec-name">{agent.name}</span>
+        <span className={`exec-status ${state.cls}`}>{state.label}</span>
+        {!agent.ready && (
+          <button className="btn xs primary" type="button" disabled={busy} onClick={onSetup}>
+            {busy ? t('settings.agents.installing') : t('settings.agents.setup')}
+          </button>
+        )}
       </div>
       <dl className="kv-grid">
-        <dt>{t('settings.executors.defaultModel')}</dt>
+        <dt>CLI</dt>
         <dd>
-          <select
-            className="select mono"
-            style={{ width: '100%' }}
-            value={model}
-            disabled={loading || visible.length === 0}
-            onChange={e => {
-              const next = e.target.value;
-              onSetModel(next);
-              // Reset effort when the new model doesn't support the current value.
-              const m = models.find(x => x.model === next);
-              const supported = m
-                ? (executor === 'claude'
-                    ? (m as CcModelCapabilities).supportedEfforts
-                    : (m as CodexModelCapabilities).supportedThinking)
-                : [];
-              if (effort && !supported.includes(effort as never)) {
-                onSetEffort('');
-              }
-            }}
-          >
-            <option value="">{t('settings.executors.proxyDefault')}</option>
-            {visible.filter(m => m.model !== '').map(m => (
-              <option key={m.id} value={m.model}>{m.displayName || m.model}</option>
-            ))}
-          </select>
+          {agent.cli.state === 'ready'
+            ? `${agent.cli.version ?? ''} · ${agent.cli.path ?? ''}`
+            : t('settings.agents.notInstalled')}
+          {agent.cli.state !== 'ready' && (
+            <button className="btn xs secondary" type="button" disabled={busy} onClick={onInstallCli}>
+              {t('settings.agents.installOfficial')}
+            </button>
+          )}
         </dd>
-        {efforts.length > 0 && (
+        <dt>{t('settings.agents.cliPath')}</dt>
+        <dd>
+          <input
+            className="input mono"
+            value={path}
+            disabled={busy}
+            placeholder="/absolute/path/to/cli"
+            onChange={event => setPath(event.target.value)}
+          />
+          <button
+            className="btn xs secondary"
+            type="button"
+            disabled={busy || path.trim() === (agent.cli.path ?? '')}
+            onClick={() => onSetPath(path.trim() || null)}
+          >
+            {t('settings.agents.savePath')}
+          </button>
+        </dd>
+        <dt>Proxy</dt>
+        <dd>
+          {agent.proxy.state === 'ready'
+            ? `${agent.proxy.version ?? ''} · GitHub`
+            : t('settings.agents.notInstalled')}
+          {agent.proxy.state !== 'ready' && (
+            <button className="btn xs secondary" type="button" disabled={busy} onClick={onInstallProxy}>
+              {t('settings.agents.installProxy')}
+            </button>
+          )}
+        </dd>
+        {models.length > 0 && (
           <>
-            <dt>{t(effortLabelKey)}</dt>
+            <dt>{t('settings.executors.defaultModel')}</dt>
             <dd>
               <select
                 className="select mono"
                 style={{ width: '100%' }}
-                value={effort}
-                onChange={e => onSetEffort(e.target.value)}
+                value={defaults.model}
+                disabled={busy || !capabilities}
+                onChange={event => {
+                  const model = event.target.value;
+                  const nextModel = models.find(candidate => candidate.model === model)
+                    ?? models.find(candidate => candidate.isDefault)
+                    ?? models[0];
+                  const supported = nextModel
+                    ? ('supportedEfforts' in nextModel
+                        ? nextModel.supportedEfforts
+                        : nextModel.supportedThinking)
+                    : [];
+                  onSetDefaults({
+                    model,
+                    ...(defaults.thinking && !supported.includes(defaults.thinking)
+                      ? { thinking: '' }
+                      : {}),
+                  });
+                }}
+              >
+                <option value="">{t('settings.executors.proxyDefault')}</option>
+                {models.filter(model => model.model !== '').map(model => (
+                  <option key={model.id} value={model.model}>
+                    {model.displayName || model.model}
+                  </option>
+                ))}
+              </select>
+            </dd>
+          </>
+        )}
+        {thinkingLevels.length > 0 && (
+          <>
+            <dt>{agent.id === 'claude'
+              ? t('settings.executors.effort')
+              : t('settings.executors.thinking')}</dt>
+            <dd>
+              <select
+                className="select mono"
+                style={{ width: '100%' }}
+                value={defaults.thinking}
+                disabled={busy || !capabilities}
+                onChange={event => onSetDefaults({ thinking: event.target.value })}
               >
                 <option value="">{t('settings.executors.modelDefault')}</option>
-                {efforts.map(level => (
+                {thinkingLevels.map(level => (
                   <option key={level} value={level}>{level}</option>
                 ))}
               </select>
             </dd>
           </>
         )}
+        <dt>{t('settings.executors.mode')}</dt>
+        <dd>
+          {!capabilities && !capabilityError ? (
+            <span className="s2-help">{t('settings.executors.status.loading')}</span>
+          ) : modes.length > 0 ? (
+            <select
+              className="select mono"
+              style={{ width: '100%' }}
+              value={selectedMode}
+              disabled={busy || !capabilities}
+              onChange={event => onSetDefaults({ mode: event.target.value })}
+            >
+              {modes.map(mode => (
+                <option key={mode.id} value={mode.id}>{mode.label}</option>
+              ))}
+            </select>
+          ) : (
+            <span className="s2-help">{capabilityError
+              ? t('settings.executors.status.unavailable')
+              : t('settings.executors.sessionMode')}</span>
+          )}
+        </dd>
       </dl>
-      {note && <p className="exec-note">{note}</p>}
     </div>
   );
 }

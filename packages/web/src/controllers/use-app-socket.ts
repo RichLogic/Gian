@@ -1,6 +1,5 @@
 import { useEffect, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
 import type {
-  Bot,
   EventEnvelope,
   Executor,
   RunnerInfo,
@@ -19,6 +18,7 @@ import {
   applyErrorEnvelopeToSession,
   applyPlanLifecycle,
   createOptimisticEcho,
+  displayTypeForEnvelope,
   nextPendingFromEnvelope,
   type PlanLifecycleState,
 } from '../transcript/apply.js';
@@ -41,7 +41,6 @@ interface UseAppSocketInput {
   setWorkspaces: Setter<Workspace[]>;
   setSessions: Setter<Session[]>;
   setTasks: Setter<Task[]>;
-  setBots: Setter<Bot[]>;
   setSystemConfig: Setter<SystemConfig | null>;
   setRunner: Setter<RunnerInfo | null>;
   setActiveSessionId: Setter<string | null>;
@@ -83,7 +82,8 @@ export function useAppSocket(input: UseAppSocketInput): void {
           [envelope.session_id]: nextPending,
         }));
       }
-      if (envelope.event === 'plan_update' || envelope.event === 'turn_completed') {
+      const displayType = displayTypeForEnvelope(envelope);
+      if (displayType === 'plan' || displayType === 'state.turn-completed') {
         current.setPlanStateBySession(previous => {
           const existing = previous[envelope.session_id] ?? { completed: false };
           const next = applyPlanLifecycle(existing, envelope);
@@ -114,7 +114,6 @@ export function useAppSocket(input: UseAppSocketInput): void {
           current.setWorkspaces(message.workspaces);
           current.setSessions(message.sessions);
           current.setTasks(message.tasks);
-          current.setBots(message.bots);
           current.setSystemConfig(message.config);
           current.setRunner(message.runner);
           return;

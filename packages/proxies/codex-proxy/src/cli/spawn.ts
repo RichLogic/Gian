@@ -16,6 +16,14 @@ import type {
 import { CodexAppServerClient } from '../runtime/codex-app-server-client.js';
 import { createProtocolWriter, protocolError } from '../transport/protocol.js';
 
+const SELF_TEST_FLAG = '--self-test';
+
+function runSelfTest(argv: string[]): boolean {
+  if (!argv.includes(SELF_TEST_FLAG)) return false;
+  process.stdout.write(`${JSON.stringify({ schemaVersion: 1, id: 'codex', ok: true })}\n`);
+  return true;
+}
+
 function parseArgs(argv: string[]) {
   const options: Record<string, string | boolean> = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -39,7 +47,9 @@ function parseArgs(argv: string[]) {
 }
 
 async function main() {
-  const options = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  if (runSelfTest(argv)) return;
+  const options = parseArgs(argv);
   const writer = createProtocolWriter(process.stdout);
 
   // Crash safety net — without these, any async error in runtime listeners

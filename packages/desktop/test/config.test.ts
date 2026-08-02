@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  desktopRequestBoundaryUrls,
   DEV_HOST_URL,
   DEV_WEB_URL,
   isSafeExternalUrl,
@@ -11,14 +12,27 @@ import {
   resolveDesktopWindowChrome,
 } from '../src/config.js';
 
+test('desktop request boundary covers HTTP and WebSocket traffic', () => {
+  assert.deepEqual(desktopRequestBoundaryUrls('http://127.0.0.1:8990'), [
+    'http://127.0.0.1:8990/*',
+    'ws://127.0.0.1:8990/*',
+  ]);
+  assert.deepEqual(desktopRequestBoundaryUrls('https://gian.example'), [
+    'https://gian.example/*',
+    'wss://gian.example/*',
+  ]);
+});
+
 test('development shell uses a distinct application identity and profile', () => {
   assert.deepEqual(resolveDesktopApplicationIdentity(false, '/tmp/app-data'), {
     name: 'GianDev',
     userDataPath: '/tmp/app-data/GianDev',
+    variant: 'development',
   });
   assert.deepEqual(resolveDesktopApplicationIdentity(true, '/tmp/app-data'), {
     name: 'Gian',
     userDataPath: null,
+    variant: 'production',
   });
 });
 
@@ -29,19 +43,19 @@ test('development targets use the isolated GianDev ports', () => {
       hostUrl: DEV_HOST_URL,
       healthUrl: `${DEV_HOST_URL}/health`,
       webUrl: DEV_WEB_URL,
-      manageLaunchAgent: false,
+      manageHost: false,
     },
   );
 });
 
-test('packaged macOS target uses the production daemon and may manage launchd', () => {
+test('packaged macOS target uses the production core and may manage its host', () => {
   assert.deepEqual(
     resolveDesktopTargets({ isPackaged: true, platform: 'darwin', env: {} }),
     {
       hostUrl: PROD_HOST_URL,
       healthUrl: `${PROD_HOST_URL}/health`,
       webUrl: PROD_HOST_URL,
-      manageLaunchAgent: true,
+      manageHost: true,
     },
   );
 });
@@ -57,7 +71,7 @@ test('custom targets disable production launchd management', () => {
   });
   assert.equal(targets.hostUrl, 'http://localhost:9100');
   assert.equal(targets.webUrl, 'http://localhost:5100');
-  assert.equal(targets.manageLaunchAgent, false);
+  assert.equal(targets.manageHost, false);
 });
 
 test('desktop targets must be plain HTTP origins', () => {

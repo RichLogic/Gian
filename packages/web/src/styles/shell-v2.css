@@ -28,13 +28,6 @@
   padding: 0;
   overflow: hidden;
 }
-.body.rail-hidden .sidebar,
-.body.rail-hidden .rail { display: none; }
-.body.right-hidden .sheet,
-.body.right-hidden .inspector { display: none; }
-.body.main-hidden .main { display: none; }
-.body.main-hidden .sheet,
-.body.main-hidden .inspector { flex: 1; min-width: 0; width: auto; }
 .body.wb-only .sheet { flex: 1; min-width: 0; width: auto; }
 /* Workbench-only view: CodingView stays mounted so the sessions sidebar is
    visible, but its main chat pane collapses. `.view` shrinks to fit the
@@ -57,7 +50,7 @@
   left: 50%; top: 8px; bottom: 8px;
   transform: translateX(-50%);
   width: 2px;
-  border-radius: 2px;
+  border-radius: var(--r-1);
   background: var(--accent);
   opacity: 0;
   transition: opacity 140ms var(--ease), width 140ms var(--ease);
@@ -117,22 +110,6 @@
 
 /* mode dropdown — switches Sessions / Spaces / Bots */
 .mode-anchor { position: relative; }
-.mode-btn {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 4px 7px 4px 9px;
-  border-radius: var(--r-2);
-  font-family: var(--font-sans);
-  font-size: var(--fz-13);
-  font-weight: 500;
-  color: var(--text);
-  background: var(--surface);
-  border: 1px solid var(--hairline);
-  margin-left: 4px;
-  transition: border-color 120ms var(--ease), background 120ms var(--ease);
-  cursor: pointer;
-}
-.mode-btn:hover { background: var(--surface-2); border-color: var(--text-3); }
-.mode-btn .caret { color: var(--text-3); font-size: 9px; margin-top: 1px; }
 
 .mode-pop {
   position: absolute;
@@ -320,12 +297,6 @@
 }
 .session-menu .rule { height: 1px; background: var(--hairline); margin: 4px 4px; }
 
-/* ---------- View-seg (3-state main/both/workbench toggle in topbar) ---------- */
-.view-seg-item.active {
-  color: var(--accent-text);
-  background: var(--accent-soft);
-}
-
 /* ---------- Dock (right icon strip) — frame surface ---------- */
 .dock {
   width: var(--dock-w, 38px);
@@ -385,28 +356,11 @@
   box-shadow: var(--shadow-2);
 }
 .dock-btn:hover .lbl { opacity: 1; transition-delay: 200ms; }
-.dock-btn .dock-badge {
-  position: absolute;
-  top: 2px; right: 2px;
-  min-width: 14px; height: 14px;
-  padding: 0 3px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--text-inv);
-  font: 700 9px/14px var(--font-mono);
-  text-align: center;
-  box-shadow: 0 0 0 1.5px var(--surface-2);
-}
 /* per-group hover affordance to reinforce visual difference */
 .dock-btn.panel:hover    { background: oklch(from var(--text) l c h / 0.06); }
 .dock-btn.wb:hover       { background: oklch(from var(--accent) l c h / 0.10); }
-.dock-btn.popout:hover   { background: var(--surface-3); }
 .dock-btn.panel.active   { background: oklch(from var(--text) l c h / 0.10); color: var(--text); }
 .dock-btn.wb.active      { background: var(--accent-soft); color: var(--accent-text); }
-.dock-btn.popout.active  { background: var(--surface-3); color: var(--text); }
-/* Slightly rounder corners on popout group so it visually reads as "ephemeral" */
-.dock-btn.popout { border-radius: 10px; }
-
 /* ---------- Runner chip (V1-style, anchored bottom of the Dock) ----------
    Clicking the chip pops out a V1-style runner-pop panel to the left of the
    Dock with host info (latency, agents, disk, versions, workspace root).
@@ -521,7 +475,6 @@
    rendered in Phase 1, but hiding rules keep snapshots clean in case any
    leftover markup sneaks in. */
 .nav { display: none; }
-.session-app > .ws-disconnect-banner { display: none; }
 
 /* ---------- Reset legacy session.css overrides that conflict with V2 ----------
    session.css gives `.sidebar` rounded corners + box-shadow (treating it as an
@@ -801,8 +754,7 @@
 }
 .msg:hover .msg-copy { opacity: 1; }
 .msg-copy:hover { background: var(--surface-2); color: var(--text-2); }
-.msg-copy.copied { opacity: 1; color: var(--success, var(--accent-text)); }
-
+.msg-copy.copied { opacity: 1; color: var(--ok); }
 
 /* ---------- Motion (phase 6) ----------
    Soft, short UI animation built on the tokens in tokens.css
@@ -840,9 +792,6 @@
 .tb-toggle,
 .sb-iconbtn,
 .sb-mode,
-.view-seg-item {
-  transition: background var(--dur-fast) var(--ease-soft), color var(--dur-fast) var(--ease-soft);
-}
 
 /* Sidebar collapse — the rail stays mounted (state preserved) and its width
    transitions. --dur-fast (not --dur-med) because the same width property is

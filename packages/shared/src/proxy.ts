@@ -11,6 +11,13 @@ export type CcEffortLevel = string;
 /** Codex owns this vocabulary and may add levels without a Gian release. */
 export type CodexThinkingLevel = string;
 
+export interface ProxyModeCapabilities {
+  id: string;
+  label: string;
+  description: string;
+  isDefault: boolean;
+}
+
 export interface CcModelCapabilities {
   id: string;
   model: string;
@@ -62,6 +69,8 @@ export interface SlashCommand {
 export interface CcCapabilities {
   protocolVersion: string;
   models: CcModelCapabilities[];
+  /** Session-mode vocabulary advertised by cc-proxy. */
+  modes?: ProxyModeCapabilities[];
   /** Built-in CLI commands + user-level custom commands from
    *  ~/.claude/commands/. Project-level commands are fetched per-session
    *  via slash.list with cwd. */
@@ -71,6 +80,8 @@ export interface CcCapabilities {
 export interface CodexCapabilities {
   protocolVersion: string;
   models: CodexModelCapabilities[];
+  /** Session-mode vocabulary advertised by codex-proxy. */
+  modes?: ProxyModeCapabilities[];
   /** Built-in CLI commands + user-level custom commands from
    *  ~/.codex/prompts/. */
   slashCommands: SlashCommand[];
@@ -79,6 +90,8 @@ export interface CodexCapabilities {
 export interface KimiCapabilities {
   protocolVersion: string;
   models: [];
+  /** Empty until ACP can advertise defaults before a session exists. */
+  modes?: ProxyModeCapabilities[];
   slashCommands: [];
   agentInfo?: {
     name?: string;

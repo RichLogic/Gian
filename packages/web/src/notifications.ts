@@ -1,5 +1,6 @@
 import type { EventEnvelope, Session } from '@gian/shared';
 import { stripGianActionBlocks } from '@gian/shared';
+import { displayDataForEnvelope, displayTypeForEnvelope } from './transcript/apply.js';
 
 const PREFS_KEY = 'gian.notificationPrefs.v1';
 
@@ -82,28 +83,30 @@ function notificationForEnvelope(
   prefs: NotificationPrefs,
 ): { title: string; body: string; tag: string } | null {
   const label = sessionLabel(session);
-  if (env.event === 'turn_completed') {
+  const type = displayTypeForEnvelope(env);
+  const data = displayDataForEnvelope(env);
+  if (type === 'state.turn-completed') {
     if (!prefs.sessionDone) return null;
-    const summary = typeof env.data.summary === 'string' ? stripGianActionBlocks(env.data.summary).trim() : '';
+    const summary = typeof data.summary === 'string' ? stripGianActionBlocks(data.summary).trim() : '';
     return {
       title: `Gian · ${label} completed`,
       body: summary || `Turn ${env.turn} completed.`,
       tag: `gian:${env.session_id}:completed:${env.turn}`,
     };
   }
-  if (env.event === 'approval_requested') {
+  if (type === 'interaction.approval' || type === 'interaction.question') {
     if (!prefs.approvalNeeded) return null;
-    const title = typeof env.data.title === 'string' ? env.data.title : 'Approval needed';
-    const subject = typeof env.data.subject === 'string' ? env.data.subject : '';
+    const title = typeof data.title === 'string' ? data.title : 'Approval needed';
+    const subject = typeof data.subject === 'string' ? data.subject : '';
     return {
       title: `Gian · ${title}`,
       body: subject || label,
       tag: `gian:${env.session_id}:approval:${env.call_id}`,
     };
   }
-  if (env.event === 'session_error') {
+  if (type === 'state.error') {
     if (!prefs.errors) return null;
-    const message = typeof env.data.message === 'string' ? env.data.message : 'Session error';
+    const message = typeof data.message === 'string' ? data.message : 'Session error';
     return {
       title: `Gian · ${label} failed`,
       body: message,

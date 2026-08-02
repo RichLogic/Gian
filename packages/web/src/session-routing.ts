@@ -50,3 +50,23 @@ export function sessionNeedsAttention(
   return session.status === 'pending'
     || ((session.status === 'done' || session.status === 'error') && session.unread === 1);
 }
+
+/** Sidebar rail ordering inside one workspace group: pinned first
+ *  (most-recently-pinned first), then by last activity. */
+export function sortSessionsForRail<T extends Pick<Session, 'pinned_at' | 'updated_at'>>(
+  sessions: T[],
+): T[] {
+  return sessions.slice().sort((a, b) => {
+    const ap = a.pinned_at ? 1 : 0;
+    const bp = b.pinned_at ? 1 : 0;
+    if (ap !== bp) return bp - ap;
+    if (a.pinned_at && b.pinned_at) return Date.parse(b.pinned_at) - Date.parse(a.pinned_at);
+    return Date.parse(b.updated_at) - Date.parse(a.updated_at);
+  });
+}
+
+/** Sidebar rail ordering for workspace groups: pinned first, stable within
+ *  each pinned/unpinned group (host `sort_order` is the incoming order). */
+export function sortWorkspacesForRail<T extends { pinned: 0 | 1 }>(workspaces: T[]): T[] {
+  return workspaces.slice().sort((a, b) => b.pinned - a.pinned);
+}

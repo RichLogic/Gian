@@ -1,12 +1,14 @@
 import type {
   ApprovalMode,
+  AgentProxyDefaults,
+  Executor,
   ExecutorConfigState,
   EventEnvelope,
   NativeConfigOption,
   NativeConfigValue,
   ProxyNotification,
   Session,
-  UnifiedEvent,
+  ChatEvent,
 } from '@gian/shared';
 import { MANAGER_SYS_OPEN, MANAGER_SYS_CLOSE } from '@gian/shared';
 import { existsSync } from 'node:fs';
@@ -56,10 +58,9 @@ export type { CreateSessionInput } from './lifecycle-service.js';
  * events; subscribes to proxy notifications and broadcasts them to the web
  * client.
  *
- * Every proxy notification flows through normalize-{cc,codex} and exits as a
- * UnifiedEvent. Anything the normalizer doesn't recognize is logged as a
- * warning and dropped — proxy-specific event shapes never leak past this
- * boundary, so DB rows and WS frames stay on the unified taxonomy.
+ * Every proxy notification keeps its provider-native method and payload.
+ * Provider adapters attach only an optional UI display projection; events
+ * without a current UI mapping remain available in DB/WS for diagnostics.
  */
 export class SessionManager {
   private sessions: SessionRepository;
@@ -82,6 +83,7 @@ export class SessionManager {
     /** Live Sync v2 — when present, host mirrors external CLI appends into
      *  events + WS for each active session. Optional so tests can omit. */
     private watcher: NativeJsonlWatcher | null = null,
+    private proxyDefaults?: (executor: Executor) => AgentProxyDefaults,
   ) {
     this.sessions = new SessionRepository(db);
     this.history = new SessionHistoryStore(db);
@@ -156,6 +158,7 @@ export class SessionManager {
           this.events.forgetConversationUsage(sessionId);
         },
       },
+      executor => this.proxyDefaults?.(executor),
     );
   }
 
@@ -721,7 +724,7 @@ export class SessionManager {
 
   /** Force-fetch capabilities by spawning a proxy if not cached.
    *  Used by GET /api/proxy/:executor/models when no session exists yet. */
-  async warmCapabilities(executor: 'codex' | 'claude'): Promise<import('@gian/shared').ProxyCapabilities> {
+  async warmCapabilities(executor: Executor): Promise<import('@gian/shared').ProxyCapabilities> {
     return this.proxySessions.warmCapabilities(executor);
   }
 
@@ -919,8 +922,8 @@ export class SessionManager {
   // onEvent hook — M3 IM router subscribes here
   // -------------------------------------------------------------------------
 
-  /** Subscribe to every dispatched UnifiedEvent. Returns an unsubscribe fn. */
-  onEvent(fn: (e: UnifiedEvent) => void): () => void {
+  /** Subscribe to every dispatched provider-native chat event. */
+  onEvent(fn: (e: ChatEvent) => void): () => void {
     return this.events.onEvent(fn);
   }
 
@@ -1073,6 +1076,11 @@ export class SessionManager {
    */
   setUnread(sessionId: string, unread: boolean): void {
     this.lifecycle.setUnread(sessionId, unread);
+  }
+
+  /** Toggle the pinned marker (sidebar ordering). See LifecycleService. */
+  setPinned(sessionId: string, pinned: boolean): void {
+    this.lifecycle.setPinned(sessionId, pinned);
   }
 
   /**

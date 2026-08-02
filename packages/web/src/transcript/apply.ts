@@ -1,4 +1,4 @@
-import type { EventEnvelope, Executor } from '@gian/shared';
+import type { DisplayEventType, EventEnvelope, Executor } from '@gian/shared';
 import { stripManagerSystemPrefix, stripGianRolePrefix, stripGianActionBlocks, GIAN_ACTION_CLOSE } from '@gian/shared';
 
 /** Strip complete gian:action blocks from accumulating assistant text — only
@@ -37,6 +37,42 @@ const TOOL_ITEM_KINDS = new Set<TranscriptItem['kind']>([
   'web-search',
   'diff',
 ]);
+
+const LEGACY_DISPLAY_TYPES: Record<string, DisplayEventType | undefined> = {
+  assistant_text: 'message',
+  'output.text': 'message',
+  'output.text.delta': 'message',
+  reasoning: 'activity.reasoning',
+  plan_update: 'plan',
+  command_execution: 'activity.command',
+  file_change: 'activity.file-change',
+  'diff.updated': 'activity.file-change',
+  file_read: 'activity.file-read',
+  file_search: 'activity.file-search',
+  web_search: 'activity.web-search',
+  tool_execution: 'activity.tool',
+  agent_spawn: 'agent',
+  approval_requested: 'interaction.approval',
+  'approval.requested': 'interaction.approval',
+  approval_resolved: 'interaction.resolved',
+  'approval.resolved': 'interaction.resolved',
+  auto_classifier_denied: 'activity.classifier-denied',
+  auto_circuit_breaker: 'activity.circuit-breaker',
+  turn_started: 'state.turn-started',
+  'turn.started': 'state.turn-started',
+  turn_completed: 'state.turn-completed',
+  'turn.completed': 'state.turn-completed',
+  session_error: 'state.error',
+  'turn.failed': 'state.error',
+};
+
+export function displayTypeForEnvelope(env: EventEnvelope): DisplayEventType | undefined {
+  return env.display?.type ?? LEGACY_DISPLAY_TYPES[env.event];
+}
+
+export function displayDataForEnvelope(env: EventEnvelope): Record<string, unknown> {
+  return (env.display?.data ?? env.data ?? {}) as Record<string, unknown>;
+}
 
 function upsertToolItem(
   items: TranscriptItem[],
@@ -99,9 +135,8 @@ function dismissStalePendingQuestions(items: TranscriptItem[]): TranscriptItem[]
 }
 
 /**
- * Folds one envelope into the transcript. Unified type names are the primary
- * path; legacy raw names (still emitted by un-normalized host paths) fall
- * through to the same helpers so nothing breaks during the M1 transition.
+ * Folds one provider-native envelope into the transcript using only its UI
+ * display projection. Historical rows are translated at this read boundary.
  *
  * Returns the same array reference if the event was a no-op so the caller
  * can skip a state update.
@@ -111,11 +146,12 @@ export function applyEnvelope(
   env: EventEnvelope,
   executor: Executor,
 ): TranscriptItem[] {
-  const data = (env.data ?? {}) as Record<string, unknown>;
-  const ev = env.event;
+  const data = displayDataForEnvelope(env);
+  const ev = displayTypeForEnvelope(env);
+  const displayEnv = data === env.data ? env : { ...env, data };
 
   // ── assistant_text (unified) / output.text.delta (legacy codex streaming) ──
-  if (ev === 'assistant_text' || ev === 'output.text.delta') {
+  if (ev === 'message') {
     const itemId = String(data.itemId ?? env.call_id);
     // unified: data.text is the delta when data.delta===true; legacy: data.delta
     // is a string chunk. Beware: data.delta can also be the JSON boolean
@@ -147,7 +183,7 @@ export function applyEnvelope(
   // ── reasoning (unified) — codex's "thinking" content. summary and full
   // forms each get their own ReasoningItem, keyed by itemId. Deltas append
   // into the existing card; non-delta full snapshots replace text.
-  if (ev === 'reasoning') {
+  if (ev === 'activity.reasoning') {
     const itemId = String(data.itemId ?? env.call_id);
     const chunk = String(data.text ?? '');
     if (!chunk) return items;
@@ -173,14 +209,14 @@ export function applyEnvelope(
   // ── plan_update (unified) — codex plan-mode output. We don't fold this
   // into the transcript; PlanChip subscribes separately and renders the
   // current plan markdown in a popover. Drop from transcript here.
-  if (ev === 'plan_update') return items;
+  if (ev === 'plan') return items;
 
   // ── turn_started (unified) — signal only, not a transcript entry. App.tsx
   // listens for this to flip pendingBySession=true.
-  if (ev === 'turn_started') return items;
+  if (ev === 'state.turn-started') return items;
 
   // ── command_execution (unified) ──
-  if (ev === 'command_execution') {
+  if (ev === 'activity.command') {
     const itemId = String(data.itemId ?? env.call_id);
     if (data.stdoutDelta !== undefined) {
       // streaming delta — update existing item or create
@@ -226,7 +262,7 @@ export function applyEnvelope(
     return upsertToolItem(items, item);
   }
 
-  if (ev === 'tool_execution') {
+  if (ev === 'activity.tool') {
     const itemId = String(data.itemId ?? env.call_id);
     const summary = data.input === undefined
       ? ''
@@ -245,7 +281,7 @@ export function applyEnvelope(
   }
 
   // ── file_read (unified) ──
-  if (ev === 'file_read') {
+  if (ev === 'activity.file-read') {
     const item: FileReadItem = {
       kind: 'file-read', id: env.call_id,
       path: String(data.path ?? '(unknown)'),
@@ -257,7 +293,7 @@ export function applyEnvelope(
   }
 
   // ── file_search (unified) ──
-  if (ev === 'file_search') {
+  if (ev === 'activity.file-search') {
     const matches = Array.isArray(data.matches)
       ? (data.matches as unknown[]).map(m => String(m))
       : undefined;
@@ -273,7 +309,7 @@ export function applyEnvelope(
   }
 
   // ── web_search (unified) ──
-  if (ev === 'web_search') {
+  if (ev === 'activity.web-search') {
     const item: WebSearchItem = {
       kind: 'web-search', id: env.call_id,
       query: String(data.query ?? ''),
@@ -284,7 +320,7 @@ export function applyEnvelope(
   }
 
   // ── agent_spawn (unified) ──
-  if (ev === 'agent_spawn') {
+  if (ev === 'agent') {
     const itemId = String(env.call_id);
     const status: AgentSpawnItem['status'] =
       data.status === 'done' || data.status === 'error' ? data.status : 'running';
@@ -346,8 +382,8 @@ export function applyEnvelope(
   }
 
   // ── approval_requested (unified + legacy) ──
-  if (ev === 'approval_requested' || ev === 'approval.requested') {
-    const item = parseApprovalRequested(env);
+  if (ev === 'interaction.approval' || ev === 'interaction.question') {
+    const item = parseApprovalRequested(displayEnv);
     if (!item) return items;
     // A single AskUserQuestion can arrive through both the live proxy and a
     // native-history replay. Dedupe by approvalId so it renders one card and keep the
@@ -360,7 +396,7 @@ export function applyEnvelope(
   }
 
   // ── approval_resolved (unified + legacy) ──
-  if (ev === 'approval_resolved' || ev === 'approval.resolved') {
+  if (ev === 'interaction.resolved') {
     const approvalId = String(data.approvalId ?? '');
     const decision = String(data.decision ?? '');
     if (!approvalId) return items;
@@ -391,13 +427,13 @@ export function applyEnvelope(
   }
 
   // ── file_change / diff.updated (legacy codex) ──
-  if (ev === 'file_change' || ev === 'diff.updated') {
-    const item = parseDiffUpdated(env);
+  if (ev === 'activity.file-change') {
+    const item = parseDiffUpdated(displayEnv);
     return item ? upsertToolItem(items, item) : items;
   }
 
   // ── auto_classifier_denied (cc auto-mode) ──
-  if (ev === 'auto_classifier_denied') {
+  if (ev === 'activity.classifier-denied') {
     const item: AutoNoticeItem = {
       kind: 'auto-notice', id: env.call_id,
       variant: 'classifier-denied',
@@ -411,7 +447,7 @@ export function applyEnvelope(
   }
 
   // ── auto_circuit_breaker (cc auto-mode trip) ──
-  if (ev === 'auto_circuit_breaker') {
+  if (ev === 'activity.circuit-breaker') {
     const item: AutoNoticeItem = {
       kind: 'auto-notice', id: env.call_id,
       variant: 'circuit-breaker',
@@ -424,7 +460,7 @@ export function applyEnvelope(
   }
 
   // ── session_error (unified) / turn.failed (legacy) ──
-  if (ev === 'session_error' || ev === 'turn.failed') {
+  if (ev === 'state.error') {
     return [
       ...items,
       {
@@ -436,7 +472,7 @@ export function applyEnvelope(
   }
 
   // ── turn_completed (unified) / turn.started / turn.completed (legacy) ──
-  if (ev === 'turn_completed' || ev === 'turn.completed') {
+  if (ev === 'state.turn-completed') {
     return [...items, { kind: 'turn-end', id: env.call_id, text: `Turn ${env.turn} · complete`, ts: env.ts, turn: env.turn }];
   }
 
@@ -592,8 +628,9 @@ export function applyErrorEnvelopeToSession(
  * envelope doesn't change pending state.
  */
 export function nextPendingFromEnvelope(env: EventEnvelope): boolean | null {
-  if (env.event === 'turn_started') return true;
-  if (env.event === 'turn_completed' || env.event === 'session_error') return false;
+  const type = displayTypeForEnvelope(env);
+  if (type === 'state.turn-started') return true;
+  if (type === 'state.turn-completed' || type === 'state.error') return false;
   return null;
 }
 
@@ -606,7 +643,7 @@ export function nextPendingFromEnvelope(env: EventEnvelope): boolean | null {
  * full App.
  */
 export function applyPlanUpdate(prev: string | undefined, env: EventEnvelope): string {
-  const data = (env.data ?? {}) as Record<string, unknown>;
+  const data = displayDataForEnvelope(env);
   const text = String(data.text ?? '');
   const isDelta = data.delta === true;
   return isDelta ? (prev ?? '') + text : text;
@@ -632,13 +669,14 @@ export function applyPlanLifecycle(
   prev: PlanLifecycleState,
   env: EventEnvelope,
 ): PlanLifecycleState {
-  if (env.event === 'plan_update') {
+  const type = displayTypeForEnvelope(env);
+  if (type === 'plan') {
     return {
       text: applyPlanUpdate(prev.text, env),
       completed: false,
     };
   }
-  if (env.event === 'turn_completed' && isPlanChecklistComplete(prev.text)) {
+  if (type === 'state.turn-completed' && isPlanChecklistComplete(prev.text)) {
     return { ...prev, completed: true };
   }
   return prev;

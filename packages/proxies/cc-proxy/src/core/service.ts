@@ -204,6 +204,11 @@ export class CcProxyService {
     return {
       protocolVersion: '0.1.0',
       models: this.runtime.getModels(),
+      modes: [
+        { id: 'plan', label: 'Plan', description: 'Explore and plan without making changes.', isDefault: false },
+        { id: 'ask', label: 'Ask', description: 'Ask before risky actions.', isDefault: true },
+        { id: 'auto', label: 'Auto', description: 'Let the Proxy review actions automatically.', isDefault: false },
+      ],
       slashCommands: await listAllSlashCommands(),
     };
   }

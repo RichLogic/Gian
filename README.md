@@ -1,173 +1,166 @@
 # Gian
 
-> Self-hosted workspace for Codex, Claude Code, and Kimi Code.
+> One local app for all your coding agents.
 
-Gian is a single-user browser and desktop interface for local AI coding
-tools. It wraps Codex, Claude Code, and Kimi Code in structured sessions with
-real-time transcripts, approvals, message queues, tasks, worktrees, files,
-bots, and a workspace terminal without replacing the underlying tools.
+Use Codex, Claude Code, and Kimi Code at the same time through one consistent
+desktop interface for sessions, approvals, tasks, worktrees, files, and
+changes.
 
-## Features
+[Download the latest macOS release](https://github.com/RichLogic/Gian/releases/latest)
 
-- **16 unified event types** rendered as structured cards in the Transcript:
-  `assistant_text`, `reasoning`, `plan_update`, `command_execution`,
-  `file_change`, `file_read`, `file_search`, `web_search`, `agent_spawn`,
-  `approval_requested`, `approval_resolved`, `auto_classifier_denied`,
-  `auto_circuit_breaker`, `turn_started`, `turn_completed`, `session_error`
-- **Approval workflow** — default (risk-level gated) and auto modes; `Allow
-  Once`, `Allow Session`, `Decline`; keyboard shortcuts A / ⇧A / D
-- **Message queue** — queue messages while the AI is running; reorder, edit,
-  Send Now, or Clear
-- **Tasks and worktrees** — Manager-led subtasks, explicit approval gates,
-  branch/worktree isolation, and merge/drop workflows
-- **Files view** — Changed (session diff) and Tree views with unified diff
-  rendering and "Open in new tab"
-- **IM bridge** — Discord and Slack bots in read-only mirror or full-control
-  mode
-- **Workbench Terminal** — a workspace shell over the dedicated `term:*`
-  protocol; it is independent of AI session execution
-- **Command Palette** — ⌘⇧K fuzzy search across sessions, changed files, and
-  commands
-- **Spaces page** — workspace management with per-workspace approval risk
-  levels
-- **Settings panel** — theme (light / warm / dark), accent, density, locale,
-  executor defaults, shortcuts, and auth settings
-- **Daemon mode** — launchd (macOS) and systemd (Linux) user-service install
-  scripts; crash-restart included
+Gian is currently an early macOS Apple Silicon release. The App and Gian
+proxies are distributed through GitHub Releases. Agent CLIs still come from
+their official vendors and keep their own login, subscription, configuration,
+and session data.
 
-AI sessions are structured-only: Claude uses `claude -p`, Codex uses
-app-server, and Kimi uses ACP. Session TTY modes were retired in ADR-0008;
-the Workbench Terminal is Gian's only PTY.
+## Why Gian
 
-## Architecture
+- Run Codex, Claude Code, and Kimi Code from one App.
+- Keep multiple agent sessions visible without juggling terminals.
+- Review commands, file changes, approvals, queues, and worktrees through one
+  shared interaction model.
+- Work locally: Gian stores its database and logs on your Mac and does not use
+  a Gian cloud service.
+- Keep the native tools: Gian connects to the official CLIs instead of
+  replacing their authentication or billing.
 
-Gian runs as a single Node.js process (the **Host**) that manages external
-Proxy sub-processes for each executor. The Web UI is a React SPA that
-communicates over a persistent WebSocket; IM adapters run inside the same Host
-process.
+## Install
 
+1. Download `Gian-<version>-arm64.dmg` from
+   [GitHub Releases](https://github.com/RichLogic/Gian/releases/latest).
+2. Drag Gian into Applications and open it.
+3. Sign in with GitHub to initialize Gian on this Mac.
+4. Open **Settings → Executors** and set up the agents you want.
+
+For each agent, Gian first detects an existing CLI and lets you provide a
+custom executable path. If it is missing, Gian can run the vendor's official
+installer. The matching Gian proxy is downloaded separately from the same
+Gian GitHub Release and verified before activation.
+
+End users do not need Node.js, pnpm, a cloned repository, or a separately
+installed Gian service.
+
+## Supported agents
+
+| Agent | Runtime source | Gian integration |
+|---|---|---|
+| Codex | OpenAI official CLI | Codex app-server proxy |
+| Claude Code | Anthropic official CLI | Claude structured-session proxy |
+| Kimi Code | Moonshot AI official CLI | ACP proxy |
+
+## Main capabilities
+
+- Provider-native chat events with UI projections: Claude Code, Codex, and
+  Kimi event names and payloads stay intact; Gian classifies them only as
+  Message, Activity, Plan, Agent, Interaction, or State for display.
+- Structured live transcripts for assistant output, plans, commands, file
+  changes, searches, approvals, and errors.
+- Approval controls, queued follow-up messages, interruption, and steering.
+- Manager-led tasks and isolated Git worktrees.
+- Changed-files, tree, diff, and workspace terminal surfaces.
+- Native session discovery and resume.
+- Optional Discord and Slack bridges.
+
+## How it works
+
+```text
+Official Agent CLI ⇄ Gian Proxy ⇄ Gian Host ⇄ Electron App
+                                      │
+                                      └── local SQLite data
 ```
-Proxy (subprocess) ◁── stdio JSON-RPC ──▷ Host ◁── WebSocket ──▷ Web / Desktop
-                                           │
-                                           ├──▷ Discord (Bot API)
-                                           └──▷ Slack (Bot API)
-```
 
-- **codex-proxy** — single shared process for all Codex sessions
-- **cc-proxy** — one process per Claude Code session
-- **kimi-proxy** — single shared ACP process for all Kimi sessions
-- Host is the sole state owner; Web and IM are stateless consumers
-- Electron is a thin shell over the independent Host
-- Persistence: SQLite at `$GIAN_DATA_DIR/gian.db`
+The Electron App starts and supervises its bundled Gian Host automatically.
+Production access is Electron-only. The local Host is bound to loopback and
+uses a per-launch desktop credential, so ordinary web pages cannot operate its
+API or terminal WebSocket.
 
-See [`docs/architecture.md`](docs/architecture.md) for full details including
-the proxy protocol and data model.
+Gian-owned proxy packages are independently installed under Gian's local data
+directory. CLI executables remain vendor-owned: an existing or configured path
+is preferred, and otherwise the official installer is used.
 
-## Installation
+## Build from source
 
-### Prerequisites
-
-- **Node.js v22** — `better-sqlite3` native bindings break on Node v25; stay
-  on v22 LTS until an upstream fix lands
-- **pnpm 10+**
-- All executor proxies are vendored under
-  `packages/proxies/`; no separate install needed
-
-### Steps
+Requirements: Node.js 22 and pnpm 10.
 
 ```bash
-# 1. Clone
-git clone https://github.com/your-org/gian.git
-cd gian
-
-# 2. Install dependencies
+git clone https://github.com/RichLogic/Gian.git
+cd Gian
 pnpm install
-
-# 3. Build all packages
 pnpm build
-
-# 4a. Daemon mode (auto-start at login, crash-restart)
-./scripts/install.sh
-
-# 4b. Dev mode (isolated host/web plus the GianDev desktop app)
-pnpm dev
+GIAN_GITHUB_CLIENT_ID=<your-oauth-client-id> pnpm dev
 ```
 
-`pnpm dev` opens a separate **GianDev** Electron app after the development
-host and web UI are ready on `8991` / `5191`. Use `pnpm dev:web` only when a
-browser-only stack is preferable. Production `8990` / `5190` and the installed
-Gian app are not touched.
+Useful release commands:
 
-> Daemon logs live at `~/.config/gian/logs/`. Run `./scripts/uninstall.sh` to
-> remove the daemon (data is preserved; add `--purge` to delete everything).
+```bash
+# Build the three versioned proxy assets and SHA-256 files.
+pnpm release:proxies
 
-## Configuration
+# Build a local macOS Apple Silicon App, DMG, and ZIP.
+GIAN_GITHUB_CLIENT_ID=<your-oauth-client-id> pnpm desktop:dmg
+```
 
-Most settings are available at runtime in **Settings** from the Dock.
-Boot-time values can be set via environment variables before starting the
-daemon.
+Create a GitHub OAuth App, enable Device Flow, and use its public Client ID.
+No client secret is embedded in Gian. The login requests no OAuth scopes, so
+it reads only the authenticated user's public profile.
 
-| Variable | Default | Description |
-|---|---|---|
-| `GIAN_HOST` | `127.0.0.1` | Host bind address |
-| `GIAN_PORT` | `8990` | Host listen port |
-| `GIAN_DATA_DIR` | `~/.config/gian/` | SQLite + logs directory |
-| `GIAN_AUTH_REQUIRED` | — | Set to `true` to enable login |
-| `GIAN_AUTH_USERNAME` | — | Login username |
-| `GIAN_AUTH_PASSWORD` | — | Login password (hashed at startup) |
-| `GIAN_SECRET` | — | AES-256-GCM key seed for bot token encryption |
-| `GIAN_CC_PROXY_ENTRY` | — | Absolute path to the cc-proxy executable |
-| `GIAN_CODEX_PROXY_ENTRY` | — | Absolute path to the codex-proxy executable |
-| `GIAN_KIMI_PROXY_ENTRY` | — | Absolute path to the kimi-proxy executable |
-| `GIAN_CC_BIN` | system PATH | Claude Code CLI path |
-| `GIAN_CODEX_BIN` | system PATH | Codex CLI path |
+Tagged versions are built, signed, notarized, checked, and published by
+`.github/workflows/release.yml`. Maintainers must configure the documented
+Apple signing and notarization secrets before pushing a `v<version>` tag.
 
-## Usage
+### Publish a release
 
-1. **Create a workspace** — go to **Spaces**, add a local directory (e.g.
-   `~/Coding/my-project`), set the default executor and per-category approval
-   risk levels.
+Configure these GitHub Actions repository secrets once:
 
-2. **Create a session** — click **+ New** in the Coding tab, pick a workspace
-   and executor, optionally name the session.
+- `MAC_CSC_LINK`: exported Developer ID Application certificate (`.p12`), as
+  Base64 or a GitHub-downloadable private URL.
+- `MAC_CSC_KEY_PASSWORD`: password for that certificate.
+- `APPLE_ID`: Apple ID used for notarization.
+- `APPLE_APP_SPECIFIC_PASSWORD`: app-specific password for that Apple ID.
+- `APPLE_TEAM_ID`: Apple Developer Team ID.
 
-3. **Send a message** — type in the Composer, press Enter. The Transcript
-   shows live event cards as the AI works: text streaming, commands running,
-   files changing.
+Also configure the repository variable `GIAN_GITHUB_CLIENT_ID` with the public
+Client ID of a GitHub OAuth App that has Device Flow enabled.
 
-4. **Handle approvals** — when the AI hits a medium/high-risk operation a
-   highlighted card appears. Press **A** (Allow Once), **⇧A** (Allow
-   Session), or **D** (Decline).
+Keep the root and workspace package versions aligned, commit the release, then
+push the matching tag:
 
-5. **Queue messages** — while the AI is running, type your next message and
-   it is queued. Reorder with ↑↓, remove, or hit **Send Now** to flush
-   immediately.
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
 
-6. **Slash commands** — type `/` in the Composer to pop up the executor's
-   native command list (`/clear`, `/compact`, etc.) for transparent
-   pass-through.
+The workflow runs all checks, builds the three proxy archives, creates the
+signed and notarized arm64 DMG/ZIP, verifies the App with macOS tools, and
+publishes every artifact plus SHA-256 checksums to one GitHub Release. No Gian
+server is involved.
 
-7. **Workbench Terminal** — open Terminal from the session Workbench to run
-   shell commands in that workspace.
+## Local data
 
-8. **Command Palette** — ⌘⇧K to search sessions, changed files, and commands
-   from anywhere.
+By default Gian stores its database, downloaded proxies, and logs under:
 
-## Known limits
+```text
+~/.config/gian/
+```
 
-- **Single-user by design** — no multi-user support planned
-- **Codex `web_search`** — not surfaced as a live event (proxy limitation;
-  cc-only for now)
-- **IM bot tokens** — encrypted at rest with AES-256-GCM derived from
-  `GIAN_SECRET`; if `GIAN_SECRET` is unset a dev fallback key is used with a
-  one-time warning at startup
-- **Theme flash** — a brief flash may occur on first load before
-  `systemConfig` arrives; cosmetic only, flagged for follow-up
+Agent credentials and subscriptions are managed by the corresponding official
+CLI. Gian does not provide a hosted account or proxy model traffic through a
+Gian server.
 
-## Status
+The GitHub login token is encrypted with macOS secure storage and kept in the
+Gian application profile. It is not sent to a Gian server.
 
-Active development. API, protocol, and config schemas may change before v1.0.
+## Project status
+
+Gian is in active early development. v0.1 targets macOS Apple Silicon and its
+public APIs and plugin contracts may change before v1.0. The future
+multi-agent orchestrator called Gian Agent is not part of the current release.
+
+See [the architecture documentation](docs/architecture.md) and
+[contribution guide](CONTRIBUTING.md) for development details. The native
+event/UI relationship and its smoke-test layers are documented in
+[`docs/chat-event-display.md`](docs/chat-event-display.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT — see [LICENSE](LICENSE).

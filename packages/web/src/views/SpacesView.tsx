@@ -14,7 +14,7 @@ import type { RepoInfo } from '../api.js';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import type { GianWs } from '../ws.js';
-import { NewWorkspaceForm, useNewWorkspace } from './workspace-create.js';
+import { managedWorkspaceDirectory, NewWorkspaceForm, useNewWorkspace } from './workspace-create.js';
 import { GitPane } from './spaces-git-pane.js';
 import { NativeSessionsPane } from './spaces-native-sessions.js';
 
@@ -41,7 +41,9 @@ export function SpacesView({
   onCreateWorktreeSession: (input: CreateWorktreeSessionInput) => void;
 }) {
   const workspaceRoot = systemConfig?.workspace_root ?? '~/Coding';
-  const [selectedId, setSelectedId] = useState<string | null>(workspaces[0]?.id ?? null);
+  const [listTab, setListTab] = useState<'active' | 'archived'>('active');
+  const [selectedId, setSelectedId] = useState<string | null>(
+    workspaces.find(w => w.hidden !== 1)?.id ?? null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const newWs = useNewWorkspace(onChange);
   const rail = useResizableWidth('spaces.rail.w', 280, 200, 480, 'left');
@@ -50,24 +52,34 @@ export function SpacesView({
     void loadSessions().then(setSessions);
   }, []);
 
+  // Archived workspaces (hidden === 1) live under their own list tab; the
+  // Active tab never shows them.
+  const visible = workspaces.filter(w =>
+    listTab === 'archived' ? w.hidden === 1 : w.hidden !== 1);
+  const archivedCount = workspaces.reduce((n, w) => n + (w.hidden === 1 ? 1 : 0), 0);
+
   const selected = workspaces.find(w => w.id === selectedId) ?? null;
 
-  async function moveUp(idx: number) {
-    if (idx === 0) return;
-    const ids = workspaces.map(w => w.id);
-    const tmp = ids[idx - 1]!;
-    ids[idx - 1] = ids[idx]!;
-    ids[idx] = tmp;
-    await reorderWorkspaces(ids);
-    onChange();
-  }
+  // Keep the selection inside the current tab: unarchiving the selected
+  // workspace (or switching tabs) drops it from the visible list.
+  useEffect(() => {
+    if (!visible.some(w => w.id === selectedId)) {
+      setSelectedId(visible[0]?.id ?? null);
+    }
+  }, [listTab, workspaces, selectedId]);
 
-  async function moveDown(idx: number) {
-    if (idx >= workspaces.length - 1) return;
+  // Reorder swaps two rows of the VISIBLE list inside the full id ordering,
+  // so workspaces in the other tab keep their relative positions.
+  async function moveVisible(idx: number, dir: -1 | 1) {
+    const target = idx + dir;
+    if (target < 0 || target >= visible.length) return;
     const ids = workspaces.map(w => w.id);
-    const tmp = ids[idx + 1]!;
-    ids[idx + 1] = ids[idx]!;
-    ids[idx] = tmp;
+    const a = ids.indexOf(visible[idx]!.id);
+    const b = ids.indexOf(visible[target]!.id);
+    if (a < 0 || b < 0) return;
+    const tmp = ids[a]!;
+    ids[a] = ids[b]!;
+    ids[b] = tmp;
     await reorderWorkspaces(ids);
     onChange();
   }
@@ -89,20 +101,23 @@ export function SpacesView({
       style={{ '--rail-w': `${rail.width}px` } as React.CSSProperties}
     >
       <SpacesList
-        workspaces={workspaces}
+        workspaces={visible}
         selectedId={selectedId}
         workspaceRoot={workspaceRoot}
         sessionCounts={sessionCounts}
+        listTab={listTab}
+        archivedCount={archivedCount}
+        onListTabChange={setListTab}
         onSelect={setSelectedId}
-        onMoveUp={moveUp}
-        onMoveDown={moveDown}
+        onMoveUp={idx => void moveVisible(idx, -1)}
+        onMoveDown={idx => void moveVisible(idx, 1)}
         onNewClick={() => { newWs.reset(); newWs.setOpen(true); }}
-        newForm={newWs.open ? (
+        newForm={listTab === 'active' && newWs.open ? (
           <NewWorkspaceForm
             form={newWs.form}
             saving={newWs.saving}
             error={newWs.error}
-            workspaceRoot={workspaceRoot}
+            workspaceRoot={managedWorkspaceDirectory(workspaceRoot)}
             onChange={f => newWs.setForm(prev => ({ ...prev, ...f }))}
             onSubmit={newWs.submit}
             onCancel={() => newWs.setOpen(false)}
@@ -115,7 +130,7 @@ export function SpacesView({
         allSessions={sessions}
         ws={ws}
         onChange={onChange}
-        onDeleted={() => setSelectedId(workspaces.find(w => w.id !== selectedId)?.id ?? null)}
+        onDeleted={() => { /* selection re-syncs via the visible-list effect */ }}
         onOpenClaudeMd={() => setClaudeMdOpen(true)}
         onCreateWorktreeSession={onCreateWorktreeSession}
       />
@@ -135,6 +150,9 @@ function SpacesList({
   selectedId,
   workspaceRoot,
   sessionCounts,
+  listTab,
+  archivedCount,
+  onListTabChange,
   onSelect,
   onMoveUp,
   onMoveDown,
@@ -145,6 +163,9 @@ function SpacesList({
   selectedId: string | null;
   workspaceRoot: string;
   sessionCounts: Record<string, number>;
+  listTab: 'active' | 'archived';
+  archivedCount: number;
+  onListTabChange: (tab: 'active' | 'archived') => void;
   onSelect: (id: string) => void;
   onMoveUp: (idx: number) => void;
   onMoveDown: (idx: number) => void;
@@ -157,7 +178,24 @@ function SpacesList({
       <div className="spaces-list-head">
         <div className="spaces-list-head-row">
           <span className="sidebar-title">{t('spaces.title')}</span>
-          <button className="btn sm primary" aria-label="New workspace" onClick={onNewClick}>{t('spaces.new')}</button>
+          {listTab === 'active' && (
+            <button className="btn sm primary" aria-label="New workspace" onClick={onNewClick}>{t('spaces.new')}</button>
+          )}
+        </div>
+        <div className="segm spaces-list-tabs">
+          <button
+            className={`segm-item ${listTab === 'active' ? 'active' : ''}`}
+            onClick={() => onListTabChange('active')}
+          >
+            {t('spaces.tab.active')}
+          </button>
+          <button
+            className={`segm-item ${listTab === 'archived' ? 'active' : ''}`}
+            onClick={() => onListTabChange('archived')}
+          >
+            {t('spaces.tab.archived')}
+            {archivedCount > 0 && <span className="count">{archivedCount}</span>}
+          </button>
         </div>
         <div className="spaces-list-head-sub">root: <span className="spaces-list-head-sub-val">{workspaceRoot}</span></div>
       </div>
@@ -185,25 +223,29 @@ function SpacesList({
                 <span className="spaces-ws-path">{ws.path}</span>
               </div>
               {count > 0 && <span className="spaces-ws-meta">{count}</span>}
-              <div className="spaces-list-row-acts" onClick={e => e.stopPropagation()}>
-                <button
-                  className="btn xs ghost icon"
-                  disabled={idx === 0}
-                  onClick={() => onMoveUp(idx)}
-                  title={t('spaces.moveup.title')}
-                >↑</button>
-                <button
-                  className="btn xs ghost icon"
-                  disabled={idx === workspaces.length - 1}
-                  onClick={() => onMoveDown(idx)}
-                  title={t('spaces.movedown.title')}
-                >↓</button>
-              </div>
+              {listTab === 'active' && (
+                <div className="spaces-list-row-acts" onClick={e => e.stopPropagation()}>
+                  <button
+                    className="btn xs ghost icon"
+                    disabled={idx === 0}
+                    onClick={() => onMoveUp(idx)}
+                    title={t('spaces.moveup.title')}
+                  >↑</button>
+                  <button
+                    className="btn xs ghost icon"
+                    disabled={idx === workspaces.length - 1}
+                    onClick={() => onMoveDown(idx)}
+                    title={t('spaces.movedown.title')}
+                  >↓</button>
+                </div>
+              )}
             </div>
           );
         })}
         {workspaces.length === 0 && !newForm && (
-          <p className="spaces-empty">{t('spaces.empty')}</p>
+          <p className="spaces-empty">
+            {t(listTab === 'archived' ? 'spaces.archived.empty' : 'spaces.empty')}
+          </p>
         )}
       </div>
     </aside>

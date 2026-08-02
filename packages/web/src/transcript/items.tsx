@@ -255,7 +255,7 @@ function ToolArgs({ raw }: { raw: string }) {
     );
   }
   return (
-    <code style={{ fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--text-2)' }}>{raw}</code>
+    <code style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-12)', color: 'var(--text-2)' }}>{raw}</code>
   );
 }
 
@@ -450,7 +450,7 @@ export function CommandCard({ item }: { item: CommandItem }) {
           {item.status !== 'success' && (
             <span className={`evt-status ${statusClass}`}>{item.status}</span>
           )}
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
         </span>
       </div>
       {hasOutput && (
@@ -484,7 +484,7 @@ export function FileReadCard({ item }: { item: FileReadItem }) {
           <FileLink path={item.path} line={item.startLine}>{fullLabel}</FileLink>
         </span>
         <span className="evt-meta">
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
         </span>
       </div>
     </div>
@@ -506,7 +506,7 @@ export function FileSearchCard({ item }: { item: FileSearchItem }) {
         </span>
         <span className="evt-meta">
           {count !== undefined && <span>{count} {t(count === 1 ? 'transcript.file.match' : 'transcript.file.matches')}</span>}
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
         </span>
       </div>
       {hasMatches && (
@@ -531,7 +531,7 @@ export function WebSearchRow({ item }: { item: WebSearchItem }) {
         <span className="evt-subject" title={item.query}>{item.query}</span>
         <span className="evt-meta">
           {item.resultCount !== undefined && <span>{item.resultCount} {t('transcript.web.results')}</span>}
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
         </span>
       </div>
     </div>
@@ -566,7 +566,7 @@ export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
               {triggerLabel} — {t('transcript.auto.paused')}
             </div>
           </div>
-          <span className="evt-meta" style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
+          <span className="evt-meta" style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
         </div>
         <div className="approval-resolved-note">
           <span className="dot" />
@@ -586,7 +586,7 @@ export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
         <span className="evt-subject">
           <span style={{ color: 'var(--text-2)' }}>{item.action || t('transcript.auto.action')}</span>
           {item.reason && (
-            <span style={{ marginLeft: 8, color: 'var(--text-3)', fontSize: 11.5 }}>
+            <span style={{ marginLeft: 8, color: 'var(--text-3)', fontSize: 'var(--fz-12)' }}>
               {item.reason}
             </span>
           )}
@@ -595,7 +595,7 @@ export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
           <span style={{ color: 'var(--text-3)' }}>
             {item.consecutive}/3 · {item.total} {t('transcript.auto.total')}
           </span>
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
         </span>
       </div>
     </div>
@@ -629,7 +629,7 @@ export function AgentSpawnRow({ item }: { item: AgentSpawnItem }) {
           {item.status !== 'done' && (
             <span className={`evt-status ${statusClass}`}>{item.status}</span>
           )}
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
         </span>
       </div>
     </div>

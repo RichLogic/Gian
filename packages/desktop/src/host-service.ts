@@ -14,13 +14,15 @@ export type HealthRequest = (
 export interface HostReadiness {
   ready: boolean;
   checks: number;
-  kickstartAttempted: boolean;
+  startAttempted: boolean;
 }
 
 export interface EnsureHostAvailableOptions {
   healthUrl: string;
-  manageLaunchAgent: boolean;
-  kickstart?: () => Promise<void>;
+  manageHost: boolean;
+  startHost?: () => Promise<void> | void;
+  requestHeaders?: Readonly<Record<string, string>>;
+  expectedInstanceId?: string;
   request?: HealthRequest;
   sleep?: (delayMs: number) => Promise<void>;
   maxChecks?: number;
@@ -35,19 +37,27 @@ export async function isHostHealthy(
   healthUrl: string,
   request: HealthRequest = fetch,
   timeoutMs = 1_500,
+  requestHeaders: Readonly<Record<string, string>> = {},
+  expectedInstanceId?: string,
 ): Promise<boolean> {
   try {
     const response = await request(healthUrl, {
-      headers: { accept: 'application/json' },
+      headers: { accept: 'application/json', ...requestHeaders },
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) return false;
     const body = await response.json();
-    return (
+    const healthy = (
       typeof body === 'object' &&
       body !== null &&
       'ok' in body &&
       body.ok === true
+    );
+    if (!healthy) return false;
+    if (!expectedInstanceId) return true;
+    return (
+      'instanceId' in body &&
+      body.instanceId === expectedInstanceId
     );
   } catch {
     return false;
@@ -56,8 +66,10 @@ export async function isHostHealthy(
 
 export async function ensureHostAvailable({
   healthUrl,
-  manageLaunchAgent,
-  kickstart,
+  manageHost,
+  startHost,
+  requestHeaders = {},
+  expectedInstanceId,
   request = fetch,
   sleep = defaultSleep,
   maxChecks = 16,
@@ -65,23 +77,29 @@ export async function ensureHostAvailable({
   requestTimeoutMs = 1_500,
 }: EnsureHostAvailableOptions): Promise<HostReadiness> {
   const checks = Math.max(1, maxChecks);
-  let kickstartAttempted = false;
+  let startAttempted = false;
 
   for (let index = 0; index < checks; index += 1) {
     if (index > 0) await sleep(intervalMs);
-    if (await isHostHealthy(healthUrl, request, requestTimeoutMs)) {
-      return { ready: true, checks: index + 1, kickstartAttempted };
+    if (await isHostHealthy(
+      healthUrl,
+      request,
+      requestTimeoutMs,
+      requestHeaders,
+      expectedInstanceId,
+    )) {
+      return { ready: true, checks: index + 1, startAttempted };
     }
 
-    if (index === 0 && manageLaunchAgent && kickstart) {
-      kickstartAttempted = true;
+    if (index === 0 && manageHost && startHost) {
+      startAttempted = true;
       try {
-        await kickstart();
+        await startHost();
       } catch {
-        // Poll anyway: launchd may have started the service despite a noisy exit.
+        // Poll anyway: the child may have started despite a noisy spawn hook.
       }
     }
   }
 
-  return { ready: false, checks, kickstartAttempted };
+  return { ready: false, checks, startAttempted };
 }

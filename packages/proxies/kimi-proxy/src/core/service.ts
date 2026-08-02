@@ -209,7 +209,10 @@ export class KimiProxyService {
   }
 
   async listCapabilities() {
-    return this.runtime.ensureStarted();
+    return {
+      ...await this.runtime.ensureStarted(),
+      modes: [],
+    };
   }
 
   async listNativeSessions(params: ListNativeSessionsParams) {

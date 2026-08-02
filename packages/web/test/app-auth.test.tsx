@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { whoAmI } from '../src/api.js';
 import { useAppAuth } from '../src/controllers/use-app-auth.js';
 
@@ -12,6 +12,10 @@ const mockedWhoAmI = vi.mocked(whoAmI);
 describe('useAppAuth', () => {
   beforeEach(() => {
     mockedWhoAmI.mockReset();
+  });
+
+  afterEach(() => {
+    delete window.gianDesktop;
   });
 
   it('holds the app at login when the HTTP session is absent', async () => {
@@ -34,7 +38,34 @@ describe('useAppAuth', () => {
     const fresh = renderHook(() => useAppAuth());
     await waitFor(() => expect(fresh.result.current.status).toBe('login'));
 
-    act(() => fresh.result.current.onLoginOk());
+    act(() => fresh.result.current.onLoginOk({ provider: 'host', username: 'admin' }));
     expect(fresh.result.current.status).toBe('authenticated');
+  });
+
+  it('uses the encrypted desktop GitHub identity instead of host password auth', async () => {
+    window.gianDesktop = {
+      githubAuth: {
+        getState: vi.fn().mockResolvedValue({
+          status: 'signed_in',
+          user: {
+            id: 42,
+            login: 'octocat',
+            name: 'The Octocat',
+            avatarUrl: 'https://avatars.githubusercontent.com/u/42',
+            profileUrl: 'https://github.com/octocat',
+          },
+        }),
+        start: vi.fn(),
+        finish: vi.fn(),
+        cancel: vi.fn(),
+        signOut: vi.fn(),
+      },
+    };
+
+    const { result } = renderHook(() => useAppAuth());
+
+    await waitFor(() => expect(result.current.status).toBe('authenticated'));
+    expect(result.current.identity?.provider).toBe('github');
+    expect(mockedWhoAmI).not.toHaveBeenCalled();
   });
 });

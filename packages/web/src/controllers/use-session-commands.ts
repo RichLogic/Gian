@@ -52,6 +52,7 @@ export interface SessionCommands {
   onSetServiceTier: (sessionId: string, tier: 'fast' | null) => void;
   onSetNativeConfig: (sessionId: string, configId: string, value: NativeConfigValue) => void;
   onArchive: (sessionId: string, archived: boolean) => void;
+  onPin: (sessionId: string, pinned: boolean) => void;
   onDelete: (sessionId: string) => void;
   onRecover: (sessionId: string) => void;
   onMerge: (sessionId: string) => Promise<void>;
@@ -172,6 +173,8 @@ export function useSessionCommands({
     }),
     onArchive: (sessionId, archived) =>
       ws.send({ type: 'session:archive', session_id: sessionId, archived }),
+    onPin: (sessionId, pinned) =>
+      ws.send({ type: 'session:pin', session_id: sessionId, pinned }),
     onDelete: sessionId =>
       ws.send({ type: 'session:delete', session_id: sessionId }),
     onRecover: sessionId =>

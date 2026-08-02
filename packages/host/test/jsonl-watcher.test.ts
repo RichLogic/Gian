@@ -42,6 +42,11 @@ async function waitFor(
   throw new Error(`waitFor timed out after ${timeoutMs}ms`);
 }
 
+function displayData(json: string): Record<string, unknown> {
+  const stored = JSON.parse(json) as { display?: { data?: Record<string, unknown> } };
+  return stored.display?.data ?? {};
+}
+
 /** macOS fs.watch needs a tick or two after watch() to start delivering
  *  events. Tests append immediately after start so we wait a moment to
  *  avoid racing the FSEvents subscription. */
@@ -180,8 +185,8 @@ test('appends one user + one assistant line → events persisted + broadcast', a
     assert.equal(rows[0]!.type, 'user_message');
     const u = JSON.parse(rows[0]!.data) as { text: string };
     assert.equal(u.text, 'hello from terminal');
-    assert.equal(rows[1]!.type, 'assistant_text');
-    const a = JSON.parse(rows[1]!.data) as { text: string };
+    assert.equal(rows[1]!.type, 'output.text');
+    const a = displayData(rows[1]!.data) as { text: string };
     assert.equal(a.text, 'hi back');
 
     // Turn row created at user-message boundary.
@@ -236,7 +241,7 @@ test('pause suppresses sync; resume advances offset to skip proxy-written bytes'
     assert.equal(rows.length, 2, 'only post-resume lines synced');
     const u = JSON.parse(rows[0]!.data) as { text: string };
     assert.equal(u.text, 'external follow-up');
-    const a = JSON.parse(rows[1]!.data) as { text: string };
+    const a = displayData(rows[1]!.data) as { text: string };
     assert.equal(a.text, 'external response');
   } finally {
     h.cleanup();
@@ -345,9 +350,9 @@ test('claude AskUserQuestion tool_use is mirrored as a question approval card an
 
     assert.equal(rows.length, 3);
     assert.equal(rows[0]!.type, 'user_message');
-    assert.equal(rows[1]!.type, 'approval_requested');
+    assert.equal(rows[1]!.type, 'approval.requested');
     assert.equal(rows[1]!.call_id, 'toolu-question');
-    const question = JSON.parse(rows[1]!.data) as {
+    const question = displayData(rows[1]!.data) as {
       approvalId: string;
       category: string;
       questions?: Array<{ question: string; options: Array<{ label: string }> }>;
@@ -357,9 +362,9 @@ test('claude AskUserQuestion tool_use is mirrored as a question approval card an
     assert.equal(question.questions?.[0]?.question, '晚饭想吃什么？');
     assert.equal(question.questions?.[0]?.options[0]?.label, '中餐');
 
-    assert.equal(rows[2]!.type, 'approval_resolved');
+    assert.equal(rows[2]!.type, 'approval.resolved');
     assert.equal(rows[2]!.call_id, 'toolu-question');
-    const resolved = JSON.parse(rows[2]!.data) as {
+    const resolved = displayData(rows[2]!.data) as {
       approvalId: string;
       decision: string;
       auto: boolean;
@@ -403,7 +408,7 @@ test('claude AskUserQuestion appended after watcher restart is attached to lates
 
     await waitFor(() => {
       const n = (h.db
-        .prepare("SELECT COUNT(*) AS n FROM events WHERE session_id = ? AND type = 'approval_requested'")
+        .prepare("SELECT COUNT(*) AS n FROM events WHERE session_id = ? AND type = 'approval.requested'")
         .get(h.sessionId) as { n: number }).n;
       return n >= 1;
     });
@@ -413,7 +418,7 @@ test('claude AskUserQuestion appended after watcher restart is attached to lates
         `SELECT e.turn_id, e.call_id, e.type, e.data, s.status
          FROM events e
          INNER JOIN sessions s ON s.id = e.session_id
-         WHERE e.session_id = ? AND e.type = 'approval_requested'
+         WHERE e.session_id = ? AND e.type = 'approval.requested'
          ORDER BY e.rowid DESC
          LIMIT 1`,
       )
@@ -421,7 +426,7 @@ test('claude AskUserQuestion appended after watcher restart is attached to lates
     assert.equal(row.turn_id, turnId);
     assert.equal(row.call_id, 'toolu-after-restart');
     assert.equal(row.status, 'pending');
-    const question = JSON.parse(row.data) as { category: string; questions?: Array<{ question: string }> };
+    const question = displayData(row.data) as { category: string; questions?: Array<{ question: string }> };
     assert.equal(question.category, 'question');
     assert.equal(question.questions?.[0]?.question, '晚饭想吃什么？');
   } finally {
@@ -461,7 +466,7 @@ test('codex executor — session_meta header skipped, event_msg lines synced', a
       .all(h.sessionId) as Array<{ type: string; data: string }>;
     assert.equal(rows.length, 2);
     assert.equal(rows[0]!.type, 'user_message');
-    assert.equal(rows[1]!.type, 'output.text');
+    assert.equal(rows[1]!.type, 'codex.event_msg.agent_message');
   } finally {
     h.cleanup();
   }

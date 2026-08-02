@@ -271,6 +271,14 @@ export class NativeJsonlWatcher {
       console.error('[jsonl-watcher] event insert failed', state.sessionId, err);
       return;
     }
+    const stored = data.__gian_event === 2 ? data : null;
+    const raw = stored?.raw && typeof stored.raw === 'object' && !Array.isArray(stored.raw)
+      ? stored.raw as Record<string, unknown>
+      : data;
+    const display = stored?.display && typeof stored.display === 'object' && !Array.isArray(stored.display)
+      ? stored.display as import('@gian/shared').ChatDisplay
+      : undefined;
+    const provider = stored?.provider;
     this.broadcaster.broadcast({
       type: 'event',
       session_id: state.sessionId,
@@ -278,11 +286,13 @@ export class NativeJsonlWatcher {
       call_id: callId,
       event: type,
       ts: Date.now(),
-      data,
+      data: raw,
+      ...(provider === 'claude' || provider === 'codex' || provider === 'kimi' ? { provider } : {}),
+      ...(display ? { display } : {}),
     });
-    if (type === 'approval_requested') {
+    if (display?.type === 'interaction.approval' || display?.type === 'interaction.question') {
       this.persistSessionStatus(state.sessionId, 'pending');
-    } else if (type === 'approval_resolved') {
+    } else if (display?.type === 'interaction.resolved') {
       this.persistSessionStatus(state.sessionId, 'running');
     }
   }

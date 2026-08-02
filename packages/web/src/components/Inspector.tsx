@@ -4,12 +4,10 @@ import { loadTree, loadChanged, loadAllFiles, stageFile, unstageFile } from '../
 import type { TreeEntry, ChangedEntry, WorkingTree, ChangeScope } from '../api.js';
 import { useT } from '../i18n/index.js';
 
-// 'workspaces' and 'manager' are rendered by App.tsx (they need workspace /
-// Task-Manager data + callbacks the generic Inspector doesn't carry); the
-// generic Inspector below only handles the working-tree-scoped 'files' /
-// 'changes' tabs. 'manager' is the compact Task-Manager panel shown in the
-// right rail when a subtask is selected in Tasks mode.
-export type InspectorTab = 'files' | 'changes' | 'workspaces' | 'manager';
+// App.tsx routes the 'workspaces' / 'settings' inspector kinds to dedicated
+// components; the generic Inspector below only handles the working-tree-scoped
+// 'files' / 'changes' tabs.
+export type InspectorTab = 'files' | 'changes';
 
 function Icon({ d, size = 13, stroke = 1.5 }: { d: string; size?: number; stroke?: number }) {
   return (
@@ -63,9 +61,6 @@ interface Props {
 }
 
 export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, revealFile, onOpenDiff, canCommit, onComposePrompt }: Props) {
-  // 'workspaces' is handled upstream in App.tsx — this component only renders the
-  // working-tree-scoped tabs.
-  if (tab === 'workspaces') return null;
   if (tab === 'files') {
     return (
       <FilesInspector
@@ -154,7 +149,7 @@ function FilesInspector({
       </div>
       <div className="insp-scroll">
         {!workingTreeId ? (
-          <div style={{ padding: '12px', color: 'var(--text-3)', fontSize: 12, fontStyle: 'italic' }}>
+          <div style={{ padding: '12px', color: 'var(--text-3)', fontSize: 'var(--fz-12)', fontStyle: 'italic' }}>
             No active working tree.
           </div>
         ) : q ? (

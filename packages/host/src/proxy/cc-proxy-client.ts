@@ -24,6 +24,8 @@ export interface CcProxyClientOptions {
   dataDir: string;
   /** Optional override for the node executable. */
   nodeBin?: string;
+  /** Runtime environment additions, including the resolved CLAUDE_BIN. */
+  env?: Readonly<Record<string, string>>;
   /** Logger for stderr / lifecycle events. */
   log?: (msg: string) => void;
 }
@@ -62,7 +64,7 @@ export class CcProxyClient implements ProxyClient {
     // init when the cc-proxy node is SIGKILLed and keep running idle.
     this.child = spawn(nodeBin, [opts.entry, '--data-dir', opts.dataDir], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
+      env: { ...process.env, ...opts.env },
       detached: true,
     });
 

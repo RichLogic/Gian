@@ -30,14 +30,14 @@ test('health probe requires the Gian JSON health shape', async () => {
   );
 });
 
-test('healthy host returns without touching launchd', async () => {
-  let kickstarts = 0;
+test('healthy host returns without starting another process', async () => {
+  let starts = 0;
   const result = await ensureHostAvailable({
     healthUrl: 'http://gian.test/health',
-    manageLaunchAgent: true,
+    manageHost: true,
     request: healthRequest([true]),
-    kickstart: async () => {
-      kickstarts += 1;
+    startHost: async () => {
+      starts += 1;
     },
     sleep: async () => undefined,
     maxChecks: 3,
@@ -46,20 +46,20 @@ test('healthy host returns without touching launchd', async () => {
   assert.deepEqual(result, {
     ready: true,
     checks: 1,
-    kickstartAttempted: false,
+    startAttempted: false,
   });
-  assert.equal(kickstarts, 0);
+  assert.equal(starts, 0);
 });
 
-test('packaged host is kicked once and then polled until healthy', async () => {
-  let kickstarts = 0;
+test('packaged host is started once and then polled until healthy', async () => {
+  let starts = 0;
   let sleeps = 0;
   const result = await ensureHostAvailable({
     healthUrl: 'http://gian.test/health',
-    manageLaunchAgent: true,
+    manageHost: true,
     request: healthRequest([false, false, true]),
-    kickstart: async () => {
-      kickstarts += 1;
+    startHost: async () => {
+      starts += 1;
     },
     sleep: async () => {
       sleeps += 1;
@@ -70,20 +70,20 @@ test('packaged host is kicked once and then polled until healthy', async () => {
   assert.deepEqual(result, {
     ready: true,
     checks: 3,
-    kickstartAttempted: true,
+    startAttempted: true,
   });
-  assert.equal(kickstarts, 1);
+  assert.equal(starts, 1);
   assert.equal(sleeps, 2);
 });
 
-test('development polling never manages the production launch agent', async () => {
-  let kickstarts = 0;
+test('development polling never starts the production host', async () => {
+  let starts = 0;
   const result = await ensureHostAvailable({
     healthUrl: 'http://gian.test/health',
-    manageLaunchAgent: false,
+    manageHost: false,
     request: healthRequest([false]),
-    kickstart: async () => {
-      kickstarts += 1;
+    startHost: async () => {
+      starts += 1;
     },
     sleep: async () => undefined,
     maxChecks: 3,
@@ -92,17 +92,17 @@ test('development polling never manages the production launch agent', async () =
   assert.deepEqual(result, {
     ready: false,
     checks: 3,
-    kickstartAttempted: false,
+    startAttempted: false,
   });
-  assert.equal(kickstarts, 0);
+  assert.equal(starts, 0);
 });
 
-test('a noisy launchctl failure does not stop health polling', async () => {
+test('a noisy spawn failure does not stop health polling', async () => {
   const result = await ensureHostAvailable({
     healthUrl: 'http://gian.test/health',
-    manageLaunchAgent: true,
+    manageHost: true,
     request: healthRequest([false, true]),
-    kickstart: async () => {
+    startHost: async () => {
       throw new Error('already running');
     },
     sleep: async () => undefined,
@@ -110,5 +110,38 @@ test('a noisy launchctl failure does not stop health polling', async () => {
   });
 
   assert.equal(result.ready, true);
-  assert.equal(result.kickstartAttempted, true);
+  assert.equal(result.startAttempted, true);
+});
+
+test('managed health checks require the expected instance and send its token', async () => {
+  let token = '';
+  const request: HealthRequest = async (_url, init) => {
+    token = init.headers['X-Gian-Desktop-Token'] ?? '';
+    return {
+      ok: true,
+      json: async () => ({ ok: true, instanceId: 'desktop-2' }),
+    };
+  };
+
+  assert.equal(
+    await isHostHealthy(
+      'http://gian.test/health',
+      request,
+      100,
+      { 'X-Gian-Desktop-Token': 'secret' },
+      'desktop-1',
+    ),
+    false,
+  );
+  assert.equal(token, 'secret');
+  assert.equal(
+    await isHostHealthy(
+      'http://gian.test/health',
+      request,
+      100,
+      { 'X-Gian-Desktop-Token': 'secret' },
+      'desktop-2',
+    ),
+    true,
+  );
 });

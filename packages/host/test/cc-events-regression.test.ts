@@ -11,8 +11,8 @@ import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { ProxyNotification, UnifiedEvent } from '@gian/shared';
-import { normalizeCcNotification } from '../src/event/normalize-cc.js';
+import type { DisplayEvent, DisplayEventType, ProxyNotification } from '@gian/shared';
+import { projectCcNotification } from '../src/event/normalize-cc.js';
 import { parseCcLine, type NormalizedEvent, type ParsedLine } from '../src/native/replay.js';
 
 const FIXTURE_ROOT = join(
@@ -58,26 +58,54 @@ function normalizeJsonl(path: string): StableEvent[] {
 function normalizeProxyNotifications(path: string): StableEvent[] {
   const notifications = readJson<ProxyNotification[]>(path);
   return notifications.flatMap(notification =>
-    normalizeCcNotification(notification, 'session-claude', 1)
-      .map(projectUnifiedEvent),
+    projectCcNotification(notification, 'session-claude', 1)
+      .map(projectDisplayEvent),
   );
 }
 
 function projectParsedEvent(boundary: ParsedLine['boundary'], event: NormalizedEvent): StableEvent {
+  const stored = event.data.__gian_event === 2 ? event.data : null;
+  const display = stored?.display as { type?: DisplayEventType; data?: Record<string, unknown> } | undefined;
+  const type = display?.type ? fixtureType(display.type) : event.type;
+  const data = display?.data ?? event.data;
   return clean({
     boundary,
-    type: event.type,
-    ...(shouldKeepCallId(event.type) ? { callId: event.callId } : {}),
-    data: projectData(event.type, event.data),
+    type,
+    ...(shouldKeepCallId(type) ? { callId: event.callId } : {}),
+    data: projectData(type, data),
   });
 }
 
-function projectUnifiedEvent(event: UnifiedEvent): StableEvent {
+function projectDisplayEvent(event: DisplayEvent): StableEvent {
+  const type = fixtureType(event.type);
   return clean({
-    type: event.type,
-    ...(shouldKeepCallId(event.type) ? { callId: event.call_id } : {}),
-    data: projectData(event.type, event.data as unknown as Record<string, unknown>),
+    type,
+    ...(shouldKeepCallId(type) ? { callId: event.call_id } : {}),
+    data: projectData(type, event.data as unknown as Record<string, unknown>),
   });
+}
+
+function fixtureType(type: DisplayEventType): string {
+  return ({
+    message: 'assistant_text',
+    'activity.reasoning': 'reasoning',
+    plan: 'plan_update',
+    'activity.command': 'command_execution',
+    'activity.file-change': 'file_change',
+    'activity.file-read': 'file_read',
+    'activity.file-search': 'file_search',
+    'activity.web-search': 'web_search',
+    'activity.tool': 'tool_execution',
+    agent: 'agent_spawn',
+    'interaction.question': 'approval_requested',
+    'interaction.approval': 'approval_requested',
+    'interaction.resolved': 'approval_resolved',
+    'activity.classifier-denied': 'auto_classifier_denied',
+    'activity.circuit-breaker': 'auto_circuit_breaker',
+    'state.turn-started': 'turn_started',
+    'state.turn-completed': 'turn_completed',
+    'state.error': 'session_error',
+  } satisfies Record<DisplayEventType, string>)[type];
 }
 
 function shouldKeepCallId(type: string): boolean {
@@ -173,9 +201,10 @@ test('CC-EVENTS: AskUserQuestion tool_result with is_error resolves as decline',
   });
   const parsed = parseCcLine(cancelledLine);
   assert.ok(parsed, 'parser should pick up the cancelled tool_result');
-  const resolved = parsed!.events.find(e => e.type === 'approval_resolved');
+  const resolved = parsed!.events.find(e => e.type === 'approval.resolved');
   assert.ok(resolved, 'expected an approval_resolved event for the cancelled tool');
-  assert.equal((resolved!.data as { decision: string }).decision, 'decline');
+  const resolvedDisplay = (resolved!.data.display as { data?: { decision?: string } }).data;
+  assert.equal(resolvedDisplay?.decision, 'decline');
 });
 
 test('CC-EVENTS: AskUserQuestion tool_result with answers stays allow_once', () => {
@@ -200,11 +229,12 @@ test('CC-EVENTS: AskUserQuestion tool_result with answers stays allow_once', () 
   });
   const parsed = parseCcLine(answeredLine);
   assert.ok(parsed);
-  const resolved = parsed!.events.find(e => e.type === 'approval_resolved');
-  assert.equal((resolved!.data as { decision: string }).decision, 'allow_once');
+  const resolved = parsed!.events.find(e => e.type === 'approval.resolved');
+  const resolvedDisplay = (resolved!.data.display as { data?: { decision?: string; answers?: unknown } }).data;
+  assert.equal(resolvedDisplay?.decision, 'allow_once');
   // Answers ride along so a reloaded transcript can still show what was picked.
   assert.deepEqual(
-    (resolved!.data as { answers?: unknown }).answers,
+    resolvedDisplay?.answers,
     { 'Pick dinner': 'Rice' },
   );
 });

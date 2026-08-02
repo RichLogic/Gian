@@ -4,17 +4,23 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  nativeTheme,
+  net,
+  safeStorage,
+  session,
   shell,
   type MenuItemConstructorOptions,
   type WebContents,
 } from 'electron';
-import { execFile } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import type { ChildProcess } from 'node:child_process';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 import {
+  desktopRequestBoundaryUrls,
   isSafeExternalUrl,
   isTrustedDesktopUrl,
   resolveDesktopApplicationIdentity,
@@ -22,9 +28,20 @@ import {
   resolveDesktopWindowChrome,
 } from './config.js';
 import { ensureHostAvailable } from './host-service.js';
+import {
+  FileGitHubCredentialStore,
+  GitHubAuthService,
+  resolveGitHubOAuthClientId,
+} from './github-auth.js';
+import {
+  DESKTOP_TOKEN_HEADER,
+  resolveManagedHostPaths,
+  resolveUnpackedAppPath,
+  startManagedHost,
+} from './managed-host.js';
 
-const execFileAsync = promisify(execFile);
 const currentDir = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 const preloadPath = join(currentDir, 'preload.cjs');
 const titlebarCss = readFileSync(
   join(app.getAppPath(), 'renderer', 'titlebar.css'),
@@ -48,44 +65,115 @@ const targets = resolveDesktopTargets({
   isPackaged: app.isPackaged,
   platform: process.platform,
 });
+const desktopToken = app.isPackaged ? randomBytes(32).toString('base64url') : null;
+const desktopInstanceId = app.isPackaged ? randomUUID() : null;
 
 let mainWindow: BrowserWindow | null = null;
+let managedHost: ChildProcess | null = null;
+let githubAuthService: GitHubAuthService | null = null;
 let loadingSurface:
   | { window: BrowserWindow; promise: Promise<boolean> }
   | null = null;
 
-async function kickstartProductionHost(): Promise<void> {
-  if (process.platform !== 'darwin' || typeof process.getuid !== 'function') {
-    throw new Error('launchd is only available on macOS');
-  }
-
-  const uid = process.getuid();
-  const domain = `gui/${uid}`;
-  const service = `${domain}/com.gian.host`;
-  try {
-    await execFileAsync('/bin/launchctl', ['kickstart', service]);
-    return;
-  } catch {
-    const plist = join(homedir(), 'Library', 'LaunchAgents', 'com.gian.host.plist');
-    if (!existsSync(plist)) throw new Error('Gian host is not installed');
-
-    try {
-      await execFileAsync('/bin/launchctl', ['bootstrap', domain, plist]);
-    } catch {
-      // It may already be bootstrapped. The second kickstart is authoritative.
-    }
-    await execFileAsync('/bin/launchctl', ['kickstart', service]);
-  }
+function dataDirectory(): string {
+  return process.env['GIAN_DATA_DIR'] ?? join(homedir(), '.config', 'gian');
 }
 
 function logDirectory(): string {
-  const configured = process.env['GIAN_DATA_DIR'];
-  if (configured) return join(configured, 'logs');
-  return join(homedir(), '.config', app.isPackaged ? 'gian' : 'gian-dev', 'logs');
+  if (app.isPackaged) return join(dataDirectory(), 'logs');
+  return join(
+    process.env['GIAN_DATA_DIR'] ?? join(homedir(), '.config', 'gian-dev'),
+    'logs',
+  );
+}
+
+function getGitHubAuthService(): GitHubAuthService {
+  if (githubAuthService) return githubAuthService;
+  githubAuthService = new GitHubAuthService({
+    clientId: resolveGitHubOAuthClientId({
+      env: process.env,
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+    }),
+    store: new FileGitHubCredentialStore({
+      path: join(app.getPath('userData'), 'github-auth.json'),
+      encryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+      encrypt: value => safeStorage.encryptString(value),
+      decrypt: value => safeStorage.decryptString(value),
+    }),
+    fetch: net.fetch,
+  });
+  return githubAuthService;
+}
+
+function isMainWindowSender(sender: WebContents): boolean {
+  return !!mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents;
+}
+
+function startProductionHost(): void {
+  if (!app.isPackaged || !desktopToken || !desktopInstanceId) return;
+  if (managedHost && managedHost.exitCode === null && !managedHost.killed) return;
+
+  const paths = resolveManagedHostPaths({
+    hostEntry: resolveUnpackedAppPath(require.resolve('@gian/host')),
+    resourcesPath: process.resourcesPath,
+    dataDir: dataDirectory(),
+  });
+  const child = startManagedHost({
+    electronExecutable: join(process.resourcesPath, 'runtime', 'node'),
+    paths,
+    host: new URL(targets.hostUrl).hostname,
+    port: Number(new URL(targets.hostUrl).port),
+    desktopToken,
+    instanceId: desktopInstanceId,
+    env: {
+      ...process.env,
+      GIAN_RELEASE_VERSION: app.getVersion(),
+      GIAN_RELEASE_REPOSITORY:
+        process.env['GIAN_RELEASE_REPOSITORY'] ?? 'RichLogic/Gian',
+    },
+  });
+  managedHost = child;
+  child.once('error', error => {
+    console.error('[desktop] managed host failed to start', error);
+  });
+  child.once('exit', (code, signal) => {
+    if (managedHost === child) managedHost = null;
+    if (code !== 0 && signal !== 'SIGTERM') {
+      console.error(`[desktop] managed host exited (${code ?? signal ?? 'unknown'})`);
+    }
+  });
+}
+
+function installDesktopRequestBoundary(): void {
+  if (!desktopToken) return;
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: desktopRequestBoundaryUrls(targets.hostUrl) },
+    (details, callback) => {
+      details.requestHeaders[DESKTOP_TOKEN_HEADER] = desktopToken;
+      callback({ requestHeaders: details.requestHeaders });
+    },
+  );
+}
+
+function stopManagedHost(): void {
+  const child = managedHost;
+  managedHost = null;
+  if (!child || child.exitCode !== null) return;
+  child.stdin?.end();
+  child.kill('SIGTERM');
 }
 
 async function openExternal(candidate: string): Promise<void> {
   if (isSafeExternalUrl(candidate)) await shell.openExternal(candidate);
+}
+
+// Match the web shell's theme backgrounds (styles/tokens.css): light is
+// #f7f7f5, dark is oklch(0.165 0.012 250) ≈ #0a0f13. A hardcoded light
+// background made dark-theme users see a bright flash on launch and reload
+// before the renderer applied body[data-theme].
+function windowBackground(): string {
+  return nativeTheme.shouldUseDarkColors ? '#0a0f13' : '#f7f7f5';
 }
 
 function hardenWebContents(contents: WebContents): void {
@@ -100,7 +188,7 @@ function hardenWebContents(contents: WebContents): void {
       return {
         action: 'allow',
         overrideBrowserWindowOptions: {
-          backgroundColor: '#f7f7f5',
+          backgroundColor: windowBackground(),
           webPreferences: {
             contextIsolation: true,
             nodeIntegration: false,
@@ -143,8 +231,12 @@ async function loadGianSurface(window: BrowserWindow): Promise<boolean> {
   const promise = (async () => {
     const readiness = await ensureHostAvailable({
       healthUrl: targets.healthUrl,
-      manageLaunchAgent: targets.manageLaunchAgent,
-      kickstart: kickstartProductionHost,
+      manageHost: targets.manageHost,
+      startHost: startProductionHost,
+      ...(desktopToken
+        ? { requestHeaders: { [DESKTOP_TOKEN_HEADER]: desktopToken } }
+        : {}),
+      ...(desktopInstanceId ? { expectedInstanceId: desktopInstanceId } : {}),
     });
     if (window.isDestroyed()) return false;
 
@@ -249,9 +341,10 @@ async function createMainWindow(): Promise<BrowserWindow> {
     minHeight: 640,
     show: false,
     title: applicationName,
-    backgroundColor: '#f7f7f5',
+    backgroundColor: windowBackground(),
     webPreferences: {
       preload: preloadPath,
+      additionalArguments: [`--gian-desktop-variant=${applicationIdentity.variant}`],
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -307,6 +400,39 @@ ipcMain.handle('desktop:set-dock-icon', (event, dataUrl: unknown) => {
   return true;
 });
 
+ipcMain.handle('desktop:github-auth:get-state', async event => {
+  if (!isMainWindowSender(event.sender)) {
+    return { status: 'unavailable', reason: 'not_configured' };
+  }
+  return getGitHubAuthService().getState();
+});
+
+ipcMain.handle('desktop:github-auth:start', async event => {
+  if (!isMainWindowSender(event.sender)) {
+    return { ok: false, error: 'not_configured' };
+  }
+  const result = await getGitHubAuthService().start();
+  if (result.ok) {
+    await shell.openExternal(result.authorization.verificationUri);
+  }
+  return result;
+});
+
+ipcMain.handle('desktop:github-auth:finish', event => {
+  if (!isMainWindowSender(event.sender)) {
+    return { ok: false, error: 'not_started' };
+  }
+  return getGitHubAuthService().finish();
+});
+
+ipcMain.handle('desktop:github-auth:cancel', event => {
+  if (isMainWindowSender(event.sender)) getGitHubAuthService().cancel();
+});
+
+ipcMain.handle('desktop:github-auth:sign-out', async event => {
+  if (isMainWindowSender(event.sender)) await getGitHubAuthService().signOut();
+});
+
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   app.quit();
@@ -322,6 +448,7 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    installDesktopRequestBoundary();
     buildApplicationMenu();
     await createMainWindow();
 
@@ -336,4 +463,9 @@ if (!hasSingleInstanceLock) {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  githubAuthService?.cancel();
+  stopManagedHost();
 });

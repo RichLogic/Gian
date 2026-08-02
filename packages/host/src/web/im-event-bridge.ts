@@ -1,4 +1,4 @@
-import type { UnifiedEvent } from '@gian/shared';
+import type { ChatEvent } from '@gian/shared';
 import type { ApprovalManager } from '../approval/index.js';
 import { toMessagingSession, toPendingApproval } from '../im/build-options.js';
 import type { MessagingPlatform } from '../im/messaging/types.js';
@@ -7,7 +7,7 @@ import type { SessionManager } from '../session/manager.js';
 import type { Db } from '../storage/db.js';
 
 export async function fanIMEvent(
-  event: UnifiedEvent,
+  event: ChatEvent,
   db: Db,
   sessions: SessionManager,
   approvals: ApprovalManager,
@@ -26,8 +26,8 @@ export async function fanIMEvent(
     .get(session.workspace_id) as { path: string } | undefined;
   const messagingSession = toMessagingSession(session, workspace?.path);
 
-  if (event.type === 'turn_completed') {
-    const data = event.data as { turnId?: string; summary?: string };
+  if (event.display?.type === 'state.turn-completed') {
+    const data = event.display.data as { turnId?: string; summary?: string };
     const turnId = data.turnId ?? event.call_id;
     const thread: CodexThread = {
       id: session.native_session_id ?? session.id,
@@ -53,8 +53,8 @@ export async function fanIMEvent(
     return;
   }
 
-  if (event.type === 'approval_requested') {
-    const approvalId = (event.data as { approvalId?: string }).approvalId ?? '';
+  if (event.display?.type === 'interaction.approval' || event.display?.type === 'interaction.question') {
+    const approvalId = (event.display.data as { approvalId?: string }).approvalId ?? '';
     const record = approvalId ? approvals.getPending(approvalId) : null;
     if (!record) return;
     const pending = toPendingApproval(record, session.executor);
@@ -66,8 +66,8 @@ export async function fanIMEvent(
     return;
   }
 
-  if (event.type === 'session_error') {
-    const message = (event.data as { message?: string }).message ?? 'Session error';
+  if (event.display?.type === 'state.error') {
+    const message = (event.display.data as { message?: string }).message ?? 'Session error';
     await Promise.all(platforms.map(platform =>
       platform.sendSessionError(messagingSession, message).catch(error => {
         console.error(`[im] ${platform.platformId} sendSessionError failed`, error);

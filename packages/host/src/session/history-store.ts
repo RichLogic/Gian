@@ -1,4 +1,4 @@
-import type { EventEnvelope } from '@gian/shared';
+import type { ChatDisplay, DisplayEventType, EventEnvelope } from '@gian/shared';
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../storage/db.js';
 
@@ -21,14 +21,24 @@ export class SessionHistoryStore {
         created_at: string;
         turn_number: number | null;
       }>;
-    return rows.map(row => ({
-      session_id: sessionId,
-      turn: row.turn_number ?? 0,
-      call_id: row.call_id,
-      event: row.type,
-      ts: Date.parse(row.created_at),
-      data: JSON.parse(row.data) as Record<string, unknown>,
-    }));
+    return rows.map(row => {
+      const stored = parseObject(row.data);
+      const isNative = stored.__gian_event === 2;
+      const raw = isNative && isRecord(stored.raw) ? stored.raw : stored;
+      const display = isNative
+        ? parseDisplay(stored.display)
+        : legacyDisplay(row.type, stored);
+      return {
+        session_id: sessionId,
+        turn: row.turn_number ?? 0,
+        call_id: row.call_id,
+        event: row.type,
+        ts: Date.parse(row.created_at),
+        data: raw,
+        ...(isNative && isExecutor(stored.provider) ? { provider: stored.provider } : {}),
+        ...(display ? { display } : {}),
+      };
+    });
   }
 
   countTurns(sessionId: string): number {
@@ -62,17 +72,18 @@ export class SessionHistoryStore {
 
   finalAssistantText(turnId: string): string {
     const rows = this.db
-      .prepare(
-        `SELECT data FROM events
-         WHERE turn_id = ? AND type IN ('assistant_text','output.text')
-         ORDER BY rowid ASC`,
-      )
-      .all(turnId) as Array<{ data: string }>;
+      .prepare('SELECT type, data FROM events WHERE turn_id = ? ORDER BY rowid ASC')
+      .all(turnId) as Array<{ type: string; data: string }>;
     const parts: string[] = [];
     for (const row of rows) {
       try {
-        const data = JSON.parse(row.data) as Record<string, unknown>;
-        if (typeof data.text === 'string' && data.text) parts.push(data.text);
+        const stored = parseObject(row.data);
+        const display = stored.__gian_event === 2
+          ? parseDisplay(stored.display)
+          : legacyDisplay(row.type, stored);
+        if (display?.type === 'message' && typeof display.data.text === 'string' && display.data.text) {
+          parts.push(display.data.text);
+        }
       } catch {
         // Historical corruption should not block turn completion.
       }
@@ -82,17 +93,17 @@ export class SessionHistoryStore {
 
   assistantTranscript(sessionId: string): string {
     const rows = this.db
-      .prepare(
-        `SELECT data FROM events
-         WHERE session_id = ? AND type = 'assistant_text'
-         ORDER BY rowid ASC`,
-      )
-      .all(sessionId) as Array<{ data: string }>;
+      .prepare('SELECT type, data FROM events WHERE session_id = ? ORDER BY rowid ASC')
+      .all(sessionId) as Array<{ type: string; data: string }>;
     const parts: string[] = [];
     for (const row of rows) {
       try {
-        const data = JSON.parse(row.data) as Record<string, unknown>;
-        const text = String(data.text ?? data.delta ?? '');
+        const stored = parseObject(row.data);
+        const display = stored.__gian_event === 2
+          ? parseDisplay(stored.display)
+          : legacyDisplay(row.type, stored);
+        if (display?.type !== 'message') continue;
+        const text = String(display.data.text ?? '');
         if (text) parts.push(text);
       } catch {
         // Summarization is best-effort and tolerates malformed history rows.
@@ -100,4 +111,52 @@ export class SessionHistoryStore {
     }
     return parts.join('');
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseObject(json: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function isExecutor(value: unknown): value is 'claude' | 'codex' | 'kimi' {
+  return value === 'claude' || value === 'codex' || value === 'kimi';
+}
+
+function parseDisplay(value: unknown): ChatDisplay | undefined {
+  if (!isRecord(value) || typeof value.type !== 'string' || !isRecord(value.data)) return undefined;
+  return { type: value.type as DisplayEventType, data: value.data } as unknown as ChatDisplay;
+}
+
+/** Read-only bridge for rows written before native events became the source of truth. */
+function legacyDisplay(type: string, data: Record<string, unknown>): ChatDisplay | undefined {
+  const mapped: DisplayEventType | undefined = ({
+    assistant_text: 'message',
+    reasoning: 'activity.reasoning',
+    plan_update: 'plan',
+    command_execution: 'activity.command',
+    file_change: 'activity.file-change',
+    file_read: 'activity.file-read',
+    file_search: 'activity.file-search',
+    web_search: 'activity.web-search',
+    tool_execution: 'activity.tool',
+    agent_spawn: 'agent',
+    approval_requested: data.category === 'question' ? 'interaction.question' : 'interaction.approval',
+    approval_resolved: 'interaction.resolved',
+    auto_classifier_denied: 'activity.classifier-denied',
+    auto_circuit_breaker: 'activity.circuit-breaker',
+    turn_started: 'state.turn-started',
+    turn_completed: 'state.turn-completed',
+    session_error: 'state.error',
+    'output.text': 'message',
+    'output.text.delta': 'message',
+  } as Record<string, DisplayEventType | undefined>)[type];
+  return mapped ? { type: mapped, data } as unknown as ChatDisplay : undefined;
 }

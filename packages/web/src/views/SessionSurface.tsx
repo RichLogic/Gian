@@ -18,6 +18,9 @@ interface SessionSurfaceProps {
   session: Session;
   workspace: Workspace | null;
   items: TranscriptItem[];
+  /** False while the session's history is still loading — suppresses the
+   *  transcript empty state so switching sessions doesn't flash it. */
+  hydrated?: boolean;
   pending: boolean;
   queue: QueueEntry[];
   planText?: string;
@@ -40,6 +43,7 @@ export function SessionSurface({
   session,
   workspace,
   items,
+  hydrated,
   pending,
   queue,
   planText,
@@ -66,6 +70,7 @@ export function SessionSurface({
                 session={session}
                 workspace={workspace}
                 items={items}
+                hydrated={hydrated}
                 pending={pending}
                 queue={queue}
                 planText={planText}

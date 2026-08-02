@@ -5,26 +5,13 @@ import type {
   ApprovalResolvedData,
   AskQuestion,
   FileChangeSummary,
-  UnifiedEvent,
+  DisplayEvent,
 } from '@gian/shared';
 
 /**
- * Translate a raw cc-proxy notification into 0..N unified events.
- *
- * Mapping coverage (M1 complete):
- *   output.text                        → assistant_text  (delta:false, full turn text)
- *   tool.use (toolName=Bash)           → command_execution (status:'running')
- *   tool.use (toolName=Write/Edit/NotebookEdit) → file_change
- *   tool.use (toolName=Read)           → file_read
- *   tool.use (toolName=Glob)           → file_search (kind:'glob')
- *   tool.use (toolName=Grep)           → file_search (kind:'grep')
- *   tool.use (toolName=WebSearch)      → web_search
- *   tool.use (toolName=Agent|Task)     → agent_spawn
- *   claude.task                        → agent_spawn (lifecycle upsert)
- *   approval.requested                 → approval_requested
- *   approval.resolved                  → approval_resolved
- *   turn.completed                     → turn_completed
- *   turn.failed                        → session_error
+ * Project a raw cc-proxy notification into 0..N UI display records.
+ * The output names are page selectors, not renamed Claude events. The
+ * original method and payload are attached by projectNotification.
  *
  * cc does NOT emit: output.text.delta (non-streaming), diff.updated,
  *   output.command.delta, runtime.error, token_usage.updated.
@@ -37,11 +24,11 @@ import type {
  *   codex uses data.decision + data.scope
  *   Discriminated by field presence in the approval_resolved case.
  */
-export function normalizeCcNotification(
+export function projectCcNotification(
   raw: ProxyNotification,
   sessionId: string,
   turn: number,
-): UnifiedEvent[] {
+): DisplayEvent[] {
   const data = (raw.params.data ?? {}) as Record<string, unknown>;
 
   switch (raw.method) {
@@ -56,7 +43,7 @@ export function normalizeCcNotification(
           turn,
           call_id: itemId,
           ts: Date.now(),
-          type: 'assistant_text',
+          type: 'message',
           data: { text, delta: false, itemId },
         },
       ];
@@ -77,7 +64,7 @@ export function normalizeCcNotification(
               turn,
               call_id: callId,
               ts: Date.now(),
-              type: 'command_execution',
+              type: 'activity.command',
               data: {
                 command: String(input.command ?? ''),
                 cwd: input.cwd != null ? String(input.cwd) : undefined,
@@ -97,13 +84,13 @@ export function normalizeCcNotification(
           // unified diff so DiffCard can render real hunks instead of just
           // path + stat. Without this the diff body would render empty.
           const diff = buildCcSyntheticDiff(toolName, file.path, input);
-          const events: UnifiedEvent[] = [
+          const events: DisplayEvent[] = [
             {
               session_id: sessionId,
               turn,
               call_id: callId,
               ts: Date.now(),
-              type: 'file_change',
+              type: 'activity.file-change',
               data: diff
                 ? { files: [file], diff }
                 : { files: [file] },
@@ -116,7 +103,7 @@ export function normalizeCcNotification(
               turn,
               call_id: `${callId}:plan`,
               ts: Date.now(),
-              type: 'plan_update',
+              type: 'plan',
               data: { text: plan, delta: false },
             });
           }
@@ -132,7 +119,7 @@ export function normalizeCcNotification(
               turn,
               call_id: callId,
               ts: Date.now(),
-              type: 'file_read',
+              type: 'activity.file-read',
               data: {
                 path: String(input.file_path ?? input.path ?? ''),
                 startLine: offset,
@@ -150,7 +137,7 @@ export function normalizeCcNotification(
               turn,
               call_id: callId,
               ts: Date.now(),
-              type: 'file_search',
+              type: 'activity.file-search',
               data: {
                 pattern: String(input.pattern ?? ''),
                 kind: 'glob',
@@ -166,7 +153,7 @@ export function normalizeCcNotification(
               turn,
               call_id: callId,
               ts: Date.now(),
-              type: 'file_search',
+              type: 'activity.file-search',
               data: {
                 pattern: String(input.pattern ?? ''),
                 kind: 'grep',
@@ -182,7 +169,7 @@ export function normalizeCcNotification(
               turn,
               call_id: callId,
               ts: Date.now(),
-              type: 'web_search',
+              type: 'activity.web-search',
               data: { query: String(input.query ?? '') },
             },
           ];
@@ -196,7 +183,7 @@ export function normalizeCcNotification(
               turn,
               call_id: callId,
               ts: Date.now(),
-              type: 'agent_spawn',
+              type: 'agent',
               data: {
                 description: String(input.description ?? input.prompt ?? ''),
                 status: 'running',
@@ -230,7 +217,7 @@ export function normalizeCcNotification(
         turn,
         call_id: toolUseId,
         ts: Date.now(),
-        type: 'agent_spawn',
+        type: 'agent',
         data: update,
       }];
     }
@@ -261,7 +248,7 @@ export function normalizeCcNotification(
           // us update the canonical list when this becomes the common case.
           // eslint-disable-next-line no-console
           console.warn(
-            `[normalize-cc] AskUserQuestion detected by input shape, not toolName. toolName=${JSON.stringify(toolName)} — add to matcher if seen repeatedly.`,
+            `[project-cc] AskUserQuestion detected by input shape, not toolName. toolName=${JSON.stringify(toolName)} — add to matcher if seen repeatedly.`,
           );
         }
         const firstQuestion = parsedQuestions[0]?.question?.trim();
@@ -271,7 +258,7 @@ export function normalizeCcNotification(
             turn,
             call_id: approvalId,
             ts: Date.now(),
-            type: 'approval_requested',
+            type: 'interaction.question',
             data: {
               approvalId,
               category: 'question',
@@ -299,7 +286,7 @@ export function normalizeCcNotification(
           turn,
           call_id: approvalId,
           ts: Date.now(),
-          type: 'approval_requested',
+          type: 'interaction.approval',
           data: {
             approvalId,
             category,
@@ -347,7 +334,7 @@ export function normalizeCcNotification(
           turn,
           call_id: callId,
           ts: Date.now(),
-          type: 'auto_classifier_denied',
+          type: 'activity.classifier-denied',
           data: {
             action: String(data.action ?? ''),
             reason: String(data.reason ?? ''),
@@ -367,7 +354,7 @@ export function normalizeCcNotification(
           turn,
           call_id: callId,
           ts: Date.now(),
-          type: 'auto_circuit_breaker',
+          type: 'activity.circuit-breaker',
           data: {
             trigger,
             consecutive: Number(data.consecutive ?? 0),
@@ -382,7 +369,7 @@ export function normalizeCcNotification(
       if (!approvalId) return [];
 
       // Discriminate by field: cc uses data.behavior; codex uses data.decision.
-      // This normalizer only handles cc notifications, but guard defensively.
+      // This adapter only handles cc notifications, but guard defensively.
       let decision: 'allow_once' | 'allow_session' | 'decline';
       if ('behavior' in data) {
         const behavior = String(data.behavior ?? '');
@@ -407,7 +394,7 @@ export function normalizeCcNotification(
           turn,
           call_id: approvalId,
           ts: Date.now(),
-          type: 'approval_resolved',
+          type: 'interaction.resolved',
           data: {
             approvalId,
             decision,
@@ -427,7 +414,7 @@ export function normalizeCcNotification(
           turn,
           call_id: turnId,
           ts: Date.now(),
-          type: 'turn_completed',
+          type: 'state.turn-completed',
           data: {
             turnId,
             summary: data.result != null ? String(data.result) : undefined,
@@ -444,7 +431,7 @@ export function normalizeCcNotification(
           turn,
           call_id: crypto.randomUUID(),
           ts: Date.now(),
-          type: 'session_error',
+          type: 'state.error',
           data: {
             message: msg,
             // cc spawns one process per session; process crash = retryable
@@ -464,7 +451,7 @@ export function normalizeCcNotification(
           turn,
           call_id: crypto.randomUUID(),
           ts: Date.now(),
-          type: 'session_error',
+          type: 'state.error',
           data: {
             message: String(data.message ?? 'cc-proxy crashed'),
             retryable: true,
@@ -481,7 +468,7 @@ export function normalizeCcNotification(
           turn,
           call_id: 'turn-start',
           ts: Date.now(),
-          type: 'turn_started',
+          type: 'state.turn-started',
           data: { turnId: String((raw.params as { turnId?: unknown }).turnId ?? '') },
         },
       ];
@@ -534,7 +521,7 @@ function parseAskUserQuestionInput(raw: unknown): AskQuestion[] {
     // host.err if Claude SDK ever changes the input shape.
     // eslint-disable-next-line no-console
     console.warn(
-      `[normalize-cc] parseAskUserQuestionInput: JSON parse failed (${err instanceof Error ? err.message : String(err)})`,
+      `[project-cc] parseAskUserQuestionInput: JSON parse failed (${err instanceof Error ? err.message : String(err)})`,
     );
     return [];
   }

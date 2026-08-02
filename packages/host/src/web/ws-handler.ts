@@ -213,6 +213,10 @@ async function dispatch(
       sessions.archiveSession(msg.session_id, msg.archived);
       return;
     }
+    case 'session:pin': {
+      sessions.setPinned(msg.session_id, msg.pinned);
+      return;
+    }
     case 'session:delete': {
       await sessions.deleteSession(msg.session_id);
       return;

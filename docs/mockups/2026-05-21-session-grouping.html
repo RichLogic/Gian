@@ -1,0 +1,723 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Gian — Session grouping mockup · 2026-05-21</title>
+<style>
+  /* ====== Tokens — copied from packages/web/src/styles/tokens.css ====== */
+  :root {
+    --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+    --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --fz-11: 11px; --fz-12: 12px; --fz-13: 13px;
+    --r-1: 4px; --r-2: 7px; --r-3: 10px; --r-pill: 999px;
+    --codex: oklch(0.62 0.14 270); --codex-soft: oklch(0.62 0.14 270 / 0.12);
+    --claude: oklch(0.70 0.15 36); --claude-soft: oklch(0.70 0.15 36 / 0.14);
+    --ease: cubic-bezier(.2,.7,.2,1);
+  }
+  body { --accent-h: 310; --accent-c: 0.13; }
+  body[data-accent="ink"]   { --accent-h: 255; --accent-c: 0.11; }
+  body[data-accent="ember"] { --accent-h:  30; --accent-c: 0.13; }
+  body[data-accent="plum"]  { --accent-h: 310; --accent-c: 0.13; }
+
+  body[data-theme="light"] {
+    --bg: oklch(0.955 0.004 280); --surface: oklch(1 0 0);
+    --surface-2: oklch(0.97 0.003 280); --surface-3: oklch(0.935 0.005 280);
+    --text: oklch(0.22 0.02 280); --text-2: oklch(0.45 0.015 280); --text-3: oklch(0.62 0.012 280);
+    --hairline: oklch(0.22 0.02 280 / 0.08);
+    --accent: oklch(0.55 var(--accent-c) var(--accent-h));
+    --accent-text: oklch(0.42 var(--accent-c) var(--accent-h));
+    --accent-soft: oklch(0.55 var(--accent-c) var(--accent-h) / 0.12);
+    --ok: oklch(0.58 0.13 150); --ok-soft: oklch(0.58 0.13 150 / 0.13);
+    --warn: oklch(0.70 0.14 75); --warn-soft: oklch(0.70 0.14 75 / 0.15);
+    --danger: oklch(0.58 0.18 25); --danger-soft: oklch(0.58 0.18 25 / 0.13);
+    --shadow-1: 0 0 0 1px oklch(0.22 0.02 280 / 0.06), 0 1px 2px oklch(0.22 0.02 280 / 0.04);
+  }
+  body[data-theme="warm"] {
+    --bg: oklch(0.955 0.020 80); --surface: oklch(0.990 0.012 82);
+    --surface-2: oklch(0.965 0.018 80); --surface-3: oklch(0.925 0.022 78);
+    --text: oklch(0.30 0.04 55); --text-2: oklch(0.48 0.035 60); --text-3: oklch(0.62 0.025 65);
+    --hairline: oklch(0.30 0.04 55 / 0.10);
+    --accent: oklch(0.52 var(--accent-c) var(--accent-h));
+    --accent-text: oklch(0.40 var(--accent-c) var(--accent-h));
+    --accent-soft: oklch(0.52 var(--accent-c) var(--accent-h) / 0.14);
+    --ok: oklch(0.55 0.13 150); --ok-soft: oklch(0.55 0.13 150 / 0.14);
+    --warn: oklch(0.65 0.14 65); --warn-soft: oklch(0.65 0.14 65 / 0.16);
+    --shadow-1: 0 0 0 1px oklch(0.30 0.04 55 / 0.07), 0 1px 2px oklch(0.30 0.04 55 / 0.05);
+  }
+  body[data-theme="dark"] {
+    --bg: oklch(0.165 0.012 250); --surface: oklch(0.210 0.014 250);
+    --surface-2: oklch(0.240 0.016 250); --surface-3: oklch(0.285 0.018 250);
+    --text: oklch(0.93 0.01 250); --text-2: oklch(0.74 0.012 250); --text-3: oklch(0.58 0.012 250);
+    --hairline: oklch(0.93 0.01 250 / 0.08);
+    --accent: oklch(0.72 var(--accent-c) var(--accent-h));
+    --accent-text: oklch(0.80 var(--accent-c) var(--accent-h));
+    --accent-soft: oklch(0.72 var(--accent-c) var(--accent-h) / 0.18);
+    --ok: oklch(0.75 0.14 150); --ok-soft: oklch(0.75 0.14 150 / 0.16);
+    --warn: oklch(0.80 0.14 80); --warn-soft: oklch(0.80 0.14 80 / 0.18);
+    --shadow-1: 0 0 0 1px oklch(0.93 0.01 250 / 0.06);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: var(--font-sans); font-size: var(--fz-13);
+    background: var(--bg); color: var(--text);
+    padding: 32px; min-height: 100vh; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page-head { max-width: 1200px; margin: 0 auto 24px; display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  .page-head h1 { font: 500 22px/1.2 var(--font-serif); font-style: italic; letter-spacing: -0.02em; }
+  .page-head .sub { font: var(--fz-12)/1.4 var(--font-mono); color: var(--text-3); }
+  .toolbar { margin-left: auto; display: flex; gap: 12px; align-items: center; }
+  .toolbar .grp { display: inline-flex; padding: 2px; background: var(--surface-2); border-radius: var(--r-2); gap: 1px; }
+  .toolbar .grp button {
+    padding: 4px 10px; border-radius: var(--r-1);
+    font: 500 11px/1 var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--text-3); background: transparent; border: 0; cursor: pointer;
+  }
+  .toolbar .grp button.active { background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--hairline); }
+
+  .grid { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .grid.three { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--surface); border-radius: var(--r-3); padding: 16px;
+    box-shadow: var(--shadow-1);
+  }
+  .card h3 {
+    font: 600 10.5px/1 var(--font-mono); color: var(--text-3);
+    text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px;
+  }
+  .card .desc { font-size: 11.5px; color: var(--text-2); margin-bottom: 14px; line-height: 1.55; }
+  .card .desc strong { color: var(--text); font-weight: 600; }
+
+  /* ===== mock sidebar ===== */
+  .sidebar {
+    width: 272px;
+    background: var(--surface-2);
+    border-radius: var(--r-2);
+    padding: 6px;
+    box-shadow: var(--shadow-1);
+  }
+
+  /* group header — baseline */
+  .sb-group {
+    font: 600 10px/1 var(--font-mono); color: var(--text-3);
+    text-transform: uppercase; letter-spacing: 0.08em;
+    padding: 12px 8px 4px; display: flex; align-items: center; gap: 6px;
+  }
+  .sb-group .count {
+    font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    color: var(--text-3); background: var(--surface-2);
+    border-radius: 3px; padding: 1px 5px; margin-left: 2px;
+  }
+
+  /* baseline rail-item */
+  .rail-item {
+    position: relative; display: block;
+    padding: 7px 8px 8px;
+    border-radius: var(--r-2);
+    width: 100%; text-align: left;
+    background: transparent; border: 0;
+    transition: background 80ms var(--ease);
+  }
+  .rail-item:hover { background: var(--surface-2); }
+  .rail-item.active { background: var(--accent-soft); }
+  .rail-item.active .ri-title { color: var(--accent-text); }
+  .ri-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .ri-row1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .ri-title {
+    font: 600 var(--fz-13)/1.3 var(--font-sans);
+    color: var(--text); letter-spacing: -0.005em;
+    flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ri-row2 {
+    display: flex; align-items: center; gap: 6px;
+    font: 10px/1.4 var(--font-mono); color: var(--text-3);
+    white-space: nowrap; min-width: 0; padding-right: 36px;
+  }
+  .ri-exec { font-weight: 600; display: inline-flex; align-items: center; gap: 3px; }
+  .ri-exec.claude { color: var(--claude); }
+  .ri-exec.codex  { color: var(--codex); }
+  .ri-sub { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .ri-dot-sep { color: var(--text-3); opacity: 0.5; }
+  .ri-age {
+    position: absolute; right: 10px; bottom: 8px;
+    font: 10px/1 var(--font-mono); color: var(--text-3);
+    pointer-events: none;
+  }
+  .ri-status {
+    position: absolute; top: 8px; right: 10px;
+    width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center;
+  }
+  .ri-status svg { width: 14px; height: 14px; }
+
+  /* ====== Proposed: left exec color bar ====== */
+  .rail-item.v2 { padding-left: 14px; }
+  .rail-item.v2::before {
+    content: ""; position: absolute;
+    left: 4px; top: 9px; bottom: 9px;
+    width: 3px; border-radius: 2px;
+    background: var(--exec-color, var(--text-3));
+  }
+  .rail-item.v2.claude { --exec-color: var(--claude); }
+  .rail-item.v2.codex  { --exec-color: var(--codex); }
+  .rail-item.v2 .ri-row2-v2 {
+    display: flex; align-items: center; gap: 5px;
+    font: 10px/1.4 var(--font-mono); color: var(--text-3);
+    white-space: nowrap; min-width: 0; padding-right: 36px;
+  }
+  .ri-branch {
+    color: var(--text-2); display: inline-flex; align-items: center; gap: 3px;
+    overflow: hidden; text-overflow: ellipsis; min-width: 0; max-width: 110px;
+  }
+  .ri-branch svg { width: 9px; height: 9px; flex: none; opacity: 0.7; }
+  .ri-branch-name { overflow: hidden; text-overflow: ellipsis; }
+  .ri-ws { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+
+  /* ====== Variant B — bg band group header ====== */
+  .sb-group.var-b {
+    background: var(--surface-2);
+    border-radius: var(--r-1);
+    margin: 8px 0 2px;
+    padding: 6px 10px;
+    color: var(--text);
+    font-size: 11px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 600;
+  }
+  .sb-group.var-b .count { background: var(--surface); }
+
+  /* ====== Variant C — color dot in header + left tint edge on rows ====== */
+  .sb-group.var-c {
+    background: transparent;
+    padding: 10px 8px 4px;
+    font-size: 10.5px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 600;
+    color: var(--text-2);
+  }
+  .sb-group.var-c .ws-dot {
+    width: 8px; height: 8px; border-radius: 2px; flex: none;
+    background: var(--ws-color, var(--text-3));
+  }
+  .sb-group.var-c .count { background: var(--surface-2); }
+
+  .rail-item.var-c { padding-left: 14px; }
+  .rail-item.var-c::after {
+    content: ""; position: absolute;
+    left: 4px; top: 9px; bottom: 9px;
+    width: 2px; border-radius: 1px;
+    background: var(--ws-color, transparent);
+    opacity: 0.55;
+  }
+  .rail-item.var-c.v2 { padding-left: 20px; }
+  .rail-item.var-c.v2::before { left: 10px; }
+  .rail-item.var-c.v2::after  { left: 4px; }
+
+  /* ====== Variant D — collapsible ====== */
+  .sb-group.var-d {
+    padding: 8px 8px 4px;
+    font-size: 11px;
+    text-transform: none; letter-spacing: 0;
+    font-weight: 600; color: var(--text-2);
+    cursor: pointer; user-select: none;
+  }
+  .sb-group.var-d .caret { color: var(--text-3); font-size: 9px; }
+  .sb-group.var-d .count { background: var(--surface-2); }
+
+  /* pill */
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 1px 6px; border-radius: var(--r-pill);
+    font: 600 9px/1.4 var(--font-mono);
+    letter-spacing: 0.02em; white-space: nowrap; flex: none;
+  }
+  .pill.run { color: var(--accent-text); background: var(--accent-soft); }
+  .pill.done { color: var(--ok); background: var(--ok-soft); }
+  .pill.wait { color: var(--warn); background: var(--warn-soft); }
+
+  .swatch-legend {
+    margin-top: 10px;
+    display: flex; gap: 12px; flex-wrap: wrap;
+    font: 10.5px/1 var(--font-mono); color: var(--text-3);
+  }
+  .swatch-legend .sw { display: inline-flex; align-items: center; gap: 5px; }
+  .swatch-legend .sw i { width: 10px; height: 10px; border-radius: 2px; }
+
+  .section-title {
+    max-width: 1200px; margin: 24px auto 8px;
+    font: 600 11px/1 var(--font-mono); color: var(--text-3);
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+
+  .note {
+    max-width: 1200px; margin: 8px auto 16px;
+    font-size: 12px; color: var(--text-2); line-height: 1.6;
+  }
+  .note code {
+    font: 11px/1.4 var(--font-mono); background: var(--surface-2);
+    padding: 1px 5px; border-radius: 3px; color: var(--text);
+  }
+</style>
+</head>
+<body data-theme="warm" data-accent="ember">
+
+<div class="page-head">
+  <h1>Session grouping — design exploration</h1>
+  <span class="sub">2026-05-21 · 4 variants + new row layout</span>
+  <div class="toolbar">
+    <div class="grp" id="theme-grp">
+      <button data-theme="light">Light</button>
+      <button data-theme="warm" class="active">Warm</button>
+      <button data-theme="dark">Dark</button>
+    </div>
+    <div class="grp" id="accent-grp">
+      <button data-accent="ink">Ink</button>
+      <button data-accent="ember" class="active">Ember</button>
+      <button data-accent="plum">Plum</button>
+    </div>
+  </div>
+</div>
+
+<div class="note">
+  <strong>关于这份 mockup：</strong>所有 sidebar 都是真实尺寸（272px 宽），样式 token 直接照搬 <code>tokens.css</code>。
+  Section 1 对比"行内布局"——左边竖色条 vs 现状文字 executor。Section 2 用新行布局展示 4 个分组变体。切顶部 theme / accent 实时换肤。
+</div>
+
+<!-- ============ Section 1 — Row layout: current vs new ============ -->
+<div class="section-title">① 行布局对比 — 现状 vs 新（左侧 executor 竖条 + branch）</div>
+
+<div class="grid">
+
+  <div class="card">
+    <h3>现状</h3>
+    <p class="desc">
+      Row2: <code>Claude · workspace · 3m</code>。executor 是颜色文字，workspace 名在 row2 占主要空间，<strong>没有 branch</strong>。
+    </p>
+    <div class="sidebar">
+      <div class="sb-group"><span>Today</span></div>
+      <div class="rail-item active">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Refactor session manager</span></div>
+          <div class="ri-row2">
+            <span class="ri-exec claude">Claude</span><span class="ri-dot-sep">·</span>
+            <span class="ri-sub">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">3m</span>
+        <span class="ri-status"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="var(--accent-soft)" stroke-width="2"/><path d="M14 8a6 6 0 0 0-6-6" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/></svg></span>
+      </div>
+      <div class="rail-item">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Composer paste handler</span></div>
+          <div class="ri-row2">
+            <span class="ri-exec codex">Codex</span><span class="ri-dot-sep">·</span>
+            <span class="ri-sub">remote-vibe-coding</span>
+          </div>
+        </div>
+        <span class="ri-age">12m</span>
+      </div>
+      <div class="rail-item">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Fix codex-proxy notification parity</span></div>
+          <div class="ri-row2">
+            <span class="ri-exec claude">Claude</span><span class="ri-dot-sep">·</span>
+            <span class="ri-sub">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">1h</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>新（提案）</h3>
+    <p class="desc">
+      左侧 <strong>3px 竖色条</strong>代表 executor（Claude 橘 / Codex 紫蓝）跨两行。Row2 加 <strong>⎇ branch</strong>，workspace 保留。
+      节省了"Claude/Codex"文字宽度，腾给 branch。
+    </p>
+    <div class="sidebar">
+      <div class="sb-group"><span>Today</span></div>
+
+      <div class="rail-item v2 claude active">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Refactor session manager</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch">
+              <svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span class="ri-branch-name">feat/runtime-mode</span>
+            </span>
+            <span class="ri-dot-sep">·</span>
+            <span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">3m</span>
+        <span class="ri-status"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="var(--accent-soft)" stroke-width="2"/><path d="M14 8a6 6 0 0 0-6-6" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/></svg></span>
+      </div>
+
+      <div class="rail-item v2 codex">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Composer paste handler</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch">
+              <svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span class="ri-branch-name">main</span>
+            </span>
+            <span class="ri-dot-sep">·</span>
+            <span class="ri-ws">remote-vibe-coding</span>
+          </div>
+        </div>
+        <span class="ri-age">12m</span>
+      </div>
+
+      <div class="rail-item v2 claude">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Fix codex-proxy notification parity</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch">
+              <svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span class="ri-branch-name">fix/notif-parity</span>
+            </span>
+            <span class="ri-dot-sep">·</span>
+            <span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">1h</span>
+      </div>
+    </div>
+    <div class="swatch-legend">
+      <span class="sw"><i style="background: var(--claude)"></i>Claude</span>
+      <span class="sw"><i style="background: var(--codex)"></i>Codex</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- ============ Section 2 — Grouping variants (using new row layout) ============ -->
+<div class="section-title">② 分组样式 4 变体（按 workspace 分组）</div>
+
+<div class="grid">
+
+  <!-- A: baseline ------------------------------------------------------ -->
+  <div class="card">
+    <h3>A · 现状（对照）</h3>
+    <p class="desc">
+      小灰大写 mono，背景透明，没有色彩/分割。各组之间区分度很弱。
+    </p>
+    <div class="sidebar">
+      <div class="sb-group"><span>GianDev</span><span class="count">3</span></div>
+      <div class="rail-item v2 claude active">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Refactor session manager</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">feat/runtime-mode</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">3m</span>
+        <span class="ri-status"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="var(--accent-soft)" stroke-width="2"/><path d="M14 8a6 6 0 0 0-6-6" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/></svg></span>
+      </div>
+      <div class="rail-item v2 claude">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Fix codex-proxy notification parity</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">fix/notif</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">1h</span>
+      </div>
+      <div class="rail-item v2 codex">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Add openWith API client</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">main</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">3h</span>
+      </div>
+      <div class="sb-group"><span>remote-vibe-coding</span><span class="count">2</span></div>
+      <div class="rail-item v2 codex">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Composer paste handler</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">main</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">remote-vibe-coding</span>
+          </div>
+        </div>
+        <span class="ri-age">12m</span>
+      </div>
+      <div class="rail-item v2 claude">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Slack handler bug</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">fix/slack</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">remote-vibe-coding</span>
+          </div>
+        </div>
+        <span class="ri-age">2h</span>
+      </div>
+      <div class="sb-group"><span>misc-experiments</span><span class="count">1</span></div>
+      <div class="rail-item v2 codex">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">tracing playground</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">main</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">misc-experiments</span>
+          </div>
+        </div>
+        <span class="ri-age">yesterday</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- B: bg band header ----------------------------------------------- -->
+  <div class="card">
+    <h3>B · 背景色带 + 加粗 workspace 名</h3>
+    <p class="desc">
+      分组头变成<strong>有背景的小条</strong>（<code>surface-2</code>），workspace 名加粗、不再大写，更像"段落标题"。无颜色，纯靠对比度。
+    </p>
+    <div class="sidebar">
+      <div class="sb-group var-b"><span>GianDev</span><span class="count">3</span></div>
+      <div class="rail-item v2 claude active">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Refactor session manager</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">feat/runtime-mode</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">3m</span>
+        <span class="ri-status"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="var(--accent-soft)" stroke-width="2"/><path d="M14 8a6 6 0 0 0-6-6" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/></svg></span>
+      </div>
+      <div class="rail-item v2 claude">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Fix codex-proxy notification parity</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">fix/notif</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">1h</span>
+      </div>
+      <div class="rail-item v2 codex">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Add openWith API client</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">main</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">3h</span>
+      </div>
+      <div class="sb-group var-b"><span>remote-vibe-coding</span><span class="count">2</span></div>
+      <div class="rail-item v2 codex">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Composer paste handler</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">main</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">remote-vibe-coding</span>
+          </div>
+        </div>
+        <span class="ri-age">12m</span>
+      </div>
+      <div class="rail-item v2 claude">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Slack handler bug</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">fix/slack</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">remote-vibe-coding</span>
+          </div>
+        </div>
+        <span class="ri-age">2h</span>
+      </div>
+      <div class="sb-group var-b"><span>misc-experiments</span><span class="count">1</span></div>
+      <div class="rail-item v2 codex">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">tracing playground</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">main</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">misc-experiments</span>
+          </div>
+        </div>
+        <span class="ri-age">yesterday</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- C: color dot + per-workspace tint edge -------------------------- -->
+  <div class="card">
+    <h3>C · workspace 自选色（色点 + 行左侧色边）</h3>
+    <p class="desc">
+      用户在 workspace 设置里给每个 workspace 选一个颜色（可选，不选就没色）。分组头加一个<strong>小色块</strong>，组内 session 行左侧加一条 2px 色边（在 executor 竖条更左侧）。<strong>不强制配色</strong>，用户控制。
+    </p>
+    <div class="sidebar">
+      <div class="sb-group var-c" style="--ws-color: oklch(0.65 0.13 200)"><span class="ws-dot"></span><span>GianDev</span><span class="count">3</span></div>
+      <div class="rail-item v2 var-c claude active" style="--ws-color: oklch(0.65 0.13 200)">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Refactor session manager</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">feat/runtime-mode</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">3m</span>
+        <span class="ri-status"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="var(--accent-soft)" stroke-width="2"/><path d="M14 8a6 6 0 0 0-6-6" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/></svg></span>
+      </div>
+      <div class="rail-item v2 var-c claude" style="--ws-color: oklch(0.65 0.13 200)">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Fix codex-proxy notification parity</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">fix/notif</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">1h</span>
+      </div>
+      <div class="rail-item v2 var-c codex" style="--ws-color: oklch(0.65 0.13 200)">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Add openWith API client</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">main</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">3h</span>
+      </div>
+      <div class="sb-group var-c" style="--ws-color: oklch(0.65 0.13 130)"><span class="ws-dot"></span><span>remote-vibe-coding</span><span class="count">2</span></div>
+      <div class="rail-item v2 var-c codex" style="--ws-color: oklch(0.65 0.13 130)">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Composer paste handler</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">main</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">remote-vibe-coding</span>
+          </div>
+        </div>
+        <span class="ri-age">12m</span>
+      </div>
+      <div class="rail-item v2 var-c claude" style="--ws-color: oklch(0.65 0.13 130)">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Slack handler bug</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">fix/slack</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">remote-vibe-coding</span>
+          </div>
+        </div>
+        <span class="ri-age">2h</span>
+      </div>
+      <div class="sb-group var-c"><span class="ws-dot" style="background: var(--text-3); opacity: 0.4"></span><span>misc-experiments</span><span class="count">1</span></div>
+      <div class="rail-item v2 var-c codex">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">tracing playground</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">main</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">misc-experiments</span>
+          </div>
+        </div>
+        <span class="ri-age">yesterday</span>
+      </div>
+    </div>
+    <div class="swatch-legend">
+      <span class="sw"><i style="background: oklch(0.65 0.13 200)"></i>GianDev (azure)</span>
+      <span class="sw"><i style="background: oklch(0.65 0.13 130)"></i>RVC (moss)</span>
+      <span class="sw"><i style="background: var(--text-3); opacity: 0.4"></i>misc (未设色)</span>
+    </div>
+  </div>
+
+  <!-- D: collapsible -------------------------------------------------- -->
+  <div class="card">
+    <h3>D · 可折叠分组 + count（无颜色）</h3>
+    <p class="desc">
+      纯结构化：分组头可点击展开/收起，<strong>显式数量</strong>，没有颜色。适合 workspace 数量很多时管理。
+    </p>
+    <div class="sidebar">
+      <div class="sb-group var-d"><span class="caret">▾</span><span>GianDev</span><span class="count">3</span></div>
+      <div class="rail-item v2 claude active">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Refactor session manager</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">feat/runtime-mode</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">3m</span>
+        <span class="ri-status"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="var(--accent-soft)" stroke-width="2"/><path d="M14 8a6 6 0 0 0-6-6" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/></svg></span>
+      </div>
+      <div class="rail-item v2 claude">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Fix codex-proxy notification parity</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">fix/notif</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">1h</span>
+      </div>
+      <div class="rail-item v2 codex">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Add openWith API client</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">main</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">GianDev</span>
+          </div>
+        </div>
+        <span class="ri-age">3h</span>
+      </div>
+      <div class="sb-group var-d"><span class="caret">▾</span><span>remote-vibe-coding</span><span class="count">2</span></div>
+      <div class="rail-item v2 codex">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Composer paste handler</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">main</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">remote-vibe-coding</span>
+          </div>
+        </div>
+        <span class="ri-age">12m</span>
+      </div>
+      <div class="rail-item v2 claude">
+        <div class="ri-body">
+          <div class="ri-row1"><span class="ri-title">Slack handler bug</span></div>
+          <div class="ri-row2-v2">
+            <span class="ri-branch"><svg viewBox="0 0 16 16" fill="none"><path d="M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ri-branch-name">fix/slack</span></span>
+            <span class="ri-dot-sep">·</span><span class="ri-ws">remote-vibe-coding</span>
+          </div>
+        </div>
+        <span class="ri-age">2h</span>
+      </div>
+      <div class="sb-group var-d"><span class="caret">▸</span><span>misc-experiments</span><span class="count">1</span></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="note">
+  <strong>我的推荐：</strong> 单选 <strong>B</strong>（轻盈、零配置、跟你说的"轻盈"完全吻合），可以叠加 <strong>D 的折叠 + count</strong>（成本低，价值大）。
+  <strong>C</strong> 也是可行选项，但要看你能不能接受"用户给 workspace 选颜色"这个额外配置面板。
+  <br><br>
+  <strong>下一步：</strong>看完后告诉我选 B / B+D / C / 其他组合，我再写 spec。
+</div>
+
+<script>
+  document.getElementById('theme-grp').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-theme]');
+    if (!btn) return;
+    document.body.setAttribute('data-theme', btn.dataset.theme);
+    document.querySelectorAll('#theme-grp button').forEach(b => b.classList.toggle('active', b === btn));
+  });
+  document.getElementById('accent-grp').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-accent]');
+    if (!btn) return;
+    document.body.setAttribute('data-accent', btn.dataset.accent);
+    document.querySelectorAll('#accent-grp button').forEach(b => b.classList.toggle('active', b === btn));
+  });
+</script>
+
+</body>
+</html>

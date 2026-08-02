@@ -117,7 +117,7 @@
 .chat-agent-provider > span {
   width: 7px;
   height: 7px;
-  border-radius: 2px;
+  border-radius: var(--r-1);
   background: var(--text-2);
 }
 

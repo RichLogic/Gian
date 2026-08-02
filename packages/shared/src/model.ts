@@ -105,6 +105,9 @@ export interface Workspace {
   path: string;
   sort_order: number;
   hidden: 0 | 1;
+  /** Pinned workspaces sort above the rest in the sidebar; `sort_order`
+   *  still applies within each pinned/unpinned group. */
+  pinned: 0 | 1;
   created_at: string;
   updated_at: string;
 }
@@ -143,6 +146,10 @@ export interface Session {
   active_channel: ActiveChannel | null;
   status: SessionStatus;
   archived: 0 | 1;
+  /** When the session was pinned (ISO-8601), or null when not pinned. Pinned
+   *  sessions sort above the rest within their workspace group,
+   *  most-recently-pinned first (pinned_at DESC). */
+  pinned_at: string | null;
   /** Unread marker. Set to 1 when a background turn finishes (done/error) and
    *  cleared to 0 when the user opens/views the session. Also togglable by hand
    *  via the session menu ("Mark as unread"). Drives the sidebar unread dot.

@@ -1,35 +1,35 @@
 /**
- * Unified event taxonomy for Gian.
+ * UI display projections for chat events.
  *
- * All Executors (cc / codex) normalize their raw proxy notifications into one
- * of these discriminated types before the event reaches any subscriber.
- * Normalization happens in `packages/host/src/event/normalize-{cc,codex}.ts`.
- *
- * Keep this file in sync with PRD §一 and `docs/protocol-proxy.md`.
+ * These names describe Gian's current cards and page-level views. They are
+ * deliberately not a cross-CLI event protocol: provider event names and raw
+ * payloads remain the source of truth on {@link ChatEvent}. A provider adapter
+ * only decides whether one native event should create one or more projections.
  */
 
 // ---------------------------------------------------------------------------
 // Event type discriminant
 // ---------------------------------------------------------------------------
 
-export type EventType =
-  | 'assistant_text'
-  | 'reasoning'
-  | 'plan_update'
-  | 'command_execution'
-  | 'file_change'
-  | 'file_read'
-  | 'file_search'
-  | 'web_search'
-  | 'tool_execution'
-  | 'agent_spawn'
-  | 'approval_requested'
-  | 'approval_resolved'
-  | 'auto_classifier_denied'
-  | 'auto_circuit_breaker'
-  | 'turn_started'
-  | 'turn_completed'
-  | 'session_error';
+export type DisplayEventType =
+  | 'message'
+  | 'activity.reasoning'
+  | 'activity.command'
+  | 'activity.file-change'
+  | 'activity.file-read'
+  | 'activity.file-search'
+  | 'activity.web-search'
+  | 'activity.tool'
+  | 'activity.classifier-denied'
+  | 'activity.circuit-breaker'
+  | 'plan'
+  | 'agent'
+  | 'interaction.question'
+  | 'interaction.approval'
+  | 'interaction.resolved'
+  | 'state.turn-started'
+  | 'state.turn-completed'
+  | 'state.error';
 
 // ---------------------------------------------------------------------------
 // Per-type data interfaces
@@ -239,7 +239,7 @@ export interface ApprovalRequestedData {
   scopeOptions: ('once' | 'session')[];
   /**
    * Tool name reported by the proxy (cc-proxy passes this as `toolName`).
-   * Currently used by the host normalizer to identify AskUserQuestion;
+   * Used by the Claude display adapter to identify AskUserQuestion;
    * surfaced for diagnostics on the UI side.
    */
   toolName?: string;
@@ -367,27 +367,28 @@ export interface SessionErrorData {
 }
 
 // ---------------------------------------------------------------------------
-// Lookup map: EventType → data interface
+// Lookup map: display selector → view-data interface
 // ---------------------------------------------------------------------------
 
-export type EventDataByType = {
-  assistant_text: AssistantTextData;
-  reasoning: ReasoningData;
-  plan_update: PlanUpdateData;
-  command_execution: CommandExecutionData;
-  file_change: FileChangeData;
-  file_read: FileReadData;
-  file_search: FileSearchData;
-  web_search: WebSearchData;
-  tool_execution: ToolExecutionData;
-  agent_spawn: AgentSpawnData;
-  approval_requested: ApprovalRequestedData;
-  approval_resolved: ApprovalResolvedData;
-  auto_classifier_denied: AutoClassifierDeniedData;
-  auto_circuit_breaker: AutoCircuitBreakerData;
-  turn_started: TurnStartedData;
-  turn_completed: TurnCompletedData;
-  session_error: SessionErrorData;
+export type DisplayDataByType = {
+  message: AssistantTextData;
+  'activity.reasoning': ReasoningData;
+  plan: PlanUpdateData;
+  'activity.command': CommandExecutionData;
+  'activity.file-change': FileChangeData;
+  'activity.file-read': FileReadData;
+  'activity.file-search': FileSearchData;
+  'activity.web-search': WebSearchData;
+  'activity.tool': ToolExecutionData;
+  agent: AgentSpawnData;
+  'interaction.question': ApprovalRequestedData;
+  'interaction.approval': ApprovalRequestedData;
+  'interaction.resolved': ApprovalResolvedData;
+  'activity.classifier-denied': AutoClassifierDeniedData;
+  'activity.circuit-breaker': AutoCircuitBreakerData;
+  'state.turn-started': TurnStartedData;
+  'state.turn-completed': TurnCompletedData;
+  'state.error': SessionErrorData;
 };
 
 // ---------------------------------------------------------------------------
@@ -395,11 +396,10 @@ export type EventDataByType = {
 // ---------------------------------------------------------------------------
 
 /**
- * The canonical event shape that flows through SessionManager and out to the
- * WebSocket layer. Replaces the untyped EventEnvelope for all internal usage.
- * EventEnvelope in web.ts remains the wire format sent to the browser.
+ * A UI projection produced by one provider adapter. It has no provider event
+ * name of its own; `type` is strictly a display selector.
  */
-export interface UnifiedEvent<T extends EventType = EventType> {
+export interface DisplayEvent<T extends DisplayEventType = DisplayEventType> {
   session_id: string;
   /** 1-based turn counter for the session. */
   turn: number;
@@ -408,5 +408,30 @@ export interface UnifiedEvent<T extends EventType = EventType> {
   /** Unix ms timestamp. */
   ts: number;
   type: T;
-  data: EventDataByType[T];
+  data: DisplayDataByType[T];
+}
+
+export type ChatDisplay<T extends DisplayEventType = DisplayEventType> = {
+  [K in T]: { type: K; data: DisplayDataByType[K] }
+}[T];
+
+/**
+ * Source-of-truth event shape used by the host and browser.
+ *
+ * `event` and `data` are the provider-native method and payload. `display` is
+ * Gian's replaceable answer to “which current UI should render this?”. The
+ * same native event may yield multiple ChatEvents when it affects multiple UI
+ * surfaces (for example a Claude plan-file write is both file activity and a
+ * page-level plan update).
+ */
+export interface ChatEvent<T extends DisplayEventType = DisplayEventType> {
+  session_id: string;
+  turn: number;
+  call_id: string;
+  ts: number;
+  provider: import('./model.js').Executor;
+  event: string;
+  data: Record<string, unknown>;
+  /** Missing means the native event is retained for diagnostics/replay but has no UI. */
+  display?: ChatDisplay<T>;
 }

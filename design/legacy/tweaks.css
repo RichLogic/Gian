@@ -1,0 +1,32 @@
+/* Tweaks floating panel */
+.tweaks {
+  position: fixed;
+  right: 10px; bottom: 10px;
+  z-index: 65;
+  width: 300px;
+  background: var(--surface);
+  border-radius: var(--r-3);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+  font-size: var(--fz-12);
+}
+.tweaks-head {
+  padding: 10px 12px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 16px;
+}
+.tweaks-body {
+  padding: 4px 12px 12px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.tweaks-row {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.tweaks-lbl {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-3);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}

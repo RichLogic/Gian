@@ -15,15 +15,6 @@
    Connection status popover (Topbar)
    ============================================================ */
 @keyframes pop-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-.status-dot {
-  flex-shrink: 0;
-  width: 8px; height: 8px;
-  border-radius: 50%;
-  background: var(--text-3);
-}
-.status-dot[data-state="ok"]  { background: var(--ok); }
-.status-dot[data-state="bad"] { background: var(--danger); }
-.status-dot[data-state="none"]{ background: var(--surface-3); }
 .runner-dot[data-state="warn"] {
   background: var(--warn);
 }
@@ -49,9 +40,6 @@
 /* Message */
 .msg { display: flex; gap: 10px; align-items: flex-start; }
 .msg.user { flex-direction: row-reverse; }
-.msg-av.user { background: var(--accent-soft); color: var(--accent-text); }
-.msg-av.codex { background: var(--codex-soft); color: var(--codex); }
-.msg-av.claude { background: var(--claude-soft); color: var(--claude); }
 
 /* Continuation rows: a message from the same sender as the previous one
  * suppresses the avatar + author/time meta row to stop the transcript from
@@ -60,9 +48,6 @@
 
 .msg-body { flex: 1; min-width: 0; }
 .msg.user .msg-body { display: flex; flex-direction: column; align-items: flex-end; }
-.msg.user .msg-meta { flex-direction: row-reverse; }
-.msg-author.codex { color: var(--codex); }
-.msg-author.claude { color: var(--claude); }
 .msg-time { font-family: var(--font-mono); font-size: 10.5px; }
 
 .msg-text {
@@ -189,21 +174,12 @@
   border-radius: var(--r-2);
   overflow: hidden;
 }
-.tool-head-stat .add { color: var(--ok); }
-.tool-head-stat .del { color: var(--danger); }
 .diff-ln { display: flex; padding: 0 10px; }
 .diff-txt { flex: 1; white-space: pre; }
 .diff-ln.add { background: oklch(from var(--ok) l c h / 0.08); }
 .diff-ln.add .diff-num { color: var(--ok); }
 .diff-ln.del { background: oklch(from var(--danger) l c h / 0.08); }
 .diff-ln.del .diff-num { color: var(--danger); }
-/* Minimal syntax coloring */
-
-/* File change tags */
-.fctag-dot.mod { background: var(--warn); }
-.fctag-dot.add { background: var(--ok); }
-.fctag-dot.del { background: var(--danger); }
-
 /* Activity ticker */
 @keyframes dot { 0%,80%,100% { opacity: 0.3; transform: scale(0.85); } 40% { opacity: 1; transform: scale(1); } }
 
@@ -383,7 +359,7 @@
   font-size: 11.5px;
   background: var(--surface-2);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--r-1);
 }
 .approval-plan-md pre {
   margin: 8px 0;
@@ -422,16 +398,6 @@
 }
 .approval-plan-md th { background: var(--surface-2); font-weight: 600; }
 .approval-plan--resolved { opacity: 0.7; }
-.approval-plan--drawer {
-  /* In the 4th-level drawer the parent already gives us padding + the
-   * preview-body scrolls — drop the inline-card chrome and let the markdown
-   * fill the column. */
-  margin: 0;
-  padding: 0;
-  background: transparent;
-  max-height: none;
-  overflow: visible;
-}
 
 /* ─────────────────────────────────────────────────────────────────────────
    Plan chip — persistent entry point above the composer for the latest
@@ -455,7 +421,7 @@
 }
 .plan-chip:hover {
   background: var(--surface-2);
-  border-color: var(--hairline-2, var(--hairline-1));
+  border-color: var(--hairline-2, var(--hairline));
   color: var(--text);
 }
 .plan-chip:focus-visible {
@@ -472,7 +438,7 @@
 }
 .plan-chip-dot--pending { background: var(--warn, #f5a524); }
 .plan-chip-dot--accepted { background: var(--ok, #22c55e); }
-.plan-chip-dot--declined { background: var(--err, #ef4444); }
+.plan-chip-dot--declined { background: var(--danger); }
 
 .approval-actions {
   display: flex; align-items: center; gap: 4px;
@@ -753,7 +719,7 @@
   height: 7px;
   display: inline-block;
   flex: none;
-  border-radius: 2px;
+  border-radius: var(--r-1);
 }
 .cmp-executor-mark.codex { background: var(--codex); }
 .cmp-executor-mark.claude { background: var(--claude); }
@@ -828,20 +794,10 @@
 .popover.approval-pop .mp-section-head,
 .popover.think-pop .mp-section-head,
 .popover.native-option-pop .mp-section-head { padding-top: 4px; }
-.popover.think-pop .mp-think-grid { padding: 2px; }
 .cmp-think-btn .name,
 .cmp-approval-btn .name,
-.cmp-native-model .name,
-.cmp-native-effort .name,
-.cmp-native-mode .name { color: var(--text); font-weight: 500; }
 .cmp-think-btn,
 .cmp-approval-btn,
-.cmp-native-model,
-.cmp-native-effort,
-.cmp-native-mode {
-  gap: 5px;
-  flex-shrink: 1;
-}
 .mp-row.danger-option .mp-row-title { color: var(--warn); }
 .mp-row.danger-option.active { background: var(--warn-soft); }
 .mp-row.danger-option.active .mp-check,
@@ -854,37 +810,10 @@
   color: var(--accent-text);
   box-shadow: inset 0 0 0 1px var(--accent-ring);
 }
-.mp-think-grid {
-  display: flex; gap: 4px;
-  padding: 0 4px;
-}
-.mp-think {
-  flex: 1 1 0;
-  min-width: 0;
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  padding: 8px 2px;
-  border: 1px solid var(--border);
-  background: transparent;
-  border-radius: var(--r-1);
-  cursor: pointer;
-  font-size: 10.5px; color: var(--text-2);
-  transition: all 60ms;
-}
-.mp-think > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
-.mp-think:hover { border-color: var(--text-3); color: var(--text); }
-.mp-think.active {
-  border-color: var(--accent-text);
-  background: var(--accent-soft);
-  color: var(--accent-text);
-}
 .composer-bar .spacer { flex: 1 1 auto; min-width: 4px; }
 /* was `.composer-bar .spacer { flex: 1; }` */
 
 /* Model picker — button styled like composer-opt, opens custom popover */
-.cmp-model-anchor {
-  position: relative;
-  display: inline-flex;
-}
 .cmp-model-wrap {
   display: inline-flex;
   align-items: center;
@@ -920,7 +849,7 @@
   color: var(--text-2);
   text-transform: lowercase;
 }
-.composer-ex .dot { width: 7px; height: 7px; border-radius: 2px; flex-shrink: 0; }
+.composer-ex .dot { width: 7px; height: 7px; border-radius: var(--r-1); flex-shrink: 0; }
 .composer-ex .dot.codex { background: var(--codex); }
 .composer-ex .dot.claude { background: var(--claude); }
 
@@ -942,12 +871,6 @@
   color: var(--warn);
   background: var(--warn-soft);
   box-shadow: 0 0 0 1px var(--warn);
-}
-.composer.is-bypass-pending {
-  box-shadow: 0 0 0 1px var(--warn), 0 0 0 3px var(--warn-soft);
-}
-.composer.is-bypass-pending:focus-within {
-  box-shadow: 0 0 0 1px var(--warn), 0 0 0 3px var(--warn-soft);
 }
 
 /* Plan-mode exit button (codex only — cc has the ExitPlanMode tool flow). */
@@ -972,53 +895,21 @@
 .composer-act:disabled { opacity: 0.4; cursor: default; }
 .composer-act svg { width: 14px; height: 14px; }
 /* Slash button — framed [/] glyph (VS Code Claude Code style) */
-.composer-act.slash-box .composer-slash-glyph {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-1);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1;
-  color: var(--text-2);
-}
-.composer-act.slash-box:hover:not(:disabled) .composer-slash-glyph {
-  border-color: var(--border);
-  color: var(--text);
-}
-.composer-act.slash-box.active .composer-slash-glyph {
-  border-color: var(--accent-text);
-  color: var(--accent-text);
-}
 .composer-act.primary {
   background: var(--accent);
-  color: var(--accent-on);
+  color: var(--text-inv);
   border-color: var(--accent);
 }
-.composer-act.primary:hover:not(:disabled) { filter: brightness(1.05); background: var(--accent); color: var(--accent-on); }
+.composer-act.primary:hover:not(:disabled) { filter: brightness(1.05); background: var(--accent); color: var(--text-inv); }
 .composer-act.primary:disabled { opacity: 0.5; }
 .composer-act.primary.danger {
   background: var(--danger);
   border-color: var(--danger);
-  color: #fff;
+  color: var(--text-inv);
 }
-.composer-act.primary.danger:hover:not(:disabled) { background: var(--danger); color: #fff; }
-.composer-act.recording {
-  background: var(--danger);
-  color: #fff;
-  border-color: var(--danger);
-}
-.composer-act.transcribing {
-  color: var(--accent-text);
-}
+.composer-act.primary.danger:hover:not(:disabled) { background: var(--danger); color: var(--text-inv); }
 
 /* Context strip below composer */
-.ctx-fill.warn { background: var(--danger); }
-.ctx-label.warn { color: var(--danger); }
 
 /* Active state for slash composer-act */
 .composer-act.active {
@@ -1081,15 +972,6 @@
 .cmp-slash-row[data-source="project"] .cmp-slash-cmd { color: var(--accent-text, var(--accent)); }
 .cmp-slash-row[data-source="user"] .cmp-slash-cmd { color: var(--ok); }
 
-.composer.is-locked {
-  opacity: 0.55;
-  pointer-events: none;
-}
-.composer.is-locked .composer-ta {
-  cursor: not-allowed;
-}
-.composer-hint { display: none; }
-
 .composer-attachments {
   display: flex;
   flex-wrap: wrap;
@@ -1148,147 +1030,9 @@
 }
 .att-remove:hover { color: var(--text); }
 
-/* Main head extras for coding */
-.session-titlebar { display: flex; align-items: center; gap: 10px; }
-.main-head-ws {
-  font-family: var(--font-mono);
-  font-size: var(--fz-11);
-  color: var(--text-3);
-  white-space: nowrap;
-}
-
-/* ============================================================
-   Preview panel — tabs + code
-   ============================================================ */
-.preview-tabs {
-  display: flex; align-items: center; gap: 2px;
-  padding: 6px 6px 0;
-  overflow-x: auto;
-}
-.preview-tab {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 5px 8px 6px;
-  border-radius: var(--r-2) var(--r-2) 0 0;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-2);
-  position: relative;
-  top: 1px;
-}
-.preview-tab:hover { color: var(--text); background: var(--surface-2); }
-.preview-tab.active {
-  color: var(--text);
-  background: var(--surface-2);
-  box-shadow: 0 0 0 1px var(--hairline);
-}
-.preview-tab-dot { width: 6px; height: 6px; border-radius: 50%; }
-.preview-tab-dot.mod { background: var(--warn); }
-.preview-tab-dot.add { background: var(--ok); }
-.preview-tab-close {
-  color: var(--text-3); font-size: 10px;
-  width: 13px; height: 13px;
-  display: inline-flex; align-items: center; justify-content: center;
-  border-radius: var(--r-1);
-}
-.preview-tab-close:hover { background: var(--surface-3); color: var(--text); }
-
-.preview-head {
-  padding: 8px 12px;
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 8px;
-  position: relative;
-}
-.preview-head::after {
-  content: "";
-  position: absolute; left: 16px; right: 16px; bottom: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--hairline), transparent);
-}
-.preview-path {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--text-3);
-}
-.preview-path .hi { color: var(--text); }
-.preview-hunks {
-  display: inline-flex; align-items: center; gap: 2px;
-  font-family: var(--font-mono); font-size: 10px;
-  color: var(--text-3);
-}
-.preview-body {
-  flex: 1; min-height: 0;
-  overflow-y: auto;
-  padding: 8px 0 16px;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  line-height: 1.7;
-}
-
-/* Hunk controls within preview */
-.hunk-bar .spacer { flex: 1; }
-.code-ln.add { background: oklch(from var(--ok) l c h / 0.07); }
-.code-ln.add .code-num { color: var(--ok); }
-.code-ln.del { background: oklch(from var(--danger) l c h / 0.07); }
-.code-ln.del .code-num { color: var(--danger); }
-.code-ln.hunk-head { background: var(--surface-2); color: var(--text-3); font-style: italic; }
-.code-ln.file-head { background: var(--surface-2); color: var(--text-2); font-weight: 600; padding: 4px 12px; grid-template-columns: 1fr; }
-.code-ln.file-head .code-num { display: none; }
-.code-ln.file-head .code-txt { font-family: var(--font-mono); font-size: 11px; }
-
 /* ============================================================
    Files tab — Changed view, diff view, mode toggle
    ============================================================ */
-
-.files-ws-picker {
-  padding: 4px 8px 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.files-fchip {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 6px;
-  border-radius: var(--r-1, 4px);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text);
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  transition: background 80ms;
-}
-.files-fchip:hover { background: var(--surface-2); }
-.files-fchip > .rfc-lbl {
-  color: var(--text-3);
-  font-size: 11px;
-  flex-shrink: 0;
-}
-.files-fchip > select {
-  flex: 1 1 0;
-  min-width: 0;
-  border: 0;
-  background: transparent;
-  font: inherit;
-  color: var(--text);
-  cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
-  padding-right: 2px;
-  text-align: right;
-  text-overflow: ellipsis;
-  overflow: hidden;
-  white-space: nowrap;
-}
-.files-fchip > select:focus { outline: none; }
-.files-fchip > .rfc-car {
-  flex-shrink: 0;
-  color: var(--text-3);
-  font-size: 10px;
-  pointer-events: none;
-}
 
 /* Files — expandable tree (mirrors design/other-views.css .tree)
    Indentation is applied per-row as inline padding-left (depth * 10px + 6px)
@@ -1337,39 +1081,6 @@
   white-space: nowrap;
 }
 
-.files-mode-toggle {
-  display: flex;
-  gap: 18px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--hairline);
-}
-.files-mode-btn {
-  position: relative;
-  padding: 8px 2px 9px;
-  font-family: var(--font-sans);
-  font-size: 12.5px;
-  font-weight: 500;
-  letter-spacing: 0;
-  color: var(--text-3);
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-  transition: color 80ms var(--ease);
-}
-.files-mode-btn:hover { color: var(--text-2); }
-.files-mode-btn.active {
-  color: var(--accent-text);
-  font-weight: 600;
-}
-.files-mode-btn.active::after {
-  content: "";
-  position: absolute;
-  left: 0; right: 0; bottom: -1px;
-  height: 2px;
-  background: var(--accent);
-  border-radius: 2px 2px 0 0;
-}
-
 /* Git-kind letters — plain coloured text (Codex-style), no pill background. */
 .files-badge {
   flex-shrink: 0;
@@ -1416,124 +1127,6 @@
   border-radius: var(--r-1);
   background: var(--surface-2);
   color: var(--text-2);
-}
-
-/* Changed-files summary header — sticky-ish row with totals */
-.files-changed-summary {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px 8px 14px;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 600;
-  text-transform: none;
-  letter-spacing: 0.05em;
-  color: var(--text-3);
-  border-bottom: 1px solid var(--hairline);
-  background: var(--surface-2);
-}
-.files-changed-summary .fcs-count { color: var(--text-2); }
-.files-changed-summary .fcs-add { color: var(--ok); margin-left: auto; }
-.files-changed-summary .fcs-del { color: var(--danger); }
-
-/* Changed-file row — single line, grid columns: badge | path | stats */
-.files-changed-row {
-  display: grid;
-  grid-template-columns: 18px 1fr max-content;
-  align-items: center;
-  column-gap: 8px;
-  padding: 5px 10px 5px 12px;
-  border: 0;
-  background: transparent;
-  border-radius: var(--r-1);
-  cursor: pointer;
-  text-align: left;
-  width: 100%;
-  margin: 0;
-}
-.files-changed-row:hover { background: var(--surface-2); }
-.files-changed-row.active { background: var(--accent-soft); }
-.files-changed-row .fcr-path {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-align: left;
-  min-width: 0;
-}
-.files-changed-row.active .fcr-path { color: var(--accent-text); }
-.files-changed-row .fcr-stat {
-  display: inline-flex;
-  gap: 6px;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-variant-numeric: tabular-nums;
-}
-.files-changed-row .fcr-stat .add { color: var(--ok); }
-.files-changed-row .fcr-stat .del { color: var(--danger); }
-.files-stat .add { color: var(--ok); }
-.files-stat .del { color: var(--danger); }
-
-.files-pane-toggle {
-  display: inline-flex;
-  margin-left: 10px;
-  gap: 0;
-}
-.files-pane-btn {
-  padding: 3px 10px;
-  font-family: var(--font-sans);
-  font-size: 11.5px;
-  font-weight: 500;
-  color: var(--text-3);
-  background: transparent;
-  border: 1px solid var(--hairline);
-  cursor: pointer;
-  transition: all 80ms var(--ease);
-}
-.files-pane-btn:first-child { border-radius: var(--r-1) 0 0 var(--r-1); }
-.files-pane-btn:last-child  { border-radius: 0 var(--r-1) var(--r-1) 0; }
-.files-pane-btn.active {
-  color: var(--accent-text);
-  background: var(--accent-soft);
-  border-color: var(--accent-ring);
-}
-
-.files-hunk-header {
-  padding: 5px 12px;
-  background: var(--surface-2);
-  border-top: 1px solid var(--hairline-2);
-  border-bottom: 1px solid var(--hairline-2);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-3);
-  white-space: pre;
-}
-.files-diff-ln {
-  display: flex;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.6;
-  padding: 0 12px;
-}
-/* Stronger row tint + a 2px colour strip on the left edge (box-shadow, so it
-   costs no layout) — closer to the Codex/GitHub diff read. */
-.files-diff-ln.add { background: oklch(from var(--ok) l c h / 0.13); box-shadow: inset 2px 0 0 var(--ok); }
-.files-diff-ln.del { background: oklch(from var(--danger) l c h / 0.13); box-shadow: inset 2px 0 0 var(--danger); }
-.files-diff-sig {
-  flex-shrink: 0;
-  width: 14px;
-  color: var(--text-3);
-  user-select: none;
-}
-.files-diff-ln.add .files-diff-sig { color: var(--ok); }
-.files-diff-ln.del .files-diff-sig { color: var(--danger); }
-.files-diff-txt {
-  flex: 1;
-  white-space: pre;
-  color: var(--text);
 }
 
 /* 2-column field grid */
@@ -1599,22 +1192,6 @@
   box-shadow: 0 0 0 1px var(--hairline);
 }
 
-/* AUTH section feedback text */
-.settings-auth-hint {
-  font-size: var(--fz-11);
-  color: var(--text-3);
-  font-style: italic;
-}
-.settings-auth-error {
-  font-size: var(--fz-12);
-  color: var(--err, oklch(0.6 0.18 20));
-}
-.settings-auth-ok {
-  font-size: var(--fz-12);
-  color: var(--ok);
-  animation: toast-in 200ms var(--ease);
-}
-
 /* ============================================================
    Login screen
    ============================================================ */
@@ -1638,6 +1215,23 @@
   gap: 20px;
 }
 
+.login-card-github {
+  width: 380px;
+  align-items: stretch;
+}
+
+.login-brand-mark {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto -8px;
+  border-radius: var(--r-3);
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font: italic 700 var(--fz-28)/1 var(--font-serif);
+}
+
 .login-brand {
   font-family: var(--font-serif);
   font-style: italic;
@@ -1646,6 +1240,74 @@
   color: var(--text);
   margin: 0;
   text-align: center;
+}
+
+.login-intro,
+.login-privacy {
+  margin: 0;
+  text-align: center;
+  color: var(--text-3);
+  font: var(--fz-12)/1.5 var(--font-sans);
+}
+
+.login-github-submit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border: 0;
+}
+
+.login-github-mark {
+  width: 18px;
+  height: 18px;
+}
+
+.login-device {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.login-device p {
+  margin: 0;
+  text-align: center;
+  color: var(--text-2);
+  font: var(--fz-13)/1.5 var(--font-sans);
+}
+
+.login-device-code {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  padding: 10px 16px;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  font: 650 var(--fz-20)/1 var(--font-mono);
+  letter-spacing: 0.1em;
+}
+
+.login-device-code:hover {
+  border-color: var(--accent);
+}
+
+.login-device-copy {
+  color: var(--text-3);
+  font: var(--fz-12)/1.3 var(--font-sans);
+}
+
+.login-device a {
+  color: var(--accent-text);
+  font: 500 var(--fz-12)/1.3 var(--font-sans);
+}
+
+.login-cancel {
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  font: var(--fz-12)/1.3 var(--font-sans);
 }
 
 .login-form {
@@ -1734,6 +1396,20 @@
 }
 .spaces-list-head-sub-val {
   color: var(--text-2);
+}
+
+/* Active / Archived list tabs (segmented control, full width of the rail). */
+.spaces-list-tabs { width: 100%; }
+.spaces-list-tabs .segm-item {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+.spaces-list-tabs .count {
+  font: 500 10.5px/1 var(--font-mono);
+  color: var(--text-3);
 }
 
 .spaces-list-body {
@@ -1976,540 +1652,6 @@
   gap: 12px;
 }
 
-
-/* ============================================================
-   Bots view
-   ============================================================ */
-
-/* — Platform color tokens (reused across list, detail, avatars) — */
-.bot-platform-chip.discord { background: oklch(0.62 0.17 263 / 0.15); color: oklch(0.62 0.17 263); }
-.bot-platform-chip.slack   { background: oklch(0.55 0.14 155 / 0.15); color: oklch(0.55 0.14 155); }
-
-/* — Bots rail (ports design/bots.html .bots-rail / .rail-head / .bot-row) — */
-.bots-rail { padding: 0; }
-.bots-rail .rail-head {
-  display: flex; flex-direction: row; align-items: center; justify-content: space-between;
-  padding: 12px 14px 8px;
-  flex-shrink: 0;
-  gap: 8px;
-}
-.bots-rail .rail-head-title {
-  font-family: var(--font-mono);
-  font-size: 10.5px; font-weight: 600;
-  color: var(--text-3);
-  letter-spacing: 0.08em;
-  text-transform: none;
-}
-.bots-rail .rail-head-title b { color: var(--text-2); font-weight: 700; }
-.btn-mini {
-  background: none;
-  border: 1px solid var(--surface-3);
-  border-radius: var(--r-1);
-  color: var(--text-2);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  padding: 2px 8px;
-  text-transform: none;
-  letter-spacing: 0.06em;
-  cursor: pointer;
-  transition: background 80ms var(--ease), border-color 80ms var(--ease), color 80ms var(--ease);
-}
-.btn-mini:hover { background: var(--surface-2); border-color: var(--text-3); color: var(--text); }
-
-.bots-rail .rail-body {
-  flex: 1; overflow-y: auto;
-  padding: 4px 6px 10px;
-  display: flex; flex-direction: column; gap: 2px;
-}
-.bot-row {
-  width: 100%;
-  display: grid;
-  grid-template-columns: 28px 1fr auto;
-  gap: 10px;
-  align-items: center;
-  padding: 10px 10px;
-  border: 0;
-  background: transparent;
-  border-radius: var(--r-2);
-  cursor: pointer;
-  text-align: left;
-  transition: background 80ms var(--ease);
-  position: relative;
-}
-.bot-row:hover { background: var(--surface-2); }
-.bot-row.active { background: var(--accent-soft); }
-.bot-row.active::before {
-  content: ""; position: absolute;
-  left: 2px; top: 14px; bottom: 14px;
-  width: 2px;
-  border-radius: 1px;
-  background: var(--accent);
-}
-.bot-platform-mark {
-  width: 28px; height: 28px;
-  border-radius: var(--r-2);
-  display: inline-flex; align-items: center; justify-content: center;
-  font-family: var(--font-mono);
-  font-size: 12px; font-weight: 700;
-  letter-spacing: -0.02em;
-}
-.bot-platform-mark.discord { background: var(--discord-soft); color: var(--discord); }
-.bot-platform-mark.slack   { background: var(--slack-soft);   color: var(--slack); }
-.bot-row-info {
-  min-width: 0;
-  display: flex; flex-direction: column; gap: 2px;
-}
-.bot-row-label {
-  font-size: var(--fz-13); font-weight: 500;
-  color: var(--text);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.bot-row.active .bot-row-label { color: var(--accent-text); }
-.bot-row-sub {
-  display: flex; align-items: center; gap: 6px;
-  font-family: var(--font-mono);
-  font-size: 10.5px; color: var(--text-3);
-  white-space: nowrap; overflow: hidden;
-}
-.bot-row-sub .sep { opacity: 0.4; }
-.bot-row-sub .ws { color: var(--text-2); }
-.bot-row-sub .ws.unbound { color: var(--text-3); font-style: italic; }
-.bot-row-meta {
-  display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
-  flex-shrink: 0;
-}
-.status-dot {
-  width: 8px; height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.status-dot.connected   { background: var(--ok);     box-shadow: 0 0 0 3px var(--ok-soft); }
-.status-dot.disabled    { background: var(--text-3); opacity: 0.45; }
-.status-dot.error       { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
-.status-dot.connecting  {
-  background: var(--warn);
-  box-shadow: 0 0 0 3px var(--warn-soft);
-  animation: bot-status-pulse 1.4s ease-in-out infinite;
-}
-@keyframes bot-status-pulse {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(0.7); }
-}
-
-.bot-list-empty {
-  font-size: var(--fz-12);
-  color: var(--text-3);
-  padding: 16px 12px;
-  text-align: center;
-  margin: 0;
-}
-
-/* — Detail header — */
-.bot-detail { overflow: hidden; }
-/* Status text+dot used inside cfg-stats and activity log. Color-only —
-   the dot inherits currentColor. */
-.bot-detail-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-weight: 600;
-}
-.bot-detail-status-dot {
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
-.bot-detail-status-connected  { color: var(--ok); }
-.bot-detail-status-connecting { color: var(--warn); }
-.bot-detail-status-error      { color: var(--danger); }
-.bot-detail-status-disabled   { color: var(--text-3); }
-
-/* ============================================================
-   Bot Detail (dashboard layout — single page, no tabs)
-   Ports design/bots.html `.detail-head`, `.detail-bot-*`, `.platform-chip`,
-   `.enable-switch`, `.section-grid`, `.mode-card`, `.danger-zone`.
-   Existing `.bot-detail-status*` styles above are reused.
-   ============================================================ */
-.bot-detail .detail-head {
-  flex-shrink: 0;
-  padding: 14px 20px 12px;
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 16px;
-  border-bottom: 1px solid var(--hairline-2);
-}
-.bot-detail .detail-head-l {
-  display: flex; align-items: center; gap: 12px;
-  min-width: 0;
-}
-.bot-detail .detail-bot-mark {
-  width: 36px; height: 36px;
-  border-radius: var(--r-2);
-  display: inline-flex; align-items: center; justify-content: center;
-  font-family: var(--font-mono);
-  font-size: 14px; font-weight: 700;
-  flex-shrink: 0;
-}
-.bot-detail .detail-bot-mark.discord { background: var(--discord-soft); color: var(--discord); }
-.bot-detail .detail-bot-mark.slack   { background: var(--slack-soft);   color: var(--slack); }
-.bot-detail .detail-bot-info {
-  display: flex; flex-direction: column; gap: 3px;
-  min-width: 0;
-}
-.bot-detail .detail-bot-name {
-  margin: 0;
-  font-family: var(--font-serif);
-  font-size: 22px;
-  font-style: italic;
-  color: var(--text);
-  letter-spacing: -0.01em;
-  line-height: 1;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.bot-detail .detail-bot-sub {
-  display: flex; align-items: center; gap: 8px;
-  font-family: var(--font-mono);
-  font-size: 11px; color: var(--text-3);
-  flex-wrap: wrap;
-}
-.bot-detail .detail-bot-sub b { color: var(--text-2); font-weight: 600; }
-.bot-detail .detail-bot-sub-sep { opacity: 0.5; }
-.bot-detail .detail-bot-sub-dim { color: var(--text-3); font-style: italic; }
-.bot-detail .platform-chip {
-  display: inline-flex; align-items: center;
-  padding: 1px 8px;
-  border-radius: var(--r-1);
-  font-size: 10px;
-  text-transform: none; letter-spacing: 0.06em;
-  font-weight: 700;
-}
-.bot-detail .platform-chip.discord { background: var(--discord-soft); color: var(--discord); }
-.bot-detail .platform-chip.slack   { background: var(--slack-soft);   color: var(--slack); }
-
-.bot-detail .detail-head-r {
-  display: flex; align-items: center; gap: 10px;
-  flex-shrink: 0;
-}
-
-/* Header enable toggle — pill shape with label + knob inside. Plum on,
-   neutral off. Color is intentionally NOT green to avoid confusion with
-   connection status (which uses --ok). */
-.enable-switch-knob.on { background: var(--accent); }
-.enable-switch-knob.on::after { transform: translateX(12px); }
-
-/* Detail body — vertical sections with a 2-col grid in the middle. The
-   cfg-card / mode-behavior / danger-zone / activity-log children all have
-   `overflow: hidden` (for radius clipping), which makes `min-height: auto`
-   resolve to 0 and lets the flex column collapse them under pressure. We
-   counter that with `flex-shrink: 0` so each section keeps its content
-   height; the scroll lives at .detail-body. */
-.bot-detail .detail-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 18px 20px 20px;
-  display: flex; flex-direction: column; gap: 16px;
-  min-height: 0;
-}
-.bot-detail .detail-body > * { flex-shrink: 0; }
-.bot-detail-stats {
-  margin: 0 0 4px;
-}
-.bot-detail-stats .cfg-stat-value.bot-detail-status {
-  font-family: var(--font-sans);
-  font-size: 17px; font-weight: 500;
-}
-.bot-detail-status-err {
-  display: inline-block;
-  max-width: 240px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  vertical-align: bottom;
-  color: var(--danger);
-}
-.bot-detail-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-@media (max-width: 1100px) {
-  .bot-detail-grid { grid-template-columns: 1fr; }
-}
-.bot-detail .cfg-card-head {
-  padding: 12px 16px 10px;
-  border-bottom: 1px solid var(--hairline);
-  text-transform: none;
-  letter-spacing: 0;
-  display: flex; align-items: baseline; justify-content: space-between;
-  gap: 12px;
-}
-.bot-detail .cfg-card-title {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: none;
-  letter-spacing: 0.06em;
-  color: var(--text-3);
-}
-.bot-detail .cfg-card-body {
-  padding: 14px 16px 16px;
-  display: flex; flex-direction: column; gap: 12px;
-}
-
-/* Mode behavior — interactive 2-col cards; click either to switch.
-   Active side gets accent-soft fill + accent-text headline. */
-.mode-card {
-  padding: 12px 14px;
-  background: var(--surface-2);
-  border: 1px solid var(--hairline-2);
-  border-radius: var(--r-2);
-  text-align: left;
-  cursor: pointer;
-  transition: background 100ms var(--ease), border-color 100ms var(--ease);
-}
-.mode-card:hover { border-color: var(--text-3); }
-.mode-card.active {
-  background: var(--accent-soft);
-  border-color: oklch(from var(--accent) l c h / 0.3);
-}
-.mode-card.active .mode-card-head { color: var(--accent-text); }
-
-/* Activity log */
-
-/* Danger zone — irreversible removal only. */
-.bot-detail .danger-zone {
-  margin-top: 4px;
-  padding: 14px 16px;
-  border: 1px dashed oklch(from var(--danger) l c h / 0.35);
-  border-radius: var(--r-3);
-  background: oklch(from var(--danger) l c h / 0.03);
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 16px;
-}
-.bot-detail .danger-zone-info {
-  display: flex; flex-direction: column; gap: 4px;
-  min-width: 0;
-  flex: 1;
-}
-.bot-detail .danger-zone-title {
-  font-family: var(--font-mono);
-  font-size: 10.5px; font-weight: 700;
-  color: var(--danger);
-  text-transform: none; letter-spacing: 0.06em;
-}
-.bot-detail .danger-zone-desc {
-  font-size: 11.5px;
-  color: var(--text-2);
-  line-height: 1.5;
-}
-.bot-detail .danger-zone-actions {
-  display: flex; align-items: center; gap: 8px;
-  flex-shrink: 0;
-}
-
-/* — Tab body / frame — */
-.bot-detail-body {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-}
-
-/* — Field shims (for tabs that still use the old class names) — */
-.bot-field {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.bot-field .input,
-.bot-field .select { width: 100%; }
-.bot-field-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--fz-11);
-  font-weight: 600;
-  text-transform: none;
-  letter-spacing: 0.06em;
-  color: var(--text-3);
-  font-family: var(--font-mono);
-}
-.bot-field-saved {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 1px 6px 1px 4px;
-  border-radius: var(--r-pill);
-  background: var(--ok-soft);
-  color: var(--ok);
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: none;
-}
-.bot-field-saved svg { width: 11px; height: 11px; }
-.bot-field-hint {
-  font-size: var(--fz-11);
-  color: var(--text-3);
-  margin: 0;
-}
-
-/* — Logs tab — */
-
-.bot-token-row {
-  display: flex;
-  gap: 4px;
-}
-.bot-token-input { flex: 1; }
-.bot-token-show { flex-shrink: 0; }
-
-.bot-error {
-  font-size: var(--fz-11);
-  color: var(--danger);
-  font-family: var(--font-mono);
-  margin: 0;
-}
-
-/* ============================================================
-   Bots — New Bot form (renders in main pane, not sidebar)
-   ============================================================ */
-
-.bot-new-main {
-  overflow-y: auto;
-}
-.bot-new-frame {
-  max-width: 720px;
-  margin: 0 auto;
-  padding: 32px 28px 40px;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-.bot-new-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding-bottom: 8px;
-}
-.bot-new-head-l {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.bot-new-title {
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: -0.012em;
-  color: var(--text);
-  margin: 0;
-}
-.bot-new-sub {
-  font-size: var(--fz-13);
-  color: var(--text-3);
-  margin: 0;
-}
-.bot-new-platform-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 4px 0 6px;
-}
-.bot-new-platform-lbl {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 600;
-  text-transform: none;
-  letter-spacing: 0.08em;
-  color: var(--text-3);
-}
-.bot-new-card {
-  background: var(--surface);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-3);
-  overflow: hidden;
-}
-.bot-new-card .fcard-head {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 14px 18px 6px;
-  border-bottom: 1px solid var(--hairline);
-  text-transform: none;
-  letter-spacing: 0;
-}
-.bot-new-card-num {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--accent-text);
-  background: var(--accent-soft);
-  padding: 2px 7px;
-  border-radius: var(--r-1);
-  letter-spacing: 0.04em;
-}
-.bot-new-card-title {
-  font-size: var(--fz-14);
-  font-weight: 600;
-  color: var(--text);
-  letter-spacing: -0.005em;
-}
-.bot-new-card-hint {
-  flex: 1;
-  text-align: right;
-  font-size: var(--fz-11);
-  color: var(--text-3);
-  font-family: var(--font-mono);
-  text-transform: none;
-  letter-spacing: 0;
-}
-.bot-new-card .fcard-body {
-  padding: 16px 18px 18px;
-  gap: 14px;
-}
-.bot-mono-input {
-  font-family: var(--font-mono);
-  font-size: var(--fz-12);
-  letter-spacing: 0.005em;
-}
-.bot-new-mode-hint {
-  margin-top: 2px;
-  text-transform: none;
-  letter-spacing: 0;
-}
-.bot-new-error {
-  margin: 0;
-  padding: 10px 14px;
-  background: oklch(from var(--danger) l c h / 0.08);
-  border-left: 2px solid var(--danger);
-  border-radius: 0 var(--r-2) var(--r-2) 0;
-}
-.bot-new-foot {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 8px;
-  padding-top: 4px;
-  margin-top: 4px;
-}
-
-/* TokenField inside the new form: the show/hide button looks like a chip */
-.bot-new-card .bot-token-row {
-  position: relative;
-}
-.bot-new-card .bot-token-input {
-  font-family: var(--font-mono);
-  font-size: var(--fz-12);
-  padding-right: 56px;
-}
-.bot-new-card .bot-token-show {
-  position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
-  padding: 3px 8px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  text-transform: none;
-}
-
 /* ============================================================
    Command Palette
    ============================================================ */
@@ -2650,140 +1792,9 @@
   font-size: 10px;
 }
 
-.bot-delete-confirm-text {
-  font-size: var(--fz-12);
-  color: var(--danger);
-  font-family: var(--font-mono);
-}
-
-/* ============================================================
-   Bots — IM message preview (Discord & Slack mock threads)
-   ============================================================ */
-
-/* ── Discord ──────────────────────────────────────────────── */
-.bp-d-btn.primary { background: #5865f2; }
-.bp-d-btn.primary:hover { background: #4752c4; }
-.bp-d-btn.danger { background: transparent; color: #f23f43; box-shadow: inset 0 0 0 1px #f23f43; }
-.bp-d-btn.danger:hover { background: #f23f43; color: #fff; }
-
-/* ── Slack ────────────────────────────────────────────────── */
-.bp-s-btn.primary {
-  background: #007a5a;
-  color: #fff;
-  border-color: transparent;
-}
-.bp-s-btn.primary:hover { background: #148567; }
-.bp-s-btn.danger { color: #e01e5a; border-color: #4d4f55; }
-.bp-s-btn.danger:hover { background: rgba(224, 30, 90, 0.08); border-color: #e01e5a; }
-
-/* Logs tab */
-
-/* ============================================================
-   Files view — syntax highlighting (M6)
-   ============================================================ */
-
-.hl-wrap {
-  flex: 1;
-  overflow: auto;
-  background: var(--surface);
-}
-.hl-table {
-  border-collapse: collapse;
-  width: 100%;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--text);
-}
-.hl-lnum {
-  user-select: none;
-  padding: 0 12px 0 20px;
-  text-align: right;
-  font-size: 11px;
-  color: var(--text-3);
-  white-space: nowrap;
-  min-width: 40px;
-  border-right: 1px solid var(--hairline-2);
-}
-.hl-lnum::after { content: attr(data-ln); }
-.hl-code {
-  padding: 0 16px;
-  white-space: pre;
-  word-break: normal;
-}
-
-/* Token colours — designed for both light and dark themes via CSS vars */
-.hl-keyword { color: var(--hl-keyword, #c678dd); }
-.hl-string  { color: var(--hl-string,  #98c379); }
-.hl-comment { color: var(--hl-comment, #676f7d); font-style: italic; }
-.hl-number  { color: var(--hl-number,  #d19a66); }
-.hl-builtin { color: var(--hl-builtin, #56b6c2); }
-
-/* ============================================================
-   Files view — meta strip + badges (uncommitted / edit count / lang)
-   ============================================================ */
-
-.file-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 14px;
-  border-bottom: 1px solid var(--hairline);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--text-3);
-}
-.file-meta-sep { opacity: 0.4; }
-.file-meta-uncommitted { color: var(--warn, #e5a200); }
-
-.files-uncommitted-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  border-radius: var(--r-pill);
-  font-size: 10px;
-  font-weight: 600;
-  font-family: var(--font-mono);
-  text-transform: none;
-  letter-spacing: 0.04em;
-  background: oklch(from var(--warn, #e5a200) l c h / 0.15);
-  color: var(--warn, #e5a200);
-  border: 1px solid oklch(from var(--warn, #e5a200) l c h / 0.35);
-}
-.files-edit-count {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--text-3);
-}
-.files-lang-badge {
-  display: inline-block;
-  padding: 1px 5px;
-  border-radius: var(--r-1);
-  background: var(--surface-2);
-  color: var(--text-3);
-  font-size: 10px;
-  font-family: var(--font-mono);
-  margin-right: 6px;
-  text-transform: lowercase;
-}
-
 /* ============================================================
    Worktree session bits — branch badge, terminal banner, sidebar menu
    ============================================================ */
-.wt-badge.merged {
-  color: var(--ok);
-  background: oklch(from var(--ok) l c h / 0.10);
-  border-color: oklch(from var(--ok) l c h / 0.25);
-}
-.wt-badge.discarded {
-  color: var(--text-3);
-  background: var(--surface-2);
-}
-.wt-badge.active {
-  color: var(--accent-text);
-  background: var(--accent-soft);
-  border-color: oklch(from var(--accent) l c h / 0.25);
-}
 
 .session-banner {
   display: flex; align-items: center; gap: 8px;
@@ -2795,40 +1806,14 @@
 .session-banner.merged { color: var(--text-2); }
 .session-banner.discarded { color: var(--text-3); }
 .session-banner-spacer { flex: 1; }
-.beta-question-dock .approval {
-  margin: 0;
-}
 
 /* Sidebar session row + context menu */
-.session-row-wrap {
-  position: relative;
-  display: flex; align-items: center;
-}
-.session-row-wrap > .session-row { flex: 1; min-width: 0; }
 /* Sessions list (Codex-style, 2026-07-01): a uniform left indent so rows read as
    children of their workspace-group header (whose title sits at ~24px past the
    caret), and a plain — not bold — title. */
 .rail-item.session-row { padding-left: 24px; }
 .session-row .ri-title { font-weight: 400; }
-.session-row-menu {
-  flex: 0 0 auto;
-  width: 22px; height: 22px;
-  display: flex; align-items: center; justify-content: center;
-  border: none;
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-  border-radius: var(--r-2);
-  opacity: 0;
-  transition: opacity 100ms var(--ease);
-}
-.session-row-wrap:hover .session-row-menu,
-.session-row-wrap.active .session-row-menu { opacity: 1; }
-.session-row-menu:hover { background: var(--surface-2); color: var(--text); }
 
-.session-menu-backdrop {
-  position: fixed; inset: 0; z-index: 60;
-}
 .session-menu {
   position: absolute;
   top: 100%; right: 4px;
@@ -2842,35 +1827,6 @@
   display: flex;
   flex-direction: column;
 }
-.session-menu-item {
-  border: none;
-  background: transparent;
-  text-align: left;
-  padding: 6px 10px;
-  font-size: var(--fz-12);
-  color: var(--text);
-  border-radius: var(--r-2);
-  cursor: pointer;
-}
-.session-menu-item:hover { background: var(--surface-2); }
-.session-menu-item.danger { color: var(--danger); }
-.session-menu-rule {
-  height: 1px;
-  background: var(--hairline);
-  margin: 4px 0;
-}
-
-/* Per-row ⋯ kebab — hidden until row hover/active to avoid visual noise. */
-.session-row-wrap .session-row-kebab {
-  visibility: hidden;
-  margin-left: 4px;
-  flex: 0 0 auto;
-  align-self: center;
-}
-.session-row-wrap:hover .session-row-kebab,
-.session-row-wrap.active .session-row-kebab { visibility: visible; }
-.session-row-kebab .ws-kebab-btn { width: 22px; height: 22px; font-size: 14px; }
-.session-row-kebab .ws-kebab-pop { right: 0; top: calc(100% + 4px); }
 
 /* ============================================================
    Composer — pending attachment chips
@@ -2888,23 +1844,11 @@
   letter-spacing: 0.06em;
   flex: 0 0 auto;
 }
-.rail-fchip .rfc-car {
-  flex: 0 0 auto;
-  color: var(--text-3);
-  font-size: 10px;
-}
 .rail-fchip-opt.active { background: var(--accent-soft); color: var(--accent-text); }
 
 /* ============================================================
    Spaces — Workspace tabs + kebab menu (Native Sessions feature)
    ============================================================ */
-.ws-tab.active { color: var(--accent-text); font-weight: 500; }
-.ws-tab.active::after {
-  content: "";
-  position: absolute; left: 12px; right: 12px; bottom: -1px;
-  height: 2px; background: var(--accent); border-radius: 2px 2px 0 0;
-}
-.ws-tab.active .ws-tab-count { background: var(--accent-soft); color: var(--accent-text); }
 
 .ws-kebab-anchor { position: relative; }
 .ws-kebab-btn {
@@ -2945,53 +1889,10 @@
 /* ============================================================
    Config tab — stats strip + repository / workspace trees cards
    ============================================================ */
-.cfg-card.full { grid-column: 1 / -1; }
-.cfg-card-body.compact { padding: 6px 0; gap: 0; }
-.cfg-kv-val.mono {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-2);
-  word-break: break-all;
-}
-.cfg-wt-claude .lines { color: var(--text-3); }
-.cfg-wt-claude:hover:not(:disabled) .lines { color: var(--accent-text); opacity: 0.7; }
-.cfg-wt-claude.empty {
-  border-style: dashed;
-  color: var(--text-3);
-}
-.cfg-wt-claude.empty:hover:not(:disabled) {
-  border-style: dashed;
-  color: var(--accent-text);
-}
-.cfg-wt-state.dirty {
-  background: var(--warn-soft, var(--surface-2));
-  color: var(--warn, var(--text-2));
-}
-.cfg-wt-state.clean {
-  background: var(--ok-soft, var(--surface-2));
-  color: var(--ok, var(--text-3));
-}
-.cfg-wt-session.muted {
-  color: var(--text-3);
-  background: transparent;
-  border: 1px dashed var(--hairline);
-  padding: 0px 7px;
-  cursor: default;
-}
-.cfg-wt-session.muted:hover { background: var(--surface-2); color: var(--text-2); }
 
 /* ============================================================
    Native Sessions pane — list + filter + adopt + delete
    ============================================================ */
-.ns-chip.active {
-  background: var(--surface);
-  color: var(--text);
-  border-color: var(--hairline);
-  box-shadow: var(--shadow-1);
-}
-.ns-row.adopted {
-  background: linear-gradient(90deg, var(--ok-soft) 0%, transparent 30%);
-}
 .ns-exec-dot {
   width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
 }
@@ -3001,7 +1902,6 @@
   background: var(--kimi);
   box-shadow: 0 0 0 1px oklch(0.65 0 0 / 0.55), 0 0 0 3px var(--kimi-soft);
 }
-.ns-exec-name { color: var(--text); font-weight: 500; }
 
 /* ============================================================
    Adopt dialog
@@ -3081,41 +1981,6 @@
    Appears when the current turn's user message is scrolled
    fully out of view above the viewport.
    ============================================================ */
-.transcript-pin {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 16px;
-  margin: -14px -20px 10px;
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--hairline);
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--text-2);
-  animation: pin-slide-in 100ms ease-out;
-  user-select: none;
-}
-.transcript-pin:hover { background: var(--surface-3); }
-.transcript-pin:focus-visible {
-  outline: 2px solid var(--text-3);
-  outline-offset: -2px;
-}
-.transcript-pin .pin-icon {
-  width: 14px;
-  height: 14px;
-  color: var(--text-3);
-  flex-shrink: 0;
-}
-.transcript-pin .pin-text {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-style: italic;
-  min-width: 0;
-}
 @keyframes pin-slide-in {
   from { transform: translateY(-100%); opacity: 0; }
   to   { transform: translateY(0);     opacity: 1; }
@@ -3124,11 +1989,3 @@
 /* Inspector status / empty states (live in the existing .preview island
  * defined in shell.css; reuses the design's `.code-ln/.code-num/.code-txt`
  * grid for content rendering). */
-.preview-status {
-  padding: 16px;
-  color: var(--text-3);
-  font-size: 12px;
-  font-family: var(--font-sans);
-}
-.preview-status.error { color: var(--danger); }
-.code-ln.active { background: var(--accent-soft); }

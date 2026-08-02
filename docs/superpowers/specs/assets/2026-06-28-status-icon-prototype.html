@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Gian · status icons v8 — bold gradient disc + knockout glyph</title>
+<style>
+:root{ --font-sans:"Instrument Sans",ui-sans-serif,system-ui,sans-serif; --r-4:14px;--r-pill:999px;
+  --maxpx:18px; --minscale:0.778; --glow:4px; --breathe:4s; --flow:4s; }
+body                      { --accent-h:230; --accent-c:.13; }
+body[data-accent="rose"]  { --accent-h:5;   --accent-c:.15; }
+body[data-accent="ember"] { --accent-h:35;  --accent-c:.14; }
+body[data-accent="citron"]{ --accent-h:95;  --accent-c:.13; }
+body[data-accent="moss"]  { --accent-h:150; --accent-c:.11; }
+body[data-accent="teal"]  { --accent-h:195; --accent-c:.11; }
+body[data-accent="azure"] { --accent-h:230; --accent-c:.13; }
+body[data-accent="ink"]   { --accent-h:270; --accent-c:.13; }
+body[data-accent="plum"]  { --accent-h:320; --accent-c:.14; }
+body[data-theme="light"]{--bg:oklch(.955 .004 280);--surface:oklch(1 0 0);--surface-2:oklch(.970 .003 280);--text:oklch(.22 .02 280);--text-2:oklch(.45 .015 280);--text-3:oklch(.62 .012 280);--hairline:oklch(.22 .02 280/.08);--accent:oklch(.55 var(--accent-c) var(--accent-h));--accent-soft:oklch(.55 var(--accent-c) var(--accent-h)/.12);--accent-ring:oklch(.55 var(--accent-c) var(--accent-h)/.30);--gL1:.66;--gL2:.74;--gL3:.58;color-scheme:light;}
+body[data-theme="warm"]{--bg:oklch(.955 .020 80);--surface:oklch(.990 .012 82);--surface-2:oklch(.965 .018 80);--text:oklch(.30 .04 55);--text-2:oklch(.48 .035 60);--text-3:oklch(.62 .025 65);--hairline:oklch(.30 .04 55/.10);--accent:oklch(.52 var(--accent-c) var(--accent-h));--accent-soft:oklch(.52 var(--accent-c) var(--accent-h)/.14);--accent-ring:oklch(.52 var(--accent-c) var(--accent-h)/.32);--gL1:.64;--gL2:.73;--gL3:.56;color-scheme:light;}
+body[data-theme="dark"]{--bg:oklch(.165 .012 250);--surface:oklch(.210 .014 250);--surface-2:oklch(.240 .016 250);--text:oklch(.93 .01 250);--text-2:oklch(.74 .012 250);--text-3:oklch(.58 .012 250);--hairline:oklch(.93 .01 250/.08);--accent:oklch(.72 var(--accent-c) var(--accent-h));--accent-soft:oklch(.72 var(--accent-c) var(--accent-h)/.18);--accent-ring:oklch(.72 var(--accent-c) var(--accent-h)/.40);--gL1:.70;--gL2:.80;--gL3:.62;color-scheme:dark;}
+body{--g1:oklch(var(--gL1) calc(var(--accent-c) + .04) calc(var(--accent-h) - 46));--g2:oklch(var(--gL2) calc(var(--accent-c) + .06) calc(var(--accent-h) + 8));--g3:oklch(var(--gL3) calc(var(--accent-c) + .04) calc(var(--accent-h) + 60));--gGlow:oklch(var(--gL2) var(--accent-c) calc(var(--accent-h) + 8) / .6);}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);padding:24px 30px 60px;-webkit-font-smoothing:antialiased}
+h1{font-size:15px;font-weight:600;margin-bottom:2px}.sub{color:var(--text-3);font-size:12px;margin-bottom:18px}
+.controls{display:flex;gap:18px;align-items:center;flex-wrap:wrap;margin-bottom:18px;padding:12px 14px;background:var(--surface);border-radius:var(--r-4);box-shadow:0 0 0 1px var(--hairline)}
+.controls .grp{display:flex;gap:6px;align-items:center}.controls label{font-size:11px;color:var(--text-3);margin-right:4px;text-transform:uppercase;letter-spacing:.5px}
+.sw{width:22px;height:22px;border-radius:50%;cursor:pointer;border:2px solid transparent;background:oklch(.6 var(--swc) var(--swh))}.sw.on{border-color:var(--text-2)}
+.pill{font-size:12px;padding:5px 11px;border-radius:var(--r-pill);cursor:pointer;background:var(--surface-2);color:var(--text-2);box-shadow:0 0 0 1px var(--hairline)}.pill.on{background:var(--accent-soft);color:var(--accent);box-shadow:0 0 0 1px var(--accent-ring)}
+.panel{display:grid;grid-template-columns:repeat(2,minmax(280px,1fr));gap:14px 28px;background:var(--surface);border-radius:var(--r-4);box-shadow:0 0 0 1px var(--hairline);padding:18px 22px;margin-bottom:8px;max-width:760px}
+.ctl{display:flex;align-items:center;gap:12px}.ctl .nm{font-size:12px;color:var(--text-2);width:96px;flex:0 0 auto}.ctl input[type=range]{flex:1;accent-color:var(--accent)}.ctl .val{font-size:12px;font-variant-numeric:tabular-nums;color:var(--accent);width:54px;text-align:right;flex:0 0 auto}
+.reset{font-size:11px;color:var(--text-3);cursor:pointer;text-decoration:underline;margin:6px 0 22px;display:inline-block}
+
+/* ICON — bold gradient disc, glyph knocked OUT (mask subtract). Flow = bg-position. */
+.ico{position:relative;display:inline-flex;flex:0 0 auto;width:var(--maxpx);height:var(--maxpx)}
+.ico .gly{position:absolute;inset:0;mask-repeat:no-repeat,no-repeat;mask-position:center,center;mask-size:contain,contain;mask-composite:subtract;-webkit-mask-repeat:no-repeat,no-repeat;-webkit-mask-position:center,center;-webkit-mask-size:contain,contain}
+.ico.unread .gly{background:linear-gradient(115deg,var(--g1),var(--g2) 42%,var(--g3) 78%,var(--g1));background-size:230% 230%;animation:flow var(--flow) ease-in-out infinite;filter:drop-shadow(0 0 var(--glow) var(--gGlow))}
+.ico.read .gly{background:var(--accent)}
+.ico.unread{animation:breathe var(--breathe) ease-in-out infinite}
+.ico.ring{width:16px;height:16px;animation:none}  /* circle fixed 16px, no breathe — spin only */
+@keyframes flow{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+@keyframes breathe{0%,100%{transform:scale(var(--minscale))}50%{transform:scale(1)}}
+.ico.ring .ringfill{position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,var(--g1),var(--g2),var(--g3),var(--g2),var(--g1));-webkit-mask:radial-gradient(closest-side,transparent 54%,#000 58%);mask:radial-gradient(closest-side,transparent 54%,#000 58%);animation:spin var(--flow) linear infinite;filter:drop-shadow(0 0 var(--glow) var(--gGlow))}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.stage{display:flex;gap:54px;align-items:center;background:var(--surface);border-radius:var(--r-4);box-shadow:0 0 0 1px var(--hairline);padding:34px 28px;margin-bottom:22px}
+.stageitem{display:flex;flex-direction:column;align-items:center;gap:12px}.stageitem .nm{font-size:11px;color:var(--text-3)}
+.stageitem.big{transform:scale(2.2);margin:0 26px}
+.bw{display:inline-flex;transform:scale(2.4)}
+.glowstage{display:flex;gap:64px;align-items:center;justify-content:center;background:var(--surface);border-radius:var(--r-4);box-shadow:0 0 0 1px var(--hairline);padding:40px 28px;margin-bottom:22px}
+
+.layoutwrap{display:flex;gap:26px;align-items:flex-start;flex-wrap:wrap}
+.rail{width:300px;background:var(--surface);border-radius:var(--r-4);box-shadow:0 0 0 1px var(--hairline);overflow:hidden}
+.rail .grp-h{padding:10px 14px 6px;font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:var(--text-3)}
+.trow,.row{display:flex;align-items:center;gap:10px;padding:10px 14px}.trow.active,.row.active{background:var(--accent-soft)}
+.tcheck{width:16px;height:16px;border-radius:50%;flex:0 0 auto;box-shadow:inset 0 0 0 1.6px var(--text-3)}
+.scheck{width:15px;height:15px;border-radius:5px;flex:0 0 auto;box-shadow:inset 0 0 0 1.6px var(--text-3)}
+.body{flex:1;min-width:0}.t1{font-size:13px;display:flex;align-items:center;gap:8px}.t2{font-size:11px;color:var(--text-3);margin-top:1px}
+.pdot{width:9px;height:9px;border-radius:50%;background:var(--accent);flex:0 0 auto;box-shadow:0 0 0 3px var(--accent-soft);animation:pulse 2.2s ease-in-out infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 3px var(--accent-soft)}50%{box-shadow:0 0 0 5px transparent}}
+.row.sub{padding-left:30px;position:relative}.row.sub::before{content:"";position:absolute;left:20px;top:0;bottom:0;width:1.5px;background:var(--hairline)}
+.row.sub .endi{margin-left:auto;display:inline-flex}
+.row.done .t1{text-decoration:line-through;color:var(--text-3)}.row.done{opacity:.6}
+</style>
+</head>
+<body data-theme="light" data-accent="azure">
+
+<h1>Status icons · v8 — 实心渐变盘 + 挖空字形（gradient 终于看得见）</h1>
+<div class="sub">字形是从渐变盘里「抠掉」的（像 ✅ emoji），渐变铺满整个盘 → 清晰可见且流动。running 仍是渐变环(B)。</div>
+
+<div class="controls">
+  <div class="grp"><label>Theme</label><span class="pill on" data-theme-btn="light">Light</span><span class="pill" data-theme-btn="warm">Warm</span><span class="pill" data-theme-btn="dark">Dark</span></div>
+  <div class="grp"><label>Accent</label>
+    <span class="sw" data-acc="rose" style="--swh:5;--swc:.15"></span><span class="sw" data-acc="ember" style="--swh:35;--swc:.14"></span>
+    <span class="sw" data-acc="citron" style="--swh:95;--swc:.13"></span><span class="sw" data-acc="moss" style="--swh:150;--swc:.11"></span>
+    <span class="sw" data-acc="teal" style="--swh:195;--swc:.11"></span><span class="sw on" data-acc="azure" style="--swh:230;--swc:.13"></span>
+    <span class="sw" data-acc="ink" style="--swh:270;--swc:.13"></span><span class="sw" data-acc="plum" style="--swh:320;--swc:.14"></span></div>
+</div>
+
+<div class="panel">
+  <div class="ctl"><span class="nm">最小 px</span><input type="range" id="minpx" min="6" max="28" step="1" value="14"><span class="val" id="minpx_v">14</span></div>
+  <div class="ctl"><span class="nm">最大 px</span><input type="range" id="maxpx" min="8" max="34" step="1" value="18"><span class="val" id="maxpx_v">18</span></div>
+  <div class="ctl"><span class="nm">glow 模糊</span><input type="range" id="glow" min="0" max="16" step="0.5" value="4"><span class="val" id="glow_v">4</span></div>
+  <div class="ctl"><span class="nm">glow 强度</span><input type="range" id="galpha" min="0" max="1" step="0.05" value="0.6"><span class="val" id="galpha_v">0.6</span></div>
+  <div class="ctl"><span class="nm">变大变小周期</span><input type="range" id="breathe" min="0.6" max="8" step="0.1" value="4"><span class="val" id="breathe_v">4s</span></div>
+  <div class="ctl"><span class="nm">渐变滚动周期</span><input type="range" id="flow" min="1" max="10" step="0.1" value="4"><span class="val" id="flow_v">4s</span></div>
+</div>
+<span class="reset" id="reset">恢复默认</span>
+
+<div class="stage">
+  <div class="stageitem big"><span class="ic" data-k="done" data-m="unread"></span><span class="nm">done 放大</span></div>
+  <div class="stageitem"><span class="ic" data-k="ring" data-m="unread"></span><span class="nm">running</span></div>
+  <div class="stageitem"><span class="ic" data-k="pend" data-m="unread"></span><span class="nm">pending ❗</span></div>
+  <div class="stageitem"><span class="ic" data-k="done" data-m="unread"></span><span class="nm">done ✅</span></div>
+  <div class="stageitem"><span class="ic" data-k="err" data-m="unread"></span><span class="nm">error ❌</span></div>
+  <div class="stageitem"><span class="ic" data-k="done" data-m="read"></span><span class="nm">done 已读</span></div>
+</div>
+
+<div class="sub" style="margin:4px 0 8px">glow 对比（2.4× 放大）：<b>左两个变「模糊」</b>(halo 扩散范围) · <b>右两个变「强度」</b>(halo 透明度)</div>
+<div class="glowstage">
+  <div class="stageitem"><span class="bw"><span class="ic" data-k="done" data-m="unread" style="--glow:1px"></span></span><span class="nm">模糊 1 · 强 0.6</span></div>
+  <div class="stageitem"><span class="bw"><span class="ic" data-k="done" data-m="unread" style="--glow:14px"></span></span><span class="nm">模糊 14 · 强 0.6</span></div>
+  <div class="stageitem"><span class="bw"><span class="ic" data-k="done" data-m="unread" style="--glow:7px;--gGlow:oklch(var(--gL2) var(--accent-c) calc(var(--accent-h) + 8)/.15)"></span></span><span class="nm">强 0.15 · 模糊 7</span></div>
+  <div class="stageitem"><span class="bw"><span class="ic" data-k="done" data-m="unread" style="--glow:7px;--gGlow:oklch(var(--gL2) var(--accent-c) calc(var(--accent-h) + 8)/1)"></span></span><span class="nm">强 1.0 · 模糊 7</span></div>
+</div>
+
+<div class="layoutwrap">
+  <div class="rail">
+    <div class="grp-h">Tasks（图标跟随上面的 px）</div>
+    <div class="trow active"><span class="tcheck"></span><div class="body"><div class="t1">开发迭代 <span class="pdot"></span></div><div class="t2">3 subtasks</div></div></div>
+    <div class="row sub" data-k="ring" data-m="unread"><span class="scheck"></span><div class="body"><div class="t1">实现登录页</div><div class="t2">Codex</div></div></div>
+    <div class="row sub" data-k="done" data-m="unread"><span class="scheck"></span><div class="body"><div class="t1">登录接口联调</div><div class="t2">Codex</div></div></div>
+    <div class="row sub" data-k="err" data-m="unread"><span class="scheck"></span><div class="body"><div class="t1">支付回调排查</div><div class="t2">Codex</div></div></div>
+    <div class="row sub" data-k="pend" data-m="unread"><span class="scheck"></span><div class="body"><div class="t1">权限校验补测</div><div class="t2">Codex</div></div></div>
+    <div class="row sub done" data-k="done" data-m="read"><span class="scheck" style="background:var(--accent-soft)"></span><div class="body"><div class="t1">建项目脚手架</div><div class="t2">Codex</div></div></div>
+  </div>
+</div>
+
+<script>
+  const body=document.body, root=document.documentElement;
+  const DISC="<circle cx='8' cy='8' r='7.4' fill='#fff'/>";
+  function svgURL(inner){return "url(\"data:image/svg+xml,"+encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"+inner+"</svg>")+"\")";}
+  function glyphInner(kind){
+    if(kind==='done') return "<path d='M5 8l2 2 4-4' fill='none' stroke='#fff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/>";
+    if(kind==='err')  return "<path d='M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8' fill='none' stroke='#fff' stroke-width='2.2' stroke-linecap='round'/>";
+    return "<rect x='7.05' y='3.8' width='1.9' height='5.3' rx='.95' fill='#fff'/><circle cx='8' cy='11.4' r='1.05' fill='#fff'/>"; // pending ❗
+  }
+  function build(el){
+    const k=el.dataset.k,m=el.dataset.m;
+    el.className=(el.className.replace(/\s*\bico\b.*/,'').trim()+' ico '+(k==='ring'?'ring':(m==='unread'?'unread':'read'))+' '+k).trim();
+    el.textContent='';
+    if(k==='ring'){const r=document.createElement('span');r.className='ringfill';el.appendChild(r);return;}
+    const gly=document.createElement('span');gly.className='gly';
+    const layers=svgURL(DISC)+', '+svgURL(glyphInner(k));
+    gly.style.maskImage=layers; gly.style.webkitMaskImage=layers;
+    el.appendChild(gly);
+  }
+  document.querySelectorAll('.stageitem .ic').forEach(build);
+  document.querySelectorAll('.row.sub').forEach(r=>{const ic=document.createElement('span');ic.className='endi';ic.dataset.k=r.dataset.k;ic.dataset.m=r.dataset.m;build(ic);r.appendChild(ic);});
+
+  const S={minpx:14,maxpx:18,glow:4,galpha:0.6,breathe:4,flow:4};
+  function apply(){
+    const minpx=Math.min(S.minpx,S.maxpx),maxpx=Math.max(S.minpx,S.maxpx);
+    root.style.setProperty('--maxpx',maxpx+'px');root.style.setProperty('--minscale',(minpx/maxpx).toFixed(3));
+    root.style.setProperty('--glow',S.glow+'px');root.style.setProperty('--breathe',S.breathe+'s');root.style.setProperty('--flow',S.flow+'s');
+    body.style.setProperty('--gGlow','oklch(var(--gL2) var(--accent-c) calc(var(--accent-h) + 8) / '+S.galpha+')');
+    minpx_v.textContent=S.minpx;maxpx_v.textContent=S.maxpx;glow_v.textContent=S.glow;galpha_v.textContent=S.galpha;breathe_v.textContent=S.breathe+'s';flow_v.textContent=S.flow+'s';
+  }
+  ['minpx','maxpx','glow','galpha','breathe','flow'].forEach(id=>{const inp=document.getElementById(id);inp.value=S[id];inp.addEventListener('input',()=>{S[id]=parseFloat(inp.value);apply();});});
+  document.getElementById('reset').onclick=()=>{Object.assign(S,{minpx:14,maxpx:18,glow:4,galpha:0.6,breathe:4,flow:4});['minpx','maxpx','glow','galpha','breathe','flow'].forEach(id=>document.getElementById(id).value=S[id]);apply();};
+  apply();
+  document.querySelectorAll('[data-theme-btn]').forEach(b=>b.onclick=()=>{body.dataset.theme=b.dataset.themeBtn;document.querySelectorAll('[data-theme-btn]').forEach(x=>x.classList.toggle('on',x===b));});
+  document.querySelectorAll('[data-acc]').forEach(s=>s.onclick=()=>{body.dataset.accent=s.dataset.acc;document.querySelectorAll('[data-acc]').forEach(x=>x.classList.toggle('on',x===s));apply();});
+</script>
+</body>
+</html>

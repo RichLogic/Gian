@@ -17,25 +17,6 @@
   min-height: 100%;
 }
 
-.settings2-nav {
-  position: sticky;
-  top: 0;
-  align-self: flex-start;
-  flex: none;
-  width: 150px;
-  padding: 16px 10px 16px 16px;
-  border-right: 1px solid var(--hairline);
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  min-height: 100%;
-}
-.settings2-title {
-  font: 600 18px/1 var(--font-sans);
-  letter-spacing: -0.01em;
-  color: var(--text);
-  margin-bottom: 2px;
-}
 .s2-group {
   display: flex;
   flex-direction: column;
@@ -89,10 +70,16 @@
   color: var(--text);
 }
 
+/* The sheet panel (.sheet-content) is already --surface, so a flat --surface-2
+   card reads as a dull gray slab with no edge. Use a --surface card with a
+   hairline border instead — the design's "white card, hairline edge" look —
+   and let inner controls (segm track, theme chips, selects, kbd) step down to
+   --surface-2 so they stay visible. */
 .s2-card {
-  background: var(--surface-2);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-3);
-  padding: 16px 18px;
+  padding: 18px 20px;
 }
 .s2-card + .s2-card { margin-top: 14px; }
 
@@ -109,7 +96,40 @@
   letter-spacing: normal;
   align-self: center;
 }
+/* The base dd is mono (meant for runner/config values); settings values are
+   prose and controls, so flip back to sans. Explicit .mono opt-ins (font
+   family row, executor selects) are unaffected. */
+.s2-card .kv-grid dd {
+  font-family: var(--font-sans);
+  color: var(--text);
+}
+
+/* Shortcuts: labels can be long (both locales) — give them the flexible
+   column and pin the keycaps to a clean right-hand column. */
+.s2-card .kv-grid.shortcuts { grid-template-columns: minmax(0, 1fr) auto; }
 .s2-card .kv-grid.shortcuts dt { align-self: baseline; }
+.s2-card .kv-grid.shortcuts kbd {
+  border-radius: var(--r-1);
+  color: var(--text-2);
+}
+
+/* Stacked toggles (notification events) — one per line with breathing room
+   instead of inline labels bumping into each other. */
+.s2-card .kv-grid dd > .switch { display: flex; }
+.s2-card .kv-grid dd > .switch + .switch { margin-top: var(--sp-5); }
+
+/* Segmented controls in settings read a size up from the dense global default
+   so they match the card's 12px label rhythm. */
+.s2-card .segm-item {
+  font-size: var(--fz-12);
+  padding: 5px 12px;
+}
+
+/* Light-theme swatches are near-white — give every chip swatch a hairline
+   ring so they stay visible against the active chip's accent-soft fill. */
+.s2-card .theme-chip .swatches i {
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
 
 .s2-help {
   margin: 0 0 13px;
@@ -127,6 +147,40 @@
   padding-top: 15px;
   border-top: 1px solid var(--hairline);
 }
+
+.settings-account {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+}
+.settings-account-user {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.settings-account-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.settings-account-avatar-fallback {
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font: 600 var(--fz-18)/1 var(--font-serif);
+}
+.settings-account-name {
+  color: var(--text);
+  font: 600 var(--fz-14)/1.4 var(--font-sans);
+}
+.settings-account-user a {
+  color: var(--accent-text);
+  font: var(--fz-12)/1.4 var(--font-mono);
+}
+.settings-account .s2-help { margin: 0; }
 
 /* Default task-PM executor picker (sits under the two exec rows). */
 .s2-taskpm {
@@ -166,7 +220,7 @@
   justify-content: flex-start;
   gap: 8px;
   padding: 7px 10px;
-  background: var(--surface);
+  background: var(--surface-2);
   border: 0;
   border-radius: var(--r-2);
 }
@@ -229,19 +283,30 @@
 }
 
 /* Selects inside the Open-with panel — flat, surface-tinted (prototype look),
-   not the system-chromed select the legacy session.css applied. */
+   not the system-chromed select the legacy session.css applied. Same custom
+   chevron as the shared .select so both settings select styles match. */
 .settings2 .open-cat-pick select,
 .settings2 .ee-add-app select {
+  appearance: none;
   height: auto;
   max-width: none;
   min-width: 190px;
   font: var(--fz-12)/1 var(--font-sans);
   color: var(--text);
   background: var(--surface);
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-3) 50%), linear-gradient(-45deg, transparent 50%, var(--text-3) 50%);
+  background-position: right 10px top 50%, right 6px top 50%;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
   border: 1px solid var(--hairline);
   border-radius: var(--r-2);
-  padding: 5px 9px;
+  padding: 6px 24px 6px 9px;
   cursor: pointer;
+  outline: 0;
+}
+.settings2 .open-cat-pick select:focus,
+.settings2 .ee-add-app select:focus {
+  box-shadow: 0 0 0 2px var(--accent-ring);
 }
 
 /* Executor model/effort selects render full-width inside their dd. */

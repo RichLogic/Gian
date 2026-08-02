@@ -14,9 +14,15 @@
     "test:smoke": "pnpm run build && node test/electron-smoke.mjs",
     "dev": "pnpm run build && electron .",
     "start": "electron .",
-    "package:mac": "pnpm run build && electron-builder --mac dir",
-    "make:mac": "pnpm run build && electron-builder --mac dmg zip",
+    "bundle:build": "pnpm --filter @gian/desktop... build && pnpm --filter @gian/web build && node ../../scripts/prepare-desktop-runtime.mjs",
+    "package:mac": "pnpm run bundle:build && electron-builder --mac dir --arm64",
+    "make:mac": "pnpm run bundle:build && electron-builder --mac dmg zip --arm64",
+    "make:mac:release": "pnpm run bundle:build && electron-builder --mac dmg zip --arm64 --config.mac.notarize=true",
     "clean": "rm -rf dist release *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@gian/host": "workspace:*",
+    "@gian/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -39,10 +45,35 @@
       "renderer/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "../web/dist",
+        "to": "web",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "runtime",
+        "to": "runtime",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asarUnpack": [
+      "node_modules/**/*"
+    ],
+    "npmRebuild": false,
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "resources/icon.icns",
-      "hardenedRuntime": true
+      "hardenedRuntime": true,
+      "entitlements": "resources/entitlements.mac.plist",
+      "entitlementsInherit": "resources/entitlements.mac.inherit.plist",
+      "binaries": [
+        "Contents/Resources/runtime/node"
+      ]
     },
     "dmg": {
       "title": "Gian ${version}"

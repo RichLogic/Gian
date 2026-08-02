@@ -1,0 +1,108 @@
+name: Release Gian
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos-arm64:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Verify release tag
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          test "${GITHUB_REF_NAME}" = "v${VERSION}"
+          for MANIFEST in \
+            packages/desktop/package.json \
+            packages/host/package.json \
+            packages/shared/package.json \
+            packages/web/package.json \
+            packages/proxies/cc-proxy/package.json \
+            packages/proxies/codex-proxy/package.json \
+            packages/proxies/kimi-proxy/package.json
+          do
+            test "$(node -p "require('./${MANIFEST}').version")" = "${VERSION}"
+          done
+
+      - name: Verify signing secrets
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GIAN_GITHUB_CLIENT_ID: ${{ vars.GIAN_GITHUB_CLIENT_ID }}
+        run: |
+          test -n "${MAC_CSC_LINK}"
+          test -n "${MAC_CSC_KEY_PASSWORD}"
+          test -n "${APPLE_ID}"
+          test -n "${APPLE_APP_SPECIFIC_PASSWORD}"
+          test -n "${APPLE_TEAM_ID}"
+          test -n "${GIAN_GITHUB_CLIENT_ID}"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify source
+        run: |
+          pnpm typecheck
+          pnpm test
+
+      - name: Build proxy release assets
+        run: pnpm release:proxies
+
+      - name: Build, sign, and notarize Gian
+        run: pnpm --filter @gian/desktop make:mac:release
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GIAN_GITHUB_CLIENT_ID: ${{ vars.GIAN_GITHUB_CLIENT_ID }}
+
+      - name: Verify signed application
+        run: |
+          codesign --verify --deep --strict --verbose=2 packages/desktop/release/mac-arm64/Gian.app
+          xcrun stapler validate packages/desktop/release/mac-arm64/Gian.app
+          spctl --assess --verbose --type exec packages/desktop/release/mac-arm64/Gian.app
+
+      - name: Create desktop checksums
+        working-directory: packages/desktop/release
+        run: shasum -a 256 Gian-*.dmg Gian-*.zip > SHA256SUMS
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            packages/desktop/release/Gian-*.dmg \
+            packages/desktop/release/Gian-*.zip \
+            packages/desktop/release/SHA256SUMS \
+            artifacts/proxies/* \
+            --verify-tag \
+            --generate-notes \
+            --title "Gian ${GITHUB_REF_NAME}"

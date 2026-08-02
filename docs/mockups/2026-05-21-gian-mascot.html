@@ -1,0 +1,825 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Gian mascot — design exploration</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+/* ============================================================
+   Gian — Design Tokens (mirror of packages/web/src/styles/tokens.css)
+   ============================================================ */
+:root {
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --fz-11: 11px; --fz-12: 12px; --fz-13: 13px; --fz-14: 14px;
+  --fz-16: 16px; --fz-20: 20px; --fz-28: 28px;
+
+  --r-1: 4px; --r-2: 7px; --r-3: 10px; --r-4: 14px; --r-pill: 999px;
+  --sp-1: 2px; --sp-2: 4px; --sp-3: 6px; --sp-4: 8px;
+  --sp-5: 10px; --sp-6: 12px; --sp-7: 16px; --sp-8: 20px; --sp-9: 24px;
+  --ease: cubic-bezier(.2,.7,.2,1);
+}
+
+/* Accent default = plum */
+body                       { --accent-h: 310; --accent-c: 0.13; }
+body[data-accent="plum"]   { --accent-h: 310; --accent-c: 0.13; }
+body[data-accent="moss"]   { --accent-h: 150; --accent-c: 0.10; }
+body[data-accent="ink"]    { --accent-h: 255; --accent-c: 0.11; }
+body[data-accent="ember"]  { --accent-h:  30; --accent-c: 0.13; }
+
+/* LIGHT */
+body[data-theme="light"] {
+  --bg:            oklch(0.955 0.004 280);
+  --surface:       oklch(1.000 0.000 0);
+  --surface-2:     oklch(0.970 0.003 280);
+  --surface-3:     oklch(0.935 0.005 280);
+  --surface-inset: oklch(0.945 0.004 280);
+  --text:          oklch(0.22 0.02 280);
+  --text-2:        oklch(0.45 0.015 280);
+  --text-3:        oklch(0.62 0.012 280);
+  --text-inv:      oklch(0.98 0 0);
+  --hairline:      oklch(0.22 0.02 280 / 0.08);
+  --accent:        oklch(0.55 var(--accent-c) var(--accent-h));
+  --accent-text:   oklch(0.42 var(--accent-c) var(--accent-h));
+  --accent-soft:   oklch(0.55 var(--accent-c) var(--accent-h) / 0.12);
+  --accent-ring:   oklch(0.55 var(--accent-c) var(--accent-h) / 0.30);
+  --ok:    oklch(0.58 0.13 150);
+  --warn:  oklch(0.70 0.14 75);
+  --danger: oklch(0.58 0.18 25);
+  --shadow-1: 0 0 0 1px oklch(0.22 0.02 280 / 0.06), 0 1px 2px oklch(0.22 0.02 280 / 0.04);
+  --shadow-2: 0 0 0 1px oklch(0.22 0.02 280 / 0.06), 0 6px 24px -8px oklch(0.22 0.02 280 / 0.18);
+  color-scheme: light;
+}
+
+/* WARM */
+body[data-theme="warm"] {
+  --bg:            oklch(0.955 0.020 80);
+  --surface:       oklch(0.990 0.012 82);
+  --surface-2:     oklch(0.965 0.018 80);
+  --surface-3:     oklch(0.925 0.022 78);
+  --surface-inset: oklch(0.940 0.020 80);
+  --text:          oklch(0.30 0.04 55);
+  --text-2:        oklch(0.48 0.035 60);
+  --text-3:        oklch(0.62 0.025 65);
+  --text-inv:      oklch(0.98 0.01 80);
+  --hairline:      oklch(0.30 0.04 55 / 0.10);
+  --accent:        oklch(0.52 var(--accent-c) var(--accent-h));
+  --accent-text:   oklch(0.40 var(--accent-c) var(--accent-h));
+  --accent-soft:   oklch(0.52 var(--accent-c) var(--accent-h) / 0.14);
+  --accent-ring:   oklch(0.52 var(--accent-c) var(--accent-h) / 0.32);
+  --ok:    oklch(0.55 0.13 150);
+  --warn:  oklch(0.65 0.14 65);
+  --danger: oklch(0.55 0.18 30);
+  --shadow-1: 0 0 0 1px oklch(0.30 0.04 55 / 0.07), 0 1px 2px oklch(0.30 0.04 55 / 0.05);
+  --shadow-2: 0 0 0 1px oklch(0.30 0.04 55 / 0.08), 0 6px 24px -8px oklch(0.30 0.04 55 / 0.20);
+  color-scheme: light;
+}
+
+/* DARK */
+body[data-theme="dark"] {
+  --bg:            oklch(0.165 0.012 250);
+  --surface:       oklch(0.210 0.014 250);
+  --surface-2:     oklch(0.240 0.016 250);
+  --surface-3:     oklch(0.285 0.018 250);
+  --surface-inset: oklch(0.190 0.012 250);
+  --text:          oklch(0.93 0.01 250);
+  --text-2:        oklch(0.74 0.012 250);
+  --text-3:        oklch(0.58 0.012 250);
+  --text-inv:      oklch(0.18 0.01 250);
+  --hairline:      oklch(0.93 0.01 250 / 0.08);
+  --accent:        oklch(0.72 var(--accent-c) var(--accent-h));
+  --accent-text:   oklch(0.80 var(--accent-c) var(--accent-h));
+  --accent-soft:   oklch(0.72 var(--accent-c) var(--accent-h) / 0.18);
+  --accent-ring:   oklch(0.72 var(--accent-c) var(--accent-h) / 0.40);
+  --ok:    oklch(0.75 0.14 150);
+  --warn:  oklch(0.80 0.14 80);
+  --danger: oklch(0.72 0.17 25);
+  --shadow-1: 0 0 0 1px oklch(0.93 0.01 250 / 0.06);
+  --shadow-2: 0 0 0 1px oklch(0.93 0.01 250 / 0.08), 0 10px 32px -8px oklch(0 0 0 / 0.55);
+  color-scheme: dark;
+}
+
+/* ============================================================
+   Page chrome
+   ============================================================ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { min-height: 100%; }
+body {
+  font-family: var(--font-sans);
+  font-size: var(--fz-14);
+  line-height: 1.55;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  padding: 32px 24px 80px;
+}
+.page { max-width: 960px; margin: 0 auto; }
+
+h1 {
+  font-family: var(--font-serif);
+  font-weight: 500;
+  font-size: 40px;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  margin-bottom: 6px;
+}
+h1 em { font-style: italic; color: var(--accent-text); }
+.subtitle { color: var(--text-2); font-size: var(--fz-14); max-width: 640px; margin-bottom: 24px; }
+
+.toolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px;
+  background: var(--surface);
+  border-radius: var(--r-3);
+  box-shadow: var(--shadow-1);
+  margin-bottom: 40px;
+  position: sticky; top: 16px; z-index: 10;
+  backdrop-filter: blur(8px);
+  flex-wrap: wrap;
+}
+.toolbar .label {
+  font-size: var(--fz-12); color: var(--text-3);
+  padding: 0 6px 0 8px;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.tbtn {
+  padding: 6px 12px;
+  border-radius: var(--r-2);
+  font-size: var(--fz-13);
+  color: var(--text-2);
+  background: transparent;
+  transition: background 160ms var(--ease), color 160ms var(--ease);
+}
+.tbtn:hover { background: var(--surface-2); color: var(--text); }
+.tbtn[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 500;
+}
+
+.concept {
+  background: var(--surface);
+  border-radius: var(--r-4);
+  box-shadow: var(--shadow-1);
+  padding: 28px;
+  margin-bottom: 28px;
+}
+.concept-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+.concept-name {
+  font-family: var(--font-serif);
+  font-size: 26px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+.concept-tag {
+  color: var(--text-3);
+  font-size: var(--fz-13);
+  font-family: var(--font-mono);
+}
+.concept-desc { color: var(--text-2); margin-bottom: 22px; max-width: 640px; }
+
+.row {
+  display: flex; align-items: center; gap: 32px;
+  padding: 18px 20px;
+  background: var(--surface-2);
+  border-radius: var(--r-3);
+  margin-bottom: 10px;
+}
+.row-label {
+  width: 110px;
+  font-size: var(--fz-12);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+}
+.specimens { display: flex; align-items: flex-end; gap: 28px; flex: 1; flex-wrap: wrap; }
+.specimen { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.specimen-tag { font-family: var(--font-mono); font-size: 10px; color: var(--text-3); }
+.specimen .frame {
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface);
+  border-radius: var(--r-2);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.specimen.s-16 .frame { width: 28px; height: 28px; }
+.specimen.s-32 .frame { width: 48px; height: 48px; }
+.specimen.s-96 .frame { width: 120px; height: 120px; }
+
+.notes {
+  margin-top: 16px;
+  padding: 14px 18px;
+  background: var(--surface-inset);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 var(--r-2) var(--r-2) 0;
+  color: var(--text-2);
+  font-size: var(--fz-13);
+}
+.notes b { color: var(--text); font-weight: 600; }
+
+footer {
+  margin-top: 48px;
+  padding: 20px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: var(--fz-12);
+  font-family: var(--font-mono);
+}
+
+/* ============================================================
+   SVG mascot styling — shared utility classes
+   ============================================================ */
+.mascot { color: var(--text); display: block; overflow: visible; }
+/* Make transform-origin always resolve against the SVG viewBox so our
+   document-level @keyframes use coordinates that match path units. */
+.mascot * { transform-box: view-box; }
+.mascot .ink   { fill: currentColor; }
+.mascot .ink-s { stroke: currentColor; fill: none; }
+.mascot .acc   { fill: var(--accent); }
+.mascot .acc-s { stroke: var(--accent); fill: none; }
+.mascot .paper { fill: var(--surface); }
+.mascot .paper-s { stroke: var(--surface); fill: none; }
+.mascot .warn  { fill: var(--warn); }
+.mascot .ok    { fill: var(--ok); }
+
+/* ============================================================
+   Concept 1: Boombox-G — animation lives inside each inline SVG
+   via per-symbol <style> so it applies inside <use> shadow trees.
+   But we use inline SVG copies for animated specimens, so animation
+   CSS lives at the document level scoped by .gMascot.alive.
+   ============================================================ */
+
+/* C1 keyframes */
+@keyframes c1Bob   { 0%,100% { transform: translateY(0) rotate(-1.5deg); } 50% { transform: translateY(-1px) rotate(1.5deg); } }
+@keyframes c1Mouth { 0%,100% { transform: scale(1,1); } 50% { transform: scale(0.85,1.3); } }
+@keyframes c1Ring  { 0% { transform: scale(0.4); opacity: 0.9; } 100% { transform: scale(2.2); opacity: 0; } }
+@keyframes c1Note  { 0% { transform: translate(0,0) rotate(-8deg); opacity: 0; } 20% { opacity: 1; } 100% { transform: translate(10px,-18px) rotate(12deg); opacity: 0; } }
+
+.gMascot.alive .gBody  { transform-origin: 32px 36px; animation: c1Bob 1.6s var(--ease) infinite; }
+.gMascot.alive .gMouth { transform-origin: 42px 36px; transform-box: fill-box; animation: c1Mouth 0.7s ease-in-out infinite; }
+.gMascot.alive .c1ring { transform-origin: 49px 22px; animation: c1Ring 1.4s var(--ease) infinite; }
+.gMascot.alive .c1ring.r2 { animation-delay: 0.45s; }
+.gMascot.alive .c1ring.r3 { animation-delay: 0.9s; }
+.gMascot.alive .c1note { transform-origin: 52px 22px; animation: c1Note 1.4s ease-out infinite; }
+.gMascot.alive .c1note.n2 { animation-delay: 0.7s; }
+
+/* C2 keyframes — Fistmark */
+@keyframes c2Pump {
+  0%,100% { transform: translateY(2px) rotate(-3deg); }
+  40%,55% { transform: translateY(-4px) rotate(4deg); }
+  70%     { transform: translateY(2px) rotate(-3deg); }
+}
+@keyframes c2Swoosh {
+  0%   { opacity: 0; transform: translateY(4px); }
+  30%  { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-6px); }
+}
+.fistMascot.alive .c2fist   { transform-origin: 32px 48px; animation: c2Pump 1.4s var(--ease) infinite; }
+.fistMascot.alive .c2swoosh { transform-origin: 32px 16px; animation: c2Swoosh 1.4s ease-out infinite; }
+.fistMascot.alive .c2swoosh.s2 { animation-delay: 0.45s; }
+
+/* C3 keyframes — Bolt-Kid */
+@keyframes c3Hop   { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
+@keyframes c3LegF  { 0%,100% { transform: rotate(-32deg); } 50% { transform: rotate(28deg); } }
+@keyframes c3LegB  { 0%,100% { transform: rotate(28deg); } 50% { transform: rotate(-32deg); } }
+@keyframes c3ArmF  { 0%,100% { transform: rotate(36deg); } 50% { transform: rotate(-24deg); } }
+@keyframes c3ArmB  { 0%,100% { transform: rotate(-24deg); } 50% { transform: rotate(36deg); } }
+@keyframes c3Dust  { 0% { transform: translate(0,0) scale(1); opacity: 0.8; } 100% { transform: translate(-10px,0) scale(0.3); opacity: 0; } }
+
+.kidMascot.alive .c3body { transform-origin: 32px 32px; animation: c3Hop 0.55s ease-in-out infinite; }
+.kidMascot.alive .c3legF { transform-origin: 27px 50px; animation: c3LegF 0.55s ease-in-out infinite; }
+.kidMascot.alive .c3legB { transform-origin: 37px 50px; animation: c3LegB 0.55s ease-in-out infinite; }
+.kidMascot.alive .c3armF { transform-origin: 16px 33px; animation: c3ArmF 0.55s ease-in-out infinite; }
+.kidMascot.alive .c3armB { transform-origin: 48px 33px; animation: c3ArmB 0.55s ease-in-out infinite; }
+.kidMascot.alive .c3dust { transform-origin: center; animation: c3Dust 0.7s ease-out infinite; }
+.kidMascot.alive .c3dust.d2 { animation-delay: 0.23s; }
+.kidMascot.alive .c3dust.d3 { animation-delay: 0.46s; }
+
+/* C4 keyframes — Megaphone-Head */
+@keyframes c4Shake  {
+  0%,100% { transform: rotate(-4deg); }
+  25%     { transform: rotate(-7deg) translateX(-0.5px); }
+  50%     { transform: rotate(-1deg) translateX(0.5px); }
+  75%     { transform: rotate(-5deg); }
+}
+@keyframes c4Mouth  { 0%,100% { transform: scaleY(1); } 50% { transform: scaleY(0.6); } }
+@keyframes c4Wave   { 0% { opacity: 0; transform: translateX(-2px) scaleX(0.5); } 30% { opacity: 1; } 100% { opacity: 0; transform: translateX(8px) scaleX(1.6); } }
+
+.megaMascot.alive .c4body  { transform-origin: 30px 32px; animation: c4Shake 0.5s ease-in-out infinite; }
+.megaMascot.alive .c4mouth { transform-origin: 30px 40px; animation: c4Mouth 0.5s ease-in-out infinite; }
+.megaMascot.alive .c4wave  { transform-origin: 54px 36px; animation: c4Wave 1.0s ease-out infinite; }
+.megaMascot.alive .c4wave.w2 { animation-delay: 0.25s; }
+.megaMascot.alive .c4wave.w3 { animation-delay: 0.5s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mascot *, .mascot { animation: none !important; }
+}
+</style>
+</head>
+<body data-theme="light" data-accent="plum">
+<div class="page">
+
+<h1>Gian mascot — <em>design exploration</em></h1>
+<p class="subtitle">
+  Four original concepts for a mascot that doubles as Gian's logomark and as
+  the "session is working" indicator. Each is shown statically and as an
+  animated loop, at 16 / 32 / 96 px. Toggle theme + accent to confirm they
+  re-tone correctly.
+</p>
+
+<div class="toolbar" role="toolbar" aria-label="Theme switcher">
+  <span class="label">Theme</span>
+  <button class="tbtn" data-set="light" aria-pressed="true">Light</button>
+  <button class="tbtn" data-set="warm"  aria-pressed="false">Warm</button>
+  <button class="tbtn" data-set="dark"  aria-pressed="false">Dark</button>
+  <span class="label">Accent</span>
+  <button class="tbtn" data-accent="plum"  aria-pressed="true">Plum</button>
+  <button class="tbtn" data-accent="moss"  aria-pressed="false">Moss</button>
+  <button class="tbtn" data-accent="ink"   aria-pressed="false">Ink</button>
+  <button class="tbtn" data-accent="ember" aria-pressed="false">Ember</button>
+</div>
+
+<!-- ============================================================
+     SYMBOL DEFS for STATIC mascots (animated versions are inlined
+     because CSS animations applied from the document don't always
+     reach into <use> shadow trees consistently across browsers).
+     ============================================================ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+
+    <!-- ===== Concept 1: Boombox-G (static) ===== -->
+    <symbol id="g-static" viewBox="0 0 64 64">
+      <!-- Slab G body: bold serif G with notch -->
+      <path class="ink" d="
+        M 32 6
+        C 18 6, 7 16, 7 32
+        C 7 48, 18 58, 32 58
+        C 42 58, 50 53, 54 46
+        L 54 30
+        L 35 30
+        L 35 39
+        L 44 39
+        C 41 45, 37 48, 32 48
+        C 23 48, 17 41, 17 32
+        C 17 23, 23 16, 32 16
+        C 36 16, 39 17, 42 19
+        L 49 11
+        C 43 7, 38 6, 32 6
+        Z" />
+      <!-- Single attitude eye (cyclops-style — clearly not Doraemon) -->
+      <ellipse class="paper" cx="25" cy="24" rx="3.6" ry="3.2" />
+      <circle class="ink"   cx="26" cy="24.5" r="1.7" />
+      <!-- Eyebrow furrow -->
+      <path class="paper-s" stroke-width="2.4" stroke-linecap="round"
+            d="M 21 20 L 29 22" />
+    </symbol>
+
+    <!-- ===== Concept 2: Fistmark (static) ===== -->
+    <symbol id="fist-static" viewBox="0 0 64 64">
+      <!-- Forearm cuff -->
+      <rect class="acc" x="21" y="48" width="22" height="11" rx="2.5" />
+      <!-- Hand bulk -->
+      <path class="ink" d="
+        M 17 28
+        C 17 23, 21 20, 26 20
+        L 38 20
+        C 43 20, 47 23, 47 28
+        L 47 50
+        C 47 53, 44 56, 41 56
+        L 23 56
+        C 20 56, 17 53, 17 50
+        Z" />
+      <!-- Knuckle ridge -->
+      <path class="paper-s" stroke-width="1.6" stroke-linecap="round"
+            d="M 22 30 Q 32 27 42 30" />
+      <!-- Finger separation lines -->
+      <path class="paper-s" stroke-width="1.4" stroke-linecap="round"
+            d="M 25 32 L 25 42 M 32 31 L 32 42 M 39 32 L 39 42" />
+      <!-- Thumb wrapping across -->
+      <path class="ink" d="
+        M 13 38
+        C 13 33, 16 30, 21 30
+        L 26 30
+        L 26 44
+        L 21 44
+        C 16 44, 13 41, 13 38 Z" />
+      <!-- Thumb highlight -->
+      <path class="paper-s" stroke-width="1.2" stroke-linecap="round" opacity="0.55"
+            d="M 16 35 Q 19 34 22 36" />
+    </symbol>
+
+    <!-- ===== Concept 3: Bolt-Kid (static, standing fists-up) ===== -->
+    <symbol id="kid-static" viewBox="0 0 64 64">
+      <!-- Shoes -->
+      <ellipse class="ink" cx="26" cy="58" rx="6" ry="3" />
+      <ellipse class="ink" cx="38" cy="58" rx="6" ry="3" />
+      <!-- Legs (short shorts) -->
+      <rect class="ink" x="23" y="48" width="6" height="9" rx="2" />
+      <rect class="ink" x="35" y="48" width="6" height="9" rx="2" />
+      <!-- Body (round dumpling torso, plain — no stripes) -->
+      <path class="acc" d="
+        M 18 38
+        C 18 30, 24 26, 32 26
+        C 40 26, 46 30, 46 38
+        L 46 49
+        C 46 51, 44 53, 41 53
+        L 23 53
+        C 20 53, 18 51, 18 49 Z" />
+      <!-- Sweat band on forehead -->
+      <rect class="warn" x="19" y="13" width="26" height="4.5" rx="2" />
+      <!-- Head (slightly square, broader-than-tall — not Doraemon's circle) -->
+      <path class="ink" d="
+        M 21 17
+        C 21 9, 26 5, 32 5
+        C 38 5, 43 9, 43 17
+        L 43 24
+        C 43 27, 38 29, 32 29
+        C 26 29, 21 27, 21 24 Z" />
+      <!-- Spiky hair tuft (three points — explicitly NOT pageboy) -->
+      <path class="ink" d="M 26 6 L 28 1 L 30 5 L 33 1 L 35 5 L 37 1 L 39 6 Z" />
+      <!-- Eyes -->
+      <circle class="paper" cx="28" cy="18" r="2.4" />
+      <circle class="paper" cx="36" cy="18" r="2.4" />
+      <circle class="ink" cx="28.6" cy="18.5" r="1.1" />
+      <circle class="ink" cx="36.6" cy="18.5" r="1.1" />
+      <!-- Eyebrows (angry V) -->
+      <path class="paper-s" stroke-width="1.8" stroke-linecap="round"
+            d="M 25 14 L 30 16  M 39 14 L 34 16" />
+      <!-- Mouth (open shout) -->
+      <ellipse class="paper" cx="32" cy="23" rx="3" ry="1.6" />
+      <!-- Arms (raised, fists up) — drawn rotated from shoulders -->
+      <g transform="rotate(-20 18 33)">
+        <rect class="acc" x="15" y="30" width="6" height="14" rx="3" />
+      </g>
+      <circle class="ink" cx="14" cy="29" r="4" />
+      <g transform="rotate(20 46 33)">
+        <rect class="acc" x="43" y="30" width="6" height="14" rx="3" />
+      </g>
+      <circle class="ink" cx="50" cy="29" r="4" />
+    </symbol>
+
+    <!-- ===== Concept 4: Megaphone-Head (static) ===== -->
+    <symbol id="mega-static" viewBox="0 0 64 64">
+      <g transform="rotate(-4 30 32)">
+        <!-- Handle/grip -->
+        <rect class="ink" x="5" y="34" width="10" height="6" rx="2" />
+        <!-- Trigger button -->
+        <circle class="warn" cx="10" cy="33" r="1.6" />
+        <!-- Cone body (wider toward the right rim) -->
+        <path class="acc" d="
+          M 13 22
+          L 13 50
+          L 51 58
+          L 51 14
+          Z" />
+        <!-- Rim outline (front-facing oval) -->
+        <ellipse class="ink" cx="51" cy="36" rx="2.5" ry="22" />
+        <!-- Rim inner (paper, looks like the opening) -->
+        <ellipse class="paper" cx="51" cy="36" rx="1.2" ry="18" />
+        <!-- Eyes -->
+        <circle class="paper" cx="25" cy="30" r="3.4" />
+        <circle class="paper" cx="36" cy="30" r="3.4" />
+        <circle class="ink"   cx="26" cy="30.5" r="1.6" />
+        <circle class="ink"   cx="37" cy="30.5" r="1.6" />
+        <!-- Angry V brows -->
+        <path class="ink-s" stroke-width="2.2" stroke-linecap="round"
+              d="M 21 25 L 28 27  M 39 27 L 33 25" />
+        <!-- Shouting mouth on the neck of the cone -->
+        <ellipse class="ink" cx="30" cy="40" rx="5" ry="3.5" />
+        <ellipse class="paper" cx="30" cy="40" rx="3" ry="1.8" />
+      </g>
+    </symbol>
+
+  </defs>
+</svg>
+
+<!-- ============================================================
+     ANIMATED MASCOT TEMPLATES — declared in <template> so we can
+     stamp inline copies at each size. We use templates rather than
+     <use> so the document-level @keyframes definitely apply.
+     ============================================================ -->
+
+<template id="t-g-alive">
+  <svg class="mascot gMascot alive" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+    <g class="gBody">
+      <path class="ink" d="M 32 6 C 18 6, 7 16, 7 32 C 7 48, 18 58, 32 58 C 42 58, 50 53, 54 46 L 54 30 L 35 30 L 35 39 L 44 39 C 41 45, 37 48, 32 48 C 23 48, 17 41, 17 32 C 17 23, 23 16, 32 16 C 36 16, 39 17, 42 19 L 49 11 C 43 7, 38 6, 32 6 Z" />
+      <ellipse class="paper" cx="25" cy="24" rx="3.6" ry="3.2" />
+      <circle class="ink"   cx="26" cy="24.5" r="1.7" />
+      <path class="paper-s" stroke-width="2.4" stroke-linecap="round"
+            d="M 21 20 L 29 22" />
+      <ellipse class="gMouth acc" cx="42" cy="36" rx="3" ry="3.5" />
+    </g>
+    <circle class="c1ring acc-s" cx="49" cy="22" r="4" stroke-width="2" />
+    <circle class="c1ring r2 acc-s" cx="49" cy="22" r="4" stroke-width="2" />
+    <circle class="c1ring r3 acc-s" cx="49" cy="22" r="4" stroke-width="2" />
+    <g class="c1note">
+      <ellipse class="acc" cx="52" cy="22" rx="2.4" ry="1.8" transform="rotate(-20 52 22)" />
+      <rect class="acc" x="53.4" y="14" width="1.4" height="9" />
+    </g>
+    <g class="c1note n2">
+      <ellipse class="acc" cx="52" cy="22" rx="2.4" ry="1.8" transform="rotate(-20 52 22)" />
+      <rect class="acc" x="53.4" y="14" width="1.4" height="9" />
+    </g>
+  </svg>
+</template>
+
+<template id="t-fist-alive">
+  <svg class="mascot fistMascot alive" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+    <!-- Swoosh motion lines -->
+    <path class="c2swoosh acc-s" stroke-width="2.5" stroke-linecap="round"
+          d="M 12 18 Q 12 12 12 6" />
+    <path class="c2swoosh s2 acc-s" stroke-width="2.5" stroke-linecap="round"
+          d="M 52 18 Q 52 12 52 6" />
+    <g class="c2fist">
+      <rect class="acc" x="21" y="48" width="22" height="11" rx="2.5" />
+      <path class="ink" d="M 17 28 C 17 23, 21 20, 26 20 L 38 20 C 43 20, 47 23, 47 28 L 47 50 C 47 53, 44 56, 41 56 L 23 56 C 20 56, 17 53, 17 50 Z" />
+      <path class="paper-s" stroke-width="1.6" stroke-linecap="round"
+            d="M 22 30 Q 32 27 42 30" />
+      <path class="paper-s" stroke-width="1.4" stroke-linecap="round"
+            d="M 25 32 L 25 42 M 32 31 L 32 42 M 39 32 L 39 42" />
+      <path class="ink" d="M 13 38 C 13 33, 16 30, 21 30 L 26 30 L 26 44 L 21 44 C 16 44, 13 41, 13 38 Z" />
+      <path class="paper-s" stroke-width="1.2" stroke-linecap="round" opacity="0.55"
+            d="M 16 35 Q 19 34 22 36" />
+    </g>
+  </svg>
+</template>
+
+<template id="t-kid-alive">
+  <svg class="mascot kidMascot alive" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+    <g class="c3body">
+      <!-- Body -->
+      <path class="acc" d="M 18 38 C 18 30, 24 26, 32 26 C 40 26, 46 30, 46 38 L 46 49 C 46 51, 44 53, 41 53 L 23 53 C 20 53, 18 51, 18 49 Z" />
+      <rect class="warn" x="19" y="13" width="26" height="4.5" rx="2" />
+      <!-- Head -->
+      <path class="ink" d="M 21 17 C 21 9, 26 5, 32 5 C 38 5, 43 9, 43 17 L 43 24 C 43 27, 38 29, 32 29 C 26 29, 21 27, 21 24 Z" />
+      <path class="ink" d="M 26 6 L 28 1 L 30 5 L 33 1 L 35 5 L 37 1 L 39 6 Z" />
+      <circle class="paper" cx="28" cy="18" r="2.4" />
+      <circle class="paper" cx="36" cy="18" r="2.4" />
+      <circle class="ink" cx="28.6" cy="18.5" r="1.1" />
+      <circle class="ink" cx="36.6" cy="18.5" r="1.1" />
+      <path class="paper-s" stroke-width="1.8" stroke-linecap="round"
+            d="M 25 14 L 30 16  M 39 14 L 34 16" />
+      <ellipse class="paper" cx="32" cy="23" rx="2.4" ry="1.3" />
+      <!-- Arms swinging from shoulder pivot -->
+      <g class="c3armF">
+        <rect class="acc" x="13" y="32" width="6" height="14" rx="3" />
+        <circle class="ink" cx="16" cy="46" r="3.5" />
+      </g>
+      <g class="c3armB">
+        <rect class="acc" x="45" y="32" width="6" height="14" rx="3" />
+        <circle class="ink" cx="48" cy="46" r="3.5" />
+      </g>
+      <!-- Legs -->
+      <g class="c3legF">
+        <rect class="ink" x="24" y="48" width="6" height="11" rx="2.5" />
+        <ellipse class="ink" cx="27" cy="60" rx="5" ry="2.5" />
+      </g>
+      <g class="c3legB">
+        <rect class="ink" x="34" y="48" width="6" height="11" rx="2.5" />
+        <ellipse class="ink" cx="37" cy="60" rx="5" ry="2.5" />
+      </g>
+    </g>
+    <!-- Dust puffs behind -->
+    <circle class="c3dust acc" cx="12" cy="58" r="2.8" opacity="0.4" />
+    <circle class="c3dust d2 acc" cx="7"  cy="60" r="2.2" opacity="0.4" />
+    <circle class="c3dust d3 acc" cx="3"  cy="59" r="1.8" opacity="0.4" />
+  </svg>
+</template>
+
+<template id="t-mega-alive">
+  <svg class="mascot megaMascot alive" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+    <!-- Sound waves behind the rim -->
+    <path class="c4wave acc-s" stroke-width="2.4" stroke-linecap="round"
+          d="M 55 22 Q 60 36 55 50" />
+    <path class="c4wave w2 acc-s" stroke-width="2.4" stroke-linecap="round"
+          d="M 55 22 Q 60 36 55 50" />
+    <path class="c4wave w3 acc-s" stroke-width="2.4" stroke-linecap="round"
+          d="M 55 22 Q 60 36 55 50" />
+    <g class="c4body">
+      <rect class="ink" x="5" y="34" width="10" height="6" rx="2" />
+      <circle class="warn" cx="10" cy="33" r="1.6" />
+      <path class="acc" d="M 13 22 L 13 50 L 51 58 L 51 14 Z" />
+      <ellipse class="ink" cx="51" cy="36" rx="2.5" ry="22" />
+      <ellipse class="paper" cx="51" cy="36" rx="1.2" ry="18" />
+      <circle class="paper" cx="25" cy="30" r="3.4" />
+      <circle class="paper" cx="36" cy="30" r="3.4" />
+      <circle class="ink"   cx="26" cy="30.5" r="1.6" />
+      <circle class="ink"   cx="37" cy="30.5" r="1.6" />
+      <path class="ink-s" stroke-width="2.2" stroke-linecap="round"
+            d="M 21 25 L 28 27  M 39 27 L 33 25" />
+      <g class="c4mouth">
+        <ellipse class="ink" cx="30" cy="40" rx="5" ry="3.5" />
+        <ellipse class="paper" cx="30" cy="40" rx="3" ry="1.8" />
+      </g>
+    </g>
+  </svg>
+</template>
+
+<!-- ============================================================
+     CONCEPT 1 — BOOMBOX-G
+     ============================================================ -->
+<section class="concept">
+  <div class="concept-head">
+    <div class="concept-name">1. Boombox-G</div>
+    <div class="concept-tag">letterform · loud · logo-ready</div>
+  </div>
+  <p class="concept-desc">
+    A bold slab-serif <b>G</b> with an open mouth in its notch — it sings, it
+    shouts, it broadcasts. Pure logomark: no character body, so no chance of
+    likeness collision.
+  </p>
+
+  <div class="row">
+    <div class="row-label">Static</div>
+    <div class="specimens">
+      <div class="specimen s-16"><div class="frame"><svg class="mascot gMascot" width="16" height="16" viewBox="0 0 64 64"><use href="#g-static" /></svg></div><div class="specimen-tag">16 px</div></div>
+      <div class="specimen s-32"><div class="frame"><svg class="mascot gMascot" width="32" height="32" viewBox="0 0 64 64"><use href="#g-static" /></svg></div><div class="specimen-tag">32 px</div></div>
+      <div class="specimen s-96"><div class="frame"><svg class="mascot gMascot" width="96" height="96" viewBox="0 0 64 64"><use href="#g-static" /></svg></div><div class="specimen-tag">96 px</div></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="row-label">Working</div>
+    <div class="specimens" data-stamp="t-g-alive">
+      <div class="specimen s-16"><div class="frame" data-size="16"></div><div class="specimen-tag">16 px</div></div>
+      <div class="specimen s-32"><div class="frame" data-size="32"></div><div class="specimen-tag">32 px</div></div>
+      <div class="specimen s-96"><div class="frame" data-size="96"></div><div class="specimen-tag">96 px</div></div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <b>Why it works</b> — Reads as a logo at 16 px (just a confident G silhouette).
+    At larger sizes the eyebrow furrow and singing mouth give it attitude.
+    Nothing here resembles a cartoon character — it's a letterform with a mood.
+    Animation: 1.6 s gentle bob + 0.7 s mouth pulse + 1.4 s sound rings on
+    offset delays so the loop boundary disappears.
+  </div>
+</section>
+
+<!-- ============================================================
+     CONCEPT 2 — FISTMARK
+     ============================================================ -->
+<section class="concept">
+  <div class="concept-head">
+    <div class="concept-name">2. Fistmark</div>
+    <div class="concept-tag">symbol · gesture · zero likeness risk</div>
+  </div>
+  <p class="concept-desc">
+    The most abstract option: a chunky raised cartoon fist, no body. Pure
+    gesture. The bully energy survives the abstraction; the IP risk evaporates.
+  </p>
+
+  <div class="row">
+    <div class="row-label">Static</div>
+    <div class="specimens">
+      <div class="specimen s-16"><div class="frame"><svg class="mascot fistMascot" width="16" height="16" viewBox="0 0 64 64"><use href="#fist-static" /></svg></div><div class="specimen-tag">16 px</div></div>
+      <div class="specimen s-32"><div class="frame"><svg class="mascot fistMascot" width="32" height="32" viewBox="0 0 64 64"><use href="#fist-static" /></svg></div><div class="specimen-tag">32 px</div></div>
+      <div class="specimen s-96"><div class="frame"><svg class="mascot fistMascot" width="96" height="96" viewBox="0 0 64 64"><use href="#fist-static" /></svg></div><div class="specimen-tag">96 px</div></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="row-label">Working</div>
+    <div class="specimens" data-stamp="t-fist-alive">
+      <div class="specimen s-16"><div class="frame" data-size="16"></div><div class="specimen-tag">16 px</div></div>
+      <div class="specimen s-32"><div class="frame" data-size="32"></div><div class="specimen-tag">32 px</div></div>
+      <div class="specimen s-96"><div class="frame" data-size="96"></div><div class="specimen-tag">96 px</div></div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <b>Why it works</b> — Strongest silhouette of the four at 16 px. Wrist cuff
+    in <i>--accent</i>, hand in <i>--text</i>, so it re-tones cleanly across
+    light/warm/dark and across accent presets. Animation pumps the fist with
+    two short swooshes — clean cycle, no trailing motion blur.
+  </div>
+</section>
+
+<!-- ============================================================
+     CONCEPT 3 — BOLT-KID
+     ============================================================ -->
+<section class="concept">
+  <div class="concept-head">
+    <div class="concept-name">3. Bolt-Kid</div>
+    <div class="concept-tag">character · running cycle · most "mascot-y"</div>
+  </div>
+  <p class="concept-desc">
+    An original chunky character — round dumpling body, spiky tuft, sweatband,
+    angry V brows. Deliberately different shape language than Doraemon's Gian:
+    no striped shirt (plain accent body), no pageboy haircut (a spiky tuft),
+    not a circle head (a softer rectangle). Same "tough little kid" energy.
+  </p>
+
+  <div class="row">
+    <div class="row-label">Static</div>
+    <div class="specimens">
+      <div class="specimen s-16"><div class="frame"><svg class="mascot kidMascot" width="16" height="16" viewBox="0 0 64 64"><use href="#kid-static" /></svg></div><div class="specimen-tag">16 px</div></div>
+      <div class="specimen s-32"><div class="frame"><svg class="mascot kidMascot" width="32" height="32" viewBox="0 0 64 64"><use href="#kid-static" /></svg></div><div class="specimen-tag">32 px</div></div>
+      <div class="specimen s-96"><div class="frame"><svg class="mascot kidMascot" width="96" height="96" viewBox="0 0 64 64"><use href="#kid-static" /></svg></div><div class="specimen-tag">96 px</div></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="row-label">Working</div>
+    <div class="specimens" data-stamp="t-kid-alive">
+      <div class="specimen s-16"><div class="frame" data-size="16"></div><div class="specimen-tag">16 px</div></div>
+      <div class="specimen s-32"><div class="frame" data-size="32"></div><div class="specimen-tag">32 px</div></div>
+      <div class="specimen s-96"><div class="frame" data-size="96"></div><div class="specimen-tag">96 px</div></div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <b>Why it works</b> — Highest personality density at 96 px. Shape language
+    deliberately diverges from the comic Gian: dumpling torso (not long-shirt
+    rectangle), spiky tuft (not bowl-cut), rounded-rect head (not circle).
+    At 16 px detail collapses into colored blobs — this works best as the
+    showcase / empty-state hero, not the favicon. Animation: arms + legs
+    swing on a 0.55 s cycle with a tiny body hop; dust puffs trail behind.
+  </div>
+</section>
+
+<!-- ============================================================
+     CONCEPT 4 — MEGAPHONE-HEAD
+     ============================================================ -->
+<section class="concept">
+  <div class="concept-head">
+    <div class="concept-name">4. Megaphone-Head</div>
+    <div class="concept-tag">object · shouting · object-with-face</div>
+  </div>
+  <p class="concept-desc">
+    A megaphone with eyes on the cone and a wide shouting mouth at the throat;
+    soundwaves blast out the rim. Object-as-mascot — channels Gian's famously
+    terrible singing without any anthropomorphic likeness.
+  </p>
+
+  <div class="row">
+    <div class="row-label">Static</div>
+    <div class="specimens">
+      <div class="specimen s-16"><div class="frame"><svg class="mascot megaMascot" width="16" height="16" viewBox="0 0 64 64"><use href="#mega-static" /></svg></div><div class="specimen-tag">16 px</div></div>
+      <div class="specimen s-32"><div class="frame"><svg class="mascot megaMascot" width="32" height="32" viewBox="0 0 64 64"><use href="#mega-static" /></svg></div><div class="specimen-tag">32 px</div></div>
+      <div class="specimen s-96"><div class="frame"><svg class="mascot megaMascot" width="96" height="96" viewBox="0 0 64 64"><use href="#mega-static" /></svg></div><div class="specimen-tag">96 px</div></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="row-label">Working</div>
+    <div class="specimens" data-stamp="t-mega-alive">
+      <div class="specimen s-16"><div class="frame" data-size="16"></div><div class="specimen-tag">16 px</div></div>
+      <div class="specimen s-32"><div class="frame" data-size="32"></div><div class="specimen-tag">32 px</div></div>
+      <div class="specimen s-96"><div class="frame" data-size="96"></div><div class="specimen-tag">96 px</div></div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <b>Why it works</b> — Conceptually the strongest "Gian without Gian" — the
+    icon literally <i>is</i> his terrible singing made tangible. Object-as-mascot
+    is also the safest IP path. Animation: cone shakes from the volume, mouth
+    pulses, three waves blast out the rim on staggered delays for a smooth cycle.
+  </div>
+</section>
+
+<footer>
+  pick a direction — we'll refine silhouette, full-color lockup, and favicon variants next.
+</footer>
+
+</div>
+
+<script>
+  // Theme + accent toggles
+  const body = document.body;
+  document.querySelectorAll('.tbtn[data-set]').forEach(b => {
+    b.addEventListener('click', () => {
+      body.dataset.theme = b.dataset.set;
+      document.querySelectorAll('.tbtn[data-set]').forEach(x =>
+        x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+    });
+  });
+  document.querySelectorAll('.tbtn[data-accent]').forEach(b => {
+    b.addEventListener('click', () => {
+      body.dataset.accent = b.dataset.accent;
+      document.querySelectorAll('.tbtn[data-accent]').forEach(x =>
+        x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+    });
+  });
+
+  // Stamp the animated mascot template into each frame at the right size.
+  // We do this once at load — animations are CSS keyframes so each copy
+  // loops independently but in sync (they start at the same instant).
+  document.querySelectorAll('[data-stamp]').forEach(row => {
+    const tplId = row.getAttribute('data-stamp');
+    const tpl = document.getElementById(tplId);
+    if (!tpl) return;
+    row.querySelectorAll('.frame[data-size]').forEach(frame => {
+      const size = frame.getAttribute('data-size');
+      const clone = tpl.content.firstElementChild.cloneNode(true);
+      clone.setAttribute('width', size);
+      clone.setAttribute('height', size);
+      frame.appendChild(clone);
+    });
+  });
+</script>
+</body>
+</html>
