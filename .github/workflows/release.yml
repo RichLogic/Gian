@@ -56,7 +56,9 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify source
-        run: pnpm typecheck
+        run: |
+          pnpm --filter @gian/shared build
+          pnpm typecheck
 
       - name: Build proxy release assets
         run: pnpm release:proxies
