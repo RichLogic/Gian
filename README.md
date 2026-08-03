@@ -96,7 +96,7 @@ Useful release commands:
 # Build the three versioned proxy assets and SHA-256 files.
 pnpm release:proxies
 
-# Build a local macOS Apple Silicon App, DMG, and ZIP.
+# Build a local macOS Apple Silicon App and DMG.
 GIAN_GITHUB_CLIENT_ID=<your-oauth-client-id> pnpm desktop:dmg
 ```
 
@@ -104,23 +104,16 @@ Create a GitHub OAuth App, enable Device Flow, and use its public Client ID.
 No client secret is embedded in Gian. The login requests no OAuth scopes, so
 it reads only the authenticated user's public profile.
 
-Tagged versions are built, signed, notarized, checked, and published by
-`.github/workflows/release.yml`. Maintainers must configure the documented
-Apple signing and notarization secrets before pushing a `v<version>` tag.
+Tagged beta versions are built and published by `.github/workflows/release.yml`
+as **unsigned, unnotarized self-use artifacts**. The workflow disables signing
+identity auto-discovery so every runner produces the same kind of build, and it
+marks the GitHub Release as a prerelease.
 
-### Publish a release
+### Publish an unsigned beta
 
-Configure these GitHub Actions repository secrets once:
-
-- `MAC_CSC_LINK`: exported Developer ID Application certificate (`.p12`), as
-  Base64 or a GitHub-downloadable private URL.
-- `MAC_CSC_KEY_PASSWORD`: password for that certificate.
-- `APPLE_ID`: Apple ID used for notarization.
-- `APPLE_APP_SPECIFIC_PASSWORD`: app-specific password for that Apple ID.
-- `APPLE_TEAM_ID`: Apple Developer Team ID.
-
-Also configure the repository variable `GIAN_GITHUB_CLIENT_ID` with the public
-Client ID of a GitHub OAuth App that has Device Flow enabled.
+Configure the repository variable `GIAN_GITHUB_CLIENT_ID` with the public Client
+ID of a GitHub OAuth App that has Device Flow enabled. No Apple Developer
+membership or signing secret is required for this beta workflow.
 
 Keep the root and workspace package versions aligned, commit the release, then
 push the matching tag:
@@ -131,9 +124,20 @@ git push origin v0.1.0
 ```
 
 The workflow runs all checks, builds the three proxy archives, creates the
-signed and notarized arm64 DMG/ZIP, verifies the App with macOS tools, and
-publishes every artifact plus SHA-256 checksums to one GitHub Release. No Gian
+unsigned arm64 DMG, verifies the expected bundle/runtime files, and
+publishes every artifact plus SHA-256 checksums to one prerelease. No Gian
 server is involved.
+
+Because the App has no Developer ID signature or Apple notarization ticket,
+macOS Gatekeeper warns when opening a downloaded build. Move Gian to
+Applications, try to open it once, then use **System Settings > Privacy &
+Security > Open Anyway** if you trust the release. Do not disable Gatekeeper
+globally. See [Apple's instructions for opening an app from an unknown
+developer](https://support.apple.com/guide/mac-help/mh40616/mac).
+
+Before distributing Gian to other users, replace this beta workflow with the
+retained `make:mac:release` signing/notarization path and a Developer ID
+certificate.
 
 ## Local data
 

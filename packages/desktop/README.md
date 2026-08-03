@@ -30,16 +30,17 @@ pnpm dev
 # Build an unpacked macOS Apple Silicon App.
 GIAN_GITHUB_CLIENT_ID=<your-oauth-client-id> pnpm desktop:pack
 
-# Build local DMG and ZIP artifacts.
+# Build a local DMG artifact.
 GIAN_GITHUB_CLIENT_ID=<your-oauth-client-id> pnpm desktop:dmg
 
 # Build the proxy assets uploaded alongside the App release.
 pnpm release:proxies
 ```
 
-The tag workflow builds, signs, notarizes, validates, checksums, and publishes
-the App and proxy assets. Local builds remain unsigned unless signing
-credentials are present.
+The current tag workflow builds, validates, checksums, and publishes an
+explicitly unsigned/unnotarized self-use prerelease plus the proxy assets. It
+sets `CSC_IDENTITY_AUTO_DISCOVERY=false`; `make:mac:release` remains available
+for a future Developer ID signing/notarization workflow.
 
 For isolated development, `GIAN_DESKTOP_HOST_URL` and
 `GIAN_DESKTOP_WEB_URL` can override the two origins.

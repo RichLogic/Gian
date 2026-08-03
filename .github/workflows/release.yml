@@ -47,21 +47,10 @@ jobs:
             test "$(node -p "require('./${MANIFEST}').version")" = "${VERSION}"
           done
 
-      - name: Verify signing secrets
+      - name: Verify beta release configuration
         env:
-          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           GIAN_GITHUB_CLIENT_ID: ${{ vars.GIAN_GITHUB_CLIENT_ID }}
-        run: |
-          test -n "${MAC_CSC_LINK}"
-          test -n "${MAC_CSC_KEY_PASSWORD}"
-          test -n "${APPLE_ID}"
-          test -n "${APPLE_APP_SPECIFIC_PASSWORD}"
-          test -n "${APPLE_TEAM_ID}"
-          test -n "${GIAN_GITHUB_CLIENT_ID}"
+        run: test -n "${GIAN_GITHUB_CLIENT_ID}"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -72,25 +61,22 @@ jobs:
       - name: Build proxy release assets
         run: pnpm release:proxies
 
-      - name: Build, sign, and notarize Gian
-        run: pnpm --filter @gian/desktop make:mac:release
+      - name: Build unsigned Gian beta
+        run: pnpm --filter @gian/desktop make:mac
         env:
-          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
           GIAN_GITHUB_CLIENT_ID: ${{ vars.GIAN_GITHUB_CLIENT_ID }}
 
-      - name: Verify signed application
+      - name: Verify unsigned beta artifacts
         run: |
-          codesign --verify --deep --strict --verbose=2 packages/desktop/release/mac-arm64/Gian.app
-          xcrun stapler validate packages/desktop/release/mac-arm64/Gian.app
-          spctl --assess --verbose --type exec packages/desktop/release/mac-arm64/Gian.app
+          VERSION="$(node -p "require('./package.json').version")"
+          test -x packages/desktop/release/mac-arm64/Gian.app/Contents/MacOS/Gian
+          test -x packages/desktop/release/mac-arm64/Gian.app/Contents/Resources/runtime/node
+          test -f "packages/desktop/release/Gian-${VERSION}-arm64.dmg"
 
       - name: Create desktop checksums
         working-directory: packages/desktop/release
-        run: shasum -a 256 Gian-*.dmg Gian-*.zip > SHA256SUMS
+        run: shasum -a 256 Gian-*.dmg > SHA256SUMS
 
       - name: Publish GitHub Release
         env:
@@ -98,9 +84,10 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             packages/desktop/release/Gian-*.dmg \
-            packages/desktop/release/Gian-*.zip \
             packages/desktop/release/SHA256SUMS \
             artifacts/proxies/* \
             --verify-tag \
             --generate-notes \
-            --title "Gian ${GITHUB_REF_NAME}"
+            --notes "Unsigned self-use beta. This build is not signed or notarized; see README for macOS Gatekeeper instructions." \
+            --prerelease \
+            --title "Gian ${GITHUB_REF_NAME} (unsigned beta)"

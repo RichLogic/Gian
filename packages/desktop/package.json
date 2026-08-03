@@ -14,8 +14,8 @@
     "start": "electron .",
     "bundle:build": "pnpm --filter @gian/desktop... build && pnpm --filter @gian/web build && node ../../scripts/prepare-desktop-runtime.mjs",
     "package:mac": "pnpm run bundle:build && electron-builder --mac dir --arm64",
-    "make:mac": "pnpm run bundle:build && electron-builder --mac dmg zip --arm64",
-    "make:mac:release": "pnpm run bundle:build && electron-builder --mac dmg zip --arm64 --config.mac.notarize=true",
+    "make:mac": "pnpm run bundle:build && electron-builder --mac dmg --arm64",
+    "make:mac:release": "pnpm run bundle:build && electron-builder --mac dmg --arm64 --config.mac.notarize=true",
     "clean": "rm -rf dist release *.tsbuildinfo"
   },
   "dependencies": {
