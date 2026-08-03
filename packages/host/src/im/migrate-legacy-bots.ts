@@ -6,7 +6,7 @@
  * 不兼容点处理:
  *   - **加密格式**:老 `extra` 列是 `iv:tag:cipher` (hex) 形式,scrypt(env GIAN_SECRET) 派生 key,
  *     整个 BotExtra JSON 一起加密。这里读出来 → 拆字段 → 用平台独立的
- *     per-token base64url 加密(key 来自 ~/.config/gian/{discord,slack}.key)重写。
+ *     per-token base64url 加密(key 来自 ~/.gian/{discord,slack}.key)重写。
  *   - **mode 字段** (read-only/full-control):平台模型不再保存 bot mode,
  *     session 使用自己的 `approval_mode`。这一列直接丢弃。
  *

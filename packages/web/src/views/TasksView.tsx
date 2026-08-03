@@ -1,102 +1,46 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { ApprovalDecision, ApprovalMode, Executor, NativeConfigValue, Session, Task, ThinkingEffort, Workspace } from '@gian/shared';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { Executor, Session, Task, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import { ModeDropdown } from '../components/ModeDropdown.js';
 import type { Mode } from '../components/Topbar.js';
 import { StatusIcon, statusGlyphShown, relTime } from './session-list-status.js';
-import type { QueueEntry, TranscriptItem } from '../types.js';
-import type { ApprovalActionContext } from '../types.js';
-import type { GianWs } from '../ws.js';
+import { NewSessionView } from './new-session-view.js';
+import type { CreateSessionInput } from './new-session-view.js';
+import { completeSubtask, createSubtask, reopenSubtask } from '../api.js';
+import { confirm as confirmDialog, toast } from '../feedback.js';
 import { sessionNeedsAttention } from '../session-routing.js';
-import { ManagerPanel } from './task-manager-panels.js';
-export { ManagerInspector } from './task-manager-panels.js';
-
-/** The session-level handlers the full Manager composer needs, pre-bound to the
- *  Manager session id by App (the Manager IS a session, so these are the same
- *  handlers a normal SessionMain uses). */
-export interface ManagerComposerHandlers {
-  onSetModel: (model: string) => void;
-  onSetMode: (mode: ApprovalMode) => void;
-  onSetEffort: (effort: ThinkingEffort | null) => void;
-  onSetServiceTier: (tier: 'fast' | null) => void;
-  onSetNativeConfig: (configId: string, value: NativeConfigValue) => void;
-  onSendSkill: (name: string, path: string) => void;
-  onQueueAdd: (text: string, attachments?: Array<{ path: string; name: string; mime: string }>) => void;
-  onQueueRemove: (queueId: string) => void;
-  onQueueReorder: (order: string[]) => void;
-  onQueueClear: () => void;
-  onQueueSendNow: () => void;
-  onApprove: (
-    approvalId: string,
-    decision: ApprovalDecision,
-    answers?: Record<string, string | string[]>,
-    context?: ApprovalActionContext,
-  ) => void;
-}
-
-/** Params the A1 "create subtask from this" prefilled form collects. */
-export interface NewSubtaskDraft {
-  workspace_id: string;
-  executor: Executor;
-  name?: string;
-  prompt: string;
-}
-
-/** A resolved manual subtask-create card that stays in the Manager conversation
- *  after the user creates it from the inline form. Non-interactive once it lands. */
-export interface ManagerSubtaskCard {
-  /** Subtask session id. */
-  id: string;
-  status: 'created';
-  name?: string;
-  /** Display name of the chosen workspace. */
-  workspaceLabel?: string;
-  executor: Executor;
-  prompt: string;
-  /** Creation time (ms). Anchors the card to its timeline position so it stays
-   *  inline at the point the user acted, not at the bottom of the conversation. */
-  ts: number;
-  /** Whether this card's context note has already been folded into a Manager
-   *  message (so it isn't sent twice). */
-  acked: boolean;
-}
-
-/** Build the hidden, LLM-facing context note for a resolved card — prepended to
- *  the Manager's next message so it learns which manual subtask was created.
- *  English to match the Manager system prompt. */
-export function managerCardContextNote(card: ManagerSubtaskCard): string {
-  const bits = [
-    card.name ? `name: "${card.name}"` : null,
-    card.workspaceLabel ? `workspace: "${card.workspaceLabel}"` : null,
-    `executor: ${card.executor}`,
-  ].filter(Boolean).join(', ');
-  return `[The user created a subtask — ${bits}. Its initial prompt was pre-filled into that subtask's composer for the user to send.]`;
-}
+import type { GianWs } from '../ws.js';
 
 // ── V2 icon paths (verbatim subset from design/gian-design-v2/js/data.jsx) ──
 const I = {
   plus: 'M12 5v14 M5 12h14',
   check: 'M5 12l5 5L20 7',
   search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-4.3-4.3',
-  send: 'M5 12l14-7-5 17-3-7z',
-  refresh: 'M3 12a9 9 0 0 1 15.5-6.3L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15.5 6.3L3 16 M3 21v-5h5',
   caretRight: 'M9 6l6 6-6 6',
   caretDown: 'M6 9l6 6 6-6',
-  x: 'M6 6l12 12 M6 18L18 6',
-  // list-checks — the task-group icon (2026-07-31). A checklist reads as "a
+  // pushpin — pin / unpin (same glyph as the Sessions rail pin).
+  pin: 'M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4a1 1 0 0 1 1 1z',
+  // kebab (horizontal ⋯) — the per-task "more actions" menu trigger.
+  kebab: 'M5 12.01v-.02 M12 12.01v-.02 M19 12.01v-.02',
+  // list-todo — the expanded task-group icon (2026-08-03, replaces
+  // list-checks). The rect+check reads as "an open checklist".
+  listTodo: 'M4 5h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z M3 17l2 2 4-4 M13 6h8 M13 12h8 M13 18h8',
+  // list-collapse — the collapsed task-group icon (2026-08-03).
+  listCollapse: 'M10 5h11 M10 12h11 M10 19h11 M3 10l3-3-3-3 M3 20l3-3-3-3',
+  // list-checks — the done-task row icon (2026-07-31). A checklist reads as "a
   // task with steps" and avoids overloading the pin, which already means
-  // "pinned to top" in the task menu. Collapsed = dim, expanded = dark (CSS).
+  // "pinned to top" in the task menu.
   listChecks: 'M3 17l2 2 4-4 M3 7l2 2 4-4 M13 6h8 M13 12h8 M13 18h8',
 };
 
-function Icon({ d, size = 14, stroke = 1.8 }: { d: string; size?: number; stroke?: number }) {
+function Icon({ d, size = 14, stroke = 1.8, filled = false }: { d: string; size?: number; stroke?: number; filled?: boolean }) {
   return (
     <svg
       viewBox="0 0 24 24"
       width={size}
       height={size}
-      fill="none"
+      fill={filled ? 'currentColor' : 'none'}
       stroke="currentColor"
       strokeWidth={stroke}
       strokeLinecap="round"
@@ -107,24 +51,32 @@ function Icon({ d, size = 14, stroke = 1.8 }: { d: string; size?: number; stroke
   );
 }
 
-/** A Subtask is a Session with type==='subtask' and a matching task_id. Ordered
- *  by creation time, newest first (created_at DESC) — a stable "steps" order
- *  that doesn't jump around on activity (decided 2026-07-01). */
-function subtasksFor(sessions: Session[], taskId: string): Session[] {
+/** A Subtask is a Session with type==='subtask' and a matching task_id. Open
+ *  subtasks come first — pinned ones float to the top (pinned_at DESC), the
+ *  rest keep the stable "steps" order (created_at DESC, decided 2026-07-01)
+ *  that doesn't jump around on activity. User-completed subtasks
+ *  (`completed_at`) sink to the bottom (created_at DESC); they can't be
+ *  pinned. ISO-8601 strings compare lexicographically in time order. */
+export function subtasksFor(sessions: Session[], taskId: string): Session[] {
   return sessions
     .filter(s => s.task_id === taskId && s.type === 'subtask')
-    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    .sort((a, b) => {
+      const ad = a.completed_at != null ? 1 : 0;
+      const bd = b.completed_at != null ? 1 : 0;
+      if (ad !== bd) return ad - bd;
+      if (!ad) {
+        const ap = a.pinned_at, bp = b.pinned_at;
+        if (ap && bp) return bp.localeCompare(ap);
+        if (ap) return -1;
+        if (bp) return 1;
+      }
+      return b.created_at.localeCompare(a.created_at);
+    });
 }
 
-/** Task ordering for the open group (decided 2026-07-01): pinned tasks first,
- *  most-recently-pinned on top (pinned_at DESC); the rest by creation time,
- *  newest first (created_at DESC). ISO-8601 strings compare lexicographically
- *  in time order. The done group ignores pins and just uses created_at DESC. */
-function compareOpenTasks(a: Task, b: Task): number {
-  const ap = a.pinned_at, bp = b.pinned_at;
-  if (ap && bp) return bp.localeCompare(ap);
-  if (ap) return -1;
-  if (bp) return 1;
+/** Task ordering (2026-08-03: task pin removed): creation time, newest first
+ *  (created_at DESC) — the same order in both the open and done groups. */
+function compareTasks(a: Task, b: Task): number {
   return b.created_at.localeCompare(a.created_at);
 }
 
@@ -137,24 +89,11 @@ export function TasksView({
   sessions,
   workspaces,
   ws,
-  defaultTaskExecutor,
   activeTaskId,
   activeSubtaskId,
-  managerSession,
-  managerItems,
-  managerPending,
-  managerCards,
-  managerHandlers,
-  managerQueue,
-  showManagerRaw,
-  onToggleManagerRaw,
   subtaskMain,
-  onSelectTask,
   onSelectSubtask,
-  onManagerMount,
-  onManagerSend,
-  onManagerStop,
-  onCreateSubtask,
+  onWorkspaceCreated,
 }: {
   /** Top-level app mode — the sidebar's mode dropdown reads/drives this. */
   mode: Mode;
@@ -165,54 +104,29 @@ export function TasksView({
   sessions: Session[];
   workspaces: Workspace[];
   ws: GianWs;
-  /** Which executor a plain click on the sidebar "+" creates the PM on
-   *  (`config.default_task_executor`). The "+" hover menu overrides it. */
-  defaultTaskExecutor: Executor;
   activeTaskId: string | null;
   activeSubtaskId: string | null;
-  /** The active Task's Manager session (type='manager'), or null until it has
-   *  been ensured. Drives the shared Composer (draft persistence keyed by this
-   *  session id, Send→Stop toggle). */
-  managerSession: Session | null;
-  /** Transcript items for the active Task's Manager session (App looks them up
-   *  by the manager session id and hands them down). */
-  managerItems: TranscriptItem[];
-  /** Whether the Manager has a turn in flight. */
-  managerPending: boolean;
-  /** "Created" subtask cards (left by the manual create form) that stay in the
-   *  Manager conversation for the active Task. */
-  managerCards: ManagerSubtaskCard[];
-  /** Session-level handlers (model / mode / effort / slash / queue / approve)
-   *  pre-bound to the Manager session id — the full Manager composer reuses
-   *  them. Null until the Manager session is ensured. */
-  managerHandlers: ManagerComposerHandlers | null;
-  /** The Manager session's message queue (for the QueueList). */
-  managerQueue: QueueEntry[];
-  /** Debug switch: show the Manager transcript's raw plumbing (system prompt /
-   *  create_subtask blocks) instead of stripping it. */
-  showManagerRaw: boolean;
-  /** Toggle `showManagerRaw`. */
-  onToggleManagerRaw: () => void;
   /** A Subtask IS a Session: when one is selected, App builds the full
-   *  <SessionMain> element (the same one CodingView renders in Sessions mode,
-   *  wired to the same App-level handlers rebound to the subtask's id) and
-   *  hands it down here. It already renders its own `.main`, so TaskDetail
-   *  drops it in place of the parent task's Manager panel. Null when no
+   *  <SessionSurface> element (the same one CodingView renders in Sessions
+   *  mode, wired to the same App-level handlers rebound to the subtask's id)
+   *  and hands it down here. It already renders its own `.main`, so
+   *  TaskDetail drops it in place of the task placeholder. Null when no
    *  subtask is selected. */
   subtaskMain: React.ReactNode;
-  onSelectTask: (taskId: string) => void;
   onSelectSubtask: (taskId: string, subtaskId: string) => void;
-  /** Called when a Task detail opens — App ensures the Manager session exists
-   *  and hydrates its transcript. */
-  onManagerMount: (taskId: string) => void;
-  /** Send a message to the Task's Manager (A1), optionally with attachments. */
-  onManagerSend: (taskId: string, text: string, opts?: { attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }> }) => void;
-  /** Stop the Task's Manager turn (session:stop on the manager session). */
-  onManagerStop: (taskId: string) => void;
-  /** Create a Subtask from the manual create form. */
-  onCreateSubtask: (taskId: string, draft: NewSubtaskDraft) => void;
+  /** NewSessionView lets the user create a workspace inline; App owns the
+   *  workspace list. */
+  onWorkspaceCreated: (workspace: Workspace) => void;
 }) {
+  const t = useT();
   const rail = useResizableWidth('rail.w', 272, 200, 480, 'left');
+
+  // Task-context new-session form (sidebar task-row "+" and the ⌘J/⌘K
+  // "new subtask" shortcut open it): the shared NewSessionView with the task
+  // shown read-only; submit goes to POST /api/tasks/:id/subtasks.
+  const [newForTaskId, setNewForTaskId] = useState<string | null>(null);
+  const [newForExecutor, setNewForExecutor] = useState<Executor | undefined>(undefined);
+  const [creatingSubtask, setCreatingSubtask] = useState(false);
 
   // The top-left "Gian" brand button broadcasts `gian.toggle-rail` (Topbar);
   // each view collapses its own rail. Sessions (CodingView) already listens —
@@ -223,10 +137,47 @@ export function TasksView({
     return () => window.removeEventListener('gian.toggle-rail', onToggle);
   }, [rail]);
 
-  const activeTask = tasks.find(t => t.id === activeTaskId) ?? null;
+  // ⌘J / ⌘K (use-app-shortcuts) opens the new-session form for the selected
+  // task with the chosen agent preselected — same form the task-row "+" opens.
+  useEffect(() => {
+    const open = (event: Event) => {
+      if (!activeTaskId || activeSubtaskId) return;
+      const executor = (event as CustomEvent<{ executor?: Executor }>).detail?.executor;
+      setNewForExecutor(executor);
+      setNewForTaskId(activeTaskId);
+    };
+    window.addEventListener('gian:new-subtask', open);
+    return () => window.removeEventListener('gian:new-subtask', open);
+  }, [activeTaskId, activeSubtaskId]);
+
+  const activeTask = tasks.find(task => task.id === activeTaskId) ?? null;
   const activeSubtask = activeSubtaskId
     ? sessions.find(s => s.id === activeSubtaskId) ?? null
     : null;
+  const newForTask = newForTaskId
+    ? tasks.find(task => task.id === newForTaskId) ?? null
+    : null;
+
+  function openNewForTask(taskId: string) {
+    setNewForExecutor(undefined);
+    setNewForTaskId(taskId);
+  }
+
+  async function submitNewSubtask(taskId: string, input: CreateSessionInput) {
+    setCreatingSubtask(true);
+    const session = await createSubtask(taskId, {
+      workspace_id: input.workspaceId,
+      executor: input.executor,
+      ...(input.name ? { name: input.name } : {}),
+    });
+    setCreatingSubtask(false);
+    if (!session) {
+      toast({ kind: 'error', message: t('tasks.newSubtask.createFailed') });
+      return;
+    }
+    setNewForTaskId(null);
+    onSelectSubtask(taskId, session.id);
+  }
 
   return (
     <div
@@ -242,45 +193,37 @@ export function TasksView({
         tasks={tasks}
         sessions={sessions}
         ws={ws}
-        defaultTaskExecutor={defaultTaskExecutor}
-        activeTaskId={activeTaskId}
         activeSubtaskId={activeSubtaskId}
-        onSelectTask={onSelectTask}
         onSelectSubtask={onSelectSubtask}
+        onNewSession={openNewForTask}
       />
       <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize tasks list" />
-      <TaskDetail
-        task={activeTask}
-        subtask={activeSubtask}
-        subtaskMain={subtaskMain}
-        workspaces={workspaces}
-        managerSession={managerSession}
-        managerItems={managerItems}
-        managerPending={managerPending}
-        managerCards={managerCards}
-        managerHandlers={managerHandlers}
-        managerQueue={managerQueue}
-        showManagerRaw={showManagerRaw}
-        onToggleManagerRaw={onToggleManagerRaw}
-        onManagerMount={onManagerMount}
-        onManagerSend={onManagerSend}
-        onManagerStop={onManagerStop}
-        onCreateSubtask={onCreateSubtask}
-      />
+      {newForTask ? (
+        <NewSessionView
+          workspaces={workspaces}
+          taskName={newForTask.name}
+          initialExecutor={newForExecutor}
+          onWorkspaceCreated={onWorkspaceCreated}
+          creating={creatingSubtask}
+          onCancel={() => setNewForTaskId(null)}
+          onCreate={input => { void submitNewSubtask(newForTask.id, input); }}
+        />
+      ) : (
+        <TaskDetail
+          task={activeTask}
+          subtask={activeSubtask}
+          subtaskMain={subtaskMain}
+        />
+      )}
     </div>
   );
 }
 
-/** Inline new-task form — mirrors the search-row's affordance with a small
- *  two-field card under the sidebar head. */
+/** Inline new-task form — a small single-field card under the sidebar head. */
 function NewTaskForm({
-  executor,
   onSubmit,
   onCancel,
 }: {
-  /** Which executor the Task's PM will run on (chosen at the "+"). Shown here
-   *  so the user sees it before committing; the "+" hover menu changes it. */
-  executor: Executor;
   onSubmit: (input: { name: string }) => void;
   onCancel: () => void;
 }) {
@@ -295,10 +238,6 @@ function NewTaskForm({
 
   return (
     <div className="tasks-new-form">
-      <div className="tasks-new-pm">
-        <span className={`sb-newtask-dot ${executor}`} />
-        {t('tasks.form.pm')} · {executor === 'claude' ? 'Claude' : executor === 'codex' ? 'Codex' : 'Kimi'}
-      </div>
       <input
         className="tasks-new-input"
         aria-label={t('tasks.form.name.label')}
@@ -322,6 +261,176 @@ function NewTaskForm({
   );
 }
 
+/** The per-task "⋯" dropdown (reuses the Spaces workspace-kebab styles).
+ *  Open tasks get Rename/Mark-done; done tasks get Reopen/Delete
+ *  (2026-08-03: open tasks can't be deleted, done tasks can't be renamed). */
+function TaskMenu({
+  task,
+  anchorClass,
+  onRename,
+  onToggleDone,
+  onDelete,
+}: {
+  task: Task;
+  /** Trigger button class — `sb-act` on both the group header and done rows. */
+  anchorClass: string;
+  onRename: () => void;
+  onToggleDone: () => void;
+  onDelete: () => void;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  const done = task.status === 'done';
+  return (
+    <span className="ws-kebab-anchor" ref={ref}>
+      <button
+        type="button"
+        className={anchorClass}
+        data-testid={`task-menu-${task.id}`}
+        aria-label={t('tasks.menu.more')}
+        title={t('tasks.menu.more')}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={e => { e.stopPropagation(); setOpen(o => !o); }}
+      >
+        <Icon d={I.kebab} size={13} stroke={2.6} />
+      </button>
+      {open && (
+        <span className="ws-kebab-pop" role="menu" onClick={e => e.stopPropagation()}>
+          {!done && (
+            <button
+              className="ws-kebab-item"
+              role="menuitem"
+              onClick={() => { setOpen(false); onRename(); }}
+            >
+              {t('path.menu.rename')}
+            </button>
+          )}
+          <button
+            className="ws-kebab-item"
+            role="menuitem"
+            onClick={() => { setOpen(false); onToggleDone(); }}
+          >
+            {t(done ? 'tasks.reopen' : 'tasks.markDone')}
+          </button>
+          {done && (
+            <>
+              <span className="ws-kebab-divider" />
+              <button
+                className="ws-kebab-item danger"
+                role="menuitem"
+                onClick={() => { setOpen(false); onDelete(); }}
+              >
+                {t('common.delete')}
+              </button>
+            </>
+          )}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Shared task-menu action builders — the same operations the topbar task
+ *  menu performs (rename / done-toggle / delete), driven from the
+ *  sidebar row "⋯". */
+function useTaskActions(
+  ws: GianWs,
+  sessions: Session[],
+  setRenamingTaskId: (taskId: string) => void,
+) {
+  const t = useT();
+  return {
+    rename: (task: Task) => () => setRenamingTaskId(task.id),
+    toggleDone: (task: Task) => () => {
+      if (task.status !== 'done') {
+        const blocked = sessions.some(session =>
+          session.task_id === task.id
+          && session.type === 'subtask'
+          && (session.status === 'running' || session.status === 'pending'));
+        if (blocked) {
+          toast({ kind: 'error', message: t('tasks.done.blocked') });
+          return;
+        }
+      }
+      ws.send({
+        type: 'task:update',
+        task_id: task.id,
+        status: task.status === 'done' ? 'open' : 'done',
+      });
+    },
+    remove: (task: Task) => () => {
+      const count = sessions.filter(session => session.task_id === task.id).length;
+      const cascade = count > 0
+        ? ` ${t('tasks.remove.cascade').replace('{n}', String(count))}`
+        : '';
+      void confirmDialog({
+        message: `${t('tasks.remove.confirmPrefix')} "${task.name || t('tasks.untitled')}"? ${t('tasks.remove.confirmSuffix')}${cascade}`,
+        danger: true,
+        confirmLabel: t('common.delete'),
+      }).then(confirmed => {
+        if (confirmed) ws.send({ type: 'task:delete', task_id: task.id });
+      });
+    },
+  };
+}
+
+/** Inline task-name editor (sidebar ⋯ → Rename). Enter commits via
+ *  `task:update`, Escape / blur cancels. */
+function TaskRenameInput({
+  task,
+  ws,
+  onDone,
+}: {
+  task: Task;
+  ws: GianWs;
+  onDone: () => void;
+}) {
+  const t = useT();
+  const [name, setName] = useState(task.name);
+
+  function submit() {
+    const trimmed = name.trim();
+    if (trimmed && trimmed !== task.name) {
+      ws.send({ type: 'task:update', task_id: task.id, name: trimmed });
+    }
+    onDone();
+  }
+
+  return (
+    <input
+      className="tasks-new-input task-rename-input"
+      aria-label={t('tasks.form.name.label')}
+      value={name}
+      autoFocus
+      onClick={e => e.stopPropagation()}
+      onChange={e => setName(e.target.value)}
+      onKeyDown={e => {
+        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+        if (e.key === 'Enter') submit();
+        if (e.key === 'Escape') onDone();
+      }}
+      onBlur={onDone}
+    />
+  );
+}
+
 function TasksList({
   mode,
   onSetMode,
@@ -329,11 +438,9 @@ function TasksList({
   tasks,
   sessions,
   ws,
-  defaultTaskExecutor,
-  activeTaskId,
   activeSubtaskId,
-  onSelectTask,
   onSelectSubtask,
+  onNewSession,
 }: {
   mode: Mode;
   onSetMode: (mode: Mode) => void;
@@ -341,19 +448,17 @@ function TasksList({
   tasks: Task[];
   sessions: Session[];
   ws: GianWs;
-  defaultTaskExecutor: Executor;
-  activeTaskId: string | null;
   activeSubtaskId: string | null;
-  onSelectTask: (taskId: string) => void;
   onSelectSubtask: (taskId: string, subtaskId: string) => void;
+  /** Open the task-context new-session form (task-row "+"). */
+  onNewSession: (taskId: string) => void;
 }) {
   const t = useT();
   const [creating, setCreating] = useState(false);
-  const [createMenuOpen, setCreateMenuOpen] = useState(false);
-  // Which executor the new Task's PM runs on. Set by the "+" (plain click →
-  // the config default; hover menu → an explicit pick), rides into task:create.
-  const [createExecutor, setCreateExecutor] = useState<Executor>(defaultTaskExecutor);
-  const [doneOpen, setDoneOpen] = useState(false); // Done group collapsed by default (spec §G)
+  // Section collapse (2026-08-03 two-group layout): 完成 collapsed by
+  // default, not persisted. The open group has no section header (2026-08-03:
+  // the "In Progress" label was dropped — open tasks are the default list).
+  const [doneOpen, setDoneOpen] = useState(false);
   // Per-task subtask collapse (Codex-style, 2026-07-01). Default = expanded
   // (empty set); clicking the task's group header toggles it. Persisted so the
   // choice survives reloads.
@@ -363,6 +468,7 @@ function TasksList({
       return new Set(raw ? (JSON.parse(raw) as string[]) : []);
     } catch { return new Set(); }
   });
+  const [renamingTaskId, setRenamingTaskId] = useState<string | null>(null);
   const toggleTaskCollapsed = (taskId: string) => {
     setCollapsedTasks(prev => {
       const next = new Set(prev);
@@ -374,71 +480,81 @@ function TasksList({
 
   // Archived tasks are hidden from the list (they're a soft-delete state).
   const visible = useMemo(() => tasks.filter(task => task.status !== 'archived'), [tasks]);
-  // Sort on render (not by array order) so live pin/unpin re-orders instantly
-  // and matches the host snapshot after a refresh — no more "jump on reload".
+  // Sort on render (not by array order) so the list matches the host snapshot
+  // after a refresh — no more "jump on reload".
   const open = useMemo(
-    () => visible.filter(task => task.status === 'open').sort(compareOpenTasks),
+    () => visible.filter(task => task.status === 'open').sort(compareTasks),
     [visible],
   );
   const done = useMemo(
-    () => visible.filter(task => task.status === 'done')
-      .sort((a, b) => b.created_at.localeCompare(a.created_at)),
+    () => visible.filter(task => task.status === 'done').sort(compareTasks),
     [visible],
   );
 
-  // Open the create form for a specific PM executor. Plain "+" click passes the
-  // config default; the "+" hover menu passes an explicit executor.
-  function startCreate(executor: Executor) {
-    setCreateExecutor(executor);
-    setCreating(true);
-    setCreateMenuOpen(false);
-  }
+  const taskActions = useTaskActions(ws, sessions, setRenamingTaskId);
 
   function createTaskNow(input: { name: string }) {
     // Match how other entities are created in the app: fire a WS message and
-    // let the host echo back `task:created`. (REST createTask() also exists in
-    // api.ts for the initial/fallback path.) Description is optional on the
-    // wire and intentionally not collected by the form. `executor` picks which
-    // executor the Task's PM runs on (chosen at the "+").
-    ws.send({ type: 'task:create', name: input.name, executor: createExecutor });
+    // let the host echo back `task:created`. No executor is picked here — the
+    // task is a pure grouping; each session picks its own agent at creation.
+    ws.send({ type: 'task:create', name: input.name });
     setCreating(false);
   }
 
   // Open tasks (spec §C): EVERY one is expanded with its subtasks nested, so
   // multiple concurrent tasks stay visible at once. Aligned with the Sessions
-  // rail (CodingView): each task is a pure `.sb-group` header — clicking it ONLY
-  // toggles collapse, no selection. The task's Manager session renders as the
-  // group's first child row (`ManagerRow`); selecting it = selecting the task.
+  // rail (CodingView): each task is a `.sb-group` header — clicking it ONLY
+  // toggles collapse, exactly like a project group (2026-08-03: tasks are no
+  // longer selectable; only subtasks are). The hover "⋯" menu carries
+  // rename/done/delete, "+" opens the task-context new-session form.
   const renderOpen = (group: Task[]) =>
     group.map(task => {
       const childSubs = subtasksFor(sessions, task.id);
-      const mgr = sessions.find(s => s.task_id === task.id && s.type === 'manager') ?? null;
-      // Group count = children that NEED the user (待处理): the Manager + its
-      // subtasks, same rollup as the Sessions rail (2026-07-31). Hidden at zero.
-      const attnCount = childSubs.filter(sessionNeedsAttention).length
-        + (mgr && sessionNeedsAttention(mgr) ? 1 : 0);
+      // Group count = children that NEED the user (待处理), same rollup as the
+      // Sessions rail (2026-07-31). Hidden at zero.
+      const attnCount = childSubs.filter(sessionNeedsAttention).length;
       const isCollapsed = collapsedTasks.has(task.id);
       return (
         <div key={task.id} className="tasks-list-task">
-          <div className={`sb-group task-group${isCollapsed ? '' : ' open'}`} onClick={() => toggleTaskCollapsed(task.id)}>
-            <span className="sb-group-ico"><Icon d={I.listChecks} size={14} /></span>
-            <span className="task-group-name">{task.name}</span>
+          <div
+            className={`sb-group task-group${isCollapsed ? '' : ' open'}`}
+            onClick={() => toggleTaskCollapsed(task.id)}
+          >
+            <span className="sb-group-ico"><Icon d={isCollapsed ? I.listCollapse : I.listTodo} size={14} /></span>
+            {renamingTaskId === task.id ? (
+              <TaskRenameInput task={task} ws={ws} onDone={() => setRenamingTaskId(null)} />
+            ) : (
+              <span className="task-group-name">{task.name}</span>
+            )}
             {attnCount > 0 && (
               <span className="count" title={t('tasks.needsAttention')}>{attnCount}</span>
             )}
+            <span className="sb-group-acts">
+              <TaskMenu
+                task={task}
+                anchorClass="sb-act"
+                onRename={taskActions.rename(task)}
+                onToggleDone={taskActions.toggleDone(task)}
+                onDelete={taskActions.remove(task)}
+              />
+              <button
+                type="button"
+                className="sb-act"
+                data-testid={`task-new-session-${task.id}`}
+                aria-label={t('tasks.menu.newSession')}
+                title={t('tasks.menu.newSession')}
+                onClick={e => { e.stopPropagation(); onNewSession(task.id); }}
+              >
+                <Icon d={I.plus} size={13} />
+              </button>
+            </span>
           </div>
-          {!isCollapsed && (
-            <ManagerRow
-              managerSession={mgr}
-              active={task.id === activeTaskId && !activeSubtaskId}
-              onSelect={() => onSelectTask(task.id)}
-            />
-          )}
           {!isCollapsed && childSubs.map(st => (
             <SubtaskRow
               key={st.id}
               subtask={st}
               active={st.id === activeSubtaskId}
+              ws={ws}
               onSelect={() => onSelectSubtask(task.id, st.id)}
             />
           ))}
@@ -462,173 +578,97 @@ function TasksList({
           >
             <Icon d={I.search} />
           </button>
-          {/* "+" — plain click creates a Task whose PM runs on the config
-              default executor; hover/focus reveals the native executor choices
-              (gian-task-pm-engineer §4.2 — PM executor is per-Task). */}
-          <div
-            className={`sb-newtask${createMenuOpen ? ' open' : ''}`}
-            onMouseEnter={() => setCreateMenuOpen(true)}
-            onMouseLeave={() => setCreateMenuOpen(false)}
-            onFocus={() => setCreateMenuOpen(true)}
-            onBlur={event => {
-              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                setCreateMenuOpen(false);
-              }
-            }}
-            onKeyDown={event => {
-              if (event.key === 'Escape') setCreateMenuOpen(false);
-            }}
+          <button
+            type="button"
+            className={`sb-iconbtn${creating ? ' active' : ''}`}
+            data-testid="sb-new-task"
+            title={t('tasks.new')}
+            aria-label={t('tasks.new')}
+            onClick={() => setCreating(c => !c)}
           >
-            <button
-              className={`sb-iconbtn${creating ? ' active' : ''}`}
-              title={t('tasks.new')}
-              aria-label={t('tasks.new')}
-              aria-haspopup="menu"
-              aria-expanded={createMenuOpen}
-              onClick={() => {
-                if (creating) {
-                  setCreating(false);
-                  setCreateMenuOpen(false);
-                } else {
-                  startCreate(defaultTaskExecutor);
-                }
-              }}
-            >
-              <Icon d={I.plus} />
-            </button>
-            <div className="sb-newtask-menu" role="menu" aria-label={t('tasks.new')}>
-              <button className="sb-newtask-item" role="menuitem" onClick={() => startCreate('claude')}>
-                <span className="sb-newtask-dot claude" />{t('tasks.new.withClaude')}
-              </button>
-              <button className="sb-newtask-item" role="menuitem" onClick={() => startCreate('codex')}>
-                <span className="sb-newtask-dot codex" />{t('tasks.new.withCodex')}
-              </button>
-              <button className="sb-newtask-item" role="menuitem" onClick={() => startCreate('kimi')}>
-                <span className="sb-newtask-dot kimi" />Kimi Code
-              </button>
-            </div>
-          </div>
+            <Icon d={I.plus} />
+          </button>
         </div>
       </div>
 
-      {/* No "Open" header (spec §F) — active tasks list directly. */}
+      {/* Open tasks render directly (no section header); 完成 keeps its
+          collapsible section, collapsed by default. */}
       <div className="sb-scroll">
         {creating && (
-          <NewTaskForm executor={createExecutor} onSubmit={createTaskNow} onCancel={() => setCreating(false)} />
+          <NewTaskForm onSubmit={createTaskNow} onCancel={() => setCreating(false)} />
         )}
-        {renderOpen(open)}
         {visible.length === 0 && !creating && (
           <p className="tasks-list-empty">{t('tasks.empty')}</p>
         )}
+        {open.length > 0 && renderOpen(open)}
+        {done.length > 0 && (
+          <>
+            <button
+              className="sb-section"
+              onClick={() => setDoneOpen(o => !o)}
+              aria-expanded={doneOpen}
+              data-testid="tasks-section-done"
+            >
+              <Icon d={doneOpen ? I.caretDown : I.caretRight} size={12} />
+              <span className="sb-section-label">{t('tasks.group.done')}</span>
+              <span className="count">{done.length}</span>
+            </button>
+            {doneOpen && done.map(task => (
+              <DoneTaskRow
+                key={task.id}
+                task={task}
+                needsAttention={subtasksFor(sessions, task.id).some(sessionNeedsAttention)}
+                renaming={renamingTaskId === task.id}
+                ws={ws}
+                onRenameDone={() => setRenamingTaskId(null)}
+                menu={(
+                  <TaskMenu
+                    task={task}
+                    anchorClass="sb-act"
+                    onRename={taskActions.rename(task)}
+                    onToggleDone={taskActions.toggleDone(task)}
+                    onDelete={taskActions.remove(task)}
+                  />
+                )}
+              />
+            ))}
+          </>
+        )}
       </div>
-
-      {/* Done tasks (spec §G): pinned to the bottom, collapsed by default,
-          reopen-only — no opening / messaging / other actions. */}
-      {done.length > 0 && (
-        <div className="tasks-done-pinned">
-          <button
-            className="sb-group done-group-head"
-            onClick={() => setDoneOpen(o => !o)}
-            aria-expanded={doneOpen}
-          >
-            <Icon d={doneOpen ? I.caretDown : I.caretRight} size={12} />
-            <span>{t('tasks.group.done')}</span>
-            <span className="count">{done.length}</span>
-          </button>
-          {doneOpen && (
-            <div className="done-group-body">
-              {done.map(task => (
-                <DoneTaskRow
-                  key={task.id}
-                  task={task}
-                  needsAttention={subtasksFor(sessions, task.id).some(sessionNeedsAttention)}
-                  onReopen={() => ws.send({ type: 'task:update', task_id: task.id, status: 'open' })}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
     </aside>
   );
 }
 
 /**
- * A completed Task in the pinned Done group (spec §G). Reopen-only: the round
- * toggle returns it to the active area; the row is NOT selectable (no opening /
- * messaging) and shows no subtasks.
+ * A completed Task in the 完成 section (2026-08-03 redesign): same visual
+ * language as an open task group header — list-checks icon + struck, greyed
+ * name — but NOT selectable (no subtasks) and without the "+" action. The
+ * hover "⋯" menu carries rename / reopen / delete.
  */
-function DoneTaskRow({ task, needsAttention, onReopen }: {
+function DoneTaskRow({ task, needsAttention, renaming, ws, onRenameDone, menu }: {
   task: Task;
-  /** Spec §G / Codex review: a done Task still surfaces the rollup dot when a
-   *  child subtask is 待处理, so active/unread subtasks aren't lost in the
-   *  collapsed Done group. */
+  /** A done Task still surfaces the rollup dot when a child subtask is
+   *  待处理, so active/unread subtasks aren't lost in the collapsed 完成
+   *  section. */
   needsAttention: boolean;
-  onReopen: () => void;
+  renaming: boolean;
+  ws: GianWs;
+  onRenameDone: () => void;
+  menu: React.ReactNode;
 }) {
   const t = useT();
   return (
-    <div className="rail-item task-row done-task-row">
-      <button
-        className="done-toggle done"
-        title={t('tasks.reopen')}
-        onClick={e => { e.stopPropagation(); onReopen(); }}
-      >
-        <Icon d={I.check} size={12} stroke={2.4} />
-      </button>
-      <div className="ri-body">
-        <div className="ri-row1">
-          <span className="ri-title">{task.name}</span>
-          {needsAttention && (
-            <span className="task-attn-dot" title={t('tasks.needsAttention')} aria-label={t('tasks.needsAttention')} />
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/**
- * The task's Manager session, rendered as the FIRST child row of an expanded
- * task group (Tasks rail ↔ Sessions rail alignment, 2026-07-31). It looks like
- * a subtask row: title + the Manager's own StatusIcon at row end (turn status +
- * unread), falling back to the compact relative time when there's no glyph —
- * this row-end logic moved here verbatim from the retired TaskRow. Selecting it
- * = selecting the task (onSelectTask), which keeps the Manager chat in the main
- * panel. `managerSession` can be null before the Manager session is ensured —
- * the row still renders, just with no row-end glyph.
- */
-function ManagerRow({
-  managerSession,
-  active,
-  onSelect,
-}: {
-  /** The task's Manager session (or null until ensured) — drives the row-end
-   *  StatusIcon. */
-  managerSession: Session | null;
-  active: boolean;
-  onSelect: () => void;
-}) {
-  const t = useT();
-  const mgr = managerSession;
-  return (
-    <div
-      className={`rail-item session-row manager-row${active ? ' active' : ''}`}
-      role="button"
-      tabIndex={0}
-      onClick={onSelect}
-      onKeyDown={e => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); }
-      }}
-    >
-      <div className="ri-body">
-        <div className="ri-row1">
-          <span className="ri-title">{t('tasks.manager.title')}</span>
-          {mgr && statusGlyphShown(mgr.status, mgr.unread === 1)
-            ? <StatusIcon status={mgr.status} unread={mgr.unread === 1} />
-            : mgr ? <span className={`ri-age ${mgr.executor}`}>{relTime(mgr.updated_at)}</span> : null}
-        </div>
-      </div>
+    <div className="sb-group task-group done-task-group">
+      <span className="sb-group-ico"><Icon d={I.listChecks} size={14} /></span>
+      {renaming ? (
+        <TaskRenameInput task={task} ws={ws} onDone={onRenameDone} />
+      ) : (
+        <span className="task-group-name">{task.name}</span>
+      )}
+      {needsAttention && (
+        <span className="task-attn-dot" title={t('tasks.needsAttention')} aria-label={t('tasks.needsAttention')} />
+      )}
+      <span className="sb-group-acts">{menu}</span>
     </div>
   );
 }
@@ -637,22 +677,29 @@ function ManagerRow({
  * Subtask row (spec 2026-06-28 §B/§D). Renders as a plain `.session-row` —
  * identical to a Sessions session row by construction (no indent, no guide
  * line, same padding/weight/active styling from components.css). Completion
- * (`completed_at`) is a USER flag, separate from turn `status`, set from the
- * breadcrumb session menu; a completed subtask renders struck-through +
- * greyed in place (`.subtask-done`). The shared `StatusIcon` (right) shows
- * turn state with merged unread/"待处理".
+ * (`completed_at`) is a USER flag, separate from turn `status`; a completed
+ * subtask renders struck-through + greyed in place (`.subtask-done`) and
+ * sinks to the bottom of its task. Hover actions mirror the Sessions rail:
+ * pin (open subtasks only — floats the row to the top of its task) and a
+ * complete/reopen toggle (REST /complete · /reopen — the same endpoints the
+ * breadcrumb session menu uses). The shared `StatusIcon` (right) shows turn
+ * state with merged unread/"待处理".
  */
 function SubtaskRow({
   subtask,
   active,
+  ws,
   onSelect,
 }: {
   subtask: Session;
   active: boolean;
+  ws: GianWs;
   onSelect: () => void;
 }) {
   const t = useT();
   const done = subtask.completed_at != null;
+  const pinned = subtask.pinned_at != null;
+  const running = subtask.status === 'running';
   return (
     <div
       className={`rail-item session-row${done ? ' subtask-done' : ''}${active ? ' active' : ''}`}
@@ -675,6 +722,43 @@ function SubtaskRow({
         </div>
         {/* Compact single-line layout: executor is carried by the time tint. */}
       </div>
+      {/* Hover actions: pin / complete toggle. They cover the row-end glyph on
+          hover (CSS). A completed subtask can't be pinned (it sorts to the
+          bottom of its task anyway); neither action stays visible off-hover —
+          an always-on glyph would overlap the row-end time (2026-08-03). */}
+      <span className="ri-acts">
+        {!done && (
+          <button
+            type="button"
+            className={`ri-act${pinned ? ' on' : ''}`}
+            data-testid={`subtask-pin-${subtask.id}`}
+            aria-label={t(pinned ? 'coding.session.unpin' : 'coding.session.pin')}
+            title={t(pinned ? 'coding.session.unpin' : 'coding.session.pin')}
+            onClick={e => {
+              e.stopPropagation();
+              ws.send({ type: 'session:pin', session_id: subtask.id, pinned: !pinned });
+            }}
+          >
+            <Icon d={I.pin} size={13} filled={pinned} />
+          </button>
+        )}
+        <button
+          type="button"
+          className="ri-act"
+          data-testid={`subtask-complete-${subtask.id}`}
+          aria-label={t(done ? 'tasks.subtask.reopen' : 'tasks.subtask.complete')}
+          title={running
+            ? t('tasks.subtask.complete.stopFirst')
+            : t(done ? 'tasks.subtask.reopen' : 'tasks.subtask.complete')}
+          disabled={running}
+          onClick={e => {
+            e.stopPropagation();
+            void (done ? reopenSubtask(subtask.id) : completeSubtask(subtask.id));
+          }}
+        >
+          <Icon d={I.check} size={13} stroke={2.2} />
+        </button>
+      </span>
     </div>
   );
 }
@@ -683,36 +767,10 @@ function TaskDetail({
   task,
   subtask,
   subtaskMain,
-  workspaces,
-  managerSession,
-  managerItems,
-  managerPending,
-  managerCards,
-  managerHandlers,
-  managerQueue,
-  showManagerRaw,
-  onToggleManagerRaw,
-  onManagerMount,
-  onManagerSend,
-  onManagerStop,
-  onCreateSubtask,
 }: {
   task: Task | null;
   subtask: Session | null;
   subtaskMain: React.ReactNode;
-  workspaces: Workspace[];
-  managerSession: Session | null;
-  managerItems: TranscriptItem[];
-  managerPending: boolean;
-  managerCards: ManagerSubtaskCard[];
-  managerHandlers: ManagerComposerHandlers | null;
-  managerQueue: QueueEntry[];
-  showManagerRaw: boolean;
-  onToggleManagerRaw: () => void;
-  onManagerMount: (taskId: string) => void;
-  onManagerSend: (taskId: string, text: string, opts?: { attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }> }) => void;
-  onManagerStop: (taskId: string) => void;
-  onCreateSubtask: (taskId: string, draft: NewSubtaskDraft) => void;
 }) {
   const t = useT();
 
@@ -725,17 +783,16 @@ function TaskDetail({
   }
 
   // A subtask is selected → a Subtask IS a Session, so render the exact same
-  // full <SessionMain> (chat/transcript/composer + header) that Sessions mode
-  // renders. App builds it (`subtaskMain`) wired to the same App-level handlers
-  // rebound to the subtask's id; the workbench Sheet + Inspector also resolve
-  // to it because App synced `activeSessionId` to the subtask. The element
-  // already renders its own `.main`, so we drop it in directly — no extra
-  // `.main`/`.view` wrapper (matches how CodingView lays out `.main`).
+  // full <SessionSurface> (chat/transcript/composer + header) that Sessions
+  // mode renders. App builds it (`subtaskMain`) wired to the same App-level
+  // handlers rebound to the subtask's id; the workbench Sheet + Inspector
+  // also resolve to it because App synced `activeSessionId` to the subtask.
+  // The element already renders its own `.main`, so we drop it in directly —
+  // no extra `.main`/`.view` wrapper (matches how CodingView lays out `.main`).
   if (subtask) {
     // `subtaskMain` is built only once App has caught up (activeSession synced
     // to this subtask); show a lightweight placeholder for the one render where
-    // it's still null. The "Open in Sessions" jump stays as a secondary
-    // affordance via the topbar, not a primary dead-end here.
+    // it's still null.
     if (!subtaskMain) {
       return (
         <main className="main tasks-main">
@@ -751,36 +808,12 @@ function TaskDetail({
     return <>{subtaskMain}</>;
   }
 
-  // Only a task is selected → the Manager chat is the main panel.
+  // Only a task is selected → a simple placeholder: the task name plus a hint
+  // to pick or create a session (same visual language as the empty state).
   return (
-    <ManagerPanel
-      task={task}
-      session={managerSession}
-      workspaces={workspaces}
-      items={managerItems}
-      pending={managerPending}
-      cards={managerCards}
-      handlers={managerHandlers}
-      queue={managerQueue}
-      showRaw={showManagerRaw}
-      onToggleRaw={onToggleManagerRaw}
-      onMount={onManagerMount}
-      onSend={onManagerSend}
-      onStop={onManagerStop}
-      onCreateSubtask={onCreateSubtask}
-    />
+    <main className="main tasks-detail-empty">
+      <p className="tasks-detail-task-name">{task.name || t('tasks.untitled')}</p>
+      <p>{t('tasks.detail.pickSession')}</p>
+    </main>
   );
 }
-
-/**
- * The per-Task Manager chat panel (PRD-v3 P3), styled like the prototype's
- * ManagerMain: a `.main` island with a head (`Manager` eyebrow · task name ·
- * status), the shared Transcript as the scroll body, and a composer at the
- * bottom. The Manager IS a session (type='manager', fixed-config Codex), so this
- * reuses the shared Transcript renderer for fidelity. Approvals never appear
- * because the Manager runs approvalPolicy:'never'.
- *
- * A1: a "Create subtask from this" affordance opens a prefilled NewSubtask
- * form. TODO(P3-live): auto-extract workspace/executor/prompt by parsing the
- * Manager's prose `create_subtask` suggestion — for now the user fills the form.
- */

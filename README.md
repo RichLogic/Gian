@@ -156,11 +156,6 @@ Gian is in active early development. v0.1 targets macOS Apple Silicon and its
 public APIs and plugin contracts may change before v1.0. The future
 multi-agent orchestrator called Gian Agent is not part of the current release.
 
-See [the architecture documentation](docs/architecture.md) and
-[contribution guide](CONTRIBUTING.md) for development details. The native
-event/UI relationship and its smoke-test layers are documented in
-[`docs/chat-event-display.md`](docs/chat-event-display.md).
-
 ## License
 
 MIT — see [LICENSE](LICENSE).

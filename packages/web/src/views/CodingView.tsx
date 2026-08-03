@@ -6,7 +6,7 @@ import type { Mode } from '../components/Topbar.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import type { PlanLifecycleState } from '../transcript/apply.js';
 import type { ApprovalActionContext, QueueEntry, TranscriptItem } from '../types.js';
-import { sessionNeedsAttention, sortSessionsForRail, sortWorkspacesForRail } from '../session-routing.js';
+import { sessionNeedsAttention, buildRailSections } from '../session-routing.js';
 import { SessionMain } from './SessionMain.js';
 import { relTime, statusGlyphShown, StatusIcon } from './session-list-status.js';
 import { NewSessionView } from './new-session-view.js';
@@ -15,9 +15,9 @@ export { buildSessionCreatePayload } from './new-session-view.js';
 export type { CreateSessionInput, SessionCreateFormState } from './new-session-view.js';
 
 // ─── V2 inline icons (24-grid, 1.5px stroke, round caps — phase 6 grid) ────
-function SvgIcon({ d, size = 16, stroke = 1.5 }: { d: string; size?: number; stroke?: number }) {
+function SvgIcon({ d, size = 16, stroke = 1.5, filled = false }: { d: string; size?: number; stroke?: number; filled?: boolean }) {
   return (
-    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor"
+    <svg viewBox="0 0 24 24" width={size} height={size} fill={filled ? 'currentColor' : 'none'} stroke="currentColor"
          strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">
       {d.split(' M').map((seg, i) => (
         <path key={i} d={i === 0 ? seg : `M${seg}`} />
@@ -309,8 +309,10 @@ function Sidebar({
 
   // Every session groups by workspace — no "needs you" section pinned to the
   // top (it overrode workspace grouping). Attention is conveyed per-row via the
-  // StatusIcon (pending/error/unread), not by reordering.
-  const rest = filtered;
+  // StatusIcon (pending/error/unread), not by reordering. Pinned sessions and
+  // pinned workspaces split off into a Codex-style "Pinned" section
+  // (2026-08-03); the rest render under "Projects".
+  const sections = buildRailSections(filtered, workspaces);
 
   function renderRow(s: Session) {
     return (
@@ -323,68 +325,46 @@ function Sidebar({
     );
   }
 
-  function renderGroups() {
-    if (rest.length === 0) return null;
-    const byWs = new Map<string, Session[]>();
-    for (const s of rest) {
-      const list = byWs.get(s.workspace_id) ?? [];
-      list.push(s);
-      byWs.set(s.workspace_id, list);
-    }
-    // Iterate workspaces pinned-first, then in host order (sort_order; the
-    // sort is stable so relative order within each group is preserved).
-    // Append any orphan workspace_ids (e.g. sessions whose ws isn't in the
-    // workspaces prop yet) at the end so they stay visible.
-    const orderedIds: string[] = [];
-    const seen = new Set<string>();
-    for (const w of sortWorkspacesForRail(workspaces)) {
-      if (byWs.has(w.id)) { orderedIds.push(w.id); seen.add(w.id); }
-    }
-    for (const wsId of byWs.keys()) {
-      if (!seen.has(wsId)) orderedIds.push(wsId);
-    }
-    return orderedIds.map(wsId => {
-      const list = byWs.get(wsId)!;
-      const ws = wsById.get(wsId);
-      const name = ws?.name ?? wsId;
-      const sorted = sortSessionsForRail(list);
-      const isCollapsed = collapsed.has(wsId);
-      // Group count = sessions that NEED the user (待处理), not the raw total —
-      // the total says nothing actionable (2026-07-31). Hidden when zero.
-      const attn = list.filter(sessionNeedsAttention).length;
-      return (
-        <div key={wsId}>
-          <div className="sb-group" onClick={() => toggleGroup(wsId)}>
-            <span className="sb-group-ico"><SvgIcon d={isCollapsed ? ICON.folder : ICON.folderOpen} size={14} /></span>
-            <span>{name}</span>
-            {attn > 0 && <span className="count">{attn}</span>}
-            <span className="sb-group-acts">
-              <button
-                type="button"
-                className="sb-act"
-                data-testid={`sb-new-session-${wsId}`}
-                aria-label={t('coding.sidebar.ws.new')}
-                title={t('coding.sidebar.ws.new')}
-                onClick={e => { e.stopPropagation(); onNewForWorkspace(wsId); }}
-              >
-                <SvgIcon d={ICON.plus} size={13} />
-              </button>
-              <button
-                type="button"
-                className={`sb-act${ws?.pinned === 1 ? ' on' : ''}`}
-                data-testid={`sb-pin-ws-${wsId}`}
-                aria-label={t(ws?.pinned === 1 ? 'coding.sidebar.ws.unpin' : 'coding.sidebar.ws.pin')}
-                title={t(ws?.pinned === 1 ? 'coding.sidebar.ws.unpin' : 'coding.sidebar.ws.pin')}
-                onClick={e => { e.stopPropagation(); if (ws) onToggleWorkspacePin(ws); }}
-              >
-                <SvgIcon d={ICON.pin} size={13} />
-              </button>
-            </span>
-          </div>
-          {!isCollapsed && sorted.map(s => renderRow(s))}
+  function renderGroup(wsId: string) {
+    const list = sections.byWs.get(wsId)!;
+    const ws = wsById.get(wsId);
+    const name = ws?.name ?? wsId;
+    const isCollapsed = collapsed.has(wsId);
+    // Group count = sessions that NEED the user (待处理), not the raw total —
+    // the total says nothing actionable (2026-07-31). Hidden when zero.
+    const attn = list.filter(sessionNeedsAttention).length;
+    return (
+      <div key={wsId}>
+        <div className="sb-group" onClick={() => toggleGroup(wsId)}>
+          <span className="sb-group-ico"><SvgIcon d={isCollapsed ? ICON.folder : ICON.folderOpen} size={14} /></span>
+          <span>{name}</span>
+          {attn > 0 && <span className="count">{attn}</span>}
+          <span className="sb-group-acts">
+            <button
+              type="button"
+              className="sb-act"
+              data-testid={`sb-pin-ws-${wsId}`}
+              aria-label={t(ws?.pinned === 1 ? 'coding.sidebar.ws.unpin' : 'coding.sidebar.ws.pin')}
+              title={t(ws?.pinned === 1 ? 'coding.sidebar.ws.unpin' : 'coding.sidebar.ws.pin')}
+              onClick={e => { e.stopPropagation(); if (ws) onToggleWorkspacePin(ws); }}
+            >
+              <SvgIcon d={ICON.pin} size={13} filled={ws?.pinned === 1} />
+            </button>
+            <button
+              type="button"
+              className="sb-act"
+              data-testid={`sb-new-session-${wsId}`}
+              aria-label={t('coding.sidebar.ws.new')}
+              title={t('coding.sidebar.ws.new')}
+              onClick={e => { e.stopPropagation(); onNewForWorkspace(wsId); }}
+            >
+              <SvgIcon d={ICON.plus} size={13} />
+            </button>
+          </span>
         </div>
-      );
-    });
+        {!isCollapsed && list.map(s => renderRow(s))}
+      </div>
+    );
   }
 
   return (
@@ -417,7 +397,23 @@ function Sidebar({
       </div>
 
       <div className="sb-scroll">
-        {renderGroups()}
+        {/* Section labels only appear once something is pinned — with no
+            pinned content the rail looks exactly like before. */}
+        {sections.hasPinned && (
+          <>
+            <div className="sb-section static" data-testid="sb-section-pinned">
+              <span className="sb-section-label">{t('coding.sidebar.section.pinned')}</span>
+            </div>
+            {sections.pinnedSessions.map(s => renderRow(s))}
+            {sections.pinnedWsIds.map(renderGroup)}
+          </>
+        )}
+        {sections.hasPinned && sections.projectWsIds.length > 0 && (
+          <div className="sb-section static" data-testid="sb-section-projects">
+            <span className="sb-section-label">{t('coding.sidebar.section.projects')}</span>
+          </div>
+        )}
+        {sections.projectWsIds.map(renderGroup)}
       </div>
     </aside>
   );
@@ -437,7 +433,7 @@ function SessionRow({
   const pinned = session.pinned_at != null;
   return (
     <div
-      className={`rail-item session-row${active ? ' active' : ''}${pinned ? ' pinned' : ''}`}
+      className={`rail-item session-row${active ? ' active' : ''}`}
       data-testid={`session-row-${session.id}`}
       role="button"
       tabIndex={0}
@@ -466,18 +462,19 @@ function SessionRow({
           <SvgIcon d={ICON.eyeOff} size={11} />
         </span>
       )}
-      {/* Hover actions: pin / archive. The pin stays visible while pinned;
-          both cover the row-end glyph on hover (CSS). */}
+      {/* Hover actions: pin / archive. They cover the row-end glyph on hover
+          (CSS). Pinned rows show no always-on pin glyph — membership in the
+          "Pinned" section already says it (2026-08-03). */}
       <span className="ri-acts">
         <button
           type="button"
-          className={`ri-act${pinned ? ' on' : ''}`}
+          className="ri-act"
           data-testid={`session-pin-${session.id}`}
           aria-label={t(pinned ? 'coding.session.unpin' : 'coding.session.pin')}
           title={t(pinned ? 'coding.session.unpin' : 'coding.session.pin')}
           onClick={e => { e.stopPropagation(); onPin(!pinned); }}
         >
-          <SvgIcon d={ICON.pin} size={13} />
+          <SvgIcon d={ICON.pin} size={13} filled={pinned} />
         </button>
         <button
           type="button"

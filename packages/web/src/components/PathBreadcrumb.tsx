@@ -9,28 +9,22 @@ export interface PathSegment {
   label: string;
   copyHint?: string;
   editing?: boolean;
+  /** Marks the one segment that owns the session menu (click opens it, the
+   *  caret shows). */
+  menuAnchor?: boolean;
 }
 
 export interface SessionMenuActions {
   /** Which context this menu is for — drives the item set, order, grouping and
    *  danger styling (see buildMenuItems). Defaults to 'session'. */
-  kind?: 'session' | 'subtask' | 'task';
+  kind?: 'session' | 'subtask';
   onRename: () => void;
   // All others are optional — the menu adapts to the context (full session /
-  // subtask / task). When a callback is absent, its item is hidden.
-  // Subtask drops fork/archive/delete; Task drops forceRecover/markUnread/fork.
+  // subtask). When a callback is absent, its item is hidden.
+  // Subtask drops fork/delete.
   onCopyName?: () => void;
   onForceRecover?: () => void;
   onMarkUnread?: () => void;
-  /** Task only: pin / unpin to the top of the Tasks list. `pinned` drives the
-   *  label ("Pin" ↔ "Unpin") and the toggle behaviour. */
-  onPin?: () => void;
-  pinned?: boolean;
-  /** Task only: mark the task done / reopen it (moved off the rail row onto
-   *  this menu when the Tasks rail aligned with the Sessions rail, 2026-07-31).
-   *  `taskDone` drives the label ("Mark done" ↔ "Reopen"). */
-  onToggleDone?: () => void;
-  taskDone?: boolean;
   onFork?: (executor: Executor) => void;
   onDelete?: () => void;
   /** Subtask only (spec §B): toggle the user completion flag. `completed`
@@ -40,12 +34,13 @@ export interface SessionMenuActions {
 }
 
 /** The branch segment's worktree dropdown (view-level working-tree switch).
- *  Items are the workspace's working trees; `onPick` selects one, `onCopy`
- *  (optional) appends a "Copy branch name" item after a divider. */
+ *  Items are the workspace's working trees; `onPick` selects one. Every item
+ *  shows the branch/worktree name as the label ("Primary" marks the workspace
+ *  checkout in the detail slot) and the owning session's name as detail when
+ *  it adds information. */
 export interface BranchMenuActions {
   items: Array<{ id: string; label: string; detail?: string | null; active?: boolean }>;
   onPick: (id: string) => void;
-  onCopy?: () => void;
 }
 
 interface Props {
@@ -56,27 +51,6 @@ interface Props {
   branchMenu?: BranchMenuActions | null;
 }
 
-function BranchIcon({ size = 11 }: { size?: number }) {
-  return (
-    <svg
-      className="branch-ico"
-      viewBox="0 0 16 16"
-      width={size}
-      height={size}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.4}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <circle cx="4" cy="3.5" r="1.6" />
-      <circle cx="4" cy="12.5" r="1.6" />
-      <circle cx="12" cy="6" r="1.6" />
-      <path d="M4 5v6 M4 11c0-3 8-2 8-4.5" />
-    </svg>
-  );
-}
-
 function CaretDown({ size = 11 }: { size?: number }) {
   return (
     <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
@@ -85,8 +59,18 @@ function CaretDown({ size = 11 }: { size?: number }) {
   );
 }
 
-function CheckIcon({ size = 10 }: { size?: number }) {
+/** lucide tree-pine — the session→worktree separator (2026-08-03): the
+ *  worktree reads as "where this session is viewed". */
+function WorktreeSepIcon({ size = 10 }: { size?: number }) {
   return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="m17 14 3 3.3a1 1 0 0 1-.7 1.7H4.7a1 1 0 0 1-.7-1.7L7 14h-.3a1 1 0 0 1-.7-1.7L9 9h-.2A1 1 0 0 1 8 7.3L12 3l4 4.3a1 1 0 0 1-.8 1.7H15l3 3.3a1 1 0 0 1-.7 1.7H17Z" />
+      <path d="M12 22v-3" />
+    </svg>
+  );
+}
+
+function CheckIcon({ size = 10 }: { size?: number }) {  return (
     <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
       <path d="M5 12l5 5L20 7" />
     </svg>
@@ -107,13 +91,10 @@ const ICON = {
   refresh: 'M3 12a9 9 0 0 1 15.5-6.3L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15.5 6.3L3 16 M3 21v-5h5',
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   trash: 'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13',
-  fork: 'M6 3v6 M6 21v-3a4 4 0 0 1 4-4h4a4 4 0 0 0 4-4V3 M6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M6 21a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
   // envelope — "mark as unread", same idiom as an unread email
   mail: 'M3 5h18v14H3z M3 7l9 6 9-6',
   // check — "mark complete" (subtask)
   check: 'M5 12l5 5L20 7',
-  // pushpin — pin / unpin a task to the top of the list
-  pin: 'M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z',
 };
 
 interface MenuItemDesc {
@@ -130,13 +111,18 @@ interface MenuItemDesc {
 }
 
 /**
- * Build the ordered menu item list for the active context. Three distinct
+ * Build the ordered menu item list for the active context. Two distinct
  * layouts (decided 2026-06-29) — they differ in order, grouping and which
  * actions are destructive, so a single fixed template can't express them:
  *
- *  session : Rename · Copy · Unread ┊ Fork×3 · Recover(red) ┊ Archive · Delete(red)
+ *  session : Rename · Copy · Unread ┊ Recover(red)
  *  subtask : Rename · Copy ┊ Unread · Complete ┊ Recover(red)
- *  task    : Rename · Copy ┊ Unread ┊ Recover(red) · Remove(red)
+ *
+ * 2026-08-03: the session menu's Fork×3 and Delete items were removed (fork
+ * plumbing in use-topbar-model stays, unused by the menu); the subtask
+ * menu's Delete item went with them. The task menu was dropped entirely when
+ * the Tasks-view breadcrumb lost the task segment — task rename/done/delete
+ * live on the sidebar rail row's ⋯ menu.
  */
 function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuItemDesc[] {
   const items: MenuItemDesc[] = [
@@ -145,21 +131,6 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
   const copy = () => {
     if (m.onCopyName) items.push({ key: 'copy', icon: ICON.copy, label: t('path.menu.copyName'), onClick: m.onCopyName });
   };
-
-  if (m.kind === 'task') {
-    copy();
-    if (m.onMarkUnread) items.push({ key: 'unread', icon: ICON.mail, label: t('path.menu.markUnread'), onClick: m.onMarkUnread, ruleBefore: true });
-    if (m.onPin) items.push({ key: 'pin', icon: ICON.pin, label: t(m.pinned ? 'path.menu.unpin' : 'path.menu.pin'), onClick: m.onPin });
-    if (m.onToggleDone) items.push({
-      key: 'done',
-      icon: m.taskDone ? ICON.refresh : ICON.check,
-      label: m.taskDone ? t('tasks.reopen') : t('tasks.markDone'),
-      onClick: m.onToggleDone,
-    });
-    if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, ruleBefore: true });
-    if (m.onDelete) items.push({ key: 'remove', icon: ICON.trash, label: t('path.menu.removeTask'), onClick: m.onDelete, danger: true });
-    return items;
-  }
 
   if (m.kind === 'subtask') {
     copy();
@@ -171,20 +142,13 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
       onClick: m.onToggleComplete,
     });
     if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, ruleBefore: true });
-    if (m.onDelete) items.push({ key: 'delete', icon: ICON.trash, label: t('path.menu.deleteSession'), onClick: m.onDelete, danger: true });
     return items;
   }
 
   // session (default)
   copy();
   if (m.onMarkUnread) items.push({ key: 'unread', icon: ICON.mail, label: t('path.menu.markUnread'), onClick: m.onMarkUnread });
-  if (m.onFork) {
-    items.push({ key: 'fork-claude', icon: ICON.fork, label: t('path.menu.forkClaude'), onClick: () => m.onFork!('claude'), ruleBefore: true });
-    items.push({ key: 'fork-codex', icon: ICON.fork, label: t('path.menu.forkCodex'), onClick: () => m.onFork!('codex') });
-    items.push({ key: 'fork-kimi', icon: ICON.fork, label: t('path.menu.forkKimi'), onClick: () => m.onFork!('kimi') });
-  }
-  if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true });
-  if (m.onDelete) items.push({ key: 'delete', icon: ICON.trash, label: t('path.menu.deleteSession'), onClick: m.onDelete, danger: true });
+  if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, ruleBefore: true });
   return items;
 }
 
@@ -231,7 +195,7 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
   }
 
   function handleSegClick(idx: number, seg: PathSegment) {
-    if (seg.kind === 'session' && sessionMenu) {
+    if (seg.menuAnchor && sessionMenu) {
       setMenuOpen(o => !o);
     } else if (seg.kind === 'branch' && branchMenu) {
       // With a branch menu wired up, clicking the branch switches worktree
@@ -249,7 +213,7 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
   return (
     <div className="path">
       {segments.map((seg, i) => {
-        const showMenu = seg.kind === 'session' && menuOpen && sessionMenu;
+        const showMenu = seg.menuAnchor === true && menuOpen && sessionMenu;
         const showBranchMenu = seg.kind === 'branch' && branchMenuOpen && branchMenu;
         const isCopied = copiedIdx === i;
         return (
@@ -272,16 +236,15 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
             ) : (
               <span
                 className="path-seg-anchor"
-                ref={seg.kind === 'session' ? anchorRef : seg.kind === 'branch' ? branchAnchorRef : undefined}
+                ref={seg.menuAnchor ? anchorRef : seg.kind === 'branch' ? branchAnchorRef : undefined}
               >
                 <button
                   className={`path-seg ${seg.kind} ${isCopied ? 'copied' : ''}`}
                   title={seg.kind === 'branch' && branchMenu ? t('path.branch.switch') : seg.copyHint}
                   onClick={e => { e.stopPropagation(); handleSegClick(i, seg); }}
                 >
-                  {seg.kind === 'branch' && <BranchIcon />}
                   <span className="path-seg-label">{seg.label}</span>
-                  {(seg.kind === 'session' || (seg.kind === 'branch' && branchMenu)) && (
+                  {(seg.menuAnchor || (seg.kind === 'branch' && branchMenu)) && (
                     <span className="path-seg-affordance caret" aria-hidden>
                       <CaretDown size={11} />
                     </span>
@@ -317,22 +280,16 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                         className={`item${it.active ? ' active' : ''}`}
                         onClick={() => { setBranchMenuOpen(false); branchMenu.onPick(it.id); }}
                       >
-                        {it.active && <CheckIcon size={11} />}
+                        {/* The check slot is always rendered so every label
+                            starts at the same x, active row or not. Same
+                            footprint as the session menu's leading icon. */}
+                        <span className="item-check">{it.active && <CheckIcon size={13} />}</span>
                         <span className="item-label">{it.label}</span>
-                        {it.detail && <span className="item-detail">{it.detail}</span>}
+                        {/* Right-side detail uses the same `.sub` style as the
+                            session menu's hint so both dropdowns read alike. */}
+                        {it.detail && <span className="sub">{it.detail}</span>}
                       </button>
                     ))}
-                    {branchMenu.onCopy && (
-                      <>
-                        <div className="rule" />
-                        <button
-                          className="item"
-                          onClick={() => { setBranchMenuOpen(false); branchMenu.onCopy!(); }}
-                        >
-                          <MenuIcon d={ICON.copy} /> {t('path.menu.copyBranch')}
-                        </button>
-                      </>
-                    )}
                   </div>
                 )}
               </span>
@@ -346,6 +303,7 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
 }
 
 function SegmentFragment({
+  seg,
   showSep,
   children,
 }: {
@@ -354,9 +312,21 @@ function SegmentFragment({
   showSep: boolean;
   children: React.ReactNode;
 }) {
+  // The worktree segment trails the session with a tree-pine glyph instead
+  // of the usual slash — it reads as an attribute of the session, not a path
+  // level (2026-08-03, replaces the middot).
+  if (!showSep) return <>{children}</>;
+  if (seg.kind === 'branch') {
+    return (
+      <>
+        <span className="path-sep branch"><WorktreeSepIcon /></span>
+        {children}
+      </>
+    );
+  }
   return (
     <>
-      {showSep && <span className="path-sep">/</span>}
+      <span className="path-sep">/</span>
       {children}
     </>
   );

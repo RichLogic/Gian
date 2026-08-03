@@ -28,10 +28,10 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>{{HOME}}/.config/gian/logs/host.out</string>
+  <string>{{HOME}}/.gian/logs/host.out</string>
 
   <key>StandardErrorPath</key>
-  <string>{{HOME}}/.config/gian/logs/host.err</string>
+  <string>{{HOME}}/.gian/logs/host.err</string>
 
   <!-- install.sh fills PATH with the dirs of claude/codex/node + standard
        system locations. Empty PATH = launchd's default `/usr/bin:/bin:/usr/sbin:/sbin`,

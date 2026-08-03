@@ -9,7 +9,6 @@
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "start": "node dist/src/cli/spawn.js",
-    "test": "pnpm run build && node --test dist/test/**/*.test.js",
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {

@@ -8,8 +8,8 @@ starts automatically at login and restarts on crash.
 | macOS | launchd LaunchAgent | `~/Library/LaunchAgents/com.gian.host.plist` |
 | Linux | systemd user service | `~/.config/systemd/user/gian.service` |
 
-The daemon runs as _you_ (not root), logs to `~/.config/gian/logs/`, and
-stores its SQLite database at `~/.config/gian/gian.db`.
+The daemon runs as _you_ (not root), logs to `~/.gian/logs/`, and
+stores its SQLite database at `~/.gian/gian.db`.
 
 ## Prerequisites
 
@@ -41,7 +41,7 @@ The installer:
 
 1. Detects macOS or Linux.
 2. Resolves the repo root and the absolute path to `node`.
-3. Creates `~/.config/gian/logs/` if it does not exist.
+3. Creates `~/.gian/logs/` if it does not exist.
 4. Substitutes `{{INSTALL_DIR}}`, `{{NODE_BIN}}`, and `{{HOME}}` into the
    platform template and writes the unit file.
 5. Registers and starts the daemon immediately.
@@ -53,7 +53,7 @@ The installer:
 ```
 
 This stops the daemon and removes the unit file. Your data and logs are left
-intact in `~/.config/gian/`.
+intact in `~/.gian/`.
 
 To also delete all data (sessions, workspaces, bots, logs — **irreversible**):
 
@@ -64,8 +64,8 @@ To also delete all data (sessions, workspaces, bots, logs — **irreversible**):
 ## View logs
 
 ```bash
-tail -f ~/.config/gian/logs/host.out
-tail -f ~/.config/gian/logs/host.err
+tail -f ~/.gian/logs/host.out
+tail -f ~/.gian/logs/host.err
 ```
 
 ## Manual service control

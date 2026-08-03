@@ -192,7 +192,7 @@ export interface WorkspaceGitUpdatedMessage {
   type: 'workspace:git-updated';
   workspace_id: string;
   /** Free-form reason — shown in dev console when debugging refresh storms. */
-  reason: 'fetch' | 'branch-created' | 'merge' | 'drop' | 'session-deleted' | 'worktree-created';
+  reason: 'fetch' | 'branch-created' | 'merge' | 'drop' | 'session-deleted';
 }
 
 /**
@@ -251,13 +251,6 @@ export interface SessionCreateMessage {
   model?: string;
   /** Required for Claude/Codex. Kimi uses executor-native configuration. */
   approval_mode?: ApprovalMode;
-  /** When 'worktree', host creates a dedicated branch + working directory
-   *  before spawning the proxy. */
-  mode?: 'regular' | 'worktree';
-  /** Override the auto-detected base branch (e.g. 'main'). Worktree mode only. */
-  base_branch?: string;
-  /** Override the auto-generated branch name. Worktree mode only. */
-  branch?: string;
   /** Fork an existing Gian session's native thread into the new session
    *  (Gian sidechat, claude-only): the new session's first turn runs
    *  `claude -p --resume <parent native> --fork-session`, carrying the

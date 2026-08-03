@@ -13,11 +13,11 @@
   transition: background 80ms var(--ease);
   cursor: pointer;
 }
-.rail-item:hover { background: var(--surface-2); }
+.rail-item:hover { background: var(--surface); }
 .rail-item.active {
-  background: var(--accent-soft);
+  background: var(--surface-2);
 }
-.rail-item.active .ri-title { color: var(--accent-text); }
+.rail-item.active .ri-title { color: var(--text); }
 
 /* Executor identity lives in the row2 text chip (ri-exec-name) now —
    the tiny avatar square was redundant with it. Keep the class as a

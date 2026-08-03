@@ -399,18 +399,6 @@ export async function createTask(input: { name: string; description?: string; ex
   }
 }
 
-/** PRD-v3 P3 — get-or-create the Task's Manager session.
- *  Idempotent; the host also broadcasts `session:created` on first creation. */
-export async function ensureManagerSession(taskId: string): Promise<Session | null> {
-  try {
-    const res = await fetch(`/api/tasks/${taskId}/manager`, { method: 'POST' });
-    if (!res.ok) return null;
-    return ((await res.json()) as { session: Session }).session;
-  } catch {
-    return null;
-  }
-}
-
 /** PRD-v3 P3 A1 — create a Subtask (session with type='subtask' + task_id)
  *  under a Task. Returns the created session or null. The host broadcasts
  *  `session:created` so the global session list updates. */
@@ -422,7 +410,6 @@ export async function createSubtask(
     name?: string;
     model?: string | null;
     approval_mode?: import('@gian/shared').ApprovalMode;
-    mode?: 'regular' | 'worktree';
   },
 ): Promise<Session | null> {
   try {

@@ -9,6 +9,8 @@ import { resolveDataDir } from './storage/paths.js';
 import { sweepColdEvents } from './events/lifecycle.js';
 import { CliRuntimeManager } from './runtime/manager.js';
 import { AgentManager } from './agents/manager.js';
+import { syncAgentInstructionBlocks } from './onboarding/agent-instructions.js';
+import { expandHome } from './workspace/index.js';
 
 // Vendored proxies live under packages/proxies/{cc,codex}-proxy in the
 // monorepo. At runtime this file resolves from packages/host/{src or
@@ -59,6 +61,18 @@ async function main(): Promise<void> {
     }
   } catch (err) {
     console.warn('[gian] event sweep failed:', err);
+  }
+
+  // Publish the workspace-root convention (worktrees live under
+  // `<root>/worktrees/`) into each agent CLI's global instruction file, so
+  // agent-created worktrees land in one predictable place.
+  try {
+    const synced = await syncAgentInstructionBlocks(expandHome(config.workspace_root));
+    if (synced.length > 0) {
+      console.log(`[gian] synced agent instruction files: ${synced.join(', ')}`);
+    }
+  } catch (err) {
+    console.warn('[gian] agent instruction sync failed:', err);
   }
 
   const developmentProxyEntries = {

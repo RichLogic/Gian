@@ -15,7 +15,6 @@ export type FileViewMode = 'source' | 'preview';
 export type RailId =
   | 'files'
   | 'diffs'
-  | 'manager'
   | 'sidechat'
   | 'terminal'
   | 'browser'

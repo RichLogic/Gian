@@ -76,13 +76,13 @@ let loadingSurface:
   | null = null;
 
 function dataDirectory(): string {
-  return process.env['GIAN_DATA_DIR'] ?? join(homedir(), '.config', 'gian');
+  return process.env['GIAN_DATA_DIR'] ?? join(homedir(), '.gian');
 }
 
 function logDirectory(): string {
   if (app.isPackaged) return join(dataDirectory(), 'logs');
   return join(
-    process.env['GIAN_DATA_DIR'] ?? join(homedir(), '.config', 'gian-dev'),
+    process.env['GIAN_DATA_DIR'] ?? join(homedir(), '.gian-dev'),
     'logs',
   );
 }
@@ -169,11 +169,11 @@ async function openExternal(candidate: string): Promise<void> {
 }
 
 // Match the web shell's theme backgrounds (styles/tokens.css): light is
-// #f7f7f5, dark is oklch(0.165 0.012 250) ≈ #0a0f13. A hardcoded light
-// background made dark-theme users see a bright flash on launch and reload
-// before the renderer applied body[data-theme].
+// #f7f7f5, dark is oklch(0.140 0.004 265) ≈ #08090b (Air-matched ramp). A
+// hardcoded light background made dark-theme users see a bright flash on
+// launch and reload before the renderer applied body[data-theme].
 function windowBackground(): string {
-  return nativeTheme.shouldUseDarkColors ? '#0a0f13' : '#f7f7f5';
+  return nativeTheme.shouldUseDarkColors ? '#08090b' : '#f7f7f5';
 }
 
 function hardenWebContents(contents: WebContents): void {

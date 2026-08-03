@@ -514,7 +514,8 @@ export function applyEnvelope(
     // Strip the always-hidden gian-task ROLE header from the first-turn user
     // message so it never shows in ANY transcript (normal/subtask views read
     // this stored text directly). The Manager system prefix is intentionally
-    // NOT stripped here — showManagerRaw reveals it at render.
+    // NOT stripped here (legacy manager sessions predate the web removal;
+    // stripping is a render-time concern).
     const item: MsgItem = {
       kind: 'user', id: env.call_id, text: stripGianRolePrefix(text), exec: executor,
       ts: env.ts, turn: env.turn,

@@ -4,7 +4,6 @@ import { loadSessions, reorderWorkspaces, updateWorkspace } from '../api.js';
 import { useT } from '../i18n/index.js';
 import type { GianWs } from '../ws.js';
 import { SpaceDetail, ClaudeMdInspector } from '../views/SpacesView.js';
-import type { CreateWorktreeSessionInput } from '../views/SpacesView.js';
 
 // Icon paths copied verbatim from design/gian-design-v2/js/data.jsx (`I`), so
 // the Inspector list matches the prototype's WorkspacesInspector exactly.
@@ -163,13 +162,11 @@ export function WorkspaceDetailBody({
   ws,
   systemConfig,
   onChange,
-  onCreateWorktreeSession,
 }: {
   workspace: Workspace | null;
   ws: GianWs;
   systemConfig: SystemConfig | null;
   onChange: () => void;
-  onCreateWorktreeSession: (input: CreateWorktreeSessionInput) => void;
 }) {
   void systemConfig;
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -192,7 +189,6 @@ export function WorkspaceDetailBody({
         onChange={onChange}
         onDeleted={onChange}
         onOpenClaudeMd={() => setClaudeMdOpen(true)}
-        onCreateWorktreeSession={onCreateWorktreeSession}
       />
       {claudeMdOpen && workspace && (
         <ClaudeMdInspector

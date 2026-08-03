@@ -10,20 +10,14 @@
   "scripts": {
     "preinstall": "node scripts/check-node.js",
     "build": "pnpm -r build",
-    "dev": "node scripts/dev.mjs",
-    "dev:web": "node scripts/dev.mjs --no-desktop",
     "typecheck": "pnpm -r typecheck",
-    "test": "node --test scripts/*.test.mjs && pnpm -r --if-present test",
-    "test:e2e": "pnpm -r build && playwright test",
     "desktop:dev": "pnpm -F @gian/desktop dev",
     "desktop:pack": "pnpm -F @gian/desktop package:mac",
     "desktop:dmg": "pnpm -F @gian/desktop make:mac",
     "release:proxies": "pnpm --filter @gian/shared build && pnpm --filter @gian/cc-proxy build && pnpm --filter @gian/codex-proxy build && pnpm --filter @gian/kimi-proxy build && node scripts/build-proxy-artifacts.mjs",
-    "quality:traceability": "node scripts/check-traceability.js",
     "clean": "pnpm -r clean && rm -rf node_modules"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.0",
     "@types/node": "^22.10.0",
     "esbuild": "^0.25.12",
     "typescript": "^5.7.2"

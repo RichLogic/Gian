@@ -53,7 +53,8 @@ interface Props {
   p3Visible: boolean;
   onToggleP3: () => void;
 
-  // Panel-2 navigation history (rail + tab), driven by App's navStack.
+  // View navigation history (sidebar mode + conversation selection), driven
+  // by App's useViewNav stack.
   canGoBack: boolean;
   canGoForward: boolean;
   onGoBack: () => void;

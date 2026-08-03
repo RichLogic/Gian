@@ -143,7 +143,6 @@ export class SessionManager {
     );
     this.lifecycle = new SessionLifecycleService(
       db,
-      dataDir,
       this.sessions,
       approvals,
       broadcaster,
@@ -220,7 +219,6 @@ export class SessionManager {
       ...(runtime.executor === 'kimi' ? {} : { approval_mode: 'plan' as const }),
       type: 'manager',
       task_id: taskId,
-      mode: 'regular',
     });
   }
 
@@ -456,6 +454,11 @@ export class SessionManager {
     assertLocalFilesBelongToSession(sessionId, items);
     if (session.worktree_outcome) {
       throw new Error(`session is ${session.worktree_outcome}; create a new session to continue`);
+    }
+    // User-completed sessions (completed_at, spec §B) are closed for input
+    // until reopened — same rule the web composer enforces visually.
+    if (session.completed_at) {
+      throw new Error('session is completed; reopen it before sending more messages');
     }
     if (session.executor === 'kimi' && oneShotBypass) {
       throw new Error('Kimi uses its native mode and does not support Gian one-shot bypass.');

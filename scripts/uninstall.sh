@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./scripts/uninstall.sh           # stop daemon + remove unit file; keep data/logs
-#   ./scripts/uninstall.sh --purge   # also delete ~/.config/gian/ (IRREVERSIBLE)
+#   ./scripts/uninstall.sh --purge   # also delete ~/.gian/ (IRREVERSIBLE)
 #
 # --purge deletes the SQLite database (gian.db) and all logs.
 # This is intentionally explicit and not the default.
@@ -43,7 +43,7 @@ else
   UNIT_DEST="${HOME}/.config/systemd/user/gian.service"
 fi
 
-DATA_DIR="${GIAN_DATA_DIR:-${HOME}/.config/gian}"
+DATA_DIR="${GIAN_DATA_DIR:-${HOME}/.gian}"
 
 # ── stop and remove ───────────────────────────────────────────────────────────
 

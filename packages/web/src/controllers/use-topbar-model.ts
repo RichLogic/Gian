@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
-import type { Executor, Session, Task, Workspace } from '@gian/shared';
+import { useCallback, useMemo, useState, type Dispatch, type SetStateAction } from 'react';
+import type { Executor, Session, Workspace } from '@gian/shared';
 import { completeSubtask, reopenSubtask, type WorkingTree } from '../api.js';
 import type {
   BranchMenuActions,
@@ -7,7 +7,7 @@ import type {
   SessionMenuActions,
 } from '../components/PathBreadcrumb.js';
 import type { Mode } from '../components/Topbar.js';
-import { confirm as confirmDialog, toast } from '../feedback.js';
+import { confirm as confirmDialog } from '../feedback.js';
 import type { GianWs } from '../ws.js';
 
 interface TopbarModelInput {
@@ -17,10 +17,6 @@ interface TopbarModelInput {
   activeSession: Session | null;
   activeWorkspace: Workspace | null;
   activeBranch: string | null;
-  tasks: Task[];
-  setTasks: Dispatch<SetStateAction<Task[]>>;
-  sessions: Session[];
-  sessionsRef: MutableRefObject<Session[]>;
   workingTrees: WorkingTree[];
   wtView: { sessionId: string; wtId: string } | null;
   setWtView: Dispatch<SetStateAction<{ sessionId: string; wtId: string } | null>>;
@@ -49,10 +45,6 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
     activeSession,
     activeWorkspace,
     activeBranch,
-    tasks,
-    setTasks,
-    sessions,
-    sessionsRef,
     workingTrees,
     wtView,
     setWtView,
@@ -67,11 +59,22 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
   const pathSegments = useMemo<PathSegment[]>(() => {
     if (mode === 'sessions' || (mode === 'tasks' && activeSubtaskId)) {
       if (!activeSession) return [];
-      const segments: PathSegment[] = [{
+      // Segment order (2026-08-03): project / session / worktree. The Tasks
+      // view no longer prepends the task name — the task is already the
+      // selected row in the sidebar, and its menu lives on the rail row.
+      const segments: PathSegment[] = [];
+      segments.push({
         kind: 'workspace',
         label: activeWorkspace?.name ?? activeSession.workspace_id,
         copyHint: `${t('common.copy')} "${activeWorkspace?.name ?? activeSession.workspace_id}"`,
-      }];
+      });
+      segments.push({
+        kind: 'session',
+        label: activeSession.name || t('coding.session.untitled'),
+        copyHint: t('coding.session.actions'),
+        editing: renaming,
+        menuAnchor: true,
+      });
       if (activeBranch) {
         segments.push({
           kind: 'branch',
@@ -79,22 +82,13 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
           copyHint: `${t('common.copy')} "${activeBranch}"`,
         });
       }
-      segments.push({
-        kind: 'session',
-        label: activeSession.name || t('coding.session.untitled'),
-        copyHint: t('coding.session.actions'),
-        editing: renaming,
-      });
       return segments;
     }
     if (mode === 'tasks' && activeTaskId) {
-      const task = tasks.find(candidate => candidate.id === activeTaskId);
-      return task ? [{
-        kind: 'session',
-        label: task.name || t('coding.session.untitled'),
-        copyHint: t('coding.session.actions'),
-        editing: renaming,
-      }] : [];
+      // Task selected without a subtask: the header shows no breadcrumb —
+      // the task name is redundant with the selected sidebar row. The task
+      // menu (rename/done/delete) stays available on the rail row's ⋯.
+      return [];
     }
     if (mode === 'spaces' && activeWorkspace) {
       return [{
@@ -104,67 +98,9 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
       }];
     }
     return [];
-  }, [activeBranch, activeSession, activeSubtaskId, activeTaskId, activeWorkspace, mode, renaming, t, tasks]);
+  }, [activeBranch, activeSession, activeSubtaskId, activeTaskId, activeWorkspace, mode, renaming, t]);
 
   const sessionMenu = useMemo<SessionMenuActions | null>(() => {
-    if (mode === 'tasks' && !activeSubtaskId && activeTaskId) {
-      const task = tasks.find(candidate => candidate.id === activeTaskId);
-      if (!task) return null;
-      return {
-        kind: 'task',
-        onRename: () => setRenaming(true),
-        onCopyName: () => {
-          try { void navigator.clipboard?.writeText(task.name || ''); } catch { /* ignore */ }
-        },
-        onMarkUnread: () => {
-          const manager = sessionsRef.current.find(session =>
-            session.type === 'manager' && session.task_id === task.id);
-          if (manager) ws.send({ type: 'session:set_unread', session_id: manager.id, unread: true });
-        },
-        pinned: task.pinned_at != null,
-        onPin: () => {
-          const pinned = task.pinned_at == null;
-          setTasks(previous => previous.map(candidate => candidate.id === task.id
-            ? { ...candidate, pinned_at: pinned ? new Date().toISOString() : null }
-            : candidate));
-          ws.send({ type: 'task:update', task_id: task.id, pinned });
-        },
-        taskDone: task.status === 'done',
-        onToggleDone: () => {
-          const blocked = sessionsRef.current.some(session =>
-            session.task_id === task.id
-            && session.type === 'subtask'
-            && (session.status === 'running' || session.status === 'pending'));
-          if (blocked) {
-            toast({ kind: 'error', message: t('tasks.done.blocked') });
-            return;
-          }
-          ws.send({
-            type: 'task:update',
-            task_id: task.id,
-            status: task.status === 'done' ? 'open' : 'done',
-          });
-        },
-        onForceRecover: () => {
-          const manager = sessionsRef.current.find(session =>
-            session.type === 'manager' && session.task_id === task.id);
-          if (manager) ws.send({ type: 'session:recover', session_id: manager.id });
-        },
-        onDelete: async () => {
-          const count = sessions.filter(session => session.task_id === task.id).length;
-          const cascade = count > 0
-            ? ` ${t('tasks.remove.cascade').replace('{n}', String(count))}`
-            : '';
-          const confirmed = await confirmDialog({
-            message: `${t('tasks.remove.confirmPrefix')} "${task.name || t('tasks.untitled')}"? ${t('tasks.remove.confirmSuffix')}${cascade}`,
-            danger: true,
-            confirmLabel: t('common.delete'),
-          });
-          if (confirmed) ws.send({ type: 'task:delete', task_id: task.id });
-        },
-      };
-    }
-
     const isSubtask = mode === 'tasks' && !!activeSubtaskId;
     if ((mode !== 'sessions' && !isSubtask) || !activeSession) return null;
     return {
@@ -197,7 +133,6 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
       } : {
         onFork: (executor: Executor) => {
           const baseName = activeSession.name || `session ${activeSession.id.slice(0, 6)}`;
-          const worktree = activeSession.worktree_path !== null;
           setCreatingSession(true);
           setForkingSession(true);
           ws.send({
@@ -208,19 +143,11 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
               ? { approval_mode: activeSession.approval_mode }
               : {}),
             name: `${baseName} copy`,
-            ...(worktree
-              ? {
-                  mode: 'worktree',
-                  ...(activeSession.base_branch
-                    ? { base_branch: activeSession.base_branch }
-                    : {}),
-                }
-              : { mode: 'regular' }),
           });
         },
       }),
     };
-  }, [activeSession, activeSubtaskId, activeTaskId, mode, sessions, sessionsRef, setCreatingSession, setForkingSession, setTasks, t, tasks, ws]);
+  }, [activeSession, activeSubtaskId, mode, setCreatingSession, setForkingSession, t, ws]);
 
   const branchMenu = useMemo<BranchMenuActions | null>(() => {
     const visible = (mode === 'sessions' || (mode === 'tasks' && activeSubtaskId))
@@ -232,18 +159,26 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
         .filter(tree => tree.workspace_id === activeSession.workspace_id)
         .map(tree => ({
           id: tree.id,
-          label: tree.kind === 'workspace'
+          // Label = the branch/worktree you switch to, same column for every
+          // row (2026-08-03: the workspace's own checkout no longer gets
+          // "Primary" as its label — that moved to the detail slot). For
+          // agent worktrees the detail is the owning session's name, but only
+          // when it adds information — a worktree whose session is named
+          // after the branch would otherwise show the same text twice.
+          label: tree.branch ?? tree.session_name ?? tree.label,
+          detail: tree.kind === 'workspace'
             ? t('files.picker.primary')
-            : tree.session_name || tree.label,
-          detail: tree.branch,
+            : (tree.session_name && tree.session_name !== tree.branch
+                ? tree.session_name
+                : null),
           active: tree.id === viewedId,
-        })),
+        }))
+        // The currently-viewed tree always leads the list (2026-08-03); the
+        // sort is stable, so the rest keep host order.
+        .sort((a, b) => Number(b.active ?? false) - Number(a.active ?? false)),
       onPick: id => {
         setWtView({ sessionId: activeSession.id, wtId: id });
         activateDiffsRail();
-      },
-      onCopy: () => {
-        try { void navigator.clipboard?.writeText(activeBranch); } catch { /* ignore */ }
       },
     };
   }, [activateDiffsRail, activeBranch, activeSession, activeSubtaskId, mode, setWtView, t, viewedWorkingTreeId, workingTrees, wtView]);
@@ -252,17 +187,10 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
     setRenaming(false);
     const name = value.trim();
     if (!name) return;
-    if (mode === 'tasks' && !activeSubtaskId && activeTaskId) {
-      const task = tasks.find(candidate => candidate.id === activeTaskId);
-      if (task && name !== task.name) {
-        ws.send({ type: 'task:update', task_id: activeTaskId, name });
-      }
-      return;
-    }
     if (activeSession && name !== activeSession.name) {
       ws.send({ type: 'session:rename', session_id: activeSession.id, name });
     }
-  }, [activeSession, activeSubtaskId, activeTaskId, mode, tasks, ws]);
+  }, [activeSession, ws]);
 
   return {
     pathSegments,

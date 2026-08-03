@@ -17,12 +17,12 @@
   display: grid;
   grid-template-rows: var(--topbar-h) 1fr;
   height: 100vh;
-  background: var(--surface-2);
+  background: var(--bg);
 }
 .body {
   display: flex;
   min-height: 0;
-  background: var(--surface-2);
+  background: var(--bg);
 }
 .body.wb-only .sheet { flex: 1; min-width: 0; width: auto; }
 
@@ -73,7 +73,7 @@
   /* Right inset centers the trailing panel-3 toggle over the dock column
      below it (dock-w 38px → center at 19px; tb-toggle is 26px → 19−13=6). */
   padding: 0 6px 0 8px;
-  background: var(--surface-2);
+  background: var(--bg);
 }
 
 /* Hairline between the window-chrome button cluster and the path breadcrumb —
@@ -93,7 +93,7 @@
   background: transparent; border: 0;
   cursor: pointer;
 }
-.tb-toggle:hover:not(:disabled) { background: var(--surface-3); color: var(--text); }
+.tb-toggle:hover:not(:disabled) { background: var(--surface); color: var(--text); }
 .tb-toggle:disabled { opacity: 0.35; cursor: not-allowed; }
 .tb-toggle.active { color: var(--accent-text); }
 .tb-toggle svg { width: 16px; height: 16px; }
@@ -168,7 +168,7 @@
   cursor: pointer;
   transition: border-color 120ms var(--ease), background 120ms var(--ease);
 }
-.path-seg:hover { background: var(--surface-2); color: var(--text); border-color: var(--hairline); }
+.path-seg:hover { background: var(--surface); color: var(--text); border-color: var(--hairline); }
 .path-seg.copied {
   background: var(--accent-soft);
   color: var(--accent-text);
@@ -232,7 +232,7 @@
   width: 272px;
   flex: none;
   display: flex; flex-direction: column;
-  background: var(--surface-2);
+  background: var(--bg);
   min-height: 0;
   overflow: hidden;
 }
@@ -259,7 +259,7 @@
   color: var(--text);
   cursor: pointer;
 }
-.sb-mode:hover { background: var(--surface-2); }
+.sb-mode:hover { background: var(--surface); }
 .sb-mode .caret { color: var(--text-3); font-size: 10px; margin-top: 1px; }
 
 .sb-iconbtn {
@@ -271,52 +271,9 @@
   background: transparent; border: 0;
   flex: none;
 }
-.sb-iconbtn:hover { background: var(--surface-2); color: var(--text); }
-.sb-iconbtn.active { background: var(--surface-2); color: var(--accent-text); }
+.sb-iconbtn:hover { background: var(--surface); color: var(--text); }
+.sb-iconbtn.active { background: var(--surface); color: var(--accent-text); }
 .sb-iconbtn svg { width: 14px; height: 14px; }
-/* "+" new-task split control: plain click = default executor (config);
-   component state opens the executor menu on hover/focus and closes it after
-   selection so it cannot cover the inline form. */
-.sb-newtask { position: relative; display: inline-flex; flex: none; }
-.sb-newtask-menu {
-  position: absolute;
-  top: 100%; right: 0;
-  z-index: 30;
-  min-width: 172px;
-  margin-top: 4px;
-  padding: 4px;
-  display: flex; flex-direction: column; gap: 2px;
-  background: var(--surface);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-2);
-  box-shadow: var(--shadow-2);
-  opacity: 0; visibility: hidden; transform: translateY(-3px);
-  pointer-events: none;
-  transition: opacity 120ms var(--ease), transform 120ms var(--ease), visibility 120ms;
-}
-/* Bridge the 4px gap so moving the cursor button→menu keeps :hover. */
-.sb-newtask-menu::before {
-  content: ''; position: absolute; left: 0; right: 0; top: -6px; height: 6px;
-}
-.sb-newtask.open .sb-newtask-menu {
-  opacity: 1; visibility: visible; transform: translateY(0);
-  pointer-events: auto;
-}
-.sb-newtask-item {
-  display: flex; align-items: center; gap: 8px;
-  width: 100%;
-  padding: 6px 8px;
-  border: 0; background: transparent;
-  border-radius: var(--r-1);
-  font: var(--fz-12)/1.2 var(--font-sans);
-  color: var(--text-2);
-  text-align: left; cursor: pointer;
-}
-.sb-newtask-item:hover { background: var(--surface-2); color: var(--text); }
-.sb-newtask-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.sb-newtask-dot.claude { background: var(--claude); }
-.sb-newtask-dot.codex { background: var(--codex); }
-.sb-newtask-dot.kimi { background: var(--kimi); box-shadow: 0 0 0 1px oklch(0.65 0 0 / 0.55); }
 
 .sb-scroll {
   flex: 1;
@@ -324,6 +281,38 @@
   overflow-y: auto;
   padding: 0 6px 10px;
 }
+/* Section label — Codex-style "Pinned" / "Projects" / 进行中 / 完成 headers
+   (2026-08-03). A plain label in the Sessions rail (.static); a collapsible
+   button (caret + hover) in the Tasks rail. */
+.sb-section {
+  display: flex; align-items: center; gap: 4px;
+  width: 100%;
+  margin: 10px 2px 2px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: var(--r-1);
+  background: transparent;
+  font: 600 var(--fz-11)/1.2 var(--font-sans);
+  letter-spacing: 0.02em;
+  color: var(--text-3);
+  cursor: pointer;
+  user-select: none;
+  text-align: left;
+}
+.sb-scroll > .sb-section:first-child,
+.sb-scroll > :first-child + .sb-section { margin-top: 2px; }
+button.sb-section:hover { color: var(--text); }
+.sb-section.static { cursor: default; }
+.sb-section-label {
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sb-section .count {
+  font: 500 10.5px/1 var(--font-mono);
+  color: var(--text-3);
+}
+.sb-section svg { flex: none; }
+
 /* Project group header — Codex-style: sans label with a folder glyph, plain
    count, hover as a soft rounded row (no mono eyebrow / count pill). */
 .sb-group {
@@ -337,7 +326,7 @@
   user-select: none;
 }
 .sb-group:first-child { margin-top: 2px; }
-.sb-group:hover { background: var(--surface-2); }
+.sb-group:hover { background: var(--surface); }
 .sb-group-ico {
   width: 14px;
   color: var(--text-3);
@@ -349,8 +338,7 @@
   font: 500 10.5px/1 var(--font-mono);
   color: var(--text-3);
 }
-/* Group-row hover actions ("+" new session here, pin). Hidden until hover,
-   except the pin while the workspace is pinned (.on). */
+/* Group-row hover actions ("+" new session here, pin). Hidden until hover. */
 .sb-group-acts {
   margin-left: auto;
   display: inline-flex; align-items: center; gap: 1px;
@@ -365,7 +353,7 @@
   transition: opacity 100ms var(--ease), background 100ms var(--ease), color 100ms var(--ease);
 }
 .sb-group:hover .sb-act, .sb-act.on { opacity: 1; pointer-events: auto; }
-.sb-act:hover { background: var(--surface-3); color: var(--text); }
+.sb-act:hover { background: var(--surface-2); color: var(--text); }
 .sb-act.on { color: var(--text-2); }
 
 /* ---------- Rail item (session row, ws row, bot row) ---------- */
@@ -380,14 +368,14 @@
   cursor: pointer;
   transition: background var(--dur-fast) var(--ease-soft);
 }
-.rail-item:hover { background: var(--surface-2); }
+.rail-item:hover { background: var(--surface); }
 /* Session rows: reserve the group header's icon width (2px group margin +
    8px padding + 14px folder glyph + 6px gap) so the session title aligns
    with the project name text, Codex-style. Hover/active backgrounds stay
    full-width. */
 .rail-item.session-row { padding-left: 30px; }
-.rail-item.active { background: var(--accent-soft); }
-.rail-item.active .ri-title { color: var(--accent-text); }
+.rail-item.active { background: var(--surface-2); }
+.rail-item.active .ri-title { color: var(--text); }
 .ri-body {
   min-width: 0; display: flex; flex-direction: column; gap: 2px;
 }
@@ -432,9 +420,9 @@
    dropped (2026-07-29 sidebar polish): coloured ages read as noise next to the
    StatusIcon, which now owns per-row status colour. Neutral grey everywhere. */
 
-/* Session-row hover actions (pin / archive). They cover the row-end glyph
-   (age / status / hidden badge) on hover; the pin stays visible while the
-   session is pinned (.on). */
+/* Session-row hover actions (pin / archive / complete). They cover the
+   row-end glyph (age / status / hidden badge) on hover; nothing stays visible
+   off-hover except a pinned subtask's pin (Tasks rail, .ri-act.on). */
 .ri-acts {
   position: absolute; right: 6px; top: 50%;
   transform: translateY(-50%);
@@ -1093,19 +1081,6 @@
   box-shadow: var(--shadow-1);
   overflow: hidden;
 }
-/* Manager rail panel 2 — the compact ManagerInspector fills the sheet slot. */
-.sheet-manager {
-  width: var(--sheet-w, 600px);
-  flex: none;
-  display: flex; flex-direction: column;
-  min-height: 0;
-  margin: var(--sp-2) 0 var(--sp-2) 0;
-}
-.sheet-manager .inspector {
-  width: auto;
-  flex: 1;
-  margin: 0;
-}
 /* Settings rail panel 3 — section nav reuses the settings-v3 s2-* items. */
 .settings-nav-inspector .settings-nav-body {
   flex: 1;
@@ -1627,7 +1602,7 @@
 /* Folder rows have no icon column (chevron + name only) — without this the
    name would land in the 14px icon track and ellipsize to nothing. */
 .tree-item.folder { grid-template-columns: 12px 1fr; }
-.tree-item.active { background: var(--accent-soft); color: var(--accent-text); }
+.tree-item.active { background: var(--surface-2); color: var(--text); }
 .tree-item.folder .tree-name { color: var(--text); font-weight: 500; }
 .tree-item .tree-caret {
   color: var(--text-3);
@@ -1824,7 +1799,7 @@
   align-items: center;
   padding: 6px 2px;
   gap: 2px;
-  background: var(--surface-2);
+  background: var(--bg);
   /* Slim seam to the neighbouring panel — tighter than the 4px splitter gap,
      since the dock's transparent strip already adds ~3px of optical space
      before the first icon. */
@@ -1839,7 +1814,7 @@
   background: transparent; border: 0;
   cursor: pointer;
 }
-.dock-btn:hover { background: var(--surface-2); color: var(--text); }
+.dock-btn:hover { background: var(--surface); color: var(--text); }
 .dock-btn.active {
   background: var(--accent-soft);
   color: var(--accent-text);

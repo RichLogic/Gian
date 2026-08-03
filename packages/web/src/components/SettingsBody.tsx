@@ -184,7 +184,7 @@ function SettingsBodyInner({
                   {([
                     ['light', 'settings.theme.light', ['oklch(0.955 0.004 280)', 'oklch(0.935 0.005 280)', 'oklch(0.22 0.02 280)']],
                     ['warm', 'settings.theme.warm', ['oklch(0.955 0.020 80)', 'oklch(0.925 0.022 78)', 'oklch(0.30 0.04 55)']],
-                    ['dark', 'settings.theme.dark', ['oklch(0.165 0.012 250)', 'oklch(0.240 0.016 250)', 'oklch(0.93 0.01 250)']],
+                    ['dark', 'settings.theme.dark', ['oklch(0.140 0.004 265)', 'oklch(0.269 0.006 271)', 'oklch(0.910 0.004 271)']],
                   ] as const).map(([key, labelKey, swatches]) => (
                     <button key={key} className={`theme-chip ${config.theme === key ? 'active' : ''}`}
                             onClick={() => patch({ theme: key, accent: THEME_DEFAULT_ACCENT[key] })}>

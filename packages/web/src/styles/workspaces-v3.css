@@ -20,8 +20,8 @@
   padding: 3px 4px 3px 8px; border-radius: var(--r-2);
   transition: background 100ms var(--ease);
 }
-.ws-item:hover { background: var(--surface-2); }
-.ws-item.active { background: var(--accent-soft); }
+.ws-item:hover { background: var(--surface); }
+.ws-item.active { background: var(--surface-2); }
 .ws-item-main {
   flex: 1; min-width: 0; display: flex; align-items: center;
   text-align: left; border: 0; background: transparent; cursor: pointer;

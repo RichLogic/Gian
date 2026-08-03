@@ -10,19 +10,12 @@ import type {
   WorktreeOutcome,
 } from '@gian/shared';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import type { ApprovalManager } from '../approval/index.js';
 import type { Db } from '../storage/db.js';
 import { loadConfig } from '../storage/config.js';
 import { purgeSessionAttachments } from '../storage/attachments.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
-import {
-  createWorktree,
-  detectDefaultBranch,
-  isGitRepo,
-  mergeBranch,
-  removeWorktree,
-} from '../workspace/git.js';
+import { mergeBranch } from '../workspace/git.js';
 import {
   executorConfigFromOptions,
   type SessionRepository,
@@ -34,9 +27,6 @@ export interface CreateSessionInput {
   name?: string;
   model?: string | null;
   approval_mode?: ApprovalMode;
-  mode?: 'regular' | 'worktree';
-  base_branch?: string;
-  branch?: string;
   type?: SessionType;
   task_id?: string | null;
   thinking_effort?: ThinkingEffort | null;
@@ -78,7 +68,6 @@ function assertApprovalModeAllowed(executor: Executor, mode: ApprovalMode): void
 export class SessionLifecycleService {
   constructor(
     private db: Db,
-    private dataDir: string,
     private sessions: SessionRepository,
     private approvals: ApprovalManager,
     private broadcaster: WsBroadcaster,
@@ -131,9 +120,6 @@ export class SessionLifecycleService {
         ? defaultEffort as ThinkingEffort
         : null;
 
-    let worktreePath: string | null = null;
-    let branch: string | null = null;
-    let baseBranch: string | null = null;
     let forkFromSessionId: string | null = null;
     let forkFromClaudeSessionId: string | null = null;
     let forkCwd: string | null = null;
@@ -141,9 +127,6 @@ export class SessionLifecycleService {
     if (input.fork_from) {
       if (input.executor !== 'claude') {
         throw new Error('fork_from is only supported for claude sessions');
-      }
-      if (input.mode === 'worktree') {
-        throw new Error('fork_from sessions share the parent cwd and cannot create a worktree');
       }
       const parent = this.db
         .prepare(
@@ -169,26 +152,12 @@ export class SessionLifecycleService {
       forkCwd = parent.worktree_path;
     }
 
-    if (input.mode === 'worktree') {
-      if (!isGitRepo(workspace.path)) {
-        throw new Error(`workspace is not a git repo: ${workspace.path}`);
-      }
-      baseBranch = input.base_branch ?? detectDefaultBranch(workspace.path);
-      branch = input.branch ?? `worktree/${id.slice(0, 8)}`;
-      worktreePath = join(this.dataDir, 'worktrees', input.workspace_id, id);
-      try {
-        createWorktree(workspace.path, worktreePath, branch, baseBranch);
-      } catch (error) {
-        throw new Error(`worktree creation failed: ${(error as Error).message}`);
-      }
-    }
-
     let proxyResult: BringUpResult;
     try {
       proxyResult = await this.runtime.bringUpProxySession({
         sessionId: id,
         executor: input.executor,
-        cwd: forkCwd ?? worktreePath ?? workspace.path,
+        cwd: forkCwd ?? workspace.path,
         model: effectiveModel,
         displayName: input.name ?? null,
         forkFromClaudeSessionId,
@@ -203,13 +172,6 @@ export class SessionLifecycleService {
       });
     } catch (error) {
       await this.runtime.discardProxy(id);
-      if (worktreePath && branch) {
-        try {
-          removeWorktree(workspace.path, worktreePath, branch);
-        } catch {
-          // Preserve the proxy error; worktree cleanup remains best-effort.
-        }
-      }
       throw error;
     }
 
@@ -224,7 +186,7 @@ export class SessionLifecycleService {
          VALUES
           (@id, @name, @type, @task_id, @workspace_id, @executor, @model,
            @approval_mode, @executor_config_json, @thinking_effort, 'web', 'new',
-           0, @worktree_path, @branch, @base_branch, NULL, @native_session_id,
+           0, NULL, NULL, NULL, NULL, @native_session_id,
            @fork_from_session_id, 1, @now, @now)`,
       )
       .run({
@@ -238,18 +200,12 @@ export class SessionLifecycleService {
         approval_mode: approvalMode,
         executor_config_json: JSON.stringify(executorConfigFromOptions(proxyResult.configOptions)),
         thinking_effort: effectiveEffort,
-        worktree_path: worktreePath,
-        branch,
-        base_branch: baseBranch,
         native_session_id: proxyResult.nativeSessionId,
         fork_from_session_id: forkFromSessionId,
         now,
       });
     this.sessions.setNativeOptions(id, proxyResult.configOptions);
 
-    if (worktreePath) {
-      this.broadcastWorkspaceGitUpdated(input.workspace_id, 'worktree-created');
-    }
     return this.sessions.get(id);
   }
 
@@ -264,9 +220,6 @@ export class SessionLifecycleService {
     const workspace = this.workspaceFor(session);
     mergeBranch(workspace.path, session.branch, session.base_branch);
     await this.runtime.teardownProxy(sessionId);
-    if (session.worktree_path) {
-      removeWorktree(workspace.path, session.worktree_path, session.branch);
-    }
     this.finalizeWorktree(sessionId, 'merged');
     this.broadcastWorkspaceGitUpdated(session.workspace_id, 'merge');
   }
@@ -277,11 +230,7 @@ export class SessionLifecycleService {
     if (session.worktree_outcome) {
       throw new Error(`session already ${session.worktree_outcome}`);
     }
-    const workspace = this.workspaceFor(session);
     await this.runtime.teardownProxy(sessionId);
-    if (session.worktree_path) {
-      removeWorktree(workspace.path, session.worktree_path, session.branch);
-    }
     this.finalizeWorktree(sessionId, 'discarded');
     this.broadcastWorkspaceGitUpdated(session.workspace_id, 'drop');
   }
@@ -323,18 +272,6 @@ export class SessionLifecycleService {
 
   async delete(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (session.branch && !session.worktree_outcome && session.worktree_path) {
-      const workspace = this.db
-        .prepare('SELECT path FROM workspaces WHERE id = ?')
-        .get(session.workspace_id) as { path: string } | undefined;
-      if (workspace) {
-        try {
-          removeWorktree(workspace.path, session.worktree_path, session.branch);
-        } catch {
-          // Deletion is authoritative even when best-effort git cleanup fails.
-        }
-      }
-    }
     await this.runtime.teardownProxy(sessionId);
     this.runtime.forgetConversationUsage(sessionId);
     this.sessions.forget(sessionId);
@@ -383,7 +320,7 @@ export class SessionLifecycleService {
 
   private broadcastWorkspaceGitUpdated(
     workspaceId: string,
-    reason: 'merge' | 'drop' | 'session-deleted' | 'worktree-created',
+    reason: 'merge' | 'drop' | 'session-deleted',
   ): void {
     this.broadcaster.broadcast({
       type: 'workspace:git-updated',

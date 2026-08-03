@@ -164,11 +164,11 @@ export function Composer({
   workspaceId?: string;
   footer?: import('react').ReactNode;
   /** `'minimal'` strips the model / approval-mode / attachment / bypass
-   *  controls down to a bare textarea + Send/Stop. Used by the read-only Task
-   *  Manager composer: the Manager is a fixed-config Codex session (forced model/policy), so those
-   *  affordances would expose abilities it doesn't have. The draft-persistence,
-   *  Send→Stop toggle, width and keyboard handling are all kept identical to a
-   *  normal session composer. */
+   *  controls down to a bare textarea + Send/Stop, for embedders that want a
+   *  fixed-config composer. The draft-persistence, Send→Stop toggle, width
+   *  and keyboard handling are all kept identical to a normal session
+   *  composer. (Currently unused — introduced for the retired per-Task
+   *  Manager composer.) */
   variant?: 'full' | 'minimal';
   /** Override the idle placeholder text (defaults to `composer.placeholder.idle`). */
   placeholder?: string;
@@ -1096,8 +1096,8 @@ export function Composer({
             </>
           )}
 
-          {/* Attach files — plus glyph (VS Code style). Hidden in minimal:
-              the Manager placeholder composer has no attachment pipeline. */}
+          {/* Attach files — plus glyph (VS Code style). Hidden in minimal
+              (bare textarea variant, no attachment pipeline). */}
           {!minimal && (
             <button
               type="button"

@@ -1,5 +1,4 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
 
 const GIT_TIMEOUT = 60_000;
 
@@ -43,14 +42,6 @@ export function detectDefaultBranch(repo: string): string {
 }
 
 /**
- * Run `git worktree add -b <branch> <path> <base>`. Throws on failure.
- * The new branch is created from base; if base doesn't exist, git fails.
- */
-export function createWorktree(repo: string, path: string, branch: string, base: string): void {
-  git(['worktree', 'add', '-b', branch, path, base], { cwd: repo });
-}
-
-/**
  * Merge `branch` into the current branch of `repo`. Uses --no-ff so the
  * merge always shows up in history. Caller chooses where to run this
  * (typically the workspace root, on the base branch).
@@ -62,25 +53,6 @@ export function mergeBranch(repo: string, branch: string, base: string): void {
   // Make sure we're on the base branch first.
   git(['checkout', base], { cwd: repo });
   git(['merge', '--no-ff', branch], { cwd: repo });
-}
-
-/**
- * Remove a worktree (force) and delete its branch. Both operations are
- * tolerant of "already gone" states so callers can use this as a unified
- * cleanup hook.
- */
-export function removeWorktree(repo: string, path: string, branch: string): void {
-  if (existsSync(path)) {
-    git(['worktree', 'remove', '--force', path], { cwd: repo, throwOnError: false });
-    // If git refused (e.g. metadata mismatch), nuke the dir directly.
-    if (existsSync(path)) {
-      try { rmSync(path, { recursive: true, force: true }); } catch { /* swallow */ }
-    }
-  }
-  // Prune stale worktree metadata before trying to delete the branch —
-  // git refuses `branch -D` if the worktree is still considered active.
-  git(['worktree', 'prune'], { cwd: repo, throwOnError: false });
-  git(['branch', '-D', branch], { cwd: repo, throwOnError: false });
 }
 
 export interface GitWorktreeInfo {

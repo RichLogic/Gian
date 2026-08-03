@@ -44,8 +44,8 @@
   color: var(--text);
 }
 .s2-navitem.active {
-  background: var(--accent-soft);
-  color: var(--accent-text);
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 /* The prototype leans on a `.mono` utility that the web app never defined as a

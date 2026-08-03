@@ -15,14 +15,14 @@
   width: 100vw;
   height: 100vh;
   min-width: 0;
-  background: var(--surface-2);
+  background: var(--bg);
   overflow: hidden;
 }
 .body {
   display: flex;
   min-width: 0;
   min-height: 0;
-  background: var(--surface-2);
+  background: var(--bg);
   /* override old grid */
   grid-template-columns: none;
   padding: 0;
@@ -82,7 +82,7 @@
   /* Right inset centers the trailing panel-3 toggle over the dock column
      below it (dock-w 38px → center at 19px; tb-toggle is 26px → 19−13=6). */
   padding: 0 6px 0 8px;
-  background: var(--surface-2);
+  background: var(--bg);
 }
 
 /* Hairline between the window-chrome button cluster and the path breadcrumb —
@@ -106,7 +106,7 @@
   background: transparent;
   border: 0;
 }
-.brand:hover { background: var(--surface-3); }
+.brand:hover { background: var(--surface); }
 
 /* mode dropdown — switches Sessions / Spaces / Bots */
 .mode-anchor { position: relative; }
@@ -152,6 +152,7 @@
   flex: none;
   opacity: 0.7;
 }
+.path-sep.branch { display: inline-flex; align-items: center; }
 .path-seg-anchor { position: relative; display: inline-flex; }
 .path-seg {
   display: inline-flex; align-items: center; gap: 4px;
@@ -167,7 +168,7 @@
   transition: border-color 120ms var(--ease), background 120ms var(--ease);
   position: relative;
 }
-.path-seg:hover { background: var(--surface-2); color: var(--text); border-color: var(--hairline); }
+.path-seg:hover { background: var(--surface); color: var(--text); border-color: var(--hairline); }
 .path-seg.copied {
   background: var(--accent-soft);
   color: var(--accent-text);
@@ -276,24 +277,28 @@
 .session-menu .item.danger svg { color: var(--danger); }
 .session-menu .item .sub {
   margin-left: auto;
+  flex: none;
+  padding-left: 12px;
   font: 10px/1 var(--font-mono);
   color: var(--text-3);
 }
 /* Branch (worktree) menu: the active tree is bold + carries a check glyph;
-   the detail (branch name) right-aligns, dimmed, like the `.sub` hint. */
+   the detail (Primary / owning session) reuses the `.sub` hint style so the
+   worktree dropdown and the session dropdown share one row format. */
 .session-menu .item.active { font-weight: 600; }
+/* Fixed-width slot for the active check so all labels align (2026-08-03). */
+.session-menu .item .item-check {
+  width: 13px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 .session-menu .item .item-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.session-menu .item .item-detail {
-  margin-left: auto;
-  color: var(--text-3);
-  font-size: 11px;
-  padding-left: 12px;
-  flex: none;
 }
 .session-menu .rule { height: 1px; background: var(--hairline); margin: 4px 4px; }
 
@@ -305,7 +310,7 @@
   align-items: center;
   padding: 6px 3px;
   gap: 2px;
-  background: var(--surface-2);
+  background: var(--bg);
 }
 .dock-group {
   display: flex; flex-direction: column;
@@ -330,7 +335,7 @@
   background: transparent; border: 0;
   cursor: pointer;
 }
-.dock-btn:hover { background: var(--surface-2); color: var(--text); }
+.dock-btn:hover { background: var(--surface); color: var(--text); }
 .dock-btn.active {
   background: var(--accent-soft);
   color: var(--accent-text);
@@ -478,7 +483,7 @@
 
 /* ---------- Reset legacy session.css overrides that conflict with V2 ----------
    session.css gives `.sidebar` rounded corners + box-shadow (treating it as an
-   island). V2 sidebar is flat against the body — same surface-2 background,
+   island). V2 sidebar is flat against the body — same --bg frame background,
    no shadow, no rounding. */
 .sidebar {
   border-radius: 0 !important;
@@ -777,15 +782,13 @@
 
 /* Panel 2 / panel 3 entry (rail open, or tab-group switch inside the sheet). */
 .sheet { animation: gian-panel-in var(--dur-med) var(--ease-soft); }
-.inspector,
-.sheet-manager { animation: gian-panel-in var(--dur-med) var(--ease-soft); }
+.inspector { animation: gian-panel-in var(--dur-med) var(--ease-soft); }
 .sheet-group { animation: gian-fade-in var(--dur-fast) var(--ease-soft); }
 
 /* Popovers & dropdowns (mode switcher, menus). */
 .mode-pop,
 .sheet-act-menu,
-.runner-pop,
-.sb-newtask-menu { animation: gian-pop-in var(--dur-fast) var(--ease-soft); }
+.runner-pop { animation: gian-pop-in var(--dur-fast) var(--ease-soft); }
 
 /* Chrome buttons — soft hover/active instead of instant color flips. */
 .dock-btn,

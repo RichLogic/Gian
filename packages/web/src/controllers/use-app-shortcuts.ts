@@ -67,9 +67,6 @@ export function useAppShortcuts({
         executor,
         ...(session.approval_mode ? { approval_mode: session.approval_mode } : {}),
         name: `${baseName} copy`,
-        ...(session.worktree_path !== null
-          ? { mode: 'worktree', ...(session.base_branch ? { base_branch: session.base_branch } : {}) }
-          : { mode: 'regular' }),
       });
     }
 
@@ -78,17 +75,12 @@ export function useAppShortcuts({
       const mod = event.metaKey || event.ctrlKey;
       if (!mod || event.shiftKey || event.altKey) return;
       if (event.key === 'Enter') {
-        const sessionId = activeSessionId
-          ?? (mode === 'tasks' && activeTaskId && !activeSubtaskId
-            ? (sessionsRef.current?.find(session =>
-                session.type === 'manager' && session.task_id === activeTaskId)?.id ?? null)
-            : null);
-        const session = sessionId
-          ? sessionsRef.current?.find(candidate => candidate.id === sessionId)
+        const session = activeSessionId
+          ? sessionsRef.current?.find(candidate => candidate.id === activeSessionId)
           : undefined;
-        if (sessionId && session?.executor === 'codex') {
+        if (activeSessionId && session?.executor === 'codex') {
           event.preventDefault();
-          ws.send({ type: 'queue:send_now', session_id: sessionId });
+          ws.send({ type: 'queue:send_now', session_id: activeSessionId });
         }
         return;
       }

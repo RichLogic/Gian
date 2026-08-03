@@ -5,11 +5,10 @@
  */
 .topbar {
   padding-left: max(82px, calc(env(titlebar-area-x, 0px) + 8px)) !important;
-  /* The hiddenInset traffic lights center ~16px from the window top, but the
-     topbar row is taller (--topbar-h, 38-48px by density). Lifting the flex
-     content by this bottom padding centers buttons + breadcrumb on the
-     traffic-light line instead of the row's geometric middle. */
-  padding-bottom: calc(var(--topbar-h, 42px) - 32px) !important;
+  /* The traffic lights are nudged down/right via trafficLightPosition so
+     their center sits on the topbar row's geometric middle (Air's header
+     idiom: lights and content share the row centerline). Content stays
+     vertically centered in the row — no compensating lift. */
   -webkit-app-region: drag;
   app-region: drag;
   user-select: none;

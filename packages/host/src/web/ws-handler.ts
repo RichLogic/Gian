@@ -193,9 +193,6 @@ async function dispatch(
         model: msg.model,
         approval_mode: msg.approval_mode,
         ...(msg.name !== undefined ? { name: msg.name } : {}),
-        ...(msg.mode !== undefined ? { mode: msg.mode } : {}),
-        ...(msg.base_branch !== undefined ? { base_branch: msg.base_branch } : {}),
-        ...(msg.branch !== undefined ? { branch: msg.branch } : {}),
         ...(msg.fork_from !== undefined ? { fork_from: msg.fork_from } : {}),
       });
       broadcaster.send(ws, {

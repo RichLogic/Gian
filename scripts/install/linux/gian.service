@@ -20,8 +20,8 @@ Restart=on-failure
 RestartSec=5
 
 # Append keeps logs across restarts in a single file, matching launchd behaviour.
-StandardOutput=append:{{HOME}}/.config/gian/logs/host.out
-StandardError=append:{{HOME}}/.config/gian/logs/host.err
+StandardOutput=append:{{HOME}}/.gian/logs/host.out
+StandardError=append:{{HOME}}/.gian/logs/host.err
 
 [Install]
 # default.target is the user-session equivalent of multi-user.target;

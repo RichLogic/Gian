@@ -4,7 +4,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 
 export function resolveDataDir(): string {
   const fromEnv = process.env.GIAN_DATA_DIR;
-  const dir = fromEnv ?? join(homedir(), '.config', 'gian');
+  const dir = fromEnv ?? join(homedir(), '.gian');
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }

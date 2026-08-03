@@ -18,7 +18,7 @@ login server is required.
 
 Agent proxies are not baked into the App. Settings downloads the matching
 versioned proxy asset from the Gian GitHub Release, verifies its SHA-256 digest,
-and activates it under `~/.config/gian/plugins/`. Agent CLIs are detected from
+and activates it under `~/.gian/plugins/`. Agent CLIs are detected from
 configured and common official paths or installed through vendor installers.
 
 ## Commands

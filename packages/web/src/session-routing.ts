@@ -70,3 +70,56 @@ export function sortSessionsForRail<T extends Pick<Session, 'pinned_at' | 'updat
 export function sortWorkspacesForRail<T extends { pinned: 0 | 1 }>(workspaces: T[]): T[] {
   return workspaces.slice().sort((a, b) => b.pinned - a.pinned);
 }
+
+/** Sidebar rail sections (Codex-style, 2026-08-03): pinned content lives in a
+ *  dedicated "Pinned" section above "Projects". A pinned SESSION becomes a
+ *  standalone row in Pinned (it leaves its workspace group); a pinned
+ *  WORKSPACE moves its whole group (header + its unpinned sessions) into
+ *  Pinned. Everything else stays grouped by workspace under Projects. */
+export interface RailSections<T> {
+  /** Standalone pinned session rows, most-recently-pinned first. */
+  pinnedSessions: T[];
+  /** Unpinned sessions grouped by workspace_id (each list rail-sorted). */
+  byWs: Map<string, T[]>;
+  /** Pinned workspace ids that have visible sessions, in host order. */
+  pinnedWsIds: string[];
+  /** Unpinned workspace ids that have visible sessions, in host order
+   *  (orphan ids — sessions whose workspace isn't in the list — appended). */
+  projectWsIds: string[];
+  /** False when nothing is pinned — the rail then renders without section
+   *  labels, exactly like the pre-sections layout. */
+  hasPinned: boolean;
+}
+
+export function buildRailSections<T extends Pick<Session, 'workspace_id' | 'pinned_at' | 'updated_at'>>(
+  sessions: T[],
+  workspaces: Array<{ id: string; pinned: 0 | 1 }>,
+): RailSections<T> {
+  const pinnedSessions = sortSessionsForRail(sessions.filter(s => s.pinned_at != null));
+  const byWs = new Map<string, T[]>();
+  for (const s of sessions) {
+    if (s.pinned_at != null) continue;
+    const list = byWs.get(s.workspace_id) ?? [];
+    list.push(s);
+    byWs.set(s.workspace_id, list);
+  }
+  for (const [id, list] of byWs) byWs.set(id, sortSessionsForRail(list));
+  const pinnedWsIds: string[] = [];
+  const projectWsIds: string[] = [];
+  const seen = new Set<string>();
+  for (const w of workspaces) {
+    if (!byWs.has(w.id)) continue;
+    seen.add(w.id);
+    (w.pinned === 1 ? pinnedWsIds : projectWsIds).push(w.id);
+  }
+  for (const wsId of byWs.keys()) {
+    if (!seen.has(wsId)) projectWsIds.push(wsId);
+  }
+  return {
+    pinnedSessions,
+    byWs,
+    pinnedWsIds,
+    projectWsIds,
+    hasPinned: pinnedSessions.length > 0 || pinnedWsIds.length > 0,
+  };
+}

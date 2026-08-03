@@ -581,7 +581,11 @@ export class SessionEventCoordinator {
 
   /** Pop the next queued message and re-enter sendMessage. Returns true if sent. */
   private maybeAutoSendNext(sessionId: string): boolean {
-    try { this.sessions.get(sessionId); } catch { return false; }
+    let session: Session;
+    try { session = this.sessions.get(sessionId); } catch { return false; }
+    // A user-completed session is closed for input: STOP the drain without
+    // popping — the queue stays intact in case the session is reopened.
+    if (session.completed_at) return false;
     const next = this.queue.popNext(sessionId);
     if (!next) return false;
     this.broadcastQueueUpdated(sessionId);

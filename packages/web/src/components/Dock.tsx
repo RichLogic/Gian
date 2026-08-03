@@ -38,7 +38,6 @@ const ICONS = {
   // Redrawn on a shared 24-grid (phase 6): 1.5px stroke, round caps/joins,
   // Codex-style minimal geometry, optically centered.
   grid: 'M4 5.5A1.5 1.5 0 0 1 5.5 4h4A1.5 1.5 0 0 1 11 5.5v4A1.5 1.5 0 0 1 9.5 11h-4A1.5 1.5 0 0 1 4 9.5z M13 5.5A1.5 1.5 0 0 1 14.5 4h4A1.5 1.5 0 0 1 20 5.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 13 9.5z M4 14.5A1.5 1.5 0 0 1 5.5 13h4a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 4 18.5z M13 14.5a1.5 1.5 0 0 1 1.5-1.5h4a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5h-4a1.5 1.5 0 0 1-1.5-1.5z',
-  chat: 'M12 4.5c-4.7 0-8.5 3.13-8.5 7 0 1.5.57 2.9 1.58 4.05L3.6 19.6l4.2-1.43c1.24.58 2.62.83 4.2.83 4.7 0 8.5-3.13 8.5-7s-3.8-7-8.5-7z',
   sidechat: 'M9.2 15.8 6 18.4v-2.6H4.8A1.8 1.8 0 0 1 3 14V6.8A1.8 1.8 0 0 1 4.8 5h8.4A1.8 1.8 0 0 1 15 6.8v.7 M15.6 9.5h3.6A1.8 1.8 0 0 1 21 11.3v4.2a1.8 1.8 0 0 1-1.8 1.8h-.6v2.6l-3.2-2.6h-4.6a1.8 1.8 0 0 1-1.8-1.8v-.7',
   folder: 'M3.5 7A2.5 2.5 0 0 1 6 4.5h3.4a2 2 0 0 1 1.6.8l1.2 1.7H18A2.5 2.5 0 0 1 20.5 9.5v8A2.5 2.5 0 0 1 18 20H6a2.5 2.5 0 0 1-2.5-2.5z',
   diff: 'M8.5 4v13 M8.5 4l-3 3 M8.5 4l3 3 M15.5 20V7 M15.5 20l3-3 M15.5 20l-3-3',
@@ -65,10 +64,6 @@ interface Props {
   /** Global workbench rails (Terminal / Workspaces / Settings) need
    *  Sessions or Tasks mode. */
   workbenchDisabled?: boolean;
-  /** The Tasks-mode Manager rail toggle. Only meaningful while a subtask is
-   *  selected (the Manager is the parent Task's), so the button is rendered
-   *  only when `managerVisible` — matching the design's subtask-only affordance. */
-  managerVisible?: boolean;
 
   // Runner chip (V1-style clickable status pill anchored bottom-right).
   wsState: WsState;
@@ -82,7 +77,6 @@ export function Dock({
   onToggleRail,
   sessionRailsDisabled,
   workbenchDisabled,
-  managerVisible,
   wsState,
   wsAttempt,
   authed,
@@ -146,17 +140,6 @@ export function Dock({
       <div className="dock-divider" aria-hidden />
 
       <div className="dock-group" data-dock-group-label={t('dock.group.chat')}>
-        {managerVisible && (
-          <DockBtn
-            group="panel"
-            testId="manager"
-            label={t('dock.manager')}
-            active={activeRail === 'manager'}
-            onClick={() => onToggleRail('manager')}
-          >
-            <Icon d={ICONS.chat} />
-          </DockBtn>
-        )}
         {/* Sidechat rail — chat tabs onto other sessions, added via the
             tab strip's "+" session picker. */}
         <DockBtn

@@ -7,6 +7,8 @@ import {
   resetOnboarding,
   saveOnboardingWorkspace,
 } from '../../onboarding/state.js';
+import { syncAgentInstructionBlocks } from '../../onboarding/agent-instructions.js';
+import { expandHome } from '../../workspace/index.js';
 
 function errorResponse(error: unknown): { error: string } {
   return { error: error instanceof Error ? error.message : String(error) };
@@ -44,6 +46,14 @@ export function registerOnboardingRoutes(
         (await buildOnboardingState(options.db, agents)).workspaceRoot,
       );
       markOnboardingComplete(options.db);
+      // The workspace root was just (re)confirmed — refresh the managed
+      // block in every agent CLI's global instruction file. A failure here
+      // must not fail onboarding.
+      try {
+        await syncAgentInstructionBlocks(expandHome(config.workspaceRoot));
+      } catch (error) {
+        console.warn('[gian] agent instruction sync failed:', error);
+      }
       return c.json({
         ...(await buildOnboardingState(options.db, agents)),
         ...config,

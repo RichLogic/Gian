@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Executor, NativeSession, Session, SystemConfig, Workspace } from '@gian/shared';
+import type { NativeSession, Session, SystemConfig, Workspace } from '@gian/shared';
 import {
   deleteWorkspace,
   loadClaudeMd,
@@ -20,25 +20,16 @@ import { NativeSessionsPane } from './spaces-native-sessions.js';
 
 type WsTab = 'overview' | 'git' | 'native';
 
-export interface CreateWorktreeSessionInput {
-  workspaceId: string;
-  executor: Executor;
-  baseBranch?: string;
-  branch?: string;
-}
-
 export function SpacesView({
   workspaces,
   systemConfig,
   ws,
   onChange,
-  onCreateWorktreeSession,
 }: {
   workspaces: Workspace[];
   systemConfig: SystemConfig | null;
   ws: GianWs;
   onChange: () => void;
-  onCreateWorktreeSession: (input: CreateWorktreeSessionInput) => void;
 }) {
   const workspaceRoot = systemConfig?.workspace_root ?? '~/Coding';
   const [listTab, setListTab] = useState<'active' | 'archived'>('active');
@@ -132,7 +123,6 @@ export function SpacesView({
         onChange={onChange}
         onDeleted={() => { /* selection re-syncs via the visible-list effect */ }}
         onOpenClaudeMd={() => setClaudeMdOpen(true)}
-        onCreateWorktreeSession={onCreateWorktreeSession}
       />
       {claudeMdOpen && selected && (
         <ClaudeMdInspector
@@ -259,7 +249,6 @@ export function SpaceDetail({
   onChange,
   onDeleted,
   onOpenClaudeMd,
-  onCreateWorktreeSession,
 }: {
   workspace: Workspace | null;
   allSessions: Session[];
@@ -267,7 +256,6 @@ export function SpaceDetail({
   onChange: () => void;
   onDeleted: () => void;
   onOpenClaudeMd: () => void;
-  onCreateWorktreeSession: (input: CreateWorktreeSessionInput) => void;
 }) {
   const t = useT();
   const [nameEdit, setNameEdit] = useState<string | null>(null);
@@ -396,7 +384,6 @@ export function SpaceDetail({
               ws={ws}
               onOpenClaudeMd={onOpenClaudeMd}
               onChange={onChange}
-              onCreateWorktreeSession={onCreateWorktreeSession}
             />
           )}
           {tab === 'native' && (

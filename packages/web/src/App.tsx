@@ -34,7 +34,7 @@ import { BrowserBody, browserHostOf } from './components/BrowserBody.js';
 import { ChatContextPanel } from './components/ChatContextPanel.js';
 import { SessionSurface } from './views/SessionSurface.js';
 import { managedWorkspaceDirectory, NewWorkspacePanel } from './views/workspace-create.js';
-import { TasksView, ManagerInspector } from './views/TasksView.js';
+import { TasksView } from './views/TasksView.js';
 // The primary view is imported statically: lazy-loading it served no purpose
 // (it renders on every launch) and its suspension used to tear down the whole
 // shell via the root Suspense boundary (the "full-screen flash" bug).
@@ -52,11 +52,11 @@ import { useOnboarding } from './controllers/use-onboarding.js';
 import { useAppSocket } from './controllers/use-app-socket.js';
 import { useTranscriptHydration } from './controllers/use-transcript-hydration.js';
 import { useTopbarModel } from './controllers/use-topbar-model.js';
-import { useTaskManager } from './controllers/use-task-manager.js';
 import { useWorkbench } from './controllers/use-workbench.js';
 import { useAppShortcuts } from './controllers/use-app-shortcuts.js';
 import { useSessionSelection } from './controllers/use-session-selection.js';
 import { useWorkbenchLayout } from './controllers/use-workbench-layout.js';
+import { useViewNav } from './controllers/use-view-nav.js';
 
 // Lazy surfaces each get their OWN Suspense boundary at the usage site below.
 // A single root boundary used to wrap the whole shell: the first render of
@@ -108,11 +108,6 @@ export function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeSubtaskId, setActiveSubtaskId] = useState<string | null>(null);
-  // Per-Task static manual subtask-created cards that live in the Manager
-  // conversation. App-level so they survive
-  // ManagerPanel unmount when you navigate between tasks/subtasks. Each card's
-  // `acked` flag tracks whether its context note has been folded into a Manager
-  // message yet.
   const [itemsBySession, setItemsBySession] = useState<Record<string, TranscriptItem[]>>({});
   const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
   const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
@@ -135,7 +130,7 @@ export function App() {
   const pendingFirstMessageRef = useRef<string | null>(null);
   // True from `session:create` dispatch until `session:created` arrives. Drives
   // the "Creating…" busy state in NewSessionView so the form doesn't look dead
-  // while the host spins up a session + worktree.
+  // while the host spins up the session.
   const [creatingSession, setCreatingSession] = useState(false);
   // Same lifecycle as creatingSession but only set during a fork. Drives a
   // global "Forking session…" toast — the user is mid-session when they
@@ -190,7 +185,9 @@ export function App() {
     setCreatingSession,
     setForkingSession,
   });
-  const hydrateTranscript = useTranscriptHydration({
+  // Active-session transcript hydration effect. (The returned hydrate
+  // callback was only consumed by the retired per-Task Manager mount.)
+  useTranscriptHydration({
     activeSessionId,
     sessions,
     itemsBySession,
@@ -234,7 +231,6 @@ export function App() {
     activeTabByGroup,
     viewState,
     activeRail,
-    setActiveRail,
     p3Collapsed,
     setP3Collapsed,
     filesInspectorSuppressed,
@@ -247,7 +243,6 @@ export function App() {
     defaultWorkingTreeIdFor,
     viewedWorkingTreeId,
     handleOpenWith,
-    revealSheetTab,
     activateRail,
     toggleRail,
     openFileInSheet,
@@ -364,10 +359,6 @@ export function App() {
     activeSession,
     activeWorkspace,
     activeBranch,
-    tasks,
-    setTasks,
-    sessions,
-    sessionsRef,
     workingTrees,
     wtView,
     setWtView,
@@ -387,61 +378,21 @@ export function App() {
     setPendingBySession,
   });
 
-  const {
-    activeManagerSession,
-    activeManagerTask,
-    managerItems,
-    managerPending,
-    managerQueue,
-    managerHandlers,
-    managerCardsByTask,
-    showManagerRaw,
-    setShowManagerRaw,
-    onManagerMount,
-    onManagerSend,
-    onManagerStop,
-    onCreateSubtask,
-  } = useTaskManager({
-    mode,
-    activeTaskId,
-    activeSubtaskId,
-    activeRail,
-    tasks,
-    sessions,
-    sessionsRef,
-    workspacesRef,
-    itemsBySession,
-    setItemsBySession,
-    pendingBySession,
-    setPendingBySession,
-    queueBySession,
-    sessionCommands: sessionMainHandlers,
-    hydrateTranscript,
-    setActiveSubtaskId,
-    ws,
-  });
-
   const subtaskActive = mode === 'tasks' && !!activeSubtaskId && !!activeSession;
   const {
     sessionViewActive,
     workbenchActive,
     activeGroup,
-    managerPanelVisible: managerP2,
     sheetMounted,
     sheetVisible,
     inspectorKind,
     inspectorVisible,
     openWorkspaceIds: openWsIds,
     selectedWorkspaceId: selectedWsId,
-    canGoBack,
-    canGoForward,
-    navigate: navGo,
   } = useWorkbenchLayout({
     mode,
     subtaskActive,
-    hasManagerTask: !!activeManagerTask,
     activeRail,
-    setActiveRail,
     tabs: wbTabs,
     activeTabByGroup,
     viewState,
@@ -450,8 +401,18 @@ export function App() {
     p3Collapsed,
     setP3Collapsed,
     groupOfRail: GROUP_OF_RAIL,
-    activateRail,
-    revealTab: revealSheetTab,
+  });
+
+  // Topbar ‹ › history: sidebar view (mode) + conversation selection only.
+  const { canGoBack, canGoForward, navigate: navGo } = useViewNav({
+    mode,
+    activeSessionId,
+    activeTaskId,
+    activeSubtaskId,
+    setMode,
+    setActiveSessionId,
+    setActiveTaskId,
+    setActiveSubtaskId,
   });
 
   /** Panel-3 settings nav click: make sure the settings tab exists and is
@@ -696,16 +657,6 @@ export function App() {
               systemConfig={systemConfig}
               ws={ws}
               onChange={() => void loadWorkspaces().then(setWorkspaces)}
-              onCreateWorktreeSession={(input) => {
-                ws.send({
-                  type: 'session:create',
-                  workspace_id: input.workspaceId,
-                  executor: input.executor,
-                  mode: 'worktree',
-                  ...(input.baseBranch ? { base_branch: input.baseBranch } : {}),
-                  ...(input.branch ? { branch: input.branch } : {}),
-                });
-              }}
             />
             </Suspense>
           )}
@@ -718,23 +669,10 @@ export function App() {
               sessions={sessions}
               workspaces={workspaces}
               ws={ws}
-              defaultTaskExecutor={systemConfig?.default_task_executor ?? 'claude'}
               activeTaskId={activeTaskId}
               activeSubtaskId={activeSubtaskId}
-              managerSession={activeManagerSession}
-              managerItems={managerItems}
-              managerPending={managerPending}
-              managerCards={activeTaskId ? (managerCardsByTask[activeTaskId] ?? []) : []}
-              managerHandlers={managerHandlers}
-              managerQueue={managerQueue}
-              showManagerRaw={showManagerRaw}
-              onToggleManagerRaw={() => setShowManagerRaw(v => !v)}
-              onManagerMount={onManagerMount}
-              onManagerSend={onManagerSend}
-              onManagerStop={onManagerStop}
-              onCreateSubtask={onCreateSubtask}
-              onSelectTask={(taskId) => { setActiveTaskId(taskId); setActiveSubtaskId(null); }}
               onSelectSubtask={(taskId, subtaskId) => { setActiveTaskId(taskId); setActiveSubtaskId(subtaskId); }}
+              onWorkspaceCreated={w => setWorkspaces(prev => [...prev, w])}
               subtaskMain={subtaskMain}
             />
           )}
@@ -756,7 +694,7 @@ export function App() {
             </FileLinkOpenContext.Provider>
           </>
         )}
-        {(sheetMounted || managerP2 || (activeRail === 'sidechat' && workbenchActive)) && (
+        {(sheetMounted || (activeRail === 'sidechat' && workbenchActive)) && (
           <>
             {sheetVisible && viewState !== 'workbench' && (
               <Splitter side="right" varName="--sheet-w" base={600} min={420} max={1080} invert />
@@ -766,7 +704,7 @@ export function App() {
             <Sheet
               tabs={wbTabs}
               activeByGroup={activeTabByGroup}
-              activeGroup={managerP2 ? null : activeGroup}
+              activeGroup={activeGroup}
               actions={sheetActions}
               onAddTab={(g) => {
                 if (g === 'term') addTerminalTab();
@@ -793,7 +731,7 @@ export function App() {
                   </div>
                 </div>
               ) : null}
-              hidden={!sheetVisible || managerP2}
+              hidden={!sheetVisible}
               externalEditors={systemConfig?.external_editors ?? []}
               openApps={systemConfig?.open_apps}
               onOpenWith={handleOpenWith}
@@ -851,16 +789,6 @@ export function App() {
                       ws={ws}
                       systemConfig={systemConfig}
                       onChange={() => void loadWorkspaces().then(setWorkspaces)}
-                      onCreateWorktreeSession={(input) => {
-                        ws.send({
-                          type: 'session:create',
-                          workspace_id: input.workspaceId,
-                          executor: input.executor,
-                          mode: 'worktree',
-                          ...(input.baseBranch ? { base_branch: input.baseBranch } : {}),
-                          ...(input.branch ? { branch: input.branch } : {}),
-                        });
-                      }}
                     />
                     </Suspense>
                   );
@@ -885,22 +813,6 @@ export function App() {
               }}
             />
             </Suspense>
-            )}
-            {managerP2 && activeManagerTask && (
-              <div className="sheet-manager" style={sheetVisible ? undefined : { display: 'none' }}>
-                <ManagerInspector
-                  task={activeManagerTask}
-                  session={activeManagerSession}
-                  workspaces={workspaces}
-                  items={managerItems}
-                  pending={managerPending}
-                  handlers={managerHandlers}
-                  queue={managerQueue}
-                  onMount={onManagerMount}
-                  onSend={onManagerSend}
-                  onStop={onManagerStop}
-                />
-              </div>
             )}
           </>
         )}
@@ -946,7 +858,6 @@ export function App() {
           onToggleRail={toggleRail}
           sessionRailsDisabled={!sessionViewActive}
           workbenchDisabled={!workbenchActive}
-          managerVisible={subtaskActive}
           wsState={wsState}
           wsAttempt={wsAttempt}
           authed={authed}

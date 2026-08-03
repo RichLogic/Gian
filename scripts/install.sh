@@ -114,7 +114,7 @@ fi
 
 # ── create log directory ──────────────────────────────────────────────────────
 
-LOG_DIR="${HOME}/.config/gian/logs"
+LOG_DIR="${HOME}/.gian/logs"
 if [[ "${CHECK}" == true ]]; then
   info "Check mode: no unit files will be installed and no daemon will be started."
 else

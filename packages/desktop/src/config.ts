@@ -14,6 +14,7 @@ export interface DesktopTargets {
 export interface DesktopWindowChrome {
   titleBarStyle?: 'hiddenInset';
   titleBarOverlay?: true;
+  trafficLightPosition?: { x: number; y: number };
 }
 
 export interface DesktopApplicationIdentity {
@@ -101,6 +102,11 @@ export function resolveDesktopWindowChrome(
   return {
     titleBarStyle: 'hiddenInset',
     titleBarOverlay: true,
+    /* Center the lights on the cozy topbar's middle (~21px): default inset
+       centers them at ~17.75px while the 42px row's content centers at 21,
+       which read as "lights floating high" next to Air. 15 + half a 14px
+       button ≈ 22. */
+    trafficLightPosition: { x: 15, y: 15 },
   };
 }
 

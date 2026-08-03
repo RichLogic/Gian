@@ -101,7 +101,10 @@ export function SessionMain({
 }: SessionMainProps) {
   const t = useT();
   const terminal = session.worktree_outcome !== null;
-  const subtaskCompleted = session.type === 'subtask' && session.completed_at != null;
+  // User-set completion flag (spec §B): a completed session is closed for
+  // input — the composer blocks and a banner explains how to reopen. The host
+  // enforces the same rule in `sendMessage` and the queue drain.
+  const sessionCompleted = session.completed_at != null;
   const [gitRefreshKey, setGitRefreshKey] = useState(0);
   const previousPendingRef = useRef(pending);
 
@@ -142,9 +145,9 @@ export function SessionMain({
           </button>
         </div>
       )}
-      {subtaskCompleted && (
+      {sessionCompleted && (
         <div className="session-banner">
-          <span>{t('coding.banner.subtaskCompleted')}</span>
+          <span>{t('coding.banner.completed')}</span>
           <span className="session-banner-spacer" />
           {onReopen && (
             <button className="btn xs secondary" onClick={onReopen}>
@@ -189,9 +192,9 @@ export function SessionMain({
         onSetEffort={onSetEffort}
         onSetServiceTier={onSetServiceTier}
         onSetNativeConfig={onSetNativeConfig}
-        disabled={pending || terminal || subtaskCompleted}
+        disabled={pending || terminal || sessionCompleted}
         running={isTurnRunning(session.status, pending)}
-        disabledSubmitBehavior={subtaskCompleted ? 'block' : 'queue'}
+        disabledSubmitBehavior={sessionCompleted ? 'block' : 'queue'}
         executor={session.executor}
         workspaceId={workspace?.id}
       />

@@ -246,12 +246,10 @@ export function useWorkbench({
     };
   }, [activeSession, activeTabByGroup.files, wbTabs, workspaces, ws]);
 
-  /** Rail → Sheet group mapping. 'manager' has no tab group — its panel 2 is
-   *  the compact Manager panel rendered inline by App. */
+  /** Rail → Sheet group mapping. */
   const GROUP_OF_RAIL: Record<RailId, SheetGroup | null> = {
     files: 'files',
     diffs: 'diffs',
-    manager: null,
     sidechat: 'sidechat',
     terminal: 'term',
     browser: 'browser',
@@ -290,7 +288,7 @@ export function useWorkbench({
       return;
     }
     const group = GROUP_OF_RAIL[rail];
-    if (rail === 'manager' || rail === 'sidechat' || (group && wbTabs.some(t => t.group === group))) {
+    if (rail === 'sidechat' || (group && wbTabs.some(t => t.group === group))) {
       setViewState(v => v === 'main' ? 'both' : v);
     }
   }

@@ -34,6 +34,8 @@ const AGENT_DESC: Record<string, string> = {
 export function NewSessionView({
   workspaces,
   initialWorkspaceId,
+  taskName,
+  initialExecutor,
   onWorkspaceCreated,
   onCreate,
   onCancel,
@@ -42,6 +44,11 @@ export function NewSessionView({
   workspaces: Workspace[];
   /** Preselected workspace (sidebar workspace-row "+" entry point). */
   initialWorkspaceId?: string;
+  /** Task context (Tasks sidebar task-row "+" entry point): shown read-only —
+   *  the new session is created as a subtask of this task. */
+  taskName?: string;
+  /** Preselected agent (⌘J/⌘K "new subtask" shortcut carries the choice). */
+  initialExecutor?: Executor;
   onWorkspaceCreated: (workspace: Workspace) => void;
   onCreate: (input: CreateSessionInput) => void;
   onCancel: () => void;
@@ -62,7 +69,7 @@ export function NewSessionView({
    *  /api/agents install status so the picker follows Settings, not a
    *  hardcoded list. Null while loading. */
   const [agents, setAgents] = useState<AgentInstallStatus[] | null>(null);
-  const [executor, setExecutor] = useState<Executor | null>(null);
+  const [executor, setExecutor] = useState<Executor | null>(initialExecutor ?? null);
   const [wsName, setWsName] = useState('');
   const [wsRemote, setWsRemote] = useState('');
   const [wsBusy, setWsBusy] = useState(false);
@@ -130,6 +137,15 @@ export function NewSessionView({
             <div className="ns-sub">{t('coding.new.sub')}</div>
           </div>
           <div className="ns-body">
+            {taskName !== undefined && (
+              <div className="field">
+                <div className="field-lbl">
+                  <span>{t('coding.new.task')}</span>
+                  <span className="field-hint">{t('coding.new.task.hint')}</span>
+                </div>
+                <div className="ns-task-static" data-testid="ns-task-name">{taskName}</div>
+              </div>
+            )}
             <div className="field">
               <div className="field-lbl">
                 <span>{t('coding.new.workspace')}</span>
