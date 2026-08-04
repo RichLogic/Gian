@@ -119,8 +119,8 @@ Keep the root and workspace package versions aligned, commit the release, then
 push the matching tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 The workflow runs all checks, builds the three proxy archives, creates the

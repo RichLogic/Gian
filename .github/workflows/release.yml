@@ -50,7 +50,26 @@ jobs:
       - name: Verify beta release configuration
         env:
           GIAN_GITHUB_CLIENT_ID: ${{ vars.GIAN_GITHUB_CLIENT_ID }}
-        run: test -n "${GIAN_GITHUB_CLIENT_ID}"
+        run: |
+          test -n "${GIAN_GITHUB_CLIENT_ID}"
+          curl --fail --silent --show-error \
+            --request POST \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/x-www-form-urlencoded" \
+            --header "User-Agent: Gian-Release-CI" \
+            --data-urlencode "client_id=${GIAN_GITHUB_CLIENT_ID}" \
+            https://github.com/login/device/code \
+            | node -e '
+                let input = "";
+                process.stdin.on("data", chunk => { input += chunk; });
+                process.stdin.on("end", () => {
+                  const response = JSON.parse(input);
+                  if (typeof response.device_code !== "string"
+                    || typeof response.user_code !== "string") {
+                    throw new Error("GitHub OAuth App did not return a device code");
+                  }
+                });
+              '
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
