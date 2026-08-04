@@ -794,10 +794,12 @@
 .popover.approval-pop .mp-section-head,
 .popover.think-pop .mp-section-head,
 .popover.native-option-pop .mp-section-head { padding-top: 4px; }
-.cmp-think-btn .name,
-.cmp-approval-btn .name,
-.cmp-think-btn,
-.cmp-approval-btn,
+/* Approval chip is warn ONLY for modes that auto-approve (2026-08-04 — it
+   and the thinking chip used to be warn unconditionally, which made the
+   colour meaningless). The dropdown's danger option (Bypass etc.) stays
+   warn always. */
+.cmp-approval-btn.risky,
+.cmp-approval-btn.risky .name,
 .mp-row.danger-option .mp-row-title { color: var(--warn); }
 .mp-row.danger-option.active { background: var(--warn-soft); }
 .mp-row.danger-option.active .mp-check,

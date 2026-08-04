@@ -1,14 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import type { Executor, Task, TaskStatus } from '@gian/shared';
+import type { Task, TaskStatus } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 
 export interface CreateTaskInput {
   name: string;
   description?: string | null;
-  /** Which executor the Task's Manager (PM) runs on. NULL/omitted → resolved
-   *  from the `default_task_executor` config default when the Manager is
-   *  first ensured (see SessionManager.ensureManagerSession). */
-  manager_executor?: Executor | null;
 }
 
 export interface UpdateTaskInput {
@@ -20,12 +16,13 @@ export interface UpdateTaskInput {
 /**
  * Persistence for the Task abstraction layer (PRD-v3). A Task is a lightweight
  * container ("one thing the user is doing") that groups multiple Subtasks
- * (sessions via `sessions.task_id`). This manager owns the `tasks` table only;
- * Subtask/Manager sessions stay on SessionManager.
+ * (sessions via `sessions.task_id`). It owns Task persistence plus the one
+ * Task-scoped session mutation: archive/restore on status transitions.
  *
  * Style mirrors SessionManager: better-sqlite3 prepared statements, ISO-8601
  * timestamps minted in JS (`new Date().toISOString()`), and `SELECT *` row →
  * type mapping (the `tasks` columns line up 1:1 with the `Task` interface).
+ * All other session lifecycle remains on SessionManager.
  */
 export class TaskManager {
   constructor(private db: Db) {}
@@ -34,13 +31,12 @@ export class TaskManager {
     const id = randomUUID();
     const now = new Date().toISOString();
     const description = input.description ?? null;
-    const managerExecutor = input.manager_executor ?? null;
     this.db
       .prepare(
-        `INSERT INTO tasks (id, name, description, status, manager_executor, created_at, updated_at)
-         VALUES (@id, @name, @description, 'open', @managerExecutor, @now, @now)`,
+        `INSERT INTO tasks (id, name, description, status, created_at, updated_at)
+         VALUES (@id, @name, @description, 'open', @now, @now)`,
       )
-      .run({ id, name: input.name, description, managerExecutor, now });
+      .run({ id, name: input.name, description, now });
     return this.getTaskOrThrow(id);
   }
 
@@ -126,9 +122,28 @@ export class TaskManager {
     sets.push('updated_at = @now');
     params['now'] = now;
 
-    this.db
-      .prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = @id`)
-      .run(params);
+    const write = () => {
+      this.db
+        .prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = @id`)
+        .run(params);
+
+      if (input.status !== undefined && input.status !== existing.status) {
+        const archived = input.status === 'done'
+          ? 1
+          : input.status === 'open'
+            ? 0
+            : null;
+        if (archived !== null) {
+          this.db
+            .prepare('UPDATE sessions SET archived = ?, updated_at = ? WHERE task_id = ?')
+            .run(archived, now, id);
+        }
+      }
+    };
+
+    // The Task status and every owned session's archive flag are one domain
+    // transition. Keep them atomic so clients never observe a half-closed Task.
+    this.db.transaction(write)();
 
     return this.getTaskOrThrow(id);
   }

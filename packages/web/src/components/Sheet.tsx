@@ -70,11 +70,10 @@ interface Props {
    *  inline; term/settings are externally-provided so the host can decide
    *  data sources. */
   renderTab?: (tab: SheetTab) => React.ReactNode | null;
-  /** Called when the user clicks the trailing "+" in the tab strip. App
-   *  decides what to add (terminal / sidechat fork / browser tab). */
+  /** Called when the user clicks the trailing "+" in the terminal tab strip. */
   onAddTab?: (group: SheetGroup) => void;
-  /** Content for the ACTIVE group when it has no tabs yet (e.g. the sidechat
-   *  intro). Rendered inside the normal `.sheet-group` so the panel keeps
+  /** Content for the active group when it has no tabs yet. Rendered inside
+   *  the normal `.sheet-group` so the panel keeps
    *  its width (`--sheet-w`) and stays resizable in the empty state too. */
   renderEmpty?: (group: SheetGroup) => React.ReactNode;
   /** Whole-sheet display:none — element stays in the DOM so child
@@ -114,8 +113,6 @@ const I = {
   plus: 'M12 5v14 M5 12h14',
   diff: 'M8.5 4v13 M8.5 4l-3 3 M8.5 4l3 3 M15.5 20V7 M15.5 20l3-3 M15.5 20l-3-3',
   image: 'M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5z M8.5 10.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z M20 15.5l-4.5-4.5L5 20',
-  chat: 'M12 4.5c-4.7 0-8.5 3.13-8.5 7 0 1.5.57 2.9 1.58 4.05L3.6 19.6l4.2-1.43c1.24.58 2.62.83 4.2.83 4.7 0 8.5-3.13 8.5-7s-3.8-7-8.5-7z',
-  browser: 'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17z M3.5 12h17 M12 3.5c2.3 2.4 3.6 5.3 3.6 8.5s-1.3 6.1-3.6 8.5c-2.3-2.4-3.6-5.3-3.6-8.5S9.7 5.9 12 3.5z',
   terminal: 'M5.5 7.5l4.5 4.5-4.5 4.5 M12.5 18.5h6',
   grid: 'M4 5.5A1.5 1.5 0 0 1 5.5 4h4A1.5 1.5 0 0 1 11 5.5v4A1.5 1.5 0 0 1 9.5 11h-4A1.5 1.5 0 0 1 4 9.5z M13 5.5A1.5 1.5 0 0 1 14.5 4h4A1.5 1.5 0 0 1 20 5.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 13 9.5z M4 14.5A1.5 1.5 0 0 1 5.5 13h4a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 4 18.5z M13 14.5a1.5 1.5 0 0 1 1.5-1.5h4a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5h-4a1.5 1.5 0 0 1-1.5-1.5z',
   // Generic document (file tabs) — color comes from the per-ext CSS class.
@@ -132,8 +129,6 @@ function ExtIco({ kind }: { kind: SheetTab['icoKind'] }) {
     : kind === 'plan' ? I.check
     : kind === 'img' ? I.image
     : kind === 'diff' ? I.diff
-    : kind === 'chat' ? I.chat
-    : kind === 'browser' ? I.browser
     : kind === 'term' ? I.terminal
     : kind === 'grid' ? I.grid
     : I.file;
@@ -573,13 +568,10 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
         const pathSlash = tab.fullPath ? tab.fullPath.lastIndexOf('/') : -1;
         const pathDir = pathSlash >= 0 ? tab.fullPath!.slice(0, pathSlash + 1) : '';
         const pathFile = tab.fullPath ? (pathSlash >= 0 ? tab.fullPath.slice(pathSlash + 1) : tab.fullPath) : '';
-        // Host-rendered groups (renderTab bodies with their own live state —
-        // xterm, sidechat panels, browser iframes) keep EVERY tab mounted in
-        // its own slot, hidden with display:none when inactive. That's both
-        // the keep-alive mechanism and what isolates per-tab state (e.g. each
-        // browser tab's URL/history). File/diff/plan bodies are stateless
+        // Host-rendered groups with their own live state keep every tab mounted
+        // in its own slot, hidden with display:none when inactive. File/diff/plan bodies are stateless
         // renders of tab data, so those groups render only the active tab.
-        const slotGroup = g === 'term' || g === 'sidechat' || g === 'browser' || g === 'workspaces' || g === 'settings';
+        const slotGroup = g === 'term' || g === 'workspaces' || g === 'settings';
         // Singleton groups (workspaces/settings) can only ever hold one tab —
         // the tab strip would be a one-tab header of pure noise, so their
         // content renders headerless (items carry their own headers).
@@ -618,11 +610,11 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
                   <TabName name={t.name} />
                 </button>
               ))}
-              {onAddTab && (g === 'term' || g === 'sidechat' || g === 'browser') && (
+              {onAddTab && g === 'term' && (
                 <button
                   className="tab-add"
                   type="button"
-                  title={g === 'term' ? tr('sheet.newTerminal') : g === 'sidechat' ? tr('sheet.newChat') : tr('sheet.newBrowserTab')}
+                  title={tr('sheet.newTerminal')}
                   onClick={() => onAddTab(g)}
                 >
                   <Icon d={I.plus} size={12} stroke={1.8} />

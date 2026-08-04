@@ -12,7 +12,11 @@ import type {
 import { loadSessions, loadTasks, loadWorkspaces } from '../api.js';
 import { toast } from '../feedback.js';
 import { maybeNotifyForEnvelope } from '../notifications.js';
-import { isSessionCreateDispatchError, planCreatedSessionFirstMessage } from '../session-routing.js';
+import {
+  applySessionUpdate,
+  isSessionCreateDispatchError,
+  planCreatedSessionFirstMessage,
+} from '../session-routing.js';
 import {
   applyEnvelope,
   applyErrorEnvelopeToSession,
@@ -34,7 +38,6 @@ interface UseAppSocketInput {
   sessionsRef: MutableRefObject<Session[]>;
   activeSessionIdRef: MutableRefObject<string | null>;
   pendingFirstMessageRef: MutableRefObject<string | null>;
-  openSidechat(sessionId: string, session: Session): void;
   setWsState: Setter<WsState>;
   setWsAttempt: Setter<number>;
   setAuthed: Setter<boolean>;
@@ -122,11 +125,6 @@ export function useAppSocket(input: UseAppSocketInput): void {
             message.session,
             ...previous.filter(session => session.id !== message.session.id),
           ]);
-          if (message.client_tag === 'sidechat') {
-            current.setCreatingSession(false);
-            current.openSidechat(message.session.id, message.session);
-            return;
-          }
           current.setActiveSessionId(message.session.id);
           current.setCreatingSession(false);
           current.setForkingSession(false);
@@ -169,12 +167,7 @@ export function useAppSocket(input: UseAppSocketInput): void {
           } else if (partial.status === 'done' || partial.status === 'error') {
             current.setPendingBySession(previous => ({ ...previous, [partial.id]: false }));
           }
-          if (partial.archived === 1) {
-            current.setSessions(previous => previous.filter(session => session.id !== partial.id));
-          } else {
-            current.setSessions(previous => previous.map(session =>
-              session.id === partial.id ? { ...session, ...partial } : session));
-          }
+          current.setSessions(previous => applySessionUpdate(previous, partial));
           return;
         }
         case 'session:native-config':

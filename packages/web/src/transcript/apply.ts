@@ -19,6 +19,7 @@ import type {
   FileSearchItem,
   MsgItem,
   ReasoningItem,
+  ToolItem,
   TranscriptItem,
   WebSearchItem,
 } from '../types.js';
@@ -264,16 +265,30 @@ export function applyEnvelope(
 
   if (ev === 'activity.tool') {
     const itemId = String(data.itemId ?? env.call_id);
+    const existing = items.find(item => item.kind === 'tool' && item.id === itemId) as ToolItem | undefined;
     const summary = data.input === undefined
-      ? ''
+      ? existing?.summary ?? ''
       : typeof data.input === 'string'
         ? data.input
         : JSON.stringify(data.input);
+    const status: ToolItem['status'] = data.status === 'pending'
+      || data.status === 'running'
+      || data.status === 'success'
+      || data.status === 'error'
+      ? data.status
+      : existing?.status ?? 'running';
+    const output = data.output === undefined
+      ? existing?.output
+      : typeof data.output === 'string'
+        ? data.output
+        : JSON.stringify(data.output, null, 2);
     const nextItem = {
       kind: 'tool' as const,
       id: itemId,
-      name: String(data.title ?? data.kind ?? 'Tool'),
+      name: String(data.title ?? data.kind ?? existing?.name ?? 'Tool'),
       summary,
+      status,
+      ...(output !== undefined ? { output } : {}),
       ts: env.ts,
       turn: env.turn,
     };

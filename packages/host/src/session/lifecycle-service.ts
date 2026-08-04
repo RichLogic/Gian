@@ -30,7 +30,6 @@ export interface CreateSessionInput {
   type?: SessionType;
   task_id?: string | null;
   thinking_effort?: ThinkingEffort | null;
-  fork_from?: string;
 }
 
 interface BringUpInput {
@@ -39,7 +38,6 @@ interface BringUpInput {
   cwd: string;
   model: string | null;
   displayName: string | null;
-  forkFromClaudeSessionId: string | null;
   executorConfig?: ExecutorConfigState;
 }
 
@@ -120,47 +118,14 @@ export class SessionLifecycleService {
         ? defaultEffort as ThinkingEffort
         : null;
 
-    let forkFromSessionId: string | null = null;
-    let forkFromClaudeSessionId: string | null = null;
-    let forkCwd: string | null = null;
-
-    if (input.fork_from) {
-      if (input.executor !== 'claude') {
-        throw new Error('fork_from is only supported for claude sessions');
-      }
-      const parent = this.db
-        .prepare(
-          `SELECT id, workspace_id, executor, native_session_id, worktree_path
-           FROM sessions WHERE id = ?`,
-        )
-        .get(input.fork_from) as {
-          id: string;
-          workspace_id: string;
-          executor: Executor;
-          native_session_id: string | null;
-          worktree_path: string | null;
-        } | undefined;
-      if (!parent) throw new Error(`fork parent not found: ${input.fork_from}`);
-      if (parent.executor !== 'claude') {
-        throw new Error('fork_from is only supported for claude sessions');
-      }
-      if (parent.workspace_id !== input.workspace_id) {
-        throw new Error('fork_from parent must belong to the requested workspace');
-      }
-      forkFromClaudeSessionId = parent.native_session_id;
-      forkFromSessionId = parent.native_session_id ? parent.id : null;
-      forkCwd = parent.worktree_path;
-    }
-
     let proxyResult: BringUpResult;
     try {
       proxyResult = await this.runtime.bringUpProxySession({
         sessionId: id,
         executor: input.executor,
-        cwd: forkCwd ?? workspace.path,
+        cwd: workspace.path,
         model: effectiveModel,
         displayName: input.name ?? null,
-        forkFromClaudeSessionId,
         ...(input.executor === 'kimi' && configuredMode
           ? {
               executorConfig: {
@@ -201,7 +166,7 @@ export class SessionLifecycleService {
         executor_config_json: JSON.stringify(executorConfigFromOptions(proxyResult.configOptions)),
         thinking_effort: effectiveEffort,
         native_session_id: proxyResult.nativeSessionId,
-        fork_from_session_id: forkFromSessionId,
+        fork_from_session_id: null,
         now,
       });
     this.sessions.setNativeOptions(id, proxyResult.configOptions);
@@ -240,10 +205,22 @@ export class SessionLifecycleService {
     this.db
       .prepare('UPDATE sessions SET archived = ?, updated_at = ? WHERE id = ?')
       .run(archived ? 1 : 0, now, sessionId);
-    this.broadcastSessionUpdated(sessionId, {
-      archived: archived ? 1 : 0,
-      updated_at: now,
-    });
+    if (archived) {
+      this.broadcastSessionUpdated(sessionId, { archived: 1, updated_at: now });
+    } else {
+      // Restored sessions are absent from active-only client state. Send the
+      // full row so clients can reinsert it rather than merge into nothing.
+      this.broadcastSessionUpdated(sessionId, this.sessions.get(sessionId));
+    }
+  }
+
+  notifyTaskSessionsUpdated(taskId: string): void {
+    const ids = this.db
+      .prepare('SELECT id FROM sessions WHERE task_id = ?')
+      .all(taskId) as Array<{ id: string }>;
+    for (const { id } of ids) {
+      this.broadcastSessionUpdated(id, this.sessions.get(id));
+    }
   }
 
   setUnread(sessionId: string, unread: boolean): void {

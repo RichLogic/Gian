@@ -1,0 +1,63 @@
+[
+  {
+    "boundary": "turn-start",
+    "type": "user_message",
+    "data": {
+      "text": "ask me one question"
+    }
+  },
+  {
+    "boundary": "continue",
+    "type": "approval_requested",
+    "callId": "toolu_question_1",
+    "data": {
+      "approvalId": "toolu_question_1",
+      "category": "question",
+      "risk": "low",
+      "title": "Pick dinner",
+      "description": "",
+      "scopeOptions": [
+        "once"
+      ],
+      "toolName": "AskUserQuestion",
+      "questions": [
+        {
+          "question": "Pick dinner",
+          "header": "Dinner",
+          "multiSelect": false,
+          "options": [
+            {
+              "label": "Noodles",
+              "description": "Warm bowl"
+            },
+            {
+              "label": "Salad",
+              "description": "Light plate"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "boundary": "continue",
+    "type": "approval_resolved",
+    "callId": "toolu_question_1",
+    "data": {
+      "approvalId": "toolu_question_1",
+      "decision": "allow_once",
+      "auto": false,
+      "answers": {
+        "Pick dinner": "Noodles"
+      }
+    }
+  },
+  {
+    "boundary": "continue",
+    "type": "assistant_text",
+    "data": {
+      "text": "Great, noodles it is.",
+      "delta": false
+    }
+  }
+]

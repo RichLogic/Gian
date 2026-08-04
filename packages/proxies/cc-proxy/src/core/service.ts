@@ -138,28 +138,6 @@ export class CcProxyService {
       this.handleProcessExited(sessionId, code, signal);
     });
 
-    // Fork adoption (Gian sidechat): the first turn of a fork session spawns
-    // `--resume <parent> --fork-session`; Claude mints the fork's native id
-    // and the runtime reports it here. Swap the placeholder id for the real
-    // one and tell the host (same `session.rotated` channel /clear uses).
-    this.runtime.on('nativeSessionIdAdopted', (sessionId, newClaudeSessionId) => {
-      const session = this.sessionsById.get(sessionId);
-      if (!session) return;
-      const oldClaudeSessionId = session.claudeSessionId;
-      const updated = this.updateSession(session, {
-        claudeSessionId: newClaudeSessionId,
-        forkFromClaudeSessionId: null,
-        lastError: null,
-      });
-      this.emitEvent('session.rotated', {
-        sessionId: updated.id,
-        data: {
-          oldNativeSessionId: oldClaudeSessionId,
-          newNativeSessionId: newClaudeSessionId,
-        },
-      });
-    });
-
     this.runtime.on('debug', (message) => {
       this.emitEvent('debug', { message });
     });
@@ -227,11 +205,6 @@ export class CcProxyService {
     // use it so the next `claude -p --resume <id>` finds the existing on-disk
     // session. Otherwise generate fresh and the next spawn uses --session-id.
     const wasResumed = typeof input.claudeSessionId === 'string' && input.claudeSessionId.trim().length > 0;
-    const forkFrom = typeof input.forkFromClaudeSessionId === 'string' && input.forkFromClaudeSessionId.trim().length > 0
-      ? input.forkFromClaudeSessionId.trim()
-      : null;
-    // A fork's claudeSessionId is a placeholder until the first turn's init
-    // event reports the real fork id (see nativeSessionIdAdopted above).
     const claudeSessionId = wasResumed ? input.claudeSessionId!.trim() : randomUUID();
     const createdAt = nowIso();
 
@@ -240,7 +213,6 @@ export class CcProxyService {
       cwd,
       claudeSessionId,
       wasResumed,
-      forkFromClaudeSessionId: forkFrom,
       model: typeof input.model === 'string' && input.model.trim() ? input.model.trim() : null,
       status: 'idle',
       activeTurnId: null,
@@ -773,14 +745,11 @@ export class CcProxyService {
         cwd: session.cwd,
         model,
         isResume,
-        ...(session.forkFromClaudeSessionId
-          ? { forkFromClaudeSessionId: session.forkFromClaudeSessionId }
-          : {}),
       });
       this.updateSession(session, { processAlive: true, lastError: null });
     } catch (error) {
       // If resume failed, try creating a new Claude session.
-      if (isResume || session.forkFromClaudeSessionId) {
+      if (isResume) {
         const oldClaudeSessionId = session.claudeSessionId;
         const newClaudeSessionId = randomUUID();
         try {
@@ -794,9 +763,6 @@ export class CcProxyService {
           const updated = this.updateSession(session, {
             claudeSessionId: newClaudeSessionId,
             wasResumed: false,
-            // Fork fallback: the parent's JSONL was missing (e.g. it never ran
-            // a turn), so there was nothing to carry — start fresh.
-            forkFromClaudeSessionId: null,
             processAlive: true,
             lastError: null,
           });

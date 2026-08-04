@@ -45,13 +45,14 @@
 .ws-act:disabled { opacity: 0.3; cursor: default; }
 
 /* ── Workbench detail tab (zone 3) ──────────────────────────
-   The detail reuses the real app's <SpaceDetail/> (Overview / Git /
-   Native panes + their API wiring) verbatim. SpaceDetail renders a
+   The detail reuses the real app's <SpaceDetail/> (Overview / Adopt /
+   Archived panes + their API wiring) verbatim. SpaceDetail renders a
    `.main > .main-scroll > .detail` island intended for the full-page
    Spaces view; inside a Sheet tab we strip its island chrome (shadow,
-   radius, margin) and let the Sheet's own `.sheet-content` own the
-   scroll, so it reads as a flush detail body — matching the
-   prototype's `.ws-detail` surface. */
+   radius, margin) and keep `.main-scroll`'s own `overflow-y: auto` as
+   the scroller (the sheet content area is a fixed-height flex slot and
+   cannot provide an outer scroll), so it reads as a flush detail body —
+   matching the prototype's `.ws-detail` surface. */
 .ws-detail-tab {
   flex: 1; min-height: 0; min-width: 0;
   display: flex;
@@ -62,9 +63,6 @@
   box-shadow: none;
   background: transparent;
 }
-/* SpaceDetail's own scroller nests inside the sheet's scroller — let it
-   grow naturally; the sheet content area provides the outer scroll. */
-.ws-detail-tab .main-scroll { overflow: visible; }
 
 /* CLAUDE.md drawer (ClaudeMdInspector) opens to the right of the detail
    inside the tab. Narrow it from the full-page 480px so it fits a Sheet

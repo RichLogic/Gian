@@ -74,6 +74,7 @@ let githubAuthService: GitHubAuthService | null = null;
 let loadingSurface:
   | { window: BrowserWindow; promise: Promise<boolean> }
   | null = null;
+let relaunchScheduled = false;
 
 function dataDirectory(): string {
   return process.env['GIAN_DATA_DIR'] ?? join(homedir(), '.gian');
@@ -378,6 +379,21 @@ ipcMain.handle('desktop:retry-connection', async event => {
 ipcMain.handle('desktop:open-logs', async event => {
   if (!mainWindow || event.sender !== mainWindow.webContents) return 'denied';
   return shell.openPath(logDirectory());
+});
+
+ipcMain.handle('desktop:restart-app', event => {
+  if (!isMainWindowSender(event.sender)) return false;
+  if (relaunchScheduled) return true;
+  relaunchScheduled = true;
+
+  // Reply to the renderer before quitting. `before-quit` stops the managed
+  // Host in a packaged app, so its next runtime is cold. GianDev's Host is
+  // externally owned; only its Electron shell relaunches for UI parity.
+  setTimeout(() => {
+    app.relaunch();
+    app.quit();
+  }, 100);
+  return true;
 });
 
 ipcMain.handle('desktop:set-dock-icon', (event, dataUrl: unknown) => {

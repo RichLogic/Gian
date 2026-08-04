@@ -1,9 +1,11 @@
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
 import type {
   PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
+  SessionConfigOption,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
 
@@ -113,6 +115,34 @@ function tokenCount(value: unknown): number {
     : 0;
 }
 
+interface ModeCapability {
+  id: string;
+  label: string;
+  description: string;
+  isDefault: boolean;
+}
+
+/** Extract the approval-mode choices from a session's ACP configOptions.
+ *  The mode option is the select whose category (or id) is "mode" — the same
+ *  heuristic the web composer uses. Select options may be flat or grouped. */
+function modesFromConfigOptions(options: SessionConfigOption[]): ModeCapability[] {
+  const modeOption = options.find(option =>
+    option.type === 'select'
+    && (
+      (typeof option.category === 'string' && option.category.trim().toLowerCase() === 'mode')
+      || option.id.trim().toLowerCase() === 'mode'
+    ));
+  if (!modeOption || modeOption.type !== 'select') return [];
+  const flat = modeOption.options.flatMap(entry =>
+    'options' in entry ? entry.options : [entry]);
+  return flat.map(choice => ({
+    id: String(choice.value),
+    label: choice.name || String(choice.value),
+    description: typeof choice.description === 'string' ? choice.description : '',
+    isDefault: choice.value === modeOption.currentValue,
+  }));
+}
+
 function conversationUsage(response: PromptResponse) {
   if (!response.usage) return null;
   const inputTokens = tokenCount(response.usage.inputTokens);
@@ -211,8 +241,39 @@ export class KimiProxyService {
   async listCapabilities() {
     return {
       ...await this.runtime.ensureStarted(),
-      modes: [],
+      modes: await this.probeModes(),
     };
+  }
+
+  private probedModes: ModeCapability[] | null = null;
+
+  /** Kimi only reveals its approval-mode choices per session (configOptions
+   *  from session/new), so learn them once: reuse an already-attached
+   *  session's options when there is one, otherwise create a throwaway
+   *  session in the temp dir and close it again. Cached for the process
+   *  lifetime — the choices only change with the Kimi version, and the
+   *  proxy is respawned on upgrade (2026-08-04). On any failure (e.g. not
+   *  logged in) report no modes rather than breaking capabilities. */
+  private async probeModes(): Promise<ModeCapability[]> {
+    if (this.probedModes) return this.probedModes;
+    for (const session of this.sessionsById.values()) {
+      const modes = modesFromConfigOptions(session.configOptions);
+      if (modes.length > 0) {
+        this.probedModes = modes;
+        return modes;
+      }
+    }
+    try {
+      const response = await this.runtime.newSession({ cwd: tmpdir(), mcpServers: [] });
+      const modes = modesFromConfigOptions(response.configOptions ?? []);
+      try {
+        await this.runtime.closeSession({ sessionId: response.sessionId });
+      } catch { /* close unsupported or failed — the probe session stays detached */ }
+      this.probedModes = modes;
+      return modes;
+    } catch {
+      return [];
+    }
   }
 
   async listNativeSessions(params: ListNativeSessionsParams) {

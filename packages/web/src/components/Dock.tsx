@@ -38,11 +38,9 @@ const ICONS = {
   // Redrawn on a shared 24-grid (phase 6): 1.5px stroke, round caps/joins,
   // Codex-style minimal geometry, optically centered.
   grid: 'M4 5.5A1.5 1.5 0 0 1 5.5 4h4A1.5 1.5 0 0 1 11 5.5v4A1.5 1.5 0 0 1 9.5 11h-4A1.5 1.5 0 0 1 4 9.5z M13 5.5A1.5 1.5 0 0 1 14.5 4h4A1.5 1.5 0 0 1 20 5.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 13 9.5z M4 14.5A1.5 1.5 0 0 1 5.5 13h4a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 4 18.5z M13 14.5a1.5 1.5 0 0 1 1.5-1.5h4a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5h-4a1.5 1.5 0 0 1-1.5-1.5z',
-  sidechat: 'M9.2 15.8 6 18.4v-2.6H4.8A1.8 1.8 0 0 1 3 14V6.8A1.8 1.8 0 0 1 4.8 5h8.4A1.8 1.8 0 0 1 15 6.8v.7 M15.6 9.5h3.6A1.8 1.8 0 0 1 21 11.3v4.2a1.8 1.8 0 0 1-1.8 1.8h-.6v2.6l-3.2-2.6h-4.6a1.8 1.8 0 0 1-1.8-1.8v-.7',
   folder: 'M3.5 7A2.5 2.5 0 0 1 6 4.5h3.4a2 2 0 0 1 1.6.8l1.2 1.7H18A2.5 2.5 0 0 1 20.5 9.5v8A2.5 2.5 0 0 1 18 20H6a2.5 2.5 0 0 1-2.5-2.5z',
   diff: 'M8.5 4v13 M8.5 4l-3 3 M8.5 4l3 3 M15.5 20V7 M15.5 20l3-3 M15.5 20l-3-3',
   terminal: 'M5.5 7.5l4.5 4.5-4.5 4.5 M12.5 18.5h6',
-  browser: 'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17z M3.5 12h17 M12 3.5c2.3 2.4 3.6 5.3 3.6 8.5s-1.3 6.1-3.6 8.5c-2.3-2.4-3.6-5.3-3.6-8.5S9.7 5.9 12 3.5z',
   gear: 'M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z M18.7 12a6 6 0 0 0-.1-1.2l1.8-1.4-1.8-3.1-2.1.8a6.2 6.2 0 0 0-2.1-1.2L14 3.5h-4l-.4 2.4a6.2 6.2 0 0 0-2.1 1.2l-2.1-.8-1.8 3.1 1.8 1.4a6 6 0 0 0 0 2.4l-1.8 1.4 1.8 3.1 2.1-.8a6.2 6.2 0 0 0 2.1 1.2l.4 2.4h4l.4-2.4a6.2 6.2 0 0 0 2.1-1.2l2.1.8 1.8-3.1-1.8-1.4c.07-.4.1-.8.1-1.2z',
 };
 
@@ -139,23 +137,6 @@ export function Dock({
 
       <div className="dock-divider" aria-hidden />
 
-      <div className="dock-group" data-dock-group-label={t('dock.group.chat')}>
-        {/* Sidechat rail — chat tabs onto other sessions, added via the
-            tab strip's "+" session picker. */}
-        <DockBtn
-          group="panel"
-          testId="sidechat"
-          label={t('dock.sidechat')}
-          active={activeRail === 'sidechat'}
-          disabled={workbenchDisabled}
-          onClick={() => onToggleRail('sidechat')}
-        >
-          <Icon d={ICONS.sidechat} />
-        </DockBtn>
-      </div>
-
-      <div className="dock-divider" aria-hidden />
-
       <div className="dock-group" data-dock-group-label={t('dock.group.workbench')}>
         <DockBtn
           group="wb"
@@ -166,17 +147,6 @@ export function Dock({
           onClick={() => onToggleRail('terminal')}
         >
           <Icon d={ICONS.terminal} />
-        </DockBtn>
-        {/* Browser rail — iframe preview tabs, added via the tab strip's "+". */}
-        <DockBtn
-          group="wb"
-          testId="browser"
-          label={t('dock.browser')}
-          active={activeRail === 'browser'}
-          disabled={workbenchDisabled}
-          onClick={() => onToggleRail('browser')}
-        >
-          <Icon d={ICONS.browser} />
         </DockBtn>
       </div>
 

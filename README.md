@@ -1,165 +1,134 @@
-# Gian
+<p align="center">
+  <img src=".github/assets/readme/gian-icon.svg" alt="Gian app icon" width="112" height="112">
+</p>
 
-> One local app for all your coding agents.
+<h1 align="center">Gian</h1>
 
-Use Codex, Claude Code, and Kimi Code at the same time through one consistent
-desktop interface for sessions, approvals, tasks, worktrees, files, and
-changes.
+<p align="center"><strong>One local desktop workspace for Codex, Claude Code, and Kimi Code.</strong></p>
 
-[Download the latest macOS release](https://github.com/RichLogic/Gian/releases/latest)
+<p align="center">
+  Keep agent sessions, approvals, tasks, worktrees, files, diffs, and terminals in one focused macOS app.
+</p>
 
-Gian is currently an early macOS Apple Silicon release. The App and Gian
-proxies are distributed through GitHub Releases. Agent CLIs still come from
-their official vendors and keep their own login, subscription, configuration,
-and session data.
+<p align="center">
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/RichLogic/Gian/releases/download/v0.2.0/Gian-0.2.0-arm64.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-Gian_0.2.0-E4572E?style=for-the-badge&logo=apple&logoColor=white" alt="Download Gian for macOS Apple Silicon"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/RichLogic/Gian/releases/tag/v0.2.0"><img src="https://img.shields.io/badge/release-v0.2.0_beta-C65D3A" alt="Current Gian beta release v0.2.0"></a>
+  <img src="https://img.shields.io/badge/platform-macOS_Apple_Silicon-1F2328?logo=apple" alt="Platform macOS Apple Silicon">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2F7D6D" alt="MIT License"></a>
+</p>
+
+<p align="center">
+  <img src=".github/assets/readme/gian-overview.webp" alt="Gian desktop app showing grouped agent sessions, live tool execution, and file changes" width="100%">
+</p>
 
 ## Why Gian
 
-- Run Codex, Claude Code, and Kimi Code from one App.
-- Keep multiple agent sessions visible without juggling terminals.
-- Review commands, file changes, approvals, queues, and worktrees through one
-  shared interaction model.
-- Work locally: Gian stores its database and logs on your Mac and does not use
-  a Gian cloud service.
-- Keep the native tools: Gian connects to the official CLIs instead of
-  replacing their authentication or billing.
+- Run Codex, Claude Code, and Kimi Code from one consistent desktop interface.
+- Keep several sessions visible and switch between them without juggling terminals.
+- Review assistant messages, plans, tool calls, commands, approvals, and errors as structured events.
+- Group related sessions into Tasks without adding an autonomous manager between you and your agents.
+- Work across repositories and isolated Git worktrees with Files, Diffs, and a workspace terminal close at hand.
+- Resume supported native CLI sessions while each provider keeps its own authentication, subscription, configuration, and billing.
 
-## Install
+## Beta scope
 
-1. Download `Gian-<version>-arm64.dmg` from
-   [GitHub Releases](https://github.com/RichLogic/Gian/releases/latest).
-2. Drag Gian into Applications and open it.
-3. Sign in with GitHub to initialize Gian on this Mac.
-4. Open **Settings → Executors** and set up the agents you want.
+Gian's current beta focuses on a reliable local coding loop:
 
-For each agent, Gian first detects an existing CLI and lets you provide a
-custom executable path. If it is missing, Gian can run the vendor's official
-installer. The matching Gian proxy is downloaded separately from the same
-Gian GitHub Release and verified before activation.
+- Create, send, stop, queue, steer, compact, and clear agent sessions.
+- Answer questions and approve or reject requested commands and tool calls.
+- Choose provider-owned models, reasoning levels, and permission modes where supported.
+- Attach files and images, inspect live transcripts, and track current context usage.
+- Create or adopt workspaces, discover worktrees, and review changed files and diffs.
+- Create, rename, pin, complete, reopen, and delete Tasks and their grouped sessions.
+- Discover and resume supported native sessions from the official agent CLIs.
+- Configure executors, appearance, project roots, and desktop notifications.
 
-End users do not need Node.js, pnpm, a cloned repository, or a separately
-installed Gian service.
+Beta intentionally does not include an embedded Browser, Sidechat, an autonomous Task Manager, or Discord/Slack bots.
+
+## A closer look
+
+### Tasks keep related sessions together
+
+<img src=".github/assets/readme/gian-tasks.webp" alt="Gian Tasks view with sessions grouped by release, quality, UI, and documentation work" width="100%">
+
+### Changes stay beside the conversation
+
+<img src=".github/assets/readme/gian-changes.webp" alt="Gian Changes inspector listing unstaged dashboard files beside an agent conversation" width="100%">
+
+## Install the macOS beta
+
+Gian is currently an **unsigned macOS beta for Apple Silicon**. It is not yet notarized, so macOS Gatekeeper will warn the first time you open it.
+
+1. Download [`Gian-0.2.0-arm64.dmg`](https://github.com/RichLogic/Gian/releases/download/v0.2.0/Gian-0.2.0-arm64.dmg) from the [current beta release](https://github.com/RichLogic/Gian/releases/tag/v0.2.0).
+2. Open the DMG and drag Gian into **Applications**.
+3. In Finder, Control-click Gian and choose **Open**, then choose **Open** again in the Gatekeeper dialog.
+4. If macOS does not offer that option, open **System Settings > Privacy & Security** and choose **Open Anyway** for Gian.
+
+Regular users do **not** need Node.js, pnpm, a source checkout, or a separately installed Gian service.
+
+On first run, Gian guides you through GitHub sign-in, agent setup, and choosing a parent directory for projects. One ready agent is enough to finish setup; the others remain optional.
 
 ## Supported agents
 
-| Agent | Runtime source | Gian integration |
+| Agent | Official runtime | Gian integration |
 |---|---|---|
-| Codex | OpenAI official CLI | Codex app-server proxy |
-| Claude Code | Anthropic official CLI | Claude structured-session proxy |
-| Kimi Code | Moonshot AI official CLI | ACP proxy |
+| Codex | OpenAI Codex CLI | Shared app-server proxy |
+| Claude Code | Anthropic Claude Code CLI | Structured print-mode proxy |
+| Kimi Code | Moonshot AI Kimi CLI | Shared ACP proxy |
 
-## Main capabilities
-
-- Provider-native chat events with UI projections: Claude Code, Codex, and
-  Kimi event names and payloads stay intact; Gian classifies them only as
-  Message, Activity, Plan, Agent, Interaction, or State for display.
-- Structured live transcripts for assistant output, plans, commands, file
-  changes, searches, approvals, and errors.
-- Approval controls, queued follow-up messages, interruption, and steering.
-- Manager-led tasks and isolated Git worktrees.
-- Changed-files, tree, diff, and workspace terminal surfaces.
-- Native session discovery and resume.
-- Optional Discord and Slack bridges.
-
-## How it works
-
-```text
-Official Agent CLI ⇄ Gian Proxy ⇄ Gian Host ⇄ Electron App
-                                      │
-                                      └── local SQLite data
-```
-
-The Electron App starts and supervises its bundled Gian Host automatically.
-Production access is Electron-only. The local Host is bound to loopback and
-uses a per-launch desktop credential, so ordinary web pages cannot operate its
-API or terminal WebSocket.
-
-Gian-owned proxy packages are independently installed under Gian's local data
-directory. CLI executables remain vendor-owned: an existing or configured path
-is preferred, and otherwise the official installer is used.
+Gian can detect an existing CLI or use a custom executable path. If a CLI is missing, setup can launch the vendor's official installer. Gian downloads its matching integration proxy from the same GitHub Release and verifies it before activation.
 
 ## Build from source
 
-Requirements: Node.js 22 and pnpm 10.
+Source builds are for contributors and developers. They require **Node.js 22** (`>=22 <25`) and **pnpm 10**.
 
 ```bash
 git clone https://github.com/RichLogic/Gian.git
 cd Gian
 pnpm install
 pnpm build
+pnpm dev
+```
+
+The development launcher uses Gian's public GitHub OAuth Client ID. Forks can override it:
+
+```bash
 GIAN_GITHUB_CLIENT_ID=<your-oauth-client-id> pnpm dev
 ```
 
-Useful release commands:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for repository conventions and development checks.
 
-```bash
-# Build the three versioned proxy assets and SHA-256 files.
-pnpm release:proxies
-
-# Build a local macOS Apple Silicon App and DMG.
-GIAN_GITHUB_CLIENT_ID=<your-oauth-client-id> pnpm desktop:dmg
-```
-
-Create a GitHub OAuth App, enable Device Flow, and use its public Client ID.
-No client secret is embedded in Gian. The login requests no OAuth scopes, so
-it reads only the authenticated user's public profile.
-
-Tagged beta versions are built and published by `.github/workflows/release.yml`
-as **unsigned, unnotarized self-use artifacts**. The workflow disables signing
-identity auto-discovery so every runner produces the same kind of build, and it
-marks the GitHub Release as a prerelease.
-
-### Publish an unsigned beta
-
-Configure the repository variable `GIAN_GITHUB_CLIENT_ID` with the public Client
-ID of a GitHub OAuth App that has Device Flow enabled. No Apple Developer
-membership or signing secret is required for this beta workflow.
-
-Keep the root and workspace package versions aligned, commit the release, then
-push the matching tag:
-
-```bash
-git tag v0.1.2
-git push origin v0.1.2
-```
-
-The workflow runs all checks, builds the three proxy archives, creates the
-unsigned arm64 DMG, verifies the expected bundle/runtime files, and
-publishes every artifact plus SHA-256 checksums to one prerelease. No Gian
-server is involved.
-
-Because the App has no Developer ID signature or Apple notarization ticket,
-macOS Gatekeeper warns when opening a downloaded build. Move Gian to
-Applications, try to open it once, then use **System Settings > Privacy &
-Security > Open Anyway** if you trust the release. Do not disable Gatekeeper
-globally. See [Apple's instructions for opening an app from an unknown
-developer](https://support.apple.com/guide/mac-help/mh40616/mac).
-
-Before distributing Gian to other users, replace this beta workflow with the
-retained `make:mac:release` signing/notarization path and a Developer ID
-certificate.
-
-## Local data
-
-By default Gian stores its database, downloaded proxies, and logs under:
+## How it works
 
 ```text
-~/.config/gian/
+Official Agent CLI <-> Gian Proxy <-> Gian Host <-> Electron App
+                                      |
+                                      `-> local SQLite data
 ```
 
-Agent credentials and subscriptions are managed by the corresponding official
-CLI. Gian does not provide a hosted account or proxy model traffic through a
-Gian server.
+The Electron app starts and supervises its bundled Host. The Host binds to loopback, stores state locally, and uses a per-launch desktop credential. Gian-owned proxies normalize each official CLI's structured events for the UI; the CLIs remain responsible for provider login, model access, subscriptions, and billing.
 
-The GitHub login token is encrypted with macOS secure storage and kept in the
-Gian application profile. It is not sent to a Gian server.
+## Network and privacy
+
+- Gian stores its database, downloaded proxies, and logs locally on your Mac. It does not use a Gian cloud service.
+- GitHub OAuth Device Flow is used for sign-in. Gian requests no OAuth scopes, reads the account's public profile, and encrypts the token with macOS secure storage.
+- Gian connects to GitHub Releases to download the app's versioned integration proxies and release assets.
+- Prompts, tool requests, and model responses travel through the official agent CLIs and their vendor services. Gian does not relay model traffic through its own server.
+- Agent credentials, subscriptions, configuration, and native session data remain managed by the corresponding official CLI.
 
 ## Project status
 
-Gian is in active early development. v0.1 targets macOS Apple Silicon and its
-public APIs and plugin contracts may change before v1.0. The future
-multi-agent orchestrator called Gian Agent is not part of the current release.
+Gian is in active beta development. The current public build is macOS Apple Silicon only, is unsigned, and may change its public APIs or integration contracts before a stable release.
+
+For bugs and feature requests, use [GitHub Issues](https://github.com/RichLogic/Gian/issues). For all public builds, see [Releases](https://github.com/RichLogic/Gian/releases).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

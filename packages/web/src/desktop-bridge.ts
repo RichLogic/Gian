@@ -4,6 +4,7 @@ export interface GianDesktopBridge {
   appVariant?: 'production' | 'development';
   retryConnection?: () => Promise<boolean>;
   openLogs?: () => Promise<string>;
+  restartApp?: () => Promise<boolean>;
   setDockIcon?: (dataUrl: string) => Promise<boolean>;
   githubAuth?: GitHubDesktopAuthApi;
 }

@@ -6,15 +6,12 @@ import type {
   EventEnvelope,
   NativeConfigOption,
   NativeConfigValue,
-  ProxyNotification,
   Session,
   ChatEvent,
 } from '@gian/shared';
-import { MANAGER_SYS_OPEN, MANAGER_SYS_CLOSE } from '@gian/shared';
 import { existsSync } from 'node:fs';
 import { ensureSessionAttachmentDir } from '../storage/attachments.js';
 import type { Db } from '../storage/db.js';
-import { loadConfig } from '../storage/config.js';
 import type { ProxyManager } from '../proxy/manager.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
 import type { ApprovalManager } from '../approval/index.js';
@@ -22,17 +19,6 @@ import type { QueueManager } from '../queue/index.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import { locateCcJsonl, appendCcCustomTitle } from '../native/locate-jsonl.js';
 import { randomUUID } from 'node:crypto';
-import {
-  getOrCreateRootWorkspace,
-  buildManagerSystemPrompt,
-  managerRuntimeFor,
-  DEFAULT_MANAGER_EXECUTOR,
-} from '../task/manager-session.js';
-import type { SummaryLlm } from '../task/summarizer.js';
-import { buildFirstTurnRolePrefix, roleForSessionType } from '../task/role-injector.js';
-import { regenerateStateViewIfDirty } from '../workspace/ai-views.js';
-import type { InsertLoopInput } from '../task/task-store.js';
-import type { TaskAction, TaskLoop } from '@gian/shared';
 import { SessionRepository } from './repository.js';
 import { SessionHistoryStore } from './history-store.js';
 import { TurnRuntime } from './turn-runtime.js';
@@ -41,7 +27,6 @@ import {
   type CreateSessionInput,
 } from './lifecycle-service.js';
 import { ProxySessionCoordinator } from './proxy-session-coordinator.js';
-import { TaskActionCoordinator } from './task-action-coordinator.js';
 import { SessionEventCoordinator } from './event-coordinator.js';
 import { SubtaskLifecycle } from './subtask-lifecycle.js';
 import { NativeSessionService } from './native-session-service.js';
@@ -69,14 +54,13 @@ export class SessionManager {
   private lifecycle: SessionLifecycleService;
   private proxySessions: ProxySessionCoordinator;
   private events: SessionEventCoordinator;
-  private taskActions: TaskActionCoordinator;
   private subtasks: SubtaskLifecycle;
   private nativeSessions: NativeSessionService;
 
   constructor(
     private db: Db,
     private proxy: ProxyManager,
-    private broadcaster: WsBroadcaster,
+    broadcaster: WsBroadcaster,
     private approvals: ApprovalManager,
     private queue: QueueManager,
     private dataDir: string,
@@ -111,23 +95,10 @@ export class SessionManager {
       watcher,
       this.proxySessions,
       {
-        finalTextFromNotification: (sessionId, notification) =>
-          this.codexFinalTextFromNotification(sessionId, notification),
-        onCompletedTurn: (sessionId, turnId, finalText) =>
-          this.processCompletedTurnAction(sessionId, turnId, finalText),
         sendMessage: (sessionId, text, items) => this.sendMessage(sessionId, text, items),
       },
     );
-    this.taskActions = new TaskActionCoordinator(db, this.history, {
-      getSession: sessionId => this.getSession(sessionId),
-      createSession: input => this.createSession(input),
-      broadcastCreated: session => this.broadcaster.broadcast({ type: 'session:created', session }),
-      broadcastUpdated: (sessionId, partial) => this.broadcastSessionUpdated(sessionId, partial),
-      sendMessage: (sessionId, text) => this.sendMessage(sessionId, text),
-      enqueueMessage: (sessionId, text) => this.enqueueMessage(sessionId, text),
-      isBusy: sessionId => this.turns.has(sessionId),
-    });
-    this.subtasks = new SubtaskLifecycle(db, this.sessions, this.history, {
+    this.subtasks = new SubtaskLifecycle(db, this.sessions, {
       broadcastUpdated: (sessionId, partial) => this.broadcastSessionUpdated(sessionId, partial),
     });
     this.nativeSessions = new NativeSessionService(
@@ -163,124 +134,6 @@ export class SessionManager {
 
   async createSession(input: CreateSessionInput): Promise<Session> {
     return this.lifecycle.create(input);
-  }
-
-  // -------------------------------------------------------------------------
-  // Per-Task Manager (PRD-v3 P3)
-  // -------------------------------------------------------------------------
-
-  /** Find the existing Manager session for a Task, if any. One per Task. */
-  getManagerSession(taskId: string): Session | null {
-    return this.sessions.findManager(taskId);
-  }
-
-  /**
-   * Get-or-create the per-Task Manager session (PRD-v3 P3). The Manager is a
-   * `type='manager'` session bound to the hidden root workspace
-   * (`workspace_root`), with an executor chosen per Task, NO worktree, and
-   * persistence across turns. Claude/Codex use `approval_mode`; Kimi keeps its
-   * ACP-provided mode/config vocabulary. No cross-executor policy is forced.
-   *
-   * Idempotent: returns the existing Manager when one already exists for the
-   * Task. Lazy creation — called on the first manager message (or eagerly by
-   * the web when a Task detail opens).
-   */
-  async ensureManagerSession(taskId: string): Promise<Session> {
-    const existing = this.getManagerSession(taskId);
-    if (existing) return existing;
-
-    const task = this.db
-      .prepare('SELECT * FROM tasks WHERE id = ?')
-      .get(taskId) as import('@gian/shared').Task | undefined;
-    if (!task) throw new Error(`task not found: ${taskId}`);
-
-    const root = getOrCreateRootWorkspace(this.db);
-
-    // The PM's executor is a per-Task choice (gian-task-pm-engineer §4.2): the
-    // Task row carries `manager_executor` (picked at creation via the sidebar
-    // "+"). Legacy tasks (NULL) fall back to the `default_task_executor` config
-    // default, then to the compile-time default. The model/effort follow from
-    // the executor — Codex pins gpt-5.5/xhigh, while Claude/Kimi defer to
-    // their own defaults/native config (managerRuntimeFor).
-    const executor = task.manager_executor
-      ?? loadConfig(this.db).default_task_executor
-      ?? DEFAULT_MANAGER_EXECUTOR;
-    const runtime = managerRuntimeFor(executor);
-
-    // Reuse the standard create path so the Manager gets the same proxy
-    // bring-up + native-session capture as any other session. Claude and Codex
-    // start in plan; Kimi omits Gian approval_mode entirely.
-    return this.createSession({
-      workspace_id: root.id,
-      executor: runtime.executor,
-      name: `Manager · ${task.name}`,
-      model: runtime.model,
-      thinking_effort: runtime.effort,
-      ...(runtime.executor === 'kimi' ? {} : { approval_mode: 'plan' as const }),
-      type: 'manager',
-      task_id: taskId,
-    });
-  }
-
-  /**
-   * Build the Manager's system prompt for a Task (role + inlined subtask
-   * metadata + signposts to the `.ai/` dirs and workspaces under the root).
-   * Pure read — used by the message path to prepend context.
-   *
-   * TODO(P3-live): the codex-proxy `session.create` / `turn.start` API has no
-   * `instructions` / system-prompt channel (see
-   * packages/proxies/codex-proxy/src/core/types.ts — StartTurnParams has no
-   * such field). So today this prompt is prepended to the Manager's FIRST user
-   * message (see sendMessage). If codex-proxy gains a native system /
-   * baseInstructions field, switch to passing it there so it doesn't consume
-   * turn budget / appear in the transcript.
-   */
-  buildManagerPrompt(taskId: string): string {
-    const task = this.db
-      .prepare('SELECT * FROM tasks WHERE id = ?')
-      .get(taskId) as import('@gian/shared').Task | undefined;
-    if (!task) throw new Error(`task not found: ${taskId}`);
-
-    const subtasks = this.db
-      .prepare(`SELECT * FROM sessions WHERE task_id = ? AND type = 'subtask' ORDER BY created_at ASC`)
-      .all(taskId) as Session[];
-
-    // Distinct workspace paths touched by the Task's subtasks.
-    const rows = this.db
-      .prepare(
-        `SELECT DISTINCT w.path AS path
-         FROM sessions s JOIN workspaces w ON w.id = s.workspace_id
-         WHERE s.task_id = ? AND s.type = 'subtask'`,
-      )
-      .all(taskId) as Array<{ path: string }>;
-    const workspacePaths = rows.map(r => r.path);
-
-    const root = getOrCreateRootWorkspace(this.db);
-    return buildManagerSystemPrompt({
-      task,
-      subtasks,
-      workspacePaths,
-      rootPath: root.path,
-    });
-  }
-
-  /**
-   * Send a message to a Task's Manager (PRD-v3 P3 A1). Ensures the Manager
-   * session exists, prepends the system prompt to the FIRST turn (see
-   * buildManagerPrompt's TODO(P3-live) about the missing native system
-   * channel), then reuses the normal structured `sendMessage` path — the
-   * Manager IS a session, so its transcript streams over the same events/WS.
-   *
-   * Returns the Manager session id so the caller (WS handler) can echo it back
-   * to the web, which then renders the Manager session's transcript.
-   */
-  async sendManagerMessage(taskId: string, text: string): Promise<string> {
-    const manager = await this.ensureManagerSession(taskId);
-    // The first-turn system-prompt prepend now lives in sendMessage (keyed on
-    // type==='manager'), so it applies exactly once to every send path — this
-    // REST helper and the structured message:send the web composer uses.
-    await this.sendMessage(manager.id, text);
-    return manager.id;
   }
 
   async listKimiNativeSessions(cwd: string): Promise<import('@gian/shared').NativeSession[]> {
@@ -478,71 +331,6 @@ export class SessionManager {
       ? await ensureSessionAttachmentDir(sessionId, this.dataDir)
       : null;
 
-    // Per-Task Manager: the shared runtime contract has no persistent
-    // system/instructions channel, so the Manager's system prompt is prepended to
-    // its FIRST turn, wrapped in sentinels the web strips at render
-    // (stripManagerSystemPrefix). Done HERE — not in sendManagerMessage — so it
-    // applies exactly once to EVERY entry path: the REST helper AND the
-    // structured `message:send` the web now uses for the Manager composer.
-    if (session.type === 'manager' && session.task_id && this.history.countTurns(sessionId) === 0) {
-      const prompt = this.buildManagerPrompt(session.task_id);
-      const wrapped = `${MANAGER_SYS_OPEN}\n${prompt}\n${MANAGER_SYS_CLOSE}`;
-      text = text.trim() ? `${wrapped}\n\n${text}` : wrapped;
-      // When the turn carries structured items (e.g. an image attachment on the
-      // very first message), the model reads `items`, not `text` — so fold the
-      // prompt into the first text item too (or prepend one if there is none).
-      if (items && items.length > 0) {
-        const ti = items.findIndex(it => it.type === 'text');
-        if (ti >= 0) {
-          const orig = (items[ti] as { type: 'text'; text: string }).text;
-          items = items.map((it, i) =>
-            i === ti
-              ? { type: 'text' as const, text: orig.trim() ? `${wrapped}\n\n${orig}` : wrapped }
-              : it,
-          );
-        } else {
-          items = [{ type: 'text' as const, text: wrapped }, ...items];
-        }
-      }
-    }
-
-    // gian-task context engine (RoleInjector, §4A.C). Env-gated until the wider
-    // feature lands (Slice 2+): with GIAN_TASK_ROLES=1, an INDIVIDUAL (coding)
-    // session gets the merged STATE.view refreshed before it orients, and on its
-    // FIRST turn a small ROLE header prepended (structured / prepend-first-message
-    // path). Best-effort — a scaffold/view hiccup must never block the turn.
-    if (process.env.GIAN_TASK_ROLES === '1' && (session.type === 'coding' || session.type === 'subtask')) {
-      const wsPath = this.workspacePathFor(session.workspace_id);
-      if (wsPath) {
-        try {
-          regenerateStateViewIfDirty(wsPath);
-        } catch {
-          /* view refresh is a derived cache — ignore failures */
-        }
-        if (this.history.countTurns(sessionId) === 0) {
-          const prefix = buildFirstTurnRolePrefix({
-            role: roleForSessionType(session.type),
-            sessionId,
-            workspacePath: wsPath,
-            taskName: session.task_id ? this.taskNameFor(session.task_id) : null,
-          });
-          text = text.trim() ? `${prefix}\n\n${text}` : prefix;
-          if (items && items.length > 0) {
-            const ti = items.findIndex(it => it.type === 'text');
-            if (ti >= 0) {
-              const orig = (items[ti] as { type: 'text'; text: string }).text;
-              items = items.map((it, i) =>
-                i === ti
-                  ? { type: 'text' as const, text: orig.trim() ? `${prefix}\n\n${orig}` : prefix }
-                  : it,
-              );
-            } else {
-              items = [{ type: 'text' as const, text: prefix }, ...items];
-            }
-          }
-        }
-      }
-    }
 
     const turnId = randomUUID();
     const now = new Date().toISOString();
@@ -947,19 +735,6 @@ export class SessionManager {
     return this.sessions.list(opts);
   }
 
-  // -------------------------------------------------------------------------
-  // Subtask completion → `.ai/` write-back (PRD-v3 P4)
-  //
-  // When a Subtask (type='subtask') is marked complete the session lands at
-  // `done` and the summarizer rewrites the workspace's `.ai/` context in the
-  // BACKGROUND — the user must never wait (§116). Abandon only appends one
-  // SESSION_LOG line (§153).
-  // -------------------------------------------------------------------------
-
-  setSummaryLlm(llm: SummaryLlm | null): void {
-    this.subtasks.setSummaryLlm(llm);
-  }
-
   completeSubtask(sessionId: string): void {
     this.subtasks.complete(sessionId);
   }
@@ -968,76 +743,8 @@ export class SessionManager {
     this.subtasks.reopen(sessionId);
   }
 
-  abandonSubtask(sessionId: string, reason?: string | null): void {
-    this.subtasks.abandon(sessionId, reason);
-  }
-
-  // -------------------------------------------------------------------------
-  // gian-task action protocol (proposal §4A.A / Slice 2-3). Env-gated by
-  // GIAN_TASK_ROLES; the executor/loop tables are inert until it's on.
-  // -------------------------------------------------------------------------
-
-  /** Codex `turn_completed` carries the authoritative final assistant text
-   *  (`assistantText` = all agentMessage text joined, service.ts:1188). Returns
-   *  it for a codex session, or undefined otherwise (Claude reconstructs from
-   *  its own events). */
-  private codexFinalTextFromNotification(sessionId: string, n: ProxyNotification): string | undefined {
-    let session: Session;
-    try {
-      session = this.getSession(sessionId);
-    } catch {
-      return undefined;
-    }
-    if (session.executor !== 'codex') return undefined;
-    const params = (n as { params?: unknown }).params as Record<string, unknown> | undefined;
-    const data = ((params?.data ?? params) ?? {}) as Record<string, unknown>;
-    const summary = (data.summary ?? {}) as Record<string, unknown>;
-    const at = summary.assistantText;
-    return typeof at === 'string' && at ? at : undefined;
-  }
-
-  /** Parse + record + execute a trailing gian:action from a completed structured
-   *  turn. `explicitFinalText` is the runtime's authoritative final-only text —
-   *  Codex passes `turn_completed`'s `assistantText` (§4A.A ①); Claude passes
-   *  nothing and we reconstruct from its persisted full assistant_text messages. */
-  private processCompletedTurnAction(sessionId: string, turnId: string, explicitFinalText?: string): void {
-    this.taskActions.processCompletedTurn(sessionId, turnId, explicitFinalText);
-  }
-
-  /**
-   * Startup reconciliation (durability): re-drive any action rows a crash/restart
-   * left non-terminal (parsed/validated/authorized/executing). Idempotent — the
-   * executor's guards mark an interrupted `executing` failed and re-authorize the
-   * rest. Call once at boot (app.ts). The Task Manager path is always-on; coding
-   * / subtask action rows still respect GIAN_TASK_ROLES through taskActionsEnabled.
-   */
-  resumePendingTaskActions(): void {
-    this.taskActions.resumePending();
-  }
-
-  /** Start a loop contract for a task (§4.5). Any prior active loop is closed. */
-  startLoop(taskId: string, input: Omit<InsertLoopInput, 'id' | 'task_id'>): TaskLoop {
-    return this.taskActions.startLoop(taskId, input);
-  }
-
-  getTaskLoop(taskId: string): TaskLoop | null {
-    return this.taskActions.getLoop(taskId);
-  }
-
-  /** Actions recorded for a task, newest first (drives the staged-confirm chip). */
-  listTaskActions(taskId: string): TaskAction[] {
-    return this.taskActions.listActions(taskId);
-  }
-
-  /** Confirm a staged action (user clicked confirm). Verifies the action
-   *  belongs to `taskId` — a cross-task action id is rejected as not-found. */
-  async confirmTaskAction(taskId: string, actionId: string): Promise<TaskAction | null> {
-    return this.taskActions.confirm(taskId, actionId);
-  }
-
-  /** Reject a staged action (user clicked reject). Task-ownership checked. */
-  rejectTaskAction(taskId: string, actionId: string): TaskAction | null {
-    return this.taskActions.reject(taskId, actionId);
+  abandonSubtask(sessionId: string): void {
+    this.subtasks.abandon(sessionId);
   }
 
 
@@ -1073,6 +780,10 @@ export class SessionManager {
     this.lifecycle.archive(sessionId, archived);
   }
 
+  notifyTaskSessionsUpdated(taskId: string): void {
+    this.lifecycle.notifyTaskSessionsUpdated(taskId);
+  }
+
   /**
    * Toggle the unread marker. Deliberately does NOT touch `updated_at` — read/
    * unread is a view-state change and must not reorder the sidebar. Idempotent.
@@ -1105,20 +816,6 @@ export class SessionManager {
     return this.history.listEvents(sessionId);
   }
 
-  private taskNameFor(taskId: string): string | null {
-    const row = this.db
-      .prepare('SELECT name FROM tasks WHERE id = ?')
-      .get(taskId) as { name: string } | undefined;
-    return row?.name ?? null;
-  }
-
-  private workspacePathFor(workspaceId: string): string | null {
-    const workspace = this.db
-      .prepare('SELECT path FROM workspaces WHERE id = ?')
-      .get(workspaceId) as { path: string } | undefined;
-    return workspace?.path ?? null;
-  }
-
   private persistNativeConfigSnapshot(
     sessionId: string,
     state: ExecutorConfigState,
@@ -1138,9 +835,8 @@ export class SessionManager {
   private completeTurn(
     sessionId: string,
     status: 'completed' | 'error' | 'stopped',
-    finalText?: string,
   ): void {
-    this.events.completeTurn(sessionId, status, finalText);
+    this.events.completeTurn(sessionId, status);
   }
 
   private broadcastEvent(

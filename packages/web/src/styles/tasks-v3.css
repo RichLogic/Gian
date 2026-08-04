@@ -107,8 +107,12 @@
 /* Inline rename input inside a task row / group header: shrink to the row. */
 .task-rename-input { flex: 1 1 auto; min-width: 0; padding: 2px 6px; }
 
-/* Disabled row hover action (complete while a turn is running). */
-.ri-act:disabled { opacity: 0.35; cursor: default; }
+/* Disabled row hover action (complete while a turn is running). The dimming
+   must stay scoped to row hover: a bare `.ri-act:disabled` out-specifies the
+   base `.ri-act { opacity: 0 }` in gian-v2.css, so the check glyph stayed
+   visible off-hover and overlapped the running ring at the row end
+   (2026-08-04). */
+.session-row:hover .ri-act:disabled { opacity: 0.35; cursor: default; }
 .ri-act:disabled:hover { background: transparent; color: var(--text-3); }
 
 .tasks-list-empty {

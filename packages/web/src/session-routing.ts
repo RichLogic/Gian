@@ -51,6 +51,37 @@ export function sessionNeedsAttention(
     || ((session.status === 'done' || session.status === 'error') && session.unread === 1);
 }
 
+/** Apply a session:updated payload to the active-only client collection. */
+export function applySessionUpdate(
+  sessions: Session[],
+  update: Pick<Session, 'id'> & Partial<Session>,
+): Session[] {
+  if (update.archived === 1) {
+    return sessions.filter(session => session.id !== update.id);
+  }
+
+  const existing = sessions.findIndex(session => session.id === update.id);
+  if (existing >= 0) {
+    return sessions.map(session => session.id === update.id
+      ? { ...session, ...update }
+      : session);
+  }
+
+  // An unarchive broadcast carries a complete Session because the archived
+  // row was not present in the initial active-only state sync.
+  if (
+    update.archived === 0
+    && update.workspace_id !== undefined
+    && update.executor !== undefined
+    && update.type !== undefined
+    && update.created_at !== undefined
+  ) {
+    return [update as Session, ...sessions];
+  }
+
+  return sessions;
+}
+
 /** Sidebar rail ordering inside one workspace group: pinned first
  *  (most-recently-pinned first), then by last activity. */
 export function sortSessionsForRail<T extends Pick<Session, 'pinned_at' | 'updated_at'>>(

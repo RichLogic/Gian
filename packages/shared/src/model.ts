@@ -93,12 +93,6 @@ export type ApprovalStatus =
 
 export type ApprovalResolvedBy = 'web' | 'im' | 'auto';
 
-export type IMPlatform = 'discord' | 'slack';
-
-export type BotMode = 'read-only' | 'full-control';
-
-export type BotStatus = 'disabled' | 'connecting' | 'connected' | 'error';
-
 export interface Workspace {
   id: string;
   name: string;
@@ -223,10 +217,6 @@ export interface Task {
   /** When the task was pinned (ISO-8601), or null when not pinned. Pinned tasks
    *  sort above the rest, most-recently-pinned first (pinned_at DESC). */
   pinned_at: string | null;
-  /** Which executor this Task's Manager (PM) runs on — chosen at creation via
-   *  the sidebar "+". NULL on legacy tasks → falls back to the config default
-   *  (`default_task_executor`) when the Manager session is first ensured. */
-  manager_executor: Executor | null;
 }
 
 export interface Approval {
@@ -251,41 +241,6 @@ export interface QueueEntry {
   text: string;
   sort_order: number;
   created_at: string;
-}
-
-export interface DiscordBotExtra {
-  token: string;
-  application_id: string;
-  bot_user_id?: string;
-  direct_channel_id?: string;
-}
-
-export interface SlackBotExtra {
-  bot_token: string;
-  app_token: string;
-  config_token: string;
-  team_id: string;
-  bot_user_id?: string;
-  direct_channel_id?: string;
-  command_prefix: string;
-}
-
-export type BotExtra = DiscordBotExtra | SlackBotExtra;
-
-export interface Bot {
-  id: string;
-  label: string;
-  platform: IMPlatform;
-  workspace_id: string | null;
-  mode: BotMode;
-  allowed_user_id: string | null;
-  enabled: 0 | 1;
-  status: BotStatus;
-  last_error: string | null;
-  last_connected_at: string | null;
-  extra: BotExtra;
-  created_at: string;
-  updated_at: string;
 }
 
 export interface ExternalEditor {
@@ -341,9 +296,6 @@ export interface SystemConfig {
   default_codex_model: string;
   /** Default reasoning effort for new codex sessions. Empty = use model default. */
   default_codex_effort: string;
-  /** Which executor a plain click on the tasks "+" creates the PM on. The hover
-   *  menu on "+" overrides it per-task. Defaults to 'claude'. */
-  default_task_executor: Executor;
   auth_username: string;
   /** Programs surfaced in the Files view's "Open with…" menu. */
   external_editors: ExternalEditor[];

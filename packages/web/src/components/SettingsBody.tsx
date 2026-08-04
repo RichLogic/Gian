@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type {
   AgentInstallStatus,
   AgentProxyDefaults,
@@ -14,12 +14,15 @@ import {
   installAgentProxy,
   loadAgents,
   loadProxyCapabilities,
+  pickAgentCliPath,
   resetOnboarding,
   saveSettings,
   setAgentCliPath,
   setAgentProxyDefaults,
 } from '../api.js';
 import { useMinimapEnabled, setMinimapEnabled } from '../display-prefs.js';
+import { desktopBridge } from '../desktop-bridge.js';
+import { confirm } from '../feedback.js';
 import { AppIcon } from './AppIcon.js';
 import { DEFAULT_OPEN_TARGET } from './sheet-model.js';
 import { useT } from '../i18n/index.js';
@@ -316,7 +319,9 @@ function SettingsBodyInner({
               <dt>{t('settings.shortcuts.createClaudeChild')}</dt><dd><kbd>⌘</kbd><kbd>J</kbd></dd>
               <dt>{t('settings.shortcuts.createCodexChild')}</dt><dd><kbd>⌘</kbd><kbd>K</kbd></dd>
               <dt>{t('settings.shortcuts.markUnread')}</dt><dd><kbd>⌘</kbd><kbd>U</kbd></dd>
-              <dt>{t('settings.shortcuts.approveDecline')}</dt><dd><kbd>⏎</kbd>&nbsp;<kbd>⌫</kbd></dd>
+              <dt>{t('settings.shortcuts.approveOnce')}</dt><dd><kbd>A</kbd></dd>
+              <dt>{t('settings.shortcuts.approveSession')}</dt><dd><kbd>⇧</kbd><kbd>A</kbd></dd>
+              <dt>{t('settings.shortcuts.decline')}</dt><dd><kbd>D</kbd></dd>
             </dl>
           </div>
         </section>
@@ -328,23 +333,6 @@ function SettingsBodyInner({
           <h3 className="s2-sectiontitle">{t('settings.section.executor')}</h3>
           <div className="s2-card">
             <AgentInstallBlock />
-            <div className="s2-taskpm">
-              <div className="s2-taskpm-head">
-                <span className="s2-taskpm-label">{t('settings.executors.taskDefault')}</span>
-                <div className="segm">
-                  {(['claude', 'codex', 'kimi'] as const).map(ex => (
-                    <button
-                      key={ex}
-                      className={`segm-item ${config.default_task_executor === ex ? 'active' : ''}`}
-                      onClick={() => patch({ default_task_executor: ex })}
-                    >
-                      {ex === 'claude' ? 'Claude' : ex === 'codex' ? 'Codex' : 'Kimi'}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <p className="s2-help">{t('settings.executors.taskDefault.help')}</p>
-            </div>
           </div>
         </section>
         )}
@@ -552,14 +540,16 @@ function AgentInstallBlock() {
     void refresh();
   }, []);
 
-  async function run(id: Executor, operation: () => Promise<unknown>) {
+  async function run(id: Executor, operation: () => Promise<unknown>): Promise<boolean> {
     setBusy(id);
     setError('');
     try {
       await operation();
       await refresh();
+      return true;
     } catch (value) {
       setError(value instanceof Error ? value.message : String(value));
+      return false;
     } finally {
       setBusy(null);
     }
@@ -569,6 +559,39 @@ function AgentInstallBlock() {
     await run(agent.id, async () => {
       if (agent.proxy.state !== 'ready') await installAgentProxy(agent.id);
       if (agent.cli.state !== 'ready') await installAgentCli(agent.id);
+    });
+  }
+
+  async function changeCliPath(
+    agent: AgentInstallStatus,
+    path: string | null,
+  ): Promise<boolean> {
+    const desktop = desktopBridge();
+    const desktopApp = desktop?.appVariant === 'production'
+      || desktop?.appVariant === 'development';
+    const restartApp = desktopApp ? desktop?.restartApp : undefined;
+    if (desktopApp) {
+      const accepted = await confirm({
+        title: t('settings.agents.restartTitle'),
+        message: t('settings.agents.restartMessage'),
+        confirmLabel: t('settings.agents.restartConfirm'),
+        cancelLabel: t('settings.agents.restartCancel'),
+      });
+      if (!accepted) return false;
+      if (!restartApp) {
+        return run(agent.id, async () => {
+          throw new Error(t('settings.agents.restartFailed'));
+        });
+      }
+    }
+
+    return run(agent.id, async () => {
+      await setAgentCliPath(agent.id, path);
+      if (!desktopApp) return;
+      const restarting = await restartApp!();
+      if (restarting) return;
+      await setAgentCliPath(agent.id, agent.cli.path ?? null);
+      throw new Error(t('settings.agents.restartFailed'));
     });
   }
 
@@ -587,7 +610,7 @@ function AgentInstallBlock() {
           onSetup={() => setup(agent)}
           onInstallCli={() => run(agent.id, () => installAgentCli(agent.id))}
           onInstallProxy={() => run(agent.id, () => installAgentProxy(agent.id))}
-          onSetPath={path => run(agent.id, () => setAgentCliPath(agent.id, path))}
+          onSetPath={path => changeCliPath(agent, path)}
           onSetDefaults={defaults => run(
             agent.id,
             () => setAgentProxyDefaults(agent.id, defaults),
@@ -613,14 +636,22 @@ function AgentInstallRow({
   onSetup: () => void;
   onInstallCli: () => void;
   onInstallProxy: () => void;
-  onSetPath: (path: string | null) => void;
+  onSetPath: (path: string | null) => Promise<boolean>;
   onSetDefaults: (defaults: Partial<AgentProxyDefaults>) => void;
 }) {
   const t = useT();
   const [path, setPath] = useState(agent.cli.path ?? '');
+  const pathInputRef = useRef<HTMLInputElement>(null);
   const [capabilities, setCapabilities] = useState<ProxyCapabilities | null>(null);
   const [capabilityError, setCapabilityError] = useState(false);
   useEffect(() => setPath(agent.cli.path ?? ''), [agent.cli.path]);
+  // Show the tail of long paths when the field isn't being edited — the
+  // executable name matters more than the prefix (2026-08-04).
+  const showPathTail = () => {
+    const input = pathInputRef.current;
+    if (input) input.scrollLeft = input.scrollWidth;
+  };
+  useEffect(showPathTail, [path, agent.cli.path]);
   useEffect(() => {
     let alive = true;
     setCapabilities(null);
@@ -635,6 +666,24 @@ function AgentInstallRow({
       });
     return () => { alive = false; };
   }, [agent.id, agent.proxy.state, agent.proxy.version]);
+
+  // Native file picker → fill + save the CLI path in one click (2026-08-04).
+  async function onBrowse() {
+    try {
+      const picked = await pickAgentCliPath(agent.id);
+      if (picked) {
+        setPath(picked);
+        if (!(await onSetPath(picked))) setPath(agent.cli.path ?? '');
+      }
+    } catch { /* picker unavailable (non-macOS) or failed — typing still works */ }
+  }
+
+  async function commitPath(next: string | null) {
+    if (!(await onSetPath(next))) {
+      setPath(agent.cli.path ?? '');
+      requestAnimationFrame(showPathTail);
+    }
+  }
 
   const defaults = agent.proxy.defaults ?? { model: '', thinking: '', mode: '' };
   const models = capabilities?.models.filter(model => !model.hidden) ?? [];
@@ -654,6 +703,7 @@ function AgentInstallRow({
   const state = agent.ready
     ? { cls: 'ok', label: t('settings.agents.ready') }
     : { cls: 'err', label: t('settings.agents.setupRequired') };
+  const proxyInstalled = agent.proxy.state === 'ready' || agent.proxy.state === 'outdated';
 
   return (
     <div className="exec-row">
@@ -668,10 +718,41 @@ function AgentInstallRow({
         )}
       </div>
       <dl className="kv-grid">
-        <dt>CLI</dt>
+        {/* Row order (2026-08-04): Path → Version → Defaults. The path input
+            auto-saves on blur/Enter (no Save button) and shows the tail of
+            long paths when not focused. */}
+        <dt>{t('settings.agents.cliPath')}</dt>
+        <dd className="cli-path-row">
+          <input
+            ref={pathInputRef}
+            className="input mono"
+            value={path}
+            disabled={busy}
+            placeholder="/absolute/path/to/cli"
+            onChange={event => setPath(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter') event.currentTarget.blur();
+              if (event.key === 'Escape') setPath(agent.cli.path ?? '');
+            }}
+            onBlur={() => {
+              const next = path.trim();
+              if (next !== (agent.cli.path ?? '')) void commitPath(next || null);
+              showPathTail();
+            }}
+          />
+          <button
+            className="btn xs secondary"
+            type="button"
+            disabled={busy}
+            onClick={() => { void onBrowse(); }}
+          >
+            {t('settings.agents.browse')}
+          </button>
+        </dd>
+        <dt>{t('settings.agents.version')}</dt>
         <dd>
           {agent.cli.state === 'ready'
-            ? `${agent.cli.version ?? ''} · ${agent.cli.path ?? ''}`
+            ? agent.cli.version ?? t('settings.agents.ready')
             : t(agent.cli.state === 'invalid' ? 'settings.agents.invalid' : 'settings.agents.notInstalled')}
           {agent.cli.state !== 'ready' && (
             <button className="btn xs secondary" type="button" disabled={busy} onClick={onInstallCli}>
@@ -679,115 +760,102 @@ function AgentInstallRow({
             </button>
           )}
         </dd>
-        <dt>{t('settings.agents.cliPath')}</dt>
-        <dd>
-          <input
-            className="input mono"
-            value={path}
-            disabled={busy}
-            placeholder="/absolute/path/to/cli"
-            onChange={event => setPath(event.target.value)}
-          />
-          <button
-            className="btn xs secondary"
-            type="button"
-            disabled={busy || path.trim() === (agent.cli.path ?? '')}
-            onClick={() => onSetPath(path.trim() || null)}
-          >
-            {t('settings.agents.savePath')}
-          </button>
-        </dd>
         <dt>Proxy</dt>
         <dd>
-          {agent.proxy.state === 'ready'
+          {proxyInstalled
             ? `${agent.proxy.version ?? ''} · GitHub`
             : t('settings.agents.notInstalled')}
           {agent.proxy.state !== 'ready' && (
             <button className="btn xs secondary" type="button" disabled={busy} onClick={onInstallProxy}>
-              {t('settings.agents.installProxy')}
+              {t(agent.proxy.state === 'outdated'
+                ? 'settings.agents.updateProxy'
+                : 'settings.agents.installProxy')}
             </button>
           )}
         </dd>
-        {models.length > 0 && (
+        {(models.length > 0 || thinkingLevels.length > 0 || modes.length > 0 || capabilityError) && (
           <>
-            <dt>{t('settings.executors.defaultModel')}</dt>
+            <dt>{t('settings.executors.defaults')}</dt>
             <dd>
-              <select
-                className="select mono"
-                style={{ width: '100%' }}
-                value={defaults.model}
-                disabled={busy || !capabilities}
-                onChange={event => {
-                  const model = event.target.value;
-                  const nextModel = models.find(candidate => candidate.model === model)
-                    ?? models.find(candidate => candidate.isDefault)
-                    ?? models[0];
-                  const supported = nextModel
-                    ? ('supportedEfforts' in nextModel
-                        ? nextModel.supportedEfforts
-                        : nextModel.supportedThinking)
-                    : [];
-                  onSetDefaults({
-                    model,
-                    ...(defaults.thinking && !supported.includes(defaults.thinking)
-                      ? { thinking: '' }
-                      : {}),
-                  });
-                }}
-              >
-                <option value="">{t('settings.executors.proxyDefault')}</option>
-                {models.filter(model => model.model !== '').map(model => (
-                  <option key={model.id} value={model.model}>
-                    {model.displayName || model.model}
-                  </option>
-                ))}
-              </select>
+              <div className="exec-defaults">
+                {models.length > 0 && (
+                  <label className="exec-default">
+                    <span className="lbl">{t('settings.executors.defaultModel')}</span>
+                    <select
+                      className="select mono"
+                      value={defaults.model}
+                      disabled={busy || !capabilities}
+                      onChange={event => {
+                        const model = event.target.value;
+                        const nextModel = models.find(candidate => candidate.model === model)
+                          ?? models.find(candidate => candidate.isDefault)
+                          ?? models[0];
+                        const supported = nextModel
+                          ? ('supportedEfforts' in nextModel
+                              ? nextModel.supportedEfforts
+                              : nextModel.supportedThinking)
+                          : [];
+                        onSetDefaults({
+                          model,
+                          ...(defaults.thinking && !supported.includes(defaults.thinking)
+                            ? { thinking: '' }
+                            : {}),
+                        });
+                      }}
+                    >
+                      <option value="">{t('settings.executors.proxyDefault')}</option>
+                      {models.filter(model => model.model !== '').map(model => (
+                        <option key={model.id} value={model.model}>
+                          {model.displayName || model.model}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {thinkingLevels.length > 0 && (
+                  <label className="exec-default">
+                    <span className="lbl">{agent.id === 'claude'
+                      ? t('settings.executors.effort')
+                      : t('settings.executors.thinking')}</span>
+                    <select
+                      className="select mono"
+                      value={defaults.thinking}
+                      disabled={busy || !capabilities}
+                      onChange={event => onSetDefaults({ thinking: event.target.value })}
+                    >
+                      <option value="">{t('settings.executors.modelDefault')}</option>
+                      {thinkingLevels.map(level => (
+                        <option key={level} value={level}>{level}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {/* Mode picker: only when the proxy advertises modes (Claude/
+                    Codex always; Kimi since the 2026-08-04 ACP probe). A
+                    capability fetch failure keeps the note instead. */}
+                {(modes.length > 0 || capabilityError) && (
+                  <label className="exec-default">
+                    <span className="lbl">{t('settings.executors.mode')}</span>
+                    {modes.length > 0 ? (
+                      <select
+                        className="select mono"
+                        value={selectedMode}
+                        disabled={busy || !capabilities}
+                        onChange={event => onSetDefaults({ mode: event.target.value })}
+                      >
+                        {modes.map(mode => (
+                          <option key={mode.id} value={mode.id}>{mode.label}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className="s2-help">{t('settings.executors.status.unavailable')}</span>
+                    )}
+                  </label>
+                )}
+              </div>
             </dd>
           </>
         )}
-        {thinkingLevels.length > 0 && (
-          <>
-            <dt>{agent.id === 'claude'
-              ? t('settings.executors.effort')
-              : t('settings.executors.thinking')}</dt>
-            <dd>
-              <select
-                className="select mono"
-                style={{ width: '100%' }}
-                value={defaults.thinking}
-                disabled={busy || !capabilities}
-                onChange={event => onSetDefaults({ thinking: event.target.value })}
-              >
-                <option value="">{t('settings.executors.modelDefault')}</option>
-                {thinkingLevels.map(level => (
-                  <option key={level} value={level}>{level}</option>
-                ))}
-              </select>
-            </dd>
-          </>
-        )}
-        <dt>{t('settings.executors.mode')}</dt>
-        <dd>
-          {!capabilities && !capabilityError ? (
-            <span className="s2-help">{t('settings.executors.status.loading')}</span>
-          ) : modes.length > 0 ? (
-            <select
-              className="select mono"
-              style={{ width: '100%' }}
-              value={selectedMode}
-              disabled={busy || !capabilities}
-              onChange={event => onSetDefaults({ mode: event.target.value })}
-            >
-              {modes.map(mode => (
-                <option key={mode.id} value={mode.id}>{mode.label}</option>
-              ))}
-            </select>
-          ) : (
-            <span className="s2-help">{capabilityError
-              ? t('settings.executors.status.unavailable')
-              : t('settings.executors.sessionMode')}</span>
-          )}
-        </dd>
       </dl>
     </div>
   );
@@ -877,17 +945,6 @@ function NotificationsBlock() {
             onChange={e => patch({ sound: e.target.checked })}
           />
           <span>{t('settings.notifications.chime')}</span>
-        </label>
-      </dd>
-      <dt>{t('settings.notifications.dockBadge')}</dt>
-      <dd>
-        <label className="switch">
-          <input
-            type="checkbox"
-            checked={prefs.badge}
-            onChange={e => patch({ badge: e.target.checked })}
-          />
-          <span>{t('settings.notifications.badge')}</span>
         </label>
       </dd>
     </dl>

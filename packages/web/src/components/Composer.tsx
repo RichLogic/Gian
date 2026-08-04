@@ -374,6 +374,12 @@ export function Composer({
 
   const activeModel = currentModel;
   const approvalMode = session.approval_mode;
+  // Warn colour only for modes that stop asking the user (2026-08-04 — the
+  // chip used to be warn unconditionally). Kimi isn't here: its mode chip is
+  // the native-option drop with its own styling.
+  const approvalRisky = cliExecutor === 'codex'
+    ? approvalMode === 'auto' || approvalMode === 'custom' || approvalMode === 'full-access'
+    : oneShotBypass || approvalMode === 'auto';
 
   const slashPrefix = text.startsWith('/') ? text : '';
   const filteredGroups = slashOpen ? slashFilterGrouped(slashCommands, slashPrefix) : [];
@@ -1016,7 +1022,7 @@ export function Composer({
               <button
                 ref={approvalDrop.btnRef}
                 type="button"
-                className={`composer-opt cmp-approval-btn${approvalDrop.open ? ' open' : ''}`}
+                className={`composer-opt cmp-approval-btn${approvalRisky ? ' risky' : ''}${approvalDrop.open ? ' open' : ''}`}
                 title={t('composer.approval.title')}
                 onClick={() => approvalDrop.setOpen(o => !o)}
               >

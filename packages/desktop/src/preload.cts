@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld(
     appVariant,
     retryConnection: () => ipcRenderer.invoke('desktop:retry-connection'),
     openLogs: () => ipcRenderer.invoke('desktop:open-logs'),
+    restartApp: () => ipcRenderer.invoke('desktop:restart-app'),
     setDockIcon: (dataUrl: string) => ipcRenderer.invoke('desktop:set-dock-icon', dataUrl),
     githubAuth: Object.freeze({
       getState: () => ipcRenderer.invoke('desktop:github-auth:get-state'),

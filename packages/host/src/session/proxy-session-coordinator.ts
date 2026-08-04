@@ -20,7 +20,6 @@ export interface BringUpProxySessionInput {
   cwd: string;
   model: string | null;
   nativeSessionId?: string | null;
-  forkFromClaudeSessionId?: string | null;
   executorConfig?: ExecutorConfigState;
   resumeMode?: 'load' | 'resume';
   displayName?: string | null;
@@ -90,23 +89,12 @@ export class ProxySessionCoordinator {
       .get(session.workspace_id) as { path: string } | undefined;
     if (!workspace) throw new Error(`workspace missing for session ${session.id}`);
 
-    const pendingFork = this.db.prepare(
-      `SELECT parent.native_session_id, parent.worktree_path
-       FROM sessions AS child
-       JOIN sessions AS parent ON parent.id = child.fork_from_session_id
-       WHERE child.id = ?`,
-    ).get(session.id) as {
-      native_session_id: string | null;
-      worktree_path: string | null;
-    } | undefined;
-    const forkFromClaudeSessionId = pendingFork?.native_session_id ?? null;
     const result = await this.bringUp({
       sessionId: session.id,
       executor: session.executor,
-      cwd: pendingFork?.worktree_path ?? session.worktree_path ?? workspace.path,
+      cwd: session.worktree_path ?? workspace.path,
       model: session.model,
-      nativeSessionId: forkFromClaudeSessionId ? null : session.native_session_id,
-      forkFromClaudeSessionId,
+      nativeSessionId: session.native_session_id,
       executorConfig: session.executor_config,
       displayName: session.name,
     });
@@ -123,7 +111,6 @@ export class ProxySessionCoordinator {
 
     const adoptParams: {
       claudeSessionId?: string;
-      forkFromClaudeSessionId?: string;
       threadId?: string;
       nativeSessionId?: string;
       resumeMode?: 'load' | 'resume';
@@ -136,10 +123,6 @@ export class ProxySessionCoordinator {
         adoptParams.resumeMode = args.resumeMode ?? 'resume';
       }
     }
-    if (args.executor === 'claude' && args.forkFromClaudeSessionId) {
-      adoptParams.forkFromClaudeSessionId = args.forkFromClaudeSessionId;
-    }
-
     let created: {
       session: import('@gian/shared').ProxySession;
       nativeSessionId: string;

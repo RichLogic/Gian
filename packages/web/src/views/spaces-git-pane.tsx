@@ -2,11 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Workspace } from '@gian/shared';
 import {
   abortPendingGitOp,
-  createLocalBranch,
   dropSession,
   fetchRemotes,
   loadBranches,
-  loadRemoteBranches,
   loadRepoInfo,
   loadWorkspaceTrees,
   mergeSession,
@@ -14,7 +12,6 @@ import {
 import type {
   LocalBranch,
   PendingGitOp,
-  RemoteBranch,
   RepoInfo,
   WorkspaceTree,
 } from '../api.js';
@@ -23,10 +20,8 @@ import { useT } from '../i18n/index.js';
 import type { GianWs } from '../ws.js';
 
 const I = {
-  folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   kebabV: 'M12 5.01v-.02 M12 12.01v-.02 M12 19.01v-.02',
   github: 'M9 19c-4.5 1.5-4.5-2.5-6-3 m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.3 4.3 0 0 0-.1-3.2s-1.1-.3-3.5 1.3a12 12 0 0 0-6 0C6.7 2.8 5.6 3.1 5.6 3.1a4.3 4.3 0 0 0-.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21',
-  info: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 8v.01 M11 12h1v5h1',
 };
 
 function Icon({ d, size = 16, stroke = 1.6 }: { d: string; size?: number; stroke?: number }) {
@@ -67,17 +62,6 @@ function BranchIcon({ size = 11 }: { size?: number }) {
   );
 }
 
-function HelpHint({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="help-hint" tabIndex={0}>
-      <span className="help-hint-trigger" aria-label="More info">
-        <Icon d={I.info} size={12} stroke={1.8} />
-      </span>
-      <span className="help-hint-pop" role="tooltip">{children}</span>
-    </span>
-  );
-}
-
 function relTime(iso: string): string {
   const seconds = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
   if (seconds < 60) return `${seconds}s`;
@@ -106,10 +90,6 @@ export function GitPane({
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
-  const [branchFilter, setBranchFilter] = useState<'all' | 'on-worktree' | 'off-worktree' | 'worktree-sessions'>('all');
-  const [remoteSearch, setRemoteSearch] = useState('');
-  const [remoteBranches, setRemoteBranches] = useState<RemoteBranch[]>([]);
-  const [remoteLoading, setRemoteLoading] = useState(false);
   const t = useT();
 
   const refresh = useCallback(async () => {
@@ -129,13 +109,6 @@ export function GitPane({
     void refresh();
   }, [refresh]);
 
-  const doRemoteSearch = useCallback(async (q: string) => {
-    setRemoteLoading(true);
-    const list = await loadRemoteBranches(workspace.id, q || undefined);
-    setRemoteBranches(list);
-    setRemoteLoading(false);
-  }, [workspace.id]);
-
   // Live refresh: host pushes `workspace:git-updated` after fetch / branch /
   // merge / drop / session-delete. Filter by workspace_id so other workspaces'
   // events don't trigger re-fetches in this pane.
@@ -143,15 +116,10 @@ export function GitPane({
     const off = ws.onMessage(msg => {
       if (msg.type === 'workspace:git-updated' && msg.workspace_id === workspace.id) {
         void refresh();
-        // Keep the remote-branches panel in sync only if it's been populated —
-        // otherwise wait for the user to open it.
-        if (remoteBranches.length > 0 || remoteSearch) {
-          void doRemoteSearch(remoteSearch);
-        }
       }
     });
     return off;
-  }, [ws, workspace.id, refresh, doRemoteSearch, remoteBranches.length, remoteSearch]);
+  }, [ws, workspace.id, refresh]);
 
   // Worktree-side info (dirty count, CLAUDE.md) lives in `trees`; key by path.
   const treesByPath = useMemo(() => {
@@ -160,17 +128,9 @@ export function GitPane({
     return m;
   }, [trees]);
 
-  // Filter chips drive what shows up in the unified branches list.
+  // Main worktree first, then other worktrees, then bare branches.
   const filtered = useMemo(() => {
-    return branches.filter(b => {
-      switch (branchFilter) {
-        case 'on-worktree': return !!b.worktreePath;
-        case 'off-worktree': return !b.worktreePath;
-        case 'worktree-sessions': return b.isWorktreeBranch;
-        default: return true;
-      }
-    }).sort((a, b) => {
-      // Main worktree first, then other worktrees, then bare branches.
+    return [...branches].sort((a, b) => {
       const aIsMain = a.worktreePath === workspace.path ? 0 : 1;
       const bIsMain = b.worktreePath === workspace.path ? 0 : 1;
       if (aIsMain !== bIsMain) return aIsMain - bIsMain;
@@ -179,7 +139,7 @@ export function GitPane({
       if (aHasTree !== bHasTree) return aHasTree - bHasTree;
       return a.name.localeCompare(b.name);
     });
-  }, [branches, branchFilter, workspace.path]);
+  }, [branches, workspace.path]);
 
   async function handleFetch() {
     setFetching(true);
@@ -192,22 +152,11 @@ export function GitPane({
     }
     setFetchedAt(result.fetchedAt ?? new Date().toISOString());
     void refresh();
-    // If the user has the remote panel open, refresh it too.
-    if (remoteSearch || remoteBranches.length > 0) void doRemoteSearch(remoteSearch);
   }
-
-  // Debounce remote-branch search so we don't hammer git on each keystroke.
-  useEffect(() => {
-    const handle = setTimeout(() => { void doRemoteSearch(remoteSearch); }, 220);
-    return () => clearTimeout(handle);
-  }, [remoteSearch, doRemoteSearch]);
 
   const remoteHref = repo?.git.remote
     ? (repo.git.remote.startsWith('http') ? repo.git.remote : `https://${repo.git.remote}`)
     : null;
-
-  const onWorktreeCount = branches.filter(b => b.worktreePath).length;
-  const dirtyCount = trees.filter(tr => tr.isDirty).length;
 
   return (
     <>
@@ -250,23 +199,7 @@ export function GitPane({
 
       <div className="card">
         <div className="card-head">
-          <h3>
-            {t('spaces.git.branches')}
-            <HelpHint>
-              {t('spaces.git.branches.help')}
-            </HelpHint>
-          </h3>
-          <span className="aside">
-            {branches.length} {t('spaces.git.local')} · {onWorktreeCount} {t('spaces.git.onWorktree')}{dirtyCount > 0 ? ` · ${dirtyCount} ${t('spaces.git.dirty')}` : ''}
-          </span>
-        </div>
-        <div style={{ display: 'flex', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--hairline-2)' }}>
-          <div className="segm sm">
-            <button className={`segm-item${branchFilter === 'all' ? ' active' : ''}`} onClick={() => setBranchFilter('all')}>{t('spaces.git.filter.all')}</button>
-            <button className={`segm-item${branchFilter === 'on-worktree' ? ' active' : ''}`} onClick={() => setBranchFilter('on-worktree')}>{t('spaces.git.filter.onWorktree')}</button>
-            <button className={`segm-item${branchFilter === 'off-worktree' ? ' active' : ''}`} onClick={() => setBranchFilter('off-worktree')}>{t('spaces.git.filter.offWorktree')}</button>
-            <button className={`segm-item${branchFilter === 'worktree-sessions' ? ' active' : ''}`} onClick={() => setBranchFilter('worktree-sessions')}>{t('spaces.git.filter.worktreeSessions')}</button>
-          </div>
+          <h3>{t('spaces.git.branches')}</h3>
         </div>
         <div className="card-body compact">
           {filtered.map(b => (
@@ -289,47 +222,6 @@ export function GitPane({
           {branches.length === 0 && branchesLoaded && (
             <div className="wt-row" style={{ color: 'var(--text-3)' }}>
               {t('spaces.git.noLocalBranches')}
-            </div>
-          )}
-          {branches.length > 0 && filtered.length === 0 && (
-            <div className="wt-row" style={{ color: 'var(--text-3)' }}>
-              {t('spaces.git.noBranchMatches')}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="card-head">
-          <h3>
-            {t('spaces.git.remoteBranches')}
-            <HelpHint>
-              {t('spaces.git.remoteBranches.help')}
-            </HelpHint>
-          </h3>
-          <span className="aside">{remoteBranches.length} {t('spaces.git.match')}{remoteLoading ? ` · ${t('spaces.git.loading')}` : ''}</span>
-        </div>
-        <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--hairline-2)' }}>
-          <input
-            className="input"
-            placeholder={t('spaces.git.searchRemoteBranches')}
-            value={remoteSearch}
-            onChange={e => setRemoteSearch(e.target.value)}
-            spellCheck={false}
-          />
-        </div>
-        <div className="card-body compact">
-          {remoteBranches.map(rb => (
-            <RemoteBranchRow
-              key={rb.fullName}
-              branch={rb}
-              workspaceId={workspace.id}
-              onRefresh={() => { void refresh(); void doRemoteSearch(remoteSearch); }}
-            />
-          ))}
-          {remoteBranches.length === 0 && !remoteLoading && (
-            <div className="wt-row" style={{ color: 'var(--text-3)' }}>
-              {remoteSearch ? t('spaces.git.noRemoteBranchMatches') : t('spaces.git.noRemoteBranches')}
             </div>
           )}
         </div>
@@ -434,28 +326,22 @@ function BranchRow({
   const isDirty = tree?.isDirty ?? false;
   const state = isDirty ? 'dirty' : 'clean';
   const modifiedCount = tree?.modifiedCount ?? 0;
-  const sessionLabel = branch.session
-    ? (branch.session.name ?? branch.session.id.slice(0, 6))
-    : null;
-  const trackingLabel = branch.upstream
-    ? (branch.gone ? `${branch.upstream} · ${t('spaces.git.gone')}` : branch.upstream)
-    : t('spaces.git.noUpstream');
-  const aheadBehind = branch.ahead || branch.behind
-    ? `${branch.ahead ? '↑' + branch.ahead : ''}${branch.behind ? '↓' + branch.behind : ''}`
-    : '';
   return (
     <div className="wt-row">
       <span className="wt-ico">
-        {isMainTree ? <Icon d={I.folder} size={15} /> : <BranchIcon size={14} />}
+        <BranchIcon size={14} />
+      </span>
+      <span
+        style={{ font: 'var(--fz-12)/1.3 var(--font-sans)', color: 'var(--text-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+        title={branch.worktreePath ?? undefined}
+      >
+        {tree?.label ?? '—'}
       </span>
       <div className="wt-branch">
         {branch.name}
         {isMainTree && <span className="main-tag">{t('spaces.git.mainTree')}</span>}
         {onWorktree && !isMainTree && <span className="main-tag">{t('spaces.git.worktree')}</span>}
       </div>
-      <span style={{ font: 'var(--fz-12)/1.3 var(--font-mono)', color: 'var(--text-3)' }} title={trackingLabel}>
-        {trackingLabel}{aheadBehind && <span style={{ marginLeft: 6, color: branch.gone ? 'var(--danger)' : 'var(--text-2)' }}>{aheadBehind}</span>}
-      </span>
       {onWorktree ? (
         <div className={`wt-state ${state}`}>
           <span className="dot" />
@@ -465,11 +351,6 @@ function BranchRow({
         <span style={{ font: 'var(--fz-12)/1.3 var(--font-sans)', color: 'var(--text-3)' }}>
           {branch.lastCommit?.age || '—'}
         </span>
-      )}
-      {sessionLabel ? (
-        <a className="wt-session" href="#" onClick={e => e.preventDefault()}>{sessionLabel}</a>
-      ) : (
-        <span className="wt-session none">—</span>
       )}
       <BranchRowKebab
         branch={branch}
@@ -656,57 +537,6 @@ function BranchRowKebab({
               </div>
             </>
           )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function RemoteBranchRow({
-  branch,
-  workspaceId,
-  onRefresh,
-}: {
-  branch: RemoteBranch;
-  workspaceId: string;
-  onRefresh: () => void;
-}) {
-  const [busy, setBusy] = useState<'track' | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const t = useT();
-
-  async function handleTrack() {
-    setBusy('track');
-    setError(null);
-    const res = await createLocalBranch(workspaceId, { name: branch.branch, base: branch.fullName });
-    setBusy(null);
-    if (!res.ok) { setError(res.error ?? t('spaces.git.createFailed')); return; }
-    onRefresh();
-  }
-
-  return (
-    <div className="wt-row" style={{ gridTemplateColumns: '18px 1fr 1fr auto', gap: 8 }}>
-      <span className="wt-ico"><BranchIcon size={14} /></span>
-      <div className="wt-branch">
-        {branch.fullName}
-        {branch.hasLocalTracking && <span className="main-tag">{t('spaces.git.tracked')}</span>}
-      </div>
-      <span style={{ font: 'var(--fz-12)/1.3 var(--font-sans)', color: 'var(--text-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {branch.lastCommit.subject} · {branch.lastCommit.age}
-      </span>
-      {!branch.hasLocalTracking ? (
-        <button
-          className="btn xs ghost"
-          onClick={() => void handleTrack()}
-          disabled={busy !== null}
-          title={`git branch --track ${branch.branch} ${branch.fullName}`}
-        >
-          {busy === 'track' ? t('spaces.git.adding') : t('spaces.git.addTracking')}
-        </button>
-      ) : <span />}
-      {error && (
-        <div style={{ gridColumn: '1 / -1', color: 'var(--danger)', font: 'var(--fz-12)/1.3 var(--font-sans)', paddingLeft: 30 }}>
-          {error}
         </div>
       )}
     </div>

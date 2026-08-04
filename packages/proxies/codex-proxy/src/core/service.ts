@@ -300,22 +300,6 @@ function codexPlanText(params: unknown): string {
   return [explanation, steps.join('\n')].filter(Boolean).join('\n\n');
 }
 
-function unsupportedNativeCommandMessage(command: string) {
-  switch (command) {
-    case '/model':
-      return 'Codex native /model is a CLI picker. In Gian Chat mode, use the model selector in the composer header, or switch the session to CLI mode.';
-    case '/permissions':
-      return 'Codex native /permissions is a CLI picker. In Gian Chat mode, use the permission menu beside Send, or switch the session to CLI mode.';
-    case '/plan':
-      return 'Codex native /plan is handled by Gian mode controls in Chat mode. Select PLAN in the composer, or switch the session to CLI mode for the native picker.';
-    case '/quit':
-    case '/exit':
-      return 'This command exits the native Codex CLI. The Gian Chat session is already managed by the host; switch to CLI mode if you need native /quit behavior.';
-    default:
-      return `Codex native ${command} is only available in the interactive CLI today. Switch this session to CLI mode to run it.`;
-  }
-}
-
 export class CodexProxyService {
   private readonly runtime: CodexRuntime;
   private emitEvent: ProxyEventSink;
@@ -500,7 +484,6 @@ export class CodexProxyService {
       if (nativeCommand === '/clear' || nativeCommand === '/new') {
         return this.handleClearIntercept(session, nativeCommand, requestId);
       }
-      return this.handleUnsupportedNativeCommand(session, nativeCommand, requestId);
     }
 
     const thinking = params.thinking === undefined ? session.thinking : normalizeThinking(params.thinking);
@@ -761,19 +744,6 @@ export class CodexProxyService {
       ? 'Conversation cleared. Next message starts a fresh Codex context.'
       : 'Started a fresh Codex conversation for this Gian session.';
     return this.emitSyntheticCompletedTurn(updated, requestId, ackText, command);
-  }
-
-  private handleUnsupportedNativeCommand(
-    session: SessionRecord,
-    command: string,
-    requestId?: number | string,
-  ) {
-    return this.emitSyntheticCompletedTurn(
-      session,
-      requestId,
-      unsupportedNativeCommandMessage(command),
-      command,
-    );
   }
 
   private emitSyntheticCompletedTurn(

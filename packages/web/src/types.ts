@@ -20,6 +20,8 @@ export interface ToolItem {
   id: string;
   name: string;
   summary: string;
+  status: 'pending' | 'running' | 'success' | 'error';
+  output?: string;
   ts: number;
   turn: number;
 }

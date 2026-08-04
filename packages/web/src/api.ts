@@ -34,6 +34,28 @@ export async function loadSessions(): Promise<Session[]> {
   return (await res.json()) as Session[];
 }
 
+export async function loadArchivedSessions(): Promise<Session[]> {
+  const res = await fetch('/api/sessions?archived=true');
+  if (!res.ok) return [];
+  return (await res.json()) as Session[];
+}
+
+export async function setSessionArchived(sessionId: string, archived: boolean): Promise<boolean> {
+  const res = await fetch(`/api/sessions/${sessionId}/archive`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ archived }),
+  });
+  return res.ok;
+}
+
+export async function deleteSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+  const body = await res.json().catch(() => ({} as { error?: string }));
+  if (!res.ok) return { ok: false, error: body.error ?? `Delete failed (${res.status})` };
+  return { ok: true };
+}
+
 export async function loadEvents(sessionId: string): Promise<EventEnvelope[]> {
   const res = await fetch(`/api/sessions/${sessionId}/events`);
   if (!res.ok) return [];
@@ -159,6 +181,17 @@ export async function setAgentCliPath(
   });
   const body = await agentResponse<{ agent: AgentInstallStatus }>(response);
   return body.agent;
+}
+
+/** Ask the host to open the native file picker so the user can browse for a
+ *  CLI executable instead of typing the path (macOS only; mirrors
+ *  `pickWorkspaceFolder`). Resolves to the picked absolute path, or null when
+ *  the dialog was canceled. */
+export async function pickAgentCliPath(executor: Executor): Promise<string | null> {
+  const response = await fetch(`/api/agents/${executor}/pick-cli-path`, { method: 'POST' });
+  const body = await response.json().catch(() => ({})) as { path?: string; canceled?: boolean; error?: string };
+  if (!response.ok) throw new Error(body.error ?? `pick-cli-path failed: ${response.status}`);
+  return body.path ?? null;
 }
 
 export async function setAgentProxyDefaults(

@@ -43,7 +43,7 @@ export function useWorkbenchLayout({
     && chatPanel === null
     && viewState !== 'main'
     && activeRail !== null
-    && (railGroupHasTabs || activeRail === 'sidechat');
+    && railGroupHasTabs;
   const inspectorKind: 'files' | 'changes' | 'workspaces' | 'settings' | null =
     activeRail === 'files' ? 'files'
     : activeRail === 'diffs' ? 'changes'

@@ -4,21 +4,20 @@ import {
   deleteWorkspace,
   loadClaudeMd,
   loadNativeSessions,
-  loadRepoInfo,
   loadSessions,
   reorderWorkspaces,
   saveClaudeMd,
   updateWorkspace,
 } from '../api.js';
-import type { RepoInfo } from '../api.js';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import type { GianWs } from '../ws.js';
 import { NewWorkspaceForm, useNewWorkspace } from './workspace-create.js';
 import { GitPane } from './spaces-git-pane.js';
 import { NativeSessionsPane } from './spaces-native-sessions.js';
+import { ArchivedSessionsPane } from './spaces-archived-sessions.js';
 
-type WsTab = 'overview' | 'git' | 'native';
+type WsTab = 'overview' | 'native' | 'archived';
 
 export function SpacesView({
   workspaces,
@@ -358,36 +357,38 @@ export function SpaceDetail({
               Overview
             </button>
             <button
-              className={`detail-tab ${tab === 'git' ? 'active' : ''}`}
-              onClick={() => setTab('git')}
+              className={`detail-tab ${tab === 'archived' ? 'active' : ''}`}
+              onClick={() => setTab('archived')}
             >
-              Git
+              Archived
             </button>
             <button
               className={`detail-tab ${tab === 'native' ? 'active' : ''}`}
               onClick={() => setTab('native')}
             >
-              Native sessions {nativeCount !== null && <span className="count">{nativeCount}</span>}
+              Adopt {nativeCount !== null && <span className="count">{nativeCount}</span>}
             </button>
           </div>
           {tab === 'overview' && (
-            <OverviewPane
-              workspace={workspace}
-              relatedSessions={relatedSessions}
-              onOpenClaudeMd={onOpenClaudeMd}
-              t={t}
-            />
-          )}
-          {tab === 'git' && (
-            <GitPane
-              workspace={workspace}
-              ws={ws}
-              onOpenClaudeMd={onOpenClaudeMd}
-              onChange={onChange}
-            />
+            <>
+              <OverviewPane
+                workspace={workspace}
+                relatedSessions={relatedSessions}
+                t={t}
+              />
+              <GitPane
+                workspace={workspace}
+                ws={ws}
+                onOpenClaudeMd={onOpenClaudeMd}
+                onChange={onChange}
+              />
+            </>
           )}
           {tab === 'native' && (
             <NativeSessionsPane workspace={workspace} onChange={onChange} />
+          )}
+          {tab === 'archived' && (
+            <ArchivedSessionsPane workspace={workspace} onChange={onChange} />
           )}
         </div>
       </div>
@@ -449,34 +450,24 @@ function WorkspaceKebab({
 function OverviewPane({
   workspace,
   relatedSessions,
-  onOpenClaudeMd,
   t,
 }: {
   workspace: Workspace;
   relatedSessions: Session[];
-  onOpenClaudeMd: () => void;
   t: ReturnType<typeof useT>;
 }) {
   void t;
   void relatedSessions;
   const [native, setNative] = useState<NativeSession[]>([]);
-  const [repo, setRepo] = useState<RepoInfo | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([
-      loadNativeSessions(workspace.id),
-      loadRepoInfo(workspace.id),
-    ]).then(([n, r]) => {
-      if (cancelled) return;
-      setNative(n);
-      setRepo(r);
+    void loadNativeSessions(workspace.id).then(n => {
+      if (!cancelled) setNative(n);
     });
     return () => { cancelled = true; };
   }, [workspace.id]);
 
-  const ccCount = native.filter(n => n.executor === 'claude').length;
-  const codexCount = native.filter(n => n.executor === 'codex').length;
   const adoptedCount = native.filter(n => n.adoptedBy).length;
   const lastNative = native[0];
   const lastNativeRel = lastNative ? relTime(lastNative.updatedAt) : '—';
@@ -484,14 +475,13 @@ function OverviewPane({
     || (lastNative?.adoptedBy ? lastNative.adoptedBy.gianSessionId.slice(0, 6) : null);
   const created = new Date(workspace.created_at);
   const createdMonth = created.toLocaleString(undefined, { month: 'short', day: 'numeric' });
-  const createdRel = relTime(workspace.created_at);
 
   return (
     <>
       <div className="stat-grid">
         <div className="stat-card">
           <div className="k">Native sessions</div>
-          <div className="v">{native.length}<span className="sub">{ccCount}cc · {codexCount}cx</span></div>
+          <div className="v">{native.length}</div>
         </div>
         <div className="stat-card">
           <div className="k">Adopted</div>
@@ -503,31 +493,7 @@ function OverviewPane({
         </div>
         <div className="stat-card">
           <div className="k">Created</div>
-          <div className="v">{createdMonth}<span className="sub">{createdRel}</span></div>
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="card-head">
-          <h3>About this workspace</h3>
-          <span className="aside">path · agent notes</span>
-        </div>
-        <div className="card-body">
-          <dl className="kv-grid">
-            <dt>Local path</dt><dd>{workspace.path}</dd>
-            <dt>Remote</dt><dd>{repo?.git.remote || '—'}</dd>
-            <dt>Default branch</dt><dd>{repo?.git.defaultBranch || 'main'}</dd>
-            <dt>CLAUDE.md</dt>
-            <dd style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-              <button
-                className="wt-claude"
-                onClick={onOpenClaudeMd}
-                style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', font: 'inherit', color: 'inherit', textAlign: 'left' }}
-              >
-                Edit CLAUDE.md
-              </button>
-            </dd>
-          </dl>
+          <div className="v">{createdMonth}</div>
         </div>
       </div>
     </>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Session, Workspace } from '@gian/shared';
 import {
   loadAllFiles,
@@ -11,7 +11,6 @@ import {
   type ChangeScope,
   type WorkingTree,
 } from '../api.js';
-import { browserHostOf } from '../components/BrowserBody.js';
 import {
   IMAGE_EXTS,
   openCategoryFor,
@@ -33,13 +32,11 @@ interface UseWorkbenchInput {
   authStatus: AppAuthStatus;
   ws: GianWs;
   sessions: Session[];
-  sessionsRef: MutableRefObject<Session[]>;
   activeSessionId: string | null;
   activeSession: Session | null;
   activeWorkspace: Workspace | null;
   workspaces: Workspace[];
   workingTrees: WorkingTree[];
-  setCreatingSession: Dispatch<SetStateAction<boolean>>;
   mode: string;
   activeSubtaskId: string | null;
   t(key: string): string;
@@ -49,13 +46,11 @@ export function useWorkbench({
   authStatus,
   ws,
   sessions,
-  sessionsRef,
   activeSessionId,
   activeSession,
   activeWorkspace,
   workspaces,
   workingTrees,
-  setCreatingSession,
   mode,
   activeSubtaskId,
   t: appT,
@@ -250,9 +245,7 @@ export function useWorkbench({
   const GROUP_OF_RAIL: Record<RailId, SheetGroup | null> = {
     files: 'files',
     diffs: 'diffs',
-    sidechat: 'sidechat',
     terminal: 'term',
-    browser: 'browser',
     workspaces: 'workspaces',
     settings: 'settings',
   };
@@ -283,12 +276,8 @@ export function useWorkbench({
       revealSheetTab('settings', tab.id);
       return;
     }
-    if (rail === 'browser' && !wbTabs.some(t => t.group === 'browser')) {
-      addBrowserTab();
-      return;
-    }
     const group = GROUP_OF_RAIL[rail];
-    if (rail === 'sidechat' || (group && wbTabs.some(t => t.group === group))) {
+    if (group && wbTabs.some(t => t.group === group)) {
       setViewState(v => v === 'main' ? 'both' : v);
     }
   }
@@ -606,83 +595,6 @@ export function useWorkbench({
     });
   }
 
-  /** Open a session as a sidechat tab (kind 'chat', group 'sidechat'). One
-   *  tab per session, keyed by session id. `known` lets the session:created
-   *  handler pass the fresh row before `sessionsRef` has caught up. */
-  function openSidechatTab(sessionId: string, known?: Session): void {
-    const sess = known
-      ?? sessionsRef.current.find(s => s.id === sessionId);
-    if (!sess) return;
-    setActiveRail('sidechat');
-    const id = `tab-chat-${sessionId}`;
-    setWbTabs(prev => {
-      if (prev.some(t => t.id === id)) return prev;
-      const tab: SheetTab = {
-        id,
-        group: 'sidechat',
-        name: sess.name || `session ${sessionId.slice(0, 6)}`,
-        kind: 'chat',
-        icoKind: 'chat',
-        ico: '',
-        sessionId,
-      };
-      return [...prev, tab];
-    });
-    revealSheetTab('sidechat', id);
-  }
-
-  /** btw-style sidechat: fork the CURRENT session's context into a new side
-   *  thread (host runs `claude -p --resume <parent> --fork-session` on the
-   *  first turn — claude-only). The `client_tag: 'sidechat'` echo on
-   *  session:created binds the fork to a sidechat tab instead of switching
-   *  the main chat. No-op for non-claude sessions. */
-  function createSidechat(): void {
-    const parent = activeSessionId
-      ? sessionsRef.current.find(s => s.id === activeSessionId) ?? null
-      : null;
-    if (!parent || parent.executor !== 'claude') return;
-    setActiveRail('sidechat');
-    setCreatingSession(true);
-    const baseName = parent.name && parent.name.length > 0
-      ? parent.name
-      : `session ${parent.id.slice(0, 6)}`;
-    ws.send({
-      type: 'session:create',
-      workspace_id: parent.workspace_id,
-      executor: 'claude',
-      ...(parent.approval_mode ? { approval_mode: parent.approval_mode } : {}),
-      name: `${baseName} · side`,
-      fork_from: parent.id,
-      client_tag: 'sidechat',
-    });
-  }
-
-  /** Add a browser tab (group 'browser'). Additive like terminal tabs; each
-   *  keeps its own address/history in the mounted BrowserBody. */
-  function addBrowserTab(initialUrl?: string): void {
-    setChatPanel(null);
-    setActiveRail('browser');
-    setWbTabs(prev => {
-      const existing = prev.filter(t => t.kind === 'browser').length;
-      const id = 'tab-browser-' + Date.now();
-      const base = appT('dock.browser');
-      const name = initialUrl
-        ? browserHostOf(initialUrl)
-        : existing === 0 ? base : `${base} #${existing + 1}`;
-      const tab: SheetTab = {
-        id,
-        group: 'browser',
-        name,
-        kind: 'browser',
-        icoKind: 'browser',
-        ico: '',
-        ...(initialUrl ? { url: initialUrl } : {}),
-      };
-      revealSheetTab('browser', id);
-      return [...prev, tab];
-    });
-  }
-
   /**
    * Compute a tab label for a new terminal. Picks the most-specific
    * known cwd (worktree path → workspace path → first workspace) and
@@ -761,9 +673,6 @@ export function useWorkbench({
     openTranscriptDiffInSheet,
     openChatPanel,
     addTerminalTab,
-    openSidechatTab,
-    createSidechat,
-    addBrowserTab,
     openWorkspaceInSheet,
     openNewWorkspaceInSheet,
   };

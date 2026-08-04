@@ -59,13 +59,16 @@ function CaretDown({ size = 11 }: { size?: number }) {
   );
 }
 
-/** lucide tree-pine — the session→worktree separator (2026-08-03): the
- *  worktree reads as "where this session is viewed". */
-function WorktreeSepIcon({ size = 10 }: { size?: number }) {
+/** lucide git-branch — the session→worktree separator (2026-08-04, replaces
+ *  the 10px tree-pine from 2026-08-03, which read too small and didn't say
+ *  "git"): the worktree reads as "where this session is viewed". */
+function WorktreeSepIcon({ size = 13 }: { size?: number }) {
   return (
-    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
-      <path d="m17 14 3 3.3a1 1 0 0 1-.7 1.7H4.7a1 1 0 0 1-.7-1.7L7 14h-.3a1 1 0 0 1-.7-1.7L9 9h-.2A1 1 0 0 1 8 7.3L12 3l4 4.3a1 1 0 0 1-.8 1.7H15l3 3.3a1 1 0 0 1-.7 1.7H17Z" />
-      <path d="M12 22v-3" />
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <line x1="6" x2="6" y1="3" y2="15" />
+      <circle cx="18" cy="6" r="3" />
+      <circle cx="6" cy="18" r="3" />
+      <path d="M18 9a9 9 0 0 1-9 9" />
     </svg>
   );
 }
@@ -196,10 +199,15 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
 
   function handleSegClick(idx: number, seg: PathSegment) {
     if (seg.menuAnchor && sessionMenu) {
+      // Mutually exclusive: opening one dropdown closes the other (2026-08-04
+      // — both could stay open at once because the outside-click handler only
+      // fires outside BOTH menus/anchors).
+      setBranchMenuOpen(false);
       setMenuOpen(o => !o);
     } else if (seg.kind === 'branch' && branchMenu) {
       // With a branch menu wired up, clicking the branch switches worktree
       // instead of copying (copying stays available as a menu item).
+      setMenuOpen(false);
       setBranchMenuOpen(o => !o);
     } else {
       copy(idx, seg.label);
@@ -312,9 +320,10 @@ function SegmentFragment({
   showSep: boolean;
   children: React.ReactNode;
 }) {
-  // The worktree segment trails the session with a tree-pine glyph instead
+  // The worktree segment trails the session with a git-branch glyph instead
   // of the usual slash — it reads as an attribute of the session, not a path
-  // level (2026-08-03, replaces the middot).
+  // level (2026-08-03, replaces the middot; glyph swapped tree-pine →
+  // git-branch on 2026-08-04).
   if (!showSep) return <>{children}</>;
   if (seg.kind === 'branch') {
     return (

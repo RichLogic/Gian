@@ -4,7 +4,6 @@ import type {
   ApprovalMode,
   ApprovalResolvedBy,
   ApprovalStatus,
-  Bot,
   Executor,
   QueueEntry,
   Session,
@@ -42,7 +41,6 @@ export interface StateSyncMessage {
   sessions: Session[];
   workspaces: Workspace[];
   tasks: Task[];
-  bots: Bot[];
   approvals: Approval[];
   config: SystemConfig;
 }
@@ -72,10 +70,6 @@ export interface SessionUpdatedMessage {
 export interface SessionCreatedMessage {
   type: 'session:created';
   session: Session;
-  /** Echo of SessionCreateMessage.client_tag — lets the creating client
-   *  correlate this row with its request (e.g. sidechat binds the new side
-   *  thread to its tab instead of switching the main chat to it). */
-  client_tag?: string;
 }
 
 export interface SessionDeletedMessage {
@@ -103,9 +97,6 @@ export interface TaskCreateMessage {
   type: 'task:create';
   name: string;
   description?: string;
-  /** Which executor the Task's Manager (PM) runs on. Omitted → host uses the
-   *  `default_task_executor` config default. */
-  executor?: Executor;
 }
 
 export interface TaskUpdateMessage {
@@ -251,13 +242,6 @@ export interface SessionCreateMessage {
   model?: string;
   /** Required for Claude/Codex. Kimi uses executor-native configuration. */
   approval_mode?: ApprovalMode;
-  /** Fork an existing Gian session's native thread into the new session
-   *  (Gian sidechat, claude-only): the new session's first turn runs
-   *  `claude -p --resume <parent native> --fork-session`, carrying the
-   *  parent's history without writing back into it. */
-  fork_from?: string;
-  /** Opaque client correlation token, echoed back on session:created. */
-  client_tag?: string;
 }
 
 export interface MessageSendMessage {

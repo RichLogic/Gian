@@ -1,7 +1,7 @@
 {
   "name": "@gian/desktop",
   "productName": "Gian",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": true,
   "description": "macOS desktop shell for the Gian coding agent workspace",
   "author": "RichLogic",
@@ -10,12 +10,14 @@
   "scripts": {
     "build": "pnpm run clean && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --import tsx test/*.test.ts",
+    "test:smoke": "pnpm run build && node test/electron-smoke.mjs",
     "dev": "pnpm run build && electron .",
     "start": "electron .",
     "bundle:build": "pnpm --filter @gian/desktop... build && pnpm --filter @gian/web build && node ../../scripts/prepare-desktop-runtime.mjs",
     "package:mac": "pnpm run bundle:build && electron-builder --mac dir --arm64",
-    "make:mac": "pnpm run bundle:build && electron-builder --mac dmg --arm64",
-    "make:mac:release": "pnpm run bundle:build && electron-builder --mac dmg --arm64 --config.mac.notarize=true",
+    "make:mac": "pnpm run bundle:build && electron-builder --mac dmg zip --arm64",
+    "make:mac:release": "pnpm run bundle:build && electron-builder --mac dmg zip --arm64 --config.mac.notarize=true",
     "clean": "rm -rf dist release *.tsbuildinfo"
   },
   "dependencies": {
@@ -25,7 +27,9 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "electron": "43.2.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "playwright": "^1.49.0",
+    "tsx": "^4.19.2"
   },
   "build": {
     "appId": "com.gian.desktop",

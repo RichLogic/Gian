@@ -1,4 +1,4 @@
-import { createContext, isValidElement, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, isValidElement, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { isNativeImageMime } from '../attachments.js';
@@ -58,6 +58,32 @@ export const PlanOpenContext = createContext<
 export const FileRefRehypeContext = createContext<
   null | (() => (tree: any) => void)
 >(null);
+
+/**
+ * Expand/collapse state for an `.evt` card that keeps the clicked header at
+ * the same viewport position. When the transcript is pinned to the bottom,
+ * browser scroll anchoring follows the content *after* the card, so a bare
+ * toggle bumps scrollTop by the inserted/removed body height and the header
+ * jumps up out of view (2026-08-04). Recording the head's position at click
+ * time and correcting scrollTop in a layout effect cancels the jump before
+ * paint, while anchoring keeps handling non-interactive growth (streaming).
+ */
+export function useStableExpand(initial = false) {
+  const [open, setOpen] = useState(initial);
+  const pending = useRef<{ el: HTMLElement; top: number } | null>(null);
+  const toggle = (e: MouseEvent<HTMLElement>) => {
+    pending.current = { el: e.currentTarget, top: e.currentTarget.getBoundingClientRect().top };
+    setOpen(o => !o);
+  };
+  useLayoutEffect(() => {
+    const rec = pending.current;
+    pending.current = null;
+    if (!rec) return;
+    const scroller = rec.el.closest('.main-scroll') as HTMLElement | null;
+    if (scroller) scroller.scrollTop += rec.el.getBoundingClientRect().top - rec.top;
+  });
+  return { open, setOpen, toggle };
+}
 
 /** Markdown renderer for transcript prose (assistant text + reasoning). Adds
  *  the file-linkify rehype plugin and an `a` override so detected files open
@@ -213,18 +239,21 @@ export function DiffCard({ item }: { item: DiffItem }) {
 
 export function ToolEvent({ item }: { item: ToolItem }) {
   const t = useT();
-  const [open, setOpen] = useState(false);
+  const { open, toggle } = useStableExpand();
   return (
     <div className={`evt agent ${open ? 'open' : ''}`}>
-      <div className="evt-head" onClick={() => setOpen(o => !o)}>
+      <div className="evt-head" onClick={toggle}>
         <Caret />
         <span className="evt-verb">{t('transcript.tool')}</span>
         <span className="evt-subject" title={item.name}>{item.name}</span>
-        <span className="evt-meta" />{/* Tool default state is success — only render an evt-status when failed (TODO when we surface tool errors) */}
+        <span className="evt-meta">
+          <span className={`evt-status ${item.status}`}>{item.status}</span>
+        </span>
       </div>
-      {item.summary && (
+      {(item.summary || item.output) && (
         <div className="evt-body">
-          <ToolArgs raw={item.summary} />
+          {item.summary && <ToolArgs raw={item.summary} />}
+          {item.output && <pre className="tool-output">{item.output}</pre>}
         </div>
       )}
     </div>
@@ -415,12 +444,12 @@ export function AssistantMessage({ item, hideAvatar, showFooter }: { item: MsgIt
  */
 export function ReasoningCard({ item }: { item: ReasoningItem }) {
   const t = useT();
-  const [open, setOpen] = useState(false);
+  const { open, toggle } = useStableExpand();
   const lineCount = item.text ? item.text.split('\n').length : 0;
   const label = item.variant === 'summary' ? t('transcript.reasoning.summary') : t('transcript.reasoning.full');
   return (
     <div className={`evt thinking${open ? ' open' : ''}`} data-variant={item.variant}>
-      <div className="evt-head" onClick={() => setOpen(o => !o)}>
+      <div className="evt-head" onClick={toggle}>
         <Caret />
         <span className="evt-verb">{label}</span>
         <span className="evt-meta">{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>
@@ -436,12 +465,12 @@ export function ReasoningCard({ item }: { item: ReasoningItem }) {
 
 export function CommandCard({ item }: { item: CommandItem }) {
   const t = useT();
-  const [open, setOpen] = useState(false);
+  const { open, toggle } = useStableExpand();
   const statusClass = item.status === 'running' ? 'running' : item.status === 'success' ? 'success' : 'error';
   const hasOutput = !!(item.stdout || item.stderr);
   return (
     <div className={`evt command ${open && hasOutput ? 'open' : ''}`}>
-      <div className="evt-head" onClick={() => hasOutput && setOpen(o => !o)}>
+      <div className="evt-head" onClick={e => { if (hasOutput) toggle(e); }}>
         {hasOutput && <Caret />}
         <span className="evt-verb">{t('transcript.command.run')}</span>
         <span className="evt-subject cmd" title={item.command}>{item.command}</span>
@@ -493,12 +522,12 @@ export function FileReadCard({ item }: { item: FileReadItem }) {
 
 export function FileSearchCard({ item }: { item: FileSearchItem }) {
   const t = useT();
-  const [open, setOpen] = useState(false);
+  const { open, toggle } = useStableExpand();
   const hasMatches = item.matches && item.matches.length > 0;
   const count = item.matchCount ?? item.matches?.length;
   return (
     <div className={`evt search ${open && hasMatches ? 'open' : ''}`}>
-      <div className="evt-head" onClick={() => hasMatches && setOpen(o => !o)}>
+      <div className="evt-head" onClick={e => { if (hasMatches) toggle(e); }}>
         {hasMatches && <Caret />}
         <span className="evt-verb">{item.searchKind === 'glob' ? t('transcript.file.glob') : t('transcript.file.grep')}</span>
         <span className="evt-subject" title={item.pattern}>

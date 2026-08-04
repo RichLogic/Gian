@@ -1,44 +1,9 @@
-import { spawn } from 'node:child_process';
 import { isAbsolute, resolve } from 'node:path';
 import type { Hono } from 'hono';
 import { loadConfig } from '../../storage/config.js';
 import type { Db } from '../../storage/db.js';
 import { expandHome, initWorkspace } from '../../workspace/index.js';
-
-type PickFolderOutcome =
-  | { kind: 'ok'; path: string }
-  | { kind: 'canceled' }
-  | { kind: 'error'; error: string };
-
-function pickWorkspaceFolder(): Promise<PickFolderOutcome> {
-  return new Promise(resolveOutcome => {
-    const child = spawn(
-      'osascript',
-      [
-        '-e', 'tell application "System Events" to activate',
-        '-e', 'POSIX path of (choose folder with prompt "Select folder")',
-      ],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
-    );
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', data => { stdout += data.toString(); });
-    child.stderr.on('data', data => { stderr += data.toString(); });
-    child.on('error', error => resolveOutcome({ kind: 'error', error: String(error) }));
-    child.on('close', code => {
-      if (code === 0) {
-        const path = stdout.trim().replace(/\/+$/, '');
-        resolveOutcome(path
-          ? { kind: 'ok', path }
-          : { kind: 'error', error: 'empty path returned' });
-      } else if (stderr.includes('User canceled') || code === 1) {
-        resolveOutcome({ kind: 'canceled' });
-      } else {
-        resolveOutcome({ kind: 'error', error: stderr.trim() || `osascript exited ${code}` });
-      }
-    });
-  });
-}
+import { pickPath } from '../pick-path.js';
 
 export function registerWorkspaceRoutes(app: Hono, db: Db): void {
   app.get('/api/workspaces', c => c.json(
@@ -160,7 +125,7 @@ export function registerWorkspaceRoutes(app: Hono, db: Db): void {
     if (process.platform !== 'darwin') {
       return c.json({ error: 'directory picker only available on macOS' }, 400);
     }
-    const outcome = await pickWorkspaceFolder();
+    const outcome = await pickPath('folder', 'Select folder');
     if (outcome.kind === 'ok') return c.json({ path: outcome.path });
     if (outcome.kind === 'canceled') return c.json({ canceled: true });
     return c.json({ error: outcome.error }, 500);

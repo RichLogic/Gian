@@ -338,7 +338,7 @@ export class AgentManager {
         return { agent: await this.status(id) };
       }
       if (process.platform !== 'darwin' || process.arch !== 'arm64') {
-        throw new Error('Gian v0.1 proxy packages support macOS Apple Silicon only.');
+        throw new Error('Managed proxy packages support macOS Apple Silicon only.');
       }
 
       const filename = `gian-proxy-${id}-${this.releaseVersion}-darwin-arm64.tar.gz`;
@@ -444,7 +444,7 @@ export class AgentManager {
       const current = await realpath(join(this.options.dataDir, 'plugins', id, 'current'));
       const manifest = await this.validateProxyDirectory(current, id);
       return {
-        state: 'ready',
+        state: manifest.version === this.releaseVersion ? 'ready' : 'outdated',
         path: join(current, manifest.entry),
         version: manifest.version,
         source: 'github-release',

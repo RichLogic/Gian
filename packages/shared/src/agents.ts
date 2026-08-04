@@ -9,7 +9,7 @@ export interface AgentProxyDefaults {
   mode: string;
 }
 
-export type AgentComponentState = 'ready' | 'missing' | 'invalid';
+export type AgentComponentState = 'ready' | 'missing' | 'invalid' | 'outdated';
 
 export interface AgentCliStatus {
   state: AgentComponentState;

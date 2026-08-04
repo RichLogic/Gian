@@ -33,11 +33,6 @@ import {
 import { kimiContentText } from './input-items.js';
 
 interface EventCoordinatorCallbacks {
-  finalTextFromNotification: (
-    sessionId: string,
-    notification: ProxyNotification,
-  ) => string | undefined;
-  onCompletedTurn: (sessionId: string, turnId: string, finalText?: string) => void;
   sendMessage: (sessionId: string, text: string, items?: InputItem[]) => Promise<void>;
 }
 
@@ -453,13 +448,7 @@ export class SessionEventCoordinator {
   /** Provider lifecycle hook for turn bookkeeping (status + queue). */
   private handleLifecycle(sessionId: string, n: ProxyNotification): void {
     if (n.method === 'turn.completed') {
-      // Codex carries the authoritative final text on the notification; Claude
-      // passes nothing here and completeTurn reconstructs from its events.
-      this.completeTurn(
-        sessionId,
-        'completed',
-        this.callbacks.finalTextFromNotification(sessionId, n),
-      );
+      this.completeTurn(sessionId, 'completed');
       // Live Sync v2: proxy finished writing this turn to the JSONL; advance
       // watcher offset to current EOF so we skip our own writes and resume
       // tailing for any external CLI appends from here.
@@ -617,7 +606,6 @@ export class SessionEventCoordinator {
   completeTurn(
     sessionId: string,
     status: 'completed' | 'error' | 'stopped',
-    finalText?: string,
   ): void {
     const now = new Date().toISOString();
     const active = this.turns.finish(sessionId, status, now);
@@ -639,15 +627,6 @@ export class SessionEventCoordinator {
         .prepare(`UPDATE sessions SET status = ?, unread = 1, updated_at = ? WHERE id = ?`)
         .run(sessionStatus, now, sessionId);
       this.broadcastSessionUpdated(sessionId, { status: sessionStatus, unread: 1, updated_at: now });
-    }
-    // gian-task action protocol (env-gated). Parse the just-completed turn's
-    // final assistant text for a trailing <<gian:action>> block; the row is
-    // recorded SYNCHRONOUSLY here (durability), then executed async so
-    // completion never blocks. Only clean completions.
-    if (status === 'completed') {
-      // processCompletedTurnAction gates on taskActionsEnabled (env flag OR the
-      // Task Manager, whose action path is always-on — see the helper).
-      this.callbacks.onCompletedTurn(sessionId, active.id, finalText);
     }
   }
 

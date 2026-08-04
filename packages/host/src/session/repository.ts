@@ -71,13 +71,6 @@ export class SessionRepository {
     return rows.map(row => this.hydrate(row));
   }
 
-  findManager(taskId: string): Session | null {
-    const row = this.db
-      .prepare(`SELECT * FROM sessions WHERE task_id = ? AND type = 'manager' LIMIT 1`)
-      .get(taskId) as SessionRow | undefined;
-    return row ? this.hydrate(row) : null;
-  }
-
   setNativeOptions(sessionId: string, options: NativeConfigOption[]): void {
     this.nativeOptions.set(sessionId, options);
   }

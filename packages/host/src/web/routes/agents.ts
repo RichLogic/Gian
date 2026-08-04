@@ -6,6 +6,7 @@ import type {
 } from '@gian/shared';
 import type { AgentManager } from '../../agents/manager.js';
 import type { CliRuntimeManager } from '../../runtime/manager.js';
+import { pickPath } from '../pick-path.js';
 
 const EXECUTORS = new Set<Executor>(['claude', 'codex', 'kimi']);
 
@@ -59,6 +60,18 @@ export function registerAgentRoutes(
     const id = executor(c.req.param('id'));
     if (!id) return c.json({ error: 'unsupported agent' }, 404);
     return c.json(await options.agents.status(id));
+  });
+
+  app.post('/api/agents/:id/pick-cli-path', async c => {
+    const id = executor(c.req.param('id'));
+    if (!id) return c.json({ error: 'unsupported agent' }, 404);
+    if (process.platform !== 'darwin') {
+      return c.json({ error: 'file picker only available on macOS' }, 400);
+    }
+    const outcome = await pickPath('file', 'Select CLI executable');
+    if (outcome.kind === 'ok') return c.json({ path: outcome.path });
+    if (outcome.kind === 'canceled') return c.json({ canceled: true });
+    return c.json({ error: outcome.error }, 500);
   });
 
   app.put('/api/agents/:id/cli-path', async c => {

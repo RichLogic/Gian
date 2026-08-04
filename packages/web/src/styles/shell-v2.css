@@ -205,13 +205,11 @@
   from { opacity: 0; transform: translate(-50%, -2px); }
   to   { opacity: 1; transform: translate(-50%, 0); }
 }
-.path-seg.branch {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-2);
-}
+/* `.path-seg.branch` / `.path-seg.session` carry no face/size/color
+   overrides — every breadcrumb segment reads in the same style, one path,
+   no per-kind emphasis (2026-08-04; the branch's mono + 11px and the
+   session's --text made the three segments look mismatched). */
 .path-seg.session {
-  color: var(--text);
   padding-right: 5px;
 }
 .path-seg .branch-ico { color: var(--text-3); flex: none; }

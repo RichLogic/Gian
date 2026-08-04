@@ -30,7 +30,6 @@ import { Inspector } from './components/Inspector.js';
 import { SettingsBody, SettingsNavInspector } from './components/SettingsBody.js';
 import type { NavKey } from './components/SettingsBody.js';
 import { makeWorkbenchWire } from './components/terminal-wire.js';
-import { BrowserBody, browserHostOf } from './components/BrowserBody.js';
 import { ChatContextPanel } from './components/ChatContextPanel.js';
 import { SessionSurface } from './views/SessionSurface.js';
 import { NewWorkspacePanel } from './views/workspace-create.js';
@@ -42,10 +41,7 @@ import { CodingView } from './views/CodingView.js';
 import type { SystemConfig } from '@gian/shared';
 import type { QueueEntry, TranscriptItem } from './types.js';
 import { applyGianIconAppearance } from './brand-icon.js';
-import {
-  BrowserLinkOpenContext,
-  ChatPanelOpenContext,
-} from './presentation/chat-panel.js';
+import { ChatPanelOpenContext } from './presentation/chat-panel.js';
 import { useSessionCommands } from './controllers/use-session-commands.js';
 import { useAppAuth } from './controllers/use-app-auth.js';
 import { useOnboarding } from './controllers/use-onboarding.js';
@@ -250,22 +246,17 @@ export function App() {
     openTranscriptDiffInSheet,
     openChatPanel,
     addTerminalTab,
-    openSidechatTab,
-    createSidechat,
-    addBrowserTab,
     openWorkspaceInSheet,
     openNewWorkspaceInSheet,
   } = useWorkbench({
     authStatus: runtimeAuthStatus,
     ws,
     sessions,
-    sessionsRef,
     activeSessionId,
     activeSession,
     activeWorkspace,
     workspaces,
     workingTrees,
-    setCreatingSession,
     mode,
     activeSubtaskId,
     t: appT,
@@ -277,7 +268,6 @@ export function App() {
     sessionsRef,
     activeSessionIdRef,
     pendingFirstMessageRef,
-    openSidechat: openSidechatTab,
     setWsState,
     setWsAttempt,
     setAuthed,
@@ -457,40 +447,6 @@ export function App() {
     />
   ) : null;
 
-  /** Sidechat tab body (Sheet kind 'chat'): the same SessionMain the main
-   *  column uses, rebound to the picked session. v1 simplification
-   *  (plan 阶段 5): the panel follows the
-   *  MAIN session's working-tree context (GitBadge + file-link routing via
-   *  openFileInSheet, which resolves against activeSessionId) instead of
-   *  plumbing a separate defaultWorkingTreeId chain. */
-  function renderSidechatPanel(session: Session) {
-    const mainWorkingTreeId = defaultWorkingTreeIdFor(activeSession);
-    return (
-      <SessionSurface
-        containerClassName="sheet-chat"
-        session={session}
-        workspace={workspaces.find(workspace => workspace.id === session.workspace_id) ?? null}
-        items={itemsBySession[session.id] ?? []}
-        hydrated={itemsBySession[session.id] !== undefined}
-        pending={pendingBySession[session.id] ?? false}
-        queue={queueBySession[session.id] ?? []}
-        planText={planStateBySession[session.id]?.text}
-        planCompleted={planStateBySession[session.id]?.completed}
-        commands={sessionMainHandlers}
-        workingTreeId={mainWorkingTreeId}
-        branch={mainWorkingTreeId
-          ? (workingTrees.find(tree => tree.id === mainWorkingTreeId)?.branch ?? null)
-          : null}
-        onOpenFile={(absolutePath, line) => { void openFileInSheet(absolutePath, false, line); }}
-        onOpenDiff={item => { void openTranscriptDiffInSheet(item); }}
-        onOpenPlan={payload => openChatPanel(session.id, { kind: 'plan', id: payload.id })}
-        onOpenChat={request => openChatPanel(session.id, request)}
-        fileRehype={fileRehype}
-        onShowChanges={() => activateRail('diffs')}
-      />
-    );
-  }
-
   if (authStatus === 'checking') {
     return (
       <LocaleProvider locale={locale}>
@@ -535,7 +491,6 @@ export function App() {
   return (
     <LocaleProvider locale={locale}>
     <ImageZoomContext.Provider value={(src, alt) => setZoomImage({ src, alt })}>
-    <BrowserLinkOpenContext.Provider value={(url) => addBrowserTab(url)}>
     <div
       className="app"
       data-testid="app-shell"
@@ -566,17 +521,7 @@ export function App() {
         onClose={() => { setPaletteOpen(false); setPaletteInitialQuery(undefined); }}
         sessions={sessions}
         workspaces={workspaces}
-        activeSessionId={activeSessionId}
-        activeWorkingTreeId={defaultWorkingTreeIdFor(activeSession)}
-        transcriptItems={activeSessionId ? (itemsBySession[activeSessionId] ?? []) : []}
-        onJumpToSession={sid => { setActiveSessionId(sid); setMode('sessions'); setPaletteOpen(false); }}
-        onOpenFile={(wtId, rel) => {
-          const abs = rel.startsWith('/')
-            ? rel
-            : `${workingTrees.find(t => t.id === wtId)?.path ?? ''}/${rel}`;
-          void openFileInSheet(abs, false);
-          setPaletteOpen(false);
-        }}
+        onJumpToSession={sid => { selectSession(sid); setMode('sessions'); setPaletteOpen(false); }}
         initialQuery={paletteInitialQuery}
       /></Suspense>}
       <div className={`body ${viewState === 'workbench' ? 'wb-only' : ''}`}>
@@ -694,12 +639,11 @@ export function App() {
             </FileLinkOpenContext.Provider>
           </>
         )}
-        {(sheetMounted || (activeRail === 'sidechat' && workbenchActive)) && (
+        {sheetMounted && (
           <>
             {sheetVisible && viewState !== 'workbench' && (
               <Splitter side="right" varName="--sheet-w" base={600} min={420} max={1080} invert />
             )}
-            {(sheetMounted || (activeRail === 'sidechat' && workbenchActive)) && (
             <Suspense fallback={null}>
             <Sheet
               tabs={wbTabs}
@@ -708,29 +652,7 @@ export function App() {
               actions={sheetActions}
               onAddTab={(g) => {
                 if (g === 'term') addTerminalTab();
-                else if (g === 'browser') addBrowserTab();
-                else if (g === 'sidechat') createSidechat();
               }}
-              renderEmpty={(g) => g === 'sidechat' ? (
-                <div className="sidechat-empty">
-                  <div className="sidechat-intro">
-                    <div className="sidechat-intro-title">{appT('sidechat.intro.title')}</div>
-                    <div className="sidechat-intro-desc">{appT('sidechat.intro.desc')}</div>
-                    {activeSession?.executor === 'claude' ? (
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={creatingSession}
-                        onClick={createSidechat}
-                      >
-                        {appT('sheet.newChat')}
-                      </button>
-                    ) : (
-                      <div className="sidechat-intro-note">{appT('sidechat.claudeOnly')}</div>
-                    )}
-                  </div>
-                </div>
-              ) : null}
               hidden={!sheetVisible}
               externalEditors={systemConfig?.external_editors ?? []}
               openApps={systemConfig?.open_apps}
@@ -793,27 +715,10 @@ export function App() {
                     </Suspense>
                   );
                 }
-                if (t.kind === 'chat') {
-                  const chatSession = sessions.find(s => s.id === t.sessionId)
-                    ?? null;
-                  if (!chatSession) {
-                    return <div className="sheet-chat-missing">{appT('sidechat.sessionGone')}</div>;
-                  }
-                  return renderSidechatPanel(chatSession);
-                }
-                if (t.kind === 'browser') {
-                  return (
-                    <BrowserBody
-                      initialUrl={t.url}
-                      onNavigate={url => sheetActions.setTabName(t.id, browserHostOf(url))}
-                    />
-                  );
-                }
                 return null;
               }}
             />
             </Suspense>
-            )}
           </>
         )}
         {inspectorVisible && inspectorKind !== null && (
@@ -872,7 +777,6 @@ export function App() {
       )}
       <Toaster />
     </div>
-    </BrowserLinkOpenContext.Provider>
     </ImageZoomContext.Provider>
     </LocaleProvider>
   );

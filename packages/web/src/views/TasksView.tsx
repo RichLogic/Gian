@@ -32,6 +32,10 @@ const I = {
   // task with steps" and avoids overloading the pin, which already means
   // "pinned to top" in the task menu.
   listChecks: 'M3 17l2 2 4-4 M3 7l2 2 4-4 M13 6h8 M13 12h8 M13 18h8',
+  // lucide lock-open — the done subtask's hover toggle (2026-08-04): the
+  // action is "reopen", so a plain check (which reads as "complete") was
+  // misleading.
+  lockOpen: 'M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z M7 11V7a5 5 0 0 1 9.9-1',
 };
 
 function Icon({ d, size = 14, stroke = 1.8, filled = false }: { d: string; size?: number; stroke?: number; filled?: boolean }) {
@@ -510,9 +514,6 @@ function TasksList({
   const renderOpen = (group: Task[]) =>
     group.map(task => {
       const childSubs = subtasksFor(sessions, task.id);
-      // Group count = children that NEED the user (待处理), same rollup as the
-      // Sessions rail (2026-07-31). Hidden at zero.
-      const attnCount = childSubs.filter(sessionNeedsAttention).length;
       const isCollapsed = collapsedTasks.has(task.id);
       return (
         <div key={task.id} className="tasks-list-task">
@@ -526,9 +527,9 @@ function TasksList({
             ) : (
               <span className="task-group-name">{task.name}</span>
             )}
-            {attnCount > 0 && (
-              <span className="count" title={t('tasks.needsAttention')}>{attnCount}</span>
-            )}
+            {/* 2026-08-04: the 待处理 count badge was removed from task
+                headers — attention is conveyed per subtask row (StatusIcon),
+                not rolled up onto the task title. */}
             <span className="sb-group-acts">
               <TaskMenu
                 task={task}
@@ -756,7 +757,7 @@ function SubtaskRow({
             void (done ? reopenSubtask(subtask.id) : completeSubtask(subtask.id));
           }}
         >
-          <Icon d={I.check} size={13} stroke={2.2} />
+          <Icon d={done ? I.lockOpen : I.check} size={13} stroke={2.2} />
         </button>
       </span>
     </div>

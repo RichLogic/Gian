@@ -1,9 +1,9 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from 'react';
 import type { ApprovalDecision } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import type { ApprovalActionContext, StatusItem, TranscriptItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
-import { AgentSpawnRow, ApprovalCard, AssistantMessage, AutoNoticeCard, Caret, CommandCard, DiffCard, FileReadCard, FileSearchCard, ReasoningCard, ToolEvent, UserMessage, WebSearchRow } from './items.js';
+import { AgentSpawnRow, ApprovalCard, AssistantMessage, AutoNoticeCard, Caret, CommandCard, DiffCard, FileReadCard, FileSearchCard, ReasoningCard, ToolEvent, UserMessage, useStableExpand, WebSearchRow } from './items.js';
 import { GianMascot } from '../components/GianMascot.js';
 
 /**
@@ -162,7 +162,7 @@ function TurnActionsBlock({
   ) => void;
 }) {
   const t = useT();
-  const [open, setOpen] = useState(block.isTrailing);
+  const { open, setOpen, toggle } = useStableExpand(block.isTrailing);
   // Auto-fold once the agent stops acting (a reply / approval comes after).
   // If the user manually toggled while trailing, this still collapses on
   // reply — that matches "show me what's happening live, then get out of
@@ -179,7 +179,7 @@ function TurnActionsBlock({
   const tally = countActions(block.items, t);
   return (
     <div className={`evt actions ${open ? 'open' : ''}`}>
-      <div className="evt-head" onClick={() => setOpen((o: boolean) => !o)}>
+      <div className="evt-head" onClick={toggle}>
         <Caret />
         <span className="evt-verb">{block.isTrailing ? t('transcript.working') : t('transcript.steps')}</span>
         <span className="evt-subject">

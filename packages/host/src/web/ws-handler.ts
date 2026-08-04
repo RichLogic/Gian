@@ -4,16 +4,14 @@ import type { WSContext, WSMessageReceive } from 'hono/ws';
 import type { SessionManager } from '../session/manager.js';
 import type { TaskManager } from '../task/manager.js';
 import type { WsBroadcaster } from './ws-broadcast.js';
-// Platform managers subscribe to SessionManager events directly; web sends
-// need no separate IM router callback.
 import type { ApprovalManager } from '../approval/index.js';
 import type { WorkbenchTerminalManager } from '../term/manager.js';
 import type { Db } from '../storage/db.js';
 import { getUsernameForToken } from '../auth/tokens.js';
 import { AUTH_REQUIRED } from '../auth/middleware.js';
 import { loadConfig } from '../storage/config.js';
-import { listAllBots } from '../im/bots-api.js';
 import { deleteTaskCascade } from '../task/delete-cascade.js';
+import { updateTaskWithSessionArchive } from '../task/update-with-session-archive.js';
 
 interface WsMessageEvent {
   data: WSMessageReceive;
@@ -60,7 +58,6 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
       sessions: sessions.listSessions(),
       tasks: tasks?.listTasks() ?? [],
       workspaces: db.prepare('SELECT * FROM workspaces ORDER BY sort_order, name').all() as StateSyncMessage['workspaces'],
-      bots: await listAllBots(db),
       approvals: (approvals?.listPending() ?? []).map(r => ({
         id: r.id,
         session_id: r.sessionId,
@@ -193,12 +190,10 @@ async function dispatch(
         model: msg.model,
         approval_mode: msg.approval_mode,
         ...(msg.name !== undefined ? { name: msg.name } : {}),
-        ...(msg.fork_from !== undefined ? { fork_from: msg.fork_from } : {}),
       });
       broadcaster.send(ws, {
         type: 'session:created',
         session,
-        ...(msg.client_tag !== undefined ? { client_tag: msg.client_tag } : {}),
       });
       return;
     }
@@ -227,7 +222,6 @@ async function dispatch(
       const task = tasks.createTask({
         name: msg.name,
         ...(msg.description !== undefined ? { description: msg.description } : {}),
-        ...(msg.executor !== undefined ? { manager_executor: msg.executor } : {}),
       });
       broadcaster.broadcast({ type: 'task:created', task });
       return;
@@ -240,7 +234,9 @@ async function dispatch(
       if (msg.status !== undefined) patch.status = msg.status;
       // Pin is a separate, updated_at-neutral path (setTaskPinned); a content
       // patch (if any) runs first, then the pin, and the final row is broadcast.
-      let task = Object.keys(patch).length > 0 ? tasks.updateTask(msg.task_id, patch) : undefined;
+      let task = Object.keys(patch).length > 0
+        ? updateTaskWithSessionArchive(tasks, sessions, msg.task_id, patch)
+        : undefined;
       if (msg.pinned !== undefined) task = tasks.setTaskPinned(msg.task_id, msg.pinned);
       if (task) broadcaster.broadcast({ type: 'task:updated', task });
       return;

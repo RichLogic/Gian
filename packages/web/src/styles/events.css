@@ -116,6 +116,13 @@
 
 /* Tool args — key/value rows (parsed from JSON when possible) */
 .tool-args { margin: 0; padding: 4px 12px; display: grid; row-gap: 2px; }
+.tool-output {
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .tool-args-row {
   display: grid;
   grid-template-columns: minmax(80px, max-content) 1fr;

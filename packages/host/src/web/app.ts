@@ -11,20 +11,6 @@ import { QueueManager } from '../queue/index.js';
 import { NativeJsonlWatcher } from '../native/watcher.js';
 import { makeWsHandlers } from './ws-handler.js';
 import { requireAuth, AUTH_REQUIRED } from '../auth/middleware.js';
-// Per-platform managers own bot lifecycle and message delivery. Session,
-// queue, approval, and workspace state all come from Gian's domain services.
-import { DiscordCodingManager } from '../im/discord/manager.js';
-import { DiscordCodingRepository } from '../im/discord/repository.js';
-import { SlackCodingManager } from '../im/slack/manager.js';
-import { SlackCodingRepository } from '../im/slack/repository.js';
-import {
-  buildIMOptions,
-} from '../im/build-options.js';
-import type { MessagingPlatform } from '../im/messaging/types.js';
-import { migrateLegacyBots } from '../im/migrate-legacy-bots.js';
-// `bots.ts` legacy helpers are referenced only by `migrateLegacyBots` (one
-// shot at startup) — REST endpoints now go through `im/bots-api` against the
-// per-platform tables.
 import { WorkbenchTerminalManager } from '../term/manager.js';
 import type { CliRuntimeManager } from '../runtime/manager.js';
 import type { AgentManager } from '../agents/manager.js';
@@ -34,14 +20,12 @@ import { registerWorkspaceRoutes } from './routes/workspaces.js';
 import { registerTaskRoutes } from './routes/tasks.js';
 import { registerProxyRoutes } from './routes/proxy.js';
 import { registerSessionRoutes } from './routes/sessions.js';
-import { registerBotRoutes } from './routes/bots.js';
 import { registerReconnectRoutes } from './routes/reconnect.js';
 import { registerNativeSessionRoutes } from './routes/native-sessions.js';
 import { registerWorkspaceFileRoutes } from './routes/workspace-files.js';
 import { registerWorkingTreeRoutes } from './routes/working-trees.js';
 import { registerAgentRoutes } from './routes/agents.js';
 import { registerOnboardingRoutes } from './routes/onboarding.js';
-import { fanIMEvent } from './im-event-bridge.js';
 import { bootJsonlWatchers } from './watcher-bootstrap.js';
 import { resolveWebDistDir, staticFiles } from './static-files.js';
 import { requireDesktopClient } from './desktop-boundary.js';
@@ -92,11 +76,6 @@ export function createApp(ctx: AppContext): AppHandle {
   );
   const tasks = new TaskManager(ctx.db);
 
-  // gian-task durability: re-drive any action rows a prior crash/restart left
-  // non-terminal. Manager actions are always-on; coding/subtask actions still
-  // respect GIAN_TASK_ROLES inside SessionManager.
-  sessions.resumePendingTaskActions();
-
   // Workbench terminal manager — standalone shell PTYs, independent of
   // any Gian session. The xterm tabs in the workbench pane are bound to
   // client-minted `term_id`s and routed through `term:*` WS messages.
@@ -114,36 +93,8 @@ export function createApp(ctx: AppContext): AppHandle {
   approvals.setRespondFn((sid, aid, dec) => sessions.respondApproval(sid, aid, dec));
   approvals.setGetModeFn(sid => sessions.getSession(sid).approval_mode);
 
-  // IM layer — instantiate per-platform managers, wire SessionManager
-  // events into them, and start enabled bots.
-  const discordRepo = new DiscordCodingRepository(ctx.db);
-  const slackRepo = new SlackCodingRepository(ctx.db);
-  const imOptions = buildIMOptions(
-    { sessions, approvals, db: ctx.db },
-    { discord: discordRepo, slack: slackRepo },
-  );
-  const discordMgr = new DiscordCodingManager({
-    ...imOptions.shared,
-    ...imOptions.discordExtras,
-  });
-  const slackMgr = new SlackCodingManager({
-    ...imOptions.shared,
-    ...imOptions.slackExtras,
-  });
-  const platforms: MessagingPlatform[] = [discordMgr, slackMgr];
-
-  // Fan SessionManager events out to every IM platform. Errors are logged
-  // and swallowed so a slow / broken IM bot can't poison the session loop.
-  sessions.onEvent(e => {
-    void fanIMEvent(e, ctx.db, sessions, approvals, platforms).catch(err => {
-      console.error('[im] event fan-out failed', err);
-    });
-  });
-
-  // Pre-warm proxy capabilities so IM `/alter` (which reads model options
-  // synchronously via `sessions.getCapabilities`) sees a populated cache
-  // even before any web session has spun up. Async, non-blocking — failures
-  // are tolerated (warmCapabilities itself catches inside).
+  // Pre-warm proxy capabilities so model controls are ready before the first
+  // session opens. Async, non-blocking; failures are tolerated.
   //
   // Skipped when `GIAN_SKIP_PROXY_WARMUP=1` so tests can `createApp` an
   // in-memory Hono harness without spawning a real cc-proxy / codex-proxy
@@ -152,7 +103,7 @@ export function createApp(ctx: AppContext): AppHandle {
   if (process.env['GIAN_SKIP_PROXY_WARMUP'] !== '1') {
     const warm = (executor: 'claude' | 'codex') => {
       const run = () => sessions.warmCapabilities(executor).catch(err => {
-        console.warn(`[im] warmCapabilities(${executor}) failed:`, err instanceof Error ? err.message : err);
+        console.warn(`[proxy] warmCapabilities(${executor}) failed:`, err instanceof Error ? err.message : err);
       });
       if (!ctx.agentManager) return run();
       return ctx.agentManager.status(executor).then(status => (
@@ -161,28 +112,6 @@ export function createApp(ctx: AppContext): AppHandle {
     };
     void Promise.all([warm('claude'), warm('codex')]);
   }
-
-  // One-shot migration of legacy `bots` rows into platform tables. Idempotent:
-  // re-runs are no-ops once a bot id is present in the new tables. Runs before
-  // startAll so newly-migrated bots that were enabled in the old table get
-  // started immediately on this boot.
-  void migrateLegacyBots(ctx.db).then(result => {
-    if (result.discordMigrated || result.slackMigrated) {
-      console.log(
-        `[im] migrated legacy bots → discord:${result.discordMigrated} slack:${result.slackMigrated} skipped:${result.skipped}`,
-      );
-    }
-    for (const e of result.errors) {
-      console.warn(`[im] legacy bot ${e.id} migration failed: ${e.error}`);
-    }
-  }).catch(err => {
-    console.error('[im] migrateLegacyBots failed', err);
-  }).finally(() => {
-    // Boot enabled bots without blocking startup.
-    void Promise.all(platforms.map(p => p.startAll().catch(err => {
-      console.error(`[im] ${p.platformId} startAll failed`, err);
-    })));
-  });
 
   const handlers = makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db: ctx.db });
 
@@ -223,8 +152,7 @@ export function createApp(ctx: AppContext): AppHandle {
   registerNativeSessionRoutes(app, { db: ctx.db, sessions, broadcaster });
   registerWorkspaceFileRoutes(app, ctx.db);
   registerWorkingTreeRoutes(app, ctx.db, broadcaster);
-  registerReconnectRoutes(app, ctx.db, proxy, platforms);
-  registerBotRoutes(app, ctx.db, platforms);
+  registerReconnectRoutes(app, proxy);
   if (ctx.agentManager && ctx.runtimeManager) {
     registerOnboardingRoutes(app, {
       db: ctx.db,
@@ -257,9 +185,6 @@ export function createApp(ctx: AppContext): AppHandle {
     shutdown: async () => {
       watcher.stopAll();
       await term.closeAll();
-      await Promise.all(platforms.map(p => p.shutdown().catch(err => {
-        console.error(`[im] ${p.platformId} shutdown failed`, err);
-      })));
       await proxy.closeAll();
     },
   };

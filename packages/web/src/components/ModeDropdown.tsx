@@ -2,10 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useT } from '../i18n/index.js';
 import type { Mode } from './Topbar.js';
 
-// Per the design: only Sessions + Tasks are top-level modes. Workspaces moved
-// into the dock rail + Workbench detail; Bots are hidden. The 'spaces'/'bots'
-// modes still exist as routes (e.g. the workspace-create flow opens 'spaces'),
-// just not as dropdown entries.
+// Only Sessions + Tasks are top-level modes. Workspaces live in the dock rail
+// and Workbench detail; the workspace-create flow still uses the spaces view.
 const MODE_OPTIONS: ReadonlyArray<readonly [Mode, string]> = [
   ['tasks', 'topbar.mode.tasks'],
   ['sessions', 'topbar.mode.sessions'],

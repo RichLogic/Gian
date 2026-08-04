@@ -205,14 +205,10 @@
   from { opacity: 0; transform: translate(-50%, -2px); }
   to   { opacity: 1; transform: translate(-50%, 0); }
 }
-.path-seg.branch {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-2);
-}
-.path-seg.session {
-  color: var(--text);
-}
+/* `.path-seg.branch` / `.path-seg.session` carry no face/size/color
+   overrides — every breadcrumb segment reads in the same style, one path,
+   no per-kind emphasis (2026-08-04; the branch's mono + 11px and the
+   session's --text made the three segments look mismatched). */
 .path-seg .branch-ico { color: var(--text-3); flex: none; }
 
 .path-rename-input {
@@ -1089,84 +1085,6 @@ button.sb-section:hover { color: var(--text); }
   padding: 4px 8px 12px;
 }
 
-/* tab-strip "+" popover anchor (sidechat session picker) */
-
-/* Sidechat — the chat tab body fills the sheet island without the main
-   column's island chrome; the sheet-content scroller is stopped because
-   SessionMain scrolls its own .main-scroll. */
-.sheet-content:has(.sheet-chat) { overflow: hidden; }
-.sheet-chat {
-  flex: 1; min-height: 0;
-  display: flex; flex-direction: column;
-  overflow: hidden;
-}
-.sheet-chat .main {
-  flex: 1; min-height: 0;
-  margin: 0;
-  border-radius: 0;
-  box-shadow: none;
-}
-.sheet-chat-missing { padding: 20px; color: var(--text-3); font-size: var(--fz-13); }
-
-/* Sidechat empty state — intro + fork-current-session action (rendered by
-   Sheet's renderEmpty inside the normal group slot, so it stays resizable) */
-.sidechat-empty {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-}
-.sidechat-intro {
-  max-width: 320px;
-  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
-}
-.sidechat-intro-title { font-size: var(--fz-15); font-weight: 600; color: var(--text); }
-.sidechat-intro-desc { font-size: var(--fz-13); color: var(--text-2); line-height: 1.5; }
-.sidechat-intro-note { font-size: var(--fz-12); color: var(--text-3); }
-
-/* Browser tab body — address bar + iframe preview */
-.browser-body {
-  flex: 1; min-height: 0;
-  display: flex; flex-direction: column;
-  background: var(--surface);
-}
-.browser-bar {
-  flex: none;
-  display: flex; align-items: center; gap: 4px;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--hairline);
-}
-.browser-btn {
-  width: 26px; height: 26px;
-  display: inline-flex; align-items: center; justify-content: center;
-  border-radius: var(--r-2);
-  color: var(--text-3);
-  background: transparent; border: 0;
-  cursor: pointer;
-  flex: none;
-}
-.browser-btn:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
-.browser-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-.browser-addr {
-  flex: 1; min-width: 0;
-  height: 26px;
-  padding: 0 10px;
-  background: var(--surface-2);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-pill);
-  outline: 0;
-  font: var(--fz-12)/1 var(--font-sans);
-  color: var(--text);
-}
-.browser-addr:focus { background: var(--surface); border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
-.browser-frame { flex: 1; min-height: 0; border: 0; background: var(--surface); }
-.browser-empty {
-  flex: 1;
-  display: flex; align-items: center; justify-content: center;
-  color: var(--text-3);
-  font-size: var(--fz-13);
-}
 /* Sheet tab strip — Codex-style compact tabs: the app's standard small-
    control radius (not full pills), tight icon+name rows, no visible divider
    under the strip. */
@@ -1180,9 +1098,8 @@ button.sb-section:hover { color: var(--text); }
   background: var(--surface);
 }
 .sheet-content, .sheet-term, .sheet-empty { background: var(--surface); }
-/* Keep-alive slot for host-rendered tab bodies (term/sidechat/browser/
-   workspaces/settings): every tab stays mounted, inactive slots hide with
-   display:none — this is what isolates per-tab state (xterm, iframe history). */
+/* Keep-alive slot for host-rendered tab bodies (term/workspaces/settings):
+   every tab stays mounted and inactive slots hide with display:none. */
 .sheet-tab-slot {
   display: flex;
   flex-direction: column;
@@ -1946,7 +1863,7 @@ button.sb-section:hover { color: var(--text); }
   width: 100%;
 }
 .detail h1 {
-  font: italic 28px/1.1 var(--font-serif);
+  font: 600 28px/1.1 var(--font-sans);
   margin: 0 0 4px;
   letter-spacing: -0.02em;
 }
@@ -2081,7 +1998,7 @@ button.sb-section:hover { color: var(--text); }
 
 .wt-row {
   display: grid;
-  grid-template-columns: 18px 1fr 130px 110px 1fr 22px;
+  grid-template-columns: 18px 1fr 1fr 110px 22px;
   align-items: center;
   gap: 10px;
   padding: 10px 10px 10px 12px;
@@ -2089,7 +2006,7 @@ button.sb-section:hover { color: var(--text); }
 }
 .wt-row:hover { background: var(--surface); }
 .wt-row + .wt-row { box-shadow: inset 0 1px var(--hairline-2); }
-.wt-ico { color: var(--text-3); }
+.wt-ico { color: var(--text-3); display: inline-flex; align-items: center; justify-content: center; }
 .wt-branch {
   font: 500 var(--fz-13)/1.3 var(--font-mono);
   color: var(--text);

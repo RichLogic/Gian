@@ -182,21 +182,23 @@
 }
 .settings-account .s2-help { margin: 0; }
 
-/* Default task-PM executor picker (sits under the two exec rows). */
-.s2-taskpm {
-  margin-top: 15px;
-  padding-top: 15px;
-  border-top: 1px solid var(--hairline);
+/* CLI path row: the input fills the cell so long paths stay visible, with
+   Browse trailing (2026-08-04; was an unsized input clipped to ~20 chars).
+   The task-PM picker that used to sit under the exec rows was removed the
+   same day (no task PM anymore). */
+.s2-card .cli-path-row { display: flex; align-items: center; gap: 6px; }
+.s2-card .cli-path-row .input { flex: 1; min-width: 0; }
+
+/* Defaults row: model / effort|thinking / mode pickers side by side, each
+   with a small caption (2026-08-04 — they used to be one row per picker). */
+.exec-defaults { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.exec-default { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.exec-default:only-child { grid-column: 1 / -1; }
+.exec-default .lbl {
+  font: 500 10.5px/1.2 var(--font-sans);
+  color: var(--text-3);
 }
-.s2-taskpm-head {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; margin-bottom: 8px;
-}
-.s2-taskpm-label {
-  font: var(--fz-13)/1.4 var(--font-sans);
-  color: var(--text);
-}
-.s2-taskpm .s2-help { margin: 0; }
+.exec-default .select { width: 100%; }
 
 /* Executor caption — "applies to claude -p only". */
 .exec-note {

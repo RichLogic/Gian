@@ -1,0 +1,21 @@
+{
+  "provider": "claude",
+  "version": "2.1.220",
+  "cases": [
+    {
+      "name": "assistant message",
+      "notification": { "method": "output.text", "params": { "sessionId": "native", "data": { "itemId": "m1", "text": "done" } } },
+      "displays": ["message"]
+    },
+    {
+      "name": "question",
+      "notification": { "method": "approval.requested", "params": { "sessionId": "native", "data": { "approvalId": "q1", "toolName": "AskUserQuestion", "inputPreview": "{\"questions\":[{\"question\":\"Pick one\",\"options\":[{\"label\":\"A\"}]}]}" } } },
+      "displays": ["interaction.question"]
+    },
+    {
+      "name": "plan file is activity plus plan",
+      "notification": { "method": "tool.use", "params": { "sessionId": "native", "data": { "callId": "p1", "toolName": "Write", "input": { "file_path": "/tmp/.claude/plans/a.md", "content": "# Plan" } } } },
+      "displays": ["activity.file-change", "plan"]
+    }
+  ]
+}

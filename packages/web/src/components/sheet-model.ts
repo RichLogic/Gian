@@ -7,35 +7,27 @@ export type SheetTabKind =
   | 'plan'
   | 'diff'
   | 'workspace'
-  | 'new-workspace'
-  | 'chat'
-  | 'browser';
+  | 'new-workspace';
 export type FileViewMode = 'source' | 'preview';
 
 export type RailId =
   | 'files'
   | 'diffs'
-  | 'sidechat'
   | 'terminal'
-  | 'browser'
   | 'workspaces'
   | 'settings';
 
 export type SheetGroup =
   | 'files'
   | 'diffs'
-  | 'sidechat'
   | 'term'
-  | 'browser'
   | 'workspaces'
   | 'settings';
 
 export const SHEET_GROUP_ORDER: readonly SheetGroup[] = [
   'files',
   'diffs',
-  'sidechat',
   'term',
-  'browser',
   'workspaces',
   'settings',
 ];
@@ -61,13 +53,10 @@ export interface SheetTab {
     | 'plan'
     | 'diff'
     | 'img'
-    | 'grid'
-    | 'chat'
-    | 'browser';
+    | 'grid';
   ico: string;
   wsId?: string;
   sessionId?: string;
-  url?: string;
   preview?: boolean;
   lines?: Array<[string, string, string?, string?]>;
   viewMode?: FileViewMode;

@@ -1,6 +1,6 @@
 {
   "name": "gian",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": true,
   "description": "One local desktop app for Codex, Claude Code, and Kimi Code",
   "packageManager": "pnpm@10.33.2",
@@ -10,7 +10,10 @@
   "scripts": {
     "preinstall": "node scripts/check-node.js",
     "build": "pnpm -r build",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "node scripts/dev.mjs --no-desktop",
     "typecheck": "pnpm -r typecheck",
+    "test": "node scripts/run-tests.mjs",
     "desktop:dev": "pnpm -F @gian/desktop dev",
     "desktop:pack": "pnpm -F @gian/desktop package:mac",
     "desktop:dmg": "pnpm -F @gian/desktop make:mac",
@@ -18,6 +21,7 @@
     "clean": "pnpm -r clean && rm -rf node_modules"
   },
   "devDependencies": {
+    "@playwright/test": "^1.49.0",
     "@types/node": "^22.10.0",
     "esbuild": "^0.25.12",
     "typescript": "^5.7.2"

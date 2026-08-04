@@ -118,10 +118,13 @@ export function NativeSessionsPane({
       <div className="card">
         <div className="card-body compact">
           {loading && (
-            <div style={{ padding: '12px 12px', color: 'var(--text-3)' }}>Loading…</div>
+            <div className="wt-row" style={{ color: 'var(--text-3)' }}>
+              <span className="spinner" aria-hidden="true" />
+              <span>Loading…</span>
+            </div>
           )}
           {!loading && filtered.length === 0 && (
-            <div style={{ padding: '12px 12px', color: 'var(--text-3)' }}>
+            <div className="wt-row" style={{ color: 'var(--text-3)' }}>
               No native sessions in this workspace.
             </div>
           )}
@@ -186,12 +189,18 @@ function NativeSessionRow({
   }
   const adopted = !!session.adoptedBy;
   const adoptedName = session.adoptedBy?.gianSessionName ?? session.adoptedBy?.gianSessionId.slice(0, 8);
+  const meta = [
+    session.gitBranch,
+    relTime(session.updatedAt),
+    `${session.turnCount} turns`,
+    fmtBytes(session.fileSize),
+  ].filter(Boolean).join(' · ');
   return (
     <div
       className="wt-row"
-      style={{ gridTemplateColumns: '18px 1fr auto 110px 22px', alignItems: 'start' }}
+      style={{ gridTemplateColumns: '18px 1fr 110px 22px' }}
     >
-      <span className="wt-ico" style={{ paddingTop: 2 }}>
+      <span className="wt-ico" title={session.executor}>
         <span
           style={{
             display: 'inline-block',
@@ -207,24 +216,21 @@ function NativeSessionRow({
         />
       </span>
       <div style={{ minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-          <span style={{ font: 'var(--fz-13)/1.3 var(--font-sans)', fontWeight: 500, color: 'var(--text)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ font: '500 var(--fz-13)/1.3 var(--font-sans)', color: 'var(--text)' }}>
             {adopted ? adoptedName : (
               <span style={{ color: 'var(--text-3)', fontStyle: 'italic' }}>unadopted session</span>
             )}
           </span>
-          {session.gitBranch && (
-            <span className="mono" style={{ color: 'var(--text-3)', fontSize: 'var(--fz-11)' }}>{session.gitBranch}</span>
-          )}
+          <span className="main-tag">{session.executor}</span>
           <span className="mono" style={{ color: 'var(--text-3)', fontSize: 'var(--fz-11)' }}>
-            · {relTime(session.updatedAt)} · {session.turnCount} turns · {fmtBytes(session.fileSize)}
+            {meta}
           </span>
         </div>
         <div style={{ color: 'var(--text-2)', fontSize: 'var(--fz-12)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {session.firstUserMessage || '(no user message)'}
         </div>
       </div>
-      <span />
       {adopted ? (
         <span style={{ font: '500 var(--fz-12)/1.4 var(--font-sans)', color: 'var(--ok)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
           <Icon d={I.check} size={12} stroke={2.4} /> Adopted

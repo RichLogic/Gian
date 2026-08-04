@@ -283,6 +283,7 @@ function OnboardingAgentRow({
   const [path, setPath] = useState(agent.cli.path ?? '');
   const cliReady = agent.cli.state === 'ready';
   const proxyReady = agent.proxy.state === 'ready';
+  const proxyInstalled = proxyReady || agent.proxy.state === 'outdated';
   useEffect(() => setPath(agent.cli.path ?? ''), [agent.cli.path]);
   return (
     <article className={`onboarding-agent ${agent.ready ? 'ready' : ''}`}>
@@ -307,7 +308,9 @@ function OnboardingAgentRow({
         </span>
         <span className={proxyReady ? 'ready' : 'missing'}>
           <b>Proxy</b>
-          {proxyReady ? `${agent.proxy.version ?? ''} · ${agent.proxy.source === 'development' ? 'Dev' : 'GitHub'}` : t('settings.agents.notInstalled')}
+          {proxyInstalled
+            ? `${agent.proxy.version ?? ''} · ${agent.proxy.source === 'development' ? 'Dev' : 'GitHub'}${agent.proxy.state === 'outdated' ? ` · ${t('settings.agents.updateRequired')}` : ''}`
+            : t('settings.agents.notInstalled')}
         </span>
       </div>
       <div className="onboarding-cli-path">

@@ -78,6 +78,7 @@ jobs:
         run: |
           pnpm --filter @gian/shared build
           pnpm typecheck
+          pnpm test
 
       - name: Build proxy release assets
         run: pnpm release:proxies

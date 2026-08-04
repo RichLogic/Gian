@@ -1,36 +1,11 @@
-import { useEffect, useRef, useState, useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Session, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
-import type { TranscriptItem } from '../types.js';
-import { loadChanged } from '../api.js';
-import type { ChangedEntry } from '../api.js';
 
-const SLASH_COMMANDS = {
-  claude: [
-    { cmd: '/clear', desc: 'Clear conversation context' },
-    { cmd: '/compact', desc: 'Compact context to free up space' },
-    { cmd: '/help', desc: 'Show CLI help' },
-    { cmd: '/init', desc: 'Initialize CLAUDE.md' },
-    { cmd: '/login', desc: 'Authenticate with Anthropic' },
-    { cmd: '/logout', desc: 'Sign out' },
-    { cmd: '/model', desc: 'Show or set current model' },
-    { cmd: '/status', desc: 'Show CLI status' },
-  ],
-  codex: [
-    { cmd: '/clear', desc: 'Clear conversation context' },
-    { cmd: '/compact', desc: 'Compact context to free up space' },
-    { cmd: '/init', desc: 'Initialize AGENTS.md' },
-    { cmd: '/status', desc: 'Show CLI status' },
-  ],
-} as const;
-
-type Section = 'sessions' | 'files' | 'commands';
-
-interface ResultItem {
-  section: Section;
-  key: string;
+interface SessionResult {
+  id: string;
   label: string;
-  sublabel?: string;
+  workspace?: string;
 }
 
 function match(haystack: string, needle: string): boolean {
@@ -42,29 +17,19 @@ export function CommandPalette({
   onClose,
   sessions,
   workspaces,
-  activeSessionId,
-  activeWorkingTreeId,
-  transcriptItems,
   onJumpToSession,
-  onOpenFile,
   initialQuery,
 }: {
   open: boolean;
   onClose: () => void;
   sessions: Session[];
   workspaces: Workspace[];
-  activeSessionId: string | null;
-  /** The working tree to source "Changed files" from. Null = no source. */
-  activeWorkingTreeId: string | null;
-  transcriptItems: TranscriptItem[];
   onJumpToSession: (id: string) => void;
-  onOpenFile: (workingTreeId: string, path: string) => void;
   initialQuery?: string;
 }) {
   const t = useT();
   const [query, setQuery] = useState('');
   const [idx, setIdx] = useState(0);
-  const [changedFiles, setChangedFiles] = useState<ChangedEntry[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -72,81 +37,23 @@ export function CommandPalette({
     if (!open) {
       setQuery('');
       setIdx(0);
-      setChangedFiles([]);
       return;
     }
     setQuery(initialQuery ?? '');
     setTimeout(() => inputRef.current?.focus(), 0);
+  }, [open, initialQuery]);
 
-    if (activeWorkingTreeId) {
-      void loadChanged(activeWorkingTreeId).then(setChangedFiles);
-    }
-  }, [open, initialQuery, activeWorkingTreeId]);
-
-  const activeSession = sessions.find(s => s.id === activeSessionId) ?? null;
-  const executor = activeSession?.executor ?? 'claude';
-
-  const results = useMemo<ResultItem[]>(() => {
-    const out: ResultItem[] = [];
-
-    const sessionResults = sessions.filter(s => {
-      if (!query) return true;
-      const name = s.name ?? s.id;
-      return match(name, query) || match(s.id.slice(0, 8), query);
-    });
-    for (const s of sessionResults) {
-      const ws = workspaces.find(w => w.id === s.workspace_id);
-      out.push({
-        section: 'sessions',
-        key: `session:${s.id}`,
-        label: s.name ?? `${t('topbar.mode.sessions')} ${s.id.slice(0, 8)}`,
-        sublabel: ws?.name,
-      });
-    }
-
-    const fileSet = new Set<string>();
-    for (const f of changedFiles) {
-      if (!query || match(f.path, query)) {
-        fileSet.add(f.path);
-      }
-    }
-    if (fileSet.size === 0 && transcriptItems) {
-      for (const item of transcriptItems) {
-        if (item.kind === 'file-read' || item.kind === 'diff') {
-          if (item.kind === 'file-read') {
-            const p = item.path;
-            if (!query || match(p, query)) fileSet.add(p);
-          } else {
-            for (const f of item.files) {
-              if (!query || match(f.path, query)) fileSet.add(f.path);
-            }
-          }
-        }
-      }
-    }
-    for (const path of fileSet) {
-      out.push({
-        section: 'files',
-        key: `file:${path}`,
-        label: path.split('/').pop() ?? path,
-        sublabel: path,
-      });
-    }
-
-    const cmds = executor === 'kimi' ? [] : SLASH_COMMANDS[executor];
-    for (const c of cmds) {
-      if (!query || match(c.cmd, query) || match(c.desc, query)) {
-        out.push({
-        section: 'commands',
-          key: `cmd:${c.cmd}`,
-          label: c.cmd,
-          sublabel: c.desc,
-        });
-      }
-    }
-
-    return out;
-  }, [query, sessions, workspaces, changedFiles, transcriptItems, executor, t]);
+  const results = useMemo<SessionResult[]>(() => sessions
+    .filter(session => session.archived === 0)
+    .filter(session => {
+      const name = session.name?.trim() ?? '';
+      return name.length > 0 && (!query || match(name, query));
+    })
+    .map(session => ({
+      id: session.id,
+      label: session.name!.trim(),
+      workspace: workspaces.find(workspace => workspace.id === session.workspace_id)?.name,
+    })), [query, sessions, workspaces]);
 
   useEffect(() => {
     setIdx(0);
@@ -154,46 +61,35 @@ export function CommandPalette({
 
   useEffect(() => {
     if (!listRef.current) return;
-    const el = listRef.current.querySelector(`[data-idx="${idx}"]`);
-    el?.scrollIntoView({ block: 'nearest' });
+    listRef.current.querySelector(`[data-idx="${idx}"]`)?.scrollIntoView({ block: 'nearest' });
   }, [idx]);
 
-  function pick(item: ResultItem) {
-    if (item.section === 'sessions') {
-      const id = item.key.slice('session:'.length);
-      onJumpToSession(id);
-    } else if (item.section === 'files') {
-      const path = item.sublabel ?? item.key.slice('file:'.length);
-      if (activeWorkingTreeId) onOpenFile(activeWorkingTreeId, path);
-    } else {
-      document.dispatchEvent(new CustomEvent('gian:palette-command', { detail: { cmd: item.label } }));
-    }
+  function pick(item: SessionResult) {
+    onJumpToSession(item.id);
     onClose();
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setIdx(i => Math.min(i + 1, results.length - 1));
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setIdx(i => Math.max(i - 1, 0));
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
+  function handleKeyDown(event: React.KeyboardEvent) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setIdx(current => Math.min(current + 1, results.length - 1));
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setIdx(current => Math.max(current - 1, 0));
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
       const item = results[idx];
       if (item) pick(item);
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
       onClose();
     }
   }
 
   if (!open) return null;
 
-  let lastSection: Section | null = null;
-
   return (
-    <div className="pal-overlay" onPointerDown={e => { if (e.target === e.currentTarget) onClose(); }}>
+    <div className="pal-overlay" onPointerDown={event => { if (event.target === event.currentTarget) onClose(); }}>
       <div className="pal-modal" role="dialog" aria-modal="true" aria-label={t('palette.dialog')}>
         <div className="pal-search-row">
           <svg className="pal-search-ico" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -206,7 +102,7 @@ export function CommandPalette({
             type="text"
             placeholder={t('palette.placeholder')}
             value={query}
-            onChange={e => setQuery(e.target.value)}
+            onChange={event => setQuery(event.target.value)}
             onKeyDown={handleKeyDown}
             autoComplete="off"
             spellCheck={false}
@@ -215,41 +111,27 @@ export function CommandPalette({
         </div>
 
         <div ref={listRef} className="pal-list">
-          {results.length === 0 && (
+          {results.length === 0 ? (
             <div className="pal-empty">{t('palette.noResults')} "{query}"</div>
-          )}
-          {results.map((item, i) => {
-            const showHeader = item.section !== lastSection;
-            lastSection = item.section;
-            return (
-              <div key={item.key}>
-                {showHeader && (
-                  <div className="pal-section-head">{t(`palette.section.${item.section}`)}</div>
-                )}
+          ) : (
+            <>
+              <div className="pal-section-head">{t('palette.section.sessions')}</div>
+              {results.map((item, index) => (
                 <button
                   type="button"
-                  className={`pal-row${i === idx ? ' active' : ''}`}
-                  data-idx={i}
-                  onPointerDown={e => { e.preventDefault(); pick(item); }}
-                  onMouseEnter={() => setIdx(i)}
+                  className={`pal-row${index === idx ? ' active' : ''}`}
+                  data-idx={index}
+                  key={item.id}
+                  onPointerDown={event => { event.preventDefault(); pick(item); }}
+                  onMouseEnter={() => setIdx(index)}
                 >
                   <span className="pal-row-label">{item.label}</span>
-                  {item.sublabel && (
-                    <span className="pal-row-sub">{item.sublabel}</span>
-                  )}
-                  {item.section === 'sessions' && (
-                    <span className="pal-row-tag">{t('palette.tag.session')}</span>
-                  )}
-                  {item.section === 'files' && (
-                    <span className="pal-row-tag files">{t('palette.tag.file')}</span>
-                  )}
-                  {item.section === 'commands' && (
-                    <span className="pal-row-tag cmd">{t('palette.tag.command')}</span>
-                  )}
+                  {item.workspace && <span className="pal-row-sub">{item.workspace}</span>}
+                  <span className="pal-row-tag">{t('palette.tag.session')}</span>
                 </button>
-              </div>
-            );
-          })}
+              ))}
+            </>
+          )}
         </div>
 
         <div className="pal-footer">

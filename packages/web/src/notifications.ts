@@ -10,7 +10,6 @@ export interface NotificationPrefs {
   approvalNeeded: boolean;
   errors: boolean;
   sound: boolean;
-  badge: boolean;
 }
 
 export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
@@ -19,7 +18,6 @@ export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
   approvalNeeded: true,
   errors: true,
   sound: false,
-  badge: true,
 };
 
 export type BrowserNotificationPermission = NotificationPermission | 'unsupported';
@@ -48,7 +46,6 @@ export function loadNotificationPrefs(): NotificationPrefs {
       approvalNeeded: typeof parsed.approvalNeeded === 'boolean' ? parsed.approvalNeeded : DEFAULT_NOTIFICATION_PREFS.approvalNeeded,
       errors: typeof parsed.errors === 'boolean' ? parsed.errors : DEFAULT_NOTIFICATION_PREFS.errors,
       sound: typeof parsed.sound === 'boolean' ? parsed.sound : DEFAULT_NOTIFICATION_PREFS.sound,
-      badge: typeof parsed.badge === 'boolean' ? parsed.badge : DEFAULT_NOTIFICATION_PREFS.badge,
     };
   } catch {
     return DEFAULT_NOTIFICATION_PREFS;
