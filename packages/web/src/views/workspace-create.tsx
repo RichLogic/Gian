@@ -20,10 +20,6 @@ const EMPTY_FORM: NewWorkspaceFormState = {
   nameTouched: false,
 };
 
-export function managedWorkspaceDirectory(projectRoot: string): string {
-  return `${projectRoot.trim().replace(/\/$/, '') || '~/Coding'}/workspaces`;
-}
-
 export function useNewWorkspace(onChange: () => void) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<NewWorkspaceFormState>(EMPTY_FORM);
@@ -69,11 +65,11 @@ export function useNewWorkspace(onChange: () => void) {
 }
 
 export function NewWorkspacePanel({
-  workspaceRoot,
+  projectRoot,
   onChange,
   onClose,
 }: {
-  workspaceRoot: string;
+  projectRoot: string;
   onChange: () => void;
   onClose: () => void;
 }) {
@@ -87,7 +83,7 @@ export function NewWorkspacePanel({
         form={workspace.form}
         saving={workspace.saving}
         error={workspace.error}
-        workspaceRoot={workspaceRoot}
+        projectRoot={projectRoot}
         onChange={patch => workspace.setForm(previous => ({ ...previous, ...patch }))}
         onSubmit={workspace.submit}
         onCancel={onClose}
@@ -100,7 +96,7 @@ export function NewWorkspaceForm({
   form,
   saving,
   error,
-  workspaceRoot,
+  projectRoot,
   onChange,
   onSubmit,
   onCancel,
@@ -108,7 +104,7 @@ export function NewWorkspaceForm({
   form: NewWorkspaceFormState;
   saving: boolean;
   error: string | null;
-  workspaceRoot: string;
+  projectRoot: string;
   onChange: (patch: Partial<NewWorkspaceFormState>) => void;
   onSubmit: () => void;
   onCancel: () => void;
@@ -118,7 +114,7 @@ export function NewWorkspaceForm({
   const pathPreview = isAdopt
     ? form.path.trim()
     : form.name
-      ? `${workspaceRoot.replace(/\/$/, '')}/${form.name}`
+      ? `${projectRoot.replace(/\/$/, '')}/${form.name}`
       : '';
 
   function changePath(value: string) {

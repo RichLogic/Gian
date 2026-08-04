@@ -3,9 +3,10 @@ import type { AgentManager } from '../../agents/manager.js';
 import type { Db } from '../../storage/db.js';
 import {
   buildOnboardingState,
+  hasReadyAgent,
   markOnboardingComplete,
   resetOnboarding,
-  saveOnboardingWorkspace,
+  saveOnboardingProjectRoot,
 } from '../../onboarding/state.js';
 import { syncAgentInstructionBlocks } from '../../onboarding/agent-instructions.js';
 import { expandHome } from '../../workspace/index.js';
@@ -22,13 +23,13 @@ export function registerOnboardingRoutes(
     await buildOnboardingState(options.db, await options.agents.list()),
   ));
 
-  app.put('/api/onboarding/workspace', async c => {
+  app.put('/api/onboarding/project-root', async c => {
     try {
       const body = await c.req.json<{ path?: unknown }>();
       if (typeof body.path !== 'string') {
         return c.json({ error: 'path must be a string' }, 400);
       }
-      return c.json(await saveOnboardingWorkspace(options.db, body.path));
+      return c.json(await saveOnboardingProjectRoot(options.db, body.path));
     } catch (error) {
       return c.json(errorResponse(error), 400);
     }
@@ -37,20 +38,19 @@ export function registerOnboardingRoutes(
   app.post('/api/onboarding/complete', async c => {
     try {
       const agents = await options.agents.list();
-      const missing = agents.filter(agent => !agent.ready).map(agent => agent.name);
-      if (missing.length > 0) {
-        return c.json({ error: `Agents still require setup: ${missing.join(', ')}` }, 409);
+      if (!hasReadyAgent(agents)) {
+        return c.json({ error: 'Set up at least one Agent before continuing.' }, 409);
       }
-      const config = await saveOnboardingWorkspace(
+      const config = await saveOnboardingProjectRoot(
         options.db,
-        (await buildOnboardingState(options.db, agents)).workspaceRoot,
+        (await buildOnboardingState(options.db, agents)).projectRoot,
       );
       markOnboardingComplete(options.db);
-      // The workspace root was just (re)confirmed — refresh the managed
+      // The project root was just (re)confirmed — refresh the managed
       // block in every agent CLI's global instruction file. A failure here
       // must not fail onboarding.
       try {
-        await syncAgentInstructionBlocks(expandHome(config.workspaceRoot));
+        await syncAgentInstructionBlocks(expandHome(config.projectRoot));
       } catch (error) {
         console.warn('[gian] agent instruction sync failed:', error);
       }

@@ -14,7 +14,7 @@ import type { RepoInfo } from '../api.js';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import type { GianWs } from '../ws.js';
-import { managedWorkspaceDirectory, NewWorkspaceForm, useNewWorkspace } from './workspace-create.js';
+import { NewWorkspaceForm, useNewWorkspace } from './workspace-create.js';
 import { GitPane } from './spaces-git-pane.js';
 import { NativeSessionsPane } from './spaces-native-sessions.js';
 
@@ -108,7 +108,7 @@ export function SpacesView({
             form={newWs.form}
             saving={newWs.saving}
             error={newWs.error}
-            workspaceRoot={managedWorkspaceDirectory(workspaceRoot)}
+            projectRoot={workspaceRoot}
             onChange={f => newWs.setForm(prev => ({ ...prev, ...f }))}
             onSubmit={newWs.submit}
             onCancel={() => newWs.setOpen(false)}

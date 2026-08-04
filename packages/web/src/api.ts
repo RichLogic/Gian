@@ -9,7 +9,7 @@ import type {
   Task,
   Workspace,
   OnboardingState,
-  OnboardingWorkspaceResult,
+  OnboardingProjectRootResult,
   ProxyCapabilities,
 } from '@gian/shared';
 
@@ -193,15 +193,15 @@ export async function loadOnboarding(): Promise<OnboardingState> {
   return agentResponse<OnboardingState>(response);
 }
 
-export async function saveOnboardingWorkspace(
+export async function saveOnboardingProjectRoot(
   path: string,
-): Promise<OnboardingWorkspaceResult> {
-  const response = await fetch('/api/onboarding/workspace', {
+): Promise<OnboardingProjectRootResult> {
+  const response = await fetch('/api/onboarding/project-root', {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ path }),
   });
-  return agentResponse<OnboardingWorkspaceResult>(response);
+  return agentResponse<OnboardingProjectRootResult>(response);
 }
 
 export async function completeOnboarding(): Promise<OnboardingState> {

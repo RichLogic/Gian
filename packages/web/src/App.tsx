@@ -33,7 +33,7 @@ import { makeWorkbenchWire } from './components/terminal-wire.js';
 import { BrowserBody, browserHostOf } from './components/BrowserBody.js';
 import { ChatContextPanel } from './components/ChatContextPanel.js';
 import { SessionSurface } from './views/SessionSurface.js';
-import { managedWorkspaceDirectory, NewWorkspacePanel } from './views/workspace-create.js';
+import { NewWorkspacePanel } from './views/workspace-create.js';
 import { TasksView } from './views/TasksView.js';
 // The primary view is imported statically: lazy-loading it served no purpose
 // (it renders on every launch) and its suspension used to tear down the whole
@@ -774,7 +774,7 @@ export function App() {
                 if (t.kind === 'new-workspace') {
                   return (
                     <NewWorkspacePanel
-                      workspaceRoot={managedWorkspaceDirectory(systemConfig?.workspace_root ?? '~/Coding')}
+                      projectRoot={systemConfig?.workspace_root ?? '~/Coding'}
                       onChange={() => void loadWorkspaces().then(setWorkspaces)}
                       onClose={() => sheetActions.closeTab(t.id)}
                     />

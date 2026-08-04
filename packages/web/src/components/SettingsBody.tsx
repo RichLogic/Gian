@@ -672,7 +672,7 @@ function AgentInstallRow({
         <dd>
           {agent.cli.state === 'ready'
             ? `${agent.cli.version ?? ''} · ${agent.cli.path ?? ''}`
-            : t('settings.agents.notInstalled')}
+            : t(agent.cli.state === 'invalid' ? 'settings.agents.invalid' : 'settings.agents.notInstalled')}
           {agent.cli.state !== 'ready' && (
             <button className="btn xs secondary" type="button" disabled={busy} onClick={onInstallCli}>
               {t('settings.agents.installOfficial')}

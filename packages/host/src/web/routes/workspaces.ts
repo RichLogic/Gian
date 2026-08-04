@@ -16,7 +16,7 @@ function pickWorkspaceFolder(): Promise<PickFolderOutcome> {
       'osascript',
       [
         '-e', 'tell application "System Events" to activate',
-        '-e', 'POSIX path of (choose folder with prompt "Select workspace folder")',
+        '-e', 'POSIX path of (choose folder with prompt "Select folder")',
       ],
       { stdio: ['ignore', 'pipe', 'pipe'] },
     );
@@ -66,10 +66,10 @@ export function registerWorkspaceRoutes(app: Hono, db: Db): void {
       }
       path = resolve(expanded);
       if (path === root) {
-        return c.json({ error: `cannot adopt the workspace root itself (${root}) — pick a subdirectory or another path` }, 400);
+        return c.json({ error: `cannot adopt the project root itself (${root}) — pick a subdirectory or another path` }, 400);
       }
     } else {
-      path = resolve(root, 'workspaces', body.name);
+      path = resolve(root, body.name);
     }
 
     const existing = db

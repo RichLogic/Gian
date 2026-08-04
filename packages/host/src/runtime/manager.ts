@@ -63,7 +63,7 @@ export class CliRuntimeManager {
         const probe = await provider.probe(candidate);
         const active: ActiveRuntime = {
           probe,
-          env: Object.freeze({ ...provider.managedEnv() }),
+          env: Object.freeze({ ...provider.managedEnv(), ...probe.env }),
           leases: 0,
         };
         this.active.set(cli, active);

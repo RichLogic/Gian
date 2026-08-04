@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import type {
   AgentInstallStatus,
   OnboardingState,
-  OnboardingWorkspaceResult,
+  OnboardingProjectRootResult,
 } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 import { loadConfig, saveConfig } from '../storage/config.js';
@@ -19,10 +19,10 @@ function compactHome(path: string, homeDir: string): string {
     : path;
 }
 
-export function resolveOnboardingWorkspace(
+export function resolveOnboardingProjectRoot(
   rawRoot: string,
   homeDir = homedir(),
-): OnboardingWorkspaceResult {
+): OnboardingProjectRootResult {
   const trimmed = rawRoot.trim();
   if (!trimmed) throw new Error('Project directory is required.');
   const expanded = trimmed === '~'
@@ -35,11 +35,7 @@ export function resolveOnboardingWorkspace(
   }
   const absolute = resolve(expanded);
   if (absolute === '/') throw new Error('Project directory cannot be the filesystem root.');
-  const workspaceRoot = compactHome(absolute, homeDir);
-  return {
-    workspaceRoot,
-    workspaceDirectory: join(absolute, 'workspaces'),
-  };
+  return { projectRoot: compactHome(absolute, homeDir) };
 }
 
 export function onboardingCompleted(db: Db): boolean {
@@ -48,22 +44,25 @@ export function onboardingCompleted(db: Db): boolean {
   return row?.value === '1';
 }
 
-export async function saveOnboardingWorkspace(
+export function hasReadyAgent(agents: AgentInstallStatus[]): boolean {
+  return agents.some(agent => agent.ready);
+}
+
+export async function saveOnboardingProjectRoot(
   db: Db,
   rawRoot: string,
   homeDir = homedir(),
-): Promise<OnboardingWorkspaceResult> {
-  const paths = resolveOnboardingWorkspace(rawRoot, homeDir);
+): Promise<OnboardingProjectRootResult> {
+  const paths = resolveOnboardingProjectRoot(rawRoot, homeDir);
   const absoluteRoot = resolve(
-    paths.workspaceRoot === '~'
+    paths.projectRoot === '~'
       ? homeDir
-      : paths.workspaceRoot.startsWith('~/')
-        ? join(homeDir, paths.workspaceRoot.slice(2))
-        : paths.workspaceRoot,
+      : paths.projectRoot.startsWith('~/')
+        ? join(homeDir, paths.projectRoot.slice(2))
+        : paths.projectRoot,
   );
   await mkdir(absoluteRoot, { recursive: true });
-  await mkdir(paths.workspaceDirectory, { recursive: true });
-  saveConfig(db, { workspace_root: paths.workspaceRoot });
+  saveConfig(db, { workspace_root: paths.projectRoot });
   return paths;
 }
 
@@ -82,7 +81,7 @@ export async function buildOnboardingState(
   homeDir = homedir(),
 ): Promise<OnboardingState> {
   const config = loadConfig(db);
-  const paths = resolveOnboardingWorkspace(config.workspace_root || '~/Coding', homeDir);
+  const paths = resolveOnboardingProjectRoot(config.workspace_root || '~/Coding', homeDir);
   return {
     completed: onboardingCompleted(db),
     ...paths,

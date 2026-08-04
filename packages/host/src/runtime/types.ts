@@ -13,6 +13,8 @@ export interface RuntimeProbe {
   binaryPath: string;
   version: string;
   source: RuntimeSource;
+  /** Environment additions required to execute this exact runtime. */
+  env?: Readonly<Record<string, string>>;
 }
 
 export interface CliRuntimeProvider {

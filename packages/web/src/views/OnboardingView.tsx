@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { AgentInstallStatus, Executor, OnboardingState } from '@gian/shared';
 import {
   completeOnboarding,
@@ -6,7 +6,7 @@ import {
   installAgentProxy,
   loadAgents,
   pickWorkspaceFolder,
-  saveOnboardingWorkspace,
+  saveOnboardingProjectRoot,
   setAgentCliPath,
 } from '../api.js';
 import type { AppIdentity } from '../controllers/use-app-auth.js';
@@ -49,13 +49,10 @@ export function OnboardingView({
   onComplete: (state: OnboardingState) => void;
 }) {
   const t = useT();
-  const [step, setStep] = useState<2 | 3>(2);
+  const [step, setStep] = useState<1 | 2 | 3>(1);
   const [agents, setAgents] = useState<AgentInstallStatus[]>(initialState?.agents ?? []);
-  const [root, setRoot] = useState(initialState?.workspaceRoot ?? '~/Coding');
-  const [workspaceDirectory, setWorkspaceDirectory] = useState(
-    initialState?.workspaceDirectory ?? '~/Coding/workspaces',
-  );
-  const [busyAgent, setBusyAgent] = useState<Executor | 'all' | null>(null);
+  const [root, setRoot] = useState(initialState?.projectRoot ?? '~/Coding');
+  const [busyAgent, setBusyAgent] = useState<Executor | null>(null);
   const [savingDirectory, setSavingDirectory] = useState(false);
   const [pickingDirectory, setPickingDirectory] = useState(false);
   const [error, setError] = useState(initialError);
@@ -63,8 +60,7 @@ export function OnboardingView({
   const orderedAgents = useMemo(() => AGENT_ORDER
     .map(id => agents.find(agent => agent.id === id))
     .filter((agent): agent is AgentInstallStatus => !!agent), [agents]);
-  const allReady = orderedAgents.length === AGENT_ORDER.length
-    && orderedAgents.every(agent => agent.ready);
+  const anyReady = orderedAgents.some(agent => agent.ready);
 
   async function refreshAgents() {
     const next = await loadAgents();
@@ -88,26 +84,6 @@ export function OnboardingView({
     setBusyAgent(agent.id);
     try {
       await setupAgent(agent);
-    } finally {
-      setBusyAgent(null);
-    }
-  }
-
-  async function setupAll() {
-    setBusyAgent('all');
-    setError('');
-    try {
-      let current = await refreshAgents();
-      for (const id of AGENT_ORDER) {
-        const agent = current.find(candidate => candidate.id === id);
-        if (!agent) throw new Error(`Agent status is missing: ${id}`);
-        if (!agent.ready) {
-          await setupAgent(agent);
-          current = await refreshAgents();
-        }
-      }
-    } catch (value) {
-      setError(value instanceof Error ? value.message : String(value));
     } finally {
       setBusyAgent(null);
     }
@@ -142,9 +118,8 @@ export function OnboardingView({
     setSavingDirectory(true);
     setError('');
     try {
-      const saved = await saveOnboardingWorkspace(root);
-      setRoot(saved.workspaceRoot);
-      setWorkspaceDirectory(saved.workspaceDirectory);
+      const saved = await saveOnboardingProjectRoot(root);
+      setRoot(saved.projectRoot);
       onComplete(await completeOnboarding());
     } catch (value) {
       setError(value instanceof Error ? value.message : String(value));
@@ -166,7 +141,30 @@ export function OnboardingView({
         </header>
         <OnboardingSteps active={step} />
 
-        {step === 2 ? (
+        {step === 1 ? (
+          <section className="onboarding-panel" aria-labelledby="onboarding-github-title">
+            <div className="onboarding-github-connected">
+              {githubUser && (
+                <img src={githubUser.avatarUrl} alt="" referrerPolicy="no-referrer" />
+              )}
+              <span className="onboarding-eyebrow">{t('onboarding.github.complete')}</span>
+              <h2 id="onboarding-github-title">{t('onboarding.github.title')}</h2>
+              <p>{t('onboarding.github.help')}</p>
+              {githubUser && (
+                <strong>@{githubUser.login}</strong>
+              )}
+            </div>
+            <footer className="onboarding-actions">
+              <button
+                className="btn primary"
+                type="button"
+                onClick={() => { setError(''); setStep(2); }}
+              >
+                {t('common.continue')}
+              </button>
+            </footer>
+          </section>
+        ) : step === 2 ? (
           <section className="onboarding-panel" aria-labelledby="onboarding-agents-title">
             <div className="onboarding-panel-heading">
               <div>
@@ -187,7 +185,7 @@ export function OnboardingView({
                 <OnboardingAgentRow
                   key={agent.id}
                   agent={agent}
-                  busy={busyAgent === agent.id || busyAgent === 'all'}
+                  busy={busyAgent === agent.id}
                   onSetup={() => void setupOne(agent)}
                   onSavePath={path => void savePath(agent, path)}
                 />
@@ -196,17 +194,17 @@ export function OnboardingView({
             {error && <p className="onboarding-error" role="alert">{error}</p>}
             <footer className="onboarding-actions">
               <button
-                className="btn secondary"
+                className="btn ghost"
                 type="button"
-                disabled={busyAgent !== null || allReady}
-                onClick={() => void setupAll()}
+                disabled={busyAgent !== null}
+                onClick={() => { setError(''); setStep(1); }}
               >
-                {busyAgent === 'all' ? t('onboarding.agents.installingAll') : t('onboarding.agents.installAll')}
+                {t('common.back')}
               </button>
               <button
                 className="btn primary"
                 type="button"
-                disabled={!allReady || busyAgent !== null}
+                disabled={!anyReady || busyAgent !== null}
                 onClick={() => { setError(''); setStep(3); }}
               >
                 {t('common.continue')}
@@ -244,12 +242,8 @@ export function OnboardingView({
             </div>
             <div className="onboarding-path-preview">
               <div>
-                <span>{t('onboarding.directory.projects')}</span>
-                <code>{root || '—'}</code>
-              </div>
-              <div>
-                <span>{t('onboarding.directory.workspaces')}</span>
-                <code>{root.trim() ? `${root.trim().replace(/\/$/, '')}/workspaces` : workspaceDirectory}</code>
+                <span>{t('onboarding.directory.worktrees')}</span>
+                <code>{root.trim() ? `${root.trim().replace(/\/$/, '')}/worktrees` : '—'}</code>
               </div>
             </div>
             <p className="onboarding-directory-note">{t('onboarding.directory.note')}</p>
@@ -289,6 +283,7 @@ function OnboardingAgentRow({
   const [path, setPath] = useState(agent.cli.path ?? '');
   const cliReady = agent.cli.state === 'ready';
   const proxyReady = agent.proxy.state === 'ready';
+  useEffect(() => setPath(agent.cli.path ?? ''), [agent.cli.path]);
   return (
     <article className={`onboarding-agent ${agent.ready ? 'ready' : ''}`}>
       <div className="onboarding-agent-summary">
@@ -306,7 +301,9 @@ function OnboardingAgentRow({
       <div className="onboarding-agent-components">
         <span className={cliReady ? 'ready' : 'missing'}>
           <b>CLI</b>
-          {cliReady ? `${agent.cli.version ?? ''} · ${agent.cli.path ?? ''}` : t('settings.agents.notInstalled')}
+          {cliReady
+            ? `${agent.cli.version ?? ''} · ${agent.cli.path ?? ''}`
+            : t(agent.cli.state === 'invalid' ? 'settings.agents.invalid' : 'settings.agents.notInstalled')}
         </span>
         <span className={proxyReady ? 'ready' : 'missing'}>
           <b>Proxy</b>

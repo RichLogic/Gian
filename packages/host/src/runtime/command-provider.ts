@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, realpath } from 'node:fs/promises';
-import { delimiter, isAbsolute, resolve } from 'node:path';
+import { delimiter, dirname, isAbsolute, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { Executor } from '@gian/shared';
 import type {
@@ -26,8 +26,31 @@ interface Candidate {
   source: RuntimeSource;
 }
 
+const SYSTEM_PATHS = [
+  '/opt/homebrew/bin',
+  '/usr/local/bin',
+  '/usr/bin',
+  '/bin',
+  '/usr/sbin',
+  '/sbin',
+];
+
 function firstVersion(text: string): string | null {
   return text.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/)?.[0] ?? null;
+}
+
+function uniquePath(entries: Array<string | undefined>): string {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of entries) {
+    for (const entry of (value ?? '').split(delimiter)) {
+      const trimmed = entry.trim();
+      if (!trimmed || seen.has(trimmed)) continue;
+      seen.add(trimmed);
+      result.push(trimmed);
+    }
+  }
+  return result.join(delimiter);
 }
 
 export class CommandRuntimeProvider implements CliRuntimeProvider {
@@ -46,9 +69,6 @@ export class CommandRuntimeProvider implements CliRuntimeProvider {
       }
       candidates.push({ path: configured, source: 'override' });
     } else {
-      for (const path of this.options.officialPaths()) {
-        candidates.push({ path, source: 'official-user' });
-      }
       for (const directory of (
         this.options.pathEnv?.() ?? process.env.PATH ?? ''
       ).split(delimiter)) {
@@ -59,6 +79,9 @@ export class CommandRuntimeProvider implements CliRuntimeProvider {
           });
         }
       }
+      for (const path of this.options.officialPaths()) {
+        candidates.push({ path, source: 'official-user' });
+      }
     }
 
     const installed: InstalledRuntime[] = [];
@@ -66,10 +89,16 @@ export class CommandRuntimeProvider implements CliRuntimeProvider {
     for (const candidate of candidates) {
       try {
         await access(candidate.path, constants.X_OK);
-        const binaryPath = await realpath(candidate.path);
-        if (!isAbsolute(binaryPath) || seen.has(binaryPath)) continue;
-        seen.add(binaryPath);
-        installed.push({ cli: this.id, binaryPath, source: candidate.source });
+        const canonicalPath = await realpath(candidate.path);
+        if (!isAbsolute(canonicalPath) || seen.has(canonicalPath)) continue;
+        seen.add(canonicalPath);
+        // Keep the launcher path. Resolving an npm-style symlink to its JS
+        // target bypasses the directory that also contains its Node runtime.
+        installed.push({
+          cli: this.id,
+          binaryPath: candidate.path,
+          source: candidate.source,
+        });
       } catch {
         if (candidate.source === 'override') {
           installed.push({
@@ -88,10 +117,11 @@ export class CommandRuntimeProvider implements CliRuntimeProvider {
       throw new Error(`resolved ${this.id} binary path is not absolute`);
     }
     await access(runtime.binaryPath, constants.X_OK);
+    const runtimeEnv = this.runtimeEnv(runtime);
     const result = await execFileAsync(runtime.binaryPath, ['--version'], {
       timeout: 8_000,
       maxBuffer: 1024 * 1024,
-      env: { ...process.env, ...this.managedEnv() },
+      env: { ...process.env, ...runtimeEnv },
     });
     const version = firstVersion(`${result.stdout}\n${result.stderr}`);
     if (!version) {
@@ -102,10 +132,27 @@ export class CommandRuntimeProvider implements CliRuntimeProvider {
       binaryPath: runtime.binaryPath,
       version,
       source: runtime.source,
+      env: runtimeEnv,
     };
   }
 
   managedEnv(): Readonly<Record<string, string>> {
     return this.options.env ?? {};
+  }
+
+  private runtimeEnv(runtime: InstalledRuntime): Readonly<Record<string, string>> {
+    const managed = this.managedEnv();
+    const officialDirectories = this.options.officialPaths().map(path => dirname(path));
+    return {
+      ...managed,
+      PATH: uniquePath([
+        dirname(runtime.binaryPath),
+        managed.PATH,
+        this.options.pathEnv?.(),
+        process.env.PATH,
+        ...officialDirectories,
+        ...SYSTEM_PATHS,
+      ]),
+    };
   }
 }
