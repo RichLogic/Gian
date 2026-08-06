@@ -1,8 +1,9 @@
 // Coverage for traceability row (component dimension):
-//   QUEUE-003 — Queue UI must show queue contents AND support move
-//               up / move down / remove / clear / send-now. The
-//               underlying QueueManager + WS routing are already
-//               covered host-side in queue-and-busy.test.ts.
+//   QUEUE-003 — Queue UI must show queue contents (text + attachment
+//               thumbnails) AND support edit / remove / clear / send-now.
+//               Reorder was removed on 2026-08-05 (no move up/down). The
+//               underlying QueueManager + WS routing are covered host-side
+//               in queue-and-busy.test.ts.
 
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -10,8 +11,8 @@ import userEvent from '@testing-library/user-event';
 import type { QueueEntry } from '../src/types.js';
 import { QueueList } from '../src/components/QueueList.js';
 
-function entry(id: string, text: string): QueueEntry {
-  return { id, text, sessionId: 'sess-1', createdAt: Date.now() };
+function entry(id: string, text: string, extra?: Partial<QueueEntry>): QueueEntry {
+  return { id, text, ...extra };
 }
 
 function renderQueue(opts: {
@@ -19,25 +20,26 @@ function renderQueue(opts: {
   withSendNow?: boolean;
 } = {}) {
   const onRemove = vi.fn();
-  const onReorder = vi.fn();
+  const onUpdate = vi.fn();
   const onClear = vi.fn();
   const onSendNow = opts.withSendNow ? vi.fn() : undefined;
   render(
     <QueueList
+      sessionId="sess-1"
       queue={opts.queue ?? []}
       onRemove={onRemove}
-      onReorder={onReorder}
+      onUpdate={onUpdate}
       onClear={onClear}
       onSendNow={onSendNow}
     />,
   );
-  return { onRemove, onReorder, onClear, onSendNow };
+  return { onRemove, onUpdate, onClear, onSendNow };
 }
 
 describe('QUEUE-003: QueueList rendering', () => {
   it('renders nothing when the queue is empty', () => {
     const { container } = render(
-      <QueueList queue={[]} onRemove={vi.fn()} onReorder={vi.fn()} onClear={vi.fn()} />,
+      <QueueList sessionId="sess-1" queue={[]} onRemove={vi.fn()} onUpdate={vi.fn()} onClear={vi.fn()} />,
     );
     expect(container).toBeEmptyDOMElement();
   });
@@ -56,40 +58,66 @@ describe('QUEUE-003: QueueList rendering', () => {
     const indices = Array.from(document.querySelectorAll('.qd-idx'), (el) => el.textContent);
     expect(indices).toEqual(['1', '2']);
   });
+
+  it('QUEUE-003: renders image attachments as thumbnails served by the host', () => {
+    renderQueue({
+      queue: [entry('a', 'with image', {
+        items: [{ type: 'localImage', path: '/data/attachments/sess-1/paste-1.png', name: 'paste-1.png', mime: 'image/png' }],
+      })],
+    });
+    const img = document.querySelector('.qd-att-thumb img');
+    expect(img?.getAttribute('src')).toBe('/api/sessions/sess-1/attachments/paste-1.png');
+  });
+
+  it('QUEUE-003: renders non-image attachments as file chips', () => {
+    renderQueue({
+      queue: [entry('a', 'with file', {
+        items: [{ type: 'localFile', path: '/data/attachments/sess-1/notes.txt', name: 'notes.txt', mime: 'text/plain' }],
+      })],
+    });
+    expect(document.querySelector('.qd-att-file')?.textContent).toContain('notes.txt');
+  });
 });
 
-describe('QUEUE-003: reorder operations', () => {
-  it('Move up sends the swapped id order to onReorder', async () => {
+describe('QUEUE-003: edit', () => {
+  it('Edit swaps the row to a textarea; Enter saves via onUpdate(id, text)', async () => {
     const user = userEvent.setup();
-    const { onReorder } = renderQueue({
-      queue: [entry('a', 'first'), entry('b', 'second'), entry('c', 'third')],
-    });
-    // Move-up button for the second entry.
-    const upButtons = screen.getAllByLabelText('Move up');
-    await user.click(upButtons[1]!);
-    expect(onReorder).toHaveBeenCalledWith(['b', 'a', 'c']);
+    const { onUpdate } = renderQueue({ queue: [entry('a', 'first'), entry('b', 'second')] });
+    await user.click(screen.getAllByLabelText('Edit')[0]!);
+    const box = screen.getByDisplayValue('first');
+    await user.clear(box);
+    await user.type(box, 'first edited{Enter}');
+    expect(onUpdate).toHaveBeenCalledWith('a', 'first edited');
   });
 
-  it('QUEUE-003: Move down sends the swapped id order to onReorder', async () => {
+  it('QUEUE-003: Escape cancels the edit without calling onUpdate', async () => {
     const user = userEvent.setup();
-    const { onReorder } = renderQueue({
-      queue: [entry('a', 'first'), entry('b', 'second'), entry('c', 'third')],
-    });
-    const downButtons = screen.getAllByLabelText('Move down');
-    await user.click(downButtons[0]!);
-    expect(onReorder).toHaveBeenCalledWith(['b', 'a', 'c']);
+    const { onUpdate } = renderQueue({ queue: [entry('a', 'first')] });
+    await user.click(screen.getByLabelText('Edit'));
+    const box = screen.getByDisplayValue('first');
+    await user.type(box, ' changed{Escape}');
+    expect(onUpdate).not.toHaveBeenCalled();
+    // Back in read mode.
+    expect(screen.getByText('first')).toBeInTheDocument();
   });
 
-  it('QUEUE-003: Move up on the FIRST entry is disabled (no-op)', () => {
-    renderQueue({ queue: [entry('a', 'first'), entry('b', 'second')] });
-    const upButtons = screen.getAllByLabelText('Move up');
-    expect(upButtons[0]).toBeDisabled();
+  it('QUEUE-003: saving an unchanged text is a no-op', async () => {
+    const user = userEvent.setup();
+    const { onUpdate } = renderQueue({ queue: [entry('a', 'first')] });
+    await user.click(screen.getByLabelText('Edit'));
+    await user.type(screen.getByDisplayValue('first'), '{Enter}');
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(screen.getByText('first')).toBeInTheDocument();
   });
 
-  it('QUEUE-003: Move down on the LAST entry is disabled', () => {
-    renderQueue({ queue: [entry('a', 'first'), entry('b', 'second')] });
-    const downButtons = screen.getAllByLabelText('Move down');
-    expect(downButtons[downButtons.length - 1]).toBeDisabled();
+  it('QUEUE-003: saving a blank text is a no-op', async () => {
+    const user = userEvent.setup();
+    const { onUpdate } = renderQueue({ queue: [entry('a', 'first')] });
+    await user.click(screen.getByLabelText('Edit'));
+    const box = screen.getByDisplayValue('first');
+    await user.clear(box);
+    await user.type(box, '{Enter}');
+    expect(onUpdate).not.toHaveBeenCalled();
   });
 });
 

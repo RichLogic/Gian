@@ -297,6 +297,18 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* The row sets `font: …/1`; inside this overflow-hidden box a 1.0 line-height
+     clips descenders (p/g/y) — give the label its own taller line box. */
+  line-height: 1.35;
+}
+/* Branch (worktree) menu: let long worktree names breathe. The bare menu
+   shrink-fits inside its breadcrumb anchor, so `codex/push-realtime-…` names
+   ellipsized well short of readable; size to content with a viewport-aware
+   cap instead, and the row's `title` tooltip covers anything still longer
+   (2026-08-05). */
+.session-menu.branch-menu {
+  width: max-content;
+  max-width: min(480px, calc(100vw - 48px));
 }
 .session-menu .rule { height: 1px; background: var(--hairline); margin: 4px 4px; }
 

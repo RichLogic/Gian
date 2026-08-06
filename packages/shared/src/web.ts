@@ -140,7 +140,9 @@ export interface ApprovalUpdatedMessage {
 export interface QueueUpdatedMessage {
   type: 'queue:updated';
   session_id: string;
-  queue: Array<Pick<QueueEntry, 'id' | 'text'>>;
+  /** Items carry the entry's attachments (localImage/localFile) so the queue
+   *  drawer can render thumbnails without a second fetch. */
+  queue: Array<Pick<QueueEntry, 'id' | 'text'> & { items?: InputItem[] }>;
 }
 
 export interface RunnerUpdatedMessage {
@@ -419,10 +421,13 @@ export interface QueueRemoveMessage {
   queue_id: string;
 }
 
-export interface QueueReorderMessage {
-  type: 'queue:reorder';
+export interface QueueUpdateMessage {
+  type: 'queue:update';
   session_id: string;
-  order: string[];
+  queue_id: string;
+  /** New text for the entry. Position in the queue is kept; attachments
+   *  (items) are not editable — remove and re-queue to change those. */
+  text: string;
 }
 
 export interface QueueSendNowMessage {
@@ -506,7 +511,7 @@ export type ClientToServerMessage =
   | SessionSetNativeConfigMessage
   | QueueAddMessage
   | QueueRemoveMessage
-  | QueueReorderMessage
+  | QueueUpdateMessage
   | QueueSendNowMessage
   | QueueClearMessage
   | TermSpawnMessage

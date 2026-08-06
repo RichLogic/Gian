@@ -804,3 +804,109 @@ test('capabilities reuses an attached session\'s configOptions instead of probin
   assert.equal(newSessionCalls, 1);
   await service.close();
 });
+
+
+const FULL_CONFIG_OPTIONS = [
+  {
+    type: 'select',
+    category: 'model',
+    id: 'model',
+    name: 'Model',
+    description: 'Model to use for this session',
+    currentValue: 'kimi-k2',
+    options: [
+      { value: 'kimi-k2', name: 'Kimi K2' },
+      { value: 'kimi-k2-thinking', name: 'Kimi K2 Thinking' },
+    ],
+  },
+  {
+    type: 'select',
+    category: 'thought_level',
+    id: 'thought_level',
+    name: 'Thinking',
+    currentValue: 'medium',
+    options: [
+      { value: 'low', name: 'Low' },
+      { value: 'medium', name: 'Medium' },
+      { value: 'high', name: 'High' },
+    ],
+  },
+  ...MODE_CONFIG_OPTIONS,
+];
+
+test('capabilities probes model and thinking choices from configOptions', async () => {
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({ sessionId: 'native-probe', configOptions: FULL_CONFIG_OPTIONS }),
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+
+  const capabilities = await service.listCapabilities();
+
+  assert.deepEqual(
+    capabilities.modes.map((mode: { id: string }) => mode.id),
+    ['default', 'plan', 'auto', 'yolo'],
+  );
+  assert.equal(capabilities.models.length, 2);
+  assert.deepEqual(capabilities.models[0], {
+    id: 'kimi-model-kimi-k2',
+    model: 'kimi-k2',
+    displayName: 'Kimi K2',
+    description: 'Model to use for this session',
+    hidden: false,
+    isDefault: true,
+    defaultThinking: null,
+    // Session-global thinking levels are attached to every model.
+    supportedThinking: ['low', 'medium', 'high'],
+  });
+  assert.deepEqual(capabilities.models[1], {
+    ...capabilities.models[0],
+    id: 'kimi-model-kimi-k2-thinking',
+    model: 'kimi-k2-thinking',
+    displayName: 'Kimi K2 Thinking',
+    isDefault: false,
+  });
+  await service.close();
+});
+
+test('capabilities reports no models when configOptions have no model option', async () => {
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({ sessionId: 'native-probe', configOptions: MODE_CONFIG_OPTIONS }),
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+
+  const capabilities = await service.listCapabilities();
+
+  assert.deepEqual(capabilities.models, []);
+  assert.equal(capabilities.modes.length, 4);
+  await service.close();
+});
+
+test('capabilities reports empty modes and models when the probe session fails', async () => {
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => {
+        throw new Error('not logged in');
+      },
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+
+  const capabilities = await service.listCapabilities();
+
+  assert.deepEqual(capabilities.modes, []);
+  assert.deepEqual(capabilities.models, []);
+  await service.close();
+});

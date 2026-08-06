@@ -5,7 +5,7 @@
 //     BOTH menus/anchors).
 
 import { describe, it, expect } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { PathBreadcrumb } from '../src/components/PathBreadcrumb.js';
 import type { PathSegment } from '../src/components/PathBreadcrumb.js';
@@ -63,5 +63,17 @@ describe('PathBreadcrumb dropdowns', () => {
     expect(screen.queryByText('Primary')).toBeNull();
     expect(screen.getByText('Rename')).toBeTruthy();
     expect(openMenus()).toBe(1);
+  });
+
+  it('branch dropdown is content-sized (branch-menu class) and rows expose the full name via title', async () => {
+    const user = userEvent.setup();
+    renderBreadcrumb();
+    await user.click(screen.getByRole('button', { name: /fix\/subtask-running-check/ }));
+    const menu = document.querySelector('.session-menu.branch-menu');
+    expect(menu).toBeTruthy();
+    // The breadcrumb segment itself is also a button with the same name; pick
+    // the one inside the menu.
+    const menuRow = within(menu as HTMLElement).getByRole('button', { name: /fix\/subtask-running-check/ });
+    expect(menuRow.getAttribute('title')).toBe('fix/subtask-running-check');
   });
 });

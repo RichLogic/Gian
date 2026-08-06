@@ -3,14 +3,17 @@ import type { MsgItem, TranscriptItem } from '../types.js';
 import { useT } from '../i18n/index.js';
 import { useMinimapEnabled } from '../display-prefs.js';
 
-/** Side room (scroll width minus transcript width, halved) needed for the
- *  minimap rail to sit beside the centered transcript without covering
- *  message text. Below it the rail stays hidden. */
-const PILL_MIN_GUTTER_PX = 190;
+/** Chat panel (`.main`) width below which the minimap rail is hidden — on a
+ *  narrow panel the transcript fills the width and a left rail would sit on
+ *  top of message text. */
+const PANEL_MIN_WIDTH_PX = 640;
 /** Not worth a minimap rail below this many of the user's own messages. */
 const MIN_MESSAGES = 3;
 /** A jumped-to message lands this far below the viewport top. */
 const LANDING_PX = 24;
+/** Distance from the bottom (px) that still counts as "at the bottom" — the
+ *  scroll-to-bottom button shows outside this range. */
+const BOTTOM_PX = 40;
 
 function snippet(s: string): string {
   const one = s.replace(/\s+/g, ' ').trim();
@@ -43,12 +46,13 @@ function isMsgVisible(scrollEl: HTMLElement, id: string | undefined): boolean {
  *  - prev/next arrow buttons (always available) jump to the message above/below
  *    the current scroll position. They render INLINE in the underbar row the
  *    caller places this component in (next to the Plan/Agent chips, flush
- *    right) — no caption, no floating pill, same layout at any width;
- *  - an optional right-gutter minimap rail (toggled in Settings, off by
- *    default, only when the layout is wide enough) modelled on the ChatGPT
- *    "scrollbar/outline" extensions: one tick per message, spaced evenly by
- *    turn order, hover reveals the text, the current message stays
- *    highlighted.
+ *    right) — no caption, no floating pill, same layout at any width. When the
+ *    view isn't pinned to the bottom, a chevrons-down button sits to their
+ *    left and scrolls straight to the latest message;
+ *  - an optional left-edge minimap rail (toggled in Settings, off by
+ *    default, hidden on narrow panels) modelled on the Codex transcript
+ *    outline: one small dash per message, spaced evenly by turn order, hover
+ *    reveals the text, the current message stays highlighted.
  *
  * The rail is an absolute overlay anchored to `.main` (NOT a child of the
  * scroll container) so it stays put while the conversation scrolls. The nav
@@ -64,6 +68,7 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
   const [markers, setMarkers] = useState<{ id: string; label: string }[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [roomy, setRoomy] = useState(false);
+  const [atBottom, setAtBottom] = useState(true);
   const [navVisible, setNavVisible] = useState(false);
   const [canPrev, setCanPrev] = useState(false);
   const [canNext, setCanNext] = useState(false);
@@ -83,9 +88,7 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
     let scrollRaf = 0;
 
     const layout = () => {
-      const content = scrollEl.querySelector('.transcript') as HTMLElement | null;
-      const contentW = content?.offsetWidth ?? scrollEl.clientWidth;
-      setRoomy((scrollEl.clientWidth - contentW) / 2 >= PILL_MIN_GUTTER_PX);
+      setRoomy((mainEl?.clientWidth ?? scrollEl.clientWidth) >= PANEL_MIN_WIDTH_PX);
       if (mainEl) {
         const sr = scrollEl.getBoundingClientRect();
         const mr = mainEl.getBoundingClientRect();
@@ -100,6 +103,7 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
       const offs = offsetsRef.current;
       const top = scrollEl.scrollTop;
       const bottom = top + scrollEl.clientHeight;
+      setAtBottom(scrollEl.scrollHeight - bottom <= BOTTOM_PX);
       // The nav earns its place only when one of your messages is actually
       // off-screen (above the viewport top or below the bottom); when every
       // message fits on screen there is nothing to jump to.
@@ -186,6 +190,9 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
   const n = markers.length;
   const showRail = !!scrollEl && minimapOn && roomy && n >= MIN_MESSAGES;
   const showNav = !!scrollEl && navVisible;
+  const scrollToBottom = () => {
+    scrollEl?.scrollTo({ top: scrollEl.scrollHeight, behavior: 'smooth' });
+  };
 
   return (
     <>
@@ -204,18 +211,30 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
           </button>
         ))}
       </div>
-      {showNav && (
+      {(showNav || !atBottom) && (
         <div className="transcript-navbtns" ref={navRef}>
-          <button type="button" className="tn-btn" onClick={goPrev} disabled={!canPrev} title={t('minimap.prev')} aria-label={t('minimap.prev')}>
-            <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M4 10l4-4 4 4" />
-            </svg>
-          </button>
-          <button type="button" className="tn-btn" onClick={goNext} disabled={!canNext} title={t('minimap.next')} aria-label={t('minimap.next')}>
-            <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M4 6l4 4 4-4" />
-            </svg>
-          </button>
+          {!atBottom && (
+            <button type="button" className="tn-btn" onClick={scrollToBottom} title={t('minimap.scrollBottom')} aria-label={t('minimap.scrollBottom')}>
+              <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 4.5l5 5 5-5" />
+                <path d="M3 8.5l5 5 5-5" />
+              </svg>
+            </button>
+          )}
+          {showNav && (
+            <>
+              <button type="button" className="tn-btn" onClick={goPrev} disabled={!canPrev} title={t('minimap.prev')} aria-label={t('minimap.prev')}>
+                <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M4 10l4-4 4 4" />
+                </svg>
+              </button>
+              <button type="button" className="tn-btn" onClick={goNext} disabled={!canNext} title={t('minimap.next')} aria-label={t('minimap.next')}>
+                <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M4 6l4 4 4-4" />
+                </svg>
+              </button>
+            </>
+          )}
         </div>
       )}
     </>

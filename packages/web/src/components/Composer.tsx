@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ApprovalMode, Executor, NativeConfigOption, NativeConfigValue, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
+import type { ApprovalMode, Executor, NativeConfigOption, NativeConfigValue, ProxyModeCapabilities, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
 import { isNativeImageMime } from '../attachments.js';
 import {
   loadNativeConfig,
@@ -8,18 +8,21 @@ import {
   uploadAttachment,
 } from '../api.js';
 import { useT } from '../i18n/index.js';
+import { ImageZoomContext } from '../transcript/items.js';
 import { ContextUsageIndicator } from './composer/context-usage-indicator.js';
 import {
-  CODEX_APPROVALS,
   claudeModelFamily,
-  codexApprovalLabelKey,
+  composerModeLabel,
+  composerModeOptions,
   defaultEffort,
   defaultModel,
   effortLabel,
   fetchModelsCached,
+  fetchModesCached,
   fetchSlashCached,
   flatFiltered,
   getModelsCached,
+  getModesCached,
   getSlashCached,
   modelLabel,
   nativeOptionRole,
@@ -32,21 +35,66 @@ export { ContextUsageIndicator } from './composer/context-usage-indicator.js';
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
 
-/** Per-session unsent draft. localStorage key prefix; bump the version
- *  suffix if the schema ever needs to change. */
-const DRAFT_KEY_PREFIX = 'gian.composer.draft.v1.';
+/** Per-session unsent draft. localStorage key prefix; v2 stores JSON
+ *  `{text, attachments}` so unsent ATTACHMENTS survive a session switch too
+ *  (v1 stored text only and silently dropped them). Attachments persist as
+ *  metadata only (name/mime/size/path) — the bytes already live in the
+ *  host's per-session attachment store, so the restored chip previews from
+ *  the served `/api/sessions/:id/attachments/:filename` URL. */
+const DRAFT_KEY_PREFIX = 'gian.composer.draft.v2.';
+const LEGACY_DRAFT_KEY_PREFIX = 'gian.composer.draft.v1.';
 const draftKey = (sessionId: string) => `${DRAFT_KEY_PREFIX}${sessionId}`;
-function readDraft(sessionId: string): string {
+const legacyDraftKey = (sessionId: string) => `${LEGACY_DRAFT_KEY_PREFIX}${sessionId}`;
+
+export interface DraftAttachment {
+  name: string;
+  mime: string;
+  size: number;
+  /** Absolute path in the host attachment store (upload already done). */
+  path: string;
+}
+
+interface ComposerDraft {
+  text: string;
+  attachments: DraftAttachment[];
+}
+
+const EMPTY_DRAFT: ComposerDraft = { text: '', attachments: [] };
+
+/** Served preview URL for an attachment that already lives in the host's
+ *  per-session store — the same endpoint the transcript bubbles use. */
+function servedAttachmentUrl(sessionId: string, path: string): string {
+  return `/api/sessions/${sessionId}/attachments/${path.split('/').pop() ?? path}`;
+}
+
+function readDraft(sessionId: string): ComposerDraft {
   try {
-    return localStorage.getItem(draftKey(sessionId)) ?? '';
+    const raw = localStorage.getItem(draftKey(sessionId));
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<ComposerDraft>;
+      return {
+        text: typeof parsed.text === 'string' ? parsed.text : '',
+        attachments: Array.isArray(parsed.attachments)
+          ? parsed.attachments.filter(a =>
+              a && typeof a.path === 'string' && typeof a.name === 'string' && typeof a.mime === 'string')
+          : [],
+      };
+    }
+    // Legacy v1 draft (plain text) — carried over once, then rewritten as v2.
+    const legacy = localStorage.getItem(legacyDraftKey(sessionId));
+    return legacy ? { text: legacy, attachments: [] } : EMPTY_DRAFT;
   } catch {
-    return '';
+    return EMPTY_DRAFT;
   }
 }
-function writeDraft(sessionId: string, text: string): void {
+function writeDraft(sessionId: string, draft: ComposerDraft): void {
   try {
-    if (text) localStorage.setItem(draftKey(sessionId), text);
-    else localStorage.removeItem(draftKey(sessionId));
+    if (draft.text || draft.attachments.length > 0) {
+      localStorage.setItem(draftKey(sessionId), JSON.stringify(draft));
+    } else {
+      localStorage.removeItem(draftKey(sessionId));
+    }
+    localStorage.removeItem(legacyDraftKey(sessionId));
   } catch {
     // localStorage may be unavailable (privacy mode) — drafts become ephemeral.
   }
@@ -63,8 +111,8 @@ const COMPOSER_INJECT_EVENT = 'gian:composer-inject';
  *  existing draft. */
 export function injectComposerDraft(sessionId: string, text: string): void {
   const existing = readDraft(sessionId);
-  const next = existing ? `${existing}\n\n${text}` : text;
-  writeDraft(sessionId, next);
+  const next = existing.text ? `${existing.text}\n\n${text}` : text;
+  writeDraft(sessionId, { ...existing, text: next });
   try {
     window.dispatchEvent(new CustomEvent(COMPOSER_INJECT_EVENT, { detail: { sessionId } }));
   } catch {
@@ -98,6 +146,29 @@ function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Rebuild composer chips from a persisted draft. The upload already happened
+ *  (path is set), so the chip previews from the host-served URL — no object
+ *  URL is created and `URL.revokeObjectURL` on it is a harmless no-op. */
+function draftAttachmentsToPending(sessionId: string, attachments: DraftAttachment[]): PendingFile[] {
+  return attachments.map(a => ({
+    id: crypto.randomUUID(),
+    name: a.name,
+    mime: a.mime,
+    size: a.size,
+    sizeLabel: fmtBytes(a.size),
+    previewUrl: servedAttachmentUrl(sessionId, a.path),
+    path: a.path,
+    uploading: false,
+  }));
+}
+
+/** Attachments worth persisting into the draft: fully uploaded, no error. */
+function persistableDraftAttachments(files: PendingFile[]): DraftAttachment[] {
+  return files
+    .filter((f): f is PendingFile & { path: string } => f.path !== null && !f.uploading && !f.error)
+    .map(f => ({ name: f.name, mime: f.mime, size: f.size, path: f.path }));
 }
 
 /** A concrete Claude id like `claude-opus-4-8` (synced from the native
@@ -176,7 +247,15 @@ export function Composer({
   const t = useT();
   const minimal = variant === 'minimal';
   const cliExecutor = executor === 'kimi' ? null : executor;
-  const [text, setText] = useState(() => readDraft(session.id));
+  const zoomImage = useContext(ImageZoomContext);
+  // Restore text AND already-uploaded attachments from the per-session draft —
+  // before v2 only the text survived a session switch and the chips vanished
+  // even though their uploads still existed in the host attachment store.
+  const [initialDraft] = useState(() => readDraft(session.id));
+  const [text, setText] = useState(initialDraft.text);
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>(
+    () => draftAttachmentsToPending(session.id, initialDraft.attachments),
+  );
 
   // Session swap: snapshot current draft under the OUTGOING session's key,
   // then load the INCOMING session's draft. We use the React-blessed
@@ -184,10 +263,12 @@ export function Composer({
   // outgoing draft against the incoming session id.
   const lastSessionRef = useRef(session.id);
   if (lastSessionRef.current !== session.id) {
-    writeDraft(lastSessionRef.current, text);
+    writeDraft(lastSessionRef.current, { text, attachments: persistableDraftAttachments(pendingFiles) });
+    for (const f of pendingFiles) URL.revokeObjectURL(f.previewUrl);
     const incoming = readDraft(session.id);
     lastSessionRef.current = session.id;
-    setText(incoming);
+    setText(incoming.text);
+    setPendingFiles(draftAttachmentsToPending(session.id, incoming.attachments));
   }
   // Single-turn bypass: ⚡ button toggles. Cleared automatically after the
   // next send so it never persists across turns.
@@ -211,6 +292,9 @@ export function Composer({
   const [models, setModels] = useState<ProxyModel[]>(
     cliExecutor ? (getModelsCached(cliExecutor) ?? []) : [],
   );
+  const [proxyModes, setProxyModes] = useState<ProxyModeCapabilities[]>(
+    cliExecutor ? (getModesCached(cliExecutor) ?? []) : [],
+  );
   const sessionNativeOptions = session.native_config_options ?? [];
   const [nativeOptions, setNativeOptions] = useState(sessionNativeOptions);
 
@@ -232,6 +316,29 @@ export function Composer({
         // Keep rendering the session with its persisted model/effort. The
         // capability menu can retry the next time this executor is mounted.
         if (alive) setModels([]);
+      });
+    return () => { alive = false; };
+  }, [cliExecutor]);
+
+  // Fetch the session-mode vocabulary lazily per executor; cached. Until it
+  // resolves (or if it fails) the mode dropdown uses the built-in lists.
+  useEffect(() => {
+    if (!cliExecutor) {
+      setProxyModes([]);
+      return;
+    }
+    const cached = getModesCached(cliExecutor);
+    if (cached) {
+      setProxyModes(cached);
+      return;
+    }
+    let alive = true;
+    void fetchModesCached(cliExecutor)
+      .then(list => { if (alive) setProxyModes(list); })
+      .catch(() => {
+        // Keep rendering the built-in mode lists; the fetch retries the next
+        // time this executor's composer is mounted.
+        if (alive) setProxyModes([]);
       });
     return () => { alive = false; };
   }, [cliExecutor]);
@@ -330,30 +437,21 @@ export function Composer({
   const nativeExtraOptions = nativeOptions.filter(option => !semanticNativeIds.has(option.id));
   // Files are uploaded into the host-owned per-session attachment store before
   // send, so queued turns and restored sessions never depend on the original.
-  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
-  const attachmentSessionRef = useRef(session.id);
+  // (pendingFiles itself is declared up top — the session-swap block needs it.)
   const fileInputRef = useRef<HTMLInputElement>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
   const modelPopRef = useRef<HTMLDivElement>(null);
 
-  // Persist the draft on every text change so refreshes / accidental closes
-  // don't lose unsent input. The session-swap render-time block above
-  // already swaps `text` to the incoming session's draft, so this effect
-  // always writes against the current session id.
+  // Persist the draft on every text / attachment change so refreshes,
+  // accidental closes and session switches don't lose unsent input. The
+  // session-swap render-time block above already swaps state to the incoming
+  // session's draft, so this effect always writes against the current
+  // session id.
   useEffect(() => {
-    writeDraft(session.id, text);
-  }, [session.id, text]);
-
-  useEffect(() => {
-    if (attachmentSessionRef.current === session.id) return;
-    attachmentSessionRef.current = session.id;
-    setPendingFiles(previous => {
-      for (const file of previous) URL.revokeObjectURL(file.previewUrl);
-      return [];
-    });
-  }, [session.id]);
+    writeDraft(session.id, { text, attachments: persistableDraftAttachments(pendingFiles) });
+  }, [session.id, text, pendingFiles]);
 
   // External draft injection (Changes inspector → "commit / push / create PR"
   // prompts). The dispatcher has already written the appended draft to
@@ -362,7 +460,7 @@ export function Composer({
     function onInject(e: Event) {
       const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
       if (detail?.sessionId !== session.id) return;
-      setText(readDraft(session.id));
+      setText(readDraft(session.id).text);
       requestAnimationFrame(() => {
         const el = ref.current;
         if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
@@ -374,6 +472,9 @@ export function Composer({
 
   const activeModel = currentModel;
   const approvalMode = session.approval_mode;
+  // Proxy-advertised mode vocabulary once capabilities resolve; built-in
+  // fallback lists before that (and on fetch failure).
+  const modeOptions = cliExecutor ? composerModeOptions(cliExecutor, proxyModes) : [];
   // Warn colour only for modes that stop asking the user (2026-08-04 — the
   // chip used to be warn unconditionally). Kimi isn't here: its mode chip is
   // the native-option drop with its own styling.
@@ -731,7 +832,14 @@ export function Composer({
             {pendingFiles.map(f => (
               <div key={f.id} className={`att-chip${f.error ? ' is-error' : ''}${f.uploading ? ' is-uploading' : ''}`}>
                 {isNativeImageMime(f.mime) ? (
-                  <img className="att-thumb" src={f.previewUrl} alt="" />
+                  <button
+                    type="button"
+                    className="att-thumb-btn"
+                    title={f.name}
+                    onClick={() => zoomImage?.(f.previewUrl, f.name)}
+                  >
+                    <img className="att-thumb" src={f.previewUrl} alt={f.name} />
+                  </button>
                 ) : (
                   <span className="att-file-icon" aria-hidden="true">
                     <svg viewBox="0 0 16 16" fill="none">
@@ -1027,11 +1135,9 @@ export function Composer({
                 onClick={() => approvalDrop.setOpen(o => !o)}
               >
                 <span className="name">
-                  {cliExecutor === 'codex'
-                    ? t(codexApprovalLabelKey(approvalMode ?? 'ask'))
-                    : oneShotBypass
-                      ? t('composer.bypass.button')
-                      : t(`mode.${approvalMode ?? 'ask'}`)}
+                  {cliExecutor === 'claude' && oneShotBypass
+                    ? t('composer.bypass.button')
+                    : composerModeLabel(cliExecutor, approvalMode ?? 'ask', proxyModes, t)}
                 </span>
                 <span className="caret cmp-caret" aria-hidden="true">▾</span>
               </button>
@@ -1050,14 +1156,12 @@ export function Composer({
                     </span>
                   </div>
                   <div className="mp-list">
-                    {(cliExecutor === 'codex'
-                      ? CODEX_APPROVALS
-                      : [
-                          { key: 'plan', mode: 'plan' as const, titleKey: 'mode.plan' },
-                          { key: 'ask', mode: 'ask' as const, titleKey: 'mode.ask' },
-                          { key: 'auto', mode: 'auto' as const, titleKey: 'mode.auto' },
-                        ]).map(opt => {
+                    {modeOptions.map(opt => {
                       const active = !oneShotBypass && approvalMode === opt.mode;
+                      const title = opt.titleKey ? t(opt.titleKey) : (opt.label ?? opt.key);
+                      const hint = opt.descKey
+                        ? t(opt.descKey)
+                        : (!opt.titleKey && opt.description ? opt.description : null);
                       return (
                         <button
                           key={opt.key}
@@ -1071,9 +1175,9 @@ export function Composer({
                         >
                           <span className="mp-check">{active ? '✓' : ''}</span>
                           <span className="mp-row-body">
-                            <span className="mp-row-title">{t(opt.titleKey)}</span>
-                            {'descKey' in opt && opt.descKey && (
-                              <span className="mp-row-hint">{t(opt.descKey)}</span>
+                            <span className="mp-row-title">{title}</span>
+                            {hint && (
+                              <span className="mp-row-hint">{hint}</span>
                             )}
                           </span>
                         </button>

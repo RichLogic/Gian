@@ -1,6 +1,6 @@
 // Coverage for traceability rows:
 //   QUEUE-001  — running turn must queue, not start a concurrent turn.
-//   QUEUE-002  — reorder / remove / clear / sendNow / FIFO semantics.
+//   QUEUE-002  — update / remove / clear / sendNow / FIFO semantics.
 //   INV-009    — per-session queue drain takes priority over job continuation.
 //   ERR-005    — startTurn SESSION_BUSY rollback must drop the phantom turn
 //                without flipping the still-running session into 'error'.
@@ -314,7 +314,7 @@ test('queue drain stops without popping when the session is completed', async ()
 });
 
 // ---------------------------------------------------------------------------
-// QUEUE-002 — reorder / remove / clear / sendNow.
+// QUEUE-002 — update / remove / clear / sendNow.
 // ---------------------------------------------------------------------------
 
 // queue_entries.session_id is a FK to sessions(id) (migration 020). The
@@ -345,27 +345,26 @@ test('QUEUE-002: QueueManager assigns monotonically increasing sort_order and li
   }
 });
 
-test('QUEUE-002: reorder swaps positions but keeps ids; popNext follows the new order', async () => {
+test('QUEUE-002: update rewrites the text in place and keeps the position', async () => {
   const ctx = setup();
   try {
     const { queue } = ctx;
     const sid = await makeSessionId(ctx);
-    const a = queue.add(sid, 'A');
+    queue.add(sid, 'A');
     const b = queue.add(sid, 'B');
-    const c = queue.add(sid, 'C');
+    queue.add(sid, 'C');
 
-    queue.reorder(sid, [c.id, a.id, b.id]);
-    const reordered = queue.list(sid).map(e => e.text);
-    assert.deepEqual(reordered, ['C', 'A', 'B']);
+    queue.update(sid, b.id, 'B edited');
+    assert.deepEqual(queue.list(sid).map(e => e.text), ['A', 'B edited', 'C'],
+      'update keeps the entry at its position');
+
+    // Attachments survive a text-only edit.
+    assert.deepEqual(queue.list(sid)[1]!.items, b.items);
 
     const popped1 = queue.popNext(sid);
-    assert.equal(popped1?.text, 'C', 'pop returns new head after reorder');
+    assert.equal(popped1?.text, 'A', 'drain order is unchanged');
     const popped2 = queue.popNext(sid);
-    assert.equal(popped2?.text, 'A');
-
-    // New add must tail the queue, not jump in front of leftover B.
-    queue.add(sid, 'D');
-    assert.deepEqual(queue.list(sid).map(e => e.text), ['B', 'D']);
+    assert.equal(popped2?.text, 'B edited');
   } finally {
     teardown(ctx);
   }

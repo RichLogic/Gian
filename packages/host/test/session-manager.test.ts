@@ -151,7 +151,7 @@ class StubKimiProxyClient implements ProxyClient {
   async capabilities() {
     return {
       protocolVersion: '1',
-      models: [] as [],
+      models: [],
       slashCommands: [] as [],
       sessionCapabilities: {
         load: true,
@@ -381,6 +381,52 @@ test('Kimi applies a Proxy-owned default mode through native config', async () =
     const session = await sessions.createSession({ workspace_id: wsId, executor: 'kimi' });
     assert.equal(session.approval_mode, null);
     assert.deepEqual(session.executor_config.values, { mode: 'yolo' });
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi applies Proxy-owned model and thinking defaults through native config', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi(() => ({
+    model: 'kimi-k2',
+    thinking: 'high',
+    mode: 'yolo',
+  }));
+  try {
+    proxyMgr.client.options.push(
+      {
+        id: 'model',
+        name: 'Model',
+        type: 'select',
+        currentValue: 'kimi-k1',
+        scope: 'session',
+        choices: [
+          { value: 'kimi-k1', label: 'Kimi K1' },
+          { value: 'kimi-k2', label: 'Kimi K2' },
+        ],
+      },
+      {
+        id: 'thought_level',
+        name: 'Thinking',
+        type: 'select',
+        currentValue: 'medium',
+        scope: 'session',
+        choices: [
+          { value: 'low', label: 'Low' },
+          { value: 'medium', label: 'Medium' },
+          { value: 'high', label: 'High' },
+        ],
+      },
+    );
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'kimi' });
+    assert.equal(session.approval_mode, null);
+    assert.equal(session.model, 'kimi-k2');
+    assert.deepEqual(session.executor_config.values, {
+      mode: 'yolo',
+      model: 'kimi-k2',
+      thought_level: 'high',
+    });
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

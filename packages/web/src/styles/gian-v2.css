@@ -499,34 +499,34 @@ button.sb-section:hover { color: var(--text); }
   position: relative; /* containing block for the transcript minimap rail */
 }
 
-/* Transcript minimap — slim right-gutter rail of the user's own messages,
-   modelled on the ChatGPT "scrollbar/outline" extensions. One tick per message,
-   spaced EVENLY by turn order (placement set inline). A fixed overlay anchored
-   to `.main` (top/height set by JS to cover the scroll viewport) — it does NOT
-   move with the content; sits just inside the scroll container's 10px scrollbar
-   so the two don't overlap. */
+/* Transcript minimap — slim LEFT-edge rail of the user's own messages,
+   modelled on the Codex transcript outline: one small dash per message,
+   spaced EVENLY by turn order (placement set inline), the current message
+   a longer, darker bar. A fixed overlay anchored to `.main` (top/height set
+   by JS to cover the scroll viewport) — it does NOT move with the content;
+   sits inside the scroll container's left padding so it never covers
+   message text. Hidden by JS on narrow panels (PANEL_MIN_WIDTH_PX). */
 .transcript-minimap {
   position: absolute;
-  right: 13px;
-  width: 12px;
+  left: 5px;
+  width: 14px;
   z-index: 6;
-  pointer-events: none; /* rail is inert; ticks opt back in */
+  pointer-events: none; /* rail is inert; dashes opt back in */
   opacity: 0.7;
   transition: opacity .15s ease;
 }
 .transcript-minimap:hover { opacity: 1; }
 .transcript-minimap.is-hidden { display: none; }
 
-/* Each user message: a short tick, with its text revealed to the left on hover. */
+/* Each user message: a short dash, with its text revealed to the right on hover. */
 .tm-item {
   position: absolute;
-  right: 0;
+  left: 0;
   transform: translateY(-50%);
   display: flex;
   align-items: center;
-  flex-direction: row-reverse; /* tick on the right, label flies out left */
   gap: 0;
-  padding: 5px 0; /* fat hit target without moving the tick */
+  padding: 5px 0; /* fat hit target without moving the dash */
   margin: -5px 0;
   background: none;
   border: 0;
@@ -534,16 +534,16 @@ button.sb-section:hover { color: var(--text); }
   pointer-events: auto;
 }
 .tm-tick {
-  width: 11px;
+  width: 7px;
   height: 2px;
   border-radius: var(--r-1);
-  background: oklch(from var(--text) l c h / 0.30);
+  background: oklch(from var(--text) l c h / 0.22);
   transition: width .12s ease, background .12s ease;
 }
-.tm-item:hover .tm-tick { width: 15px; background: var(--accent); }
+.tm-item:hover .tm-tick { width: 13px; background: oklch(from var(--text) l c h / 0.55); }
 .tm-item.active .tm-tick {
-  width: 15px;
-  background: var(--accent);
+  width: 13px;
+  background: oklch(from var(--text) l c h / 0.85);
 }
 .tm-item:focus-visible { outline: none; }
 .tm-item:focus-visible .tm-tick {
@@ -552,9 +552,9 @@ button.sb-section:hover { color: var(--text); }
 }
 .tm-label {
   position: absolute;
-  right: 19px;
+  left: 21px;
   top: 50%;
-  transform: translateY(-50%) translateX(4px);
+  transform: translateY(-50%) translateX(-4px);
   max-width: 260px;
   white-space: nowrap;
   overflow: hidden;
@@ -1442,7 +1442,10 @@ button.sb-section:hover { color: var(--text); }
   background: var(--surface);
   border-radius: var(--r-3);
   box-shadow: var(--shadow-1);
-  overflow: hidden;
+  /* No overflow:hidden here — it clipped the Changes scope menu's Committed
+     submenu, which flies out left past the panel edge. Corner rounding is
+     safe without it: the background lives on .inspector itself and the
+     children (.insp-head / .insp-scroll) are transparent and padded. */
   min-height: 0;
   margin: var(--sp-2) 0 var(--sp-2) 0;
 }
@@ -1504,6 +1507,12 @@ button.sb-section:hover { color: var(--text); }
 /* File trees render in sans (Codex-style); mono is reserved for code/diff
    panes. Slightly roomier rows + r-2 radius to match the rail items. */
 .tree { padding: 0 2px; font-family: var(--font-sans); font-size: var(--fz-12); }
+/* coding.css gives `.tree` `min-width: max-content` (legacy Files view: grow
+   to the widest row, horizontal scroll, never truncate). Inside the
+   inspector that makes rows wider than the panel and pushes the Changes
+   +/− stats off the right edge — inspector trees fit the panel width and
+   truncate names instead. */
+.inspector .tree { min-width: 0; }
 .tree-item {
   display: grid;
   grid-template-columns: 12px 14px 1fr auto;
@@ -1620,10 +1629,107 @@ button.sb-section:hover { color: var(--text); }
 }
 .changes-scope-menu button:hover { background: var(--surface-2); }
 .changes-scope-menu button.active { color: var(--text); font-weight: 600; }
+/* Hairline between scope groups: working-tree slices | history | Last Turn. */
+.changes-scope-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--hairline);
+}
 .changes-scope-menu .ck {
   width: 12px; flex: none;
   color: var(--accent, var(--text));
   font-size: 11px; text-align: center;
+}
+
+/* Second row under the Changes header (Codex's two-row Review UI — no nested
+   dropdowns): for Branch, `<head> → <base ⌄>`; for Committed, the pinned
+   commit picker. The dropdown is a flat searchable list. */
+.changes-base-row {
+  flex: none;
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 12px 6px;
+  border-top: 1px solid var(--hairline);
+  font: var(--fz-12)/1.3 var(--font-sans);
+  color: var(--text-3);
+}
+.changes-base-row .base-head {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 40%;
+}
+.changes-base-row .base-arrow { flex: none; opacity: 0.6; }
+.changes-base { position: relative; min-width: 0; flex: 1; display: flex; }
+.changes-base-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  max-width: 100%;
+  padding: 2px 6px;
+  border: 0; background: transparent;
+  color: var(--text);
+  border-radius: var(--r-1);
+  font: var(--fz-12)/1.3 var(--font-sans);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: pointer;
+}
+.changes-base-btn:hover { background: var(--surface-2); }
+.changes-base-btn .caret { font-size: 8px; opacity: 0.7; flex: none; }
+.changes-base-menu {
+  position: absolute;
+  top: calc(100% + 4px); left: 0;
+  z-index: 31;
+  min-width: 220px;
+  max-width: 300px;
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex; flex-direction: column;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  box-shadow: var(--shadow-2);
+}
+.changes-base-search {
+  flex: none;
+  margin: 2px 2px 4px;
+  padding: 5px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  color: var(--text);
+  font: var(--fz-12)/1.3 var(--font-sans);
+  outline: none;
+}
+.changes-base-search:focus { border-color: var(--text-3); }
+.changes-base-menu button {
+  display: flex; align-items: baseline; gap: 8px;
+  text-align: left;
+  padding: 6px 8px;
+  border: 0; background: transparent;
+  color: var(--text);
+  border-radius: var(--r-1);
+  font: var(--fz-12)/1.3 var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.changes-base-menu button:hover { background: var(--surface-2); }
+.changes-base-menu button.active { font-weight: 600; }
+.changes-base-menu .ck {
+  width: 12px; flex: none;
+  color: var(--accent, var(--text));
+  font-size: 11px; text-align: center;
+}
+.changes-base-menu .subj {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.changes-base-menu .rel {
+  flex: 0 0 auto;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+.changes-commit-empty {
+  padding: 6px 8px;
+  color: var(--text-3);
+  font-size: var(--fz-12);
 }
 
 /* Changed files as a collapsible file tree (reuses .tree / .tree-item chrome).
@@ -1631,9 +1737,19 @@ button.sb-section:hover { color: var(--text); }
    content, so the only write affordance is the hover-reveal stage toggle
    (index-only). */
 .tree-item.changes-leaf {
-  grid-template-columns: 12px 16px 1fr auto;
+  /* minmax(0, 1fr) lets the name track shrink below its content width so a
+     long filename never pushes the +/− stats off the panel's right edge. */
+  grid-template-columns: 12px 16px minmax(0, 1fr) auto;
   color: var(--text);
   position: relative;
+}
+/* Truncated names fade out at the right edge (gradient mask) instead of an
+   ellipsis, keeping the pinned stats readable next to them. The fade zone
+   is only the last 16px, so short names are unaffected. */
+.tree-item.changes-leaf .tree-name {
+  text-overflow: clip;
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent 100%);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent 100%);
 }
 .tree-item.changes-leaf .files-badge {
   width: 16px; height: 16px;

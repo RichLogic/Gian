@@ -16,11 +16,19 @@ const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 export function resolveDevEnvironment(env = process.env) {
   const githubClientId = env.GIAN_GITHUB_CLIENT_ID?.trim()
     || DEFAULT_GITHUB_CLIENT_ID;
-  const baseEnv = Object.fromEntries(
+  // Drop every inherited GIAN_* var before pinning the dev values: a shell
+  // launched from the production Gian desktop carries GIAN_DESKTOP_TOKEN,
+  // GIAN_PARENT_MANAGED, GIAN_WEB_DIST, GIAN_PORT=8990, … — leaking them makes
+  // the GianDev host enforce the production desktop token (readiness probe
+  // gets `desktop_client_required`), serve the production web dist, and shut
+  // down when the parent's stdin closes (2026-08-05). The honored overrides
+  // (GIAN_DEV_DATA_DIR, GIAN_GITHUB_CLIENT_ID) are read from `env` directly
+  // and re-set explicitly below.
+  const clean = Object.fromEntries(
     Object.entries(env).filter(([key]) => !key.startsWith('GIAN_')),
   );
   return {
-    ...baseEnv,
+    ...clean,
     GIAN_HOST: '127.0.0.1',
     GIAN_PORT: '8991',
     GIAN_HOST_PORT: '8991',
@@ -149,6 +157,11 @@ export async function main(args = process.argv.slice(2)) {
         '-r',
         '--parallel',
         '--filter', '!@gian/desktop',
+        // Exclusion-only filters also select the workspace ROOT package, whose
+        // "dev" script is this very script — without `!gian` the services
+        // group recursively re-runs dev.mjs, which wipes shared/dist mid-boot
+        // and races the outer Vite for port 5191 (2026-08-05).
+        '--filter', '!gian',
         '--if-present',
         'dev',
       ], env);

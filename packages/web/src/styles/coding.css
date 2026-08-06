@@ -185,30 +185,27 @@
 
 /* ============================================================
    Approval card — the important UX piece
+   ------------------------------------------------------------
+   Restrained palette (2026-08-05): the shell is always neutral
+   (surface-2 + single hairline). At most ONE hue per card:
+   - pending high risk: thin danger outline + danger icon/pill
+   - resolved (approved): ok icon + ok status pill
+   - declined: danger icon + danger status pill
+   Everything else (medium/low risk, question) stays monochrome.
    ============================================================ */
 .approval {
   margin: 12px 0;
   border-radius: var(--r-3);
   background: var(--surface-2);
   overflow: hidden;
-  box-shadow: 0 0 0 1px var(--hairline), 0 0 0 3px var(--warn-soft);
+  box-shadow: 0 0 0 1px var(--hairline);
   transition: box-shadow 140ms var(--ease);
 }
+/* high risk: the only pending state that earns a hue — a thin
+   danger outline, not a glow ring */
 .approval.high {
-  box-shadow: 0 0 0 1px oklch(from var(--danger) l c h / 0.3), 0 0 0 4px var(--danger-soft);
+  box-shadow: 0 0 0 1px oklch(from var(--danger) l c h / 0.35);
 }
-/* low risk: softer warn ring */
-.approval.low {
-  box-shadow: 0 0 0 1px var(--hairline), 0 0 0 2px var(--ok-soft);
-}
-.approval.low .approval-ico { background: var(--ok-soft); color: var(--ok); }
-/* AskUserQuestion variant — same affordance, accent ring (blue/info) so it
-   reads visually as "input wanted" not "permission gate". */
-.approval.question {
-  box-shadow: 0 0 0 1px var(--hairline), 0 0 0 3px var(--accent-soft);
-}
-.approval.question .approval-ico { background: var(--accent-soft); color: var(--accent-text); }
-.approval.question .approval-risk { background: var(--accent-soft); color: var(--accent-text); }
 .question-body {
   padding: 4px 14px 10px;
   display: flex; flex-direction: column; gap: 14px;
@@ -272,7 +269,7 @@
 }
 .approval-ico {
   width: 28px; height: 28px; border-radius: var(--r-2);
-  background: var(--warn-soft); color: var(--warn);
+  background: var(--surface-3); color: var(--text-3);
   display: flex; align-items: center; justify-content: center;
   flex-shrink: 0;
   /* — ported from design/coding.css — smooth state transition */
@@ -290,14 +287,14 @@
   font-size: 9.5px; font-weight: 700;
   text-transform: none; letter-spacing: 0.06em;
   padding: 1px 5px; border-radius: var(--r-1);
-  background: var(--warn-soft); color: var(--warn);
+  background: var(--surface-3); color: var(--text-3);
 }
 .approval.high .approval-risk { background: var(--danger-soft); color: var(--danger); }
 
-/* Risk pill subclasses (low / medium / high) */
-.approval-risk--low     { background: var(--ok-soft) !important; color: var(--ok) !important; }
-.approval-risk--medium  { background: var(--warn-soft); color: var(--warn); }
-.approval-risk--high    { background: var(--danger-soft) !important; color: var(--danger) !important; }
+/* Risk pill subclasses (low / medium neutral; only high earns a hue) */
+.approval-risk--low     { background: var(--surface-3); color: var(--text-3); }
+.approval-risk--medium  { background: var(--surface-3); color: var(--text-3); }
+.approval-risk--high    { background: var(--danger-soft); color: var(--danger); }
 
 .approval-sub {
   font-size: 11px;
@@ -461,6 +458,10 @@
 }
 
 .queue-drawer {
+  /* Same width as the composer: the drawer is a direct flex child of `.main`
+     (no .composer-wrap padding), so it needs the 16px side insets subtracted
+     explicitly; margin auto then centers it under the input box. */
+  width: calc(100% - 32px);
   max-width: 820px; margin: 0 auto 6px;
   background: var(--surface-2);
   border-radius: var(--r-2) var(--r-2) 0 0;
@@ -493,11 +494,16 @@
 .qd-body {
   padding: 4px 6px 6px;
   display: flex; flex-direction: column; gap: 4px;
+  /* Long / multiline entries render in full now — cap the drawer instead so
+     a big queue can't push the composer off-screen. */
+  max-height: 240px;
+  overflow-y: auto;
 }
 .qd-item {
   display: grid;
   grid-template-columns: 18px 1fr auto;
-  align-items: center; gap: 8px;
+  align-items: start;
+  gap: 8px;
   padding: 6px 8px;
   border-radius: var(--r-1);
   background: var(--surface);
@@ -509,15 +515,62 @@
   font-size: 10px; font-weight: 700;
   color: var(--text-3);
   text-align: center;
+  /* Align with the first text line now that rows can be multi-line. */
+  padding-top: 3px;
 }
 .qd-text {
   color: var(--text);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  /* Full text, newlines preserved — long messages wrap instead of
+     truncating with an ellipsis (2026-08-05). */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
+/* Text + attachment thumbnails stacked in the row's content cell. */
+.qd-text-cell {
+  display: flex; flex-direction: column; gap: 4px;
+  min-width: 0;
+}
+.qd-atts {
+  display: flex; flex-wrap: wrap; gap: 4px;
+}
+.qd-att-thumb {
+  display: inline-flex;
+  padding: 0; border: 0; background: transparent;
+  cursor: zoom-in;
+  border-radius: var(--r-1);
+}
+.qd-att-thumb img {
+  width: 32px; height: 32px;
+  object-fit: cover;
+  border-radius: var(--r-1);
+  display: block;
+}
+.qd-att-file {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10.5px; color: var(--text-3);
+  max-width: 200px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.qd-att-file svg { width: 12px; height: 12px; flex: none; }
+/* Inline edit (replaces the text cell while active). */
+.qd-edit {
+  width: 100%;
+  resize: none;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border, oklch(from var(--text) l c h / 0.12));
+  border-radius: var(--r-1);
+  padding: 4px 6px;
+  outline: none;
+}
+.qd-edit:focus { border-color: var(--accent); }
 .qd-item-act {
   display: flex; align-items: center; gap: 1px;
   opacity: 0.7;
   transition: opacity 100ms;
+  /* Top-align with the first text line on multi-line rows. */
+  padding-top: 1px;
 }
 .qd-item:hover .qd-item-act { opacity: 1; }
 .qd-item-act .btn { height: 20px; width: 20px; }
@@ -993,6 +1046,15 @@
 }
 .att-chip.is-uploading { opacity: 0.6; }
 .att-chip.is-error { border-color: var(--warn); color: var(--warn); }
+/* Clickable thumbnail — opens the in-app lightbox (ImageZoomContext). */
+.att-thumb-btn {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+  border-radius: var(--r-1);
+}
 .att-thumb {
   width: 28px; height: 28px;
   object-fit: cover;

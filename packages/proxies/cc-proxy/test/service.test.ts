@@ -406,8 +406,14 @@ test('capabilities discovery does not run claude -p unless explicitly opted in',
 
   const oldClaudeBin = process.env.CLAUDE_BIN;
   const oldAllowProbe = process.env.GIAN_ALLOW_CLAUDE_PRINT_PROBE;
+  const oldHome = process.env.HOME;
+  const oldConfigDir = process.env.CLAUDE_CONFIG_DIR;
   process.env.CLAUDE_BIN = fakeClaude;
   delete process.env.GIAN_ALLOW_CLAUDE_PRINT_PROBE;
+  // Hermetic settings discovery: no CLAUDE_CONFIG_DIR and a tmp HOME with no
+  // ~/.claude/settings.json, so discovery must land on the static alias menu.
+  delete process.env.CLAUDE_CONFIG_DIR;
+  process.env.HOME = dir;
 
   const service = new CcProxyService({ runtime: new ClaudeMcpRuntime() });
   try {
@@ -431,6 +437,10 @@ test('capabilities discovery does not run claude -p unless explicitly opted in',
     else process.env.CLAUDE_BIN = oldClaudeBin;
     if (oldAllowProbe === undefined) delete process.env.GIAN_ALLOW_CLAUDE_PRINT_PROBE;
     else process.env.GIAN_ALLOW_CLAUDE_PRINT_PROBE = oldAllowProbe;
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    if (oldConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = oldConfigDir;
     rmSync(dir, { recursive: true, force: true });
   }
 });

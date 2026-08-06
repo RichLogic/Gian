@@ -120,17 +120,27 @@ export class SessionLifecycleService {
 
     let proxyResult: BringUpResult;
     try {
+      // Kimi applies executor defaults through its ACP config options. The
+      // values keys are the native option ids Kimi advertises in
+      // configOptions (model / thought_level / mode), applied via
+      // setNativeConfig during bring-up.
+      const kimiConfigValues: Record<string, string> = {};
+      if (input.executor === 'kimi') {
+        if (defaultModel) kimiConfigValues.model = defaultModel;
+        if (defaultEffort) kimiConfigValues.thought_level = defaultEffort;
+        if (configuredMode) kimiConfigValues.mode = configuredMode;
+      }
       proxyResult = await this.runtime.bringUpProxySession({
         sessionId: id,
         executor: input.executor,
         cwd: workspace.path,
         model: effectiveModel,
         displayName: input.name ?? null,
-        ...(input.executor === 'kimi' && configuredMode
+        ...(Object.keys(kimiConfigValues).length > 0
           ? {
               executorConfig: {
                 schemaVersion: 1 as const,
-                values: { mode: configuredMode },
+                values: kimiConfigValues,
               },
             }
           : {}),

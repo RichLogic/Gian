@@ -41,7 +41,7 @@ const SESSION = {
 
 function renderComposer() {
   const onSend = vi.fn();
-  render(
+  const view = render(
     <LocaleProvider locale="en">
       <Composer
         session={SESSION}
@@ -59,7 +59,7 @@ function renderComposer() {
       />
     </LocaleProvider>,
   );
-  return { onSend };
+  return { onSend, unmount: view.unmount };
 }
 
 describe('Composer file attachments', () => {
@@ -108,5 +108,28 @@ describe('Composer file attachments', () => {
         previewUrl: 'blob:attachment-preview',
       }],
     });
+  });
+
+  it('restores uploaded image attachments from the draft after a remount', async () => {
+    vi.mocked(uploadAttachment).mockResolvedValue({
+      path: '/tmp/gian/attachments/session-attachment/uuid.png',
+      name: 'paste-1.png',
+      size: 3,
+      mime: 'image/png',
+    });
+    const first = renderComposer();
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [new File(['img'], 'paste-1.png', { type: 'image/png' })] } });
+    expect(await screen.findByText('paste-1.png')).toBeInTheDocument();
+
+    // Switching away unmounts the composer; coming back must restore the chip
+    // from the persisted draft, previewing via the host-served URL.
+    first.unmount();
+    renderComposer();
+    await waitFor(() => {
+      const img = document.querySelector('.att-thumb');
+      expect(img?.getAttribute('src')).toBe('/api/sessions/session-attachment/attachments/uuid.png');
+    });
+    expect(screen.getByText('paste-1.png')).toBeInTheDocument();
   });
 });

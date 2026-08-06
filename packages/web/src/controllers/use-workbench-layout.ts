@@ -73,6 +73,10 @@ export function useWorkbenchLayout({
     sheetMounted,
     sheetVisible,
     inspectorKind,
+    // Exposed separately from `inspectorVisible`: the topbar toggle's
+    // availability must NOT depend on the collapsed state, otherwise hiding
+    // panel 3 disables the very button that brings it back (2026-08-05).
+    inspectorAvailable,
     inspectorVisible,
     openWorkspaceIds,
     selectedWorkspaceId,

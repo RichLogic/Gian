@@ -329,9 +329,10 @@ describe('subtask row actions', () => {
     expect(reopenSubtask).toHaveBeenCalledWith('sub-1');
   });
 
-  it('disables the complete toggle while the turn is running', () => {
+  it('hides the complete toggle while the turn is running (pin stays)', () => {
     renderTasks({ tasks: [task()], sessions: [subtask({ status: 'running' })] });
-    expect(screen.getByTestId('subtask-complete-sub-1')).toBeDisabled();
+    expect(screen.queryByTestId('subtask-complete-sub-1')).toBeNull();
+    expect(screen.getByTestId('subtask-pin-sub-1')).toBeTruthy();
   });
 });
 

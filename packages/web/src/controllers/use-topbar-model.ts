@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState, type Dispatch, type SetStateAction } from 'react';
 import type { Executor, Session, Workspace } from '@gian/shared';
-import { completeSubtask, reopenSubtask, type WorkingTree } from '../api.js';
+import type { WorkingTree } from '../api.js';
 import type {
   BranchMenuActions,
   PathSegment,
@@ -59,6 +59,10 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
   const pathSegments = useMemo<PathSegment[]>(() => {
     if (mode === 'sessions' || (mode === 'tasks' && activeSubtaskId)) {
       if (!activeSession) return [];
+      // A completed conversation (completed_at set) is read-only in the
+      // breadcrumb: no session menu anchor (no caret, click copies the name)
+      // and no worktree dropdown (2026-08-05).
+      const completed = activeSession.completed_at != null;
       // Segment order (2026-08-03): project / session / worktree. The Tasks
       // view no longer prepends the task name — the task is already the
       // selected row in the sidebar, and its menu lives on the rail row.
@@ -71,9 +75,11 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
       segments.push({
         kind: 'session',
         label: activeSession.name || t('coding.session.untitled'),
-        copyHint: t('coding.session.actions'),
+        copyHint: completed
+          ? `${t('common.copy')} "${activeSession.name || t('coding.session.untitled')}"`
+          : t('coding.session.actions'),
         editing: renaming,
-        menuAnchor: true,
+        menuAnchor: !completed,
       });
       if (activeBranch) {
         segments.push({
@@ -103,6 +109,8 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
   const sessionMenu = useMemo<SessionMenuActions | null>(() => {
     const isSubtask = mode === 'tasks' && !!activeSubtaskId;
     if ((mode !== 'sessions' && !isSubtask) || !activeSession) return null;
+    // Completed conversation: no session dropdown (2026-08-05).
+    if (activeSession.completed_at != null) return null;
     return {
       kind: isSubtask ? 'subtask' : 'session',
       onRename: () => setRenaming(true),
@@ -123,14 +131,7 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
         });
         if (confirmed) ws.send({ type: 'session:delete', session_id: activeSession.id });
       },
-      ...(isSubtask ? {
-        completed: activeSession.completed_at != null,
-        onToggleComplete: () => {
-          void (activeSession.completed_at
-            ? reopenSubtask(activeSession.id)
-            : completeSubtask(activeSession.id));
-        },
-      } : {
+      ...(isSubtask ? {} : {
         onFork: (executor: Executor) => {
           const baseName = activeSession.name || `session ${activeSession.id.slice(0, 6)}`;
           setCreatingSession(true);
@@ -153,6 +154,8 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
     const visible = (mode === 'sessions' || (mode === 'tasks' && activeSubtaskId))
       && !!activeBranch;
     if (!visible || !activeSession) return null;
+    // Completed conversation: no worktree dropdown either (2026-08-05).
+    if (activeSession.completed_at != null) return null;
     const viewedId = viewedWorkingTreeId(activeSession);
     return {
       items: workingTrees

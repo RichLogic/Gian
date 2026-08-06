@@ -44,9 +44,9 @@ function rowToEntry(row: QueueRow): QueueEntry {
  * Per-session message queue backed by SQLite (queue_entries table).
  *
  * sort_order is assigned as MAX(sort_order)+1 on insert, so newly added
- * entries always tail the queue. popNext reads the lowest sort_order, which
- * stays correct even after reorder operations reassign sort_order values
- * sequentially (0, 1, 2…).
+ * entries always tail the queue. popNext reads the lowest sort_order. Entry
+ * text is editable in place (`update`); changing position is not supported —
+ * the UI has no reorder control (2026-08-05).
  */
 export class QueueManager {
   constructor(private db: Db) {}
@@ -81,15 +81,11 @@ export class QueueManager {
       .run(sessionId, queueId);
   }
 
-  reorder(sessionId: string, orderedIds: string[]): void {
-    const update = this.db.prepare(
-      'UPDATE queue_entries SET sort_order = ? WHERE session_id = ? AND id = ?',
-    );
-    this.db.transaction(() => {
-      for (let i = 0; i < orderedIds.length; i++) {
-        update.run(i, sessionId, orderedIds[i]);
-      }
-    })();
+  /** Update an entry's text in place — its position (sort_order) is kept. */
+  update(sessionId: string, queueId: string, text: string): void {
+    this.db
+      .prepare('UPDATE queue_entries SET text = ? WHERE session_id = ? AND id = ?')
+      .run(text, sessionId, queueId);
   }
 
   clear(sessionId: string): void {

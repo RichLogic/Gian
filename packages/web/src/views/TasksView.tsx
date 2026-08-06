@@ -703,7 +703,7 @@ function SubtaskRow({
   const running = subtask.status === 'running';
   return (
     <div
-      className={`rail-item session-row${done ? ' subtask-done' : ''}${active ? ' active' : ''}`}
+      className={`rail-item session-row${done ? ' subtask-done' : ''}${active ? ' active' : ''}${running ? ' is-running' : ''}`}
       role="button"
       tabIndex={0}
       onClick={onSelect}
@@ -724,9 +724,13 @@ function SubtaskRow({
         {/* Compact single-line layout: executor is carried by the time tint. */}
       </div>
       {/* Hover actions: pin / complete toggle. They cover the row-end glyph on
-          hover (CSS). A completed subtask can't be pinned (it sorts to the
-          bottom of its task anyway); neither action stays visible off-hover —
-          an always-on glyph would overlap the row-end time (2026-08-03). */}
+          hover (CSS) — EXCEPT while a turn is running: then the complete
+          toggle is not rendered at all (a disabled check next to the spinner
+          read as "done"), and the pin shifts left to sit BESIDE the running
+          ring instead of covering it (`.is-running` rules in tasks-v3.css).
+          A completed subtask can't be pinned (it sorts to the bottom of its
+          task anyway); neither action stays visible off-hover — an always-on
+          glyph would overlap the row-end time (2026-08-03). */}
       <span className="ri-acts">
         {!done && (
           <button
@@ -743,22 +747,21 @@ function SubtaskRow({
             <Icon d={I.pin} size={13} filled={pinned} />
           </button>
         )}
-        <button
-          type="button"
-          className="ri-act"
-          data-testid={`subtask-complete-${subtask.id}`}
-          aria-label={t(done ? 'tasks.subtask.reopen' : 'tasks.subtask.complete')}
-          title={running
-            ? t('tasks.subtask.complete.stopFirst')
-            : t(done ? 'tasks.subtask.reopen' : 'tasks.subtask.complete')}
-          disabled={running}
-          onClick={e => {
-            e.stopPropagation();
-            void (done ? reopenSubtask(subtask.id) : completeSubtask(subtask.id));
-          }}
-        >
-          <Icon d={done ? I.lockOpen : I.check} size={13} stroke={2.2} />
-        </button>
+        {!running && (
+          <button
+            type="button"
+            className="ri-act"
+            data-testid={`subtask-complete-${subtask.id}`}
+            aria-label={t(done ? 'tasks.subtask.reopen' : 'tasks.subtask.complete')}
+            title={t(done ? 'tasks.subtask.reopen' : 'tasks.subtask.complete')}
+            onClick={e => {
+              e.stopPropagation();
+              void (done ? reopenSubtask(subtask.id) : completeSubtask(subtask.id));
+            }}
+          >
+            <Icon d={done ? I.lockOpen : I.check} size={13} stroke={2.2} />
+          </button>
+        )}
       </span>
     </div>
   );

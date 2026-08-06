@@ -18,6 +18,9 @@ type RenderableItem =
   | TranscriptItem
   | { kind: 'turn-actions'; id: string; items: TranscriptItem[]; isTrailing: boolean };
 
+/** Distance from the bottom (px) within which the scroll-follow stays pinned. */
+const AT_BOTTOM_PX = 40;
+
 function isActionItem(item: TranscriptItem): boolean {
   switch (item.kind) {
     case 'user':
@@ -258,22 +261,56 @@ export function Transcript({
   const tailLen = items.length > 0 && 'text' in items[items.length - 1]!
     ? (items[items.length - 1] as { text: string }).text.length
     : 0;
-  // Scroll to bottom on every items change. The actual scroll container is
-  // CodingView's `.main-scroll` wrapper (V2-style island), not our local
-  // `.transcript-wrap`, so we walk up via closest(). Jam scrollTop twice —
-  // synchronously and on next rAF — to absorb async layout shifts from
-  // ReactMarkdown / syntax highlight that grow the transcript after the
-  // initial measurement.
+  // Scroll-follow: pin to the bottom on items change, but ONLY while the user
+  // is already at the bottom — scrolling up releases the pin so streaming
+  // output doesn't yank the view back down. Scrolling back to the bottom (or
+  // clicking the nav row's scroll-to-bottom button) re-engages it. Sending a
+  // message or switching sessions also re-pins.
+  const atBottomRef = useRef(true);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const scroller = (el.closest('.main-scroll') as HTMLElement | null) ?? el;
+    const onScroll = () => {
+      atBottomRef.current =
+        scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= AT_BOTTOM_PX;
+    };
+    scroller.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+    return () => scroller.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // The actual scroll container is CodingView's `.main-scroll` wrapper
+  // (V2-style island), not our local `.transcript-wrap`, so we walk up via
+  // closest(). Jam scrollTop twice — synchronously and on next rAF — to absorb
+  // async layout shifts from ReactMarkdown / syntax highlight that grow the
+  // transcript after the initial measurement.
+  const firstId = items[0]?.id;
+  // Most recent user message — a new one means the user just sent/steered, so
+  // the view re-pins to the bottom even if they had scrolled up.
+  let lastUserId: string | undefined;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i]!;
+    if (it.kind === 'user') { lastUserId = it.id; break; }
+  }
+  const idsRef = useRef<{ firstId?: string; lastUserId?: string }>({});
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
+    // A new session (first item changed) or a freshly sent user message
+    // re-pins to the bottom regardless of where the user had scrolled.
+    if (idsRef.current.firstId !== firstId || idsRef.current.lastUserId !== lastUserId) {
+      atBottomRef.current = true;
+    }
+    idsRef.current = { firstId, lastUserId };
+    if (!atBottomRef.current) return;
     const scroller = (el.closest('.main-scroll') as HTMLElement | null) ?? el;
     scroller.scrollTop = scroller.scrollHeight;
     const id = window.requestAnimationFrame(() => {
       scroller.scrollTop = scroller.scrollHeight;
     });
     return () => window.cancelAnimationFrame(id);
-  }, [items.length, tailLen, pending, extras?.length]);
+  }, [items.length, tailLen, pending, extras?.length, firstId, lastUserId]);
 
   // Find the most recent user message — that's the "current" turn's user input.
   const currentUser = useMemo(() => {

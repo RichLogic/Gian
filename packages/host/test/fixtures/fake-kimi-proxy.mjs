@@ -49,6 +49,19 @@ for await (const line of lines) {
             loadSession: true,
             sessionCapabilities: { list: {}, resume: {} },
           },
+          models: [
+            {
+              id: 'kimi-model-kimi-k2',
+              model: 'kimi-k2',
+              displayName: 'Kimi K2',
+              description: '',
+              hidden: false,
+              isDefault: true,
+              defaultThinking: null,
+              supportedThinking: ['low', 'medium', 'high'],
+            },
+            { id: 42, model: null },
+          ],
         },
       });
       break;

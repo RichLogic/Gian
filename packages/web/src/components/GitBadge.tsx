@@ -29,7 +29,10 @@ export function GitBadge({
   useEffect(() => {
     if (!workingTreeId) { setStats(null); return; }
     let alive = true;
-    void loadChanged(workingTreeId).then(rows => {
+    // All-changes scope (HEAD vs worktree: staged + unstaged + untracked) —
+    // the user's pick over the branch-wide scope, which kept growing as
+    // agent commits landed on the branch.
+    void loadChanged(workingTreeId, 'all').then(rows => {
       if (!alive) return;
       let added = 0, removed = 0;
       for (const r of rows) { added += r.added; removed += r.removed; }

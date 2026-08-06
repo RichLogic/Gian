@@ -177,9 +177,28 @@ function normalizeCapabilities(raw: unknown): KimiCapabilities {
         }];
       })
     : [];
+  const models = Array.isArray(record.models)
+    ? record.models.flatMap(model => {
+        if (!model || typeof model !== 'object') return [];
+        const value = model as Record<string, unknown>;
+        if (typeof value.id !== 'string' || typeof value.model !== 'string') return [];
+        return [{
+          id: value.id,
+          model: value.model,
+          displayName: typeof value.displayName === 'string' ? value.displayName : value.model,
+          description: typeof value.description === 'string' ? value.description : '',
+          hidden: value.hidden === true,
+          isDefault: value.isDefault === true,
+          defaultThinking: typeof value.defaultThinking === 'string' ? value.defaultThinking : null,
+          supportedThinking: Array.isArray(value.supportedThinking)
+            ? value.supportedThinking.filter((level): level is string => typeof level === 'string')
+            : [],
+        }];
+      })
+    : [];
   return {
     protocolVersion: String(record.protocolVersion ?? '1'),
-    models: [],
+    models,
     modes,
     slashCommands: [],
     ...(agentInfo

@@ -18,9 +18,13 @@ test('dev environment pins isolated GianDev services and desktop targets', () =>
     PATH: '/usr/bin',
     GIAN_PORT: '8990',
     GIAN_DATA_DIR: '/tmp/production-must-not-leak',
-    GIAN_DESKTOP_TOKEN: 'production-token-must-not-leak',
-    GIAN_PARENT_MANAGED: '1',
     GIAN_DEV_DATA_DIR: '/tmp/gian-dev-test',
+    // Inherited from a shell spawned by the production Gian desktop — every
+    // one of these must be stripped, not overridden-but-present.
+    GIAN_DESKTOP_TOKEN: 'production-token',
+    GIAN_DESKTOP_INSTANCE_ID: 'production-instance',
+    GIAN_PARENT_MANAGED: '1',
+    GIAN_WEB_DIST: '/Applications/Gian.app/Contents/Resources/web',
   });
 
   assert.equal(env.GIAN_HOST, '127.0.0.1');
@@ -32,7 +36,11 @@ test('dev environment pins isolated GianDev services and desktop targets', () =>
   assert.equal(env.GIAN_DESKTOP_DISABLE_HOST_MANAGEMENT, '1');
   assert.equal(env.GIAN_GITHUB_CLIENT_ID, DEFAULT_GITHUB_CLIENT_ID);
   assert.equal(env.GIAN_DESKTOP_TOKEN, undefined);
+  assert.equal(env.GIAN_DESKTOP_INSTANCE_ID, undefined);
   assert.equal(env.GIAN_PARENT_MANAGED, undefined);
+  assert.equal(env.GIAN_WEB_DIST, undefined);
+  assert.equal(env.GIAN_DEV_DATA_DIR, undefined);
+  assert.equal(env.PATH, '/usr/bin');
 });
 
 test('dev environment preserves an explicit GitHub OAuth client id override', () => {

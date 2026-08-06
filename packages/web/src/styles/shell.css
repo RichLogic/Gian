@@ -135,3 +135,7 @@
 
 .main-head { flex-wrap: wrap; row-gap: 4px; }
 .main-head-l { flex-wrap: wrap; row-gap: 4px; }
+
+/* Chat header keeps only the branch-diff badge; when the tree is clean the
+   badge renders nothing and the whole header (padding + hairline) collapses. */
+.session-chat-head:has(.main-head-r:empty) { display: none; }

@@ -11,6 +11,7 @@ import { Composer } from '../components/Composer.js';
 import { GitBadge } from '../components/GitBadge.js';
 import { PlanChip } from '../components/PlanChip.js';
 import { QueueList } from '../components/QueueList.js';
+import { TurnDiffChip } from '../components/TurnDiffChip.js';
 import { useT } from '../i18n/index.js';
 import { Transcript } from '../transcript/Transcript.js';
 import { TranscriptMinimap } from '../transcript/TranscriptMinimap.js';
@@ -48,7 +49,7 @@ export interface SessionMainProps {
     attachments?: Array<{ path: string; name: string; mime: string; size?: number }>,
   ) => void;
   onQueueRemove: (queueId: string) => void;
-  onQueueReorder: (order: string[]) => void;
+  onQueueUpdate: (queueId: string, text: string) => void;
   onQueueClear: () => void;
   onQueueSendNow: () => void;
   onSteer: (
@@ -84,7 +85,7 @@ export function SessionMain({
   onApprove,
   onQueueAdd,
   onQueueRemove,
-  onQueueReorder,
+  onQueueUpdate,
   onQueueClear,
   onQueueSendNow,
   onSteer,
@@ -117,12 +118,7 @@ export function SessionMain({
 
   return (
     <main className="main">
-      <div className="main-head">
-        <div className="main-head-l">
-          {session.type === 'subtask' && (
-            <span className="manager-eyebrow">{t('tasks.subtask.title')}</span>
-          )}
-        </div>
+      <div className="main-head session-chat-head">
         <div className="main-head-r">
           <GitBadge
             workingTreeId={workingTreeId}
@@ -165,9 +161,10 @@ export function SessionMain({
         />
       </div>
       <QueueList
+        sessionId={session.id}
         queue={queue}
         onRemove={onQueueRemove}
-        onReorder={onQueueReorder}
+        onUpdate={onQueueUpdate}
         onClear={onQueueClear}
         onSendNow={session.executor === 'codex' ? onQueueSendNow : undefined}
       />
@@ -178,6 +175,7 @@ export function SessionMain({
           planCompleted={codexPlanCompleted}
           sessionId={session.id}
         />
+        <TurnDiffChip items={items} sessionId={session.id} />
         <TranscriptMinimap items={items} />
       </div>
       <Composer

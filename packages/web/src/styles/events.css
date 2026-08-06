@@ -312,16 +312,11 @@
   line-height: 1.55;
 }
 
-/* --- 9. approval_requested: extended styling on existing .approval --- */
-.approval.resolved {
-  box-shadow: 0 0 0 1px var(--hairline), 0 0 0 3px var(--ok-soft) !important;
-}
+/* --- 9. approval_requested: extended styling on existing .approval ---
+   Terminal states keep a single semantic hue on icon + status pill;
+   the shell stays neutral (see coding.css "Approval card"). */
 .approval.resolved .approval-ico { background: var(--ok-soft); color: var(--ok); }
 .approval.resolved .approval-risk { background: var(--ok-soft); color: var(--ok); }
-.approval.declined {
-  box-shadow: 0 0 0 1px var(--hairline), 0 0 0 3px var(--danger-soft) !important;
-  opacity: 0.85;
-}
 .approval.declined .approval-ico { background: var(--danger-soft); color: var(--danger); }
 .approval.declined .approval-risk { background: var(--danger-soft); color: var(--danger); }
 .approval-resolved-note {

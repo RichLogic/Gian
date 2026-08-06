@@ -5,11 +5,12 @@ import type {
   Executor,
   NativeConfigChoice,
   NativeConfigOption,
+  ProxyModeCapabilities,
   SlashCommand,
   SlashCommandSource,
   ThinkingEffort,
 } from '@gian/shared';
-import { loadProxyModels, loadSlashCommands } from '../../api.js';
+import { loadProxyCapabilities, loadProxyModels, loadSlashCommands } from '../../api.js';
 
 export type ProxyModel = CcModelCapabilities | CodexModelCapabilities;
 
@@ -46,6 +47,36 @@ export function defaultModel(models: ProxyModel[], executor: 'claude' | 'codex')
 
 export function modelLabel(models: ProxyModel[], id: string): string {
   return models.find(model => model.model === id)?.displayName ?? id;
+}
+
+const modeCache = new Map<'claude' | 'codex', ProxyModeCapabilities[]>();
+const modePromises = new Map<'claude' | 'codex', Promise<ProxyModeCapabilities[]>>();
+
+export function getModesCached(executor: 'claude' | 'codex'): ProxyModeCapabilities[] | undefined {
+  return modeCache.get(executor);
+}
+
+export function fetchModesCached(executor: 'claude' | 'codex'): Promise<ProxyModeCapabilities[]> {
+  const hit = modeCache.get(executor);
+  if (hit) return Promise.resolve(hit);
+  const inflight = modePromises.get(executor);
+  if (inflight) return inflight;
+  // Defer the call so a missing/broken api export rejects instead of throwing
+  // synchronously — callers treat either as "keep the built-in fallback".
+  const request = Promise.resolve()
+    .then(() => loadProxyCapabilities(executor))
+    .then(capabilities => {
+      const modes = capabilities.modes ?? [];
+      modeCache.set(executor, modes);
+      modePromises.delete(executor);
+      return modes;
+    })
+    .catch(error => {
+      modePromises.delete(executor);
+      throw error;
+    });
+  modePromises.set(executor, request);
+  return request;
 }
 
 export function claudeModelFamily(id: string): string {
@@ -126,26 +157,84 @@ export function flatFiltered(
   return groups.flatMap(group => group.items);
 }
 
-export const CODEX_APPROVALS: Array<{
+export interface ComposerModeOption {
   key: string;
   mode: ApprovalMode;
-  titleKey: string;
-  descKey: string;
-}> = [
+  /** i18n title key for known mode ids; absent → render `label` instead. */
+  titleKey?: string;
+  /** i18n hint key for known mode ids; absent → render `description` instead. */
+  descKey?: string;
+  /** Proxy-advertised label, used when no i18n title exists (unknown ids). */
+  label?: string;
+  /** Proxy-advertised description, used when no i18n hint exists. */
+  description?: string;
+}
+
+/** Known mode ids keep their localized composer labels (zh users see the
+ *  Chinese hints); ids the proxy adds later fall back to the advertised
+ *  label/description. */
+const CLAUDE_MODE_I18N: Record<string, { titleKey: string; descKey?: string }> = {
+  plan: { titleKey: 'mode.plan' },
+  ask: { titleKey: 'mode.ask' },
+  auto: { titleKey: 'mode.auto' },
+  custom: { titleKey: 'mode.custom' },
+  'full-access': { titleKey: 'mode.full-access' },
+};
+
+const CODEX_MODE_I18N: Record<string, { titleKey: string; descKey?: string }> = {
+  plan: { titleKey: 'mode.plan' },
+  ask: { titleKey: 'composer.approval.ask.title', descKey: 'composer.approval.ask.desc' },
+  auto: { titleKey: 'composer.approval.approve.title', descKey: 'composer.approval.approve.desc' },
+  'full-access': { titleKey: 'composer.approval.full.title', descKey: 'composer.approval.full.desc' },
+  custom: { titleKey: 'composer.approval.custom.title', descKey: 'composer.approval.custom.desc' },
+};
+
+/** Built-in fallback shown until the proxy capabilities resolve (or if the
+ *  fetch fails). Mirrors what cc-proxy/codex-proxy advertised when this UI
+ *  was hardcoded. */
+export const CLAUDE_MODES: ComposerModeOption[] = [
+  { key: 'plan', mode: 'plan', titleKey: 'mode.plan' },
+  { key: 'ask', mode: 'ask', titleKey: 'mode.ask' },
+  { key: 'auto', mode: 'auto', titleKey: 'mode.auto' },
+];
+
+export const CODEX_APPROVALS: ComposerModeOption[] = [
   { key: 'ask', mode: 'ask', titleKey: 'composer.approval.ask.title', descKey: 'composer.approval.ask.desc' },
   { key: 'approve', mode: 'auto', titleKey: 'composer.approval.approve.title', descKey: 'composer.approval.approve.desc' },
   { key: 'full', mode: 'full-access', titleKey: 'composer.approval.full.title', descKey: 'composer.approval.full.desc' },
   { key: 'custom', mode: 'custom', titleKey: 'composer.approval.custom.title', descKey: 'composer.approval.custom.desc' },
 ];
 
-export function codexApprovalLabelKey(mode: ApprovalMode): string {
-  switch (mode) {
-    case 'ask': return 'composer.approval.ask.title';
-    case 'auto': return 'composer.approval.approve.title';
-    case 'custom': return 'composer.approval.custom.title';
-    case 'full-access': return 'composer.approval.full.title';
-    default: return 'composer.approval.title';
+/** Mode dropdown rows: proxy-advertised modes once capabilities resolve, the
+ *  built-in fallback list before that. */
+export function composerModeOptions(
+  executor: 'claude' | 'codex',
+  modes: ProxyModeCapabilities[] | undefined,
+): ComposerModeOption[] {
+  if (!modes || modes.length === 0) {
+    return executor === 'codex' ? CODEX_APPROVALS : CLAUDE_MODES;
   }
+  const i18n = executor === 'codex' ? CODEX_MODE_I18N : CLAUDE_MODE_I18N;
+  return modes.map(mode => ({
+    key: mode.id,
+    mode: mode.id as ApprovalMode,
+    titleKey: i18n[mode.id]?.titleKey,
+    descKey: i18n[mode.id]?.descKey,
+    label: mode.label,
+    description: mode.description,
+  }));
+}
+
+/** Collapsed dropdown button label for the active mode. */
+export function composerModeLabel(
+  executor: 'claude' | 'codex',
+  mode: ApprovalMode,
+  modes: ProxyModeCapabilities[] | undefined,
+  t: (key: string) => string,
+): string {
+  const titleKey = (executor === 'codex' ? CODEX_MODE_I18N : CLAUDE_MODE_I18N)[mode]?.titleKey;
+  if (titleKey) return t(titleKey);
+  return modes?.find(entry => entry.id === mode)?.label ?? mode;
 }
 
 const CODEX_EFFORT_LABELS: Record<string, string> = {

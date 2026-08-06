@@ -215,4 +215,7 @@ export type TranscriptItem =
 export interface QueueEntry {
   id: string;
   text: string;
+  /** Structured input items carried with the message — localImage/localFile
+   *  attachments render as thumbnails in the queue drawer. */
+  items?: import('@gian/shared').InputItem[];
 }

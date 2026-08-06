@@ -659,7 +659,11 @@ export class SessionEventCoordinator {
     this.broadcaster.broadcast({
       type: 'queue:updated',
       session_id: sessionId,
-      queue: this.queue.list(sessionId).map(e => ({ id: e.id, text: e.text })),
+      queue: this.queue.list(sessionId).map(e => ({
+        id: e.id,
+        text: e.text,
+        ...(e.items ? { items: e.items } : {}),
+      })),
     });
   }
 

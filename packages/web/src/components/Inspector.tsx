@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
-import { loadTree, loadChanged, loadAllFiles, stageFile, unstageFile } from '../api.js';
-import type { TreeEntry, ChangedEntry, WorkingTree, ChangeScope } from '../api.js';
+import { loadTree, loadChanged, loadCommits, loadBranchList, loadAllFiles, stageFile, unstageFile } from '../api.js';
+import type { TreeEntry, ChangedEntry, BranchCommit, BranchList, WorkingTree, ChangeScope } from '../api.js';
 import { useT } from '../i18n/index.js';
 
 // App.tsx routes the 'workspaces' / 'settings' inspector kinds to dedicated
@@ -49,9 +49,14 @@ interface Props {
   onOpenFile: (path: string, permanent: boolean) => void;
   /** Files tab: expand, select, and scroll to a file opened from elsewhere. */
   revealFile?: { workingTreeId: string; path: string; requestId: number } | null;
+  /** Changes tab: force a scope from outside (the GitBadge lands on All
+   *  changes because that's the scope whose numbers it reports). requestId
+   *  re-triggers the apply even when the scope value didn't change. */
+  scopeRequest?: { scope: ChangeScope; requestId: number } | null;
   /** Changes tab: open the file's diff in Sheet, in the currently-selected
-   *  scope so the diff matches what the row represents. */
-  onOpenDiff: (path: string, permanent: boolean, scope: ChangeScope) => void;
+   *  scope (and pinned commit / compare base, for the Committed / Branch
+   *  second-row pickers) so the diff matches what the row represents. */
+  onOpenDiff: (path: string, permanent: boolean, scope: ChangeScope, sha?: string | null, base?: string | null) => void;
   /** True when an active session is bound to this working tree, so git-action
    *  prompts can be dropped into its composer. False → footer buttons disabled. */
   canCommit: boolean;
@@ -60,7 +65,7 @@ interface Props {
   onComposePrompt: (text: string) => void;
 }
 
-export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, revealFile, onOpenDiff, canCommit, onComposePrompt }: Props) {
+export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, revealFile, scopeRequest, onOpenDiff, canCommit, onComposePrompt }: Props) {
   if (tab === 'files') {
     return (
       <FilesInspector
@@ -71,7 +76,7 @@ export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, reveal
       />
     );
   }
-  return <ChangesInspector workingTreeId={workingTreeId} onOpenDiff={onOpenDiff} canCommit={canCommit} onComposePrompt={onComposePrompt} />;
+  return <ChangesInspector workingTreeId={workingTreeId} scopeRequest={scopeRequest} onOpenDiff={onOpenDiff} canCommit={canCommit} onComposePrompt={onComposePrompt} />;
 }
 
 // ─── Files Inspector ────────────────────────────────────────────────────────
@@ -389,8 +394,12 @@ function sortChangeNodes(nodes: ChangeNode[]): void {
 
 interface ChangeTreeProps {
   scope: ChangeScope;
+  /** Pinned commit for the `commit` scope (second-row picker). */
+  commitSha: string | null;
+  /** Explicit compare base for the `branch` scope (null = auto-detected). */
+  baseBranch: string | null;
   busyPath: string | null;
-  onOpenDiff: (path: string, permanent: boolean, scope: ChangeScope) => void;
+  onOpenDiff: (path: string, permanent: boolean, scope: ChangeScope, sha?: string | null, base?: string | null) => void;
   onToggleStage: (e: ReactMouseEvent, c: ChangedEntry) => void;
   t: (key: string) => string;
 }
@@ -427,8 +436,8 @@ function ChangeLeaf({ entry, name, depth, ctx }: { entry: ChangedEntry; name: st
       className={`tree-item changes-leaf ${entry.staged ? 'staged' : ''}`}
       style={{ paddingLeft: 6 + depth * 10 }}
       title={entry.path}
-      onClick={() => ctx.onOpenDiff(entry.path, false, ctx.scope)}
-      onDoubleClick={() => ctx.onOpenDiff(entry.path, true, ctx.scope)}
+      onClick={() => ctx.onOpenDiff(entry.path, false, ctx.scope, ctx.commitSha, ctx.baseBranch)}
+      onDoubleClick={() => ctx.onOpenDiff(entry.path, true, ctx.scope, ctx.commitSha, ctx.baseBranch)}
     >
       <span className="tree-caret" />
       <span className={`files-badge ${cls}`}>{txt}</span>
@@ -454,24 +463,33 @@ function ChangeLeaf({ entry, name, depth, ctx }: { entry: ChangedEntry; name: st
   );
 }
 
-// The five diff-source scopes offered in the Changes picker, in Codex's order.
-// `all` is intentionally absent — it stays a host-only default for GitBadge.
+// The diff-source scopes offered in the Changes picker, in the user's order:
+// Last Turn pinned first, then the working-tree slices (All changes / Added /
+// Unadded), then the history scopes (Committed, Branch). The menu is FLAT —
+// commit/base picking happens on a second row under the header (Codex's
+// two-row Review UI), not in a nested submenu.
 const SCOPE_OPTIONS: ReadonlyArray<{ value: ChangeScope; key: string }> = [
-  { value: 'unstaged', key: 'changes.scope.unstaged' },
+  { value: 'lastturn', key: 'changes.scope.lastTurn' },
+  { value: 'all', key: 'changes.scope.uncommitted' },
   { value: 'staged', key: 'changes.scope.staged' },
+  { value: 'unstaged', key: 'changes.scope.unstaged' },
   { value: 'commit', key: 'changes.scope.commit' },
   { value: 'branch', key: 'changes.scope.branch' },
-  { value: 'lastturn', key: 'changes.scope.lastTurn' },
 ];
+// Scope groups separated by a hairline in the menu: Last Turn | working-tree
+// slices | history scopes.
+const SCOPE_SEP_BEFORE: ReadonlySet<ChangeScope> = new Set(['all', 'commit']);
 
 function ChangesInspector({
   workingTreeId,
+  scopeRequest,
   onOpenDiff,
   canCommit,
   onComposePrompt,
 }: {
   workingTreeId: string | null;
-  onOpenDiff: (path: string, permanent: boolean, scope: ChangeScope) => void;
+  scopeRequest?: { scope: ChangeScope; requestId: number } | null;
+  onOpenDiff: (path: string, permanent: boolean, scope: ChangeScope, sha?: string | null, base?: string | null) => void;
   canCommit: boolean;
   onComposePrompt: (text: string) => void;
 }) {
@@ -479,9 +497,8 @@ function ChangesInspector({
   const [scope, setScope] = useState<ChangeScope>(() => {
     try {
       const s = localStorage.getItem('gian.changes.scope');
-      // Accept the five Codex-aligned scopes. Legacy stored 'all' (dropped from
-      // the picker) falls through to the new default, Branch.
-      if (s === 'unstaged' || s === 'staged' || s === 'commit' || s === 'branch' || s === 'lastturn') return s;
+      // Accept the Codex-aligned scopes (all = "All changes").
+      if (s === 'all' || s === 'unstaged' || s === 'staged' || s === 'commit' || s === 'branch' || s === 'lastturn') return s;
     } catch { /* storage disabled */ }
     return 'branch';
   });
@@ -490,6 +507,16 @@ function ChangesInspector({
   const [busyPath, setBusyPath] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
+  // Second-row pickers (Codex's two-row Review UI — no nested dropdowns):
+  // the Committed row pins a commit (null = HEAD's delta, the legacy `commit`
+  // behavior); the Branch row pins a compare base (null = auto-detected).
+  const [commitSha, setCommitSha] = useState<string | null>(null);
+  const [commits, setCommits] = useState<BranchCommit[]>([]);
+  const [commitsLoaded, setCommitsLoaded] = useState(false);
+  const [baseBranch, setBaseBranch] = useState<string | null>(null);
+  const [branches, setBranches] = useState<BranchList | null>(null);
+  const [rowMenuOpen, setRowMenuOpen] = useState(false);
+  const [rowSearch, setRowSearch] = useState('');
 
   useEffect(() => {
     if (!workingTreeId) {
@@ -497,15 +524,66 @@ function ChangesInspector({
       return;
     }
     let cancelled = false;
-    void loadChanged(workingTreeId, scope).then(list => {
+    void loadChanged(workingTreeId, scope, commitSha, baseBranch).then(list => {
       if (!cancelled) setChanges(list);
     });
     return () => { cancelled = true; };
-  }, [workingTreeId, scope, reloadKey]);
+  }, [workingTreeId, scope, commitSha, baseBranch, reloadKey]);
+
+  useEffect(() => {
+    setCommits([]);
+    setCommitsLoaded(false);
+    setCommitSha(null);
+    setBranches(null);
+    // The compare base is remembered per working tree (it answers "where did
+    // THIS tree's branch come from", which differs across trees).
+    try {
+      setBaseBranch(workingTreeId ? localStorage.getItem(`gian.changes.base.${workingTreeId}`) : null);
+    } catch { setBaseBranch(null); }
+  }, [workingTreeId]);
+
+  useEffect(() => {
+    if (scope !== 'commit' || !workingTreeId || commitsLoaded) return;
+    let cancelled = false;
+    void loadCommits(workingTreeId).then(list => {
+      if (cancelled) return;
+      setCommits(list);
+      setCommitsLoaded(true);
+    });
+    return () => { cancelled = true; };
+  }, [scope, workingTreeId, commitsLoaded]);
+
+  useEffect(() => {
+    if (scope !== 'branch' || !workingTreeId || branches) return;
+    let cancelled = false;
+    void loadBranchList(workingTreeId).then(list => {
+      if (!cancelled) setBranches(list);
+    });
+    return () => { cancelled = true; };
+  }, [scope, workingTreeId, branches]);
 
   function pickScope(next: ChangeScope) {
     setScope(next);
+    if (next !== 'commit') setCommitSha(null);
     try { localStorage.setItem('gian.changes.scope', next); } catch { /* storage disabled */ }
+  }
+
+  // External scope request (GitBadge click → All changes). Keyed on
+  // requestId so repeated clicks re-apply even when the scope is unchanged.
+  const scopeRequestId = scopeRequest?.requestId;
+  useEffect(() => {
+    if (scopeRequestId == null || !scopeRequest) return;
+    pickScope(scopeRequest.scope);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeRequestId]);
+
+  function pickBase(branch: string | null) {
+    setBaseBranch(branch);
+    try {
+      const key = `gian.changes.base.${workingTreeId}`;
+      if (branch) localStorage.setItem(key, branch); else localStorage.removeItem(key);
+    } catch { /* storage disabled */ }
+    setRowMenuOpen(false);
   }
 
   const total = changes.reduce((acc, c) => ({ add: acc.add + c.added, del: acc.del + c.removed }), { add: 0, del: 0 });
@@ -534,8 +612,8 @@ function ChangesInspector({
     <aside className="inspector">
       <div className="insp-head">
         <span className="label">{t('inspector.changes')}</span>
-        {/* Diff-source picker — the five Codex-aligned scopes, with a ✓ on the
-            active one. Custom menu (not a native <select>) to match Codex. */}
+        {/* Diff-source picker — flat menu (no nested dropdowns) with a ✓ on
+            the active scope; commit/base picking lives on the second row. */}
         <div className="changes-scope">
           <button
             className="changes-scope-btn"
@@ -551,17 +629,19 @@ function ChangesInspector({
               <div className="changes-menu-backdrop" onClick={() => setScopeMenuOpen(false)} />
               <div className="changes-scope-menu" role="menu">
                 {SCOPE_OPTIONS.map(opt => (
-                  <button
-                    key={opt.value}
-                    role="menuitemradio"
-                    aria-checked={scope === opt.value}
-                    type="button"
-                    className={scope === opt.value ? 'active' : ''}
-                    onClick={() => { pickScope(opt.value); setScopeMenuOpen(false); }}
-                  >
-                    <span className="ck">{scope === opt.value ? '✓' : ''}</span>
-                    {t(opt.key)}
-                  </button>
+                  <Fragment key={opt.value}>
+                    {SCOPE_SEP_BEFORE.has(opt.value) && <div className="changes-scope-sep" role="separator" />}
+                    <button
+                      role="menuitemradio"
+                      aria-checked={scope === opt.value}
+                      type="button"
+                      className={scope === opt.value ? 'active' : ''}
+                      onClick={() => { pickScope(opt.value); setScopeMenuOpen(false); }}
+                    >
+                      <span className="ck">{scope === opt.value ? '✓' : ''}</span>
+                      {t(opt.key)}
+                    </button>
+                  </Fragment>
                 ))}
               </div>
             </>
@@ -571,6 +651,104 @@ function ChangesInspector({
           <Icon d={I.refresh} />
         </button>
       </div>
+      {/* Second row (Codex's two-row Review UI): for Branch, the compare-base
+          picker `<head> → <base>`; for Committed, the pinned-commit picker. */}
+      {(scope === 'branch' || scope === 'commit') && (
+        <div className="changes-base-row">
+          {scope === 'branch' && <span className="base-head">{branches?.head ?? '…'}</span>}
+          {scope === 'branch' && <span className="base-arrow">→</span>}
+          <div className="changes-base">
+            <button
+              className="changes-base-btn"
+              type="button"
+              onClick={() => { setRowMenuOpen(o => !o); setRowSearch(''); }}
+            >
+              {scope === 'branch'
+                ? (baseBranch ?? branches?.base ?? '…')
+                : (commitSha
+                    ? `${commitSha.slice(0, 7)} ${commits.find(cm => cm.sha === commitSha)?.subject ?? ''}`.trim()
+                    : t('changes.scope.latestCommit'))}
+              <span className="caret">▾</span>
+            </button>
+            {rowMenuOpen && (
+              <>
+                <div className="changes-menu-backdrop" onClick={() => setRowMenuOpen(false)} />
+                <div className="changes-base-menu" role="menu">
+                  <input
+                    autoFocus
+                    className="changes-base-search"
+                    placeholder={t(scope === 'branch' ? 'changes.scope.searchBranches' : 'changes.scope.searchCommits')}
+                    value={rowSearch}
+                    onChange={e => setRowSearch(e.target.value)}
+                  />
+                  {scope === 'branch' ? (
+                    <>
+                      <button
+                        role="menuitemradio"
+                        aria-checked={baseBranch === null}
+                        type="button"
+                        className={baseBranch === null ? 'active' : ''}
+                        onClick={() => pickBase(null)}
+                      >
+                        <span className="ck">{baseBranch === null ? '✓' : ''}</span>
+                        {t('changes.scope.autoBase')}{branches?.base ? ` (${branches.base})` : ''}
+                      </button>
+                      {(branches?.branches ?? [])
+                        .filter(b => !rowSearch || b.toLowerCase().includes(rowSearch.toLowerCase()))
+                        .map(b => (
+                          <button
+                            key={b}
+                            role="menuitemradio"
+                            aria-checked={(baseBranch ?? branches?.base) === b}
+                            type="button"
+                            className={(baseBranch ?? branches?.base) === b ? 'active' : ''}
+                            onClick={() => pickBase(b)}
+                          >
+                            <span className="ck">{(baseBranch ?? branches?.base) === b ? '✓' : ''}</span>
+                            {b}
+                          </button>
+                        ))}
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        role="menuitemradio"
+                        aria-checked={commitSha === null}
+                        type="button"
+                        className={commitSha === null ? 'active' : ''}
+                        onClick={() => { setCommitSha(null); setRowMenuOpen(false); }}
+                      >
+                        <span className="ck">{commitSha === null ? '✓' : ''}</span>
+                        {t('changes.scope.latestCommit')}
+                      </button>
+                      {commitsLoaded && commits.length === 0 && (
+                        <div className="changes-commit-empty">{t('changes.scope.noCommits')}</div>
+                      )}
+                      {commits
+                        .filter(cm => !rowSearch || cm.subject.toLowerCase().includes(rowSearch.toLowerCase()) || cm.sha.startsWith(rowSearch.toLowerCase()))
+                        .map(cm => (
+                          <button
+                            key={cm.sha}
+                            role="menuitemradio"
+                            aria-checked={commitSha === cm.sha}
+                            type="button"
+                            className={commitSha === cm.sha ? 'active' : ''}
+                            title={cm.sha}
+                            onClick={() => { setCommitSha(cm.sha); setRowMenuOpen(false); }}
+                          >
+                            <span className="ck">{commitSha === cm.sha ? '✓' : ''}</span>
+                            <span className="subj">{cm.subject}</span>
+                            <span className="rel">{cm.rel}</span>
+                          </button>
+                        ))}
+                    </>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
       <div className="insp-scroll">
         <div className="changes-summary">
           <span className="count">{changes.length} {t('changes.files')}</span>
@@ -586,7 +764,7 @@ function ChangesInspector({
                 key={node.path}
                 node={node}
                 depth={0}
-                ctx={{ scope, busyPath, onOpenDiff, onToggleStage: (e, c) => { void toggleStage(e, c); }, t }}
+                ctx={{ scope, commitSha, baseBranch, busyPath, onOpenDiff, onToggleStage: (e, c) => { void toggleStage(e, c); }, t }}
               />
             ))}
           </div>

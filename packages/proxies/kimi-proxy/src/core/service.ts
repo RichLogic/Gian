@@ -122,25 +122,112 @@ interface ModeCapability {
   isDefault: boolean;
 }
 
-/** Extract the approval-mode choices from a session's ACP configOptions.
- *  The mode option is the select whose category (or id) is "mode" — the same
- *  heuristic the web composer uses. Select options may be flat or grouped. */
-function modesFromConfigOptions(options: SessionConfigOption[]): ModeCapability[] {
-  const modeOption = options.find(option =>
-    option.type === 'select'
-    && (
-      (typeof option.category === 'string' && option.category.trim().toLowerCase() === 'mode')
-      || option.id.trim().toLowerCase() === 'mode'
-    ));
-  if (!modeOption || modeOption.type !== 'select') return [];
-  const flat = modeOption.options.flatMap(entry =>
+interface ModelCapability {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  isDefault: boolean;
+  defaultThinking: string | null;
+  supportedThinking: string[];
+}
+
+interface ProbedCapabilities {
+  modes: ModeCapability[];
+  models: ModelCapability[];
+}
+
+type SelectConfigOption = Extract<SessionConfigOption, { type: 'select' }>;
+
+function flatChoices(option: SelectConfigOption) {
+  return option.options.flatMap(entry =>
     'options' in entry ? entry.options : [entry]);
-  return flat.map(choice => ({
+}
+
+/** Classify a session config option the same way the web composer's
+ *  nativeOptionRole does: category (or id) decides whether the select is the
+ *  model picker, the thinking-level picker, or the approval-mode picker. */
+function configOptionRole(
+  option: SessionConfigOption,
+): 'model' | 'thinking' | 'mode' | null {
+  const category = typeof option.category === 'string'
+    ? option.category.trim().toLowerCase()
+    : '';
+  const id = option.id.trim().toLowerCase();
+  if (category === 'model' || id === 'model') return 'model';
+  if (
+    category === 'thought_level'
+    || category === 'thought'
+    || category === 'thinking'
+    || category === 'effort'
+    || id === 'thought_level'
+    || id === 'thought'
+    || id === 'thinking'
+    || id === 'effort'
+    || id === 'reasoning_effort'
+  ) return 'thinking';
+  if (category === 'mode' || id === 'mode') return 'mode';
+  return null;
+}
+
+function selectOptionByRole(
+  options: SessionConfigOption[],
+  role: 'model' | 'thinking' | 'mode',
+): SelectConfigOption | null {
+  const found = options.find(option =>
+    option.type === 'select' && configOptionRole(option) === role);
+  return found && found.type === 'select' ? found : null;
+}
+
+/** Extract the approval-mode choices from a session's ACP configOptions.
+ *  Select options may be flat or grouped. */
+function modesFromConfigOptions(options: SessionConfigOption[]): ModeCapability[] {
+  const modeOption = selectOptionByRole(options, 'mode');
+  if (!modeOption) return [];
+  return flatChoices(modeOption).map(choice => ({
     id: String(choice.value),
     label: choice.name || String(choice.value),
     description: typeof choice.description === 'string' ? choice.description : '',
     isDefault: choice.value === modeOption.currentValue,
   }));
+}
+
+/** Kimi thinking levels are session-global (one thought_level select, not
+ *  per-model), so extract them once and attach the same list to every model
+ *  — the generic Settings UI reads supportedThinking off the selected model. */
+function thinkingLevelsFromConfigOptions(options: SessionConfigOption[]): string[] {
+  const thinkingOption = selectOptionByRole(options, 'thinking');
+  if (!thinkingOption) return [];
+  return flatChoices(thinkingOption).map(choice => String(choice.value));
+}
+
+function modelsFromConfigOptions(
+  options: SessionConfigOption[],
+  supportedThinking: string[],
+): ModelCapability[] {
+  const modelOption = selectOptionByRole(options, 'model');
+  if (!modelOption) return [];
+  return flatChoices(modelOption).map(choice => {
+    const value = String(choice.value);
+    return {
+      id: `kimi-model-${value}`,
+      model: value,
+      displayName: choice.name || value,
+      description: typeof modelOption.description === 'string' ? modelOption.description : '',
+      hidden: false,
+      isDefault: choice.value === modelOption.currentValue,
+      defaultThinking: null,
+      supportedThinking,
+    };
+  });
+}
+
+function capabilitiesFromConfigOptions(options: SessionConfigOption[]): ProbedCapabilities {
+  return {
+    modes: modesFromConfigOptions(options),
+    models: modelsFromConfigOptions(options, thinkingLevelsFromConfigOptions(options)),
+  };
 }
 
 function conversationUsage(response: PromptResponse) {
@@ -239,40 +326,43 @@ export class KimiProxyService {
   }
 
   async listCapabilities() {
+    const probed = await this.probeCapabilities();
     return {
       ...await this.runtime.ensureStarted(),
-      modes: await this.probeModes(),
+      modes: probed.modes,
+      models: probed.models,
     };
   }
 
-  private probedModes: ModeCapability[] | null = null;
+  private probedCapabilities: ProbedCapabilities | null = null;
 
-  /** Kimi only reveals its approval-mode choices per session (configOptions
-   *  from session/new), so learn them once: reuse an already-attached
-   *  session's options when there is one, otherwise create a throwaway
-   *  session in the temp dir and close it again. Cached for the process
-   *  lifetime — the choices only change with the Kimi version, and the
-   *  proxy is respawned on upgrade (2026-08-04). On any failure (e.g. not
-   *  logged in) report no modes rather than breaking capabilities. */
-  private async probeModes(): Promise<ModeCapability[]> {
-    if (this.probedModes) return this.probedModes;
+  /** Kimi only reveals its model/thinking/mode choices per session
+   *  (configOptions from session/new), so learn them once: reuse an
+   *  already-attached session's options when there is one, otherwise create
+   *  a throwaway session in the temp dir and close it again. Cached for the
+   *  process lifetime — the choices only change with the Kimi version, and
+   *  the proxy is respawned on upgrade (2026-08-04). On any failure (e.g.
+   *  not logged in) report no modes/models rather than breaking
+   *  capabilities. */
+  private async probeCapabilities(): Promise<ProbedCapabilities> {
+    if (this.probedCapabilities) return this.probedCapabilities;
     for (const session of this.sessionsById.values()) {
-      const modes = modesFromConfigOptions(session.configOptions);
-      if (modes.length > 0) {
-        this.probedModes = modes;
-        return modes;
+      const probed = capabilitiesFromConfigOptions(session.configOptions);
+      if (probed.modes.length > 0 || probed.models.length > 0) {
+        this.probedCapabilities = probed;
+        return probed;
       }
     }
     try {
       const response = await this.runtime.newSession({ cwd: tmpdir(), mcpServers: [] });
-      const modes = modesFromConfigOptions(response.configOptions ?? []);
+      const probed = capabilitiesFromConfigOptions(response.configOptions ?? []);
       try {
         await this.runtime.closeSession({ sessionId: response.sessionId });
       } catch { /* close unsupported or failed — the probe session stays detached */ }
-      this.probedModes = modes;
-      return modes;
+      this.probedCapabilities = probed;
+      return probed;
     } catch {
-      return [];
+      return { modes: [], models: [] };
     }
   }
 

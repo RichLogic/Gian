@@ -38,7 +38,7 @@ export interface SessionCommands {
     attachments?: ComposerAttachmentPayload[],
   ) => void;
   onQueueRemove: (sessionId: string, queueId: string) => void;
-  onQueueReorder: (sessionId: string, order: string[]) => void;
+  onQueueUpdate: (sessionId: string, queueId: string, text: string) => void;
   onQueueClear: (sessionId: string) => void;
   onQueueSendNow: (sessionId: string) => void;
   onSteer: (
@@ -142,8 +142,8 @@ export function useSessionCommands({
     },
     onQueueRemove: (sessionId, queueId) =>
       ws.send({ type: 'queue:remove', session_id: sessionId, queue_id: queueId }),
-    onQueueReorder: (sessionId, order) =>
-      ws.send({ type: 'queue:reorder', session_id: sessionId, order }),
+    onQueueUpdate: (sessionId, queueId, text) =>
+      ws.send({ type: 'queue:update', session_id: sessionId, queue_id: queueId, text }),
     onQueueClear: sessionId =>
       ws.send({ type: 'queue:clear', session_id: sessionId }),
     onQueueSendNow: sessionId =>

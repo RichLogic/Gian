@@ -23,6 +23,17 @@ test('Kimi host normalizes capabilities, native config, slash and routing', asyn
       close: false,
     });
     assert.deepEqual(capabilities.modes, []);
+    // Malformed entries are dropped defensively.
+    assert.deepEqual(capabilities.models, [{
+      id: 'kimi-model-kimi-k2',
+      model: 'kimi-k2',
+      displayName: 'Kimi K2',
+      description: '',
+      hidden: false,
+      isDefault: true,
+      defaultThinking: null,
+      supportedThinking: ['low', 'medium', 'high'],
+    }]);
 
     const facade = new KimiProxySessionClient(host);
     const notifications: string[] = [];

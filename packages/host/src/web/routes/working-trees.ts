@@ -96,36 +96,57 @@ export function registerWorkingTreeRoutes(
     }
   }
 
-  // Base for the `commit` scope: HEAD's parent, or the empty tree when HEAD is
-  // the root commit (so the first commit still renders as all-added).
-  function commitBase(cwd: string): string {
+  // Base for the `commit` scope: the given ref's parent, or the empty tree
+  // when the ref is the root commit (so the first commit still renders as
+  // all-added). Defaults to HEAD for the legacy "HEAD's delta" behavior.
+  function commitBaseOf(cwd: string, ref: string = 'HEAD'): string {
     try {
-      execFileSync('git', ['-C', cwd, 'rev-parse', '--verify', '-q', 'HEAD~1'], {
+      execFileSync('git', ['-C', cwd, 'rev-parse', '--verify', '-q', `${ref}~1`], {
         stdio: ['ignore', 'ignore', 'ignore'],
       });
-      return 'HEAD~1';
+      return `${ref}~1`;
     } catch {
       return EMPTY_TREE;
     }
   }
 
-  // Base for the `branch` scope: the merge-base of HEAD with the working tree's
-  // base branch — the session's recorded `base_branch` for a `wt:` tree, else
-  // the repo's detected default. Falls back to HEAD (→ empty branch diff) when
-  // there's no distinct base or git can't resolve a merge-base (e.g. the base
-  // ref isn't local). Result is a commit-ish suitable for `git diff <base>`.
-  function branchBase(wt: { path: string; session_id: string | null }): string {
-    let base: string | null = null;
+  // The `commit` scope optionally pins a single commit via `?sha=` (Codex's
+  // Committed submenu). Only hex shas are accepted — anything else falls back
+  // to HEAD's delta.
+  function parseCommitSha(raw: string | undefined): string | null {
+    return raw && /^[0-9a-f]{7,40}$/i.test(raw) ? raw : null;
+  }
+
+  // Base for the `branch` scope: the merge-base of HEAD with the compare
+  // base — an explicit `?base=` ref when given (the web UI's second-row
+  // branch picker), else the session's recorded `base_branch` for a `wt:`
+  // tree, else the repo's detected default. Falls back to HEAD (→ empty
+  // branch diff) when there's no distinct base or git can't resolve a
+  // merge-base. Result is a commit-ish suitable for `git diff <base>`.
+  function autoBaseRef(wt: { path: string; session_id: string | null }): string | null {
     if (wt.session_id) {
       const row = db
         .prepare('SELECT base_branch FROM sessions WHERE id = ?')
         .get(wt.session_id) as { base_branch: string | null } | undefined;
-      if (row?.base_branch) base = row.base_branch;
+      if (row?.base_branch) return row.base_branch;
     }
-    if (!base) base = detectDefaultBranch(wt.path);
+    return detectDefaultBranch(wt.path);
+  }
+
+  function branchBase(wt: { path: string; session_id: string | null }, overrideRef?: string | null): string {
+    const base = overrideRef ?? autoBaseRef(wt);
     if (!base) return 'HEAD';
     const mb = gitText(wt.path, ['merge-base', base, 'HEAD']).trim();
     return mb || 'HEAD';
+  }
+
+  // The `branch` scope optionally pins its compare base via `?base=` (the
+  // second-row branch picker). Only plausible ref names are accepted —
+  // anything else (or an unresolvable ref, caught by merge-base failing)
+  // falls back to the auto-detected base.
+  function parseBaseRef(raw: string | undefined): string | null {
+    if (!raw || raw.length > 200) return null;
+    return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(raw) && !raw.includes('..') ? raw : null;
   }
 
   // Distinct file paths the agent edited in the session's most recent turn,
@@ -224,12 +245,13 @@ export function registerWorkingTreeRoutes(
   //     still synthesizing untracked files via --no-index.
   //   - 'staged': only index-vs-HEAD changes (`diff --cached -- <path>`).
   //     Untracked files have nothing staged, so no --no-index fallback.
-  function computeFileDiff(cwd: string, rel: string, scope: ChangeScope = 'all', wt?: { path: string; session_id: string | null }): string {
+  function computeFileDiff(cwd: string, rel: string, scope: ChangeScope = 'all', wt?: { path: string; session_id: string | null }, commitSha?: string | null, baseRef?: string | null): string {
+    const commitRef = commitSha ?? 'HEAD';
     const baseArgs =
       scope === 'staged' ? ['diff', '--cached'] :
       scope === 'unstaged' ? ['diff'] :
-      scope === 'commit' ? ['diff', commitBase(cwd), 'HEAD'] :
-      scope === 'branch' ? ['diff', branchBase(wt ?? { path: cwd, session_id: null })] :
+      scope === 'commit' ? ['diff', commitBaseOf(cwd, commitRef), commitRef] :
+      scope === 'branch' ? ['diff', branchBase(wt ?? { path: cwd, session_id: null }, baseRef)] :
       ['diff', 'HEAD']; // 'all' and 'lastturn' both diff the working tree vs HEAD
     try {
       const out = execFileSync('git', ['-C', cwd, ...baseArgs, '--', rel], {
@@ -464,6 +486,48 @@ export function registerWorkingTreeRoutes(
     }
   });
 
+  app.get('/api/working_trees/:id/commits', c => {
+    const id = c.req.param('id');
+    const wt = resolveWorkingTree(id);
+    if (!wt) return c.json({ error: 'working tree not found' }, 404);
+    // Commits on this branch since it diverged from its base — powers the
+    // Committed submenu in the Changes scope picker (Codex parity). Newest
+    // first, capped at 50. Empty when there's no distinct base.
+    const base = branchBase(wt);
+    const out = gitText(wt.path, [
+      'log', '-n', '50', '--format=%H%x1f%s%x1f%cr', `${base}..HEAD`,
+    ]);
+    const commits = out
+      .split('\n')
+      .filter(Boolean)
+      .map(line => {
+        const [sha = '', subject = '', rel = ''] = line.split('\x1f');
+        return { sha, subject, rel };
+      })
+      .filter(row => row.sha);
+    return c.json(commits);
+  });
+
+  app.get('/api/working_trees/:id/branches', c => {
+    const id = c.req.param('id');
+    const wt = resolveWorkingTree(id);
+    if (!wt) return c.json({ error: 'working tree not found' }, 404);
+    // Branch picker data for the Branch scope's second row: the checked-out
+    // head, the auto-detected compare base (same logic the branch scope uses
+    // when no explicit base is pinned), and every local + remote branch.
+    const head = gitText(wt.path, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() || 'HEAD';
+    const branches = [
+      ...new Set(
+        gitText(wt.path, ['branch', '-a', '--format=%(refname:short)'])
+          .split('\n')
+          .map(b => b.trim())
+          // The `origin/HEAD` symref entry is noise in a picker.
+          .filter(b => b && !b.endsWith('/HEAD')),
+      ),
+    ];
+    return c.json({ head, base: autoBaseRef(wt), branches });
+  });
+
   app.get('/api/working_trees/:id/diff', async c => {
     const id = c.req.param('id');
     const rel = c.req.query('path') ?? '';
@@ -474,7 +538,9 @@ export function registerWorkingTreeRoutes(
     if (!resolved) return c.json({ error: 'path escapes working tree' }, 400);
     void resolved;
     const scope = parseScope(c.req.query('scope'));
-    return c.json({ diff: computeFileDiff(wt.path, rel, scope, wt) });
+    const sha = parseCommitSha(c.req.query('sha'));
+    const base = scope === 'branch' ? parseBaseRef(c.req.query('base')) : null;
+    return c.json({ diff: computeFileDiff(wt.path, rel, scope, wt, sha, base) });
   });
 
   app.get('/api/working_trees/:id/file_meta', async c => {
@@ -542,11 +608,14 @@ export function registerWorkingTreeRoutes(
     // History scopes (commit / branch / lastturn) read the file list from
     // `git diff --name-status` against a base ref, not `git status`.
     if (scope === 'commit' || scope === 'branch' || scope === 'lastturn') {
-      // Ref(s) to diff against. `<base> HEAD` = the committed delta (commit);
-      // a single ref = that ref vs the working tree (branch / lastturn).
+      // Ref(s) to diff against. `<base> <ref>` = the committed delta (commit,
+      // optionally pinned to `?sha=`); a single ref = that ref vs the working
+      // tree (branch / lastturn).
+      const commitRef = parseCommitSha(c.req.query('sha')) ?? 'HEAD';
+      const baseRef = scope === 'branch' ? parseBaseRef(c.req.query('base')) : null;
       const baseRange =
-        scope === 'commit' ? [commitBase(wt.path), 'HEAD'] :
-        scope === 'branch' ? [branchBase(wt)] :
+        scope === 'commit' ? [commitBaseOf(wt.path, commitRef), commitRef] :
+        scope === 'branch' ? [branchBase(wt, baseRef)] :
         ['HEAD']; // lastturn diffs the working tree vs HEAD, then filters
       const out: ChangedFile[] = [];
       const recs = gitText(wt.path, ['diff', '--name-status', '-z', ...baseRange]).split('\0');

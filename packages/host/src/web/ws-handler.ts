@@ -301,8 +301,8 @@ async function dispatch(
       sessions.removeFromQueue(msg.session_id, msg.queue_id);
       return;
     }
-    case 'queue:reorder': {
-      sessions.reorderQueue(msg.session_id, msg.order);
+    case 'queue:update': {
+      sessions.updateQueueMessage(msg.session_id, msg.queue_id, msg.text);
       return;
     }
     case 'queue:clear': {

@@ -622,8 +622,8 @@ export class SessionManager {
     this.broadcastQueueUpdated(sessionId);
   }
 
-  reorderQueue(sessionId: string, orderedIds: string[]): void {
-    this.queue.reorder(sessionId, orderedIds);
+  updateQueueMessage(sessionId: string, queueId: string, text: string): void {
+    this.queue.update(sessionId, queueId, text);
     this.broadcastQueueUpdated(sessionId);
   }
 

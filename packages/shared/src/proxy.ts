@@ -89,8 +89,11 @@ export interface CodexCapabilities {
 
 export interface KimiCapabilities {
   protocolVersion: string;
-  models: [];
-  /** Empty until ACP can advertise defaults before a session exists. */
+  /** Probed from a throwaway ACP session's configOptions. Thinking levels
+   *  are session-global in Kimi, so every model carries the same
+   *  supportedThinking list. Empty when the agent advertises no model
+   *  option (or the probe failed, e.g. not logged in). */
+  models: CodexModelCapabilities[];
   modes?: ProxyModeCapabilities[];
   slashCommands: [];
   agentInfo?: {

@@ -15,7 +15,7 @@ import {
   updateWorkspace,
 } from './api.js';
 import { injectComposerDraft } from './components/Composer.js';
-import type { WorkingTree } from './api.js';
+import type { WorkingTree, ChangeScope } from './api.js';
 import { FileRefRehypeContext } from './transcript/items.js';
 import type { PlanLifecycleState } from './transcript/apply.js';
 import { DiffOpenContext, FileLinkOpenContext, ImageZoomContext, PlanOpenContext } from './transcript/items.js';
@@ -262,6 +262,15 @@ export function App() {
     t: appT,
   });
 
+  // The top-right GitBadge reports the All-changes numbers, so clicking it
+  // must land the Changes inspector on that same scope (requestId forces a
+  // re-apply even when the inspector is already mounted on another scope).
+  const [changesScopeRequest, setChangesScopeRequest] = useState<{ scope: ChangeScope; requestId: number } | null>(null);
+  const showAllChanges = () => {
+    setChangesScopeRequest({ scope: 'all', requestId: Date.now() });
+    activateRail('diffs');
+  };
+
   useAppSocket({
     authStatus: runtimeAuthStatus,
     ws,
@@ -376,6 +385,7 @@ export function App() {
     sheetMounted,
     sheetVisible,
     inspectorKind,
+    inspectorAvailable,
     inspectorVisible,
     openWorkspaceIds: openWsIds,
     selectedWorkspaceId: selectedWsId,
@@ -443,7 +453,7 @@ export function App() {
       onOpenChat={request => openChatPanel(subtask.id, request)}
       fileRehype={fileRehype}
       onReopen={() => { void reopenSubtask(subtask.id); }}
-      onShowChanges={() => activateRail('diffs')}
+      onShowChanges={showAllChanges}
     />
   ) : null;
 
@@ -507,7 +517,7 @@ export function App() {
           window.dispatchEvent(new CustomEvent('gian.toggle-rail'));
           setSidebarCollapsedUi(c => !c);
         }}
-        p3Available={sheetVisible && inspectorVisible}
+        p3Available={sheetVisible && inspectorAvailable}
         p3Visible={inspectorVisible}
         onToggleP3={() => setP3Collapsed(c => !c)}
         canGoBack={canGoBack}
@@ -573,7 +583,7 @@ export function App() {
               onApprove={sessionMainHandlers.onApprove}
               onQueueAdd={sessionMainHandlers.onQueueAdd}
               onQueueRemove={sessionMainHandlers.onQueueRemove}
-              onQueueReorder={sessionMainHandlers.onQueueReorder}
+              onQueueUpdate={sessionMainHandlers.onQueueUpdate}
               onQueueClear={sessionMainHandlers.onQueueClear}
               onQueueSendNow={sessionMainHandlers.onQueueSendNow}
               onSteer={sessionMainHandlers.onSteer}
@@ -582,7 +592,7 @@ export function App() {
               onSetEffort={sessionMainHandlers.onSetEffort}
               onSetServiceTier={sessionMainHandlers.onSetServiceTier}
               onSetNativeConfig={sessionMainHandlers.onSetNativeConfig}
-              onShowChanges={() => { activateRail('diffs'); }}
+              onShowChanges={showAllChanges}
               activeWorkingTreeId={viewedWorkingTreeId(activeSession)}
               activeBranch={
                 workingTrees.find(wt => wt.id === viewedWorkingTreeId(activeSession))?.branch
@@ -743,6 +753,7 @@ export function App() {
                 workingTreeId={viewedWorkingTreeId(activeSession)}
                 workingTrees={workingTrees}
                 revealFile={fileReveal}
+                scopeRequest={changesScopeRequest}
                 onOpenFile={(rel, perm) => {
                   const sess = activeSession;
                   const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
@@ -751,7 +762,7 @@ export function App() {
                   const abs = `${wt.path}/${rel}`;
                   void openFileInSheet(abs, perm);
                 }}
-                onOpenDiff={(rel, perm, scope) => { void openDiffInSheet(rel, perm, scope); }}
+                onOpenDiff={(rel, perm, scope, sha, base) => { void openDiffInSheet(rel, perm, scope, sha, base); }}
                 canCommit={!!activeSession}
                 onComposePrompt={text => { if (activeSessionId) injectComposerDraft(activeSessionId, text); }}
               />

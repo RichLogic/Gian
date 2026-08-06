@@ -27,10 +27,6 @@ export interface SessionMenuActions {
   onMarkUnread?: () => void;
   onFork?: (executor: Executor) => void;
   onDelete?: () => void;
-  /** Subtask only (spec §B): toggle the user completion flag. `completed`
-   *  drives the label ("Mark complete" ↔ "Reopen"). */
-  onToggleComplete?: () => void;
-  completed?: boolean;
 }
 
 /** The branch segment's worktree dropdown (view-level working-tree switch).
@@ -96,8 +92,6 @@ const ICON = {
   trash: 'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13',
   // envelope — "mark as unread", same idiom as an unread email
   mail: 'M3 5h18v14H3z M3 7l9 6 9-6',
-  // check — "mark complete" (subtask)
-  check: 'M5 12l5 5L20 7',
 };
 
 interface MenuItemDesc {
@@ -119,13 +113,15 @@ interface MenuItemDesc {
  * actions are destructive, so a single fixed template can't express them:
  *
  *  session : Rename · Copy · Unread ┊ Recover(red)
- *  subtask : Rename · Copy ┊ Unread · Complete ┊ Recover(red)
+ *  subtask : Rename · Copy ┊ Unread ┊ Recover(red)
  *
  * 2026-08-03: the session menu's Fork×3 and Delete items were removed (fork
  * plumbing in use-topbar-model stays, unused by the menu); the subtask
  * menu's Delete item went with them. The task menu was dropped entirely when
  * the Tasks-view breadcrumb lost the task segment — task rename/done/delete
- * live on the sidebar rail row's ⋯ menu.
+ * live on the sidebar rail row's ⋯ menu. 2026-08-05: the subtask menu's
+ * Complete/Reopen item was removed too — completion is toggled from the
+ * subtask row's hover check in the Tasks rail.
  */
 function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuItemDesc[] {
   const items: MenuItemDesc[] = [
@@ -138,12 +134,6 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
   if (m.kind === 'subtask') {
     copy();
     if (m.onMarkUnread) items.push({ key: 'unread', icon: ICON.mail, label: t('path.menu.markUnread'), onClick: m.onMarkUnread, ruleBefore: true });
-    if (m.onToggleComplete) items.push({
-      key: 'complete',
-      icon: m.completed ? ICON.refresh : ICON.check,
-      label: m.completed ? t('tasks.subtask.reopen') : t('tasks.subtask.complete'),
-      onClick: m.onToggleComplete,
-    });
     if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, ruleBefore: true });
     return items;
   }
@@ -281,11 +271,12 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                   </div>
                 )}
                 {showBranchMenu && branchMenu && (
-                  <div className="session-menu" ref={branchMenuRef} onClick={e => e.stopPropagation()}>
+                  <div className="session-menu branch-menu" ref={branchMenuRef} onClick={e => e.stopPropagation()}>
                     {branchMenu.items.map(it => (
                       <button
                         key={it.id}
                         className={`item${it.active ? ' active' : ''}`}
+                        title={it.label}
                         onClick={() => { setBranchMenuOpen(false); branchMenu.onPick(it.id); }}
                       >
                         {/* The check slot is always rendered so every label

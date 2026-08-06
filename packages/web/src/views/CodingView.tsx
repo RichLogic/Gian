@@ -81,7 +81,7 @@ export interface CodingViewProps {
   ) => void;
   onQueueAdd: (sessionId: string, text: string, attachments?: Array<{ path: string; name: string; mime: string; size?: number }>) => void;
   onQueueRemove: (sessionId: string, queueId: string) => void;
-  onQueueReorder: (sessionId: string, order: string[]) => void;
+  onQueueUpdate: (sessionId: string, queueId: string, text: string) => void;
   onQueueClear: (sessionId: string) => void;
   onQueueSendNow: (sessionId: string) => void;
   /** Codex-only mid-turn injection (`turn/steer`) — the composer's Ctrl+Enter
@@ -190,7 +190,7 @@ export function CodingView(p: CodingViewProps) {
           onApprove={(approvalId, decision, answers, context) => p.onApprove(p.activeSession!.id, approvalId, decision, answers, context)}
           onQueueAdd={(text, items) => p.onQueueAdd(p.activeSession!.id, text, items)}
           onQueueRemove={queueId => p.onQueueRemove(p.activeSession!.id, queueId)}
-          onQueueReorder={order => p.onQueueReorder(p.activeSession!.id, order)}
+          onQueueUpdate={(queueId, text) => p.onQueueUpdate(p.activeSession!.id, queueId, text)}
           onQueueClear={() => p.onQueueClear(p.activeSession!.id)}
           onQueueSendNow={() => p.onQueueSendNow(p.activeSession!.id)}
           onSteer={(text, opts) => p.onSteer(p.activeSession!.id, text, opts?.attachments)}

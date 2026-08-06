@@ -9,6 +9,8 @@ vi.mock('../src/api.js', async () => {
   return {
     ...actual,
     loadChanged: vi.fn().mockResolvedValue([] as ChangedEntry[]),
+    loadCommits: vi.fn().mockResolvedValue([]),
+    loadBranchList: vi.fn().mockResolvedValue({ head: 'demo', base: 'main', branches: ['main', 'demo'] }),
     stageFile: vi.fn().mockResolvedValue(true),
     unstageFile: vi.fn().mockResolvedValue(true),
   };
@@ -46,7 +48,7 @@ function renderChanges(opts: {
 
 // Open the custom scope dropdown and pick a scope by its visible label.
 const SCOPE_LABEL: Record<string, string> = {
-  unstaged: 'Unstaged', staged: 'Staged', commit: 'Commit', branch: 'Branch', lastturn: 'Last turn',
+  unstaged: 'Unadded', staged: 'Added', commit: 'Committed', branch: 'Branch', lastturn: 'Last turn',
 };
 function pickScope(value: keyof typeof SCOPE_LABEL): void {
   fireEvent.click(document.querySelector('.changes-scope-btn') as HTMLElement);
@@ -65,14 +67,14 @@ describe('Inspector CHANGES', () => {
 
   it('defaults to the "branch" scope', async () => {
     renderChanges();
-    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'branch'));
+    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'branch', null, null));
   });
 
   it('switching the scope re-fetches with that scope', async () => {
     renderChanges();
     await waitFor(() => expect(api.loadChanged).toHaveBeenCalled());
     pickScope('staged');
-    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'staged'));
+    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'staged', null, null));
   });
 
   it('clicking a row opens its diff in the current scope', async () => {
@@ -80,7 +82,7 @@ describe('Inspector CHANGES', () => {
     const { onOpenDiff } = renderChanges();
     fireEvent.click(await screen.findByText('a.ts'));
     // Default scope is now Branch.
-    expect(onOpenDiff).toHaveBeenCalledWith('src/a.ts', false, 'branch');
+    expect(onOpenDiff).toHaveBeenCalledWith('src/a.ts', false, 'branch', null, null);
   });
 
   it('Stage on an unstaged row calls stageFile then reloads', async () => {

@@ -65,6 +65,39 @@ describe('MarkdownText file linkification', () => {
     expect(onOpen.container.querySelector('pre a')).toBeNull();
     expect(onOpen.container.querySelector('a')).toBeNull();
   });
+
+  it('converts a model-written relative markdown link to a known file into an in-app file link', () => {
+    const onOpen = renderMd('已整理成方案文档：[README.md](./README.md)。');
+    const link = screen.getByText('README.md');
+    expect(link.tagName).toBe('A');
+    expect(link.className).toContain('file-link');
+    fireEvent.click(link);
+    expect(onOpen).toHaveBeenCalledWith('/repo/README.md', undefined);
+  });
+
+  it('resolves a markdown link whose href carries a :line suffix', () => {
+    const onOpen = renderMd('[App.tsx](packages/web/src/App.tsx:12)');
+    fireEvent.click(screen.getByText('App.tsx'));
+    expect(onOpen).toHaveBeenCalledWith('/repo/packages/web/src/App.tsx', 12);
+  });
+
+  it('swallows clicks on relative markdown links that do NOT resolve to a file (no new window)', () => {
+    const onOpen = renderMd('[missing.md](./missing.md)');
+    const link = screen.getByText('missing.md');
+    expect(link.className).not.toContain('file-link');
+    // dispatchEvent returns false when the handler called preventDefault —
+    // i.e. the browser/Electron shell never sees a navigation to open.
+    expect(fireEvent.click(link)).toBe(false);
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('leaves scheme URLs (https:, vscode:) as normal anchors', () => {
+    const onOpen = renderMd('[site](https://example.com) and [code](vscode://file/x.ts)');
+    const links = onOpen.container.querySelectorAll('a');
+    expect(links).toHaveLength(2);
+    expect(links[0]!.className).not.toContain('file-link');
+    expect(links[1]!.className).not.toContain('file-link');
+  });
 });
 
 describe('MarkdownText fenced code block copy button', () => {

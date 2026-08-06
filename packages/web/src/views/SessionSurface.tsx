@@ -82,7 +82,7 @@ export function SessionSurface({
                   commands.onApprove(session.id, approvalId, decision, answers, context)}
                 onQueueAdd={(text, attachments) => commands.onQueueAdd(session.id, text, attachments)}
                 onQueueRemove={queueId => commands.onQueueRemove(session.id, queueId)}
-                onQueueReorder={order => commands.onQueueReorder(session.id, order)}
+                onQueueUpdate={(queueId, text) => commands.onQueueUpdate(session.id, queueId, text)}
                 onQueueClear={() => commands.onQueueClear(session.id)}
                 onQueueSendNow={() => commands.onQueueSendNow(session.id)}
                 onSteer={(text, options) => commands.onSteer(session.id, text, options?.attachments)}

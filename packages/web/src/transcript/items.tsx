@@ -101,12 +101,20 @@ function MarkdownAnchor(props: {
     return <FileLink path={abs} line={line} className="file-link-auto">{props.children}</FileLink>;
   }
   const routesToBrowser = !!props.href && /^https?:\/\//i.test(props.href);
+  // Relative/bare-path hrefs (e.g. a model-written `[x.md](x.md)` that didn't
+  // resolve to a real file) would just reload the SPA at a junk URL — in the
+  // desktop shell that spawns a whole second Gian window. Swallow them.
+  const isDeadRelative = !!props.href && !/^[a-z][a-z0-9+.-]*:/i.test(props.href);
   return (
     <a
       href={props.href}
       target={routesToBrowser && openBrowser ? undefined : '_blank'}
       rel="noreferrer noopener"
       onClick={event => {
+        if (isDeadRelative) {
+          event.preventDefault();
+          return;
+        }
         if (!routesToBrowser || !openBrowser || !props.href) return;
         event.preventDefault();
         openBrowser(props.href);

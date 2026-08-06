@@ -102,27 +102,66 @@ export interface ChangedEntry {
   removed: number;
 }
 
-/** Diff comparison scope. Mirrors Codex's five-option picker plus the legacy
- *  `all`:
+/** Diff comparison scope. Mirrors Codex's picker plus the legacy `all`:
  *   - `all`      = working tree vs HEAD (staged+unstaged, the historical
  *                  default; default-omitted from the URL so it stays
- *                  byte-identical to the pre-scope endpoint — GitBadge + older
- *                  callers rely on that). Not shown in the UI picker.
+ *                  byte-identical to the pre-scope endpoint — older
+ *                  callers rely on that). Shown in the picker as "Uncommitted".
  *   - `unstaged` = working tree vs index.
  *   - `staged`   = index vs HEAD.
- *   - `commit`   = HEAD's committed delta (parent..HEAD).
+ *   - `commit`   = a single commit's delta (HEAD's by default; `sha` pins
+ *                  any commit — the Committed submenu).
  *   - `branch`   = the whole branch vs its base (merge-base) + untracked.
  *   - `lastturn` = files the agent edited in its most recent turn, vs HEAD. */
 export type ChangeScope = 'all' | 'unstaged' | 'staged' | 'commit' | 'branch' | 'lastturn';
 
+/** A commit on the current branch since it diverged from its base. */
+export interface BranchCommit {
+  sha: string;
+  subject: string;
+  /** git's relative date (`%cr`), e.g. "19 hours ago". */
+  rel: string;
+}
+
+/** Branch picker data for the Changes inspector's second row: the checked-out
+ *  head, the auto-detected compare base, and every local + remote branch. */
+export interface BranchList {
+  head: string;
+  /** Auto-detected compare base (session base_branch / repo default), or
+   *  null when none could be determined. */
+  base: string | null;
+  branches: string[];
+}
+
 export async function loadChanged(
   workingTreeId: string,
   scope: ChangeScope = 'all',
+  sha?: string | null,
+  base?: string | null,
 ): Promise<ChangedEntry[]> {
-  const q = scope === 'all' ? '' : `?scope=${scope}`;
+  const params = new URLSearchParams();
+  if (scope !== 'all') params.set('scope', scope);
+  if (scope === 'commit' && sha) params.set('sha', sha);
+  if (scope === 'branch' && base) params.set('base', base);
+  const q = params.size ? `?${params.toString()}` : '';
   const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/changed${q}`);
   if (!res.ok) return [];
   return (await res.json()) as ChangedEntry[];
+}
+
+/** Commits on the branch since divergence — the Changes picker's Committed row. */
+export async function loadCommits(workingTreeId: string): Promise<BranchCommit[]> {
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/commits`);
+  if (!res.ok) return [];
+  return (await res.json()) as BranchCommit[];
+}
+
+/** Branches for the Branch scope's compare-base picker (second row). Named
+ *  distinct from the workspace-scoped `loadBranches` below. */
+export async function loadBranchList(workingTreeId: string): Promise<BranchList | null> {
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/branches`);
+  if (!res.ok) return null;
+  return (await res.json()) as BranchList;
 }
 
 /** Stage a single file (`git add -- <path>`). Index-only — never touches file
@@ -287,9 +326,13 @@ export async function loadDiff(
   workingTreeId: string,
   path: string,
   scope: ChangeScope = 'all',
+  sha?: string | null,
+  base?: string | null,
 ): Promise<string> {
   const params = new URLSearchParams({ path });
   if (scope !== 'all') params.set('scope', scope);
+  if (scope === 'commit' && sha) params.set('sha', sha);
+  if (scope === 'branch' && base) params.set('base', base);
   const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/diff?${params.toString()}`);
   if (!res.ok) return '';
   const body = (await res.json()) as { diff: string };

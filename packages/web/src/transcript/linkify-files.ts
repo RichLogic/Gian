@@ -106,16 +106,52 @@ interface HastNode {
   children?: HastNode[];
 }
 
+// Matches any URL scheme (`http:`, `mailto:`, `vscode:` …). Anchors whose
+// href has a scheme are left alone; only relative/bare paths are candidates
+// for in-app file resolution.
+const SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
+
 /**
  * Build a rehype plugin that linkifies file references in text nodes.
  * `toAbs` maps a resolved relative path to the absolute on-disk path the
  * in-app opener expects. Skips text inside existing `<a>` and `<pre>` (code
- * blocks) so links and code fences aren't mangled.
+ * blocks) so links and code fences aren't mangled. Existing `<a>` elements
+ * whose href is a relative path that resolves to a real file are converted
+ * into in-app file links too — otherwise a model-written `[x.md](x.md)`
+ * would navigate the SPA origin (or spawn a second window in the desktop
+ * shell) instead of opening the Files view (2026-08-05).
  */
 export function makeFileLinkifyRehype(
   index: FileRefIndex,
   toAbs: (relPath: string) => string,
 ) {
+  function linkProps(rel: string, line?: number): Record<string, unknown> {
+    const abs = toAbs(rel);
+    return {
+      className: ['file-link', 'file-link-auto'],
+      href: `vscode://file/${encodeURI(abs)}${line ? ':' + line : ''}`,
+      dataFileAbs: abs,
+      ...(line != null ? { dataFileLine: String(line) } : {}),
+    };
+  }
+
+  /** Resolve an existing anchor's href to a real file, or return null. */
+  function refFromHref(href: unknown): { rel: string; line?: number } | null {
+    if (typeof href !== 'string' || !href) return null;
+    if (href.startsWith('#') || SCHEME_RE.test(href)) return null;
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(href);
+    } catch {
+      return null;
+    }
+    const m = decoded.match(/^(.*?)(?::(\d+))?$/);
+    const rel = index.resolve(m?.[1] ?? decoded);
+    if (!rel) return null;
+    const line = m?.[2] ? Number(m[2]) : undefined;
+    return { rel, ...(line != null ? { line } : {}) };
+  }
+
   function splitText(value: string): HastNode[] {
     const refs = findFileRefs(value);
     if (refs.length === 0) return [{ type: 'text', value }];
@@ -126,16 +162,10 @@ export function makeFileLinkifyRehype(
       const rel = index.resolve(r.path);
       if (!rel) continue; // leave unresolved tokens as plain text
       if (r.start > pos) nodes.push({ type: 'text', value: value.slice(pos, r.start) });
-      const abs = toAbs(rel);
       nodes.push({
         type: 'element',
         tagName: 'a',
-        properties: {
-          className: ['file-link', 'file-link-auto'],
-          href: `vscode://file/${encodeURI(abs)}${r.line ? ':' + r.line : ''}`,
-          dataFileAbs: abs,
-          ...(r.line != null ? { dataFileLine: String(r.line) } : {}),
-        },
+        properties: linkProps(rel, r.line),
         children: [{ type: 'text', value: value.slice(r.start, r.end) }],
       });
       pos = r.end;
@@ -155,6 +185,15 @@ export function makeFileLinkifyRehype(
         out.push(...splitText(child.value ?? ''));
       } else {
         if (child.type === 'element') {
+          // A model-written `[file.md](file.md)` anchor whose href resolves
+          // to a real file becomes an in-app file link; its text children
+          // stay untouched (skip still applies below).
+          if (child.tagName === 'a' && !skip && child.properties?.dataFileAbs == null) {
+            const ref = refFromHref(child.properties?.href);
+            if (ref) {
+              child.properties = { ...child.properties, ...linkProps(ref.rel, ref.line) };
+            }
+          }
           const childSkip = skip || child.tagName === 'a' || child.tagName === 'pre';
           walk(child, childSkip);
         }

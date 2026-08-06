@@ -473,7 +473,7 @@ export function useWorkbench({
   /** Open a unified diff for a changed file in the Sheet workbench. The
    *  Changes inspector routes row clicks here so the diff lands in the
    *  workbench (full width) rather than crammed into the narrow inspector. */
-  async function openDiffInSheet(rel: string, permanent: boolean = false, scope: ChangeScope = 'all'): Promise<void> {
+  async function openDiffInSheet(rel: string, permanent: boolean = false, scope: ChangeScope = 'all', sha?: string | null, base?: string | null): Promise<void> {
     setChatPanel(null);
     const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
     // Follows the view-level override (branch picker) — the diff sheet shows
@@ -483,7 +483,7 @@ export function useWorkbench({
     if (!wt) return;
     const name = rel.split('/').pop() || rel;
     const fullPath = `${wt.path}/${rel}`;
-    const diffText = await loadDiff(wt.id, rel, scope);
+    const diffText = await loadDiff(wt.id, rel, scope, sha, base);
 
     setActiveRail('diffs');
     setWbTabs(prev => {

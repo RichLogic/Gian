@@ -11,9 +11,10 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { closeSync, openSync, readFileSync, readSync } from 'node:fs';
 import { writeFile, unlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import type { TokenUsageUpdate } from '@gian/shared';
@@ -278,6 +279,115 @@ function probeEffortLevels(): Promise<EffortLevel[]> {
   });
 }
 
+const SCRIPT_PROBE_BYTES = 16 * 1024;
+
+/** Expand a leading `~` against the given home directory. */
+function expandHome(raw: string, home: string): string {
+  if (raw === '~') return home;
+  if (raw.startsWith('~/')) return join(home, raw.slice(2));
+  return raw;
+}
+
+/**
+ * Extract the value assigned to CLAUDE_CONFIG_DIR in a wrapper script,
+ * resolving only the expansions we understand: `$HOME`, a leading `~`, and
+ * `${VAR:-default}` / `${VAR-default}` (the default wins, which matches how
+ * the wrapper behaves when the outer variable is unset). Returns null when
+ * there is no assignment or the value still contains expansions we can't
+ * resolve locally.
+ */
+export function extractClaudeConfigDirFromScript(scriptText: string, home: string = homedir()): string | null {
+  const match = scriptText.match(/CLAUDE_CONFIG_DIR\s*=\s*("[^"\n]*"|'[^'\n]*'|[^\s;]+)/);
+  if (!match?.[1]) return null;
+  let value = match[1];
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
+  }
+  value = value.replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:?-([^}]*)\}/g, '$1');
+  value = expandHome(value.replace(/\$HOME/g, home), home);
+  if (!value || value.includes('$') || !isAbsolute(value)) return null;
+  return value;
+}
+
+/** Read the first `maxBytes` of a file, or null when unreadable. */
+function readFileHead(path: string, maxBytes: number): Buffer | null {
+  try {
+    const fd = openSync(path, 'r');
+    try {
+      const buf = Buffer.alloc(maxBytes);
+      const bytesRead = readSync(fd, buf, 0, maxBytes, 0);
+      return buf.subarray(0, bytesRead);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Locate the Claude settings.json the configured CLI actually reads, trying
+ * in order:
+ *   a. `$CLAUDE_CONFIG_DIR/settings.json` (when the env var is set),
+ *   b. a CLAUDE_CONFIG_DIR assignment inside the configured CLI when that CLI
+ *      is a text wrapper script (binary executables are skipped),
+ *   c. `~/.claude/settings.json`.
+ * The first candidate that exists and parses as JSON wins; anything failing
+ * silently falls through so discovery can never crash the proxy. Returns
+ * null when no usable settings file is found.
+ */
+export function resolveClaudeSettingsPath(options?: {
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+  executable?: string;
+}): string | null {
+  const env = options?.env ?? process.env;
+  const home = options?.home ?? homedir();
+  const executable = options?.executable ?? claudeExecutable();
+
+  const candidates: string[] = [];
+
+  const fromEnv = env.CLAUDE_CONFIG_DIR?.trim();
+  if (fromEnv) {
+    const expanded = expandHome(fromEnv, home);
+    if (isAbsolute(expanded)) candidates.push(join(expanded, 'settings.json'));
+  }
+
+  const head = readFileHead(executable, SCRIPT_PROBE_BYTES);
+  // A NUL byte means we're looking at a real binary, not a wrapper script.
+  if (head && !head.includes(0)) {
+    const dir = extractClaudeConfigDirFromScript(head.toString('utf8'), home);
+    if (dir) candidates.push(join(dir, 'settings.json'));
+  }
+
+  candidates.push(join(home, '.claude', 'settings.json'));
+
+  for (const candidate of candidates) {
+    try {
+      JSON.parse(readFileSync(candidate, 'utf8'));
+      return candidate;
+    } catch {
+      // Missing file / unreadable / invalid JSON — try the next candidate.
+    }
+  }
+  return null;
+}
+
+/** Pull the `availableModels` string list out of a parsed Claude settings
+ *  object. Returns [] for anything that isn't a usable non-empty list. */
+export function parseAvailableModels(settings: unknown): string[] {
+  if (!settings || typeof settings !== 'object') return [];
+  const raw = (settings as Record<string, unknown>).availableModels;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((m): m is string => typeof m === 'string' && m.length > 0);
+}
+
+/** Stable slug for building capability ids out of arbitrary model strings. */
+function slugifyModelId(model: string): string {
+  const slug = model.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return slug || 'model';
+}
+
 interface ManagedSession {
   sessionId: string;
   claudeSessionId: string;
@@ -393,15 +503,32 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       allowClaudePrintProbe() ? probeCurrentModel() : Promise.resolve(null),
       probeEffortLevels(),
     ]);
-    // Static alias menu. Claude Code accepts `opus` / `sonnet` / `haiku` (and
-    // "no --model" = the configured default) as `--model` values; aliases are
-    // stable (always the latest of that family), so this list never goes stale
-    // and costs zero Agent SDK credit. The interactive `/model` picker shows
-    // exactly this set (Default / Sonnet / Haiku [+ Opus]), so scraping its TUI
-    // would discover nothing extra — the static list IS the full menu.
+    // Model menu sources, in priority order:
+    //  1. The `availableModels` list from the Claude settings.json the
+    //     configured CLI actually reads (see resolveClaudeSettingsPath).
+    //     Users running a wrapped/router CLI (custom ANTHROPIC_BASE_URL)
+    //     define their real model menu there; honoring it costs zero Agent
+    //     SDK credit because it's a local file read.
+    //  2. The static alias menu (opus / sonnet / haiku + "no --model" = the
+    //     configured default) as fallback. Aliases are stable (always the
+    //     latest of that family), so this list never goes stale. The
+    //     interactive `/model` picker shows exactly this set, so scraping its
+    //     TUI would discover nothing extra.
     // `probeCurrentModel` (gated off by default) only enriches the Default
     // entry's label with the resolved concrete name; it never changes which
     // models are offered.
+    let settingsModels: string[] = [];
+    try {
+      const settingsPath = resolveClaudeSettingsPath();
+      if (settingsPath) {
+        settingsModels = parseAvailableModels(JSON.parse(readFileSync(settingsPath, 'utf8')));
+        if (settingsModels.length > 0) {
+          this.emit('debug', `[runtime] Model menu from ${settingsPath} availableModels (${settingsModels.length} entries)`);
+        }
+      }
+    } catch (err) {
+      this.emit('debug', `[runtime] Claude settings discovery failed, using static aliases: ${err}`);
+    }
     const alias = (
       id: string,
       model: string,
@@ -412,21 +539,36 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       id, model, displayName, description,
       hidden: false, isDefault, defaultEffort: null, supportedEfforts,
     });
-    this.discoveredModels = [
-      // Empty model means "do not pass --model"; Claude Code picks the
-      // configured default. Resolving the concrete name requires `claude -p`,
-      // so it is only attempted behind GIAN_ALLOW_CLAUDE_PRINT_PROBE.
-      alias(
-        CLAUDE_DEFAULT_MODEL_ID,
-        '',
-        probedDefaultModel ? `Default · ${probedDefaultModel}` : 'Default',
-        "Uses Claude Code's configured default model.",
-        true,
-      ),
-      alias('claude-alias-opus', 'opus', 'Opus', 'Most capable for complex work.'),
-      alias('claude-alias-sonnet', 'sonnet', 'Sonnet', 'Best for everyday tasks.'),
-      alias('claude-alias-haiku', 'haiku', 'Haiku', 'Fastest for quick answers.'),
-    ];
+    // Empty model means "do not pass --model"; Claude Code picks the
+    // configured default. Resolving the concrete name requires `claude -p`,
+    // so it is only attempted behind GIAN_ALLOW_CLAUDE_PRINT_PROBE.
+    const defaultEntry = alias(
+      CLAUDE_DEFAULT_MODEL_ID,
+      '',
+      probedDefaultModel ? `Default · ${probedDefaultModel}` : 'Default',
+      "Uses Claude Code's configured default model.",
+      true,
+    );
+    if (settingsModels.length > 0) {
+      const usedIds = new Set<string>();
+      this.discoveredModels = [
+        defaultEntry,
+        ...settingsModels.map((model) => {
+          const slug = slugifyModelId(model);
+          let id = `claude-settings-${slug}`;
+          for (let n = 2; usedIds.has(id); n++) id = `claude-settings-${slug}-${n}`;
+          usedIds.add(id);
+          return alias(id, model, model, 'From Claude settings availableModels.');
+        }),
+      ];
+    } else {
+      this.discoveredModels = [
+        defaultEntry,
+        alias('claude-alias-opus', 'opus', 'Opus', 'Most capable for complex work.'),
+        alias('claude-alias-sonnet', 'sonnet', 'Sonnet', 'Best for everyday tasks.'),
+        alias('claude-alias-haiku', 'haiku', 'Haiku', 'Fastest for quick answers.'),
+      ];
+    }
     this.emit('debug', `[runtime] Discovered ${this.discoveredModels.length} models: ${this.discoveredModels.map((m) => m.model || '(default)').join(', ')}`);
   }
 
