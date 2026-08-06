@@ -68,7 +68,8 @@ export class ProxySessionCoordinator {
 
   async ensure(session: Session): Promise<string> {
     const cached = this.sessionIds.get(session.id);
-    if (cached) return cached;
+    if (cached && this.proxy.get(session.id)) return cached;
+    if (cached) this.forget(session.id);
     const existing = this.bringUps.get(session.id);
     if (existing) return existing;
 

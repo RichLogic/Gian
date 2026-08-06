@@ -269,14 +269,20 @@ class StubKimiProxyClient implements ProxyClient {
 class FakeKimiProxyManager {
   client = new StubKimiProxyClient();
   disposeCalls: string[] = [];
+  private available = true;
   async getOrCreate(): Promise<ProxyClient> {
+    this.available = true;
     return this.client;
   }
-  get(): ProxyClient {
-    return this.client;
+  get(): ProxyClient | undefined {
+    return this.available ? this.client : undefined;
+  }
+  dropClient(): void {
+    this.available = false;
   }
   async dispose(sessionId: string): Promise<void> {
     this.disposeCalls.push(sessionId);
+    this.available = false;
   }
   async closeAll(): Promise<void> {}
 }
@@ -633,6 +639,30 @@ test('Kimi lazy reattach is single-flight and recycles after auth failure', asyn
   } finally {
     db.close();
     rmSync(first.dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi send reattaches after an installed Proxy update drops the live facade', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'kimi' });
+    assert.equal(proxyMgr.client.createCalls, 1);
+
+    // ProxyManager.closeByExecutor() intentionally removes live facades when
+    // activating an installed Proxy. The coordinator may still hold the old
+    // proxy session id until the next request notices that the facade is gone.
+    proxyMgr.dropClient();
+
+    await sessions.sendMessage(session.id, 'after proxy update');
+
+    assert.equal(proxyMgr.client.createCalls, 2, 'send reattaches the persisted native session');
+    const row = db.prepare('SELECT status FROM sessions WHERE id = ?').get(session.id) as {
+      status: string;
+    };
+    assert.equal(row.status, 'running');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
