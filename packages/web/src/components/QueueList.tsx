@@ -1,6 +1,7 @@
 import { useContext, useState } from 'react';
 import { isNativeImageMime } from '../attachments.js';
 import { useT } from '../i18n/index.js';
+import { useQueueWithOverlays, useSessionOperationPending } from '../operations/use-operations.js';
 import { ImageZoomContext } from '../transcript/items.js';
 import type { QueueEntry } from '../types.js';
 
@@ -33,7 +34,14 @@ export function QueueList({
    *  Escape cancels. Position in the queue is kept (host `queue:update`). */
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
-  if (queue.length === 0) return null;
+  // Rendered queue = canonical + the whole-array overlay (proposal §4.3):
+  // add/update/remove/clear reflect immediately, the queue:updated broadcast
+  // + operation:result settle, a failure reveals the canonical array again.
+  const displayQueue = useQueueWithOverlays(sessionId, queue);
+  // Pending queue.sendNow run: the button disables and duplicate dispatches
+  // are blocked by the operation layer (⌘Enter included).
+  const sendingNow = useSessionOperationPending(sessionId, 'queue.sendNow');
+  if (displayQueue.length === 0) return null;
 
   function startEdit(entry: QueueEntry) {
     setEditingId(entry.id);
@@ -43,7 +51,7 @@ export function QueueList({
   function commitEdit() {
     if (!editingId) return;
     const next = editText.trim();
-    const original = queue.find(e => e.id === editingId);
+    const original = displayQueue.find(e => e.id === editingId);
     // Attachments-only entries have no text — an empty save keeps the old
     // text rather than blanking it (blank text + items is still sendable,
     // but never silently mutate on an accidental Enter).
@@ -56,13 +64,13 @@ export function QueueList({
       <div className="qd-head">
         <span className="qd-title">
           {t('queue.title')}
-          <span className="qd-count">{queue.length}</span>
+          <span className="qd-count">{displayQueue.length}</span>
         </span>
         <span className="qd-sub">· {t('queue.subtitle')}</span>
         <div className="qd-actions">
           {onSendNow != null ? (
-            <button className="btn xs secondary" onClick={onSendNow}>
-              {t('queue.sendNow')}
+            <button className="btn xs secondary" onClick={onSendNow} disabled={sendingNow}>
+              {sendingNow ? t('queue.sending') : t('queue.sendNow')}
             </button>
           ) : null}
           <button className="btn xs ghost" onClick={onClear}>
@@ -71,7 +79,7 @@ export function QueueList({
         </div>
       </div>
       <div className="qd-body">
-        {queue.map((entry, i) => {
+        {displayQueue.map((entry, i) => {
           const attachments = (entry.items ?? []).filter(
             item => item.type === 'localImage' || item.type === 'localFile',
           );

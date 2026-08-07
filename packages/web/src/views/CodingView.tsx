@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ApprovalDecision, ApprovalMode, NativeConfigValue, Session, Workspace } from '@gian/shared';
+import type { ApprovalDecision, ApprovalMode, Executor, NativeConfigValue, Session, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { ModeDropdown } from '../components/ModeDropdown.js';
 import type { Mode } from '../components/Topbar.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
+import { useSessionOperationPending } from '../operations/use-operations.js';
 import type { PlanLifecycleState } from '../transcript/apply.js';
+import type { TranscriptHistoryState } from '../controllers/use-transcript-hydration.js';
 import type { ApprovalActionContext, QueueEntry, TranscriptItem } from '../types.js';
 import { sessionNeedsAttention, buildRailSections } from '../session-routing.js';
 import { SessionMain } from './SessionMain.js';
@@ -37,7 +39,13 @@ const ICON = {
   // pushpin — pin / unpin rows (same glyph as the task pin in PathBreadcrumb)
   pin: 'M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z',
   archive: 'M3 4h18v4H3z M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8 M10 12h4',
+  caretRight: 'M9 6l6 6-6 6',
+  caretDown: 'M6 9l6 6 6-6',
 };
+
+/** Reserved collapse-set key for the 无归属 (Unfiled) group — '$' can never
+ *  collide with a workspace UUID. */
+const UNFILED_GROUP_KEY = '$unfiled';
 
 
 export interface CodingViewProps {
@@ -56,10 +64,13 @@ export interface CodingViewProps {
   queueBySession: Record<string, QueueEntry[]>;
   /** Streamed plan text and whether a successful turn finalized it. */
   planStateBySession: Record<string, PlanLifecycleState>;
+  historyBySession: Record<string, TranscriptHistoryState>;
+  onLoadOlder: (sessionId: string, executor: Executor) => void;
   onSelectSession: (id: string) => void;
   onWorkspaceCreated: (ws: Workspace) => void;
   onCreateSession: (input: CreateSessionInput) => void;
-  /** True from `session:create` dispatch until `session:created` lands. Drives
+  /** True while the pending session.create run is in flight (from dispatch
+   *  until operation:result lands; session:created arrives first). Drives
    *  the busy state in NewSessionView's submit button. */
   creatingSession: boolean;
   onSend: (
@@ -105,6 +116,8 @@ export interface CodingViewProps {
   onToggleWorkspacePin: (workspace: Workspace) => void;
   /** Open the Files view in Changed mode for this session's working tree. */
   onShowChanges: (session: Session) => void;
+  /** Open the Diffs inspector pinned to the Last-turn scope (TurnDiffChip). */
+  onShowLastTurnChanges: (session: Session) => void;
   /** Active session's working tree id (`wt:<id>` or `ws:<id>`), null if none. */
   activeWorkingTreeId: string | null;
   /** Branch name for the active session's working tree. */
@@ -179,7 +192,10 @@ export function CodingView(p: CodingViewProps) {
           session={p.activeSession}
           workspace={p.activeWorkspace}
           items={p.itemsBySession[p.activeSession.id] ?? []}
-          hydrated={p.itemsBySession[p.activeSession.id] !== undefined}
+          hydrated={p.historyBySession[p.activeSession.id]?.phase === 'page'
+            || p.historyBySession[p.activeSession.id]?.phase === 'complete'}
+          history={p.historyBySession[p.activeSession.id]}
+          onLoadOlder={() => p.onLoadOlder(p.activeSession!.id, p.activeSession!.executor)}
           pending={p.pendingBySession[p.activeSession.id] ?? false}
           queue={p.queueBySession[p.activeSession.id] ?? []}
           planText={p.planStateBySession[p.activeSession.id]?.text}
@@ -202,6 +218,7 @@ export function CodingView(p: CodingViewProps) {
             p.onSetNativeConfig(p.activeSession!.id, configId, value)}
           onDelete={() => p.onDelete(p.activeSession!.id)}
           onShowChanges={() => p.onShowChanges(p.activeSession!)}
+          onShowLastTurnChanges={() => p.onShowLastTurnChanges(p.activeSession!)}
           workingTreeId={p.activeWorkingTreeId}
           branch={p.activeBranch}
         />
@@ -297,14 +314,11 @@ function Sidebar({
   const filtered = active.filter(s => {
     // The per-Task Manager (type='manager') lives in Tasks mode only — it is
     // never a row in the Sessions list. Subtasks (type='subtask') DO appear
-    // here: a subtask is a 1:1 session.
-    if (s.type === 'manager') return false;
-    const ws = wsById.get(s.workspace_id);
-    // Sessions whose workspace is hidden disappear from the list — UNLESS
-    // they're the currently active session, in which case we keep the row
-    // visible with a "wsHidden" badge so the user has a route back.
-    if (ws?.hidden && s.id !== activeSessionId) return false;
-    return true;
+    // here: a subtask is a 1:1 session. Hidden-workspace sessions are NOT
+    // dropped either (2026-08-06): buildRailSections collects them into the
+    // 无归属 group so they stay reachable — e.g. before deleting the hidden
+    // workspace, which refuses while any session still references it.
+    return s.type !== 'manager';
   });
 
   // Every session groups by workspace — no "needs you" section pinned to the
@@ -319,7 +333,7 @@ function Sidebar({
       <SessionRow
         key={s.id}
         session={s}
-        wsHidden={wsById.get(s.workspace_id)?.hidden === 1}
+        wsHidden={s.workspace_id != null && wsById.get(s.workspace_id)?.hidden === 1}
         {...makeRowHandlers(s)}
       />
     );
@@ -414,6 +428,25 @@ function Sidebar({
           </div>
         )}
         {sections.projectWsIds.map(renderGroup)}
+        {/* 无归属: sessions of hidden workspaces stay reachable here instead
+            of disappearing from the rail. Same collapsible affordance as the
+            task 完成 section; the collapse state shares the rail's persisted
+            set under a reserved key. */}
+        {sections.unfiled.length > 0 && (
+          <>
+            <button
+              className="sb-section"
+              onClick={() => toggleGroup(UNFILED_GROUP_KEY)}
+              aria-expanded={!collapsed.has(UNFILED_GROUP_KEY)}
+              data-testid="sb-section-unfiled"
+            >
+              <SvgIcon d={collapsed.has(UNFILED_GROUP_KEY) ? ICON.caretRight : ICON.caretDown} size={12} />
+              <span className="sb-section-label">{t('coding.sidebar.section.unfiled')}</span>
+              <span className="count">{sections.unfiled.length}</span>
+            </button>
+            {!collapsed.has(UNFILED_GROUP_KEY) && sections.unfiled.map(s => renderRow(s))}
+          </>
+        )}
       </div>
     </aside>
   );
@@ -431,9 +464,12 @@ function SessionRow({
 }) {
   const t = useT();
   const pinned = session.pinned_at != null;
+  // Destructive-delete rule (proposal §5): the row stays visible with a
+  // pending affordance until the canonical session:deleted removes it.
+  const deleting = useSessionOperationPending(session.id, 'session.delete');
   return (
     <div
-      className={`rail-item session-row${active ? ' active' : ''}`}
+      className={`rail-item session-row${active ? ' active' : ''}${deleting ? ' deleting' : ''}`}
       data-testid={`session-row-${session.id}`}
       role="button"
       tabIndex={0}
@@ -450,9 +486,11 @@ function SessionRow({
       </div>
       {/* Row-end = status glyph when there is one (running/pending/error/unread),
           else the relative time. Mutually exclusive so the row stays compact. */}
-      {statusGlyphShown(session.status, session.unread === 1 && !active)
-        ? <StatusIcon status={session.status} unread={session.unread === 1 && !active} />
-        : <span className={`ri-age ${session.executor}`} title={t('coding.session.lastActivity')}>{relTime(session.updated_at)}</span>}
+      {deleting
+        ? <span className="spinner" role="status" aria-label={t('coding.session.deleting')} />
+        : statusGlyphShown(session.status, session.unread === 1 && !active)
+          ? <StatusIcon status={session.status} unread={session.unread === 1 && !active} />
+          : <span className={`ri-age ${session.executor}`} title={t('coding.session.lastActivity')}>{relTime(session.updated_at)}</span>}
       {wsHidden && (
         <span
           className="ri-hidden-badge"

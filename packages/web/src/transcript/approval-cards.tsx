@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ApprovalDecision } from '@gian/shared';
 import { useT } from '../i18n/index.js';
+import { useOperationPending } from '../operations/use-operations.js';
 import type { ApprovalActionContext, ApprovalItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
 
@@ -72,12 +73,17 @@ export function ApprovalCard({
   const isPlanExit = item.category === 'exit_plan_mode' && item.planActions && item.planActions.length > 0;
   const isNative = (item.nativeOptions?.length ?? 0) > 0;
   const sessionScopeAllowed = (item.scopeOptions ?? ['once']).includes('session');
+  // Pending approval.resolve run (Phase 2b, proposal §5): clicking any
+  // decision immediately disables the submitted card and labels it
+  // resolving; failure re-enables it (the run settles as failed) and the
+  // host's error envelope surfaces the error.
+  const resolving = useOperationPending(`approval:${item.approvalId}`, 'approval.resolve');
 
   // Keyboard shortcut wiring (A / Shift+A / D) while pending — only for
   // ordinary approvals; AskUserQuestion uses option pickers, and the plan
   // exit card uses semantic three-way buttons rather than allow/deny.
   useEffect(() => {
-    if (item.status !== 'pending' || isQuestion || isPlanExit || isNative) return;
+    if (item.status !== 'pending' || resolving || isQuestion || isPlanExit || isNative) return;
     function handleKey(e: KeyboardEvent) {
       // Ignore if focus is in an input/textarea/contenteditable
       const tag = (e.target as HTMLElement | null)?.tagName ?? '';
@@ -95,7 +101,7 @@ export function ApprovalCard({
     }
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [item.status, item.approvalId, onApprove, isQuestion, isPlanExit, isNative, sessionScopeAllowed]);
+  }, [item.status, item.approvalId, onApprove, resolving, isQuestion, isPlanExit, isNative, sessionScopeAllowed]);
 
   if (item.status === 'pending' && isQuestion) {
     return <QuestionCard item={item} onApprove={onApprove} />;
@@ -227,6 +233,7 @@ export function ApprovalCard({
               <button
                 key={option.optionId}
                 className={`btn sm ${rejected ? 'danger-ghost' : 'primary'}`}
+                disabled={resolving}
                 onClick={() => onApprove(
                   item.approvalId,
                   decision,
@@ -241,41 +248,52 @@ export function ApprovalCard({
               </button>
             );
           })}
+          {resolving && <span className="approval-resolving">{t('transcript.approval.resolving')}</span>}
         </div>
       ) : isPlanExit ? (
         <div className="approval-actions approval-actions--plan">
           <button
             className="btn primary sm"
+            disabled={resolving}
             onClick={() => onApprove(item.approvalId, 'accept_with_auto')}
           >
             {t('transcript.approval.autoAccept')}
           </button>
           <button
             className="btn secondary sm"
+            disabled={resolving}
             onClick={() => onApprove(item.approvalId, 'accept_with_ask')}
           >
             {t('transcript.approval.manualApprove')}
           </button>
           <button
             className="btn danger-ghost sm"
+            disabled={resolving}
             onClick={() => onApprove(item.approvalId, 'keep_planning')}
           >
             {t('transcript.approval.keepPlanning')}
           </button>
+          {resolving && <span className="approval-resolving">{t('transcript.approval.resolving')}</span>}
         </div>
       ) : (
         <div className="approval-actions">
-          <button className="btn primary sm" onClick={() => onApprove(item.approvalId, 'allow_once')}>{t('transcript.approval.allowOnce')}</button>
+          <button className="btn primary sm" disabled={resolving} onClick={() => onApprove(item.approvalId, 'allow_once')}>{t('transcript.approval.allowOnce')}</button>
           {allowSession && (
-            <button className="btn secondary sm" onClick={() => onApprove(item.approvalId, 'allow_session')}>{t('transcript.approval.allowSession')}</button>
+            <button className="btn secondary sm" disabled={resolving} onClick={() => onApprove(item.approvalId, 'allow_session')}>{t('transcript.approval.allowSession')}</button>
           )}
-          <button className="btn danger-ghost sm" onClick={() => onApprove(item.approvalId, 'decline')}>{t('transcript.approval.decline')}</button>
-          <span className="spacer" />
-          <span className="approval-tip">
-            <kbd className="kc">A</kbd>{' '}{t('transcript.approval.once')}
-            {allowSession && <> · <kbd className="kc">⇧A</kbd>{' '}{t('transcript.approval.session')}</>}
-            {' '}· <kbd className="kc">D</kbd>{' '}{t('transcript.approval.decline')}
-          </span>
+          <button className="btn danger-ghost sm" disabled={resolving} onClick={() => onApprove(item.approvalId, 'decline')}>{t('transcript.approval.decline')}</button>
+          {resolving ? (
+            <span className="approval-resolving">{t('transcript.approval.resolving')}</span>
+          ) : (
+            <>
+              <span className="spacer" />
+              <span className="approval-tip">
+                <kbd className="kc">A</kbd>{' '}{t('transcript.approval.once')}
+                {allowSession && <> · <kbd className="kc">⇧A</kbd>{' '}{t('transcript.approval.session')}</>}
+                {' '}· <kbd className="kc">D</kbd>{' '}{t('transcript.approval.decline')}
+              </span>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -306,6 +324,9 @@ function QuestionCard({
   // multi-select stores a list. "Other" (free text) lives in a parallel map.
   const [selections, setSelections] = useState<Record<string, string | string[]>>({});
   const [other, setOther] = useState<Record<string, string>>({});
+  // Submitted card: the pending approval.resolve run disables the card and
+  // labels it resolving (proposal §5); failure re-enables it.
+  const resolving = useOperationPending(`approval:${item.approvalId}`, 'approval.resolve');
   // Present one question at a time — mirrors how native Claude Code surfaces a
   // multi-question AskUserQuestion (one selector per question) rather than a
   // wall of them. Answers are still collected across all and submitted together.
@@ -430,6 +451,7 @@ function QuestionCard({
         {idx > 0 && (
           <button
             className="btn ghost sm"
+            disabled={resolving}
             onClick={() => setIdx(i => Math.max(0, i - 1))}
           >
             {t('transcript.question.back')}
@@ -438,7 +460,7 @@ function QuestionCard({
         {!isLast ? (
           <button
             className="btn primary sm"
-            disabled={!curAnswered}
+            disabled={!curAnswered || resolving}
             onClick={() => setIdx(i => Math.min(total - 1, i + 1))}
           >
             {t('transcript.question.next')}
@@ -446,7 +468,7 @@ function QuestionCard({
         ) : (
           <button
             className="btn primary sm"
-            disabled={!curAnswered}
+            disabled={!curAnswered || resolving}
             onClick={submit}
           >
             {t('common.submit')}
@@ -454,10 +476,12 @@ function QuestionCard({
         )}
         <button
           className="btn danger-ghost sm"
+          disabled={resolving}
           onClick={() => onApprove(item.approvalId, 'decline', undefined, { category: item.category })}
         >
           {t('common.cancel')}
         </button>
+        {resolving && <span className="approval-resolving">{t('transcript.approval.resolving')}</span>}
       </div>
     </div>
   );

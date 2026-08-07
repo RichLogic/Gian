@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  node-pty@1.1.0:
+    hash: dd4be6ca2416fc0cfe2e652940387284ec3cd200a6281faf32b585b4bed84573
+    path: patches/node-pty@1.1.0.patch
+
 importers:
 
   .:
@@ -65,7 +70,7 @@ importers:
         version: 4.12.15
       node-pty:
         specifier: ^1.1.0-beta40
-        version: 1.1.0
+        version: 1.1.0(patch_hash=dd4be6ca2416fc0cfe2e652940387284ec3cd200a6281faf32b585b4bed84573)
     devDependencies:
       '@gian/cc-proxy':
         specifier: workspace:*
@@ -5536,7 +5541,7 @@ snapshots:
 
   node-int64@0.4.0: {}
 
-  node-pty@1.1.0:
+  node-pty@1.1.0(patch_hash=dd4be6ca2416fc0cfe2e652940387284ec3cd200a6281faf32b585b4bed84573):
     dependencies:
       node-addon-api: 7.1.1
 

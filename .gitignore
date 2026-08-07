@@ -36,6 +36,7 @@ test-results/
 playwright-report/
 playwright/.cache/
 output/playwright/
+output/quality/
 .DS_Store
 
 # Desktop packaging

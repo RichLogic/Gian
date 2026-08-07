@@ -32,6 +32,18 @@ import {
 } from './token-usage.js';
 import { kimiContentText } from './input-items.js';
 
+function isReplaceableSnapshot(event: ChatEvent): boolean {
+  if (event.event === 'diff.updated') return true;
+  if (event.event === 'codex.agent' && event.display?.type === 'agent') return true;
+  if (event.event !== 'acp.sessionUpdate') return false;
+  const update = event.data.update;
+  if (!update || typeof update !== 'object' || Array.isArray(update)) return false;
+  const kind = (update as Record<string, unknown>).sessionUpdate;
+  return kind === 'tool_call' || kind === 'tool_call_update';
+}
+
+const SNAPSHOT_FLUSH_MS = 120;
+
 interface EventCoordinatorCallbacks {
   sendMessage: (sessionId: string, text: string, items?: InputItem[]) => Promise<void>;
 }
@@ -39,6 +51,11 @@ interface EventCoordinatorCallbacks {
 export class SessionEventCoordinator {
   private eventSubscribers: Array<(event: ChatEvent) => void> = [];
   private conversationUsageTurns = new Map<string, Set<string>>();
+  private pendingSnapshots = new Map<string, {
+    event: ChatEvent;
+    turnId: string;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
 
   constructor(
     private db: Db,
@@ -117,27 +134,22 @@ export class SessionEventCoordinator {
       callId: string,
       type: string,
       data: Record<string, unknown>,
+      replaceSnapshot = false,
     ): void => {
-      this.db
-        .prepare(
-          `INSERT INTO events
-            (id, session_id, turn_id, call_id, type, data, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          randomUUID(),
-          sessionId,
-          activeTurnId,
-          callId,
-          type,
-          JSON.stringify(data),
-          timestamp,
-        );
-      eventCount += 1;
+      const result = this.history.appendEvent(
+        sessionId,
+        activeTurnId,
+        callId,
+        type,
+        data,
+        { replaceSnapshot, createdAt: timestamp },
+      );
+      if (result.inserted) eventCount += 1;
     };
 
     const flushUserMessage = (): void => {
       if (!pendingUserText) return;
+      if (turnId) this.history.compactTurnStreams(turnId);
       turnId = null;
       insert(ensureTurn(), randomUUID(), 'user_message', { text: pendingUserText });
       pendingUserText = '';
@@ -187,10 +199,12 @@ export class SessionEventCoordinator {
             raw: event.data,
             ...(event.display ? { display: event.display } : {}),
           },
+          isReplaceableSnapshot(event),
         );
       }
     }
     flushUserMessage();
+    if (turnId) this.history.compactTurnStreams(turnId);
 
     if (turnNumber > 0) {
       this.db
@@ -315,6 +329,9 @@ export class SessionEventCoordinator {
     sessionId: string,
     notification: ProxyNotification,
   ): void {
+    if (notification.method === 'turn.completed' || notification.method === 'turn.failed') {
+      this.flushSnapshots(sessionId);
+    }
     // session.rotated: cc-proxy emits this when /clear creates a new native
     // session. Pure host-internal: update sessions.native_session_id and
     // broadcast session:updated. Don't surface as a transcript event.
@@ -472,6 +489,40 @@ export class SessionEventCoordinator {
 
   /** Persist the native event and broadcast its optional UI projection. */
   private dispatchChatEvent(e: ChatEvent): void {
+    const turnId = this.activeTurnId(e.session_id);
+    if (isReplaceableSnapshot(e)) {
+      const key = `${e.session_id}\u0000${turnId}\u0000${e.event}\u0000${e.call_id}`;
+      const pending = this.pendingSnapshots.get(key);
+      if (pending) {
+        pending.event = e;
+        return;
+      }
+      const entry = {
+        event: e,
+        turnId,
+        timer: setTimeout(() => this.flushSnapshot(key), SNAPSHOT_FLUSH_MS),
+      };
+      this.pendingSnapshots.set(key, entry);
+      return;
+    }
+    this.persistAndBroadcast(e, turnId);
+  }
+
+  private flushSnapshot(key: string): void {
+    const pending = this.pendingSnapshots.get(key);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingSnapshots.delete(key);
+    this.persistAndBroadcast(pending.event, pending.turnId);
+  }
+
+  private flushSnapshots(sessionId: string): void {
+    for (const [key, pending] of this.pendingSnapshots) {
+      if (pending.event.session_id === sessionId) this.flushSnapshot(key);
+    }
+  }
+
+  private persistAndBroadcast(e: ChatEvent, turnId: string): void {
     const storedData = {
       __gian_event: 2,
       provider: e.provider,
@@ -480,10 +531,11 @@ export class SessionEventCoordinator {
     };
     this.history.appendEvent(
       e.session_id,
-      this.activeTurnId(e.session_id),
+      turnId,
       e.call_id,
       e.event,
       storedData,
+      { replaceSnapshot: isReplaceableSnapshot(e) },
     );
     this.broadcaster.broadcast({
       type: 'event',
@@ -597,6 +649,7 @@ export class SessionEventCoordinator {
     // the next sendMessage hits a stale cache → `no proxy for session`.
     this.proxySessions.forget(sessionId);
     this.watcher?.resume(sessionId);
+    this.flushSnapshots(sessionId);
     const active = this.turns.get(sessionId);
     if (!active) return;
     console.error(`[session] proxy exited mid-turn session=${sessionId} code=${code} turn=${active.id}`);
@@ -610,6 +663,11 @@ export class SessionEventCoordinator {
     const now = new Date().toISOString();
     const active = this.turns.finish(sessionId, status, now);
     if (!active) return;
+    try {
+      this.history.compactTurnStreams(active.id);
+    } catch (error) {
+      console.warn(`[session] failed to compact turn streams turn=${active.id}`, error);
+    }
     // 'stopped' (user-initiated interrupt) is logically a clean termination,
     // not an error — the session lands at 'done' so the UI doesn't show a red
     // error pill. Only true failures land at 'error'.

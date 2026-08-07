@@ -8,6 +8,7 @@ import {
   isTrustedDesktopUrl,
   PROD_HOST_URL,
   resolveDesktopApplicationIdentity,
+  resolveDesktopDisplayName,
   resolveDesktopTargets,
   resolveDesktopWindowChrome,
 } from '../src/config.js';
@@ -34,6 +35,27 @@ test('development shell uses a distinct application identity and profile', () =>
     userDataPath: null,
     variant: 'production',
   });
+});
+
+test('desktop smoke can override the profile for either application variant', () => {
+  const env = { GIAN_DESKTOP_USER_DATA_DIR: '/tmp/gian-smoke-profile' };
+  assert.equal(
+    resolveDesktopApplicationIdentity(false, '/tmp/app-data', env).userDataPath,
+    '/tmp/gian-smoke-profile',
+  );
+  assert.equal(
+    resolveDesktopApplicationIdentity(true, '/tmp/app-data', env).userDataPath,
+    '/tmp/gian-smoke-profile',
+  );
+});
+
+test('development launcher can label the window with its current worktree', () => {
+  const identity = resolveDesktopApplicationIdentity(false, '/tmp/app-data');
+  assert.equal(resolveDesktopDisplayName(identity), 'GianDev');
+  assert.equal(
+    resolveDesktopDisplayName(identity, { GIAN_DESKTOP_LABEL: ' GianDev · gian-0.3.0 ' }),
+    'GianDev · gian-0.3.0',
+  );
 });
 
 test('development targets use the isolated GianDev ports', () => {
@@ -72,6 +94,29 @@ test('custom targets disable production launchd management', () => {
   assert.equal(targets.hostUrl, 'http://localhost:9100');
   assert.equal(targets.webUrl, 'http://localhost:5100');
   assert.equal(targets.manageHost, false);
+});
+
+test('packaged smoke may manage a custom loopback Host without using 8990', () => {
+  const targets = resolveDesktopTargets({
+    isPackaged: true,
+    platform: 'darwin',
+    env: {
+      GIAN_DESKTOP_HOST_URL: 'http://127.0.0.1:49123',
+      GIAN_DESKTOP_SMOKE_MANAGE_HOST: '1',
+    },
+  });
+  assert.equal(targets.hostUrl, 'http://127.0.0.1:49123');
+  assert.equal(targets.webUrl, 'http://127.0.0.1:49123');
+  assert.equal(targets.manageHost, true);
+
+  assert.equal(resolveDesktopTargets({
+    isPackaged: true,
+    platform: 'darwin',
+    env: {
+      GIAN_DESKTOP_HOST_URL: 'https://example.com',
+      GIAN_DESKTOP_SMOKE_MANAGE_HOST: '1',
+    },
+  }).manageHost, false);
 });
 
 test('desktop targets must be plain HTTP origins', () => {

@@ -1,6 +1,8 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 
 const GIT_TIMEOUT = 60_000;
+const execFileAsync = promisify(execFile);
 
 interface ExecOpts {
   cwd?: string;
@@ -118,6 +120,21 @@ export function listGitWorktrees(repoPath: string): GitWorktreeInfo[] {
   });
   if (!out) return [];
   return parseWorktreeListPorcelain(out);
+}
+
+/** Non-blocking variant for request paths that fan out across workspaces. */
+export async function listGitWorktreesAsync(repoPath: string): Promise<GitWorktreeInfo[]> {
+  try {
+    const { stdout } = await execFileAsync('git', ['worktree', 'list', '--porcelain'], {
+      cwd: repoPath,
+      timeout: GIT_TIMEOUT,
+      encoding: 'utf8',
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    return stdout ? parseWorktreeListPorcelain(stdout.trim()) : [];
+  } catch {
+    return [];
+  }
 }
 
 /** True if `repo` is the toplevel of a git working tree. */

@@ -4,15 +4,23 @@
 
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentInstallStatus, Executor, Workspace } from '@gian/shared';
-import { createWorkspace, loadAgents } from '../src/api.js';
+import type { AgentInstallStatus, ClientToServerMessage, Executor, Workspace } from '@gian/shared';
+import { loadAgents } from '../src/api.js';
 import { LocaleProvider } from '../src/i18n/index.js';
+import { createOperationDispatcher } from '../src/operations/dispatcher.js';
+// Side effect: registers the product Workspace definitions (the inline
+// workspace create dispatches workspace.create since Phase 3a).
+import '../src/operations/workspace.js';
+import { createOperationStore } from '../src/operations/store.js';
+import { OperationDispatcherProvider, OperationStoreProvider } from '../src/operations/use-operations.js';
 import { NewSessionView } from '../src/views/new-session-view.js';
 
 vi.mock('../src/api.js', () => ({
   createWorkspace: vi.fn(),
   loadAgents: vi.fn(),
+  peekAgents: vi.fn(() => null),
 }));
 
 function agent(id: Executor, name: string, ready = true): AgentInstallStatus {
@@ -55,18 +63,40 @@ const agents = [
   agent('kimi', 'Kimi Code', false),
 ];
 
+/** Operation-layer harness: the inline workspace create dispatches
+ *  workspace.create through a real dispatcher (Phase 3a). */
+function operationWrapper() {
+  const store = createOperationStore();
+  const dispatcher = createOperationDispatcher({
+    store,
+    transport: {
+      send: () => {},
+      onMessage: () => () => {},
+      onState: listener => { listener('open', 0); return () => {}; },
+    },
+  });
+  return ({ children }: { children: ReactNode }) => (
+    <OperationStoreProvider store={store}>
+      <OperationDispatcherProvider dispatcher={dispatcher}>{children}</OperationDispatcherProvider>
+    </OperationStoreProvider>
+  );
+}
+
 function renderView(props: Partial<Parameters<typeof NewSessionView>[0]> = {}) {
   const onCreate = vi.fn();
+  const Ops = operationWrapper();
   render(
     <LocaleProvider locale="en">
-      <NewSessionView
-        workspaces={[workspace('ws-1', 'Alpha'), workspace('ws-2', 'Beta')]}
-        onWorkspaceCreated={vi.fn()}
-        onCreate={onCreate}
-        onCancel={vi.fn()}
-        creating={false}
-        {...props}
-      />
+      <Ops>
+        <NewSessionView
+          workspaces={[workspace('ws-1', 'Alpha'), workspace('ws-2', 'Beta')]}
+          onWorkspaceCreated={vi.fn()}
+          onCreate={onCreate}
+          onCancel={vi.fn()}
+          creating={false}
+          {...props}
+        />
+      </Ops>
     </LocaleProvider>,
   );
   return { onCreate };
@@ -76,7 +106,6 @@ describe('NewSessionView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(loadAgents).mockResolvedValue(agents);
-    vi.mocked(createWorkspace).mockResolvedValue({ workspace: null, error: 'not used' });
   });
 
   it('renders one card per agent from /api/agents and disables unready agents', async () => {

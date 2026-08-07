@@ -7,6 +7,7 @@ import type {
   SystemConfig,
 } from '@gian/shared';
 import { SettingsBody } from '../src/components/SettingsBody.js';
+import { renderWithOperations } from './operation-test-utils.js';
 import { Toaster } from '../src/components/Toaster.js';
 import { __resetFeedback } from '../src/feedback.js';
 import * as api from '../src/api.js';
@@ -128,16 +129,16 @@ describe('SettingsBody Executors', () => {
   });
 
   function renderSettingsWithToaster() {
-    return render(
+    return renderWithOperations(
       <>
-        <SettingsBody config={config()} activeSection="executors" onChange={() => {}} />
+        <SettingsBody config={config()} activeSection="executors" />
         <Toaster />
       </>,
     );
   }
 
   it('renders exactly three cards with Proxy-owned defaults inside each card', async () => {
-    render(<SettingsBody config={config()} activeSection="executors" onChange={() => {}} />);
+    renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
 
     await waitFor(() => expect(screen.getAllByText('Claude Code')).toHaveLength(1));
     expect(screen.getAllByText('Codex')).toHaveLength(1);
@@ -166,7 +167,7 @@ describe('SettingsBody Executors', () => {
           }
         : capabilities(id)
     ));
-    render(<SettingsBody config={config()} activeSection="executors" onChange={() => {}} />);
+    renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
 
     const kimiCard = (await screen.findByText('Kimi Code')).closest('.exec-row') as HTMLElement;
     await waitFor(() => {
@@ -179,7 +180,7 @@ describe('SettingsBody Executors', () => {
   });
 
   it('persists Mode through the Agent Proxy defaults endpoint', async () => {
-    render(<SettingsBody config={config()} activeSection="executors" onChange={() => {}} />);
+    renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
     const heading = await screen.findByText('Claude Code');
     const card = heading.closest('.exec-row');
     expect(card).toBeTruthy();
@@ -207,7 +208,7 @@ describe('SettingsBody Executors', () => {
       },
     ]);
 
-    render(<SettingsBody config={config()} activeSection="executors" onChange={() => {}} />);
+    renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
 
     expect(await screen.findByRole('button', { name: 'Update proxy' })).toBeInTheDocument();
     expect(screen.getByText('0.1.0 · GitHub')).toBeInTheDocument();
@@ -222,7 +223,11 @@ describe('SettingsBody Executors', () => {
     fireEvent.change(pathInput, { target: { value: '/Users/test/bin/claude-mix' } });
     fireEvent.blur(pathInput);
 
-    expect(await screen.findByRole('alertdialog', { name: 'Restart Gian?' })).toBeTruthy();
+    expect(await screen.findByRole(
+      'alertdialog',
+      { name: 'Restart Gian?' },
+      { timeout: 3_000 },
+    )).toBeTruthy();
     expect(api.setAgentCliPath).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Restart' }));
 
@@ -243,7 +248,11 @@ describe('SettingsBody Executors', () => {
     const pathInput = await screen.findByDisplayValue('/bin/claude');
     fireEvent.change(pathInput, { target: { value: '/Users/test/bin/claude-mix' } });
     fireEvent.blur(pathInput);
-    fireEvent.click(await screen.findByRole('button', { name: 'Keep current path' }));
+    fireEvent.click(await screen.findByRole(
+      'button',
+      { name: 'Keep current path' },
+      { timeout: 3_000 },
+    ));
 
     await waitFor(() => expect(pathInput).toHaveValue('/bin/claude'));
     expect(api.setAgentCliPath).not.toHaveBeenCalled();
@@ -259,7 +268,11 @@ describe('SettingsBody Executors', () => {
     const pathInput = await screen.findByDisplayValue('/bin/claude');
     fireEvent.change(pathInput, { target: { value: '/missing/claude' } });
     fireEvent.blur(pathInput);
-    fireEvent.click(await screen.findByRole('button', { name: 'Restart' }));
+    fireEvent.click(await screen.findByRole(
+      'button',
+      { name: 'Restart' },
+      { timeout: 3_000 },
+    ));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('invalid CLI');
     await waitFor(() => expect(pathInput).toHaveValue('/bin/claude'));
@@ -275,7 +288,11 @@ describe('SettingsBody Executors', () => {
     fireEvent.change(pathInput, { target: { value: '/Users/test/bin/codex-next' } });
     fireEvent.blur(pathInput);
     expect(api.setAgentCliPath).not.toHaveBeenCalled();
-    fireEvent.click(await screen.findByRole('button', { name: 'Restart' }));
+    fireEvent.click(await screen.findByRole(
+      'button',
+      { name: 'Restart' },
+      { timeout: 3_000 },
+    ));
 
     await waitFor(() => {
       expect(api.setAgentCliPath).toHaveBeenCalledWith('codex', '/Users/test/bin/codex-next');

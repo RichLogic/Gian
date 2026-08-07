@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { SettingsBody } from '../src/components/SettingsBody.js';
+import { renderWithOperations } from './operation-test-utils.js';
 import * as api from '../src/api.js';
 import type { SystemConfig } from '@gian/shared';
 
@@ -29,7 +30,7 @@ describe('SettingsBody Appearance', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
   it('switching theme resets accent to the theme default', async () => {
-    render(<SettingsBody config={baseConfig()} onChange={() => {}} />);
+    renderWithOperations(<SettingsBody config={baseConfig()} />);
     fireEvent.click(screen.getByRole('button', { name: /Dark/ }));
     await waitFor(() => {
       expect(api.saveSettings).toHaveBeenCalledWith({ theme: 'dark', accent: 'plum' });
@@ -37,7 +38,7 @@ describe('SettingsBody Appearance', () => {
   });
 
   it('switching to light theme resets accent to azure', async () => {
-    render(<SettingsBody config={baseConfig()} onChange={() => {}} />);
+    renderWithOperations(<SettingsBody config={baseConfig()} />);
     fireEvent.click(screen.getByRole('button', { name: /Light/ }));
     await waitFor(() => {
       expect(api.saveSettings).toHaveBeenCalledWith({ theme: 'light', accent: 'azure' });
@@ -45,14 +46,14 @@ describe('SettingsBody Appearance', () => {
   });
 
   it('renders all 8 accent buttons', () => {
-    render(<SettingsBody config={baseConfig()} onChange={() => {}} />);
+    renderWithOperations(<SettingsBody config={baseConfig()} />);
     for (const name of ['Rose', 'Ember', 'Citron', 'Moss', 'Teal', 'Azure', 'Ink', 'Plum']) {
       expect(screen.getByRole('button', { name })).toBeTruthy();
     }
   });
 
   it('clicking an accent button sends a patch with only accent (not theme)', async () => {
-    render(<SettingsBody config={baseConfig()} onChange={() => {}} />);
+    renderWithOperations(<SettingsBody config={baseConfig()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Teal' }));
     await waitFor(() => {
       expect(api.saveSettings).toHaveBeenCalledWith({ accent: 'teal' });
@@ -60,7 +61,7 @@ describe('SettingsBody Appearance', () => {
   });
 
   it('switching language saves only the locale', async () => {
-    render(<SettingsBody config={baseConfig()} onChange={() => {}} />);
+    renderWithOperations(<SettingsBody config={baseConfig()} />);
     fireEvent.click(screen.getByRole('button', { name: 'English' }));
     await waitFor(() => {
       expect(api.saveSettings).toHaveBeenCalledWith({ locale: 'en' });

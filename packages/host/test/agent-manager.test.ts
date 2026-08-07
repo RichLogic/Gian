@@ -56,6 +56,10 @@ test('agent manager detects configured official CLIs and development proxies', a
     ['codex', true, '0.146.0'],
     ['kimi', true, '0.31.1'],
   ]);
+
+  await executable(bins.codex, 'codex-cli 0.147.0');
+  assert.equal((await manager.status('codex')).cli.version, '0.146.0');
+  assert.equal((await manager.status('codex', true)).cli.version, '0.147.0');
 });
 
 test('agent manager validates and persists a user CLI path', async t => {
@@ -226,4 +230,36 @@ test('agent manager marks a valid older managed proxy as outdated', async t => {
   assert.equal(status.proxy.state, 'outdated');
   assert.equal(status.proxy.version, '0.1.0');
   assert.equal(status.ready, false);
+});
+
+test('agent manager keeps the base Proxy ready for an app-only hotfix', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-proxy-hotfix-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const claude = join(root, 'bin', 'claude');
+  await executable(claude, 'claude 2.1.220');
+
+  const proxyDir = join(root, 'data', 'plugins', 'claude', '0.2.1');
+  await mkdir(proxyDir, { recursive: true });
+  await writeFile(join(proxyDir, 'proxy.mjs'), selfTestingProxy('claude'));
+  await writeFile(join(proxyDir, 'manifest.json'), JSON.stringify({
+    schemaVersion: 1,
+    id: 'claude',
+    version: '0.2.1',
+    entry: 'proxy.mjs',
+  }));
+  await symlink('0.2.1', join(root, 'data', 'plugins', 'claude', 'current'), 'dir');
+
+  const manager = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.2.1-hotfix',
+    managedProxies: true,
+    environmentCliPaths: { claude },
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+
+  const status = await manager.status('claude');
+  assert.equal(status.proxy.state, 'ready');
+  assert.equal(status.proxy.version, '0.2.1');
+  assert.equal(status.ready, true);
 });

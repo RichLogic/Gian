@@ -3,6 +3,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { isNativeImageMime } from '../attachments.js';
 import { useT } from '../i18n/index.js';
+import { dispatchMessageSend } from '../operations/message.js';
+import { useOperationDispatchOptional, useOperationRun } from '../operations/use-operations.js';
 import {
   BrowserLinkOpenContext,
   ChatPanelOpenContext,
@@ -46,6 +48,18 @@ export interface PlanOpenPayload {
 }
 export const PlanOpenContext = createContext<
   ((payload: PlanOpenPayload) => void) | null
+>(null);
+
+/**
+ * Provided by App.tsx: click-time fallback for relative-path markdown links
+ * that the render-time linkify pass did NOT resolve (file created after the
+ * index loaded, index missing, etc.). The handler re-resolves the href
+ * against the active working tree with a fresh file list and opens it in the
+ * in-app Files view. Null when no provider is mounted — clicks are then
+ * swallowed so the SPA never navigates to a junk relative URL.
+ */
+export const RelativeLinkOpenContext = createContext<
+  ((href: string) => void) | null
 >(null);
 
 /**
@@ -94,6 +108,7 @@ function MarkdownAnchor(props: {
   children?: React.ReactNode;
 }) {
   const openBrowser = useContext(BrowserLinkOpenContext);
+  const openRelative = useContext(RelativeLinkOpenContext);
   const p = props.node?.properties ?? {};
   const abs = typeof p.dataFileAbs === 'string' ? p.dataFileAbs : null;
   if (abs) {
@@ -101,9 +116,12 @@ function MarkdownAnchor(props: {
     return <FileLink path={abs} line={line} className="file-link-auto">{props.children}</FileLink>;
   }
   const routesToBrowser = !!props.href && /^https?:\/\//i.test(props.href);
-  // Relative/bare-path hrefs (e.g. a model-written `[x.md](x.md)` that didn't
-  // resolve to a real file) would just reload the SPA at a junk URL — in the
-  // desktop shell that spawns a whole second Gian window. Swallow them.
+  // Relative/bare-path hrefs the render-time linkify pass didn't resolve
+  // (e.g. a file the agent created after the index loaded) never got a
+  // dataFileAbs. Without a handler we'd have to swallow the click — such
+  // hrefs would just reload the SPA at a junk URL (in the desktop shell
+  // that spawns a whole second Gian window). With a handler, re-resolve
+  // against the working tree at click time instead.
   const isDeadRelative = !!props.href && !/^[a-z][a-z0-9+.-]*:/i.test(props.href);
   return (
     <a
@@ -113,6 +131,7 @@ function MarkdownAnchor(props: {
       onClick={event => {
         if (isDeadRelative) {
           event.preventDefault();
+          if (openRelative && props.href) openRelative(props.href);
           return;
         }
         if (!routesToBrowser || !openBrowser || !props.href) return;
@@ -349,8 +368,14 @@ function CopyButton({ text, title = 'Copy message', className }: { text: string;
 export function UserMessage({ item }: { item: MsgItem }) {
   const t = useT();
   const zoom = useContext(ImageZoomContext);
-  // Optimistic echo: `pending` until the server emits its `user_message`,
-  // `failed` when an `error` envelope marks it rejected.
+  const dispatch = useOperationDispatchOptional();
+  // Echo lifecycle (proposal §9): `pending` until the server emits its
+  // `user_message`; `failed` marks a rejected send IN PLACE with a retry
+  // affordance (retry re-dispatches the same operation); a still-pending
+  // echo whose operation run timed out (or disconnected) shows the
+  // unknown-outcome "may not have been sent" state — never a silent success.
+  const sendRun = useOperationRun(item.sendRunId);
+  const sendUnknown = Boolean(item.pending && item.sendRunId && sendRun?.phase === 'timed-out');
   const stateCls = item.pending ? ' pending' : item.failed ? ' failed' : '';
   const hasText = item.text.length > 0;
   const attachments = item.attachments ?? [];
@@ -405,6 +430,16 @@ export function UserMessage({ item }: { item: MsgItem }) {
         {hasText && <div className="msg-text user-text">{item.text}</div>}
         <div className="msg-foot user">
           {item.failed && <span className="msg-state-failed">{t('transcript.failedToSend')}</span>}
+          {item.failed && item.sendRetry && dispatch && (
+            <button
+              type="button"
+              className="msg-retry"
+              onClick={() => dispatchMessageSend(dispatch, item.sendRetry!)}
+            >
+              {t('transcript.retrySend')}
+            </button>
+          )}
+          {sendUnknown && <span className="msg-state-unknown">{t('transcript.sendUnknown')}</span>}
           {hasText && <CopyButton text={item.text} />}
           <span className="msg-time user">{formatTime(item.ts)}</span>
         </div>

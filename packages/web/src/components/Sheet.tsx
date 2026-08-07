@@ -659,8 +659,19 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
                           />
                         </div>
                       )}
-                      {tab.kind === 'file' && tab.loadError
-                        ? <div className="sheet-empty">{tab.loadError}</div>
+                      {tab.loading
+                        ? <div className="sheet-empty"><span className="spinner" aria-hidden="true" /> {tr('sheet.loading')}</div>
+                        : (tab.kind === 'file' || tab.kind === 'diff') && tab.loadError
+                        ? (
+                          <div className="sheet-empty">
+                            {tab.loadError}
+                            {tab.retryLoad && (
+                              <button className="btn sm secondary" type="button" onClick={tab.retryLoad}>
+                                {tr('sheet.retry')}
+                              </button>
+                            )}
+                          </div>
+                        )
                         : tab.kind === 'file' && tab.rawSrc
                         ? <ImageBody src={tab.rawSrc} name={tab.name} />
                         : tab.kind === 'file' && tab.icoKind === 'md' && tab.viewMode === 'preview' && tab.lines

@@ -4,7 +4,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { basename, isAbsolute, resolve } from 'node:path';
 import type { Db } from '../../storage/db.js';
-import { detectDefaultBranch, listGitWorktrees } from '../../workspace/git.js';
+import { detectDefaultBranch, listGitWorktrees, listGitWorktreesAsync } from '../../workspace/git.js';
 import {
   buildRawPreviewHeaders,
   rawPreviewOversize,
@@ -15,7 +15,6 @@ import { registerApplicationRoutes } from './applications.js';
 import { registerWorkspaceGitRoutes } from './workspace-git.js';
 import {
   extTreeId,
-  gitBranchAt,
 } from '../working-tree-git.js';
 
 export function registerWorkingTreeRoutes(
@@ -33,6 +32,19 @@ export function registerWorkingTreeRoutes(
   // -------------------------------------------------------------------------
 
   registerWorkspaceGitRoutes(app, db, broadcaster);
+  type WorkingTreeListItem = {
+    id: string;
+    kind: 'workspace' | 'worktree';
+    label: string;
+    path: string;
+    branch: string | null;
+    workspace_id: string;
+    workspace_name: string;
+    session_id: string | null;
+    session_name: string | null;
+  };
+  let workingTreeCache: { signature: string; expiresAt: number; value: WorkingTreeListItem[] } | null = null;
+  let workingTreeScan: { signature: string; promise: Promise<WorkingTreeListItem[]> } | null = null;
   function resolveWorkingTree(id: string): { path: string; workspace_id: string; session_id: string | null } | null {
     if (id.startsWith('ws:')) {
       const wsId = id.slice(3);
@@ -302,7 +314,7 @@ export function registerWorkingTreeRoutes(
       : 'all';
   }
 
-  app.get('/api/working_trees', c => {
+  app.get('/api/working_trees', async c => {
     const wsRows = db.prepare('SELECT id, name, path FROM workspaces ORDER BY sort_order ASC').all() as
       Array<{ id: string; name: string; path: string }>;
     const sessRows = db.prepare(`
@@ -312,74 +324,83 @@ export function registerWorkingTreeRoutes(
       ORDER BY updated_at DESC
     `).all() as Array<{ id: string; name: string | null; workspace_id: string; worktree_path: string; branch: string | null }>;
 
-    const out: Array<{
-      id: string;
-      kind: 'workspace' | 'worktree';
-      label: string;
-      path: string;
-      branch: string | null;
-      workspace_id: string;
-      workspace_name: string;
-      session_id: string | null;
-      session_name: string | null;
-    }> = [];
+    const signature = JSON.stringify({ wsRows, sessRows });
+    const refresh = c.req.query('refresh') === '1';
+    if (!refresh && workingTreeCache?.signature === signature
+      && workingTreeCache.expiresAt > Date.now()) {
+      return c.json(workingTreeCache.value);
+    }
+    if (workingTreeScan?.signature === signature) return c.json(await workingTreeScan.promise);
 
-    for (const ws of wsRows) {
-      out.push({
-        id: `ws:${ws.id}`,
-        kind: 'workspace',
-        label: ws.name,
-        path: ws.path,
-        branch: gitBranchAt(ws.path),
-        workspace_id: ws.id,
-        workspace_name: ws.name,
-        session_id: null,
-        session_name: null,
-      });
-    }
-    for (const s of sessRows) {
-      const ws = wsRows.find(w => w.id === s.workspace_id);
-      out.push({
-        id: `wt:${s.id}`,
-        kind: 'worktree',
-        label: s.name || `session ${s.id.slice(0, 6)}`,
-        path: s.worktree_path,
-        branch: s.branch ?? gitBranchAt(s.worktree_path),
-        workspace_id: s.workspace_id,
-        workspace_name: ws?.name ?? '',
-        session_id: s.id,
-        session_name: s.name,
-      });
-    }
-    // External worktrees (created outside Gian — e.g. by the agent itself via
-    // `git worktree add`). Discovered per workspace via `git worktree list`;
-    // deduped against the workspace main tree and DB-owned session worktrees
-    // (the `wt:` entry wins on overlap).
-    const sessionPathsByWs = new Map<string, Set<string>>();
-    for (const s of sessRows) {
-      let set = sessionPathsByWs.get(s.workspace_id);
-      if (!set) sessionPathsByWs.set(s.workspace_id, set = new Set());
-      set.add(s.worktree_path);
-    }
-    for (const ws of wsRows) {
-      const known = sessionPathsByWs.get(ws.id) ?? new Set<string>();
-      known.add(ws.path);
-      for (const wt of listGitWorktrees(ws.path)) {
-        if (known.has(wt.path)) continue;
+    const promise = (async (): Promise<WorkingTreeListItem[]> => {
+      const discoveredEntries = await Promise.all(wsRows.map(async ws => (
+        [ws.id, await listGitWorktreesAsync(ws.path)] as const
+      )));
+      const discoveredByWorkspace = new Map(discoveredEntries);
+      const branchByPath = new Map(
+        discoveredEntries.flatMap(([, trees]) => trees.map(tree => [tree.path, tree.branch] as const)),
+      );
+      const out: WorkingTreeListItem[] = [];
+      for (const ws of wsRows) {
         out.push({
-          id: extTreeId(ws.id, wt.path),
-          kind: 'worktree',
-          label: basename(wt.path),
-          path: wt.path,
-          branch: wt.branch ?? gitBranchAt(wt.path),
+          id: `ws:${ws.id}`,
+          kind: 'workspace',
+          label: ws.name,
+          path: ws.path,
+          branch: branchByPath.get(ws.path) ?? null,
           workspace_id: ws.id,
           workspace_name: ws.name,
           session_id: null,
           session_name: null,
         });
       }
+      for (const s of sessRows) {
+        const ws = wsRows.find(w => w.id === s.workspace_id);
+        out.push({
+          id: `wt:${s.id}`,
+          kind: 'worktree',
+          label: s.name || `session ${s.id.slice(0, 6)}`,
+          path: s.worktree_path,
+          branch: s.branch ?? branchByPath.get(s.worktree_path) ?? null,
+          workspace_id: s.workspace_id,
+          workspace_name: ws?.name ?? '',
+          session_id: s.id,
+          session_name: s.name,
+        });
+      }
+      const sessionPathsByWs = new Map<string, Set<string>>();
+      for (const s of sessRows) {
+        let set = sessionPathsByWs.get(s.workspace_id);
+        if (!set) sessionPathsByWs.set(s.workspace_id, set = new Set());
+        set.add(s.worktree_path);
+      }
+      for (const ws of wsRows) {
+        const known = sessionPathsByWs.get(ws.id) ?? new Set<string>();
+        known.add(ws.path);
+        for (const wt of discoveredByWorkspace.get(ws.id) ?? []) {
+          if (known.has(wt.path)) continue;
+          out.push({
+            id: extTreeId(ws.id, wt.path),
+            kind: 'worktree',
+            label: basename(wt.path),
+            path: wt.path,
+            branch: wt.branch,
+            workspace_id: ws.id,
+            workspace_name: ws.name,
+            session_id: null,
+            session_name: null,
+          });
+        }
+      }
+      workingTreeCache = { signature, expiresAt: Date.now() + 5_000, value: out };
+      return out;
+    })();
+    workingTreeScan = { signature, promise };
+    try {
+      return c.json(await promise);
+    } finally {
+      if (workingTreeScan?.promise === promise) workingTreeScan = null;
     }
-    return c.json(out);
   });
 
   app.get('/api/working_trees/:id/tree', async c => {
@@ -651,7 +672,21 @@ export function registerWorkingTreeRoutes(
       // lastturn: keep only the paths the agent edited in its most recent turn.
       let list = out;
       if (scope === 'lastturn') {
-        const turnPaths = lastTurnPaths(wt.session_id);
+        // `wt:` trees carry their session; `ws:` trees don't, so the web
+        // passes the active session explicitly. It's accepted only when the
+        // session actually belongs to this tree's workspace — otherwise the
+        // param would let a caller probe another workspace's session events.
+        let sessionId = wt.session_id;
+        if (!sessionId) {
+          const raw = c.req.query('session');
+          if (raw) {
+            const s = db
+              .prepare('SELECT id FROM sessions WHERE id = ? AND workspace_id = ?')
+              .get(raw, wt.workspace_id) as { id: string } | undefined;
+            sessionId = s?.id ?? null;
+          }
+        }
+        const turnPaths = lastTurnPaths(sessionId);
         list = out.filter(e => turnPaths.has(e.path));
       }
       fillLineCounts(wt.path, list, ['diff', '--numstat', ...baseRange]);

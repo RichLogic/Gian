@@ -1,4 +1,5 @@
 import type { Db } from '../storage/db.js';
+import { hasEventStorageV3 } from '../storage/event-storage-v3-schema.js';
 
 /**
  * Hot-cache lifecycle for the events table.
@@ -103,11 +104,15 @@ export function sweepColdEvents(db: Db, opts?: { ttlDays?: number }): SweepResul
   const sweep = db.transaction(() => {
     const delEvents = db.prepare('DELETE FROM events WHERE session_id = ?');
     const delTurns = db.prepare('DELETE FROM turns WHERE session_id = ?');
+    const delRebuildState = hasEventStorageV3(db)
+      ? db.prepare('DELETE FROM event_rebuild_state WHERE session_id = ?')
+      : null;
     for (const id of sessionsToSweep) {
       const evRes = delEvents.run(id);
       eventsDeleted += Number(evRes.changes ?? 0);
       const tRes = delTurns.run(id);
       turnsDeleted += Number(tRes.changes ?? 0);
+      delRebuildState?.run(id);
     }
   });
   sweep();

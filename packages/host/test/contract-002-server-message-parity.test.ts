@@ -24,7 +24,15 @@ const WEB_SRC_ROOT = resolve('../web/src');
 // Every declared server message has a consumer.
 // ---------------------------------------------------------------------------
 
-const NOT_DISPLAYED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> = [];
+const NOT_DISPLAYED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> = [
+  {
+    type: 'operation:result',
+    reason:
+      'UI Operation Layer (docs/proposals/ui-operation-layer.md) Phase 1 is host-only: ' +
+      'the host emits operation:result but the web client does not consume it until ' +
+      'Phase 2 wires the operation store. Remove this entry when the client lands.',
+  },
+];
 
 // ---------------------------------------------------------------------------
 // Parsers

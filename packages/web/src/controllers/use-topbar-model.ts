@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import type { Executor, Session, Workspace } from '@gian/shared';
 import type { WorkingTree } from '../api.js';
 import type {
@@ -8,7 +8,7 @@ import type {
 } from '../components/PathBreadcrumb.js';
 import type { Mode } from '../components/Topbar.js';
 import { confirm as confirmDialog } from '../feedback.js';
-import type { GianWs } from '../ws.js';
+import type { OperationDispatcher } from '../operations/dispatcher.js';
 
 interface TopbarModelInput {
   mode: Mode;
@@ -19,12 +19,12 @@ interface TopbarModelInput {
   activeBranch: string | null;
   workingTrees: WorkingTree[];
   wtView: { sessionId: string; wtId: string } | null;
-  setWtView: Dispatch<SetStateAction<{ sessionId: string; wtId: string } | null>>;
+  setWtView: (v: { sessionId: string; wtId: string } | null) => void;
   viewedWorkingTreeId(session: Session): string | null;
-  activateDiffsRail(): void;
-  setCreatingSession: Dispatch<SetStateAction<boolean>>;
-  setForkingSession: Dispatch<SetStateAction<boolean>>;
-  ws: GianWs;
+  /** True while a session.recover run is in flight for the active session —
+   *  the Force-recover menu item renders disabled/"recovering". */
+  activeSessionRecovering: boolean;
+  ops: OperationDispatcher;
   t(key: string): string;
 }
 
@@ -49,10 +49,8 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
     wtView,
     setWtView,
     viewedWorkingTreeId,
-    activateDiffsRail,
-    setCreatingSession,
-    setForkingSession,
-    ws,
+    activeSessionRecovering,
+    ops,
     t,
   } = input;
 
@@ -69,8 +67,8 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
       const segments: PathSegment[] = [];
       segments.push({
         kind: 'workspace',
-        label: activeWorkspace?.name ?? activeSession.workspace_id,
-        copyHint: `${t('common.copy')} "${activeWorkspace?.name ?? activeSession.workspace_id}"`,
+        label: activeWorkspace?.name ?? activeSession.workspace_id ?? t('coding.sidebar.section.unfiled'),
+        copyHint: `${t('common.copy')} "${activeWorkspace?.name ?? activeSession.workspace_id ?? t('coding.sidebar.section.unfiled')}"`,
       });
       segments.push({
         kind: 'session',
@@ -111,44 +109,42 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
     if ((mode !== 'sessions' && !isSubtask) || !activeSession) return null;
     // Completed conversation: no session dropdown (2026-08-05).
     if (activeSession.completed_at != null) return null;
+    // Fork needs a workspace — an Unfiled (workspace-deleted) session cannot
+    // be forked, so the menu omits Fork there.
+    const forkWorkspaceId = activeSession.workspace_id;
+    // Session mutations route through the operation layer (Phase 2a): rename
+    // and mark-unread are optimistic overlays; delete/recover/fork are
+    // pending runs with duplicate submission blocked by the dispatcher.
     return {
       kind: isSubtask ? 'subtask' : 'session',
       onRename: () => setRenaming(true),
       onCopyName: () => {
         try { void navigator.clipboard?.writeText(activeSession.name || ''); } catch { /* ignore */ }
       },
-      onForceRecover: () => ws.send({ type: 'session:recover', session_id: activeSession.id }),
-      onMarkUnread: () => ws.send({
-        type: 'session:set_unread',
-        session_id: activeSession.id,
-        unread: true,
-      }),
+      onForceRecover: () => ops.dispatch('session.recover', { sessionId: activeSession.id }),
+      recovering: activeSessionRecovering,
+      onMarkUnread: () => ops.dispatch('session.setUnread', { sessionId: activeSession.id, unread: true }),
       onDelete: async () => {
         const confirmed = await confirmDialog({
           message: `${t('coding.session.deleteConfirmPrefix')} "${activeSession.name || t('coding.session.untitled')}"? ${t('coding.session.deleteConfirmSuffix')}`,
           danger: true,
           confirmLabel: t('common.delete'),
         });
-        if (confirmed) ws.send({ type: 'session:delete', session_id: activeSession.id });
+        if (confirmed) ops.dispatch('session.delete', { sessionId: activeSession.id });
       },
-      ...(isSubtask ? {} : {
+      ...(isSubtask || forkWorkspaceId == null ? {} : {
         onFork: (executor: Executor) => {
           const baseName = activeSession.name || `session ${activeSession.id.slice(0, 6)}`;
-          setCreatingSession(true);
-          setForkingSession(true);
-          ws.send({
-            type: 'session:create',
-            workspace_id: activeSession.workspace_id,
+          ops.dispatch('session.fork', {
+            workspaceId: forkWorkspaceId,
             executor,
-            ...(executor !== 'kimi' && activeSession.approval_mode
-              ? { approval_mode: activeSession.approval_mode }
-              : {}),
+            approvalMode: activeSession.approval_mode,
             name: `${baseName} copy`,
           });
         },
       }),
     };
-  }, [activeSession, activeSubtaskId, mode, setCreatingSession, setForkingSession, t, ws]);
+  }, [activeSession, activeSessionRecovering, activeSubtaskId, mode, ops, t]);
 
   const branchMenu = useMemo<BranchMenuActions | null>(() => {
     const visible = (mode === 'sessions' || (mode === 'tasks' && activeSubtaskId))
@@ -180,20 +176,22 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
         // sort is stable, so the rest keep host order.
         .sort((a, b) => Number(b.active ?? false) - Number(a.active ?? false)),
       onPick: id => {
+        // View switch only — picking a worktree must NOT pop the Diffs rail
+        // open (2026-08-06 user request). The pick persists per session via
+        // setWtView (localStorage), so it survives reloads.
         setWtView({ sessionId: activeSession.id, wtId: id });
-        activateDiffsRail();
       },
     };
-  }, [activateDiffsRail, activeBranch, activeSession, activeSubtaskId, mode, setWtView, t, viewedWorkingTreeId, workingTrees, wtView]);
+  }, [activeBranch, activeSession, activeSubtaskId, mode, setWtView, t, viewedWorkingTreeId, workingTrees, wtView]);
 
   const onRenameSubmit = useCallback((value: string) => {
     setRenaming(false);
     const name = value.trim();
     if (!name) return;
     if (activeSession && name !== activeSession.name) {
-      ws.send({ type: 'session:rename', session_id: activeSession.id, name });
+      ops.dispatch('session.rename', { sessionId: activeSession.id, name });
     }
-  }, [activeSession, ws]);
+  }, [activeSession, ops]);
 
   return {
     pathSegments,

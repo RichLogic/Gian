@@ -196,7 +196,9 @@ export class SessionLifecycleService {
     mergeBranch(workspace.path, session.branch, session.base_branch);
     await this.runtime.teardownProxy(sessionId);
     this.finalizeWorktree(sessionId, 'merged');
-    this.broadcastWorkspaceGitUpdated(session.workspace_id, 'merge');
+    if (session.workspace_id != null) {
+      this.broadcastWorkspaceGitUpdated(session.workspace_id, 'merge');
+    }
   }
 
   async dropWorktree(sessionId: string): Promise<void> {
@@ -207,7 +209,9 @@ export class SessionLifecycleService {
     }
     await this.runtime.teardownProxy(sessionId);
     this.finalizeWorktree(sessionId, 'discarded');
-    this.broadcastWorkspaceGitUpdated(session.workspace_id, 'drop');
+    if (session.workspace_id != null) {
+      this.broadcastWorkspaceGitUpdated(session.workspace_id, 'drop');
+    }
   }
 
   archive(sessionId: string, archived: boolean): void {
@@ -266,7 +270,7 @@ export class SessionLifecycleService {
     this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
     await purgeSessionAttachments(sessionId);
     this.broadcaster.broadcast({ type: 'session:deleted', session_id: sessionId });
-    if (session.branch) {
+    if (session.branch && session.workspace_id != null) {
       this.broadcastWorkspaceGitUpdated(session.workspace_id, 'session-deleted');
     }
   }

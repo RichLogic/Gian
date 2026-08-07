@@ -127,6 +127,22 @@ test('chat display contract · unknown native events are retained without invent
   assert.equal(event?.display, undefined);
 });
 
+test('chat display contract · Codex diff snapshots share a turn-stable identity', () => {
+  const notification: ProxyNotification = {
+    method: 'diff.updated',
+    params: {
+      sessionId: 'native',
+      turnId: 'turn-diff-1',
+      data: { diff: 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b' },
+    },
+  };
+  const first = projectNotification('codex', notification, 'gian-session', 7);
+  const second = projectNotification('codex', notification, 'gian-session', 7);
+
+  assert.equal(first[0]?.call_id, 'turn-diff-1');
+  assert.equal(second[0]?.call_id, first[0]?.call_id);
+});
+
 const fixtureRoot = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'chat-display');
 for (const filename of [
   'claude-2.1.220.json',

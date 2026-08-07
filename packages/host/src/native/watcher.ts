@@ -3,6 +3,7 @@ import type { FSWatcher } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../storage/db.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
+import { EventStore } from '../session/event-store.js';
 import { parseCcLine, parseCodexLine, type ParsedLine } from './replay.js';
 
 /**
@@ -57,8 +58,11 @@ interface WatchedSession {
 
 export class NativeJsonlWatcher {
   private sessions = new Map<string, WatchedSession>();
+  private events: EventStore;
 
-  constructor(private db: Db, private broadcaster: WsBroadcaster) {}
+  constructor(private db: Db, private broadcaster: WsBroadcaster) {
+    this.events = new EventStore(db);
+  }
 
   /**
    * Begin watching `filePath` for `sessionId`. Idempotent — re-calling with
@@ -259,14 +263,14 @@ export class NativeJsonlWatcher {
     type: string,
     data: Record<string, unknown>,
   ): void {
-    const id = randomUUID();
     try {
-      this.db
-        .prepare(
-          `INSERT INTO events (id, session_id, turn_id, call_id, type, data)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-        )
-        .run(id, state.sessionId, state.currentTurnId, callId, type, JSON.stringify(data));
+      this.events.persist({
+        sessionId: state.sessionId,
+        turnId: state.currentTurnId!,
+        callId,
+        type,
+        data,
+      });
     } catch (err) {
       console.error('[jsonl-watcher] event insert failed', state.sessionId, err);
       return;

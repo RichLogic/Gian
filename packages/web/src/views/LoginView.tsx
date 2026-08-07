@@ -4,22 +4,30 @@ import type {
   GitHubAuthUnavailableReason,
   GitHubDeviceAuthorization,
 } from '@gian/shared';
-import { login } from '../api.js';
 import { desktopBridge } from '../desktop-bridge.js';
+import { AUTH_INVALID_CREDENTIALS } from '../operations/auth.js';
+import { useOperationDispatch, useOperationRun } from '../operations/use-operations.js';
 import { useT } from '../i18n/index.js';
-import type { AppIdentity } from '../controllers/use-app-auth.js';
 import { OnboardingSteps } from './OnboardingView.js';
 
-export function LoginView({ onLoginOk }: { onLoginOk: (identity: AppIdentity) => void }) {
+/**
+ * Login surfaces. Phase 3b (UI Operation Layer): both login paths dispatch
+ * pending auth operations (`auth.login` REST / `auth.githubLogin` desktop
+ * bridge device flow, entity `auth:current`); the settled identity reaches
+ * App through the auth sink wired by use-app-auth, and the run's phase drives
+ * the submitting/disabled states and inline errors here.
+ */
+export function LoginView() {
   const githubAuth = desktopBridge()?.githubAuth;
   if (githubAuth) {
-    return <GitHubLoginView onLoginOk={onLoginOk} />;
+    return <GitHubLoginView />;
   }
-  return <PasswordLoginView onLoginOk={onLoginOk} />;
+  return <PasswordLoginView />;
 }
 
-function GitHubLoginView({ onLoginOk }: { onLoginOk: (identity: AppIdentity) => void }) {
+function GitHubLoginView() {
   const t = useT();
+  const dispatch = useOperationDispatch();
   const githubAuth = desktopBridge()?.githubAuth;
   const attemptRef = useRef(0);
   const [authorization, setAuthorization] = useState<GitHubDeviceAuthorization | null>(null);
@@ -27,6 +35,9 @@ function GitHubLoginView({ onLoginOk }: { onLoginOk: (identity: AppIdentity) => 
   const [error, setError] = useState<GitHubAuthError | null>(null);
   const [phase, setPhase] = useState<'checking' | 'idle' | 'starting' | 'waiting'>('checking');
   const [copied, setCopied] = useState(false);
+  // The in-flight auth.githubLogin run + the attempt that dispatched it.
+  const [loginRun, setLoginRun] = useState<{ runId: string; attempt: number } | null>(null);
+  const run = useOperationRun(loginRun?.runId);
 
   useEffect(() => {
     let alive = true;
@@ -46,32 +57,34 @@ function GitHubLoginView({ onLoginOk }: { onLoginOk: (identity: AppIdentity) => 
     };
   }, [githubAuth]);
 
-  async function startLogin() {
+  // Settle the run back into the phase machine: a failure returns to idle
+  // with the error code; a stale attempt (canceled/superseded) ignores the
+  // outcome entirely. Success signs in via the auth sink — App swaps this
+  // view out, there is nothing local to do.
+  useEffect(() => {
+    if (!loginRun || !run || run.phase !== 'failed') return;
+    if (loginRun.attempt !== attemptRef.current) return;
+    setLoginRun(null);
+    setAuthorization(null);
+    setPhase('idle');
+    setError((run.error ?? 'network') as GitHubAuthError);
+  }, [loginRun, run?.phase, run?.error]);
+
+  function startLogin() {
     if (!githubAuth) return;
     const attempt = ++attemptRef.current;
     setError(null);
     setCopied(false);
     setAuthorization(null);
     setPhase('starting');
-    const started = await githubAuth.start().catch(() => ({ ok: false, error: 'network' } as const));
-    if (attempt !== attemptRef.current) return;
-    if (!started.ok) {
-      setError(started.error);
-      setPhase('idle');
-      return;
-    }
-
-    setAuthorization(started.authorization);
-    setPhase('waiting');
-    const finished = await githubAuth.finish().catch(() => ({ ok: false, error: 'network' } as const));
-    if (attempt !== attemptRef.current) return;
-    if (finished.ok) {
-      onLoginOk({ provider: 'github', user: finished.user });
-      return;
-    }
-    setError(finished.error);
-    setAuthorization(null);
-    setPhase('idle');
+    const dispatched = dispatch('auth.githubLogin', {
+      onAuthorization: (next: GitHubDeviceAuthorization) => {
+        if (attempt !== attemptRef.current) return;
+        setAuthorization(next);
+        setPhase('waiting');
+      },
+    });
+    setLoginRun({ runId: dispatched.id, attempt });
   }
 
   function cancelLogin() {
@@ -131,7 +144,7 @@ function GitHubLoginView({ onLoginOk }: { onLoginOk: (identity: AppIdentity) => 
             className="login-submit login-github-submit"
             type="button"
             disabled={phase !== 'idle' || unavailable !== null}
-            onClick={() => void startLogin()}
+            onClick={startLogin}
           >
             <GitHubMark />
             {phase === 'starting' || phase === 'checking'
@@ -157,36 +170,37 @@ function GitHubMark() {
   );
 }
 
-function PasswordLoginView({ onLoginOk }: { onLoginOk: (identity: AppIdentity) => void }) {
+function PasswordLoginView() {
   const t = useT();
+  const dispatch = useOperationDispatch();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  // Busy state is the in-flight auth.login run (Phase 3b), not a local flag.
+  const [runId, setRunId] = useState<string>();
+  const run = useOperationRun(runId);
+  const loading = run?.phase === 'pending';
 
-  async function handleSubmit(e: React.FormEvent) {
+  useEffect(() => {
+    if (!run || run.phase !== 'failed') return;
+    setError(
+      run.error === AUTH_INVALID_CREDENTIALS
+        ? t('login.error.invalid')
+        : t('login.error.network'),
+    );
+  }, [run?.phase, run?.error, t]);
+
+  function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError('');
-    setLoading(true);
-    try {
-      const result = await login(username, password);
-      if (result) {
-        onLoginOk({ provider: 'host', username: result.user });
-      } else {
-        setError(t('login.error.invalid'));
-      }
-    } catch {
-      setError(t('login.error.network'));
-    } finally {
-      setLoading(false);
-    }
+    setRunId(dispatch('auth.login', { username, password }).id);
   }
 
   return (
     <div className="login-shell">
       <div className="login-card">
         <h1 className="login-brand">Gian</h1>
-        <form className="login-form" onSubmit={e => void handleSubmit(e)}>
+        <form className="login-form" onSubmit={handleSubmit}>
           <div className="login-field">
             <label className="login-label" htmlFor="username">{t('login.username.label')}</label>
             <input

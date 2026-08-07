@@ -128,8 +128,40 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
         return;
       }
 
+      // Correlation id for the UI Operation Layer (spec §4.4). Only
+      // non-empty strings correlate; pre-correlation clients omit the field
+      // and must see no behavior change.
+      const rawRequestId = (parsed as { request_id?: unknown }).request_id;
+      const requestId = typeof rawRequestId === 'string' && rawRequestId.length > 0
+        ? rawRequestId
+        : null;
       try {
         await dispatch(parsed, sessions, tasks, broadcaster, ws, term);
+        // §4.4 success result. ORDERING CONTRACT: the result must never
+        // arrive before the canonical broadcast caused by the command.
+        // `dispatch` is awaited, and the domain managers broadcast
+        // synchronously inside their methods — verified:
+        //   session:rename → SessionManager.renameSession broadcasts
+        //     session:updated synchronously (session/manager.ts:546-553);
+        //   task:update → the dispatch arm itself broadcasts task:updated
+        //     synchronously (below);
+        //   queue:add → SessionManager.enqueueMessage broadcasts
+        //     queue:updated synchronously (session/manager.ts:614-617);
+        //   message:send → SessionManager.sendMessage broadcasts
+        //     session:updated (running) and the user_message echo at
+        //     session/manager.ts:347/353, both BEFORE its final
+        //     `await client.startTurn`, so the echo precedes the promise
+        //     resolving — no async-after-return broadcast found.
+        // Sending the result immediately after the awaited dispatch
+        // therefore satisfies the contract for every command family.
+        if (requestId && isMutatingCommand(parsed.type)) {
+          broadcaster.send(ws, {
+            type: 'operation:result',
+            request_id: requestId,
+            request_type: parsed.type,
+            ok: true,
+          });
+        }
       } catch (err) {
         console.error('[ws] dispatch error', err);
         // Surface the failure to the client. Without this, errors inside
@@ -141,16 +173,49 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
           && typeof (err as { code?: unknown }).code === 'string')
           ? (err as { code: string }).code
           : null;
+        const code = explicitCode ?? dispatchErrorCode(parsed.type);
+        const message = err instanceof Error ? err.message : String(err);
+        // The `error` envelope goes first: existing clients' toast behavior
+        // is driven by it. The operation:result then settles operation state
+        // (§4.4) with the same code/message.
         broadcaster.send(ws, {
           type: 'error',
           request_type: parsed.type,
           ...(typeof sessionIdField === 'string' ? { session_id: sessionIdField } : {}),
-          code: explicitCode ?? dispatchErrorCode(parsed.type),
-          message: err instanceof Error ? err.message : String(err),
+          ...(requestId ? { request_id: requestId } : {}),
+          code,
+          message,
         });
+        if (requestId && isMutatingCommand(parsed.type)) {
+          broadcaster.send(ws, {
+            type: 'operation:result',
+            request_id: requestId,
+            request_type: parsed.type,
+            ok: false,
+            error: { code, message },
+          });
+        }
       }
     },
   };
+}
+
+/**
+ * UI Operation Layer (spec §4.4): every ClientToServerMessage type is a
+ * mutating command EXCEPT these protocol-level exemptions — auth handshake,
+ * event subscription, and the high-frequency terminal I/O frames. Only
+ * mutating commands ever receive an `operation:result`.
+ */
+const NON_MUTATING_TYPES: ReadonlySet<ClientToServerMessage['type']> = new Set([
+  'auth',
+  'events:subscribe',
+  'term:input',
+  'term:resize',
+  'term:replay-request',
+]);
+
+function isMutatingCommand(type: ClientToServerMessage['type']): boolean {
+  return !NON_MUTATING_TYPES.has(type);
 }
 
 function dispatchErrorCode(messageType: string): string {
@@ -183,6 +248,10 @@ async function dispatch(
   term?: WorkbenchTerminalManager,
 ): Promise<void> {
   switch (msg.type) {
+    case 'events:subscribe': {
+      broadcaster.subscribeToEvents(ws, msg.session_id);
+      return;
+    }
     case 'session:create': {
       const session = await sessions.createSession({
         workspace_id: msg.workspace_id,

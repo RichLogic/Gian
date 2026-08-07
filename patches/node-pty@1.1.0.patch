@@ -1,0 +1,19 @@
+diff --git a/lib/unixTerminal.js b/lib/unixTerminal.js
+index 1ec12f796a822c78fba9ad7f6448c3987e325c23..b3d43571846df54d4ffd7d006c895a200598961f 100644
+--- a/lib/unixTerminal.js
++++ b/lib/unixTerminal.js
+@@ -28,8 +28,12 @@ var native = utils_1.loadNativeModule('pty');
+ var pty = native.module;
+ var helperPath = native.dir + '/spawn-helper';
+ helperPath = path.resolve(__dirname, helperPath);
+-helperPath = helperPath.replace('app.asar', 'app.asar.unpacked');
+-helperPath = helperPath.replace('node_modules.asar', 'node_modules.asar.unpacked');
++// Gian patch: the upstream replaces match the substring 'app.asar' inside an
++// ALREADY-unpacked 'app.asar.unpacked' path too, producing a nonexistent
++// 'app.asar.unpacked.unpacked' helper path (posix_spawnp ENOENT). Anchor on
++// the trailing slash so only real in-archive paths are rewritten.
++helperPath = helperPath.replace('app.asar/', 'app.asar.unpacked/');
++helperPath = helperPath.replace('node_modules.asar/', 'node_modules.asar.unpacked/');
+ var DEFAULT_FILE = 'sh';
+ var DEFAULT_NAME = 'xterm';
+ var DESTROY_SOCKET_TIMEOUT_MS = 200;

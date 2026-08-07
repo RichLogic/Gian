@@ -97,6 +97,8 @@ export interface TaskCreateMessage {
   type: 'task:create';
   name: string;
   description?: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface TaskUpdateMessage {
@@ -108,11 +110,15 @@ export interface TaskUpdateMessage {
   /** Pin / unpin the task. Independent of the content fields above; the host
    *  stamps `pinned_at` (pin) or clears it (unpin) without bumping updated_at. */
   pinned?: boolean;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface TaskDeleteMessage {
   type: 'task:delete';
   task_id: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface ApprovalCreatedMessage {
@@ -164,10 +170,29 @@ export interface ErrorMessage {
    *  loading state even when `code` is an executor-native error such as
    *  `AUTH_REQUIRED`. */
   request_type?: ClientToServerMessage['type'];
+  /** Correlation id of the failed request, when it carried one. */
+  request_id?: string;
   /** Short machine-readable code, e.g. `MESSAGE_SEND_FAILED`. */
   code: string;
   /** Human-readable message; safe to surface in UI. */
   message: string;
+}
+
+/**
+ * Per-request ack for a mutating client message (ui-operation-layer §4.4).
+ * Sent only to the originating socket, after the Host command handler has
+ * completed — and after any canonical broadcast caused by that command has
+ * been fanned out to this socket, so a success result never arrives ahead of
+ * the state it confirms. Canonical entity/event broadcasts remain the source
+ * of durable state; the result only correlates the request and ends the
+ * local pending/optimistic phase.
+ */
+export interface OperationResultMessage {
+  type: 'operation:result';
+  request_id: string;
+  request_type: ClientToServerMessage['type'];
+  ok: boolean;
+  error?: { code: string; message: string };
 }
 
 /**
@@ -234,6 +259,7 @@ export type ServerToClientMessage =
   | SessionNativeConfigMessage
   | SessionSlashCommandsMessage
   | WorkspaceGitUpdatedMessage
+  | OperationResultMessage
   | ErrorMessage;
 
 export interface SessionCreateMessage {
@@ -244,6 +270,14 @@ export interface SessionCreateMessage {
   model?: string;
   /** Required for Claude/Codex. Kimi uses executor-native configuration. */
   approval_mode?: ApprovalMode;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
+}
+
+/** Select the one transcript whose full event payloads this client needs. */
+export interface EventSubscribeMessage {
+  type: 'events:subscribe';
+  session_id: string | null;
 }
 
 export interface MessageSendMessage {
@@ -266,6 +300,8 @@ export interface MessageSendMessage {
    * surfaces this as the ⚡ button next to the PLAN/ASK/AUTO segmented control.
    */
   oneShotBypass?: boolean;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 /**
@@ -308,11 +344,15 @@ export interface ApprovalResolveMessage {
   answers?: Record<string, string | string[]>;
   /** Exact executor option for ACP-native approvals. */
   native_option_id?: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface SessionStopMessage {
   type: 'session:stop';
   session_id: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 /**
@@ -323,29 +363,39 @@ export interface SessionStopMessage {
 export interface SessionRecoverMessage {
   type: 'session:recover';
   session_id: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface SessionRenameMessage {
   type: 'session:rename';
   session_id: string;
   name: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface SessionArchiveMessage {
   type: 'session:archive';
   session_id: string;
   archived: boolean;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface SessionPinMessage {
   type: 'session:pin';
   session_id: string;
   pinned: boolean;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface SessionDeleteMessage {
   type: 'session:delete';
   session_id: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 /**
@@ -358,18 +408,24 @@ export interface SessionSetUnreadMessage {
   type: 'session:set_unread';
   session_id: string;
   unread: boolean;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface SessionSetModeMessage {
   type: 'session:set_mode';
   session_id: string;
   approval_mode: ApprovalMode;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface SessionSetModelMessage {
   type: 'session:set_model';
   session_id: string;
   model: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface SessionSetEffortMessage {
@@ -377,6 +433,8 @@ export interface SessionSetEffortMessage {
   session_id: string;
   /** Null clears (use model default). See `ThinkingEffort`. */
   effort: import('./model.js').ThinkingEffort | null;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface SessionSetServiceTierMessage {
@@ -384,6 +442,8 @@ export interface SessionSetServiceTierMessage {
   session_id: string;
   /** 'fast' turns the codex Fast tier on; null turns it off. codex-only. */
   service_tier: 'fast' | null;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface SessionSetNativeConfigMessage {
@@ -391,6 +451,8 @@ export interface SessionSetNativeConfigMessage {
   session_id: string;
   config_id: string;
   value: import('./model.js').NativeConfigValue;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface SessionNativeConfigMessage {
@@ -413,12 +475,16 @@ export interface QueueAddMessage {
   /** Structured input items (image attachments) carried with the message —
    *  same shape as MessageSendMessage.items. */
   items?: InputItem[];
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface QueueRemoveMessage {
   type: 'queue:remove';
   session_id: string;
   queue_id: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface QueueUpdateMessage {
@@ -428,16 +494,22 @@ export interface QueueUpdateMessage {
   /** New text for the entry. Position in the queue is kept; attachments
    *  (items) are not editable — remove and re-queue to change those. */
   text: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface QueueSendNowMessage {
   type: 'queue:send_now';
   session_id: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface QueueClearMessage {
   type: 'queue:clear';
   session_id: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 /** Codex-only mid-turn injection: append the message to the session's ACTIVE
@@ -448,6 +520,8 @@ export interface MessageSteerMessage {
   session_id: string;
   text: string;
   items?: InputItem[];
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 /**
@@ -463,6 +537,8 @@ export interface TermSpawnMessage {
   rows: number;
   /** Optional override of the shell binary (default = $SHELL). */
   shell?: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export interface TermInputMessage {
@@ -486,10 +562,13 @@ export interface TermReplayRequestMessage {
 export interface TermCloseMessage {
   type: 'term:close';
   term_id: string;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
 }
 
 export type ClientToServerMessage =
   | AuthMessage
+  | EventSubscribeMessage
   | SessionCreateMessage
   | MessageSendMessage
   | MessageSteerMessage

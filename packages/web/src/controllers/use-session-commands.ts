@@ -1,18 +1,19 @@
-import { useMemo, type Dispatch, type RefObject, type SetStateAction } from 'react';
+import { useMemo, type RefObject } from 'react';
 import type {
   ApprovalDecision,
   ApprovalMode,
-  InputItem,
   NativeConfigValue,
   Session,
   ThinkingEffort,
 } from '@gian/shared';
-import { dropSession, mergeSession } from '../api.js';
-import { attachmentInputItem, type ComposerAttachmentPayload } from '../attachments.js';
-import { toast } from '../feedback.js';
-import { createOptimisticEcho } from '../transcript/apply.js';
-import type { ApprovalActionContext, TranscriptItem } from '../types.js';
-import type { GianWs } from '../ws.js';
+import type { ComposerAttachmentPayload } from '../attachments.js';
+import type { OperationDispatcher } from '../operations/dispatcher.js';
+import { dispatchMessageSend } from '../operations/message.js';
+// Side effects: register the Queue/Approval definitions this controller
+// dispatches (message.js registers its own via the import above).
+import '../operations/queue.js';
+import '../operations/approval.js';
+import type { ApprovalActionContext } from '../types.js';
 
 export interface SessionCommands {
   onSend: (
@@ -55,139 +56,93 @@ export interface SessionCommands {
   onPin: (sessionId: string, pinned: boolean) => void;
   onDelete: (sessionId: string) => void;
   onRecover: (sessionId: string) => void;
-  onMerge: (sessionId: string) => Promise<void>;
-  onDrop: (sessionId: string) => Promise<void>;
+  onMerge: (sessionId: string) => void;
+  onDrop: (sessionId: string) => void;
   onRename: (sessionId: string, name: string) => void;
 }
 
 interface UseSessionCommandsInput {
-  ws: GianWs;
+  /** Operation dispatcher — EVERY command here routes through the operation
+   *  layer (Session in Phase 2a; message/queue/approval in Phase 2b). This
+   *  controller deliberately holds no socket reference: transport is private
+   *  to the operation layer (proposal §4.1). */
+  ops: OperationDispatcher;
   sessionsRef: RefObject<Session[]>;
-  setItemsBySession: Dispatch<SetStateAction<Record<string, TranscriptItem[]>>>;
-  setPendingBySession: Dispatch<SetStateAction<Record<string, boolean>>>;
-}
-
-function inputItems(
-  text: string,
-  attachments: ComposerAttachmentPayload[],
-): InputItem[] {
-  const items: InputItem[] = [];
-  if (text.trim()) items.push({ type: 'text', text });
-  for (const attachment of attachments) items.push(attachmentInputItem(attachment));
-  return items;
 }
 
 export function useSessionCommands({
-  ws,
+  ops,
   sessionsRef,
-  setItemsBySession,
-  setPendingBySession,
 }: UseSessionCommandsInput): SessionCommands {
-  return useMemo(() => ({
-    onSend: (sessionId, text, opts) => {
-      const exec = sessionsRef.current?.find(session => session.id === sessionId)?.executor
-        ?? 'claude';
-      const attachments = opts?.attachments ?? [];
-      const optimistic = createOptimisticEcho({
-        sessionId,
-        text,
-        exec,
-        attachments: attachments.length > 0
-          ? attachments.map(attachment => ({
-              name: attachment.name,
-              mime: attachment.mime,
-              url: attachment.previewUrl,
-              ...(attachment.size !== undefined ? { size: attachment.size } : {}),
-            }))
-          : undefined,
-      });
-      setItemsBySession(previous => ({
-        ...previous,
-        [sessionId]: [...(previous[sessionId] ?? []), optimistic],
-      }));
-      setPendingBySession(previous => ({ ...previous, [sessionId]: true }));
-
-      const items = inputItems(text, attachments);
-      ws.send({
-        type: 'message:send',
-        session_id: sessionId,
-        text,
-        ...(items.length > 0 ? { items } : {}),
-        ...(opts?.oneShotBypass ? { oneShotBypass: true } : {}),
-      });
-    },
-    onSendSkill: (sessionId, name, path) => ws.send({
-      type: 'message:send',
-      session_id: sessionId,
-      text: `/${name}`,
-      items: [{ type: 'skill', name, path }],
-    }),
-    onStop: sessionId => ws.send({ type: 'session:stop', session_id: sessionId }),
-    onApprove: (sessionId, approvalId, decision, answers, context) => ws.send({
-      type: 'approval:resolve',
-      session_id: sessionId,
-      approval_id: approvalId,
-      decision,
-      ...(answers ? { answers } : {}),
-      ...(context?.nativeOptionId ? { native_option_id: context.nativeOptionId } : {}),
-    }),
-    onQueueAdd: (sessionId, text, attachments = []) => {
-      const items = inputItems(text, attachments);
-      ws.send({
-        type: 'queue:add',
-        session_id: sessionId,
-        text,
-        ...(items.length > 0 ? { items } : {}),
-      });
-    },
-    onQueueRemove: (sessionId, queueId) =>
-      ws.send({ type: 'queue:remove', session_id: sessionId, queue_id: queueId }),
-    onQueueUpdate: (sessionId, queueId, text) =>
-      ws.send({ type: 'queue:update', session_id: sessionId, queue_id: queueId, text }),
-    onQueueClear: sessionId =>
-      ws.send({ type: 'queue:clear', session_id: sessionId }),
-    onQueueSendNow: sessionId =>
-      ws.send({ type: 'queue:send_now', session_id: sessionId }),
-    onSteer: (sessionId, text, attachments = []) => {
-      const items = inputItems(text, attachments);
-      ws.send({
-        type: 'message:steer',
-        session_id: sessionId,
-        text,
-        ...(items.length > 0 ? { items } : {}),
-      });
-    },
-    onSetMode: (sessionId, approvalMode) =>
-      ws.send({ type: 'session:set_mode', session_id: sessionId, approval_mode: approvalMode }),
-    onSetModel: (sessionId, model) =>
-      ws.send({ type: 'session:set_model', session_id: sessionId, model }),
-    onSetEffort: (sessionId, effort) =>
-      ws.send({ type: 'session:set_effort', session_id: sessionId, effort }),
-    onSetServiceTier: (sessionId, tier) =>
-      ws.send({ type: 'session:set_service_tier', session_id: sessionId, service_tier: tier }),
-    onSetNativeConfig: (sessionId, configId, value) => ws.send({
-      type: 'session:set_native_config',
-      session_id: sessionId,
-      config_id: configId,
-      value,
-    }),
-    onArchive: (sessionId, archived) =>
-      ws.send({ type: 'session:archive', session_id: sessionId, archived }),
-    onPin: (sessionId, pinned) =>
-      ws.send({ type: 'session:pin', session_id: sessionId, pinned }),
-    onDelete: sessionId =>
-      ws.send({ type: 'session:delete', session_id: sessionId }),
-    onRecover: sessionId =>
-      ws.send({ type: 'session:recover', session_id: sessionId }),
-    onMerge: async sessionId => {
-      const result = await mergeSession(sessionId);
-      if (!result.ok) toast({ kind: 'error', message: result.error ?? 'merge failed' });
-    },
-    onDrop: async sessionId => {
-      const result = await dropSession(sessionId);
-      if (!result.ok) toast({ kind: 'error', message: result.error ?? 'drop failed' });
-    },
-    onRename: (sessionId, name) =>
-      ws.send({ type: 'session:rename', session_id: sessionId, name }),
-  }), [sessionsRef, setItemsBySession, setPendingBySession, ws]);
+  return useMemo(() => {
+    const executorOf = (sessionId: string) =>
+      sessionsRef.current?.find(session => session.id === sessionId)?.executor ?? 'claude';
+    return {
+      // Message sends share one path (dispatchMessageSend): dispatch +
+      // synchronous optimistic echo commit. Failure marks the echo failed in
+      // place with a retry affordance — see operations/message.ts.
+      onSend: (sessionId, text, opts) => {
+        dispatchMessageSend(ops.dispatch, {
+          sessionId,
+          text,
+          exec: executorOf(sessionId),
+          ...(opts?.oneShotBypass ? { oneShotBypass: true } : {}),
+          ...(opts?.attachments && opts.attachments.length > 0 ? { attachments: opts.attachments } : {}),
+        });
+      },
+      onSendSkill: (sessionId, name, path) => {
+        dispatchMessageSend(ops.dispatch, {
+          sessionId,
+          text: `/${name}`,
+          exec: executorOf(sessionId),
+          skill: { name, path },
+        });
+      },
+      onStop: sessionId => ops.dispatch('session.stop', { sessionId }),
+      onApprove: (sessionId, approvalId, decision, answers, context) =>
+        ops.dispatch('approval.resolve', {
+          sessionId,
+          approvalId,
+          decision,
+          ...(answers ? { answers } : {}),
+          ...(context?.nativeOptionId ? { nativeOptionId: context.nativeOptionId } : {}),
+        }),
+      // Queue operations render through the whole-array overlay
+      // (`session:<id>:queue` — see operations/queue.ts); the canonical
+      // queue:updated broadcast + operation:result settle them.
+      onQueueAdd: (sessionId, text, attachments = []) =>
+        ops.dispatch('queue.add', {
+          sessionId,
+          text,
+          ...(attachments.length > 0 ? { attachments } : {}),
+        }),
+      onQueueRemove: (sessionId, queueId) => ops.dispatch('queue.remove', { sessionId, queueId }),
+      onQueueUpdate: (sessionId, queueId, text) => ops.dispatch('queue.update', { sessionId, queueId, text }),
+      onQueueClear: sessionId => ops.dispatch('queue.clear', { sessionId }),
+      onQueueSendNow: sessionId => ops.dispatch('queue.sendNow', { sessionId }),
+      onSteer: (sessionId, text, attachments = []) =>
+        ops.dispatch('message.steer', {
+          sessionId,
+          text,
+          ...(attachments.length > 0 ? { attachments } : {}),
+        }),
+      // Session-domain commands dispatch through the operation layer: the
+      // optimistic ones render via overlays (canonical session state is never
+      // patched locally anymore), the pending ones get their duplicate guard
+      // and result correlation from the dispatcher.
+      onSetMode: (sessionId, approvalMode) => ops.dispatch('session.setMode', { sessionId, approvalMode }),
+      onSetModel: (sessionId, model) => ops.dispatch('session.setModel', { sessionId, model }),
+      onSetEffort: (sessionId, effort) => ops.dispatch('session.setEffort', { sessionId, effort }),
+      onSetServiceTier: (sessionId, tier) => ops.dispatch('session.setServiceTier', { sessionId, tier }),
+      onSetNativeConfig: (sessionId, configId, value) =>
+        ops.dispatch('session.setNativeConfig', { sessionId, configId, value }),
+      onArchive: (sessionId, archived) => ops.dispatch('session.archive', { sessionId, archived }),
+      onPin: (sessionId, pinned) => ops.dispatch('session.pin', { sessionId, pinned }),
+      onDelete: sessionId => ops.dispatch('session.delete', { sessionId }),
+      onRecover: sessionId => ops.dispatch('session.recover', { sessionId }),
+      onMerge: sessionId => { ops.dispatch('session.merge', { sessionId }); },
+      onDrop: sessionId => { ops.dispatch('session.drop', { sessionId }); },
+      onRename: (sessionId, name) => ops.dispatch('session.rename', { sessionId, name }),
+    };
+  }, [ops, sessionsRef]);
 }

@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 import type { Session } from '@gian/shared';
 import type { Mode } from '../components/Topbar.js';
-import type { GianWs } from '../ws.js';
+import type { OperationDispatcher } from '../operations/dispatcher.js';
 
 interface UseAppShortcutsInput {
   authenticated: boolean;
@@ -11,11 +11,11 @@ interface UseAppShortcutsInput {
   activeTaskId: string | null;
   activeSubtaskId: string | null;
   sessionsRef: RefObject<Session[]>;
-  ws: GianWs;
+  /** All shortcut commands dispatch through the operation layer (Session in
+   *  Phase 2a; ⌘Enter queue.sendNow in Phase 2b). */
+  ops: OperationDispatcher;
   paletteOpen: boolean;
   setPaletteOpen: Dispatch<SetStateAction<boolean>>;
-  setCreatingSession: Dispatch<SetStateAction<boolean>>;
-  setForkingSession: Dispatch<SetStateAction<boolean>>;
 }
 
 export function useAppShortcuts({
@@ -25,11 +25,9 @@ export function useAppShortcuts({
   activeTaskId,
   activeSubtaskId,
   sessionsRef,
-  ws,
+  ops,
   paletteOpen,
   setPaletteOpen,
-  setCreatingSession,
-  setForkingSession,
 }: UseAppShortcutsInput): void {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -56,16 +54,18 @@ export function useAppShortcuts({
         ? sessionsRef.current?.find(candidate => candidate.id === activeSessionId) ?? null
         : null;
       if (!session) return;
+      // Fork needs a workspace — an Unfiled (workspace-deleted) session
+      // cannot be forked.
+      if (session.workspace_id == null) return;
       const baseName = session.name && session.name.length > 0
         ? session.name
         : `session ${session.id.slice(0, 6)}`;
-      setCreatingSession(true);
-      setForkingSession(true);
-      ws.send({
-        type: 'session:create',
-        workspace_id: session.workspace_id,
+      // The pending fork run drives the global "Forking session…" toast (App
+      // derives it from the operation store); it ends on operation:result.
+      ops.dispatch('session.fork', {
+        workspaceId: session.workspace_id,
         executor,
-        ...(session.approval_mode ? { approval_mode: session.approval_mode } : {}),
+        approvalMode: session.approval_mode,
         name: `${baseName} copy`,
       });
     }
@@ -80,7 +80,9 @@ export function useAppShortcuts({
           : undefined;
         if (activeSessionId && session?.executor === 'codex') {
           event.preventDefault();
-          ws.send({ type: 'queue:send_now', session_id: activeSessionId });
+          // Pending policy: the dispatcher's duplicate guard blocks repeat
+          // ⌘Enter while one drain is in flight.
+          ops.dispatch('queue.sendNow', { sessionId: activeSessionId });
         }
         return;
       }
@@ -88,7 +90,7 @@ export function useAppShortcuts({
       if (key === 'u') {
         if (activeSessionId) {
           event.preventDefault();
-          ws.send({ type: 'session:set_unread', session_id: activeSessionId, unread: true });
+          ops.dispatch('session.setUnread', { sessionId: activeSessionId, unread: true });
         }
       } else if (key === 'j') {
         event.preventDefault();
@@ -107,9 +109,7 @@ export function useAppShortcuts({
     activeTaskId,
     authenticated,
     mode,
+    ops,
     sessionsRef,
-    setCreatingSession,
-    setForkingSession,
-    ws,
   ]);
 }

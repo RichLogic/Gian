@@ -24,6 +24,7 @@ import {
   isSafeExternalUrl,
   isTrustedDesktopUrl,
   resolveDesktopApplicationIdentity,
+  resolveDesktopDisplayName,
   resolveDesktopTargets,
   resolveDesktopWindowChrome,
 } from './config.js';
@@ -51,8 +52,10 @@ const titlebarCss = readFileSync(
 const applicationIdentity = resolveDesktopApplicationIdentity(
   app.isPackaged,
   app.getPath('appData'),
+  process.env,
 );
 const applicationName = applicationIdentity.name;
+const displayName = resolveDesktopDisplayName(applicationIdentity, process.env);
 
 app.setName(applicationName);
 if (applicationIdentity.userDataPath) {
@@ -341,7 +344,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
     minWidth: 960,
     minHeight: 640,
     show: false,
-    title: applicationName,
+    title: displayName,
     backgroundColor: windowBackground(),
     webPreferences: {
       preload: preloadPath,
@@ -353,6 +356,10 @@ async function createMainWindow(): Promise<BrowserWindow> {
       backgroundThrottling: false,
       spellcheck: true,
     },
+  });
+  window.on('page-title-updated', event => {
+    event.preventDefault();
+    window.setTitle(displayName);
   });
   mainWindow = window;
 

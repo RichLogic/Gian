@@ -32,6 +32,7 @@ const PROXY_ENTRY = 'proxy.mjs';
 const MAX_INSTALLER_BYTES = 2 * 1024 * 1024;
 const MAX_PROXY_BYTES = 64 * 1024 * 1024;
 const PROXY_SELF_TEST_TIMEOUT_MS = 5_000;
+const STATUS_CACHE_TTL_MS = 30_000;
 
 interface AgentDefinition {
   id: Executor;
@@ -133,6 +134,16 @@ function safeReleaseValue(value: string, label: string): string {
   return trimmed;
 }
 
+function isCompatibleProxyVersion(proxyVersion: string, releaseVersion: string): boolean {
+  if (proxyVersion === releaseVersion) return true;
+
+  // A -hotfix release is reserved for app-only fixes. Its Proxy protocol and
+  // bundles remain those of the base release, so an existing base Proxy stays
+  // usable instead of disabling every Agent after the app update.
+  const hotfixMatch = /^(.*)-hotfix$/.exec(releaseVersion);
+  return hotfixMatch?.[1] === proxyVersion;
+}
+
 function normalizeRepository(value: string): string {
   const trimmed = value.trim();
   if (!/^[0-9A-Za-z_.-]+\/[0-9A-Za-z_.-]+$/.test(trimmed)) {
@@ -173,6 +184,8 @@ export class AgentManager {
   private readonly providers = new Map<Executor, CommandRuntimeProvider>();
   private readonly operations = new Map<string, Promise<AgentInstallResult>>();
   private readonly proxySelfTests = new Map<string, Promise<void>>();
+  private readonly statusCache = new Map<Executor, { value: AgentInstallStatus; expiresAt: number }>();
+  private readonly statusProbes = new Map<Executor, Promise<AgentInstallStatus>>();
   private config: AgentConfigFile = emptyConfig();
 
   private constructor(private readonly options: AgentManagerOptions) {
@@ -232,25 +245,33 @@ export class AgentManager {
     return join(this.options.dataDir, 'plugins', id, 'current', PROXY_ENTRY);
   }
 
-  async list(): Promise<AgentInstallStatus[]> {
-    return Promise.all((Object.keys(AGENTS) as Executor[]).map(id => this.status(id)));
+  async list(refresh = false): Promise<AgentInstallStatus[]> {
+    return Promise.all((Object.keys(AGENTS) as Executor[]).map(id => this.status(id, refresh)));
   }
 
-  async status(id: Executor): Promise<AgentInstallStatus> {
+  async status(id: Executor, refresh = false): Promise<AgentInstallStatus> {
     const definition = AGENTS[id];
     if (!definition) throw new Error(`unsupported agent: ${id}`);
-    const [cli, proxy] = await Promise.all([
-      this.cliStatus(id),
-      this.proxyStatus(id),
-    ]);
-    return {
-      id,
-      name: definition.name,
-      ready: cli.state === 'ready' && proxy.state === 'ready',
-      cli,
-      proxy: { ...proxy, defaults: this.proxyDefaults(id) },
-      officialInstallUrl: definition.installerUrl,
-    };
+    const cached = this.statusCache.get(id);
+    if (!refresh && cached && cached.expiresAt > Date.now()) return cached.value;
+    const pending = this.statusProbes.get(id);
+    if (pending) return pending;
+    const probe = Promise.all([this.cliStatus(id), this.proxyStatus(id)])
+      .then(([cli, proxy]) => {
+        const value: AgentInstallStatus = {
+          id,
+          name: definition.name,
+          ready: cli.state === 'ready' && proxy.state === 'ready',
+          cli,
+          proxy: { ...proxy, defaults: this.proxyDefaults(id) },
+          officialInstallUrl: definition.installerUrl,
+        };
+        this.statusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
+        return value;
+      })
+      .finally(() => this.statusProbes.delete(id));
+    this.statusProbes.set(id, probe);
+    return probe;
   }
 
   configuredPath(id: Executor): string | null {
@@ -274,7 +295,8 @@ export class AgentManager {
     const current = this.proxyDefaults(id);
     this.config.proxyDefaults[id] = normalizeProxyDefaults({ ...current, ...patch });
     await this.saveConfig();
-    return this.status(id);
+    this.statusCache.delete(id);
+    return this.status(id, true);
   }
 
   async setCliPath(id: Executor, path: string | null): Promise<AgentInstallStatus> {
@@ -294,7 +316,8 @@ export class AgentManager {
       }
     }
     await this.saveConfig();
-    return this.status(id);
+    this.statusCache.delete(id);
+    return this.status(id, true);
   }
 
   installOfficialCli(id: Executor): Promise<AgentInstallResult> {
@@ -315,7 +338,8 @@ export class AgentManager {
             NON_INTERACTIVE: '1',
           },
         });
-        const agent = await this.status(id);
+        this.statusCache.delete(id);
+        const agent = await this.status(id, true);
         if (agent.cli.state !== 'ready') {
           throw new Error(
             `The official installer finished, but ${definition.command} was not found. Configure its path manually.`,
@@ -335,7 +359,7 @@ export class AgentManager {
     return this.runOperation(`proxy:${id}`, async () => {
       if (!AGENTS[id]) throw new Error(`unsupported agent: ${id}`);
       if (!this.options.managedProxies) {
-        return { agent: await this.status(id) };
+        return { agent: await this.status(id, true) };
       }
       if (process.platform !== 'darwin' || process.arch !== 'arm64') {
         throw new Error('Managed proxy packages support macOS Apple Silicon only.');
@@ -376,7 +400,8 @@ export class AgentManager {
       } finally {
         await rm(staging, { recursive: true, force: true });
       }
-      return { agent: await this.status(id) };
+      this.statusCache.delete(id);
+      return { agent: await this.status(id, true) };
     });
   }
 
@@ -444,7 +469,9 @@ export class AgentManager {
       const current = await realpath(join(this.options.dataDir, 'plugins', id, 'current'));
       const manifest = await this.validateProxyDirectory(current, id);
       return {
-        state: manifest.version === this.releaseVersion ? 'ready' : 'outdated',
+        state: isCompatibleProxyVersion(manifest.version, this.releaseVersion)
+          ? 'ready'
+          : 'outdated',
         path: join(current, manifest.entry),
         version: manifest.version,
         source: 'github-release',

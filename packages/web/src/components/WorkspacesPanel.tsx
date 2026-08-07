@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { Session, SystemConfig, Workspace } from '@gian/shared';
-import { loadSessions, reorderWorkspaces, updateWorkspace } from '../api.js';
+import { loadSessions } from '../api.js';
 import { useT } from '../i18n/index.js';
+import { useOperationDispatch } from '../operations/use-operations.js';
 import type { GianWs } from '../ws.js';
 import { SpaceDetail, ClaudeMdInspector } from '../views/SpacesView.js';
 
@@ -31,16 +32,19 @@ function Icon({ d, size = 14, stroke = 1.6 }: { d: string; size?: number; stroke
 // Workbench tab (zone 3) via onOpenWorkspace.
 //
 // Unlike the prototype (where order + hidden are local-only and reset on
-// reload), this is wired to the real persistence layer: reordering hits
-// `POST /api/workspaces/reorder` and hide toggles `PATCH /api/workspaces/:id`
-// { hidden }. The list itself reflects `workspace.sort_order` (already sorted by
-// the host) and `workspace.hidden`.
+// reload), this is wired to the real persistence layer THROUGH THE OPERATION
+// LAYER (Phase 3a): reordering dispatches `workspace.reorder` (whole-list
+// order overlay → POST /api/workspaces/reorder) and hide toggles dispatch
+// `workspace.setHidden` (optimistic `hidden` overlay → PATCH
+// /api/workspaces/:id). The host does not broadcast these; the definitions'
+// reconcile patches + refetches canonical state on success. The list itself
+// reflects `workspace.sort_order` (already sorted by the host) and
+// `workspace.hidden`.
 export function WorkspacesInspector({
   workspaces,
   selectedWsId,
   openWsIds,
   onOpenWorkspace,
-  onChange,
   onNewWorkspace,
 }: {
   workspaces: Workspace[];
@@ -49,18 +53,17 @@ export function WorkspacesInspector({
   /** Ids of workspaces that currently have an open detail tab. */
   openWsIds: Set<string>;
   onOpenWorkspace: (wsId: string) => void;
-  /** Re-fetch the workspace list after a reorder / hide toggle. */
-  onChange: () => void;
   /** Surface the create-workspace flow (Spaces mode hosts the full form). */
   onNewWorkspace: () => void;
 }) {
   const t = useT();
+  const dispatch = useOperationDispatch();
   // The synthetic root workspace is a container, not a real project — never
   // list it. Reordering still round-trips the FULL id list (positions of the
   // two swapped visible rows), so the hidden root keeps its slot.
   const rows = workspaces.filter(w => w.name !== '__gian_root__');
 
-  async function move(idx: number, dir: -1 | 1) {
+  function move(idx: number, dir: -1 | 1) {
     const j = idx + dir;
     if (j < 0 || j >= rows.length) return;
     const ids = workspaces.map(w => w.id);
@@ -69,13 +72,11 @@ export function WorkspacesInspector({
     const tmp = ids[a]!;
     ids[a] = ids[b]!;
     ids[b] = tmp;
-    await reorderWorkspaces(ids);
-    onChange();
+    dispatch('workspace.reorder', { ids });
   }
 
-  async function toggleHidden(ws: Workspace) {
-    await updateWorkspace(ws.id, { hidden: ws.hidden !== 1 });
-    onChange();
+  function toggleHidden(ws: Workspace) {
+    dispatch('workspace.setHidden', { workspaceId: ws.id, hidden: ws.hidden !== 1 });
   }
 
   return (

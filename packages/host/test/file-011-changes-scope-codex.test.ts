@@ -203,3 +203,52 @@ test('FILE-011: lastturn scope is empty for a non-session (ws:) working tree', a
     await ctx.cleanup();
   }
 });
+
+test('FILE-011: lastturn scope on a ws: tree honors a same-workspace ?session= hint', async () => {
+  const ctx = await setup();
+  try {
+    const sessionId = seedSession(ctx, [
+      { turnNumber: 1, paths: ['src/app.ts'] },
+      { turnNumber: 2, paths: ['src/util.ts'] },
+    ]);
+    writeFileSync(join(ctx.repo.path, 'src/app.ts'), "console.log('init')\nturn1\n");
+    writeFileSync(join(ctx.repo.path, 'src/util.ts'), 'export const u = 1;\nturn2\n');
+
+    const res = await ctx.appCtx.fetch(
+      `/api/working_trees/${ctx.wsTreeId}/changed?scope=lastturn&session=${sessionId}`,
+    );
+    assert.equal(res.status, 200);
+    const changed = await res.json() as ChangedEntry[];
+    assert.deepEqual(changed.map(e => e.path), ['src/util.ts'],
+      'the hinted session supplies the last-turn paths');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('FILE-011: lastturn ?session= pointing at ANOTHER workspace is ignored', async () => {
+  const ctx = await setup();
+  try {
+    const sessionId = seedSession(ctx, [{ turnNumber: 1, paths: ['src/app.ts'] }]);
+    // A second workspace with its own session that touched files. (path is
+    // UNIQUE — this row's path is never read, the route under test uses the
+    // first workspace's tree.)
+    const otherWs = randomUUID();
+    ctx.appCtx.db.prepare('INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)')
+      .run(otherWs, 'other', `${ctx.repo.path}-other`);
+    ctx.appCtx.db.prepare(
+      `UPDATE sessions SET workspace_id = ? WHERE id = ?`,
+    ).run(otherWs, sessionId);
+    writeFileSync(join(ctx.repo.path, 'src/app.ts'), "console.log('init')\nedit\n");
+
+    const res = await ctx.appCtx.fetch(
+      `/api/working_trees/${ctx.wsTreeId}/changed?scope=lastturn&session=${sessionId}`,
+    );
+    assert.equal(res.status, 200);
+    const changed = await res.json() as ChangedEntry[];
+    assert.deepEqual(changed, [],
+      'a session from another workspace must not feed this tree\'s lastturn scope');
+  } finally {
+    await ctx.cleanup();
+  }
+});

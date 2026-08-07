@@ -38,8 +38,6 @@ export function projectCodexNotification(
   turn: number,
 ): DisplayEvent[] {
   const data = (raw.params.data ?? {}) as Record<string, unknown>;
-  const callId = (): string =>
-    String((raw.params as Record<string, unknown>).itemId ?? data.itemId ?? crypto.randomUUID());
 
   switch (raw.method) {
     case 'output.text.delta': {
@@ -133,11 +131,20 @@ export function projectCodexNotification(
       if (!diffText.trim()) return [];
       const files = parseUnifiedDiffSummary(diffText);
       if (files.length === 0) return [];
+      // turn/diff/updated is a full snapshot. Some Codex versions omit an
+      // itemId, so deriving the identity from the turn keeps one card (and
+      // one persisted snapshot) instead of inventing a new event each time.
+      const diffId = String(
+        (raw.params as Record<string, unknown>).itemId
+        ?? data.itemId
+        ?? raw.params.turnId
+        ?? `codex-diff:${turn}`,
+      );
       return [
         {
           session_id: sessionId,
           turn,
-          call_id: callId(),
+          call_id: diffId,
           ts: Date.now(),
           type: 'activity.file-change',
           data: { files, diff: diffText },

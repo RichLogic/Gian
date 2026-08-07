@@ -40,26 +40,26 @@ export async function loadArchivedSessions(): Promise<Session[]> {
   return (await res.json()) as Session[];
 }
 
-export async function setSessionArchived(sessionId: string, archived: boolean): Promise<boolean> {
-  const res = await fetch(`/api/sessions/${sessionId}/archive`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ archived }),
-  });
-  return res.ok;
+// NOTE: the REST archive/delete session helpers were removed in Phase 3a of
+// the UI Operation Layer — all archive/delete entry points (including the git
+// pane's session delete, Phase 3b) dispatch the WS-backed session.archive /
+// session.delete operations.
+
+export interface EventHistoryPage {
+  events: EventEnvelope[];
+  nextCursor: number | null;
+  hasMore: boolean;
 }
 
-export async function deleteSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
-  const res = await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
-  const body = await res.json().catch(() => ({} as { error?: string }));
-  if (!res.ok) return { ok: false, error: body.error ?? `Delete failed (${res.status})` };
-  return { ok: true };
-}
-
-export async function loadEvents(sessionId: string): Promise<EventEnvelope[]> {
-  const res = await fetch(`/api/sessions/${sessionId}/events`);
-  if (!res.ok) return [];
-  return (await res.json()) as EventEnvelope[];
+export async function loadEvents(sessionId: string, beforeTurn?: number | null): Promise<EventHistoryPage> {
+  const query = beforeTurn == null ? '' : `?before=${encodeURIComponent(beforeTurn)}`;
+  const res = await fetch(`/api/sessions/${sessionId}/events${query}`);
+  if (!res.ok) return { events: [], nextCursor: null, hasMore: false };
+  const body = (await res.json()) as EventHistoryPage | EventEnvelope[];
+  // Development fixtures and an older Host may still return the pre-pagination
+  // array. Treat it as one complete page during rolling upgrades.
+  if (Array.isArray(body)) return { events: body, nextCursor: null, hasMore: false };
+  return body;
 }
 
 export interface WorkingTree {
@@ -76,8 +76,8 @@ export interface WorkingTree {
   session_name: string | null;
 }
 
-export async function loadWorkingTrees(): Promise<WorkingTree[]> {
-  const res = await fetch('/api/working_trees');
+export async function loadWorkingTrees(options: { refresh?: boolean } = {}): Promise<WorkingTree[]> {
+  const res = await fetch(`/api/working_trees${options.refresh ? '?refresh=1' : ''}`);
   if (!res.ok) return [];
   return (await res.json()) as WorkingTree[];
 }
@@ -138,11 +138,15 @@ export async function loadChanged(
   scope: ChangeScope = 'all',
   sha?: string | null,
   base?: string | null,
+  sessionId?: string | null,
 ): Promise<ChangedEntry[]> {
   const params = new URLSearchParams();
   if (scope !== 'all') params.set('scope', scope);
   if (scope === 'commit' && sha) params.set('sha', sha);
   if (scope === 'branch' && base) params.set('base', base);
+  // `ws:`/`ext:` trees don't carry a session server-side; the host validates
+  // the id against the tree's workspace before trusting it.
+  if (scope === 'lastturn' && sessionId) params.set('session', sessionId);
   const q = params.size ? `?${params.toString()}` : '';
   const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/changed${q}`);
   if (!res.ok) return [];
@@ -203,10 +207,36 @@ async function agentResponse<T>(response: Response): Promise<T> {
   return body;
 }
 
-export async function loadAgents(): Promise<AgentInstallStatus[]> {
-  const response = await fetch('/api/agents');
-  const body = await agentResponse<{ agents: AgentInstallStatus[] }>(response);
-  return body.agents;
+const AGENT_CACHE_TTL_MS = 30_000;
+let agentCache: { agents: AgentInstallStatus[]; expiresAt: number } | null = null;
+let agentRequest: Promise<AgentInstallStatus[]> | null = null;
+
+export function peekAgents(): AgentInstallStatus[] | null {
+  return agentCache?.agents ?? null;
+}
+
+function cacheAgent(agent: AgentInstallStatus): AgentInstallStatus {
+  const current = agentCache?.agents ?? [];
+  agentCache = {
+    agents: [agent, ...current.filter(candidate => candidate.id !== agent.id)]
+      .sort((a, b) => ['claude', 'codex', 'kimi'].indexOf(a.id) - ['claude', 'codex', 'kimi'].indexOf(b.id)),
+    expiresAt: Date.now() + AGENT_CACHE_TTL_MS,
+  };
+  return agent;
+}
+
+export async function loadAgents(options: { refresh?: boolean } = {}): Promise<AgentInstallStatus[]> {
+  if (!options.refresh && agentCache && agentCache.expiresAt > Date.now()) return agentCache.agents;
+  if (agentRequest) return agentRequest;
+  const query = options.refresh ? '?refresh=1' : '';
+  agentRequest = fetch(`/api/agents${query}`)
+    .then(response => agentResponse<{ agents: AgentInstallStatus[] }>(response))
+    .then(body => {
+      agentCache = { agents: body.agents, expiresAt: Date.now() + AGENT_CACHE_TTL_MS };
+      return body.agents;
+    })
+    .finally(() => { agentRequest = null; });
+  return agentRequest;
 }
 
 export async function setAgentCliPath(
@@ -219,7 +249,7 @@ export async function setAgentCliPath(
     body: JSON.stringify({ path }),
   });
   const body = await agentResponse<{ agent: AgentInstallStatus }>(response);
-  return body.agent;
+  return cacheAgent(body.agent);
 }
 
 /** Ask the host to open the native file picker so the user can browse for a
@@ -243,21 +273,25 @@ export async function setAgentProxyDefaults(
     body: JSON.stringify(defaults),
   });
   const body = await agentResponse<{ agent: AgentInstallStatus }>(response);
-  return body.agent;
+  return cacheAgent(body.agent);
 }
 
 export async function installAgentCli(executor: Executor): Promise<AgentInstallResult> {
   const response = await fetch(`/api/agents/${executor}/install-cli`, {
     method: 'POST',
   });
-  return agentResponse<AgentInstallResult>(response);
+  const result = await agentResponse<AgentInstallResult>(response);
+  cacheAgent(result.agent);
+  return result;
 }
 
 export async function installAgentProxy(executor: Executor): Promise<AgentInstallResult> {
   const response = await fetch(`/api/agents/${executor}/install-proxy`, {
     method: 'POST',
   });
-  return agentResponse<AgentInstallResult>(response);
+  const result = await agentResponse<AgentInstallResult>(response);
+  cacheAgent(result.agent);
+  return result;
 }
 
 export async function loadOnboarding(): Promise<OnboardingState> {
@@ -334,7 +368,9 @@ export async function loadDiff(
   if (scope === 'commit' && sha) params.set('sha', sha);
   if (scope === 'branch' && base) params.set('base', base);
   const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/diff?${params.toString()}`);
-  if (!res.ok) return '';
+  // Throws on failure (Phase 3b): the diff tab's loading→fill-or-fail timing
+  // must distinguish a failed load (error state + retry) from an empty diff.
+  if (!res.ok) throw new Error(`Diff load failed (${res.status})`);
   const body = (await res.json()) as { diff: string };
   return body.diff ?? '';
 }
@@ -443,8 +479,11 @@ export async function reorderWorkspaces(ids: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 // Tasks (PRD-v3) — Subtasks are just sessions filtered by task_id, so there is
 // no subtask endpoint here. Tasks are primarily seeded from `state_sync` and
-// kept fresh via the WS `task:*` messages; these REST helpers mirror the
-// workspace ones for the initial / fallback fetch and the create flow.
+// kept fresh via the WS `task:*` messages; this REST helper mirrors the
+// workspace ones for the initial / fallback fetch. Task creation goes through
+// the WS `task:create` operation (`task.create`) — the REST `createTask`
+// helper was a dead surface and was deleted in Phase 4 of the UI Operation
+// Layer (inventory §5).
 // ---------------------------------------------------------------------------
 
 export async function loadTasks(): Promise<Task[]> {
@@ -454,24 +493,6 @@ export async function loadTasks(): Promise<Task[]> {
     return (await res.json()) as Task[];
   } catch {
     return [];
-  }
-}
-
-export async function createTask(input: { name: string; description?: string; executor?: Executor }): Promise<Task | null> {
-  try {
-    const res = await fetch('/api/tasks', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: input.name,
-        ...(input.description ? { description: input.description } : {}),
-        ...(input.executor ? { executor: input.executor } : {}),
-      }),
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as Task;
-  } catch {
-    return null;
   }
 }
 
@@ -503,21 +524,25 @@ export async function createSubtask(
 
 /** PRD-v3 P3 — mark a Subtask's session done. The host flips status to 'done'
  *  (sets `completed_at`, spec §B) and runs the summarizer, then broadcasts
- *  `session:updated` so the row reflects it. Fail-soft. */
-export async function completeSubtask(sessionId: string): Promise<void> {
+ *  `session:updated` so the row reflects it. Returns false on failure so the
+ *  operation layer can settle the run as failed. */
+export async function completeSubtask(sessionId: string): Promise<boolean> {
   try {
-    await fetch(`/api/sessions/${sessionId}/complete`, { method: 'POST' });
+    const res = await fetch(`/api/sessions/${sessionId}/complete`, { method: 'POST' });
+    return res.ok;
   } catch {
-    /* fail-soft: the row stays as-is; the broadcast would have updated it */
+    return false;
   }
 }
 
-/** Reopen a completed Subtask (spec §B) — clears `completed_at`. Fail-soft. */
-export async function reopenSubtask(sessionId: string): Promise<void> {
+/** Reopen a completed Subtask (spec §B) — clears `completed_at`. Returns
+ *  false on failure (same contract as `completeSubtask`). */
+export async function reopenSubtask(sessionId: string): Promise<boolean> {
   try {
-    await fetch(`/api/sessions/${sessionId}/reopen`, { method: 'POST' });
+    const res = await fetch(`/api/sessions/${sessionId}/reopen`, { method: 'POST' });
+    return res.ok;
   } catch {
-    /* fail-soft */
+    return false;
   }
 }
 
@@ -746,22 +771,6 @@ export async function abortPendingGitOp(workspaceId: string): Promise<{ ok: bool
   return { ok: true };
 }
 
-export async function createLocalBranch(
-  workspaceId: string,
-  input: { name: string; base?: string },
-): Promise<{ ok: boolean; error?: string }> {
-  const res = await fetch(`/api/workspaces/${workspaceId}/branches`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(input),
-  });
-  const body = await res.json().catch(() => ({} as Record<string, unknown>));
-  if (!res.ok) {
-    return { ok: false, error: (body as { error?: string }).error ?? `Create failed (${res.status})` };
-  }
-  return { ok: true };
-}
-
 export interface UploadedAttachment {
   path: string;
   name: string;
@@ -793,6 +802,19 @@ export async function openFileWith(
   editorId?: string,
 ): Promise<{ ok: true } | { error: string }> {
   return postOpen(workingTreeId, { path, ...(editorId ? { editor_id: editorId } : {}) });
+}
+
+/** Reveal a working tree in the OS file manager (Finder). Moved here from
+ *  the inline fetch in spaces-git-pane.tsx (Phase 3b, inventory §4.1). */
+export async function revealWorkingTree(
+  workingTreeId: string,
+): Promise<{ ok: true } | { error: string }> {
+  const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/reveal`, {
+    method: 'POST',
+  });
+  if (res.ok) return { ok: true };
+  const body = (await res.json().catch(() => ({}))) as { error?: string };
+  return { error: body.error ?? `Reveal failed (${res.status})` };
 }
 
 /** Open a file with a named macOS application (from `loadApps`). */

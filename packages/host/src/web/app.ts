@@ -28,6 +28,7 @@ import { registerAgentRoutes } from './routes/agents.js';
 import { registerOnboardingRoutes } from './routes/onboarding.js';
 import { bootJsonlWatchers } from './watcher-bootstrap.js';
 import { resolveWebDistDir, staticFiles } from './static-files.js';
+import { buildHealthPayload } from './health.js';
 import { requireDesktopClient } from './desktop-boundary.js';
 
 export interface AppContext {
@@ -136,13 +137,7 @@ export function createApp(ctx: AppContext): AppHandle {
 
   app.use('*', requireAuth());
 
-  app.get('/health', c => c.json({
-    ok: true,
-    version: '0.1.0',
-    ...(process.env['GIAN_DESKTOP_INSTANCE_ID']
-      ? { instanceId: process.env['GIAN_DESKTOP_INSTANCE_ID'] }
-      : {}),
-  }));
+  app.get('/health', c => c.json(buildHealthPayload()));
   registerAuthRoutes(app, ctx.db);
   registerSettingsRoutes(app, ctx.db);
   registerWorkspaceRoutes(app, ctx.db);

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { Inspector } from '../src/components/Inspector.js';
+import { renderWithOperations } from './operation-test-utils.js';
 import type { WorkingTree, ChangedEntry } from '../src/api.js';
 import * as api from '../src/api.js';
 
@@ -32,7 +33,7 @@ function renderChanges(opts: {
 } = {}) {
   const onOpenDiff = opts.onOpenDiff ?? vi.fn();
   const onComposePrompt = opts.onComposePrompt ?? vi.fn();
-  render(
+  renderWithOperations(
     <Inspector
       tab="changes"
       workingTreeId="ws:demo"
@@ -67,14 +68,14 @@ describe('Inspector CHANGES', () => {
 
   it('defaults to the "branch" scope', async () => {
     renderChanges();
-    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'branch', null, null));
+    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'branch', null, null, undefined));
   });
 
   it('switching the scope re-fetches with that scope', async () => {
     renderChanges();
     await waitFor(() => expect(api.loadChanged).toHaveBeenCalled());
     pickScope('staged');
-    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'staged', null, null));
+    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'staged', null, null, undefined));
   });
 
   it('clicking a row opens its diff in the current scope', async () => {

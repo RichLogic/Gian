@@ -5,9 +5,12 @@ import { isNativeImageMime } from '../attachments.js';
 import {
   loadNativeConfig,
   loadSessionSlashCommands,
-  uploadAttachment,
 } from '../api.js';
 import { useT } from '../i18n/index.js';
+// Runtime import (not `import type`): registering message.uploadAttachment
+// on the product registry is a module side effect.
+import { type UploadAttachmentInput } from '../operations/message.js';
+import { useOperationDispatchOptional, useSessionOperationPending } from '../operations/use-operations.js';
 import { ImageZoomContext } from '../transcript/items.js';
 import { ContextUsageIndicator } from './composer/context-usage-indicator.js';
 import {
@@ -297,6 +300,14 @@ export function Composer({
   );
   const sessionNativeOptions = session.native_config_options ?? [];
   const [nativeOptions, setNativeOptions] = useState(sessionNativeOptions);
+  // Pending session.stop run (Phase 2a): the Stop button flips to a stable
+  // "stopping" state immediately and duplicate clicks are blocked — both by
+  // this disabled state and by the dispatcher's duplicate pending guard.
+  const stopping = useSessionOperationPending(session.id, 'session.stop');
+  // Operation dispatch for attachment uploads (Phase 2b,
+  // message.uploadAttachment). Null only when no operation provider is
+  // mounted (standalone test renders) — uploads then fail the chip visibly.
+  const dispatch = useOperationDispatchOptional();
 
   // Fetch model list lazily per executor; cached.
   useEffect(() => {
@@ -688,7 +699,7 @@ export function Composer({
     });
   }
 
-  async function uploadOne(file: File): Promise<void> {
+  function uploadOne(file: File): void {
     const id = crypto.randomUUID();
     const previewUrl = URL.createObjectURL(file);
     const entry: PendingFile = {
@@ -706,19 +717,32 @@ export function Composer({
     };
     setPendingFiles(prev => [...prev, entry]);
     if (file.size > MAX_FILE_BYTES) return;
-
-    try {
-      const result = await uploadAttachment(session.id, file, file.name);
+    if (!dispatch) {
+      // No operation provider (standalone render) — fail the chip visibly
+      // rather than silently dropping the upload.
       setPendingFiles(prev =>
-        prev.map(f => f.id === id
-          ? { ...f, path: result.path, mime: result.mime, size: result.size, sizeLabel: fmtBytes(result.size), uploading: false }
-          : f),
+        prev.map(f => f.id === id ? { ...f, uploading: false, error: t('composer.attachment.uploadUnavailable') } : f),
       );
-    } catch (err) {
-      setPendingFiles(prev =>
-        prev.map(f => f.id === id ? { ...f, uploading: false, error: String(err) } : f),
-      );
+      return;
     }
+
+    // The pending-file chip UX is unchanged: `uploading` drives the spinner,
+    // onFailed sets the error flag. The operation layer correlates the run.
+    dispatch<UploadAttachmentInput>('message.uploadAttachment', {
+      sessionId: session.id,
+      blob: file,
+      filename: file.name,
+      onUploaded: result =>
+        setPendingFiles(prev =>
+          prev.map(f => f.id === id
+            ? { ...f, path: result.path, mime: result.mime, size: result.size, sizeLabel: fmtBytes(result.size), uploading: false }
+            : f),
+        ),
+      onFailed: message =>
+        setPendingFiles(prev =>
+          prev.map(f => f.id === id ? { ...f, uploading: false, error: message } : f),
+        ),
+    });
   }
 
   function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
@@ -1228,12 +1252,17 @@ export function Composer({
               type="button"
               className="composer-act primary danger"
               onClick={onStop}
-              title={t('composer.stop.title')}
-              aria-label={t('composer.stop.button')}
+              disabled={stopping}
+              title={stopping ? t('composer.stopping') : t('composer.stop.title')}
+              aria-label={stopping ? t('composer.stopping') : t('composer.stop.button')}
             >
-              <svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
-                <rect x="3" y="3" width="8" height="8" rx="1" />
-              </svg>
+              {stopping ? (
+                <span className="spinner" aria-hidden="true" />
+              ) : (
+                <svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
+                  <rect x="3" y="3" width="8" height="8" rx="1" />
+                </svg>
+              )}
             </button>
           ) : (
             <button

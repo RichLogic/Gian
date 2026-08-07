@@ -116,6 +116,38 @@ test('SEC-014: /api/working_trees dedupes DB-owned session worktrees (wt: wins)'
   }
 });
 
+test('PERF-002: /api/working_trees reuses its scan cache until an explicit refresh', async () => {
+  const ctx = await setup();
+  const requested = `${ctx.repo.path}-agent-wt-2`;
+  let secondPath: string | null = null;
+  try {
+    const initial = await ctx.appCtx.fetch('/api/working_trees');
+    assert.equal(initial.status, 200);
+
+    ctx.repo.git(['worktree', 'add', '-b', 'feature/agent-2', requested, 'main']);
+    secondPath = listGitWorktrees(ctx.workspacePath)
+      .find(worktree => worktree.branch === 'feature/agent-2')!.path;
+
+    const cached = await ctx.appCtx.fetch('/api/working_trees');
+    assert.equal(cached.status, 200);
+    const cachedRows = await cached.json() as WorkingTreeRow[];
+    assert.equal(cachedRows.some(row => row.path === secondPath), false,
+      'ordinary remounts reuse the bounded scan cache');
+
+    const refreshed = await ctx.appCtx.fetch('/api/working_trees?refresh=1');
+    assert.equal(refreshed.status, 200);
+    const refreshedRows = await refreshed.json() as WorkingTreeRow[];
+    assert.equal(refreshedRows.some(row => row.path === secondPath), true,
+      'explicit repository refresh bypasses the cache');
+  } finally {
+    if (secondPath) {
+      ctx.repo.git(['worktree', 'remove', '--force', secondPath]);
+      ctx.repo.git(['branch', '-D', 'feature/agent-2']);
+    }
+    await ctx.cleanup();
+  }
+});
+
 test('SEC-014: /api/workspaces/:id/trees also lists external worktrees', async () => {
   const ctx = await setup();
   try {

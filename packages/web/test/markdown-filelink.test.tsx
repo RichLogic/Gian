@@ -1,17 +1,19 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { MarkdownText, FileRefRehypeContext, FileLinkOpenContext } from '../src/transcript/items.js';
+import { MarkdownText, FileRefRehypeContext, FileLinkOpenContext, RelativeLinkOpenContext } from '../src/transcript/items.js';
 import { buildFileRefIndex, makeFileLinkifyRehype } from '../src/transcript/linkify-files.js';
 
 const index = buildFileRefIndex(['packages/web/src/App.tsx', 'README.md'], '/repo');
 const rehype = makeFileLinkifyRehype(index, rel => `/repo/${rel}`);
 
-function renderMd(text: string, onOpen = vi.fn()) {
+function renderMd(text: string, onOpen = vi.fn(), onOpenRel: ((href: string) => void) | null = null) {
   const r = render(
     <FileLinkOpenContext.Provider value={onOpen}>
-      <FileRefRehypeContext.Provider value={rehype}>
-        <MarkdownText>{text}</MarkdownText>
-      </FileRefRehypeContext.Provider>
+      <RelativeLinkOpenContext.Provider value={onOpenRel}>
+        <FileRefRehypeContext.Provider value={rehype}>
+          <MarkdownText>{text}</MarkdownText>
+        </FileRefRehypeContext.Provider>
+      </RelativeLinkOpenContext.Provider>
     </FileLinkOpenContext.Provider>,
   );
   return Object.assign(onOpen, { container: r.container });
@@ -81,13 +83,22 @@ describe('MarkdownText file linkification', () => {
     expect(onOpen).toHaveBeenCalledWith('/repo/packages/web/src/App.tsx', 12);
   });
 
-  it('swallows clicks on relative markdown links that do NOT resolve to a file (no new window)', () => {
+  it('swallows clicks on relative markdown links that do NOT resolve when no fallback handler is mounted', () => {
     const onOpen = renderMd('[missing.md](./missing.md)');
     const link = screen.getByText('missing.md');
     expect(link.className).not.toContain('file-link');
     // dispatchEvent returns false when the handler called preventDefault —
     // i.e. the browser/Electron shell never sees a navigation to open.
     expect(fireEvent.click(link)).toBe(false);
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('routes unresolved relative markdown links to the click-time fallback handler', () => {
+    const onOpenRel = vi.fn();
+    const onOpen = renderMd('[missing.md](./missing.md)', vi.fn(), onOpenRel);
+    const link = screen.getByText('missing.md');
+    expect(fireEvent.click(link)).toBe(false); // still no SPA navigation
+    expect(onOpenRel).toHaveBeenCalledWith('./missing.md');
     expect(onOpen).not.toHaveBeenCalled();
   });
 

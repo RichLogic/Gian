@@ -12,6 +12,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Inspector } from '../src/components/Inspector.js';
+import { renderWithOperations } from './operation-test-utils.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 
 vi.mock('../src/api.js', () => ({
@@ -32,7 +33,7 @@ const loadCommits = vi.mocked(api.loadCommits);
 const loadBranchList = vi.mocked(api.loadBranchList);
 
 function renderChanges(opts: { scopeRequest?: { scope: 'all' | 'unstaged' | 'staged' | 'commit' | 'branch' | 'lastturn'; requestId: number } } = {}) {
-  render(
+  renderWithOperations(
     <LocaleProvider locale="en">
       <Inspector
         tab="changes"
@@ -69,7 +70,7 @@ describe('Changes scope picker', () => {
   it('defaults to Branch and queries the branch scope', async () => {
     renderChanges();
     expect(document.querySelector('.changes-scope-btn')?.textContent).toContain('Branch');
-    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'branch', null, null));
+    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'branch', null, null, undefined));
   });
 
   it('lists the six scopes grouped in order, with a ✓ on the active one', async () => {
@@ -91,11 +92,11 @@ describe('Changes scope picker', () => {
   it('switching scope re-queries and persists the choice', async () => {
     const user = userEvent.setup();
     renderChanges();
-    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'branch', null, null));
+    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'branch', null, null, undefined));
 
     await pickScope(user, /Unadded/);
 
-    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'unstaged', null, null));
+    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'unstaged', null, null, undefined));
     expect(localStorage.getItem('gian.changes.scope')).toBe('unstaged');
     // Trigger now reflects the new scope.
     expect(document.querySelector('.changes-scope-btn')?.textContent).toContain('Unadded');
@@ -113,11 +114,11 @@ describe('Changes scope picker', () => {
     // Second row appears with the default (latest commit).
     const rowBtn = document.querySelector('.changes-base-btn') as HTMLElement;
     expect(rowBtn.textContent).toContain('Latest commit');
-    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'commit', null, null));
+    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'commit', null, null, undefined));
 
     await user.click(rowBtn);
     await user.click(await screen.findByText('feat: first'));
-    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'commit', 'abc1234def0000', null));
+    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'commit', 'abc1234def0000', null, undefined));
     // Row button reflects the pinned commit (short sha).
     expect(document.querySelector('.changes-base-btn')?.textContent).toContain('abc1234');
   });
@@ -134,7 +135,7 @@ describe('Changes scope picker', () => {
 
     await user.click(document.querySelector('.changes-base-btn') as HTMLElement);
     await user.click(await screen.findByRole('menuitemradio', { name: 'origin/main' }));
-    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'branch', null, 'origin/main'));
+    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'branch', null, 'origin/main', undefined));
     // The explicit base is remembered per working tree.
     expect(localStorage.getItem('gian.changes.base.wt:s1')).toBe('origin/main');
   });
@@ -155,13 +156,13 @@ describe('Changes scope picker', () => {
     localStorage.setItem('gian.changes.scope', 'all');
     renderChanges();
     expect(document.querySelector('.changes-scope-btn')?.textContent).toContain('All changes');
-    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'all', null, null));
+    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'all', null, null, undefined));
   });
 
   it('an external scopeRequest (GitBadge click) forces All changes and persists it', async () => {
     localStorage.setItem('gian.changes.scope', 'branch');
     renderChanges({ scopeRequest: { scope: 'all', requestId: 1 } });
-    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'all', null, null));
+    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'all', null, null, undefined));
     expect(document.querySelector('.changes-scope-btn')?.textContent).toContain('All changes');
     expect(localStorage.getItem('gian.changes.scope')).toBe('all');
   });

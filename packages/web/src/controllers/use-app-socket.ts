@@ -9,19 +9,23 @@ import type {
   Task,
   Workspace,
 } from '@gian/shared';
-import { loadSessions, loadTasks, loadWorkspaces } from '../api.js';
+import { loadSessions, loadTasks, loadWorkingTrees, loadWorkspaces, type WorkingTree } from '../api.js';
 import { toast } from '../feedback.js';
 import { maybeNotifyForEnvelope } from '../notifications.js';
+import type { OperationDispatcher } from '../operations/dispatcher.js';
+import { dispatchMessageSend } from '../operations/message.js';
+import { sessionEntityKey } from '../operations/session.js';
+import { taskEntityKey } from '../operations/task.js';
+import { workspaceEntityKey } from '../operations/workspace.js';
+import type { OperationStore } from '../operations/store.js';
 import {
   applySessionUpdate,
-  isSessionCreateDispatchError,
   planCreatedSessionFirstMessage,
 } from '../session-routing.js';
 import {
   applyEnvelope,
   applyErrorEnvelopeToSession,
   applyPlanLifecycle,
-  createOptimisticEcho,
   displayTypeForEnvelope,
   nextPendingFromEnvelope,
   type PlanLifecycleState,
@@ -42,6 +46,7 @@ interface UseAppSocketInput {
   setWsAttempt: Setter<number>;
   setAuthed: Setter<boolean>;
   setWorkspaces: Setter<Workspace[]>;
+  setWorkingTrees: Setter<WorkingTree[]>;
   setSessions: Setter<Session[]>;
   setTasks: Setter<Task[]>;
   setSystemConfig: Setter<SystemConfig | null>;
@@ -53,8 +58,13 @@ interface UseAppSocketInput {
   setPendingBySession: Setter<Record<string, boolean>>;
   setQueueBySession: Setter<Record<string, QueueEntry[]>>;
   setPlanStateBySession: Setter<Record<string, PlanLifecycleState>>;
-  setCreatingSession: Setter<boolean>;
-  setForkingSession: Setter<boolean>;
+  markSessionHistoryLive: (sessionId: string) => void;
+  /** Operation store — canonical session data applied here defensively
+   *  absorbs matching overlays (proposal §4.3). */
+  operationStore: OperationStore;
+  /** Operation dispatcher — the auto first-queued send and the unread
+   *  auto-clear dispatch through the operation layer (Phase 2b). */
+  ops: OperationDispatcher;
 }
 
 export function useAppSocket(input: UseAppSocketInput): void {
@@ -93,6 +103,7 @@ export function useAppSocket(input: UseAppSocketInput): void {
           return next === existing ? previous : { ...previous, [envelope.session_id]: next };
         });
       }
+      current.markSessionHistoryLive(envelope.session_id);
       current.setItemsBySession(previous => {
         const list = previous[envelope.session_id] ?? [];
         const next = applyEnvelope(list, envelope, executor);
@@ -112,6 +123,10 @@ export function useAppSocket(input: UseAppSocketInput): void {
       switch (message.type) {
         case 'auth_ok':
           current.setAuthed(true);
+          input.ws.send({
+            type: 'events:subscribe',
+            session_id: current.activeSessionIdRef.current,
+          });
           return;
         case 'state_sync':
           current.setWorkspaces(message.workspaces);
@@ -119,6 +134,29 @@ export function useAppSocket(input: UseAppSocketInput): void {
           current.setTasks(message.tasks);
           current.setSystemConfig(message.config);
           current.setRunner(message.runner);
+          // Defensive absorption: any overlay whose value the sync already
+          // reflects is dropped immediately (§4.3).
+          for (const session of message.sessions) {
+            current.operationStore.absorbMatchingOverlays(
+              sessionEntityKey(session.id),
+              field => session[field as keyof Session],
+            );
+          }
+          for (const task of message.tasks) {
+            current.operationStore.absorbMatchingOverlays(
+              taskEntityKey(task.id),
+              field => task[field as keyof Task],
+            );
+          }
+          for (const workspace of message.workspaces) {
+            current.operationStore.absorbMatchingOverlays(
+              workspaceEntityKey(workspace.id),
+              field => workspace[field as keyof Workspace],
+            );
+          }
+          return;
+        case 'workspace:git-updated':
+          void loadWorkingTrees({ refresh: true }).then(current.setWorkingTrees);
           return;
         case 'session:created': {
           current.setSessions(previous => [
@@ -126,29 +164,19 @@ export function useAppSocket(input: UseAppSocketInput): void {
             ...previous.filter(session => session.id !== message.session.id),
           ]);
           current.setActiveSessionId(message.session.id);
-          current.setCreatingSession(false);
-          current.setForkingSession(false);
+          // The creating/forking busy state is driven by the pending
+          // operation run in App and ends on operation:result — nothing to
+          // clear here.
           const pending = current.pendingFirstMessageRef.current;
           current.pendingFirstMessageRef.current = null;
           const firstMessage = planCreatedSessionFirstMessage(pending);
           if (firstMessage.structuredText) {
-            const optimistic = createOptimisticEcho({
+            // The auto first-queued send shares the Composer's send path:
+            // dispatch + synchronous optimistic echo via the echo sink.
+            dispatchMessageSend(current.ops.dispatch, {
               sessionId: message.session.id,
               text: firstMessage.structuredText,
               exec: message.session.executor,
-            });
-            current.setItemsBySession(previous => ({
-              ...previous,
-              [message.session.id]: [optimistic],
-            }));
-            current.setPendingBySession(previous => ({
-              ...previous,
-              [message.session.id]: true,
-            }));
-            input.ws.send({
-              type: 'message:send',
-              session_id: message.session.id,
-              text: firstMessage.structuredText,
             });
           } else {
             current.setItemsBySession(previous => ({ ...previous, [message.session.id]: [] }));
@@ -160,7 +188,7 @@ export function useAppSocket(input: UseAppSocketInput): void {
           const fromTurnEnd = partial.status === 'done' || partial.status === 'error';
           if (partial.unread === 1 && fromTurnEnd
             && partial.id === current.activeSessionIdRef.current) {
-            input.ws.send({ type: 'session:set_unread', session_id: partial.id, unread: false });
+            current.ops.dispatch('session.setUnread', { sessionId: partial.id, unread: false });
           }
           if (partial.status === 'running' || partial.status === 'pending') {
             current.setPendingBySession(previous => ({ ...previous, [partial.id]: true }));
@@ -168,6 +196,10 @@ export function useAppSocket(input: UseAppSocketInput): void {
             current.setPendingBySession(previous => ({ ...previous, [partial.id]: false }));
           }
           current.setSessions(previous => applySessionUpdate(previous, partial));
+          current.operationStore.absorbMatchingOverlays(
+            sessionEntityKey(partial.id),
+            field => (partial as Record<string, unknown>)[field],
+          );
           return;
         }
         case 'session:native-config':
@@ -199,6 +231,12 @@ export function useAppSocket(input: UseAppSocketInput): void {
         case 'task:updated':
           current.setTasks(previous => previous.map(task =>
             task.id === message.task.id ? { ...task, ...message.task } : task));
+          // Defensive absorption for task overlays (rename/done/pin), same
+          // contract as session:updated above.
+          current.operationStore.absorbMatchingOverlays(
+            taskEntityKey(message.task.id),
+            field => (message.task as Record<string, unknown>)[field],
+          );
           return;
         case 'task:deleted':
           current.setTasks(previous => previous.filter(task => task.id !== message.task_id));
@@ -228,16 +266,20 @@ export function useAppSocket(input: UseAppSocketInput): void {
         case 'error': {
           if (message.session_id && message.code === 'MESSAGE_SEND_FAILED') {
             const sessionId = message.session_id;
-            current.setItemsBySession(previous => {
-              const delta = applyErrorEnvelopeToSession(previous[sessionId], sessionId);
-              if (!delta || delta.items === previous[sessionId]) return previous;
-              return { ...previous, [sessionId]: delta.items };
-            });
+            if (!message.request_id) {
+              // UNCORRELATED legacy fallback only: correlated send failures
+              // (every send now carries a request_id) mark THEIR echo failed
+              // precisely by run id via the operation rollback (proposal §9);
+              // this imprecise latest-pending marking must not run for them.
+              current.setItemsBySession(previous => {
+                const delta = applyErrorEnvelopeToSession(previous[sessionId], sessionId);
+                if (!delta || delta.items === previous[sessionId]) return previous;
+                return { ...previous, [sessionId]: delta.items };
+              });
+            }
+            // Clear the spinner for both paths (the operation rollback only
+            // marks the echo; the session-level pending flag is cleared here).
             current.setPendingBySession(previous => ({ ...previous, [sessionId]: false }));
-          }
-          if (isSessionCreateDispatchError(message)) {
-            current.setCreatingSession(false);
-            current.setForkingSession(false);
           }
           toast({ kind: 'error', title: message.code, message: message.message });
         }

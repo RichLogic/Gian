@@ -7,27 +7,39 @@
 //   - Task group rows carry a "⋯" menu (rename / done-toggle / delete
 //     with confirm) and a "+" that opens the task-context new-session form.
 //   - Done rows keep the same menu (no "+") and are not selectable.
-//   - Subtask rows carry hover pin (`session:pin`, open subtasks only) and a
-//     complete/reopen toggle (REST /complete · /reopen), disabled while a
-//     turn is running.
+//   - Subtask rows carry hover pin (`session.pin`, open subtasks only) and a
+//     complete/reopen toggle (task.completeSubtask / task.reopenSubtask),
+//     disabled while a turn is running.
+//   - All task mutations dispatch through the operation layer (Phase 3a):
+//     rename/done/pin are optimistic overlays on `task:<id>`, create/delete
+//     are pending (delete keeps the row visible with a pending affordance).
 //   - The sidebar "+" creates a task with NO executor pick.
 //   - A selected task (no session) shows the placeholder panel.
 
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Session, Task, Workspace } from '@gian/shared';
+import type { ClientToServerMessage, Session, Task, Workspace } from '@gian/shared';
 import { completeSubtask, createSubtask, reopenSubtask } from '../src/api.js';
 import { __resetFeedback, getSnapshot, resolveConfirm } from '../src/feedback.js';
 import { LocaleProvider } from '../src/i18n/index.js';
+import { createOperationDispatcher } from '../src/operations/dispatcher.js';
+// Side effects: register the product Session/Task definitions (subtask pin
+// routes through session.pin since Phase 2a; task + subtask mutations
+// through the task operations since Phase 3a).
+import '../src/operations/session.js';
+import '../src/operations/task.js';
+import { createOperationStore } from '../src/operations/store.js';
+import { OperationDispatcherProvider, OperationStoreProvider } from '../src/operations/use-operations.js';
 import { TasksView, subtasksFor } from '../src/views/TasksView.js';
-import type { GianWs } from '../src/ws.js';
 
 vi.mock('../src/api.js', () => ({
   completeSubtask: vi.fn(),
   reopenSubtask: vi.fn(),
   createSubtask: vi.fn(),
   createWorkspace: vi.fn(),
+  peekAgents: vi.fn(() => null),
   loadAgents: vi.fn().mockResolvedValue([
     { id: 'codex', name: 'Codex', ready: true, cli: { state: 'ready', path: '/bin/codex', version: '1.0.0', source: 'path' }, proxy: { state: 'ready', path: '/proxy/codex', version: '0.1.0', source: 'github-release' }, officialInstallUrl: 'https://example.invalid' },
   ]),
@@ -91,35 +103,60 @@ function workspace(id: string): Workspace {
   };
 }
 
+/** Operation-layer harness: every TasksView mutation dispatches through a
+ *  real dispatcher bound to a capture transport (Phase 2a pin, Phase 3a
+ *  task + subtask operations). */
+function operationHarness() {
+  const sent: ClientToServerMessage[] = [];
+  const store = createOperationStore();
+  const dispatcher = createOperationDispatcher({
+    store,
+    transport: {
+      send: msg => sent.push(msg),
+      onMessage: () => () => {},
+      onState: listener => { listener('open', 0); return () => {}; },
+    },
+  });
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <OperationStoreProvider store={store}>
+      <OperationDispatcherProvider dispatcher={dispatcher}>{children}</OperationDispatcherProvider>
+    </OperationStoreProvider>
+  );
+  return { sent, store, wrapper };
+}
+
 function renderTasks(props: Partial<Parameters<typeof TasksView>[0]> = {}) {
-  const ws = { send: vi.fn() } as unknown as GianWs;
   const onSelectTask = vi.fn();
   const onSelectSubtask = vi.fn();
+  const harness = operationHarness();
   render(
     <LocaleProvider locale="en">
-      <TasksView
-        mode="tasks"
-        onSetMode={vi.fn()}
-        onOpenSearch={vi.fn()}
-        tasks={[]}
-        sessions={[]}
-        workspaces={[workspace('ws-1')]}
-        ws={ws}
-        activeTaskId={null}
-        activeSubtaskId={null}
-        subtaskMain={null}
-        onSelectTask={onSelectTask}
-        onSelectSubtask={onSelectSubtask}
-        onWorkspaceCreated={vi.fn()}
-        {...props}
-      />
+      <harness.wrapper>
+        <TasksView
+          mode="tasks"
+          onSetMode={vi.fn()}
+          onOpenSearch={vi.fn()}
+          tasks={[]}
+          sessions={[]}
+          workspaces={[workspace('ws-1')]}
+          activeTaskId={null}
+          activeSubtaskId={null}
+          subtaskMain={null}
+          onSelectTask={onSelectTask}
+          onSelectSubtask={onSelectSubtask}
+          onWorkspaceCreated={vi.fn()}
+          {...props}
+        />
+      </harness.wrapper>
     </LocaleProvider>,
   );
-  return { ws, onSelectTask, onSelectSubtask };
+  return { onSelectTask, onSelectSubtask, opSent: harness.sent };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(completeSubtask).mockResolvedValue(true);
+  vi.mocked(reopenSubtask).mockResolvedValue(true);
   __resetFeedback();
   localStorage.clear();
 });
@@ -164,20 +201,21 @@ describe('task group row actions', () => {
   });
 
   it('renames inline via the menu', async () => {
-    const { ws } = renderTasks({ tasks: [task()] });
+    const { opSent } = renderTasks({ tasks: [task()] });
     await userEvent.click(screen.getByTestId('task-menu-task-1'));
     await userEvent.click(screen.getByRole('menuitem', { name: 'Rename' }));
     const input = screen.getByLabelText('Task name');
     await userEvent.clear(input);
     await userEvent.type(input, 'Renamed{Enter}');
-    expect(ws.send).toHaveBeenCalledWith({ type: 'task:update', task_id: 'task-1', name: 'Renamed' });
+    expect(opSent.at(-1)).toMatchObject({ type: 'task:update', task_id: 'task-1', name: 'Renamed' });
+    expect((opSent.at(-1) as { request_id?: string })?.request_id).toBeTruthy();
   });
 
   it('marks the task done via task:update status', async () => {
-    const { ws } = renderTasks({ tasks: [task()] });
+    const { opSent } = renderTasks({ tasks: [task()] });
     await userEvent.click(screen.getByTestId('task-menu-task-1'));
     await userEvent.click(screen.getByRole('menuitem', { name: 'Mark done' }));
-    expect(ws.send).toHaveBeenCalledWith({ type: 'task:update', task_id: 'task-1', status: 'done' });
+    expect(opSent.at(-1)).toMatchObject({ type: 'task:update', task_id: 'task-1', status: 'done' });
   });
 
   it('open tasks cannot be deleted — no Delete item (2026-08-03)', async () => {
@@ -187,20 +225,18 @@ describe('task group row actions', () => {
   });
 
   it('blocks mark-done while a subtask is running', async () => {
-    const { ws } = renderTasks({
+    const { opSent } = renderTasks({
       tasks: [task()],
       sessions: [subtask({ status: 'running' })],
     });
     await userEvent.click(screen.getByTestId('task-menu-task-1'));
     await userEvent.click(screen.getByRole('menuitem', { name: 'Mark done' }));
-    expect(ws.send).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'task:update', status: 'done' }),
-    );
+    expect(opSent.some(msg => msg.type === 'task:update')).toBe(false);
     expect(getSnapshot().toasts.some(t => t.kind === 'error')).toBe(true);
   });
 
   it('deletes a DONE task after the confirm dialog', async () => {
-    const { ws } = renderTasks({ tasks: [task({ status: 'done' })] });
+    const { opSent } = renderTasks({ tasks: [task({ status: 'done' })] });
     await userEvent.click(screen.getByTestId('tasks-section-done'));
     await userEvent.click(screen.getByTestId('task-menu-task-1'));
     await userEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
@@ -208,8 +244,12 @@ describe('task group row actions', () => {
     expect(confirmRec?.message).toContain('My task');
     resolveConfirm(confirmRec!.id, true);
     await waitFor(() => {
-      expect(ws.send).toHaveBeenCalledWith({ type: 'task:delete', task_id: 'task-1' });
+      expect(opSent.some(msg => msg.type === 'task:delete'
+        && (msg as { task_id?: string }).task_id === 'task-1')).toBe(true);
     });
+    // Destructive-pending row treatment (proposal §5): the row stays visible
+    // with a pending affordance until task:deleted lands.
+    expect(await screen.findByTestId('task-deleting-task-1')).toBeInTheDocument();
   });
 
   it('opens the task-context new-session form from "+" and creates a subtask', async () => {
@@ -252,25 +292,26 @@ describe('sections (进行中 / 完成)', () => {
 
 describe('done group', () => {
   it('shows the menu without pin or "+" on done rows; reopen via menu', async () => {
-    const { ws } = renderTasks({ tasks: [task({ status: 'done' })] });
+    const { opSent } = renderTasks({ tasks: [task({ status: 'done' })] });
     await userEvent.click(screen.getByTestId('tasks-section-done'));
     await userEvent.click(screen.getByTestId('task-menu-task-1'));
     expect(screen.queryByRole('menuitem', { name: 'Pin to top' })).toBeNull();
     // Done tasks can't be renamed (2026-08-03).
     expect(screen.queryByRole('menuitem', { name: 'Rename' })).toBeNull();
     await userEvent.click(screen.getByRole('menuitem', { name: 'Reopen' }));
-    expect(ws.send).toHaveBeenCalledWith({ type: 'task:update', task_id: 'task-1', status: 'open' });
+    expect(opSent.at(-1)).toMatchObject({ type: 'task:update', task_id: 'task-1', status: 'open' });
     expect(screen.queryByTestId('task-new-session-task-1')).toBeNull();
   });
 });
 
 describe('subtask row actions', () => {
-  it('pins via session:pin', async () => {
-    const { ws } = renderTasks({ tasks: [task()], sessions: [subtask()] });
+  it('pins via session.pin (operation layer, request-correlated)', async () => {
+    const { opSent } = renderTasks({ tasks: [task()], sessions: [subtask()] });
     const row = screen.getByText('Sub session').closest('.session-row')!;
     await userEvent.hover(row);
     await userEvent.click(screen.getByTestId('subtask-pin-sub-1'));
-    expect(ws.send).toHaveBeenCalledWith({ type: 'session:pin', session_id: 'sub-1', pinned: true });
+    expect(opSent.at(-1)).toMatchObject({ type: 'session:pin', session_id: 'sub-1', pinned: true });
+    expect((opSent.at(-1) as { request_id?: string })?.request_id).toBeTruthy();
   });
 
   it('a completed subtask cannot be pinned — no pin button', () => {
@@ -283,24 +324,26 @@ describe('subtask row actions', () => {
     expect(screen.getByTestId('subtask-complete-sub-1')).toBeInTheDocument();
   });
 
-  it('completes via REST /complete and reopens via /reopen', async () => {
+  it('completes via REST /complete and reopens via /reopen (operation layer)', async () => {
+    const harness = operationHarness();
     const { rerender } = render(
       <LocaleProvider locale="en">
-        <TasksView
-          mode="tasks"
-          onSetMode={vi.fn()}
-          onOpenSearch={vi.fn()}
-          tasks={[task()]}
-          sessions={[subtask()]}
-          workspaces={[workspace('ws-1')]}
-          ws={{ send: vi.fn() } as unknown as GianWs}
-          activeTaskId={null}
-          activeSubtaskId={null}
-          subtaskMain={null}
-          onSelectTask={vi.fn()}
-          onSelectSubtask={vi.fn()}
-          onWorkspaceCreated={vi.fn()}
-        />
+        <harness.wrapper>
+          <TasksView
+            mode="tasks"
+            onSetMode={vi.fn()}
+            onOpenSearch={vi.fn()}
+            tasks={[task()]}
+            sessions={[subtask()]}
+            workspaces={[workspace('ws-1')]}
+            activeTaskId={null}
+            activeSubtaskId={null}
+            subtaskMain={null}
+            onSelectTask={vi.fn()}
+            onSelectSubtask={vi.fn()}
+            onWorkspaceCreated={vi.fn()}
+          />
+        </harness.wrapper>
       </LocaleProvider>,
     );
     await userEvent.click(screen.getByTestId('subtask-complete-sub-1'));
@@ -308,21 +351,22 @@ describe('subtask row actions', () => {
 
     rerender(
       <LocaleProvider locale="en">
-        <TasksView
-          mode="tasks"
-          onSetMode={vi.fn()}
-          onOpenSearch={vi.fn()}
-          tasks={[task()]}
-          sessions={[subtask({ completed_at: '2026-08-01T04:00:00Z' })]}
-          workspaces={[workspace('ws-1')]}
-          ws={{ send: vi.fn() } as unknown as GianWs}
-          activeTaskId={null}
-          activeSubtaskId={null}
-          subtaskMain={null}
-          onSelectTask={vi.fn()}
-          onSelectSubtask={vi.fn()}
-          onWorkspaceCreated={vi.fn()}
-        />
+        <harness.wrapper>
+          <TasksView
+            mode="tasks"
+            onSetMode={vi.fn()}
+            onOpenSearch={vi.fn()}
+            tasks={[task()]}
+            sessions={[subtask({ completed_at: '2026-08-01T04:00:00Z' })]}
+            workspaces={[workspace('ws-1')]}
+            activeTaskId={null}
+            activeSubtaskId={null}
+            subtaskMain={null}
+            onSelectTask={vi.fn()}
+            onSelectSubtask={vi.fn()}
+            onWorkspaceCreated={vi.fn()}
+          />
+        </harness.wrapper>
       </LocaleProvider>,
     );
     await userEvent.click(screen.getByTestId('subtask-complete-sub-1'));
@@ -338,33 +382,36 @@ describe('subtask row actions', () => {
 
 describe('new task form', () => {
   it('creates a task without any executor pick', async () => {
-    const { ws } = renderTasks();
+    const { opSent } = renderTasks();
     await userEvent.click(screen.getByTestId('sb-new-task'));
     await userEvent.type(screen.getByLabelText('Task name'), 'Fresh task');
     await userEvent.click(screen.getByRole('button', { name: 'Create' }));
-    expect(ws.send).toHaveBeenCalledWith({ type: 'task:create', name: 'Fresh task' });
+    expect(opSent.at(-1)).toMatchObject({ type: 'task:create', name: 'Fresh task' });
+    expect((opSent.at(-1) as { request_id?: string })?.request_id).toBeTruthy();
   });
 });
 
 describe('task detail placeholder', () => {
   it('shows the task name and pick/create hint when only a task is selected', () => {
+    const harness = operationHarness();
     const { container } = render(
       <LocaleProvider locale="en">
-        <TasksView
-          mode="tasks"
-          onSetMode={vi.fn()}
-          onOpenSearch={vi.fn()}
-          tasks={[task()]}
-          sessions={[]}
-          workspaces={[workspace('ws-1')]}
-          ws={{ send: vi.fn() } as unknown as GianWs}
-          activeTaskId="task-1"
-          activeSubtaskId={null}
-          subtaskMain={null}
-          onSelectTask={vi.fn()}
-          onSelectSubtask={vi.fn()}
-          onWorkspaceCreated={vi.fn()}
-        />
+        <harness.wrapper>
+          <TasksView
+            mode="tasks"
+            onSetMode={vi.fn()}
+            onOpenSearch={vi.fn()}
+            tasks={[task()]}
+            sessions={[]}
+            workspaces={[workspace('ws-1')]}
+            activeTaskId="task-1"
+            activeSubtaskId={null}
+            subtaskMain={null}
+            onSelectTask={vi.fn()}
+            onSelectSubtask={vi.fn()}
+            onWorkspaceCreated={vi.fn()}
+          />
+        </harness.wrapper>
       </LocaleProvider>,
     );
     expect(container.querySelector('.tasks-detail-task-name')).toHaveTextContent('My task');

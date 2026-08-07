@@ -1,13 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Session, Workspace } from '@gian/shared';
 import {
   loadAllFiles,
   loadApps,
   loadDiff,
   loadFile,
-  openFileBuiltin,
-  openFileWith,
-  openFileWithApp,
   type ChangeScope,
   type WorkingTree,
 } from '../api.js';
@@ -20,17 +17,20 @@ import {
   type SheetOpenWith,
   type SheetTab,
 } from '../components/sheet-model.js';
+import type { OperationDispatcher } from '../operations/dispatcher.js';
 import { buildFileRefIndex, makeFileLinkifyRehype } from '../transcript/linkify-files.js';
 import type { DiffItem } from '../types.js';
 import { longestRootMatch } from '../utils/paths.js';
 import { resolveFilePanelRoute } from '../presentation/file-panel.js';
+import { readWtViewOverride, resolveViewedTreeId, writeWtViewOverride } from '../presentation/wt-view.js';
 import type { ChatPanelRequest, ChatPanelTarget } from '../presentation/chat-panel.js';
-import type { GianWs } from '../ws.js';
 import type { AppAuthStatus } from './use-app-auth.js';
 
 interface UseWorkbenchInput {
   authStatus: AppAuthStatus;
-  ws: GianWs;
+  /** Operation dispatcher (Phase 3b): `term.close` on Sheet tab close and
+   *  `files.openExternal` for the "Open with…" menu. */
+  dispatch: OperationDispatcher['dispatch'];
   sessions: Session[];
   activeSessionId: string | null;
   activeSession: Session | null;
@@ -44,7 +44,7 @@ interface UseWorkbenchInput {
 
 export function useWorkbench({
   authStatus,
-  ws,
+  dispatch,
   sessions,
   activeSessionId,
   activeSession,
@@ -55,7 +55,14 @@ export function useWorkbench({
   activeSubtaskId,
   t: appT,
 }: UseWorkbenchInput) {
-  const [wtView, setWtView] = useState<{ sessionId: string; wtId: string } | null>(null);
+  const [wtView, setWtViewState] = useState<{ sessionId: string; wtId: string } | null>(null);
+  /** Sets the view-level working-tree override AND persists it per session —
+   *  an in-memory-only pick silently reverted to the primary checkout on
+   *  reload (2026-08-06 user report). */
+  const setWtView = useCallback((v: { sessionId: string; wtId: string } | null) => {
+    setWtViewState(v);
+    if (v) writeWtViewOverride(v.sessionId, v.wtId);
+  }, []);
   const [apps, setApps] = useState<string[]>([]);
   const [wbTabs, setWbTabs] = useState<SheetTab[]>([]);
   const [activeTabByGroup, setActiveTabByGroup] =
@@ -96,10 +103,17 @@ export function useWorkbench({
   // what the Diffs/Files rails, the diff sheet, and the breadcrumb label show.
   // Execution cwd, terminal cwd, and file-mention stay bound to the session's
   // own worktree. Keyed by session id so a stale override never leaks across
-  // sessions.
+  // sessions; the in-memory pick wins, then the persisted per-session
+  // override (if the tree still exists), then the session default.
   function viewedWorkingTreeId(sess: Session | null): string | null {
-    if (sess && wtView && wtView.sessionId === sess.id) return wtView.wtId;
-    return defaultWorkingTreeIdFor(sess);
+    if (!sess) return defaultWorkingTreeIdFor(null);
+    return resolveViewedTreeId({
+      sessionId: sess.id,
+      inMemory: wtView,
+      stored: readWtViewOverride(sess.id),
+      trees: workingTrees,
+      defaultId: defaultWorkingTreeIdFor(sess),
+    });
   }
 
   // Load the installed-apps list once for the Sheet "Open with…" menu.
@@ -112,15 +126,24 @@ export function useWorkbench({
   // pair, then route it to the host's open endpoint. Falls back to the
   // `vscode://` handler for paths outside any known tree (mirrors
   // openFileInSheet's own fallback).
-  // Dispatch a resolved open target for a known (wt, rel).
+  // Dispatch a resolved open target for a known (wt, rel) — Phase 3b: the
+  // files.openExternal pending operation (a launch failure toasts from the
+  // definition). The browser raw-URL open stays a window.open local
+  // exception (inventory §3).
   function dispatchOpen(wt: { id: string }, rel: string, target: SheetOpenWith): void {
-    if (target.kind === 'editor') { void openFileWith(wt.id, rel, target.id); return; }
-    if (target.kind === 'app') { void openFileWithApp(wt.id, rel, target.app); return; }
+    if (target.kind === 'editor') {
+      dispatch('files.openExternal', { workingTreeId: wt.id, path: rel, target: { kind: 'editor', editorId: target.id } });
+      return;
+    }
+    if (target.kind === 'app') {
+      dispatch('files.openExternal', { workingTreeId: wt.id, path: rel, target: { kind: 'app', app: target.app } });
+      return;
+    }
     if (target.name === 'browser') {
       window.open(`/api/working_trees/${encodeURIComponent(wt.id)}/raw?path=${encodeURIComponent(rel)}`, '_blank', 'noopener');
       return;
     }
-    void openFileBuiltin(wt.id, rel, target.name); // 'default' | 'finder' | 'terminal'
+    dispatch('files.openExternal', { workingTreeId: wt.id, path: rel, target: { kind: 'builtin', builtin: target.name } }); // 'default' | 'finder' | 'terminal'
   }
 
   function handleOpenWith(tab: SheetTab, target: SheetOpenWith): void {
@@ -209,7 +232,10 @@ export function useWorkbench({
       closeTab: (id: string) => {
         const tab = wbTabs.find(t => t.id === id);
         if (tab?.kind === 'term') {
-          ws.send({ type: 'term:close', term_id: id });
+          // Phase 3b: the PTY close dispatches the term.close operation; the
+          // tab removal below stays local (tab close is policy `local`,
+          // inventory §3).
+          dispatch('term.close', { termId: id });
         }
         if (tab?.group === 'files' && activeTabByGroup.files === id) {
           const sibling = wbTabs.find(t => t.group === 'files' && t.id !== id);
@@ -239,7 +265,7 @@ export function useWorkbench({
       setTabName: (id: string, name: string) =>
         setWbTabs(prev => prev.map(t => (t.id === id && t.name !== name) ? { ...t, name } : t)),
     };
-  }, [activeSession, activeTabByGroup.files, wbTabs, workspaces, ws]);
+  }, [activeSession, activeTabByGroup.files, wbTabs, workspaces, dispatch]);
 
   /** Rail → Sheet group mapping. */
   const GROUP_OF_RAIL: Record<RailId, SheetGroup | null> = {
@@ -321,9 +347,101 @@ export function useWorkbench({
     return 'ts';
   }
 
+  /** Insert a files-group tab with V2 preview semantics (single-click
+   *  preview tab replaced in place; double-click/permanent promotes or
+   *  stacks). */
+  function insertFileTab(tabContent: Omit<SheetTab, 'id' | 'group' | 'preview'>, permanent: boolean, line?: number): void {
+    setActiveRail('files');
+    setWbTabs(prev => {
+      const existingPrev = prev.find(t => t.group === 'files' && t.kind === 'file' && t.preview);
+      let tabs = [...prev];
+      // Replace preview tab in place.
+      if (existingPrev) {
+        if (permanent && existingPrev.fullPath === tabContent.fullPath) {
+          tabs = tabs.map(t => t.id === existingPrev.id ? { ...t, preview: false, scrollLine: line } : t);
+          revealSheetTab('files', existingPrev.id);
+          return tabs;
+        }
+        if (!permanent) {
+          // Replace the preview tab's content WITHOUT spreading the old tab —
+          // otherwise stale fields (e.g. an image tab's `rawSrc` or a text
+          // tab's `lines`) leak into the new content and the body mis-renders.
+          tabs = tabs.map(t => t.id === existingPrev.id ? { ...tabContent, id: t.id, group: t.group, preview: true } : t);
+          revealSheetTab('files', existingPrev.id);
+          return tabs;
+        }
+        // Permanent open of a different file: drop preview tab.
+        tabs = tabs.filter(t => t.id !== existingPrev.id);
+      }
+      const id = 'tab-' + Date.now();
+      const tab: SheetTab = { id, group: 'files', ...tabContent, preview: !permanent };
+      tabs.push(tab);
+      revealSheetTab('files', id);
+      return tabs;
+    });
+  }
+
+  /** Which tab an async fill belongs to. Matched by kind + path (NOT the tab
+   *  id: setWbTabs updaters run after insertFileTab returns, so a captured
+   *  id is unreliable). Preview semantics guarantee at most one loading tab
+   *  per path, so a late fill can never clobber a tab a newer click
+   *  replaced it with. */
+  interface TabMatch {
+    kind: 'file' | 'diff';
+    fullPath?: string;
+  }
+
+  function tabMatches(t: SheetTab, match: TabMatch): boolean {
+    return t.kind === match.kind && t.fullPath === match.fullPath;
+  }
+
+  /** Re-enter the loading state and re-run an async tab fill — the Sheet
+   *  error body's retry affordance (proposal §4.5). */
+  function retryTabLoad(match: TabMatch, fill: () => Promise<void>): void {
+    setWbTabs(prev => prev.map(t => tabMatches(t, match) && t.loadError
+      ? { ...t, loading: true, loadError: undefined, retryLoad: undefined }
+      : t));
+    void fill();
+  }
+
+  interface FileTabFill {
+    wtId: string;
+    rel: string;
+    line?: number;
+    icoKind: SheetTab['icoKind'];
+    fullPath: string;
+  }
+
+  /** Async fill of a file tab created in the loading state: lines on
+   *  success, an error state with retry on failure. Fills ONLY the tab this
+   *  load belongs to (same kind + path, still loading — see TabMatch). */
+  async function fillFileTab(fill: FileTabFill): Promise<void> {
+    const match: TabMatch = { kind: 'file', fullPath: fill.fullPath };
+    const file = await loadFile(fill.wtId, fill.rel);
+    setWbTabs(prev => prev.map(t => {
+      if (!tabMatches(t, match) || !t.loading) return t;
+      if (file) {
+        // Preview-capable files (md) open with the rendered view by default —
+        // but a line jump forces source view so the target line is visible.
+        const initialViewMode: FileViewMode = fill.line != null ? 'source' : fill.icoKind === 'md' ? 'preview' : 'source';
+        return { ...t, loading: undefined, lines: fileToLines(file.content), viewMode: initialViewMode, scrollLine: fill.line, loadError: undefined };
+      }
+      return {
+        ...t,
+        loading: undefined,
+        loadError: appT('sheet.loadFailed'),
+        retryLoad: () => retryTabLoad(match, () => fillFileTab(fill)),
+      };
+    }));
+  }
+
   /** Open a file in the Sheet workbench (Phase 3+ replacement for the old
    *  preview drawer). Files in the current Files index also reveal their tree
-   *  row; hidden/other-tree/unknown files keep the inspector closed. */
+   *  row; hidden/other-tree/unknown files keep the inspector closed.
+   *
+   *  Query timing (Phase 3b, proposal §4.5): the tab is created and selected
+   *  IMMEDIATELY with a loading body, then filled (or failed, with retry) —
+   *  no silent wait for loadFile before the destination surface exists. */
   async function openFileInSheet(absPath: string, permanent: boolean = false, line?: number): Promise<void> {
     setChatPanel(null);
     const sess = activeSessionId
@@ -395,11 +513,10 @@ export function useWorkbench({
       return;
     }
 
-    // Images render straight from `/raw` via an <img> (no text load); everything
-    // else loads its source lines.
-    let tabContent;
+    // Images render straight from `/raw` via an <img> (no text load); binary
+    // targets get the notice. Both are synchronous — no loading phase.
     if (!wt || !rel || openCategoryFor(name) === 'pdf') {
-      tabContent = {
+      insertFileTab({
         name,
         kind: 'file' as const,
         icoKind,
@@ -408,9 +525,11 @@ export function useWorkbench({
         fileTreePath: route.revealRel ?? undefined,
         workingTreeId: wt?.id,
         loadError: appT('sheet.binary.notice'),
-      };
-    } else if (isImage && rawUrl) {
-      tabContent = {
+      }, permanent, line);
+      return;
+    }
+    if (isImage && rawUrl) {
+      insertFileTab({
         name,
         kind: 'file' as const,
         icoKind: 'img' as const,
@@ -419,60 +538,94 @@ export function useWorkbench({
         fullPath,
         fileTreePath: route.revealRel ?? undefined,
         workingTreeId: wt.id,
-      };
-    } else {
-      const file = await loadFile(wt.id, rel);
-      // Preview-capable files (md) open with the rendered view by default —
-      // but a line jump forces source view so the target line is visible.
-      const initialViewMode: FileViewMode = line != null ? 'source' : icoKind === 'md' ? 'preview' : 'source';
-      tabContent = {
-        name,
-        kind: 'file' as const,
-        icoKind,
-        ico: '',
-        lines: file ? fileToLines(file.content) : undefined,
-        viewMode: initialViewMode,
-        fullPath,
-        scrollLine: line,
-        fileTreePath: route.revealRel ?? undefined,
-        workingTreeId: wt.id,
-        loadError: file ? undefined : appT('sheet.binary.notice'),
-      };
+      }, permanent, line);
+      return;
     }
 
-    setActiveRail('files');
-    setWbTabs(prev => {
-      const existingPrev = prev.find(t => t.group === 'files' && t.kind === 'file' && t.preview);
-      let tabs = [...prev];
-      // Replace preview tab in place.
-      if (existingPrev) {
-        if (permanent && existingPrev.fullPath === fullPath) {
-          tabs = tabs.map(t => t.id === existingPrev.id ? { ...t, preview: false, scrollLine: line } : t);
-          revealSheetTab('files', existingPrev.id);
-          return tabs;
-        }
-        if (!permanent) {
-          // Replace the preview tab's content WITHOUT spreading the old tab —
-          // otherwise stale fields (e.g. an image tab's `rawSrc` or a text
-          // tab's `lines`) leak into the new content and the body mis-renders.
-          tabs = tabs.map(t => t.id === existingPrev.id ? { ...tabContent, id: t.id, group: t.group, preview: true } : t);
-          revealSheetTab('files', existingPrev.id);
-          return tabs;
-        }
-        // Permanent open of a different file: drop preview tab.
-        tabs = tabs.filter(t => t.id !== existingPrev.id);
-      }
-      const id = 'tab-' + Date.now();
-      const tab: SheetTab = { id, group: 'files', ...tabContent, preview: !permanent };
-      tabs.push(tab);
-      revealSheetTab('files', id);
-      return tabs;
-    });
+    // Text file: create the tab NOW with a loading body, then fill it.
+    insertFileTab({
+      name,
+      kind: 'file' as const,
+      icoKind,
+      ico: '',
+      fullPath,
+      fileTreePath: route.revealRel ?? undefined,
+      workingTreeId: wt.id,
+      loading: true,
+    }, permanent, line);
+    void fillFileTab({ wtId: wt.id, rel, line, icoKind, fullPath });
+  }
+
+  /** Click-time fallback for relative-path markdown links that the render-time
+   *  linkify pass did not resolve (the file was created after the once-loaded
+   *  index, or the index never loaded). Resolves the href against the active
+   *  session's working tree and opens it in the Sheet; `openFileInSheet`
+   *  re-checks the tree with a fresh file list, so a file that exists on disk
+   *  now opens even though the render-time index missed it. Absolute hrefs
+   *  (rare in markdown) go straight through. */
+  function openRelativeFileHref(href: string): void {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(href);
+    } catch {
+      decoded = href;
+    }
+    if (!decoded || decoded.startsWith('#')) return;
+    // Same trailing `:N` line-suffix convention as linkify's refFromHref.
+    const m = decoded.match(/^(.*?)(?::(\d+))?$/);
+    const rel = (m?.[1] ?? decoded).replace(/^\.\//, '');
+    if (!rel) return;
+    const line = m?.[2] ? Number(m[2]) : undefined;
+    let abs = rel;
+    if (!rel.startsWith('/')) {
+      const wtId = defaultWorkingTreeIdFor(activeSession);
+      const base = (wtId ? workingTrees.find(w => w.id === wtId)?.path : null)
+        ?? activeWorkspace?.path
+        ?? workspaces[0]?.path;
+      if (!base) return;
+      abs = `${base.replace(/\/+$/, '')}/${rel}`;
+    }
+    void openFileInSheet(abs, false, line);
+  }
+
+  interface DiffTabFill {
+    wtId: string;
+    rel: string;
+    scope: ChangeScope;
+    sha?: string | null;
+    base?: string | null;
+    fullPath: string;
+  }
+
+  /** Async fill of a diff tab created in the loading state (same contract as
+   *  fillFileTab): diff text on success, error + retry on failure, and no
+   *  clobbering of a tab that was replaced while the load was in flight. */
+  async function fillDiffTab(fill: DiffTabFill): Promise<void> {
+    const match: TabMatch = { kind: 'diff', fullPath: fill.fullPath };
+    let diffText: string | null = null;
+    try {
+      diffText = await loadDiff(fill.wtId, fill.rel, fill.scope, fill.sha, fill.base);
+    } catch {
+      diffText = null;
+    }
+    setWbTabs(prev => prev.map(t => {
+      if (!tabMatches(t, match) || !t.loading) return t;
+      if (diffText !== null) return { ...t, loading: undefined, diffText, loadError: undefined };
+      return {
+        ...t,
+        loading: undefined,
+        loadError: appT('sheet.loadFailed'),
+        retryLoad: () => retryTabLoad(match, () => fillDiffTab(fill)),
+      };
+    }));
   }
 
   /** Open a unified diff for a changed file in the Sheet workbench. The
    *  Changes inspector routes row clicks here so the diff lands in the
-   *  workbench (full width) rather than crammed into the narrow inspector. */
+   *  workbench (full width) rather than crammed into the narrow inspector.
+   *
+   *  Query timing (Phase 3b, proposal §4.5): the tab is created and selected
+   *  IMMEDIATELY with a loading body, then filled (or failed, with retry). */
   async function openDiffInSheet(rel: string, permanent: boolean = false, scope: ChangeScope = 'all', sha?: string | null, base?: string | null): Promise<void> {
     setChatPanel(null);
     const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
@@ -483,8 +636,11 @@ export function useWorkbench({
     if (!wt) return;
     const name = rel.split('/').pop() || rel;
     const fullPath = `${wt.path}/${rel}`;
-    const diffText = await loadDiff(wt.id, rel, scope, sha, base);
 
+    // Promote short-circuit (render snapshot): a permanent diff tab for this
+    // exact path is only re-activated — no reload. The updater below repeats
+    // the check against the latest state for correctness under batching.
+    const promoted = wbTabs.some(t => t.group === 'diffs' && t.kind === 'diff' && t.fullPath === fullPath && !t.preview);
     setActiveRail('diffs');
     setWbTabs(prev => {
       let tabs = [...prev];
@@ -507,20 +663,64 @@ export function useWorkbench({
         kind: 'diff',
         icoKind: 'diff',
         ico: '±',
-        diffText,
         fullPath,
         workingTreeId: wt.id,
         preview: !permanent,
+        loading: true,
       };
       tabs.push(tab);
       revealSheetTab('diffs', id);
       return tabs;
     });
+    if (promoted) return;
+    void fillDiffTab({ wtId: wt.id, rel, scope, sha, base, fullPath });
+  }
+
+  /** Async fill of a transcript diff tab. Files whose event carried no hunks
+   *  load their text from the working tree; when every needed load failed,
+   *  the tab lands in the error state with retry. */
+  async function fillTranscriptDiffTab(tabId: string, item: DiffItem, wtId: string, match: TabMatch): Promise<void> {
+    const chunks = await Promise.all(item.files.map(async file => {
+      if (file.hunks.length === 0) {
+        const text = await loadDiff(wtId, file.path, 'all').catch(() => null);
+        return { text, failed: text === null };
+      }
+      return {
+        failed: false,
+        text: [
+          `diff --git a/${file.path} b/${file.path}`,
+          `--- a/${file.path}`,
+          `+++ b/${file.path}`,
+          ...file.hunks.flatMap(hunk => [
+            hunk.header,
+            ...hunk.lines.map(line =>
+              `${line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}${line.text}`),
+          ]),
+        ].join('\n'),
+      };
+    }));
+    const diffText = chunks.map(chunk => chunk.text).filter(Boolean).join('\n');
+    const failed = chunks.some(chunk => chunk.failed);
+    setWbTabs(prev => prev.map(t => {
+      if (t.id !== tabId || !t.loading) return t;
+      if (failed && !diffText) {
+        return {
+          ...t,
+          loading: undefined,
+          loadError: appT('sheet.loadFailed'),
+          retryLoad: () => retryTabLoad(match, () => fillTranscriptDiffTab(tabId, item, wtId, match)),
+        };
+      }
+      return { ...t, loading: undefined, diffText, loadError: undefined };
+    }));
   }
 
   /** Route a transcript diff to the Diffs rail. Native file_change events may
    *  contain full hunks or only changed paths; load missing text from the
-   *  working tree so both shapes land in the same diff viewer. */
+   *  working tree so both shapes land in the same diff viewer.
+   *
+   *  Query timing (Phase 3b, proposal §4.5): the tab is created and selected
+   *  IMMEDIATELY with a loading body, then filled (or failed, with retry). */
   async function openTranscriptDiffInSheet(item: DiffItem): Promise<void> {
     setChatPanel(null);
     const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
@@ -528,20 +728,6 @@ export function useWorkbench({
     const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
     if (!wt || item.files.length === 0) return;
 
-    const chunks = await Promise.all(item.files.map(async file => {
-      if (file.hunks.length === 0) return loadDiff(wt.id, file.path, 'all');
-      return [
-        `diff --git a/${file.path} b/${file.path}`,
-        `--- a/${file.path}`,
-        `+++ b/${file.path}`,
-        ...file.hunks.flatMap(hunk => [
-          hunk.header,
-          ...hunk.lines.map(line =>
-            `${line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}${line.text}`),
-        ]),
-      ].join('\n');
-    }));
-    const diffText = chunks.filter(Boolean).join('\n');
     const single = item.files.length === 1 ? item.files[0]! : null;
     const fullPath = single ? `${wt.path}/${single.path}` : undefined;
     const name = single
@@ -549,11 +735,11 @@ export function useWorkbench({
       : `${item.files.length} files`;
 
     setActiveRail('diffs');
+    const id = `tab-diff-event-${item.id}`;
     setWbTabs(prev => {
       const preview = prev.find(tab =>
         tab.group === 'diffs' && tab.kind === 'diff' && tab.preview);
       const tabs = preview ? prev.filter(tab => tab.id !== preview.id) : [...prev];
-      const id = `tab-diff-event-${item.id}`;
       const tab: SheetTab = {
         id,
         group: 'diffs',
@@ -561,14 +747,15 @@ export function useWorkbench({
         kind: 'diff',
         icoKind: 'diff',
         ico: '±',
-        diffText,
         fullPath,
         workingTreeId: wt.id,
         preview: true,
+        loading: true,
       };
       revealSheetTab('diffs', id);
       return [...tabs, tab];
     });
+    void fillTranscriptDiffTab(id, item, wt.id, { kind: 'diff', fullPath });
   }
 
   function openChatPanel(
@@ -669,6 +856,7 @@ export function useWorkbench({
     activateRail,
     toggleRail,
     openFileInSheet,
+    openRelativeFileHref,
     openDiffInSheet,
     openTranscriptDiffInSheet,
     openChatPanel,

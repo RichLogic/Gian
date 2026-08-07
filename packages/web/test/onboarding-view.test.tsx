@@ -11,6 +11,7 @@ import {
 } from '../src/api.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { OnboardingView } from '../src/views/OnboardingView.js';
+import { createOperationHarness } from './operation-test-utils.js';
 
 vi.mock('../src/api.js', () => ({
   completeOnboarding: vi.fn(),
@@ -61,11 +62,14 @@ describe('OnboardingView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(loadAgents).mockResolvedValue(readyAgents);
+    vi.mocked(installAgentProxy).mockImplementation(async id => ({ agent: agent(id, id, true) }) as never);
+    vi.mocked(installAgentCli).mockImplementation(async id => ({ agent: agent(id, id, true) }) as never);
     vi.mocked(saveOnboardingProjectRoot).mockResolvedValue({ projectRoot: '~/Coding' });
     vi.mocked(completeOnboarding).mockResolvedValue({ ...state(), completed: true });
   });
 
   it('shows an already connected GitHub account as the explicit first step', async () => {
+    const { wrapper } = createOperationHarness();
     render(
       <LocaleProvider locale="en">
         <OnboardingView
@@ -83,6 +87,7 @@ describe('OnboardingView', () => {
           onComplete={vi.fn()}
         />
       </LocaleProvider>,
+      { wrapper },
     );
 
     expect(screen.getByRole('heading', { name: 'Your GitHub account is ready' })).toBeInTheDocument();
@@ -95,6 +100,7 @@ describe('OnboardingView', () => {
 
   it('finishes agent setup and shows the Agent worktree directory', async () => {
     const onComplete = vi.fn();
+    const { wrapper } = createOperationHarness();
     render(
       <LocaleProvider locale="en">
         <OnboardingView
@@ -112,6 +118,7 @@ describe('OnboardingView', () => {
           onComplete={onComplete}
         />
       </LocaleProvider>,
+      { wrapper },
     );
 
     await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
@@ -130,6 +137,7 @@ describe('OnboardingView', () => {
   it('allows continuing when any one Agent is ready', async () => {
     const missingCodex = agent('codex', 'Codex', false);
     const missingKimi = agent('kimi', 'Kimi Code', false);
+    const { wrapper } = createOperationHarness();
     render(
       <LocaleProvider locale="en">
         <OnboardingView
@@ -138,6 +146,7 @@ describe('OnboardingView', () => {
           onComplete={vi.fn()}
         />
       </LocaleProvider>,
+      { wrapper },
     );
 
     await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
@@ -152,6 +161,7 @@ describe('OnboardingView', () => {
     ];
     const codexReady = [agent('codex', 'Codex'), missingAgents[1]!, missingAgents[2]!];
     vi.mocked(loadAgents).mockResolvedValue(codexReady);
+    const { wrapper } = createOperationHarness();
     render(
       <LocaleProvider locale="en">
         <OnboardingView
@@ -160,6 +170,7 @@ describe('OnboardingView', () => {
           onComplete={vi.fn()}
         />
       </LocaleProvider>,
+      { wrapper },
     );
 
     await userEvent.click(screen.getByRole('button', { name: 'Continue' }));

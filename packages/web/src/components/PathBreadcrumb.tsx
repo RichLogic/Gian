@@ -24,6 +24,9 @@ export interface SessionMenuActions {
   // Subtask drops fork/delete.
   onCopyName?: () => void;
   onForceRecover?: () => void;
+  /** True while a session.recover run is in flight — the Force-recover item
+   *  renders disabled with a "recovering" label (Phase 2a pending policy). */
+  recovering?: boolean;
   onMarkUnread?: () => void;
   onFork?: (executor: Executor) => void;
   onDelete?: () => void;
@@ -103,6 +106,8 @@ interface MenuItemDesc {
   ruleBefore?: boolean;
   /** Danger (red) styling. */
   danger?: boolean;
+  /** Inert while its operation is in flight (e.g. Force recover pending). */
+  disabled?: boolean;
   /** Right-aligned hint, e.g. the F2 shortcut. */
   hint?: string;
 }
@@ -134,14 +139,14 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
   if (m.kind === 'subtask') {
     copy();
     if (m.onMarkUnread) items.push({ key: 'unread', icon: ICON.mail, label: t('path.menu.markUnread'), onClick: m.onMarkUnread, ruleBefore: true });
-    if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, ruleBefore: true });
+    if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t(m.recovering ? 'path.menu.recovering' : 'path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, disabled: m.recovering, ruleBefore: true });
     return items;
   }
 
   // session (default)
   copy();
   if (m.onMarkUnread) items.push({ key: 'unread', icon: ICON.mail, label: t('path.menu.markUnread'), onClick: m.onMarkUnread });
-  if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t('path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, ruleBefore: true });
+  if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t(m.recovering ? 'path.menu.recovering' : 'path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, disabled: m.recovering, ruleBefore: true });
   return items;
 }
 
@@ -261,6 +266,7 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                         {it.ruleBefore && <div className="rule" />}
                         <button
                           className={`item${it.danger ? ' danger' : ''}`}
+                          disabled={it.disabled}
                           onClick={() => { setMenuOpen(false); it.onClick(); }}
                         >
                           <MenuIcon d={it.icon} /> {it.label}

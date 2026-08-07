@@ -120,7 +120,10 @@ export interface Session {
    *  type='subtask' is a Subtask; type='manager' is the Task's executor-backed
    *  manager. Null = a standalone ("scattered") session. */
   task_id: string | null;
-  workspace_id: string;
+  /** Owning workspace. NULL after the workspace was deleted (migration 045:
+   *  ON DELETE SET NULL) — such sessions surface in the Sessions rail's
+   *  无归属 (Unfiled) group and can no longer run turns. */
+  workspace_id: string | null;
   executor: Executor;
   model: string | null;
   /** Legacy Claude/Codex policy. Kimi stores its exact ACP mode in

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { SettingsBody } from '../src/components/SettingsBody.js';
+import { renderWithOperations } from './operation-test-utils.js';
 import * as api from '../src/api.js';
 import type { SystemConfig } from '@gian/shared';
 
@@ -32,16 +33,16 @@ describe('SettingsBody "Open with" apps', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
   it('renders the empty-state hint when no apps are configured', () => {
-    render(<SettingsBody
+    renderWithOperations(<SettingsBody
         activeSection="openwith"
-        config={baseConfig()} onChange={() => {}} />);
+        config={baseConfig()} />);
     expect(screen.getByText(/no apps configured/i)).toBeTruthy();
   });
 
   it('picking an installed app appends an `open -a` opener', async () => {
-    render(<SettingsBody
+    renderWithOperations(<SettingsBody
         activeSection="openwith"
-        config={baseConfig()} apps={['VS Code', 'Sublime Text']} onChange={() => {}} />);
+        config={baseConfig()} apps={['VS Code', 'Sublime Text']} />);
     const picker = screen.getByLabelText('Add application') as HTMLSelectElement;
     fireEvent.change(picker, { target: { value: 'VS Code' } });
     await new Promise(r => setTimeout(r, 600));
@@ -54,12 +55,11 @@ describe('SettingsBody "Open with" apps', () => {
   });
 
   it('a configured app shows as a row and is filtered out of the picker', () => {
-    render(
+    renderWithOperations(
       <SettingsBody
         activeSection="openwith"
         config={baseConfig({ external_editors: [vscodeOpener] })}
         apps={['VS Code', 'Sublime Text']}
-        onChange={() => {}}
       />,
     );
     // Configured app appears as a row (name only — no manual command/args fields).
@@ -73,12 +73,11 @@ describe('SettingsBody "Open with" apps', () => {
   });
 
   it('Remove (✕) drops the app', async () => {
-    render(
+    renderWithOperations(
       <SettingsBody
         activeSection="openwith"
         config={baseConfig({ external_editors: [vscodeOpener] })}
         apps={['VS Code']}
-        onChange={() => {}}
       />,
     );
     fireEvent.click(screen.getByRole('button', { name: /remove editor/i }));
@@ -97,13 +96,12 @@ describe('SettingsBody "Default apps"', () => {
   }
 
   it('offers only the system targets + the curated "Open with" apps — never the full scanned catalog', () => {
-    render(
+    renderWithOperations(
       <SettingsBody
         activeSection="openwith"
         config={baseConfig({ external_editors: [vscodeOpener] })}
         // Scanned catalog includes apps the user did NOT add to "Open with".
         apps={['VS Code', 'Photoshop', 'Xcode', 'Sublime Text']}
-        onChange={() => {}}
       />,
     );
     const values = openAppOptionValues();
@@ -121,12 +119,11 @@ describe('SettingsBody "Default apps"', () => {
   it('keeps the current value selectable even when it is not in the "Open with" list', () => {
     // `code` defaults to the built-in TextEdit target; it must stay selectable
     // so the <select> has a matching option (not a blank value).
-    render(
+    renderWithOperations(
       <SettingsBody
         activeSection="openwith"
         config={baseConfig({ external_editors: [], open_apps: { code: 'TextEdit' } })}
         apps={['Photoshop']}
-        onChange={() => {}}
       />,
     );
     expect(openAppOptionValues()).toContain('TextEdit');
@@ -134,12 +131,11 @@ describe('SettingsBody "Default apps"', () => {
   });
 
   it('changing a category default saves the picked app', async () => {
-    render(
+    renderWithOperations(
       <SettingsBody
         activeSection="openwith"
         config={baseConfig({ external_editors: [vscodeOpener] })}
         apps={['VS Code']}
-        onChange={() => {}}
       />,
     );
     const selects = Array.from(document.querySelectorAll('.open-cat-row select')) as HTMLSelectElement[];

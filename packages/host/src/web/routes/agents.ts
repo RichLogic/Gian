@@ -54,12 +54,14 @@ export function registerAgentRoutes(
     capabilities: (id: Executor) => Promise<ProxyCapabilities>;
   },
 ): void {
-  app.get('/api/agents', async c => c.json({ agents: await options.agents.list() }));
+  app.get('/api/agents', async c => c.json({
+    agents: await options.agents.list(c.req.query('refresh') === '1'),
+  }));
 
   app.get('/api/agents/:id', async c => {
     const id = executor(c.req.param('id'));
     if (!id) return c.json({ error: 'unsupported agent' }, 404);
-    return c.json(await options.agents.status(id));
+    return c.json(await options.agents.status(id, c.req.query('refresh') === '1'));
   });
 
   app.post('/api/agents/:id/pick-cli-path', async c => {

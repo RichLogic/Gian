@@ -1,5 +1,4 @@
 import type {
-  ErrorMessage,
   Session,
   SessionStatus,
 } from '@gian/shared';
@@ -7,16 +6,6 @@ import type {
 export interface CreatedSessionFirstMessagePlan {
   structuredText: string | null;
   seedOptimisticEcho: boolean;
-}
-
-/** A session:create failure can carry an executor-native code (for example
- * AUTH_REQUIRED), so the request correlation is authoritative. Keep the
- * legacy code fallback for hosts that predate request_type. */
-export function isSessionCreateDispatchError(
-  error: Pick<ErrorMessage, 'code' | 'request_type'>,
-): boolean {
-  return error.request_type === 'session:create'
-    || error.code === 'SESSION_CREATE_FAILED';
 }
 
 /**
@@ -106,7 +95,11 @@ export function sortWorkspacesForRail<T extends { pinned: 0 | 1 }>(workspaces: T
  *  dedicated "Pinned" section above "Projects". A pinned SESSION becomes a
  *  standalone row in Pinned (it leaves its workspace group); a pinned
  *  WORKSPACE moves its whole group (header + its unpinned sessions) into
- *  Pinned. Everything else stays grouped by workspace under Projects. */
+ *  Pinned. Everything else stays grouped by workspace under Projects.
+ *  Sessions of a HIDDEN workspace (2026-08-06) no longer vanish from the
+ *  rail: they collect in the bottom 无归属 (Unfiled) group so they stay
+ *  reachable — e.g. before deleting the workspace, which refuses while any
+ *  session still references it. */
 export interface RailSections<T> {
   /** Standalone pinned session rows, most-recently-pinned first. */
   pinnedSessions: T[];
@@ -117,6 +110,9 @@ export interface RailSections<T> {
   /** Unpinned workspace ids that have visible sessions, in host order
    *  (orphan ids — sessions whose workspace isn't in the list — appended). */
   projectWsIds: string[];
+  /** Unpinned sessions whose workspace is hidden — or gone (NULL after the
+   *  workspace was deleted, migration 045) — rail-sorted. */
+  unfiled: T[];
   /** False when nothing is pinned — the rail then renders without section
    *  labels, exactly like the pre-sections layout. */
   hasPinned: boolean;
@@ -124,17 +120,26 @@ export interface RailSections<T> {
 
 export function buildRailSections<T extends Pick<Session, 'workspace_id' | 'pinned_at' | 'updated_at'>>(
   sessions: T[],
-  workspaces: Array<{ id: string; pinned: 0 | 1 }>,
+  workspaces: Array<{ id: string; pinned: 0 | 1; hidden?: 0 | 1 }>,
 ): RailSections<T> {
+  const hiddenWsIds = new Set(workspaces.filter(w => w.hidden === 1).map(w => w.id));
   const pinnedSessions = sortSessionsForRail(sessions.filter(s => s.pinned_at != null));
   const byWs = new Map<string, T[]>();
+  const unfiled: T[] = [];
   for (const s of sessions) {
     if (s.pinned_at != null) continue;
+    // NULL workspace_id (workspace deleted → ON DELETE SET NULL) and hidden
+    // workspaces both land in 无归属 (Unfiled).
+    if (s.workspace_id == null || hiddenWsIds.has(s.workspace_id)) {
+      unfiled.push(s);
+      continue;
+    }
     const list = byWs.get(s.workspace_id) ?? [];
     list.push(s);
     byWs.set(s.workspace_id, list);
   }
   for (const [id, list] of byWs) byWs.set(id, sortSessionsForRail(list));
+  const sortedUnfiled = sortSessionsForRail(unfiled);
   const pinnedWsIds: string[] = [];
   const projectWsIds: string[] = [];
   const seen = new Set<string>();
@@ -151,6 +156,7 @@ export function buildRailSections<T extends Pick<Session, 'workspace_id' | 'pinn
     byWs,
     pinnedWsIds,
     projectWsIds,
+    unfiled: sortedUnfiled,
     hasPinned: pinnedSessions.length > 0 || pinnedWsIds.length > 0,
   };
 }

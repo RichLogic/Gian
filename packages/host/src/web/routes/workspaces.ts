@@ -105,18 +105,10 @@ export function registerWorkspaceRoutes(app: Hono, db: Db): void {
     if (!db.prepare('SELECT 1 FROM workspaces WHERE id = ?').get(id)) {
       return c.json({ error: 'workspace not found' }, 404);
     }
-    const sessionCount = db
-      .prepare('SELECT COUNT(*) as n FROM sessions WHERE workspace_id = ?')
-      .get(id) as { n: number };
-    if (sessionCount.n > 0) {
-      return c.json({ error: 'workspace has associated sessions' }, 409);
-    }
-    const liveWorktreeCount = db
-      .prepare('SELECT COUNT(*) as n FROM sessions WHERE workspace_id = ? AND worktree_path IS NOT NULL')
-      .get(id) as { n: number };
-    if (liveWorktreeCount.n > 0) {
-      return c.json({ error: 'workspace has live worktrees; merge or drop them first' }, 409);
-    }
+    // Deleting a workspace never blocks on its sessions (2026-08-06):
+    // sessions.workspace_id is ON DELETE SET NULL (migration 045), so they
+    // lose their affiliation and surface in the Sessions rail's 无归属
+    // (Unfiled) group instead of being deleted or blocking the delete.
     db.prepare('DELETE FROM workspaces WHERE id = ?').run(id);
     return c.json({ ok: true });
   });

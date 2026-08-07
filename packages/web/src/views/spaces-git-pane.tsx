@@ -1,13 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Workspace } from '@gian/shared';
 import {
-  abortPendingGitOp,
-  dropSession,
-  fetchRemotes,
   loadBranches,
   loadRepoInfo,
   loadWorkspaceTrees,
-  mergeSession,
 } from '../api.js';
 import type {
   LocalBranch,
@@ -16,6 +12,16 @@ import type {
   WorkspaceTree,
 } from '../api.js';
 import { confirm } from '../feedback.js';
+import {
+  gitAbortEntityKey,
+  gitFetchEntityKey,
+} from '../operations/git.js';
+import {
+  useOperationDispatch,
+  useOperationPending,
+  useOperationRun,
+} from '../operations/use-operations.js';
+import type { OperationName } from '../operations/types.js';
 import { useT } from '../i18n/index.js';
 import type { GianWs } from '../ws.js';
 
@@ -87,10 +93,15 @@ export function GitPane({
   const [branches, setBranches] = useState<LocalBranch[]>([]);
   const [trees, setTrees] = useState<WorkspaceTree[]>([]);
   const [branchesLoaded, setBranchesLoaded] = useState(false);
-  const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const t = useT();
+  const dispatch = useOperationDispatch();
+  // Fetch busy state is the in-flight git.fetch run (Phase 3b); the tracked
+  // run id lets the settle effect pick up the fetchedAt result / error.
+  const fetching = useOperationPending(gitFetchEntityKey(workspace.id), 'git.fetch');
+  const [fetchRunId, setFetchRunId] = useState<string>();
+  const fetchRun = useOperationRun(fetchRunId);
 
   const refresh = useCallback(async () => {
     const [r, b, tr] = await Promise.all([
@@ -141,18 +152,27 @@ export function GitPane({
     });
   }, [branches, workspace.path]);
 
-  async function handleFetch() {
-    setFetching(true);
+  function handleFetch() {
     setFetchError(null);
-    const result = await fetchRemotes(workspace.id);
-    setFetching(false);
-    if (!result.ok) {
-      setFetchError(result.error ?? t('spaces.git.fetchFailed'));
-      return;
-    }
-    setFetchedAt(result.fetchedAt ?? new Date().toISOString());
-    void refresh();
+    setFetchRunId(dispatch('git.fetch', { workspaceId: workspace.id }).id);
   }
+
+  // Fetch settle: on confirm, stamp the fetch time and refresh the pane (the
+  // host also broadcasts workspace:git-updated); on failure, inline the
+  // run's error (the definition deliberately does not toast — see
+  // operations/git.ts).
+  useEffect(() => {
+    if (!fetchRun) return;
+    if (fetchRun.phase === 'confirmed') {
+      setFetchedAt((fetchRun.result as { fetchedAt?: string } | undefined)?.fetchedAt ?? new Date().toISOString());
+      setFetchRunId(undefined);
+      void refresh();
+    } else if (fetchRun.phase === 'failed') {
+      setFetchError(fetchRun.error ?? t('spaces.git.fetchFailed'));
+      setFetchRunId(undefined);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchRun?.phase]);
 
   const remoteHref = repo?.git.remote
     ? (repo.git.remote.startsWith('http') ? repo.git.remote : `https://${repo.git.remote}`)
@@ -239,7 +259,12 @@ function PendingOpBanner({
   workspaceId: string;
   workspacePath: string;
 }) {
-  const [busy, setBusy] = useState(false);
+  const dispatch = useOperationDispatch();
+  // Busy = the in-flight git.abortPendingOp run (Phase 3b); the tracked run
+  // id surfaces the failure inline.
+  const busy = useOperationPending(gitAbortEntityKey(workspaceId), 'git.abortPendingOp');
+  const [abortRunId, setAbortRunId] = useState<string>();
+  const abortRun = useOperationRun(abortRunId);
   const [error, setError] = useState<string | null>(null);
   const verb: Record<PendingGitOp['kind'], string> = {
     'merge': 'Merge',
@@ -249,16 +274,19 @@ function PendingOpBanner({
   };
   const opName = verb[op.kind];
 
+  useEffect(() => {
+    if (abortRun?.phase !== 'failed') return;
+    setError(abortRun.error ?? 'Abort failed');
+    setAbortRunId(undefined);
+  }, [abortRun?.phase, abortRun?.error]);
+
   async function handleAbort() {
     if (!(await confirm({
       message: `Run "git ${op.kind} --abort" in ${workspacePath}?\nThis discards conflict resolution work in progress and rewinds the index.`,
       danger: true,
     }))) return;
-    setBusy(true);
     setError(null);
-    const res = await abortPendingGitOp(workspaceId);
-    setBusy(false);
-    if (!res.ok) { setError(res.error ?? 'Abort failed'); return; }
+    setAbortRunId(dispatch('git.abortPendingOp', { workspaceId }).id);
     // Host broadcasts workspace:git-updated → GitPane refreshes; banner
     // disappears once `repo.git.pendingOp` flips to null.
   }
@@ -377,10 +405,16 @@ function BranchRowKebab({
   onRefresh: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState<'reveal' | 'merge' | 'drop' | 'delete' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const t = useT();
+  const dispatch = useOperationDispatch();
+  // Phase 3b: every action dispatches an operation. The tracked run drives
+  // the item busy labels and the settle behavior (close + refresh on
+  // confirm). Busy is derived from the run, not a local flag.
+  const [action, setAction] = useState<{ runId: string; kind: 'reveal' | 'merge' | 'drop' | 'delete' } | null>(null);
+  const actionRun = useOperationRun(action?.runId);
+  const busy = actionRun?.phase === 'pending' || actionRun?.phase === 'optimistic' ? (action?.kind ?? null) : null;
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (e: PointerEvent) => {
@@ -390,21 +424,36 @@ function BranchRowKebab({
     return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [open]);
 
-  async function handleReveal() {
-    if (!tree) return;
-    setBusy('reveal');
-    setError(null);
-    try {
-      const res = await fetch(`/api/working_trees/${tree.id}/reveal`, { method: 'POST' });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({} as { error?: string }));
-        setError(body.error ?? `${t('spaces.git.revealFailed')} (${res.status})`);
-      }
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setBusy(null);
+  useEffect(() => {
+    if (!action || !actionRun) return;
+    if (actionRun.phase === 'confirmed') {
+      setAction(null);
+      setOpen(false);
+      onRefresh();
+      return;
     }
+    if (actionRun.phase === 'failed') {
+      // merge/drop failures toast from their definitions (operations/session.ts)
+      // and a reveal failure toasts from files.openExternal — only the
+      // session.delete failure (WS, no definition toast) renders inline here.
+      if (action.kind === 'delete') setError(actionRun.error ?? t('spaces.git.deleteFailed'));
+      setAction(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [actionRun?.phase]);
+
+  function dispatchAction(kind: 'reveal' | 'merge' | 'drop' | 'delete', name: OperationName, input: unknown): void {
+    setError(null);
+    setAction({ runId: dispatch(name, input).id, kind });
+  }
+
+  function handleReveal() {
+    if (!tree) return;
+    dispatchAction('reveal', 'files.openExternal', {
+      workingTreeId: tree.id,
+      path: '',
+      target: { kind: 'reveal' },
+    });
   }
 
   async function handleMerge() {
@@ -414,13 +463,7 @@ function BranchRowKebab({
       message: `${t('spaces.git.confirmMerge')} "${branch.name}"?\n${t('spaces.git.confirmMergeHelp')}`,
       confirmLabel: t('spaces.git.confirmMerge'),
     }))) return;
-    setBusy('merge');
-    setError(null);
-    const res = await mergeSession(sid);
-    setBusy(null);
-    if (!res.ok) { setError(res.error ?? t('spaces.git.mergeFailed')); return; }
-    setOpen(false);
-    onRefresh();
+    dispatchAction('merge', 'session.merge', { sessionId: sid });
   }
 
   async function handleDrop() {
@@ -431,13 +474,7 @@ function BranchRowKebab({
       danger: true,
       confirmLabel: t('spaces.git.confirmDiscard'),
     }))) return;
-    setBusy('drop');
-    setError(null);
-    const res = await dropSession(sid);
-    setBusy(null);
-    if (!res.ok) { setError(res.error ?? t('spaces.git.discardFailed')); return; }
-    setOpen(false);
-    onRefresh();
+    dispatchAction('drop', 'session.drop', { sessionId: sid });
   }
 
   async function handleDelete() {
@@ -449,22 +486,11 @@ function BranchRowKebab({
       danger: true,
       confirmLabel: t('spaces.git.confirmDelete'),
     }))) return;
-    setBusy('delete');
-    setError(null);
-    try {
-      const res = await fetch(`/api/sessions/${sid}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({} as { error?: string }));
-        setError(body.error ?? `${t('spaces.git.deleteFailed')} (${res.status})`);
-        return;
-      }
-      setOpen(false);
-      onRefresh();
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setBusy(null);
-    }
+    // Phase 3b dedupe (inventory §4.1): the pre-migration inline DELETE fetch
+    // duplicated the session-delete transport — this pane renders inside the
+    // App's operation providers, so it dispatches the same WS-backed
+    // session.delete operation as every other delete entry point.
+    dispatchAction('delete', 'session.delete', { sessionId: sid });
   }
 
   const hasTree = !!tree;

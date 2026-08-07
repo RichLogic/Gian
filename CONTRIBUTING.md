@@ -41,7 +41,7 @@ pnpm test
 pnpm build
 ```
 
-Release tags run the unsigned Apple Silicon beta packaging workflow.
+Release tags also run the signed and notarized macOS packaging workflow.
 
 ## Monorepo layout
 
@@ -52,7 +52,7 @@ packages/web/      React SPA (Vite)
 packages/desktop/  Electron launcher and macOS packaging
 packages/proxies/  independently released Agent protocol adapters
 scripts/           development and release tooling
-.github/           release workflow and public README assets
+docs/              architecture, protocol, roadmap, AI/quality/ADR docs
 ```
 
 Changes to `packages/shared/src/` affect all three packages — rebuild shared
@@ -64,7 +64,9 @@ pnpm -F @gian/shared build
 
 ## Agent-assisted development
 
-If you use an AI agent to contribute, keep each change focused and preserve the
-same package boundaries: shared contracts live in `packages/shared/`, runtime
-behavior stays in its owning package, and TypeScript import paths use the `.js`
-extension.
+This repo was built using a team-of-agents pattern. See
+[`docs/roadmap.md`](docs/roadmap.md) for the milestone history, per-track file
+ownership rules, and parallel constraint protocol used to coordinate multiple
+agents without conflicts. If you are using an AI agent to contribute, follow
+the same rules: each agent owns only the files listed in its brief, types flow
+through `packages/shared/`, and import paths use the `.js` extension.

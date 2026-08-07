@@ -400,11 +400,6 @@ interface ManagedSession {
   detectedModelId: string | null;
   activeProcess: ChildProcess | null;
   hasHadFirstTurn: boolean;
-  /** Gian sidechat: parent Claude session to fork on the first turn. */
-  forkFromClaudeSessionId: string | null;
-  /** True between the fork spawn's registration and the init event that
-   *  reports the fork's real native id. */
-  forkPending: boolean;
   /** Absolute path to the per-session mcp-config json passed to `claude
    *  --mcp-config`. Written before each spawn that goes through the approval
    *  bridge; cleaned up on session close. */
@@ -578,7 +573,6 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     cwd: string;
     model?: string | null;
     isResume: boolean;
-    forkFromClaudeSessionId?: string;
   }): Promise<void> {
     // Kill any existing process for this session.
     this.killSession(options.sessionId);
@@ -592,8 +586,6 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       detectedModelId: null,
       activeProcess: null,
       hasHadFirstTurn: options.isResume,
-      forkFromClaudeSessionId: options.forkFromClaudeSessionId ?? null,
-      forkPending: !!options.forkFromClaudeSessionId,
       mcpConfigPath: null,
       pendingCallIds: new Set(),
     });
@@ -617,8 +609,6 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     }
     session.claudeSessionId = newClaudeSessionId;
     session.hasHadFirstTurn = false;
-    session.forkFromClaudeSessionId = null;
-    session.forkPending = false;
     this.emit('debug', `[runtime] Session ${sessionId} reset to fresh claude session ${newClaudeSessionId}`);
   }
 
@@ -714,14 +704,6 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
         if (eventType === 'system' && event.subtype === 'init') {
           if (typeof event.model === 'string') {
             session.detectedModelId = event.model;
-          }
-          // Sidechat fork: adopt the native id Claude minted for the fork —
-          // the registered claudeSessionId was a placeholder until now.
-          if (session.forkPending && typeof event.session_id === 'string' && event.session_id.length > 0) {
-            session.claudeSessionId = event.session_id;
-            session.forkPending = false;
-            session.forkFromClaudeSessionId = null;
-            this.emit('nativeSessionIdAdopted', session.sessionId, event.session_id);
           }
         }
 
@@ -1021,12 +1003,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       args.push('--effort', options.effort);
     }
 
-    if (session.forkPending && session.forkFromClaudeSessionId) {
-      // Gian sidechat: fork the parent's native session — Claude copies the
-      // history into a NEW session id (adopted from the init event; no
-      // `--session-id` pinning, and no `--name` to avoid flag-combo risk).
-      args.push('--resume', session.forkFromClaudeSessionId, '--fork-session');
-    } else if (session.hasHadFirstTurn) {
+    if (session.hasHadFirstTurn) {
       args.push('--resume', session.claudeSessionId);
     } else {
       args.push('--session-id', session.claudeSessionId);

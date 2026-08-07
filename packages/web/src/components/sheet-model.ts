@@ -68,6 +68,12 @@ export interface SheetTab {
   rawSrc?: string;
   fileTreePath?: string;
   loadError?: string;
+  /** Query timing (proposal §4.5): the tab was created immediately with a
+   *  loading body; its content fill is still in flight. */
+  loading?: boolean;
+  /** Error-state retry: re-runs the tab's content load (set by the loader
+   *  alongside `loadError`). */
+  retryLoad?: () => void;
 }
 
 export interface SheetActions {

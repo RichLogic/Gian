@@ -30,12 +30,20 @@ export function main() {
 
   run(process.execPath, ['--test', ...scriptTests], env);
 
+  // Static UI-operation gate (proposal §7 Phase 4): strict mode — a direct
+  // mutation from a view or an unclassified Host command fails the chain
+  // here, locally and in CI (`pnpm test`, release workflow "Verify source").
+  run(process.execPath, ['scripts/check-ui-operations.mjs', '--strict'], env);
+
   const pnpmEntry = process.env.npm_execpath;
-  if (pnpmEntry) {
-    run(process.execPath, [pnpmEntry, '-r', '--if-present', 'test'], env);
-  } else {
-    run(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['-r', '--if-present', 'test'], env);
-  }
+  const pnpm = pnpmEntry
+    ? { command: process.execPath, args: [pnpmEntry] }
+    : { command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', args: [] };
+  // Dependents resolve @gian/shared through its dist declarations, and the
+  // proxy suites test built output — build shared first so a fresh checkout
+  // passes (mirrors scripts/dev.mjs).
+  run(pnpm.command, [...pnpm.args, '--filter', '@gian/shared', 'build'], env);
+  run(pnpm.command, [...pnpm.args, '-r', '--if-present', 'test'], env);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) main();

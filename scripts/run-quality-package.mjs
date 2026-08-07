@@ -1,0 +1,95 @@
+import { spawnSync } from 'node:child_process';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { acquireQualityLock, QUALITY_LOCK_ENV } from './quality-lock.mjs';
+import { sanitizedTestEnv } from './run-tests.mjs';
+
+const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+const steps = [
+  { label: 'Source prepackage gate', args: ['quality:prepackage'] },
+  { label: 'Unsigned macOS app package', args: ['desktop:pack'] },
+  { label: 'Packaged app resources and lifecycle', args: ['quality:package:smoke'] },
+];
+
+function pnpmInvocation(args) {
+  const pnpmEntry = process.env.npm_execpath;
+  return pnpmEntry
+    ? { command: process.execPath, args: [pnpmEntry, ...args] }
+    : {
+        command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm',
+        args,
+      };
+}
+
+function elapsed(startedAt) {
+  return `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+}
+
+export function main() {
+  const lock = acquireQualityLock({ command: 'quality:package', rootDir });
+  try {
+    const env = sanitizedTestEnv();
+    const githubClientId = process.env.GIAN_GITHUB_CLIENT_ID?.trim();
+    if (githubClientId) env.GIAN_GITHUB_CLIENT_ID = githubClientId;
+    env[QUALITY_LOCK_ENV] = lock.token;
+    delete env.FORCE_COLOR;
+    env.NO_COLOR = '1';
+
+    const logDir = join(rootDir, 'output', 'quality');
+    const timestamp = new Date().toISOString().replaceAll(':', '-');
+    const logPath = join(logDir, `package-${timestamp}.log`);
+    const results = [];
+    let failed = false;
+
+    mkdirSync(logDir, { recursive: true });
+    writeFileSync(logPath, 'Gian local package quality gate\n');
+    console.log('Gian local package quality gate');
+
+    for (const step of steps) {
+      if (failed) {
+        results.push({ ...step, status: 'SKIP' });
+        continue;
+      }
+
+      console.log(`\n==> ${step.label}`);
+      const startedAt = Date.now();
+      const command = pnpmInvocation(step.args);
+      const result = spawnSync(command.command, command.args, {
+        cwd: rootDir,
+        env,
+        encoding: 'utf8',
+        maxBuffer: 50 * 1024 * 1024,
+      });
+      const status = !result.error && result.status === 0 ? 'PASS' : 'FAIL';
+      const duration = elapsed(startedAt);
+      const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+      appendFileSync(logPath, `\n==> ${step.label}\n${output}`);
+      results.push({ ...step, status, duration });
+      console.log(`[${status}] ${step.label} (${duration})`);
+      if (result.error) console.error(result.error);
+      if (status === 'FAIL' && output) {
+        console.error('\nLast output from the failed step:');
+        console.error(output.trimEnd().split('\n').slice(-40).join('\n'));
+      }
+      failed = status === 'FAIL';
+    }
+
+    console.log('\nLocal package quality summary');
+    for (const result of results) {
+      console.log(`[${result.status}] ${result.label}${result.duration ? ` (${result.duration})` : ''}`);
+    }
+    console.log(failed
+      ? '\nRESULT: FAIL - do not keep or distribute this package.'
+      : '\nRESULT: PASS - the local .app package passed its artifact smoke.');
+    console.log('NOTE: this command does not sign/notarize or run real Agent canaries.');
+    console.log(`Detailed log: ${logPath}`);
+    return failed ? 1 : 0;
+  } finally {
+    lock.release();
+  }
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  process.exitCode = main();
+}

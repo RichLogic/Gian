@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import type { NativeSession, Session, SystemConfig, Workspace } from '@gian/shared';
 import {
-  deleteWorkspace,
   loadClaudeMd,
   loadNativeSessions,
   loadSessions,
-  reorderWorkspaces,
-  saveClaudeMd,
-  updateWorkspace,
 } from '../api.js';
 import { useT } from '../i18n/index.js';
+import { confirm as confirmDialog, toast } from '../feedback.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
+import {
+  useOperationDispatch,
+  useOperationRun,
+} from '../operations/use-operations.js';
 import type { GianWs } from '../ws.js';
 import { NewWorkspaceForm, useNewWorkspace } from './workspace-create.js';
 import { GitPane } from './spaces-git-pane.js';
@@ -59,8 +60,12 @@ export function SpacesView({
   }, [listTab, workspaces, selectedId]);
 
   // Reorder swaps two rows of the VISIBLE list inside the full id ordering,
-  // so workspaces in the other tab keep their relative positions.
-  async function moveVisible(idx: number, dir: -1 | 1) {
+  // so workspaces in the other tab keep their relative positions. Dispatched
+  // through the operation layer (Phase 3a): the whole-list order overlay
+  // re-renders immediately; the definition's reconcile refetches canonical
+  // state on success (the host does not broadcast reorders).
+  const dispatch = useOperationDispatch();
+  function moveVisible(idx: number, dir: -1 | 1) {
     const target = idx + dir;
     if (target < 0 || target >= visible.length) return;
     const ids = workspaces.map(w => w.id);
@@ -70,8 +75,7 @@ export function SpacesView({
     const tmp = ids[a]!;
     ids[a] = ids[b]!;
     ids[b] = tmp;
-    await reorderWorkspaces(ids);
-    onChange();
+    dispatch('workspace.reorder', { ids });
   }
 
   const [claudeMdOpen, setClaudeMdOpen] = useState(false);
@@ -257,13 +261,27 @@ export function SpaceDetail({
   onOpenClaudeMd: () => void;
 }) {
   const t = useT();
+  const dispatch = useOperationDispatch();
   const [nameEdit, setNameEdit] = useState<string | null>(null);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState(false);
-  const [saving, setSaving] = useState<string | null>(null);
   const [tab, setTab] = useState<WsTab>('overview');
   const [nativeCount, setNativeCount] = useState<number | null>(null);
-  void saving;
+  // Delete runs as a pending operation (Phase 3a): `deleting` reflects the
+  // in-flight run (and blocks a duplicate submission), a failure surfaces
+  // inline from the run's error. The row/list converge via the definition's
+  // canonical reconcile (remove + refetch).
+  const [deleteRunId, setDeleteRunId] = useState<string | undefined>(undefined);
+  const deleteRun = useOperationRun(deleteRunId);
+  const deleting = deleteRun?.phase === 'pending';
+  const deleteError = deleteRun?.phase === 'failed' ? (deleteRun.error ?? 'Delete failed') : null;
+  useEffect(() => {
+    if (deleteRun?.phase === 'confirmed') {
+      setDeleteRunId(undefined);
+      onDeleted();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deleteRun?.phase]);
+  // A stale delete error must not leak onto another workspace's detail.
+  useEffect(() => { setDeleteRunId(undefined); }, [workspace?.id]);
 
   // Refresh native-session badge count when workspace changes.
   useEffect(() => {
@@ -285,35 +303,32 @@ export function SpaceDetail({
 
   const relatedSessions = allSessions.filter(s => s.workspace_id === workspace.id);
 
-  async function patchField(field: string, value: unknown) {
-    setSaving(field);
-    await updateWorkspace(workspace!.id, { [field]: value } as Parameters<typeof updateWorkspace>[1]);
-    setSaving(null);
-    onChange();
-  }
-
-  async function commitNameEdit() {
+  function commitNameEdit() {
     if (nameEdit === null) return;
     const trimmed = nameEdit.trim();
-    if (!trimmed || trimmed === workspace!.name) {
-      setNameEdit(null);
-      return;
-    }
-    await patchField('name', trimmed);
     setNameEdit(null);
+    if (!trimmed || trimmed === workspace!.name) return;
+    // Optimistic rename (Phase 3a): the overlay reflects immediately; the
+    // reconcile patches canonical state from the REST response (no host
+    // broadcast for workspace PATCH).
+    dispatch('workspace.rename', { workspaceId: workspace!.id, name: trimmed });
   }
 
   async function handleDelete() {
-    setDeleteError(null);
-    setDeleting(true);
-    const result = await deleteWorkspace(workspace!.id);
-    setDeleting(false);
-    if (!result.ok) {
-      setDeleteError(result.error ?? 'Delete failed');
-      return;
-    }
-    onChange();
-    onDeleted();
+    // Delete always succeeds now (2026-08-06): sessions keep their history
+    // and move to the rail's 无归属 (Unfiled) group. Confirm first — the
+    // previous 409 blocker doubled as the accidental-delete guard.
+    const sessionCount = allSessions.filter(s => s.workspace_id === workspace!.id).length;
+    const confirmed = await confirmDialog({
+      message: sessionCount > 0
+        ? `Delete workspace "${workspace!.name}"? ${sessionCount} session${sessionCount === 1 ? '' : 's'} will move to Unfiled.`
+        : `Delete workspace "${workspace!.name}"?`,
+      danger: true,
+      confirmLabel: 'Delete',
+    });
+    if (!confirmed) return;
+    const run = dispatch('workspace.delete', { workspaceId: workspace!.id });
+    setDeleteRunId(run.id);
   }
 
   return (
@@ -342,7 +357,7 @@ export function SpaceDetail({
               <WorkspaceKebab
                 hidden={workspace.hidden === 1}
                 onRename={() => setNameEdit(workspace.name)}
-                onToggleHidden={() => void patchField('hidden', workspace.hidden !== 1)}
+                onToggleHidden={() => dispatch('workspace.setHidden', { workspaceId: workspace.id, hidden: workspace.hidden !== 1 })}
                 onDelete={() => void handleDelete()}
                 deleting={deleting}
               />
@@ -519,11 +534,35 @@ export function ClaudeMdInspector({
   workspaceName: string;
   onClose: () => void;
 }) {
+  const t = useT();
+  const dispatch = useOperationDispatch();
   const [content, setContent] = useState<string>('');
   const [original, setOriginal] = useState<string>('');
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  // Save runs as a pending operation (Phase 3a): `saving` reflects the
+  // in-flight run, success keeps the transient 已保存 indicator, failure
+  // surfaces a toast.
+  const [saveRunId, setSaveRunId] = useState<string | undefined>(undefined);
+  const saveRun = useOperationRun(saveRunId);
+  const saving = saveRun?.phase === 'pending';
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  // Content captured at dispatch time — the confirmed run restores THIS as
+  // the clean baseline even if the user kept typing meanwhile.
+  const savedContentRef = useRef<string>('');
+
+  useEffect(() => {
+    if (!saveRun) return;
+    if (saveRun.phase === 'confirmed') {
+      setOriginal(savedContentRef.current);
+      setSavedAt(Date.now());
+      setSaveRunId(undefined);
+      setTimeout(() => setSavedAt(null), 2500);
+    } else if (saveRun.phase === 'failed') {
+      setSaveRunId(undefined);
+      toast({ kind: 'error', message: t('spaces.claudeMd.saveFailed') });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saveRun?.phase]);
 
   useEffect(() => {
     setLoading(true);
@@ -536,15 +575,10 @@ export function ClaudeMdInspector({
 
   const dirty = content !== original;
 
-  async function save() {
-    setSaving(true);
-    const ok = await saveClaudeMd(workspaceId, content);
-    setSaving(false);
-    if (ok) {
-      setOriginal(content);
-      setSavedAt(Date.now());
-      setTimeout(() => setSavedAt(null), 2500);
-    }
+  function save() {
+    savedContentRef.current = content;
+    const run = dispatch('workspace.saveClaudeMd', { workspaceId, content });
+    setSaveRunId(run.id);
   }
 
   return (

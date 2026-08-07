@@ -17,6 +17,7 @@ import { Transcript } from '../transcript/Transcript.js';
 import { TranscriptMinimap } from '../transcript/TranscriptMinimap.js';
 import type { ApprovalActionContext, QueueEntry, TranscriptItem } from '../types.js';
 import { isTurnRunning } from '../session-routing.js';
+import type { TranscriptHistoryState } from '../controllers/use-transcript-hydration.js';
 
 export interface SessionMainProps {
   session: Session;
@@ -25,6 +26,8 @@ export interface SessionMainProps {
   /** False while the session's history is still loading — suppresses the
    *  transcript empty state so switching sessions doesn't flash it. */
   hydrated?: boolean;
+  history?: TranscriptHistoryState;
+  onLoadOlder?: () => void;
   pending: boolean;
   queue: QueueEntry[];
   planText?: string;
@@ -66,6 +69,8 @@ export interface SessionMainProps {
   onDelete: () => void;
   onReopen?: () => void;
   onShowChanges: () => void;
+  /** Opens the Diffs inspector pinned to the Last-turn scope (TurnDiffChip). */
+  onShowLastTurnChanges: () => void;
   workingTreeId: string | null;
   branch: string | null;
 }
@@ -75,6 +80,8 @@ export function SessionMain({
   workspace,
   items,
   hydrated,
+  history,
+  onLoadOlder,
   pending,
   queue,
   planText,
@@ -97,6 +104,7 @@ export function SessionMain({
   onDelete,
   onReopen,
   onShowChanges,
+  onShowLastTurnChanges,
   workingTreeId,
   branch,
 }: SessionMainProps) {
@@ -156,6 +164,9 @@ export function SessionMain({
         <Transcript
           items={items}
           hydrated={hydrated}
+          hasOlder={history?.hasMore ?? false}
+          loadingOlder={history?.loadingOlder ?? false}
+          onLoadOlder={onLoadOlder}
           pending={pending || session.status === 'running' || session.status === 'pending'}
           onApprove={onApprove}
         />
@@ -175,7 +186,7 @@ export function SessionMain({
           planCompleted={codexPlanCompleted}
           sessionId={session.id}
         />
-        <TurnDiffChip items={items} sessionId={session.id} />
+        <TurnDiffChip items={items} onShowLastTurn={onShowLastTurnChanges} />
         <TranscriptMinimap items={items} />
       </div>
       <Composer

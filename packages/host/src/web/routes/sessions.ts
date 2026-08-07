@@ -8,7 +8,7 @@ import {
   writeAttachment,
 } from '../../storage/attachments.js';
 import type { Db } from '../../storage/db.js';
-import { ensureEventsRebuilt } from '../../events/lazy-rebuild.js';
+import { ensureEventPageRebuilt } from '../../events/lazy-rebuild.js';
 import { markAccessed } from '../../events/lifecycle.js';
 
 function errorMessage(error: unknown): string {
@@ -102,13 +102,17 @@ export function registerSessionRoutes(app: Hono, db: Db, sessions: SessionManage
   app.get('/api/sessions/:id/events', c => {
     const id = c.req.param('id');
     try {
+      const beforeRaw = c.req.query('before');
+      const before = beforeRaw && /^\d+$/.test(beforeRaw) ? Number(beforeRaw) : null;
+      const pageSizeRaw = c.req.query('turns');
+      const pageSize = pageSizeRaw && /^\d+$/.test(pageSizeRaw) ? Number(pageSizeRaw) : undefined;
       try {
-        ensureEventsRebuilt(db, id, c.req.query('rebuild') === '1');
+        ensureEventPageRebuilt(db, id, before, pageSize, c.req.query('rebuild') === '1');
       } catch (error) {
         console.warn(`[gian] failed to rebuild events for session ${id}:`, error);
       }
       markAccessed(db, id);
-      return c.json(sessions.listEvents(id));
+      return c.json(sessions.listEventPage(id, before, pageSize));
     } catch (error) {
       return c.json({ error: String(error) }, 404);
     }

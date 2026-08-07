@@ -8,7 +8,6 @@ import { applyEnvelope } from '../src/transcript/apply.js';
 import {
   buildRailSections,
   applySessionUpdate,
-  isSessionCreateDispatchError,
   isTurnRunning,
   planCreatedSessionFirstMessage,
   sortSessionsForRail,
@@ -62,28 +61,6 @@ describe('session:updated active-list reconciliation', () => {
 
   it('does not invent a missing row from a partial unarchive payload', () => {
     expect(applySessionUpdate([], { id: 'session-1', archived: 0 })).toEqual([]);
-  });
-});
-
-describe('session:create error correlation', () => {
-  it('settles create state for executor-native AUTH_REQUIRED errors', () => {
-    expect(isSessionCreateDispatchError({
-      code: 'AUTH_REQUIRED',
-      request_type: 'session:create',
-    })).toBe(true);
-  });
-
-  it('keeps the legacy SESSION_CREATE_FAILED fallback', () => {
-    expect(isSessionCreateDispatchError({
-      code: 'SESSION_CREATE_FAILED',
-    })).toBe(true);
-  });
-
-  it('does not settle create state for unrelated errors', () => {
-    expect(isSessionCreateDispatchError({
-      code: 'AUTH_REQUIRED',
-      request_type: 'message:send',
-    })).toBe(false);
   });
 });
 
@@ -359,5 +336,46 @@ describe('buildRailSections: Pinned section above Projects (2026-08-03)', () => 
   it('orphan workspace ids append to Projects so their sessions stay visible', () => {
     const sections = buildRailSections([session('s1', 'ws-zzz')], workspaces);
     expect(sections.projectWsIds).toEqual(['ws-zzz']);
+  });
+
+  it('hidden-workspace sessions collect in unfiled and leave every workspace list', () => {
+    const withHidden = [...workspaces, { id: 'ws-h', pinned: 0 as const, hidden: 1 as const }];
+    const sections = buildRailSections([
+      session('s1', 'ws-a'),
+      session('s2', 'ws-h'),
+      session('s3', 'ws-h'),
+    ], withHidden);
+    expect(sections.unfiled.map(s => s.id)).toEqual(['s2', 's3']);
+    expect(sections.byWs.has('ws-h')).toBe(false);
+    expect(sections.projectWsIds).toEqual(['ws-a']);
+    expect(sections.pinnedWsIds).toEqual([]);
+    expect(sections.hasPinned).toBe(false);
+  });
+
+  it('a pinned session of a hidden workspace stays a standalone pinned row', () => {
+    const withHidden = [...workspaces, { id: 'ws-h', pinned: 0 as const, hidden: 1 as const }];
+    const sections = buildRailSections([
+      session('s1', 'ws-h', '2026-08-01T10:00:00Z'),
+      session('s2', 'ws-h'),
+    ], withHidden);
+    expect(sections.pinnedSessions.map(s => s.id)).toEqual(['s1']);
+    expect(sections.unfiled.map(s => s.id)).toEqual(['s2']);
+    expect(sections.hasPinned).toBe(true);
+  });
+
+  it('a hidden workspace never enters pinnedWsIds even when pinned', () => {
+    const withHiddenPinned = [...workspaces, { id: 'ws-h', pinned: 1 as const, hidden: 1 as const }];
+    const sections = buildRailSections([session('s1', 'ws-h')], withHiddenPinned);
+    expect(sections.unfiled.map(s => s.id)).toEqual(['s1']);
+    expect(sections.pinnedWsIds).toEqual([]);
+    expect(sections.hasPinned).toBe(false);
+  });
+
+  it('sessions without a workspace (deleted → NULL workspace_id) collect in unfiled', () => {
+    const orphan = { id: 's1', workspace_id: null, pinned_at: null, updated_at: '2026-08-01T00:00:00Z' };
+    const sections = buildRailSections([orphan, session('s2', 'ws-a')], workspaces);
+    expect(sections.unfiled.map(s => s.id)).toEqual(['s1']);
+    expect(sections.byWs.has(null as unknown as string)).toBe(false);
+    expect(sections.projectWsIds).toEqual(['ws-a']);
   });
 });

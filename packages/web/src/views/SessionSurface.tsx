@@ -1,5 +1,6 @@
 import type { Session, Workspace } from '@gian/shared';
 import type { SessionCommands } from '../controllers/use-session-commands.js';
+import type { TranscriptHistoryState } from '../controllers/use-transcript-hydration.js';
 import {
   ChatPanelOpenContext,
 } from '../presentation/chat-panel.js';
@@ -9,6 +10,7 @@ import {
   FileLinkOpenContext,
   FileRefRehypeContext,
   PlanOpenContext,
+  RelativeLinkOpenContext,
 } from '../transcript/items.js';
 import type { PlanOpenPayload } from '../transcript/items.js';
 import type { DiffItem, QueueEntry, TranscriptItem } from '../types.js';
@@ -21,6 +23,8 @@ interface SessionSurfaceProps {
   /** False while the session's history is still loading — suppresses the
    *  transcript empty state so switching sessions doesn't flash it. */
   hydrated?: boolean;
+  history?: TranscriptHistoryState;
+  onLoadOlder?: () => void;
   pending: boolean;
   queue: QueueEntry[];
   planText?: string;
@@ -29,12 +33,17 @@ interface SessionSurfaceProps {
   workingTreeId: string | null;
   branch: string | null;
   onOpenFile: (absolutePath: string, line?: number) => void;
+  /** Click-time fallback for relative markdown links the render-time linkify
+   *  pass didn't resolve (see RelativeLinkOpenContext). */
+  onOpenRelativeFile: (href: string) => void;
   onOpenDiff: (item: DiffItem) => void;
   onOpenPlan: (payload: PlanOpenPayload) => void;
   onOpenChat: (request: ChatPanelRequest) => void;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   fileRehype: null | (() => (tree: any) => void);
   onShowChanges: () => void;
+  /** Opens the Diffs inspector pinned to the Last-turn scope (TurnDiffChip). */
+  onShowLastTurnChanges: () => void;
   onReopen?: () => void;
   containerClassName?: string;
 }
@@ -44,6 +53,8 @@ export function SessionSurface({
   workspace,
   items,
   hydrated,
+  history,
+  onLoadOlder,
   pending,
   queue,
   planText,
@@ -52,16 +63,19 @@ export function SessionSurface({
   workingTreeId,
   branch,
   onOpenFile,
+  onOpenRelativeFile,
   onOpenDiff,
   onOpenPlan,
   onOpenChat,
   fileRehype,
   onShowChanges,
+  onShowLastTurnChanges,
   onReopen,
   containerClassName,
 }: SessionSurfaceProps) {
   const content = (
     <FileLinkOpenContext.Provider value={onOpenFile}>
+      <RelativeLinkOpenContext.Provider value={onOpenRelativeFile}>
       <FileRefRehypeContext.Provider value={fileRehype}>
         <DiffOpenContext.Provider value={onOpenDiff}>
           <PlanOpenContext.Provider value={onOpenPlan}>
@@ -71,6 +85,8 @@ export function SessionSurface({
                 workspace={workspace}
                 items={items}
                 hydrated={hydrated}
+                history={history}
+                onLoadOlder={onLoadOlder}
                 pending={pending}
                 queue={queue}
                 planText={planText}
@@ -95,6 +111,7 @@ export function SessionSurface({
                 onDelete={() => commands.onDelete(session.id)}
                 onReopen={onReopen}
                 onShowChanges={onShowChanges}
+                onShowLastTurnChanges={onShowLastTurnChanges}
                 workingTreeId={workingTreeId}
                 branch={branch}
               />
@@ -102,6 +119,7 @@ export function SessionSurface({
           </PlanOpenContext.Provider>
         </DiffOpenContext.Provider>
       </FileRefRehypeContext.Provider>
+      </RelativeLinkOpenContext.Provider>
     </FileLinkOpenContext.Provider>
   );
 

@@ -24,11 +24,24 @@ configured and common official paths or installed through vendor installers.
 ## Commands
 
 ```sh
-# Start the isolated 8991/5191 development stack and open GianDev.
+# Ensure the worktree-owned 8991/5191 stack is healthy and open GianDev.
 pnpm dev
+
+# Inspect or recover the managed development runtime.
+pnpm dev:status
+pnpm dev:restart
+pnpm dev:down
+
+# Open the browser-only Web debugging surface. GianDev remains the default
+# product preview and Desktop acceptance surface.
+pnpm dev:chrome
 
 # Build an unpacked macOS Apple Silicon App.
 GIAN_GITHUB_CLIENT_ID=<your-oauth-client-id> pnpm desktop:pack
+
+# Run the source gate, build an unsigned .app, then verify its bundled
+# Host/Web/Node/native resources plus clean quit and reopen on an isolated port.
+GIAN_GITHUB_CLIENT_ID=<your-oauth-client-id> pnpm quality:package
 
 # Build local DMG and ZIP artifacts.
 GIAN_GITHUB_CLIENT_ID=<your-oauth-client-id> pnpm desktop:dmg
@@ -41,5 +54,8 @@ The tag workflow builds, signs, notarizes, validates, checksums, and publishes
 the App and proxy assets. Local builds remain unsigned unless signing
 credentials are present.
 
-For isolated development, `GIAN_DESKTOP_HOST_URL` and
-`GIAN_DESKTOP_WEB_URL` can override the two origins.
+The development controller stores worktree-bound PID/state files and component
+logs under `.gian-runtime/`. Host/Web outlive the Electron window; a hanging
+shell can be replaced with `pnpm dev:restart -- desktop` without restarting
+the services. For isolated test harnesses, `GIAN_DESKTOP_HOST_URL` and
+`GIAN_DESKTOP_WEB_URL` can still override the two origins.

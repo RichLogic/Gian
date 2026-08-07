@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import type {
   AgentInstallStatus,
   AgentProxyDefaults,
-  Executor,
   ExternalEditor,
   OpenFileCategory,
   ProxyCapabilities,
@@ -10,19 +9,23 @@ import type {
 } from '@gian/shared';
 import { THEME_DEFAULT_ACCENT } from '@gian/shared';
 import {
-  installAgentCli,
-  installAgentProxy,
   loadAgents,
   loadProxyCapabilities,
-  pickAgentCliPath,
-  resetOnboarding,
-  saveSettings,
-  setAgentCliPath,
-  setAgentProxyDefaults,
 } from '../api.js';
 import { useMinimapEnabled, setMinimapEnabled } from '../display-prefs.js';
 import { desktopBridge } from '../desktop-bridge.js';
 import { confirm } from '../feedback.js';
+import { agentEntityKey } from '../operations/agents.js';
+import { AUTH_ENTITY_KEY } from '../operations/auth.js';
+import { SETTINGS_ONBOARDING_ENTITY_KEY } from '../operations/settings.js';
+import {
+  useOperationDispatch,
+  useOperationPending,
+  useOperationStore,
+  usePendingOperations,
+  waitForRunSettle,
+} from '../operations/use-operations.js';
+import type { OperationRun } from '../operations/types.js';
 import { AppIcon } from './AppIcon.js';
 import { DEFAULT_OPEN_TARGET } from './sheet-model.js';
 import { useT } from '../i18n/index.js';
@@ -91,27 +94,31 @@ function editorsEqual(a: ExternalEditor[], b: ExternalEditor[]): boolean {
 }
 
 interface Props {
+  /** Rendered config — canonical + settings.save overlays merged by App. */
   config: SystemConfig | null;
   /** Installed apps (macOS) for the "Add application" picker. */
   apps?: string[];
-  onChange: (cfg: SystemConfig) => void;
   /** Which section to render — controlled by App (driven by the panel-3
    *  SettingsNavInspector; the state survives rail collapse/restore).
   *  Defaults to 'appearance'. */
   activeSection?: NavKey;
   identity?: AppIdentity | null;
-  onSignOut?: () => Promise<void>;
+  onSignOut?: () => void;
 }
 
 /** Settings v3 — single-section switcher (dock Settings rail, phase 4).
  *  The nav lives in panel 3 (SettingsNavInspector); this panel-2 body renders
  *  ONLY the active section. Account is included because desktop GitHub login
  *  is part of first-run initialization; unrelated Public/System/About panels
- *  stay out of this compact workbench surface. */
+ *  stay out of this compact workbench surface.
+ *
+ *  Phase 3b (UI Operation Layer): every mutation here dispatches a registered
+ *  operation — `settings.save` (optimistic overlays on the rendered config),
+ *  `settings.resetOnboarding`, `auth.logout`, and the `agent.*` pending
+ *  operations. Busy states derive from the runs, not local flags. */
 export function SettingsBody({
   config,
   apps,
-  onChange,
   activeSection = 'appearance',
   identity = null,
   onSignOut,
@@ -122,7 +129,6 @@ export function SettingsBody({
     <SettingsBodyInner
       config={config}
       apps={apps ?? []}
-      onChange={onChange}
       activeSection={activeSection}
       identity={identity}
       onSignOut={onSignOut}
@@ -131,36 +137,39 @@ export function SettingsBody({
 }
 
 function SettingsBodyInner({
-  config, apps, onChange, activeSection, identity, onSignOut,
+  config, apps, activeSection, identity, onSignOut,
 }: {
   config: SystemConfig;
   apps: string[];
-  onChange: (cfg: SystemConfig) => void;
   activeSection: NavKey;
   identity: AppIdentity | null;
-  onSignOut?: () => Promise<void>;
+  onSignOut?: () => void;
 }) {
   const t = useT();
+  const dispatch = useOperationDispatch();
   const minimapOn = useMinimapEnabled();
   const [editors, setEditors] = useState<ExternalEditor[]>(config.external_editors);
 
-  // Sync local editor state when config is replaced from outside (e.g. initial load).
+  // Sync local editor state when config is replaced from outside (e.g. initial
+  // load, or a settings.save rollback restoring the canonical list).
   useEffect(() => {
     setEditors(config.external_editors);
   }, [config.external_editors]);
 
-  // Debounced auto-save: schedule a patch 500ms after the user stops typing.
-  // Skip when local matches prop (initial mount, post-sync).
+  // Debounced auto-save: dispatch the final write 500ms after the user stops
+  // typing. Skip when local matches prop (initial mount, post-sync — the
+  // optimistic overlay makes them equal right after the dispatch). The
+  // debounce stays in the view; the operation sees only the final write.
   useEffect(() => {
     if (editorsEqual(editors, config.external_editors)) return;
     const handle = setTimeout(() => {
-      void saveSettings({ external_editors: editors }).then(cfg => { if (cfg) onChange(cfg); });
+      dispatch('settings.save', { patch: { external_editors: editors } });
     }, 500);
     return () => clearTimeout(handle);
-  }, [editors, config.external_editors, onChange]);
+  }, [editors, config.external_editors, dispatch]);
 
   function patch(partial: Partial<SystemConfig>) {
-    void saveSettings(partial).then(cfg => { if (cfg) onChange(cfg); });
+    dispatch('settings.save', { patch: partial });
   }
 
   function patchEditors(next: ExternalEditor[]) {
@@ -440,11 +449,13 @@ function AccountBlock({
   onSignOut,
 }: {
   identity: AppIdentity | null;
-  onSignOut?: () => Promise<void>;
+  onSignOut?: () => void;
 }) {
   const t = useT();
-  const [busy, setBusy] = useState(false);
-  const [resettingSetup, setResettingSetup] = useState(false);
+  const dispatch = useOperationDispatch();
+  // Busy states are the runs (Phase 3b) — no local flags.
+  const signingOut = useOperationPending(AUTH_ENTITY_KEY, 'auth.logout');
+  const resettingSetup = useOperationPending(SETTINGS_ONBOARDING_ENTITY_KEY, 'settings.resetOnboarding');
   const githubUser = identity?.provider === 'github' ? identity.user : null;
   const displayName = githubUser
     ? githubUser.name || githubUser.login
@@ -452,24 +463,9 @@ function AccountBlock({
       ? identity.username
       : t('settings.account.signedIn');
 
-  async function signOut() {
-    if (!onSignOut) return;
-    setBusy(true);
-    try {
-      await onSignOut();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function restartSetup() {
-    setResettingSetup(true);
-    try {
-      await resetOnboarding();
-      window.location.reload();
-    } finally {
-      setResettingSetup(false);
-    }
+  function restartSetup() {
+    // The definition's reconcile preserves the reload-on-success behavior.
+    dispatch('settings.resetOnboarding', {});
   }
 
   return (
@@ -499,8 +495,8 @@ function AccountBlock({
         <button
           className="btn secondary"
           type="button"
-          disabled={busy || resettingSetup}
-          onClick={() => void restartSetup()}
+          disabled={signingOut || resettingSetup}
+          onClick={restartSetup}
         >
           {resettingSetup ? t('settings.account.reconfiguring') : t('settings.account.reconfigure')}
         </button>
@@ -508,10 +504,10 @@ function AccountBlock({
       <button
         className="btn danger-ghost"
         type="button"
-        disabled={busy || resettingSetup || !onSignOut}
-        onClick={() => void signOut()}
+        disabled={signingOut || resettingSetup || !onSignOut}
+        onClick={() => onSignOut?.()}
       >
-        {busy ? t('settings.account.signingOut') : t('settings.account.signOut')}
+        {signingOut ? t('settings.account.signingOut') : t('settings.account.signOut')}
       </button>
     </div>
   );
@@ -519,15 +515,16 @@ function AccountBlock({
 
 function AgentInstallBlock() {
   const t = useT();
+  const dispatch = useOperationDispatch();
+  const store = useOperationStore();
   const [agents, setAgents] = useState<AgentInstallStatus[]>([]);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<Executor | null>(null);
   const [error, setError] = useState('');
 
   async function refresh() {
     setLoading(true);
     try {
-      setAgents(await loadAgents());
+      setAgents(await loadAgents({ refresh: true }));
       setError('');
     } catch (value) {
       setError(value instanceof Error ? value.message : String(value));
@@ -540,26 +537,32 @@ function AgentInstallBlock() {
     void refresh();
   }, []);
 
-  async function run(id: Executor, operation: () => Promise<unknown>): Promise<boolean> {
-    setBusy(id);
+  /** Dispatch one agent operation and wait for its settle (Phase 3b): the
+   *  pending run drives the row's busy state; this promise preserves the
+   *  pre-migration success-boolean contract (refresh + inline error). */
+  async function run(
+    name: 'agent.installCli' | 'agent.installProxy' | 'agent.setCliPath' | 'agent.setProxyDefaults',
+    input: Parameters<typeof dispatch>[1],
+  ): Promise<boolean> {
     setError('');
-    try {
-      await operation();
+    const dispatched = dispatch(name, input);
+    const settled: OperationRun = await waitForRunSettle(store, dispatched.id);
+    if (settled.phase === 'confirmed') {
       await refresh();
       return true;
-    } catch (value) {
-      setError(value instanceof Error ? value.message : String(value));
-      return false;
-    } finally {
-      setBusy(null);
     }
+    // Failure: surface the run's error inline; no refresh (that would clear
+    // it — the pre-migration catch path didn't refresh either).
+    setError(settled.error ?? 'Agent operation failed');
+    return false;
   }
 
   async function setup(agent: AgentInstallStatus) {
-    await run(agent.id, async () => {
-      if (agent.proxy.state !== 'ready') await installAgentProxy(agent.id);
-      if (agent.cli.state !== 'ready') await installAgentCli(agent.id);
-    });
+    if (agent.proxy.state !== 'ready'
+      && !(await run('agent.installProxy', { executor: agent.id }))) return;
+    if (agent.cli.state !== 'ready') {
+      await run('agent.installCli', { executor: agent.id });
+    }
   }
 
   async function changeCliPath(
@@ -569,8 +572,10 @@ function AgentInstallBlock() {
     const desktop = desktopBridge();
     const desktopApp = desktop?.appVariant === 'production'
       || desktop?.appVariant === 'development';
-    const restartApp = desktopApp ? desktop?.restartApp : undefined;
     if (desktopApp) {
+      // The restart confirm stays in the view (user interaction); the
+      // operation executor runs path-set → restart → rollback (see
+      // operations/agents.ts).
       const accepted = await confirm({
         title: t('settings.agents.restartTitle'),
         message: t('settings.agents.restartMessage'),
@@ -578,20 +583,18 @@ function AgentInstallBlock() {
         cancelLabel: t('settings.agents.restartCancel'),
       });
       if (!accepted) return false;
-      if (!restartApp) {
-        return run(agent.id, async () => {
-          throw new Error(t('settings.agents.restartFailed'));
-        });
+      if (!desktop?.restartApp) {
+        setError(t('settings.agents.restartFailed'));
+        return false;
       }
     }
 
-    return run(agent.id, async () => {
-      await setAgentCliPath(agent.id, path);
-      if (!desktopApp) return;
-      const restarting = await restartApp!();
-      if (restarting) return;
-      await setAgentCliPath(agent.id, agent.cli.path ?? null);
-      throw new Error(t('settings.agents.restartFailed'));
+    return run('agent.setCliPath', {
+      executor: agent.id,
+      path,
+      restart: desktopApp,
+      previousPath: agent.cli.path ?? null,
+      restartFailedMessage: t('settings.agents.restartFailed'),
     });
   }
 
@@ -606,15 +609,18 @@ function AgentInstallBlock() {
         <AgentInstallRow
           key={agent.id}
           agent={agent}
-          busy={busy === agent.id}
-          onSetup={() => setup(agent)}
-          onInstallCli={() => run(agent.id, () => installAgentCli(agent.id))}
-          onInstallProxy={() => run(agent.id, () => installAgentProxy(agent.id))}
+          onSetup={() => { void setup(agent); }}
+          onInstallCli={() => { void run('agent.installCli', { executor: agent.id }); }}
+          onInstallProxy={() => { void run('agent.installProxy', { executor: agent.id }); }}
           onSetPath={path => changeCliPath(agent, path)}
-          onSetDefaults={defaults => run(
-            agent.id,
-            () => setAgentProxyDefaults(agent.id, defaults),
-          )}
+          onSetDefaults={defaults => { void run('agent.setProxyDefaults', { executor: agent.id, defaults }); }}
+          onPickPath={async () => {
+            const settled = await waitForRunSettle(
+              store,
+              dispatch('agent.pickCliPath', { executor: agent.id }).id,
+            );
+            return settled.phase === 'confirmed' ? (settled.result as string | null) : null;
+          }}
         />
       ))}
       {error && <p className="s2-help" role="alert">{error}</p>}
@@ -624,22 +630,25 @@ function AgentInstallBlock() {
 
 function AgentInstallRow({
   agent,
-  busy,
   onSetup,
   onInstallCli,
   onInstallProxy,
   onSetPath,
   onSetDefaults,
+  onPickPath,
 }: {
   agent: AgentInstallStatus;
-  busy: boolean;
   onSetup: () => void;
   onInstallCli: () => void;
   onInstallProxy: () => void;
   onSetPath: (path: string | null) => Promise<boolean>;
   onSetDefaults: (defaults: Partial<AgentProxyDefaults>) => void;
+  onPickPath: () => Promise<string | null>;
 }) {
   const t = useT();
+  // Busy = any in-flight agent operation for THIS executor (Phase 3b — the
+  // runs carry the state the pre-migration `busy` flag duplicated).
+  const busy = usePendingOperations(agentEntityKey(agent.id)).length > 0;
   const [path, setPath] = useState(agent.cli.path ?? '');
   const pathInputRef = useRef<HTMLInputElement>(null);
   const [capabilities, setCapabilities] = useState<ProxyCapabilities | null>(null);
@@ -669,13 +678,11 @@ function AgentInstallRow({
 
   // Native file picker → fill + save the CLI path in one click (2026-08-04).
   async function onBrowse() {
-    try {
-      const picked = await pickAgentCliPath(agent.id);
-      if (picked) {
-        setPath(picked);
-        if (!(await onSetPath(picked))) setPath(agent.cli.path ?? '');
-      }
-    } catch { /* picker unavailable (non-macOS) or failed — typing still works */ }
+    const picked = await onPickPath();
+    if (picked) {
+      setPath(picked);
+      if (!(await onSetPath(picked))) setPath(agent.cli.path ?? '');
+    }
   }
 
   async function commitPath(next: string | null) {

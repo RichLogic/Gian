@@ -1,6 +1,7 @@
-import { useState } from 'react';
-import { createWorkspace, pickWorkspaceFolder } from '../api.js';
+import { useEffect, useState } from 'react';
+import type { PickFolderResult } from '../api.js';
 import { useT } from '../i18n/index.js';
+import { useOperationDispatch, useOperationRun } from '../operations/use-operations.js';
 
 type NewWorkspaceSource = 'new' | 'adopt';
 
@@ -21,19 +22,38 @@ const EMPTY_FORM: NewWorkspaceFormState = {
 };
 
 export function useNewWorkspace(onChange: () => void) {
+  const dispatch = useOperationDispatch();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<NewWorkspaceFormState>(EMPTY_FORM);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notes, setNotes] = useState<string[]>([]);
+  // Create runs as a pending operation (Phase 3a): `saving` reflects the
+  // in-flight run; canonical state converges via the definition's reconcile
+  // (upsert + refetch — the host does not broadcast workspace creates over
+  // REST).
+  const [createRunId, setCreateRunId] = useState<string | undefined>(undefined);
+  const createRun = useOperationRun(createRunId);
+  const saving = createRun?.phase === 'pending';
 
   function reset() {
     setForm(EMPTY_FORM);
     setError(null);
-    setNotes([]);
   }
 
-  async function submit() {
+  useEffect(() => {
+    if (!createRun) return;
+    if (createRun.phase === 'confirmed') {
+      setCreateRunId(undefined);
+      reset();
+      setOpen(false);
+      onChange();
+    } else if (createRun.phase === 'failed') {
+      setError(createRun.error ?? 'Create failed');
+      setCreateRunId(undefined);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createRun?.phase]);
+
+  function submit() {
     if (!form.name) {
       setError('Name is required');
       return;
@@ -42,26 +62,17 @@ export function useNewWorkspace(onChange: () => void) {
       setError('Path is required');
       return;
     }
-    setSaving(true);
     setError(null);
-    const result = await createWorkspace(
-      form.name,
-      form.source === 'adopt'
+    const run = dispatch('workspace.create', {
+      name: form.name,
+      ...(form.source === 'adopt'
         ? { path: form.path.trim() }
-        : { gitRemote: form.gitRemote.trim() || undefined },
-    );
-    setSaving(false);
-    if (!result.workspace) {
-      setError(result.error ?? 'Create failed');
-      setNotes(result.notes);
-      return;
-    }
-    reset();
-    setOpen(false);
-    onChange();
+        : { ...(form.gitRemote.trim() ? { gitRemote: form.gitRemote.trim() } : {}) }),
+    });
+    setCreateRunId(run.id);
   }
 
-  return { open, setOpen, form, setForm, saving, error, notes, submit, reset };
+  return { open, setOpen, form, setForm, saving, error, submit, reset };
 }
 
 export function NewWorkspacePanel({
@@ -209,20 +220,32 @@ function BrowseFolderButton({
   disabled?: boolean;
   onPicked: (path: string) => void;
 }) {
-  const [busy, setBusy] = useState(false);
+  const dispatch = useOperationDispatch();
   const [error, setError] = useState<string | null>(null);
+  // The native picker runs as a pending operation (Phase 3a). A cancel is a
+  // CONFIRMED no-op — the button simply re-enables with no picked path.
+  const [pickRunId, setPickRunId] = useState<string | undefined>(undefined);
+  const pickRun = useOperationRun(pickRunId);
+  const busy = pickRun?.phase === 'pending';
 
-  async function pick() {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
-    const result = await pickWorkspaceFolder();
-    setBusy(false);
-    if (result.error) {
-      setError(result.error);
-    } else if (result.path) {
-      onPicked(result.path);
+  useEffect(() => {
+    if (!pickRun) return;
+    if (pickRun.phase === 'confirmed') {
+      const result = pickRun.result as PickFolderResult | undefined;
+      setPickRunId(undefined);
+      if (result?.path) onPicked(result.path);
+    } else if (pickRun.phase === 'failed') {
+      setError(pickRun.error ?? 'Picker failed');
+      setPickRunId(undefined);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickRun?.phase]);
+
+  function pick() {
+    if (busy) return;
+    setError(null);
+    const run = dispatch('workspace.pickFolder', {});
+    setPickRunId(run.id);
   }
 
   return (

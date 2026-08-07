@@ -2,8 +2,8 @@ import { useCallback, useEffect } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 import type { Session } from '@gian/shared';
 import type { Mode } from '../components/Topbar.js';
+import type { OperationDispatcher } from '../operations/dispatcher.js';
 import type { ChatPanelTarget } from '../presentation/chat-panel.js';
-import type { GianWs } from '../ws.js';
 
 interface UseSessionSelectionInput {
   mode: Mode;
@@ -12,7 +12,7 @@ interface UseSessionSelectionInput {
   activeSessionIdRef: RefObject<string | null>;
   setActiveSessionId: Dispatch<SetStateAction<string | null>>;
   setChatPanel: Dispatch<SetStateAction<ChatPanelTarget | null>>;
-  ws: GianWs;
+  ops: OperationDispatcher;
 }
 
 export function useSessionSelection({
@@ -22,14 +22,17 @@ export function useSessionSelection({
   activeSessionIdRef,
   setActiveSessionId,
   setChatPanel,
-  ws,
+  ops,
 }: UseSessionSelectionInput): (sessionId: string) => void {
+  // Mark-viewed routes through the operation layer (Phase 2a): the unread
+  // dot clears immediately via the overlay instead of waiting for the Host
+  // broadcast.
   const markSessionViewed = useCallback((sessionId: string) => {
     const session = sessionsRef.current?.find(candidate => candidate.id === sessionId);
     if (session?.unread === 1) {
-      ws.send({ type: 'session:set_unread', session_id: sessionId, unread: false });
+      ops.dispatch('session.setUnread', { sessionId, unread: false });
     }
-  }, [sessionsRef, ws]);
+  }, [ops, sessionsRef]);
 
   const selectSession = useCallback((sessionId: string) => {
     setChatPanel(null);

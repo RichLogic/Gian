@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { AgentInstallStatus, Executor, Workspace } from '@gian/shared';
-import { createWorkspace, loadAgents } from '../api.js';
+import { loadAgents, peekAgents } from '../api.js';
 import { useT } from '../i18n/index.js';
+import { useOperationDispatch, useOperationRun } from '../operations/use-operations.js';
 
 export interface CreateSessionInput {
   workspaceId: string;
@@ -68,12 +69,19 @@ export function NewSessionView({
   /** Which agents exist and whether they're usable — driven by the host's
    *  /api/agents install status so the picker follows Settings, not a
    *  hardcoded list. Null while loading. */
-  const [agents, setAgents] = useState<AgentInstallStatus[] | null>(null);
+  const [agents, setAgents] = useState<AgentInstallStatus[] | null>(() => peekAgents());
   const [executor, setExecutor] = useState<Executor | null>(initialExecutor ?? null);
   const [wsName, setWsName] = useState('');
   const [wsRemote, setWsRemote] = useState('');
-  const [wsBusy, setWsBusy] = useState(false);
   const [wsError, setWsError] = useState<string | null>(null);
+  // Inline workspace create runs as a pending operation (Phase 3a): `wsBusy`
+  // reflects the in-flight run; the created Workspace arrives as the run's
+  // result and is selected on confirm. Canonical list state converges via
+  // the definition's reconcile + App's onWorkspaceCreated.
+  const dispatch = useOperationDispatch();
+  const [wsRunId, setWsRunId] = useState<string | undefined>(undefined);
+  const wsRun = useOperationRun(wsRunId);
+  const wsBusy = wsRun?.phase === 'pending';
 
   useEffect(() => {
     let cancelled = false;
@@ -90,20 +98,32 @@ export function NewSessionView({
     if (first) setExecutor(first.id);
   }, [agents, executor]);
 
-  async function createWs() {
-    if (!wsName) return;
-    setWsBusy(true);
-    setWsError(null);
-    const result = await createWorkspace(wsName, { gitRemote: wsRemote.trim() || undefined });
-    setWsBusy(false);
-    if (!result.workspace) {
-      setWsError(result.error ?? 'workspace create failed');
-      return;
+  useEffect(() => {
+    if (!wsRun) return;
+    if (wsRun.phase === 'confirmed') {
+      const workspace = wsRun.result as Workspace | undefined;
+      setWsRunId(undefined);
+      if (workspace) {
+        onWorkspaceCreated(workspace);
+        setSelectedWs(workspace.id);
+        setWsName('');
+        setWsRemote('');
+      }
+    } else if (wsRun.phase === 'failed') {
+      setWsError(wsRun.error ?? 'workspace create failed');
+      setWsRunId(undefined);
     }
-    onWorkspaceCreated(result.workspace);
-    setSelectedWs(result.workspace.id);
-    setWsName('');
-    setWsRemote('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsRun?.phase]);
+
+  function createWs() {
+    if (!wsName) return;
+    setWsError(null);
+    const run = dispatch('workspace.create', {
+      name: wsName,
+      ...(wsRemote.trim() ? { gitRemote: wsRemote.trim() } : {}),
+    });
+    setWsRunId(run.id);
   }
 
   const showInlineCreate = workspaces.length === 0 || selectedWs === '__new__';

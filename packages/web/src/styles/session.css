@@ -41,6 +41,10 @@
   text-align: left;
 }
 .session-row.active { color: var(--accent-text); }
+/* Pending session.delete (ui-operation-layer §5): the row stays visible but
+ * inert until the canonical session:deleted removes it — a failed delete
+ * only clears this state, never reinserts a row. */
+.session-row.deleting { opacity: 0.55; pointer-events: none; }
 
 @keyframes gian-pulse {
   0%, 100% { opacity: 0.4; transform: scale(0.8); }
@@ -185,6 +189,12 @@
 .exec-card-desc { font-size: var(--fz-11); color: var(--text-3); font-family: var(--font-mono); }
 
 /* Empty states */
+
+.transcript-history-load {
+  display: flex;
+  justify-content: center;
+  min-height: 28px;
+}
 
 .transcript-empty {
   align-self: center;

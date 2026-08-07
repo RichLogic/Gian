@@ -23,6 +23,7 @@ import { QueueManager } from '../src/queue/index.js';
 import { writeAttachment } from '../src/storage/attachments.js';
 import { listGitWorktrees } from '../src/workspace/git.js';
 import { createGitRepo } from './fixtures/git-repo.js';
+import { installEventStorageV3 } from '../src/storage/event-storage-v3-schema.js';
 
 class StubProxyClient implements ProxyClient {
   readonly executor = 'claude' as const;
@@ -300,9 +301,13 @@ class CapturingBroadcaster {
   }
 }
 
-function setup(proxyDefaults?: (executor: Executor) => AgentProxyDefaults) {
+function setup(
+  proxyDefaults?: (executor: Executor) => AgentProxyDefaults,
+  eventStorageV3 = false,
+) {
   const dir = mkdtempSync(join(tmpdir(), 'gian-sm-test-'));
   const db = openDatabase(dir);
+  if (eventStorageV3) installEventStorageV3(db);
 
   const wsId = randomUUID();
   // Migration 006 dropped `executor` from workspaces — it's a session
@@ -331,9 +336,13 @@ function setup(proxyDefaults?: (executor: Executor) => AgentProxyDefaults) {
   return { dir, db, wsId, proxyMgr, broadcaster, sessions };
 }
 
-function setupKimi(proxyDefaults?: (executor: Executor) => AgentProxyDefaults) {
+function setupKimi(
+  proxyDefaults?: (executor: Executor) => AgentProxyDefaults,
+  eventStorageV3 = false,
+) {
   const dir = mkdtempSync(join(tmpdir(), 'gian-sm-kimi-test-'));
   const db = openDatabase(dir);
+  if (eventStorageV3) installEventStorageV3(db);
   const wsId = randomUUID();
   db.prepare(
     'INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)',
@@ -588,6 +597,78 @@ test('Kimi adoption coalesces replay chunks and keeps assistant IDs turn-local',
       .filter(event => event.display?.type === 'message')
       .map(event => event.display?.data.itemId);
     assert.equal(new Set(assistantIds).size, 2);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi adoption replaces replayed tool snapshots instead of amplifying history', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi(undefined, true);
+  proxyMgr.client.replayUpdates = [
+    {
+      sessionId: 'kimi-tool-history',
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'run it' },
+      },
+    },
+    {
+      sessionId: 'kimi-tool-history',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-1',
+        kind: 'execute',
+        title: 'Run command',
+        status: 'pending',
+        rawInput: { command: 'printf done' },
+      },
+    },
+    {
+      sessionId: 'kimi-tool-history',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tool-1',
+        kind: 'execute',
+        title: 'Run command',
+        status: 'in_progress',
+        rawInput: { command: 'printf done' },
+        rawOutput: 'do',
+      },
+    },
+    {
+      sessionId: 'kimi-tool-history',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tool-1',
+        kind: 'execute',
+        title: 'Run command',
+        status: 'completed',
+        rawInput: { command: 'printf done' },
+        rawOutput: 'done',
+      },
+    },
+  ];
+
+  try {
+    const adopted = await sessions.adoptKimiNativeSession({
+      workspaceId: wsId,
+      cwd: '/tmp/test-ws',
+      nativeSessionId: 'kimi-tool-history',
+    });
+    assert.deepEqual(adopted.replay, { turns: 1, events: 2 });
+
+    const toolEvents = sessions.listEvents(adopted.session.id)
+      .filter(event => event.event === 'acp.sessionUpdate');
+    assert.equal(toolEvents.length, 1, 'one persisted row per replayed tool identity');
+    assert.equal(toolEvents[0]!.display?.type, 'activity.command');
+    assert.equal(toolEvents[0]!.display?.data.status, 'success');
+    assert.equal(toolEvents[0]!.display?.data.stdout, 'done');
+    assert.equal(
+      (toolEvents[0]!.data.update as { status?: string }).status,
+      'completed',
+      'the retained native payload is the final provider snapshot',
+    );
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -912,6 +993,51 @@ test('proxy notification persists event and broadcasts; turn.completed updates s
         m.type === 'session:updated' && (m as { session: { status?: string } }).session.status === 'done',
     );
     assert.ok(doneUpdate && doneUpdate.session.unread === 1, 'turn.completed broadcasts unread:1');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('P0 coalesces a burst of Codex diff snapshots into one final event', async () => {
+  const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup(undefined, true);
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'codex' });
+    await sessions.sendMessage(session.id, 'change it');
+    broadcaster.messages.length = 0;
+
+    for (let update = 0; update < 300; update++) {
+      proxyMgr.client.fire({
+        method: 'diff.updated',
+        params: {
+          sessionId: 'proxy_x',
+          turnId: 'stable-diff-turn',
+          data: {
+            diff: `diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new-${update}`,
+          },
+        },
+      });
+    }
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: { sessionId: 'proxy_x', data: { status: 'completed' } },
+    });
+
+    const rows = db.prepare(
+      `SELECT COUNT(*) AS n FROM events
+       WHERE session_id = ? AND type = 'diff.updated'`,
+    ).get(session.id) as { n: number };
+    assert.equal(rows.n, 1);
+    const diff = sessions.listEvents(session.id)
+      .find(event => event.event === 'diff.updated');
+    assert.equal(diff?.call_id, 'stable-diff-turn');
+    assert.match(String(diff?.display?.data.diff), /new-299$/);
+    assert.equal(
+      broadcaster.messages.filter(message => (
+        message.type === 'event' && message.event === 'diff.updated'
+      )).length,
+      1,
+    );
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

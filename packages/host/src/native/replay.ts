@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { Db } from '../storage/db.js';
 import type { ChatDisplay, Executor } from '@gian/shared';
 import { projectCcNotification } from '../event/normalize-cc.js';
+import { EventStore } from '../session/event-store.js';
 
 /**
  * Replay a native (claude / codex) JSONL session into Gian's `turns` and
@@ -53,10 +54,7 @@ export function replayNativeJsonl(
     `INSERT INTO turns (id, session_id, turn_number, status, created_at, completed_at)
      VALUES (?, ?, ?, 'completed', ?, ?)`,
   );
-  const insertEvent = db.prepare(
-    `INSERT INTO events (id, session_id, turn_id, call_id, type, data, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  );
+  const eventStore = new EventStore(db);
 
   let eventCount = 0;
   // Use a base timestamp + per-turn nanosecond bump so created_at stays in
@@ -83,48 +81,45 @@ export function replayNativeJsonl(
 
       // Bracket each turn with Gian-owned lifecycle events so the
       // transcript renders the turn-divider line.
-      insertEvent.run(
-        randomUUID(),
+      eventStore.persist({
         sessionId,
         turnId,
-        randomUUID(),
-        'gian.turn.started',
-        JSON.stringify(storedNativeEvent(executor, { turnId, status: 'running' }, {
+        callId: randomUUID(),
+        type: 'gian.turn.started',
+        data: storedNativeEvent(executor, { turnId, status: 'running' }, {
           type: 'state.turn-started',
           data: { turnId },
-        })),
-        turnStartedAt,
-      );
+        }),
+        createdAt: turnStartedAt,
+      });
       eventCount++;
 
       for (let e = 0; e < turn.events.length; e++) {
         const event = turn.events[e]!;
         // Spread events evenly between turn-started and turn-completed.
         const ts = new Date(baseTime + i * 1000 + 1 + e * 10).toISOString();
-        insertEvent.run(
-          randomUUID(),
+        eventStore.persist({
           sessionId,
           turnId,
-          event.callId,
-          event.type,
-          JSON.stringify(event.data),
-          ts,
-        );
+          callId: event.callId,
+          type: event.type,
+          data: event.data,
+          createdAt: ts,
+        });
         eventCount++;
       }
 
-      insertEvent.run(
-        randomUUID(),
+      eventStore.persist({
         sessionId,
         turnId,
-        randomUUID(),
-        'gian.turn.completed',
-        JSON.stringify(storedNativeEvent(executor, { turnId, status: 'completed' }, {
+        callId: randomUUID(),
+        type: 'gian.turn.completed',
+        data: storedNativeEvent(executor, { turnId, status: 'completed' }, {
           type: 'state.turn-completed',
           data: { turnId },
-        })),
-        turnCompletedAt,
-      );
+        }),
+        createdAt: turnCompletedAt,
+      });
       eventCount++;
     }
   });
@@ -138,24 +133,8 @@ export function replayNativeJsonl(
 // ---------------------------------------------------------------------------
 
 function parseCcJsonl(filePath: string): NormalizedTurn[] {
-  const turns: NormalizedTurn[] = [];
   const content = readFileSync(filePath, 'utf8');
-  const lines = content.split('\n');
-
-  let currentTurn: NormalizedTurn | null = null;
-
-  for (const line of lines) {
-    const parsed = parseCcLine(line);
-    if (!parsed) continue;
-    if (parsed.boundary === 'turn-start') {
-      currentTurn = { events: [...parsed.events] };
-      turns.push(currentTurn);
-    } else if (currentTurn) {
-      currentTurn.events.push(...parsed.events);
-    }
-  }
-
-  return turns;
+  return parseNativeJsonlLines(content.split('\n'), 'claude');
 }
 
 /**
@@ -319,14 +298,19 @@ function isAskUserQuestionToolResult(
 // ---------------------------------------------------------------------------
 
 function parseCodexJsonl(filePath: string): NormalizedTurn[] {
-  const turns: NormalizedTurn[] = [];
   const content = readFileSync(filePath, 'utf8');
-  const lines = content.split('\n');
+  return parseNativeJsonlLines(content.split('\n'), 'codex');
+}
 
+export function parseNativeJsonlLines(
+  lines: Iterable<string>,
+  executor: 'claude' | 'codex',
+): NormalizedTurn[] {
+  const turns: NormalizedTurn[] = [];
+  const parser = executor === 'claude' ? parseCcLine : parseCodexLine;
   let currentTurn: NormalizedTurn | null = null;
-
   for (const line of lines) {
-    const parsed = parseCodexLine(line);
+    const parsed = parser(line);
     if (!parsed) continue;
     if (parsed.boundary === 'turn-start') {
       currentTurn = { events: [...parsed.events] };
@@ -335,7 +319,6 @@ function parseCodexJsonl(filePath: string): NormalizedTurn[] {
       currentTurn.events.push(...parsed.events);
     }
   }
-
   return turns;
 }
 

@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ApprovalMode, Executor, NativeSession, Workspace } from '@gian/shared';
-import { adoptNativeSession, deleteNativeSession, loadNativeSessions } from '../api.js';
+import { loadNativeSessions } from '../api.js';
 import { confirm } from '../feedback.js';
+import {
+  useOperationDispatch,
+  useOperationPending,
+  useOperationRun,
+} from '../operations/use-operations.js';
+import { nativeEntityKey } from '../operations/native.js';
 
 const I = {
   check: 'M5 12l5 5L20 7',
@@ -50,6 +56,23 @@ export function NativeSessionsPane({
   const [status, setStatus] = useState<'all' | 'adopted' | 'available'>('all');
   const [adoptingFor, setAdoptingFor] = useState<NativeSession | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const dispatch = useOperationDispatch();
+  // Tracked native.delete run (Phase 3b): refresh on confirm, inline error
+  // on failure. `key` identifies the row so a follow-up delete supersedes.
+  const [deleteRun, setDeleteRun] = useState<{ runId: string; key: string } | null>(null);
+  const deleteRunState = useOperationRun(deleteRun?.runId);
+
+  useEffect(() => {
+    if (!deleteRun || !deleteRunState) return;
+    if (deleteRunState.phase === 'confirmed') {
+      setDeleteRun(null);
+      void refresh();
+    } else if (deleteRunState.phase === 'failed') {
+      setError(deleteRunState.error ?? 'Delete failed');
+      setDeleteRun(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deleteRunState?.phase]);
 
   async function refresh() {
     setLoading(true);
@@ -75,13 +98,14 @@ export function NativeSessionsPane({
       message: `Delete native ${s.executor} session ${s.id.slice(0, 8)}…?\nThis removes the .jsonl file from disk and cannot be undone.`,
       danger: true,
     }))) return;
-    const r = await deleteNativeSession(workspace.id, s.executor, s.id);
-    if (!r.ok) {
-      setError(r.error ?? 'Delete failed');
-      return;
-    }
     setError(null);
-    void refresh();
+    // Phase 3b: pending native.delete operation; the row stays visible until
+    // the run confirms, then the list refreshes (settle effect below).
+    setDeleteRun({ runId: dispatch('native.delete', {
+      workspaceId: workspace.id,
+      executor: s.executor,
+      nativeId: s.id,
+    }).id, key: `${s.executor}:${s.id}` });
   }
 
   return (
@@ -132,6 +156,7 @@ export function NativeSessionsPane({
             <NativeSessionRow
               key={`${s.executor}:${s.id}`}
               session={s}
+              deleting={deleteRun?.key === `${s.executor}:${s.id}` && deleteRunState?.phase === 'pending'}
               onAdopt={() => setAdoptingFor(s)}
               onDelete={() => void handleDelete(s)}
             />
@@ -157,10 +182,13 @@ export function NativeSessionsPane({
 
 function NativeSessionRow({
   session,
+  deleting = false,
   onAdopt,
   onDelete,
 }: {
   session: NativeSession;
+  /** True while this row's native.delete run is in flight (Phase 3b). */
+  deleting?: boolean;
   onAdopt: () => void;
   onDelete: () => void;
 }) {
@@ -258,11 +286,11 @@ function NativeSessionRow({
             {session.executor !== 'kimi' && (
               <button
                 className="ws-kebab-item danger"
-                disabled={adopted}
+                disabled={adopted || deleting}
                 title={adopted ? 'Unbind the Gian session before deleting the underlying native session' : ''}
                 onClick={() => { setMenuOpen(false); onDelete(); }}
               >
-                Delete native session
+                {deleting ? 'Deleting…' : 'Delete native session'}
               </button>
             )}
           </div>
@@ -280,26 +308,42 @@ function AdoptDialog({
   onCancel: () => void;
   onAdopted: () => void;
 }) {
+  const dispatch = useOperationDispatch();
   const [name, setName] = useState('');
   const [mode, setMode] = useState<ApprovalMode>('ask');
-  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Submitting state is the in-flight native.adopt run (Phase 3b).
+  const submitting = useOperationPending(
+    nativeEntityKey(workspaceId, source.executor, source.id),
+    'native.adopt',
+  );
+  const [adoptRunId, setAdoptRunId] = useState<string>();
+  const adoptRun = useOperationRun(adoptRunId);
 
-  async function submit() {
-    setSubmitting(true);
-    setError(null);
-    const result = await adoptNativeSession(workspaceId, {
-      executor: source.executor,
-      native_session_id: source.id,
-      ...(source.executor === 'kimi' ? {} : { approval_mode: mode }),
-      ...(name.trim() ? { name: name.trim() } : {}),
-    });
-    setSubmitting(false);
-    if (!result.session) {
-      setError(result.error ?? 'Adopt failed');
-      return;
+  useEffect(() => {
+    if (!adoptRun) return;
+    if (adoptRun.phase === 'confirmed') {
+      onAdopted();
+    } else if (adoptRun.phase === 'failed') {
+      setError(adoptRun.error ?? 'Adopt failed');
+      setAdoptRunId(undefined);
     }
-    onAdopted();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adoptRun?.phase]);
+
+  function submit() {
+    setError(null);
+    setAdoptRunId(dispatch('native.adopt', {
+      workspaceId,
+      executor: source.executor,
+      nativeId: source.id,
+      request: {
+        executor: source.executor,
+        native_session_id: source.id,
+        ...(source.executor === 'kimi' ? {} : { approval_mode: mode }),
+        ...(name.trim() ? { name: name.trim() } : {}),
+      },
+    }).id);
   }
 
   return (
@@ -371,7 +415,7 @@ function AdoptDialog({
           <button className="btn ghost" onClick={onCancel} disabled={submitting}>Cancel</button>
           <button
             className="btn primary"
-            onClick={() => void submit()}
+            onClick={submit}
             disabled={submitting}
           >
             {submitting ? 'Adopting…' : 'Adopt'}

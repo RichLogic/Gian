@@ -1,19 +1,25 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { GitHubUserProfile } from '@gian/shared';
-import { logout as hostLogout, whoAmI } from '../api.js';
+import { whoAmI } from '../api.js';
 import { desktopBridge } from '../desktop-bridge.js';
+import { wireAuthSink, type AuthIdentity } from '../operations/auth.js';
+import type { OperationDispatcher } from '../operations/dispatcher.js';
 
 export type AppAuthStatus = 'checking' | 'login' | 'authenticated';
-export type AppIdentity =
-  | { provider: 'github'; user: GitHubUserProfile }
-  | { provider: 'host'; username: string };
+export type AppIdentity = AuthIdentity;
 
 /**
  * Resolve the HTTP login before the realtime client starts. Password-backed
  * deployments otherwise open a socket with an empty token and reconnect
  * forever without ever rendering the login form.
+ *
+ * Phase 3b (UI Operation Layer): `signOut` dispatches the `auth.logout`
+ * operation (REST for host sessions, the desktop bridge for GitHub sessions
+ * — the definition picks per provider); login/logout state transitions
+ * arrive through the auth sink, wired here because this hook owns the
+ * status/identity state. Takes the dispatcher as a parameter — App creates
+ * it before calling this hook.
  */
-export function useAppAuth() {
+export function useAppAuth(dispatch: OperationDispatcher['dispatch']) {
   const [status, setStatus] = useState<AppAuthStatus>('checking');
   const [identity, setIdentity] = useState<AppIdentity | null>(null);
 
@@ -45,21 +51,24 @@ export function useAppAuth() {
     };
   }, []);
 
-  const onLoginOk = useCallback((nextIdentity: AppIdentity) => {
-    setIdentity(nextIdentity);
-    setStatus('authenticated');
+  // Settled auth operations land here (see operations/auth.ts).
+  useEffect(() => {
+    wireAuthSink({
+      signedIn: next => {
+        setIdentity(next);
+        setStatus('authenticated');
+      },
+      signedOut: () => {
+        setIdentity(null);
+        setStatus('login');
+      },
+    });
+    return () => wireAuthSink(null);
   }, []);
 
-  const signOut = useCallback(async () => {
-    const githubAuth = desktopBridge()?.githubAuth;
-    if (identity?.provider === 'github' && githubAuth) {
-      await githubAuth.signOut();
-    } else {
-      await hostLogout();
-    }
-    setIdentity(null);
-    setStatus('login');
-  }, [identity]);
+  const signOut = useCallback(() => {
+    dispatch('auth.logout', { provider: identity?.provider ?? 'host' });
+  }, [dispatch, identity]);
 
-  return { status, identity, onLoginOk, signOut };
+  return { status, identity, signOut };
 }

@@ -6,6 +6,41 @@ not listed.
 
 All releases below are unsigned macOS Apple Silicon beta builds.
 
+## [0.3.0] - 2026-08-07
+
+### Added
+
+- Added an Unfiled session group so sessions remain accessible after their
+  workspace is deleted.
+- Added paged transcript history and bounded replacement of mutable event
+  snapshots to keep long-running sessions responsive.
+- Added deterministic pending and optimistic feedback for user actions, with
+  reconciliation after failures, timeouts, or reconnects.
+
+### Changed
+
+- Last-turn file changes now open directly in the Diffs inspector, including
+  changes viewed from a workspace's primary checkout.
+- Working-tree and branch view selections now persist per session across
+  reloads without changing the Agent's execution directory.
+- Agent discovery and sidebar data loading now avoid repeated blocking probes
+  and unnecessary full-session event subscriptions.
+
+### Fixed
+
+- Fixed relative transcript links that became unresponsive when the linked
+  file was created after the transcript first loaded.
+- Fixed packaged Workbench Terminal startup when `node-pty` was already loaded
+  from the unpacked application directory.
+- Fixed workspace deletion being blocked by existing sessions or worktrees;
+  surviving sessions now lose only their workspace affiliation.
+
+### Known limitations
+
+- Event-storage v3 artifact offloading and compaction are not activated as an
+  automatic startup migration. Existing large databases remain compatible but
+  are not physically reduced by this release.
+
 ## [0.2.1-hotfix] - 2026-08-06
 
 ### Fixed

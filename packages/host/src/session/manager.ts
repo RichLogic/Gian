@@ -20,7 +20,7 @@ import type { NativeJsonlWatcher } from '../native/watcher.js';
 import { locateCcJsonl, appendCcCustomTitle } from '../native/locate-jsonl.js';
 import { randomUUID } from 'node:crypto';
 import { SessionRepository } from './repository.js';
-import { SessionHistoryStore } from './history-store.js';
+import { SessionHistoryStore, type EventHistoryPage } from './history-store.js';
 import { TurnRuntime } from './turn-runtime.js';
 import {
   SessionLifecycleService,
@@ -814,6 +814,10 @@ export class SessionManager {
 
   listEvents(sessionId: string): EventEnvelope[] {
     return this.history.listEvents(sessionId);
+  }
+
+  listEventPage(sessionId: string, beforeTurn: number | null, pageSize?: number): EventHistoryPage {
+    return this.history.listEventPage(sessionId, beforeTurn, pageSize);
   }
 
   private persistNativeConfigSnapshot(

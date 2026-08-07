@@ -608,10 +608,13 @@ button.sb-section:hover { color: var(--text); }
 }
 
 /* The strip shell is built to stand alone (own width math + auto margins);
-   inside the underbar the ROW owns the geometry — shell stretches to fill it
-   (chips flush left, nav flush right, pop-up panels span the composer width). */
+   inside the underbar the ROW owns the geometry — the shell shrinks to its
+   chip so the Last-turn chip packs next to it on the left; the nav buttons'
+   margin-left:auto keeps them flush right. Pop-up panels are absolute against
+   the underbar row (left/right:16px), so they stay composer-width regardless
+   of the shell's width. */
 .main-underbar .context-strip-shell {
-  flex: 1;
+  flex: 0 1 auto;
   width: auto;
   max-width: none;
   margin: 0;
@@ -1565,8 +1568,6 @@ button.sb-section:hover { color: var(--text); }
 .changes-foot {
   flex: none;
   padding: 10px 12px;
-  border-top: 1px solid var(--hairline);
-  background: var(--surface-2);
   display: flex; flex-direction: column; gap: 8px;
 }
 .changes-foot .row {

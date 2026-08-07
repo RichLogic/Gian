@@ -7,10 +7,16 @@ import type { Mode } from '../components/Topbar.js';
 import { StatusIcon, statusGlyphShown, relTime } from './session-list-status.js';
 import { NewSessionView } from './new-session-view.js';
 import type { CreateSessionInput } from './new-session-view.js';
-import { completeSubtask, createSubtask, reopenSubtask } from '../api.js';
 import { confirm as confirmDialog, toast } from '../feedback.js';
+import { sessionEntityKey } from '../operations/session.js';
+import { taskEntityKey } from '../operations/task.js';
+import {
+  useOperationDispatch,
+  useOperationPending,
+  useOperationRun,
+  usePendingOperations,
+} from '../operations/use-operations.js';
 import { sessionNeedsAttention } from '../session-routing.js';
-import type { GianWs } from '../ws.js';
 
 // ── V2 icon paths (verbatim subset from design/gian-design-v2/js/data.jsx) ──
 const I = {
@@ -92,7 +98,6 @@ export function TasksView({
   tasks,
   sessions,
   workspaces,
-  ws,
   activeTaskId,
   activeSubtaskId,
   subtaskMain,
@@ -107,7 +112,6 @@ export function TasksView({
   tasks: Task[];
   sessions: Session[];
   workspaces: Workspace[];
-  ws: GianWs;
   activeTaskId: string | null;
   activeSubtaskId: string | null;
   /** A Subtask IS a Session: when one is selected, App builds the full
@@ -123,14 +127,35 @@ export function TasksView({
   onWorkspaceCreated: (workspace: Workspace) => void;
 }) {
   const t = useT();
+  const dispatch = useOperationDispatch();
   const rail = useResizableWidth('rail.w', 272, 200, 480, 'left');
 
   // Task-context new-session form (sidebar task-row "+" and the ⌘J/⌘K
   // "new subtask" shortcut open it): the shared NewSessionView with the task
-  // shown read-only; submit goes to POST /api/tasks/:id/subtasks.
+  // shown read-only; submit dispatches `task.createSubtask` (REST
+  // POST /api/tasks/:id/subtasks) through the operation layer. The pending
+  // run drives the form's creating state; the created Session arrives as the
+  // run's result and is selected on confirm.
   const [newForTaskId, setNewForTaskId] = useState<string | null>(null);
   const [newForExecutor, setNewForExecutor] = useState<Executor | undefined>(undefined);
-  const [creatingSubtask, setCreatingSubtask] = useState(false);
+  const [subtaskRun, setSubtaskRun] = useState<{ runId: string; taskId: string } | null>(null);
+  const subtaskCreateRun = useOperationRun(subtaskRun?.runId);
+  const creatingSubtask = subtaskCreateRun?.phase === 'pending';
+
+  useEffect(() => {
+    if (!subtaskRun || !subtaskCreateRun) return;
+    if (subtaskCreateRun.phase === 'confirmed') {
+      const session = subtaskCreateRun.result as Session | undefined;
+      const taskId = subtaskRun.taskId;
+      setSubtaskRun(null);
+      setNewForTaskId(null);
+      if (session) onSelectSubtask(taskId, session.id);
+    } else if (subtaskCreateRun.phase === 'failed') {
+      setSubtaskRun(null);
+      toast({ kind: 'error', message: t('tasks.newSubtask.createFailed') });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subtaskCreateRun?.phase]);
 
   // The top-left "Gian" brand button broadcasts `gian.toggle-rail` (Topbar);
   // each view collapses its own rail. Sessions (CodingView) already listens —
@@ -167,20 +192,14 @@ export function TasksView({
     setNewForTaskId(taskId);
   }
 
-  async function submitNewSubtask(taskId: string, input: CreateSessionInput) {
-    setCreatingSubtask(true);
-    const session = await createSubtask(taskId, {
-      workspace_id: input.workspaceId,
+  function submitNewSubtask(taskId: string, input: CreateSessionInput) {
+    const run = dispatch('task.createSubtask', {
+      taskId,
+      workspaceId: input.workspaceId,
       executor: input.executor,
       ...(input.name ? { name: input.name } : {}),
     });
-    setCreatingSubtask(false);
-    if (!session) {
-      toast({ kind: 'error', message: t('tasks.newSubtask.createFailed') });
-      return;
-    }
-    setNewForTaskId(null);
-    onSelectSubtask(taskId, session.id);
+    setSubtaskRun({ runId: run.id, taskId });
   }
 
   return (
@@ -196,7 +215,6 @@ export function TasksView({
         onOpenSearch={onOpenSearch}
         tasks={tasks}
         sessions={sessions}
-        ws={ws}
         activeSubtaskId={activeSubtaskId}
         onSelectSubtask={onSelectSubtask}
         onNewSession={openNewForTask}
@@ -210,7 +228,7 @@ export function TasksView({
           onWorkspaceCreated={onWorkspaceCreated}
           creating={creatingSubtask}
           onCancel={() => setNewForTaskId(null)}
-          onCreate={input => { void submitNewSubtask(newForTask.id, input); }}
+          onCreate={input => { submitNewSubtask(newForTask.id, input); }}
         />
       ) : (
         <TaskDetail
@@ -353,13 +371,15 @@ function TaskMenu({
 
 /** Shared task-menu action builders — the same operations the topbar task
  *  menu performs (rename / done-toggle / delete), driven from the
- *  sidebar row "⋯". */
+ *  sidebar row "⋯". All mutations dispatch through the operation layer
+ *  (Phase 3a): rename/done are optimistic overlays, delete is pending with
+ *  the duplicate destructive guard. */
 function useTaskActions(
-  ws: GianWs,
   sessions: Session[],
   setRenamingTaskId: (taskId: string) => void,
 ) {
   const t = useT();
+  const dispatch = useOperationDispatch();
   return {
     rename: (task: Task) => () => setRenamingTaskId(task.id),
     toggleDone: (task: Task) => () => {
@@ -373,11 +393,7 @@ function useTaskActions(
           return;
         }
       }
-      ws.send({
-        type: 'task:update',
-        task_id: task.id,
-        status: task.status === 'done' ? 'open' : 'done',
-      });
+      dispatch('task.toggleDone', { taskId: task.id, status: task.status === 'done' ? 'open' : 'done' });
     },
     remove: (task: Task) => () => {
       const count = sessions.filter(session => session.task_id === task.id).length;
@@ -389,30 +405,29 @@ function useTaskActions(
         danger: true,
         confirmLabel: t('common.delete'),
       }).then(confirmed => {
-        if (confirmed) ws.send({ type: 'task:delete', task_id: task.id });
+        if (confirmed) dispatch('task.delete', { taskId: task.id });
       });
     },
   };
 }
 
 /** Inline task-name editor (sidebar ⋯ → Rename). Enter commits via
- *  `task:update`, Escape / blur cancels. */
+ *  `task.rename` (optimistic overlay), Escape / blur cancels. */
 function TaskRenameInput({
   task,
-  ws,
   onDone,
 }: {
   task: Task;
-  ws: GianWs;
   onDone: () => void;
 }) {
   const t = useT();
+  const dispatch = useOperationDispatch();
   const [name, setName] = useState(task.name);
 
   function submit() {
     const trimmed = name.trim();
     if (trimmed && trimmed !== task.name) {
-      ws.send({ type: 'task:update', task_id: task.id, name: trimmed });
+      dispatch('task.rename', { taskId: task.id, name: trimmed });
     }
     onDone();
   }
@@ -441,7 +456,6 @@ function TasksList({
   onOpenSearch,
   tasks,
   sessions,
-  ws,
   activeSubtaskId,
   onSelectSubtask,
   onNewSession,
@@ -451,13 +465,13 @@ function TasksList({
   onOpenSearch: () => void;
   tasks: Task[];
   sessions: Session[];
-  ws: GianWs;
   activeSubtaskId: string | null;
   onSelectSubtask: (taskId: string, subtaskId: string) => void;
   /** Open the task-context new-session form (task-row "+"). */
   onNewSession: (taskId: string) => void;
 }) {
   const t = useT();
+  const dispatch = useOperationDispatch();
   const [creating, setCreating] = useState(false);
   // Section collapse (2026-08-03 two-group layout): 完成 collapsed by
   // default, not persisted. The open group has no section header (2026-08-03:
@@ -495,13 +509,24 @@ function TasksList({
     [visible],
   );
 
-  const taskActions = useTaskActions(ws, sessions, setRenamingTaskId);
+  const taskActions = useTaskActions(sessions, setRenamingTaskId);
+  // Destructive-pending row treatment (proposal §5): a task being deleted
+  // stays visible with a pending affordance until `task:deleted` lands — a
+  // failed delete never requires a surprising reinsert.
+  const pendingRuns = usePendingOperations();
+  const deletingTaskIds = new Set(
+    pendingRuns
+      .filter(run => run.name === 'task.delete')
+      .map(run => run.entityKey.slice(taskEntityKey('').length)),
+  );
 
   function createTaskNow(input: { name: string }) {
-    // Match how other entities are created in the app: fire a WS message and
-    // let the host echo back `task:created`. No executor is picked here — the
-    // task is a pure grouping; each session picks its own agent at creation.
-    ws.send({ type: 'task:create', name: input.name });
+    // Match how other entities are created in the app: dispatch the pending
+    // create operation; the host echoes `task:created` before the
+    // operation:result, so the canonical row appears first. No executor is
+    // picked here — the task is a pure grouping; each session picks its own
+    // agent at creation.
+    dispatch('task.create', { name: input.name });
     setCreating(false);
   }
 
@@ -515,6 +540,7 @@ function TasksList({
     group.map(task => {
       const childSubs = subtasksFor(sessions, task.id);
       const isCollapsed = collapsedTasks.has(task.id);
+      const deleting = deletingTaskIds.has(task.id);
       return (
         <div key={task.id} className="tasks-list-task">
           <div
@@ -523,13 +549,17 @@ function TasksList({
           >
             <span className="sb-group-ico"><Icon d={isCollapsed ? I.listCollapse : I.listTodo} size={14} /></span>
             {renamingTaskId === task.id ? (
-              <TaskRenameInput task={task} ws={ws} onDone={() => setRenamingTaskId(null)} />
+              <TaskRenameInput task={task} onDone={() => setRenamingTaskId(null)} />
             ) : (
               <span className="task-group-name">{task.name}</span>
+            )}
+            {deleting && (
+              <span className="ri-age" data-testid={`task-deleting-${task.id}`}>{t('tasks.deleting')}</span>
             )}
             {/* 2026-08-04: the 待处理 count badge was removed from task
                 headers — attention is conveyed per subtask row (StatusIcon),
                 not rolled up onto the task title. */}
+            {!deleting && (
             <span className="sb-group-acts">
               <TaskMenu
                 task={task}
@@ -549,13 +579,13 @@ function TasksList({
                 <Icon d={I.plus} size={13} />
               </button>
             </span>
+            )}
           </div>
           {!isCollapsed && childSubs.map(st => (
             <SubtaskRow
               key={st.id}
               subtask={st}
               active={st.id === activeSubtaskId}
-              ws={ws}
               onSelect={() => onSelectSubtask(task.id, st.id)}
             />
           ))}
@@ -620,7 +650,7 @@ function TasksList({
                 task={task}
                 needsAttention={subtasksFor(sessions, task.id).some(sessionNeedsAttention)}
                 renaming={renamingTaskId === task.id}
-                ws={ws}
+                deleting={deletingTaskIds.has(task.id)}
                 onRenameDone={() => setRenamingTaskId(null)}
                 menu={(
                   <TaskMenu
@@ -646,14 +676,16 @@ function TasksList({
  * name — but NOT selectable (no subtasks) and without the "+" action. The
  * hover "⋯" menu carries rename / reopen / delete.
  */
-function DoneTaskRow({ task, needsAttention, renaming, ws, onRenameDone, menu }: {
+function DoneTaskRow({ task, needsAttention, renaming, deleting, onRenameDone, menu }: {
   task: Task;
   /** A done Task still surfaces the rollup dot when a child subtask is
    *  待处理, so active/unread subtasks aren't lost in the collapsed 完成
    *  section. */
   needsAttention: boolean;
   renaming: boolean;
-  ws: GianWs;
+  /** Delete in flight (pending operation) — the row stays visible with a
+   *  pending affordance until `task:deleted` lands (proposal §5). */
+  deleting: boolean;
   onRenameDone: () => void;
   menu: React.ReactNode;
 }) {
@@ -662,14 +694,18 @@ function DoneTaskRow({ task, needsAttention, renaming, ws, onRenameDone, menu }:
     <div className="sb-group task-group done-task-group">
       <span className="sb-group-ico"><Icon d={I.listChecks} size={14} /></span>
       {renaming ? (
-        <TaskRenameInput task={task} ws={ws} onDone={onRenameDone} />
+        <TaskRenameInput task={task} onDone={onRenameDone} />
       ) : (
         <span className="task-group-name">{task.name}</span>
       )}
       {needsAttention && (
         <span className="task-attn-dot" title={t('tasks.needsAttention')} aria-label={t('tasks.needsAttention')} />
       )}
-      <span className="sb-group-acts">{menu}</span>
+      {deleting ? (
+        <span className="ri-age" data-testid={`task-deleting-${task.id}`}>{t('tasks.deleting')}</span>
+      ) : (
+        <span className="sb-group-acts">{menu}</span>
+      )}
     </div>
   );
 }
@@ -689,18 +725,23 @@ function DoneTaskRow({ task, needsAttention, renaming, ws, onRenameDone, menu }:
 function SubtaskRow({
   subtask,
   active,
-  ws,
   onSelect,
 }: {
   subtask: Session;
   active: boolean;
-  ws: GianWs;
   onSelect: () => void;
 }) {
   const t = useT();
+  const dispatch = useOperationDispatch();
   const done = subtask.completed_at != null;
   const pinned = subtask.pinned_at != null;
   const running = subtask.status === 'running';
+  // Pending complete/reopen run (Phase 3a): disables the toggle and blocks
+  // duplicate submission while the REST call is in flight.
+  const updating = useOperationPending(
+    sessionEntityKey(subtask.id),
+    done ? 'task.reopenSubtask' : 'task.completeSubtask',
+  );
   return (
     <div
       className={`rail-item session-row${done ? ' subtask-done' : ''}${active ? ' active' : ''}${running ? ' is-running' : ''}`}
@@ -741,7 +782,9 @@ function SubtaskRow({
             title={t(pinned ? 'coding.session.unpin' : 'coding.session.pin')}
             onClick={e => {
               e.stopPropagation();
-              ws.send({ type: 'session:pin', session_id: subtask.id, pinned: !pinned });
+              // Pin routes through the operation layer (Phase 2a): the row
+              // re-sorts immediately via the pinned_at overlay.
+              dispatch('session.pin', { sessionId: subtask.id, pinned: !pinned });
             }}
           >
             <Icon d={I.pin} size={13} filled={pinned} />
@@ -754,9 +797,14 @@ function SubtaskRow({
             data-testid={`subtask-complete-${subtask.id}`}
             aria-label={t(done ? 'tasks.subtask.reopen' : 'tasks.subtask.complete')}
             title={t(done ? 'tasks.subtask.reopen' : 'tasks.subtask.complete')}
+            disabled={updating}
             onClick={e => {
               e.stopPropagation();
-              void (done ? reopenSubtask(subtask.id) : completeSubtask(subtask.id));
+              // Complete/reopen routes through the operation layer (Phase
+              // 3a): the pending run correlates the REST result; canonical
+              // state converges via the session:updated broadcast plus the
+              // definition's direct canonical patch (operations/task.ts).
+              dispatch(done ? 'task.reopenSubtask' : 'task.completeSubtask', { sessionId: subtask.id });
             }}
           >
             <Icon d={done ? I.lockOpen : I.check} size={13} stroke={2.2} />

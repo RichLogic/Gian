@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { AgentInstallStatus, Executor, OnboardingState } from '@gian/shared';
+import type { AgentInstallStatus, Executor, OnboardingProjectRootResult, OnboardingState } from '@gian/shared';
+import { loadAgents } from '../api.js';
+import type { PickFolderResult } from '../api.js';
+import { agentEntityKey } from '../operations/agents.js';
 import {
-  completeOnboarding,
-  installAgentCli,
-  installAgentProxy,
-  loadAgents,
-  pickWorkspaceFolder,
-  saveOnboardingProjectRoot,
-  setAgentCliPath,
-} from '../api.js';
+  useOperationDispatch,
+  useOperationRun,
+  useOperationStore,
+  usePendingOperations,
+  waitForRunSettle,
+} from '../operations/use-operations.js';
 import type { AppIdentity } from '../controllers/use-app-auth.js';
 import { useT } from '../i18n/index.js';
 
@@ -37,6 +38,16 @@ export function OnboardingSteps({ active }: { active: 1 | 2 | 3 }) {
   );
 }
 
+/**
+ * First-run onboarding. Phase 3b (UI Operation Layer): every mutation
+ * dispatches a registered pending operation — `agent.installCli` /
+ * `agent.installProxy` / `agent.setCliPath` (install + path, restart-free:
+ * onboarding runs before the desktop app needs a restart), the shared
+ * `workspace.pickFolder` (native directory dialog), and the
+ * `onboarding.saveProjectRoot` → `onboarding.complete` finish chain.
+ * Busy states derive from the runs; `waitForRunSettle` sequences the
+ * multi-step flows promise-style.
+ */
 export function OnboardingView({
   identity,
   initialState,
@@ -49,13 +60,21 @@ export function OnboardingView({
   onComplete: (state: OnboardingState) => void;
 }) {
   const t = useT();
+  const dispatch = useOperationDispatch();
+  const store = useOperationStore();
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [agents, setAgents] = useState<AgentInstallStatus[]>(initialState?.agents ?? []);
   const [root, setRoot] = useState(initialState?.projectRoot ?? '~/Coding');
-  const [busyAgent, setBusyAgent] = useState<Executor | null>(null);
-  const [savingDirectory, setSavingDirectory] = useState(false);
-  const [pickingDirectory, setPickingDirectory] = useState(false);
   const [error, setError] = useState(initialError);
+  // Tracked runs driving the directory-step busy states (derived, not
+  // duplicated local flags).
+  const [pickRunId, setPickRunId] = useState<string>();
+  const [finishRunId, setFinishRunId] = useState<string>();
+  const pickRun = useOperationRun(pickRunId);
+  const finishRun = useOperationRun(finishRunId);
+  const pickingDirectory = pickRun?.phase === 'pending';
+  const savingDirectory = finishRun?.phase === 'pending';
+  const anyAgentBusy = usePendingOperations().some(run => run.name.startsWith('agent.'));
 
   const orderedAgents = useMemo(() => AGENT_ORDER
     .map(id => agents.find(agent => agent.id === id))
@@ -68,64 +87,83 @@ export function OnboardingView({
     return next;
   }
 
-  async function setupAgent(agent: AgentInstallStatus) {
-    setError('');
-    try {
-      if (agent.proxy.state !== 'ready') await installAgentProxy(agent.id);
-      if (agent.cli.state !== 'ready') await installAgentCli(agent.id);
-      await refreshAgents();
-    } catch (value) {
-      setError(value instanceof Error ? value.message : String(value));
-      await refreshAgents().catch(() => undefined);
-    }
-  }
-
   async function setupOne(agent: AgentInstallStatus) {
-    setBusyAgent(agent.id);
-    try {
-      await setupAgent(agent);
-    } finally {
-      setBusyAgent(null);
+    setError('');
+    if (agent.proxy.state !== 'ready') {
+      const settled = await waitForRunSettle(
+        store,
+        dispatch('agent.installProxy', { executor: agent.id }).id,
+      );
+      if (settled.phase !== 'confirmed') {
+        setError(settled.error ?? 'Install failed');
+        await refreshAgents().catch(() => undefined);
+        return;
+      }
     }
+    if (agent.cli.state !== 'ready') {
+      const settled = await waitForRunSettle(
+        store,
+        dispatch('agent.installCli', { executor: agent.id }).id,
+      );
+      if (settled.phase !== 'confirmed') {
+        setError(settled.error ?? 'Install failed');
+        await refreshAgents().catch(() => undefined);
+        return;
+      }
+    }
+    await refreshAgents();
   }
 
   async function savePath(agent: AgentInstallStatus, path: string) {
-    setBusyAgent(agent.id);
     setError('');
-    try {
-      await setAgentCliPath(agent.id, path.trim() || null);
-      await refreshAgents();
-    } catch (value) {
-      setError(value instanceof Error ? value.message : String(value));
-    } finally {
-      setBusyAgent(null);
+    const settled = await waitForRunSettle(
+      store,
+      dispatch('agent.setCliPath', {
+        executor: agent.id,
+        path: path.trim() || null,
+        restart: false,
+        previousPath: agent.cli.path ?? null,
+      }).id,
+    );
+    if (settled.phase !== 'confirmed') {
+      setError(settled.error ?? 'Save failed');
+      return;
     }
+    await refreshAgents();
   }
 
   async function pickDirectory() {
-    setPickingDirectory(true);
     setError('');
-    try {
-      const result = await pickWorkspaceFolder();
-      if (result.error) setError(result.error);
-      if (result.path) setRoot(result.path);
-    } finally {
-      setPickingDirectory(false);
+    const run = dispatch('workspace.pickFolder', {});
+    setPickRunId(run.id);
+    const settled = await waitForRunSettle(store, run.id);
+    if (settled.phase !== 'confirmed') {
+      setError(settled.error ?? 'Picker failed');
+      return;
     }
+    const result = settled.result as PickFolderResult | undefined;
+    if (result?.path) setRoot(result.path);
   }
 
   async function finish() {
-    setSavingDirectory(true);
     setError('');
-    try {
-      const saved = await saveOnboardingProjectRoot(root);
-      setRoot(saved.projectRoot);
-      onComplete(await completeOnboarding());
-    } catch (value) {
-      setError(value instanceof Error ? value.message : String(value));
-    } finally {
-      setSavingDirectory(false);
+    const save = dispatch('onboarding.saveProjectRoot', { path: root });
+    setFinishRunId(save.id);
+    const savedRun = await waitForRunSettle(store, save.id);
+    if (savedRun.phase !== 'confirmed') {
+      setError(savedRun.error ?? 'Save failed');
+      return;
     }
+    const saved = savedRun.result as OnboardingProjectRootResult;
+    setRoot(saved.projectRoot);
+    const complete = dispatch('onboarding.complete', {});
+    setFinishRunId(complete.id);
+    const completedRun = await waitForRunSettle(store, complete.id);
+    if (completedRun.phase !== 'confirmed') {
+      setError(completedRun.error ?? 'Complete failed');
+      return;
+    }
+    onComplete(completedRun.result as OnboardingState);
   }
 
   const githubUser = identity?.provider === 'github' ? identity.user : null;
@@ -185,7 +223,6 @@ export function OnboardingView({
                 <OnboardingAgentRow
                   key={agent.id}
                   agent={agent}
-                  busy={busyAgent === agent.id}
                   onSetup={() => void setupOne(agent)}
                   onSavePath={path => void savePath(agent, path)}
                 />
@@ -196,7 +233,7 @@ export function OnboardingView({
               <button
                 className="btn ghost"
                 type="button"
-                disabled={busyAgent !== null}
+                disabled={anyAgentBusy}
                 onClick={() => { setError(''); setStep(1); }}
               >
                 {t('common.back')}
@@ -204,7 +241,7 @@ export function OnboardingView({
               <button
                 className="btn primary"
                 type="button"
-                disabled={!anyReady || busyAgent !== null}
+                disabled={!anyReady || anyAgentBusy}
                 onClick={() => { setError(''); setStep(3); }}
               >
                 {t('common.continue')}
@@ -270,16 +307,16 @@ export function OnboardingView({
 
 function OnboardingAgentRow({
   agent,
-  busy,
   onSetup,
   onSavePath,
 }: {
   agent: AgentInstallStatus;
-  busy: boolean;
   onSetup: () => void;
   onSavePath: (path: string) => void;
 }) {
   const t = useT();
+  // Busy = any in-flight agent operation for THIS executor (Phase 3b).
+  const busy = usePendingOperations(agentEntityKey(agent.id)).length > 0;
   const [path, setPath] = useState(agent.cli.path ?? '');
   const cliReady = agent.cli.state === 'ready';
   const proxyReady = agent.proxy.state === 'ready';

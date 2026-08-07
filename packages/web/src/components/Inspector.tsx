@@ -1,7 +1,9 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
-import { loadTree, loadChanged, loadCommits, loadBranchList, loadAllFiles, stageFile, unstageFile } from '../api.js';
+import { loadTree, loadChanged, loadCommits, loadBranchList, loadAllFiles } from '../api.js';
 import type { TreeEntry, ChangedEntry, BranchCommit, BranchList, WorkingTree, ChangeScope } from '../api.js';
+import { gitIndexEntityKey } from '../operations/git.js';
+import { useOperationDispatch, useOperationRun, usePendingOperations } from '../operations/use-operations.js';
 import { useT } from '../i18n/index.js';
 
 // App.tsx routes the 'workspaces' / 'settings' inspector kinds to dedicated
@@ -53,6 +55,9 @@ interface Props {
    *  changes because that's the scope whose numbers it reports). requestId
    *  re-triggers the apply even when the scope value didn't change. */
   scopeRequest?: { scope: ChangeScope; requestId: number } | null;
+  /** Active session — forwarded to the host on the Last-turn scope, whose
+   *  `ws:`/`ext:` trees don't carry a session of their own. */
+  activeSessionId?: string | null;
   /** Changes tab: open the file's diff in Sheet, in the currently-selected
    *  scope (and pinned commit / compare base, for the Committed / Branch
    *  second-row pickers) so the diff matches what the row represents. */
@@ -65,7 +70,7 @@ interface Props {
   onComposePrompt: (text: string) => void;
 }
 
-export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, revealFile, scopeRequest, onOpenDiff, canCommit, onComposePrompt }: Props) {
+export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, revealFile, scopeRequest, activeSessionId, onOpenDiff, canCommit, onComposePrompt }: Props) {
   if (tab === 'files') {
     return (
       <FilesInspector
@@ -76,7 +81,7 @@ export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, reveal
       />
     );
   }
-  return <ChangesInspector workingTreeId={workingTreeId} scopeRequest={scopeRequest} onOpenDiff={onOpenDiff} canCommit={canCommit} onComposePrompt={onComposePrompt} />;
+  return <ChangesInspector workingTreeId={workingTreeId} scopeRequest={scopeRequest} activeSessionId={activeSessionId} onOpenDiff={onOpenDiff} canCommit={canCommit} onComposePrompt={onComposePrompt} />;
 }
 
 // ─── Files Inspector ────────────────────────────────────────────────────────
@@ -233,6 +238,7 @@ function TreeFolder({
   revealPath: string | null;
   revealRequestId?: number;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(openInitial);
   const [entries, setEntries] = useState<TreeEntry[] | null>(null);
   const containsReveal = !!revealPath && (
@@ -266,6 +272,15 @@ function TreeFolder({
         <span className="tree-caret"><Icon d={I.chev} size={10} /></span>
         <span className="tree-name">{name}</span>
       </div>
+      {/* Row-level loader while loadTree is in flight (proposal §4.5) — the
+          expand must not wait silently. */}
+      {open && entries === null && (
+        <div className="tree-item tree-loading" style={{ paddingLeft: 6 + (depth + 1) * 10 }}>
+          <span className="tree-caret" />
+          <span className="spinner" aria-hidden="true" />
+          <span className="tree-name" style={{ color: 'var(--text-3)' }}>{t('inspector.files.loading')}</span>
+        </div>
+      )}
       {open && entries && (
         <div className="tree-children">
           {entries.map(e => e.type === 'dir' ? (
@@ -483,17 +498,20 @@ const SCOPE_SEP_BEFORE: ReadonlySet<ChangeScope> = new Set(['all', 'commit']);
 function ChangesInspector({
   workingTreeId,
   scopeRequest,
+  activeSessionId,
   onOpenDiff,
   canCommit,
   onComposePrompt,
 }: {
   workingTreeId: string | null;
   scopeRequest?: { scope: ChangeScope; requestId: number } | null;
+  activeSessionId?: string | null;
   onOpenDiff: (path: string, permanent: boolean, scope: ChangeScope, sha?: string | null, base?: string | null) => void;
   canCommit: boolean;
   onComposePrompt: (text: string) => void;
 }) {
   const t = useT();
+  const dispatch = useOperationDispatch();
   const [scope, setScope] = useState<ChangeScope>(() => {
     try {
       const s = localStorage.getItem('gian.changes.scope');
@@ -504,7 +522,21 @@ function ChangesInspector({
   });
   const [changes, setChanges] = useState<ChangedEntry[]>([]);
   const [reloadKey, setReloadKey] = useState(0);
-  const [busyPath, setBusyPath] = useState<string | null>(null);
+  // Stage/unstage busy state is derived from the in-flight git.stage /
+  // git.unstage runs (Phase 3b — the runs replaced the local busyPath flag);
+  // the tracked run reloads the changed list once the index write confirms.
+  const [stageRunId, setStageRunId] = useState<string>();
+  const stageRun = useOperationRun(stageRunId);
+  const pendingRuns = usePendingOperations();
+  // `git:<wt>:` — the entity-key prefix for this tree's stage/unstage runs
+  // (see gitIndexEntityKey in operations/git.ts).
+  const indexPrefix = workingTreeId ? gitIndexEntityKey(workingTreeId, '') : null;
+  const busyRun = pendingRuns.find(run =>
+    (run.name === 'git.stage' || run.name === 'git.unstage')
+    && (indexPrefix ? run.entityKey.startsWith(indexPrefix) : false));
+  const busyPath = busyRun && indexPrefix
+    ? busyRun.entityKey.slice(indexPrefix.length)
+    : null;
   const [menuOpen, setMenuOpen] = useState(false);
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   // Second-row pickers (Codex's two-row Review UI — no nested dropdowns):
@@ -524,11 +556,11 @@ function ChangesInspector({
       return;
     }
     let cancelled = false;
-    void loadChanged(workingTreeId, scope, commitSha, baseBranch).then(list => {
+    void loadChanged(workingTreeId, scope, commitSha, baseBranch, activeSessionId).then(list => {
       if (!cancelled) setChanges(list);
     });
     return () => { cancelled = true; };
-  }, [workingTreeId, scope, commitSha, baseBranch, reloadKey]);
+  }, [workingTreeId, scope, commitSha, baseBranch, reloadKey, activeSessionId]);
 
   useEffect(() => {
     setCommits([]);
@@ -589,15 +621,26 @@ function ChangesInspector({
   const total = changes.reduce((acc, c) => ({ add: acc.add + c.added, del: acc.del + c.removed }), { add: 0, del: 0 });
   const tree = buildChangeTree(changes);
 
-  async function toggleStage(e: ReactMouseEvent, c: ChangedEntry) {
+  // Stage/unstage settle: the confirmed index write reloads the changed-file
+  // list (the pre-migration await-then-reload); failures toast from the
+  // definition (operations/git.ts) and just clear the tracked run here.
+  useEffect(() => {
+    if (!stageRun) return;
+    if (stageRun.phase === 'confirmed') {
+      setStageRunId(undefined);
+      setReloadKey(k => k + 1);
+    } else if (stageRun.phase === 'failed' || stageRun.phase === 'timed-out') {
+      setStageRunId(undefined);
+    }
+  }, [stageRun?.phase]);
+
+  function toggleStage(e: ReactMouseEvent, c: ChangedEntry) {
     e.stopPropagation();
-    if (!workingTreeId || busyPath) return;
-    setBusyPath(c.path);
-    const ok = c.staged
-      ? await unstageFile(workingTreeId, c.path)
-      : await stageFile(workingTreeId, c.path);
-    setBusyPath(null);
-    if (ok) setReloadKey(k => k + 1);
+    if (!workingTreeId) return;
+    setStageRunId(dispatch(c.staged ? 'git.unstage' : 'git.stage', {
+      workingTreeId,
+      path: c.path,
+    }).id);
   }
 
   // Compose a git-action prompt and drop it into the active session composer.

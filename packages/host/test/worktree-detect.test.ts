@@ -15,6 +15,7 @@ import { resolve } from 'node:path';
 import { detectWorktreeAddPath } from '../src/session/worktree-detect.js';
 import {
   listGitWorktrees,
+  listGitWorktreesAsync,
   parseWorktreeListPorcelain,
 } from '../src/workspace/git.js';
 import { createGitRepo } from './fixtures/git-repo.js';
@@ -155,7 +156,7 @@ test('listGitWorktrees: non-repo path yields [] (never throws)', () => {
   assert.deepEqual(listGitWorktrees('/this/path/is/not/a/repo'), []);
 });
 
-test('listGitWorktrees: enumerates main, branched, and detached worktrees', () => {
+test('sync and async worktree discovery enumerate main, branched, and detached worktrees', async () => {
   const repo = createGitRepo({ initialBranch: 'main' });
   const branchedPath = `${repo.path}-wt-branched`;
   const detachedPath = `${repo.path}-wt-detached`;
@@ -165,6 +166,8 @@ test('listGitWorktrees: enumerates main, branched, and detached worktrees', () =
     try {
       const list = listGitWorktrees(repo.path);
       assert.equal(list.length, 3);
+      assert.deepEqual(await listGitWorktreesAsync(repo.path), list,
+        'non-blocking discovery preserves the established parser contract');
 
       // macOS tmpdir resolves through /private — compare resolved forms.
       assert.equal(realpathSync(list[0]!.path), realpathSync(repo.path),

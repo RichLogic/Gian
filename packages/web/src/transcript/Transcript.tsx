@@ -20,6 +20,7 @@ type RenderableItem =
 
 /** Distance from the bottom (px) within which the scroll-follow stays pinned. */
 const AT_BOTTOM_PX = 40;
+const LOAD_OLDER_TOP_PX = 80;
 
 function isActionItem(item: TranscriptItem): boolean {
   switch (item.kind) {
@@ -233,6 +234,7 @@ export interface TranscriptExtra {
 
 export function Transcript({
   items, pending, onApprove, hiddenApprovalId, extras, hydrated = true,
+  hasOlder = false, loadingOlder = false, onLoadOlder,
 }: {
   items: TranscriptItem[];
   pending: boolean;
@@ -251,6 +253,9 @@ export function Transcript({
    *  state is gated on this so switching to an unhydrated session doesn't
    *  flash "no messages" before the history arrives. */
   hydrated?: boolean;
+  hasOlder?: boolean;
+  loadingOlder?: boolean;
+  onLoadOlder?: () => void;
 }) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
@@ -267,18 +272,44 @@ export function Transcript({
   // clicking the nav row's scroll-to-bottom button) re-engages it. Sending a
   // message or switching sessions also re-pins.
   const atBottomRef = useRef(true);
+  const olderAnchorRef = useRef<{ scroller: HTMLElement; height: number; top: number } | null>(null);
+  const lastScrollTopRef = useRef(0);
+
+  function loadOlder() {
+    const el = ref.current;
+    if (!el || !onLoadOlder || loadingOlder) return;
+    const scroller = (el.closest('.main-scroll') as HTMLElement | null) ?? el;
+    olderAnchorRef.current = {
+      scroller,
+      height: scroller.scrollHeight,
+      top: scroller.scrollTop,
+    };
+    atBottomRef.current = false;
+    onLoadOlder();
+  }
+
+  useEffect(() => {
+    if (!loadingOlder) olderAnchorRef.current = null;
+  }, [loadingOlder]);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     const scroller = (el.closest('.main-scroll') as HTMLElement | null) ?? el;
     const onScroll = () => {
+      const movingUp = scroller.scrollTop < lastScrollTopRef.current;
+      lastScrollTopRef.current = scroller.scrollTop;
       atBottomRef.current =
         scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= AT_BOTTOM_PX;
+      if (movingUp && scroller.scrollTop <= LOAD_OLDER_TOP_PX && hasOlder && !loadingOlder) {
+        loadOlder();
+      }
     };
     scroller.addEventListener('scroll', onScroll, { passive: true });
-    onScroll();
+    lastScrollTopRef.current = scroller.scrollTop;
+    atBottomRef.current =
+      scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= AT_BOTTOM_PX;
     return () => scroller.removeEventListener('scroll', onScroll);
-  }, []);
+  }, [hasOlder, loadingOlder, onLoadOlder]);
 
   // The actual scroll container is CodingView's `.main-scroll` wrapper
   // (V2-style island), not our local `.transcript-wrap`, so we walk up via
@@ -297,9 +328,23 @@ export function Transcript({
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
+    const previousIds = idsRef.current;
+    const olderAnchor = olderAnchorRef.current;
+    if (olderAnchor && previousIds.firstId !== firstId) {
+      const restoreAnchor = () => {
+        olderAnchor.scroller.scrollTop = olderAnchor.top
+          + (olderAnchor.scroller.scrollHeight - olderAnchor.height);
+      };
+      restoreAnchor();
+      const id = window.requestAnimationFrame(restoreAnchor);
+      olderAnchorRef.current = null;
+      atBottomRef.current = false;
+      idsRef.current = { firstId, lastUserId };
+      return () => window.cancelAnimationFrame(id);
+    }
     // A new session (first item changed) or a freshly sent user message
     // re-pins to the bottom regardless of where the user had scrolled.
-    if (idsRef.current.firstId !== firstId || idsRef.current.lastUserId !== lastUserId) {
+    if (previousIds.firstId !== firstId || previousIds.lastUserId !== lastUserId) {
       atBottomRef.current = true;
     }
     idsRef.current = { firstId, lastUserId };
@@ -329,6 +374,13 @@ export function Transcript({
 
   return (
     <div className="transcript" ref={ref}>
+        {hasOlder && onLoadOlder && (
+          <div className="transcript-history-load">
+            <button className="btn ghost sm" type="button" onClick={loadOlder} disabled={loadingOlder}>
+              {loadingOlder ? t('transcript.history.loading') : t('transcript.history.older')}
+            </button>
+          </div>
+        )}
         {items.length === 0 && (extras?.length ?? 0) === 0 && !pending && hydrated && (
           <div className="transcript-empty">{t('transcript.empty')}</div>
         )}

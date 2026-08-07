@@ -6,6 +6,9 @@ import type { Session } from '@gian/shared';
 import { Composer } from '../src/components/Composer.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { uploadAttachment } from '../src/api.js';
+import { createOperationDispatcher } from '../src/operations/dispatcher.js';
+import { createOperationStore } from '../src/operations/store.js';
+import { OperationDispatcherProvider, OperationStoreProvider } from '../src/operations/use-operations.js';
 
 vi.mock('../src/api.js', () => ({
   loadProxyModels: vi.fn().mockResolvedValue([]),
@@ -13,6 +16,9 @@ vi.mock('../src/api.js', () => ({
   loadSessionSlashCommands: vi.fn().mockResolvedValue([]),
   loadNativeConfig: vi.fn().mockResolvedValue(null),
   uploadAttachment: vi.fn(),
+  // Imported by operations/session.js (pulled in via use-operations.js).
+  dropSession: vi.fn(),
+  mergeSession: vi.fn(),
 }));
 
 const SESSION = {
@@ -41,22 +47,31 @@ const SESSION = {
 
 function renderComposer() {
   const onSend = vi.fn();
+  // The Composer dispatches message.uploadAttachment through the operation
+  // layer — mount the providers with a real (transport-less: REST op)
+  // dispatcher, as App does.
+  const store = createOperationStore();
+  const dispatcher = createOperationDispatcher({ store });
   const view = render(
     <LocaleProvider locale="en">
-      <Composer
-        session={SESSION}
-        executor="claude"
-        workspaceId="workspace-1"
-        disabled={false}
-        running={false}
-        onSend={onSend}
-        onSendSkill={vi.fn()}
-        onStop={vi.fn()}
-        onQueueAdd={vi.fn()}
-        onSetMode={vi.fn()}
-        onSetModel={vi.fn()}
-        onSetEffort={vi.fn()}
-      />
+      <OperationStoreProvider store={store}>
+        <OperationDispatcherProvider dispatcher={dispatcher}>
+          <Composer
+            session={SESSION}
+            executor="claude"
+            workspaceId="workspace-1"
+            disabled={false}
+            running={false}
+            onSend={onSend}
+            onSendSkill={vi.fn()}
+            onStop={vi.fn()}
+            onQueueAdd={vi.fn()}
+            onSetMode={vi.fn()}
+            onSetModel={vi.fn()}
+            onSetEffort={vi.fn()}
+          />
+        </OperationDispatcherProvider>
+      </OperationStoreProvider>
     </LocaleProvider>,
   );
   return { onSend, unmount: view.unmount };

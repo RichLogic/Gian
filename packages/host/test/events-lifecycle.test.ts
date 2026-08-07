@@ -9,7 +9,9 @@ import {
   sweepColdEvents,
   markAccessed,
 } from '../src/events/lifecycle.js';
-import { ensureEventsRebuilt } from '../src/events/lazy-rebuild.js';
+import { ensureEventPageRebuilt, ensureEventsRebuilt } from '../src/events/lazy-rebuild.js';
+import { SessionHistoryStore } from '../src/session/history-store.js';
+import { installEventStorageV3 } from '../src/storage/event-storage-v3-schema.js';
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -423,6 +425,73 @@ test('ensureEventsRebuilt is a no-op when JSONL file is missing', () => {
     assert.equal(res.turnsInserted, 0);
     assert.equal(res.eventsInserted, 0);
 
+    db.close();
+  } finally {
+    if (originalHome === undefined) delete process.env['HOME'];
+    else process.env['HOME'] = originalHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('P0 cold JSONL rebuild persists only requested turn pages', () => {
+  const dir = makeTempDir();
+  const originalHome = process.env['HOME'];
+  process.env['HOME'] = dir;
+  try {
+    const db = openDatabase(dir);
+    installEventStorageV3(db);
+    const wsPath = join(dir, 'paged-proj');
+    mkdirSync(wsPath, { recursive: true });
+    const wsId = seedWorkspace(db, wsPath);
+    const nativeId = `cc_${randomUUID()}`;
+    const sid = seedSession(db, wsId, { nativeSessionId: nativeId, withEvents: false });
+    const projectDir = join(dir, '.claude', 'projects', encodeCcProjectDir(wsPath));
+    mkdirSync(projectDir, { recursive: true });
+    const jsonlPath = join(projectDir, `${nativeId}.jsonl`);
+    const lines = Array.from({ length: 8 }, (_, index) => [
+      JSON.stringify({ type: 'user', message: { content: `question ${index + 1}` } }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: `answer ${index + 1}` }] },
+      }),
+    ]).flat();
+    writeFileSync(jsonlPath, `${lines.join('\n')}\n`, 'utf8');
+
+    const firstRebuild = ensureEventPageRebuilt(db, sid, null, 3);
+    assert.equal(firstRebuild.turnsInserted, 3);
+    assert.equal(
+      (db.prepare('SELECT COUNT(*) AS n FROM turns WHERE session_id = ?').get(sid) as { n: number }).n,
+      3,
+      'first request must not rebuild the complete eight-turn file',
+    );
+    const history = new SessionHistoryStore(db);
+    const first = history.listEventPage(sid, null, 3);
+    assert.equal(first.hasMore, true);
+    assert.deepEqual(
+      first.events.filter(event => event.event === 'user_message').map(event => event.data.text),
+      ['question 6', 'question 7', 'question 8'],
+    );
+
+    const secondRebuild = ensureEventPageRebuilt(db, sid, first.nextCursor, 3);
+    assert.equal(secondRebuild.turnsInserted, 3);
+    const second = history.listEventPage(sid, first.nextCursor, 3);
+    assert.equal(second.hasMore, true);
+    assert.deepEqual(
+      second.events.filter(event => event.event === 'user_message').map(event => event.data.text),
+      ['question 3', 'question 4', 'question 5'],
+    );
+
+    ensureEventPageRebuilt(db, sid, second.nextCursor, 3);
+    const third = history.listEventPage(sid, second.nextCursor, 3);
+    assert.equal(third.hasMore, false);
+    assert.deepEqual(
+      third.events.filter(event => event.event === 'user_message').map(event => event.data.text),
+      ['question 1', 'question 2'],
+    );
+    assert.equal(
+      (db.prepare('SELECT complete FROM event_rebuild_state WHERE session_id = ?').get(sid) as { complete: number }).complete,
+      1,
+    );
     db.close();
   } finally {
     if (originalHome === undefined) delete process.env['HOME'];

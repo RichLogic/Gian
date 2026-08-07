@@ -12,6 +12,9 @@ const electronPath = process.env.GIAN_DESKTOP_SMOKE_EXECUTABLE || require('elect
 const packagedSmoke = Boolean(process.env.GIAN_DESKTOP_SMOKE_EXECUTABLE);
 const packageDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const smokeUserData = await mkdtemp(join(tmpdir(), 'gian-desktop-smoke-'));
+const cleanEnvironment = Object.fromEntries(
+  Object.entries(process.env).filter(([key]) => !key.startsWith('GIAN_')),
+);
 
 async function listen(handler) {
   const server = createServer(handler);
@@ -80,14 +83,13 @@ let electronApp;
 try {
   electronApp = await electron.launch({
     executablePath: electronPath,
-    args: packagedSmoke
-      ? [`--user-data-dir=${smokeUserData}`]
-      : [`--user-data-dir=${smokeUserData}`, '.'],
+    args: packagedSmoke ? [] : ['.'],
     cwd: packageDir,
     env: {
-      ...process.env,
+      ...cleanEnvironment,
       GIAN_DESKTOP_DISABLE_HOST_MANAGEMENT: '1',
       GIAN_DESKTOP_HOST_URL: host.origin,
+      GIAN_DESKTOP_USER_DATA_DIR: smokeUserData,
       GIAN_DESKTOP_WEB_URL: web.origin,
     },
   });

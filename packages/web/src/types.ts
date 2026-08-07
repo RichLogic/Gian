@@ -1,3 +1,21 @@
+/**
+ * Everything needed to (re)dispatch a message send through the operation
+ * layer — stored on the optimistic echo (`MsgItem.sendRetry`) so a failed
+ * send's retry affordance re-dispatches the SAME operation (proposal §9).
+ */
+export interface MessageSendPayload {
+  sessionId: string;
+  text: string;
+  exec: import('@gian/shared').Executor;
+  oneShotBypass?: boolean;
+  /** Uploaded attachments for this turn; `previewUrl` (blob) is reused by the
+   *  retry echo's thumbnails — it is only revoked on canonical reconcile. */
+  attachments?: Array<import('./attachments.js').ComposerAttachmentPayload & { previewUrl: string }>;
+  /** Skill invocation: `text` is `/<name>` and the wire items carry the
+   *  typed skill item instead of a text item. */
+  skill?: { name: string; path: string };
+}
+
 export interface MsgItem {
   kind: 'user' | 'assistant';
   id: string;
@@ -9,6 +27,12 @@ export interface MsgItem {
   pending?: boolean;
   /** Server rejected the send (e.g. `MESSAGE_SEND_FAILED`). */
   failed?: boolean;
+  /** Operation run id of the send that produced this echo — the bubble
+   *  derives the unknown-outcome ("may not have been sent") state from the
+   *  run's `timed-out` phase in the operation store. */
+  sendRunId?: string;
+  /** Re-dispatch payload for the failed echo's retry affordance. */
+  sendRetry?: MessageSendPayload;
   /** Attachments to render in the bubble. Images use inline thumbnails;
    *  other files use download chips. Pending echoes carry a blob URL until
    *  the server confirms with its permanent attachment URL. */

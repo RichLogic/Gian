@@ -55,6 +55,12 @@ export function resolveDesktopTargets({
     'GIAN_DESKTOP_WEB_URL',
   );
   const managementDisabled = env['GIAN_DESKTOP_DISABLE_HOST_MANAGEMENT'] === '1';
+  // The packaged-app harness must exercise the real bundled Host without
+  // touching production 8990. Keep this override loopback-only and explicit.
+  const smokeManagesCustomHost = (
+    env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] === '1'
+    && new URL(hostUrl).hostname === '127.0.0.1'
+  );
 
   return {
     hostUrl,
@@ -63,7 +69,7 @@ export function resolveDesktopTargets({
     manageHost:
       isPackaged &&
       platform === 'darwin' &&
-      hostUrl === PROD_HOST_URL &&
+      (hostUrl === PROD_HOST_URL || smokeManagesCustomHost) &&
       !managementDisabled,
   };
 }
@@ -113,12 +119,21 @@ export function resolveDesktopWindowChrome(
 export function resolveDesktopApplicationIdentity(
   isPackaged: boolean,
   appDataPath: string,
+  env: Readonly<Record<string, string | undefined>> = {},
 ): DesktopApplicationIdentity {
+  const userDataOverride = env['GIAN_DESKTOP_USER_DATA_DIR']?.trim() || null;
   return isPackaged
-    ? { name: 'Gian', userDataPath: null, variant: 'production' }
+    ? { name: 'Gian', userDataPath: userDataOverride, variant: 'production' }
     : {
         name: 'GianDev',
-        userDataPath: join(appDataPath, 'GianDev'),
+        userDataPath: userDataOverride ?? join(appDataPath, 'GianDev'),
         variant: 'development',
       };
+}
+
+export function resolveDesktopDisplayName(
+  identity: DesktopApplicationIdentity,
+  env: Readonly<Record<string, string | undefined>> = {},
+): string {
+  return env['GIAN_DESKTOP_LABEL']?.trim() || identity.name;
 }
