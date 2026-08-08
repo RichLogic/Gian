@@ -49,3 +49,9 @@ output/quality/
 
 # Gian-maintained per-workspace AI context (runtime scaffold; see workspace/ai-scaffold.ts)
 .ai/
+CLAUDE.local.md
+.ai/sessions/
+.ai/log/
+.ai/.history/
+.ai/STATE.view.md
+.ai/gian-task/

@@ -1,12 +1,12 @@
 /**
  * UI Operation Layer — Phase 0 artifact of
- * `docs/proposals/ui-operation-layer.md`.
+ * `docs/archive/proposals/ui-operation-layer.md`.
  *
  * This module currently contains ONLY the closed operation-name union, the
  * policy table, and the shared types from proposal §4.2/§4.3. The operation
  * store, overlay reducer, dispatcher, and hooks land in Phase 1. Nothing
  * here is wired into product code yet; the full rationale for every name
- * and policy lives in `docs/proposals/ui-operation-inventory.md`.
+ * and policy lives in `docs/archive/proposals/ui-operation-inventory.md`.
  */
 import type { ClientToServerMessage } from '@gian/shared';
 
@@ -66,10 +66,13 @@ export type OperationName =
   | 'workspace.pickFolder'
   // Git / worktree / external open
   | 'git.fetch'
+  | 'git.historyFetch'
   | 'git.abortPendingOp'
   | 'git.stage'
   | 'git.unstage'
   | 'files.openExternal'
+  | 'browser.openExternal'
+  | 'browser.clearData'
   // Native Session
   | 'native.adopt'
   | 'native.delete'
@@ -147,10 +150,13 @@ export const OPERATION_POLICIES = {
   'workspace.saveClaudeMd': 'pending',
   'workspace.pickFolder': 'pending',
   'git.fetch': 'pending',
+  'git.historyFetch': 'pending',
   'git.abortPendingOp': 'pending',
   'git.stage': 'pending',
   'git.unstage': 'pending',
   'files.openExternal': 'pending',
+  'browser.openExternal': 'pending',
+  'browser.clearData': 'pending',
   'native.adopt': 'pending',
   'native.delete': 'pending',
   'settings.save': 'optimistic',
@@ -276,6 +282,9 @@ export interface OperationError {
 export interface OperationContext {
   runId: string;
   requestId: string;
+  /** Canonical entity key captured when the run starts. Escape-hatch
+   * rollbacks use it to converge adjacent local UI state precisely. */
+  entityKey: string;
 }
 
 /**

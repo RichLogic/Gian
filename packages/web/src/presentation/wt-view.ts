@@ -54,7 +54,12 @@ export function resolveViewedTreeId(opts: {
   trees: ReadonlyArray<{ id: string }>;
   defaultId: string | null;
 }): string | null {
-  if (opts.inMemory && opts.inMemory.sessionId === opts.sessionId) return opts.inMemory.wtId;
+  const inMemory = opts.inMemory;
+  if (inMemory
+    && inMemory.sessionId === opts.sessionId
+    && opts.trees.some(tree => tree.id === inMemory.wtId)) {
+    return inMemory.wtId;
+  }
   if (opts.stored && opts.trees.some(t => t.id === opts.stored)) return opts.stored;
   return opts.defaultId;
 }

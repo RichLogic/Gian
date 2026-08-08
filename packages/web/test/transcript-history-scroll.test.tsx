@@ -1,4 +1,4 @@
-import { act, fireEvent, render } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { Transcript } from '../src/transcript/Transcript.js';
 import type { MsgItem } from '../src/types.js';
@@ -85,5 +85,64 @@ describe('transcript history pagination', () => {
       );
     });
     expect(scroller.scrollTop).toBe(620);
+  });
+
+  it('keeps transcript content visible and exposes an accessible history retry', () => {
+    const onRetryHistory = vi.fn();
+    const item: MsgItem = {
+      kind: 'user', id: 'message-live', text: 'live content remains', exec: 'codex', ts: 1, turn: 1,
+    };
+    render(
+      <Transcript
+        items={[item]}
+        pending={false}
+        onApprove={() => undefined}
+        historyError={{
+          kind: 'http', status: 500, operation: 'initial', message: 'server failed',
+        }}
+        onRetryHistory={onRetryHistory}
+      />,
+    );
+
+    expect(screen.getByText('live content remains')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not load message history.');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry history load' }));
+    expect(onRetryHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases bottom-follow while the user reads older output and re-locks after returning to bottom', () => {
+    const user: MsgItem = {
+      kind: 'user', id: 'message-user', text: 'run the tests', exec: 'codex', ts: 1, turn: 1,
+    };
+    const assistant = (text: string): MsgItem => ({
+      kind: 'assistant', id: 'message-assistant', text, exec: 'codex', ts: 2, turn: 1,
+    });
+    const props = (text: string) => (
+      <div className="main-scroll">
+        <Transcript items={[user, assistant(text)]} pending onApprove={() => undefined} />
+      </div>
+    );
+    const { container, rerender } = render(props('first chunk'));
+    const scroller = container.querySelector('.main-scroll') as HTMLDivElement;
+    let scrollHeight = 1_000;
+    Object.defineProperty(scroller, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 400 });
+
+    // Scrolling up releases the transcript's follow lock.
+    scroller.scrollTop = 400;
+    fireEvent.scroll(scroller);
+    scrollHeight = 1_100;
+    act(() => rerender(props('first chunk\nstreamed while reading')));
+    expect(scroller.scrollTop).toBe(400);
+
+    // Returning to the actual bottom re-engages it for the next delta.
+    scroller.scrollTop = 700;
+    fireEvent.scroll(scroller);
+    scrollHeight = 1_200;
+    act(() => rerender(props('first chunk\nstreamed while reading\nlatest chunk')));
+    expect(scroller.scrollTop).toBe(1_200);
   });
 });

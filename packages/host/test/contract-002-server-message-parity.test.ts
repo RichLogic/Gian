@@ -7,7 +7,7 @@
 //
 // Mirrors `contract-001-client-message-parity.test.ts`: parse the
 // declared union members in shared/web.ts at test time, then grep the
-// `packages/web/src/` tree for `case '<type>':` and `msg.type === '<type>'`
+// `packages/web/src/` tree for `case '<type>':` and direct type comparisons
 // arms. Anything declared-but-unconsumed must be on the whitelist; any
 // arm referencing a wire type the shared file doesn't list is also a
 // contract violation.
@@ -24,15 +24,7 @@ const WEB_SRC_ROOT = resolve('../web/src');
 // Every declared server message has a consumer.
 // ---------------------------------------------------------------------------
 
-const NOT_DISPLAYED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> = [
-  {
-    type: 'operation:result',
-    reason:
-      'UI Operation Layer (docs/proposals/ui-operation-layer.md) Phase 1 is host-only: ' +
-      'the host emits operation:result but the web client does not consume it until ' +
-      'Phase 2 wires the operation store. Remove this entry when the client lands.',
-  },
-];
+const NOT_DISPLAYED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> = [];
 
 // ---------------------------------------------------------------------------
 // Parsers
@@ -62,11 +54,30 @@ function declaredServerMessageTypes(): Set<string> {
   return types;
 }
 
+function declaredClientMessageTypes(): Set<string> {
+  const text = readFileSync(WEB_TS, 'utf8');
+  const unionMatch = text.match(/export type ClientToServerMessage[\s\S]*?;/);
+  assert.ok(unionMatch, 'failed to locate ClientToServerMessage union in shared/src/web.ts');
+  const memberNames = Array.from(unionMatch![0].matchAll(/\|\s*(\w+Message)/g), m => m[1]!);
+  const types = new Set<string>();
+  for (const name of memberNames) {
+    const ifaceMatch = text.match(
+      new RegExp(`export interface ${name}\\b[^{]*\\{[\\s\\S]*?\\}`, 'm'),
+    );
+    if (!ifaceMatch) assert.fail(`could not locate interface ${name} in shared/src/web.ts`);
+    const lit = ifaceMatch![0].match(/type:\s*'([^']+)'/);
+    if (!lit) assert.fail(`interface ${name} has no \`type: '<literal>';\` discriminator`);
+    types.add(lit![1]!);
+  }
+  return types;
+}
+
 /**
  * Walk every `.ts` / `.tsx` file under `packages/web/src/` and collect
  * every server-message type literal that appears in either:
  *   • a switch case (`case '<type>':`)
- *   • a direct equality test (`msg.type === '<type>'`)
+ *   • a direct equality/inequality test (`msg.type === '<type>'` or
+ *     `msg.type !== '<type>'`)
  *
  * Doesn't double-count; the set deduplicates automatically.
  */
@@ -92,7 +103,7 @@ function consumedServerMessageTypes(): Set<string> {
     for (const m of text.matchAll(/case\s+'([a-z][a-z0-9:_-]*)'\s*:/g)) {
       consumed.add(m[1]!);
     }
-    for (const m of text.matchAll(/\b\w+\.type\s*===\s*'([a-z][a-z0-9:_-]*)'/g)) {
+    for (const m of text.matchAll(/\b\w+\.type\s*(?:===|!==)\s*'([a-z][a-z0-9:_-]*)'/g)) {
       consumed.add(m[1]!);
     }
   }
@@ -154,6 +165,7 @@ test('CONTRACT-002: every wire-shaped consumer arm matches a declared ServerToCl
   // executor names (claude/codex), etc. Those don't ride
   // ServerToClientMessage.
   const declared = declaredServerMessageTypes();
+  const clientDeclared = declaredClientMessageTypes();
   const consumed = consumedServerMessageTypes();
   const whitelisted = new Set(NOT_DISPLAYED_BY_DESIGN.map(e => e.type));
 
@@ -166,6 +178,10 @@ test('CONTRACT-002: every wire-shaped consumer arm matches a declared ServerToCl
   for (const t of consumed) {
     if (!looksLikeWireShape(t)) continue;
     if (declared.has(t)) continue;
+    // The source scan intentionally sees both inbound reducers and outbound
+    // helpers (for example GianWs replay classification). A discriminator
+    // declared in ClientToServerMessage is valid, but is not a server arm.
+    if (clientDeclared.has(t)) continue;
     if (whitelisted.has(t)) continue;
     undeclared.push(t);
   }

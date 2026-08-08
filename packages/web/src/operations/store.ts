@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — operation store + overlay reducer (Phase 1).
- * Implements proposal §4.3 (`docs/proposals/ui-operation-layer.md`) exactly:
+ * Implements proposal §4.3 (`docs/archive/proposals/ui-operation-layer.md`) exactly:
  *
  * - Runs are keyed by run id with phases
  *   `optimistic | pending | confirmed | failed | timed-out`.

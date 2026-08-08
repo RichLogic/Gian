@@ -13,6 +13,8 @@ interface Props {
   items: TranscriptItem[];
   planText?: string;
   planCompleted?: boolean;
+  planStatus?: 'active' | 'paused' | 'completed';
+  planTurn?: number;
   onClose: () => void;
 }
 
@@ -21,6 +23,8 @@ export function ChatContextPanel({
   items,
   planText,
   planCompleted,
+  planStatus,
+  planTurn,
   onClose,
 }: Props) {
   const t = useT();
@@ -29,11 +33,13 @@ export function ChatContextPanel({
       items,
       planText,
       planCompleted,
+      planStatus,
+      planTurn,
       sessionId: target.sessionId,
       includeAgentHistory: true,
       includePlanHistory: true,
     }),
-    [items, planText, planCompleted, target.sessionId],
+    [items, planText, planCompleted, planStatus, planTurn, target.sessionId],
   );
 
   useEffect(() => {
@@ -108,11 +114,10 @@ function AgentDetail({ agent }: { agent: AgentRunDisplayItem }) {
     : 'Kimi';
   const statusLabel =
     agent.status === 'running' ? t('coding.status.running')
+    : agent.status === 'interrupted' ? t('coding.status.interrupted')
     : agent.status === 'error' ? t('coding.status.error')
     : t('coding.status.done');
-  const prompt = typeof agent.input?.prompt === 'string'
-    ? agent.input.prompt.trim()
-    : '';
+  const prompt = agentPrompt(agent.input);
   const elapsedTo = agent.completedAt
     ?? (agent.status === 'running' ? Date.now() : agent.updatedAt);
 
@@ -171,7 +176,7 @@ function AgentDetail({ agent }: { agent: AgentRunDisplayItem }) {
 
       <section className="chat-agent-section">
         <h4>
-          {agent.status === 'error'
+          {agent.status === 'error' || agent.status === 'interrupted'
             ? t('chatPanel.agent.error')
             : t('chatPanel.agent.result')}
         </h4>
@@ -189,6 +194,15 @@ function AgentDetail({ agent }: { agent: AgentRunDisplayItem }) {
       </section>
     </article>
   );
+}
+
+function agentPrompt(input: Record<string, unknown> | undefined): string {
+  if (!input) return '';
+  for (const key of ['prompt', 'description', 'task', 'message']) {
+    const value = input[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
 }
 
 function Meta({

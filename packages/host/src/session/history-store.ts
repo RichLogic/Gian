@@ -1,6 +1,10 @@
 import type { ChatDisplay, DisplayEventType, EventEnvelope } from '@gian/shared';
 import type { Db } from '../storage/db.js';
-import { EventStore, type PersistEventResult } from './event-store.js';
+import {
+  EventStore,
+  type EventStoreOptions,
+  type PersistEventResult,
+} from './event-store.js';
 
 interface StoredEventRow {
   id: string;
@@ -18,11 +22,21 @@ export interface EventHistoryPage {
   hasMore: boolean;
 }
 
+export interface SnapshotCompactionResult {
+  groups: number;
+  removed: number;
+}
+
+export interface StreamCompactionResult {
+  groups: number;
+  removed: number;
+}
+
 export class SessionHistoryStore {
   private events: EventStore;
 
-  constructor(private db: Db) {
-    this.events = new EventStore(db);
+  constructor(private db: Db, options: EventStoreOptions = {}) {
+    this.events = new EventStore(db, options);
   }
 
   listEvents(sessionId: string): EventEnvelope[] {
@@ -126,6 +140,65 @@ export class SessionHistoryStore {
     return row?.n ?? 0;
   }
 
+  /** Canonical replay projection shared by migration verification and history reads. */
+  canonicalTurnEvents(turnId: string): EventEnvelope[] {
+    const order = this.events.usesSequence ? 'sequence' : 'rowid';
+    const rows = this.db.prepare(
+      `SELECT e.id, e.session_id, e.call_id, e.type, e.data, e.created_at,
+              t.turn_number
+       FROM events e
+       JOIN turns t ON t.id = e.turn_id
+       WHERE e.turn_id = ?
+       ORDER BY e.${order} ASC`,
+    ).all(turnId) as StoredEventRow[];
+    return canonicalizeHistoryEnvelopes(
+      rows.map(row => eventEnvelope(this.events, row.session_id, row, true)),
+    );
+  }
+
+  /** Remove only recognized full snapshots, retaining and v3-encoding the newest row. */
+  compactTurnSnapshots(turnId: string): SnapshotCompactionResult {
+    if (!this.events.usesSequence) return { groups: 0, removed: 0 };
+    const rows = this.db.prepare(
+      `SELECT e.id, e.session_id, e.call_id, e.type, e.data, e.created_at,
+              t.turn_number
+       FROM events e
+       JOIN turns t ON t.id = e.turn_id
+       WHERE e.turn_id = ?
+       ORDER BY e.sequence ASC`,
+    ).all(turnId) as StoredEventRow[];
+    const groups = new Map<string, Array<{ row: StoredEventRow; event: EventEnvelope }>>();
+    for (const row of rows) {
+      const event = eventEnvelope(this.events, row.session_id, row, true);
+      const identity = snapshotIdentity(event);
+      if (!identity) continue;
+      const group = groups.get(identity) ?? [];
+      group.push({ row, event });
+      groups.set(identity, group);
+    }
+
+    let groupCount = 0;
+    let removed = 0;
+    this.db.transaction(() => {
+      for (const group of groups.values()) {
+        const retained = group[group.length - 1];
+        if (!retained) continue;
+        this.events.replaceData(retained.row.id, this.events.decode(retained.row.data));
+        if (retained.event.event === 'diff.updated') {
+          this.db.prepare('UPDATE events SET call_id = ? WHERE id = ?')
+            .run(`diff:${turnId}`, retained.row.id);
+        }
+        if (group.length < 2) continue;
+        groupCount += 1;
+        const obsolete = group.slice(0, -1).map(item => item.row.id);
+        const placeholders = obsolete.map(() => '?').join(', ');
+        this.db.prepare(`DELETE FROM events WHERE id IN (${placeholders})`).run(...obsolete);
+        removed += obsolete.length;
+      }
+    })();
+    return { groups: groupCount, removed };
+  }
+
   nextTurnNumber(sessionId: string): number {
     const row = this.db
       .prepare('SELECT MAX(turn_number) AS n FROM turns WHERE session_id = ?')
@@ -154,9 +227,13 @@ export class SessionHistoryStore {
 
   /** Merge safe streaming fragments once a turn is terminal. */
   compactTurnStreams(turnId: string): number {
+    return this.compactTurnStreamsDetailed(turnId).removed;
+  }
+
+  compactTurnStreamsDetailed(turnId: string): StreamCompactionResult {
     // Existing Gian databases remain read-only until the packaged migration is
     // explicitly run. Automatic compaction is enabled only by that schema.
-    if (!this.events.usesSequence) return 0;
+    if (!this.events.usesSequence) return { groups: 0, removed: 0 };
     const order = this.events.usesSequence ? 'sequence' : 'rowid';
     const rows = this.db.prepare(
       `SELECT e.id, e.session_id, e.call_id, e.type, e.data, e.created_at,
@@ -170,7 +247,7 @@ export class SessionHistoryStore {
     for (const row of rows) {
       const event = eventEnvelope(this.events, row.session_id, row, true);
       const display = event.display;
-      if (!display || !isCompactableDisplay(display.type)) continue;
+      if (!display || !isCompactableEvent(event)) continue;
       const key = `${display.type}\u0000${event.call_id}`;
       const group = groups.get(key) ?? [];
       group.push({ row, event });
@@ -178,6 +255,7 @@ export class SessionHistoryStore {
     }
 
     let removed = 0;
+    let groupCount = 0;
     this.db.transaction(() => {
       for (const group of groups.values()) {
         if (group.length < 2) continue;
@@ -198,10 +276,11 @@ export class SessionHistoryStore {
         const obsolete = group.slice(0, -1).map(item => item.row.id);
         const placeholders = obsolete.map(() => '?').join(', ');
         this.db.prepare(`DELETE FROM events WHERE id IN (${placeholders})`).run(...obsolete);
+        groupCount += 1;
         removed += obsolete.length;
       }
     })();
-    return removed;
+    return { groups: groupCount, removed };
   }
 
   finalAssistantText(turnId: string): string {
@@ -257,6 +336,20 @@ function isExecutor(value: unknown): value is 'claude' | 'codex' | 'kimi' {
   return value === 'claude' || value === 'codex' || value === 'kimi';
 }
 
+const SQLITE_UTC_TIMESTAMP_RE =
+  /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+
+/** SQLite's datetime('now') is UTC but omits a timezone suffix. V8 parses
+ *  that shape as local time, shifting restored transcript timestamps by the
+ *  machine's UTC offset. Preserve explicit offsets and treat only the legacy
+ *  offset-less SQLite shape as UTC. */
+function parseStoredEventTimestamp(createdAt: string): number {
+  const normalized = SQLITE_UTC_TIMESTAMP_RE.test(createdAt)
+    ? `${createdAt.replace(' ', 'T')}Z`
+    : createdAt;
+  return Date.parse(normalized);
+}
+
 function eventEnvelope(
   events: EventStore,
   sessionId: string,
@@ -277,7 +370,7 @@ function eventEnvelope(
     turn: row.turn_number ?? 0,
     call_id: row.call_id,
     event: row.type,
-    ts: Date.parse(row.created_at),
+    ts: parseStoredEventTimestamp(row.created_at),
     // Paginated transcript hydration consumes the display projection only.
     // Keep native payloads in the DB and in internal listEvents() callers,
     // but do not duplicate multi-megabyte diffs/tool output over HTTP.
@@ -290,12 +383,12 @@ function eventEnvelope(
 const PAGED_HISTORY_SKIPPED_PATHS = new Set(['raw']);
 
 /** Collapse streaming fragments after DB replay so the browser hydrates cards, not tokens. */
-function compactHistoryEnvelopes(events: EventEnvelope[]): EventEnvelope[] {
-  const out: EventEnvelope[] = [];
+export function compactHistoryEnvelopes(events: EventEnvelope[]): EventEnvelope[] {
+  const out: Array<EventEnvelope | undefined> = [];
   const compacted = new Map<string, number>();
   for (const event of events) {
     const display = event.display;
-    if (!display || !isCompactableDisplay(display.type)) {
+    if (!display || !isCompactableEvent(event)) {
       out.push(event);
       continue;
     }
@@ -351,14 +444,69 @@ function compactHistoryEnvelopes(events: EventEnvelope[]): EventEnvelope[] {
         delta: false,
       };
     }
-    out[existingIndex] = {
+    // The persisted compactor retains the newest physical row. Move the
+    // canonical projection to that same chronological position so a
+    // pre-migration replay and its one-row representation order identically.
+    out[existingIndex] = undefined;
+    compacted.set(key, out.length);
+    out.push({
       ...existing,
       ts: event.ts,
       data: event.data,
       display: { type: display.type, data: nextData } as unknown as ChatDisplay,
-    };
+    });
   }
-  return out;
+  return out.filter((event): event is EventEnvelope => event !== undefined);
+}
+
+export function canonicalizeHistoryEnvelopes(events: EventEnvelope[]): EventEnvelope[] {
+  const retained: EventEnvelope[] = [];
+  const seenSnapshots = new Set<string>();
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (!event) continue;
+    const identity = snapshotIdentity(event);
+    if (identity) {
+      if (seenSnapshots.has(identity)) continue;
+      seenSnapshots.add(identity);
+    }
+    retained.push(event);
+  }
+  retained.reverse();
+  return compactHistoryEnvelopes(retained);
+}
+
+export function snapshotIdentity(event: EventEnvelope): string | null {
+  if (event.event === 'diff.updated') return `${event.turn}\u0000diff.updated`;
+  if (event.event === 'codex.agent') {
+    const displayData = event.display?.data as unknown as Record<string, unknown> | undefined;
+    const id = stringValue(displayData?.agentId) ?? stringValue(displayData?.itemId) ?? event.call_id;
+    return id ? `${event.turn}\u0000codex.agent\u0000${id}` : null;
+  }
+  if (event.event !== 'acp.sessionUpdate') return null;
+  const update = isRecord(event.data.update) ? event.data.update : null;
+  const rawUpdate = isRecord(event.data.raw) && isRecord(event.data.raw.update)
+    ? event.data.raw.update
+    : null;
+  const kind = stringValue(rawUpdate?.sessionUpdate) ?? stringValue(update?.sessionUpdate);
+  if (kind !== 'tool_call' && kind !== 'tool_call_update') return null;
+  const displayData = event.display?.data as unknown as Record<string, unknown> | undefined;
+  const id = stringValue(rawUpdate?.toolCallId)
+    ?? stringValue(update?.toolCallId)
+    ?? stringValue(displayData?.itemId);
+  return id ? `${event.turn}\u0000acp.tool\u0000${id}` : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function isCompactableEvent(event: EventEnvelope): boolean {
+  const display = event.display;
+  if (!display || !isCompactableDisplay(display.type)) return false;
+  if (display.type !== 'message') return true;
+  const data = display.data as unknown as Record<string, unknown>;
+  return event.event !== 'user_message' && data.role !== 'user';
 }
 
 function isCompactableDisplay(type: DisplayEventType): boolean {

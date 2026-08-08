@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Static completeness gate for the UI Operation Layer (proposal §6,
- * `docs/proposals/ui-operation-layer.md`).
+ * `docs/archive/proposals/ui-operation-layer.md`).
  *
  * WARN MODE (default, `pnpm quality:operations` — for humans): every
  * violation is printed with rule id and file:line, exit code stays 0.
@@ -62,7 +62,7 @@ const WS_TYPE_EXEMPTIONS = new Set([
 
 /**
  * REST → operation policy map, owned by this gate (Phase 1 choice; see
- * header). Mirrors inventory §2 (`docs/proposals/ui-operation-inventory.md`).
+ * header). Mirrors inventory §2 (`docs/archive/proposals/ui-operation-inventory.md`).
  * Several operations may share one REST function (updateWorkspace backs all
  * workspace metadata writes). Exported for the gate's test fixtures.
  */
@@ -80,6 +80,7 @@ export const REST_MUTATION_TO_OPERATION = {
   saveClaudeMd: ['workspace.saveClaudeMd'],
   pickWorkspaceFolder: ['workspace.pickFolder'],
   fetchRemotes: ['git.fetch'],
+  fetchGitHistory: ['git.historyFetch'],
   abortPendingGitOp: ['git.abortPendingOp'],
   stageFile: ['git.stage'],
   unstageFile: ['git.unstage'],
@@ -155,7 +156,7 @@ const ALLOWLIST = [
  * methods, or whose chain passes through `githubAuth` with a mutating
  * GitHub-auth method. `githubAuth.getState` is a query — exempt by design.
  */
-const BRIDGE_MUTATING_METHODS = new Set(['restartApp', 'setDockIcon']);
+const BRIDGE_MUTATING_METHODS = new Set(['restartApp', 'setDockIcon', 'openExternal', 'clearData']);
 const GITHUB_AUTH_MUTATING_METHODS = new Set(['signOut', 'start', 'finish', 'cancel']);
 /** Declared but never called (inventory §5): a violation ANYWHERE, including
  *  operations/** — do not call them. */

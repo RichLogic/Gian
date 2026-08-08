@@ -1,6 +1,8 @@
 // Coverage for traceability rows (component rendering dimension):
-//   EVT-006 — Codex reasoning must default to a collapsed
-//             ReasoningCard with summary/full label and line count.
+//   EVT-006 — Codex reasoning must default to a collapsed row with
+//             summary/full label and line count. (P1 redesign 2026-08-08:
+//             the `.evt.thinking` card became a `.trow` row with an
+//             in-place `.trow-detail` expansion.)
 //   EVT-007 — Codex plan_update + cc exit_plan_mode approval must
 //             surface a `PlanChip` that expands the plan inline on click.
 //
@@ -51,12 +53,13 @@ function planApproval(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
 // ---------------------------------------------------------------------------
 
 describe('EVT-006: ReasoningCard component', () => {
-  it('renders a folded .evt.thinking shell that is closed by default', () => {
-    render(<ReasoningCard item={reasoningItem()} />);
-    const shell = screen.getByText('Reasoning').closest('.evt');
-    expect(shell).toBeInTheDocument();
-    expect(shell).toHaveClass('thinking');
-    expect(shell).not.toHaveClass('open');
+  it('renders a collapsed .trow row that is closed by default', () => {
+    const { container } = render(<ReasoningCard item={reasoningItem()} />);
+    const row = screen.getByText('Reasoning').closest('.trow');
+    expect(row).toBeInTheDocument();
+    expect(row).toHaveClass('expandable');
+    expect(row).not.toHaveClass('open');
+    expect(container.querySelector('.trow-detail')).toBeNull();
   });
 
   it('EVT-006: variant=full carries the "Reasoning" label; summary carries "Reasoning summary"', () => {
@@ -69,13 +72,13 @@ describe('EVT-006: ReasoningCard component', () => {
 
   it('EVT-006: data-variant attribute encodes the variant for CSS styling', () => {
     const { rerender } = render(<ReasoningCard item={reasoningItem({ variant: 'full' })} />);
-    expect(screen.getByText('Reasoning').closest('.evt')).toHaveAttribute('data-variant', 'full');
+    expect(screen.getByText('Reasoning').closest('.trow')).toHaveAttribute('data-variant', 'full');
 
     rerender(<ReasoningCard item={reasoningItem({ variant: 'summary' })} />);
-    expect(screen.getByText('Reasoning summary').closest('.evt')).toHaveAttribute('data-variant', 'summary');
+    expect(screen.getByText('Reasoning summary').closest('.trow')).toHaveAttribute('data-variant', 'summary');
   });
 
-  it('EVT-006: surfaces a line count in the header', () => {
+  it('EVT-006: surfaces a line count in the right meta', () => {
     render(<ReasoningCard item={reasoningItem({ text: 'a\nb\nc\nd' })} />);
     expect(screen.getByText('4 lines')).toBeInTheDocument();
   });
@@ -90,15 +93,31 @@ describe('EVT-006: ReasoningCard component', () => {
     expect(screen.getByText('1 line')).toBeInTheDocument();
   });
 
-  it('EVT-006: clicking the head toggles open and reveals the trace', async () => {
+  it('EVT-006: clicking the row expands the trace in place; clicking again collapses', async () => {
     const user = userEvent.setup();
-    render(<ReasoningCard item={reasoningItem()} />);
-    const shell = screen.getByText('Reasoning').closest('.evt') as HTMLElement;
-    expect(shell).not.toHaveClass('open');
-    expect(shell.querySelector('.evt-body')).toBeNull();
-    await user.click(screen.getByText('Reasoning'));
-    expect(shell).toHaveClass('open');
-    expect(shell.querySelector('.evt-body')?.textContent).toContain('first line');
+    const { container } = render(<ReasoningCard item={reasoningItem()} />);
+    const row = screen.getByText('Reasoning').closest('.trow') as HTMLElement;
+    expect(row).not.toHaveClass('open');
+    expect(container.querySelector('.trow-detail')).toBeNull();
+    await user.click(row);
+    expect(row).toHaveClass('open');
+    expect(container.querySelector('.trow-detail')?.textContent).toContain('first line');
+    await user.click(row);
+    expect(row).not.toHaveClass('open');
+  });
+
+  it('EVT-006: a short trace expands without the scroll cap; a long one scrolls', async () => {
+    const user = userEvent.setup();
+    const { container, rerender } = render(<ReasoningCard item={reasoningItem()} />);
+    await user.click(screen.getByText('Reasoning').closest('.trow') as HTMLElement);
+    const shortDetail = container.querySelector('.trow-detail');
+    expect(shortDetail).not.toBeNull();
+    expect(shortDetail).not.toHaveClass('scroll');
+
+    const longText = Array.from({ length: 42 }, (_, i) => `line ${i + 1}`).join('\n');
+    rerender(<ReasoningCard item={reasoningItem({ text: longText })} />);
+    // Same component instance — the open state survives the rerender.
+    expect(container.querySelector('.trow-detail')).toHaveClass('scroll');
   });
 });
 

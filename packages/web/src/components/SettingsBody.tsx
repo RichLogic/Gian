@@ -12,12 +12,21 @@ import {
   loadAgents,
   loadProxyCapabilities,
 } from '../api.js';
-import { useMinimapEnabled, setMinimapEnabled } from '../display-prefs.js';
+import {
+  MAX_ZOOM_PERCENT,
+  MIN_ZOOM_PERCENT,
+  ZOOM_STEP_PERCENT,
+  setMinimapEnabled,
+  setZoomPercent,
+  useMinimapEnabled,
+  useZoomPercent,
+} from '../display-prefs.js';
 import { desktopBridge } from '../desktop-bridge.js';
 import { confirm } from '../feedback.js';
 import { agentEntityKey } from '../operations/agents.js';
 import { AUTH_ENTITY_KEY } from '../operations/auth.js';
 import { SETTINGS_ONBOARDING_ENTITY_KEY } from '../operations/settings.js';
+import { BROWSER_PROFILE_ENTITY_KEY } from '../operations/browser.js';
 import {
   useOperationDispatch,
   useOperationPending,
@@ -147,7 +156,10 @@ function SettingsBodyInner({
 }) {
   const t = useT();
   const dispatch = useOperationDispatch();
+  const browserAvailable = !!desktopBridge()?.browser;
+  const clearingBrowserData = useOperationPending(BROWSER_PROFILE_ENTITY_KEY, 'browser.clearData');
   const minimapOn = useMinimapEnabled();
+  const zoomPercent = useZoomPercent();
   const [editors, setEditors] = useState<ExternalEditor[]>(config.external_editors);
 
   // Sync local editor state when config is replaced from outside (e.g. initial
@@ -177,8 +189,8 @@ function SettingsBodyInner({
   }
 
   // "Default apps" (below) picks from the curated "Open with" list — the apps
-  // the user added above — plus the two built-in system targets (@newtab /
-  // @finder). It deliberately does NOT offer the full scanned app catalog.
+  // the user added above — plus Gian Browser and the fixed system targets.
+  // It deliberately does NOT offer the full scanned app catalog.
   const editorAppNames = [...new Set(editors.map(e => e.name.trim()).filter(Boolean))];
 
   return (
@@ -228,17 +240,6 @@ function SettingsBodyInner({
                   ))}
                 </div>
               </dd>
-              <dt>{t('settings.appearance.density')}</dt>
-              <dd>
-                <div className="segm">
-                  {(['compact', 'cozy', 'roomy'] as const).map(d => (
-                    <button key={d} className={`segm-item ${config.density === d ? 'active' : ''}`}
-                            onClick={() => patch({ density: d })}>
-                      {t(`settings.density.${d}`)}
-                    </button>
-                  ))}
-                </div>
-              </dd>
               <dt>{t('settings.appearance.language')}</dt>
               <dd>
                 <div className="segm">
@@ -256,15 +257,31 @@ function SettingsBodyInner({
                   ))}
                 </div>
               </dd>
-              <dt>{t('settings.appearance.fontInterface')}</dt>
+              <dt>{t('settings.appearance.zoom')}</dt>
               <dd>
-                <div className="segm">
-                  {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
-                    <button key={s} className={`segm-item ${config.font_scale_chrome === s ? 'active' : ''}`}
-                            onClick={() => patch({ font_scale_chrome: s })}>
-                      {s.toUpperCase()}
-                    </button>
-                  ))}
+                <div className="appearance-zoom">
+                  <button
+                    type="button"
+                    aria-label={t('settings.appearance.zoomOut')}
+                    disabled={zoomPercent <= MIN_ZOOM_PERCENT}
+                    onClick={() => setZoomPercent(zoomPercent - ZOOM_STEP_PERCENT)}
+                  >−</button>
+                  <input
+                    type="range"
+                    aria-label={t('settings.appearance.zoom')}
+                    min={MIN_ZOOM_PERCENT}
+                    max={MAX_ZOOM_PERCENT}
+                    step={ZOOM_STEP_PERCENT}
+                    value={zoomPercent}
+                    onChange={e => setZoomPercent(Number(e.currentTarget.value))}
+                  />
+                  <output>{zoomPercent}%</output>
+                  <button
+                    type="button"
+                    aria-label={t('settings.appearance.zoomIn')}
+                    disabled={zoomPercent >= MAX_ZOOM_PERCENT}
+                    onClick={() => setZoomPercent(zoomPercent + ZOOM_STEP_PERCENT)}
+                  >+</button>
                 </div>
               </dd>
               <dt>{t('settings.appearance.fontTranscript')}</dt>
@@ -273,17 +290,6 @@ function SettingsBodyInner({
                   {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
                     <button key={s} className={`segm-item ${config.font_scale_chat === s ? 'active' : ''}`}
                             onClick={() => patch({ font_scale_chat: s })}>
-                      {s.toUpperCase()}
-                    </button>
-                  ))}
-                </div>
-              </dd>
-              <dt>{t('settings.appearance.fontCode')}</dt>
-              <dd>
-                <div className="segm">
-                  {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
-                    <button key={s} className={`segm-item ${config.font_scale_code === s ? 'active' : ''}`}
-                            onClick={() => patch({ font_scale_code: s })}>
                       {s.toUpperCase()}
                     </button>
                   ))}
@@ -410,7 +416,7 @@ function SettingsBodyInner({
                   <div key={key} className="open-cat-row">
                     <span className="open-cat-label">{t(labelKey)}</span>
                     <span className="open-cat-pick">
-                      {cur === '@newtab'
+                      {cur === '@browser' || cur === '@newtab'
                         ? <span className="app-icon app-icon-newtab" aria-hidden>↗</span>
                         : <AppIcon name={cur === '@finder' ? 'Finder' : cur} />}
                       <select
@@ -418,6 +424,7 @@ function SettingsBodyInner({
                         value={cur}
                         onChange={e => patch({ open_apps: { ...(config.open_apps ?? {}), [key]: e.target.value } })}
                       >
+                        <option value="@browser">{t('settings.openapps.browser')}</option>
                         <option value="@newtab">{t('settings.openapps.newtab')}</option>
                         <option value="@finder">{t('settings.openapps.finder')}</option>
                         {appOpts.map(a => <option key={a} value={a}>{a}</option>)}
@@ -427,6 +434,30 @@ function SettingsBodyInner({
                 );
               })}
             </div>
+            {browserAvailable && (
+              <>
+                <div className="s2-subhead">{t('settings.browserData.title')}</div>
+                <div className="browser-data-row">
+                  <span className="s2-help">{t('settings.browserData.help')}</span>
+                  <button
+                    type="button"
+                    className="btn sm secondary"
+                    disabled={clearingBrowserData}
+                    onClick={async () => {
+                      const ok = await confirm({
+                        title: t('settings.browserData.clear'),
+                        message: t('settings.browserData.confirm'),
+                        confirmLabel: t('settings.browserData.clear'),
+                        danger: true,
+                      });
+                      if (ok) dispatch('browser.clearData', {});
+                    }}
+                  >
+                    {clearingBrowserData ? t('settings.browserData.clearing') : t('settings.browserData.clear')}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </section>
         )}

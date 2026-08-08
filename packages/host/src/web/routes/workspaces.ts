@@ -1,9 +1,67 @@
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, posix, resolve, win32 } from 'node:path';
 import type { Hono } from 'hono';
 import { loadConfig } from '../../storage/config.js';
 import type { Db } from '../../storage/db.js';
 import { expandHome, initWorkspace } from '../../workspace/index.js';
+import {
+  canonicalWorkspacePath,
+  reserveWorkspacePath,
+  WorkspacePathReservationError,
+  WorkspacePathResolutionError,
+} from '../../workspace/path-reservation.js';
 import { pickPath } from '../pick-path.js';
+
+function isWindowsNamespacedRoot(candidate: string): boolean {
+  const normalized = win32.normalize(candidate);
+  const prefix = normalized.slice(0, 4).toLowerCase();
+  if (prefix !== '\\\\?\\' && prefix !== '\\\\.\\') return false;
+
+  const parts = normalized
+    .slice(4)
+    .replace(/[\\/]+$/, '')
+    .split(/[\\/]+/)
+    .filter(Boolean);
+  if (parts[0]?.toLowerCase() === 'unc') {
+    return parts.length === 3;
+  }
+  return parts.length === 1;
+}
+
+/** Reject every filesystem root before registration. Checking both path
+ * dialects keeps the boundary testable on one platform while matching the
+ * host semantics on POSIX, Windows drive roots, and Windows UNC shares. */
+export function isFilesystemRoot(candidate: string): boolean {
+  if (isWindowsNamespacedRoot(candidate)) return true;
+  if (posix.isAbsolute(candidate)) {
+    const normalized = posix.resolve(candidate);
+    if (normalized === posix.parse(normalized).root) return true;
+  }
+  if (win32.isAbsolute(candidate)) {
+    const normalized = win32.resolve(candidate);
+    if (normalized === win32.parse(normalized).root) return true;
+  }
+  return false;
+}
+
+function sameWorkspaceIdentity(left: string, right: string): boolean {
+  if (process.platform === 'win32') {
+    return win32.normalize(left).toLowerCase() === win32.normalize(right).toLowerCase();
+  }
+  return left === right;
+}
+
+function pathResolutionFailure(error: unknown): {
+  message: string;
+  status: 500 | 503 | 504;
+} {
+  if (error instanceof WorkspacePathResolutionError) {
+    return {
+      message: error.message,
+      status: error.reason === 'timed_out' ? 504 : 503,
+    };
+  }
+  return { message: String(error), status: 500 };
+}
 
 export function registerWorkspaceRoutes(app: Hono, db: Db): void {
   app.get('/api/workspaces', c => c.json(
@@ -22,49 +80,116 @@ export function registerWorkspaceRoutes(app: Hono, db: Db): void {
     }
 
     const adopt = typeof body.path === 'string' && body.path.trim() !== '';
-    const root = resolve(expandHome(loadConfig(db).workspace_root || '~/Coding'));
+    const requestedRoot = resolve(expandHome(loadConfig(db).workspace_root || '~/Coding'));
     let path: string;
     if (adopt) {
       const expanded = expandHome(body.path!.trim());
+      if (isFilesystemRoot(expanded)) {
+        return c.json({ error: `cannot adopt a filesystem root (${expanded}) — pick a project directory` }, 400);
+      }
       if (!isAbsolute(expanded)) {
         return c.json({ error: 'path must be absolute (or start with ~)' }, 400);
       }
       path = resolve(expanded);
-      if (path === root) {
+    } else {
+      path = resolve(requestedRoot, body.name);
+    }
+
+    let root: string;
+    try {
+      [path, root] = await Promise.all([
+        canonicalWorkspacePath(path, { signal: c.req.raw.signal }),
+        canonicalWorkspacePath(requestedRoot, { signal: c.req.raw.signal }),
+      ]);
+    } catch (error) {
+      const failure = pathResolutionFailure(error);
+      return c.json({ error: failure.message }, failure.status);
+    }
+
+    if (adopt) {
+      if (isFilesystemRoot(path)) {
+        return c.json({ error: `cannot adopt a filesystem root (${path}) — pick a project directory` }, 400);
+      }
+      if (sameWorkspaceIdentity(path, root)) {
         return c.json({ error: `cannot adopt the project root itself (${root}) — pick a subdirectory or another path` }, 400);
       }
-    } else {
-      path = resolve(root, body.name);
     }
 
-    const existing = db
-      .prepare('SELECT id, name FROM workspaces WHERE path = ?')
-      .get(path) as { id: string; name: string } | undefined;
-    if (existing) {
-      return c.json({ error: `path is already a workspace: "${existing.name}"` }, 409);
-    }
-
-    const result = initWorkspace({
-      path,
-      ...(body.git_remote ? { gitRemote: body.git_remote } : {}),
-      name: body.name,
-      ...(adopt ? { adopt: true } : {}),
-    });
-    if (!result.ok) {
-      return c.json({ error: result.error ?? 'init failed', notes: result.notes }, 400);
-    }
-
-    const id = crypto.randomUUID();
+    let releaseReservation: () => void;
     try {
-      db.prepare('INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)')
-        .run(id, body.name, path);
+      releaseReservation = await reserveWorkspacePath(path, { signal: c.req.raw.signal });
     } catch (error) {
-      return c.json({ error: String(error), notes: result.notes }, 400);
+      if (error instanceof WorkspacePathReservationError) {
+        return c.json({
+          error: error.message,
+          code: 'WORKSPACE_INIT_IN_PROGRESS',
+        }, 409);
+      }
+      if (error instanceof WorkspacePathResolutionError) {
+        const failure = pathResolutionFailure(error);
+        return c.json({ error: failure.message }, failure.status);
+      }
+      return c.json({ error: String(error) }, 500);
     }
-    return c.json({
-      workspace: db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id),
-      notes: result.notes,
-    });
+
+    try {
+      // Re-check only after reservation ownership. A request that arrived
+      // during provisioning must see the row published by the prior owner.
+      const existingRows = db
+        .prepare('SELECT id, name, path FROM workspaces')
+        .all() as Array<{ id: string; name: string; path: string }>;
+      for (const existing of existingRows) {
+        let existingPath: string;
+        try {
+          existingPath = await canonicalWorkspacePath(existing.path, { signal: c.req.raw.signal });
+        } catch (error) {
+          const failure = pathResolutionFailure(error);
+          return c.json({ error: failure.message }, failure.status);
+        }
+        if (sameWorkspaceIdentity(existingPath, path)) {
+          return c.json({ error: `path is already a workspace: "${existing.name}"` }, 409);
+        }
+      }
+
+      const result = await initWorkspace({
+        path,
+        ...(body.git_remote ? { gitRemote: body.git_remote } : {}),
+        name: body.name,
+        ...(adopt ? { adopt: true } : {}),
+        signal: c.req.raw.signal,
+      });
+      if (!result.ok) {
+        return c.json(
+          { error: result.error ?? 'init failed', notes: result.notes },
+          result.errorStatus ?? 400,
+        );
+      }
+
+      const id = crypto.randomUUID();
+      try {
+        db.prepare('INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)')
+          .run(id, body.name, path);
+      } catch (error) {
+        // A second Host process may have won even though the in-process
+        // reservation was held. Normalize that path conflict to 409.
+        const winner = db
+          .prepare('SELECT name FROM workspaces WHERE path = ?')
+          .get(path) as { name: string } | undefined;
+        if (winner) {
+          return c.json({
+            error: `path is already a workspace: "${winner.name}"`,
+            notes: result.notes,
+          }, 409);
+        }
+        return c.json({ error: String(error), notes: result.notes }, 500);
+      }
+      return c.json({
+        workspace: db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id),
+        notes: result.notes,
+      });
+    } finally {
+      releaseReservation();
+    }
   });
 
   app.patch('/api/workspaces/:id', async c => {

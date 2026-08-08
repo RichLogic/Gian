@@ -176,6 +176,29 @@ function teardown(ctx: { dir: string; db: ReturnType<typeof openDatabase> }) {
 // Wait one microtask tick so fire-and-forget chains in handleLifecycle settle.
 async function tick() { await new Promise(r => setTimeout(r, 0)); }
 
+const CLOSED_SESSION_STATES = ['completed', 'merged', 'discarded'] as const;
+type ClosedSessionState = typeof CLOSED_SESSION_STATES[number];
+
+function closeSessionForInput(
+  db: ReturnType<typeof openDatabase>,
+  sessionId: string,
+  state: ClosedSessionState,
+): void {
+  if (state === 'completed') {
+    db.prepare('UPDATE sessions SET completed_at = ? WHERE id = ?')
+      .run(new Date().toISOString(), sessionId);
+    return;
+  }
+  db.prepare('UPDATE sessions SET worktree_outcome = ? WHERE id = ?')
+    .run(state, sessionId);
+}
+
+function closedSessionError(state: ClosedSessionState): RegExp {
+  return state === 'completed'
+    ? /session is completed; reopen it before sending more messages/
+    : new RegExp(`session is ${state}; create a new session to continue`);
+}
+
 // ---------------------------------------------------------------------------
 // QUEUE-001 — concurrent send must enqueue, not start a second turn.
 // ---------------------------------------------------------------------------
@@ -261,53 +284,179 @@ test('QUEUE-001: queued message is consumed exactly once on turn.completed (seri
 });
 
 // ---------------------------------------------------------------------------
-// Completed sessions (user `completed_at` flag) are closed for input:
-// sendMessage rejects and the queue drain stops WITHOUT popping.
+// Completed and finalized sessions are closed for all new input. Every path
+// rejects before mutating the queue, transcript, proxy, or broadcast stream.
 // ---------------------------------------------------------------------------
 
-test('sendMessage rejects on a completed session (reopen to send more)', async () => {
-  const ctx = setup();
-  try {
-    const { sessions, proxyMgr, db } = ctx;
-    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+for (const closedState of CLOSED_SESSION_STATES) {
+  test(`sendMessage rejects when the session is ${closedState}`, async () => {
+    const ctx = setup();
+    try {
+      const { sessions, proxyMgr, db } = ctx;
+      const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+      closeSessionForInput(db, session.id, closedState);
 
-    db.prepare('UPDATE sessions SET completed_at = ? WHERE id = ?')
-      .run(new Date().toISOString(), session.id);
+      await assert.rejects(
+        sessions.sendMessage(session.id, 'hello'),
+        closedSessionError(closedState),
+        `${closedState} session must refuse new turns`,
+      );
+      assert.equal(proxyMgr.client.startTurnCalls.length, 0, 'no turn was started');
+    } finally {
+      teardown(ctx);
+    }
+  });
+
+  test(`enqueueMessage rejects without mutation when the session is ${closedState}`, async () => {
+    const ctx = setup();
+    try {
+      const { sessions, queue, broadcaster, db } = ctx;
+      const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+      closeSessionForInput(db, session.id, closedState);
+      const broadcastsBefore = broadcaster.messages.filter(message => message.type === 'queue:updated').length;
+
+      assert.throws(
+        () => sessions.enqueueMessage(session.id, 'must-not-enqueue'),
+        closedSessionError(closedState),
+      );
+      assert.deepEqual(queue.list(session.id), [], 'closed session queue remains empty');
+      assert.equal(
+        broadcaster.messages.filter(message => message.type === 'queue:updated').length,
+        broadcastsBefore,
+        'rejected enqueue must not broadcast a phantom queue update',
+      );
+    } finally {
+      teardown(ctx);
+    }
+  });
+
+  test(`sendQueuedNow preserves FIFO without side effects when the session is ${closedState}`, async () => {
+    const codexClient = new FakeCodexProxyClient();
+    const ctx = setup(codexClient);
+    try {
+      const { sessions, queue, broadcaster, db } = ctx;
+      const session = await sessions.createSession({
+        workspace_id: ctx.wsId,
+        executor: 'codex',
+        approval_mode: 'auto',
+      });
+      sessions.enqueueMessage(session.id, 'queued-first');
+      sessions.enqueueMessage(session.id, 'queued-second');
+      const broadcastsBefore = broadcaster.messages.filter(message => message.type === 'queue:updated').length;
+      closeSessionForInput(db, session.id, closedState);
+
+      await assert.rejects(
+        sessions.sendQueuedNow(session.id),
+        closedSessionError(closedState),
+      );
+      assert.deepEqual(
+        queue.list(session.id).map(entry => entry.text),
+        ['queued-first', 'queued-second'],
+        'rejected send-now must preserve queue length and FIFO order',
+      );
+      assert.equal(codexClient.startTurnCalls.length, 0, 'rejected send-now must not start a turn');
+      assert.equal(codexClient.steerCalls.length, 0, 'rejected send-now must not steer a turn');
+      assert.equal(
+        broadcaster.messages.filter(message => message.type === 'queue:updated').length,
+        broadcastsBefore,
+        'rejected send-now must not broadcast a queue pop',
+      );
+    } finally {
+      teardown(ctx);
+    }
+  });
+
+  test(`queue edit, remove, and clear preserve contents when the session is ${closedState}`, async () => {
+    const ctx = setup();
+    try {
+      const { sessions, queue, broadcaster, db } = ctx;
+      const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+      sessions.enqueueMessage(session.id, 'queued-first');
+      sessions.enqueueMessage(session.id, 'queued-second');
+      const queueBefore = queue.list(session.id);
+      const broadcastsBefore = broadcaster.messages.filter(message => message.type === 'queue:updated').length;
+      closeSessionForInput(db, session.id, closedState);
+
+      assert.throws(
+        () => sessions.updateQueueMessage(session.id, queueBefore[0]!.id, 'must-not-update'),
+        closedSessionError(closedState),
+      );
+      assert.throws(
+        () => sessions.removeFromQueue(session.id, queueBefore[0]!.id),
+        closedSessionError(closedState),
+      );
+      assert.throws(
+        () => sessions.clearQueue(session.id),
+        closedSessionError(closedState),
+      );
+      assert.deepEqual(
+        queue.list(session.id),
+        queueBefore,
+        'rejected queue mutations must preserve entry identity, contents, count, and FIFO order',
+      );
+      assert.equal(
+        broadcaster.messages.filter(message => message.type === 'queue:updated').length,
+        broadcastsBefore,
+        'rejected queue mutations must not broadcast a phantom update',
+      );
+    } finally {
+      teardown(ctx);
+    }
+  });
+
+  test(`queue drain stops without popping when the session is ${closedState}`, async () => {
+    const ctx = setup();
+    try {
+      const { sessions, proxyMgr, queue, db } = ctx;
+      const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+      await sessions.sendMessage(session.id, 'turn-A');
+      sessions.enqueueMessage(session.id, 'turn-B');
+      assert.equal(queue.list(session.id).length, 1, 'one message queued behind active turn');
+
+      closeSessionForInput(db, session.id, closedState);
+      proxyMgr.client.fire({
+        method: 'turn.completed',
+        params: { sessionId: 'proxy_x', data: { status: 'completed' } },
+      });
+      await tick();
+
+      assert.equal(proxyMgr.client.startTurnCalls.length, 1,
+        'drain must not start another turn on a closed session');
+      assert.deepEqual(queue.list(session.id).map(entry => entry.text), ['turn-B'],
+        'drain must not pop the queued message');
+    } finally {
+      teardown(ctx);
+    }
+  });
+}
+
+test('steerMessage rejects without proxy or transcript mutation after finalization', async () => {
+  const codexClient = new FakeCodexProxyClient();
+  const ctx = setup(codexClient);
+  try {
+    const { sessions, db } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'codex',
+      approval_mode: 'auto',
+    });
+    await sessions.sendMessage(session.id, 'turn-A');
+    closeSessionForInput(db, session.id, 'merged');
 
     await assert.rejects(
-      sessions.sendMessage(session.id, 'hello'),
-      /session is completed; reopen it before sending more messages/,
-      'completed session must refuse new turns',
+      sessions.steerMessage(session.id, 'must-not-steer'),
+      closedSessionError('merged'),
     );
-    assert.equal(proxyMgr.client.startTurnCalls.length, 0, 'no turn was started');
-  } finally {
-    teardown(ctx);
-  }
-});
-
-test('queue drain stops without popping when the session is completed', async () => {
-  const ctx = setup();
-  try {
-    const { sessions, proxyMgr, queue, db } = ctx;
-    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
-
-    await sessions.sendMessage(session.id, 'turn-A');
-    sessions.enqueueMessage(session.id, 'turn-B');
-    assert.equal(queue.list(session.id).length, 1, 'one message queued behind active turn');
-
-    // The user completes the session mid-turn; the turn then ends.
-    db.prepare('UPDATE sessions SET completed_at = ? WHERE id = ?')
-      .run(new Date().toISOString(), session.id);
-    proxyMgr.client.fire({
-      method: 'turn.completed',
-      params: { sessionId: 'proxy_x', data: { status: 'completed' } },
-    });
-    await tick();
-
-    assert.equal(proxyMgr.client.startTurnCalls.length, 1,
-      'drain must not start another turn on a completed session');
-    assert.equal(queue.list(session.id).length, 1,
-      'drain must NOT pop the queued message — it survives a later reopen');
+    assert.equal(codexClient.steerCalls.length, 0, 'finalized session must not reach turn/steer');
+    const messages = db
+      .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid")
+      .all(session.id) as Array<{ data: string }>;
+    assert.deepEqual(
+      messages.map(message => (JSON.parse(message.data) as { text: string }).text),
+      ['turn-A'],
+      'rejected steer must not append a transcript event',
+    );
   } finally {
     teardown(ctx);
   }
@@ -637,7 +786,7 @@ test('QUEUE-004: steerMessage without an active turn rejects; with one it record
   const codexClient = new FakeCodexProxyClient();
   const ctx = setup(codexClient);
   try {
-    const { sessions, db } = ctx;
+    const { sessions, db, broadcaster } = ctx;
     const session = await sessions.createSession({
       workspace_id: ctx.wsId,
       executor: 'codex',
@@ -661,11 +810,32 @@ test('QUEUE-004: steerMessage without an active turn rejects; with one it record
     const input = codexClient.steerCalls[0]!.input as Array<{ type: string }>;
     assert.ok(input.some(it => it.type === 'localImage'), 'steer carries attachments');
     const msg = db
-      .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid DESC LIMIT 1")
-      .get(session.id) as { data: string };
+      .prepare("SELECT call_id, data, created_at FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid DESC LIMIT 1")
+      .get(session.id) as { call_id: string; data: string; created_at: string };
     const payload = JSON.parse(msg.data) as { text: string; attachments?: unknown[] };
     assert.equal(payload.text, 'steer this');
     assert.equal(payload.attachments?.length, 1, 'steered message echo carries the attachment');
+    const broadcastMsg = broadcaster.messages.findLast(message => (
+      message.type === 'event'
+      && message.event === 'user_message'
+      && message.data.text === 'steer this'
+    ));
+    assert.ok(broadcastMsg && broadcastMsg.type === 'event', 'steered user_message is broadcast');
+    assert.equal(
+      broadcastMsg.call_id,
+      msg.call_id,
+      'persisted and broadcast steered user_message must share one stable call_id',
+    );
+    assert.match(msg.created_at, /Z$/, 'new steered user_message timestamps must carry UTC');
+    assert.equal(
+      broadcastMsg.ts,
+      Date.parse(msg.created_at),
+      'persisted and broadcast steered user_message must share one timestamp',
+    );
+    const replayed = sessions.listEvents(session.id)
+      .findLast(event => event.event === 'user_message');
+    assert.equal(replayed?.call_id, broadcastMsg.call_id);
+    assert.equal(replayed?.ts, broadcastMsg.ts);
   } finally {
     teardown(ctx);
   }

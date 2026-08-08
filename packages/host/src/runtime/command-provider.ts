@@ -1,17 +1,15 @@
-import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, realpath } from 'node:fs/promises';
 import { delimiter, dirname, isAbsolute, resolve } from 'node:path';
-import { promisify } from 'node:util';
 import type { Executor } from '@gian/shared';
+import { runProtectedCommand } from './protected-command.js';
 import type {
   CliRuntimeProvider,
   InstalledRuntime,
   RuntimeProbe,
+  RuntimeProcessGroupProtector,
   RuntimeSource,
 } from './types.js';
-
-const execFileAsync = promisify(execFile);
 
 export interface CommandRuntimeProviderOptions {
   id: Executor;
@@ -112,16 +110,23 @@ export class CommandRuntimeProvider implements CliRuntimeProvider {
     return installed;
   }
 
-  async probe(runtime: InstalledRuntime): Promise<RuntimeProbe> {
+  async probe(
+    runtime: InstalledRuntime,
+    protector?: RuntimeProcessGroupProtector,
+  ): Promise<RuntimeProbe> {
     if (!isAbsolute(runtime.binaryPath)) {
       throw new Error(`resolved ${this.id} binary path is not absolute`);
     }
     await access(runtime.binaryPath, constants.X_OK);
     const runtimeEnv = this.runtimeEnv(runtime);
-    const result = await execFileAsync(runtime.binaryPath, ['--version'], {
-      timeout: 8_000,
+    const result = await runProtectedCommand({
+      command: runtime.binaryPath,
+      args: ['--version'],
+      timeoutMs: 8_000,
       maxBuffer: 1024 * 1024,
       env: { ...process.env, ...runtimeEnv },
+      label: `${this.options.command} --version`,
+      ...(protector ? { protector } : {}),
     });
     const version = firstVersion(`${result.stdout}\n${result.stderr}`);
     if (!version) {

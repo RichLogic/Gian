@@ -40,7 +40,10 @@ const ICONS = {
   grid: 'M4 5.5A1.5 1.5 0 0 1 5.5 4h4A1.5 1.5 0 0 1 11 5.5v4A1.5 1.5 0 0 1 9.5 11h-4A1.5 1.5 0 0 1 4 9.5z M13 5.5A1.5 1.5 0 0 1 14.5 4h4A1.5 1.5 0 0 1 20 5.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 13 9.5z M4 14.5A1.5 1.5 0 0 1 5.5 13h4a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 4 18.5z M13 14.5a1.5 1.5 0 0 1 1.5-1.5h4a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5h-4a1.5 1.5 0 0 1-1.5-1.5z',
   folder: 'M3.5 7A2.5 2.5 0 0 1 6 4.5h3.4a2 2 0 0 1 1.6.8l1.2 1.7H18A2.5 2.5 0 0 1 20.5 9.5v8A2.5 2.5 0 0 1 18 20H6a2.5 2.5 0 0 1-2.5-2.5z',
   diff: 'M8.5 4v13 M8.5 4l-3 3 M8.5 4l3 3 M15.5 20V7 M15.5 20l3-3 M15.5 20l-3-3',
+  // Counter-clockwise clock — "history" (same 24-grid family).
+  history: 'M3 3v5h5 M3.05 13A9 9 0 1 0 6 5.3L3 8 M12 7v5l4 2',
   terminal: 'M5.5 7.5l4.5 4.5-4.5 4.5 M12.5 18.5h6',
+  browser: 'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17z M3.5 12h17 M12 3.5c2.2 2.3 3.3 5.1 3.3 8.5S14.2 18.2 12 20.5 M12 3.5C9.8 5.8 8.7 8.6 8.7 12s1.1 6.2 3.3 8.5',
   gear: 'M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z M18.7 12a6 6 0 0 0-.1-1.2l1.8-1.4-1.8-3.1-2.1.8a6.2 6.2 0 0 0-2.1-1.2L14 3.5h-4l-.4 2.4a6.2 6.2 0 0 0-2.1 1.2l-2.1-.8-1.8 3.1 1.8 1.4a6 6 0 0 0 0 2.4l-1.8 1.4 1.8 3.1 2.1-.8a6.2 6.2 0 0 0 2.1 1.2l.4 2.4h4l.4-2.4a6.2 6.2 0 0 0 2.1-1.2l2.1.8 1.8-3.1-1.8-1.4c.07-.4.1-.8.1-1.2z',
 };
 
@@ -62,6 +65,8 @@ interface Props {
   /** Global workbench rails (Terminal / Workspaces / Settings) need
    *  Sessions or Tasks mode. */
   workbenchDisabled?: boolean;
+  /** Browser is available only in the Electron desktop renderer. */
+  browserAvailable?: boolean;
 
   // Runner chip (V1-style clickable status pill anchored bottom-right).
   wsState: WsState;
@@ -75,6 +80,7 @@ export function Dock({
   onToggleRail,
   sessionRailsDisabled,
   workbenchDisabled,
+  browserAvailable,
   wsState,
   wsAttempt,
   authed,
@@ -133,11 +139,33 @@ export function Dock({
         >
           <Icon d={ICONS.diff} />
         </DockBtn>
+        <DockBtn
+          group="panel"
+          testId="history"
+          label={t('dock.history')}
+          active={activeRail === 'history'}
+          disabled={sessionRailsDisabled}
+          onClick={() => onToggleRail('history')}
+        >
+          <Icon d={ICONS.history} />
+        </DockBtn>
       </div>
 
       <div className="dock-divider" aria-hidden />
 
       <div className="dock-group" data-dock-group-label={t('dock.group.workbench')}>
+        {browserAvailable && (
+          <DockBtn
+            group="wb"
+            testId="browser"
+            label={t('dock.browser')}
+            active={activeRail === 'browser'}
+            disabled={workbenchDisabled}
+            onClick={() => onToggleRail('browser')}
+          >
+            <Icon d={ICONS.browser} />
+          </DockBtn>
+        )}
         <DockBtn
           group="wb"
           testId="terminal"

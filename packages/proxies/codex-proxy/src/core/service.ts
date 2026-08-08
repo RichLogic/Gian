@@ -359,6 +359,7 @@ export class CodexProxyService {
         'slash.list',
         'session.create',
         'session.get',
+        'session.setName',
         'turn.start',
         'turn.interrupt',
         'turn.steer',

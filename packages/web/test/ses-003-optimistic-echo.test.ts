@@ -11,7 +11,7 @@
 // (`applyEnvelope` + `markLatestPendingEchoFailed`), so we exercise
 // them in one file as pure-function tests over `TranscriptItem[]`.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { EventEnvelope } from '@gian/shared';
 import type { MsgItem, TranscriptItem } from '../src/types.js';
 import {
@@ -106,6 +106,49 @@ describe('SES-003: optimistic user echo reconciliation', () => {
     const after = applyEnvelope(before, userMessageEnvelope('old'), 'claude');
     expect(after).toHaveLength(2);
     expect((after[0] as MsgItem).id).toBe('real-1');
+  });
+
+  it('SES-003: collapses canonical + pending state when the matching WS event arrives', () => {
+    const env: EventEnvelope = {
+      ...userMessageEnvelope('hello'),
+      data: {
+        text: 'hello',
+        attachments: [
+          { name: 'shot.png', mime: 'image/png', url: '/api/sessions/sess-1/attachments/shot.png' },
+        ],
+      },
+    };
+    const canonical = applyEnvelope([], env, 'claude')[0] as MsgItem;
+    const pending: MsgItem = {
+      ...optimisticEcho('hello', 'pending-after-refresh'),
+      attachments: [{ name: 'shot.png', mime: 'image/png', url: 'blob:pending-shot' }],
+    };
+    const revokeDescriptor = Object.getOwnPropertyDescriptor(URL, 'revokeObjectURL');
+    const revoke = vi.fn();
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: revoke,
+    });
+    try {
+      const after = applyEnvelope(
+        [canonical, pending],
+        { ...env, ts: env.ts + 250 },
+        'claude',
+      );
+
+      expect(after).toHaveLength(1);
+      expect(after[0]).toMatchObject({
+        kind: 'user',
+        id: env.call_id,
+        text: 'hello',
+        ts: env.ts + 250,
+      });
+      expect((after[0] as MsgItem).pending).toBeUndefined();
+      expect(revoke).toHaveBeenCalledWith('blob:pending-shot');
+    } finally {
+      if (revokeDescriptor) Object.defineProperty(URL, 'revokeObjectURL', revokeDescriptor);
+      else Reflect.deleteProperty(URL, 'revokeObjectURL');
+    }
   });
 
   it('SES-003: reconciles an image-only (empty text) optimistic echo and swaps in server attachment URLs', () => {

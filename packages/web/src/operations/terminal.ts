@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — Terminal-domain definitions (Phase 3b of
- * `docs/proposals/ui-operation-layer.md`): `term.spawn` and `term.close`,
+ * `docs/archive/proposals/ui-operation-layer.md`): `term.spawn` and `term.close`,
  * both PENDING WS.
  *
  * BOUNDARY DECISION (task brief + inventory §3): `terminal-wire.ts` stays the

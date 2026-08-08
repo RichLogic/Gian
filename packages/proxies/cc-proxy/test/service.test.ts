@@ -17,6 +17,13 @@ import {
   shouldRetryWithoutNoSessionPersistence,
 } from '../src/runtime/claude-mcp-runtime.js';
 import type { ModelCapabilities } from '../src/core/types.js';
+import {
+  CLAUDE_STREAM_JSON_MALFORMED_MODEL_USAGE_V1,
+  CLAUDE_STREAM_JSON_MALFORMED_V1,
+  CLAUDE_STREAM_JSON_UNKNOWN,
+  CLAUDE_STREAM_JSON_V1,
+  CLAUDE_STREAM_JSON_V1_COMPACTION,
+} from './fixtures/claude-stream-json-v1.js';
 
 class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRuntime {
   readonly spawnCalls: Array<{
@@ -159,24 +166,25 @@ test('shouldRetryWithoutNoSessionPersistence detects older Claude CLI rejection'
 });
 
 test('Claude compact boundary detection covers native auto-compaction signals', () => {
-  assert.equal(isClaudeCompactBoundary({
-    type: 'system',
-    subtype: 'compact_boundary',
-  }), true);
-  assert.equal(isClaudeCompactBoundary({
-    type: 'system',
-    subtype: 'init',
-  }), false);
+  assert.equal(isClaudeCompactBoundary(CLAUDE_STREAM_JSON_V1_COMPACTION.boundary), true);
+  assert.equal(
+    isClaudeCompactBoundary(CLAUDE_STREAM_JSON_V1_COMPACTION.futureBoundary),
+    false,
+    'an unknown discriminator must not invalidate the current context',
+  );
 });
 
 test('Claude auto-compaction clears the pre-boundary context before result parsing', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'cc-proxy-compact-boundary-'));
   const fakeClaude = join(dir, 'claude');
+  const frames = [
+    CLAUDE_STREAM_JSON_V1_COMPACTION.preBoundary,
+    CLAUDE_STREAM_JSON_V1_COMPACTION.boundary,
+    CLAUDE_STREAM_JSON_V1_COMPACTION.postBoundary,
+  ];
   writeFileSync(fakeClaude, [
     '#!/usr/bin/env node',
-    "console.log(JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-4-8', usage: { input_tokens: 180000, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, content: [] } }));",
-    "console.log(JSON.stringify({ type: 'system', subtype: 'compact_boundary' }));",
-    "console.log(JSON.stringify({ type: 'result', subtype: 'success', result: '', usage: { input_tokens: 100, output_tokens: 25, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0 }, modelUsage: { 'claude-opus-4-8': { inputTokens: 100, outputTokens: 25, cacheReadInputTokens: 1000, cacheCreationInputTokens: 0, contextWindow: 200000 } } }));",
+    ...frames.map(frame => `console.log(${JSON.stringify(JSON.stringify(frame))});`),
   ].join('\n'));
   chmodSync(fakeClaude, 0o755);
 
@@ -295,37 +303,17 @@ test('Claude -p native task lifecycle keeps Agent tool id and terminal summary',
 });
 
 test('Claude stream usage keeps current context separate from result aggregates', () => {
-  const assistant = parseClaudeAssistantUsage({
-    type: 'assistant',
-    message: {
-      model: 'claude-opus-4-8[1m]',
-      usage: {
-        input_tokens: 120,
-        cache_read_input_tokens: 62_000,
-        cache_creation_input_tokens: 880,
-        output_tokens: 450,
-      },
-    },
-  });
+  const assistant = parseClaudeAssistantUsage(CLAUDE_STREAM_JSON_V1.assistant);
   assert.deepEqual(assistant, {
     context: { used: 63_000 },
     model: 'claude-opus-4-8[1m]',
   });
 
-  const result = parseClaudeResultUsage({
-    type: 'result',
-    usage: {
-      input_tokens: 200,
-      cache_read_input_tokens: 90_000,
-      cache_creation_input_tokens: 1_000,
-      output_tokens: 2_000,
-    },
-    modelUsage: {
-      'claude-opus-4-8[1m]': {
-        contextWindow: 1_000_000,
-      },
-    },
-  }, assistant!.context, assistant!.model);
+  const result = parseClaudeResultUsage(
+    CLAUDE_STREAM_JSON_V1.result,
+    assistant!.context,
+    assistant!.model,
+  );
   assert.deepEqual(result, {
     context: { used: 63_000, window: 1_000_000 },
     conversation: {
@@ -336,6 +324,37 @@ test('Claude stream usage keeps current context separate from result aggregates'
       totalTokens: 93_200,
     },
   });
+});
+
+test('unknown Claude usage fixtures stay unknown instead of emitting zero usage', () => {
+  assert.equal(parseClaudeAssistantUsage(CLAUDE_STREAM_JSON_UNKNOWN.assistant), null);
+  assert.equal(
+    parseClaudeResultUsage(CLAUDE_STREAM_JSON_UNKNOWN.result, null, null),
+    null,
+  );
+  assert.equal(parseClaudeAssistantUsage(CLAUDE_STREAM_JSON_MALFORMED_V1.assistant), null);
+  assert.equal(
+    parseClaudeResultUsage(CLAUDE_STREAM_JSON_MALFORMED_V1.result, null, null),
+    null,
+  );
+  assert.equal(parseClaudeAssistantUsage({
+    type: 'assistant',
+    message: { usage: { input_tokens: '120' } },
+  }), null, 'numeric strings are not a documented stream-json shape');
+  assert.equal(parseClaudeAssistantUsage({
+    type: 'assistant',
+    message: { usage: { input_tokens: 0.5 } },
+  }), null, 'fractional counters are not a documented stream-json shape');
+  assert.equal(parseClaudeResultUsage(
+    CLAUDE_STREAM_JSON_MALFORMED_MODEL_USAGE_V1.mixedCompleteAndPartial,
+    null,
+    null,
+  ), null, 'a partial model must invalidate the whole multi-model snapshot');
+  assert.equal(parseClaudeResultUsage(
+    CLAUDE_STREAM_JSON_MALFORMED_MODEL_USAGE_V1.partialWithValidTopLevelFallback,
+    null,
+    null,
+  ), null, 'present but malformed modelUsage must not fall back to top-level usage');
 });
 
 test('Claude result usage prefers whole-tree modelUsage over the top-level fallback', () => {

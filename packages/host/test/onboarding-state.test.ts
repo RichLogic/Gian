@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { AgentInstallStatus, Executor } from '@gian/shared';
+import { Hono } from 'hono';
+import type { AgentManager } from '../src/agents/manager.js';
 import {
   buildOnboardingState,
   hasReadyAgent,
@@ -14,6 +16,8 @@ import {
   saveOnboardingProjectRoot,
 } from '../src/onboarding/state.js';
 import { openDatabase } from '../src/storage/db.js';
+import { saveConfig } from '../src/storage/config.js';
+import { registerOnboardingRoutes } from '../src/web/routes/onboarding.js';
 
 function readyAgent(id: Executor, name: string): AgentInstallStatus {
   return {
@@ -80,4 +84,35 @@ test('ONBOARD-001 requires one ready Agent rather than every Agent', () => {
   assert.equal(hasReadyAgent([]), false);
   assert.equal(hasReadyAgent([unavailable]), false);
   assert.equal(hasReadyAgent([codex, unavailable]), true);
+});
+
+test('WT-001: completing onboarding triggers managed agent instructions for the confirmed root', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-onboarding-route-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'data');
+  await mkdir(dataDir, { recursive: true });
+  const db = openDatabase(dataDir);
+  t.after(() => db.close());
+  const projectRoot = join(root, 'projects');
+  saveConfig(db, { workspace_root: projectRoot });
+
+  const synced: string[] = [];
+  const agents = {
+    list: async () => [readyAgent('codex', 'Codex')],
+  } as unknown as AgentManager;
+  const app = new Hono();
+  registerOnboardingRoutes(app, {
+    db,
+    agents,
+    syncAgentInstructions: async confirmedRoot => {
+      synced.push(confirmedRoot);
+      return [];
+    },
+  });
+
+  const response = await app.request('/api/onboarding/complete', { method: 'POST' });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json() as { completed: boolean }).completed, true);
+  assert.deepEqual(synced, [projectRoot]);
+  assert.equal(onboardingCompleted(db), true);
 });

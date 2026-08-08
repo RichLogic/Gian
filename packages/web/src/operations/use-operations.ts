@@ -155,6 +155,14 @@ export function useOperationPending(entityKey: string, name: OperationName): boo
  *  when no store is mounted or the run is unknown. */
 export function useOperationRun(runId: string | undefined): OperationRun | undefined {
   const store = useOperationStoreOptional();
+  return useStoreOperationRun(store, runId);
+}
+
+/** Explicit-store variant for App, which owns the store above its provider. */
+export function useStoreOperationRun(
+  store: OperationStore | null,
+  runId: string | undefined,
+): OperationRun | undefined {
   const getSnapshot = useCallback(
     () => (store && runId ? store.getRun(runId) : undefined),
     [store, runId],

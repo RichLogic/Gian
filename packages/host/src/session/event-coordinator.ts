@@ -19,7 +19,7 @@ import {
 import type { QueueManager } from '../queue/index.js';
 import type { Db } from '../storage/db.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
-import { listGitWorktrees } from '../workspace/git.js';
+import { listGitWorktreesAsync } from '../workspace/git.js';
 import { detectWorktreeAddPath } from './worktree-detect.js';
 import { executorConfigFromOptions, type SessionRepository } from './repository.js';
 import type { SessionHistoryStore } from './history-store.js';
@@ -56,6 +56,8 @@ export class SessionEventCoordinator {
     turnId: string;
     timer: ReturnType<typeof setTimeout>;
   }>();
+  private pendingWorktreeDetectionCommands = new Map<string, string>();
+  private activeWorktreeDetections = new Set<string>();
 
   constructor(
     private db: Db,
@@ -577,7 +579,38 @@ export class SessionEventCoordinator {
     }
     if (e.display?.type === 'activity.command') {
       const d = e.display.data as import('@gian/shared').CommandExecutionData;
-      this.maybeDetectExternalWorktree(e.session_id, d.command);
+      this.queueExternalWorktreeDetection(e.session_id, d.command);
+    }
+  }
+
+  private queueExternalWorktreeDetection(sessionId: string, command: string | undefined): void {
+    // Almost every command event is unrelated. Avoid building promise tails
+    // for ordinary shell traffic; only the rare worktree candidates need the
+    // per-session ordering below.
+    if (!command || !command.includes('worktree')) return;
+    // Keep at most one latest command behind the active scan. Agent event
+    // bursts therefore cannot create an unbounded promise tail or spend
+    // minutes replaying obsolete membership checks.
+    this.pendingWorktreeDetectionCommands.set(sessionId, command);
+    if (this.activeWorktreeDetections.has(sessionId)) return;
+    this.activeWorktreeDetections.add(sessionId);
+    void this.drainExternalWorktreeDetections(sessionId);
+  }
+
+  private async drainExternalWorktreeDetections(sessionId: string): Promise<void> {
+    try {
+      while (true) {
+        const command = this.pendingWorktreeDetectionCommands.get(sessionId);
+        if (command === undefined) return;
+        this.pendingWorktreeDetectionCommands.delete(sessionId);
+        try {
+          await this.maybeDetectExternalWorktree(sessionId, command);
+        } catch (error) {
+          console.warn('[worktree-detect] async membership check failed:', error);
+        }
+      }
+    } finally {
+      this.activeWorktreeDetections.delete(sessionId);
     }
   }
 
@@ -596,7 +629,7 @@ export class SessionEventCoordinator {
    *      session's workspace repo — the agent's claim is never trusted on its
    *      own (mirrors the SEC-014 stance in resolveWorkingTree).
    */
-  private maybeDetectExternalWorktree(sessionId: string, command: string | undefined): void {
+  private async maybeDetectExternalWorktree(sessionId: string, command: string | undefined): Promise<void> {
     if (!command || !command.includes('worktree')) return;
     const detected = detectWorktreeAddPath(command);
     if (!detected) return;
@@ -609,24 +642,38 @@ export class SessionEventCoordinator {
     if (session.worktree_path) return;
     if (session.detected_worktree_path === detected) return;
     const workspace = this.db
-      .prepare('SELECT path FROM workspaces WHERE id = ?')
-      .get(session.workspace_id) as { path: string } | undefined;
+      .prepare('SELECT id, path FROM workspaces WHERE id = ?')
+      .get(session.workspace_id) as { id: string; path: string } | undefined;
     if (!workspace) return;
-    const isMember = listGitWorktrees(workspace.path).some(w => w.path === detected);
+    const isMember = (await listGitWorktreesAsync(workspace.path)).some(w => w.path === detected);
     if (!isMember) return;
-    this.db
-      .prepare('UPDATE sessions SET detected_worktree_path = ? WHERE id = ?')
-      .run(detected, sessionId);
-    this.broadcastSessionUpdated(sessionId, { detected_worktree_path: detected });
+    // The subprocess yielded to the event loop. Revalidate ownership and
+    // managed-worktree state before committing the derived path so a stale
+    // scan cannot overwrite a concurrent session transition.
+    const updated = this.db
+      .prepare(
+        `UPDATE sessions SET detected_worktree_path = ?
+         WHERE id = ? AND workspace_id = ? AND worktree_path IS NULL
+           AND (detected_worktree_path IS NULL OR detected_worktree_path <> ?)`,
+      )
+      .run(detected, sessionId, session.workspace_id, detected);
+    if (updated.changes > 0) {
+      this.broadcastSessionUpdated(sessionId, { detected_worktree_path: detected });
+      this.broadcaster.broadcast({
+        type: 'workspace:git-updated',
+        workspace_id: workspace.id,
+        reason: 'worktree-detected',
+      });
+    }
   }
 
   /** Pop the next queued message and re-enter sendMessage. Returns true if sent. */
   private maybeAutoSendNext(sessionId: string): boolean {
     let session: Session;
     try { session = this.sessions.get(sessionId); } catch { return false; }
-    // A user-completed session is closed for input: STOP the drain without
-    // popping — the queue stays intact in case the session is reopened.
-    if (session.completed_at) return false;
+    // Finalized worktrees and user-completed sessions are closed for input:
+    // stop before popping so their queues remain intact.
+    if (session.worktree_outcome || session.completed_at) return false;
     const next = this.queue.popNext(sessionId);
     if (!next) return false;
     this.broadcastQueueUpdated(sessionId);
@@ -694,13 +741,14 @@ export class SessionEventCoordinator {
     callId: string,
     event: string,
     data: Record<string, unknown>,
+    ts = Date.now(),
   ): void {
     const envelope: EventEnvelope = {
       session_id: sessionId,
       turn,
       call_id: callId,
       event,
-      ts: Date.now(),
+      ts,
       data,
     };
     this.broadcaster.broadcast({ type: 'event', ...envelope });

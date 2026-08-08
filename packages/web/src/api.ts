@@ -12,6 +12,7 @@ import type {
   OnboardingProjectRootResult,
   ProxyCapabilities,
 } from '@gian/shared';
+import { parseListNativeSessionsResponse, parseSessionList } from '@gian/shared';
 
 export interface TreeEntry {
   name: string;
@@ -31,13 +32,14 @@ export async function loadWorkspaces(): Promise<Workspace[]> {
 
 export async function loadSessions(): Promise<Session[]> {
   const res = await fetch('/api/sessions');
-  return (await res.json()) as Session[];
+  if (!res.ok) throw new Error(`Session list load failed (${res.status})`);
+  return parseSessionList(await res.json());
 }
 
 export async function loadArchivedSessions(): Promise<Session[]> {
   const res = await fetch('/api/sessions?archived=true');
-  if (!res.ok) return [];
-  return (await res.json()) as Session[];
+  if (!res.ok) throw new Error(`Archived sessions load failed (${res.status})`);
+  return parseSessionList(await res.json());
 }
 
 // NOTE: the REST archive/delete session helpers were removed in Phase 3a of
@@ -51,14 +53,62 @@ export interface EventHistoryPage {
   hasMore: boolean;
 }
 
+export type EventHistoryLoadErrorKind = 'http' | 'network' | 'invalid-response';
+
+/** A history request must never be indistinguishable from a genuinely empty
+ * page. Callers use this structured error to retain live transcript state and
+ * offer the right retry path. */
+export class EventHistoryLoadError extends Error {
+  readonly kind: EventHistoryLoadErrorKind;
+  readonly status: number | null;
+  readonly originalError?: unknown;
+
+  constructor(
+    kind: EventHistoryLoadErrorKind,
+    message: string,
+    options: { status?: number; originalError?: unknown } = {},
+  ) {
+    super(message);
+    this.name = 'EventHistoryLoadError';
+    this.kind = kind;
+    this.status = options.status ?? null;
+    this.originalError = options.originalError;
+  }
+}
+
 export async function loadEvents(sessionId: string, beforeTurn?: number | null): Promise<EventHistoryPage> {
   const query = beforeTurn == null ? '' : `?before=${encodeURIComponent(beforeTurn)}`;
-  const res = await fetch(`/api/sessions/${sessionId}/events${query}`);
-  if (!res.ok) return { events: [], nextCursor: null, hasMore: false };
-  const body = (await res.json()) as EventHistoryPage | EventEnvelope[];
+  let res: Response;
+  try {
+    res = await fetch(`/api/sessions/${sessionId}/events${query}`);
+  } catch (error) {
+    throw new EventHistoryLoadError('network', 'Unable to reach the event history endpoint.', {
+      originalError: error,
+    });
+  }
+  if (!res.ok) {
+    throw new EventHistoryLoadError('http', `Event history request failed with HTTP ${res.status}.`, {
+      status: res.status,
+    });
+  }
+  let body: EventHistoryPage | EventEnvelope[];
+  try {
+    body = (await res.json()) as EventHistoryPage | EventEnvelope[];
+  } catch (error) {
+    throw new EventHistoryLoadError('invalid-response', 'Event history response was not valid JSON.', {
+      status: res.status,
+      originalError: error,
+    });
+  }
   // Development fixtures and an older Host may still return the pre-pagination
   // array. Treat it as one complete page during rolling upgrades.
   if (Array.isArray(body)) return { events: body, nextCursor: null, hasMore: false };
+  if (!body || !Array.isArray(body.events) || typeof body.hasMore !== 'boolean'
+    || (body.nextCursor !== null && typeof body.nextCursor !== 'number')) {
+    throw new EventHistoryLoadError('invalid-response', 'Event history response had an invalid shape.', {
+      status: res.status,
+    });
+  }
   return body;
 }
 
@@ -78,7 +128,9 @@ export interface WorkingTree {
 
 export async function loadWorkingTrees(options: { refresh?: boolean } = {}): Promise<WorkingTree[]> {
   const res = await fetch(`/api/working_trees${options.refresh ? '?refresh=1' : ''}`);
-  if (!res.ok) return [];
+  // Keep transport failure distinct from a legitimate empty list. Callers can
+  // then retain the last known-good picker contents instead of flashing empty.
+  if (!res.ok) throw new Error(`working trees request failed (${res.status})`);
   return (await res.json()) as WorkingTree[];
 }
 
@@ -133,12 +185,201 @@ export interface BranchList {
   branches: string[];
 }
 
+// Git History read model. Kept worktree-scoped and distinct from the Changes
+// rail's BranchCommit/ChangedEntry state even though both surfaces reuse the
+// same diff renderer.
+export interface GitHistoryRef {
+  name: string;
+  shortName: string;
+  kind: 'local' | 'remote' | 'tag';
+  target: string;
+}
+
+export interface GitHistoryAuthor {
+  name: string;
+  email: string;
+}
+
+export interface GitHistoryCommit {
+  sha: string;
+  parents: string[];
+  author: GitHistoryAuthor;
+  authoredAt: string;
+  committedAt: string;
+  subject: string;
+  bodyPreview: string;
+  refs: GitHistoryRef[];
+  isMerge: boolean;
+  isRoot: boolean;
+}
+
+export interface GitHistoryPage {
+  items: GitHistoryCommit[];
+  nextCursor: string | null;
+  snapshot: string | null;
+  currentRef: string | null;
+  /** Actual HEAD commit, independent of the selected ref/filter snapshot. */
+  headSha: string | null;
+  selectedRef: string;
+  availableRefs: GitHistoryRef[];
+  /** Returned on the first page; later pages intentionally return []. */
+  availableAuthors: GitHistoryAuthor[];
+}
+
+export interface GitHistoryChangedFile {
+  path: string;
+  oldPath?: string;
+  status: 'added' | 'copied' | 'deleted' | 'modified' | 'renamed' | 'type-changed' | 'unknown';
+  added: number;
+  removed: number;
+  binary: boolean;
+}
+
+export interface GitHistoryCommitDetail extends GitHistoryCommit {
+  body: string;
+  base: string;
+  files: GitHistoryChangedFile[];
+}
+
+export interface GitHistoryFileDiff {
+  sha: string;
+  base: string;
+  path: string;
+  diff: string;
+  truncated: boolean;
+}
+
+export interface GitHistoryReachability {
+  sha: string;
+  reachable: boolean;
+}
+
+export interface GitHistoryFetchResult {
+  ok: true;
+  fetchedAt: string;
+  refsChanged: boolean;
+  coalesced: boolean;
+}
+
+export class GitHistoryRequestError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly unknownOutcome: boolean;
+  readonly refsChanged: boolean;
+  readonly status: number;
+
+  constructor(input: {
+    code: string;
+    message: string;
+    retryable?: boolean;
+    unknownOutcome?: boolean;
+    refsChanged?: boolean;
+    status: number;
+  }) {
+    super(input.message);
+    this.name = 'GitHistoryRequestError';
+    this.code = input.code;
+    this.retryable = input.retryable ?? false;
+    this.unknownOutcome = input.unknownOutcome ?? false;
+    this.refsChanged = input.refsChanged ?? false;
+    this.status = input.status;
+  }
+}
+
+async function gitHistoryResponse<T>(response: Response): Promise<T> {
+  const raw = await response.json().catch(() => null) as {
+    error?: {
+      code?: string;
+      message?: string;
+      retryable?: boolean;
+      unknownOutcome?: boolean;
+      refsChanged?: boolean;
+    };
+  } | null;
+  if (!response.ok) {
+    throw new GitHistoryRequestError({
+      code: raw?.error?.code ?? 'git_history_request_failed',
+      message: raw?.error?.message ?? `Git History request failed (${response.status})`,
+      retryable: raw?.error?.retryable,
+      unknownOutcome: raw?.error?.unknownOutcome,
+      refsChanged: raw?.error?.refsChanged,
+      status: response.status,
+    });
+  }
+  return raw as T;
+}
+
+export async function loadGitHistory(
+  workingTreeId: string,
+  options: {
+    limit?: number;
+    cursor?: string | null;
+    q?: string;
+    ref?: string | null;
+    author?: string | null;
+  } = {},
+): Promise<GitHistoryPage> {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  if (options.cursor) params.set('cursor', options.cursor);
+  if (options.q) params.set('q', options.q);
+  if (options.ref) params.set('ref', options.ref);
+  if (options.author) params.set('author', options.author);
+  const query = params.size ? `?${params.toString()}` : '';
+  const response = await fetch(
+    `/api/working_trees/${encodeURIComponent(workingTreeId)}/history${query}`,
+  );
+  return gitHistoryResponse<GitHistoryPage>(response);
+}
+
+export async function loadGitHistoryCommit(
+  workingTreeId: string,
+  sha: string,
+): Promise<GitHistoryCommitDetail> {
+  const response = await fetch(
+    `/api/working_trees/${encodeURIComponent(workingTreeId)}/history/${encodeURIComponent(sha)}`,
+  );
+  return gitHistoryResponse<GitHistoryCommitDetail>(response);
+}
+
+export async function loadGitHistoryCommitReachability(
+  workingTreeId: string,
+  sha: string,
+): Promise<GitHistoryReachability> {
+  const response = await fetch(
+    `/api/working_trees/${encodeURIComponent(workingTreeId)}/history/${encodeURIComponent(sha)}/reachability`,
+  );
+  return gitHistoryResponse<GitHistoryReachability>(response);
+}
+
+export async function loadGitHistoryFileDiff(
+  workingTreeId: string,
+  sha: string,
+  path: string,
+): Promise<GitHistoryFileDiff> {
+  const params = new URLSearchParams({ path });
+  const response = await fetch(
+    `/api/working_trees/${encodeURIComponent(workingTreeId)}/history/${encodeURIComponent(sha)}/diff?${params.toString()}`,
+  );
+  return gitHistoryResponse<GitHistoryFileDiff>(response);
+}
+
+/** Mutation transport for the registered History Fetch operation only. */
+export async function fetchGitHistory(workingTreeId: string): Promise<GitHistoryFetchResult> {
+  const response = await fetch(
+    `/api/working_trees/${encodeURIComponent(workingTreeId)}/fetch`,
+    { method: 'POST' },
+  );
+  return gitHistoryResponse<GitHistoryFetchResult>(response);
+}
+
 export async function loadChanged(
   workingTreeId: string,
   scope: ChangeScope = 'all',
   sha?: string | null,
   base?: string | null,
   sessionId?: string | null,
+  turn?: number | null,
 ): Promise<ChangedEntry[]> {
   const params = new URLSearchParams();
   if (scope !== 'all') params.set('scope', scope);
@@ -147,6 +388,7 @@ export async function loadChanged(
   // `ws:`/`ext:` trees don't carry a session server-side; the host validates
   // the id against the tree's workspace before trusting it.
   if (scope === 'lastturn' && sessionId) params.set('session', sessionId);
+  if (scope === 'lastturn' && turn != null) params.set('turn', String(turn));
   const q = params.size ? `?${params.toString()}` : '';
   const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/changed${q}`);
   if (!res.ok) return [];
@@ -435,7 +677,10 @@ export async function createWorkspace(
 
 export async function loadClaudeMd(workspaceId: string): Promise<string> {
   const res = await fetch(`/api/workspaces/${workspaceId}/claude_md`);
-  if (!res.ok) return '';
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `CLAUDE.md load failed (${res.status})`);
+  }
   const body = (await res.json()) as { content: string };
   return body.content ?? '';
 }
@@ -630,8 +875,11 @@ export async function loadNativeSessions(
 ): Promise<import('@gian/shared').NativeSession[]> {
   const res = await fetch(`/api/workspaces/${workspaceId}/native-sessions`);
   if (!res.ok) return [];
-  const body = (await res.json()) as import('@gian/shared').ListNativeSessionsResponse;
-  return body.sessions ?? [];
+  try {
+    return parseListNativeSessionsResponse(await res.json()).sessions;
+  } catch {
+    return [];
+  }
 }
 
 export async function adoptNativeSession(

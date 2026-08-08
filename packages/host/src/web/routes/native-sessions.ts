@@ -103,7 +103,7 @@ export function registerNativeSessionRoutes(
     const replay = replayNativeJsonl(db, sessionId, native.filePath, executor);
     clearNativeSessionsCache();
     const session = sessions.getSession(sessionId);
-    broadcaster.broadcast({ type: 'session:created', session });
+    broadcaster.broadcast({ type: 'session:created', session, origin: 'native-adopt' });
     return c.json({ session, replay });
   });
 

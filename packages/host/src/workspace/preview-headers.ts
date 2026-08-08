@@ -23,14 +23,15 @@ const MIME: Record<string, string> = {
 /** 20 MiB cap on the raw preview endpoint — anything larger gets 413. */
 export const RAW_PREVIEW_MAX_BYTES = 20 * 1024 * 1024;
 
-/** Strict CSP for HTML previews. Forbids framing, plugins, base/form
- *  redirection, and same-origin network calls. Inline styles + scripts are
- *  allowed so static-rendered HTML still works, but `script-src` and
- *  `connect-src` deliberately exclude `'self'` — workspace HTML is served
- *  on the host's own origin, so allowing `'self'` would let a malicious
- *  preview fetch the Gian host API (SEC pivot).
+/** Strict CSP for HTML previews. The CSP sandbox deliberately keeps
+ *  `allow-same-origin` disabled: workspace HTML is served from Gian's own
+ *  origin, so an unsandboxed inline script could otherwise read or mutate
+ *  application cookies/storage even when network egress is blocked. Scripts
+ *  remain enabled for static generated reports, but they run in an opaque
+ *  origin and cannot open popups, submit forms, or navigate the opener.
  */
 const HTML_CSP =
+  "sandbox allow-scripts; " +
   "default-src 'none'; " +
   "img-src 'self' data: blob:; " +
   "style-src 'unsafe-inline'; " +
@@ -48,6 +49,7 @@ const HTML_CSP =
 /** Stricter CSP for SVG: no scripts at all. SVG can carry JS in
  *  `<script>` tags, so `script-src 'none'` is non-negotiable. */
 const SVG_CSP =
+  "sandbox; " +
   "default-src 'none'; " +
   "img-src 'self' data: blob:; " +
   "style-src 'unsafe-inline'; " +

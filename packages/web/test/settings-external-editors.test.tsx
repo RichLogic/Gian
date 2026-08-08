@@ -106,6 +106,7 @@ describe('SettingsBody "Default apps"', () => {
     );
     const values = openAppOptionValues();
     // Built-in system targets are always available.
+    expect(values).toContain('@browser');
     expect(values).toContain('@newtab');
     expect(values).toContain('@finder');
     // The one app added to "Open with" is offered.

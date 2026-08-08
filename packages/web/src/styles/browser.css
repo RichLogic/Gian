@@ -1,0 +1,105 @@
+.browser-panel {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+}
+
+.browser-toolbar {
+  flex: none;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface);
+}
+
+.browser-tool {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-2);
+  color: var(--text-2);
+  background: transparent;
+  cursor: pointer;
+}
+
+.browser-tool:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.browser-tool:disabled { opacity: 0.34; cursor: default; }
+
+.browser-address {
+  position: relative;
+  flex: 1;
+  min-width: 80px;
+  height: 28px;
+}
+
+.browser-address input {
+  width: 100%;
+  height: 100%;
+  padding: 0 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  outline: none;
+  background: var(--surface-2);
+  color: var(--text);
+  font: var(--fz-11)/1 var(--font-mono);
+}
+
+.browser-address input:focus {
+  border-color: oklch(from var(--accent) l c h / 0.65);
+  box-shadow: 0 0 0 2px oklch(from var(--accent) l c h / 0.12);
+}
+
+.browser-address.invalid input { border-color: var(--danger); }
+.browser-loading {
+  position: absolute;
+  z-index: 1;
+  left: 1px;
+  right: 1px;
+  bottom: 0;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 45% 100%;
+  animation: browser-progress 1s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes browser-progress {
+  from { background-position: -70% 0; }
+  to { background-position: 170% 0; }
+}
+
+.browser-status {
+  flex: none;
+  padding: 4px 10px;
+  border-bottom: 1px solid oklch(from var(--danger) l c h / 0.22);
+  color: var(--danger);
+  background: oklch(from var(--danger) l c h / 0.08);
+  font: var(--fz-11)/1.35 var(--font-sans);
+}
+
+.browser-viewport {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: #fff;
+}
+
+.browser-unavailable {
+  display: grid;
+  place-items: center;
+  flex: 1;
+  color: var(--text-3);
+  font: var(--fz-12)/1.5 var(--font-sans);
+}

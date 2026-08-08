@@ -12,6 +12,9 @@ import type {
 
 export interface ProxyClient {
   readonly executor: Executor;
+  /** Synchronous lifecycle snapshot used to make cache publication atomic
+   * with respect to Node's single-threaded exit callbacks. */
+  isExited(): boolean;
   initialize(): Promise<InitializeResult>;
   capabilities(): Promise<ProxyCapabilities>;
   /** List slash commands. Built-in + user-level always; project-level

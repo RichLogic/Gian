@@ -145,3 +145,44 @@ test('managed health checks require the expected instance and send its token', a
     true,
   );
 });
+
+test('desktop health negotiation rejects a missing or mismatched Host version', async () => {
+  const requestWithVersion = (version?: string): HealthRequest => async () => ({
+    ok: true,
+    json: async () => ({ ok: true, ...(version ? { version } : {}) }),
+  });
+
+  assert.equal(
+    await isHostHealthy(
+      'http://gian.test/health',
+      requestWithVersion(),
+      100,
+      {},
+      undefined,
+      '0.3.0',
+    ),
+    false,
+  );
+  assert.equal(
+    await isHostHealthy(
+      'http://gian.test/health',
+      requestWithVersion('0.2.0'),
+      100,
+      {},
+      undefined,
+      '0.3.0',
+    ),
+    false,
+  );
+  assert.equal(
+    await isHostHealthy(
+      'http://gian.test/health',
+      requestWithVersion('0.3.0'),
+      100,
+      {},
+      undefined,
+      '0.3.0',
+    ),
+    true,
+  );
+});

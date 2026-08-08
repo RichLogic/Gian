@@ -125,6 +125,35 @@
   padding: 5px 12px;
 }
 
+.appearance-zoom {
+  display: grid;
+  grid-template-columns: 28px minmax(92px, 180px) 44px 28px;
+  align-items: center;
+  gap: 8px;
+}
+.appearance-zoom button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font: 500 16px/1 var(--font-sans);
+  cursor: pointer;
+}
+.appearance-zoom button:hover:not(:disabled) {
+  border-color: var(--text-3);
+  color: var(--text);
+}
+.appearance-zoom button:disabled { opacity: 0.4; cursor: default; }
+.appearance-zoom input { width: 100%; accent-color: var(--accent); }
+.appearance-zoom output {
+  color: var(--text-2);
+  font: 500 var(--fz-12)/1 var(--font-mono);
+  text-align: right;
+}
+
 /* Light-theme swatches are near-white — give every chip swatch a hairline
    ring so they stay visible against the active chip's accent-soft fill. */
 .s2-card .theme-chip .swatches i {
@@ -266,6 +295,16 @@
   flex-direction: column;
   gap: 9px;
 }
+
+.browser-data-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 0 2px;
+}
+.browser-data-row .s2-help { margin: 0; }
+.browser-data-row .btn { flex: none; }
 .settings2 .open-cat-row {
   display: flex;
   align-items: center;

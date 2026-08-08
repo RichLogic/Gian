@@ -14,6 +14,10 @@ import type {
   RespondApprovalParams,
   StartTurnParams,
 } from './types.js';
+import {
+  createProxyProcessShutdownState,
+  shutdownProxyProcess,
+} from './process-shutdown.js';
 
 export interface CcProxyClientOptions {
   /** Absolute path to cc-proxy spawn.js entry. */
@@ -28,6 +32,8 @@ export interface CcProxyClientOptions {
   env?: Readonly<Record<string, string>>;
   /** Logger for stderr / lifecycle events. */
   log?: (msg: string) => void;
+  /** Internal test seam for process-group shutdown signalling. */
+  shutdownProcess?: typeof shutdownProxyProcess;
 }
 
 interface PendingRequest {
@@ -51,9 +57,15 @@ export class CcProxyClient implements ProxyClient {
   private exitHandlers = new Set<(code: number | null) => void>();
   private log: (msg: string) => void;
   private exited = false;
+  private processGroupCleanup: Promise<void> | null = null;
+  private readonly processGroupShutdownState = createProxyProcessShutdownState();
+  private readonly shutdownProcess: typeof shutdownProxyProcess;
+  private exitCode: number | null | undefined;
+  private exitNotified = false;
 
   constructor(opts: CcProxyClientOptions) {
     this.log = opts.log ?? (() => {});
+    this.shutdownProcess = opts.shutdownProcess ?? shutdownProxyProcess;
 
     const nodeBin = opts.nodeBin ?? process.execPath;
     // `detached: true` puts cc-proxy in its own process group. We still
@@ -79,8 +91,24 @@ export class CcProxyClient implements ProxyClient {
   }
 
   onExit(handler: (code: number | null) => void): () => void {
+    if (this.exitNotified) {
+      const code = this.exitCode ?? null;
+      let active = true;
+      queueMicrotask(() => {
+        if (active) {
+          try { handler(code); } catch (error) {
+            this.log(`[cc-proxy] late exit handler threw: ${String(error)}`);
+          }
+        }
+      });
+      return () => { active = false; };
+    }
     this.exitHandlers.add(handler);
     return () => this.exitHandlers.delete(handler);
+  }
+
+  isExited(): boolean {
+    return this.exited;
   }
 
   initialize(): Promise<InitializeResult> {
@@ -148,15 +176,21 @@ export class CcProxyClient implements ProxyClient {
   }
 
   async shutdown(): Promise<void> {
-    if (this.exited) return;
-    try {
-      await this.request<unknown>('shutdown');
-    } catch {
-      // proxy may exit before responding
+    await this.cleanupProcessGroup(() => this.request<unknown>('shutdown'));
+  }
+
+  /** @internal Detached children use their spawn PID as the protected PGID. */
+  processGroupId(): number {
+    const pid = this.child.pid;
+    if (pid === undefined || pid <= 0) {
+      throw new Error('Claude Proxy process group is unavailable.');
     }
-    if (!this.exited) {
-      this.child.kill('SIGTERM');
-    }
+    return pid;
+  }
+
+  /** @internal Registration already observed ESRCH for this exact group. */
+  observeProcessGroupAbsence(): void {
+    this.processGroupShutdownState.observeAbsence();
   }
 
   /** SIGKILL the cc-proxy child immediately AND any grandchild it spawned
@@ -167,7 +201,7 @@ export class CcProxyClient implements ProxyClient {
    *  `detached: true`, which puts it in its own process group; otherwise
    *  the orphaned claude child inherits to init and keeps spinning. */
   forceKill(): void {
-    if (this.exited) return;
+    if (!this.processGroupShutdownState.beginEscalation()) return;
     const pid = this.child.pid;
     if (pid !== undefined) {
       try { process.kill(-pid, 'SIGKILL'); } catch { /* group may already be gone */ }
@@ -203,11 +237,51 @@ export class CcProxyClient implements ProxyClient {
   private bindExit(): void {
     this.child.on('exit', code => {
       this.exited = true;
+      this.exitCode = code;
       const err = new Error(`cc-proxy exited (code=${code ?? 'null'})`);
       for (const pending of this.pending.values()) pending.reject(err);
       this.pending.clear();
-      for (const handler of this.exitHandlers) handler(code);
+      // Unexpected leader exit is not process-tree exit: detached vendor CLI
+      // descendants retain this PGID. Do not notify ProxyManager (which owns
+      // the runtime claim) until the group is confirmed empty. A failure is
+      // deliberately fail-closed: no exit callback means no claim release.
+      void this.cleanupProcessGroup()
+        .then(() => this.notifyExit(code))
+        .catch(error => this.log(
+          `[cc-proxy] process-group cleanup failed; retaining runtime claim: ${String(error)}`,
+        ));
     });
+  }
+
+  private cleanupProcessGroup(
+    requestShutdown?: () => Promise<unknown>,
+  ): Promise<void> {
+    if (!this.processGroupCleanup) {
+      const cleanup = this.shutdownProcess({
+        child: this.child,
+        isExited: () => this.exited,
+        ...(requestShutdown ? { requestShutdown } : {}),
+        label: 'Claude Proxy',
+        state: this.processGroupShutdownState,
+      });
+      this.processGroupCleanup = cleanup;
+      void cleanup.catch(() => {
+        if (this.processGroupCleanup === cleanup) this.processGroupCleanup = null;
+      });
+    }
+    return this.processGroupCleanup;
+  }
+
+  private notifyExit(code: number | null): void {
+    if (this.exitNotified) return;
+    this.exitNotified = true;
+    for (const handler of this.exitHandlers) {
+      try {
+        handler(code);
+      } catch (error) {
+        this.log(`[cc-proxy] exit handler threw: ${String(error)}`);
+      }
+    }
   }
 
   private dispatch(message: unknown): void {

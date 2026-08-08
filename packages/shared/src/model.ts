@@ -286,9 +286,12 @@ export interface SystemConfig {
   workspace_root: string;
   theme: 'light' | 'warm' | 'dark';
   accent: Accent;
+  /** @deprecated Fixed to `cozy`; retained for older API clients. */
   density: 'compact' | 'cozy' | 'roomy';
+  /** @deprecated Fixed to `md`; retained for older API clients. */
   font_scale_chrome: FontScale;
   font_scale_chat: FontScale;
+  /** @deprecated Fixed to `md`; retained for older API clients. */
   font_scale_code: FontScale;
   locale: 'zh-CN' | 'en';
   /** Default model for new claude (cc) sessions. Empty = use proxy default. */

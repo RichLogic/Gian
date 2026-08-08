@@ -1,6 +1,6 @@
 {
   "name": "@gian/shared",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -26,6 +26,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "pnpm run clean && tsc",
+    "test": "node --test test/*.test.mjs",
     "clean": "rm -rf dist *.tsbuildinfo"
   }
 }

@@ -6,6 +6,14 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { loadConfig } from '../../storage/config.js';
 import type { Db } from '../../storage/db.js';
 import { resolveDataDir } from '../../storage/paths.js';
+import {
+  CommandExecutionError,
+  commandErrorMessage,
+  GitQueueFullError,
+  RepoMutationLockError,
+  runGit,
+  withRepoMutationLock,
+} from '../../workspace/async-command.js';
 import { resolveWithinWorkspace } from '../../workspace/safe-path.js';
 import {
   appOpenerArgs,
@@ -23,7 +31,12 @@ export interface WorkingTreeTarget {
   session_id: string | null;
 }
 
-type ResolveWorkingTree = (id: string) => WorkingTreeTarget | null;
+type ResolveWorkingTree = (id: string) => Promise<WorkingTreeTarget | null>;
+
+function gitMutationStatus(error: unknown): 500 | 503 | 504 {
+  if (error instanceof RepoMutationLockError || error instanceof GitQueueFullError) return 503;
+  return error instanceof CommandExecutionError && error.timedOut ? 504 : 500;
+}
 
 export function registerApplicationRoutes(
   app: Hono,
@@ -178,9 +191,9 @@ export function registerApplicationRoutes(
   // Reveal a working tree (main tree or worktree) in macOS Finder.
   // :id accepts `ws:<workspace-id>` or `wt:<session-id>`, same shape used by
   // the rest of the /api/working_trees/:id endpoints.
-  app.post('/api/working_trees/:id/reveal', c => {
+  app.post('/api/working_trees/:id/reveal', async c => {
     const id = c.req.param('id');
-    const wt = resolveWorkingTree(id);
+    const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
     try {
       execFileSync('open', [wt.path], { timeout: 5000, stdio: 'ignore' });
@@ -196,7 +209,7 @@ export function registerApplicationRoutes(
   // same way /raw and /open are.
   app.post('/api/working_trees/:id/stage', async c => {
     const id = c.req.param('id');
-    const wt = resolveWorkingTree(id);
+    const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
 
     let body: { path?: string };
@@ -208,18 +221,24 @@ export function registerApplicationRoutes(
     if (!body.path || typeof body.path !== 'string') {
       return c.json({ error: 'path required' }, 400);
     }
-    const absPath = await resolveWithinWorkspace(wt.path, body.path);
+    const relativePath = body.path;
+    const absPath = await resolveWithinWorkspace(wt.path, relativePath);
     if (!absPath) {
       return c.json({ error: 'path escapes working tree' }, 400);
     }
 
     try {
-      execFileSync('git', ['-C', wt.path, 'add', '--', body.path], {
-        timeout: 5000, stdio: ['ignore', 'ignore', 'pipe'],
-      });
+      const signal = c.req.raw.signal;
+      await withRepoMutationLock(wt.path, () => (
+        runGit(
+          ['add', '--', relativePath],
+          { cwd: wt.path, timeoutMs: 5_000, signal },
+        )
+      ), { signal });
       return c.json({ ok: true });
     } catch (err) {
-      return c.json({ error: String(err) }, 500);
+      const status = gitMutationStatus(err);
+      return c.json({ error: commandErrorMessage(err, 'stage failed') }, status);
     }
   });
 
@@ -228,7 +247,7 @@ export function registerApplicationRoutes(
   // pure inverse of /stage. Same path-boundary check.
   app.post('/api/working_trees/:id/unstage', async c => {
     const id = c.req.param('id');
-    const wt = resolveWorkingTree(id);
+    const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
 
     let body: { path?: string };
@@ -240,18 +259,24 @@ export function registerApplicationRoutes(
     if (!body.path || typeof body.path !== 'string') {
       return c.json({ error: 'path required' }, 400);
     }
-    const absPath = await resolveWithinWorkspace(wt.path, body.path);
+    const relativePath = body.path;
+    const absPath = await resolveWithinWorkspace(wt.path, relativePath);
     if (!absPath) {
       return c.json({ error: 'path escapes working tree' }, 400);
     }
 
     try {
-      execFileSync('git', ['-C', wt.path, 'reset', '-q', 'HEAD', '--', body.path], {
-        timeout: 5000, stdio: ['ignore', 'ignore', 'pipe'],
-      });
+      const signal = c.req.raw.signal;
+      await withRepoMutationLock(wt.path, () => (
+        runGit(
+          ['reset', '-q', 'HEAD', '--', relativePath],
+          { cwd: wt.path, timeoutMs: 5_000, signal },
+        )
+      ), { signal });
       return c.json({ ok: true });
     } catch (err) {
-      return c.json({ error: String(err) }, 500);
+      const status = gitMutationStatus(err);
+      return c.json({ error: commandErrorMessage(err, 'unstage failed') }, status);
     }
   });
 
@@ -260,7 +285,7 @@ export function registerApplicationRoutes(
   // ws:/wt: handle and the relative path is bounded to the working tree.
   app.post('/api/working_trees/:id/open', async c => {
     const id = c.req.param('id');
-    const wt = resolveWorkingTree(id);
+    const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
 
     let body: { path?: string; editor_id?: string; app?: string; builtin?: string };
@@ -355,4 +380,3 @@ export function registerApplicationRoutes(
     });
   });
 }
-

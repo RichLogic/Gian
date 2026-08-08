@@ -108,7 +108,7 @@ export function registerTaskRoutes(
         ...(body.model !== undefined ? { model: body.model } : {}),
         ...(body.approval_mode !== undefined ? { approval_mode: body.approval_mode } : {}),
       });
-      broadcaster.broadcast({ type: 'session:created', session });
+      broadcaster.broadcast({ type: 'session:created', session, origin: 'task-create' });
       return c.json({ session });
     } catch (error) {
       return c.json({ error: errorMessage(error) }, 500);

@@ -1,7 +1,7 @@
 {
   "name": "@gian/desktop",
   "productName": "Gian",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "macOS desktop shell for the Gian coding agent workspace",
   "author": "RichLogic",
@@ -15,7 +15,7 @@
     "test:smoke:run": "node test/electron-smoke.mjs",
     "dev": "pnpm run build && electron .",
     "start": "electron .",
-    "bundle:build": "pnpm --filter @gian/desktop... build && pnpm --filter @gian/web build && node ../../scripts/prepare-desktop-runtime.mjs",
+    "bundle:build": "node ../../scripts/prepare-desktop-runtime.mjs && pnpm --filter @gian/desktop... build && pnpm --filter @gian/web build",
     "package:mac": "pnpm run bundle:build && electron-builder --mac dir --arm64",
     "make:mac": "pnpm run bundle:build && electron-builder --mac dmg zip --arm64",
     "make:mac:release": "pnpm run bundle:build && electron-builder --mac dmg zip --arm64 --config.mac.notarize=true",

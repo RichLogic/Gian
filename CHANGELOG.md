@@ -6,6 +6,38 @@ not listed.
 
 All releases below are unsigned macOS Apple Silicon beta builds.
 
+## [0.4.0] - 2026-08-08
+
+### Added
+
+- Added an isolated multi-tab Browser for project HTML and regular web content,
+  with separate history per tab and no Node or preload access to page content.
+- Added Git History inspection for branches, commits, and changed files directly
+  beside the active coding session.
+- Redesigned transcripts with compact single-line event rows, turn folding,
+  context panels, and richer Sheet detail views.
+- Added controlled Event Storage v3 migration tooling to keep durable session
+  history responsive as transcripts grow.
+
+### Changed
+
+- Simplified the workbench layout, panel behavior, breadcrumb identity, and
+  device-local zoom controls for a more focused coding surface.
+- Improved native session recovery, worktree context refresh, queue behavior,
+  and changed-file inspection across reconnects and provider restarts.
+
+### Fixed
+
+- Hardened Agent CLI and managed Proxy updates so active runtimes retain their
+  leases until process cleanup completes.
+- Fixed duplicate Codex recovery callbacks, delayed Proxy bring-up events, and
+  several workspace, session-finalization, and file-preview safety boundaries.
+
+### Known limitations
+
+- Event Storage v3 migration remains an explicit maintenance operation; it is
+  not an automatic startup compaction or database-size reduction step.
+
 ## [0.3.0] - 2026-08-07
 
 ### Added

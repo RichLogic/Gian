@@ -1,4 +1,4 @@
-import { lazy, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { RunnerInfo, Session, Task, Workspace } from '@gian/shared';
 import { LocaleProvider } from './i18n/index.js';
 import { EN } from './i18n/en.js';
@@ -11,24 +11,27 @@ import {
   loadAgents,
   loadSessions,
   loadTasks,
-  loadWorkingTrees,
   loadWorkspaces,
   makeWsUrl,
 } from './api.js';
 import { injectComposerDraft } from './components/Composer.js';
-import type { WorkingTree, ChangeScope } from './api.js';
+import type { ChangeScope } from './api.js';
+import { GitHistoryRequestError, loadGitHistoryCommitReachability } from './api.js';
+import { useHistoryMovementRevision } from './controllers/use-history.js';
+import './operations/git-history.js';
 import { FileRefRehypeContext } from './transcript/items.js';
 import type { PlanLifecycleState } from './transcript/apply.js';
-import { DiffOpenContext, FileLinkOpenContext, ImageZoomContext, PlanOpenContext, RelativeLinkOpenContext } from './transcript/items.js';
+import { DiffOpenContext, FileLinkOpenContext, ImageZoomContext, PlanOpenContext, RelativeLinkOpenContext, TranscriptDetailOpenContext } from './transcript/items.js';
 import { ImageLightbox, type ZoomImage } from './components/ImageLightbox.js';
 import { Topbar } from './components/Topbar.js';
 import type { Mode } from './components/Topbar.js';
 import { Dock } from './components/Dock.js';
 import { Toaster } from './components/Toaster.js';
-import { toast } from './feedback.js';
+import { getSnapshot as getFeedbackSnapshot, subscribe as subscribeFeedback, toast } from './feedback.js';
 import { Splitter } from './components/Splitter.js';
 import { Inspector } from './components/Inspector.js';
 import { SettingsBody, SettingsNavInspector } from './components/SettingsBody.js';
+import { BrowserPanel } from './components/BrowserPanel.js';
 import type { NavKey } from './components/SettingsBody.js';
 import { makeWorkbenchWire } from './components/terminal-wire.js';
 import { ChatContextPanel } from './components/ChatContextPanel.js';
@@ -55,6 +58,9 @@ import { useAppShortcuts } from './controllers/use-app-shortcuts.js';
 import { useSessionSelection } from './controllers/use-session-selection.js';
 import { useWorkbenchLayout } from './controllers/use-workbench-layout.js';
 import { useViewNav } from './controllers/use-view-nav.js';
+import { useWorkingTrees } from './controllers/use-working-trees.js';
+import { usePanelLayout } from './controllers/use-panel-layout.js';
+import { useAppZoom } from './display-prefs.js';
 import { createOperationDispatcher, type OperationDispatcher } from './operations/dispatcher.js';
 // Importing the operations modules registers the operation definitions on
 // the product registry as a side effect (session.js directly here;
@@ -66,9 +72,10 @@ import { createOperationDispatcher, type OperationDispatcher } from './operation
 // (their dispatches are by name), so they are imported here explicitly.
 import './operations/terminal.js';
 import './operations/files.js';
+import './operations/browser.js';
 import './operations/onboarding.js';
 import { sessionEntityKey } from './operations/session.js';
-import { wireMessageEchoSink } from './operations/message.js';
+import { createMessageEchoSink, wireMessageEchoSink } from './operations/message.js';
 import { QUEUE_OVERLAY_FIELD, wireCanonicalQueueReader } from './operations/queue.js';
 import { wireSubtaskCanonicalSink } from './operations/task.js';
 import { SETTINGS_ENTITY_KEY, wireSettingsSink } from './operations/settings.js';
@@ -82,6 +89,7 @@ import { createOperationStore, entityFieldKey, type OperationStore } from './ope
 import {
   OperationDispatcherProvider,
   OperationStoreProvider,
+  useStoreOperationRun,
   useStorePendingOperations,
   useStoreSessionsWithOverlays,
   useStoreSettingsWithOverlays,
@@ -104,6 +112,10 @@ const Terminal = lazy(() =>
   import('./components/Terminal.js').then(module => ({ default: module.Terminal })));
 const WorkspacesInspector = lazy(() =>
   import('./components/WorkspacesPanel.js').then(module => ({ default: module.WorkspacesInspector })));
+const HistoryInspector = lazy(() =>
+  import('./components/HistoryInspector.js').then(module => ({ default: module.HistoryInspector })));
+const HistoryCommitBody = lazy(() =>
+  import('./components/HistoryCommitBody.js').then(module => ({ default: module.HistoryCommitBody })));
 const WorkspaceDetailBody = lazy(() =>
   import('./components/WorkspacesPanel.js').then(module => ({ default: module.WorkspaceDetailBody })));
 const LoginView = lazy(() =>
@@ -144,6 +156,7 @@ function reconcileUnresolvedEntity(
 }
 
 export function App() {
+  useAppZoom();
   // useAppAuth needs the operation dispatcher (auth.logout), which is created
   // below — bind it lazily through a ref. The dispatch is only ever invoked
   // from user actions (sign-out click), long after the dispatcher exists.
@@ -177,6 +190,9 @@ export function App() {
   // so SessionRow falls through to this when session.branch itself is null.
   // Refreshed on `workspace:git-updated` so external branch switches show up.
   const [sessions, setSessions] = useState<Session[]>([]);
+  // The exact create attempt is App-owned so an unknown outcome cannot be
+  // forgotten by closing the form or switching away from Sessions mode.
+  const [sessionCreateRunId, setSessionCreateRunId] = useState<string | undefined>();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   // ─── Tasks (PRD-v3) ───────────────────────────────────────────────────────
   // Tasks group Subtasks (sessions with type==='subtask' + a matching task_id).
@@ -188,14 +204,13 @@ export function App() {
   const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
   const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
   const [mode, setMode] = useState<Mode>('tasks');
-  const [workingTrees, setWorkingTrees] = useState<WorkingTree[]>([]);
+  const { workingTrees, reloadWorkingTrees } = useWorkingTrees();
+  const refreshWorkingTrees = useCallback(() => {
+    reloadWorkingTrees({ force: true });
+  }, [reloadWorkingTrees]);
   // Active Settings section — owned here (controlled into SettingsBody +
   // SettingsNavInspector) so it survives rail collapse/restore.
   const [settingsSection, setSettingsSection] = useState<NavKey>('appearance');
-  // Mirror of the left sidebar's collapsed state for the Topbar icon. The
-  // views own the real state and listen for `gian.toggle-rail`; this button
-  // is the only dispatcher, so the mirror can't drift.
-  const [sidebarCollapsedUi, setSidebarCollapsedUi] = useState(false);
   const [systemConfig, setSystemConfig] = useState<SystemConfig | null>(null);
   // Canonical config for the operation layer's overlay `previous` values —
   // read via ref, never the overlaid render value.
@@ -206,6 +221,13 @@ export function App() {
   // Image tapped in a transcript bubble → shown in the in-app lightbox
   // (ImageZoomContext below), instead of opening a new browser tab.
   const [zoomImage, setZoomImage] = useState<ZoomImage | null>(null);
+  // Native WebContentsView sits above renderer DOM. Hide it whenever a Gian
+  // modal is present so confirmations, palette and lightbox remain usable.
+  const feedbackState = useSyncExternalStore(
+    subscribeFeedback,
+    getFeedbackSnapshot,
+    getFeedbackSnapshot,
+  );
   const [runner, setRunner] = useState<RunnerInfo | null>(null);
   const pendingFirstMessageRef = useRef<string | null>(null);
   // Streamed plan text plus its turn-end lifecycle. Keeping completion beside
@@ -291,28 +313,7 @@ export function App() {
   // queue overlay — it reads the RENDERED queue (canonical + any in-flight
   // queue overlay) so two rapid queue edits compose (see operations/queue.ts).
   useEffect(() => {
-    wireMessageEchoSink({
-      append: (sessionId, item) => {
-        setItemsBySession(previous => ({
-          ...previous,
-          [sessionId]: [...(previous[sessionId] ?? []), item],
-        }));
-        setPendingBySession(previous => ({ ...previous, [sessionId]: true }));
-      },
-      markFailed: runId => {
-        setItemsBySession(previous => {
-          let touched = false;
-          const next: Record<string, TranscriptItem[]> = { ...previous };
-          for (const [sessionId, items] of Object.entries(previous)) {
-            if (!items.some(it => it.kind === 'user' && it.sendRunId === runId)) continue;
-            touched = true;
-            next[sessionId] = items.map(it =>
-              it.kind === 'user' && it.sendRunId === runId ? { ...it, pending: false, failed: true } : it);
-          }
-          return touched ? next : previous;
-        });
-      },
-    });
+    wireMessageEchoSink(createMessageEchoSink(setItemsBySession, setPendingBySession));
     wireCanonicalQueueReader(sessionId => {
       const overlay = operationStore.getOverlay(
         entityFieldKey(sessionEntityKey(sessionId), QUEUE_OVERLAY_FIELD),
@@ -359,6 +360,7 @@ export function App() {
   // dispatch until the operation:result lands (session:created still
   // populates canonical state and arrives first, host-side).
   const pendingRuns = useStorePendingOperations(operationStore);
+  const sessionCreateRun = useStoreOperationRun(operationStore, sessionCreateRunId);
   const creatingSession = pendingRuns.some(run => run.name === 'session.create');
   const forkingSession = pendingRuns.some(run => run.name === 'session.fork');
   // Rendered sessions = canonical + overlays (proposal §4.3). Canonical
@@ -369,27 +371,26 @@ export function App() {
   const displayTasks = useStoreTasksWithOverlays(operationStore, tasks);
   const displayWorkspaces = useStoreWorkspacesWithOverlays(operationStore, workspaces);
   // Rendered settings = canonical + settings.save overlays (Phase 3b):
-  // SettingsBody, the theme/density side-effect, and the Sheet's editor/app
+  // SettingsBody, the appearance side-effect, and the Sheet's editor/app
   // lists all read the merged config so optimistic writes apply in the same
   // task they dispatch.
   const displayConfig = useStoreSettingsWithOverlays(operationStore, systemConfig);
 
-  // Theme/density side-effect reads the RENDERED config (canonical +
+  // Appearance side-effect reads the RENDERED config (canonical +
   // settings.save overlays) so an optimistic theme switch applies in the
   // same task it dispatches, and a rollback visibly reverts it.
   useEffect(() => {
     if (!displayConfig) return;
     document.body.setAttribute('data-theme', displayConfig.theme);
     document.body.setAttribute('data-accent', displayConfig.accent);
-    document.body.setAttribute('data-density', displayConfig.density);
-    document.body.setAttribute('data-scale-chrome', displayConfig.font_scale_chrome);
+    document.body.setAttribute('data-density', 'cozy');
+    document.body.setAttribute('data-scale-chrome', 'md');
     document.body.setAttribute('data-scale-chat', displayConfig.font_scale_chat);
-    document.body.setAttribute('data-scale-code', displayConfig.font_scale_code);
+    document.body.setAttribute('data-scale-code', 'md');
     document.documentElement.setAttribute('lang', displayConfig.locale);
     applyGianIconAppearance(displayConfig.theme, displayConfig.accent);
-  }, [displayConfig?.theme, displayConfig?.accent, displayConfig?.density,
-      displayConfig?.font_scale_chrome, displayConfig?.font_scale_chat,
-      displayConfig?.font_scale_code, displayConfig?.locale]);
+  }, [displayConfig?.theme, displayConfig?.accent,
+      displayConfig?.font_scale_chat, displayConfig?.locale]);
   // Shared "workspace created" handler — append-if-missing so the operation
   // layer's reconcile sink (which already upserts) and the view callback
   // never double-append the same workspace.
@@ -418,10 +419,15 @@ export function App() {
   });
   // Active-session transcript hydration effect. (The returned hydrate
   // callback was only consumed by the retired per-Task Manager mount.)
-  const { historyBySession, loadOlder, markLive: markSessionHistoryLive } = useTranscriptHydration({
+  const {
+    historyBySession,
+    loadOlder,
+    retry: retryHistory,
+    markLive: markSessionHistoryLive,
+  } = useTranscriptHydration({
     activeSessionId,
+    connectionReady: wsState === 'open' && authed,
     sessions,
-    itemsBySession,
     setItemsBySession,
     setPlanStateBySession,
   });
@@ -450,8 +456,8 @@ export function App() {
   }), [workspaces, sessions]);
   useEffect(() => {
     if (runtimeAuthStatus !== 'authenticated' || workspaces.length === 0) return;
-    void loadWorkingTrees().then(setWorkingTrees);
-  }, [runtimeAuthStatus, workingTreeShape]);
+    reloadWorkingTrees({ force: false });
+  }, [reloadWorkingTrees, runtimeAuthStatus, workingTreeShape, workspaces.length]);
 
   // Tracks the last auto-applied worktree detection — see the auto-switch
   // effect next to appT below (appT is declared late in this component).
@@ -522,7 +528,9 @@ export function App() {
     setWbTabs,
     activeTabByGroup,
     viewState,
+    setViewState,
     activeRail,
+    setActiveRail,
     p3Collapsed,
     setP3Collapsed,
     filesInspectorSuppressed,
@@ -540,9 +548,14 @@ export function App() {
     openFileInSheet,
     openRelativeFileHref,
     openDiffInSheet,
+    revealOpenDiffPath,
     openTranscriptDiffInSheet,
+    openCommitInSheet,
+    revalidateHistoryTabs,
+    openTranscriptTextInSheet,
     openChatPanel,
     addTerminalTab,
+    addBrowserTab,
     openWorkspaceInSheet,
     openNewWorkspaceInSheet,
   } = useWorkbench({
@@ -562,15 +575,61 @@ export function App() {
   // The top-right GitBadge reports the All-changes numbers, so clicking it
   // must land the Changes inspector on that same scope (requestId forces a
   // re-apply even when the inspector is already mounted on another scope).
-  const [changesScopeRequest, setChangesScopeRequest] = useState<{ scope: ChangeScope; requestId: number } | null>(null);
-  const showChanges = (scope: ChangeScope) => {
-    setChangesScopeRequest({ scope, requestId: Date.now() });
+  const [changesScopeRequest, setChangesScopeRequest] = useState<{
+    scope: ChangeScope;
+    requestId: number;
+    sessionId?: string;
+    turn?: number;
+  } | null>(null);
+  const showChanges = (
+    scope: ChangeScope,
+    target?: { sessionId: string; turn: number },
+  ) => {
+    setChangesScopeRequest({ scope, requestId: Date.now(), ...target });
     activateRail('diffs');
   };
   const showAllChanges = () => showChanges('all');
-  // The transcript underbar's Last-turn chip jumps straight to the Diffs
-  // inspector pinned to that scope (no inline file-list panel).
-  const showLastTurnChanges = () => showChanges('lastturn');
+  // A file selected from the transcript underbar's Diff panel opens the
+  // Diffs inspector with both its exact turn scope and selected file intact.
+  const showLastTurnChanges = (session: Session, turn: number, path: string) => {
+    showChanges('lastturn', { sessionId: session.id, turn });
+    void openDiffInSheet(path, false, 'lastturn');
+  };
+
+  // Git History (Issue #3): when a fetch reports refsChanged for the viewed
+  // tree, the use-history store raises `moved` — revalidate every open commit
+  // tab of that tree against the host so a commit that became unreachable
+  // gets the ORPHANED tag + snapshot banner instead of silently closing.
+  const historyWtId = viewedWorkingTreeId(activeSession);
+  const historyMovementRevision = useHistoryMovementRevision(historyWtId);
+  useEffect(() => {
+    if (historyMovementRevision === 0 || !historyWtId) return;
+    const tabs = wbTabs.filter(t =>
+      t.group === 'history' && t.kind === 'commit' && t.workingTreeId === historyWtId && t.commitSha);
+    if (tabs.length === 0) return;
+    let cancelled = false;
+    void Promise.all(tabs.map(async tab => {
+      try {
+        const result = await loadGitHistoryCommitReachability(historyWtId, tab.commitSha!);
+        return { sha: tab.commitSha!, unreachable: !result.reachable };
+      } catch (err) {
+        return {
+          sha: tab.commitSha!,
+          // A missing object is conclusively orphaned. Transport/Host errors
+          // are inconclusive and must not clear an existing ORPHANED marker.
+          unreachable: err instanceof GitHistoryRequestError && err.code === 'history_commit_not_found'
+            ? true
+            : undefined,
+        };
+      }
+    })).then(results => {
+      if (cancelled) return;
+      const bySha = new Map(results.map(result => [result.sha, result.unreachable]));
+      revalidateHistoryTabs(historyWtId, sha => bySha.get(sha));
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyMovementRevision, historyWtId]);
 
   useAppSocket({
     authStatus: runtimeAuthStatus,
@@ -582,7 +641,7 @@ export function App() {
     setWsAttempt,
     setAuthed,
     setWorkspaces,
-    setWorkingTrees,
+    refreshWorkingTrees,
     setSessions,
     setTasks,
     setSystemConfig,
@@ -608,6 +667,24 @@ export function App() {
     setChatPanel,
     ops,
   });
+
+  const openAdoptedSession = useCallback((session: Session) => {
+    // Make the HTTP result available synchronously for selection and unread
+    // handling. The Host marks the independent WS broadcast with
+    // origin=native-adopt, so either network delivery order is safe.
+    sessionsRef.current = [
+      session,
+      ...sessionsRef.current.filter(candidate => candidate.id !== session.id),
+    ];
+    setSessions(previous => [
+      session,
+      ...previous.filter(candidate => candidate.id !== session.id),
+    ]);
+    selectSession(session.id);
+    setActiveRail(null);
+    setViewState('main');
+    startTransition(() => setMode('sessions'));
+  }, [selectSession, setActiveRail, setViewState]);
 
   // Worktree auto-switch: when the host detects the agent created its own
   // worktree mid-session (`git worktree add` → session.detected_worktree_path),
@@ -671,6 +748,7 @@ export function App() {
     activeWorkspace,
     activeBranch,
     workingTrees,
+    refreshWorkingTrees,
     wtView,
     setWtView,
     viewedWorkingTreeId,
@@ -713,6 +791,15 @@ export function App() {
     groupOfRail: GROUP_OF_RAIL,
   });
 
+  const panelLayout = usePanelLayout({
+    enabled: authStatus === 'authenticated' && onboarding.status === 'complete',
+    panel1Visible: mode === 'spaces' || viewState !== 'workbench',
+    panel2Visible: (chatPanel !== null && workbenchActive) || sheetVisible,
+    inspectorVisible,
+    p3Collapsed,
+    setP3Collapsed,
+  });
+
   // Topbar ‹ › history: sidebar view (mode) + conversation selection only.
   const { canGoBack, canGoForward, navigate: navGo } = useViewNav({
     mode,
@@ -745,6 +832,7 @@ export function App() {
     : null;
   const subtaskWorkingTreeId = defaultWorkingTreeIdFor(subtask);
   const subtaskMain = subtask ? (
+    <TranscriptDetailOpenContext.Provider value={(payload) => { openTranscriptTextInSheet(payload); }}>
     <SessionSurface
       session={subtask}
       workspace={subtaskWorkspace}
@@ -753,10 +841,13 @@ export function App() {
         || historyBySession[subtask.id]?.phase === 'complete'}
       history={historyBySession[subtask.id]}
       onLoadOlder={() => loadOlder(subtask.id, subtask.executor)}
+      onRetryHistory={() => retryHistory(subtask.id, subtask.executor)}
       pending={pendingBySession[subtask.id] ?? false}
       queue={queueBySession[subtask.id] ?? []}
       planText={planStateBySession[subtask.id]?.text}
       planCompleted={planStateBySession[subtask.id]?.completed}
+      planStatus={planStateBySession[subtask.id]?.status}
+      planTurn={planStateBySession[subtask.id]?.turn}
       commands={sessionMainHandlers}
       workingTreeId={subtaskWorkingTreeId}
       branch={workingTrees.find(tree => tree.id === subtaskWorkingTreeId)?.branch ?? null}
@@ -768,8 +859,9 @@ export function App() {
       fileRehype={fileRehype}
       onReopen={() => { ops.dispatch('task.reopenSubtask', { sessionId: subtask.id }); }}
       onShowChanges={showAllChanges}
-      onShowLastTurnChanges={showLastTurnChanges}
+      onShowLastTurnChanges={(turn, path) => showLastTurnChanges(subtask, turn, path)}
     />
+    </TranscriptDetailOpenContext.Provider>
   ) : null;
 
   if (authStatus === 'checking') {
@@ -842,14 +934,11 @@ export function App() {
         branchMenu={branchMenu}
         onRenameSubmit={handleRenameSubmit}
         onRenameCancel={handleRenameCancel}
-        sidebarCollapsed={sidebarCollapsedUi}
-        onToggleSidebar={() => {
-          window.dispatchEvent(new CustomEvent('gian.toggle-rail'));
-          setSidebarCollapsedUi(c => !c);
-        }}
+        sidebarCollapsed={panelLayout.railLayout.collapsed}
+        onToggleSidebar={panelLayout.toggleSidebar}
         p3Available={sheetVisible && inspectorAvailable}
         p3Visible={inspectorVisible}
-        onToggleP3={() => setP3Collapsed(c => !c)}
+        onToggleP3={panelLayout.toggleInspector}
         canGoBack={canGoBack}
         canGoForward={canGoForward}
         onGoBack={() => navGo(-1)}
@@ -864,12 +953,18 @@ export function App() {
         onJumpToSession={sid => { selectSession(sid); setMode('sessions'); setPaletteOpen(false); }}
         initialQuery={paletteInitialQuery}
       /></Suspense>}
-      <div className={`body ${viewState === 'workbench' ? 'wb-only' : ''}`}>
+      <div
+        ref={panelLayout.bodyRef}
+        className={`body ${viewState === 'workbench' ? 'wb-only' : ''}`}
+        style={panelLayout.bodyStyle}
+        data-panel-resizing={panelLayout.resizing ? 'true' : undefined}
+      >
           {mode === 'sessions' && (
           <FileLinkOpenContext.Provider value={(absPath, line) => { void openFileInSheet(absPath, false, line); }}>
           <RelativeLinkOpenContext.Provider value={openRelativeFileHref}>
           <FileRefRehypeContext.Provider value={fileRehype}>
           <DiffOpenContext.Provider value={(item) => { void openTranscriptDiffInSheet(item); }}>
+          <TranscriptDetailOpenContext.Provider value={(payload) => { openTranscriptTextInSheet(payload); }}>
           <PlanOpenContext.Provider value={(payload) => {
             if (activeSessionId) openChatPanel(activeSessionId, { kind: 'plan', id: payload.id });
           }}>
@@ -891,17 +986,30 @@ export function App() {
               planStateBySession={planStateBySession}
               historyBySession={historyBySession}
               onLoadOlder={(sessionId, executor) => loadOlder(sessionId, executor)}
+              onRetryHistory={(sessionId, executor) => retryHistory(sessionId, executor)}
               onSelectSession={selectSession}
               onWorkspaceCreated={upsertWorkspace}
               onCreateSession={(input) => {
-                ops.dispatch('session.create', {
+                const run = ops.dispatch('session.create', {
                   workspaceId: input.workspaceId,
                   executor: input.executor,
                   ...(input.name ? { name: input.name } : {}),
                 });
+                setSessionCreateRunId(run.id);
+                return run;
               }}
+              sessionCreateRun={sessionCreateRun}
               creatingSession={creatingSession}
+              onClearSessionCreateRun={() => setSessionCreateRunId(undefined)}
+              onVerifySessionCreate={async () => {
+                const fresh = await loadSessions();
+                setSessions(fresh);
+                setSessionCreateRunId(undefined);
+              }}
               onDelete={sessionMainHandlers.onDelete}
+              onReopenSession={sessionId => {
+                ops.dispatch('task.reopenSubtask', { sessionId });
+              }}
               onPinSession={sessionMainHandlers.onPin}
               onArchiveSession={sessionId => sessionMainHandlers.onArchive(sessionId, true)}
               onToggleWorkspacePin={(workspace) => {
@@ -929,9 +1037,11 @@ export function App() {
                 workingTrees.find(wt => wt.id === viewedWorkingTreeId(activeSession))?.branch
                 ?? null
               }
+              railLayout={panelLayout.railLayout}
             />
           </ChatPanelOpenContext.Provider>
           </PlanOpenContext.Provider>
+          </TranscriptDetailOpenContext.Provider>
           </DiffOpenContext.Provider>
           </FileRefRehypeContext.Provider>
           </RelativeLinkOpenContext.Provider>
@@ -944,6 +1054,8 @@ export function App() {
               systemConfig={systemConfig}
               ws={ws}
               onChange={() => void loadWorkspaces().then(setWorkspaces)}
+              railLayout={panelLayout.railLayout}
+              onSessionAdopted={openAdoptedSession}
             />
             </Suspense>
           )}
@@ -960,11 +1072,17 @@ export function App() {
               onSelectSubtask={(taskId, subtaskId) => { setActiveTaskId(taskId); setActiveSubtaskId(subtaskId); }}
               onWorkspaceCreated={upsertWorkspace}
               subtaskMain={subtaskMain}
+              railLayout={panelLayout.railLayout}
             />
           )}
         {chatPanel && workbenchActive && (
           <>
-            <Splitter side="right" varName="--sheet-w" base={600} min={360} max={1080} invert />
+            <Splitter
+              side="right"
+              seam="main-sheet"
+              ariaLabel="Resize conversation and context panels"
+              onMouseDown={panelLayout.onMainSheetMouseDown}
+            />
             <FileLinkOpenContext.Provider value={(absPath, line) => {
               void openFileInSheet(absPath, false, line);
             }}>
@@ -975,6 +1093,8 @@ export function App() {
                 items={itemsBySession[chatPanel.sessionId] ?? []}
                 planText={planStateBySession[chatPanel.sessionId]?.text}
                 planCompleted={planStateBySession[chatPanel.sessionId]?.completed}
+                planStatus={planStateBySession[chatPanel.sessionId]?.status}
+                planTurn={planStateBySession[chatPanel.sessionId]?.turn}
                 onClose={() => setChatPanel(null)}
               />
             </FileRefRehypeContext.Provider>
@@ -985,7 +1105,12 @@ export function App() {
         {sheetMounted && (
           <>
             {sheetVisible && viewState !== 'workbench' && (
-              <Splitter side="right" varName="--sheet-w" base={600} min={420} max={1080} invert />
+              <Splitter
+                side="right"
+                seam="main-sheet"
+                ariaLabel="Resize main and workbench panels"
+                onMouseDown={panelLayout.onMainSheetMouseDown}
+              />
             )}
             <Suspense fallback={null}>
             <Sheet
@@ -995,6 +1120,7 @@ export function App() {
               actions={sheetActions}
               onAddTab={(g) => {
                 if (g === 'term') addTerminalTab();
+                if (g === 'browser') addBrowserTab();
               }}
               hidden={!sheetVisible}
               externalEditors={displayConfig?.external_editors ?? []}
@@ -1002,6 +1128,19 @@ export function App() {
               onOpenWith={handleOpenWith}
               onConfigureEditors={() => activateRail('settings')}
               renderTab={(t) => {
+                if (t.kind === 'browser') {
+                  return (
+                    <BrowserPanel
+                      tabId={t.id}
+                      visible={sheetVisible
+                        && activeGroup === 'browser'
+                        && activeTabByGroup.browser === t.id
+                        && !paletteOpen
+                        && !zoomImage
+                        && feedbackState.confirms.length === 0}
+                    />
+                  );
+                }
                 if (t.kind === 'settings') {
                   return (
                     <SettingsBody
@@ -1053,19 +1192,47 @@ export function App() {
                       ws={ws}
                       systemConfig={systemConfig}
                       onChange={() => void loadWorkspaces().then(setWorkspaces)}
+                      onSessionAdopted={openAdoptedSession}
+                    />
+                    </Suspense>
+                  );
+                }
+                if (t.kind === 'commit') {
+                  return (
+                    <Suspense fallback={null}>
+                    <HistoryCommitBody
+                      tab={t}
+                      onOpenCommit={(commit, permanent) => {
+                        if (t.workingTreeId) openCommitInSheet({ workingTreeId: t.workingTreeId, ...commit }, permanent);
+                      }}
                     />
                     </Suspense>
                   );
                 }
                 return null;
               }}
+              renderEmpty={(group) => group === 'history' ? (
+                <div className="sheet-empty history-empty" data-testid="history-empty-panel">
+                  <svg className="fpe-icon" viewBox="0 0 24 24" width="34" height="34" fill="none"
+                       stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M3 12h6 M15 12h6" />
+                  </svg>
+                  <span className="fpe-title">{appT('history.emptyPanel.title')}</span>
+                  <span className="fpe-hint">{appT('history.emptyPanel.hint')}</span>
+                </div>
+              ) : null}
             />
             </Suspense>
           </>
         )}
         {inspectorVisible && inspectorKind !== null && (
           <>
-            <Splitter side="right" varName="--inspector-w" base={280} min={220} max={500} invert />
+            <Splitter
+              side="right"
+              seam="sheet-inspector"
+              ariaLabel="Resize workbench and inspector panels"
+              onMouseDown={panelLayout.onSheetInspectorMouseDown}
+            />
             {inspectorKind === 'workspaces' ? (
               <Suspense fallback={null}>
               <WorkspacesInspector
@@ -1078,6 +1245,21 @@ export function App() {
               </Suspense>
             ) : inspectorKind === 'settings' ? (
               <SettingsNavInspector active={settingsSection} onSelect={onSettingsNavSelect} />
+            ) : inspectorKind === 'history' ? (
+              <Suspense fallback={null}>
+              <HistoryInspector
+                workingTreeId={historyWtId}
+                selectedSha={(() => {
+                  const tab = wbTabs.find(t => t.id === activeTabByGroup.history);
+                  return tab?.kind === 'commit' && tab.workingTreeId === historyWtId
+                    ? tab.commitSha ?? null
+                    : null;
+                })()}
+                onOpenCommit={(commit, permanent) => {
+                  if (historyWtId) openCommitInSheet({ workingTreeId: historyWtId, ...commit }, permanent);
+                }}
+              />
+              </Suspense>
             ) : (
               <Inspector
                 tab={inspectorKind}
@@ -1094,7 +1276,10 @@ export function App() {
                   const abs = `${wt.path}/${rel}`;
                   void openFileInSheet(abs, perm);
                 }}
-                onOpenDiff={(rel, perm, scope, sha, base) => { void openDiffInSheet(rel, perm, scope, sha, base); }}
+                onOpenDiff={(rel, perm, scope, sha, base) => {
+                  if (!perm && revealOpenDiffPath(rel, scope, sha, base)) return;
+                  void openDiffInSheet(rel, perm, scope, sha, base);
+                }}
                 canCommit={!!activeSession}
                 onComposePrompt={text => { if (activeSessionId) injectComposerDraft(activeSessionId, text); }}
               />
@@ -1106,6 +1291,7 @@ export function App() {
           onToggleRail={toggleRail}
           sessionRailsDisabled={!sessionViewActive}
           workbenchDisabled={!workbenchActive}
+          browserAvailable={!!window.gianDesktop?.browser}
           wsState={wsState}
           wsAttempt={wsAttempt}
           authed={authed}

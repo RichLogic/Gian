@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — Git/worktree-domain definitions (Phase 3b of
- * `docs/proposals/ui-operation-layer.md`). All PENDING REST: remote fetch,
+ * `docs/archive/proposals/ui-operation-layer.md`). All PENDING REST: remote fetch,
  * pending-op abort, and index stage/unstage.
  *
  * The views keep their existing UX and derive it from the run:

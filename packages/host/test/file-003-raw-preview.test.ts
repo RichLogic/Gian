@@ -168,6 +168,10 @@ test('SEC-009: HTML preview carries a CSP that forbids framing, plugins, base, a
   assert.ok(csp, 'HTML preview MUST carry a CSP header');
   assert.equal(csp, RAW_PREVIEW_CSP.html,
     'HTML CSP literal must match the documented sandbox; any change is a security-review surface');
+  assert.ok(csp!.includes('sandbox allow-scripts'),
+    'HTML must run in an opaque sandbox origin while retaining static-report scripts');
+  assert.ok(!csp!.includes('allow-same-origin'),
+    'workspace HTML must never inherit the Gian application origin');
   // Spot-check the critical directives so a refactor that drops one fails loudly.
   for (const needle of [
     "frame-ancestors 'none'",
@@ -184,6 +188,8 @@ test('SEC-009: SVG preview CSP is strictly tighter than HTML — no scripts allo
   const csp = headers['Content-Security-Policy'];
   assert.ok(csp, 'SVG preview MUST carry a CSP header (SVG can embed <script>)');
   assert.equal(csp, RAW_PREVIEW_CSP.svg);
+  assert.ok(csp!.includes('sandbox;'),
+    'SVG must receive a sandbox with no elevated capabilities');
   assert.ok(csp!.includes("script-src 'none'"),
     'SVG CSP MUST set script-src to none — SVG <script> tags are an injection vector');
   assert.ok(csp!.includes("frame-ancestors 'none'"));

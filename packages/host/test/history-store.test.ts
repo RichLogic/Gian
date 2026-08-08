@@ -115,3 +115,48 @@ test('history pages are turn-bounded and compact legacy snapshot floods on read'
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('history treats offset-less SQLite event timestamps as UTC', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-history-timestamp-'));
+  const previousTimezone = process.env.TZ;
+  process.env.TZ = 'Asia/Shanghai';
+  try {
+    const db = openDatabase(dir);
+    db.exec(`
+      INSERT INTO workspaces(id,name,path,sort_order,hidden,created_at,updated_at)
+      VALUES('w1','workspace','/tmp',0,0,datetime('now'),datetime('now'));
+      INSERT INTO sessions(id,name,type,workspace_id,executor,approval_mode,status,archived,unread,native_session_id,created_at,updated_at)
+      VALUES('s1','session','primary','w1','codex','plan','done',0,0,'native',datetime('now'),datetime('now'));
+      INSERT INTO turns(id,session_id,turn_number,status)
+      VALUES('t1','s1',1,'completed');
+      INSERT INTO events(id,session_id,turn_id,call_id,type,data,created_at) VALUES
+        ('e1','s1','t1','sqlite','user_message','{"text":"sqlite"}','2026-08-08 02:40:12'),
+        ('e2','s1','t1','fraction','user_message','{"text":"fraction"}','2026-08-08 02:40:12.345'),
+        ('e3','s1','t1','zoned','user_message','{"text":"zoned"}','2026-08-08T02:40:12.500Z'),
+        ('e4','s1','t1','offset','user_message','{"text":"offset"}','2026-08-08T10:40:12+08:00');
+    `);
+
+    const history = new SessionHistoryStore(db);
+    const expected = new Map([
+      ['sqlite', Date.UTC(2026, 7, 8, 2, 40, 12)],
+      ['fraction', Date.UTC(2026, 7, 8, 2, 40, 12, 345)],
+      ['zoned', Date.UTC(2026, 7, 8, 2, 40, 12, 500)],
+      ['offset', Date.UTC(2026, 7, 8, 2, 40, 12)],
+    ]);
+    const allEvents = history.listEvents('s1');
+    assert.equal(allEvents.length, expected.size);
+    for (const event of allEvents) {
+      assert.equal(event.ts, expected.get(event.call_id));
+    }
+    const pageEvents = history.listEventPage('s1', null).events;
+    assert.equal(pageEvents.length, expected.size);
+    for (const event of pageEvents) {
+      assert.equal(event.ts, expected.get(event.call_id));
+    }
+    db.close();
+  } finally {
+    if (previousTimezone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTimezone;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

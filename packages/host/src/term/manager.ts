@@ -36,6 +36,8 @@ interface WorkbenchTerminalRec {
   cols: number;
   rows: number;
   exited: boolean;
+  exitCode: number | null;
+  exitSignal: string | null;
 }
 
 class RingBuffer {
@@ -147,6 +149,8 @@ export class WorkbenchTerminalManager extends EventEmitter<WorkbenchTerminalEven
       cols: opts.cols,
       rows: opts.rows,
       exited: false,
+      exitCode: null,
+      exitSignal: null,
     };
     this.terms.set(opts.termId, record);
 
@@ -158,8 +162,12 @@ export class WorkbenchTerminalManager extends EventEmitter<WorkbenchTerminalEven
     proc.onExit(({ exitCode, signal }) => {
       record.exited = true;
       const signalName =
-        typeof signal === 'number' ? `SIG#${signal}` : (signal ?? null);
-      this.emit('exited', opts.termId, exitCode ?? null, signalName);
+        typeof signal === 'number'
+          ? (signal > 0 ? `SIG#${signal}` : null)
+          : (signal ?? null);
+      record.exitCode = exitCode ?? null;
+      record.exitSignal = signalName;
+      this.emit('exited', opts.termId, record.exitCode, record.exitSignal);
     });
 
     return { replay: ring.snapshotBase64(), alive: true };
@@ -189,10 +197,20 @@ export class WorkbenchTerminalManager extends EventEmitter<WorkbenchTerminalEven
     }
   }
 
-  replay(termId: string): { chunks: string[]; alive: boolean } {
+  replay(termId: string): {
+    chunks: string[];
+    alive: boolean;
+    code: number | null;
+    signal: string | null;
+  } {
     const rec = this.terms.get(termId);
-    if (!rec) return { chunks: [], alive: false };
-    return { chunks: rec.ring.snapshotBase64(), alive: !rec.exited };
+    if (!rec) return { chunks: [], alive: false, code: null, signal: null };
+    return {
+      chunks: rec.ring.snapshotBase64(),
+      alive: !rec.exited,
+      code: rec.exitCode,
+      signal: rec.exitSignal,
+    };
   }
 
   async kill(termId: string): Promise<void> {

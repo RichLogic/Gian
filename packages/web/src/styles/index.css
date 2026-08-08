@@ -17,6 +17,7 @@
 @import url('./workspaces-v3.css');
 /* Plan and Agent detail owned by the active chat, separate from dock rails. */
 @import url('./chat-context-panel.css');
+@import url('./browser.css');
 @import url('./onboarding.css');
 
 * {

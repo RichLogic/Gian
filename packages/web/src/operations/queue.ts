@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — Queue-domain definitions (Phase 2b of
- * `docs/proposals/ui-operation-layer.md`).
+ * `docs/archive/proposals/ui-operation-layer.md`).
  *
  * OVERLAY MODEL — the queue is an ORDERED ARRAY, not an entity field, so it
  * cannot use the per-field overlay shape one-to-one. The choice made here:

@@ -32,10 +32,10 @@ test('command runtime keeps the launcher path and its companion runtime on PATH'
   assert.equal(installed.length, 1);
   assert.equal(installed[0]?.binaryPath, launcher);
 
-  const runtimeManager = new CliRuntimeManager([provider]);
+  const runtimeManager = new CliRuntimeManager([provider], root);
   const lease = await runtimeManager.acquire('codex');
   assert.equal(lease.binaryPath, launcher);
   assert.equal(lease.version, '0.146.0');
   assert.equal(lease.env.PATH?.split(delimiter)[0], dirname(launcher));
-  lease.release();
+  await lease.release();
 });

@@ -27,6 +27,7 @@ import {
   getModelsCached,
   getModesCached,
   getSlashCached,
+  SLASH_CACHE_INVALIDATED_EVENT,
   modelLabel,
   nativeOptionRole,
   slashFilterGrouped,
@@ -249,6 +250,7 @@ export function Composer({
 }) {
   const t = useT();
   const minimal = variant === 'minimal';
+  const hardDisabled = disabled && disabledSubmitBehavior === 'block';
   const cliExecutor = executor === 'kimi' ? null : executor;
   const zoomImage = useContext(ImageZoomContext);
   // Restore text AND already-uploaded attachments from the per-session draft —
@@ -277,6 +279,10 @@ export function Composer({
   // next send so it never persists across turns.
   const [oneShotBypass, setOneShotBypass] = useState(false);
   const [slashOpen, setSlashOpen] = useState(false);
+  const [slashDismissedInput, setSlashDismissedInput] = useState<{
+    sessionId: string;
+    text: string;
+  } | null>(null);
   const [slashIdx, setSlashIdx] = useState(0);
   const [slashLoading, setSlashLoading] = useState(false);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>(
@@ -284,6 +290,7 @@ export function Composer({
       ? (getSlashCached(cliExecutor, workspaceId) ?? [])
       : [],
   );
+  const [slashRefreshVersion, setSlashRefreshVersion] = useState(0);
   const [slashPopPos, setSlashPopPos] = useState<{ left: number; bottom: number; width: number } | null>(null);
   const [modelPopOpen, setModelPopOpen] = useState(false);
   const [modelPopPos, setModelPopPos] = useState<{ left: number; bottom: number } | null>(null);
@@ -358,6 +365,7 @@ export function Composer({
   useEffect(() => {
     if (executor === 'kimi') {
       let alive = true;
+      setSlashCommands([]);
       setSlashLoading(true);
       void loadSessionSlashCommands(session.id)
         .then(list => {
@@ -375,9 +383,14 @@ export function Composer({
     const cached = getSlashCached(executor, workspaceId);
     if (cached) {
       setSlashCommands(cached);
+      setSlashLoading(false);
       return;
     }
     let alive = true;
+    // Never render commands from the previous executor/workspace while this
+    // key is loading. Without the reset, a fast `/` could expose and invoke a
+    // command belonging to the session the user just left.
+    setSlashCommands([]);
     setSlashLoading(true);
     void fetchSlashCached(executor, workspaceId)
       .then(list => {
@@ -391,7 +404,19 @@ export function Composer({
         setSlashLoading(false);
       });
     return () => { alive = false; };
-  }, [executor, session.id, workspaceId]);
+  }, [executor, session.id, workspaceId, slashRefreshVersion]);
+
+  useEffect(() => {
+    if (executor === 'kimi' || !workspaceId) return;
+    const refresh = (event: Event) => {
+      const detail = (event as CustomEvent).detail as { workspaceId?: unknown } | undefined;
+      if (detail?.workspaceId === workspaceId) {
+        setSlashRefreshVersion(version => version + 1);
+      }
+    };
+    window.addEventListener(SLASH_CACHE_INVALIDATED_EVENT, refresh);
+    return () => window.removeEventListener(SLASH_CACHE_INVALIDATED_EVENT, refresh);
+  }, [executor, workspaceId]);
 
   useEffect(() => {
     if (executor !== 'kimi') return;
@@ -506,7 +531,15 @@ export function Composer({
 
   useEffect(() => {
     // Minimal variant has no slash UI — never auto-open the popover.
-    if (minimal) return;
+    if (minimal || hardDisabled) {
+      setSlashOpen(false);
+      return;
+    }
+    // Escape/outside-click explicitly dismisses this exact input. Discovery
+    // can finish after the dismissal and update `slashCommands`; do not let
+    // that asynchronous update reopen the popover until the user edits.
+    if (slashDismissedInput?.sessionId === session.id
+      && slashDismissedInput.text === text) return;
     // Auto-open / auto-filter the popover based on what the user types.
     // Empty input is a no-op. Typing `/` is the only entry point; the visible
     // slash button was intentionally removed from the composer.
@@ -525,7 +558,7 @@ export function Composer({
       // Non-slash text → close. Empty text is a no-op (button-controlled).
       setSlashOpen(false);
     }
-  }, [text, slashCommands, minimal]);
+  }, [text, slashCommands, minimal, hardDisabled, session.id, slashDismissedInput]);
 
   useEffect(() => {
     if (!slashOpen) return;
@@ -534,12 +567,13 @@ export function Composer({
         popRef.current && !popRef.current.contains(e.target as Node) &&
         ref.current && !ref.current.contains(e.target as Node)
       ) {
+        setSlashDismissedInput({ sessionId: session.id, text });
         setSlashOpen(false);
       }
     }
     document.addEventListener('pointerdown', onPointerDown);
     return () => document.removeEventListener('pointerdown', onPointerDown);
-  }, [slashOpen]);
+  }, [slashOpen, session.id, text]);
 
   useLayoutEffect(() => {
     if (!modelPopOpen) { setModelPopPos(null); return; }
@@ -585,6 +619,12 @@ export function Composer({
   }, [modelPopOpen]);
 
   function pickCommand(cmd: SlashCommand) {
+    // Codex typed skills bypass submit(), so a popup that was open when the
+    // session became completed needs an explicit fail-closed guard.
+    if (hardDisabled) {
+      setSlashOpen(false);
+      return;
+    }
     // Codex user/project skills dispatch as a typed input item directly —
     // codex resolves the skill markdown and runs it. Native commands and cc
     // commands fall back to the text-into-input path so the user can edit
@@ -592,6 +632,7 @@ export function Composer({
     const isCodexSkill = executor === 'codex' && (cmd.source === 'user' || cmd.source === 'project') && !!cmd.filePath;
     if (isCodexSkill) {
       setSlashOpen(false);
+      setText('');
       onSendSkill(cmd.name.replace(/^\//, ''), cmd.filePath!);
       return;
     }
@@ -764,10 +805,15 @@ export function Composer({
   }
 
   function handleTextareaKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (hardDisabled) {
+      e.preventDefault();
+      setSlashOpen(false);
+      return;
+    }
     if (slashOpen) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        setSlashIdx(i => Math.min(i + 1, filtered.length - 1));
+        setSlashIdx(i => filtered.length > 0 ? Math.min(i + 1, filtered.length - 1) : 0);
         return;
       }
       if (e.key === 'ArrowUp') {
@@ -782,6 +828,7 @@ export function Composer({
       }
       if (e.key === 'Escape') {
         e.preventDefault();
+        setSlashDismissedInput({ sessionId: session.id, text });
         setSlashOpen(false);
         return;
       }
@@ -839,7 +886,11 @@ export function Composer({
             className="composer-ta"
             rows={1}
             value={text}
-            onChange={e => setText(e.target.value)}
+            disabled={hardDisabled}
+            onChange={e => {
+              setSlashDismissedInput(null);
+              setText(e.target.value);
+            }}
             onKeyDown={handleTextareaKeyDown}
             onPaste={handlePaste}
             placeholder={
@@ -880,7 +931,7 @@ export function Composer({
           </div>
         )}
 
-        {!minimal && slashOpen && slashPopPos && (slashLoading || filteredGroups.length > 0) && createPortal(
+        {!minimal && !hardDisabled && slashOpen && slashPopPos && (slashLoading || filteredGroups.length > 0) && createPortal(
           <div
             ref={popRef}
             className="cmp-slash-pop"
@@ -1236,6 +1287,7 @@ export function Composer({
             <button
               type="button"
               className={`composer-act${pendingFiles.length > 0 ? ' active' : ''}`}
+              disabled={hardDisabled}
               title={t('composer.attachment.addFiles')}
               onClick={() => fileInputRef.current?.click()}
               aria-label={t('composer.attachment.addFiles')}
@@ -1268,7 +1320,7 @@ export function Composer({
             <button
               type="button"
               className="composer-act primary"
-              disabled={!text.trim() && !canSendAttachmentOnly}
+              disabled={hardDisabled || (!text.trim() && !canSendAttachmentOnly)}
               onClick={submit}
               title={t('composer.send.button')}
               aria-label={t('composer.send.button')}

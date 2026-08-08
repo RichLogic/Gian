@@ -72,6 +72,12 @@ function sanitizeOpenApps(raw: unknown): Record<string, string> {
 export function saveConfig(db: Db, partial: Partial<SystemConfig>): void {
   const stmt = db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)`);
   for (const [key, value] of Object.entries(partial) as [keyof SystemConfig, SystemConfig[keyof SystemConfig]][]) {
+    // Kept in the wire model for backward compatibility, but these appearance
+    // choices were retired in 0.3.0. Ignore stale clients and always render
+    // Cozy with MD interface/code text.
+    if (key === 'density' || key === 'font_scale_chrome' || key === 'font_scale_code') {
+      continue;
+    }
     if (key === EXTERNAL_EDITORS_KEY) {
       const cleaned = sanitizeEditors(value);
       stmt.run(key, JSON.stringify(cleaned));
@@ -130,10 +136,10 @@ export function loadConfig(db: Db): SystemConfig {
     workspace_root: map.get('workspace_root') ?? '~/Coding',
     theme,
     accent,
-    density: (map.get('density') ?? 'cozy') as SystemConfig['density'],
-    font_scale_chrome: sanitizeScale(map.get('font_scale_chrome')),
+    density: 'cozy',
+    font_scale_chrome: 'md',
     font_scale_chat: sanitizeScale(map.get('font_scale_chat')),
-    font_scale_code: sanitizeScale(map.get('font_scale_code')),
+    font_scale_code: 'md',
     locale: (map.get('locale') ?? 'zh-CN') as SystemConfig['locale'],
     default_claude_model: map.get('default_claude_model') ?? '',
     default_claude_effort: map.get('default_claude_effort') ?? '',

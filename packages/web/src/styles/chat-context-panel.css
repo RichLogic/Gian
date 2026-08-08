@@ -1,7 +1,7 @@
 .chat-context-panel {
-  width: clamp(340px, 46vw, var(--sheet-w, 600px));
+  width: var(--sheet-w, 600px);
   max-width: calc(100vw - 56px);
-  min-width: min(340px, calc(100vw - 56px));
+  min-width: 0;
   flex: none;
   display: flex;
   flex-direction: column;
@@ -133,6 +133,7 @@
 
 .chat-agent-state--running { color: var(--accent-text); }
 .chat-agent-state--error { color: var(--danger); }
+.chat-agent-state--interrupted { color: var(--warn); }
 .chat-agent-state--done { color: var(--ok); }
 
 .chat-agent-summary h3 {
@@ -220,18 +221,6 @@
 }
 
 @media (max-width: 780px) {
-  .chat-context-panel {
-    position: fixed;
-    z-index: 30;
-    top: calc(var(--topbar-h) + var(--sp-2));
-    right: 44px;
-    bottom: var(--sp-2);
-    width: calc(100vw - 56px);
-    max-width: none;
-    min-width: 0;
-    margin: 0;
-  }
-
   .chat-agent-meta {
     grid-template-columns: 1fr;
   }

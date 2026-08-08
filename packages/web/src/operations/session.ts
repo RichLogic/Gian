@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — Session-domain definitions (Phase 2a of
- * `docs/proposals/ui-operation-layer.md`). Every Session mutation the UI can
+ * `docs/archive/proposals/ui-operation-layer.md`). Every Session mutation the UI can
  * trigger is registered here on the product registry; entry points
  * (controllers, shortcuts, views) dispatch by name instead of calling
  * `ws.send` / mutation APIs directly.

@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — Agent-domain definitions (Phase 3b of
- * `docs/proposals/ui-operation-layer.md`): executor CLI/proxy install, CLI
+ * `docs/archive/proposals/ui-operation-layer.md`): executor CLI/proxy install, CLI
  * path, proxy defaults, the native CLI-path picker, and the desktop restart.
  * All PENDING (REST, plus the desktop bridge for the restart) — the result
  * entity (`AgentInstallStatus`) is recorded on the run (`run.result`, Phase

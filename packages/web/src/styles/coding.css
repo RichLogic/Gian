@@ -184,38 +184,45 @@
 @keyframes dot { 0%,80%,100% { opacity: 0.3; transform: scale(0.85); } 40% { opacity: 1; transform: scale(1); } }
 
 /* ============================================================
-   Approval card — the important UX piece
+   Approval card — minimal v3 (transcript redesign P1, 2026-08-08)
    ------------------------------------------------------------
-   Restrained palette (2026-08-05): the shell is always neutral
-   (surface-2 + single hairline). At most ONE hue per card:
-   - pending high risk: thin danger outline + danger icon/pill
-   - resolved (approved): ok icon + ok status pill
-   - declined: danger icon + danger status pill
-   Everything else (medium/low risk, question) stays monochrome.
+   The shell is always neutral (surface-2 + single hairline). A pending
+   card is a type label row (`.approval-head`) + a surface content block
+   (`.approval-cmd` / `.approval-plan` / `.question-body`) + a button row;
+   resolved approvals compress to `.approval-line` single rows (below).
+   The v2 chrome (icon / title / risk pill / high outline / kbd hints) was
+   removed — no CLI currently emits a non-medium risk anyway.
    ============================================================ */
 .approval {
-  margin: 12px 0;
+  margin: 8px 0;
   border-radius: var(--r-3);
   background: var(--surface-2);
   overflow: hidden;
   box-shadow: 0 0 0 1px var(--hairline);
   transition: box-shadow 140ms var(--ease);
 }
-/* high risk: the only pending state that earns a hue — a thin
-   danger outline, not a glow ring */
-.approval.high {
-  box-shadow: 0 0 0 1px oklch(from var(--danger) l c h / 0.35);
+/* Card-type label row (Approval / Question / Plan) — mono micro-label in
+ * the `.trow-verb` / `.question-header` language. */
+.approval-head {
+  padding: 9px 12px 0;
+  font-family: var(--font-mono);
+  font-size: 10px; font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
 }
 .question-body {
-  padding: 4px 14px 10px;
+  margin: 10px 12px 0;
+  padding: 10px 12px;
+  border-radius: var(--r-2);
+  background: var(--surface);
   display: flex; flex-direction: column; gap: 14px;
 }
 .question-progress {
-  align-self: flex-start;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
+  align-self: center;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
   color: var(--text-3);
-  letter-spacing: 0.02em;
+  padding: 0 6px;
 }
 .question-block { display: flex; flex-direction: column; gap: 6px; }
 .question-text {
@@ -263,47 +270,9 @@
   color: var(--text);
 }
 .question-option--other input[type='text']:focus { outline: 1px solid var(--accent-text); }
-.approval-top {
-  display: flex; align-items: center; gap: 10px;
-  padding: 10px 12px 8px;
-}
-.approval-ico {
-  width: 28px; height: 28px; border-radius: var(--r-2);
-  background: var(--surface-3); color: var(--text-3);
-  display: flex; align-items: center; justify-content: center;
-  flex-shrink: 0;
-  /* — ported from design/coding.css — smooth state transition */
-  transition: background 120ms var(--ease), color 120ms var(--ease);
-}
-.approval-ico svg { width: 14px; height: 14px; }
-.approval.high .approval-ico { background: var(--danger-soft); color: var(--danger); }
-.approval-title {
-  font-size: var(--fz-12); font-weight: 600;
-  color: var(--text);
-  display: flex; align-items: center; gap: 8px;
-}
-.approval-risk {
-  font-family: var(--font-mono);
-  font-size: 9.5px; font-weight: 700;
-  text-transform: none; letter-spacing: 0.06em;
-  padding: 1px 5px; border-radius: var(--r-1);
-  background: var(--surface-3); color: var(--text-3);
-}
-.approval.high .approval-risk { background: var(--danger-soft); color: var(--danger); }
-
-/* Risk pill subclasses (low / medium neutral; only high earns a hue) */
-.approval-risk--low     { background: var(--surface-3); color: var(--text-3); }
-.approval-risk--medium  { background: var(--surface-3); color: var(--text-3); }
-.approval-risk--high    { background: var(--danger-soft); color: var(--danger); }
-
-.approval-sub {
-  font-size: 11px;
-  color: var(--text-3);
-  margin-top: 2px;
-}
 
 .approval-cmd {
-  margin: 0 12px 10px;
+  margin: 10px 12px 0;
   padding: 8px 10px;
   border-radius: var(--r-2);
   background: var(--surface);
@@ -314,17 +283,15 @@
   word-break: break-all;
 }
 .approval-cmd .prompt { color: var(--text-3); user-select: none; }
-/* Resolved state: grey out the command row */
-.approval-cmd--resolved { color: var(--text-3); opacity: 0.65; }
 
 /* ExitPlanMode plan: markdown-rendered plan content. Rich formatting,
  * scrollable so a long plan doesn't push the approve buttons offscreen. */
 .approval-plan {
-  margin: 0 12px 10px;
-  padding: 12px 14px;
+  margin: 10px 12px 0;
+  padding: 10px 12px;
   border-radius: var(--r-2);
   background: var(--surface);
-  max-height: 420px;
+  max-height: 300px;
   overflow-y: auto;
 }
 .approval-plan-md {
@@ -394,7 +361,43 @@
   text-align: left;
 }
 .approval-plan-md th { background: var(--surface-2); font-weight: 600; }
-.approval-plan--resolved { opacity: 0.7; }
+
+.approval-actions {
+  display: flex; align-items: center; gap: 4px;
+  padding: 8px 10px 10px;
+  flex-wrap: wrap;
+}
+.approval-actions .spacer { flex: 1; }
+.approval-resolving {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+  padding: 0 6px;
+}
+
+/* Resolved approval / question: compressed to a single line that mixes in
+ * with the surrounding `.trow` process rows (✓ ok / ✕ danger + subject +
+ * right note). Values copied from the 2026-08-05 redesign mockup. */
+.approval-line {
+  position: relative;
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 8px 3px 28px;
+  font-size: var(--fz-11);
+  color: var(--text-3);
+}
+.approval-line .al-mark { font-weight: 700; }
+.approval-line .al-mark.ok { color: var(--ok); }
+.approval-line .al-mark.no { color: var(--danger); }
+.approval-line .al-subject {
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--text-2);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.approval-line .al-note {
+  margin-left: auto; flex-shrink: 0;
+  font-family: var(--font-mono); font-size: 10.5px;
+}
+.approval-line .prompt { color: var(--text-3); user-select: none; }
 
 /* ─────────────────────────────────────────────────────────────────────────
    Plan chip — persistent entry point above the composer for the latest
@@ -436,17 +439,6 @@
 .plan-chip-dot--pending { background: var(--warn, #f5a524); }
 .plan-chip-dot--accepted { background: var(--ok, #22c55e); }
 .plan-chip-dot--declined { background: var(--danger); }
-
-.approval-actions {
-  display: flex; align-items: center; gap: 4px;
-  padding: 0 10px 10px;
-  flex-wrap: wrap;
-}
-.approval-actions .spacer { flex: 1; }
-.approval-tip {
-  font-size: 10.5px; color: var(--text-3);
-  font-family: var(--font-mono);
-}
 
 /* ============================================================
    Composer + Queue drawer
@@ -1586,6 +1578,20 @@
   border-radius: var(--r-2);
 }
 .spaces-claude-md:focus { border-color: var(--accent); outline: none; }
+.spaces-claude-md-error {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  color: var(--text-2);
+}
 
 /* CLAUDE.md inspector — 4th-level slide-in panel on Spaces tab. */
 .spaces-inspector {

@@ -23,6 +23,7 @@ export interface EnsureHostAvailableOptions {
   startHost?: () => Promise<void> | void;
   requestHeaders?: Readonly<Record<string, string>>;
   expectedInstanceId?: string;
+  expectedVersion?: string;
   request?: HealthRequest;
   sleep?: (delayMs: number) => Promise<void>;
   maxChecks?: number;
@@ -39,6 +40,7 @@ export async function isHostHealthy(
   timeoutMs = 1_500,
   requestHeaders: Readonly<Record<string, string>> = {},
   expectedInstanceId?: string,
+  expectedVersion?: string,
 ): Promise<boolean> {
   try {
     const response = await request(healthUrl, {
@@ -54,6 +56,9 @@ export async function isHostHealthy(
       body.ok === true
     );
     if (!healthy) return false;
+    if (expectedVersion) {
+      if (!('version' in body) || body.version !== expectedVersion) return false;
+    }
     if (!expectedInstanceId) return true;
     return (
       'instanceId' in body &&
@@ -70,6 +75,7 @@ export async function ensureHostAvailable({
   startHost,
   requestHeaders = {},
   expectedInstanceId,
+  expectedVersion,
   request = fetch,
   sleep = defaultSleep,
   maxChecks = 16,
@@ -87,6 +93,7 @@ export async function ensureHostAvailable({
       requestTimeoutMs,
       requestHeaders,
       expectedInstanceId,
+      expectedVersion,
     )) {
       return { ready: true, checks: index + 1, startAttempted };
     }

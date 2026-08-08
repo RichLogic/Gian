@@ -1,39 +1,62 @@
 import type { Hono } from 'hono';
-import { execFileSync } from 'node:child_process';
 import { basename } from 'node:path';
 import type { Db } from '../../storage/db.js';
 import {
   buildRemoteBranchList,
-  listLocalBranches,
+  listLocalBranchesAsync,
   REMOTE_BRANCHES_FOR_EACH_REF_FMT,
 } from '../../workspace/git-branches.js';
-import { listGitWorktrees } from '../../workspace/git.js';
+import { listGitWorktreesAsync } from '../../workspace/git.js';
 import {
-  claudeMdInfoAt,
+  CommandExecutionError,
+  commandErrorMessage,
+  GIT_MAX_CONCURRENCY,
+  GitQueueFullError,
+  mapWithConcurrency,
+  RepoMutationLockError,
+  runGit,
+  withRepoMutationLock,
+} from '../../workspace/async-command.js';
+import {
+  claudeMdInfoAtAsync,
   extTreeId,
-  gitBranchAt,
-  gitInfoAt,
-  gitPendingOpAt,
+  gitBranchAtAsync,
+  gitInfoAtAsync,
+  gitPendingOpAtAsync,
 } from '../working-tree-git.js';
 import type { WsBroadcaster } from '../ws-broadcast.js';
+
+function gitMutationStatus(
+  error: unknown,
+  nonZeroStatus: 400 | 500 = 500,
+): 400 | 500 | 503 | 504 {
+  if (error instanceof RepoMutationLockError || error instanceof GitQueueFullError) return 503;
+  if (error instanceof CommandExecutionError && error.timedOut) return 504;
+  if (error instanceof CommandExecutionError
+    && error.exitCode != null && !error.aborted && error.signal == null) {
+    return nonZeroStatus;
+  }
+  return 500;
+}
 
 export function registerWorkspaceGitRoutes(
   app: Hono,
   db: Db,
   broadcaster: WsBroadcaster,
 ): void {
-  app.get('/api/workspaces/:id/repo-info', c => {
+  app.get('/api/workspaces/:id/repo-info', async c => {
     const id = c.req.param('id');
     const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
       | { path: string } | undefined;
     if (!ws) return c.json({ error: 'workspace not found' }, 404);
-    return c.json({
-      git: gitInfoAt(ws.path),
-      claudeMd: claudeMdInfoAt(ws.path),
-    });
+    const [git, claudeMd] = await Promise.all([
+      gitInfoAtAsync(ws.path),
+      claudeMdInfoAtAsync(ws.path),
+    ]);
+    return c.json({ git, claudeMd });
   });
 
-  app.get('/api/workspaces/:id/trees', c => {
+  app.get('/api/workspaces/:id/trees', async c => {
     const id = c.req.param('id');
     const ws = db.prepare('SELECT id, name, path, created_at FROM workspaces WHERE id = ?').get(id) as
       | { id: string; name: string; path: string; created_at: string } | undefined;
@@ -46,19 +69,20 @@ export function registerWorkspaceGitRoutes(
       ORDER BY updated_at DESC
     `).all(id) as Array<{ id: string; name: string | null; worktree_path: string; branch: string | null }>;
 
-    function dirty(path: string): { isDirty: boolean; modifiedCount: number } {
+    async function dirty(path: string): Promise<{ isDirty: boolean; modifiedCount: number }> {
       try {
-        const out = execFileSync('git', ['-C', path, 'status', '--porcelain'], {
-          timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-        });
-        const lines = out.split('\n').filter(l => l.trim());
+        const { stdout } = await runGit(
+          ['status', '--porcelain'],
+          { cwd: path, timeoutMs: 2_000 },
+        );
+        const lines = stdout.split('\n').filter(l => l.trim());
         return { isDirty: lines.length > 0, modifiedCount: lines.length };
       } catch {
         return { isDirty: false, modifiedCount: 0 };
       }
     }
 
-    const out: Array<{
+    type TreeOut = {
       id: string;
       kind: 'main' | 'worktree';
       label: string;
@@ -68,26 +92,24 @@ export function registerWorkspaceGitRoutes(
       modifiedCount: number;
       claudeMd: { exists: boolean; lines: number; mtime: string | null };
       session?: { id: string; name: string | null };
-    }> = [];
-
-    out.push({
+    };
+    type Candidate = Omit<TreeOut, 'branch' | 'isDirty' | 'modifiedCount' | 'claudeMd'> & {
+      branchHint: string | null;
+    };
+    const candidates: Candidate[] = [{
       id: `ws:${ws.id}`,
       kind: 'main',
       label: ws.name,
       path: ws.path,
-      branch: gitBranchAt(ws.path),
-      ...dirty(ws.path),
-      claudeMd: claudeMdInfoAt(ws.path),
-    });
+      branchHint: null,
+    }];
     for (const s of sessRows) {
-      out.push({
+      candidates.push({
         id: `wt:${s.id}`,
         kind: 'worktree',
         label: s.name || `session ${s.id.slice(0, 6)}`,
         path: s.worktree_path,
-        branch: s.branch ?? gitBranchAt(s.worktree_path),
-        ...dirty(s.worktree_path),
-        claudeMd: claudeMdInfoAt(s.worktree_path),
+        branchHint: s.branch,
         session: { id: s.id, name: s.name },
       });
     }
@@ -95,18 +117,33 @@ export function registerWorkspaceGitRoutes(
     // `git worktree add`). Dedupe against the main tree and DB-owned session
     // worktrees; the `wt:` entry wins on overlap.
     const knownPaths = new Set<string>([ws.path, ...sessRows.map(s => s.worktree_path)]);
-    for (const wt of listGitWorktrees(ws.path)) {
+    for (const wt of await listGitWorktreesAsync(ws.path)) {
       if (knownPaths.has(wt.path)) continue;
-      out.push({
+      candidates.push({
         id: extTreeId(ws.id, wt.path),
         kind: 'worktree',
         label: basename(wt.path),
         path: wt.path,
-        branch: wt.branch ?? gitBranchAt(wt.path),
-        ...dirty(wt.path),
-        claudeMd: claudeMdInfoAt(wt.path),
+        branchHint: wt.branch,
       });
     }
+    const out = await mapWithConcurrency(candidates, GIT_MAX_CONCURRENCY, async candidate => {
+      const [fallbackBranch, dirtyState, claudeMd] = await Promise.all([
+        candidate.branchHint == null ? gitBranchAtAsync(candidate.path) : Promise.resolve(candidate.branchHint),
+        dirty(candidate.path),
+        claudeMdInfoAtAsync(candidate.path),
+      ]);
+      return {
+        id: candidate.id,
+        kind: candidate.kind,
+        label: candidate.label,
+        path: candidate.path,
+        branch: fallbackBranch,
+        ...dirtyState,
+        claudeMd,
+        ...(candidate.session ? { session: candidate.session } : {}),
+      } satisfies TreeOut;
+    });
     return c.json(out);
   });
 
@@ -132,12 +169,13 @@ export function registerWorkspaceGitRoutes(
     session: { id: string; name: string | null } | null;
   }
 
-  app.get('/api/workspaces/:id/branches', c => {
+  app.get('/api/workspaces/:id/branches', async c => {
     const id = c.req.param('id');
     const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
       | { path: string } | undefined;
     if (!ws) return c.json({ error: 'workspace not found' }, 404);
-    const branches: LocalBranchOut[] = listLocalBranches(ws.path).map(b => ({ ...b, session: null }));
+    const branches: LocalBranchOut[] = (await listLocalBranchesAsync(ws.path))
+      .map(b => ({ ...b, session: null }));
     const sessRows = db.prepare(`
       SELECT id, name, branch FROM sessions
       WHERE workspace_id = ? AND branch IS NOT NULL AND archived = 0
@@ -150,23 +188,27 @@ export function registerWorkspaceGitRoutes(
     return c.json(branches);
   });
 
-  app.get('/api/workspaces/:id/remote-branches', c => {
+  app.get('/api/workspaces/:id/remote-branches', async c => {
     const id = c.req.param('id');
     const search = (c.req.query('search') ?? '').trim().toLowerCase();
     const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
       | { path: string } | undefined;
     if (!ws) return c.json({ error: 'workspace not found' }, 404);
     let raw: string;
+    let localNames: Set<string>;
     try {
-      raw = execFileSync(
-        'git',
-        ['-C', ws.path, 'for-each-ref', '--format=' + REMOTE_BRANCHES_FOR_EACH_REF_FMT, 'refs/remotes'],
-        { timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
-      );
+      const [remoteResult, localBranches] = await Promise.all([
+        runGit(
+          ['for-each-ref', '--format=' + REMOTE_BRANCHES_FOR_EACH_REF_FMT, 'refs/remotes'],
+          { cwd: ws.path, timeoutMs: 5_000 },
+        ),
+        listLocalBranchesAsync(ws.path),
+      ]);
+      raw = remoteResult.stdout;
+      localNames = new Set(localBranches.map(branch => branch.name));
     } catch {
       return c.json([]);
     }
-    const localNames = new Set(listLocalBranches(ws.path).map(b => b.name));
     const out = buildRemoteBranchList({ rawForEachRef: raw, localBranchNames: localNames, search });
     return c.json(out);
   });
@@ -180,92 +222,156 @@ export function registerWorkspaceGitRoutes(
     const name = (body.name ?? '').trim();
     const base = (body.base ?? '').trim();
     if (!name) return c.json({ error: 'name is required' }, 400);
-    // `git check-ref-format --branch <name>` validates the proposed branch
-    // name without creating anything. Cheaper than letting `git branch` blow
-    // up with a vague error.
+    const signal = c.req.raw.signal;
     try {
-      execFileSync('git', ['-C', ws.path, 'check-ref-format', '--branch', name], {
-        timeout: 2000, stdio: ['ignore', 'ignore', 'ignore'],
-      });
-    } catch {
-      return c.json({ error: `invalid branch name: ${name}` }, 400);
-    }
-    // When base is a remote-tracking ref (origin/foo), --track makes the new
-    // local branch follow it for ahead/behind. Probe with rev-parse against
-    // refs/remotes/<base> — `feature/x` happens to look like `origin/foo` by
-    // shape, so a regex isn't enough.
-    let isRemote = false;
-    if (base) {
-      try {
-        execFileSync('git', ['-C', ws.path, 'rev-parse', '--verify', '--quiet', `refs/remotes/${base}`], {
-          timeout: 2000, stdio: ['ignore', 'ignore', 'ignore'],
+      return await withRepoMutationLock(ws.path, async () => {
+        // Keep validation, remote probing, and creation in one repository
+        // mutation transaction so fetch/merge cannot change refs in between.
+        try {
+          await runGit(
+            ['check-ref-format', '--branch', name],
+            { cwd: ws.path, timeoutMs: 2_000, signal },
+          );
+        } catch (error) {
+          if (!(error instanceof CommandExecutionError)
+            || error.exitCode == null || error.timedOut || error.aborted) {
+            const status = gitMutationStatus(error);
+            return c.json({
+              ok: false,
+              error: commandErrorMessage(error, 'branch validation failed'),
+            }, status);
+          }
+          return c.json({ error: `invalid branch name: ${name}` }, 400);
+        }
+        // When base is a remote-tracking ref (origin/foo), --track makes the
+        // new local branch follow it for ahead/behind. Probe refs/remotes;
+        // shape alone cannot distinguish `feature/x` from `origin/foo`.
+        let isRemote = false;
+        if (base) {
+          try {
+            await runGit(
+              ['rev-parse', '--verify', '--quiet', `refs/remotes/${base}`],
+              { cwd: ws.path, timeoutMs: 2_000, signal },
+            );
+            isRemote = true;
+          } catch (error) {
+            if (error instanceof CommandExecutionError
+              && error.exitCode != null && !error.timedOut && !error.aborted) {
+              isRemote = false;
+            } else {
+              const status = gitMutationStatus(error);
+              return c.json({
+                ok: false,
+                error: commandErrorMessage(error, 'base branch probe failed'),
+              }, status);
+            }
+          }
+        }
+        const args = ['branch'];
+        if (isRemote) args.push('--track');
+        args.push(name);
+        if (base) args.push(base);
+        try {
+          await runGit(args, { cwd: ws.path, timeoutMs: 5_000, signal });
+        } catch (err) {
+          const status = gitMutationStatus(err, 400);
+          return c.json({
+            ok: false,
+            error: commandErrorMessage(err, 'branch create failed'),
+          }, status);
+        }
+        broadcaster.broadcast({
+          type: 'workspace:git-updated',
+          workspace_id: id,
+          reason: 'branch-created',
         });
-        isRemote = true;
-      } catch {
-        isRemote = false;
-      }
+        return c.json({ ok: true });
+      }, { signal });
+    } catch (error) {
+      return c.json(
+        { ok: false, error: commandErrorMessage(error, 'branch mutation unavailable') },
+        gitMutationStatus(error),
+      );
     }
-    const args = ['-C', ws.path, 'branch'];
-    if (isRemote) args.push('--track');
-    args.push(name);
-    if (base) args.push(base);
-    try {
-      execFileSync('git', args, {
-        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch (err) {
-      const e = err as { stderr?: Buffer | string; message?: string };
-      const stderr = typeof e.stderr === 'string' ? e.stderr : e.stderr?.toString('utf8') ?? '';
-      return c.json({ ok: false, error: stderr.trim() || e.message || 'branch create failed' }, 400);
-    }
-    broadcaster.broadcast({ type: 'workspace:git-updated', workspace_id: id, reason: 'branch-created' });
-    return c.json({ ok: true });
   });
 
-  app.post('/api/workspaces/:id/abort-merge', c => {
+  app.post('/api/workspaces/:id/abort-merge', async c => {
     const id = c.req.param('id');
     const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
       | { path: string } | undefined;
     if (!ws) return c.json({ error: 'workspace not found' }, 404);
-    const pending = gitPendingOpAt(ws.path);
-    if (!pending) return c.json({ ok: false, error: 'no merge in progress' }, 400);
-    // `git <op> --abort` is the canonical way to back out each state. The
-    // command matches the pending op kind we detected.
-    const args: Record<typeof pending.kind, string[]> = {
-      'merge':       ['merge', '--abort'],
-      'rebase':      ['rebase', '--abort'],
-      'cherry-pick': ['cherry-pick', '--abort'],
-      'revert':      ['revert', '--abort'],
-    };
+    const signal = c.req.raw.signal;
     try {
-      execFileSync('git', ['-C', ws.path, ...args[pending.kind]], {
-        timeout: 10_000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch (err) {
-      const e = err as { stderr?: Buffer | string; message?: string };
-      const stderr = typeof e.stderr === 'string' ? e.stderr : e.stderr?.toString('utf8') ?? '';
-      return c.json({ ok: false, error: stderr.trim() || e.message || 'abort failed' }, 500);
+      return await withRepoMutationLock(ws.path, async () => {
+        const pending = await gitPendingOpAtAsync(ws.path, signal);
+        if (!pending) return c.json({ ok: false, error: 'no merge in progress' }, 400);
+        // Detect and abort under the same lock; otherwise another mutation can
+        // finish or replace the operation between the probe and `--abort`.
+        const args: Record<typeof pending.kind, string[]> = {
+          'merge':       ['merge', '--abort'],
+          'rebase':      ['rebase', '--abort'],
+          'cherry-pick': ['cherry-pick', '--abort'],
+          'revert':      ['revert', '--abort'],
+        };
+        try {
+          await runGit(
+            args[pending.kind],
+            { cwd: ws.path, timeoutMs: 10_000, signal },
+          );
+        } catch (err) {
+          const status = gitMutationStatus(err);
+          return c.json({
+            ok: false,
+            error: commandErrorMessage(err, 'abort failed'),
+          }, status);
+        }
+        broadcaster.broadcast({
+          type: 'workspace:git-updated',
+          workspace_id: id,
+          reason: 'merge',
+        });
+        return c.json({ ok: true });
+      }, { signal });
+    } catch (error) {
+      return c.json(
+        { ok: false, error: commandErrorMessage(error, 'abort mutation unavailable') },
+        gitMutationStatus(error),
+      );
     }
-    broadcaster.broadcast({ type: 'workspace:git-updated', workspace_id: id, reason: 'merge' });
-    return c.json({ ok: true });
   });
 
-  app.post('/api/workspaces/:id/fetch', c => {
+  app.post('/api/workspaces/:id/fetch', async c => {
     const id = c.req.param('id');
     const ws = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(id) as
       | { path: string } | undefined;
     if (!ws) return c.json({ error: 'workspace not found' }, 404);
+    const signal = c.req.raw.signal;
     try {
-      execFileSync('git', ['-C', ws.path, 'fetch', '--prune', '--all'], {
-        timeout: 60_000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch (err) {
-      const e = err as { stderr?: Buffer | string; message?: string };
-      const stderr = typeof e.stderr === 'string' ? e.stderr : e.stderr?.toString('utf8') ?? '';
-      return c.json({ ok: false, error: stderr || e.message || 'fetch failed' }, 500);
+      return await withRepoMutationLock(ws.path, async () => {
+        try {
+          await runGit(
+            ['fetch', '--prune', '--all'],
+            { cwd: ws.path, timeoutMs: 60_000, signal },
+          );
+        } catch (err) {
+          const status = gitMutationStatus(err);
+          return c.json({
+            ok: false,
+            error: commandErrorMessage(err, 'fetch failed'),
+          }, status);
+        }
+        broadcaster.broadcast({
+          type: 'workspace:git-updated',
+          workspace_id: id,
+          reason: 'fetch',
+        });
+        return c.json({ ok: true, fetchedAt: new Date().toISOString() });
+      }, { signal });
+    } catch (error) {
+      return c.json(
+        { ok: false, error: commandErrorMessage(error, 'fetch mutation unavailable') },
+        gitMutationStatus(error),
+      );
     }
-    broadcaster.broadcast({ type: 'workspace:git-updated', workspace_id: id, reason: 'fetch' });
-    return c.json({ ok: true, fetchedAt: new Date().toISOString() });
   });
-
 }

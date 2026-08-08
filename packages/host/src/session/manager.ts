@@ -38,6 +38,17 @@ import {
 } from './input-items.js';
 export type { CreateSessionInput } from './lifecycle-service.js';
 
+const PROXY_CLOSE_TIMEOUT_MS = 5_000;
+
+function assertSessionAcceptsInput(session: Session): void {
+  if (session.worktree_outcome) {
+    throw new Error(`session is ${session.worktree_outcome}; create a new session to continue`);
+  }
+  if (session.completed_at) {
+    throw new Error('session is completed; reopen it before sending more messages');
+  }
+}
+
 /**
  * Bridges WebSocket commands and the proxy layer. Persists sessions, turns,
  * events; subscribes to proxy notifications and broadcasts them to the web
@@ -206,8 +217,7 @@ export class SessionManager {
       .run(now, sessionId);
     this.broadcastSessionUpdated(sessionId, { status: 'done', updated_at: now });
 
-    const client = this.proxy.get(sessionId);
-    if (client) client.forceKill();
+    this.proxy.forceDispose(sessionId);
   }
 
   async respondApproval(
@@ -304,17 +314,10 @@ export class SessionManager {
     oneShotBypass?: boolean,
   ): Promise<void> {
     const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
     assertLocalFilesBelongToSession(sessionId, items);
-    if (session.worktree_outcome) {
-      throw new Error(`session is ${session.worktree_outcome}; create a new session to continue`);
-    }
-    // User-completed sessions (completed_at, spec §B) are closed for input
-    // until reopened — same rule the web composer enforces visually.
-    if (session.completed_at) {
-      throw new Error('session is completed; reopen it before sending more messages');
-    }
-    if (session.executor === 'kimi' && oneShotBypass) {
-      throw new Error('Kimi uses its native mode and does not support Gian one-shot bypass.');
+    if (oneShotBypass && session.executor !== 'claude') {
+      throw new Error(`One-shot bypass is only supported for Claude sessions; got ${session.executor}.`);
     }
     // Reject before any optimistic writes if a turn is already in flight.
     // The downstream `startTurn` would return SESSION_BUSY, and the catch
@@ -349,8 +352,13 @@ export class SessionManager {
     const attachments = buildAttachmentsFromItems(sessionId, items);
     const userMessagePayload: Record<string, unknown> = { text };
     if (attachments.length > 0) userMessagePayload.attachments = attachments;
-    this.history.appendEvent(sessionId, turnId, randomUUID(), 'user_message', userMessagePayload);
-    this.broadcastEvent(sessionId, turnNumber, randomUUID(), 'user_message', userMessagePayload);
+    this.persistAndBroadcastUserMessage(
+      sessionId,
+      turnId,
+      turnNumber,
+      userMessagePayload,
+      Date.parse(now),
+    );
 
     // One-shot bypass: override the per-turn policy without touching
     // session.approval_mode in DB. Applied only for this startTurn — the next
@@ -368,13 +376,7 @@ export class SessionManager {
     const policyParams = session.executor === 'kimi'
       ? {}
       : oneShotBypass
-        ? (session.executor === 'claude'
-          ? { permissionMode: 'bypassPermissions' as const }
-          : {
-              sandbox: 'danger-full-access' as const,
-              approvalPolicy: 'never' as const,
-              approvalsReviewer: 'auto_review' as const,
-            })
+        ? { permissionMode: 'bypassPermissions' as const }
         : proxyTurnParamsFor(
             session.executor,
             session.approval_mode ?? (() => {
@@ -612,28 +614,37 @@ export class SessionManager {
   // -------------------------------------------------------------------------
 
   enqueueMessage(sessionId: string, text: string, items?: import('@gian/shared').InputItem[]): void {
+    const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
     assertLocalFilesBelongToSession(sessionId, items);
     this.queue.add(sessionId, text, items);
     this.broadcastQueueUpdated(sessionId);
   }
 
   removeFromQueue(sessionId: string, queueId: string): void {
+    const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
     this.queue.remove(sessionId, queueId);
     this.broadcastQueueUpdated(sessionId);
   }
 
   updateQueueMessage(sessionId: string, queueId: string, text: string): void {
+    const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
     this.queue.update(sessionId, queueId, text);
     this.broadcastQueueUpdated(sessionId);
   }
 
   clearQueue(sessionId: string): void {
+    const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
     this.queue.clear(sessionId);
     this.broadcastQueueUpdated(sessionId);
   }
 
   async sendQueuedNow(sessionId: string): Promise<void> {
     const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
     if (this.turns.has(sessionId)) {
       if (session.executor !== 'codex') {
         // Claude/Kimi have no mid-turn injection — "send now" can't beat the
@@ -682,6 +693,7 @@ export class SessionManager {
     items?: import('@gian/shared').InputItem[],
   ): Promise<void> {
     const session = this.getSession(sessionId);
+    assertSessionAcceptsInput(session);
     assertLocalFilesBelongToSession(sessionId, items);
     const client = this.proxy.get(sessionId);
     if (!client?.steerTurn) {
@@ -705,8 +717,12 @@ export class SessionManager {
     // Only record the message after Codex accepted the steer. Persisting it
     // before the RPC made a rejected steer look successful and caused a
     // re-queued entry to appear twice when it later drained normally.
-    this.history.appendEvent(sessionId, active.id, randomUUID(), 'user_message', userMessagePayload);
-    this.broadcastEvent(sessionId, active.number, randomUUID(), 'user_message', userMessagePayload);
+    this.persistAndBroadcastUserMessage(
+      sessionId,
+      active.id,
+      active.number,
+      userMessagePayload,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -757,8 +773,8 @@ export class SessionManager {
   // sendMessage is blocked.
   // -------------------------------------------------------------------------
 
-  async mergeWorktree(sessionId: string): Promise<void> {
-    await this.lifecycle.mergeWorktree(sessionId);
+  async mergeWorktree(sessionId: string, signal?: AbortSignal): Promise<void> {
+    await this.lifecycle.mergeWorktree(sessionId, signal);
   }
 
   async dropWorktree(sessionId: string): Promise<void> {
@@ -769,7 +785,22 @@ export class SessionManager {
     const proxyClient = this.proxy.get(sessionId);
     const proxySessionId = this.proxySessions.get(sessionId);
     if (proxyClient && proxySessionId) {
-      try { await proxyClient.closeSession(proxySessionId); } catch { /* ignore */ }
+      let timeout: NodeJS.Timeout | undefined;
+      try {
+        // Proxy shutdown is best-effort, but it must never hold the session
+        // lifecycle guard forever. Catch the RPC promise itself so a late
+        // rejection after the deadline cannot become unhandled.
+        await Promise.race([
+          Promise.resolve()
+            .then(() => proxyClient.closeSession(proxySessionId))
+            .catch(() => undefined),
+          new Promise<void>(resolveTimeout => {
+            timeout = setTimeout(resolveTimeout, PROXY_CLOSE_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
     }
     this.proxySessions.forget(sessionId);
     this.turns.forget(sessionId);
@@ -843,14 +874,36 @@ export class SessionManager {
     this.events.completeTurn(sessionId, status);
   }
 
+  /** Persist and broadcast one canonical user-message envelope. Both paths
+   *  must share identity and time so live hydration can converge with history. */
+  private persistAndBroadcastUserMessage(
+    sessionId: string,
+    turnId: string,
+    turnNumber: number,
+    data: Record<string, unknown>,
+    ts = Date.now(),
+  ): void {
+    const callId = randomUUID();
+    this.history.appendEvent(
+      sessionId,
+      turnId,
+      callId,
+      'user_message',
+      data,
+      { createdAt: new Date(ts).toISOString() },
+    );
+    this.broadcastEvent(sessionId, turnNumber, callId, 'user_message', data, ts);
+  }
+
   private broadcastEvent(
     sessionId: string,
     turn: number,
     callId: string,
     event: string,
     data: Record<string, unknown>,
+    ts?: number,
   ): void {
-    this.events.broadcastEvent(sessionId, turn, callId, event, data);
+    this.events.broadcastEvent(sessionId, turn, callId, event, data, ts);
   }
 
   private broadcastSessionUpdated(id: string, partial: Partial<Session>): void {

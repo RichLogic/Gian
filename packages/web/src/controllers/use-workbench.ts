@@ -10,7 +10,11 @@ import {
 } from '../api.js';
 import {
   IMAGE_EXTS,
+  normalizeDiffQueryIdentity,
+  insertGroupPreviewTab,
   openCategoryFor,
+  tabMatchesDiffQuery,
+  type DiffQueryIdentity,
   type FileViewMode,
   type RailId,
   type SheetGroup,
@@ -22,9 +26,25 @@ import { buildFileRefIndex, makeFileLinkifyRehype } from '../transcript/linkify-
 import type { DiffItem } from '../types.js';
 import { longestRootMatch } from '../utils/paths.js';
 import { resolveFilePanelRoute } from '../presentation/file-panel.js';
+import { desktopBridge } from '../desktop-bridge.js';
 import { readWtViewOverride, resolveViewedTreeId, writeWtViewOverride } from '../presentation/wt-view.js';
 import type { ChatPanelRequest, ChatPanelTarget } from '../presentation/chat-panel.js';
 import type { AppAuthStatus } from './use-app-auth.js';
+
+let browserTabSequence = 0;
+let terminalTabSequence = 0;
+
+function createBrowserTab(existingCount: number): SheetTab {
+  browserTabSequence += 1;
+  return {
+    id: `tab-browser-${Date.now()}-${browserTabSequence}`,
+    group: 'browser',
+    name: existingCount === 0 ? 'Browser' : `Browser #${existingCount + 1}`,
+    kind: 'browser',
+    icoKind: 'browser',
+    ico: '◎',
+  };
+}
 
 interface UseWorkbenchInput {
   authStatus: AppAuthStatus;
@@ -128,8 +148,8 @@ export function useWorkbench({
   // openFileInSheet's own fallback).
   // Dispatch a resolved open target for a known (wt, rel) — Phase 3b: the
   // files.openExternal pending operation (a launch failure toasts from the
-  // definition). The browser raw-URL open stays a window.open local
-  // exception (inventory §3).
+  // definition). Built-in Browser navigation stays a local desktop-view
+  // action; opening an OS application remains an operation.
   function dispatchOpen(wt: { id: string }, rel: string, target: SheetOpenWith): void {
     if (target.kind === 'editor') {
       dispatch('files.openExternal', { workingTreeId: wt.id, path: rel, target: { kind: 'editor', editorId: target.id } });
@@ -141,6 +161,10 @@ export function useWorkbench({
     }
     if (target.name === 'browser') {
       window.open(`/api/working_trees/${encodeURIComponent(wt.id)}/raw?path=${encodeURIComponent(rel)}`, '_blank', 'noopener');
+      return;
+    }
+    if (target.name === 'gian-browser') {
+      openProjectInBrowser(wt.id, rel);
       return;
     }
     dispatch('files.openExternal', { workingTreeId: wt.id, path: rel, target: { kind: 'builtin', builtin: target.name } }); // 'default' | 'finder' | 'terminal'
@@ -196,7 +220,7 @@ export function useWorkbench({
   // ─── Sheet (Workbench) actions ──────────────────────────────────────────
   // V2's openFileInSheet from design/gian-design-v2/js/app.jsx: single-click
   // a file = preview tab (one at a time, italic name); double-click or pin =
-  // permanent. Settings/Terminal are singleton tabs.
+  // permanent. Settings is singleton; Terminal and Browser are additive.
 
   // Force viewState back to 'main' when wbTabs goes empty.
   useEffect(() => {
@@ -237,6 +261,9 @@ export function useWorkbench({
           // inventory §3).
           dispatch('term.close', { termId: id });
         }
+        if (tab?.kind === 'browser') {
+          void desktopBridge()?.browser?.closeTab(id);
+        }
         if (tab?.group === 'files' && activeTabByGroup.files === id) {
           const sibling = wbTabs.find(t => t.group === 'files' && t.id !== id);
           if (sibling) syncFilesInspectorToTab(sibling);
@@ -271,7 +298,9 @@ export function useWorkbench({
   const GROUP_OF_RAIL: Record<RailId, SheetGroup | null> = {
     files: 'files',
     diffs: 'diffs',
+    history: 'history',
     terminal: 'term',
+    browser: 'browser',
     workspaces: 'workspaces',
     settings: 'settings',
   };
@@ -300,6 +329,18 @@ export function useWorkbench({
       const tab: SheetTab = { id: 'tab-settings', group: 'settings', name: appT('sheet.tab.settings'), kind: 'settings', icoKind: 'gear', ico: '⚙' };
       setWbTabs(prev => [...prev, tab]);
       revealSheetTab('settings', tab.id);
+      return;
+    }
+    if (rail === 'browser' && !wbTabs.some(t => t.group === 'browser')) {
+      const tab = createBrowserTab(0);
+      setWbTabs(prev => [...prev, tab]);
+      revealSheetTab('browser', tab.id);
+      return;
+    }
+    if (rail === 'history') {
+      // History keeps panel 2 mounted even with zero commit tabs (the empty
+      // state is designed, not absent) — make sure the workbench is visible.
+      setViewState(v => v === 'main' ? 'both' : v);
       return;
     }
     const group = GROUP_OF_RAIL[rail];
@@ -381,18 +422,21 @@ export function useWorkbench({
     });
   }
 
-  /** Which tab an async fill belongs to. Matched by kind + path (NOT the tab
-   *  id: setWbTabs updaters run after insertFileTab returns, so a captured
-   *  id is unreliable). Preview semantics guarantee at most one loading tab
-   *  per path, so a late fill can never clobber a tab a newer click
-   *  replaced it with. */
+  /** Which tab an async fill belongs to. File previews use kind + path;
+   *  queried diffs add their normalized comparison identity, and transcript
+   *  diffs use the stable event tab id. This prevents late loads from
+   *  clobbering the same path under another comparison. */
   interface TabMatch {
     kind: 'file' | 'diff';
     fullPath?: string;
+    diffQuery?: DiffQueryIdentity;
+    id?: string;
   }
 
   function tabMatches(t: SheetTab, match: TabMatch): boolean {
-    return t.kind === match.kind && t.fullPath === match.fullPath;
+    if (t.kind !== match.kind || t.fullPath !== match.fullPath) return false;
+    if (match.id && t.id !== match.id) return false;
+    return !match.diffQuery || tabMatchesDiffQuery(t, match.diffQuery);
   }
 
   /** Re-enter the loading state and re-run an async tab fill — the Sheet
@@ -588,12 +632,8 @@ export function useWorkbench({
     void openFileInSheet(abs, false, line);
   }
 
-  interface DiffTabFill {
-    wtId: string;
+  interface DiffTabFill extends DiffQueryIdentity {
     rel: string;
-    scope: ChangeScope;
-    sha?: string | null;
-    base?: string | null;
     fullPath: string;
   }
 
@@ -601,10 +641,10 @@ export function useWorkbench({
    *  fillFileTab): diff text on success, error + retry on failure, and no
    *  clobbering of a tab that was replaced while the load was in flight. */
   async function fillDiffTab(fill: DiffTabFill): Promise<void> {
-    const match: TabMatch = { kind: 'diff', fullPath: fill.fullPath };
+    const match: TabMatch = { kind: 'diff', fullPath: fill.fullPath, diffQuery: fill };
     let diffText: string | null = null;
     try {
-      diffText = await loadDiff(fill.wtId, fill.rel, fill.scope, fill.sha, fill.base);
+      diffText = await loadDiff(fill.workingTreeId, fill.rel, fill.scope, fill.sha, fill.base);
     } catch {
       diffText = null;
     }
@@ -636,21 +676,26 @@ export function useWorkbench({
     if (!wt) return;
     const name = rel.split('/').pop() || rel;
     const fullPath = `${wt.path}/${rel}`;
+    const diffQuery = normalizeDiffQueryIdentity(wt.id, scope, sha, base, activeSessionId);
 
     // Promote short-circuit (render snapshot): a permanent diff tab for this
-    // exact path is only re-activated — no reload. The updater below repeats
+    // exact query is only re-activated — no reload. The updater below repeats
     // the check against the latest state for correctness under batching.
-    const promoted = wbTabs.some(t => t.group === 'diffs' && t.kind === 'diff' && t.fullPath === fullPath && !t.preview);
+    const promoted = wbTabs.some(t => t.group === 'diffs' && t.fullPath === fullPath
+      && !t.preview && tabMatchesDiffQuery(t, diffQuery));
     setActiveRail('diffs');
     setWbTabs(prev => {
       let tabs = [...prev];
-      // If a non-permanent diff preview tab is already open, replace it in place.
-      const existingPreview = tabs.find(t => t.group === 'diffs' && t.kind === 'diff' && t.preview);
+      // If a non-permanent preview tab is already open in this group (diff or
+      // level-3 text detail), replace it in place.
+      const existingPreview = tabs.find(t => t.group === 'diffs' && t.preview);
       if (existingPreview) {
         tabs = tabs.filter(t => t.id !== existingPreview.id);
       }
-      // Promote: if a permanent diff tab for this exact path exists, just activate.
-      const existingPerm = tabs.find(t => t.group === 'diffs' && t.kind === 'diff' && t.fullPath === fullPath && !t.preview);
+      // Promote only an exact query match. The same path under another scope,
+      // commit, base, or working tree is a different diff.
+      const existingPerm = tabs.find(t => t.group === 'diffs' && t.fullPath === fullPath
+        && !t.preview && tabMatchesDiffQuery(t, diffQuery));
       if (existingPerm) {
         revealSheetTab('diffs', existingPerm.id);
         return tabs;
@@ -665,6 +710,11 @@ export function useWorkbench({
         ico: '±',
         fullPath,
         workingTreeId: wt.id,
+        sessionId: diffQuery.sessionId ?? undefined,
+        diffScope: diffQuery.scope,
+        diffSha: diffQuery.sha,
+        diffBase: diffQuery.base,
+        diffPaths: [rel],
         preview: !permanent,
         loading: true,
       };
@@ -673,7 +723,36 @@ export function useWorkbench({
       return tabs;
     });
     if (promoted) return;
-    void fillDiffTab({ wtId: wt.id, rel, scope, sha, base, fullPath });
+    void fillDiffTab({ ...diffQuery, rel, fullPath });
+  }
+
+  /** Reveal a file inside the active stacked diff instead of replacing the
+   * overview with a single-file preview. Query identity is checked before
+   * the DOM anchor so a stale tree/scope/ref cannot capture the click. */
+  function revealOpenDiffPath(rel: string, scope: ChangeScope, sha?: string | null, base?: string | null): boolean {
+    if (activeRail !== 'diffs') return false;
+    const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
+    const wtId = sess ? viewedWorkingTreeId(sess) : null;
+    const activeId = activeTabByGroup.diffs;
+    const tab = activeId ? wbTabs.find(t => t.id === activeId) : null;
+    if (!wtId || !tab || (tab.diffPaths?.length ?? 0) < 2 || !tab.diffPaths?.includes(rel)) return false;
+    const diffQuery = normalizeDiffQueryIdentity(wtId, scope, sha, base, activeSessionId);
+    if (!tabMatchesDiffQuery(tab, diffQuery)) return false;
+
+    const blocks = document.querySelectorAll<HTMLElement>('.sheet-diff-file[data-path]');
+    for (const block of blocks) {
+      if (block.dataset.path !== rel) continue;
+      const group = block.closest<HTMLElement>('.sheet-group');
+      const slot = block.closest<HTMLElement>('.sheet-tab-slot');
+      const sheet = block.closest<HTMLElement>('.sheet');
+      if (group?.dataset.activeTabId !== tab.id
+        || group.style.display === 'none'
+        || slot?.style.display === 'none'
+        || sheet?.style.display === 'none') continue;
+      block.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return true;
+    }
+    return false;
   }
 
   /** Async fill of a transcript diff tab. Files whose event carried no hunks
@@ -733,13 +812,11 @@ export function useWorkbench({
     const name = single
       ? single.path.split('/').pop() || single.path
       : `${item.files.length} files`;
+    const diffQuery = normalizeDiffQueryIdentity(wt.id, 'lastturn', null, null, activeSessionId);
 
     setActiveRail('diffs');
     const id = `tab-diff-event-${item.id}`;
     setWbTabs(prev => {
-      const preview = prev.find(tab =>
-        tab.group === 'diffs' && tab.kind === 'diff' && tab.preview);
-      const tabs = preview ? prev.filter(tab => tab.id !== preview.id) : [...prev];
       const tab: SheetTab = {
         id,
         group: 'diffs',
@@ -749,13 +826,121 @@ export function useWorkbench({
         ico: '±',
         fullPath,
         workingTreeId: wt.id,
+        sessionId: diffQuery.sessionId ?? undefined,
+        diffScope: diffQuery.scope,
+        diffSha: diffQuery.sha,
+        diffBase: diffQuery.base,
+        diffPaths: [...new Set(item.files.map(file => file.path))],
         preview: true,
         loading: true,
       };
       revealSheetTab('diffs', id);
-      return [...tabs, tab];
+      // Preview replacement spans every 'diffs'-group preview tab (diff or
+      // level-3 text detail): one preview tab at a time.
+      return insertGroupPreviewTab(prev, 'diffs', tab);
     });
-    void fillTranscriptDiffTab(id, item, wt.id, { kind: 'diff', fullPath });
+    void fillTranscriptDiffTab(id, item, wt.id, { kind: 'diff', fullPath, diffQuery, id });
+  }
+
+  /** Open a commit's change-set review in the Sheet workbench (History rail).
+   *  V2 preview semantics like files/diffs: single-click replaces the preview
+   *  tab in place, permanent pins. Tab identity is {workingTreeId, full sha} —
+   *  the short sha is only ever a label (git-history proposal §5). */
+  function openCommitInSheet(input: { workingTreeId: string; sha: string; subject?: string }, permanent: boolean = false): void {
+    setChatPanel(null);
+    setActiveRail('history');
+    const name = input.subject ? `${input.sha.slice(0, 7)} · ${input.subject}` : input.sha.slice(0, 7);
+    setWbTabs(prev => {
+      let tabs = [...prev];
+      const sameCommit = (t: SheetTab) =>
+        t.group === 'history' && t.kind === 'commit' && t.commitSha === input.sha && t.workingTreeId === input.workingTreeId;
+      const existingPreview = tabs.find(t => t.group === 'history' && t.kind === 'commit' && t.preview);
+      if (existingPreview) {
+        if (permanent && sameCommit(existingPreview)) {
+          tabs = tabs.map(t => t.id === existingPreview.id ? { ...t, preview: false } : t);
+          revealSheetTab('history', existingPreview.id);
+          return tabs;
+        }
+        if (!permanent) {
+          // Replace the preview tab's identity — like insertFileTab, stale
+          // fields must not leak into the new commit.
+          tabs = tabs.map(t => t.id === existingPreview.id
+            ? { ...t, commitSha: input.sha, workingTreeId: input.workingTreeId, name, orphaned: undefined }
+            : t);
+          revealSheetTab('history', existingPreview.id);
+          return tabs;
+        }
+        tabs = tabs.filter(t => t.id !== existingPreview.id);
+      }
+      const existingPerm = tabs.find(t => sameCommit(t) && !t.preview);
+      if (existingPerm) {
+        revealSheetTab('history', existingPerm.id);
+        return tabs;
+      }
+      const id = 'tab-commit-' + Date.now();
+      const tab: SheetTab = {
+        id,
+        group: 'history',
+        name,
+        kind: 'commit',
+        icoKind: 'commit',
+        ico: '●',
+        preview: !permanent,
+        commitSha: input.sha,
+        workingTreeId: input.workingTreeId,
+      };
+      tabs.push(tab);
+      revealSheetTab('history', id);
+      return tabs;
+    });
+  }
+
+  /** Mark history tabs whose commit is no longer reachable after a fetch
+   *  (or clear the flag when it is). Called by App when a fetch reports
+   *  refsChanged for the tab's tree. */
+  function revalidateHistoryTabs(
+    workingTreeId: string,
+    unreachable: (sha: string) => boolean | undefined,
+  ): void {
+    setWbTabs(prev => prev.map(t =>
+      t.group === 'history' && t.kind === 'commit' && t.workingTreeId === workingTreeId
+        ? (() => {
+            if (!t.commitSha) return t;
+            const next = unreachable(t.commitSha);
+            return next === undefined ? t : { ...t, orphaned: next };
+          })()
+        : t));
+  }
+
+  /** Route an over-threshold transcript detail (P3: full command output,
+   *  long reasoning, long result list) to panel 2 as a preview text tab.
+   *  Same preview semantics as transcript diffs — the next detail replaces
+   *  the current preview tab; double-click/pin fixes it. Content travels in
+   *  the tab itself, so no working-tree context or async fill is needed. */
+  function openTranscriptTextInSheet(payload: {
+    title: string;
+    text: string;
+    /** Transcript item id, for a stable tab identity across re-opens. */
+    sourceId?: string;
+  }): void {
+    setChatPanel(null);
+    setActiveRail('diffs');
+    const id = `tab-text-${payload.sourceId ?? Date.now()}`;
+    setWbTabs(prev => {
+      const tab: SheetTab = {
+        id,
+        group: 'diffs',
+        name: payload.title,
+        kind: 'text',
+        icoKind: 'term',
+        ico: '›',
+        preview: true,
+        text: payload.text,
+        sessionId: activeSessionId ?? undefined,
+      };
+      revealSheetTab('diffs', id);
+      return insertGroupPreviewTab(prev, 'diffs', tab);
+    });
   }
 
   function openChatPanel(
@@ -770,16 +955,24 @@ export function useWorkbench({
    *  at the right end of the terminal tabs strip. Always additive, and
    *  surfaces the terminal rail (un-collapsing it if needed). */
   function addTerminalTab(): void {
+    terminalTabSequence += 1;
+    const existingTerms = wbTabs.filter(t => t.kind === 'term').length;
+    const id = `tab-term-${Date.now()}-${terminalTabSequence}`;
+    const base = terminalTabName();
+    const name = existingTerms === 0 ? base : `${base} #${existingTerms + 1}`;
+    const tab: SheetTab = { id, group: 'term', name, kind: 'term', icoKind: 'term', ico: '$' };
     setActiveRail('terminal');
-    setWbTabs(prev => {
-      const existingTerms = prev.filter(t => t.kind === 'term').length;
-      const id = 'tab-term-' + Date.now();
-      const base = terminalTabName();
-      const name = existingTerms === 0 ? base : `${base} #${existingTerms + 1}`;
-      const tab: SheetTab = { id, group: 'term', name, kind: 'term', icoKind: 'term', ico: '$' };
-      revealSheetTab('term', id);
-      return [...prev, tab];
-    });
+    setWbTabs(prev => [...prev, tab]);
+    revealSheetTab('term', id);
+  }
+
+  /** Add an independent native Browser tab with its own WebContentsView and
+   * navigation history, parallel to Terminal's additive tab behavior. */
+  function addBrowserTab(): void {
+    const tab = createBrowserTab(wbTabs.filter(item => item.kind === 'browser').length);
+    setActiveRail('browser');
+    setWbTabs(prev => [...prev, tab]);
+    revealSheetTab('browser', tab.id);
   }
 
   /**
@@ -827,6 +1020,27 @@ export function useWorkbench({
     revealSheetTab('workspaces', tab.id);
   }
 
+  /** Open one full static site in the desktop Browser. The HTML file's
+   * directory becomes that site's isolated gian-browser origin root. */
+  function openProjectInBrowser(workingTreeId: string, path: string): void {
+    const browser = desktopBridge()?.browser;
+    if (!browser) {
+      window.open(`/api/working_trees/${encodeURIComponent(workingTreeId)}/raw?path=${encodeURIComponent(path)}`, '_blank', 'noopener');
+      return;
+    }
+    const selected = activeTabByGroup.browser
+      ? wbTabs.find(tab => tab.id === activeTabByGroup.browser && tab.kind === 'browser')
+      : undefined;
+    const tab = selected ?? createBrowserTab(wbTabs.filter(item => item.kind === 'browser').length);
+    if (!selected) {
+      setWbTabs(prev => [...prev, tab]);
+      revealSheetTab('browser', tab.id);
+      setActiveRail('browser');
+    } else {
+      activateRail('browser');
+    }
+    void browser.openProject(tab.id, { workingTreeId, path });
+  }
 
   return {
     wtView,
@@ -858,10 +1072,16 @@ export function useWorkbench({
     openFileInSheet,
     openRelativeFileHref,
     openDiffInSheet,
+    revealOpenDiffPath,
     openTranscriptDiffInSheet,
+    openCommitInSheet,
+    revalidateHistoryTabs,
+    openTranscriptTextInSheet,
     openChatPanel,
     addTerminalTab,
+    addBrowserTab,
     openWorkspaceInSheet,
     openNewWorkspaceInSheet,
+    openProjectInBrowser,
   };
 }

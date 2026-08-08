@@ -37,6 +37,14 @@ export interface ApprovalServerCallbacks {
   onDebug(message: string): void;
 }
 
+export interface ApprovalServerOptions {
+  /** Production stays at 15s. Tests shorten this to cross multiple idle
+   *  intervals without sleeping for wall-clock seconds. */
+  keepAliveIntervalMs?: number;
+  /** Injectable write boundary for deterministic SSE fault tests. */
+  writeKeepalive?: (response: ServerResponse) => void;
+}
+
 interface PendingApproval {
   sessionId: string;
   resolver: (response: CallToolResult) => void;
@@ -60,10 +68,15 @@ export class ApprovalServer {
   private readonly connections = new Map<string, SessionConnection>();
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly callbacks: ApprovalServerCallbacks;
+  private readonly keepAliveIntervalMs: number;
+  private readonly writeKeepalive: (response: ServerResponse) => void;
   private nextCallId = 1;
 
-  constructor(callbacks: ApprovalServerCallbacks) {
+  constructor(callbacks: ApprovalServerCallbacks, options: ApprovalServerOptions = {}) {
     this.callbacks = callbacks;
+    this.keepAliveIntervalMs = options.keepAliveIntervalMs ?? 15_000;
+    this.writeKeepalive = options.writeKeepalive
+      ?? ((response) => { response.write(': keepalive\n\n'); });
   }
 
   /** Start the HTTP server on a random localhost port. */
@@ -104,12 +117,10 @@ export class ApprovalServer {
 
   /** Resolve a previously-suspended approval_prompt CallTool.
    *
-   * `extra.updatedInput` (Claude SDK contract) lets us hand the agent
-   * back a modified input for the upcoming tool call. Used by Gian's
-   * AskUserQuestion bridge: when the user picks an option in the web UI,
-   * we resolve `behavior: 'allow'` and pass `updatedInput: { answers }`
-   * so claude effectively re-invokes AskUserQuestion with the answers
-   * pre-supplied.
+   * `extra.updatedInput` (Claude SDK contract) lets callers hand the agent
+   * back modified input for an allowed tool call. Gian's current
+   * AskUserQuestion bridge uses deny+message instead; this remains necessary
+   * for ordinary permission flows that rewrite an allowed input.
    */
   resolve(
     callId: string,
@@ -129,8 +140,7 @@ export class ApprovalServer {
       // `updatedInput`; omitting it caused the agent to silently wedge after
       // the user clicked through (no SDK error, just no further activity).
       // Default to the original input — semantically a no-op pass-through.
-      // AskUserQuestion routes through `extra.updatedInput = { answers }`,
-      // which overrides this default to feed the structured response back.
+      // A caller-supplied rewrite overrides this no-op default.
       payload.updatedInput = extra?.updatedInput ?? pending.input;
     }
 
@@ -145,16 +155,7 @@ export class ApprovalServer {
    *  Transport close is deferred to the next tick so the deny response can
    *  flush through SSE before the connection terminates. */
   dropConnection(sessionId: string): void {
-    let hadPending = false;
-    for (const [callId, pending] of this.pendingApprovals) {
-      if (pending.sessionId === sessionId) {
-        this.pendingApprovals.delete(callId);
-        pending.resolver({
-          content: [{ type: 'text', text: JSON.stringify({ behavior: 'deny', message: 'session closed' }) }],
-        });
-        hadPending = true;
-      }
-    }
+    const hadPending = this.denyPendingForSession(sessionId, 'session closed');
 
     const conn = this.connections.get(sessionId);
     if (!conn) return;
@@ -167,6 +168,20 @@ export class ApprovalServer {
     } else {
       closeTransport();
     }
+  }
+
+  private denyPendingForSession(sessionId: string, message: string): boolean {
+    let hadPending = false;
+    for (const [callId, pending] of this.pendingApprovals) {
+      if (pending.sessionId === sessionId) {
+        this.pendingApprovals.delete(callId);
+        pending.resolver({
+          content: [{ type: 'text', text: JSON.stringify({ behavior: 'deny', message }) }],
+        });
+        hadPending = true;
+      }
+    }
+    return hadPending;
   }
 
   hasConnection(sessionId: string): boolean {
@@ -234,17 +249,21 @@ export class ApprovalServer {
     // valid SSE and ignored by the MCP client, so they don't disturb frames.
     const ping = setInterval(() => {
       try {
-        if (!res.writableEnded) res.write(': keepalive\n\n');
+        if (!res.writableEnded) this.writeKeepalive(res);
       } catch {
         /* connection gone — transport.onclose handles cleanup */
       }
-    }, 15_000);
+    }, this.keepAliveIntervalMs);
     if (typeof ping.unref === 'function') ping.unref();
     const clearPing = () => clearInterval(ping);
 
     transport.onclose = () => {
       clearPing();
       if (this.connections.get(sessionId) === conn) {
+        // A natural socket break bypasses dropConnection(). Settle every
+        // suspended CallTool so stale decisions cannot leak into a later
+        // connection for the same Gian session.
+        this.denyPendingForSession(sessionId, 'approval connection closed');
         this.connections.delete(sessionId);
         this.callbacks.onDisconnected(sessionId);
       }

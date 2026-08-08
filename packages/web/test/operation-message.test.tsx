@@ -74,11 +74,19 @@ function requestIdOf(msg: ClientToServerMessage | undefined): string {
 
 /** Fake transcript echo sink — App wires the real one with its setters. */
 function fakeSink() {
-  const sink: MessageEchoSink & { appended: Array<{ sessionId: string; item: MsgItem }>; failed: string[] } = {
+  const sink: MessageEchoSink & {
+    appended: Array<{ sessionId: string; item: MsgItem }>;
+    confirmed: string[];
+    failed: string[];
+  } = {
     appended: [],
+    confirmed: [],
     failed: [],
     append(sessionId, item) {
       sink.appended.push({ sessionId, item });
+    },
+    markConfirmed(runId) {
+      sink.confirmed.push(runId);
     },
     markFailed(runId) {
       sink.failed.push(runId);
@@ -124,6 +132,21 @@ describe('message send echo (proposal §9, product definitions)', () => {
     expect(requestIdOf(transport.sent[0])).toBeTruthy();
   });
 
+  it.each(['codex', 'kimi'] as const)(
+    'one-shot bypass fails closed before transport or optimistic echo for %s',
+    exec => {
+      const { transport, dispatcher, sink } = setup();
+
+      expect(() => dispatchMessageSend(dispatcher.dispatch, payload({
+        exec,
+        oneShotBypass: true,
+      }))).toThrow(/only supported for Claude sessions/);
+
+      expect(transport.sent).toHaveLength(0);
+      expect(sink.appended).toHaveLength(0);
+    },
+  );
+
   it('skill send: echo appears synchronously (the pre-Phase-2b gap), wire carries the typed skill item', () => {
     const { transport, dispatcher, sink } = setup();
 
@@ -153,6 +176,16 @@ describe('message send echo (proposal §9, product definitions)', () => {
     expect(sink.failed).toEqual([run.id]);
     // The echo stays in the transcript (the sink never removes on failure).
     expect(sink.appended).toHaveLength(1);
+  });
+
+  it('success clears transient echo correlation through the production reconcile hook', () => {
+    const { transport, dispatcher, sink } = setup();
+    const run = dispatchMessageSend(dispatcher.dispatch, payload());
+
+    transport.emitResult(requestIdOf(transport.sent[0]), true);
+
+    expect(sink.confirmed).toEqual([run.id]);
+    expect(sink.failed).toEqual([]);
   });
 
   it('retry re-dispatches the same operation from the failed echo', () => {
@@ -216,7 +249,10 @@ describe('message send echo (proposal §9, product definitions)', () => {
 
     expect(after).toHaveLength(1);
     expect(after[0]).toMatchObject({ kind: 'user', id: 'real-user-1', text: 'hello' });
-    expect((after[0] as MsgItem).pending).toBeUndefined();
+    expect((after[0] as MsgItem).pending).toBe(true);
+    expect((after[0] as MsgItem).sendCanonical).toBe(true);
+    expect((after[0] as MsgItem).sendRunId).toBe(echo.sendRunId);
+    expect((after[0] as MsgItem).sendRetry).toEqual(echo.sendRetry);
   });
 });
 

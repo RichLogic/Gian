@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — Message-domain definitions (Phase 2b of
- * `docs/proposals/ui-operation-layer.md`): ordinary + skill send (optimistic
+ * `docs/archive/proposals/ui-operation-layer.md`): ordinary + skill send (optimistic
  * echo), steer (pending), and attachment upload (pending, REST).
  *
  * THE SEND ECHO DOES NOT FIT entity+field overlays (proposal §4.3): it is
@@ -16,8 +16,8 @@
  *   (`sendRetry`). The definitions' `optimisticWrites` intentionally write
  *   NO overlay (the registry requires the hook for optimistic operations).
  * - SUCCESS: the canonical `user_message` event still replaces the pending
- *   echo (`applyEnvelope` matches by text — unchanged mechanism); the
- *   operation:result merely settles the run.
+ *   echo (`applyEnvelope` matches by text) while retaining correlation until
+ *   operation:result settles the run and removes transient retry metadata.
  * - FAILURE (operation:result ok:false): the definition's `rollback` marks
  *   the echo FAILED IN PLACE via the sink — it is never silently removed —
  *   and the bubble offers a retry affordance that re-dispatches the same
@@ -35,7 +35,7 @@ import type { InputItem } from '@gian/shared';
 import { attachmentInputItem, type ComposerAttachmentPayload } from '../attachments.js';
 import { uploadAttachment, type UploadedAttachment } from '../api.js';
 import { createOptimisticEcho } from '../transcript/apply.js';
-import type { MessageSendPayload, MsgItem } from '../types.js';
+import type { MessageSendPayload, MsgItem, TranscriptItem } from '../types.js';
 import type { OperationDispatcher } from './dispatcher.js';
 import { registry } from './registry.js';
 import { sessionEntityKey } from './session.js';
@@ -52,9 +52,67 @@ const UPLOAD_TIMEOUT_MS = 30_000;
 export interface MessageEchoSink {
   /** Append a pending echo and raise the session's pending spinner. */
   append(sessionId: string, item: MsgItem): void;
-  /** Mark the echo of run `runId` failed in place. No-op when the echo is
-   *  already gone (reconciled by the canonical user_message). */
-  markFailed(runId: string): void;
+  /** Drop transient correlation/retry metadata after the Host confirms the
+   *  send. The canonical transcript item itself remains untouched. */
+  markConfirmed(runId: string, sessionId: string): void;
+  /** Mark the echo of run `runId` failed in place. No-op after its correlation
+   *  was already cleared by a confirmed result. */
+  markFailed(runId: string, sessionId: string): void;
+}
+
+type FunctionalSetter<T> = (update: (previous: T) => T) => void;
+
+/** Production transcript reducer used by App and wire-level tests. Keeping
+ * this state transition beside the operation definition prevents tests from
+ * proving a copied reducer while the real UI wiring drifts. */
+export function createMessageEchoSink(
+  setItemsBySession: FunctionalSetter<Record<string, TranscriptItem[]>>,
+  setPendingBySession: FunctionalSetter<Record<string, boolean>>,
+): MessageEchoSink {
+  return {
+    append(sessionId, item) {
+      setItemsBySession(previous => ({
+        ...previous,
+        [sessionId]: [...(previous[sessionId] ?? []), item],
+      }));
+      setPendingBySession(previous => ({ ...previous, [sessionId]: true }));
+    },
+    markConfirmed(runId, sessionId) {
+      setItemsBySession(previous => {
+        const items = previous[sessionId];
+        if (!items) return previous;
+        let touched = false;
+        const nextItems = items.map(item => {
+          if (item.kind !== 'user' || item.sendRunId !== runId) return item;
+          touched = true;
+          const {
+            sendRunId: _runId,
+            sendRetry: _retry,
+            sendCanonical: _canonical,
+            pending: _pending,
+            ...confirmed
+          } = item;
+          return confirmed;
+        });
+        return touched ? { ...previous, [sessionId]: nextItems } : previous;
+      });
+    },
+    markFailed(runId, sessionId) {
+      setItemsBySession(previous => {
+        const items = previous[sessionId];
+        if (!items?.some(item => item.kind === 'user' && item.sendRunId === runId)) return previous;
+        return {
+          ...previous,
+          [sessionId]: items.map(item => {
+            if (item.kind !== 'user' || item.sendRunId !== runId) return item;
+            const { sendCanonical: _canonical, ...failed } = item;
+            return { ...failed, pending: false, failed: true };
+          }),
+        };
+      });
+      setPendingBySession(previous => ({ ...previous, [sessionId]: false }));
+    },
+  };
 }
 
 let echoSink: MessageEchoSink | null = null;
@@ -73,6 +131,9 @@ export function dispatchMessageSend(
   dispatch: OperationDispatcher['dispatch'],
   input: MessageSendPayload,
 ): ReturnType<OperationDispatcher['dispatch']> {
+  if (input.oneShotBypass && input.exec !== 'claude') {
+    throw new Error(`One-shot bypass is only supported for Claude sessions; got ${input.exec}.`);
+  }
   const run = dispatch(input.skill ? 'message.sendSkill' : 'message.send', input);
   const echo = createOptimisticEcho({
     sessionId: input.sessionId,
@@ -85,6 +146,10 @@ export function dispatchMessageSend(
       ...(attachment.size !== undefined ? { size: attachment.size } : {}),
     })),
   });
+  // `Date.now()` alone can collide when two sends commit in the same
+  // millisecond. The operation run is already unique and is the authoritative
+  // correlation, so use it for the rendered transcript key as well.
+  echo.id = `optimistic:${input.sessionId}:${run.id}`;
   echo.sendRunId = run.id;
   echo.sendRetry = input;
   echoSink?.append(input.sessionId, echo);
@@ -116,8 +181,18 @@ function buildSendMessage(input: MessageSendPayload) {
   };
 }
 
+function echoSessionId(context: OperationContext): string {
+  return context.entityKey.startsWith('session:')
+    ? context.entityKey.slice('session:'.length)
+    : context.entityKey;
+}
+
+function confirmEcho(context: OperationContext): void {
+  echoSink?.markConfirmed(context.runId, echoSessionId(context));
+}
+
 function failEchoInPlace(context: OperationContext): void {
-  echoSink?.markFailed(context.runId);
+  echoSink?.markFailed(context.runId, echoSessionId(context));
 }
 
 const messageSend: OperationDefinition<MessageSendPayload> = {
@@ -126,6 +201,7 @@ const messageSend: OperationDefinition<MessageSendPayload> = {
   // No overlay — the echo is transcript state (see header).
   optimisticWrites: () => [],
   buildMessage: buildSendMessage,
+  reconcile: (_result, context) => confirmEcho(context),
   rollback: (_error, context) => failEchoInPlace(context),
   timeoutMs: WS_TIMEOUT_MS,
 };
@@ -135,6 +211,7 @@ const messageSendSkill: OperationDefinition<MessageSendPayload> = {
   entityKey: input => sessionEntityKey(input.sessionId),
   optimisticWrites: () => [],
   buildMessage: buildSendMessage,
+  reconcile: (_result, context) => confirmEcho(context),
   rollback: (_error, context) => failEchoInPlace(context),
   timeoutMs: WS_TIMEOUT_MS,
 };

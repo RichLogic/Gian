@@ -1,14 +1,14 @@
 // Branch parsing helpers extracted from `web/app.ts` so they can be
 // exercised by GIT-002 / INV-015 tests without booting createApp.
 //
-// `listLocalBranches` runs `git for-each-ref refs/heads` with a stable
+// `listLocalBranchesAsync` runs `git for-each-ref refs/heads` with a stable
 // formatted line shape and parses the result. `parseTrack` decodes the
 // upstream/track segment into `{ ahead, behind, gone }`. Both are pure
 // over their inputs; the only impure piece is the subprocess call inside
-// `listLocalBranches`. The web route adds Gian-session linkage on top of
+// `listLocalBranchesAsync`. The web route adds Gian-session linkage on top of
 // what this module returns.
 
-import { execFileSync } from 'node:child_process';
+import { runGit } from './async-command.js';
 
 export interface BranchTrack {
   ahead: number;
@@ -60,28 +60,34 @@ const FIELD_SEP = '\x1f';
  * metadata. Returns `[]` on any git failure (matches the web route's
  * `try/catch → []` behavior).
  */
-export function listLocalBranches(repoPath: string): LocalBranch[] {
-  const fmt = [
-    '%(refname:short)',
-    '%(upstream:short)',
-    '%(upstream:track)',
-    '%(objectname:short)',
-    '%(contents:subject)',
-    '%(committerdate:relative)',
-    '%(worktreepath)',
-  ].join(FIELD_SEP);
-  let raw: string;
-  try {
-    raw = execFileSync('git', ['-C', repoPath, 'for-each-ref', '--format=' + fmt, 'refs/heads'], {
-      timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    });
-  } catch {
-    return [];
-  }
+const LOCAL_BRANCHES_FOR_EACH_REF_FMT = [
+  '%(refname:short)',
+  '%(upstream:short)',
+  '%(upstream:track)',
+  '%(objectname:short)',
+  '%(contents:subject)',
+  '%(committerdate:relative)',
+  '%(worktreepath)',
+].join(FIELD_SEP);
+
+function parseLocalBranchList(raw: string): LocalBranch[] {
   return raw
     .split('\n')
     .filter((line) => line.length > 0)
     .map(parseForEachRefLine);
+}
+
+/** Non-blocking branch discovery for the Workspace Git HTTP panel. */
+export async function listLocalBranchesAsync(repoPath: string): Promise<LocalBranch[]> {
+  try {
+    const { stdout } = await runGit(
+      ['for-each-ref', '--format=' + LOCAL_BRANCHES_FOR_EACH_REF_FMT, 'refs/heads'],
+      { cwd: repoPath, timeoutMs: 5_000 },
+    );
+    return parseLocalBranchList(stdout);
+  } catch {
+    return [];
+  }
 }
 
 /**

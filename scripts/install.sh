@@ -41,11 +41,24 @@ if [[ ! -f "${ENTRY}" ]]; then
   die "Built entry point not found at ${ENTRY}. Run: pnpm install && pnpm -F @gian/shared build && pnpm -F @gian/host build"
 fi
 
-# Resolve the absolute path to node — launchd/systemd don't inherit $PATH.
-NODE_BIN="$(command -v node)" || die "node not found on \$PATH"
+# Resolve executable lookups to absolute paths — launchd/systemd do not start
+# in the installer's cwd, and PATH is allowed to contain relative entries.
+resolve_executable() {
+  local candidate directory
+  candidate="$(type -P -- "$1" 2>/dev/null || true)"
+  [[ -n "${candidate}" ]] || return 1
+  if [[ "${candidate}" == /* ]]; then
+    printf '%s\n' "${candidate}"
+    return 0
+  fi
+  directory="$(cd "$(dirname "${candidate}")" && pwd -P)" || return 1
+  printf '%s/%s\n' "${directory}" "$(basename "${candidate}")"
+}
+
+NODE_BIN="$(resolve_executable node)" || die "node not found on \$PATH"
 
 # Confirm it's new enough (v22+) and not Node v25+ (better-sqlite3 breaks).
-NODE_VERSION="$(node --version)"         # e.g. "v22.4.0"
+NODE_VERSION="$("${NODE_BIN}" --version)" # e.g. "v22.4.0"
 NODE_MAJOR="${NODE_VERSION#v}"           # strip leading "v"
 NODE_MAJOR="${NODE_MAJOR%%.*}"           # keep only major number
 if (( NODE_MAJOR < 22 )); then
@@ -56,33 +69,60 @@ if (( NODE_MAJOR >= 25 )); then
 fi
 
 # Resolve runtime tool paths so launchd's bare PATH doesn't ENOENT on the
-# probe. Both are optional at install time — the daemon emits a clearer
+# probe. All three are optional at install time — the daemon emits a clearer
 # error later if they're missing — but if present, bake their dirs into the
-# plist's EnvironmentVariables.PATH so cc-proxy/codex-proxy can spawn them.
-CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
-CODEX_BIN="$(command -v codex 2>/dev/null || true)"
+# unit's runtime PATH so the provider proxies can spawn them.
+CLAUDE_BIN="$(resolve_executable claude || true)"
+CODEX_BIN="$(resolve_executable codex || true)"
+KIMI_BIN="$(resolve_executable kimi || true)"
 
 # Build a deduplicated PATH for the launchd plist. launchd's default PATH is
 # `/usr/bin:/bin:/usr/sbin:/sbin` — not enough for ~/.local/bin (claude) or
-# /opt/homebrew/bin (codex). We include the dirnames of claude/codex/node
+# /opt/homebrew/bin (codex). We include the provider and Node directories
 # (when found), then append standard locations so anything not yet installed
 # resolves once it lands in the usual spots.
 _path_dirs=()
 [[ -n "${CLAUDE_BIN}" ]] && _path_dirs+=("$(dirname "${CLAUDE_BIN}")")
 [[ -n "${CODEX_BIN}"  ]] && _path_dirs+=("$(dirname "${CODEX_BIN}")")
+[[ -n "${KIMI_BIN}"   ]] && _path_dirs+=("$(dirname "${KIMI_BIN}")")
 _path_dirs+=("$(dirname "${NODE_BIN}")")
 # Common user-bin (claude installer's default) + standard system dirs as
 # fallbacks for tools the user installs after running install.sh.
 _path_dirs+=("${HOME}/.local/bin" "/opt/homebrew/bin" "/usr/local/bin" "/usr/bin" "/bin")
 
-# Dedupe while preserving order — awk-based one-pass scan.
-LAUNCHD_PATH="$(printf '%s\n' "${_path_dirs[@]}" | awk '!seen[$0]++' | paste -sd: -)"
+# Validate and dedupe without newline-delimited shell pipelines: a legitimate
+# directory containing a newline would otherwise be silently split into extra
+# PATH entries. Colons are rejected because PATH cannot represent them.
+_unique_path_dirs=()
+_gian_path_initialized=false
+for candidate in "${_path_dirs[@]}"; do
+  if [[ "${candidate}" == *:* || "${candidate}" == *[[:cntrl:]]* ]]; then
+    die "daemon PATH directory contains an unsupported colon or control character: ${candidate}"
+  fi
+  duplicate=false
+  if [[ "${_gian_path_initialized}" == true ]]; then
+    for existing in "${_unique_path_dirs[@]}"; do
+      if [[ "${candidate}" == "${existing}" ]]; then
+        duplicate=true
+        break
+      fi
+    done
+  fi
+  if [[ "${duplicate}" != true ]]; then
+    _unique_path_dirs+=("${candidate}")
+    _gian_path_initialized=true
+  fi
+done
+LAUNCHD_PATH="$(IFS=:; printf '%s' "${_unique_path_dirs[*]}")"
 
 if [[ -z "${CLAUDE_BIN}" ]]; then
   echo "  warn: claude not found on \$PATH — daemon will probe ENOENT until it's installed." >&2
 fi
 if [[ -z "${CODEX_BIN}" ]]; then
   echo "  warn: codex not found on \$PATH — daemon will probe ENOENT until it's installed." >&2
+fi
+if [[ -z "${KIMI_BIN}" ]]; then
+  echo "  warn: kimi not found on \$PATH — daemon will probe ENOENT until it's installed." >&2
 fi
 
 # ── platform detection ────────────────────────────────────────────────────────
@@ -124,34 +164,49 @@ fi
 
 # ── substitute template variables ────────────────────────────────────────────
 #
-# We use sed rather than envsubst so we control exactly which variables are
-# expanded — no risk of accidentally expanding shell variables in user-supplied
-# content that ends up in the template.
+# Render with context-specific XML/systemd escaping. Generic sed replacement
+# corrupts paths containing `&`, `|`, backslashes, XML metacharacters, spaces,
+# or systemd `%` specifiers.
 
 substitute() {
   local src="$1" dst="$2"
-  sed \
-    -e "s|{{INSTALL_DIR}}|${INSTALL_DIR}|g" \
-    -e "s|{{NODE_BIN}}|${NODE_BIN}|g" \
-    -e "s|{{HOME}}|${HOME}|g" \
-    -e "s|{{LAUNCHD_PATH}}|${LAUNCHD_PATH}|g" \
-    "${src}" > "${dst}"
+  "${NODE_BIN}" "${SCRIPT_DIR}/render-daemon-unit.mjs" \
+    --platform "${PLATFORM}" \
+    --template "${src}" \
+    --output "${dst}" \
+    --install-dir "${INSTALL_DIR}" \
+    --node-bin "${NODE_BIN}" \
+    --home "${HOME}" \
+    --launchd-path "${LAUNCHD_PATH}"
 }
 
 if [[ "${CHECK}" == true ]]; then
   [[ -f "${TEMPLATE}" ]] || die "template not found: ${TEMPLATE}"
-  TMP_UNIT="$(mktemp "${TMPDIR:-/tmp}/gian-unit.XXXXXX")"
-  substitute "${TEMPLATE}" "${TMP_UNIT}"
-  if grep -q '{{' "${TMP_UNIT}"; then
-    cat "${TMP_UNIT}" >&2
+  TMP_UNIT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gian-unit.XXXXXX")"
+  if [[ "${PLATFORM}" == macos ]]; then
+    TMP_UNIT="${TMP_UNIT_DIR}/com.gian.host.plist"
+  else
+    # systemd-analyze derives the unit type from the filename and rejects a
+    # source path without a recognized suffix before parsing its contents.
+    TMP_UNIT="${TMP_UNIT_DIR}/gian.service"
+  fi
+  cleanup_tmp_unit() {
     rm -f "${TMP_UNIT}"
-    die "template substitution left unresolved placeholders"
+    rmdir "${TMP_UNIT_DIR}" 2>/dev/null || true
+  }
+  trap cleanup_tmp_unit EXIT
+  substitute "${TEMPLATE}" "${TMP_UNIT}"
+  if [[ "${PLATFORM}" == macos ]]; then
+    /usr/bin/plutil -lint "${TMP_UNIT}" >/dev/null \
+      || die "rendered launchd plist is invalid"
+  elif command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze verify "${TMP_UNIT}" >/dev/null \
+      || die "rendered systemd unit is invalid"
   fi
   info "Rendered ${PLATFORM} unit successfully → ${TMP_UNIT}"
   info "Install dir : ${INSTALL_DIR}"
   info "Node        : ${NODE_BIN} (${NODE_VERSION})"
   info "Launch PATH : ${LAUNCHD_PATH}"
-  rm -f "${TMP_UNIT}"
   exit 0
 fi
 

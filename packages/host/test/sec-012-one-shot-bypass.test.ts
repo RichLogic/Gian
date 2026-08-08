@@ -3,9 +3,8 @@
 //             must show a warning UI, and must not persist into
 //             session.approval_mode.
 //
-// This file covers the host policy dimension only. The Composer UI warning
-// and the message:send WS payload assertion still need separate evidence
-// before the SEC-012 row can leave GAP — see traceability matrix.
+// This file covers the authoritative host policy boundary. Browser
+// wire-through lives in e2e/specs/06-one-shot-bypass.spec.ts.
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
@@ -13,7 +12,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { ProxyNotification, ServerToClientMessage } from '@gian/shared';
+import type { Executor, ProxyNotification, ServerToClientMessage } from '@gian/shared';
 import { openDatabase } from '../src/storage/db.js';
 import { SessionManager } from '../src/session/manager.js';
 import type { ProxyManager } from '../src/proxy/manager.js';
@@ -28,11 +27,11 @@ import { QueueManager } from '../src/queue/index.js';
 // ---------------------------------------------------------------------------
 
 class RecordingProxyClient implements ProxyClient {
-  readonly executor: 'claude' | 'codex';
+  readonly executor: Executor;
   notificationHandlers: NotificationHandler[] = [];
   startTurnCalls: Array<Record<string, unknown>> = [];
 
-  constructor(executor: 'claude' | 'codex') {
+  constructor(executor: Executor) {
     this.executor = executor;
   }
 
@@ -97,7 +96,7 @@ class RecordingProxyClient implements ProxyClient {
 
 class FakeProxyManager {
   client: RecordingProxyClient;
-  constructor(executor: 'claude' | 'codex') {
+  constructor(executor: Executor) {
     this.client = new RecordingProxyClient(executor);
   }
   async getOrCreate(): Promise<ProxyClient> {
@@ -122,7 +121,7 @@ class CapturingBroadcaster {
   }
 }
 
-function setup(executor: 'claude' | 'codex') {
+function setup(executor: Executor) {
   const dir = mkdtempSync(join(tmpdir(), 'gian-sec012-test-'));
   const db = openDatabase(dir);
   const wsId = randomUUID();
@@ -258,62 +257,43 @@ test('SEC-012: second bypass turn re-applies bypassPermissions without coupling 
 });
 
 // ---------------------------------------------------------------------------
-// Codex executor — different policy field set
+// Unsupported executors — fail closed before any turn side effect
 // ---------------------------------------------------------------------------
 
-test('SEC-012: bypass turn (codex) carries danger-full-access + approvalPolicy=never exactly once', async () => {
-  const ctx = setup('codex');
-  try {
-    const session = await ctx.sessions.createSession({
-      workspace_id: ctx.wsId,
-      executor: 'codex',
-      approval_mode: 'ask',
-    });
+for (const executor of ['codex', 'kimi'] as const) {
+  test(`SEC-012: ${executor} one-shot bypass fails closed without side effects`, async () => {
+    const ctx = setup(executor);
+    try {
+      const session = await ctx.sessions.createSession({
+        workspace_id: ctx.wsId,
+        executor,
+        ...(executor === 'codex' ? { approval_mode: 'plan' as const } : {}),
+      });
+      const before = ctx.db
+        .prepare('SELECT approval_mode, status, updated_at FROM sessions WHERE id = ?')
+        .get(session.id) as { approval_mode: string | null; status: string; updated_at: string };
+      const eventsBefore = (ctx.db
+        .prepare('SELECT COUNT(*) AS count FROM events WHERE session_id = ?')
+        .get(session.id) as { count: number }).count;
+      ctx.broadcaster.messages.length = 0;
 
-    await ctx.sessions.sendMessage(session.id, 'risky', undefined, true);
-    fireCompleted(ctx.proxyMgr);
+      await assert.rejects(
+        ctx.sessions.sendMessage(session.id, 'must stay blocked', undefined, true),
+        /only supported for Claude sessions/,
+      );
 
-    await ctx.sessions.sendMessage(session.id, 'normal follow up');
-
-    const calls = ctx.proxyMgr.client.startTurnCalls;
-    assert.equal(calls.length, 2);
-
-    assert.equal(calls[0]!.sandbox, 'danger-full-access',
-      'codex bypass turn must request danger-full-access sandbox');
-    assert.equal(calls[0]!.approvalPolicy, 'never',
-      'codex bypass turn must set approvalPolicy=never');
-    assert.equal(calls[0]!.approvalsReviewer, 'auto_review',
-      'codex bypass turn must set approvalsReviewer=auto_review');
-
-    // Follow-up turn must NOT carry bypass params — ask → workspace-write + on-request.
-    assert.notEqual(calls[1]!.sandbox, 'danger-full-access',
-      'follow-up turn must NOT carry danger-full-access sandbox');
-    assert.equal(calls[1]!.sandbox, 'workspace-write',
-      'follow-up turn uses the stored approval_mode mapping (ask → workspace-write)');
-    assert.equal(calls[1]!.approvalPolicy, 'on-request');
-    assert.equal(calls[1]!.approvalsReviewer, 'user');
-  } finally {
-    teardown(ctx);
-  }
-});
-
-test('SEC-012: codex bypass does NOT mutate session.approval_mode in DB', async () => {
-  const ctx = setup('codex');
-  try {
-    const session = await ctx.sessions.createSession({
-      workspace_id: ctx.wsId,
-      executor: 'codex',
-      approval_mode: 'plan',
-    });
-
-    await ctx.sessions.sendMessage(session.id, 'risky', undefined, true);
-
-    const row = ctx.db
-      .prepare('SELECT approval_mode FROM sessions WHERE id = ?')
-      .get(session.id) as { approval_mode: string };
-    assert.equal(row.approval_mode, 'plan',
-      'codex bypass must not persist into session.approval_mode');
-  } finally {
-    teardown(ctx);
-  }
-});
+      const after = ctx.db
+        .prepare('SELECT approval_mode, status, updated_at FROM sessions WHERE id = ?')
+        .get(session.id) as { approval_mode: string | null; status: string; updated_at: string };
+      const eventsAfter = (ctx.db
+        .prepare('SELECT COUNT(*) AS count FROM events WHERE session_id = ?')
+        .get(session.id) as { count: number }).count;
+      assert.deepEqual(after, before, 'rejected bypass must not mutate the session row');
+      assert.equal(eventsAfter, eventsBefore, 'rejected bypass must not append transcript events');
+      assert.equal(ctx.proxyMgr.client.startTurnCalls.length, 0, 'rejected bypass must not start a turn');
+      assert.equal(ctx.broadcaster.messages.length, 0, 'rejected bypass must not broadcast optimistic state');
+    } finally {
+      teardown(ctx);
+    }
+  });
+}

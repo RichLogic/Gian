@@ -1,113 +1,156 @@
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { access, readFile, stat } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
+import { runGit } from '../workspace/async-command.js';
 
-export function gitBranchAt(path: string): string | null {
-  try {
-    const out = execFileSync('git', ['-C', path, 'rev-parse', '--abbrev-ref', 'HEAD'], {
-      timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    return out || null;
-  } catch { return null; }
-}
-
-/**
- * Detect "I'm in the middle of an operation" states that leave the index in
- * a half-baked spot — typically because a merge/rebase/cherry-pick hit
- * conflicts. We surface this in the UI so the user knows why their tools
- * are stuck instead of silently working on a poisoned tree.
- */
-export function gitPendingOpAt(path: string):
+export type GitPendingOperation =
   | { kind: 'merge'; mergeHead: string }
   | { kind: 'rebase' }
   | { kind: 'cherry-pick'; head: string }
   | { kind: 'revert'; head: string }
-  | null {
-  function tryRevParse(ref: string): string | null {
-    try {
-      const out = execFileSync('git', ['-C', path, 'rev-parse', '--verify', '--quiet', ref], {
-        timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim();
-      return out || null;
-    } catch { return null; }
-  }
-  const merge = tryRevParse('MERGE_HEAD');
-  if (merge) return { kind: 'merge', mergeHead: merge };
-  // `rebase-merge` (interactive / merge backend) and `rebase-apply` (am)
-  // are directories under .git, not refs. Easiest probe is `git status
-  // --porcelain=v2` header lines, but checking the filesystem is faster.
+  | null;
+
+function withAbort<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolveResult, rejectResult) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => rejectResult(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+    operation.then(
+      value => finish(() => resolveResult(value)),
+      error => finish(() => rejectResult(error)),
+    );
+  });
+}
+
+async function safeGit(
+  path: string,
+  args: string[],
+  signal?: AbortSignal,
+): Promise<string | null> {
   try {
-    const gitDir = execFileSync('git', ['-C', path, 'rev-parse', '--git-dir'], {
-      timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    if (gitDir) {
-      const dir = isAbsolute(gitDir) ? gitDir : resolve(path, gitDir);
-      if (existsSync(resolve(dir, 'rebase-merge')) || existsSync(resolve(dir, 'rebase-apply'))) {
-        return { kind: 'rebase' };
-      }
+    const { stdout } = await runGit(args, {
+      cwd: path,
+      timeoutMs: 2_000,
+      ...(signal ? { signal } : {}),
+    });
+    return stdout.trim();
+  } catch (error) {
+    // Read-only repo discovery tolerates ordinary Git failures, but request
+    // cancellation must stop the multi-probe pending-operation scan instead
+    // of starting each remaining subprocess while the mutation lock is held.
+    if (signal?.aborted) throw error;
+    return null;
+  }
+}
+
+export async function gitBranchAtAsync(path: string): Promise<string | null> {
+  return (await safeGit(path, ['rev-parse', '--abbrev-ref', 'HEAD'])) || null;
+}
+
+export async function gitPendingOpAtAsync(
+  path: string,
+  signal?: AbortSignal,
+): Promise<GitPendingOperation> {
+  const merge = await safeGit(path, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], signal);
+  if (merge) return { kind: 'merge', mergeHead: merge };
+
+  const gitDir = await safeGit(path, ['rev-parse', '--git-dir'], signal);
+  if (gitDir) {
+    const dir = isAbsolute(gitDir) ? gitDir : resolve(path, gitDir);
+    try {
+      await withAbort(
+        Promise.any([
+          access(resolve(dir, 'rebase-merge')),
+          access(resolve(dir, 'rebase-apply')),
+        ]),
+        signal,
+      );
+      return { kind: 'rebase' };
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // Neither rebase state directory exists.
     }
-  } catch { /* swallow — non-rebase path falls through */ }
-  const cherry = tryRevParse('CHERRY_PICK_HEAD');
+  }
+
+  const cherry = await safeGit(
+    path,
+    ['rev-parse', '--verify', '--quiet', 'CHERRY_PICK_HEAD'],
+    signal,
+  );
   if (cherry) return { kind: 'cherry-pick', head: cherry };
-  const revert = tryRevParse('REVERT_HEAD');
+  const revert = await safeGit(
+    path,
+    ['rev-parse', '--verify', '--quiet', 'REVERT_HEAD'],
+    signal,
+  );
   if (revert) return { kind: 'revert', head: revert };
   return null;
 }
 
-export function gitInfoAt(path: string): {
+export async function gitInfoAtAsync(path: string): Promise<{
   isRepo: boolean;
   remote: string | null;
   defaultBranch: string | null;
   currentBranch: string | null;
   lastCommit: { hash: string; message: string; age: string } | null;
   modifiedCount: number;
-  pendingOp: ReturnType<typeof gitPendingOpAt>;
-} {
-  function safe(args: string[]): string | null {
-    try {
-      return execFileSync('git', ['-C', path, ...args], {
-        timeout: 2000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim();
-    } catch { return null; }
-  }
-  const inside = safe(['rev-parse', '--is-inside-work-tree']);
+  pendingOp: GitPendingOperation;
+}> {
+  const inside = await safeGit(path, ['rev-parse', '--is-inside-work-tree']);
   if (inside !== 'true') {
     return {
       isRepo: false, remote: null, defaultBranch: null,
       currentBranch: null, lastCommit: null, modifiedCount: 0, pendingOp: null,
     };
   }
-  const remote = safe(['remote', 'get-url', 'origin']);
-  let remoteHuman: string | null = null;
-  if (remote) {
-    // git@github.com:user/repo.git → github.com/user/repo
-    // https://github.com/user/repo.git → github.com/user/repo
-    remoteHuman = remote
+
+  const [remote, defaultBranchRaw, currentBranch, last, status, pendingOp] = await Promise.all([
+    safeGit(path, ['remote', 'get-url', 'origin']),
+    safeGit(path, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']),
+    gitBranchAtAsync(path),
+    safeGit(path, ['log', '-1', '--format=%h\x1f%s\x1f%cr']),
+    safeGit(path, ['status', '--porcelain']),
+    gitPendingOpAtAsync(path),
+  ]);
+
+  const remoteHuman = remote
+    ? remote
       .replace(/^git@([^:]+):/, '$1/')
       .replace(/^https?:\/\//, '')
-      .replace(/\.git$/, '');
-  }
-  const defaultBranchRaw = safe(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
-  const defaultBranch = defaultBranchRaw ? defaultBranchRaw.replace(/^origin\//, '') : null;
-  const currentBranch = gitBranchAt(path);
-  const last = safe(['log', '-1', '--format=%h\x1f%s\x1f%cr']);
+      .replace(/\.git$/, '')
+    : null;
+  const defaultBranch = defaultBranchRaw
+    ? defaultBranchRaw.replace(/^origin\//, '')
+    : null;
   let lastCommit: { hash: string; message: string; age: string } | null = null;
   if (last) {
     const [hash, message, age] = last.split('\x1f');
     if (hash && message && age) lastCommit = { hash, message, age };
   }
-  const status = safe(['status', '--porcelain']);
-  const modifiedCount = status ? status.split('\n').filter(l => l.trim()).length : 0;
-  const pendingOp = gitPendingOpAt(path);
-  return { isRepo: true, remote: remoteHuman, defaultBranch, currentBranch, lastCommit, modifiedCount, pendingOp };
+  const modifiedCount = status ? status.split('\n').filter(line => line.trim()).length : 0;
+  return {
+    isRepo: true,
+    remote: remoteHuman,
+    defaultBranch,
+    currentBranch,
+    lastCommit,
+    modifiedCount,
+    pendingOp,
+  };
 }
 
-export function claudeMdInfoAt(path: string): { exists: boolean; lines: number; mtime: string | null } {
+export async function claudeMdInfoAtAsync(path: string): Promise<{ exists: boolean; lines: number; mtime: string | null }> {
   try {
     const file = resolve(path, 'CLAUDE.md');
-    const content = readFileSync(file, 'utf8');
-    const stat = statSync(file);
-    return { exists: true, lines: content.split('\n').length, mtime: stat.mtime.toISOString() };
+    const [content, info] = await Promise.all([readFile(file, 'utf8'), stat(file)]);
+    return { exists: true, lines: content.split('\n').length, mtime: info.mtime.toISOString() };
   } catch {
     return { exists: false, lines: 0, mtime: null };
   }
@@ -120,5 +163,3 @@ export function claudeMdInfoAt(path: string): { exists: boolean; lines: number; 
 export function extTreeId(workspaceId: string, path: string): string {
   return `ext:${workspaceId}:${Buffer.from(path, 'utf8').toString('base64url')}`;
 }
-
-

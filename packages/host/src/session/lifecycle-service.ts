@@ -15,7 +15,7 @@ import type { Db } from '../storage/db.js';
 import { loadConfig } from '../storage/config.js';
 import { purgeSessionAttachments } from '../storage/attachments.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
-import { mergeBranch } from '../workspace/git.js';
+import { mergeBranchAsync } from '../workspace/git.js';
 import {
   executorConfigFromOptions,
   type SessionRepository,
@@ -63,7 +63,23 @@ function assertApprovalModeAllowed(executor: Executor, mode: ApprovalMode): void
   }
 }
 
+export class WorktreeLifecycleConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorktreeLifecycleConflictError';
+  }
+}
+
+export class SessionLifecycleBusyError extends Error {
+  constructor(sessionId: string) {
+    super(`session lifecycle operation already in progress: ${sessionId}`);
+    this.name = 'SessionLifecycleBusyError';
+  }
+}
+
 export class SessionLifecycleService {
+  private readonly activeSessionLifecycles = new Set<string>();
+
   constructor(
     private db: Db,
     private sessions: SessionRepository,
@@ -184,34 +200,47 @@ export class SessionLifecycleService {
     return this.sessions.get(id);
   }
 
-  async mergeWorktree(sessionId: string): Promise<void> {
-    const session = this.sessions.get(sessionId);
-    if (!session.branch || !session.base_branch) {
-      throw new Error('session is not in worktree mode');
-    }
-    if (session.worktree_outcome) {
-      throw new Error(`session already ${session.worktree_outcome}`);
-    }
-    const workspace = this.workspaceFor(session);
-    mergeBranch(workspace.path, session.branch, session.base_branch);
-    await this.runtime.teardownProxy(sessionId);
-    this.finalizeWorktree(sessionId, 'merged');
-    if (session.workspace_id != null) {
-      this.broadcastWorkspaceGitUpdated(session.workspace_id, 'merge');
-    }
+  async mergeWorktree(sessionId: string, signal?: AbortSignal): Promise<void> {
+    await this.withExclusiveSessionLifecycle(sessionId, async () => {
+      // Read state only after acquiring ownership so a later retry observes
+      // the outcome written by the operation that previously held it.
+      const session = this.worktreeSession(sessionId);
+      if (!session.branch || !session.base_branch) {
+        throw new WorktreeLifecycleConflictError('session is not in worktree mode');
+      }
+      if (session.worktree_outcome) {
+        throw new WorktreeLifecycleConflictError(`session already ${session.worktree_outcome}`);
+      }
+      const workspace = this.workspaceFor(session);
+      await mergeBranchAsync(
+        workspace.path,
+        session.branch,
+        session.base_branch,
+        signal ? { signal } : {},
+      );
+      await this.runtime.teardownProxy(sessionId);
+      this.finalizeWorktree(sessionId, 'merged');
+      if (session.workspace_id != null) {
+        this.broadcastWorkspaceGitUpdated(session.workspace_id, 'merge');
+      }
+    });
   }
 
   async dropWorktree(sessionId: string): Promise<void> {
-    const session = this.sessions.get(sessionId);
-    if (!session.branch) throw new Error('session is not in worktree mode');
-    if (session.worktree_outcome) {
-      throw new Error(`session already ${session.worktree_outcome}`);
-    }
-    await this.runtime.teardownProxy(sessionId);
-    this.finalizeWorktree(sessionId, 'discarded');
-    if (session.workspace_id != null) {
-      this.broadcastWorkspaceGitUpdated(session.workspace_id, 'drop');
-    }
+    await this.withExclusiveSessionLifecycle(sessionId, async () => {
+      const session = this.worktreeSession(sessionId);
+      if (!session.branch) {
+        throw new WorktreeLifecycleConflictError('session is not in worktree mode');
+      }
+      if (session.worktree_outcome) {
+        throw new WorktreeLifecycleConflictError(`session already ${session.worktree_outcome}`);
+      }
+      await this.runtime.teardownProxy(sessionId);
+      this.finalizeWorktree(sessionId, 'discarded');
+      if (session.workspace_id != null) {
+        this.broadcastWorkspaceGitUpdated(session.workspace_id, 'drop');
+      }
+    });
   }
 
   archive(sessionId: string, archived: boolean): void {
@@ -262,16 +291,36 @@ export class SessionLifecycleService {
   }
 
   async delete(sessionId: string): Promise<void> {
-    const session = this.sessions.get(sessionId);
-    await this.runtime.teardownProxy(sessionId);
-    this.runtime.forgetConversationUsage(sessionId);
-    this.sessions.forget(sessionId);
-    this.approvals.clearSession(sessionId);
-    this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
-    await purgeSessionAttachments(sessionId);
-    this.broadcaster.broadcast({ type: 'session:deleted', session_id: sessionId });
-    if (session.branch && session.workspace_id != null) {
-      this.broadcastWorkspaceGitUpdated(session.workspace_id, 'session-deleted');
+    await this.withExclusiveSessionLifecycle(sessionId, async () => {
+      const session = this.sessions.get(sessionId);
+      await this.runtime.teardownProxy(sessionId);
+      this.runtime.forgetConversationUsage(sessionId);
+      this.sessions.forget(sessionId);
+      this.approvals.clearSession(sessionId);
+      this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+      await purgeSessionAttachments(sessionId);
+      this.broadcaster.broadcast({ type: 'session:deleted', session_id: sessionId });
+      if (session.branch && session.workspace_id != null) {
+        this.broadcastWorkspaceGitUpdated(session.workspace_id, 'session-deleted');
+      }
+    });
+  }
+
+  private async withExclusiveSessionLifecycle<T>(
+    sessionId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    // Lifecycle operations include proxy RPC and filesystem cleanup. Do not
+    // build an unbounded per-session promise queue behind a slow/hung owner:
+    // callers get a stable conflict response and may retry after it finishes.
+    if (this.activeSessionLifecycles.has(sessionId)) {
+      throw new SessionLifecycleBusyError(sessionId);
+    }
+    this.activeSessionLifecycles.add(sessionId);
+    try {
+      return await operation();
+    } finally {
+      this.activeSessionLifecycles.delete(sessionId);
     }
   }
 
@@ -281,6 +330,17 @@ export class SessionLifecycleService {
       .get(session.workspace_id) as { path: string } | undefined;
     if (!workspace) throw new Error(`workspace missing for session ${session.id}`);
     return workspace;
+  }
+
+  private worktreeSession(sessionId: string): Session {
+    try {
+      return this.sessions.get(sessionId);
+    } catch (error) {
+      if (error instanceof Error && error.message === `session not found: ${sessionId}`) {
+        throw new WorktreeLifecycleConflictError(error.message);
+      }
+      throw error;
+    }
   }
 
   private finalizeWorktree(sessionId: string, outcome: WorktreeOutcome): void {

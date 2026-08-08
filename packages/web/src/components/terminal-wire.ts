@@ -8,7 +8,10 @@ export interface TerminalWire {
   spawn?(cols: number, rows: number): void;
   subscribe(handlers: {
     onChunk: (bytes: Uint8Array) => void;
-    onReplay: (chunks: Uint8Array[]) => void;
+    onReplay: (
+      chunks: Uint8Array[],
+      state: { alive: boolean; code: number | null; signal: string | null },
+    ) => void;
     onExit?: (exitCode: number | null, signal: string | null) => void;
   }): () => void;
   dispose?(): void;
@@ -47,6 +50,19 @@ export function makeWorkbenchWire(
   options: { cwd?: string; shell?: string } = {},
   dispatch?: OperationDispatcher['dispatch'],
 ): TerminalWire {
+  let deferredSpawn: { cols: number; rows: number } | null = null;
+
+  const dispatchSpawn = (cols: number, rows: number): void => {
+    if (!dispatch) return;
+    dispatch('term.spawn', {
+      termId,
+      cols,
+      rows,
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+      ...(options.shell ? { shell: options.shell } : {}),
+    });
+  };
+
   return {
     sendInput(bytes) {
       ws.send({ type: 'term:input', term_id: termId, data: bytesToBase64(bytes) });
@@ -61,25 +77,57 @@ export function makeWorkbenchWire(
     // falls back to requestReplay for a replay-only wire, as before.
     ...(dispatch ? {
       spawn(cols: number, rows: number) {
-        dispatch('term.spawn', {
-          termId,
-          cols,
-          rows,
-          ...(options.cwd ? { cwd: options.cwd } : {}),
-          ...(options.shell ? { shell: options.shell } : {}),
-        });
+        // Spawn is not replay-safe: retrying an uncertain request would kill
+        // and replace an existing PTY. If this tab mounts before the socket's
+        // first authoritative snapshot, delay the *known-unsent* request and
+        // issue it once the generation becomes ready.
+        if (ws.getState() !== 'open') {
+          deferredSpawn = { cols, rows };
+          return;
+        }
+        dispatchSpawn(cols, rows);
       },
     } : {}),
     subscribe(handlers) {
-      return ws.onMessage(message => {
+      const offMessage = ws.onMessage(message => {
         if (message.type === 'term:output' && message.term_id === termId) {
           handlers.onChunk(base64ToBytes(message.data));
         } else if (message.type === 'term:replay' && message.term_id === termId) {
-          handlers.onReplay(message.chunks.map(base64ToBytes));
+          handlers.onReplay(message.chunks.map(base64ToBytes), {
+            alive: message.alive,
+            code: message.code,
+            signal: message.signal,
+          });
         } else if (message.type === 'term:exited' && message.term_id === termId) {
           handlers.onExit?.(message.code, message.signal);
         }
       });
+      // Terminal mounts issue one explicit initial replay (or spawn) after
+      // subscribing. On every *subsequent* ready generation, request the
+      // server buffer again so output produced during the disconnect window
+      // is recovered. onState fires immediately, which lets us distinguish
+      // the initial readiness from a later reconnect without duplicating the
+      // component's first request.
+      let hasReachedReady = false;
+      const offState = ws.onState(state => {
+        if (state !== 'open') return;
+        if (deferredSpawn) {
+          const pending = deferredSpawn;
+          deferredSpawn = null;
+          dispatchSpawn(pending.cols, pending.rows);
+          hasReachedReady = true;
+          return;
+        }
+        if (!hasReachedReady) {
+          hasReachedReady = true;
+          return;
+        }
+        ws.send({ type: 'term:replay-request', term_id: termId });
+      });
+      return () => {
+        offMessage();
+        offState();
+      };
     },
   };
 }

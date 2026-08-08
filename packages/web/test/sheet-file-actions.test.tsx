@@ -144,10 +144,10 @@ describe('Sheet file actions', () => {
     expect(onOpenWith).toHaveBeenCalledWith(tab, { kind: 'app', app: 'TextEdit' });
   });
 
-  it('smart Open: pdf / images / html default to a new tab', () => {
+  it('smart Open: pdf/images use a new tab while HTML defaults to Browser', () => {
     expect(openTab('doc.pdf', 'p1').onOpenWith).toHaveBeenCalledWith(expect.any(Object), { kind: 'system', name: 'browser' });
     expect(openTab('pic.png', 'i1').onOpenWith).toHaveBeenCalledWith(expect.any(Object), { kind: 'system', name: 'browser' });
-    expect(openTab('page.html', 'w1').onOpenWith).toHaveBeenCalledWith(expect.any(Object), { kind: 'system', name: 'browser' });
+    expect(openTab('page.html', 'w1').onOpenWith).toHaveBeenCalledWith(expect.any(Object), { kind: 'system', name: 'gian-browser' });
   });
 
   it('smart Open: an unknown/binary file reveals in Finder', () => {

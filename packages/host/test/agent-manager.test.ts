@@ -143,6 +143,10 @@ test('agent manager verifies and atomically activates a GitHub proxy archive', {
   await execFileAsync('/usr/bin/tar', ['-czf', archivePath, '-C', packageDir, '.']);
   const archive = await readFile(archivePath);
   const checksum = createHash('sha256').update(archive).digest('hex');
+  const checksumBody = Buffer.from(
+    `${checksum}  gian-proxy-claude-0.1.0-darwin-arm64.tar.gz\n`,
+  );
+  const checksumDigest = createHash('sha256').update(checksumBody).digest('hex');
 
   const manager = await AgentManager.create({
     dataDir: join(root, 'data'),
@@ -152,10 +156,26 @@ test('agent manager verifies and atomically activates a GitHub proxy archive', {
     pathEnv: '',
     fetchImpl: async input => {
       const url = String(input);
+      if (url.startsWith('https://api.github.com/')) {
+        return new Response(JSON.stringify({
+          tag_name: 'v0.1.0',
+          assets: [
+            {
+              name: 'gian-proxy-claude-0.1.0-darwin-arm64.tar.gz',
+              digest: `sha256:${checksum}`,
+            },
+            {
+              name: 'gian-proxy-claude-0.1.0-darwin-arm64.tar.gz.sha256',
+              digest: `sha256:${checksumDigest}`,
+            },
+          ],
+        }));
+      }
       return url.endsWith('.sha256')
-        ? new Response(`${checksum}  proxy.tar.gz\n`)
+        ? new Response(checksumBody)
         : new Response(archive);
     },
+    proxyActivationProbe: async () => undefined,
   });
 
   const result = await manager.installProxy('claude');

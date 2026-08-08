@@ -97,3 +97,20 @@ test('UI-ACCENT-001 · defaults when nothing is set', async () => {
   assert.equal(cfg.font_scale_code, 'md');
   await ctx.cleanup?.();
 });
+
+test('retired density and interface/code scale preferences stay Cozy + MD', async () => {
+  const ctx = await makeTestApp();
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('density', 'compact')`).run();
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('font_scale_chrome', 'xl')`).run();
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('font_scale_code', 'sm')`).run();
+  saveConfig(ctx.db, {
+    density: 'roomy',
+    font_scale_chrome: 'lg',
+    font_scale_code: 'lg',
+  });
+  const cfg = loadConfig(ctx.db);
+  assert.equal(cfg.density, 'cozy');
+  assert.equal(cfg.font_scale_chrome, 'md');
+  assert.equal(cfg.font_scale_code, 'md');
+  await ctx.cleanup?.();
+});

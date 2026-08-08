@@ -28,10 +28,13 @@ export interface SessionMainProps {
   hydrated?: boolean;
   history?: TranscriptHistoryState;
   onLoadOlder?: () => void;
+  onRetryHistory?: () => void;
   pending: boolean;
   queue: QueueEntry[];
   planText?: string;
   codexPlanCompleted?: boolean;
+  codexPlanStatus?: 'active' | 'paused' | 'completed';
+  codexPlanTurn?: number;
   onSend: (
     text: string,
     options?: {
@@ -69,8 +72,8 @@ export interface SessionMainProps {
   onDelete: () => void;
   onReopen?: () => void;
   onShowChanges: () => void;
-  /** Opens the Diffs inspector pinned to the Last-turn scope (TurnDiffChip). */
-  onShowLastTurnChanges: () => void;
+  /** Opens a selected file in Diffs pinned to the card's Last-turn scope. */
+  onShowLastTurnChanges: (turn: number, path: string) => void;
   workingTreeId: string | null;
   branch: string | null;
 }
@@ -82,10 +85,13 @@ export function SessionMain({
   hydrated,
   history,
   onLoadOlder,
+  onRetryHistory,
   pending,
   queue,
   planText,
   codexPlanCompleted,
+  codexPlanStatus,
+  codexPlanTurn,
   onSend,
   onSendSkill,
   onStop,
@@ -167,27 +173,38 @@ export function SessionMain({
           hasOlder={history?.hasMore ?? false}
           loadingOlder={history?.loadingOlder ?? false}
           onLoadOlder={onLoadOlder}
+          historyError={history?.error}
+          onRetryHistory={onRetryHistory}
           pending={pending || session.status === 'running' || session.status === 'pending'}
           onApprove={onApprove}
         />
       </div>
+      <TranscriptMinimap items={items} />
       <QueueList
         sessionId={session.id}
         queue={queue}
-        onRemove={onQueueRemove}
-        onUpdate={onQueueUpdate}
-        onClear={onQueueClear}
-        onSendNow={session.executor === 'codex' ? onQueueSendNow : undefined}
+        onRemove={terminal || sessionCompleted ? undefined : onQueueRemove}
+        onUpdate={terminal || sessionCompleted ? undefined : onQueueUpdate}
+        onClear={terminal || sessionCompleted ? undefined : onQueueClear}
+        onSendNow={session.executor === 'codex' && !terminal && !sessionCompleted
+          ? onQueueSendNow
+          : undefined}
+        readOnly={terminal || sessionCompleted}
       />
       <div className="main-underbar">
         <PlanChip
           items={items}
           planText={planText}
           planCompleted={codexPlanCompleted}
+          planStatus={codexPlanStatus}
+          planTurn={codexPlanTurn}
           sessionId={session.id}
         />
-        <TurnDiffChip items={items} onShowLastTurn={onShowLastTurnChanges} />
-        <TranscriptMinimap items={items} />
+        <TurnDiffChip
+          items={items}
+          sessionId={session.id}
+          onShowLastTurn={onShowLastTurnChanges}
+        />
       </div>
       <Composer
         session={session}
@@ -203,7 +220,7 @@ export function SessionMain({
         onSetNativeConfig={onSetNativeConfig}
         disabled={pending || terminal || sessionCompleted}
         running={isTurnRunning(session.status, pending)}
-        disabledSubmitBehavior={sessionCompleted ? 'block' : 'queue'}
+        disabledSubmitBehavior={terminal || sessionCompleted ? 'block' : 'queue'}
         executor={session.executor}
         workspaceId={workspace?.id}
       />

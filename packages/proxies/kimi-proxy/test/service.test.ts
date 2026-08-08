@@ -12,12 +12,42 @@ import {
   type PromptResponse,
 } from '@agentclientprotocol/sdk';
 
-import { KimiProxyService } from '../src/core/service.js';
+import { KimiProxyService, parseKimiConversationUsage } from '../src/core/service.js';
 import {
   KimiAcpClient,
   type KimiAcpExit,
   type KimiAcpTransportFactory,
 } from '../src/runtime/kimi-acp-client.js';
+import {
+  ACP_MALFORMED_V0_23_PROMPT_USAGE,
+  ACP_UNKNOWN_PROMPT_USAGE,
+  ACP_V0_23_COMPACTION,
+  ACP_V0_23_PROMPT_USAGE,
+} from './fixtures/acp-v0-23-usage.js';
+
+test('versioned ACP prompt usage parses known fields and rejects unknown shapes', () => {
+  assert.deepEqual(parseKimiConversationUsage(ACP_V0_23_PROMPT_USAGE.usage), {
+    mode: 'absolute',
+    inputTokens: 1_100_000,
+    outputTokens: 14_000,
+    cachedInputTokens: 910_000,
+    totalTokens: 1_114_000,
+  });
+  assert.equal(parseKimiConversationUsage(ACP_UNKNOWN_PROMPT_USAGE.usage), null);
+  assert.equal(parseKimiConversationUsage(ACP_MALFORMED_V0_23_PROMPT_USAGE.usage), null);
+  assert.equal(parseKimiConversationUsage({ inputTokens: '1100000' }), null);
+  assert.equal(parseKimiConversationUsage({
+    inputTokens: 0.5,
+    outputTokens: 0,
+    totalTokens: 0,
+  }), null);
+  assert.equal(parseKimiConversationUsage({
+    inputTokens: 1,
+    outputTokens: 1,
+    totalTokens: 2,
+    thoughtTokens: '1',
+  }), null);
+});
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -336,48 +366,29 @@ test('suppresses hidden /status output and refreshes context after compact', asy
         }) => {
           const text = params.prompt.find(block => block.type === 'text')?.text ?? '';
           if (text === '/status') {
-            await remote.sessionUpdate({
-              sessionId: params.sessionId,
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: { type: 'text', text: 'Context: 86,397 / ' },
-              },
-            });
-            await remote.sessionUpdate({
-              sessionId: params.sessionId,
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: { type: 'text', text: '1,048,576 (8.2%)' },
-              },
-            });
+            for (const update of ACP_V0_23_COMPACTION.postBoundaryStatusChunks) {
+              await remote.sessionUpdate({ sessionId: params.sessionId, update });
+            }
             return { stopReason: 'end_turn' };
           }
-          if (text === '/compact') {
+          if (text === ACP_V0_23_COMPACTION.compactCommand) {
             await remote.sessionUpdate({
               sessionId: params.sessionId,
-              update: {
-                sessionUpdate: 'usage_update',
-                used: 999_999,
-                size: 1_048_576,
-              },
+              update: ACP_V0_23_COMPACTION.summarizationUsageUpdate,
             });
           }
           await remote.sessionUpdate({
             sessionId: params.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: text === '/compact' ? 'Compacted.' : 'Normal answer.' },
-            },
+            update: text === ACP_V0_23_COMPACTION.compactCommand
+              ? ACP_V0_23_COMPACTION.summarizationMessage
+              : {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'Normal answer.' },
+                },
           });
           return {
             stopReason: 'end_turn',
-            usage: {
-              inputTokens: 1_100_000,
-              outputTokens: 14_000,
-              cachedReadTokens: 900_000,
-              cachedWriteTokens: 10_000,
-              totalTokens: 1_114_000,
-            },
+            usage: ACP_V0_23_COMPACTION.promptUsage,
           };
         },
       } as unknown as Agent;
@@ -427,10 +438,27 @@ test('suppresses hidden /status output and refreshes context after compact', asy
     { used: 86_397, window: 1_048_576 },
   );
 
+  const futureStart = events.length;
+  await service.startTurn({
+    sessionId: created.session.id,
+    input: [{ type: 'text', text: ACP_V0_23_COMPACTION.futureCommand }],
+  });
+  await waitFor(
+    () => events.slice(futureStart).some(event => event.method === 'turn.completed'),
+    'future command turn did not complete',
+  );
+  assert.ok(
+    !events.slice(futureStart).some(event => (
+      event.method === 'token_usage.updated'
+      && (event.params.data as { context?: unknown }).context === null
+    )),
+    'an unknown command discriminator must not invalidate current context',
+  );
+
   const compactStart = events.length;
   await service.startTurn({
     sessionId: created.session.id,
-    input: [{ type: 'text', text: '/compact' }],
+    input: [{ type: 'text', text: ACP_V0_23_COMPACTION.compactCommand }],
   });
   await waitFor(
     () => events.slice(compactStart).some(event => event.method === 'turn.completed'),

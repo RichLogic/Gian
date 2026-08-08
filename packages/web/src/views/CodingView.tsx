@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ApprovalDecision, ApprovalMode, Executor, NativeConfigValue, Session, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { ModeDropdown } from '../components/ModeDropdown.js';
 import type { Mode } from '../components/Topbar.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
+import type { RailLayoutController } from '../components/RailLayout.js';
 import { useSessionOperationPending } from '../operations/use-operations.js';
+import type { OperationRun } from '../operations/types.js';
 import type { PlanLifecycleState } from '../transcript/apply.js';
 import type { TranscriptHistoryState } from '../controllers/use-transcript-hydration.js';
 import type { ApprovalActionContext, QueueEntry, TranscriptItem } from '../types.js';
@@ -66,13 +68,20 @@ export interface CodingViewProps {
   planStateBySession: Record<string, PlanLifecycleState>;
   historyBySession: Record<string, TranscriptHistoryState>;
   onLoadOlder: (sessionId: string, executor: Executor) => void;
+  onRetryHistory: (sessionId: string, executor: Executor) => void;
   onSelectSession: (id: string) => void;
   onWorkspaceCreated: (ws: Workspace) => void;
-  onCreateSession: (input: CreateSessionInput) => void;
-  /** True while the pending session.create run is in flight (from dispatch
-   *  until operation:result lands; session:created arrives first). Drives
-   *  the busy state in NewSessionView's submit button. */
+  onCreateSession: (input: CreateSessionInput) => OperationRun;
+  /** Latest create run, owned by App so timed-out attempts survive this
+   * view unmounting during mode switches. */
+  sessionCreateRun?: OperationRun;
+  /** Global session.create pending state survives view/mode unmounts, so
+   * reopening the form cannot accidentally submit a duplicate create. */
   creatingSession: boolean;
+  onClearSessionCreateRun: () => void;
+  /** Reload canonical sessions after an unknown create outcome. Only a
+   * successful reload releases the retry interlock. */
+  onVerifySessionCreate: () => Promise<void>;
   onSend: (
     sessionId: string,
     text: string,
@@ -108,6 +117,7 @@ export interface CodingViewProps {
     value: NativeConfigValue,
   ) => void;
   onDelete: (sessionId: string) => void;
+  onReopenSession: (sessionId: string) => void;
   /** Toggle a session's pinned marker (sidebar ordering). */
   onPinSession: (sessionId: string, pinned: boolean) => void;
   /** Archive a session from the sidebar row. */
@@ -116,40 +126,80 @@ export interface CodingViewProps {
   onToggleWorkspacePin: (workspace: Workspace) => void;
   /** Open the Files view in Changed mode for this session's working tree. */
   onShowChanges: (session: Session) => void;
-  /** Open the Diffs inspector pinned to the Last-turn scope (TurnDiffChip). */
-  onShowLastTurnChanges: (session: Session) => void;
+  /** Open a selected file in Diffs pinned to the card's Last-turn scope. */
+  onShowLastTurnChanges: (session: Session, turn: number, path: string) => void;
   /** Active session's working tree id (`wt:<id>` or `ws:<id>`), null if none. */
   activeWorkingTreeId: string | null;
   /** Branch name for the active session's working tree. */
   activeBranch: string | null;
+  /** App-owned four-panel layout. Optional for isolated component renders. */
+  railLayout?: RailLayoutController;
 }
 
 export function CodingView(p: CodingViewProps) {
   const [showNew, setShowNew] = useState(false);
+  const [verifyingCreate, setVerifyingCreate] = useState(false);
+  const [verifyCreateError, setVerifyCreateError] = useState<string | null>(null);
+  const createRun = p.sessionCreateRun;
+  const createUnknown = createRun?.phase === 'timed-out';
+  const preserveCreateRun = createUnknown
+    || createRun?.phase === 'pending'
+    || createRun?.phase === 'optimistic';
+  const creatingSession = p.creatingSession
+    || createRun?.phase === 'pending'
+    || createRun?.phase === 'optimistic';
+  const createError = createRun?.phase === 'failed'
+    ? (createRun.error ?? 'Session creation failed. You can adjust the form and retry.')
+    : createRun?.phase === 'timed-out'
+      ? 'Session creation status is unknown. Refresh sessions before retrying.'
+      : null;
   /** Workspace preselected in NewSessionView when opened via a workspace
    *  row's "+" action. Undefined when opened from the header "+" button. */
   const [newForWs, setNewForWs] = useState<string | undefined>(undefined);
-  const rail = useResizableWidth('rail.w', 272, 200, 480, 'left');
+  const fallbackRail = useResizableWidth('rail.w', 272, 200, 480, 'left');
+  const rail = p.railLayout ?? fallbackRail;
 
-  // Once the session lands (creatingSession flips back to false), close the
-  // new-session form. Kept here — not on submit — so the form stays visible
-  // with a "Creating…" indicator instead of flashing to an empty pane.
-  const wasCreatingRef = useRef(false);
+  // The Host broadcasts session:created before the correlated result. Close
+  // only on a confirmed run; failures remain visible and retryable in-place.
   useEffect(() => {
-    if (wasCreatingRef.current && !p.creatingSession) {
+    if (createRun?.phase === 'confirmed') {
       setShowNew(false);
+      p.onClearSessionCreateRun();
     }
-    wasCreatingRef.current = p.creatingSession;
-  }, [p.creatingSession]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createRun?.phase]);
+
+  async function verifyUnknownCreate() {
+    if (!createUnknown || verifyingCreate) return;
+    setVerifyingCreate(true);
+    setVerifyCreateError(null);
+    try {
+      await p.onVerifySessionCreate();
+    } catch (thrown) {
+      setVerifyCreateError(
+        thrown instanceof Error ? thrown.message : 'Failed to refresh sessions',
+      );
+    } finally {
+      setVerifyingCreate(false);
+    }
+  }
+
+  const resetNewSession = () => {
+    // Explicit failures are safe to forget. In-flight and unknown outcomes
+    // remain globally interlocked even if the form closes.
+    if (!preserveCreateRun) p.onClearSessionCreateRun();
+    setShowNew(false);
+  };
 
   // Topbar's brand burger emits this event — primary discoverable affordance
   // for hiding/showing the rail. The in-sidebar collapse button is the
   // secondary path. Listening at the window level keeps Topbar decoupled.
   useEffect(() => {
+    if (p.railLayout) return;
     const onToggle = () => rail.setCollapsed(!rail.collapsed);
     window.addEventListener('gian.toggle-rail', onToggle);
     return () => window.removeEventListener('gian.toggle-rail', onToggle);
-  }, [rail]);
+  }, [p.railLayout, rail.collapsed, rail.setCollapsed]);
 
   return (
     <div
@@ -168,22 +218,35 @@ export function CodingView(p: CodingViewProps) {
         sessions={p.sessions}
         activeSessionId={p.activeSessionId}
         showNew={showNew}
-        onToggleNew={() => { setNewForWs(undefined); setShowNew(v => !v); }}
-        onNewForWorkspace={id => { setNewForWs(id); setShowNew(true); }}
+        onToggleNew={() => {
+          setNewForWs(undefined);
+          if (!preserveCreateRun) p.onClearSessionCreateRun();
+          setShowNew(v => !v);
+        }}
+        onNewForWorkspace={id => {
+          setNewForWs(id);
+          if (!preserveCreateRun) p.onClearSessionCreateRun();
+          setShowNew(true);
+        }}
         onToggleWorkspacePin={p.onToggleWorkspacePin}
         onPinSession={p.onPinSession}
         onArchiveSession={p.onArchiveSession}
-        onSelect={id => { setShowNew(false); p.onSelectSession(id); }}
+        onSelect={id => { resetNewSession(); p.onSelectSession(id); }}
       />
       <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize sidebar" />
       {showNew ? (
         <NewSessionView
           workspaces={p.workspaces}
           initialWorkspaceId={newForWs}
-          onCancel={() => setShowNew(false)}
+          onCancel={resetNewSession}
           onWorkspaceCreated={p.onWorkspaceCreated}
-          creating={p.creatingSession}
+          creating={creatingSession}
+          createError={verifyCreateError ?? createError}
+          createUnknown={createUnknown}
+          verifyingCreate={verifyingCreate}
+          onVerifyCreate={() => void verifyUnknownCreate()}
           onCreate={input => {
+            setVerifyCreateError(null);
             p.onCreateSession(input);
           }}
         />
@@ -196,10 +259,13 @@ export function CodingView(p: CodingViewProps) {
             || p.historyBySession[p.activeSession.id]?.phase === 'complete'}
           history={p.historyBySession[p.activeSession.id]}
           onLoadOlder={() => p.onLoadOlder(p.activeSession!.id, p.activeSession!.executor)}
+          onRetryHistory={() => p.onRetryHistory(p.activeSession!.id, p.activeSession!.executor)}
           pending={p.pendingBySession[p.activeSession.id] ?? false}
           queue={p.queueBySession[p.activeSession.id] ?? []}
           planText={p.planStateBySession[p.activeSession.id]?.text}
           codexPlanCompleted={p.planStateBySession[p.activeSession.id]?.completed}
+          codexPlanStatus={p.planStateBySession[p.activeSession.id]?.status}
+          codexPlanTurn={p.planStateBySession[p.activeSession.id]?.turn}
           onSend={(text, opts) => p.onSend(p.activeSession!.id, text, opts)}
           onSendSkill={(name, path) => p.onSendSkill(p.activeSession!.id, name, path)}
           onStop={() => p.onStop(p.activeSession!.id)}
@@ -217,8 +283,10 @@ export function CodingView(p: CodingViewProps) {
           onSetNativeConfig={(configId, value) =>
             p.onSetNativeConfig(p.activeSession!.id, configId, value)}
           onDelete={() => p.onDelete(p.activeSession!.id)}
+          onReopen={() => p.onReopenSession(p.activeSession!.id)}
           onShowChanges={() => p.onShowChanges(p.activeSession!)}
-          onShowLastTurnChanges={() => p.onShowLastTurnChanges(p.activeSession!)}
+          onShowLastTurnChanges={(turn, path) =>
+            p.onShowLastTurnChanges(p.activeSession!, turn, path)}
           workingTreeId={p.activeWorkingTreeId}
           branch={p.activeBranch}
         />

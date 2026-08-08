@@ -78,7 +78,12 @@ export function useAppShortcuts({
         const session = activeSessionId
           ? sessionsRef.current?.find(candidate => candidate.id === activeSessionId)
           : undefined;
-        if (activeSessionId && session?.executor === 'codex') {
+        if (
+          activeSessionId
+          && session?.executor === 'codex'
+          && session.completed_at == null
+          && session.worktree_outcome == null
+        ) {
           event.preventDefault();
           // Pending policy: the dispatcher's duplicate guard blocks repeat
           // ⌘Enter while one drain is in flight.

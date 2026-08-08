@@ -104,7 +104,7 @@ body {
 
 body,
 .sidebar, .topbar, .inspector,
-.transcript, .composer, .composer-wrap, .approval, .evt,
+.transcript, .composer, .composer-wrap, .approval,
 .sheet, .gian-terminal, .sheet-file, .md-preview {
   /* Base sizes calibrated 2026-08-03 to match Air's default UI type size
      (pixel-measured on same-resolution screenshots: Gian ran ~6% small).
@@ -137,22 +137,19 @@ body[data-scale-chrome="xl"] .sidebar,
 body[data-scale-chrome="xl"] .topbar,
 body[data-scale-chrome="xl"] .inspector                          { --zone-scale: 1.25;  }
 
-.transcript, .composer, .composer-wrap, .approval, .evt            { --zone-scale: 1; }
+.transcript, .composer, .composer-wrap, .approval            { --zone-scale: 1; }
 body[data-scale-chat="sm"] .transcript,
 body[data-scale-chat="sm"] .composer,
 body[data-scale-chat="sm"] .composer-wrap,
-body[data-scale-chat="sm"] .approval,
-body[data-scale-chat="sm"] .evt                                    { --zone-scale: 0.875; }
+body[data-scale-chat="sm"] .approval                         { --zone-scale: 0.875; }
 body[data-scale-chat="lg"] .transcript,
 body[data-scale-chat="lg"] .composer,
 body[data-scale-chat="lg"] .composer-wrap,
-body[data-scale-chat="lg"] .approval,
-body[data-scale-chat="lg"] .evt                                    { --zone-scale: 1.125; }
+body[data-scale-chat="lg"] .approval                         { --zone-scale: 1.125; }
 body[data-scale-chat="xl"] .transcript,
 body[data-scale-chat="xl"] .composer,
 body[data-scale-chat="xl"] .composer-wrap,
-body[data-scale-chat="xl"] .approval,
-body[data-scale-chat="xl"] .evt                                    { --zone-scale: 1.25;  }
+body[data-scale-chat="xl"] .approval                         { --zone-scale: 1.25;  }
 
 .sheet, .gian-terminal, .sheet-file, .md-preview                   { --zone-scale: 1; }
 body[data-scale-code="sm"] .sheet,

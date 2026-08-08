@@ -12,6 +12,7 @@ export const PREPACKAGE_STEPS = [
   { id: 'tests', label: 'Unit, integration, and contract tests', args: ['test'] },
   { id: 'build', label: 'Production build', args: ['build'] },
   { id: 'traceability', label: 'Traceability registry', args: ['quality:traceability'] },
+  { id: 'docs', label: 'Documentation links', args: ['quality:docs'] },
   { id: 'e2e', label: 'Isolated browser journeys', args: ['test:e2e:run'] },
   {
     id: 'desktop',

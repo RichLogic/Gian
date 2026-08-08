@@ -109,10 +109,10 @@ function firstTextCommand(input: Array<{ type: string; text?: string }>): string
   return text.split(/\s+/, 1)[0]?.toLowerCase() ?? null;
 }
 
-function tokenCount(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? Math.floor(value)
-    : 0;
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
 }
 
 interface ModeCapability {
@@ -230,18 +230,40 @@ function capabilitiesFromConfigOptions(options: SessionConfigOption[]): ProbedCa
   };
 }
 
-function conversationUsage(response: PromptResponse) {
-  if (!response.usage) return null;
-  const inputTokens = tokenCount(response.usage.inputTokens);
-  const outputTokens = tokenCount(response.usage.outputTokens);
+export function parseKimiConversationUsage(value: unknown) {
+  if (!value || typeof value !== 'object') return null;
+  const usage = value as Record<string, unknown>;
+  const inputTokens = tokenCount(usage.inputTokens);
+  const outputTokens = tokenCount(usage.outputTokens);
+  const totalTokens = tokenCount(usage.totalTokens);
+  // ACP SDK 0.23 marks these three fields as required. Accepting a partial
+  // match as an absolute snapshot would let EventCoordinator replace every
+  // missing counter with zero, so malformed/future shapes must stay unknown.
+  if (inputTokens === undefined || outputTokens === undefined || totalTokens === undefined) {
+    return null;
+  }
+  const rawCachedRead = usage.cachedReadTokens;
+  const rawCachedWrite = usage.cachedWriteTokens;
+  const rawThoughtTokens = usage.thoughtTokens;
+  const cachedReadTokens = tokenCount(rawCachedRead);
+  const cachedWriteTokens = tokenCount(rawCachedWrite);
+  const thoughtTokens = tokenCount(rawThoughtTokens);
+  if (
+    (rawCachedRead !== undefined && rawCachedRead !== null && cachedReadTokens === undefined)
+    || (rawCachedWrite !== undefined && rawCachedWrite !== null && cachedWriteTokens === undefined)
+    || (rawThoughtTokens !== undefined && rawThoughtTokens !== null && thoughtTokens === undefined)
+  ) return null;
   return {
     mode: 'absolute' as const,
     inputTokens,
     outputTokens,
-    cachedInputTokens: tokenCount(response.usage.cachedReadTokens)
-      + tokenCount(response.usage.cachedWriteTokens),
-    totalTokens: tokenCount(response.usage.totalTokens),
+    cachedInputTokens: (cachedReadTokens ?? 0) + (cachedWriteTokens ?? 0),
+    totalTokens,
   };
+}
+
+function conversationUsage(response: PromptResponse) {
+  return parseKimiConversationUsage(response.usage);
 }
 
 export function parseKimiStatusContext(

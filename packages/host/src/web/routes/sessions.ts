@@ -1,6 +1,10 @@
 import type { Hono } from 'hono';
 import type { SessionManager } from '../../session/manager.js';
 import {
+  SessionLifecycleBusyError,
+  WorktreeLifecycleConflictError,
+} from '../../session/lifecycle-service.js';
+import {
   FALLBACK_ATTACHMENT_MIME,
   MAX_ATTACHMENT_BYTES,
   mimeForAttachment,
@@ -10,9 +14,30 @@ import {
 import type { Db } from '../../storage/db.js';
 import { ensureEventPageRebuilt } from '../../events/lazy-rebuild.js';
 import { markAccessed } from '../../events/lifecycle.js';
+import {
+  CommandExecutionError,
+  GitQueueFullError,
+  RepoMutationLockError,
+} from '../../workspace/async-command.js';
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function mergeErrorStatus(error: unknown): 400 | 409 | 500 | 503 | 504 {
+  if (error instanceof SessionLifecycleBusyError) return 409;
+  if (error instanceof RepoMutationLockError || error instanceof GitQueueFullError) return 503;
+  if (error instanceof WorktreeLifecycleConflictError) return 400;
+  if (!(error instanceof CommandExecutionError)) return 500;
+  if (error.timedOut) return 504;
+  // A normal non-zero Git exit represents an expected merge conflict or
+  // invalid branch. Spawn/abort/signal failures are infrastructure errors.
+  if (error.exitCode != null && !error.aborted && error.signal == null) return 400;
+  return 500;
+}
+
+function lifecycleErrorStatus(error: unknown): 400 | 409 {
+  return error instanceof SessionLifecycleBusyError ? 409 : 400;
 }
 
 export function registerSessionRoutes(app: Hono, db: Db, sessions: SessionManager): void {
@@ -25,10 +50,10 @@ export function registerSessionRoutes(app: Hono, db: Db, sessions: SessionManage
 
   app.post('/api/sessions/:id/merge', async c => {
     try {
-      await sessions.mergeWorktree(c.req.param('id'));
+      await sessions.mergeWorktree(c.req.param('id'), c.req.raw.signal);
       return c.json({ ok: true });
     } catch (error) {
-      return c.json({ error: errorMessage(error) }, 400);
+      return c.json({ error: errorMessage(error) }, mergeErrorStatus(error));
     }
   });
 
@@ -37,7 +62,7 @@ export function registerSessionRoutes(app: Hono, db: Db, sessions: SessionManage
       await sessions.dropWorktree(c.req.param('id'));
       return c.json({ ok: true });
     } catch (error) {
-      return c.json({ error: errorMessage(error) }, 400);
+      return c.json({ error: errorMessage(error) }, lifecycleErrorStatus(error));
     }
   });
 
@@ -95,7 +120,7 @@ export function registerSessionRoutes(app: Hono, db: Db, sessions: SessionManage
       await sessions.deleteSession(c.req.param('id'));
       return c.json({ ok: true });
     } catch (error) {
-      return c.json({ error: errorMessage(error) }, 400);
+      return c.json({ error: errorMessage(error) }, lifecycleErrorStatus(error));
     }
   });
 

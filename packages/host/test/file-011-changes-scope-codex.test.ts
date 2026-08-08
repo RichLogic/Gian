@@ -193,6 +193,50 @@ test('FILE-011: lastturn scope returns only the files the agent touched in its m
   }
 });
 
+test('FILE-011: lastturn scope can pin the exact turn represented by a Diff chip', async () => {
+  const ctx = await setup();
+  try {
+    const sessionId = seedSession(ctx, [
+      { turnNumber: 1, paths: ['src/app.ts'] },
+      { turnNumber: 2, paths: ['src/util.ts'] },
+    ]);
+    writeFileSync(join(ctx.repo.path, 'src/app.ts'), "console.log('init')\nturn1\n");
+    writeFileSync(join(ctx.repo.path, 'src/util.ts'), 'export const u = 1;\nturn2\n');
+
+    const res = await ctx.appCtx.fetch(
+      `/api/working_trees/wt:${sessionId}/changed?scope=lastturn&turn=1`,
+    );
+    assert.equal(res.status, 200);
+    const changed = await res.json() as ChangedEntry[];
+    assert.deepEqual(changed.map(entry => entry.path), ['src/app.ts']);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('FILE-011: an explicit same-workspace session overrides the viewed worktree owner', async () => {
+  const ctx = await setup();
+  try {
+    const worktreeOwner = seedSession(ctx, [
+      { turnNumber: 1, paths: ['src/app.ts'] },
+    ]);
+    const cardSession = seedSession(ctx, [
+      { turnNumber: 1, paths: ['src/util.ts'] },
+    ]);
+    writeFileSync(join(ctx.repo.path, 'src/app.ts'), "console.log('init')\nowner\n");
+    writeFileSync(join(ctx.repo.path, 'src/util.ts'), 'export const u = 1;\ncard\n');
+
+    const res = await ctx.appCtx.fetch(
+      `/api/working_trees/wt:${worktreeOwner}/changed?scope=lastturn&session=${cardSession}&turn=1`,
+    );
+    assert.equal(res.status, 200);
+    const changed = await res.json() as ChangedEntry[];
+    assert.deepEqual(changed.map(entry => entry.path), ['src/util.ts']);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test('FILE-011: lastturn scope is empty for a non-session (ws:) working tree', async () => {
   const ctx = await setup();
   try {

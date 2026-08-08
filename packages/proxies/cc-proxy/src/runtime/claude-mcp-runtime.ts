@@ -26,13 +26,15 @@ const NO_SESSION_PERSISTENCE_FLAG = '--no-session-persistence';
 const CLAUDE_DEFAULT_MODEL_ID = 'claude-default';
 
 function nonNegativeInteger(value: unknown): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : 0;
 }
 
 function optionalNonNegativeInteger(value: unknown): number | null {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
 }
 
 export interface ClaudeAssistantUsageSample {
@@ -56,9 +58,17 @@ export function parseClaudeAssistantUsage(
   const message = event.message as Record<string, unknown>;
   if (!message.usage || typeof message.usage !== 'object') return null;
   const usage = message.usage as Record<string, unknown>;
-  const used = nonNegativeInteger(usage.input_tokens)
-    + nonNegativeInteger(usage.cache_read_input_tokens)
-    + nonNegativeInteger(usage.cache_creation_input_tokens);
+  const input = optionalNonNegativeInteger(usage.input_tokens);
+  if (input === null) return null;
+  const rawCacheRead = usage.cache_read_input_tokens;
+  const rawCacheCreation = usage.cache_creation_input_tokens;
+  const cacheRead = optionalNonNegativeInteger(usage.cache_read_input_tokens);
+  const cacheCreation = optionalNonNegativeInteger(usage.cache_creation_input_tokens);
+  if (
+    (rawCacheRead !== undefined && rawCacheRead !== null && cacheRead === null)
+    || (rawCacheCreation !== undefined && rawCacheCreation !== null && cacheCreation === null)
+  ) return null;
+  const used = input + (cacheRead ?? 0) + (cacheCreation ?? 0);
   return {
     context: { used },
     model: typeof message.model === 'string' ? message.model : null,
@@ -86,24 +96,54 @@ export function parseClaudeResultUsage(
   }
 
   let conversation: TokenUsageUpdate['conversation'];
+  let sawModelTokenFields = false;
   if (event.modelUsage && typeof event.modelUsage === 'object') {
     let sawTokenUsage = false;
+    let invalidModelUsage = false;
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedInputTokens = 0;
     for (const value of Object.values(event.modelUsage as Record<string, unknown>)) {
       if (!value || typeof value !== 'object') continue;
       const usage = value as Record<string, unknown>;
+      const hasTokenFields = [
+        'inputTokens',
+        'input_tokens',
+        'outputTokens',
+        'output_tokens',
+        'cacheReadInputTokens',
+        'cache_read_input_tokens',
+        'cacheCreationInputTokens',
+        'cache_creation_input_tokens',
+      ].some(field => Object.hasOwn(usage, field));
+      // Newer Claude emits context-only modelUsage entries alongside the
+      // legacy top-level aggregate. Those contain no token fields and may
+      // fall through. Once a model advertises any token counter, however,
+      // it participates in the whole-tree snapshot and must be complete.
+      if (!hasTokenFields) continue;
+      sawModelTokenFields = true;
       const input = optionalNonNegativeInteger(usage.inputTokens ?? usage.input_tokens);
       const output = optionalNonNegativeInteger(usage.outputTokens ?? usage.output_tokens);
+      const rawCacheRead = usage.cacheReadInputTokens ?? usage.cache_read_input_tokens;
+      const rawCacheCreation = usage.cacheCreationInputTokens
+        ?? usage.cache_creation_input_tokens;
       const cacheRead = optionalNonNegativeInteger(
-        usage.cacheReadInputTokens ?? usage.cache_read_input_tokens,
+        rawCacheRead,
       );
       const cacheCreation = optionalNonNegativeInteger(
-        usage.cacheCreationInputTokens ?? usage.cache_creation_input_tokens,
+        rawCacheCreation,
       );
-      if (input === null && output === null && cacheRead === null && cacheCreation === null) {
-        continue;
+      // The stream-json v1 modelUsage counters are a complete snapshot.
+      // Context-only entries are valid (and handled above), but a partial or
+      // malformed counter set must not become a zero-filled conversation.
+      if (
+        input === null
+        || output === null
+        || (rawCacheRead !== undefined && rawCacheRead !== null && cacheRead === null)
+        || (rawCacheCreation !== undefined && rawCacheCreation !== null && cacheCreation === null)
+      ) {
+        invalidModelUsage = true;
+        break;
       }
       sawTokenUsage = true;
       const cached = (cacheRead ?? 0) + (cacheCreation ?? 0);
@@ -111,7 +151,7 @@ export function parseClaudeResultUsage(
       outputTokens += output ?? 0;
       cachedInputTokens += cached;
     }
-    if (sawTokenUsage) {
+    if (sawTokenUsage && !invalidModelUsage) {
       conversation = {
         mode: 'delta',
         inputTokens,
@@ -124,21 +164,31 @@ export function parseClaudeResultUsage(
 
   // Older Claude CLI builds may expose only the top-level query aggregate.
   // It excludes subagents but remains a valid per-invocation fallback.
-  if (!conversation && event.usage && typeof event.usage === 'object') {
+  if (!conversation && !sawModelTokenFields && event.usage && typeof event.usage === 'object') {
     const usage = event.usage as Record<string, unknown>;
-    const inputTokens = nonNegativeInteger(usage.input_tokens)
-      + nonNegativeInteger(usage.cache_read_input_tokens)
-      + nonNegativeInteger(usage.cache_creation_input_tokens);
-    const outputTokens = nonNegativeInteger(usage.output_tokens);
-    const cachedInputTokens = nonNegativeInteger(usage.cache_read_input_tokens)
-      + nonNegativeInteger(usage.cache_creation_input_tokens);
-    conversation = {
-      mode: 'delta',
-      inputTokens,
-      outputTokens,
-      cachedInputTokens,
-      totalTokens: inputTokens + outputTokens,
-    };
+    const input = optionalNonNegativeInteger(usage.input_tokens);
+    const output = optionalNonNegativeInteger(usage.output_tokens);
+    const rawCacheRead = usage.cache_read_input_tokens;
+    const rawCacheCreation = usage.cache_creation_input_tokens;
+    const cacheRead = optionalNonNegativeInteger(usage.cache_read_input_tokens);
+    const cacheCreation = optionalNonNegativeInteger(usage.cache_creation_input_tokens);
+    if (
+      input !== null
+      && output !== null
+      && !(rawCacheRead !== undefined && rawCacheRead !== null && cacheRead === null)
+      && !(rawCacheCreation !== undefined && rawCacheCreation !== null && cacheCreation === null)
+    ) {
+      const cachedInputTokens = (cacheRead ?? 0) + (cacheCreation ?? 0);
+      const inputTokens = input + cachedInputTokens;
+      const outputTokens = output;
+      conversation = {
+        mode: 'delta',
+        inputTokens,
+        outputTokens,
+        cachedInputTokens,
+        totalTokens: inputTokens + outputTokens,
+      };
+    }
   }
 
   if (!currentContext && !conversation) return null;

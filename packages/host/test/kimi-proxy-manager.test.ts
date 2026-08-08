@@ -20,7 +20,7 @@ test('failed Kimi attach recycles an unused ACP host for login retry', async () 
         version: '0.29.2',
         source: 'managed',
         env: {},
-        release() {
+        async release() {
           releaseCalls += 1;
         },
       };
@@ -73,7 +73,7 @@ test('concurrent Kimi sessions initialize through one shared ACP host', async ()
         version: '0.29.2',
         source: 'managed',
         env: {},
-        release() {
+        async release() {
           releaseCalls += 1;
         },
       };

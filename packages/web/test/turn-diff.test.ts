@@ -1,5 +1,5 @@
 // projectTurnDiff (underbar "Last turn" diff chip): aggregates the most
-// recent change-producing turn, merging per-path last-one-wins so codex's
+// current/latest transcript turn, merging per-path last-one-wins so codex's
 // turn-cumulative diff.updated events don't double count while claude/kimi
 // per-edit events still surface every file.
 
@@ -53,5 +53,24 @@ describe('projectTurnDiff', () => {
     const out = projectTurnDiff(items);
     expect(out?.turn).toBe(2);
     expect(out?.files.map(f => f.path)).toEqual(['new.ts']);
+  });
+
+  it('clears the previous diff as soon as a newer turn starts', () => {
+    const items: TranscriptItem[] = [
+      diff('d1', 1, [file('old.ts', 1, 1)]),
+      { kind: 'user', id: 'u2', text: 'Next turn', ts: 2000, turn: 2 },
+    ];
+    expect(projectTurnDiff(items)).toBeNull();
+  });
+
+  it('clears immediately for an optimistic next-turn user echo', () => {
+    const items: TranscriptItem[] = [
+      diff('d1', 1, [file('old.ts', 1, 1)]),
+      {
+        kind: 'user', id: 'pending', text: 'Next turn', ts: 2000, turn: 0,
+        pending: true,
+      },
+    ];
+    expect(projectTurnDiff(items)).toBeNull();
   });
 });

@@ -25,10 +25,13 @@ interface SessionSurfaceProps {
   hydrated?: boolean;
   history?: TranscriptHistoryState;
   onLoadOlder?: () => void;
+  onRetryHistory?: () => void;
   pending: boolean;
   queue: QueueEntry[];
   planText?: string;
   planCompleted?: boolean;
+  planStatus?: 'active' | 'paused' | 'completed';
+  planTurn?: number;
   commands: SessionCommands;
   workingTreeId: string | null;
   branch: string | null;
@@ -42,8 +45,8 @@ interface SessionSurfaceProps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   fileRehype: null | (() => (tree: any) => void);
   onShowChanges: () => void;
-  /** Opens the Diffs inspector pinned to the Last-turn scope (TurnDiffChip). */
-  onShowLastTurnChanges: () => void;
+  /** Opens a selected file in Diffs pinned to the card's Last-turn scope. */
+  onShowLastTurnChanges: (turn: number, path: string) => void;
   onReopen?: () => void;
   containerClassName?: string;
 }
@@ -55,10 +58,13 @@ export function SessionSurface({
   hydrated,
   history,
   onLoadOlder,
+  onRetryHistory,
   pending,
   queue,
   planText,
   planCompleted,
+  planStatus,
+  planTurn,
   commands,
   workingTreeId,
   branch,
@@ -87,10 +93,13 @@ export function SessionSurface({
                 hydrated={hydrated}
                 history={history}
                 onLoadOlder={onLoadOlder}
+                onRetryHistory={onRetryHistory}
                 pending={pending}
                 queue={queue}
                 planText={planText}
                 codexPlanCompleted={planCompleted}
+                codexPlanStatus={planStatus}
+                codexPlanTurn={planTurn}
                 onSend={(text, options) => commands.onSend(session.id, text, options)}
                 onSendSkill={(name, path) => commands.onSendSkill(session.id, name, path)}
                 onStop={() => commands.onStop(session.id)}

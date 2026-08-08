@@ -12,6 +12,7 @@ import {
   type MenuItemConstructorOptions,
   type WebContents,
 } from 'electron';
+import type { GianBrowserBounds, GianBrowserProjectTarget, GianBrowserState } from '@gian/shared';
 import type { ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -40,6 +41,12 @@ import {
   resolveUnpackedAppPath,
   startManagedHost,
 } from './managed-host.js';
+import { BrowserController, registerBrowserScheme } from './browser-controller.js';
+import {
+  DEFAULT_ZOOM_PERCENT,
+  normalizeZoomPercent,
+  stepZoomPercent,
+} from './zoom.js';
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -57,6 +64,7 @@ const applicationIdentity = resolveDesktopApplicationIdentity(
 const applicationName = applicationIdentity.name;
 const displayName = resolveDesktopDisplayName(applicationIdentity, process.env);
 
+registerBrowserScheme();
 app.setName(applicationName);
 if (applicationIdentity.userDataPath) {
   // Keep the dev shell's Chromium profile and single-instance lock isolated
@@ -72,6 +80,7 @@ const desktopToken = app.isPackaged ? randomBytes(32).toString('base64url') : nu
 const desktopInstanceId = app.isPackaged ? randomUUID() : null;
 
 let mainWindow: BrowserWindow | null = null;
+let browserController: BrowserController | null = null;
 let managedHost: ChildProcess | null = null;
 let githubAuthService: GitHubAuthService | null = null;
 let loadingSurface:
@@ -112,6 +121,25 @@ function getGitHubAuthService(): GitHubAuthService {
 
 function isMainWindowSender(sender: WebContents): boolean {
   return !!mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents;
+}
+
+const ZOOM_CHANGED_CHANNEL = 'desktop:zoom-changed';
+
+function currentMainWindowZoom(): number {
+  if (!mainWindow || mainWindow.isDestroyed()) return DEFAULT_ZOOM_PERCENT;
+  return normalizeZoomPercent(mainWindow.webContents.getZoomFactor() * 100);
+}
+
+function setMainWindowZoom(value: unknown): number {
+  const percent = normalizeZoomPercent(value);
+  if (!mainWindow || mainWindow.isDestroyed()) return percent;
+  mainWindow.webContents.setZoomFactor(percent / 100);
+  mainWindow.webContents.send(ZOOM_CHANGED_CHANNEL, percent);
+  return percent;
+}
+
+function changeMainWindowZoom(direction: -1 | 1): number {
+  return setMainWindowZoom(stepZoomPercent(currentMainWindowZoom(), direction));
 }
 
 function startProductionHost(): void {
@@ -241,6 +269,7 @@ async function loadGianSurface(window: BrowserWindow): Promise<boolean> {
         ? { requestHeaders: { [DESKTOP_TOKEN_HEADER]: desktopToken } }
         : {}),
       ...(desktopInstanceId ? { expectedInstanceId: desktopInstanceId } : {}),
+      expectedVersion: app.getVersion(),
     });
     if (window.isDestroyed()) return false;
 
@@ -309,9 +338,21 @@ function buildApplicationMenu(): void {
     {
       label: 'View',
       submenu: [
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
+        {
+          label: 'Actual Size',
+          accelerator: 'CmdOrCtrl+0',
+          click: () => { setMainWindowZoom(DEFAULT_ZOOM_PERCENT); },
+        },
+        {
+          label: 'Zoom In',
+          accelerator: 'CmdOrCtrl+Plus',
+          click: () => { changeMainWindowZoom(1); },
+        },
+        {
+          label: 'Zoom Out',
+          accelerator: 'CmdOrCtrl+-',
+          click: () => { changeMainWindowZoom(-1); },
+        },
         { type: 'separator' },
         { role: 'togglefullscreen' },
         ...(!app.isPackaged
@@ -362,6 +403,18 @@ async function createMainWindow(): Promise<BrowserWindow> {
     window.setTitle(displayName);
   });
   mainWindow = window;
+  const controller = new BrowserController({
+    window,
+    hostUrl: targets.hostUrl,
+    desktopToken,
+    openExternalUrl: openExternal,
+    onState: (tabId, state) => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:state', tabId, state);
+      }
+    },
+  });
+  browserController = controller;
 
   hardenWebContents(window.webContents);
   installDesktopTitlebar(window.webContents);
@@ -370,6 +423,8 @@ async function createMainWindow(): Promise<BrowserWindow> {
   });
   window.once('ready-to-show', () => window.show());
   window.on('closed', () => {
+    controller.destroy();
+    if (browserController === controller) browserController = null;
     if (mainWindow === window) mainWindow = null;
   });
 
@@ -403,6 +458,16 @@ ipcMain.handle('desktop:restart-app', event => {
   return true;
 });
 
+ipcMain.handle('desktop:zoom:get', event => {
+  if (!isMainWindowSender(event.sender)) return null;
+  return currentMainWindowZoom();
+});
+
+ipcMain.handle('desktop:zoom:set', (event, percent: unknown) => {
+  if (!isMainWindowSender(event.sender)) return null;
+  return setMainWindowZoom(percent);
+});
+
 ipcMain.handle('desktop:set-dock-icon', (event, dataUrl: unknown) => {
   const dock = app.dock;
   if (
@@ -421,6 +486,76 @@ ipcMain.handle('desktop:set-dock-icon', (event, dataUrl: unknown) => {
   if (icon.isEmpty()) return false;
   dock.setIcon(icon);
   return true;
+});
+
+const EMPTY_BROWSER_STATE: GianBrowserState = {
+  url: '',
+  title: '',
+  loading: false,
+  canGoBack: false,
+  canGoForward: false,
+  canOpenExternal: false,
+};
+
+ipcMain.handle('desktop:browser:get-state', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  return browserController?.getState(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:navigate', async (event, tabId: unknown, url: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId) || typeof url !== 'string' || url.length > 16_384) {
+    return EMPTY_BROWSER_STATE;
+  }
+  return browserController?.navigate(tabId, url) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:open-project', async (event, tabId: unknown, target: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId) || !isBrowserProjectTarget(target)) {
+    return EMPTY_BROWSER_STATE;
+  }
+  return browserController?.openProject(tabId, target) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:back', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  return browserController?.goBack(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:forward', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  return browserController?.goForward(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:reload', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  return browserController?.reload(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:stop', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  return browserController?.stop(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:set-layout', (event, tabId: unknown, bounds: unknown, visible: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId) || !isBrowserBounds(bounds) || typeof visible !== 'boolean') {
+    return false;
+  }
+  return browserController?.setLayout(tabId, bounds, visible) ?? false;
+});
+
+ipcMain.handle('desktop:browser:open-external', async (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return false;
+  return browserController?.openExternal(tabId) ?? false;
+});
+
+ipcMain.handle('desktop:browser:close-tab', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return false;
+  return browserController?.closeTab(tabId) ?? false;
+});
+
+ipcMain.handle('desktop:browser:clear-data', async event => {
+  if (!isMainWindowSender(event.sender)) return false;
+  return browserController?.clearData() ?? false;
 });
 
 ipcMain.handle('desktop:github-auth:get-state', async event => {
@@ -492,3 +627,27 @@ app.on('before-quit', () => {
   githubAuthService?.cancel();
   stopManagedHost();
 });
+
+function isBrowserBounds(value: unknown): value is GianBrowserBounds {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<GianBrowserBounds>;
+  return typeof candidate.x === 'number'
+    && typeof candidate.y === 'number'
+    && typeof candidate.width === 'number'
+    && typeof candidate.height === 'number';
+}
+
+function isBrowserTabId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256;
+}
+
+function isBrowserProjectTarget(value: unknown): value is GianBrowserProjectTarget {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<GianBrowserProjectTarget>;
+  return typeof candidate.workingTreeId === 'string'
+    && candidate.workingTreeId.length > 0
+    && candidate.workingTreeId.length <= 512
+    && typeof candidate.path === 'string'
+    && candidate.path.length > 0
+    && candidate.path.length <= 16_384;
+}

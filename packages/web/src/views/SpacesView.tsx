@@ -8,6 +8,7 @@ import {
 import { useT } from '../i18n/index.js';
 import { confirm as confirmDialog, toast } from '../feedback.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
+import type { RailLayoutController } from '../components/RailLayout.js';
 import {
   useOperationDispatch,
   useOperationRun,
@@ -25,11 +26,16 @@ export function SpacesView({
   systemConfig,
   ws,
   onChange,
+  railLayout,
+  onSessionAdopted,
 }: {
   workspaces: Workspace[];
   systemConfig: SystemConfig | null;
   ws: GianWs;
   onChange: () => void;
+  /** App-owned shell rail. Optional for isolated Spaces renders. */
+  railLayout?: RailLayoutController;
+  onSessionAdopted: (session: Session) => void;
 }) {
   const workspaceRoot = systemConfig?.workspace_root ?? '~/Coding';
   const [listTab, setListTab] = useState<'active' | 'archived'>('active');
@@ -37,7 +43,8 @@ export function SpacesView({
     workspaces.find(w => w.hidden !== 1)?.id ?? null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const newWs = useNewWorkspace(onChange);
-  const rail = useResizableWidth('spaces.rail.w', 280, 200, 480, 'left');
+  const fallbackRail = useResizableWidth('spaces.rail.w', 280, 200, 480, 'left');
+  const rail = railLayout ?? fallbackRail;
 
   useEffect(() => {
     void loadSessions().then(setSessions);
@@ -91,7 +98,7 @@ export function SpacesView({
 
   return (
     <div
-      className={`view${claudeMdOpen ? ' has-inspector' : ''}`}
+      className={`view${claudeMdOpen ? ' has-inspector' : ''}${rail.collapsed ? ' rail-collapsed' : ''}`}
       style={{ '--rail-w': `${rail.width}px` } as React.CSSProperties}
     >
       <SpacesList
@@ -124,6 +131,7 @@ export function SpacesView({
         allSessions={sessions}
         ws={ws}
         onChange={onChange}
+        onSessionAdopted={onSessionAdopted}
         onDeleted={() => { /* selection re-syncs via the visible-list effect */ }}
         onOpenClaudeMd={() => setClaudeMdOpen(true)}
       />
@@ -250,6 +258,7 @@ export function SpaceDetail({
   allSessions,
   ws,
   onChange,
+  onSessionAdopted,
   onDeleted,
   onOpenClaudeMd,
 }: {
@@ -257,6 +266,7 @@ export function SpaceDetail({
   allSessions: Session[];
   ws: GianWs;
   onChange: () => void;
+  onSessionAdopted: (session: Session) => void;
   onDeleted: () => void;
   onOpenClaudeMd: () => void;
 }) {
@@ -400,10 +410,14 @@ export function SpaceDetail({
             </>
           )}
           {tab === 'native' && (
-            <NativeSessionsPane workspace={workspace} onChange={onChange} />
+            <NativeSessionsPane
+              workspace={workspace}
+              onChange={onChange}
+              onSessionAdopted={onSessionAdopted}
+            />
           )}
           {tab === 'archived' && (
-            <ArchivedSessionsPane workspace={workspace} onChange={onChange} />
+            <ArchivedSessionsPane key={workspace.id} workspace={workspace} onChange={onChange} />
           )}
         </div>
       </div>
@@ -539,6 +553,8 @@ export function ClaudeMdInspector({
   const [content, setContent] = useState<string>('');
   const [original, setOriginal] = useState<string>('');
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   // Save runs as a pending operation (Phase 3a): `saving` reflects the
   // in-flight run, success keeps the transient 已保存 indicator, failure
   // surfaces a toast.
@@ -565,13 +581,25 @@ export function ClaudeMdInspector({
   }, [saveRun?.phase]);
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
-    void loadClaudeMd(workspaceId).then(c => {
-      setContent(c);
-      setOriginal(c);
-      setLoading(false);
-    });
-  }, [workspaceId]);
+    setLoadError(null);
+    void loadClaudeMd(workspaceId)
+      .then(c => {
+        if (cancelled) return;
+        setContent(c);
+        setOriginal(c);
+        setLoading(false);
+      })
+      .catch(error => {
+        if (cancelled) return;
+        // Preserve the last successfully loaded buffer. A failed read must
+        // never turn unknown content into an apparently empty, saveable file.
+        setLoadError(error instanceof Error ? error.message : String(error));
+        setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [workspaceId, loadAttempt]);
 
   const dirty = content !== original;
 
@@ -590,19 +618,30 @@ export function ClaudeMdInspector({
         </div>
         <button className="btn ghost sm" onClick={onClose} title="关闭">×</button>
       </header>
-      <textarea
-        className="input spaces-claude-md"
-        value={loading ? '' : content}
-        placeholder={loading ? 'Loading…' : '# notes for AI agents…'}
-        onChange={e => setContent(e.target.value)}
-      />
+      {loadError ? (
+        <div className="spaces-claude-md-error" role="alert" data-testid="claude-md-load-error">
+          <span>{t('sheet.loadFailed')}</span>
+          <span className="spaces-error">{loadError}</span>
+          <button className="btn sm" onClick={() => setLoadAttempt(attempt => attempt + 1)}>
+            {t('sheet.retry')}
+          </button>
+        </div>
+      ) : (
+        <textarea
+          className="input spaces-claude-md"
+          value={loading ? '' : content}
+          placeholder={loading ? 'Loading…' : '# notes for AI agents…'}
+          disabled={loading}
+          onChange={e => setContent(e.target.value)}
+        />
+      )}
       <footer className="spaces-inspector-foot">
         <span className="field-hint">AGENTS.md → 软链接到此文件</span>
         <span className="spaces-inspector-foot-spacer" />
         {savedAt && <span className="settings-saved">已保存</span>}
         <button
           className="btn sm primary"
-          disabled={!dirty || saving}
+          disabled={loading || loadError !== null || !dirty || saving}
           onClick={() => void save()}
         >
           {saving ? '保存中…' : '保存'}

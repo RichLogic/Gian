@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import type { Executor, Session } from '@gian/shared';
-import { loadEvents } from '../api.js';
+import {
+  EventHistoryLoadError,
+  loadEvents,
+  type EventHistoryLoadErrorKind,
+} from '../api.js';
 import { applyEnvelope, applyPlanLifecycle, type PlanLifecycleState } from '../transcript/apply.js';
 import type { TranscriptItem } from '../types.js';
 
 interface TranscriptHydrationInput {
   activeSessionId: string | null;
+  connectionReady: boolean;
   sessions: Session[];
-  itemsBySession: Record<string, TranscriptItem[]>;
   setItemsBySession: Dispatch<SetStateAction<Record<string, TranscriptItem[]>>>;
   setPlanStateBySession: Dispatch<SetStateAction<Record<string, PlanLifecycleState>>>;
 }
@@ -15,13 +19,25 @@ interface TranscriptHydrationInput {
 export interface TranscriptHistoryState {
   phase: 'unloaded' | 'live' | 'page' | 'complete';
   hasMore: boolean;
+  loading: boolean;
   loadingOlder: boolean;
   cursor: number | null;
+  error: TranscriptHistoryError | null;
+}
+
+export type TranscriptHistoryLoadOperation = 'initial' | 'refresh' | 'older';
+
+export interface TranscriptHistoryError {
+  kind: EventHistoryLoadErrorKind;
+  status: number | null;
+  operation: TranscriptHistoryLoadOperation;
+  message: string;
 }
 
 interface TranscriptHydrationResult {
   historyBySession: Record<string, TranscriptHistoryState>;
   loadOlder: (sessionId: string, executor: Executor) => void;
+  retry: (sessionId: string, executor: Executor) => void;
   markLive: (sessionId: string) => void;
 }
 
@@ -29,49 +45,119 @@ export function historyIsHydrated(state: TranscriptHistoryState | undefined): bo
   return state?.phase === 'page' || state?.phase === 'complete';
 }
 
+function unloadedHistoryState(): TranscriptHistoryState {
+  return {
+    phase: 'unloaded',
+    hasMore: false,
+    loading: false,
+    loadingOlder: false,
+    cursor: null,
+    error: null,
+  };
+}
+
+function structuredHistoryError(
+  error: unknown,
+  operation: TranscriptHistoryLoadOperation,
+): TranscriptHistoryError {
+  if (error instanceof EventHistoryLoadError) {
+    return {
+      kind: error.kind,
+      status: error.status,
+      operation,
+      message: error.message,
+    };
+  }
+  return {
+    kind: 'invalid-response',
+    status: null,
+    operation,
+    message: error instanceof Error ? error.message : 'Unknown event history error.',
+  };
+}
+
 export function useTranscriptHydration({
   activeSessionId,
+  connectionReady,
   sessions,
-  itemsBySession,
   setItemsBySession,
   setPlanStateBySession,
 }: TranscriptHydrationInput): TranscriptHydrationResult {
-  const itemsRef = useRef(itemsBySession);
-  itemsRef.current = itemsBySession;
   const [historyBySession, setHistoryBySession] = useState<Record<string, TranscriptHistoryState>>({});
   const historyRef = useRef(historyBySession);
   historyRef.current = historyBySession;
   const loadingRef = useRef(new Set<string>());
   const previousActiveRef = useRef<string | null>(null);
+  const previousConnectionReadyRef = useRef(connectionReady);
 
-  const hydrate = useCallback((sessionId: string, executor: Executor) => {
-    if (historyIsHydrated(historyRef.current[sessionId]) || loadingRef.current.has(sessionId)) return;
+  const loadFirstPage = useCallback((
+    sessionId: string,
+    executor: Executor,
+    operation: 'initial' | 'refresh',
+  ) => {
+    const existing = historyRef.current[sessionId];
+    if (loadingRef.current.has(sessionId)
+      || (operation === 'initial' && historyIsHydrated(existing))) return;
     loadingRef.current.add(sessionId);
+    setHistoryBySession(previous => {
+      const current = previous[sessionId] ?? unloadedHistoryState();
+      return {
+        ...previous,
+        [sessionId]: { ...current, loading: true, error: null },
+      };
+    });
     void loadEvents(sessionId).then(page => {
       const items = page.events.reduce<TranscriptItem[]>(
         (current, event) => applyEnvelope(current, event, executor),
         [],
       );
-      const plan = page.events.reduce<PlanLifecycleState>(
-        (current, event) => applyPlanLifecycle(current, event),
-        { completed: false },
-      );
-      setItemsBySession(previous => ({
-        ...previous,
-        [sessionId]: mergeHydratedItems(items, previous[sessionId] ?? []),
-      }));
-      if (plan.text !== undefined) {
-        setPlanStateBySession(previous => ({ ...previous, [sessionId]: plan }));
+      if (operation === 'initial') {
+        const plan = page.events.reduce<PlanLifecycleState>(
+          (current, event) => applyPlanLifecycle(current, event),
+          { completed: false },
+        );
+        setItemsBySession(previous => ({
+          ...previous,
+          [sessionId]: mergeHydratedItems(items, previous[sessionId] ?? []),
+        }));
+        if (plan.text !== undefined) {
+          setPlanStateBySession(previous => ({ ...previous, [sessionId]: plan }));
+        }
+      } else {
+        setItemsBySession(previous => ({
+          ...previous,
+          [sessionId]: mergeLatestItems(previous[sessionId] ?? [], items),
+        }));
       }
       setHistoryBySession(previous => ({
         ...previous,
-        [sessionId]: {
-          phase: page.hasMore ? 'page' : 'complete',
-          hasMore: page.hasMore,
-          loadingOlder: false,
-          cursor: page.nextCursor,
-        },
+        [sessionId]: operation === 'initial'
+          ? {
+              phase: page.hasMore ? 'page' : 'complete',
+              hasMore: page.hasMore,
+              loading: false,
+              loadingOlder: false,
+              cursor: page.nextCursor,
+              error: null,
+            }
+          : {
+              ...(previous[sessionId] ?? unloadedHistoryState()),
+              loading: false,
+              error: null,
+            },
       }));
+    }).catch(error => {
+      setHistoryBySession(previous => {
+        const current = previous[sessionId] ?? unloadedHistoryState();
+        return {
+          ...previous,
+          [sessionId]: {
+            ...current,
+            loading: false,
+            error: structuredHistoryError(error, operation),
+          },
+        };
+      });
     }).finally(() => {
       loadingRef.current.delete(sessionId);
     });
@@ -83,7 +169,7 @@ export function useTranscriptHydration({
     loadingRef.current.add(sessionId);
     setHistoryBySession(previous => ({
       ...previous,
-      [sessionId]: { ...previous[sessionId]!, loadingOlder: true },
+      [sessionId]: { ...previous[sessionId]!, loadingOlder: true, error: null },
     }));
     void loadEvents(sessionId, state.cursor).then(page => {
       const olderItems = page.events.reduce<TranscriptItem[]>(
@@ -99,10 +185,25 @@ export function useTranscriptHydration({
         [sessionId]: {
           phase: page.hasMore ? 'page' : 'complete',
           hasMore: page.hasMore,
+          loading: false,
           loadingOlder: false,
           cursor: page.nextCursor,
+          error: null,
         },
       }));
+    }).catch(error => {
+      setHistoryBySession(previous => {
+        const current = previous[sessionId];
+        if (!current) return previous;
+        return {
+          ...previous,
+          [sessionId]: {
+            ...current,
+            loadingOlder: false,
+            error: structuredHistoryError(error, 'older'),
+          },
+        };
+      });
     }).finally(() => {
       loadingRef.current.delete(sessionId);
       setHistoryBySession(previous => {
@@ -114,16 +215,26 @@ export function useTranscriptHydration({
     });
   }, [setItemsBySession]);
 
+  const retry = useCallback((sessionId: string, executor: Executor) => {
+    const state = historyRef.current[sessionId];
+    if (!state?.error || loadingRef.current.has(sessionId)) return;
+    if (state.error.operation === 'older') {
+      loadOlder(sessionId, executor);
+      return;
+    }
+    loadFirstPage(sessionId, executor, state.error.operation);
+  }, [loadFirstPage, loadOlder]);
+
   const markLive = useCallback((sessionId: string) => {
     setHistoryBySession(previous => {
-      const current = previous[sessionId];
-      if (historyIsHydrated(current) || current?.phase === 'live') return previous;
+      const state = previous[sessionId];
+      if (historyIsHydrated(state) || state?.phase === 'live') return previous;
       return {
         ...previous,
         [sessionId]: {
+          ...(state ?? unloadedHistoryState()),
           phase: 'live',
           hasMore: false,
-          loadingOlder: false,
           cursor: null,
         },
       };
@@ -133,27 +244,27 @@ export function useTranscriptHydration({
   useEffect(() => {
     const previousActive = previousActiveRef.current;
     previousActiveRef.current = activeSessionId;
+    const wasConnectionReady = previousConnectionReadyRef.current;
+    previousConnectionReadyRef.current = connectionReady;
     if (!activeSessionId) return;
+    const reconnected = connectionReady && !wasConnectionReady;
     const executor = sessions.find(session => session.id === activeSessionId)?.executor ?? 'claude';
-    if (!historyIsHydrated(historyBySession[activeSessionId])) {
-      hydrate(activeSessionId, executor);
+    const history = historyBySession[activeSessionId];
+    const reentered = previousActive !== activeSessionId;
+    if (history?.error && (reconnected || reentered)) {
+      retry(activeSessionId, executor);
       return;
     }
-    if (previousActive === activeSessionId || loadingRef.current.has(activeSessionId)) return;
-    loadingRef.current.add(activeSessionId);
-    void loadEvents(activeSessionId).then(page => {
-      const latest = page.events.reduce<TranscriptItem[]>(
-        (current, event) => applyEnvelope(current, event, executor),
-        [],
-      );
-      setItemsBySession(previous => ({
-        ...previous,
-        [activeSessionId]: mergeLatestItems(previous[activeSessionId] ?? [], latest),
-      }));
-    }).finally(() => loadingRef.current.delete(activeSessionId));
-  }, [activeSessionId, historyBySession, hydrate, sessions, setItemsBySession]);
+    if (!historyIsHydrated(history)) {
+      if (history?.loading || history?.error) return;
+      loadFirstPage(activeSessionId, executor, 'initial');
+      return;
+    }
+    if (!reentered || history?.loading) return;
+    loadFirstPage(activeSessionId, executor, 'refresh');
+  }, [activeSessionId, connectionReady, historyBySession, loadFirstPage, retry, sessions]);
 
-  return { historyBySession, loadOlder, markLive };
+  return { historyBySession, loadOlder, retry, markLive };
 }
 
 function transcriptKey(item: TranscriptItem): string {

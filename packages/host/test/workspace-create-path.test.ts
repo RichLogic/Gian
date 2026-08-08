@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -20,7 +20,7 @@ test('ONBOARD-001 creates a new repository directly under the project root', asy
     const body = await response.json() as { workspace?: Workspace; error?: string };
 
     assert.equal(response.status, 200, body.error);
-    assert.equal(body.workspace?.path, join(projectRoot, 'demo'));
+    assert.equal(body.workspace?.path, join(await realpath(projectRoot), 'demo'));
     await access(join(projectRoot, 'demo', '.git'));
     await assert.rejects(access(join(projectRoot, 'workspaces')));
   } finally {

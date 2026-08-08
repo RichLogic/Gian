@@ -55,6 +55,8 @@ describe('provider-native event → page display contract', () => {
     expect(applyPlanLifecycle({ completed: false }, env)).toEqual({
       text: '- [ ] inspect',
       completed: false,
+      status: 'active',
+      turn: 1,
     });
   });
 

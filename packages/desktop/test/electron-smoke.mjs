@@ -9,6 +9,7 @@ import { _electron as electron } from 'playwright';
 
 const require = createRequire(import.meta.url);
 const electronPath = process.env.GIAN_DESKTOP_SMOKE_EXECUTABLE || require('electron');
+const desktopVersion = require('../package.json').version;
 const packagedSmoke = Boolean(process.env.GIAN_DESKTOP_SMOKE_EXECUTABLE);
 const packageDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const smokeUserData = await mkdtemp(join(tmpdir(), 'gian-desktop-smoke-'));
@@ -32,11 +33,49 @@ async function listen(handler) {
   };
 }
 
-let hostHealthy = false;
+async function waitForBrowserState(window, tabId, predicate, timeout = 15_000) {
+  const deadline = Date.now() + timeout;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    lastState = await window.evaluate(id => window.gianDesktop?.browser?.getState(id), tabId);
+    if (lastState && predicate(lastState)) return lastState;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for Browser tab ${tabId}: ${JSON.stringify(lastState)}`);
+}
+
+let hostVersion = '0.0.0-mismatch';
 const host = await listen((request, response) => {
-  if (request.url === '/health') {
+  const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+  if (url.pathname === '/health') {
     response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ ok: hostHealthy }));
+    response.end(JSON.stringify({ ok: true, version: hostVersion }));
+    return;
+  }
+  if (url.pathname.startsWith('/api/working_trees/') && url.pathname.endsWith('/raw')) {
+    const path = url.searchParams.get('path');
+    const resources = {
+      'site/index.html': {
+        type: 'text/html; charset=utf-8',
+        body: '<!doctype html><html><head><link rel="stylesheet" href="./style.css"><script type="module" src="./app.js"></script></head><body><main id="browser-smoke">loading</main></body></html>',
+      },
+      'site/style.css': { type: 'text/css; charset=utf-8', body: 'body { background: rgb(12, 34, 56); }' },
+      'site/app.js': {
+        type: 'text/javascript; charset=utf-8',
+        body: "const data = await fetch('./data.json').then(r => r.json()); const previous = localStorage.getItem('browser-smoke'); document.querySelector('#browser-smoke').textContent = data.marker; document.title = `Browser Smoke ${previous ?? data.marker}`; localStorage.setItem('browser-smoke', 'Persisted');",
+      },
+      'site/data.json': { type: 'application/json; charset=utf-8', body: JSON.stringify({ marker: 'Ready' }) },
+    };
+    const resource = resources[path];
+    if (resource) {
+      response.writeHead(200, { 'content-type': resource.type });
+      response.end(resource.body);
+      return;
+    }
+  }
+  if (url.pathname === '/browser-http') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><title>Browser HTTP Ready</title><p>HTTP preview</p>');
     return;
   }
   response.writeHead(404);
@@ -106,7 +145,7 @@ try {
     fullPage: true,
   });
 
-  hostHealthy = true;
+  hostVersion = desktopVersion;
   await retry.click();
   await window.getByTestId('ready').waitFor();
   assert.equal(new URL(window.url()).origin, web.origin);
@@ -121,6 +160,18 @@ try {
   );
   assert.equal(
     await window.evaluate(() => typeof window.gianDesktop?.restartApp),
+    'function',
+  );
+  assert.equal(
+    await window.evaluate(() => typeof window.gianDesktop?.browser?.openProject),
+    'function',
+  );
+  assert.equal(
+    await window.evaluate(() => typeof window.gianDesktop?.zoom?.set),
+    'function',
+  );
+  assert.equal(
+    await window.evaluate(() => typeof window.gianDesktop?.zoom?.onChanged),
     'function',
   );
   assert.equal(
@@ -152,6 +203,100 @@ try {
   assert.ok(titlebarChrome.paddingLeft >= 82);
   assert.equal(titlebarChrome.topbarRegion, 'drag');
   assert.equal(titlebarChrome.actionRegion, 'no-drag');
+
+  const browserProjectState = await window.evaluate(async () => {
+    const browser = window.gianDesktop?.browser;
+    if (!browser) throw new Error('Browser bridge unavailable');
+    await browser.setLayout('browser-smoke-primary', { x: 100, y: 100, width: 640, height: 420 }, true);
+    return browser.openProject('browser-smoke-primary', { workingTreeId: 'ws:smoke', path: 'site/index.html' });
+  });
+  assert.match(browserProjectState.url, /^gian-browser:\/\/[a-f0-9]+\/index\.html$/);
+  const loadedProjectState = await waitForBrowserState(
+    window,
+    'browser-smoke-primary',
+    state => state.title === 'Browser Smoke Ready',
+  );
+  assert.equal(loadedProjectState.title, 'Browser Smoke Ready');
+  assert.equal(loadedProjectState.canOpenExternal, true);
+
+  await window.evaluate(() => window.gianDesktop.browser.reload('browser-smoke-primary'));
+  await waitForBrowserState(
+    window,
+    'browser-smoke-primary',
+    state => state.title === 'Browser Smoke Persisted',
+  );
+
+  await window.evaluate(url => window.gianDesktop.browser.navigate('browser-smoke-primary', url), `${host.origin}/browser-http`);
+  await waitForBrowserState(
+    window,
+    'browser-smoke-primary',
+    state => state.title === 'Browser HTTP Ready'
+      && state.url === `${host.origin}/browser-http`
+      && !state.loading,
+  );
+  const httpState = await window.evaluate(() => window.gianDesktop.browser.getState('browser-smoke-primary'));
+  assert.equal(httpState.url, `${host.origin}/browser-http`);
+  assert.equal(httpState.canGoBack, true);
+
+  await window.evaluate(() => window.gianDesktop.browser.goBack('browser-smoke-primary'));
+  await waitForBrowserState(
+    window,
+    'browser-smoke-primary',
+    state => state.title === 'Browser Smoke Persisted'
+      && state.url.startsWith('gian-browser://')
+      && !state.loading,
+  );
+
+  await window.evaluate(async url => {
+    const browser = window.gianDesktop.browser;
+    await browser.setLayout('browser-smoke-primary', { x: 100, y: 100, width: 640, height: 420 }, false);
+    await browser.setLayout('browser-smoke-secondary', { x: 100, y: 100, width: 640, height: 420 }, true);
+    await browser.navigate('browser-smoke-secondary', url);
+  }, `${host.origin}/browser-http`);
+  await waitForBrowserState(
+    window,
+    'browser-smoke-secondary',
+    state => state.title === 'Browser HTTP Ready'
+      && state.url === `${host.origin}/browser-http`
+      && !state.loading,
+  );
+  const independentTabs = await window.evaluate(async () => Promise.all([
+    window.gianDesktop.browser.getState('browser-smoke-primary'),
+    window.gianDesktop.browser.getState('browser-smoke-secondary'),
+  ]));
+  assert.equal(independentTabs[0].title, 'Browser Smoke Persisted');
+  assert.match(independentTabs[0].url, /^gian-browser:\/\//);
+  assert.equal(independentTabs[1].title, 'Browser HTTP Ready');
+  assert.equal(independentTabs[1].url, `${host.origin}/browser-http`);
+  assert.equal(await window.evaluate(() => window.gianDesktop.browser.closeTab('browser-smoke-secondary')), true);
+  assert.equal(
+    (await window.evaluate(() => window.gianDesktop.browser.getState('browser-smoke-secondary'))).url,
+    '',
+  );
+  await window.evaluate(() => window.gianDesktop.browser.setLayout(
+    'browser-smoke-primary',
+    { x: 100, y: 100, width: 640, height: 420 },
+    true,
+  ));
+
+  assert.equal(await window.evaluate(() => window.gianDesktop.browser.clearData()), true);
+  const clearedBrowserState = await window.evaluate(() => window.gianDesktop.browser.getState('browser-smoke-primary'));
+  assert.equal(clearedBrowserState.url, '');
+  assert.equal(clearedBrowserState.canGoBack, false);
+  await window.evaluate(() => window.gianDesktop.browser.openProject('browser-smoke-primary', {
+    workingTreeId: 'ws:smoke',
+    path: 'site/index.html',
+  }));
+  await waitForBrowserState(
+    window,
+    'browser-smoke-primary',
+    state => state.title === 'Browser Smoke Ready',
+  );
+  await window.evaluate(() => window.gianDesktop.browser.setLayout(
+    'browser-smoke-primary',
+    { x: 100, y: 100, width: 640, height: 420 },
+    false,
+  ));
 
   await window.screenshot({
     path: join(screenshotDir, 'gian-desktop-smoke.png'),

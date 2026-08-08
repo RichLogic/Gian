@@ -1,6 +1,8 @@
+import { execFileSync } from 'node:child_process';
 import { chmod, copyFile, mkdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertPortableMacNodeRuntime } from './desktop-runtime-portability.mjs';
 
 if (process.platform !== 'darwin' || process.arch !== 'arm64') {
   throw new Error('Gian v0.1 desktop runtime must be prepared on macOS arm64.');
@@ -8,6 +10,11 @@ if (process.platform !== 'darwin' || process.arch !== 'arm64') {
 if (process.versions.node.split('.')[0] !== '22') {
   throw new Error(`Gian desktop runtime requires Node 22, received ${process.version}.`);
 }
+
+const linkedLibraries = execFileSync('/usr/bin/otool', ['-L', process.execPath], {
+  encoding: 'utf8',
+});
+assertPortableMacNodeRuntime(linkedLibraries);
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const runtimeDir = join(root, 'packages', 'desktop', 'runtime');

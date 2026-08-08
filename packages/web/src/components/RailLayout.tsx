@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react';
 
+export interface RailLayoutController {
+  width: number;
+  collapsed: boolean;
+  setCollapsed: (next: boolean) => void;
+  onMouseDown: (e: React.MouseEvent) => void;
+}
+
 /**
  * Drag-to-resize a horizontal pane width, persisted to localStorage.
  *
@@ -82,6 +89,7 @@ export function RailSplitter({
       role="separator"
       aria-orientation="vertical"
       aria-label={ariaLabel}
+      data-panel-seam="sidebar-main"
     />
   );
 }

@@ -102,6 +102,11 @@ export function defaultEffort(model: ProxyModel | undefined): ThinkingEffort | n
 const slashCache = new Map<string, SlashCommand[]>();
 const slashPromises = new Map<string, Promise<SlashCommand[]>>();
 
+/** Emitted after a workspace-scoped command cache is invalidated. Mounted
+ *  composers for that workspace refresh immediately instead of waiting for a
+ *  session remount. */
+export const SLASH_CACHE_INVALIDATED_EVENT = 'gian:slash-cache-invalidated';
+
 function slashCacheKey(executor: 'claude' | 'codex', workspaceId: string | undefined): string {
   return `${executor}:${workspaceId ?? '_'}`;
 }
@@ -113,20 +118,47 @@ export function getSlashCached(
   return slashCache.get(slashCacheKey(executor, workspaceId));
 }
 
+/** Drop both executor entries for a workspace. Project commands/skills can
+ *  change after the Host reports a branch/fetch/merge update, while the user
+ *  and builtin entries are cheap enough to rediscover with them. */
+export function invalidateSlashCacheForWorkspace(workspaceId: string): void {
+  for (const executor of ['claude', 'codex'] as const) {
+    const key = slashCacheKey(executor, workspaceId);
+    slashCache.delete(key);
+    // Do not let an older request repopulate the invalidated key. The request
+    // may still resolve for its original caller, but a subsequent fetch starts
+    // a fresh discovery and owns the cache write.
+    slashPromises.delete(key);
+  }
+}
+
+/** Test/session teardown helper; production invalidation is workspace-scoped
+ *  through `invalidateSlashCacheForWorkspace`. */
+export function clearSlashCache(): void {
+  slashCache.clear();
+  slashPromises.clear();
+}
+
 export function fetchSlashCached(executor: 'claude' | 'codex', workspaceId?: string): Promise<SlashCommand[]> {
   const key = slashCacheKey(executor, workspaceId);
   const hit = slashCache.get(key);
   if (hit) return Promise.resolve(hit);
   const inflight = slashPromises.get(key);
   if (inflight) return inflight;
-  const request = loadSlashCommands(executor, workspaceId)
+  let request: Promise<SlashCommand[]>;
+  request = loadSlashCommands(executor, workspaceId)
     .then(commands => {
-      slashCache.set(key, commands);
-      slashPromises.delete(key);
+      // Cache only if this is still the request registered for the key. A
+      // workspace invalidation can deliberately detach an older in-flight
+      // request before it resolves.
+      if (slashPromises.get(key) === request) {
+        slashCache.set(key, commands);
+        slashPromises.delete(key);
+      }
       return commands;
     })
     .catch(error => {
-      slashPromises.delete(key);
+      if (slashPromises.get(key) === request) slashPromises.delete(key);
       throw error;
     });
   slashPromises.set(key, request);

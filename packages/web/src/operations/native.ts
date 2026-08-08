@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — Native-session-domain definitions (Phase 3b of
- * `docs/proposals/ui-operation-layer.md`): adopt an executor-owned native
+ * `docs/archive/proposals/ui-operation-layer.md`): adopt an executor-owned native
  * session as a Gian session, and delete a native session's underlying file.
  * Both PENDING REST (inventory: `native.adopt`, `native.delete`).
  *

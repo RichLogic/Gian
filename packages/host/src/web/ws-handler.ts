@@ -80,7 +80,6 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
   return {
     onOpen(_evt: Event, ws: WSContext) {
       states.set(ws, { authed: false, clientId: randomUUID() });
-      broadcaster.add(ws);
     },
 
     onClose(_evt: WsCloseEvent, ws: WSContext) {
@@ -117,9 +116,11 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
             return;
           }
           state.authed = true;
+          broadcaster.add(ws);
           broadcaster.send(ws, { type: 'auth_ok', user: username });
         } else {
           state.authed = true;
+          broadcaster.add(ws);
           broadcaster.send(ws, { type: 'auth_ok', user: 'dev' });
         }
         // Send authoritative state immediately after auth so the client can
@@ -263,6 +264,7 @@ async function dispatch(
       broadcaster.send(ws, {
         type: 'session:created',
         session,
+        origin: 'interactive-create',
       });
       return;
     }
@@ -397,6 +399,8 @@ async function dispatch(
         term_id: msg.term_id,
         chunks: result.replay,
         alive: result.alive,
+        code: null,
+        signal: null,
       });
       return;
     }
@@ -418,6 +422,8 @@ async function dispatch(
         term_id: msg.term_id,
         chunks: result.chunks,
         alive: result.alive,
+        code: result.code,
+        signal: result.signal,
       });
       return;
     }

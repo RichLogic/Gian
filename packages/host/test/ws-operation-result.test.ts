@@ -1,4 +1,4 @@
-// Coverage for UI Operation Layer Phase 1 (docs/proposals/ui-operation-layer.md
+// Coverage for UI Operation Layer Phase 1 (docs/archive/proposals/ui-operation-layer.md
 // §4.4): mutating client commands that carry a `request_id` receive exactly
 // one `operation:result` on the originating socket, after the canonical
 // broadcast; failures additionally annotate the `error` envelope with

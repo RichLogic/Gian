@@ -6,8 +6,9 @@ export interface TurnDiff {
 }
 
 /**
- * Aggregate the file changes of the most recent turn that produced any —
- * the data behind the underbar "Last turn" diff chip.
+ * Aggregate the file changes of the transcript's current/latest turn.
+ * Starting a newer turn therefore clears the previous chip immediately; a
+ * new chip appears only after that newer turn produces its first diff.
  *
  * Multiple diff items per turn merge by path, LAST ONE WINS. Codex re-emits
  * the turn-cumulative unified diff on every `diff.updated`, so the last
@@ -16,9 +17,12 @@ export interface TurnDiff {
  * still surfaces every touched file.
  */
 export function projectTurnDiff(items: TranscriptItem[]): TurnDiff | null {
+  // Optimistic user echoes use turn=0 until the canonical user_message
+  // arrives. They still mark the next turn boundary immediately in the UI.
+  if (items.some(item => item.kind === 'user' && item.pending === true)) return null;
   let turn = 0;
   for (const it of items) {
-    if (it.kind === 'diff' && it.turn > turn) turn = it.turn;
+    if (it.turn > turn) turn = it.turn;
   }
   if (!turn) return null;
   const byPath = new Map<string, DiffFile>();
@@ -26,5 +30,6 @@ export function projectTurnDiff(items: TranscriptItem[]): TurnDiff | null {
     if (it.kind !== 'diff' || it.turn !== turn) continue;
     for (const f of it.files) byPath.set(f.path, f);
   }
-  return { turn, files: [...byPath.values()] };
+  const files = [...byPath.values()];
+  return files.length > 0 ? { turn, files } : null;
 }

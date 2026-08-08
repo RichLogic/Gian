@@ -20,6 +20,7 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
 
   useEffect(() => {
     if (!containerRef.current) return;
+    const container = containerRef.current;
 
     // Stay in step with the rest of the app's mono surfaces — same
     // JetBrains Mono stack as `--font-mono`, slightly smaller than
@@ -29,25 +30,18 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
     const term = new Xterm({
       cursorBlink: true,
       fontFamily: '"JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace',
-      fontSize: 12.5,
+      fontSize: readCodeFontSizeFromCss(container) ?? 12.5,
       lineHeight: 1.25,
       letterSpacing: 0,
-      theme: readThemeFromCss(containerRef.current),
+      theme: readThemeFromCss(container),
       allowProposedApi: true,
     });
     const fit = new FitAddon();
     const links = new WebLinksAddon();
     term.loadAddon(fit);
     term.loadAddon(links);
-    term.open(containerRef.current);
+    term.open(container);
     try { fit.fit(); } catch { /* before layout settles */ }
-
-    // Apply current code-zone scale once at startup (config-driven).
-    const initialRaw = getComputedStyle(document.body).getPropertyValue('--fz-13').trim();
-    const initialPx = parseFloat(initialRaw);
-    if (initialPx > 0 && Number.isFinite(initialPx)) {
-      term.options.fontSize = initialPx;
-    }
 
     // Re-paint when the user flips the app theme (light / warm / dark)
     // or accent. Cheap — xterm exposes `options.theme` as a settable
@@ -63,9 +57,8 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
     // JS-driven fontSize. Read the resolved --fz-13 px value and apply
     // it, then refit so the cell grid matches the new metric.
     const applyCodeScale = () => {
-      const raw = getComputedStyle(document.body).getPropertyValue('--fz-13').trim();
-      const px = parseFloat(raw);
-      if (px > 0 && Number.isFinite(px)) {
+      const px = readCodeFontSizeFromCss(container);
+      if (px !== null) {
         term.options.fontSize = px;
         pushResize();
       }
@@ -108,7 +101,7 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
     };
 
     const resizeObserver = new ResizeObserver(() => { pushResize(); });
-    resizeObserver.observe(containerRef.current);
+    resizeObserver.observe(container);
 
     // Listener first, then spawn (if applicable), then replay request —
     // ordering matters: replay-request response races with the first
@@ -116,13 +109,13 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
     // attached before either arrives.
     const off = wire.subscribe({
       onChunk: bytes => term.write(bytes),
-      onReplay: chunks => {
+      onReplay: (chunks, state) => {
         term.reset();
         for (const c of chunks) term.write(c);
+        if (!state.alive) writeExitStatus(term, state.code, state.signal);
       },
       onExit: (exitCode, signal) => {
-        const detail = signal ? `signal ${signal}` : `exit ${exitCode ?? 'unknown'}`;
-        term.write(`\r\n[terminal ${detail}]\r\n`);
+        writeExitStatus(term, exitCode, signal);
       },
     });
 
@@ -164,9 +157,32 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
   return <div className="gian-terminal" ref={containerRef} />;
 }
 
+function writeExitStatus(term: Xterm, exitCode: number | null, signal: string | null): void {
+  const detail = signal ? `signal ${signal}` : `exit ${exitCode ?? 'unknown'}`;
+  term.write(`\r\n[terminal ${detail}]\r\n`);
+}
+
 // ---------------------------------------------------------------------------
 // Theme bridge
 // ---------------------------------------------------------------------------
+
+/** Resolve the code-zone font token to a concrete pixel value for xterm. */
+function readCodeFontSizeFromCss(host: HTMLElement): number | null {
+  // CSS custom properties retain their calc() expression when read directly.
+  // A probe using the token as an actual font-size asks the browser to resolve
+  // the host's code-zone --zone-scale into the px value xterm requires.
+  const probe = document.createElement('span');
+  probe.style.cssText = [
+    'position:absolute',
+    'visibility:hidden',
+    'pointer-events:none',
+    'font-size:var(--fz-13)',
+  ].join(';');
+  host.appendChild(probe);
+  const px = parseFloat(getComputedStyle(probe).fontSize);
+  host.removeChild(probe);
+  return px > 0 && Number.isFinite(px) ? px : null;
+}
 
 /**
  * Resolve an xterm theme from the active CSS theme tokens.

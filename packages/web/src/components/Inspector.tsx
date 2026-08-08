@@ -54,7 +54,12 @@ interface Props {
   /** Changes tab: force a scope from outside (the GitBadge lands on All
    *  changes because that's the scope whose numbers it reports). requestId
    *  re-triggers the apply even when the scope value didn't change. */
-  scopeRequest?: { scope: ChangeScope; requestId: number } | null;
+  scopeRequest?: {
+    scope: ChangeScope;
+    requestId: number;
+    sessionId?: string;
+    turn?: number;
+  } | null;
   /** Active session — forwarded to the host on the Last-turn scope, whose
    *  `ws:`/`ext:` trees don't carry a session of their own. */
   activeSessionId?: string | null;
@@ -504,7 +509,12 @@ function ChangesInspector({
   onComposePrompt,
 }: {
   workingTreeId: string | null;
-  scopeRequest?: { scope: ChangeScope; requestId: number } | null;
+  scopeRequest?: {
+    scope: ChangeScope;
+    requestId: number;
+    sessionId?: string;
+    turn?: number;
+  } | null;
   activeSessionId?: string | null;
   onOpenDiff: (path: string, permanent: boolean, scope: ChangeScope, sha?: string | null, base?: string | null) => void;
   canCommit: boolean;
@@ -539,6 +549,10 @@ function ChangesInspector({
     : null;
   const [menuOpen, setMenuOpen] = useState(false);
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
+  const [lastTurnTarget, setLastTurnTarget] = useState<{
+    sessionId: string;
+    turn: number;
+  } | null>(null);
   // Second-row pickers (Codex's two-row Review UI — no nested dropdowns):
   // the Committed row pins a commit (null = HEAD's delta, the legacy `commit`
   // behavior); the Branch row pins a compare base (null = auto-detected).
@@ -556,11 +570,22 @@ function ChangesInspector({
       return;
     }
     let cancelled = false;
-    void loadChanged(workingTreeId, scope, commitSha, baseBranch, activeSessionId).then(list => {
+    const targetSession = scope === 'lastturn'
+      ? lastTurnTarget?.sessionId ?? activeSessionId
+      : activeSessionId;
+    const targetTurn = scope === 'lastturn' ? lastTurnTarget?.turn : undefined;
+    void loadChanged(
+      workingTreeId,
+      scope,
+      commitSha,
+      baseBranch,
+      targetSession,
+      targetTurn,
+    ).then(list => {
       if (!cancelled) setChanges(list);
     });
     return () => { cancelled = true; };
-  }, [workingTreeId, scope, commitSha, baseBranch, reloadKey, activeSessionId]);
+  }, [workingTreeId, scope, commitSha, baseBranch, reloadKey, activeSessionId, lastTurnTarget]);
 
   useEffect(() => {
     setCommits([]);
@@ -596,6 +621,7 @@ function ChangesInspector({
 
   function pickScope(next: ChangeScope) {
     setScope(next);
+    setLastTurnTarget(null);
     if (next !== 'commit') setCommitSha(null);
     try { localStorage.setItem('gian.changes.scope', next); } catch { /* storage disabled */ }
   }
@@ -606,6 +632,14 @@ function ChangesInspector({
   useEffect(() => {
     if (scopeRequestId == null || !scopeRequest) return;
     pickScope(scopeRequest.scope);
+    if (scopeRequest.scope === 'lastturn'
+        && scopeRequest.sessionId
+        && scopeRequest.turn != null) {
+      setLastTurnTarget({
+        sessionId: scopeRequest.sessionId,
+        turn: scopeRequest.turn,
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeRequestId]);
 

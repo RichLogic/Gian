@@ -140,7 +140,7 @@ export class NativeSessionService {
     }
 
     const session = this.sessions.get(sessionId);
-    this.broadcaster.broadcast({ type: 'session:created', session });
+    this.broadcaster.broadcast({ type: 'session:created', session, origin: 'native-adopt' });
     return { session, replay };
   }
 }

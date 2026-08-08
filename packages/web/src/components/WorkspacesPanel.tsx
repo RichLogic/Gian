@@ -163,11 +163,13 @@ export function WorkspaceDetailBody({
   ws,
   systemConfig,
   onChange,
+  onSessionAdopted,
 }: {
   workspace: Workspace | null;
   ws: GianWs;
   systemConfig: SystemConfig | null;
   onChange: () => void;
+  onSessionAdopted: (session: Session) => void;
 }) {
   void systemConfig;
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -188,6 +190,7 @@ export function WorkspaceDetailBody({
         allSessions={sessions}
         ws={ws}
         onChange={onChange}
+        onSessionAdopted={onSessionAdopted}
         onDeleted={onChange}
         onOpenClaudeMd={() => setClaudeMdOpen(true)}
       />

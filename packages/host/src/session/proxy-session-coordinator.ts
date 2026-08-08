@@ -10,6 +10,7 @@ import type {
 import { locateNativeJsonl } from '../native/locate-jsonl.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import type { ProxyManager } from '../proxy/manager.js';
+import type { ProxyClient } from '../proxy/types.js';
 import type { Db } from '../storage/db.js';
 import type { SessionHistoryStore } from './history-store.js';
 import { executorConfigFromOptions, type SessionRepository } from './repository.js';
@@ -38,9 +39,15 @@ interface ProxySessionCallbacks {
   onSessionUpdated(sessionId: string, partial: Partial<Session>): void;
 }
 
+interface ProxySessionBindings {
+  offNotification: () => void;
+  offExit: () => void;
+}
+
 export class ProxySessionCoordinator {
   private sessionIds = new Map<string, string>();
   private bringUps = new Map<string, Promise<string>>();
+  private bindings = new Map<string, ProxySessionBindings>();
   private capabilitiesByExecutor = new Map<string, ProxyCapabilities>();
 
   constructor(
@@ -59,11 +66,12 @@ export class ProxySessionCoordinator {
   forget(sessionId: string): void {
     this.sessionIds.delete(sessionId);
     this.bringUps.delete(sessionId);
+    this.unbind(sessionId);
   }
 
   async dispose(sessionId: string): Promise<void> {
-    await this.proxy.dispose(sessionId).catch(() => undefined);
     this.forget(sessionId);
+    await this.proxy.dispose(sessionId).catch(() => undefined);
   }
 
   async ensure(session: Session): Promise<string> {
@@ -104,8 +112,10 @@ export class ProxySessionCoordinator {
 
   async bringUp(args: BringUpProxySessionInput): Promise<BringUpProxySessionResult> {
     const client = await this.proxy.getOrCreate(args.sessionId, args.executor);
-    client.onNotification(notification => this.callbacks.onNotification(args.sessionId, notification));
-    client.onExit(code => this.callbacks.onExit(args.sessionId, code));
+    // Replace any stale callbacks before the new facade starts initialization.
+    // Native create/adopt may emit notifications or exit before createSession
+    // resolves, so binding only at the end of bring-up would lose that state.
+    this.bind(args.sessionId, client);
     await client.initialize();
     const capabilities = await client.capabilities();
     this.capabilitiesByExecutor.set(args.executor, capabilities);
@@ -199,7 +209,13 @@ export class ProxySessionCoordinator {
       const filePath = locateNativeJsonl(args.executor, created.nativeSessionId, args.cwd);
       if (filePath) this.watcher.start(args.sessionId, filePath, args.executor);
     }
-    const displayName = args.displayName?.trim();
+    // Re-read the authoritative name after the potentially slow native
+    // create/adopt. A rename can land while createSession is in flight, when
+    // the facade exists but has not bound a native thread yet. Row absence is
+    // intentional during first creation, so only then fall back to args.
+    const persistedName = this.db.prepare('SELECT name FROM sessions WHERE id = ?')
+      .get(args.sessionId) as { name: string | null } | undefined;
+    const displayName = (persistedName ? persistedName.name : args.displayName)?.trim();
     if (args.executor === 'codex' && displayName && client.setName) {
       try {
         await client.setName(displayName);
@@ -213,6 +229,24 @@ export class ProxySessionCoordinator {
       configOptions,
       replayUpdates: created.replayUpdates ?? [],
     };
+  }
+
+  private bind(sessionId: string, client: ProxyClient): void {
+    this.unbind(sessionId);
+    this.bindings.set(sessionId, {
+      offNotification: client.onNotification(notification => (
+        this.callbacks.onNotification(sessionId, notification)
+      )),
+      offExit: client.onExit(code => this.callbacks.onExit(sessionId, code)),
+    });
+  }
+
+  private unbind(sessionId: string): void {
+    const binding = this.bindings.get(sessionId);
+    if (!binding) return;
+    this.bindings.delete(sessionId);
+    binding.offNotification();
+    binding.offExit();
   }
 
   getCapabilities(executor: string): ProxyCapabilities | null {

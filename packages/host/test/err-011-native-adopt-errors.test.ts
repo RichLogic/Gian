@@ -15,9 +15,15 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { randomUUID } from 'node:crypto';
+import type { ServerToClientMessage } from '@gian/shared';
+import { Hono } from 'hono';
 import { makeTestApp, type TestAppCtx } from './fixtures/test-app.js';
 import { makeNativeHome, type NativeHome } from './fixtures/native-home.js';
 import { clearNativeSessionsCache } from '../src/native/scanner.js';
+import type { SessionManager } from '../src/session/manager.js';
+import { SessionRepository } from '../src/session/repository.js';
+import { registerNativeSessionRoutes } from '../src/web/routes/native-sessions.js';
+import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 
 interface NativeTestCtx {
   appCtx: TestAppCtx;
@@ -197,6 +203,42 @@ test('ERR-011: adopt happy path returns the new gian session row when the native
     const body = await res.json() as { session: { native_session_id: string; name: string } };
     assert.equal(body.session.native_session_id, sid);
     assert.equal(body.session.name, 'Test adopted');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ERR-011: native adopt broadcast identifies its Host origin', async () => {
+  const ctx = await setup();
+  try {
+    const sid = ctx.home.addClaudeSession({
+      workspacePath: ctx.workspacePath,
+      sessionId: 'cc-origin-adoptable',
+    });
+    const messages: ServerToClientMessage[] = [];
+    const repository = new SessionRepository(ctx.appCtx.db);
+    const routeApp = new Hono();
+    registerNativeSessionRoutes(routeApp, {
+      db: ctx.appCtx.db,
+      sessions: {
+        getSession: (sessionId: string) => repository.get(sessionId),
+      } as unknown as SessionManager,
+      broadcaster: {
+        broadcast: (message: ServerToClientMessage) => messages.push(message),
+      } as unknown as WsBroadcaster,
+    });
+
+    const res = await routeApp.fetch(new Request(
+      `http://test.invalid/api/workspaces/${ctx.workspaceId}/native-sessions/adopt`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ executor: 'claude', native_session_id: sid }),
+      },
+    ));
+    assert.equal(res.status, 200);
+    const created = messages.find(message => message.type === 'session:created');
+    assert.equal(created?.origin, 'native-adopt');
   } finally {
     await ctx.cleanup();
   }

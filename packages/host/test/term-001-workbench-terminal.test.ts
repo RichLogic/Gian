@@ -168,13 +168,14 @@ test('TERM-001: PTY output broadcasts term:output with base64-encoded chunks', a
   assert.equal(Buffer.from(out!.data, 'base64').toString('utf8'), 'hello world\n');
 });
 
-test('TERM-001: exit broadcasts term:exited and marks the record exited', async () => {
+test('TERM-001: normal exit preserves code when node-pty reports signal=0', async () => {
   const ctx = setup();
   await ctx.mgr.spawn({ termId: 't1', cwd: '/tmp', cols: 80, rows: 24 });
   const pty = handleFor(ctx, 0);
   ctx.broadcaster.messages.length = 0;
 
-  pty.fireExit(137);
+  // Real node-pty uses numeric 0 (not null) for a normal, non-signal exit.
+  pty.fireExit(7, 0);
   await tick();
 
   const exited = ctx.broadcaster.messages.find(
@@ -182,12 +183,17 @@ test('TERM-001: exit broadcasts term:exited and marks the record exited', async 
   ) as { type: 'term:exited'; term_id: string; code: number | null; signal: string | null } | undefined;
   assert.ok(exited, 'exit must broadcast a term:exited message');
   assert.equal(exited!.term_id, 't1');
-  assert.equal(exited!.code, 137);
+  assert.equal(exited!.code, 7);
+  assert.equal(exited!.signal, null,
+    'node-pty signal=0 is the no-signal sentinel, not a real SIG#0');
 
   // After exit, the replay still works but reports alive=false.
   const replay = ctx.mgr.replay('t1');
   assert.equal(replay.alive, false,
     'replay() must report alive=false after the PTY exits');
+  assert.equal(replay.code, 7,
+    'replay() must retain the exit code for reconnecting xterm clients');
+  assert.equal(replay.signal, null);
 });
 
 test('TERM-001: spawn() with same termId kills the previous PTY (idempotent)', async () => {
@@ -280,7 +286,9 @@ test('TERM-001: replay() returns the ring buffer chunks for live reconnect', asy
 
 test('TERM-001: replay() for an unknown termId returns empty + alive=false', () => {
   const ctx = setup();
-  assert.deepEqual(ctx.mgr.replay('ghost'), { chunks: [], alive: false });
+  assert.deepEqual(ctx.mgr.replay('ghost'), {
+    chunks: [], alive: false, code: null, signal: null,
+  });
 });
 
 test('TERM-001: ring buffer caps memory — oldest chunks drop when ~1 MiB cap is exceeded', async () => {

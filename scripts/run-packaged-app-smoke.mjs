@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +20,8 @@ import { _electron as electron } from '@playwright/test';
 import { sanitizedTestEnv } from './run-tests.mjs';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+const requireFromHost = createRequire(join(rootDir, 'packages', 'host', 'package.json'));
+const Database = requireFromHost('better-sqlite3');
 const defaultAppPath = join(rootDir, 'packages', 'desktop', 'release', 'mac-arm64', 'Gian.app');
 
 async function reservePort() {
@@ -36,6 +50,12 @@ async function assertFile(path, executable = false) {
   }
 }
 
+async function writeFakeClaude(path, version) {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `#!/bin/sh\nprintf '%s\\n' 'claude ${version}'\n`);
+  await chmod(path, 0o700);
+}
+
 export async function validatePackagedApp(appPath) {
   const contents = join(appPath, 'Contents');
   const resources = join(contents, 'Resources');
@@ -49,6 +69,7 @@ export async function validatePackagedApp(appPath) {
     [join(resources, 'runtime', 'github-auth.json'), false],
     [join(resources, 'web', 'index.html'), false],
     [join(unpacked, 'node_modules', '@gian', 'host', 'dist', 'index.js'), false],
+    [join(unpacked, 'node_modules', '@gian', 'host', 'dist', 'cli', 'event-storage-v3.js'), false],
     [join(unpacked, 'node_modules', '@gian', 'host', 'migrations', '001_initial.sql'), false],
   ];
   for (const [path, executableFile] of required) {
@@ -65,7 +86,24 @@ export async function validatePackagedApp(appPath) {
     );
   }
 
-  return { executable, resources };
+  const bundledNode = join(resources, 'runtime', 'node');
+  const migrationCli = join(
+    unpacked,
+    'node_modules',
+    '@gian',
+    'host',
+    'dist',
+    'cli',
+    'event-storage-v3.js',
+  );
+  const help = spawnSync(bundledNode, [migrationCli, '--help'], {
+    encoding: 'utf8',
+    env: sanitizedTestEnv(process.env),
+  });
+  assert.equal(help.status, 0, `packaged migration CLI --help failed: ${help.stderr}`);
+  assert.match(help.stdout, /event-storage-v3 migrate/);
+
+  return { executable, resources, migrationCli };
 }
 
 export function createPackagedSmokeEnvironment(source, {
@@ -133,8 +171,12 @@ async function launchPackagedApp({ executable, env, hostLogPath, origin, screens
       await window.evaluate(() => typeof window.gianDesktop?.restartApp),
       'function',
     );
+    assert.equal(
+      await window.evaluate(() => typeof window.gianDesktop?.zoom?.set),
+      'function',
+    );
     await window.screenshot({ path: screenshotPath, fullPage: true });
-    return electronApp;
+    return { electronApp, window };
   } catch (error) {
     await window.screenshot({ path: screenshotPath, fullPage: true }).catch(() => undefined);
     const diagnostics = await window.evaluate(() => ({
@@ -164,12 +206,63 @@ async function launchPackagedApp({ executable, env, hostLogPath, origin, screens
   }
 }
 
+function seedPriorVersionFixture(databasePath) {
+  const db = new Database(databasePath);
+  try {
+    db.exec(`
+      INSERT INTO workspaces(id,name,path,sort_order,hidden,created_at,updated_at)
+      VALUES('migration-ws','Migration Fixture','/tmp/gian-migration-fixture',0,0,datetime('now'),datetime('now'));
+      INSERT INTO sessions(
+        id,name,type,workspace_id,executor,approval_mode,status,archived,unread,
+        native_session_id,created_at,updated_at
+      ) VALUES(
+        'migration-session','Migration Fixture','primary','migration-ws','kimi',
+        'default','done',0,0,'migration-native',datetime('now'),datetime('now')
+      );
+      INSERT INTO turns(id,session_id,turn_number,status,completed_at)
+      VALUES('migration-turn','migration-session',1,'completed',datetime('now'));
+    `);
+    const insert = db.prepare(`
+      INSERT INTO events(id,session_id,turn_id,call_id,type,data)
+      VALUES(?,?,?,?,?,?)
+    `);
+    db.transaction(() => {
+      for (let index = 0; index < 300; index++) {
+        insert.run(
+          `migration-event-${index}`,
+          'migration-session',
+          'migration-turn',
+          `legacy-call-${index}`,
+          'acp.sessionUpdate',
+          JSON.stringify({
+            __gian_event: 2,
+            provider: 'kimi',
+            raw: { update: { sessionUpdate: 'tool_call_update', toolCallId: 'fixture-tool', index } },
+            display: {
+              type: 'activity.tool',
+              data: { itemId: 'fixture-tool', title: 'Fixture', status: index === 299 ? 'success' : 'running' },
+            },
+          }),
+        );
+      }
+    })();
+  } finally {
+    db.close();
+  }
+}
+
+function runMigrationCli(nodePath, cliPath, args, env) {
+  const result = spawnSync(nodePath, [cliPath, ...args], { encoding: 'utf8', env });
+  assert.equal(result.status, 0, `packaged migration CLI failed: ${result.stderr}`);
+  return JSON.parse(result.stdout);
+}
+
 export async function main(args = process.argv.slice(2)) {
   if (args.length > 1) throw new Error('usage: node scripts/run-packaged-app-smoke.mjs [Gian.app]');
   if (process.platform !== 'darwin') throw new Error('packaged Gian smoke requires macOS');
 
   const appPath = resolve(args[0] ?? process.env.GIAN_PACKAGED_APP_PATH ?? defaultAppPath);
-  const { executable } = await validatePackagedApp(appPath);
+  const { executable, resources, migrationCli } = await validatePackagedApp(appPath);
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'gian-packaged-smoke-'));
   const dataDir = join(temporaryRoot, 'data');
   const homeDir = join(temporaryRoot, 'home');
@@ -191,28 +284,94 @@ export async function main(args = process.argv.slice(2)) {
     hostPort,
     userDataDir,
   });
+  const fakeClaude = join(temporaryRoot, 'bin', 'claude');
+  await writeFakeClaude(fakeClaude, '9.8.7');
 
   try {
-    electronApp = await launchPackagedApp({
+    const firstLaunch = await launchPackagedApp({
       executable,
       env,
       hostLogPath: join(dataDir, 'logs', 'desktop-host.log'),
       origin,
       screenshotPath: join(screenshotDir, 'gian-packaged-first-run.png'),
     });
+    electronApp = firstLaunch.electronApp;
     await assertFile(join(dataDir, 'gian.db'));
     await assertFile(join(dataDir, 'logs', 'desktop-host.log'));
+    const configured = await firstLaunch.window.evaluate(async path => {
+      const response = await fetch('/api/agents/claude/cli-path', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      if (!response.ok) throw new Error(`CLI Path update failed: ${response.status}`);
+      return await response.json();
+    }, fakeClaude);
+    assert.equal(configured.agent.cli.path, fakeClaude);
+    assert.equal(configured.agent.cli.version, '9.8.7');
+    assert.equal(configured.agent.cli.source, 'override');
     await electronApp.close();
     electronApp = undefined;
     await waitForHostExit(origin);
+    // A different version at the persisted path proves the reopened packaged
+    // shell started a cold Host and resolved a fresh runtime generation.
+    await writeFakeClaude(fakeClaude, '9.8.8');
 
-    electronApp = await launchPackagedApp({
+    const databasePath = join(dataDir, 'gian.db');
+    seedPriorVersionFixture(databasePath);
+    const migrationReportPath = join(dataDir, 'event-v3-inspect.json');
+    const migrationBackupDirectory = join(dataDir, 'migrations');
+    await mkdir(migrationBackupDirectory, { recursive: true });
+    const bundledNode = join(resources, 'runtime', 'node');
+    const inspection = runMigrationCli(
+      bundledNode,
+      migrationCli,
+      ['inspect', '--db', databasePath, '--report', migrationReportPath],
+      env,
+    );
+    assert.equal(inspection.events, 300);
+    const migration = runMigrationCli(
+      bundledNode,
+      migrationCli,
+      [
+        'migrate',
+        '--db',
+        databasePath,
+        '--backup-dir',
+        migrationBackupDirectory,
+        '--confirm',
+        inspection.confirmationToken,
+      ],
+      env,
+    );
+    assert.equal(migration.state, 'active');
+    const migrated = new Database(databasePath, { readonly: true, fileMustExist: true });
+    try {
+      assert.equal(
+        migrated.prepare(`SELECT state FROM event_storage_meta WHERE singleton = 1`).pluck().get(),
+        'active',
+      );
+      assert.equal(migrated.prepare('SELECT COUNT(*) FROM events').pluck().get(), 1);
+    } finally {
+      migrated.close();
+    }
+
+    const secondLaunch = await launchPackagedApp({
       executable,
       env,
       hostLogPath: join(dataDir, 'logs', 'desktop-host.log'),
       origin,
       screenshotPath: join(screenshotDir, 'gian-packaged-reopen.png'),
     });
+    electronApp = secondLaunch.electronApp;
+    const relaunched = await secondLaunch.window.evaluate(async () => {
+      const response = await fetch('/api/agents/claude?refresh=1');
+      if (!response.ok) throw new Error(`Agent refresh failed: ${response.status}`);
+      return await response.json();
+    });
+    assert.equal(relaunched.cli.path, fakeClaude);
+    assert.equal(relaunched.cli.version, '9.8.8');
+    assert.equal(relaunched.cli.source, 'override');
     await electronApp.close();
     electronApp = undefined;
     await waitForHostExit(origin);

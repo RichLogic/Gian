@@ -13,7 +13,9 @@ import type { RailId, SheetGroup, SheetTab } from '../src/components/sheet-model
 const GROUP_OF_RAIL: Record<RailId, SheetGroup | null> = {
   files: 'files',
   diffs: 'diffs',
+  history: 'history',
   terminal: 'term',
+  browser: 'browser',
   workspaces: 'workspaces',
   settings: 'settings',
 };
@@ -59,5 +61,34 @@ describe('useWorkbenchLayout panel-3 gating', () => {
     expect(result.current.layout.inspectorVisible).toBe(false);
     expect(result.current.layout.inspectorAvailable).toBe(true);
     expect(result.current.layout.sheetVisible).toBe(true);
+  });
+
+  it('history rail: inspector maps to history and panel 2 stays visible with zero tabs', () => {
+    // The history rail's empty state is designed content (design/git-history
+    // §3.1): with no commit tabs open, panel 2 must stay mounted+visible
+    // instead of disappearing like the other rails' empty groups.
+    function useHistoryHarness() {
+      const [p3Collapsed, setP3Collapsed] = useState(false);
+      const layout = useWorkbenchLayout({
+        mode: 'sessions',
+        subtaskActive: false,
+        activeRail: 'history',
+        tabs: [],
+        activeTabByGroup: {},
+        viewState: 'both',
+        chatPanel: null,
+        filesInspectorSuppressed: false,
+        p3Collapsed,
+        setP3Collapsed,
+        groupOfRail: GROUP_OF_RAIL,
+      });
+      return layout;
+    }
+    const { result } = renderHook(() => useHistoryHarness());
+    expect(result.current.inspectorKind).toBe('history');
+    expect(result.current.inspectorAvailable).toBe(true);
+    expect(result.current.sheetMounted).toBe(true);
+    expect(result.current.sheetVisible).toBe(true);
+    expect(result.current.activeGroup).toBe('history');
   });
 });

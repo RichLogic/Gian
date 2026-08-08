@@ -17,7 +17,13 @@ function errorResponse(error: unknown): { error: string } {
 
 export function registerOnboardingRoutes(
   app: Hono,
-  options: { db: Db; agents: AgentManager },
+  options: {
+    db: Db;
+    agents: AgentManager;
+    /** Test seam for proving the completion route triggers the same managed
+     * instruction sync used at host startup without writing into real homes. */
+    syncAgentInstructions?: typeof syncAgentInstructionBlocks;
+  },
 ): void {
   app.get('/api/onboarding', async c => c.json(
     await buildOnboardingState(options.db, await options.agents.list()),
@@ -50,7 +56,9 @@ export function registerOnboardingRoutes(
       // block in every agent CLI's global instruction file. A failure here
       // must not fail onboarding.
       try {
-        await syncAgentInstructionBlocks(expandHome(config.projectRoot));
+        await (options.syncAgentInstructions ?? syncAgentInstructionBlocks)(
+          expandHome(config.projectRoot),
+        );
       } catch (error) {
         console.warn('[gian] agent instruction sync failed:', error);
       }

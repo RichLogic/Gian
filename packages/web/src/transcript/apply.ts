@@ -543,26 +543,85 @@ export function applyEnvelope(
     // echo holds only the bare text — compare against the stripped form too, or
     // the first message reconciles against nothing and renders twice.
     const strippedItemText = stripGianRolePrefix(stripManagerSystemPrefix(item.text));
-    for (let i = base.length - 1; i >= 0; i--) {
+    // The Host receives message:send frames in wire order and broadcasts each
+    // accepted canonical user_message before its correlated result. Match the
+    // oldest still-local compatible echo (FIFO), not the newest: two sends may
+    // have identical visible text but distinct run ids and outcomes.
+    let optimisticIndex = -1;
+    for (let i = 0; i < base.length; i++) {
       const cand = base[i]!;
       if (
         cand.kind === 'user' && cand.pending
+        && !cand.sendCanonical
         && (cand.text === item.text || cand.text === strippedItemText)
         && (cand.attachments?.length ?? 0) === attachments.length
       ) {
-        // Reconciled — release the optimistic blob URLs before we swap the
-        // server item in. Object URLs created via createObjectURL leak the
-        // underlying Blob until revoked. Wrapped because some unit tests
-        // run under jsdom where URL.revokeObjectURL is a no-op stub.
-        if (cand.attachments) {
-          for (const a of cand.attachments) {
-            try { URL.revokeObjectURL(a.url); } catch { /* noop in test envs */ }
-          }
-        }
-        const next = base.slice();
-        next[i] = { ...item };
-        return next;
+        optimisticIndex = i;
+        break;
       }
+    }
+
+    const optimistic = optimisticIndex >= 0 ? base[optimisticIndex] : undefined;
+    const releaseOptimisticAttachments = (candidate = optimistic) => {
+      if (candidate?.kind !== 'user' || !candidate.attachments) return;
+      // Object URLs created via createObjectURL retain their Blob until
+      // revoked. Wrapped for test/browser environments without this API.
+      for (const attachment of candidate.attachments) {
+        try { URL.revokeObjectURL(attachment.url); } catch { /* noop */ }
+      }
+    };
+
+    const retainCorrelatedSend = (candidate: MsgItem): MsgItem => {
+      if (candidate.kind !== 'user' || !candidate.sendRunId) return item;
+      const correlatedRetry = candidate.sendRetry
+        ? {
+            ...candidate.sendRetry,
+            ...(candidate.sendRetry.attachments
+              ? {
+                  attachments: candidate.sendRetry.attachments.map((attachment, index) => ({
+                    ...attachment,
+                    previewUrl: attachments[index]?.url ?? attachment.previewUrl,
+                  })),
+                }
+              : {}),
+          }
+        : undefined;
+      return {
+        ...item,
+        pending: true,
+        sendCanonical: true,
+        sendRunId: candidate.sendRunId,
+        ...(correlatedRetry ? { sendRetry: correlatedRetry } : {}),
+      };
+    };
+
+    // HTTP hydration, latest-page refresh and the live WS frame can arrive in
+    // any order. Upsert the canonical item and also retire a matching pending
+    // echo if both are temporarily present in state.
+    const canonicalIndex = base.findIndex(candidate => (
+      candidate.kind === 'user' && candidate.id === item.id
+    ));
+    if (canonicalIndex >= 0) {
+      const next = base.slice();
+      const existingCanonical = base[canonicalIndex]!;
+      next[canonicalIndex] = existingCanonical.kind === 'user'
+        && existingCanonical.pending
+        && existingCanonical.sendCanonical
+        ? retainCorrelatedSend(existingCanonical)
+        : item;
+      if (optimisticIndex >= 0) {
+        releaseOptimisticAttachments();
+        next.splice(optimisticIndex, 1);
+      }
+      return next;
+    }
+    if (optimisticIndex >= 0) {
+      releaseOptimisticAttachments();
+      const next = base.slice();
+      next[optimisticIndex] = optimistic?.kind === 'user'
+        ? retainCorrelatedSend(optimistic)
+        : item;
+      return next;
     }
     return [...base, item];
   }
@@ -675,11 +734,17 @@ export function isPlanChecklistComplete(plan: string | undefined): boolean {
 export interface PlanLifecycleState {
   text?: string;
   completed: boolean;
+  /** Page-level presentation state. A plan may span turns, but it must not
+   *  keep looking live after the executor has stopped producing output. */
+  status?: 'active' | 'paused' | 'completed';
+  /** Turn that most recently changed the plan lifecycle (update or stop). */
+  turn?: number;
 }
 
 /**
- * Fold plan updates and successful turn endings into the page-level lifecycle.
- * Completion is evaluated only at `turn_completed`, never mid-stream.
+ * Fold plan updates and terminal turn signals into the page-level lifecycle.
+ * Completion is evaluated only at `turn_completed`, never mid-stream; an
+ * incomplete or failed turn pauses the plan instead of leaving it live.
  */
 export function applyPlanLifecycle(
   prev: PlanLifecycleState,
@@ -690,10 +755,26 @@ export function applyPlanLifecycle(
     return {
       text: applyPlanUpdate(prev.text, env),
       completed: false,
+      status: 'active',
+      turn: env.turn,
     };
   }
-  if (type === 'state.turn-completed' && isPlanChecklistComplete(prev.text)) {
-    return { ...prev, completed: true };
+  if (type === 'state.turn-completed' && prev.text) {
+    const completed = isPlanChecklistComplete(prev.text);
+    return {
+      ...prev,
+      completed,
+      status: completed ? 'completed' : 'paused',
+      turn: env.turn,
+    };
+  }
+  if (type === 'state.error' && prev.text) {
+    return {
+      ...prev,
+      completed: false,
+      status: 'paused',
+      turn: env.turn,
+    };
   }
   return prev;
 }

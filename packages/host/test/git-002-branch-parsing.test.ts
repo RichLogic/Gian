@@ -8,7 +8,7 @@
 //
 // We test `workspace/git-branches.ts` directly: pure parsers
 // (`parseTrack`, `parseForEachRefLine`, `buildRemoteBranchList`) plus a
-// `listLocalBranches` end-to-end against a real git fixture. The route
+// `listLocalBranchesAsync` end-to-end against a real git fixture. The route
 // wrappers in `web/app.ts` are thin and add only the session-table JOIN
 // on top — that piece is covered by WT-001 already.
 
@@ -18,7 +18,7 @@ import {
   parseTrack,
   parseForEachRefLine,
   buildRemoteBranchList,
-  listLocalBranches,
+  listLocalBranchesAsync,
   FIELD_SEP,
 } from '../src/workspace/git-branches.js';
 import { realpathSync } from 'node:fs';
@@ -182,23 +182,23 @@ test('GIT-002: buildRemoteBranchList applies the case-insensitive search filter 
 });
 
 // ---------------------------------------------------------------------------
-// listLocalBranches — drive a real git fixture end-to-end
+// listLocalBranchesAsync — drive a real git fixture end-to-end
 // ---------------------------------------------------------------------------
 
-test('GIT-002: listLocalBranches returns [] for a non-repo path (graceful failure mode)', () => {
-  const out = listLocalBranches('/this/path/is/not/a/repo');
+test('GIT-002: listLocalBranchesAsync returns [] for a non-repo path (graceful failure mode)', async () => {
+  const out = await listLocalBranchesAsync('/this/path/is/not/a/repo');
   assert.deepEqual(out, [],
     'non-repo path must yield empty list, never throw');
 });
 
-test('GIT-002: listLocalBranches reports every local branch with correct names and isWorktreeBranch flags', () => {
+test('GIT-002: listLocalBranchesAsync reports every local branch with correct names and isWorktreeBranch flags', async () => {
   const repo = createGitRepo({ initialBranch: 'main' });
   try {
     repo.createBranch('worktree/abcd1234');
     repo.createBranch('gian/legacy');
     repo.createBranch('feature/x');
 
-    const branches = listLocalBranches(repo.path).sort((a, b) => a.name.localeCompare(b.name));
+    const branches = (await listLocalBranchesAsync(repo.path)).sort((a, b) => a.name.localeCompare(b.name));
     const byName = Object.fromEntries(branches.map((b) => [b.name, b]));
 
     for (const expected of ['main', 'worktree/abcd1234', 'gian/legacy', 'feature/x']) {
@@ -213,7 +213,7 @@ test('GIT-002: listLocalBranches reports every local branch with correct names a
   }
 });
 
-test('INV-015: branch parsing stays stable across main + worktree + session-owned branches', () => {
+test('INV-015: branch parsing stays stable across main + worktree + session-owned branches', async () => {
   // INV-015 is the durability claim: regardless of how many worktrees exist
   // or what's checked out where, the per-branch fields are stable. We drive
   // a real worktree-add to force `%(worktreepath)` to populate.
@@ -226,7 +226,7 @@ test('INV-015: branch parsing stays stable across main + worktree + session-owne
     repo.git(['worktree', 'add', '-b', 'worktree/feature-y', wtPath, 'main']);
 
     try {
-      const branches = listLocalBranches(repo.path);
+      const branches = await listLocalBranchesAsync(repo.path);
       const wt = branches.find((b) => b.name === 'worktree/feature-y');
       assert.ok(wt, 'worktree branch must be enumerated from the main repo');
       assert.ok(wt!.worktreePath && wt!.worktreePath.endsWith('-wt'),
@@ -254,7 +254,7 @@ test('INV-015: branch parsing stays stable across main + worktree + session-owne
   }
 });
 
-test('GIT-002: listLocalBranches against a repo with an origin populates upstream + ahead', () => {
+test('GIT-002: listLocalBranchesAsync against a repo with an origin populates upstream + ahead', async () => {
   // Create a bare upstream, set up the working tree with origin pointing
   // at it, and verify the upstream ref + ahead count.
   //
@@ -270,7 +270,7 @@ test('GIT-002: listLocalBranches against a repo with an origin populates upstrea
       repo.setUpstream('origin', 'main');
       repo.commit('local.txt', 'local change', 'local commit');
 
-      const branches = listLocalBranches(repo.path);
+      const branches = await listLocalBranchesAsync(repo.path);
       const main = branches.find((b) => b.name === 'main');
       assert.ok(main);
       assert.equal(main!.upstream, 'origin/main',
@@ -287,7 +287,7 @@ test('GIT-002: listLocalBranches against a repo with an origin populates upstrea
   }
 });
 
-test('GIT-002: listLocalBranches flags `[gone]` when the upstream ref is deleted from the bare', () => {
+test('GIT-002: listLocalBranchesAsync flags `[gone]` when the upstream ref is deleted from the bare', async () => {
   const bare = bareUpstream({ seedBranch: 'main' });
   try {
     const repo = createGitRepo({ initialBranch: 'main', origin: bare.path });
@@ -300,7 +300,7 @@ test('GIT-002: listLocalBranches flags `[gone]` when the upstream ref is deleted
       // Local branch still has tracking config but the remote ref is gone.
       repo.git(['fetch', '--prune']);
 
-      const branches = listLocalBranches(repo.path);
+      const branches = await listLocalBranchesAsync(repo.path);
       const feat = branches.find((b) => b.name === 'feature/disposable');
       assert.ok(feat);
       assert.equal(feat!.gone, true,

@@ -185,10 +185,16 @@ describe('EVT-007: plan_update reducer surface', () => {
     expect(streamed).toEqual({
       text: '- [x] inspect\n- [x] test',
       completed: false,
+      status: 'active',
+      turn: 1,
     });
 
     const finalized = applyPlanLifecycle(streamed, turnEnvelope('turn_completed'));
-    expect(finalized.completed).toBe(true);
+    expect(finalized).toMatchObject({
+      completed: true,
+      status: 'completed',
+      turn: 1,
+    });
   });
 
   it('keeps incomplete plans visible and lets a later update restart a finalized plan', () => {
@@ -196,13 +202,22 @@ describe('EVT-007: plan_update reducer surface', () => {
       { completed: false },
       planUpdate('- [x] inspect\n- [ ] test', { delta: false }),
     );
-    expect(applyPlanLifecycle(incomplete, turnEnvelope('turn_completed')).completed).toBe(false);
+    expect(applyPlanLifecycle(incomplete, turnEnvelope('turn_completed'))).toMatchObject({
+      completed: false,
+      status: 'paused',
+      turn: 1,
+    });
 
     const restarted = applyPlanLifecycle(
       { text: '- [x] old', completed: true },
       planUpdate('- [ ] new', { delta: false }),
     );
-    expect(restarted).toEqual({ text: '- [ ] new', completed: false });
+    expect(restarted).toEqual({
+      text: '- [ ] new',
+      completed: false,
+      status: 'active',
+      turn: 1,
+    });
   });
 });
 

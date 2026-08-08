@@ -5,6 +5,18 @@ import { EventEmitter } from 'node:events';
 import { CodexProxyService } from '../src/core/service.js';
 import type { InputItem } from '../src/core/types.js';
 import type { CodexRuntime, RuntimeNotification, RuntimeServerRequest } from '../src/runtime/types.js';
+import { CODEX_APP_SERVER_V2_COMPACTION } from './fixtures/codex-app-server-v2-compaction.js';
+
+function bindCompactionFixture(
+  notification: { method: string; params: Record<string, unknown> },
+  threadId: string,
+  turnId: string,
+): RuntimeNotification {
+  return {
+    method: notification.method,
+    params: { ...notification.params, threadId, turnId },
+  };
+}
 
 class FakeRuntime extends EventEmitter implements CodexRuntime {
   nextThreadId = 1;
@@ -263,6 +275,29 @@ test('turn.steer forwards input to turn/steer with the active turn id', async ()
   }
 });
 
+test('turn.start forwards a typed skill item unchanged to the Codex runtime', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+    await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{
+        type: 'skill',
+        name: 'project-check',
+        path: '/tmp/work/.codex/skills/project-check/SKILL.md',
+      }],
+    });
+
+    assert.deepEqual(harness.runtime.startTurnCalls[0]?.input, [{
+      type: 'skill',
+      name: 'project-check',
+      path: '/tmp/work/.codex/skills/project-check/SKILL.md',
+    }]);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('turn.steer without an active turn rejects with NO_ACTIVE_TURN', async () => {
   const harness = await createHarness();
   try {
@@ -492,28 +527,21 @@ test('Codex auto-compaction replaces context only after the compaction item comp
       input: [{ type: 'text', text: 'long running turn' }],
     }, 43);
 
-    const usageNotification = (used: number): RuntimeNotification => ({
-      method: 'thread/tokenUsage/updated',
-      params: {
-        threadId: created.session.threadId,
-        turnId: started.turn.id,
-        tokenUsage: {
-          last: { totalTokens: used },
-          total: { totalTokens: 900_000 + used },
-          modelContextWindow: 200_000,
-        },
-      },
-    });
-    harness.runtime.emitNotification(usageNotification(180_000));
+    const bound = (notification: { method: string; params: Record<string, unknown> }) => (
+      bindCompactionFixture(notification, created.session.threadId, started.turn.id)
+    );
+    harness.runtime.emitNotification(bound(CODEX_APP_SERVER_V2_COMPACTION.preBoundaryUsage));
+    const beforeFutureBoundary = harness.events.filter(
+      entry => entry.method === 'token_usage.updated',
+    ).length;
+    harness.runtime.emitNotification(bound(CODEX_APP_SERVER_V2_COMPACTION.futureBoundary));
+    assert.equal(
+      harness.events.filter(entry => entry.method === 'token_usage.updated').length,
+      beforeFutureBoundary,
+      'an unknown item discriminator must not invalidate current context',
+    );
 
-    harness.runtime.emitNotification({
-      method: 'item/started',
-      params: {
-        threadId: created.session.threadId,
-        turnId: started.turn.id,
-        item: { id: 'compact-auto-1', type: 'contextCompaction' },
-      },
-    });
+    harness.runtime.emitNotification(bound(CODEX_APP_SERVER_V2_COMPACTION.boundaryStarted));
     const afterInvalidation = harness.events.filter(
       entry => entry.method === 'token_usage.updated',
     );
@@ -522,29 +550,22 @@ test('Codex auto-compaction replaces context only after the compaction item comp
       reason: 'compact_started',
     });
 
-    harness.runtime.emitNotification(usageNotification(190_000));
+    harness.runtime.emitNotification(bound(CODEX_APP_SERVER_V2_COMPACTION.summarizationUsage));
     assert.equal(
       harness.events.filter(entry => entry.method === 'token_usage.updated').length,
       afterInvalidation.length,
       'summarization usage must remain suppressed',
     );
 
-    harness.runtime.emitNotification({
-      method: 'item/completed',
-      params: {
-        threadId: created.session.threadId,
-        turnId: started.turn.id,
-        item: { id: 'compact-auto-1', type: 'contextCompaction' },
-      },
-    });
-    harness.runtime.emitNotification(usageNotification(32_000));
+    harness.runtime.emitNotification(bound(CODEX_APP_SERVER_V2_COMPACTION.boundaryCompleted));
+    harness.runtime.emitNotification(bound(CODEX_APP_SERVER_V2_COMPACTION.postBoundaryUsage));
     const afterFreshUsage = harness.events.filter(
       entry => entry.method === 'token_usage.updated',
     );
     assert.equal(afterFreshUsage.length, afterInvalidation.length + 1);
     assert.deepEqual(
       (afterFreshUsage.at(-1)?.params.data as { params?: unknown }).params,
-      usageNotification(32_000).params,
+      bound(CODEX_APP_SERVER_V2_COMPACTION.postBoundaryUsage).params,
     );
   } finally {
     await harness.cleanup();
@@ -679,13 +700,11 @@ test('Codex thread/compacted notification completes intercepted /compact turn', 
 
     const compactTurnId = 'compact-1';
     harness.runtime.setCompletedTurn(created.session.threadId, compactTurnId);
-    harness.runtime.emitNotification({
-      method: 'thread/compacted',
-      params: {
-        threadId: created.session.threadId,
-        turnId: compactTurnId,
-      },
-    });
+    harness.runtime.emitNotification(bindCompactionFixture(
+      CODEX_APP_SERVER_V2_COMPACTION.threadCompacted,
+      created.session.threadId,
+      compactTurnId,
+    ));
 
     await waitFor(() => harness.events.some((entry) => entry.method === 'turn.completed'));
 
@@ -697,18 +716,11 @@ test('Codex thread/compacted notification completes intercepted /compact turn', 
     const usageCountAfterCompact = harness.events.filter(
       entry => entry.method === 'token_usage.updated',
     ).length;
-    harness.runtime.emitNotification({
-      method: 'thread/tokenUsage/updated',
-      params: {
-        threadId: created.session.threadId,
-        turnId: compactTurnId,
-        tokenUsage: {
-          last: { totalTokens: 190_000 },
-          total: { totalTokens: 900_000 },
-          modelContextWindow: 200_000,
-        },
-      },
-    });
+    harness.runtime.emitNotification(bindCompactionFixture(
+      CODEX_APP_SERVER_V2_COMPACTION.summarizationUsage,
+      created.session.threadId,
+      compactTurnId,
+    ));
     assert.equal(
       harness.events.filter(entry => entry.method === 'token_usage.updated').length,
       usageCountAfterCompact,
@@ -719,18 +731,11 @@ test('Codex thread/compacted notification completes intercepted /compact turn', 
       sessionId: created.session.id,
       input: [{ type: 'text', text: 'next turn' }],
     }, 45);
-    harness.runtime.emitNotification({
-      method: 'thread/tokenUsage/updated',
-      params: {
-        threadId: created.session.threadId,
-        turnId: next.turn.id,
-        tokenUsage: {
-          last: { totalTokens: 31_000 },
-          total: { totalTokens: 910_000 },
-          modelContextWindow: 200_000,
-        },
-      },
-    });
+    harness.runtime.emitNotification(bindCompactionFixture(
+      CODEX_APP_SERVER_V2_COMPACTION.postBoundaryUsage,
+      created.session.threadId,
+      next.turn.id,
+    ));
     assert.equal(
       harness.events.filter(entry => entry.method === 'token_usage.updated').length,
       usageCountAfterCompact + 1,

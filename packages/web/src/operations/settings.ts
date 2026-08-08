@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — Settings-domain definitions (Phase 3b of
- * `docs/proposals/ui-operation-layer.md`).
+ * `docs/archive/proposals/ui-operation-layer.md`).
  *
  * - `settings.save` (OPTIMISTIC, REST `saveSettings`): every SettingsBody
  *   toggle/select and the debounced editor-list autosave render the expected

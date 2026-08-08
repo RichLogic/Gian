@@ -182,4 +182,30 @@ describe('NewSessionView', () => {
       executor: 'claude',
     });
   });
+
+  it('keeps a session creation failure visible while preserving editable form state', async () => {
+    renderView({ createError: 'executor failed to start' });
+    await screen.findByRole('button', { name: /Codex/ });
+
+    expect(screen.getByRole('alert')).toHaveTextContent('executor failed to start');
+    expect(screen.getByLabelText('Workspace')).toBeEnabled();
+    expect(screen.getByLabelText('Session name')).toBeEnabled();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Create session' })).toBeEnabled();
+    });
+  });
+
+  it('interlocks an unknown create until the user refreshes canonical sessions', async () => {
+    const onVerifyCreate = vi.fn();
+    renderView({
+      createUnknown: true,
+      createError: 'Session creation status is unknown.',
+      onVerifyCreate,
+    });
+    await screen.findByRole('button', { name: /Codex/ });
+
+    expect(screen.getByRole('button', { name: 'Create session' })).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh sessions before retrying' }));
+    expect(onVerifyCreate).toHaveBeenCalledTimes(1);
+  });
 });

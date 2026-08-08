@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — Auth-domain definitions (Phase 3b of
- * `docs/proposals/ui-operation-layer.md`): password login, logout, and the
+ * `docs/archive/proposals/ui-operation-layer.md`): password login, logout, and the
  * desktop GitHub device flow. All PENDING; all entity-keyed `auth:current`
  * (there is exactly one auth session, and a second submission while one is
  * in flight is a duplicate).

@@ -68,14 +68,14 @@ describe('Inspector CHANGES', () => {
 
   it('defaults to the "branch" scope', async () => {
     renderChanges();
-    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'branch', null, null, undefined));
+    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'branch', null, null, undefined, undefined));
   });
 
   it('switching the scope re-fetches with that scope', async () => {
     renderChanges();
     await waitFor(() => expect(api.loadChanged).toHaveBeenCalled());
     pickScope('staged');
-    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'staged', null, null, undefined));
+    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'staged', null, null, undefined, undefined));
   });
 
   it('clicking a row opens its diff in the current scope', async () => {

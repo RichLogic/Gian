@@ -23,7 +23,9 @@ export interface MsgItem {
   exec: import('@gian/shared').Executor;
   ts: number;
   turn: number;
-  /** Local-only user echo awaiting the server's `user_message` event. */
+  /** Local-only user echo awaiting the correlated operation result. The Host
+   *  can publish the canonical `user_message` before that result, so this may
+   *  remain true briefly after the canonical bubble has replaced the echo. */
   pending?: boolean;
   /** Server rejected the send (e.g. `MESSAGE_SEND_FAILED`). */
   failed?: boolean;
@@ -31,6 +33,10 @@ export interface MsgItem {
    *  derives the unknown-outcome ("may not have been sent") state from the
    *  run's `timed-out` phase in the operation store. */
   sendRunId?: string;
+  /** The canonical `user_message` has replaced this echo, but its correlated
+   *  operation result is still outstanding. Excludes the item from the FIFO
+   *  matcher when another compatible canonical message arrives. */
+  sendCanonical?: boolean;
   /** Re-dispatch payload for the failed echo's retry affordance. */
   sendRetry?: MessageSendPayload;
   /** Attachments to render in the bubble. Images use inline thumbnails;
@@ -168,6 +174,24 @@ export interface StatusItem {
   turn: number;
 }
 
+/**
+ * Context compaction marker (P2, render-side only for now). No display event
+ * carries compaction into the transcript yet — host parses
+ * `token_usage.updated` for the composer stats side channel and drops its
+ * `reason: 'compact_started'` (packages/host/src/session/token-usage.ts), so
+ * nothing produces this item today. The type + row exist so the display
+ * layer has a mapping target once host emits a compaction display event
+ * (needs before/after token counts).
+ */
+export interface CompactionItem {
+  kind: 'compaction';
+  id: string;
+  beforeTokens?: number;
+  afterTokens?: number;
+  ts: number;
+  turn: number;
+}
+
 export interface ApprovalItem {
   kind: 'approval';
   id: string;
@@ -233,7 +257,8 @@ export type TranscriptItem =
   | FileSearchItem
   | WebSearchItem
   | AgentSpawnItem
-  | AutoNoticeItem;
+  | AutoNoticeItem
+  | CompactionItem;
 
 /** Queue entry mirror of QueueUpdatedMessage payload (host/src/queue). */
 export interface QueueEntry {

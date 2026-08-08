@@ -20,6 +20,10 @@ import type {
   RespondApprovalParams,
   StartTurnParams,
 } from './types.js';
+import {
+  createProxyProcessShutdownState,
+  shutdownProxyProcess,
+} from './process-shutdown.js';
 
 export interface KimiProxyHostOptions {
   entry: string;
@@ -235,6 +239,10 @@ export class KimiProxyHost {
   private readonly log: (message: string) => void;
   private nextId = 1;
   private exited = false;
+  private processGroupCleanup: Promise<void> | null = null;
+  private readonly processGroupShutdownState = createProxyProcessShutdownState();
+  private exitCode: number | null | undefined;
+  private exitNotified = false;
   private initialized: Promise<InitializeResult> | null = null;
   private capabilities_: Promise<KimiCapabilities> | null = null;
 
@@ -246,6 +254,7 @@ export class KimiProxyHost {
       {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, ...options.env },
+        detached: true,
       },
     );
     this.bindStdout();
@@ -366,8 +375,20 @@ export class KimiProxyHost {
   }
 
   onHostExit(handler: (code: number | null) => void): () => void {
+    if (this.exitNotified) {
+      const code = this.exitCode ?? null;
+      let active = true;
+      queueMicrotask(() => {
+        if (active) handler(code);
+      });
+      return () => { active = false; };
+    }
     this.exitHandlers.add(handler);
     return () => this.exitHandlers.delete(handler);
+  }
+
+  isExited(): boolean {
+    return this.exited;
   }
 
   hasSessions(): boolean {
@@ -375,9 +396,21 @@ export class KimiProxyHost {
   }
 
   async shutdown(): Promise<void> {
-    if (this.exited) return;
-    await this.request('shutdown').catch(() => undefined);
-    if (!this.exited) this.child.kill('SIGTERM');
+    await this.cleanupProcessGroup(() => this.request('shutdown'));
+  }
+
+  /** @internal Detached children use their spawn PID as the protected PGID. */
+  processGroupId(): number {
+    const pid = this.child.pid;
+    if (pid === undefined || pid <= 0) {
+      throw new Error('Kimi Proxy process group is unavailable.');
+    }
+    return pid;
+  }
+
+  /** @internal Registration already observed ESRCH for this exact group. */
+  observeProcessGroupAbsence(): void {
+    this.processGroupShutdownState.observeAbsence();
   }
 
   private bindStdout(): void {
@@ -403,13 +436,56 @@ export class KimiProxyHost {
   private bindExit(): void {
     this.child.on('exit', code => {
       this.exited = true;
+      this.exitCode = code;
       const error = new Error(`kimi-proxy exited (code=${code ?? 'null'})`);
       for (const pending of this.pending.values()) pending.reject(error);
       this.pending.clear();
-      for (const session of this.sessions.values()) session.notifyHostExit(code);
-      this.sessions.clear();
-      for (const handler of this.exitHandlers) handler(code);
+      void this.cleanupProcessGroup()
+        .then(() => this.notifyExit(code))
+        .catch(cleanupError => this.log(
+          `[kimi-proxy] process-group cleanup failed; retaining runtime claim: ${String(cleanupError)}`,
+        ));
     });
+  }
+
+  private cleanupProcessGroup(
+    requestShutdown?: () => Promise<unknown>,
+  ): Promise<void> {
+    if (!this.processGroupCleanup) {
+      const cleanup = shutdownProxyProcess({
+        child: this.child,
+        isExited: () => this.exited,
+        ...(requestShutdown ? { requestShutdown } : {}),
+        label: 'Kimi Proxy',
+        state: this.processGroupShutdownState,
+      });
+      this.processGroupCleanup = cleanup;
+      void cleanup.catch(() => {
+        if (this.processGroupCleanup === cleanup) this.processGroupCleanup = null;
+      });
+    }
+    return this.processGroupCleanup;
+  }
+
+  private notifyExit(code: number | null): void {
+    if (this.exitNotified) return;
+    this.exitNotified = true;
+    const sessions = [...this.sessions.values()];
+    this.sessions.clear();
+    for (const session of sessions) {
+      try {
+        session.notifyHostExit(code);
+      } catch (error) {
+        this.log(`[kimi-proxy] session exit notification threw: ${String(error)}`);
+      }
+    }
+    for (const handler of this.exitHandlers) {
+      try {
+        handler(code);
+      } catch (error) {
+        this.log(`[kimi-proxy] exit handler threw: ${String(error)}`);
+      }
+    }
   }
 
   private dispatch(message: unknown): void {
@@ -458,8 +534,19 @@ export class KimiProxySessionClient implements ProxyClient {
   private readonly exitHandlers = new Set<(code: number | null) => void>();
   private proxySessionId: string | null = null;
   private closed = false;
+  private exitNotified = false;
+  private exitCode: number | null | undefined;
 
   constructor(private readonly host: KimiProxyHost) {}
+
+  isExited(): boolean {
+    return this.host.isExited();
+  }
+
+  /** @internal Exact shared runtime owner for identity-safe cleanup. */
+  runtimeHost(): KimiProxyHost {
+    return this.host;
+  }
 
   hasAttachedSession(): boolean {
     return this.proxySessionId !== null;
@@ -534,15 +621,42 @@ export class KimiProxySessionClient implements ProxyClient {
   }
 
   onExit(handler: (code: number | null) => void): () => void {
+    if (this.exitNotified) {
+      const code = this.exitCode ?? null;
+      let active = true;
+      queueMicrotask(() => {
+        if (active) {
+          try { handler(code); } catch (error) {
+            console.error('[kimi-proxy] late session exit handler threw:', error);
+          }
+        }
+      });
+      return () => { active = false; };
+    }
     this.exitHandlers.add(handler);
     return () => this.exitHandlers.delete(handler);
   }
 
   deliverNotification(notification: ProxyNotification): void {
-    for (const handler of this.notificationHandlers) handler(notification);
+    for (const handler of this.notificationHandlers) {
+      try {
+        handler(notification);
+      } catch (error) {
+        console.error('[kimi-proxy] notification handler threw:', error);
+      }
+    }
   }
 
   notifyHostExit(code: number | null): void {
-    for (const handler of this.exitHandlers) handler(code);
+    if (this.exitNotified) return;
+    this.exitNotified = true;
+    this.exitCode = code;
+    for (const handler of this.exitHandlers) {
+      try {
+        handler(code);
+      } catch (error) {
+        console.error('[kimi-proxy] session exit handler threw:', error);
+      }
+    }
   }
 }

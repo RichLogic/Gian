@@ -41,4 +41,39 @@ describe('performance-sensitive API clients', () => {
     });
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/sessions/s1/events?before=7');
   });
+
+  it('rejects 500, 401, and network failures as structured history errors', async () => {
+    const networkFailure = new TypeError('connection reset');
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(null, { status: 500 }))
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockRejectedValueOnce(networkFailure);
+    const api = await import('../src/api.js');
+
+    await expect(api.loadEvents('s1')).rejects.toMatchObject({
+      name: 'EventHistoryLoadError', kind: 'http', status: 500,
+    });
+    await expect(api.loadEvents('s1')).rejects.toMatchObject({
+      name: 'EventHistoryLoadError', kind: 'http', status: 401,
+    });
+    await expect(api.loadEvents('s1')).rejects.toMatchObject({
+      name: 'EventHistoryLoadError',
+      kind: 'network',
+      status: null,
+      originalError: networkFailure,
+    });
+  });
+
+  it('forces a working-tree rescan and rejects failures instead of returning an empty list', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('[]', { status: 200 }))
+      .mockResolvedValueOnce(new Response('unavailable', { status: 503 }));
+    const api = await import('../src/api.js');
+
+    await expect(api.loadWorkingTrees({ refresh: true })).resolves.toEqual([]);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/working_trees?refresh=1');
+    await expect(api.loadWorkingTrees({ refresh: true })).rejects.toThrow(
+      'working trees request failed (503)',
+    );
+  });
 });

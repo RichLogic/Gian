@@ -16,10 +16,11 @@
  *   (unknown outcome — never confirmed, never rolled back, §4.3) and fires
  *   the `onUnresolved` hook so the app can reload the entity's canonical
  *   state and reconcile the run's unresolved overlays (Phase 3a).
- * - Socket close: every in-flight run transitions to `timed-out` — a result
- *   is delivered only on the socket that received the request, so a
- *   reconnect means every old-socket run has an unknown outcome — and fires
- *   `onUnresolved` per affected entity.
+ * - Socket close: every in-flight WS run transitions to `timed-out` — a
+ *   result is delivered only on the socket that received the request, so a
+ *   reconnect means every old-socket WS run has an unknown outcome — and
+ *   fires `onUnresolved` per affected entity. REST runs are independent of
+ *   the socket and continue to settle from their HTTP promises.
  *
  * Duplicate pending destructive guard (proposal §4.3 "disable duplicate
  * pending destructive commands"): dispatching a `pending`-policy operation
@@ -50,7 +51,7 @@ import type {
  * transport without constructing a real WebSocket.
  */
 export interface OperationTransport {
-  send(msg: ClientToServerMessage): void;
+  send(msg: ClientToServerMessage): void | 'sent' | 'queued' | 'dropped';
   onMessage(listener: (msg: ServerToClientMessage) => void): () => void;
   onState(listener: (state: 'connecting' | 'open' | 'closed', attempt: number) => void): () => void;
 }
@@ -88,11 +89,22 @@ export function createOperationDispatcher(deps: OperationDispatcherDeps = {}): O
 
   /** request_id → in-flight WS run. */
   const wsRuns = new Map<string, string>();
-  /** run id → timeout handle. */
-  const timers = new Map<string, ReturnType<typeof setTimeout>>();
-  /** run id → per-dispatch context handed to reconcile/rollback. */
-  const contexts = new Map<string, OperationContext>();
+  /**
+   * Resources owned by one in-flight run. Keeping timer, context and the
+   * optional WS correlation together lets every terminal path release them
+   * through the same idempotent function.
+   */
+  interface ActiveRun {
+    context: OperationContext;
+    timer?: ReturnType<typeof setTimeout>;
+    requestId?: string;
+  }
+  const activeRuns = new Map<string, ActiveRun>();
   const disposers: Array<() => void> = [];
+
+  type RunOutcome =
+    | { type: 'result'; ok: boolean; error?: OperationError; result?: unknown }
+    | { type: 'unknown' };
 
   if (deps.transport) {
     // One subscription for the dispatcher's lifetime; results are correlated
@@ -102,44 +114,58 @@ export function createOperationDispatcher(deps: OperationDispatcherDeps = {}): O
         if (msg.type !== 'operation:result') return;
         const runId = wsRuns.get(msg.request_id);
         if (!runId) return; // late result for a timed-out run — outcome already unknown
-        wsRuns.delete(msg.request_id);
-        settle(runId, msg.ok, msg.error);
+        finish(runId, { type: 'result', ok: msg.ok, error: msg.error });
       }),
     );
     disposers.push(
       deps.transport.onState(state => {
         // A result is delivered only on the socket that received the
-        // request: on close, every in-flight run's outcome is unknown.
+        // request: on close, only runs sent over that socket are unknown.
         if (state !== 'closed') return;
-        for (const entityKey of store.markAllInFlightTimedOut()) {
-          deps.onUnresolved?.(entityKey);
+        for (const runId of [...wsRuns.values()]) {
+          finish(runId, { type: 'unknown' });
         }
       }),
     );
   }
 
-  function clearTimerFor(runId: string): void {
-    const timer = timers.get(runId);
-    if (timer !== undefined) {
-      clearTimer(timer);
-      timers.delete(runId);
-    }
-  }
+  /**
+   * The sole terminal path for result, timeout and socket close. Taking the
+   * active record first makes it idempotent: late results, repeated close
+   * events and timer races become no-ops and cannot fire hooks twice.
+   */
+  function finish(runId: string, outcome: RunOutcome): void {
+    const active = activeRuns.get(runId);
+    if (!active) return;
 
-  function settle(runId: string, ok: boolean, error?: OperationError, result?: unknown): void {
-    clearTimerFor(runId);
-    const context = contexts.get(runId);
-    contexts.delete(runId);
-    // applyResult returns false when the run already settled (e.g. a late
-    // result after timeout) — the escape hatches must not fire then either.
-    if (!store.applyResult(runId, ok, error?.message, result)) return;
+    activeRuns.delete(runId);
+    if (active.timer !== undefined) clearTimer(active.timer);
+    if (active.requestId !== undefined) wsRuns.delete(active.requestId);
+
     const run = store.getRun(runId);
-    if (!run || !context) return;
+    if (!run) return;
+
+    if (outcome.type === 'unknown') {
+      // Avoid a spurious reload if an external store write won a race before
+      // dispatcher cleanup. Normally activeRuns and the store settle together.
+      if (run.phase !== 'optimistic' && run.phase !== 'pending') return;
+      store.markTimedOut(runId);
+      deps.onUnresolved?.(run.entityKey);
+      return;
+    }
+
+    // applyResult returns false when the store was already settled through an
+    // external path; resources are still released, but escape hatches do not
+    // fire a second time.
+    if (!store.applyResult(runId, outcome.ok, outcome.error?.message, outcome.result)) return;
     const definition = registry.get(run.name);
-    if (ok) {
-      definition.reconcile?.(result, context);
+    if (outcome.ok) {
+      definition.reconcile?.(outcome.result, active.context);
     } else {
-      definition.rollback?.(error ?? { code: 'UNKNOWN', message: 'operation failed' }, context);
+      definition.rollback?.(
+        outcome.error ?? { code: 'UNKNOWN', message: 'operation failed' },
+        active.context,
+      );
     }
   }
 
@@ -158,12 +184,17 @@ export function createOperationDispatcher(deps: OperationDispatcherDeps = {}): O
         if (existing) return existing;
       }
 
+      if (definition.buildMessage && !deps.transport) {
+        throw new Error(`operation "${name}" is WS-backed but no transport was provided`);
+      }
+
       const dev = Boolean(import.meta.env?.DEV);
       const run = store.startRun({ name, entityKey, policy: definition.policy });
       if (dev) performance.mark(`gian:op:${run.id}:dispatch`);
 
-      const context: OperationContext = { runId: run.id, requestId: run.id };
-      contexts.set(run.id, context);
+      const context: OperationContext = { runId: run.id, requestId: run.id, entityKey };
+      const active: ActiveRun = { context };
+      activeRuns.set(run.id, active);
 
       if (definition.policy === 'optimistic') {
         const writes = (definition.optimisticWrites?.(input) ?? []).map(write => ({
@@ -183,33 +214,71 @@ export function createOperationDispatcher(deps: OperationDispatcherDeps = {}): O
       }
 
       // Unknown-outcome path: timeout is never a failure (proposal §4.3).
-      timers.set(
-        run.id,
-        setTimer(() => {
-          timers.delete(run.id);
-          contexts.delete(run.id);
-          store.markTimedOut(run.id);
-          deps.onUnresolved?.(run.entityKey);
-        }, definition.timeoutMs),
-      );
+      active.timer = setTimer(() => finish(run.id, { type: 'unknown' }), definition.timeoutMs);
 
       if (definition.buildMessage) {
         // WS executor — request_id correlates the operation:result.
-        if (!deps.transport) {
-          throw new Error(`operation "${name}" is WS-backed but no transport was provided`);
-        }
         const requestId = globalThis.crypto?.randomUUID?.() ?? `${run.id}-req`;
         context.requestId = requestId;
+        active.requestId = requestId;
         wsRuns.set(requestId, run.id);
-        deps.transport.send({ ...definition.buildMessage(input), request_id: requestId });
+        try {
+          const disposition = deps.transport!.send({
+            ...definition.buildMessage(input),
+            request_id: requestId,
+          });
+          if (disposition === 'dropped') {
+            // GianWs rejects unsafe mutations while it is not authoritative;
+            // replaying them could duplicate side effects. Finish in a
+            // microtask so domain helpers can first append their synchronous
+            // optimistic UI (notably the message echo) and rollback can then
+            // converge that exact state instead of racing ahead of it.
+            void Promise.resolve().then(() => finish(run.id, {
+              type: 'result',
+              ok: false,
+              error: {
+                code: 'TRANSPORT_NOT_READY',
+                message: 'Connection is not ready; the operation was not sent.',
+              },
+            }));
+          }
+        } catch (thrown) {
+          finish(run.id, {
+            type: 'result',
+            ok: false,
+            error: {
+              code: 'SEND_FAILED',
+              message: thrown instanceof Error ? thrown.message : String(thrown),
+            },
+          });
+          throw thrown;
+        }
       } else {
         // REST executor — the HTTP promise already identifies the request.
-        definition.execute!(input, context).then(
-          result => settle(run.id, true, undefined, result),
-          (thrown: unknown) => {
-            settle(run.id, false, {
+        let execution: Promise<unknown>;
+        try {
+          execution = definition.execute!(input, context);
+        } catch (thrown) {
+          finish(run.id, {
+            type: 'result',
+            ok: false,
+            error: {
               code: 'EXECUTE_FAILED',
               message: thrown instanceof Error ? thrown.message : String(thrown),
+            },
+          });
+          throw thrown;
+        }
+        execution.then(
+          result => finish(run.id, { type: 'result', ok: true, result }),
+          (thrown: unknown) => {
+            finish(run.id, {
+              type: 'result',
+              ok: false,
+              error: {
+                code: 'EXECUTE_FAILED',
+                message: thrown instanceof Error ? thrown.message : String(thrown),
+              },
             });
           },
         );
@@ -221,10 +290,11 @@ export function createOperationDispatcher(deps: OperationDispatcherDeps = {}): O
     dispose() {
       for (const dispose of disposers) dispose();
       disposers.length = 0;
-      for (const timer of timers.values()) clearTimer(timer);
-      timers.clear();
+      for (const active of activeRuns.values()) {
+        if (active.timer !== undefined) clearTimer(active.timer);
+      }
+      activeRuns.clear();
       wsRuns.clear();
-      contexts.clear();
     },
   };
 }

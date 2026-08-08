@@ -83,7 +83,54 @@ describe('session persistent context projection', () => {
     expect(history.plan?.totalSteps).toBe(2);
   });
 
-  it('removes an accepted Claude plan after its successful turn ends', () => {
+  it('keeps lifecycle-aware completed and paused plans through the idle boundary', () => {
+    const turnEnd: TranscriptItem = {
+      kind: 'turn-end', id: 'end-1', text: 'done', ts: 200, turn: 1,
+    };
+    const completed = projectSessionContext({
+      items: [turnEnd],
+      planText: '- [x] inspect',
+      planCompleted: true,
+      planStatus: 'completed',
+      planTurn: 1,
+      sessionId: 'session-1',
+    });
+    expect(completed.plan?.status).toBe('completed');
+
+    const pendingTurn: TranscriptItem = {
+      kind: 'user', id: 'pending-2', text: 'next', ts: 250, turn: 0,
+      pending: true,
+    };
+    expect(projectSessionContext({
+      items: [turnEnd, pendingTurn],
+      planText: '- [x] inspect',
+      planCompleted: true,
+      planStatus: 'completed',
+      planTurn: 1,
+      sessionId: 'session-1',
+    }).plan).toBeNull();
+
+    const nextTurn: TranscriptItem = {
+      kind: 'user', id: 'user-2', text: 'next', ts: 300, turn: 2,
+    };
+    expect(projectSessionContext({
+      items: [turnEnd, nextTurn],
+      planText: '- [x] inspect',
+      planCompleted: true,
+      planStatus: 'completed',
+      planTurn: 1,
+      sessionId: 'session-1',
+    }).plan).toBeNull();
+    expect(projectSessionContext({
+      items: [turnEnd, nextTurn],
+      planText: '- [ ] inspect',
+      planStatus: 'paused',
+      planTurn: 1,
+      sessionId: 'session-1',
+    }).plan?.status).toBe('paused');
+  });
+
+  it('keeps an accepted Claude plan through idle and removes it on the next turn', () => {
     const approval: ApprovalItem = {
       kind: 'approval',
       id: 'approval-row',
@@ -108,6 +155,13 @@ describe('session persistent context projection', () => {
 
     expect(projectSessionContext({
       items: [approval, turnEnd],
+      sessionId: 'session-1',
+    }).plan?.status).toBe('accepted');
+    const nextTurn: TranscriptItem = {
+      kind: 'user', id: 'user-2', text: 'Next task', ts: 300, turn: 2,
+    };
+    expect(projectSessionContext({
+      items: [approval, turnEnd, nextTurn],
       sessionId: 'session-1',
     }).plan).toBeNull();
     expect(projectSessionContext({
@@ -164,7 +218,7 @@ describe('session persistent context projection', () => {
     });
   });
 
-  it('removes terminal agents when their turn ends but keeps running agents', () => {
+  it('keeps the latest turn summary, interrupts stale foreground runs, and clears it next turn', () => {
     const completed = agent({ status: 'done', turn: 1, updatedAt: 150 });
     const stillRunning = agent({
       id: 'agent-running',
@@ -199,16 +253,16 @@ describe('session persistent context projection', () => {
     expect(projectSessionContext({
       items: [completed, stillRunning, nextTurnWithoutCompletion],
       sessionId: 'session-1',
-    }).agents.map(item => item.id)).toEqual([
-      'agent-running',
-      'agent-1',
-    ]);
+    }).agents).toEqual([]);
 
     const afterTurn = projectSessionContext({
       items: [completed, stillRunning, turnEnd],
       sessionId: 'session-1',
     });
-    expect(afterTurn.agents.map(item => item.id)).toEqual(['agent-running']);
+    expect(afterTurn.agents.map(item => [item.id, item.status])).toEqual([
+      ['agent-running', 'interrupted'],
+      ['agent-1', 'done'],
+    ]);
 
     const history = projectSessionContext({
       items: [completed, stillRunning, turnEnd],
@@ -216,6 +270,53 @@ describe('session persistent context projection', () => {
       includeAgentHistory: true,
     });
     expect(history.agents).toHaveLength(2);
+  });
+
+  it('keeps only explicitly background agents across turn boundaries', () => {
+    const foreground = agent({ id: 'foreground', turn: 1 });
+    const background = agent({ id: 'background', turn: 1, background: true });
+    const nextTurn: TranscriptItem = {
+      kind: 'user', id: 'user-2', text: 'Continue', ts: 300, turn: 2,
+    };
+    const projected = projectSessionContext({
+      items: [foreground, background, nextTurn],
+      sessionId: 'session-1',
+    });
+    expect(projected.agents.map(item => [item.id, item.status])).toEqual([
+      ['background', 'running'],
+    ]);
+  });
+
+  it('clears the foreground Agent summary on an optimistic next-turn echo', () => {
+    const pending: TranscriptItem = {
+      kind: 'user', id: 'pending', text: 'Continue', ts: 300, turn: 0,
+      pending: true,
+    };
+    const projected = projectSessionContext({
+      items: [agent({ id: 'foreground' }), pending],
+      sessionId: 'session-1',
+    });
+    expect(projected.agents).toEqual([]);
+  });
+
+  it('derives a useful task description from native agent input', () => {
+    const projected = projectSessionContext({
+      items: [agent({ description: '', input: { task: 'Review the reducer lifecycle' } })],
+      sessionId: 'session-1',
+    });
+    expect(projected.agents[0]?.description).toBe('Review the reducer lifecycle');
+  });
+
+  it('turns a Codex agent path into a readable task when no prompt was emitted', () => {
+    const projected = projectSessionContext({
+      items: [agent({
+        description: '',
+        provider: 'codex',
+        agentType: '/root/fix_issue_40_batch3/review_issue20_tests',
+      })],
+      sessionId: 'session-1',
+    });
+    expect(projected.agents[0]?.description).toBe('Review issue20 tests');
   });
 });
 

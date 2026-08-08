@@ -39,6 +39,8 @@ export interface SessionMenuActions {
  *  it adds information. */
 export interface BranchMenuActions {
   items: Array<{ id: string; label: string; detail?: string | null; active?: boolean }>;
+  /** Refresh the available working trees immediately before opening. */
+  onOpen?: () => void;
   onPick: (id: string) => void;
 }
 
@@ -58,16 +60,22 @@ function CaretDown({ size = 11 }: { size?: number }) {
   );
 }
 
-/** lucide git-branch — the session→worktree separator (2026-08-04, replaces
- *  the 10px tree-pine from 2026-08-03, which read too small and didn't say
- *  "git"): the worktree reads as "where this session is viewed". */
-function WorktreeSepIcon({ size = 13 }: { size?: number }) {
+/** `branch` is the historical model name for the selected worktree. */
+function WorktreeIcon({ size = 14 }: { size?: number }) {
   return (
-    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <svg data-icon="git-branch" viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <line x1="6" x2="6" y1="3" y2="15" />
       <circle cx="18" cy="6" r="3" />
       <circle cx="6" cy="18" r="3" />
       <path d="M18 9a9 9 0 0 1-9 9" />
+    </svg>
+  );
+}
+
+function ChevronRight({ size = 12 }: { size?: number }) {
+  return (
+    <svg data-icon="chevron-right" viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="m9 18 6-6-6-6" />
     </svg>
   );
 }
@@ -203,7 +211,8 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
       // With a branch menu wired up, clicking the branch switches worktree
       // instead of copying (copying stays available as a menu item).
       setMenuOpen(false);
-      setBranchMenuOpen(o => !o);
+      if (!branchMenuOpen) branchMenu.onOpen?.();
+      setBranchMenuOpen(open => !open);
     } else {
       copy(idx, seg.label);
     }
@@ -222,20 +231,25 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
         return (
           <SegmentFragment key={i} idx={i} seg={seg} showSep={i > 0}>
             {seg.editing ? (
-              <input
-                className="path-rename-input"
-                autoFocus
-                defaultValue={seg.label}
-                onBlur={e => onRenameSubmit?.(e.currentTarget.value)}
-                onKeyDown={e => {
-                  // Skip while an IME composition is in flight — Chinese/
-                  // Japanese/Korean input methods use Enter to commit the
-                  // candidate, not to submit the rename.
-                  if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                  if (e.key === 'Escape') onRenameCancel?.();
-                }}
-              />
+              <span className="path-editing">
+                {seg.kind === 'branch' && (
+                  <span className="path-seg-icon"><WorktreeIcon /></span>
+                )}
+                <input
+                  className="path-rename-input"
+                  autoFocus
+                  defaultValue={seg.label}
+                  onBlur={e => onRenameSubmit?.(e.currentTarget.value)}
+                  onKeyDown={e => {
+                    // Skip while an IME composition is in flight — Chinese/
+                    // Japanese/Korean input methods use Enter to commit the
+                    // candidate, not to submit the rename.
+                    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                    if (e.key === 'Escape') onRenameCancel?.();
+                  }}
+                />
+              </span>
             ) : (
               <span
                 className="path-seg-anchor"
@@ -246,6 +260,9 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                   title={seg.kind === 'branch' && branchMenu ? t('path.branch.switch') : seg.copyHint}
                   onClick={e => { e.stopPropagation(); handleSegClick(i, seg); }}
                 >
+                  {seg.kind === 'branch' && (
+                    <span className="path-seg-icon"><WorktreeIcon /></span>
+                  )}
                   <span className="path-seg-label">{seg.label}</span>
                   {(seg.menuAnchor || (seg.kind === 'branch' && branchMenu)) && (
                     <span className="path-seg-affordance caret" aria-hidden>
@@ -308,7 +325,6 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
 }
 
 function SegmentFragment({
-  seg,
   showSep,
   children,
 }: {
@@ -317,22 +333,10 @@ function SegmentFragment({
   showSep: boolean;
   children: React.ReactNode;
 }) {
-  // The worktree segment trails the session with a git-branch glyph instead
-  // of the usual slash — it reads as an attribute of the session, not a path
-  // level (2026-08-03, replaces the middot; glyph swapped tree-pine →
-  // git-branch on 2026-08-04).
   if (!showSep) return <>{children}</>;
-  if (seg.kind === 'branch') {
-    return (
-      <>
-        <span className="path-sep branch"><WorktreeSepIcon /></span>
-        {children}
-      </>
-    );
-  }
   return (
     <>
-      <span className="path-sep">/</span>
+      <span className="path-sep"><ChevronRight /></span>
       {children}
     </>
   );

@@ -41,6 +41,10 @@ export function NewSessionView({
   onCreate,
   onCancel,
   creating,
+  createError,
+  createUnknown = false,
+  verifyingCreate = false,
+  onVerifyCreate,
 }: {
   workspaces: Workspace[];
   /** Preselected workspace (sidebar workspace-row "+" entry point). */
@@ -54,6 +58,10 @@ export function NewSessionView({
   onCreate: (input: CreateSessionInput) => void;
   onCancel: () => void;
   creating: boolean;
+  createError?: string | null;
+  createUnknown?: boolean;
+  verifyingCreate?: boolean;
+  onVerifyCreate?: () => void;
 }) {
   const t = useT();
   const [selectedWs, setSelectedWs] = useState(() => {
@@ -129,7 +137,7 @@ export function NewSessionView({
   const showInlineCreate = workspaces.length === 0 || selectedWs === '__new__';
   const canCreate = !!selectedWs && selectedWs !== '__new__';
   const selectedAgent = agents?.find(agent => agent.id === executor) ?? null;
-  const canSubmit = canCreate && !creating && selectedAgent?.ready === true;
+  const canSubmit = canCreate && !creating && !createUnknown && selectedAgent?.ready === true;
 
   function submit() {
     if (!canSubmit || !executor) return;
@@ -147,7 +155,7 @@ export function NewSessionView({
           <span className="main-title">{t('coding.new.title')}</span>
         </div>
         <div className="main-head-r">
-          <button className="btn ghost sm" onClick={onCancel}>{t('coding.new.cancel')}</button>
+          <button className="btn ghost sm" onClick={onCancel} disabled={creating}>{t('coding.new.cancel')}</button>
         </div>
       </div>
       <div className="ns-wrap">
@@ -260,6 +268,22 @@ export function NewSessionView({
                 onChange={event => setSessionName(event.target.value)}
               />
             </div>
+            {createError && (
+              <p className="spaces-error" role="alert" data-testid="session-create-error">
+                {createError}
+              </p>
+            )}
+            {createUnknown && onVerifyCreate && (
+              <button
+                type="button"
+                className="btn secondary sm"
+                data-testid="session-create-refresh"
+                disabled={verifyingCreate}
+                onClick={onVerifyCreate}
+              >
+                {verifyingCreate ? 'Refreshing sessions…' : 'Refresh sessions before retrying'}
+              </button>
+            )}
           </div>
           <div className="ns-foot">
             <button className="btn ghost sm" onClick={onCancel} disabled={creating}>

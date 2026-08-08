@@ -1,85 +1,107 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type { MsgItem, TranscriptItem } from '../types.js';
 import { useT } from '../i18n/index.js';
 import { useMinimapEnabled } from '../display-prefs.js';
 
-/** Chat panel (`.main`) width below which the minimap rail is hidden — on a
- *  narrow panel the transcript fills the width and a left rail would sit on
- *  top of message text. */
+/** Hide the right-edge outline before it would overlap the transcript body. */
 const PANEL_MIN_WIDTH_PX = 640;
-/** Not worth a minimap rail below this many of the user's own messages. */
+/** A compact outline is useful only once there is something to navigate. */
 const MIN_MESSAGES = 3;
-/** A jumped-to message lands this far below the viewport top. */
+/** Codex keeps the outline as a compact stack rather than filling the screen. */
+const MAX_STACK_HEIGHT_PX = 288;
+const MARKER_GAP_PX = 15;
 const LANDING_PX = 24;
-/** Distance from the bottom (px) that still counts as "at the bottom" — the
- *  scroll-to-bottom button shows outside this range. */
-const BOTTOM_PX = 40;
 
-function snippet(s: string): string {
-  const one = s.replace(/\s+/g, ' ').trim();
-  return one.length > 64 ? `${one.slice(0, 64)}…` : one;
+interface MinimapMarker {
+  id: string;
+  prompt: string;
+  response: string;
+  tickWidth: number;
 }
 
-/** Index of the message currently anchored at the viewport top. The window is
- *  wider than the landing offset so a freshly-jumped-to message reads as
- *  "current" rather than "the next one" — otherwise the next button no-ops on
- *  the message it just scrolled to. */
-function anchorIndexOf(offs: { offset: number }[], scrollTop: number): number {
-  let idx = 0;
-  for (let i = 0; i < offs.length; i++) {
-    if (offs[i]!.offset <= scrollTop + LANDING_PX + 8) idx = i; else break;
-  }
-  return idx;
+function previewText(text: string, limit: number): string {
+  const one = text.replace(/\s+/g, ' ').trim();
+  return one.length > limit ? `${one.slice(0, limit)}…` : one;
 }
 
-/** True when the message row for `id` still has any part at/below the viewport
- *  top — i.e. it's actually on screen, not scrolled off above it. */
-function isMsgVisible(scrollEl: HTMLElement, id: string | undefined): boolean {
-  if (!id) return false;
-  const node = scrollEl.querySelector(`[data-msg-id="${id}"]`) as HTMLElement | null;
-  if (!node) return false;
-  return node.offsetTop + node.offsetHeight > scrollEl.scrollTop;
+function userPreview(item: MsgItem): string {
+  if (item.text.trim()) return previewText(item.text, 160);
+  const names = item.attachments?.map(attachment => attachment.name).filter(Boolean) ?? [];
+  return names.length > 0 ? names.join(', ') : 'Message';
 }
 
 /**
- * Navigation for your own messages in the transcript:
- *  - prev/next arrow buttons (always available) jump to the message above/below
- *    the current scroll position. They render INLINE in the underbar row the
- *    caller places this component in (next to the Plan/Agent chips, flush
- *    right) — no caption, no floating pill, same layout at any width. When the
- *    view isn't pinned to the bottom, a chevrons-down button sits to their
- *    left and scrolls straight to the latest message;
- *  - an optional left-edge minimap rail (toggled in Settings, off by
- *    default, hidden on narrow panels) modelled on the Codex transcript
- *    outline: one small dash per message, spaced evenly by turn order, hover
- *    reveals the text, the current message stays highlighted.
+ * Codex previews a conversation stop, not just an isolated prompt. Pair each
+ * user message with the first assistant text before the next user message.
+ */
+export function projectMinimapMarkers(items: TranscriptItem[]): MinimapMarker[] {
+  const markers: MinimapMarker[] = [];
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index]!;
+    if (item.kind !== 'user') continue;
+
+    let response = '';
+    for (let next = index + 1; next < items.length; next++) {
+      const candidate = items[next]!;
+      if (candidate.kind === 'user') break;
+      if (candidate.kind === 'assistant' && candidate.text.trim()) {
+        response = previewText(candidate.text, 260);
+        break;
+      }
+    }
+
+    const prompt = userPreview(item);
+    // Codex's pale ticks vary with prompt density. Keep that signal bounded so
+    // a long prompt never turns into the active-position bar by itself.
+    const tickWidth = Math.min(24, Math.max(8, 8 + Math.round(Math.sqrt(prompt.length) * 1.25)));
+    markers.push({ id: item.id, prompt, response, tickWidth });
+  }
+  return markers;
+}
+
+function anchorIndexOf(offsets: { offset: number }[], scrollTop: number): number {
+  let index = 0;
+  for (let current = 0; current < offsets.length; current++) {
+    if (offsets[current]!.offset <= scrollTop + LANDING_PX + 8) index = current;
+    else break;
+  }
+  return index;
+}
+
+function messageNode(scrollEl: HTMLElement, id: string): HTMLElement | null {
+  for (const node of scrollEl.querySelectorAll<HTMLElement>('[data-msg-id]')) {
+    if (node.dataset.msgId === id) return node;
+  }
+  return null;
+}
+
+/**
+ * Codex-style transcript outline:
+ *  - one compact right-edge tick per user turn;
+ *  - tick length hints at prompt size, while the current turn is dark/long;
+ *  - hover/focus previews both the prompt and the first assistant response;
+ *  - click scrolls the transcript to that user turn.
  *
- * The rail is an absolute overlay anchored to `.main` (NOT a child of the
- * scroll container) so it stays put while the conversation scrolls. The nav
- * row is plain inline content. The only layout coupling is `data-msg-id` on
- * user message rows.
+ * This component must be a direct child of `.main`. Its absolute rail is then
+ * positioned against `.main`, while JS aligns its viewport to `.main-scroll`.
+ * Gian keeps this compact Codex-style outline on the Chat Panel's right edge.
  */
 export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
   const t = useT();
   const minimapOn = useMinimapEnabled();
   const railRef = useRef<HTMLDivElement>(null);
-  const navRef = useRef<HTMLDivElement>(null);
   const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
-  const [markers, setMarkers] = useState<{ id: string; label: string }[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [roomy, setRoomy] = useState(false);
-  const [atBottom, setAtBottom] = useState(true);
-  const [navVisible, setNavVisible] = useState(false);
-  const [canPrev, setCanPrev] = useState(false);
-  const [canNext, setCanNext] = useState(false);
-  const offsetsRef = useRef<{ id: string; offset: number; height: number }[]>([]);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const offsetsRef = useRef<{ id: string; offset: number }[]>([]);
+  const markers = useMemo(() => projectMinimapMarkers(items), [items]);
+  const markerIds = markers.map(marker => marker.id).join('|');
 
   useEffect(() => {
-    setScrollEl((railRef.current?.closest('.main')?.querySelector('.main-scroll') as HTMLElement | null) ?? null);
+    const main = railRef.current?.closest('.main');
+    setScrollEl((main?.querySelector('.main-scroll') as HTMLElement | null) ?? null);
   }, []);
-
-  const userMsgs = items.filter((it): it is MsgItem => it.kind === 'user');
-  const userKey = userMsgs.map(u => u.id).join('|');
 
   useEffect(() => {
     if (!scrollEl) return;
@@ -88,155 +110,122 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
     let scrollRaf = 0;
 
     const layout = () => {
+      const height = scrollEl.clientHeight;
       setRoomy((mainEl?.clientWidth ?? scrollEl.clientWidth) >= PANEL_MIN_WIDTH_PX);
-      if (mainEl) {
-        const sr = scrollEl.getBoundingClientRect();
-        const mr = mainEl.getBoundingClientRect();
-        const rail = railRef.current;
-        if (rail) {
-          rail.style.top = `${sr.top - mr.top}px`;
-          rail.style.height = `${scrollEl.clientHeight}px`;
-        }
-      }
+      setViewportHeight(height);
+      if (!mainEl || !railRef.current) return;
+      const scrollRect = scrollEl.getBoundingClientRect();
+      const mainRect = mainEl.getBoundingClientRect();
+      railRef.current.style.top = `${scrollRect.top - mainRect.top}px`;
+      railRef.current.style.height = `${height}px`;
     };
-    const updateNav = () => {
-      const offs = offsetsRef.current;
-      const top = scrollEl.scrollTop;
-      const bottom = top + scrollEl.clientHeight;
-      setAtBottom(scrollEl.scrollHeight - bottom <= BOTTOM_PX);
-      // The nav earns its place only when one of your messages is actually
-      // off-screen (above the viewport top or below the bottom); when every
-      // message fits on screen there is nothing to jump to.
-      setNavVisible(offs.some(o => o.offset + o.height <= top || o.offset >= bottom));
-      const i = anchorIndexOf(offs, top);
-      const cur = offs[i];
-      setActiveId(cur?.id ?? null);
-      // "prev" can also re-show the current message when it has scrolled off the
-      // top, so enable it whenever there's a message above OR the current one is
-      // no longer visible. "next" is unchanged.
-      setCanPrev(i > 0 || (!!cur && !isMsgVisible(scrollEl, cur.id)));
-      setCanNext(offs.length > 0 && i < offs.length - 1);
+
+    const updateActive = () => {
+      const offsets = offsetsRef.current;
+      setActiveId(offsets[anchorIndexOf(offsets, scrollEl.scrollTop)]?.id ?? null);
     };
+
     const measure = () => {
-      const offs: { id: string; offset: number; height: number }[] = [];
-      const labels: { id: string; label: string }[] = [];
-      for (const u of userMsgs) {
-        const node = scrollEl.querySelector(`[data-msg-id="${u.id}"]`) as HTMLElement | null;
-        if (!node) continue;
-        offs.push({ id: u.id, offset: node.offsetTop, height: node.offsetHeight });
-        labels.push({ id: u.id, label: snippet(u.text) });
-      }
-      offsetsRef.current = offs;
-      setMarkers(labels);
+      offsetsRef.current = markers.flatMap(marker => {
+        const node = messageNode(scrollEl, marker.id);
+        return node ? [{ id: marker.id, offset: node.offsetTop }] : [];
+      });
       layout();
-      updateNav();
+      updateActive();
     };
 
     const onScroll = () => {
       if (scrollRaf) return;
-      scrollRaf = requestAnimationFrame(() => { scrollRaf = 0; updateNav(); });
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = 0;
+        updateActive();
+      });
     };
     const scheduleMeasure = () => {
       if (measureRaf) return;
-      measureRaf = requestAnimationFrame(() => { measureRaf = 0; measure(); });
+      measureRaf = requestAnimationFrame(() => {
+        measureRaf = 0;
+        measure();
+      });
     };
 
     scrollEl.addEventListener('scroll', onScroll, { passive: true });
-    const ro = new ResizeObserver(scheduleMeasure);
-    ro.observe(scrollEl);
-    if (mainEl) ro.observe(mainEl);
-    const content = scrollEl.querySelector('.transcript');
-    if (content) ro.observe(content);
+    const resizeObserver = new ResizeObserver(scheduleMeasure);
+    resizeObserver.observe(scrollEl);
+    if (mainEl) resizeObserver.observe(mainEl);
+    const transcript = scrollEl.querySelector('.transcript');
+    if (transcript) resizeObserver.observe(transcript);
     measure();
     const initial = requestAnimationFrame(measure);
 
     return () => {
       scrollEl.removeEventListener('scroll', onScroll);
-      ro.disconnect();
+      resizeObserver.disconnect();
       cancelAnimationFrame(initial);
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
       if (measureRaf) cancelAnimationFrame(measureRaf);
     };
+    // Text streaming changes marker previews without changing their anchors;
+    // the ResizeObserver handles transcript-height changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scrollEl, userKey]);
+  }, [scrollEl, markerIds]);
 
-  const scrollToOffset = (offset: number) => {
-    scrollEl?.scrollTo({ top: Math.max(0, offset - LANDING_PX), behavior: 'smooth' });
-  };
   const jumpTo = (id: string) => {
-    const node = scrollEl?.querySelector(`[data-msg-id="${id}"]`) as HTMLElement | null;
-    if (node) scrollToOffset(node.offsetTop);
-  };
-  const goPrev = () => {
-    if (!scrollEl) return;
-    const offs = offsetsRef.current;
-    const i = anchorIndexOf(offs, scrollEl.scrollTop);
-    const cur = offs[i];
-    // If the current (anchored) message has scrolled above the viewport, "prev"
-    // re-shows IT first instead of skipping to the message above it.
-    if (cur && !isMsgVisible(scrollEl, cur.id)) {
-      scrollToOffset(cur.offset);
-      return;
-    }
-    const target = offs[i - 1];
-    if (target) scrollToOffset(target.offset);
-  };
-  const goNext = () => {
-    if (!scrollEl) return;
-    const target = offsetsRef.current[anchorIndexOf(offsetsRef.current, scrollEl.scrollTop) + 1];
-    if (target) scrollToOffset(target.offset);
+    const node = scrollEl ? messageNode(scrollEl, id) : null;
+    if (!node) return;
+    scrollEl?.scrollTo({
+      top: Math.max(0, node.offsetTop - LANDING_PX),
+      behavior: 'smooth',
+    });
   };
 
-  const n = markers.length;
-  const showRail = !!scrollEl && minimapOn && roomy && n >= MIN_MESSAGES;
-  const showNav = !!scrollEl && navVisible;
-  const scrollToBottom = () => {
-    scrollEl?.scrollTo({ top: scrollEl.scrollHeight, behavior: 'smooth' });
-  };
+  const count = markers.length;
+  const availableHeight = Math.max(72, viewportHeight - 48);
+  const stackHeight = Math.min(
+    MAX_STACK_HEIGHT_PX,
+    availableHeight,
+    Math.max(24, (count - 1) * MARKER_GAP_PX + 12),
+  );
+  const markerTop = (index: number) => count <= 1
+    ? stackHeight / 2
+    : 6 + (index / (count - 1)) * (stackHeight - 12);
+  const showRail = !!scrollEl && minimapOn && roomy && count >= MIN_MESSAGES;
 
   return (
-    <>
-      <div className={`transcript-minimap${showRail ? '' : ' is-hidden'}`} ref={railRef} aria-hidden={!showRail}>
-        {showRail && markers.map((m, i) => (
-          <button
-            key={m.id}
-            type="button"
-            className={`tm-item${activeId === m.id ? ' active' : ''}`}
-            style={{ top: `${((i + 0.5) / n) * 100}%` }}
-            aria-label={`${t('minimap.jump')} ${i + 1}`}
-            onClick={() => jumpTo(m.id)}
-          >
-            <span className="tm-tick" />
-            <span className="tm-label">{m.label}</span>
-          </button>
-        ))}
-      </div>
-      {(showNav || !atBottom) && (
-        <div className="transcript-navbtns" ref={navRef}>
-          {!atBottom && (
-            <button type="button" className="tn-btn" onClick={scrollToBottom} title={t('minimap.scrollBottom')} aria-label={t('minimap.scrollBottom')}>
-              <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M3 4.5l5 5 5-5" />
-                <path d="M3 8.5l5 5 5-5" />
-              </svg>
-            </button>
-          )}
-          {showNav && (
-            <>
-              <button type="button" className="tn-btn" onClick={goPrev} disabled={!canPrev} title={t('minimap.prev')} aria-label={t('minimap.prev')}>
-                <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M4 10l4-4 4 4" />
-                </svg>
+    <div
+      className={`transcript-minimap${showRail ? '' : ' is-hidden'}`}
+      ref={railRef}
+      aria-hidden={!showRail}
+    >
+      {showRail && (
+        <div className="tm-stack" style={{ height: `${stackHeight}px` }}>
+          {markers.map((marker, index) => {
+            const active = activeId === marker.id;
+            return (
+              <button
+                key={marker.id}
+                type="button"
+                className={`tm-item${active ? ' active' : ''}`}
+                style={{
+                  top: `${markerTop(index)}px`,
+                  '--tm-tick-width': `${marker.tickWidth}px`,
+                } as CSSProperties}
+                aria-label={`${t('minimap.jump')} ${index + 1}: ${marker.prompt}`}
+                aria-current={active ? 'true' : undefined}
+                onClick={() => jumpTo(marker.id)}
+              >
+                <span className="tm-tick" aria-hidden />
+                <span className="tm-preview">
+                  <span className="tm-preview-prompt">{marker.prompt}</span>
+                  {marker.response && (
+                    <span className="tm-preview-response">{marker.response}</span>
+                  )}
+                </span>
               </button>
-              <button type="button" className="tn-btn" onClick={goNext} disabled={!canNext} title={t('minimap.next')} aria-label={t('minimap.next')}>
-                <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M4 6l4 4 4-4" />
-                </svg>
-              </button>
-            </>
-          )}
+            );
+          })}
         </div>
       )}
-    </>
+    </div>
   );
 }

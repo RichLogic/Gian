@@ -11,8 +11,9 @@ After=network.target
 Type=simple
 
 # Full path to node + entry point; cwd mirrors the macOS launchd config.
-ExecStart={{NODE_BIN}} {{INSTALL_DIR}}/packages/host/dist/index.js
-WorkingDirectory={{INSTALL_DIR}}/packages/host
+ExecStart={{EXEC_START}}
+WorkingDirectory={{WORKING_DIRECTORY}}
+Environment={{ENVIRONMENT_PATH}}
 
 # Restart on non-zero exit (crash). Does NOT restart on clean exit (code 0)
 # so a deliberate `systemctl --user stop gian` stays stopped.
@@ -20,8 +21,8 @@ Restart=on-failure
 RestartSec=5
 
 # Append keeps logs across restarts in a single file, matching launchd behaviour.
-StandardOutput=append:{{HOME}}/.gian/logs/host.out
-StandardError=append:{{HOME}}/.gian/logs/host.err
+StandardOutput={{STANDARD_OUTPUT}}
+StandardError={{STANDARD_ERROR}}
 
 [Install]
 # default.target is the user-session equivalent of multi-user.target;

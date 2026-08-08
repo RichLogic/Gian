@@ -7,8 +7,8 @@ export interface ParsedTokenUsageUpdate {
 }
 
 function nonNegativeInteger(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? Math.floor(value)
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
     : undefined;
 }
 
@@ -33,6 +33,32 @@ function tokenBreakdown(value: unknown) {
     ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
     ...(totalTokens === undefined ? {} : { totalTokens }),
   };
+}
+
+/** Pinned codex app-server v2 TokenUsageBreakdown. This stays separate from
+ * canonical proxy parsing because a partial raw absolute snapshot would
+ * otherwise replace every missing stored counter with zero. */
+function codexV2TokenBreakdown(value: unknown) {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as Record<string, unknown>;
+  const inputTokens = nonNegativeInteger(source.inputTokens);
+  const outputTokens = nonNegativeInteger(source.outputTokens);
+  const cachedInputTokens = nonNegativeInteger(source.cachedInputTokens);
+  const totalTokens = nonNegativeInteger(source.totalTokens);
+  const reasoningOutputTokens = nonNegativeInteger(source.reasoningOutputTokens);
+  const rawCacheWrite = source.cacheWriteInputTokens;
+  const cacheWriteInputTokens = nonNegativeInteger(rawCacheWrite);
+  if (
+    inputTokens === undefined
+    || outputTokens === undefined
+    || cachedInputTokens === undefined
+    || totalTokens === undefined
+    || reasoningOutputTokens === undefined
+    || (rawCacheWrite !== undefined && cacheWriteInputTokens === undefined)
+  ) return null;
+  // Gian currently has no separate reasoning/cache-write columns. Validate
+  // those v2 fields above, then retain the four counters in its wire model.
+  return { inputTokens, outputTokens, cachedInputTokens, totalTokens };
 }
 
 function parseCanonical(data: Record<string, unknown>): ParsedTokenUsageUpdate | null {
@@ -91,17 +117,22 @@ export function parseTokenUsageUpdate(
   if (!tokenUsage || typeof tokenUsage !== 'object') return null;
   const raw = tokenUsage as Record<string, unknown>;
   const total = tokenBreakdown(raw.total);
-  const last = tokenBreakdown(raw.last);
+  const codexTotal = codexV2TokenBreakdown(raw.total);
+  const codexLast = codexV2TokenBreakdown(raw.last);
+  const rawWindow = raw.modelContextWindow;
   const window = nonNegativeInteger(raw.modelContextWindow);
 
   if (executor === 'codex') {
-    const used = last?.totalTokens;
+    if (
+      !codexLast
+      || !codexTotal
+      || (rawWindow !== undefined && rawWindow !== null && window === undefined)
+    ) return null;
+    const used = codexLast.totalTokens;
     return {
-      hasContext: used !== undefined,
-      ...(used === undefined
-        ? {}
-        : { context: { used, ...(window && window > 0 ? { window } : {}) } }),
-      ...(total ? { conversation: { mode: 'absolute' as const, ...total } } : {}),
+      hasContext: true,
+      context: { used, ...(window && window > 0 ? { window } : {}) },
+      conversation: { mode: 'absolute' as const, ...codexTotal },
     };
   }
 
@@ -130,12 +161,9 @@ export function parseAcpUsageUpdate(data: unknown): ParsedTokenUsageUpdate | nul
   if (update.sessionUpdate !== 'usage_update') return null;
   const used = nonNegativeInteger(update.used);
   const window = nonNegativeInteger(update.size);
-  if (used === undefined) return null;
+  if (used === undefined || window === undefined || window === 0) return null;
   return {
     hasContext: true,
-    context: {
-      used,
-      ...(window && window > 0 ? { window } : {}),
-    },
+    context: { used, window },
   };
 }

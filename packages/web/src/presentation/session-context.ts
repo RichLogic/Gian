@@ -2,6 +2,8 @@ import type { ApprovalItem, AgentSpawnItem, TranscriptItem } from '../types.js';
 
 export type PlanDisplayStatus =
   | 'active'
+  | 'paused'
+  | 'completed'
   | 'awaiting-review'
   | 'accepted'
   | 'revision-requested';
@@ -21,7 +23,7 @@ export interface AgentRunDisplayItem {
   provider: AgentSpawnItem['provider'];
   agentId?: string;
   description: string;
-  status: AgentSpawnItem['status'];
+  status: AgentSpawnItem['status'] | 'interrupted';
   agentType?: string;
   model?: string;
   output?: string;
@@ -39,7 +41,9 @@ export interface SessionContextDisplay {
   plan: PlanDisplayItem | null;
   agents: AgentRunDisplayItem[];
   runningAgents: number;
+  completedAgents: number;
   failedAgents: number;
+  interruptedAgents: number;
 }
 
 /**
@@ -51,6 +55,8 @@ export function projectSessionContext(params: {
   items: TranscriptItem[];
   planText?: string;
   planCompleted?: boolean;
+  planStatus?: 'active' | 'paused' | 'completed';
+  planTurn?: number;
   sessionId: string;
   includeAgentHistory?: boolean;
   includePlanHistory?: boolean;
@@ -60,6 +66,8 @@ export function projectSessionContext(params: {
     params.planText,
     params.sessionId,
     params.planCompleted === true,
+    params.planStatus,
+    params.planTurn,
     params.includePlanHistory === true,
   );
   const agents = projectAgents(params.items, params.includeAgentHistory);
@@ -67,7 +75,9 @@ export function projectSessionContext(params: {
     plan,
     agents,
     runningAgents: agents.filter(agent => agent.status === 'running').length,
+    completedAgents: agents.filter(agent => agent.status === 'done').length,
     failedAgents: agents.filter(agent => agent.status === 'error').length,
+    interruptedAgents: agents.filter(agent => agent.status === 'interrupted').length,
   };
 }
 
@@ -76,8 +86,12 @@ function projectPlan(
   planText: string | undefined,
   sessionId: string,
   planCompleted: boolean,
+  planStatus: 'active' | 'paused' | 'completed' | undefined,
+  planTurn: number | undefined,
   includeHistory: boolean,
 ): PlanDisplayItem | null {
+  const latestTurn = latestTranscriptTurn(items);
+  const nextTurnPending = hasPendingUserTurn(items);
   let latestApproval: ApprovalItem | null = null;
   let latestApprovalIndex = -1;
   for (let i = items.length - 1; i >= 0; i--) {
@@ -93,11 +107,14 @@ function projectPlan(
     const accepted = latestApproval.status === 'approved-once'
       || latestApproval.status === 'approved-session';
     const resolvedAt = latestApproval.resolvedAt;
-    const completedAfterAcceptance = accepted
-      && resolvedAt != null
-      && items.slice(latestApprovalIndex + 1).some(item =>
-        item.kind === 'turn-end' && item.ts >= resolvedAt);
-    if (!includeHistory && completedAfterAcceptance) return null;
+    const completion = accepted && resolvedAt != null
+      ? items.slice(latestApprovalIndex + 1).find(item =>
+        item.kind === 'turn-end' && item.ts >= resolvedAt)
+      : undefined;
+    // Keep the just-finished plan available for inspection while the session
+    // is idle. It becomes history as soon as a newer turn starts.
+    if (!includeHistory && completion
+        && (nextTurnPending || latestTurn > completion.turn)) return null;
     return planDisplay(
       latestApproval.approvalId,
       latestApproval.cmd,
@@ -110,9 +127,14 @@ function projectPlan(
   }
 
   const markdown = planText?.trim();
-  if (!includeHistory && planCompleted) return null;
+  const status = planStatus ?? (planCompleted ? 'completed' : 'active');
+  // New lifecycle-aware callers retain a completed plan through the idle
+  // boundary and remove it when the next turn begins. Keep the legacy
+  // immediate-hide behavior when no lifecycle turn is available.
+  if (!includeHistory && status === 'completed'
+      && (planTurn == null || nextTurnPending || latestTurn > planTurn)) return null;
   return markdown
-    ? planDisplay(`codex-plan-${sessionId}`, markdown, 'active')
+    ? planDisplay(`codex-plan-${sessionId}`, markdown, status)
     : null;
 }
 
@@ -138,38 +160,88 @@ function projectAgents(
   includeHistory = false,
 ): AgentRunDisplayItem[] {
   const byId = new Map<string, AgentRunDisplayItem>();
-  const completedTurns = new Set(
-    items.filter(item => item.kind === 'turn-end').map(item => item.turn),
-  );
+  const latestTurn = latestTranscriptTurn(items);
+  const nextTurnPending = hasPendingUserTurn(items);
+  const terminalTurnAt = new Map<number, number>();
+  for (const item of items) {
+    if (item.kind !== 'turn-end' && item.kind !== 'error') continue;
+    const previous = terminalTurnAt.get(item.turn);
+    if (previous == null || item.ts < previous) terminalTurnAt.set(item.turn, item.ts);
+  }
   for (const item of items) {
     if (item.kind !== 'agent-spawn') continue;
     const previous = byId.get(item.id);
+    const input = item.input
+      ? { ...(previous?.input ?? {}), ...item.input }
+      : previous?.input;
+    const agentType = item.agentType ?? previous?.agentType;
     byId.set(item.id, {
       kind: 'agent-run',
       id: item.id,
       provider: item.provider,
       agentId: item.agentId ?? previous?.agentId,
-      description: item.description || previous?.description || 'Agent task',
+      description: item.description
+        || previous?.description
+        || descriptionFromAgentInput(input)
+        || descriptionFromAgentType(agentType)
+        || 'Agent task',
       status: item.status,
-      agentType: item.agentType ?? previous?.agentType,
+      agentType,
       model: item.model ?? previous?.model,
       output: item.output ?? previous?.output,
       outputFile: item.outputFile ?? previous?.outputFile,
       taskId: item.taskId ?? previous?.taskId,
       background: item.background ?? previous?.background,
-      input: item.input
-        ? { ...(previous?.input ?? {}), ...item.input }
-        : previous?.input,
+      input,
       startedAt: previous?.startedAt ?? item.startedAt,
       updatedAt: item.updatedAt,
       completedAt: item.completedAt ?? previous?.completedAt,
       turn: item.turn,
     });
   }
-  return [...byId.values()]
-    .filter(agent =>
-      includeHistory
-      || agent.status === 'running'
-      || !completedTurns.has(agent.turn))
+  return [...byId.values()].map(agent => {
+    const closedAt = terminalTurnAt.get(agent.turn);
+    const turnHasMovedOn = latestTurn > agent.turn
+      || (nextTurnPending && latestTurn === agent.turn);
+    if (agent.status !== 'running' || agent.background === true
+        || (closedAt == null && !turnHasMovedOn)) return agent;
+    // A foreground child cannot remain live after its parent turn has ended.
+    // Do not claim success without a terminal child event; surface the honest
+    // fallback state and freeze its duration at the enclosing turn boundary.
+    return {
+      ...agent,
+      status: 'interrupted' as const,
+      completedAt: agent.completedAt ?? closedAt ?? agent.updatedAt,
+    };
+  })
+    .filter(agent => includeHistory
+      || (!nextTurnPending && agent.turn === latestTurn)
+      || (agent.status === 'running' && agent.background === true))
     .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function latestTranscriptTurn(items: TranscriptItem[]): number {
+  let latest = 0;
+  for (const item of items) if (item.turn > latest) latest = item.turn;
+  return latest;
+}
+
+function hasPendingUserTurn(items: TranscriptItem[]): boolean {
+  return items.some(item => item.kind === 'user' && item.pending === true);
+}
+
+function descriptionFromAgentInput(input: Record<string, unknown> | undefined): string {
+  if (!input) return '';
+  for (const key of ['prompt', 'description', 'task', 'message']) {
+    const value = input[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function descriptionFromAgentType(agentType: string | undefined): string {
+  if (!agentType) return '';
+  const leaf = agentType.split('/').filter(Boolean).pop() ?? agentType;
+  const words = leaf.replace(/[_-]+/g, ' ').trim();
+  return words ? words[0]!.toUpperCase() + words.slice(1) : '';
 }

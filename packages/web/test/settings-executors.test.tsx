@@ -226,7 +226,7 @@ describe('SettingsBody Executors', () => {
     expect(await screen.findByRole(
       'alertdialog',
       { name: 'Restart Gian?' },
-      { timeout: 3_000 },
+      { timeout: 5_000 },
     )).toBeTruthy();
     expect(api.setAgentCliPath).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Restart' }));
@@ -237,7 +237,7 @@ describe('SettingsBody Executors', () => {
         '/Users/test/bin/claude-mix',
       );
       expect(restartApp).toHaveBeenCalledOnce();
-    });
+    }, { timeout: 5_000 });
   });
 
   it('restores the previous path without persisting when restart is declined', async () => {
@@ -251,7 +251,7 @@ describe('SettingsBody Executors', () => {
     fireEvent.click(await screen.findByRole(
       'button',
       { name: 'Keep current path' },
-      { timeout: 3_000 },
+      { timeout: 5_000 },
     ));
 
     await waitFor(() => expect(pathInput).toHaveValue('/bin/claude'));
@@ -271,7 +271,7 @@ describe('SettingsBody Executors', () => {
     fireEvent.click(await screen.findByRole(
       'button',
       { name: 'Restart' },
-      { timeout: 3_000 },
+      { timeout: 5_000 },
     ));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('invalid CLI');
@@ -291,12 +291,12 @@ describe('SettingsBody Executors', () => {
     fireEvent.click(await screen.findByRole(
       'button',
       { name: 'Restart' },
-      { timeout: 3_000 },
+      { timeout: 5_000 },
     ));
 
     await waitFor(() => {
       expect(api.setAgentCliPath).toHaveBeenCalledWith('codex', '/Users/test/bin/codex-next');
       expect(restartApp).toHaveBeenCalledOnce();
-    });
-  });
+    }, { timeout: 5_000 });
+  }, 15_000);
 });

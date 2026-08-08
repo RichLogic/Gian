@@ -18,6 +18,15 @@ function errorResponse(error: unknown): { error: string } {
   return { error: error instanceof Error ? error.message : String(error) };
 }
 
+function installErrorStatus(error: unknown): 409 | 502 {
+  return (
+    typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && error.code === 'AGENT_UPDATE_BUSY'
+  ) ? 409 : 502;
+}
+
 function validateProxyDefaults(
   defaults: AgentProxyDefaults,
   capabilities: ProxyCapabilities,
@@ -87,8 +96,17 @@ export function registerAgentRoutes(
           ? body.path
           : undefined;
       if (path === undefined) return c.json({ error: 'path must be a string or null' }, 400);
-      const agent = await options.agents.setCliPath(id, path);
-      const activated = options.runtimes.invalidate(id);
+      let agent;
+      let activated = false;
+      try {
+        agent = await options.agents.setCliPath(id, path);
+      } finally {
+        // setCliPath can commit the new path and then fail while retiring one
+        // of its coordination claims. Invalidate the old runtime generation
+        // for every completed mutation attempt, including that committed-error
+        // outcome, so a stale lease can never keep serving the previous CLI.
+        activated = options.runtimes.invalidate(id);
+      }
       return c.json({ agent, activated });
     } catch (error) {
       return c.json(errorResponse(error), 400);
@@ -120,11 +138,16 @@ export function registerAgentRoutes(
     const id = executor(c.req.param('id'));
     if (!id) return c.json({ error: 'unsupported agent' }, 404);
     try {
+      // Drain this Host's shared runtime claim before requesting the exclusive
+      // installer claim. A concurrent session or another Host can still win
+      // the claim race, in which case installation fails closed with 409.
+      await options.closeProxy(id);
+      await options.runtimes.drain(id);
       const result = await options.agents.installOfficialCli(id);
       const activated = options.runtimes.invalidate(id);
       return c.json({ ...result, activated });
     } catch (error) {
-      return c.json(errorResponse(error), 502);
+      return c.json(errorResponse(error), installErrorStatus(error));
     }
   });
 
@@ -133,10 +156,14 @@ export function registerAgentRoutes(
     if (!id) return c.json({ error: 'unsupported agent' }, 404);
     try {
       const result = await options.agents.installProxy(id);
+      // The active Proxy version is an immutable directory selected at child
+      // spawn, so existing children may drain only after atomic activation.
+      // The scoped Proxy updater claim serializes updater work without
+      // blocking another Host's read-only vendor CLI runtime claim.
       await options.closeProxy(id);
       return c.json(result);
     } catch (error) {
-      return c.json(errorResponse(error), 502);
+      return c.json(errorResponse(error), installErrorStatus(error));
     }
   });
 }

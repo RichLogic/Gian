@@ -177,6 +177,21 @@ describe('session operations (proposal §8, product definitions)', () => {
     expect(store.getRun(fork.id)?.phase).toBe('pending');
   });
 
+  it('session.create timeout remains an unknown outcome after the fake-timer deadline', () => {
+    const { store, transport, dispatcher } = setup();
+    const create = dispatcher.dispatch('session.create', {
+      workspaceId: 'w1', executor: 'codex', name: 'Maybe created',
+    });
+    const requestId = requestIdOf(transport.sent[0]);
+
+    vi.advanceTimersByTime(30_001);
+
+    expect(store.getRun(create.id)?.phase).toBe('timed-out');
+    expect(store.getPendingRuns()).toHaveLength(0);
+    transport.emitResult(requestId, true);
+    expect(store.getRun(create.id)?.phase).toBe('timed-out');
+  });
+
   it('success absorbs the overlay and leaves canonical state to the broadcast', () => {
     const { store, transport, dispatcher, canonical } = setup();
     const run = dispatcher.dispatch('session.pin', { sessionId: 's1', pinned: true });

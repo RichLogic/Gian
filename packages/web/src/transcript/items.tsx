@@ -1,4 +1,4 @@
-import { createContext, isValidElement, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { createContext, Fragment, isValidElement, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { isNativeImageMime } from '../attachments.js';
@@ -9,9 +9,9 @@ import {
   BrowserLinkOpenContext,
   ChatPanelOpenContext,
 } from '../presentation/chat-panel.js';
-import type { AgentSpawnItem, AutoNoticeItem, CommandItem, DiffItem, FileReadItem, FileSearchItem, MsgItem, ReasoningItem, ToolItem, WebSearchItem } from '../types.js';
+import type { AgentSpawnItem, AutoNoticeItem, CommandItem, CompactionItem, DiffItem, FileReadItem, FileSearchItem, MsgItem, ReasoningItem, ToolItem, WebSearchItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
-import { Caret, SeverityIcon } from './approval-cards.js';
+import { Caret } from './approval-cards.js';
 export { ApprovalCard, Caret } from './approval-cards.js';
 
 /**
@@ -35,6 +35,23 @@ export const ImageZoomContext = createContext<
  *  handler on DiffCard fires this instead of expanding inline — the card
  *  itself stays compact (just file path + +/- stats). */
 export const DiffOpenContext = createContext<((item: DiffItem) => void) | null>(null);
+
+/** Provided by App.tsx: opens an over-threshold transcript detail (P3 level
+ *  3 — full command output, long reasoning, long search-result list) in
+ *  panel 2 as a preview text tab. Null when no provider is mounted — the
+ *  row then keeps the P1 fallback (inline expand with a capped, scrolling
+ *  detail). */
+export interface TranscriptDetailPayload {
+  /** Tab title, e.g. `Run: pnpm test`. */
+  title: string;
+  /** Full detail text (mono, pre-wrap body). */
+  text: string;
+  /** Transcript item id, for a stable tab identity across re-opens. */
+  sourceId?: string;
+}
+export const TranscriptDetailOpenContext = createContext<
+  ((payload: TranscriptDetailPayload) => void) | null
+>(null);
 
 /** Compatibility path for callers that explicitly push plan markdown into the
  *  4th-level inspector. The persistent PlanChip now expands inline; keeping
@@ -230,60 +247,225 @@ function FileLink({
   );
 }
 
+/* ------------------------------------------------------------------
+ * Transcript redesign P1 (2026-08-08): single-line `.trow` system.
+ * Every tool/event card below renders as one `.trow` row — caret (only
+ * when the row can expand inline) + mono verb + subject + right meta —
+ * with an optional `.trow-detail` in-place expansion for small content.
+ * Over-threshold content (>10 output lines, multi-file / >30-line diffs,
+ * long reasoning) keeps today's behavior: inline expand with a capped,
+ * scrolling detail, or the existing inspector push for large diffs.
+ * ------------------------------------------------------------------ */
+
+/** Level-2 thresholds (locked in docs/work-items/transcript-redesign-acd.md). */
+const INLINE_OUTPUT_LINES = 10;
+const INLINE_DIFF_LINES = 30;
+
+/** Re-render once a second while `active` so running timers tick. */
+function useNowSeconds(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [active]);
+  return now;
+}
+
+/** `8s` under a minute, `1m 03s` past it. Exported for the P2 turnsum lead. */
+export function formatElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+}
+
+/** Right-meta for a running row: breathing dot + live timer from item.ts. */
+function RunningMeta({ since }: { since: number }) {
+  const now = useNowSeconds(true);
+  return <span className="trow-run">running · {formatElapsed(now - since)}</span>;
+}
+
+/** Shared `.trow` row shell. `expandable` rows get a caret and toggle on
+ *  click; `onRowClick` rows (panel-2 detail / inspector push / chat panel)
+ *  are clickable but never expand inline. `caret` forces the caret glyph on
+ *  a clickable level-3 row (the mockup marks every drill-down row with it;
+ *  only level-1 "row is everything" rows go caret-less). */
+function TRow({
+  verb,
+  subject,
+  subjectDim = false,
+  subjectTitle,
+  meta,
+  expandable = false,
+  open = false,
+  onToggle,
+  onRowClick,
+  caret = false,
+  rowRef,
+  dataAttrs,
+}: {
+  verb: React.ReactNode;
+  subject: React.ReactNode;
+  subjectDim?: boolean;
+  subjectTitle?: string;
+  meta?: React.ReactNode;
+  expandable?: boolean;
+  open?: boolean;
+  onToggle?: (e: MouseEvent<HTMLElement>) => void;
+  onRowClick?: () => void;
+  caret?: boolean;
+  rowRef?: React.Ref<HTMLDivElement>;
+  dataAttrs?: Record<string, string>;
+}) {
+  return (
+    <div
+      ref={rowRef}
+      className={`trow${expandable ? ' expandable' : ''}${!expandable && onRowClick ? ' clickable' : ''}${open ? ' open' : ''}`}
+      onClick={expandable ? onToggle : onRowClick}
+      {...(onRowClick && !expandable ? {
+        role: 'button',
+        tabIndex: 0,
+        onKeyDown: (e: React.KeyboardEvent) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(); }
+        },
+      } : {})}
+      {...dataAttrs}
+    >
+      {(expandable || caret) && <Caret className="trow-caret" />}
+      <span className="trow-verb">{verb}</span>
+      <span className={`trow-subject${subjectDim ? ' dim' : ''}`} title={subjectTitle}>{subject}</span>
+      {meta && <span className="trow-meta">{meta}</span>}
+    </div>
+  );
+}
+
+/** Hover-revealed `⇥ panel` hint on level-3 rows (P3). */
+function PanelExtHint() {
+  const t = useT();
+  return <span className="trow-ext" title={t('transcript.panel.open')}>⇥ panel</span>;
+}
+
 export function DiffCard({ item }: { item: DiffItem }) {
   const t = useT();
-  // Compact-only: click pushes the diff to the inspector drawer instead of
-  // expanding inline. The diff itself can be hundreds of lines; inlining it
-  // crowded the transcript heavily. Now the card is one-line and the
-  // inspector renders the hunks.
+  // Level routing: a single-file diff with ≤30 hunk lines expands inline as
+  // a mini diff; anything larger (multi-file, >30 lines, or no hunk data at
+  // all) keeps the pre-redesign behavior — click pushes the diff into the
+  // inspector drawer (panel-2 routing is P3).
   const openDiff = useContext(DiffOpenContext);
+  const { open, toggle } = useStableExpand();
   const totalAdd = item.files.reduce((s, f) => s + f.add, 0);
   const totalDel = item.files.reduce((s, f) => s + f.del, 0);
   const fileCount = item.files.length;
+  const file = fileCount === 1 ? item.files[0]! : null;
+  const diffLineCount = file
+    ? file.hunks.reduce((n, h) => n + 1 + h.lines.length, 0)
+    : 0;
+  const inlineOk = file !== null && diffLineCount > 0 && diffLineCount <= INLINE_DIFF_LINES;
+  const stats = (
+    <>
+      <span className="add">+{totalAdd}</span>
+      <span className="del">−{totalDel}</span>
+    </>
+  );
+  const subject = fileCount === 1 ? item.files[0]!.path : `${t('transcript.diff.changedFiles')} ${fileCount}`;
+  if (inlineOk && file) {
+    return (
+      <>
+        <TRow
+          verb={t('transcript.diff.edit')}
+          subject={subject}
+          subjectTitle={subject}
+          meta={stats}
+          expandable
+          open={open}
+          onToggle={toggle}
+        />
+        {open && (
+          <div className="trow-detail diff">
+            {file.hunks.map((h, hi) => (
+              <Fragment key={hi}>
+                <div className="dline hunk">{h.header}</div>
+                {h.lines.map((l, li) => (
+                  <div key={li} className={`dline ${l.kind}`}>
+                    <span className="dsign">{l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ' '}</span>
+                    <span className="dtext">{l.text}</span>
+                  </div>
+                ))}
+              </Fragment>
+            ))}
+          </div>
+        )}
+      </>
+    );
+  }
+  // Level 3 (P3): multi-file or >30-line diff — click opens the full diff in
+  // panel 2 (the Sheet's diff viewer, via the same preview-tab route as
+  // before); the hover `⇥ panel` hint advertises the destination.
   return (
-    <div
-      className="evt fc compact"
-      onClick={() => openDiff?.(item)}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDiff?.(item); }
-      }}
-    >
-      <div className="evt-head">
-        <span className="evt-verb">{t('transcript.diff.edit')}</span>
-        <span className="evt-subject">
-          {fileCount === 1 ? item.files[0]!.path : `${t('transcript.diff.changedFiles')} ${fileCount}`}
-        </span>
-        <span className="evt-meta">
-          <span className="add">+{totalAdd}</span>
-          <span className="del">−{totalDel}</span>
-        </span>
-      </div>
-    </div>
+    <TRow
+      verb={t('transcript.diff.edit')}
+      subject={subject}
+      subjectTitle={subject}
+      meta={<>{openDiff && <PanelExtHint />}{stats}</>}
+      onRowClick={() => openDiff?.(item)}
+      caret
+    />
   );
 }
 
 export function ToolEvent({ item }: { item: ToolItem }) {
   const t = useT();
   const { open, toggle } = useStableExpand();
+  const openDetail = useContext(TranscriptDetailOpenContext);
+  const hasDetail = !!(item.summary || item.output);
+  const outputLines = item.output ? item.output.split('\n').length : 0;
+  const running = item.status === 'running' || item.status === 'pending';
+  // Level 3: a long tool output opens in panel 2 rather than scrolling
+  // inline. Args-only or short-output tools keep the inline detail.
+  if (!running && item.output && outputLines > INLINE_OUTPUT_LINES && openDetail) {
+    return (
+      <TRow
+        verb={t('transcript.tool')}
+        subject={item.name}
+        subjectTitle={item.name}
+        meta={
+          <>
+            <PanelExtHint />
+            {item.status === 'error' && <span className="err">error</span>}
+            <span>{outputLines} {t(outputLines === 1 ? 'transcript.line' : 'transcript.lines')}</span>
+          </>
+        }
+        onRowClick={() => openDetail({
+          title: `${t('transcript.tool')}: ${item.name}`,
+          text: item.output!,
+          sourceId: item.id,
+        })}
+        caret
+      />
+    );
+  }
   return (
-    <div className={`evt agent ${open ? 'open' : ''}`}>
-      <div className="evt-head" onClick={toggle}>
-        <Caret />
-        <span className="evt-verb">{t('transcript.tool')}</span>
-        <span className="evt-subject" title={item.name}>{item.name}</span>
-        <span className="evt-meta">
-          <span className={`evt-status ${item.status}`}>{item.status}</span>
-        </span>
-      </div>
-      {(item.summary || item.output) && (
-        <div className="evt-body">
+    <>
+      <TRow
+        verb={t('transcript.tool')}
+        subject={item.name}
+        subjectTitle={item.name}
+        meta={
+          running ? <RunningMeta since={item.ts} />
+          : item.status === 'error' ? <span className="err">error</span>
+          : undefined
+        }
+        expandable={hasDetail}
+        open={open}
+        onToggle={toggle}
+      />
+      {open && hasDetail && (
+        <div className={`trow-detail${outputLines > INLINE_OUTPUT_LINES ? ' scroll' : ''}`}>
           {item.summary && <ToolArgs raw={item.summary} />}
           {item.output && <pre className="tool-output">{item.output}</pre>}
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -479,54 +661,106 @@ export function AssistantMessage({ item, hideAvatar, showFooter }: { item: MsgIt
 
 /**
  * Reasoning content from codex (full trace or summary). Default-collapsed
- * row on the shared `.evt` shell (`.evt.thinking` variant) — same caret,
- * gutter, fonts and hover as every other action row so it folds naturally
- * into a turn-actions block. Both `variant: 'summary'` and `variant: 'full'`
- * use the same shell, differentiated only by the header label and the
- * summary accent.
+ * `.trow` row: verb label + a dim one-line preview + line count on the
+ * right. Click expands the trace in place; long traces stay inline but
+ * scroll (panel-2 routing is P3).
  */
 export function ReasoningCard({ item }: { item: ReasoningItem }) {
   const t = useT();
   const { open, toggle } = useStableExpand();
+  const openDetail = useContext(TranscriptDetailOpenContext);
   const lineCount = item.text ? item.text.split('\n').length : 0;
   const label = item.variant === 'summary' ? t('transcript.reasoning.summary') : t('transcript.reasoning.full');
+  const preview = item.text.split('\n', 1)[0] ?? '';
+  const expandable = item.text.length > 0;
+  // Level 3 (P3): a long trace opens in panel 2 instead of scrolling inline.
+  if (expandable && lineCount > INLINE_OUTPUT_LINES && openDetail) {
+    return (
+      <TRow
+        verb={label}
+        subject={preview}
+        subjectDim
+        subjectTitle={preview}
+        meta={
+          <>
+            <PanelExtHint />
+            <span>{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>
+          </>
+        }
+        onRowClick={() => openDetail({ title: label, text: item.text, sourceId: item.id })}
+        caret
+        dataAttrs={{ 'data-variant': item.variant }}
+      />
+    );
+  }
   return (
-    <div className={`evt thinking${open ? ' open' : ''}`} data-variant={item.variant}>
-      <div className="evt-head" onClick={toggle}>
-        <Caret />
-        <span className="evt-verb">{label}</span>
-        <span className="evt-meta">{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>
-      </div>
-      {open && (
-        <div className="evt-body md">
-          <MarkdownText>{item.text}</MarkdownText>
-        </div>
+    <>
+      <TRow
+        verb={label}
+        subject={preview}
+        subjectDim
+        subjectTitle={preview}
+        meta={<span>{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>}
+        expandable={expandable}
+        open={open}
+        onToggle={toggle}
+        dataAttrs={{ 'data-variant': item.variant }}
+      />
+      {open && expandable && (
+        <div className={`trow-detail cmd${lineCount > INLINE_OUTPUT_LINES ? ' scroll' : ''}`}>{item.text}</div>
       )}
-    </div>
+    </>
   );
 }
 
 export function CommandCard({ item }: { item: CommandItem }) {
   const t = useT();
   const { open, toggle } = useStableExpand();
-  const statusClass = item.status === 'running' ? 'running' : item.status === 'success' ? 'success' : 'error';
-  const hasOutput = !!(item.stdout || item.stderr);
+  const openDetail = useContext(TranscriptDetailOpenContext);
+  const outputText = item.stdout + (item.stderr ? `\n${item.stderr}` : '');
+  const hasOutput = outputText.length > 0;
+  const lineCount = hasOutput ? outputText.split('\n').length : 0;
+  // Level 3 (P3): a finished command with >10 output lines opens the full
+  // output in panel 2. Running commands keep streaming inline.
+  if (hasOutput && lineCount > INLINE_OUTPUT_LINES && item.status !== 'running' && openDetail) {
+    return (
+      <TRow
+        verb={t('transcript.command.run')}
+        subject={item.command}
+        subjectTitle={item.cwd ? `${item.command} — ${item.cwd}` : item.command}
+        meta={
+          <>
+            <PanelExtHint />
+            {item.status === 'error' && <span className="err">error</span>}
+            <span>{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>
+          </>
+        }
+        onRowClick={() => openDetail({
+          title: `${t('transcript.command.run')}: ${item.command}`,
+          text: outputText,
+          sourceId: item.id,
+        })}
+        caret
+      />
+    );
+  }
   return (
-    <div className={`evt command ${open && hasOutput ? 'open' : ''}`}>
-      <div className="evt-head" onClick={e => { if (hasOutput) toggle(e); }}>
-        {hasOutput && <Caret />}
-        <span className="evt-verb">{t('transcript.command.run')}</span>
-        <span className="evt-subject cmd" title={item.command}>{item.command}</span>
-        <span className="evt-meta">
-          {item.cwd && <span style={{ color: 'var(--text-3)' }} title={item.cwd}>{item.cwd}</span>}
-          {item.status !== 'success' && (
-            <span className={`evt-status ${statusClass}`}>{item.status}</span>
-          )}
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
-        </span>
-      </div>
-      {hasOutput && (
-        <div className="evt-body" style={{ padding: '8px 12px', whiteSpace: 'pre-wrap', color: 'var(--text-2)' }}>
+    <>
+      <TRow
+        verb={t('transcript.command.run')}
+        subject={item.command}
+        subjectTitle={item.cwd ? `${item.command} — ${item.cwd}` : item.command}
+        meta={
+          item.status === 'running' ? <RunningMeta since={item.ts} />
+          : item.status === 'error' ? <span className="err">error</span>
+          : undefined
+        }
+        expandable={hasOutput}
+        open={open}
+        onToggle={toggle}
+      />
+      {open && hasOutput && (
+        <div className={`trow-detail cmd${lineCount > INLINE_OUTPUT_LINES ? ' scroll' : ''}`}>
           {item.status === 'running'
             ? (
               <div className="cmd-stream">
@@ -534,11 +768,11 @@ export function CommandCard({ item }: { item: CommandItem }) {
                 <span className="cmd-cursor" />
               </div>
             )
-            : <span>{item.stdout}{item.stderr ? `\n${item.stderr}` : ''}</span>
+            : outputText
           }
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -549,40 +783,59 @@ export function FileReadCard({ item }: { item: FileReadItem }) {
     : '';
   const fullLabel = `${item.path}${lineRange}`;
   return (
-    <div className="evt inline">
-      <div className="evt-head">
-        <span className="evt-verb">{t('transcript.file.read')}</span>
-        <span className="evt-subject path" title={fullLabel}>
-          <FileLink path={item.path} line={item.startLine}>{fullLabel}</FileLink>
-        </span>
-        <span className="evt-meta">
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
-        </span>
-      </div>
-    </div>
+    <TRow
+      verb={t('transcript.file.read')}
+      subject={<FileLink path={item.path} line={item.startLine}>{fullLabel}</FileLink>}
+      subjectTitle={fullLabel}
+    />
   );
 }
 
 export function FileSearchCard({ item }: { item: FileSearchItem }) {
   const t = useT();
   const { open, toggle } = useStableExpand();
+  const openDetail = useContext(TranscriptDetailOpenContext);
   const hasMatches = item.matches && item.matches.length > 0;
   const count = item.matchCount ?? item.matches?.length;
+  const verb = item.searchKind === 'glob' ? t('transcript.file.glob') : t('transcript.file.grep');
+  // Level 3 (P3): a long result list opens in panel 2 instead of scrolling
+  // inline; short lists keep the inline detail.
+  if (hasMatches && item.matches!.length > INLINE_OUTPUT_LINES && openDetail) {
+    return (
+      <TRow
+        verb={verb}
+        subject={<span className="search-pattern">{item.pattern}</span>}
+        subjectDim
+        subjectTitle={item.pattern}
+        meta={
+          <>
+            <PanelExtHint />
+            {count !== undefined && <span>{count} {t(count === 1 ? 'transcript.file.match' : 'transcript.file.matches')}</span>}
+          </>
+        }
+        onRowClick={() => openDetail({
+          title: `${verb}: /${item.pattern}/`,
+          text: item.matches!.join('\n'),
+          sourceId: item.id,
+        })}
+        caret
+      />
+    );
+  }
   return (
-    <div className={`evt search ${open && hasMatches ? 'open' : ''}`}>
-      <div className="evt-head" onClick={e => { if (hasMatches) toggle(e); }}>
-        {hasMatches && <Caret />}
-        <span className="evt-verb">{item.searchKind === 'glob' ? t('transcript.file.glob') : t('transcript.file.grep')}</span>
-        <span className="evt-subject" title={item.pattern}>
-          <span className="search-pattern">{item.pattern}</span>
-        </span>
-        <span className="evt-meta">
-          {count !== undefined && <span>{count} {t(count === 1 ? 'transcript.file.match' : 'transcript.file.matches')}</span>}
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
-        </span>
-      </div>
-      {hasMatches && (
-        <div className="evt-body search-results" style={{ maxHeight: 200 }}>
+    <>
+      <TRow
+        verb={verb}
+        subject={<span className="search-pattern">{item.pattern}</span>}
+        subjectDim
+        subjectTitle={item.pattern}
+        meta={count !== undefined ? <span>{count} {t(count === 1 ? 'transcript.file.match' : 'transcript.file.matches')}</span> : undefined}
+        expandable={hasMatches}
+        open={open}
+        onToggle={toggle}
+      />
+      {open && hasMatches && (
+        <div className={`trow-detail search-results${item.matches!.length > INLINE_OUTPUT_LINES ? ' scroll' : ''}`}>
           {item.matches!.map((m, i) => (
             <div key={i} className="search-result">
               <span className="sr-loc">{m}</span>
@@ -590,32 +843,65 @@ export function FileSearchCard({ item }: { item: FileSearchItem }) {
           ))}
         </div>
       )}
-    </div>
+    </>
   );
 }
 
 export function WebSearchRow({ item }: { item: WebSearchItem }) {
   const t = useT();
   return (
-    <div className="evt web inline">
-      <div className="evt-head">
-        <span className="evt-verb">{t('transcript.web.search')}</span>
-        <span className="evt-subject" title={item.query}>{item.query}</span>
-        <span className="evt-meta">
-          {item.resultCount !== undefined && <span>{item.resultCount} {t('transcript.web.results')}</span>}
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
-        </span>
-      </div>
+    <TRow
+      verb={t('transcript.web.search')}
+      subject={item.query}
+      subjectDim
+      subjectTitle={item.query}
+      meta={item.resultCount !== undefined ? <span>{item.resultCount} {t('transcript.web.results')}</span> : undefined}
+    />
+  );
+}
+
+/**
+ * Minimal error card (P2, 2026-08-08): the neutral `.approval` shell with a
+ * small danger label + error text — no icon / title / pill / timestamp.
+ * Shared by the Turn-failed card and the auto-mode circuit-breaker.
+ */
+export function MinimalErrorCard({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="approval">
+      <div className="error-label">{label}</div>
+      <div className="error-text">{children}</div>
     </div>
   );
 }
 
 /**
- * Renders cc auto-mode notices: per-action classifier denials (info) and the
- * 3-in-a-row / 20-total circuit-breaker trip (alert). The recovery action set
- * sketched in the schema (retry / switch to ask / abort) isn't wired yet —
- * host has no control channel for it — so the card is presentational. Once
- * those controls exist, the buttons drop in below `.auto-notice-body`.
+ * Compaction row (P2): `.trow` single line, verb `Compact`, subject
+ * `context compacted · 128k → 41k`. No producer yet — see CompactionItem.
+ */
+export function CompactionRow({ item }: { item: CompactionItem }) {
+  const t = useT();
+  const k = (n: number) => `${Math.round(n / 1000)}k`;
+  const subject = item.beforeTokens !== undefined && item.afterTokens !== undefined
+    ? `${t('transcript.compact.subject')} · ${k(item.beforeTokens)} → ${k(item.afterTokens)}`
+    : t('transcript.compact.subject');
+  return (
+    <TRow
+      verb={t('transcript.compact.verb')}
+      subject={subject}
+      subjectDim
+    />
+  );
+}
+
+/**
+ * Renders cc auto-mode notices. P2 forms:
+ *   classifier-denied — a `.trow` single line (verb Auto-block, subject the
+ *                       blocked action + dimmed reason, meta the
+ *                       `2/3 · 5 total` counters) that folds into the
+ *                       turnsum with the other process rows.
+ *   circuit-breaker   — the minimal error card (label AUTO-MODE STOPPED).
+ * The recovery action set sketched in the schema (retry / switch to ask /
+ * abort) still isn't wired — host has no control channel for it.
  */
 export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
   const t = useT();
@@ -624,86 +910,43 @@ export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
       ? `${item.total} ${t('transcript.auto.totalDenials')}`
       : `${item.consecutive} ${t('transcript.auto.consecutiveDenials')}`;
     return (
-      <div className="approval declined auto-notice auto-notice--breaker">
-        <div className="approval-top">
-          <div className="approval-ico">
-            <SeverityIcon risk="high" />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="approval-title">
-              <span>{t('transcript.auto.breaker')}</span>
-              <span className="approval-risk">{t('transcript.auto.stopped')}</span>
-            </div>
-            <div className="approval-sub">
-              {triggerLabel} — {t('transcript.auto.paused')}
-            </div>
-          </div>
-          <span className="evt-meta" style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
-        </div>
-        <div className="approval-resolved-note">
-          <span className="dot" />
-          <span>
-            {t('transcript.auto.recovery')}
-          </span>
-        </div>
-      </div>
+      <MinimalErrorCard label={t('transcript.auto.stoppedLabel')}>
+        {triggerLabel} — {t('transcript.auto.paused')} {t('transcript.auto.recovery')}
+      </MinimalErrorCard>
     );
   }
-  // classifier-denied: lightweight inline notice, mirrors the FileSearch / Run
-  // row look so it folds naturally into a turn-actions block.
   return (
-    <div className="evt inline auto-notice auto-notice--classifier">
-      <div className="evt-head">
-        <span className="evt-verb">{t('transcript.auto.block')}</span>
-        <span className="evt-subject">
-          <span style={{ color: 'var(--text-2)' }}>{item.action || t('transcript.auto.action')}</span>
-          {item.reason && (
-            <span style={{ marginLeft: 8, color: 'var(--text-3)', fontSize: 'var(--fz-12)' }}>
-              {item.reason}
-            </span>
-          )}
-        </span>
-        <span className="evt-meta">
-          <span style={{ color: 'var(--text-3)' }}>
-            {item.consecutive}/3 · {item.total} {t('transcript.auto.total')}
-          </span>
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
-        </span>
-      </div>
-    </div>
+    <TRow
+      verb={t('transcript.auto.block')}
+      subject={
+        <>
+          {item.action || t('transcript.auto.action')}
+          {item.reason && <span className="dim-reason">{item.reason}</span>}
+        </>
+      }
+      subjectTitle={item.action}
+      meta={<span>{item.consecutive}/3 · {item.total} {t('transcript.auto.total')}</span>}
+    />
   );
 }
 
 export function AgentSpawnRow({ item }: { item: AgentSpawnItem }) {
   const t = useT();
   const openChatPanel = useContext(ChatPanelOpenContext);
-  const statusClass = item.status === 'running' ? 'running' : item.status === 'done' ? 'success' : 'error';
+  // Plain trow (the pre-redesign orange shell is gone); the row has no
+  // inline detail — click opens the agent's chat panel instead.
   return (
-    <div
-      className="evt agent"
-      data-agent-id={item.id}
-      data-provider={item.provider}
-      role="button"
-      tabIndex={0}
-      title={t('transcript.agentOpen')}
-      onClick={() => openChatPanel?.({ kind: 'agent', id: item.id })}
-      onKeyDown={event => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          openChatPanel?.({ kind: 'agent', id: item.id });
-        }
-      }}
-    >
-      <div className="evt-head">
-        <span className="evt-verb">{t('transcript.agent')}</span>
-        <span className="evt-subject" title={item.description}>{item.description}</span>
-        <span className="evt-meta">
-          {item.status !== 'done' && (
-            <span className={`evt-status ${statusClass}`}>{item.status}</span>
-          )}
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fz-10)', color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
-        </span>
-      </div>
-    </div>
+    <TRow
+      verb={t('transcript.agent')}
+      subject={item.description}
+      subjectTitle={item.description}
+      meta={
+        item.status === 'running' ? <RunningMeta since={item.ts} />
+        : item.status === 'error' ? <span className="err">error</span>
+        : undefined
+      }
+      onRowClick={() => openChatPanel?.({ kind: 'agent', id: item.id })}
+      dataAttrs={{ 'data-agent-id': item.id, 'data-provider': item.provider, title: t('transcript.agentOpen') }}
+    />
   );
 }

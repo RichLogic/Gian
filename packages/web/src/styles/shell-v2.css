@@ -9,6 +9,13 @@
 /* ---------- App shell grid ---------- */
 .app {
   display: grid;
+  /* A one-column grid defaults to an `auto` track whose min-content size can
+     exceed the explicit 100vw container. At narrow widths the breadcrumb +
+     workbench then widened both the topbar and body while `.app` merely
+     clipped them, hiding the Dock and trailing controls. Force the sole
+     track to honor the viewport and let the already shrinkable descendants
+     (`min-width: 0`) do their job. */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: var(--topbar-h) 1fr;
   /* Both dimensions must be explicit, otherwise the grid auto-sizes to its
      content width and the Workbench/Dock can push past the viewport. */
@@ -28,6 +35,9 @@
   padding: 0;
   overflow: hidden;
 }
+/* Panel 1's responsive quarter-width floor is enforced by panel-layout.ts.
+   Clear the legacy fixed 420px floor so CSS and drag geometry agree. */
+.body .main { min-width: 0; }
 .body.wb-only .sheet { flex: 1; min-width: 0; width: auto; }
 /* Workbench-only view: CodingView stays mounted so the sessions sidebar is
    visible, but its main chat pane collapses. `.view` shrinks to fit the
@@ -43,7 +53,9 @@
   cursor: col-resize;
   position: relative;
   z-index: 5;
+  transition: transform 160ms var(--ease-soft);
 }
+.view-splitter { transition: transform 160ms var(--ease-soft); }
 .splitter::after {
   content: "";
   position: absolute;
@@ -59,6 +71,7 @@
 }
 .splitter:hover::after,
 .splitter.dragging::after { opacity: 0.85; width: 3px; box-shadow: 0 0 6px 0 var(--accent-ring); }
+
 .splitter.h {
   width: auto;
   height: 4px;
@@ -147,12 +160,13 @@
   margin-left: 4px;
 }
 .path-sep {
+  display: inline-flex;
+  align-items: center;
   color: var(--text-3);
   font-size: 11px;
   flex: none;
   opacity: 0.7;
 }
-.path-sep.branch { display: inline-flex; align-items: center; }
 .path-seg-anchor { position: relative; display: inline-flex; }
 .path-seg {
   display: inline-flex; align-items: center; gap: 4px;
@@ -212,7 +226,13 @@
 .path-seg.session {
   padding-right: 5px;
 }
-.path-seg .branch-ico { color: var(--text-3); flex: none; }
+.path-seg-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-3);
+  flex: none;
+}
+.path-editing { display: inline-flex; align-items: center; gap: 6px; }
 .path-seg-label { display: inline-block; }
 .path-seg-affordance {
   display: inline-flex; align-items: center;
@@ -601,6 +621,15 @@
   padding: 8px 0 14px;
   color: var(--text);
 }
+/* Level-3 transcript detail body (P3): full command output / reasoning —
+ *  mono, wrapped, vertically scrollable within the sheet content area. */
+.sheet-text {
+  font: var(--fz-12)/1.6 var(--font-mono);
+  padding: 10px 14px 16px;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .sheet-diff-empty {
   padding: 14px 16px;
   color: var(--text-3);
@@ -810,7 +839,25 @@
    transitions. --dur-fast (not --dur-med) because the same width property is
    drag-resized live; a longer transition would trail the pointer. */
 .sidebar {
-  transition: width var(--dur-fast) var(--ease-soft), opacity var(--dur-fast) var(--ease-soft);
+  transition:
+    width var(--dur-fast) var(--ease-soft),
+    opacity var(--dur-fast) var(--ease-soft),
+    transform 160ms var(--ease-soft);
+}
+.sheet,
+.chat-context-panel,
+.inspector {
+  transition:
+    width 160ms var(--ease-soft),
+    opacity 160ms var(--ease-soft),
+    transform 160ms var(--ease-soft);
+}
+.body[data-panel-resizing="true"] .sidebar,
+.body[data-panel-resizing="true"] .sheet,
+.body[data-panel-resizing="true"] .chat-context-panel,
+.body[data-panel-resizing="true"] .inspector,
+.body[data-panel-resizing="true"] [data-panel-seam] {
+  transition: none;
 }
 .view.rail-collapsed { gap: 0; }
 .view.rail-collapsed .sidebar {
@@ -820,3 +867,13 @@
   pointer-events: none;
 }
 .view.rail-collapsed .view-splitter { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar,
+  .sheet,
+  .chat-context-panel,
+  .inspector,
+  [data-panel-seam] {
+    transition-duration: 0ms !important;
+  }
+}

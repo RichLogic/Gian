@@ -114,6 +114,11 @@
   background: var(--danger);
 }
 
+.context-chip-dot--interrupted,
+.plan-chip-dot--paused {
+  background: var(--warn);
+}
+
 @keyframes context-dot-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
@@ -391,6 +396,15 @@
   background: var(--danger);
 }
 
+.context-agent-status--interrupted {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.context-agent-status--interrupted > span {
+  background: var(--warn);
+}
+
 .context-agent-more {
   padding: 0 12px 8px;
   color: var(--text-3);
@@ -399,8 +413,8 @@
 }
 
 /* Last-turn diff chip — the underbar entry for the current turn's file
-   changes. Click jumps straight to the Diffs inspector (Last-turn scope);
-   there is no inline panel anymore. */
+   changes. Its file list uses the same composer-width upward panel as Plan
+   and Agent; selecting a row continues into the Diffs inspector. */
 .turn-diff-shell {
   position: static;
   min-width: 0;
@@ -417,6 +431,60 @@
 
 .turn-diff-chip-stat .add { color: var(--ok); }
 .turn-diff-chip-stat .del { color: var(--warn); }
+
+.turn-diff-list {
+  display: flex;
+  max-height: min(258px, 34vh);
+  padding: 2px 8px 8px;
+  overflow-y: auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.turn-diff-row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--r-2);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: box-shadow 120ms var(--ease);
+}
+
+.turn-diff-row:hover {
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+.turn-diff-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-diff-row:hover .turn-diff-path { color: var(--text); }
+
+.turn-diff-stat {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.turn-diff-stat .add { color: var(--ok); }
+.turn-diff-stat .del { color: var(--warn); }
 
 @media (max-width: 640px) {
   .context-strip {

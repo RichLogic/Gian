@@ -14,7 +14,6 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { detectWorktreeAddPath } from '../src/session/worktree-detect.js';
 import {
-  listGitWorktrees,
   listGitWorktreesAsync,
   parseWorktreeListPorcelain,
 } from '../src/workspace/git.js';
@@ -144,19 +143,36 @@ test('porcelain: bare entry yields empty head and null branch', () => {
   ]);
 });
 
+test('porcelain: prunable ghost entries are omitted', () => {
+  const out = [
+    'worktree /repo/main',
+    'HEAD aaaa1111',
+    'branch refs/heads/main',
+    '',
+    'worktree /repo/missing',
+    'HEAD bbbb2222',
+    'branch refs/heads/stale',
+    'prunable gitdir file points to non-existent location',
+    '',
+  ].join('\n');
+  assert.deepEqual(parseWorktreeListPorcelain(out), [
+    { path: '/repo/main', head: 'aaaa1111', branch: 'main' },
+  ]);
+});
+
 test('porcelain: empty input yields no entries', () => {
   assert.deepEqual(parseWorktreeListPorcelain(''), []);
 });
 
 // ---------------------------------------------------------------------------
-// listGitWorktrees — real git fixture, mirroring git-002's approach
+// listGitWorktreesAsync — real git fixture, mirroring git-002's approach
 // ---------------------------------------------------------------------------
 
-test('listGitWorktrees: non-repo path yields [] (never throws)', () => {
-  assert.deepEqual(listGitWorktrees('/this/path/is/not/a/repo'), []);
+test('listGitWorktreesAsync: non-repo path yields [] (never throws)', async () => {
+  assert.deepEqual(await listGitWorktreesAsync('/this/path/is/not/a/repo'), []);
 });
 
-test('sync and async worktree discovery enumerate main, branched, and detached worktrees', async () => {
+test('async worktree discovery enumerates main, branched, and detached worktrees', async () => {
   const repo = createGitRepo({ initialBranch: 'main' });
   const branchedPath = `${repo.path}-wt-branched`;
   const detachedPath = `${repo.path}-wt-detached`;
@@ -164,10 +180,10 @@ test('sync and async worktree discovery enumerate main, branched, and detached w
     repo.git(['worktree', 'add', '-b', 'feature/agent', branchedPath, 'main']);
     repo.git(['worktree', 'add', '--detach', detachedPath, 'main']);
     try {
-      const list = listGitWorktrees(repo.path);
+      const list = await listGitWorktreesAsync(repo.path);
       assert.equal(list.length, 3);
       assert.deepEqual(await listGitWorktreesAsync(repo.path), list,
-        'non-blocking discovery preserves the established parser contract');
+        'repeat non-blocking discovery preserves the established parser contract');
 
       // macOS tmpdir resolves through /private — compare resolved forms.
       assert.equal(realpathSync(list[0]!.path), realpathSync(repo.path),

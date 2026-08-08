@@ -39,7 +39,7 @@ function methodsFromInitializePayload(servicePath: string): Set<string> {
   const out = new Set<string>();
   // Method entries are `'<id>',` — anchor on the trailing comma so we
   // only capture array elements, never substrings from other contexts.
-  for (const m of block.matchAll(/'([a-z][a-z0-9.]*)'\s*,/g)) {
+  for (const m of block.matchAll(/'([a-z][A-Za-z0-9.]*)'\s*,/g)) {
     out.add(m[1]!);
   }
   return out;
@@ -65,7 +65,7 @@ function methodsCalledByClient(clientPath: string): Set<string> {
 function methodsHandledByCli(cliPath: string): Set<string> {
   const text = readFileSync(cliPath, 'utf8');
   const out = new Set<string>();
-  for (const m of text.matchAll(/case\s+'([a-z][a-z0-9.]*)'\s*:/g)) {
+  for (const m of text.matchAll(/case\s+'([a-z][A-Za-z0-9.]*)'\s*:/g)) {
     out.add(m[1]!);
   }
   return out;
@@ -98,7 +98,7 @@ test('CONTRACT-003: shared PROXY_METHODS contains the canonical structured-metho
   // service files too.
   const canonical = new Set([
     'initialize', 'capabilities.list', 'slash.list',
-    'session.create', 'session.get',
+    'session.create', 'session.get', 'session.setName',
     'turn.start', 'turn.interrupt', 'turn.steer',
     'approval.respond',
     'session.snapshot', 'session.close',

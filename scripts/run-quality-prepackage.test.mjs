@@ -11,6 +11,7 @@ test('prepackage gate runs the deterministic checks in dependency order', () => 
     'tests',
     'build',
     'traceability',
+    'docs',
     'e2e',
     'desktop',
   ]);

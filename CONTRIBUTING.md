@@ -64,9 +64,7 @@ pnpm -F @gian/shared build
 
 ## Agent-assisted development
 
-This repo was built using a team-of-agents pattern. See
-[`docs/roadmap.md`](docs/roadmap.md) for the milestone history, per-track file
-ownership rules, and parallel constraint protocol used to coordinate multiple
-agents without conflicts. If you are using an AI agent to contribute, follow
-the same rules: each agent owns only the files listed in its brief, types flow
-through `packages/shared/`, and import paths use the `.js` extension.
+This repo uses a team-of-agents workflow. Follow
+[`docs/collaboration.md`](docs/collaboration.md) for Issue ownership, branch and
+worktree isolation, review, and handoff rules. Historical milestones are kept
+under [`docs/archive/`](docs/archive/); they are not an active backlog.

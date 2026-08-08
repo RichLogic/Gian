@@ -1,75 +1,117 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from 'react';
 import type { ApprovalDecision } from '@gian/shared';
+import type { TranscriptHistoryError } from '../controllers/use-transcript-hydration.js';
 import { useT } from '../i18n/index.js';
-import type { ApprovalActionContext, StatusItem, TranscriptItem } from '../types.js';
+import type { ApprovalActionContext, ApprovalItem, StatusItem, TranscriptItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
-import { AgentSpawnRow, ApprovalCard, AssistantMessage, AutoNoticeCard, Caret, CommandCard, DiffCard, FileReadCard, FileSearchCard, ReasoningCard, ToolEvent, UserMessage, useStableExpand, WebSearchRow } from './items.js';
+import { AgentSpawnRow, ApprovalCard, AssistantMessage, AutoNoticeCard, Caret, CommandCard, CompactionRow, DiffCard, FileReadCard, FileSearchCard, formatElapsed, MinimalErrorCard, ReasoningCard, ToolEvent, UserMessage, useStableExpand, WebSearchRow } from './items.js';
 import { GianMascot } from '../components/GianMascot.js';
 
 /**
- * Render-time grouping: walk items[] and fold consecutive action items
- * (everything that's not user/assistant text, approval, or error) into a
- * virtual `turn-actions` block. Boundaries (text/approval/error) flush the
- * current block. The trailing block — i.e. the one with no boundary after
- * it, meaning the agent is still acting — is flagged so the wrapper can
- * default to expanded while live and auto-collapse once a reply arrives.
+ * P2 render-time grouping (2026-08-08): a completed turn folds ALL of its
+ * process events into one `.turnsum` summary row ("完成即折" — collapse as
+ * soon as the turn ends, historical replays included). A turn counts as
+ * complete once its `turn-end` item is in the flow. Turns still in flight
+ * (no turn-end) render their rows flat in P1 process form.
+ *
+ * Fold rules (docs/work-items/transcript-redesign-acd.md §3):
+ * - tool / command / diff / file-read / file-search / web-search / reasoning
+ *   / agent-spawn / auto-notice / compaction rows and RESOLVED approvals
+ *   fold (resolved approvals render as `.approval-line` rows in the body);
+ * - PENDING approvals/questions never fold — they render right after their
+ *   turn's summary row;
+ * - user/assistant messages, status and error items are turn-boundary
+ *   content and stay outside the fold;
+ * - a turn with no process events at all gets no summary row.
  */
 type RenderableItem =
   | TranscriptItem
-  | { kind: 'turn-actions'; id: string; items: TranscriptItem[]; isTrailing: boolean };
+  | {
+    kind: 'turnsum';
+    id: string;
+    turn: number;
+    /** Folded process rows, in flow order. */
+    items: TranscriptItem[];
+    /** Process-event count including pending approvals (each counts 1). */
+    actions: number;
+    startTs: number;
+    endTs: number;
+  };
+
+/** Item kinds that fold into a completed turn's summary (one action each). */
+const TURN_FOLD_KINDS: ReadonlySet<TranscriptItem['kind']> = new Set([
+  'tool',
+  'command',
+  'diff',
+  'file-read',
+  'file-search',
+  'web-search',
+  'reasoning',
+  'agent-spawn',
+  'auto-notice',
+  'compaction',
+]);
+
+function groupIntoBlocks(items: TranscriptItem[]): RenderableItem[] {
+  const endByTurn = new Map<number, number>();
+  for (const it of items) {
+    if (it.kind === 'turn-end' && !endByTurn.has(it.turn)) endByTurn.set(it.turn, it.ts);
+  }
+  if (endByTurn.size === 0) return [...items];
+
+  const foldablesByTurn = new Map<number, TranscriptItem[]>();
+  const pendingByTurn = new Map<number, ApprovalItem[]>();
+  const skip = new Set<TranscriptItem>();
+  const pushTo = (map: Map<number, TranscriptItem[]>, turn: number, it: TranscriptItem) => {
+    const list = map.get(turn) ?? [];
+    list.push(it);
+    map.set(turn, list);
+  };
+  for (const it of items) {
+    if (!endByTurn.has(it.turn)) continue;
+    if (TURN_FOLD_KINDS.has(it.kind)) {
+      pushTo(foldablesByTurn, it.turn, it);
+      skip.add(it);
+    } else if (it.kind === 'approval') {
+      if (it.status === 'pending') pushTo(pendingByTurn, it.turn, it);
+      else pushTo(foldablesByTurn, it.turn, it); // resolved → `.approval-line`
+      skip.add(it);
+    }
+  }
+
+  const out: RenderableItem[] = [];
+  const emitted = new Set<number>();
+  for (const it of items) {
+    if (!skip.has(it)) {
+      out.push(it);
+      continue;
+    }
+    const turn = it.turn;
+    if (emitted.has(turn)) continue;
+    emitted.add(turn);
+    const foldables = foldablesByTurn.get(turn) ?? [];
+    const pendings = pendingByTurn.get(turn) ?? [];
+    if (foldables.length > 0) {
+      out.push({
+        kind: 'turnsum',
+        id: `turnsum_${turn}_${foldables[0]!.id}`,
+        turn,
+        items: foldables,
+        actions: foldables.length + pendings.length,
+        startTs: Math.min(foldables[0]!.ts, pendings[0]?.ts ?? Infinity),
+        endTs: endByTurn.get(turn)!,
+      });
+    }
+    // Pending interactions of a finished turn stay expanded, right after the
+    // summary row (or in place when the turn had nothing foldable).
+    out.push(...pendings);
+  }
+  return out;
+}
 
 /** Distance from the bottom (px) within which the scroll-follow stays pinned. */
 const AT_BOTTOM_PX = 40;
 const LOAD_OLDER_TOP_PX = 80;
-
-function isActionItem(item: TranscriptItem): boolean {
-  switch (item.kind) {
-    case 'user':
-    case 'assistant':
-    case 'approval':
-    case 'error':
-    case 'status':
-    case 'turn-start':
-    case 'turn-end':
-      return false;
-    case 'auto-notice':
-      // Inline classifier-denials fold into turn-actions; the circuit-breaker
-      // is session-stopping and breaks the group so the card stands out.
-      return item.variant === 'classifier-denied';
-    default:
-      return true;
-  }
-}
-
-function groupIntoBlocks(items: TranscriptItem[]): RenderableItem[] {
-  const out: RenderableItem[] = [];
-  let bucket: TranscriptItem[] = [];
-  const flush = () => {
-    if (bucket.length === 0) return;
-    out.push({
-      kind: 'turn-actions',
-      id: `actions_${bucket[0]!.id}`,
-      items: bucket,
-      isTrailing: false,
-    });
-    bucket = [];
-  };
-  for (const it of items) {
-    if (isActionItem(it)) {
-      bucket.push(it);
-    } else {
-      flush();
-      out.push(it);
-    }
-  }
-  flush();
-  // Mark only the very last item as trailing (if it's an actions block).
-  const last = out[out.length - 1];
-  if (last && last.kind === 'turn-actions') {
-    last.isTrailing = true;
-  }
-  return out;
-}
 
 export function renderItem(
   item: TranscriptItem,
@@ -111,9 +153,11 @@ export function renderItem(
     case 'turn-end':
       return null; // Skip, separator already shown by next turn-start
     case 'error':
-      return <ErrorCard key={item.id} item={item} />;
+      return <TranscriptErrorCard key={item.id} item={item} />;
     case 'status':
-      return <div key={item.id} className="transcript-empty">{item.text}</div>;
+      return <div key={item.id} className="status-line">{item.text}</div>;
+    case 'compaction':
+      return <CompactionRow key={item.id} item={item} />;
     case 'command':
       return <CommandCard key={item.id} item={item} />;
     case 'file-read':
@@ -129,35 +173,24 @@ export function renderItem(
   }
 }
 
-function ErrorCard({ item }: { item: StatusItem }) {
+/** Turn failed / session error: the minimal P2 error card (danger label +
+ *  error text on the neutral `.approval` shell — no icon/title/pill/time). */
+function TranscriptErrorCard({ item }: { item: StatusItem }) {
   const t = useT();
-  return (
-    <div className="approval declined" style={{ maxWidth: 820 }}>
-      <div className="approval-top">
-        <div style={{ flex: 1 }}>
-          <div className="approval-title">
-            <span>{t('transcript.turnFailed')}</span>
-            <span className="approval-risk">{t('coding.status.error')}</span>
-          </div>
-          <div className="approval-sub">{item.text}</div>
-        </div>
-        <span className="evt-meta" style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-3)' }}>{formatTime(item.ts)}</span>
-      </div>
-    </div>
-  );
+  return <MinimalErrorCard label={t('transcript.turnFailed')}>{item.text}</MinimalErrorCard>;
 }
 
 /**
- * Wraps a stretch of consecutive action items so the user can collapse the
- * "what the agent did" between two text replies. Single-item blocks fall
- * through to the bare child render — no wrapper noise. Multi-item blocks
- * default to expanded while trailing (live), collapse once a reply arrives.
+ * A finished turn's summary row (P2): `Worked 1m 03s · 7 actions ·
+ * 1 file +6 −2` with the turn-end time on the right. Doubles as the turn
+ * boundary. Click expands the full process list on a left guide rail; the
+ * rows inside behave exactly like the live process rows.
  */
-function TurnActionsBlock({
+function TurnSumBlock({
   block,
   onApprove,
 }: {
-  block: { id: string; items: TranscriptItem[]; isTrailing: boolean };
+  block: Extract<RenderableItem, { kind: 'turnsum' }>;
   onApprove: (
     approvalId: string,
     decision: ApprovalDecision,
@@ -166,60 +199,61 @@ function TurnActionsBlock({
   ) => void;
 }) {
   const t = useT();
-  const { open, setOpen, toggle } = useStableExpand(block.isTrailing);
-  // Auto-fold once the agent stops acting (a reply / approval comes after).
-  // If the user manually toggled while trailing, this still collapses on
-  // reply — that matches "show me what's happening live, then get out of
-  // the way" UX. They can always reopen.
-  useEffect(() => {
-    setOpen(block.isTrailing);
-  }, [block.isTrailing]);
-
-  if (block.items.length === 1) {
-    return <>{renderItem(block.items[0]!, onApprove)}</>;
+  const { open, toggle } = useStableExpand();
+  // Stats per the locked口径: files deduped by path with add/del summed
+  // across the turn's diffs; failed = command errors + agent errors (kept
+  // danger-red, never discounted).
+  let add = 0;
+  let del = 0;
+  let failed = 0;
+  const paths = new Set<string>();
+  for (const it of block.items) {
+    if (it.kind === 'diff') {
+      for (const f of it.files) {
+        paths.add(f.path);
+        add += f.add;
+        del += f.del;
+      }
+    } else if (it.kind === 'command' && it.status === 'error') {
+      failed++;
+    } else if (it.kind === 'agent-spawn' && it.status === 'error') {
+      failed++;
+    }
   }
-
-  // Tiny tally: count by major kinds for the summary line.
-  const tally = countActions(block.items, t);
+  const fileCount = paths.size;
   return (
-    <div className={`evt actions ${open ? 'open' : ''}`}>
-      <div className="evt-head" onClick={toggle}>
-        <Caret />
-        <span className="evt-verb">{block.isTrailing ? t('transcript.working') : t('transcript.steps')}</span>
-        <span className="evt-subject">
-          <span style={{ color: 'var(--text-2)' }}>{block.items.length} {t('transcript.actions')}</span>
-          {tally && (
-            <span style={{ marginLeft: 8, color: 'var(--text-3)', fontSize: 11.5 }}>
-              {tally}
-            </span>
+    <>
+      <div className={`turnsum${open ? ' open' : ''}`} onClick={toggle}>
+        <Caret className="turnsum-caret" />
+        <span className="turnsum-lead">
+          {t('transcript.turnsum.worked')} {formatElapsed(block.endTs - block.startTs)}
+        </span>
+        <span className="turnsum-stats">
+          <span>{block.actions} {t(block.actions === 1 ? 'transcript.turnsum.action' : 'transcript.turnsum.actions')}</span>
+          {fileCount > 0 && (
+            <>
+              <span className="sep">·</span>
+              <span>{fileCount} {t(fileCount === 1 ? 'transcript.turnsum.file' : 'transcript.turnsum.files')}</span>
+              <span className="add">+{add}</span>
+              <span className="del">−{del}</span>
+            </>
+          )}
+          {failed > 0 && (
+            <>
+              <span className="sep">·</span>
+              <span className="err">{failed} {t('transcript.turnsum.failed')}</span>
+            </>
           )}
         </span>
+        <span className="turnsum-time">{formatTime(block.endTs)}</span>
       </div>
       {open && (
-        <div className="evt-body actions-body">
+        <div className="turnsum-body">
           {block.items.map(child => renderItem(child, onApprove))}
         </div>
       )}
-    </div>
+    </>
   );
-}
-
-function countActions(items: TranscriptItem[], t: (key: string) => string): string {
-  let run = 0, edit = 0, explore = 0, agent = 0, other = 0;
-  for (const it of items) {
-    if (it.kind === 'command') run++;
-    else if (it.kind === 'diff') edit++;
-    else if (it.kind === 'file-read' || it.kind === 'file-search' || it.kind === 'web-search') explore++;
-    else if (it.kind === 'agent-spawn') agent++;
-    else other++;
-  }
-  return [
-    explore && `${t('transcript.actions.explored')} ${explore}`,
-    run && `${t('transcript.actions.ran')} ${run}`,
-    edit && `${t('transcript.actions.edited')} ${edit}`,
-    agent && `${t('transcript.agent')} ${agent}`,
-    other && `${t('transcript.actions.other')} ${other}`,
-  ].filter(Boolean).join(' · ');
 }
 
 /** A non-event node interleaved into the transcript by timestamp — e.g. the
@@ -234,7 +268,7 @@ export interface TranscriptExtra {
 
 export function Transcript({
   items, pending, onApprove, hiddenApprovalId, extras, hydrated = true,
-  hasOlder = false, loadingOlder = false, onLoadOlder,
+  hasOlder = false, loadingOlder = false, onLoadOlder, historyError, onRetryHistory,
 }: {
   items: TranscriptItem[];
   pending: boolean;
@@ -256,6 +290,8 @@ export function Transcript({
   hasOlder?: boolean;
   loadingOlder?: boolean;
   onLoadOlder?: () => void;
+  historyError?: TranscriptHistoryError | null;
+  onRetryHistory?: () => void;
 }) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
@@ -275,9 +311,9 @@ export function Transcript({
   const olderAnchorRef = useRef<{ scroller: HTMLElement; height: number; top: number } | null>(null);
   const lastScrollTopRef = useRef(0);
 
-  function loadOlder() {
+  function rememberOlderAnchor() {
     const el = ref.current;
-    if (!el || !onLoadOlder || loadingOlder) return;
+    if (!el) return;
     const scroller = (el.closest('.main-scroll') as HTMLElement | null) ?? el;
     olderAnchorRef.current = {
       scroller,
@@ -285,7 +321,18 @@ export function Transcript({
       top: scroller.scrollTop,
     };
     atBottomRef.current = false;
+  }
+
+  function loadOlder() {
+    if (!onLoadOlder || loadingOlder) return;
+    rememberOlderAnchor();
     onLoadOlder();
+  }
+
+  function retryHistory() {
+    if (!onRetryHistory) return;
+    if (historyError?.operation === 'older') rememberOlderAnchor();
+    onRetryHistory();
   }
 
   useEffect(() => {
@@ -374,7 +421,23 @@ export function Transcript({
 
   return (
     <div className="transcript" ref={ref}>
-        {hasOlder && onLoadOlder && (
+        {historyError && (
+          <div className="transcript-history-error" role="alert">
+            <span>
+              {historyError.status === 401
+                ? t('transcript.history.unauthorized')
+                : historyError.operation === 'older'
+                  ? t('transcript.history.olderError')
+                  : t('transcript.history.error')}
+            </span>
+            {onRetryHistory && (
+              <button className="btn secondary sm" type="button" onClick={retryHistory}>
+                {t('transcript.history.retry')}
+              </button>
+            )}
+          </div>
+        )}
+        {hasOlder && onLoadOlder && !historyError && (
           <div className="transcript-history-load">
             <button className="btn ghost sm" type="button" onClick={loadOlder} disabled={loadingOlder}>
               {loadingOlder ? t('transcript.history.loading') : t('transcript.history.older')}
@@ -404,8 +467,8 @@ export function Transcript({
           // sender break, like any non-text item.
           const sortedExtras = (extras ?? []).slice().sort((a, b) => a.afterTs - b.afterTs);
           const blockTs = (b: RenderableItem): number =>
-            b.kind === 'turn-actions'
-              ? (b.items[b.items.length - 1]?.ts ?? 0)
+            b.kind === 'turnsum'
+              ? b.endTs
               : ((b as { ts?: number }).ts ?? 0);
           const out: ReactNode[] = [];
           let ei = 0;
@@ -417,9 +480,9 @@ export function Transcript({
             }
           };
           blocks.forEach((item, bi) => {
-            if (item.kind === 'turn-actions') {
+            if (item.kind === 'turnsum') {
               prevSender = null;
-              out.push(<TurnActionsBlock key={item.id} block={item} onApprove={onApprove} />);
+              out.push(<TurnSumBlock key={item.id} block={item} onApprove={onApprove} />);
             } else {
               let hideAvatar = false;
               // Assistant footer (time + copy) renders on the TAIL of a

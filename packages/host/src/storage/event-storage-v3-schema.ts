@@ -1,57 +1,38 @@
 import type { Db } from './db.js';
 
-/**
- * Install the P0 event-storage schema into an explicitly selected database.
- *
- * This is deliberately NOT part of openDatabase()/the automatic migration
- * directory. P0 tests call it for disposable databases. The packaged-app
- * migration will be added only after the migration rehearsal is complete.
- */
-export function installEventStorageV3(db: Db): void {
+export type EventStorageV3State = 'installing' | 'migrating' | 'verifying' | 'active' | 'failed';
+
+export interface EventStorageV3Meta {
+  version: number;
+  state: EventStorageV3State;
+  run_id: string;
+  backup_path: string;
+  backup_sha256: string;
+  phase: string;
+  cursor: string | null;
+  counters_json: string;
+  updated_at: string;
+}
+
+/** Install only the additive schema needed by the offline migrator. */
+export function installEventStorageV3Schema(db: Db): void {
   const hasSequence = (db.prepare(`PRAGMA table_info('events')`).all() as Array<{ name: string }>)
     .some(column => column.name === 'sequence');
-  const sequenceIndex = db.prepare(
-    `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_session_sequence'`,
-  ).get() as { sql: string | null } | undefined;
-  const expectedSequenceIndex = sequenceIndex?.sql
-    ? /CREATE\s+UNIQUE\s+INDEX\s+idx_events_session_sequence\s+ON\s+events\s*\(\s*session_id\s*,\s*sequence\s*\)\s*$/i
-      .test(sequenceIndex.sql)
-    : false;
-
   db.transaction(() => {
     if (!hasSequence) db.exec('ALTER TABLE events ADD COLUMN sequence INTEGER');
-    if (sequenceIndex && !expectedSequenceIndex) {
-      db.exec('DROP INDEX idx_events_session_sequence');
-    }
     db.exec(`
-      WITH ranked AS (
-        SELECT
-          id,
-          ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY rowid) AS sequence
-        FROM events
-      )
-      UPDATE events
-      SET sequence = (SELECT ranked.sequence FROM ranked WHERE ranked.id = events.id)
-      WHERE sequence IS NULL;
-
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_events_session_sequence
-        ON events(session_id, sequence);
-
-      CREATE INDEX IF NOT EXISTS idx_events_snapshot_identity
-        ON events(session_id, turn_id, type, call_id, sequence);
-
-      CREATE TRIGGER IF NOT EXISTS events_assign_sequence
-      AFTER INSERT ON events
-      WHEN NEW.sequence IS NULL
-      BEGIN
-        UPDATE events
-        SET sequence = (
-          SELECT COALESCE(MAX(sequence), 0) + 1
-          FROM events
-          WHERE session_id = NEW.session_id AND id <> NEW.id
-        )
-        WHERE id = NEW.id;
-      END;
+      CREATE TABLE IF NOT EXISTS event_storage_meta (
+        singleton     INTEGER PRIMARY KEY CHECK (singleton = 1),
+        version       INTEGER NOT NULL,
+        state         TEXT NOT NULL CHECK (state IN ('installing', 'migrating', 'verifying', 'active', 'failed')),
+        run_id        TEXT NOT NULL,
+        backup_path   TEXT NOT NULL,
+        backup_sha256 TEXT NOT NULL,
+        phase         TEXT NOT NULL,
+        cursor        TEXT,
+        counters_json TEXT NOT NULL,
+        updated_at    TEXT NOT NULL
+      );
 
       CREATE TABLE IF NOT EXISTS event_artifacts (
         id          TEXT PRIMARY KEY,
@@ -104,10 +85,97 @@ export function installEventStorageV3(db: Db): void {
   })();
 }
 
-export function hasEventStorageV3(db: Db): boolean {
-  return (db.prepare(`PRAGMA table_info('events')`).all() as Array<{ name: string }>)
-    .some(column => column.name === 'sequence')
-    && Boolean(db.prepare(
-      `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'event_artifacts'`,
-    ).get());
+/** Finalize indexes/triggers only after the bounded sequence backfill passes. */
+export function finalizeEventStorageV3Schema(db: Db): void {
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_events_session_sequence
+      ON events(session_id, sequence);
+
+    CREATE INDEX IF NOT EXISTS idx_events_snapshot_identity
+      ON events(session_id, turn_id, type, call_id, sequence);
+
+    CREATE TRIGGER IF NOT EXISTS events_assign_sequence
+    AFTER INSERT ON events
+    WHEN NEW.sequence IS NULL
+    BEGIN
+      UPDATE events
+      SET sequence = (
+        SELECT COALESCE(MAX(sequence), 0) + 1
+        FROM events
+        WHERE session_id = NEW.session_id AND id <> NEW.id
+      )
+      WHERE id = NEW.id;
+    END;
+  `);
+}
+
+export function readEventStorageV3Meta(db: Db): EventStorageV3Meta | null {
+  if (!tableExists(db, 'event_storage_meta')) return null;
+  return (db.prepare(
+    `SELECT version, state, run_id, backup_path, backup_sha256,
+            phase, cursor, counters_json, updated_at
+     FROM event_storage_meta WHERE singleton = 1`,
+  ).get() as EventStorageV3Meta | undefined) ?? null;
+}
+
+export function hasEventStorageV3Schema(db: Db): boolean {
+  const hasSequence = (db.prepare(`PRAGMA table_info('events')`).all() as Array<{ name: string }>)
+    .some(column => column.name === 'sequence');
+  return hasSequence
+    && tableExists(db, 'event_storage_meta')
+    && tableExists(db, 'event_artifacts')
+    && tableExists(db, 'event_artifact_chunks')
+    && tableExists(db, 'event_artifact_links');
+}
+
+export function isEventStorageV3Active(db: Db): boolean {
+  if (!hasEventStorageV3Schema(db)) return false;
+  const meta = readEventStorageV3Meta(db);
+  return meta?.version === 3 && meta.state === 'active';
+}
+
+/** Runtime compatibility alias. Presence alone is intentionally insufficient. */
+export const hasEventStorageV3 = isEventStorageV3Active;
+
+/**
+ * Disposable-database rehearsal helper used by focused storage tests.
+ * Production databases must use the packaged offline migration CLI.
+ */
+export function installEventStorageV3(db: Db): void {
+  installEventStorageV3Schema(db);
+  db.transaction(() => {
+    db.exec(`
+      WITH ranked AS (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY rowid) AS sequence
+        FROM events
+      )
+      UPDATE events
+      SET sequence = (SELECT ranked.sequence FROM ranked WHERE ranked.id = events.id)
+      WHERE sequence IS NULL;
+    `);
+    finalizeEventStorageV3Schema(db);
+    db.prepare(`
+      INSERT INTO event_storage_meta
+        (singleton, version, state, run_id, backup_path, backup_sha256,
+         phase, cursor, counters_json, updated_at)
+      VALUES (1, 3, 'active', 'test-rehearsal', ':memory:', 'test-only',
+              'complete', NULL, '{}', datetime('now'))
+      ON CONFLICT(singleton) DO UPDATE SET
+        version = excluded.version,
+        state = excluded.state,
+        run_id = excluded.run_id,
+        backup_path = excluded.backup_path,
+        backup_sha256 = excluded.backup_sha256,
+        phase = excluded.phase,
+        cursor = excluded.cursor,
+        counters_json = excluded.counters_json,
+        updated_at = excluded.updated_at
+    `).run();
+  })();
+}
+
+function tableExists(db: Db, name: string): boolean {
+  return Boolean(db.prepare(
+    `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`,
+  ).get(name));
 }

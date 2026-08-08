@@ -6,6 +6,7 @@ import { createApp } from './web/app.js';
 import { openDatabase } from './storage/db.js';
 import { loadConfig } from './storage/config.js';
 import { resolveDataDir } from './storage/paths.js';
+import { assertNoEventStorageMaintenance } from './storage/maintenance-lock.js';
 import { sweepColdEvents } from './events/lifecycle.js';
 import { CliRuntimeManager } from './runtime/manager.js';
 import { AgentManager } from './agents/manager.js';
@@ -43,6 +44,7 @@ function resolveProxyEntry(
 
 async function main(): Promise<void> {
   const dataDir = resolveDataDir();
+  assertNoEventStorageMaintenance(dataDir);
   const db = openDatabase(dataDir);
   const config = loadConfig(db);
 
@@ -117,7 +119,10 @@ async function main(): Promise<void> {
       ...(process.env.KIMI_BIN ? { kimi: process.env.KIMI_BIN } : {}),
     },
   });
-  const runtimeManager = new CliRuntimeManager(agentManager.runtimeProviders());
+  const runtimeManager = new CliRuntimeManager(
+    agentManager.runtimeProviders(),
+    agentManager.updateLockDataDir(),
+  );
 
   const handle = createApp({
     db,

@@ -128,8 +128,8 @@ export interface ApprovalResponseParams {
   behavior: 'allow' | 'deny';
   /** Structured answers for an AskUserQuestion-flavored approval. Keyed
    *  by question text; values are the user's selected option label(s).
-   *  When present, the proxy resolves with `{ updatedInput: { answers } }`
-   *  per the Claude Code SDK `approval_prompt` contract. */
+   *  When present, the proxy tunnels them through deny+message because
+   *  current Claude `-p` does not honor updatedInput answers. */
   answers?: Record<string, string | string[]>;
 }
 

@@ -124,6 +124,7 @@ test('SEC-009: /raw on a .html file attaches a strict CSP that forbids framing, 
     const csp = res.headers.get('Content-Security-Policy');
     assert.ok(csp, 'HTML preview MUST carry a CSP header');
     for (const needle of [
+      'sandbox allow-scripts',
       "frame-ancestors 'none'",
       "object-src 'none'",
       "base-uri 'none'",
@@ -149,6 +150,8 @@ test('SEC-009: /raw on an .svg file attaches the tighter SVG CSP that forbids AL
     assert.ok(csp, 'SVG preview MUST carry a CSP header (SVG can embed <script>)');
     assert.ok(csp!.includes("script-src 'none'"),
       'SVG CSP MUST set script-src to none — SVG <script> tags are an injection vector');
+    assert.ok(csp!.includes('sandbox;'),
+      'SVG CSP MUST use a sandbox without script or same-origin privileges');
     assert.ok(csp!.includes("default-src 'none'"),
       'SVG CSP MUST start from deny-all default-src');
     assert.ok(csp!.includes("frame-ancestors 'none'"),

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Session, Workspace } from '@gian/shared';
 import { loadArchivedSessions } from '../api.js';
 import { confirm } from '../feedback.js';
@@ -29,16 +29,27 @@ export function ArchivedSessionsPane({
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const refreshGeneration = useRef(0);
 
   async function refresh() {
+    const generation = ++refreshGeneration.current;
     setLoading(true);
-    const list = await loadArchivedSessions();
-    setSessions(list.filter(s => s.workspace_id === workspace.id));
-    setLoading(false);
+    try {
+      const list = await loadArchivedSessions();
+      if (generation !== refreshGeneration.current) return;
+      setSessions(list.filter(s => s.workspace_id === workspace.id));
+      setError(null);
+    } catch (thrown) {
+      if (generation !== refreshGeneration.current) return;
+      setError(thrown instanceof Error ? thrown.message : 'Failed to load archived sessions');
+    } finally {
+      if (generation === refreshGeneration.current) setLoading(false);
+    }
   }
 
   useEffect(() => {
     void refresh();
+    return () => { refreshGeneration.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace.id]);
 
@@ -48,7 +59,12 @@ export function ArchivedSessionsPane({
         Conversations archived from the session sidebar. <b>Restore</b> moves a conversation back to the sidebar; <b>Delete</b> removes it permanently.
       </div>
 
-      {error && <p className="spaces-error">{error}</p>}
+      {error && (
+        <div className="spaces-error" role="alert">
+          <span>{error}</span>{' '}
+          <button className="btn xs" onClick={() => void refresh()}>Retry</button>
+        </div>
+      )}
 
       <div className="card">
         <div className="card-body compact">
@@ -126,6 +142,7 @@ function ArchivedRow({
   return (
     <div
       className="wt-row"
+      data-testid={`archived-session-${s.id}`}
       style={{ gridTemplateColumns: '1fr auto auto', alignItems: 'center' }}
     >
       <div style={{ minWidth: 0 }}>
@@ -138,8 +155,8 @@ function ArchivedRow({
           </span>
         </div>
       </div>
-      <button className="btn sm" disabled={busy} onClick={() => void handleRestore()}>Restore</button>
-      <button className="btn sm danger" disabled={busy} onClick={() => void handleDelete()}>Delete</button>
+      <button data-testid={`archived-restore-${s.id}`} className="btn sm" disabled={busy} onClick={() => void handleRestore()}>Restore</button>
+      <button data-testid={`archived-delete-${s.id}`} className="btn sm danger" disabled={busy} onClick={() => void handleDelete()}>Delete</button>
     </div>
   );
 }

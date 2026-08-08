@@ -27,7 +27,38 @@ function baseConfig(overrides: Partial<SystemConfig> = {}): SystemConfig {
 }
 
 describe('SettingsBody Appearance', () => {
-  beforeEach(() => { vi.clearAllMocks(); });
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    delete window.gianDesktop;
+  });
+
+  it('removes Density and the Interface/Code font controls', () => {
+    renderWithOperations(<SettingsBody config={baseConfig({
+      density: 'compact',
+      font_scale_chrome: 'xl',
+      font_scale_code: 'sm',
+    })} />);
+    expect(screen.queryByText('Density')).toBeNull();
+    expect(screen.queryByText('Font · Interface')).toBeNull();
+    expect(screen.queryByText('Font · Code')).toBeNull();
+    expect(screen.getByText('Font · Transcript')).toBeTruthy();
+  });
+
+  it('controls device zoom from 80% to 150% in the same 10% steps as Cmd +/-', () => {
+    renderWithOperations(<SettingsBody config={baseConfig()} />);
+    const slider = screen.getByRole('slider', { name: 'Zoom' }) as HTMLInputElement;
+    expect(slider.min).toBe('80');
+    expect(slider.max).toBe('150');
+    expect(slider.step).toBe('10');
+    expect(screen.getByText('100%')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    expect(screen.getByText('110%')).toBeTruthy();
+    fireEvent.change(slider, { target: { value: '150' } });
+    expect(screen.getByText('150%')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Zoom in' })).toBeDisabled();
+  });
 
   it('switching theme resets accent to the theme default', async () => {
     renderWithOperations(<SettingsBody config={baseConfig()} />);

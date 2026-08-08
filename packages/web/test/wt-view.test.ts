@@ -54,6 +54,26 @@ describe('resolveViewedTreeId', () => {
     })).toBe('ext:ws:Z2lhbg');
   });
 
+  it('ignores an in-memory override whose worktree disappeared after refresh', () => {
+    expect(resolveViewedTreeId({
+      sessionId: 's1',
+      inMemory: { sessionId: 's1', wtId: 'ext:ws:ZGVhZA' },
+      stored: null,
+      trees,
+      defaultId: 'ws:main',
+    })).toBe('ws:main');
+  });
+
+  it('falls through an invalid in-memory override to a valid stored tree', () => {
+    expect(resolveViewedTreeId({
+      sessionId: 's1',
+      inMemory: { sessionId: 's1', wtId: 'ext:ws:ZGVhZA' },
+      stored: 'ext:ws:Z2lhbg',
+      trees,
+      defaultId: 'ws:main',
+    })).toBe('ext:ws:Z2lhbg');
+  });
+
   it('ignores a persisted override whose tree no longer exists', () => {
     expect(resolveViewedTreeId({
       sessionId: 's1',

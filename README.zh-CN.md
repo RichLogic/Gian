@@ -15,11 +15,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/RichLogic/Gian/releases/download/v0.1.2/Gian-0.1.2-arm64.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-Gian_0.1.2-E4572E?style=for-the-badge&logo=apple&logoColor=white" alt="Download Gian for macOS Apple Silicon"></a>
+  <a href="https://github.com/RichLogic/Gian/releases/download/v0.4.0/Gian-0.4.0-arm64.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-Gian_0.4.0-E4572E?style=for-the-badge&logo=apple&logoColor=white" alt="Download Gian for macOS Apple Silicon"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/RichLogic/Gian/releases/tag/v0.1.2"><img src="https://img.shields.io/badge/release-v0.1.2_beta-C65D3A" alt="Current Gian beta release v0.1.2"></a>
+  <a href="https://github.com/RichLogic/Gian/releases/tag/v0.4.0"><img src="https://img.shields.io/badge/release-v0.4.0_beta-C65D3A" alt="Current Gian beta release v0.4.0"></a>
   <img src="https://img.shields.io/badge/platform-macOS_Apple_Silicon-1F2328?logo=apple" alt="Platform macOS Apple Silicon">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2F7D6D" alt="MIT License"></a>
 </p>
@@ -44,13 +44,13 @@
 - 创建、发送、停止、排队、引导、压缩和清空 Agent 会话。
 - 回答 Agent 的问题，批准或拒绝命令与工具调用。
 - 在服务商支持时选择其原生模型、推理等级和权限模式。
-- 附加文件与图片，查看实时 transcript 和当前上下文用量。
+- 附加文件与图片，查看实时 transcript、当前上下文用量，并在隔离的 Browser 标签页中预览网页内容。
 - 创建或接入 workspace，发现 worktree，查看改动文件和 Diff。
 - 创建、重命名、置顶、完成、重新打开和删除 Tasks 及其分组会话。
 - 发现并恢复官方 Agent CLI 支持的原生会话。
 - 配置 Executors、外观、项目根目录和桌面通知。
 
-当前 Beta 有意不包含内置 Browser、Sidechat、自动化 Task Manager，以及 Discord/Slack Bots。
+当前 Beta 有意不包含 Sidechat、自动化 Task Manager，以及 Discord/Slack Bots。
 
 ## 界面细节
 
@@ -66,7 +66,7 @@
 
 Gian 当前是面向 **Apple Silicon 的 unsigned macOS Beta**。它尚未经过 Apple 公证，因此第一次打开时 macOS Gatekeeper 会给出提示。
 
-1. 从[当前 Beta Release](https://github.com/RichLogic/Gian/releases/tag/v0.1.2)下载 [`Gian-0.1.2-arm64.dmg`](https://github.com/RichLogic/Gian/releases/download/v0.1.2/Gian-0.1.2-arm64.dmg)。
+1. 从[当前 Beta Release](https://github.com/RichLogic/Gian/releases/tag/v0.4.0)下载 [`Gian-0.4.0-arm64.dmg`](https://github.com/RichLogic/Gian/releases/download/v0.4.0/Gian-0.4.0-arm64.dmg)。
 2. 打开 DMG，把 Gian 拖入 **Applications（应用程序）**。
 3. 在 Finder 中按住 Control 点击 Gian，选择 **Open（打开）**，再在 Gatekeeper 对话框中选择一次 **Open（打开）**。
 4. 如果没有这个选项，打开 **System Settings > Privacy & Security（系统设置 > 隐私与安全性）**，在 Gian 对应提示旁选择 **Open Anyway（仍要打开）**。

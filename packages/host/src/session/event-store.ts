@@ -1,7 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import type { Db } from '../storage/db.js';
-import { hasEventStorageV3 } from '../storage/event-storage-v3-schema.js';
+import {
+  hasEventStorageV3Schema,
+  isEventStorageV3Active,
+} from '../storage/event-storage-v3-schema.js';
 
 export const EVENT_ARTIFACT_THRESHOLD_BYTES = 16 * 1024;
 export const MAX_STORED_EVENT_BYTES = 128 * 1024;
@@ -54,6 +57,10 @@ export interface EventStorageMetrics {
   largestStoredEventBytes: number;
 }
 
+export interface EventStoreOptions {
+  mode?: 'runtime' | 'migration';
+}
+
 const metrics: EventStorageMetrics = {
   externalizedValues: 0,
   restoredArtifacts: 0,
@@ -78,8 +85,10 @@ export function resetEventStorageMetrics(): void {
 export class EventStore {
   readonly usesSequence: boolean;
 
-  constructor(private db: Db) {
-    this.usesSequence = hasEventStorageV3(db);
+  constructor(private db: Db, options: EventStoreOptions = {}) {
+    this.usesSequence = options.mode === 'migration'
+      ? hasEventStorageV3Schema(db)
+      : isEventStorageV3Active(db);
   }
 
   persist(input: PersistEventInput): PersistEventResult {

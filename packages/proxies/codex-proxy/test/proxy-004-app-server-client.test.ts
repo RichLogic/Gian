@@ -2,8 +2,9 @@
 //   PROXY-004 — Codex app-server client must handle readiness, WebSocket
 //               connect, serverRequest, runtimeStopped, pending rejection.
 //
-// The real start() path spawns the `codex` binary — out of scope for a
-// unit test. The interesting risk surface is the message-routing layer:
+// A deterministic cross-process smoke below drives the real start() path
+// through a local fake binary (spawn → readyz → WebSocket → initialize).
+// The remaining focused tests isolate the message-routing layer:
 //   • result frames resolve the matching pending request;
 //   • error frames reject the matching pending request;
 //   • method+id frames emit `serverRequest` (codex asking us something);
@@ -21,13 +22,23 @@
 // invite callers to bypass `request()`.
 
 import assert from 'node:assert/strict';
-import test from 'node:test';
 import { EventEmitter } from 'node:events';
+import { chmodSync } from 'node:fs';
+import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
+  buildAppServerArgs,
   buildInitializeParams,
   CodexAppServerClient,
 } from '../src/runtime/codex-app-server-client.js';
+import {
+  CODEX_APP_SERVER_V2_DEFAULT_ELIDED_GRANULAR_PERMISSIONS,
+  CODEX_APP_SERVER_V2_EXTERNAL_SANDBOX_PERMISSIONS,
+  CODEX_APP_SERVER_UNKNOWN_PERMISSIONS,
+  CODEX_APP_SERVER_V2_GRANULAR_PERMISSIONS,
+  CODEX_APP_SERVER_V2_NAMED_PERMISSIONS,
+} from './fixtures/app-server-v2-permissions.js';
 
 // ---------------------------------------------------------------------------
 // Internal-surface helper. Keeps every cast localized so the production
@@ -40,13 +51,26 @@ interface PendingRequest {
 }
 
 interface ClientInternals {
-  socket: { readyState: number; send: (data: string) => void } | null;
+  socket: { readyState: number; send: (data: string) => void; close?: () => void } | null;
   pending: Map<number, PendingRequest>;
   nextId: number;
-  process: { killed: boolean; kill: (sig: string) => void } | null;
+  process: FakeChild | null;
   startPromise: Promise<void> | null;
+  activeGeneration: number | null;
+  nextGeneration: number;
+  deadlines: {
+    startupMs: number;
+    readyMs: number;
+    socketConnectMs: number;
+    rpcMs: number;
+    terminateGraceMs: number;
+  };
+  start(generation: number): Promise<void>;
+  attachProcess(child: FakeChild, generation: number): void;
+  attachSocket(socket: WebSocket, generation: number, signal: AbortSignal): Promise<void>;
   handleMessage(raw: string): void;
   send(payload: unknown): void;
+  requestInternal(method: string, params: unknown): Promise<unknown>;
 }
 
 function internals(client: CodexAppServerClient): ClientInternals {
@@ -60,6 +84,99 @@ function makePending(): { promise: Promise<unknown>; pending: PendingRequest } {
   return { promise, pending: { resolve, reject } };
 }
 
+async function within<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+class FakeSocket extends EventTarget {
+  readyState: number = WebSocket.CONNECTING;
+  readonly sent: string[] = [];
+  closeCalls = 0;
+  onSend: ((data: string) => void) | null = null;
+
+  send(data: string) {
+    this.sent.push(data);
+    this.onSend?.(data);
+  }
+
+  open() {
+    this.readyState = WebSocket.OPEN;
+    this.dispatchEvent(new Event('open'));
+  }
+
+  fail() {
+    this.dispatchEvent(new Event('error'));
+  }
+
+  disconnect() {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSED;
+    this.dispatchEvent(new Event('close'));
+  }
+
+  close() {
+    this.closeCalls += 1;
+    this.disconnect();
+  }
+
+  receive(payload: unknown) {
+    this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(payload) }));
+  }
+}
+
+class FakeChild extends EventEmitter {
+  stdout = null;
+  stderr = null;
+  killed = false;
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
+  readonly killSignals: Array<NodeJS.Signals | number> = [];
+
+  kill(signal: NodeJS.Signals | number = 'SIGTERM') {
+    this.killSignals.push(signal);
+    this.killed = true;
+    return true;
+  }
+
+  exit(code = 0) {
+    if (this.exitCode !== null || this.signalCode !== null) return;
+    this.exitCode = code;
+    this.emit('exit', code, null);
+  }
+}
+
+async function installRuntime(
+  client: CodexAppServerClient,
+  generation = 1,
+  child = new FakeChild(),
+  socket = new FakeSocket(),
+) {
+  const i = internals(client);
+  i.activeGeneration = generation;
+  i.nextGeneration = Math.max(i.nextGeneration, generation + 1);
+  i.process = child;
+  i.startPromise = Promise.resolve();
+  i.attachProcess(child, generation);
+  const connected = i.attachSocket(
+    socket as unknown as WebSocket,
+    generation,
+    new AbortController().signal,
+  );
+  socket.open();
+  await connected;
+  return { child, socket };
+}
+
 test('PROXY-004: initialize opts into the experimental API required by runtimeWorkspaceRoots', () => {
   assert.deepEqual(buildInitializeParams(), {
     clientInfo: { name: 'codex-proxy', version: '0.1.0' },
@@ -68,6 +185,72 @@ test('PROXY-004: initialize opts into the experimental API required by runtimeWo
       requestAttestation: false,
     },
   });
+});
+
+test('PROXY-004: app-server startup disables the vendor updater', () => {
+  assert.deepEqual(buildAppServerArgs('ws://127.0.0.1:4321'), [
+    '-c', 'check_for_update_on_startup=false',
+    'app-server', '--listen', 'ws://127.0.0.1:4321',
+  ]);
+});
+
+test('PROXY-004: real start path spans spawn, readyz, WebSocket, serverRequest, and runtimeStopped', async () => {
+  const fakeCodex = fileURLToPath(new URL('./fixtures/fake-codex-app-server.js', import.meta.url));
+  chmodSync(fakeCodex, 0o755);
+  const client = new CodexAppServerClient({
+    codexBin: fakeCodex,
+    deadlines: {
+      startupMs: 5_000,
+      readyMs: 2_000,
+      socketConnectMs: 2_000,
+      rpcMs: 5_000,
+      terminateGraceMs: 100,
+    },
+  });
+  let stoppedCount = 0;
+  const stopped = new Promise<void>((resolve) => {
+    client.on('runtimeStopped', () => {
+      stoppedCount += 1;
+      resolve();
+    });
+  });
+  const serverRequest = new Promise<{ id: number; method: string; params?: unknown }>((resolve) => {
+    client.on('serverRequest', message => resolve(message as {
+      id: number;
+      method: string;
+      params?: unknown;
+    }));
+  });
+
+  try {
+    await client.ensureStarted();
+    const request = await within(serverRequest, 2_000, 'fixture serverRequest');
+    assert.deepEqual(request, {
+      jsonrpc: '2.0',
+      id: 901,
+      method: 'item/commandExecution/requestApproval',
+      params: { command: 'fixture-command' },
+    });
+
+    const pending = client.readThread('fixture-pending').then(
+      result => ({ status: 'resolved' as const, result }),
+      error => ({ status: 'rejected' as const, error }),
+    );
+    await client.respond(request.id, { decision: 'accept' });
+    await within(stopped, 2_000, 'fixture runtimeStopped');
+    const settled = await within(pending, 2_000, 'fixture pending RPC drain');
+    assert.equal(settled.status, 'rejected');
+    if (settled.status === 'rejected') {
+      assert.match(
+        String(settled.error),
+        /Codex app-server (stopped|websocket (?:closed|failed))/,
+      );
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(stoppedCount, 1);
+  } finally {
+    await client.stop();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -188,37 +371,16 @@ test('PROXY-004: send() writes JSON to the socket when readyState is OPEN', () =
 // PROXY-004 — runtimeStopped + pending rejection
 // ---------------------------------------------------------------------------
 
-// We replicate the inline exit handler installed by start(). The contract
-// being pinned: when the child exits, every pending request must reject
-// with "Codex app-server stopped." AND a `runtimeStopped` event must fire.
-// If this drifts (e.g. someone forgets to reject), the host-side caller
-// hangs forever — exactly the bug PROXY-004 is meant to catch.
-
-function attachExitTeardown(client: CodexAppServerClient, child: EventEmitter): void {
-  const i = internals(client);
-  child.on('exit', () => {
-    i.socket = null;
-    i.process = null;
-    i.startPromise = null;
-    for (const [id, pending] of i.pending.entries()) {
-      pending.reject(new Error('Codex app-server stopped.'));
-      i.pending.delete(id);
-    }
-    client.emit('runtimeStopped');
-  });
-}
-
 test('PROXY-004: simulated child exit rejects every pending request with `Codex app-server stopped.`', async () => {
   const client = new CodexAppServerClient();
-  const fakeChild = new EventEmitter();
-  attachExitTeardown(client, fakeChild);
+  const { child } = await installRuntime(client);
 
   const a = makePending();
   const b = makePending();
   internals(client).pending.set(1, a.pending);
   internals(client).pending.set(2, b.pending);
 
-  fakeChild.emit('exit');
+  child.exit();
 
   await assert.rejects(a.promise, /Codex app-server stopped/);
   await assert.rejects(b.promise, /Codex app-server stopped/);
@@ -226,31 +388,226 @@ test('PROXY-004: simulated child exit rejects every pending request with `Codex 
     'pending map must be drained on child exit so the next start() begins clean');
 });
 
-test('PROXY-004: simulated child exit emits `runtimeStopped` exactly once', () => {
+test('PROXY-004: simulated child exit emits `runtimeStopped` exactly once', async () => {
   const client = new CodexAppServerClient();
-  const fakeChild = new EventEmitter();
-  attachExitTeardown(client, fakeChild);
+  const { child } = await installRuntime(client);
 
   let stops = 0;
   client.on('runtimeStopped', () => { stops += 1; });
-  fakeChild.emit('exit');
+  child.exit();
+  child.emit('exit', 0, null);
   assert.equal(stops, 1, 'runtimeStopped must surface so SessionManager can flip session→error');
 });
 
-test('PROXY-004: child exit clears socket + startPromise so a subsequent ensureStarted re-spawns', () => {
+test('PROXY-004: child exit clears socket + startPromise so a subsequent ensureStarted re-spawns', async () => {
   const client = new CodexAppServerClient();
-  const fakeChild = new EventEmitter();
-  attachExitTeardown(client, fakeChild);
+  const { child } = await installRuntime(client);
 
-  // Pretend a session was up.
-  internals(client).socket = { readyState: 1, send: () => {} };
-  internals(client).startPromise = Promise.resolve();
-
-  fakeChild.emit('exit');
+  child.exit();
   assert.equal(internals(client).socket, null,
     'socket reference must be dropped — leaving a stale handle would let send() write to a closed pipe');
   assert.equal(internals(client).startPromise, null,
     'startPromise must clear so ensureStarted re-spawns the codex child on the next call');
+});
+
+// ---------------------------------------------------------------------------
+// PROXY-005 — socket-only failure, deadlines, deterministic recovery
+// ---------------------------------------------------------------------------
+
+test('PROXY-005: socket-only close rejects all pending RPCs and child exit cannot double-notify', async () => {
+  const client = new CodexAppServerClient({
+    deadlines: { rpcMs: 1_000, terminateGraceMs: 20 },
+  });
+  const { child, socket } = await installRuntime(client);
+  const i = internals(client);
+  let stops = 0;
+  client.on('runtimeStopped', () => { stops += 1; });
+
+  const first = i.requestInternal('thread/read', { threadId: 'one' });
+  const second = i.requestInternal('thread/read', { threadId: 'two' });
+  assert.equal(i.pending.size, 2);
+
+  // Only the transport disappears; the child intentionally remains alive.
+  socket.disconnect();
+  const results = await Promise.allSettled([first, second]);
+  for (const result of results) {
+    assert.equal(result.status, 'rejected');
+    if (result.status === 'rejected') assert.match(String(result.reason), /websocket closed/);
+  }
+
+  assert.equal(i.pending.size, 0);
+  assert.equal(i.startPromise, null);
+  assert.equal(i.activeGeneration, null);
+  assert.deepEqual(child.killSignals, ['SIGTERM'],
+    'a live app-server must be terminated rather than left orphaned after socket loss');
+  assert.equal(stops, 1);
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.deepEqual(child.killSignals, ['SIGTERM', 'SIGKILL'],
+    'a child that survives the grace period must be force-killed deterministically');
+
+  // Browser/WebSocket implementations commonly report error/close together,
+  // then the SIGTERM produces child exit. All are the same generation.
+  socket.fail();
+  child.exit();
+  assert.equal(stops, 1, 'close/error/exit re-entry must emit one lifecycle stop only');
+});
+
+test('PROXY-005: socket error before close drains pending immediately and only once', async () => {
+  const client = new CodexAppServerClient({
+    deadlines: { rpcMs: 1_000, terminateGraceMs: 500 },
+  });
+  const { child, socket } = await installRuntime(client);
+  const i = internals(client);
+  const pending = i.requestInternal('thread/read', { threadId: 'one' });
+  const manual = makePending();
+  let manualRejects = 0;
+  i.pending.set(999, {
+    resolve: manual.pending.resolve,
+    reject: (error) => {
+      manualRejects += 1;
+      manual.pending.reject(error);
+    },
+  });
+  let stops = 0;
+  client.on('runtimeStopped', () => { stops += 1; });
+
+  socket.fail();
+  await Promise.all([
+    assert.rejects(pending, /websocket failed/),
+    assert.rejects(manual.promise, /websocket failed/),
+  ]);
+  socket.disconnect();
+  child.exit();
+
+  assert.equal(i.pending.size, 0);
+  assert.equal(manualRejects, 1, 'error/close/exit re-entry must call each reject exactly once');
+  assert.equal(stops, 1);
+});
+
+test('PROXY-005: a never-returning RPC times out, tears down, and the next request recovers', async () => {
+  const client = new CodexAppServerClient({
+    deadlines: { rpcMs: 25, terminateGraceMs: 500 },
+  });
+  const firstRuntime = await installRuntime(client);
+  const i = internals(client);
+  let stops = 0;
+  client.on('runtimeStopped', () => { stops += 1; });
+
+  await assert.rejects(
+    client.readThread('thread-hung'),
+    /RPC "thread\/read" timed out after 25ms/,
+  );
+  assert.equal(i.pending.size, 0);
+  assert.equal(i.startPromise, null);
+  assert.equal(i.activeGeneration, null);
+  assert.deepEqual(firstRuntime.child.killSignals, ['SIGTERM']);
+  assert.equal(stops, 1);
+
+  const recoveredChild = new FakeChild();
+  const recoveredSocket = new FakeSocket();
+  recoveredSocket.onSend = (raw) => {
+    const request = JSON.parse(raw) as { id?: number };
+    if (typeof request.id === 'number') {
+      queueMicrotask(() => recoveredSocket.receive({
+        jsonrpc: '2.0',
+        id: request.id,
+        result: { thread: { id: 'thread-recovered' } },
+      }));
+    }
+  };
+  i.start = async (generation) => {
+    i.process = recoveredChild;
+    i.attachProcess(recoveredChild, generation);
+    const connected = i.attachSocket(
+      recoveredSocket as unknown as WebSocket,
+      generation,
+      new AbortController().signal,
+    );
+    recoveredSocket.open();
+    await connected;
+  };
+
+  assert.deepEqual(await client.readThread('thread-recovered'), {
+    thread: { id: 'thread-recovered' },
+  });
+  assert.equal(i.activeGeneration, 2);
+  assert.equal(stops, 1);
+
+  // A delayed exit from generation 1 must not tear down generation 2.
+  firstRuntime.child.exit();
+  assert.equal(i.activeGeneration, 2);
+  assert.equal(stops, 1);
+  await client.stop();
+  recoveredChild.exit();
+});
+
+test('PROXY-005: successful response clears its RPC timer', async () => {
+  const client = new CodexAppServerClient({
+    deadlines: { rpcMs: 25, terminateGraceMs: 500 },
+  });
+  const { child, socket } = await installRuntime(client);
+  let stops = 0;
+  client.on('runtimeStopped', () => { stops += 1; });
+  socket.onSend = (raw) => {
+    const request = JSON.parse(raw) as { id?: number };
+    queueMicrotask(() => socket.receive({ jsonrpc: '2.0', id: request.id, result: 'ok' }));
+  };
+
+  assert.equal(await internals(client).requestInternal('fast', {}), 'ok');
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(stops, 0, 'a settled RPC timer must not later stop a healthy runtime');
+  assert.equal(internals(client).pending.size, 0);
+  await client.stop();
+  child.exit();
+});
+
+test('PROXY-005: socket handshake has a configurable deadline', async () => {
+  const client = new CodexAppServerClient({
+    deadlines: { socketConnectMs: 20, terminateGraceMs: 500 },
+  });
+  const i = internals(client);
+  const child = new FakeChild();
+  const socket = new FakeSocket();
+  i.activeGeneration = 1;
+  i.nextGeneration = 2;
+  i.startPromise = Promise.resolve();
+  i.process = child;
+  i.attachProcess(child, 1);
+  let stops = 0;
+  client.on('runtimeStopped', () => { stops += 1; });
+
+  await assert.rejects(
+    i.attachSocket(socket as unknown as WebSocket, 1, new AbortController().signal),
+    /Timed out connecting Codex app-server websocket after 20ms/,
+  );
+  assert.equal(stops, 1);
+  assert.deepEqual(child.killSignals, ['SIGTERM']);
+  child.exit();
+  assert.equal(stops, 1);
+});
+
+test('PROXY-005: startup, ready, socket, RPC, and termination deadlines are configurable', () => {
+  const client = new CodexAppServerClient({
+    deadlines: {
+      startupMs: 101,
+      readyMs: 102,
+      socketConnectMs: 103,
+      rpcMs: 104,
+      terminateGraceMs: 105,
+    },
+  });
+  assert.deepEqual(internals(client).deadlines, {
+    startupMs: 101,
+    readyMs: 102,
+    socketConnectMs: 103,
+    rpcMs: 104,
+    terminateGraceMs: 105,
+  });
+  assert.throws(
+    () => new CodexAppServerClient({ deadlines: { rpcMs: 0 } }),
+    /deadline rpcMs must be a positive finite number/,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -264,40 +621,28 @@ test('PROXY-004: stop() is a clean no-op when nothing was started', async () => 
 
 test('PROXY-004: stop() closes the socket and SIGTERMs the child process', async () => {
   const client = new CodexAppServerClient();
-  let socketClosed = false;
-  let killSignal: string | null = null;
-  internals(client).socket = {
-    readyState: 1,
-    send: () => {},
-    // Augment with close() — not part of the narrow ClientInternals
-    // interface, so we cast inline.
-    close: () => { socketClosed = true; },
-  } as unknown as ClientInternals['socket'];
-  internals(client).process = {
-    killed: false,
-    kill: (sig: string) => { killSignal = sig; },
-  };
+  const { child, socket } = await installRuntime(client);
 
   await client.stop();
-  assert.equal(socketClosed, true);
-  assert.equal(killSignal, 'SIGTERM');
+  assert.equal(socket.closeCalls, 1);
+  assert.deepEqual(child.killSignals, ['SIGTERM']);
   assert.equal(internals(client).process, null,
     'process reference must be dropped so stop() is idempotent');
   assert.equal(internals(client).startPromise, null,
     'startPromise must clear so a later ensureStarted() re-spawns');
+  child.exit();
 });
 
 test('PROXY-004: stop() does NOT re-kill an already-killed child', async () => {
   const client = new CodexAppServerClient();
-  let killCalls = 0;
-  internals(client).process = {
-    killed: true,
-    kill: () => { killCalls += 1; },
-  };
+  const child = new FakeChild();
+  child.killed = true;
+  await installRuntime(client, 1, child);
 
   await client.stop();
-  assert.equal(killCalls, 0,
+  assert.equal(child.killSignals.length, 0,
     'already-killed child must not be SIGTERMed again — would surface as ESRCH in the log');
+  child.exit();
 });
 
 // ---------------------------------------------------------------------------
@@ -318,13 +663,7 @@ test('thread/start inherits config.toml and captures the effective permission pr
   (client as unknown as { request(method: string, params: unknown): Promise<unknown> }).request =
     async (method, params) => {
       calls.push({ method, params });
-      return {
-        thread: { id: 'thread-configured' },
-        approvalPolicy: 'on-request',
-        approvalsReviewer: 'user',
-        sandbox: { type: 'workspaceWrite', writableRoots: ['/repo'], networkAccess: false },
-        activePermissionProfile: { id: 'my-profile', extends: ':workspace' },
-      };
+      return CODEX_APP_SERVER_V2_NAMED_PERMISSIONS.response;
     };
 
   const result = await client.startThread({ cwd: '/repo' });
@@ -338,6 +677,76 @@ test('thread/start inherits config.toml and captures the effective permission pr
     permissions: 'my-profile',
   });
 });
+
+test('thread/start accepts the complete versioned granular permission shape', async () => {
+  const client = new CodexAppServerClient();
+  (client as unknown as { request(method: string, params: unknown): Promise<unknown> }).request =
+    async () => CODEX_APP_SERVER_V2_GRANULAR_PERMISSIONS.response;
+
+  const result = await client.startThread({ cwd: '/repo' });
+  assert.deepEqual(result.configuredPermissions, {
+    approvalPolicy: CODEX_APP_SERVER_V2_GRANULAR_PERMISSIONS.response.approvalPolicy,
+    approvalsReviewer: 'guardian_subagent',
+    sandboxPolicy: { type: 'readOnly', networkAccess: false },
+  });
+});
+
+test('thread/start canonicalizes v2 default-elided granular fields', async () => {
+  const client = new CodexAppServerClient();
+  (client as unknown as { request(method: string, params: unknown): Promise<unknown> }).request =
+    async () => CODEX_APP_SERVER_V2_DEFAULT_ELIDED_GRANULAR_PERMISSIONS.response;
+
+  const result = await client.startThread({ cwd: '/repo' });
+  assert.deepEqual(result.configuredPermissions, {
+    approvalPolicy: {
+      granular: {
+        sandbox_approval: true,
+        rules: true,
+        skill_approval: false,
+        request_permissions: false,
+        mcp_elicitations: true,
+      },
+    },
+    approvalsReviewer: 'user',
+    sandboxPolicy: {
+      type: 'workspaceWrite',
+      writableRoots: [],
+      networkAccess: false,
+      excludeTmpdirEnvVar: false,
+      excludeSlashTmp: false,
+    },
+  });
+});
+
+test('thread/start accepts and normalizes the current v2 external sandbox', async () => {
+  const client = new CodexAppServerClient();
+  (client as unknown as { request(method: string, params: unknown): Promise<unknown> }).request =
+    async () => CODEX_APP_SERVER_V2_EXTERNAL_SANDBOX_PERMISSIONS.response;
+
+  const result = await client.startThread({ cwd: '/repo' });
+  assert.deepEqual(result.configuredPermissions, {
+    approvalPolicy: 'never',
+    approvalsReviewer: 'user',
+    sandboxPolicy: {
+      type: 'externalSandbox',
+      provider: 'fixture',
+      networkAccess: 'restricted',
+    },
+  });
+});
+
+for (const fixture of CODEX_APP_SERVER_UNKNOWN_PERMISSIONS) {
+  test(`thread/start fails closed for ${fixture.fixtureVersion}`, async () => {
+    const client = new CodexAppServerClient();
+    (client as unknown as { request(method: string, params: unknown): Promise<unknown> }).request =
+      async () => fixture.response;
+
+    await assert.rejects(
+      client.startThread({ cwd: '/repo' }),
+      /effective (approval|sandbox) policy/,
+    );
+  });
+}
 
 test('turn/start sends an exact configured profile without a conflicting sandbox policy', async () => {
   const client = new CodexAppServerClient();

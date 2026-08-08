@@ -112,8 +112,10 @@ const I = {
   check: 'M5 12l5 5L20 7',
   plus: 'M12 5v14 M5 12h14',
   diff: 'M8.5 4v13 M8.5 4l-3 3 M8.5 4l3 3 M15.5 20V7 M15.5 20l3-3 M15.5 20l-3-3',
+  commit: 'M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M3 12h6 M15 12h6',
   image: 'M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5z M8.5 10.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z M20 15.5l-4.5-4.5L5 20',
   terminal: 'M5.5 7.5l4.5 4.5-4.5 4.5 M12.5 18.5h6',
+  browser: 'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17z M3.5 12h17 M12 3.5c2.2 2.3 3.3 5.1 3.3 8.5S14.2 18.2 12 20.5 M12 3.5C9.8 5.8 8.7 8.6 8.7 12s1.1 6.2 3.3 8.5',
   grid: 'M4 5.5A1.5 1.5 0 0 1 5.5 4h4A1.5 1.5 0 0 1 11 5.5v4A1.5 1.5 0 0 1 9.5 11h-4A1.5 1.5 0 0 1 4 9.5z M13 5.5A1.5 1.5 0 0 1 14.5 4h4A1.5 1.5 0 0 1 20 5.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 13 9.5z M4 14.5A1.5 1.5 0 0 1 5.5 13h4a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 4 18.5z M13 14.5a1.5 1.5 0 0 1 1.5-1.5h4a1.5 1.5 0 0 1 1.5 1.5v4a1.5 1.5 0 0 1-1.5 1.5h-4a1.5 1.5 0 0 1-1.5-1.5z',
   // Generic document (file tabs) — color comes from the per-ext CSS class.
   file: 'M6.5 3.5h6L17 8v12.5h-10.5z M12.5 3.5V8H17',
@@ -129,7 +131,9 @@ function ExtIco({ kind }: { kind: SheetTab['icoKind'] }) {
     : kind === 'plan' ? I.check
     : kind === 'img' ? I.image
     : kind === 'diff' ? I.diff
+    : kind === 'commit' ? I.commit
     : kind === 'term' ? I.terminal
+    : kind === 'browser' ? I.browser
     : kind === 'grid' ? I.grid
     : I.file;
   return <span className={`ext-ico ${kind}`}><Icon d={d} size={11} stroke={1.6} /></span>;
@@ -223,6 +227,12 @@ function PlanBody({ source }: { source: string }) {
   return <MarkdownPreview source={source} />;
 }
 
+/** Level-3 transcript detail body (P3): full command output / reasoning
+ *  trace / long result list — mono, pre-wrap, scrollable. */
+function TextBody({ text }: { text: string }) {
+  return <div className="sheet-text">{text}</div>;
+}
+
 /** One row of a side-by-side hunk: each side is null when that side has no
  *  cell on this row (e.g. a pure add has no left cell). `n` is the 1-based
  *  line number in that file; `text` is the line body. */
@@ -269,8 +279,10 @@ function splitHunkRows(header: string, lines: Array<{ kind: 'add' | 'del' | 'ctx
  *  `split` swaps the single-column unified view for a side-by-side
  *  (old | new) view; `wrap` mirrors the sheet's word-wrap preference.
  *  Each file block carries `data-path` (kept from the anchor-jump
- *  experiment — harmless, useful for future cross-linking). */
-function DiffBody({ diffText, path, split, wrap }: { diffText: string; path?: string; split?: boolean; wrap?: boolean }) {
+ *  experiment — harmless, useful for future cross-linking).
+ *  Exported for the History commit change-set body (Issue #3) — History,
+ *  Changes and ref-compare all share this one renderer. */
+export function DiffBody({ diffText, path, split, wrap }: { diffText: string; path?: string; split?: boolean; wrap?: boolean }) {
   const t = useT();
   const files = parseUnifiedDiff(diffText);
   if (files.length === 0 || files.every(f => f.hunks.length === 0)) {
@@ -571,15 +583,21 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
         // Host-rendered groups with their own live state keep every tab mounted
         // in its own slot, hidden with display:none when inactive. File/diff/plan bodies are stateless
         // renders of tab data, so those groups render only the active tab.
-        const slotGroup = g === 'term' || g === 'workspaces' || g === 'settings';
+        // History commit tabs hold lazily-loaded detail/diff state and scroll —
+        // they get slots too so switching commits never refetches.
+        const slotGroup = g === 'term' || g === 'browser' || g === 'workspaces'
+          || g === 'settings' || g === 'history';
         // Singleton groups (workspaces/settings) can only ever hold one tab —
         // the tab strip would be a one-tab header of pure noise, so their
         // content renders headerless (items carry their own headers).
+        // Browser deliberately keeps the standard tab strip so it matches the
+        // established Terminal surface and can be closed/reopened from Dock.
         const hideTabStrip = g === 'workspaces' || g === 'settings';
         return (
           <div
             className="sheet-group"
             key={g}
+            data-active-tab-id={tab.id}
             style={g === activeGroup ? undefined : { display: 'none' }}
           >
             {!hideTabStrip && (
@@ -607,14 +625,25 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
                       <Icon d={I.x} size={10} stroke={2.2} />
                     </span>
                   </span>
-                  <TabName name={t.name} />
+                  {/* Commit tabs read sha-first and END-truncate (there is no
+                      extension tail worth pinning); file tabs keep the middle
+                      truncation. ORPHANED marks a commit a fetch made
+                      unreachable (its body keeps the snapshot + banner). */}
+                  {t.kind === 'commit' ? (
+                    <>
+                      <span className="name"><span className="name-head">{t.name}</span></span>
+                      {t.orphaned && <span className="tab-flag" title={tr('history.orphaned.tab')}>{tr('history.orphaned.tag')}</span>}
+                    </>
+                  ) : (
+                    <TabName name={t.name} />
+                  )}
                 </button>
               ))}
-              {onAddTab && g === 'term' && (
+              {onAddTab && (g === 'term' || g === 'browser') && (
                 <button
                   className="tab-add"
                   type="button"
-                  title={tr('sheet.newTerminal')}
+                  title={g === 'term' ? tr('sheet.newTerminal') : tr('browser.newTab')}
                   onClick={() => onAddTab(g)}
                 >
                   <Icon d={I.plus} size={12} stroke={1.8} />
@@ -682,9 +711,11 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
                             ? <PlanBody source={tab.planBody} />
                             : tab.kind === 'diff' && tab.diffText !== undefined
                               ? <DiffBody diffText={tab.diffText} path={tab.fullPath ?? tab.name} split={split} wrap={wrap} />
-                              : renderTab
-                                ? renderTab(tab)
-                                : null}
+                              : tab.kind === 'text' && tab.text !== undefined
+                                ? <TextBody text={tab.text} />
+                                : renderTab
+                                  ? renderTab(tab)
+                                  : null}
                     </>
                   )}
             </div>

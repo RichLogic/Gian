@@ -1,4 +1,4 @@
-import { useContext, useState } from 'react';
+import { useContext, useEffect, useState } from 'react';
 import { isNativeImageMime } from '../attachments.js';
 import { useT } from '../i18n/index.js';
 import { useQueueWithOverlays, useSessionOperationPending } from '../operations/use-operations.js';
@@ -20,13 +20,15 @@ export function QueueList({
   onUpdate,
   onClear,
   onSendNow,
+  readOnly = false,
 }: {
   sessionId: string;
   queue: QueueEntry[];
-  onRemove: (queueId: string) => void;
-  onUpdate: (queueId: string, text: string) => void;
-  onClear: () => void;
+  onRemove?: (queueId: string) => void;
+  onUpdate?: (queueId: string, text: string) => void;
+  onClear?: () => void;
   onSendNow?: () => void;
+  readOnly?: boolean;
 }) {
   const t = useT();
   const zoomImage = useContext(ImageZoomContext);
@@ -41,6 +43,11 @@ export function QueueList({
   // Pending queue.sendNow run: the button disables and duplicate dispatches
   // are blocked by the operation layer (⌘Enter included).
   const sendingNow = useSessionOperationPending(sessionId, 'queue.sendNow');
+  useEffect(() => {
+    if (!readOnly) return;
+    setEditingId(null);
+    setEditText('');
+  }, [readOnly]);
   if (displayQueue.length === 0) return null;
 
   function startEdit(entry: QueueEntry) {
@@ -55,7 +62,7 @@ export function QueueList({
     // Attachments-only entries have no text — an empty save keeps the old
     // text rather than blanking it (blank text + items is still sendable,
     // but never silently mutate on an accidental Enter).
-    if (original && next && next !== original.text) onUpdate(editingId, next);
+    if (!readOnly && original && next && next !== original.text) onUpdate?.(editingId, next);
     setEditingId(null);
   }
 
@@ -73,9 +80,11 @@ export function QueueList({
               {sendingNow ? t('queue.sending') : t('queue.sendNow')}
             </button>
           ) : null}
-          <button className="btn xs ghost" onClick={onClear}>
-            {t('common.clear')}
-          </button>
+          {!readOnly ? (
+            <button className="btn xs ghost" onClick={onClear}>
+              {t('common.clear')}
+            </button>
+          ) : null}
         </div>
       </div>
       <div className="qd-body">
@@ -86,7 +95,7 @@ export function QueueList({
           return (
             <div key={entry.id} className="qd-item">
               <span className="qd-idx">{i + 1}</span>
-              {editingId === entry.id ? (
+              {editingId === entry.id && !readOnly ? (
                 <textarea
                   className="qd-edit"
                   autoFocus
@@ -131,41 +140,43 @@ export function QueueList({
                   )}
                 </span>
               )}
-              <div className="qd-item-act">
-                {editingId === entry.id ? (
+              {!readOnly ? (
+                <div className="qd-item-act">
+                  {editingId === entry.id ? (
+                    <button
+                      className="btn xs ghost icon"
+                      onClick={commitEdit}
+                      title={t('queue.save')}
+                      aria-label={t('queue.save')}
+                    >
+                      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M3 8.5l3.5 3.5L13 4.5" />
+                      </svg>
+                    </button>
+                  ) : (
+                    <button
+                      className="btn xs ghost icon"
+                      onClick={() => startEdit(entry)}
+                      title={t('queue.edit')}
+                      aria-label={t('queue.edit')}
+                    >
+                      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M11.3 2.7l2 2L6 12H4v-2l7.3-7.3z" />
+                      </svg>
+                    </button>
+                  )}
                   <button
                     className="btn xs ghost icon"
-                    onClick={commitEdit}
-                    title={t('queue.save')}
-                    aria-label={t('queue.save')}
+                    onClick={() => onRemove?.(entry.id)}
+                    title={t('queue.remove')}
+                    aria-label={t('queue.remove')}
                   >
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M3 8.5l3.5 3.5L13 4.5" />
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                      <path d="M4 4l8 8M12 4l-8 8" />
                     </svg>
                   </button>
-                ) : (
-                  <button
-                    className="btn xs ghost icon"
-                    onClick={() => startEdit(entry)}
-                    title={t('queue.edit')}
-                    aria-label={t('queue.edit')}
-                  >
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M11.3 2.7l2 2L6 12H4v-2l7.3-7.3z" />
-                    </svg>
-                  </button>
-                )}
-                <button
-                  className="btn xs ghost icon"
-                  onClick={() => onRemove(entry.id)}
-                  title={t('queue.remove')}
-                  aria-label={t('queue.remove')}
-                >
-                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-                    <path d="M4 4l8 8M12 4l-8 8" />
-                  </svg>
-                </button>
-              </div>
+                </div>
+              ) : null}
             </div>
           );
         })}

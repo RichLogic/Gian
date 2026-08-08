@@ -18,6 +18,7 @@ interface TopbarModelInput {
   activeWorkspace: Workspace | null;
   activeBranch: string | null;
   workingTrees: WorkingTree[];
+  refreshWorkingTrees: () => void;
   wtView: { sessionId: string; wtId: string } | null;
   setWtView: (v: { sessionId: string; wtId: string } | null) => void;
   viewedWorkingTreeId(session: Session): string | null;
@@ -46,6 +47,7 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
     activeWorkspace,
     activeBranch,
     workingTrees,
+    refreshWorkingTrees,
     wtView,
     setWtView,
     viewedWorkingTreeId,
@@ -154,6 +156,7 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
     if (activeSession.completed_at != null) return null;
     const viewedId = viewedWorkingTreeId(activeSession);
     return {
+      onOpen: refreshWorkingTrees,
       items: workingTrees
         .filter(tree => tree.workspace_id === activeSession.workspace_id)
         .map(tree => ({
@@ -182,7 +185,7 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
         setWtView({ sessionId: activeSession.id, wtId: id });
       },
     };
-  }, [activeBranch, activeSession, activeSubtaskId, mode, setWtView, t, viewedWorkingTreeId, workingTrees, wtView]);
+  }, [activeBranch, activeSession, activeSubtaskId, mode, refreshWorkingTrees, setWtView, t, viewedWorkingTreeId, workingTrees, wtView]);
 
   const onRenameSubmit = useCallback((value: string) => {
     setRenaming(false);

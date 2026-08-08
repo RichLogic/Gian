@@ -18,6 +18,8 @@ export function PlanChip({
   items,
   planText,
   planCompleted,
+  planStatus,
+  planTurn,
   sessionId,
 }: {
   items: TranscriptItem[];
@@ -25,6 +27,8 @@ export function PlanChip({
   planText?: string;
   /** Successful turn-end has confirmed that every streamed step is complete. */
   planCompleted?: boolean;
+  planStatus?: 'active' | 'paused' | 'completed';
+  planTurn?: number;
   sessionId: string;
 }) {
   const t = useT();
@@ -36,9 +40,11 @@ export function PlanChip({
       items,
       planText: planText,
       planCompleted,
+      planStatus,
+      planTurn,
       sessionId,
     }),
-    [items, planText, planCompleted, sessionId],
+    [items, planText, planCompleted, planStatus, planTurn, sessionId],
   );
 
   useEffect(() => {
@@ -59,7 +65,10 @@ export function PlanChip({
     ? 'context-chip-dot--error'
     : context.runningAgents > 0
       ? 'context-chip-dot--running'
+      : context.interruptedAgents > 0
+        ? 'context-chip-dot--interrupted'
       : 'context-chip-dot--done';
+  const agentSummary = formatAgentSummary(context, t);
 
   return (
     <div className="context-strip-shell">
@@ -102,9 +111,7 @@ export function PlanChip({
             <div>
               <strong>{t('transcript.agentRuns')}</strong>
               <span>
-                {context.runningAgents > 0
-                  ? `${context.runningAgents} ${t('coding.status.running').toLowerCase()}`
-                  : `${context.agents.length} ${t('coding.status.done').toLowerCase()}`}
+                {agentSummary}
               </span>
             </div>
             <button
@@ -157,6 +164,9 @@ export function PlanChip({
                 {context.plan.completedSteps}/{context.plan.totalSteps}
               </span>
             )}
+            <span className="context-chip-meta">
+              {planStatusLabel(context.plan.status, t)}
+            </span>
             <span
               className={`plan-chip-dot ${planDotClass(context.plan.status)}`}
               aria-hidden
@@ -177,6 +187,7 @@ export function PlanChip({
           >
             <span>{t('transcript.agent')}</span>
             <span className="context-chip-count">{context.agents.length}</span>
+            <span className="context-chip-meta">{agentSummary}</span>
             <span className={`context-chip-dot ${agentStateClass}`} aria-hidden />
           </button>
         )}
@@ -199,6 +210,7 @@ function AgentRunRow({
     'Kimi';
   const statusLabel =
     agent.status === 'running' ? t('coding.status.running') :
+    agent.status === 'interrupted' ? t('coding.status.interrupted') :
     agent.status === 'error' ? t('coding.status.error') :
     t('coding.status.done');
   const detail = [agent.agentType, agent.model].filter(Boolean).join(' · ');
@@ -230,11 +242,41 @@ function AgentRunRow({
   );
 }
 
-function planDotClass(status: 'active' | 'awaiting-review' | 'accepted' | 'revision-requested') {
+function planDotClass(status: 'active' | 'paused' | 'completed' | 'awaiting-review' | 'accepted' | 'revision-requested') {
   if (status === 'awaiting-review') return 'plan-chip-dot--pending';
   if (status === 'revision-requested') return 'plan-chip-dot--declined';
+  if (status === 'paused') return 'plan-chip-dot--paused';
   if (status === 'active') return 'plan-chip-dot--active';
   return 'plan-chip-dot--accepted';
+}
+
+function planStatusLabel(status: 'active' | 'paused' | 'completed' | 'awaiting-review' | 'accepted' | 'revision-requested', t: (key: string) => string) {
+  if (status === 'active') return t('coding.status.running');
+  if (status === 'paused') return t('coding.status.paused');
+  if (status === 'completed') return t('coding.status.done');
+  if (status === 'awaiting-review') return t('coding.status.awaitingApproval');
+  if (status === 'revision-requested') return t('transcript.planRevisionRequested');
+  return t('transcript.planAccepted');
+}
+
+function formatAgentSummary(
+  context: ReturnType<typeof projectSessionContext>,
+  t: (key: string) => string,
+): string {
+  const parts: string[] = [];
+  if (context.runningAgents > 0) {
+    parts.push(`${context.runningAgents} ${t('coding.status.running').toLowerCase()}`);
+  }
+  if (context.completedAgents > 0) {
+    parts.push(`${context.completedAgents} ${t('coding.status.done').toLowerCase()}`);
+  }
+  if (context.failedAgents > 0) {
+    parts.push(`${context.failedAgents} ${t('coding.status.error').toLowerCase()}`);
+  }
+  if (context.interruptedAgents > 0) {
+    parts.push(`${context.interruptedAgents} ${t('coding.status.interrupted').toLowerCase()}`);
+  }
+  return parts.join(' · ');
 }
 
 function jumpToAgent(agentId: string) {

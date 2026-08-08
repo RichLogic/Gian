@@ -57,30 +57,65 @@ function makeQuestion(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
 }
 
 // ---------------------------------------------------------------------------
-// APR-001 — surface text: title / risk / reason / subject
+// APR-001 — surface text: minimal v3 shows only the subject + buttons
 // ---------------------------------------------------------------------------
 
-describe('APR-001: pending approval card surface', () => {
-  it('renders title, risk badge, reason, and cmd subject', () => {
+describe('APR-001: pending approval card surface (v3)', () => {
+  it('renders the cmd subject with a `$ ` prompt and no v2 chrome', () => {
     const onApprove = vi.fn();
     render(<ApprovalCard item={makeApproval()} onApprove={onApprove} />);
 
-    expect(screen.getByText('Run shell command')).toBeInTheDocument();
-    expect(screen.getByText('medium risk')).toBeInTheDocument();
-    expect(screen.getByText('install project deps')).toBeInTheDocument();
     // Command category renders the `$ ` prompt prefix.
     expect(screen.getByText('npm install')).toBeInTheDocument();
     expect(screen.getByText('$')).toBeInTheDocument();
+    // v3 removed the icon / v2 title / risk pill / reason line / timestamp.
+    expect(screen.queryByText('Run shell command')).toBeNull();
+    expect(screen.queryByText('install project deps')).toBeNull();
+    expect(screen.queryByText(/risk/i)).toBeNull();
+    expect(document.querySelector('.approval-top')).toBeNull();
+    expect(document.querySelector('.approval-ico')).toBeNull();
+    expect(document.querySelector('.approval-risk')).toBeNull();
   });
 
-  it('APR-001: high-risk approvals carry a distinct "high risk" badge text', () => {
-    render(<ApprovalCard item={makeApproval({ risk: 'high', title: 'Dangerous shell' })} onApprove={vi.fn()} />);
-    expect(screen.getByText('high risk')).toBeInTheDocument();
+  it('APR-001: cards carry a mono type-label head (Approval / Question / Plan)', () => {
+    const { container, rerender } = render(<ApprovalCard item={makeApproval()} onApprove={vi.fn()} />);
+    expect(container.querySelector('.approval-head')).toHaveTextContent('Approval');
+
+    rerender(<ApprovalCard item={makeQuestion()} onApprove={vi.fn()} />);
+    expect(container.querySelector('.approval-head')).toHaveTextContent('Question');
+
+    rerender(<ApprovalCard
+      item={makeApproval({
+        category: 'exit_plan_mode',
+        cmd: 'plan body',
+        scopeOptions: ['once'],
+        planActions: ['accept_with_auto', 'accept_with_ask', 'keep_planning'],
+      })}
+      onApprove={vi.fn()}
+    />);
+    expect(container.querySelector('.approval-head')).toHaveTextContent('Plan');
   });
 
-  it('APR-001: low-risk approvals carry a "low risk" badge text', () => {
-    render(<ApprovalCard item={makeApproval({ risk: 'low' })} onApprove={vi.fn()} />);
-    expect(screen.getByText('low risk')).toBeInTheDocument();
+  it('APR-001: the resolved .approval-line carries no type-label head', () => {
+    const { container } = render(<ApprovalCard
+      item={makeApproval({ status: 'approved-once' })}
+      onApprove={vi.fn()}
+    />);
+    expect(container.querySelector('.approval-head')).toBeNull();
+  });
+
+  it('APR-001: high risk no longer earns a red outline or badge', () => {
+    const { container } = render(<ApprovalCard item={makeApproval({ risk: 'high', title: 'Dangerous shell' })} onApprove={vi.fn()} />);
+    expect(container.querySelector('.approval.high')).toBeNull();
+    expect(screen.queryByText(/high risk/i)).toBeNull();
+  });
+
+  it('APR-001: buttons are secondary / danger-ghost — no primary', () => {
+    const { container } = render(<ApprovalCard item={makeApproval()} onApprove={vi.fn()} />);
+    expect(container.querySelector('.btn.primary')).toBeNull();
+    expect(screen.getByRole('button', { name: /Allow once/i })).toHaveClass('secondary');
+    expect(screen.getByRole('button', { name: /Allow session/i })).toHaveClass('secondary');
+    expect(screen.getByRole('button', { name: /Decline/i })).toHaveClass('danger-ghost');
   });
 
   it('APR-001: non-command categories omit the `$ ` shell prefix', () => {
@@ -373,27 +408,30 @@ describe('APR-001: resolved approval states', () => {
     expect(screen.queryByRole('button', { name: /^Decline$/i })).toBeNull();
   });
 
-  it('APR-001: resolved QUESTION renders an "answered" card, not the permission note', () => {
-    // Regression: a resolved AskUserQuestion used to fall through to the
-    // generic resolved card, showing "command" (empty-reason fallback) and the
-    // "Allowed once · by web" permission note — both wrong for a question.
-    render(<ApprovalCard
+  it('APR-001: resolved QUESTION compresses to a single line with the picked answer', () => {
+    // P1 redesign: resolved approvals/questions are `.approval-line` rows —
+    // ✓ + the question text + the answer as the right note — not a card.
+    const { container } = render(<ApprovalCard
       item={makeQuestion({ status: 'approved-once', answeredWith: 'Rice' })}
       onApprove={vi.fn()}
     />);
-    expect(screen.getByText(/answered/i)).toBeInTheDocument();
+    const line = container.querySelector('.approval-line');
+    expect(line).not.toBeNull();
+    expect(line!.querySelector('.al-mark.ok')).not.toBeNull();
+    expect(screen.getByText('Pick dinner')).toBeInTheDocument();
     expect(screen.getByText('Rice')).toBeInTheDocument();
     // No permission-style leftovers.
     expect(screen.queryByText(/Allowed once/i)).toBeNull();
     expect(screen.queryByText(/by web/i)).toBeNull();
-    expect(screen.queryByText(/^command$/i)).toBeNull();
+    expect(container.querySelector('.approval-top')).toBeNull();
   });
 
-  it('APR-001: a declined QUESTION renders "cancelled" and omits the answer line', () => {
-    render(<ApprovalCard
+  it('APR-001: a declined QUESTION line shows ✕ and "cancelled", omitting the answer', () => {
+    const { container } = render(<ApprovalCard
       item={makeQuestion({ status: 'declined', answeredWith: 'Rice' })}
       onApprove={vi.fn()}
     />);
+    expect(container.querySelector('.approval-line .al-mark.no')).not.toBeNull();
     expect(screen.getByText(/cancelled/i)).toBeInTheDocument();
     // Declined → we did not answer, so the picked-answer line must not show.
     expect(screen.queryByText('Rice')).toBeNull();
@@ -401,21 +439,42 @@ describe('APR-001: resolved approval states', () => {
 });
 
 // ---------------------------------------------------------------------------
-// APR-001 — hint chip lists the right keys based on scope
+// APR-001 — resolved approvals compress to `.approval-line` rows
 // ---------------------------------------------------------------------------
 
-describe('APR-001: hint chip', () => {
-  it('shows A, ⇧A, and D kbd hints when session scope is allowed', () => {
-    render(<ApprovalCard item={makeApproval()} onApprove={vi.fn()} />);
-    const kbds = document.querySelectorAll('kbd.kc');
-    const labels = Array.from(kbds, (el) => el.textContent ?? '');
-    expect(labels).toEqual(['A', '⇧A', 'D']);
+describe('APR-001: resolved approval line', () => {
+  it('renders ✓ + `$ cmd` + "Allowed once · by web" for an approved command', () => {
+    const { container } = render(<ApprovalCard
+      item={makeApproval({ status: 'approved-once' })}
+      onApprove={vi.fn()}
+    />);
+    const line = container.querySelector('.approval-line');
+    expect(line).not.toBeNull();
+    expect(line!.querySelector('.al-mark.ok')).toHaveTextContent('✓');
+    expect(line!.querySelector('.al-subject')).toHaveTextContent('$ npm install');
+    expect(line!.querySelector('.al-note')).toHaveTextContent(/Allowed once · by web/i);
   });
 
-  it('APR-001: omits ⇧A kbd from the hint when session scope is disallowed', () => {
-    render(<ApprovalCard item={makeApproval({ scopeOptions: ['once'] })} onApprove={vi.fn()} />);
-    const kbds = document.querySelectorAll('kbd.kc');
-    const labels = Array.from(kbds, (el) => el.textContent ?? '');
-    expect(labels).toEqual(['A', 'D']);
+  it('APR-001: declined approvals render ✕ + "Declined · by web"', () => {
+    const { container } = render(<ApprovalCard
+      item={makeApproval({ status: 'declined', cmd: 'git push --force' })}
+      onApprove={vi.fn()}
+    />);
+    const line = container.querySelector('.approval-line');
+    expect(line!.querySelector('.al-mark.no')).toHaveTextContent('✕');
+    expect(line!.querySelector('.al-subject')).toHaveTextContent('git push --force');
+    expect(line!.querySelector('.al-note')).toHaveTextContent(/Declined · by web/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// APR-001 — v3 removed the visible kbd hint chips; the shortcuts themselves
+// stay (covered by the keyboard-shortcut suite above).
+// ---------------------------------------------------------------------------
+
+describe('APR-001: hint chip removed in v3', () => {
+  it('renders no kbd hint chips on a pending card', () => {
+    render(<ApprovalCard item={makeApproval()} onApprove={vi.fn()} />);
+    expect(document.querySelectorAll('kbd.kc')).toHaveLength(0);
   });
 });

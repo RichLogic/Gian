@@ -56,6 +56,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Audit production dependencies
+        run: pnpm run quality:audit:prod
+
       - name: Verify source
         run: |
           pnpm typecheck

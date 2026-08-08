@@ -1,17 +1,26 @@
 import type { Hono } from 'hono';
-import { execFileSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { basename, isAbsolute, resolve } from 'node:path';
 import type { Db } from '../../storage/db.js';
-import { detectDefaultBranch, listGitWorktrees, listGitWorktreesAsync } from '../../workspace/git.js';
+import { detectDefaultBranchAsync, listGitWorktreesAsync } from '../../workspace/git.js';
+import {
+  GIT_MAX_CONCURRENCY,
+  mapWithConcurrency,
+  runGit,
+} from '../../workspace/async-command.js';
 import {
   buildRawPreviewHeaders,
-  rawPreviewOversize,
+  RAW_PREVIEW_MAX_BYTES,
 } from '../../workspace/preview-headers.js';
+import {
+  fileReadFailure,
+  isLikelyBinary,
+  readBoundedFile,
+} from '../../workspace/bounded-file.js';
 import { resolveWithinWorkspace } from '../../workspace/safe-path.js';
 import type { WsBroadcaster } from '../ws-broadcast.js';
 import { registerApplicationRoutes } from './applications.js';
+import { registerGitHistoryRoutes } from './git-history.js';
 import { registerWorkspaceGitRoutes } from './workspace-git.js';
 import {
   extTreeId,
@@ -21,6 +30,9 @@ export function registerWorkingTreeRoutes(
   app: Hono,
   db: Db,
   broadcaster: WsBroadcaster,
+  options: {
+    listGitWorktreesAsync?: typeof listGitWorktreesAsync;
+  } = {},
 ): void {
   // Working trees — the right unit for "files I can see and edit right now".
   //
@@ -44,8 +56,12 @@ export function registerWorkingTreeRoutes(
     session_name: string | null;
   };
   let workingTreeCache: { signature: string; expiresAt: number; value: WorkingTreeListItem[] } | null = null;
-  let workingTreeScan: { signature: string; promise: Promise<WorkingTreeListItem[]> } | null = null;
-  function resolveWorkingTree(id: string): { path: string; workspace_id: string; session_id: string | null } | null {
+  let workingTreeScan: {
+    signature: string;
+    forced: boolean;
+    promise: Promise<WorkingTreeListItem[]>;
+  } | null = null;
+  async function resolveWorkingTree(id: string): Promise<{ path: string; workspace_id: string; session_id: string | null } | null> {
     if (id.startsWith('ws:')) {
       const wsId = id.slice(3);
       const ws = db.prepare('SELECT id, path FROM workspaces WHERE id = ?').get(wsId) as
@@ -81,12 +97,17 @@ export function registerWorkingTreeRoutes(
         return null;
       }
       if (!isAbsolute(decoded)) return null;
-      const hit = listGitWorktrees(ws.path).find(w => w.path === decoded);
+      const hit = (await (options.listGitWorktreesAsync ?? listGitWorktreesAsync)(ws.path))
+        .find(w => w.path === decoded);
       if (!hit) return null;
       return { path: hit.path, workspace_id: ws.id, session_id: null };
     }
     return null;
   }
+
+  // History is intentionally a separate, worktree-scoped read model. It does
+  // not mutate or reuse the Changes rail's active scope/tab state.
+  registerGitHistoryRoutes(app, broadcaster, resolveWorkingTree);
 
   // Diff-source scope for the Changes review surface. Aligned with Codex's
   // five-option picker: working-tree slices (`unstaged`/`staged`), the last
@@ -98,11 +119,9 @@ export function registerWorkingTreeRoutes(
   // Empty-tree object hash — the diff base for a root commit (no parent).
   const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
-  function gitText(cwd: string, args: string[]): string {
+  async function gitText(cwd: string, args: string[]): Promise<string> {
     try {
-      return execFileSync('git', ['-C', cwd, ...args], {
-        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      });
+      return (await runGit(args, { cwd, timeoutMs: 5_000 })).stdout;
     } catch {
       return '';
     }
@@ -111,11 +130,9 @@ export function registerWorkingTreeRoutes(
   // Base for the `commit` scope: the given ref's parent, or the empty tree
   // when the ref is the root commit (so the first commit still renders as
   // all-added). Defaults to HEAD for the legacy "HEAD's delta" behavior.
-  function commitBaseOf(cwd: string, ref: string = 'HEAD'): string {
+  async function commitBaseOf(cwd: string, ref: string = 'HEAD'): Promise<string> {
     try {
-      execFileSync('git', ['-C', cwd, 'rev-parse', '--verify', '-q', `${ref}~1`], {
-        stdio: ['ignore', 'ignore', 'ignore'],
-      });
+      await runGit(['rev-parse', '--verify', '-q', `${ref}~1`], { cwd, timeoutMs: 5_000 });
       return `${ref}~1`;
     } catch {
       return EMPTY_TREE;
@@ -135,20 +152,20 @@ export function registerWorkingTreeRoutes(
   // tree, else the repo's detected default. Falls back to HEAD (→ empty
   // branch diff) when there's no distinct base or git can't resolve a
   // merge-base. Result is a commit-ish suitable for `git diff <base>`.
-  function autoBaseRef(wt: { path: string; session_id: string | null }): string | null {
+  async function autoBaseRef(wt: { path: string; session_id: string | null }): Promise<string | null> {
     if (wt.session_id) {
       const row = db
         .prepare('SELECT base_branch FROM sessions WHERE id = ?')
         .get(wt.session_id) as { base_branch: string | null } | undefined;
       if (row?.base_branch) return row.base_branch;
     }
-    return detectDefaultBranch(wt.path);
+    return detectDefaultBranchAsync(wt.path);
   }
 
-  function branchBase(wt: { path: string; session_id: string | null }, overrideRef?: string | null): string {
-    const base = overrideRef ?? autoBaseRef(wt);
+  async function branchBase(wt: { path: string; session_id: string | null }, overrideRef?: string | null): Promise<string> {
+    const base = overrideRef ?? await autoBaseRef(wt);
     if (!base) return 'HEAD';
-    const mb = gitText(wt.path, ['merge-base', base, 'HEAD']).trim();
+    const mb = (await gitText(wt.path, ['merge-base', base, 'HEAD'])).trim();
     return mb || 'HEAD';
   }
 
@@ -161,15 +178,19 @@ export function registerWorkingTreeRoutes(
     return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(raw) && !raw.includes('..') ? raw : null;
   }
 
-  // Distinct file paths the agent edited in the session's most recent turn,
-  // pulled from file-change display projections. Powers the `lastturn` scope. Empty for a
-  // non-session (`ws:`) working tree or a session with no recorded turns.
-  function lastTurnPaths(sessionId: string | null): Set<string> {
+  // Distinct file paths the agent edited in an explicitly requested turn, or
+  // the session's most recent turn when no number is pinned. Pulled from
+  // file-change display projections for the `lastturn` scope.
+  function lastTurnPaths(sessionId: string | null, turnNumber?: number | null): Set<string> {
     const paths = new Set<string>();
     if (!sessionId) return paths;
-    const turn = db
-      .prepare('SELECT id FROM turns WHERE session_id = ? ORDER BY turn_number DESC LIMIT 1')
-      .get(sessionId) as { id: string } | undefined;
+    const turn = turnNumber != null
+      ? db
+        .prepare('SELECT id FROM turns WHERE session_id = ? AND turn_number = ?')
+        .get(sessionId, turnNumber) as { id: string } | undefined
+      : db
+        .prepare('SELECT id FROM turns WHERE session_id = ? ORDER BY turn_number DESC LIMIT 1')
+        .get(sessionId) as { id: string } | undefined;
     if (!turn) return paths;
     const rows = db
       .prepare(
@@ -200,11 +221,9 @@ export function registerWorkingTreeRoutes(
   // --numstat` for tracked diffs, then an on-disk line count for untracked
   // creates that numstat misses (staged=false, still added=0). Shared by every
   // scope so the count logic lives in one place. Mutates `entries` in place.
-  function fillLineCounts(cwd: string, entries: ChangedFile[], numstatArgs: string[]): void {
+  async function fillLineCounts(cwd: string, entries: ChangedFile[], numstatArgs: string[]): Promise<void> {
     try {
-      const numstat = execFileSync('git', ['-C', cwd, ...numstatArgs], {
-        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      });
+      const numstat = (await runGit(numstatArgs, { cwd, timeoutMs: 5_000 })).stdout;
       const stats = new Map<string, { added: number; removed: number }>();
       for (const line of numstat.split('\n')) {
         if (!line) continue;
@@ -226,15 +245,15 @@ export function registerWorkingTreeRoutes(
     // Untracked files don't appear in any `git diff --numstat`. Count their
     // lines from disk so they contribute to +N totals. Skip files larger than
     // 1 MiB or with a null byte in the first 8 KiB (binary).
-    for (const e of entries) {
-      if (e.kind !== 'create' || e.staged || e.added !== 0) continue;
+    const untracked = entries.filter(e => e.kind === 'create' && !e.staged && e.added === 0);
+    await mapWithConcurrency(untracked, GIT_MAX_CONCURRENCY, async e => {
       try {
         const filePath = resolve(cwd, e.path);
-        const st = statSync(filePath);
-        if (!st.isFile() || st.size > 1024 * 1024) continue;
-        const buf = readFileSync(filePath);
+        const st = await stat(filePath);
+        if (!st.isFile() || st.size > 1024 * 1024) return;
+        const buf = await readFile(filePath);
         const probe = buf.subarray(0, Math.min(buf.length, 8192));
-        if (probe.includes(0)) continue;
+        if (probe.includes(0)) return;
         let lines = 0;
         for (let i = 0; i < buf.length; i++) if (buf[i] === 0x0a) lines++;
         // Count a trailing-newline-less last line as a line too.
@@ -243,7 +262,7 @@ export function registerWorkingTreeRoutes(
       } catch {
         // file vanished or unreadable — leave at 0
       }
-    }
+    });
   }
 
   // Per-file diff aligned with what Files Changed surfaces. `scope` selects
@@ -257,18 +276,16 @@ export function registerWorkingTreeRoutes(
   //     still synthesizing untracked files via --no-index.
   //   - 'staged': only index-vs-HEAD changes (`diff --cached -- <path>`).
   //     Untracked files have nothing staged, so no --no-index fallback.
-  function computeFileDiff(cwd: string, rel: string, scope: ChangeScope = 'all', wt?: { path: string; session_id: string | null }, commitSha?: string | null, baseRef?: string | null): string {
+  async function computeFileDiff(cwd: string, rel: string, scope: ChangeScope = 'all', wt?: { path: string; session_id: string | null }, commitSha?: string | null, baseRef?: string | null): Promise<string> {
     const commitRef = commitSha ?? 'HEAD';
     const baseArgs =
       scope === 'staged' ? ['diff', '--cached'] :
       scope === 'unstaged' ? ['diff'] :
-      scope === 'commit' ? ['diff', commitBaseOf(cwd, commitRef), commitRef] :
-      scope === 'branch' ? ['diff', branchBase(wt ?? { path: cwd, session_id: null }, baseRef)] :
+      scope === 'commit' ? ['diff', await commitBaseOf(cwd, commitRef), commitRef] :
+      scope === 'branch' ? ['diff', await branchBase(wt ?? { path: cwd, session_id: null }, baseRef)] :
       ['diff', 'HEAD']; // 'all' and 'lastturn' both diff the working tree vs HEAD
     try {
-      const out = execFileSync('git', ['-C', cwd, ...baseArgs, '--', rel], {
-        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      });
+      const out = (await runGit([...baseArgs, '--', rel], { cwd, timeoutMs: 5_000 })).stdout;
       if (out) return out;
     } catch {
       // Not a repo, or some other git failure — nothing more we can do.
@@ -282,23 +299,18 @@ export function registerWorkingTreeRoutes(
     // Empty result so far means either tracked-but-clean or untracked. Probe
     // tracked-ness; only fall through to --no-index for untracked.
     try {
-      execFileSync('git', ['-C', cwd, 'ls-files', '--error-unmatch', '--', rel], {
-        stdio: ['ignore', 'ignore', 'ignore'],
-      });
+      await runGit(['ls-files', '--error-unmatch', '--', rel], { cwd, timeoutMs: 5_000 });
       return '';
     } catch {
       // Untracked: synthesize a "new file" diff. `--no-index` exits 1 when
       // the two paths differ, so stdout is on the thrown error object.
       try {
-        execFileSync('git', ['-C', cwd, 'diff', '--no-index', '--', '/dev/null', rel], {
-          timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-        });
-        return '';
-      } catch (err) {
-        const e = err as { stdout?: Buffer | string; status?: number };
-        if (e.status === 1 && e.stdout != null) {
-          return typeof e.stdout === 'string' ? e.stdout : e.stdout.toString('utf8');
-        }
+        const result = await runGit(
+          ['diff', '--no-index', '--', '/dev/null', rel],
+          { cwd, timeoutMs: 5_000, acceptableExitCodes: [0, 1] },
+        );
+        return result.exitCode === 1 ? result.stdout : '';
+      } catch {
         return '';
       }
     }
@@ -330,12 +342,26 @@ export function registerWorkingTreeRoutes(
       && workingTreeCache.expiresAt > Date.now()) {
       return c.json(workingTreeCache.value);
     }
-    if (workingTreeScan?.signature === signature) return c.json(await workingTreeScan.promise);
+    const inFlight = workingTreeScan?.signature === signature ? workingTreeScan : null;
+    if (inFlight) {
+      // Ordinary callers may share any current scan. A forced refresh may
+      // share a scan that is already forced, but must never accept an ordinary
+      // scan that started before the refresh request: wait for it to settle,
+      // then scan once more so the old result cannot finish late and replace
+      // the refreshed cache.
+      if (!refresh || inFlight.forced) return c.json(await inFlight.promise);
+      await inFlight.promise;
+      const successor = workingTreeScan?.signature === signature ? workingTreeScan : null;
+      if (successor && successor.promise !== inFlight.promise) {
+        return c.json(await successor.promise);
+      }
+    }
 
     const promise = (async (): Promise<WorkingTreeListItem[]> => {
-      const discoveredEntries = await Promise.all(wsRows.map(async ws => (
-        [ws.id, await listGitWorktreesAsync(ws.path)] as const
-      )));
+      const scanWorktrees = options.listGitWorktreesAsync ?? listGitWorktreesAsync;
+      const discoveredEntries = await mapWithConcurrency(wsRows, GIT_MAX_CONCURRENCY, async ws => (
+        [ws.id, await scanWorktrees(ws.path)] as const
+      ));
       const discoveredByWorkspace = new Map(discoveredEntries);
       const branchByPath = new Map(
         discoveredEntries.flatMap(([, trees]) => trees.map(tree => [tree.path, tree.branch] as const)),
@@ -395,7 +421,7 @@ export function registerWorkingTreeRoutes(
       workingTreeCache = { signature, expiresAt: Date.now() + 5_000, value: out };
       return out;
     })();
-    workingTreeScan = { signature, promise };
+    workingTreeScan = { signature, forced: refresh, promise };
     try {
       return c.json(await promise);
     } finally {
@@ -406,7 +432,7 @@ export function registerWorkingTreeRoutes(
   app.get('/api/working_trees/:id/tree', async c => {
     const id = c.req.param('id');
     const rel = c.req.query('path') ?? '';
-    const wt = resolveWorkingTree(id);
+    const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
     const resolved = await resolveWithinWorkspace(wt.path, rel);
     if (!resolved) return c.json({ error: 'path escapes working tree' }, 400);
@@ -435,7 +461,7 @@ export function registerWorkingTreeRoutes(
   // node_modules), capped so a pathological repo can't OOM the response.
   app.get('/api/working_trees/:id/files', async c => {
     const id = c.req.param('id');
-    const wt = resolveWorkingTree(id);
+    const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
     const MAX = 20000;
     const out: string[] = [];
@@ -465,18 +491,24 @@ export function registerWorkingTreeRoutes(
     const id = c.req.param('id');
     const rel = c.req.query('path') ?? '';
     if (!rel) return c.json({ error: 'path required' }, 400);
-    const wt = resolveWorkingTree(id);
+    const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
     const resolved = await resolveWithinWorkspace(wt.path, rel);
     if (!resolved) return c.json({ error: 'path escapes working tree' }, 400);
     try {
-      const info = await stat(resolved);
-      if (!info.isFile()) return c.json({ error: 'not a file' }, 400);
-      if (info.size > 1024 * 1024) return c.json({ error: 'file too large' }, 413);
-      const content = await readFile(resolved, 'utf8');
-      return c.json({ path: rel, size: info.size, content });
+      const bytes = await readBoundedFile(resolved, 1024 * 1024);
+      // Match the changed-file line-count heuristic: a NUL byte in the first
+      // 8 KiB marks binary content. Returning decoded replacement characters
+      // from the text endpoint is neither useful nor reversible; callers can
+      // use /raw for byte-preserving access instead.
+      if (isLikelyBinary(bytes)) {
+        return c.json({ error: 'binary file; use raw endpoint' }, 415);
+      }
+      const content = bytes.toString('utf8');
+      return c.json({ path: rel, size: bytes.length, content });
     } catch (err) {
-      return c.json({ error: String(err) }, 500);
+      const failure = fileReadFailure(err);
+      return c.json({ error: failure.error }, failure.status);
     }
   });
 
@@ -491,31 +523,29 @@ export function registerWorkingTreeRoutes(
     const id = c.req.param('id');
     const rel = c.req.query('path') ?? '';
     if (!rel) return c.json({ error: 'path required' }, 400);
-    const wt = resolveWorkingTree(id);
+    const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
     const resolved = await resolveWithinWorkspace(wt.path, rel);
     if (!resolved) return c.json({ error: 'path escapes working tree' }, 400);
     try {
-      const info = await stat(resolved);
-      if (!info.isFile()) return c.json({ error: 'not a file' }, 400);
-      if (rawPreviewOversize(info.size)) return c.json({ error: 'file too large' }, 413);
-      const { headers } = buildRawPreviewHeaders({ rel, size: info.size });
-      const bytes = await readFile(resolved);
+      const bytes = await readBoundedFile(resolved, RAW_PREVIEW_MAX_BYTES);
+      const { headers } = buildRawPreviewHeaders({ rel, size: bytes.length });
       return new Response(new Uint8Array(bytes), { status: 200, headers });
     } catch (err) {
-      return c.json({ error: String(err) }, 500);
+      const failure = fileReadFailure(err);
+      return c.json({ error: failure.error }, failure.status);
     }
   });
 
-  app.get('/api/working_trees/:id/commits', c => {
+  app.get('/api/working_trees/:id/commits', async c => {
     const id = c.req.param('id');
-    const wt = resolveWorkingTree(id);
+    const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
     // Commits on this branch since it diverged from its base — powers the
     // Committed submenu in the Changes scope picker (Codex parity). Newest
     // first, capped at 50. Empty when there's no distinct base.
-    const base = branchBase(wt);
-    const out = gitText(wt.path, [
+    const base = await branchBase(wt);
+    const out = await gitText(wt.path, [
       'log', '-n', '50', '--format=%H%x1f%s%x1f%cr', `${base}..HEAD`,
     ]);
     const commits = out
@@ -529,31 +559,36 @@ export function registerWorkingTreeRoutes(
     return c.json(commits);
   });
 
-  app.get('/api/working_trees/:id/branches', c => {
+  app.get('/api/working_trees/:id/branches', async c => {
     const id = c.req.param('id');
-    const wt = resolveWorkingTree(id);
+    const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
     // Branch picker data for the Branch scope's second row: the checked-out
     // head, the auto-detected compare base (same logic the branch scope uses
     // when no explicit base is pinned), and every local + remote branch.
-    const head = gitText(wt.path, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() || 'HEAD';
+    const [headRaw, branchRaw, base] = await Promise.all([
+      gitText(wt.path, ['rev-parse', '--abbrev-ref', 'HEAD']),
+      gitText(wt.path, ['branch', '-a', '--format=%(refname:short)']),
+      autoBaseRef(wt),
+    ]);
+    const head = headRaw.trim() || 'HEAD';
     const branches = [
       ...new Set(
-        gitText(wt.path, ['branch', '-a', '--format=%(refname:short)'])
+        branchRaw
           .split('\n')
           .map(b => b.trim())
           // The `origin/HEAD` symref entry is noise in a picker.
           .filter(b => b && !b.endsWith('/HEAD')),
       ),
     ];
-    return c.json({ head, base: autoBaseRef(wt), branches });
+    return c.json({ head, base, branches });
   });
 
   app.get('/api/working_trees/:id/diff', async c => {
     const id = c.req.param('id');
     const rel = c.req.query('path') ?? '';
     if (!rel) return c.json({ error: 'path required' }, 400);
-    const wt = resolveWorkingTree(id);
+    const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
     const resolved = await resolveWithinWorkspace(wt.path, rel);
     if (!resolved) return c.json({ error: 'path escapes working tree' }, 400);
@@ -561,24 +596,25 @@ export function registerWorkingTreeRoutes(
     const scope = parseScope(c.req.query('scope'));
     const sha = parseCommitSha(c.req.query('sha'));
     const base = scope === 'branch' ? parseBaseRef(c.req.query('base')) : null;
-    return c.json({ diff: computeFileDiff(wt.path, rel, scope, wt, sha, base) });
+    return c.json({ diff: await computeFileDiff(wt.path, rel, scope, wt, sha, base) });
   });
 
   app.get('/api/working_trees/:id/file_meta', async c => {
     const id = c.req.param('id');
     const rel = c.req.query('path') ?? '';
     if (!rel) return c.json({ error: 'path required' }, 400);
-    const wt = resolveWorkingTree(id);
+    const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
     const resolved = await resolveWithinWorkspace(wt.path, rel);
     if (!resolved) return c.json({ error: 'path escapes working tree' }, 400);
 
     let uncommitted = false;
     try {
-      const out = execFileSync('git', ['-C', wt.path, 'status', '--porcelain', '--', rel], {
-        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      });
-      uncommitted = out.trim().length > 0;
+      const { stdout } = await runGit(
+        ['status', '--porcelain', '--', rel],
+        { cwd: wt.path, timeoutMs: 5_000 },
+      );
+      uncommitted = stdout.trim().length > 0;
     } catch {
       // no git or not a repo
     }
@@ -620,9 +656,9 @@ export function registerWorkingTreeRoutes(
   //                session's base_branch / repo default) + untracked.
   //   - lastturn = the files the agent edited in its most recent turn
   //                (file_change events), shown as their live diff vs HEAD.
-  app.get('/api/working_trees/:id/changed', c => {
+  app.get('/api/working_trees/:id/changed', async c => {
     const id = c.req.param('id');
-    const wt = resolveWorkingTree(id);
+    const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
     const scope = parseScope(c.req.query('scope'));
 
@@ -635,11 +671,11 @@ export function registerWorkingTreeRoutes(
       const commitRef = parseCommitSha(c.req.query('sha')) ?? 'HEAD';
       const baseRef = scope === 'branch' ? parseBaseRef(c.req.query('base')) : null;
       const baseRange =
-        scope === 'commit' ? [commitBaseOf(wt.path, commitRef), commitRef] :
-        scope === 'branch' ? [branchBase(wt, baseRef)] :
+        scope === 'commit' ? [await commitBaseOf(wt.path, commitRef), commitRef] :
+        scope === 'branch' ? [await branchBase(wt, baseRef)] :
         ['HEAD']; // lastturn diffs the working tree vs HEAD, then filters
       const out: ChangedFile[] = [];
-      const recs = gitText(wt.path, ['diff', '--name-status', '-z', ...baseRange]).split('\0');
+      const recs = (await gitText(wt.path, ['diff', '--name-status', '-z', ...baseRange])).split('\0');
       for (let i = 0; i < recs.length; i++) {
         const status = recs[i];
         if (!status) continue;
@@ -661,7 +697,7 @@ export function registerWorkingTreeRoutes(
       // branch / lastturn also surface untracked files (new on the branch, or
       // freshly created by the agent). commit never does — they're in no commit.
       if (scope === 'branch' || scope === 'lastturn') {
-        for (const rec of gitText(wt.path, ['status', '--porcelain=1', '-z']).split('\0')) {
+        for (const rec of (await gitText(wt.path, ['status', '--porcelain=1', '-z'])).split('\0')) {
           if (!rec.startsWith('?? ')) continue;
           const p = rec.slice(3);
           if (p && !out.some(e => e.path === p)) {
@@ -677,27 +713,37 @@ export function registerWorkingTreeRoutes(
         // session actually belongs to this tree's workspace — otherwise the
         // param would let a caller probe another workspace's session events.
         let sessionId = wt.session_id;
-        if (!sessionId) {
-          const raw = c.req.query('session');
-          if (raw) {
-            const s = db
-              .prepare('SELECT id FROM sessions WHERE id = ? AND workspace_id = ?')
-              .get(raw, wt.workspace_id) as { id: string } | undefined;
-            sessionId = s?.id ?? null;
-          }
+        const rawSession = c.req.query('session');
+        if (rawSession) {
+          const s = db
+            .prepare('SELECT id FROM sessions WHERE id = ? AND workspace_id = ?')
+            .get(rawSession, wt.workspace_id) as { id: string } | undefined;
+          // A Diff chip carries the conversation that produced it. Prefer
+          // that explicit target even when the viewed `wt:` tree belongs to
+          // another Gian session; workspace validation keeps the override
+          // from exposing events across repositories.
+          if (s) sessionId = s.id;
         }
-        const turnPaths = lastTurnPaths(sessionId);
+        const rawTurn = c.req.query('turn');
+        const requestedTurn = rawTurn && /^\d+$/.test(rawTurn)
+          ? Number(rawTurn)
+          : null;
+        const turnPaths = lastTurnPaths(
+          sessionId,
+          requestedTurn != null && requestedTurn > 0 ? requestedTurn : null,
+        );
         list = out.filter(e => turnPaths.has(e.path));
       }
-      fillLineCounts(wt.path, list, ['diff', '--numstat', ...baseRange]);
+      await fillLineCounts(wt.path, list, ['diff', '--numstat', ...baseRange]);
       return c.json(list);
     }
 
     let raw = '';
     try {
-      raw = execFileSync('git', ['-C', wt.path, 'status', '--porcelain=1', '-z'], {
-        timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      });
+      raw = (await runGit(
+        ['status', '--porcelain=1', '-z'],
+        { cwd: wt.path, timeoutMs: 5_000 },
+      )).stdout;
     } catch {
       return c.json([]);
     }
@@ -749,7 +795,7 @@ export function registerWorkingTreeRoutes(
       scope === 'staged' ? ['diff', '--numstat', '--cached'] :
       scope === 'unstaged' ? ['diff', '--numstat'] :
       ['diff', '--numstat', 'HEAD'];
-    fillLineCounts(wt.path, out, numstatArgs);
+    await fillLineCounts(wt.path, out, numstatArgs);
 
     return c.json(out);
   });

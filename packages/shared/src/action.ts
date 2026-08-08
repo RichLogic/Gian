@@ -1,5 +1,5 @@
 // Gian action protocol + task-loop / action-ledger types (proposal
-// `docs/proposals/gian-task-pm-engineer.md` §4A.A). An agent emits a JSON
+// `docs/archive/proposals/gian-task-pm-engineer.md` §4A.A). An agent emits a JSON
 // envelope in its FINAL text; the host's output watcher parses, deduplicates,
 // authorizes, and executes it. This is NOT MCP / not a real tool call — it is
 // text the host intercepts, so there is no permission popup and Claude/Codex

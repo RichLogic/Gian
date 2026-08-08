@@ -25,6 +25,7 @@ import { randomUUID } from 'node:crypto';
 import type { ProxyNotification, ServerToClientMessage } from '@gian/shared';
 import { openDatabase } from '../src/storage/db.js';
 import { SessionManager } from '../src/session/manager.js';
+import { SessionLifecycleBusyError } from '../src/session/lifecycle-service.js';
 import type { ProxyManager } from '../src/proxy/manager.js';
 import type { ProxyClient, NotificationHandler } from '../src/proxy/types.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
@@ -43,6 +44,8 @@ class FakeProxyClient implements ProxyClient {
   notificationHandlers: NotificationHandler[] = [];
   createSessionCalls: Array<{ cwd: string }> = [];
   closeSessionCalls: string[] = [];
+  closeSessionGate: Promise<void> | undefined;
+  onCloseSession: ((id: string) => void) | undefined;
 
   async initialize() { return { mode: 'spawn' as const, protocolVersion: '0.1.0', methods: [] }; }
   async capabilities() { return { protocolVersion: '0.1.0', models: [], slashCommands: [] }; }
@@ -77,7 +80,11 @@ class FakeProxyClient implements ProxyClient {
       turn: { id: 'proxy_turn' },
     };
   }
-  async closeSession(id: string) { this.closeSessionCalls.push(id); }
+  async closeSession(id: string) {
+    this.closeSessionCalls.push(id);
+    this.onCloseSession?.(id);
+    await this.closeSessionGate;
+  }
   async shutdown() {}
   forceKill() {}
   onNotification(handler: NotificationHandler) {
@@ -267,6 +274,66 @@ test('WT-003: cannot merge OR drop a session that is already finalized', async (
     await assert.rejects(ctx.sessions.dropWorktree(session.id), /already discarded/);
     await assert.rejects(ctx.sessions.mergeWorktree(session.id), /already discarded/);
   } finally {
+    teardown(ctx);
+  }
+});
+
+test('WT-003: concurrent merge/drop rejects contention and preserves the first outcome', async () => {
+  const ctx = setup();
+  try {
+    const { session, worktreePath } = await setupWorktreeSession(ctx);
+    ctx.repo.git(['-C', worktreePath, 'commit', '--allow-empty', '-m', 'wt change']);
+
+    let releaseTeardown!: () => void;
+    const teardownGate = new Promise<void>(resolve => {
+      releaseTeardown = resolve;
+    });
+    let notifyTeardownEntered!: () => void;
+    const teardownEntered = new Promise<void>(resolve => {
+      notifyTeardownEntered = resolve;
+    });
+    ctx.proxyMgr.client.closeSessionGate = teardownGate;
+    ctx.proxyMgr.client.onCloseSession = () => notifyTeardownEntered();
+
+    const merge = ctx.sessions.mergeWorktree(session.id);
+    await teardownEntered;
+    await assert.rejects(
+      ctx.sessions.dropWorktree(session.id),
+      error => error instanceof SessionLifecycleBusyError,
+      'a competing lifecycle request must fail fast instead of queueing behind proxy teardown',
+    );
+    releaseTeardown();
+
+    await merge;
+
+    const row = ctx.db.prepare('SELECT worktree_outcome FROM sessions WHERE id = ?')
+      .get(session.id) as { worktree_outcome: string | null };
+    assert.equal(row.worktree_outcome, 'merged',
+      'a concurrent drop must not overwrite the completed merge outcome');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('WT-003: hung proxy close reaches its deadline and releases lifecycle ownership', async t => {
+  const ctx = setup();
+  try {
+    const { session } = await setupWorktreeSession(ctx);
+    ctx.proxyMgr.client.closeSessionGate = new Promise<void>(() => undefined);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+
+    const drop = ctx.sessions.dropWorktree(session.id);
+    t.mock.timers.tick(5_000);
+    await drop;
+
+    const row = ctx.db.prepare('SELECT worktree_outcome FROM sessions WHERE id = ?')
+      .get(session.id) as { worktree_outcome: string | null };
+    assert.equal(row.worktree_outcome, 'discarded',
+      'best-effort proxy teardown must not block worktree finalization forever');
+    await assert.rejects(ctx.sessions.dropWorktree(session.id), /already discarded/,
+      'the lifecycle guard is released after the teardown deadline');
+  } finally {
+    t.mock.timers.reset();
     teardown(ctx);
   }
 });

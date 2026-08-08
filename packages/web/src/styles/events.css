@@ -1,61 +1,14 @@
 /* ============================================================
-   Transcript event cards — 12 event types per PRD §一
+   Transcript event rendering — .trow single-line system (P1) +
+   .turnsum completed-turn fold (P2), per the 2026-08-05 redesign
+   mockup (docs/mockups/2026-08-05-transcript-redesign-acd.html).
+   The legacy .evt card system was removed in P2 (2026-08-08): its
+   last consumers (TurnActionsBlock, AutoNoticeCard, ErrorCard,
+   resolved approval cards) moved to .trow / .turnsum / the minimal
+   error card. Only the shared utility classes below survive.
    ============================================================ */
 
-/* Generic tool card shell (shared by read/search/command/change) */
-.evt {
-  margin: 8px 0;
-  border-radius: var(--r-2);
-  background: var(--surface-2);
-  overflow: hidden;
-}
-.evt-head {
-  display: flex; align-items: center; gap: 8px;
-  /* Reserve a 18px gutter for the (optional) caret so rows with and without
-   * a caret line up at the same verb x-position. Caret is absolutely
-   * positioned into the gutter; no caret = empty gutter, same alignment. */
-  padding: 6px 10px 6px 28px;
-  position: relative;
-  font-size: var(--fz-11);
-  color: var(--text-2);
-  cursor: pointer;
-  /* Selectable so the command / path / subject can be copied — a click still
-     toggles the card (a click is not a drag-select). */
-  user-select: text;
-  transition: background 80ms;
-}
-.evt-head:hover { background: var(--surface-3); }
-.evt-caret {
-  position: absolute;
-  left: 12px;
-  top: 50%;
-  width: 9px; height: 9px;
-  color: var(--text-3);
-  flex-shrink: 0;
-  transform: translateY(-50%);
-  transition: transform 120ms var(--ease);
-}
-/* Direct-child combinator so an open parent block doesn't cascade rotation
- * onto closed nested .evt children's carets. Without this, the WORKING /
- * exploration-group wrappers rotated every descendant caret regardless of
- * the child's own state. */
-.evt.open > .evt-head > .evt-caret { transform: translateY(-50%) rotate(90deg); }
-.evt-verb {
-  font-family: var(--font-mono);
-  font-size: 10px; font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--text-3);
-  text-transform: none;
-}
-.evt-subject {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text);
-  min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.evt-subject.path { cursor: pointer; }
-.evt-subject.path:hover { color: var(--accent-text); text-decoration: underline; text-underline-offset: 2px; }
+/* --- Shared utilities (used inside .trow / .trow-detail) --- */
 .file-link {
   color: inherit;
   text-decoration: none;
@@ -76,45 +29,9 @@
   cursor: pointer;
 }
 .file-link-auto:hover { text-decoration-style: solid; }
-.evt-meta {
-  margin-left: auto;
-  display: flex; align-items: center; gap: 8px;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--text-3);
-  flex-shrink: 0;
-}
-.evt-meta .add { color: var(--ok); }
-.evt-meta .del { color: var(--danger); }
 
-/* Status badge (running / success / error) */
-.evt-status {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 1px 6px;
-  border-radius: var(--r-pill);
-  font-family: var(--font-mono);
-  font-size: 9.5px; font-weight: 600;
-  text-transform: none; letter-spacing: 0.04em;
-  line-height: 1.5;
-}
-.evt-status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-.evt-status.running { color: var(--accent-text); background: var(--accent-soft); }
-.evt-status.running::before { animation: breath 1.8s ease-in-out infinite; }
-.evt-status.success { color: var(--ok); background: var(--ok-soft); }
-.evt-status.error   { color: var(--danger); background: var(--danger-soft); }
-.evt-status.pending { color: var(--warn); background: var(--warn-soft); }
-
-.evt-body {
-  background: var(--surface);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  line-height: 1.7;
-  max-height: 320px;
-  overflow-y: auto;
-}
-.evt:not(.open) .evt-body { display: none; }
-
-/* Tool args — key/value rows (parsed from JSON when possible) */
+/* Tool args — key/value rows (parsed from JSON when possible), shown inside
+ * an expanded tool row's .trow-detail. */
 .tool-args { margin: 0; padding: 4px 12px; display: grid; row-gap: 2px; }
 .tool-output {
   margin: 0;
@@ -153,62 +70,26 @@
   display: block;
 }
 
-/* --- Compact/inline events (single line, no body) --- */
-.evt.inline {
-  margin: 2px 0;
-  background: transparent;
+/* Search results inside an expanded .trow-detail */
+.search-results { padding: 4px 4px 6px; }
+.search-result {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  padding: 4px 10px;
+  border-radius: var(--r-1);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
-.evt.inline .evt-head {
-  padding: 3px 8px 3px 28px;
-  background: transparent;
-  cursor: default;
-}
-.evt.inline .evt-head:hover { background: var(--surface-2); }
-
-/* --- 2. thinking --- */
-.evt.thinking {
-  background: transparent;
-  box-shadow: 0 0 0 1px var(--hairline-2);
-  margin: 6px 0;
-}
-.evt.thinking .evt-head { color: var(--text-3); font-style: italic; }
-.evt.thinking .evt-verb { color: var(--text-3); font-style: normal; font-weight: 500; text-transform: none; letter-spacing: 0; font-family: var(--font-sans); font-size: 11.5px; }
-.evt.thinking[data-variant="summary"] .evt-verb { color: var(--accent-text); }
-.evt.thinking .evt-body {
-  padding: 4px 12px 10px 30px;
-  font-family: var(--font-sans);
-  font-style: italic;
-  background: transparent;
+.search-result:hover { background: var(--surface-3); }
+.search-result .sr-loc {
   color: var(--text-3);
-  line-height: 1.55;
-  font-size: 12px;
-  max-height: none;
+  min-width: 180px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.evt.thinking .evt-body p + p { margin-top: 4px; }
 
-/* --- 3. command_execution --- */
-.evt.command .evt-subject.cmd {
-  color: var(--text);
-}
-.evt.command .evt-subject.cmd::before {
-  content: "$ ";
-  color: var(--text-3);
-}
-/* When the user expands the card to see output, also unwrap the command
- * line itself — long pasted scripts otherwise stay ellipsis-truncated even
- * when the body is open. `align-items: flex-start` keeps the verb/meta
- * aligned to the top of the now-multiline subject. */
-.evt.command.open .evt-head { align-items: flex-start; }
-.evt.command.open .evt-subject.cmd {
-  white-space: pre-wrap;
-  overflow: visible;
-  word-break: break-word;
-}
-.evt.command .evt-body {
-  padding: 8px 12px;
-  color: var(--text-2);
-  white-space: pre-wrap;
-}
+/* Streaming command output cursor (running command detail) */
 .cmd-stream {
   display: flex; align-items: flex-start; gap: 6px;
   font-family: var(--font-mono);
@@ -224,107 +105,189 @@
 }
 @keyframes cursor-blink { to { opacity: 0; } }
 
-/* --- 4. file_change (the heaviest) --- */
-.evt.fc .evt-head { padding: 7px 10px 7px 28px; }
-/* Compact Edit card: clickable, opens diff in inspector — no inline body. */
-.evt.fc.compact { cursor: pointer; }
-.evt.fc.compact:hover { background: var(--surface-3); }
-.evt.fc .evt-subject { font-family: var(--font-sans); font-size: 12px; color: var(--text); }
-
-/* --- 6. file_search --- */
-.evt.search .evt-subject .search-pattern {
-  color: var(--text);
-}
-.evt.search .evt-subject .search-pattern::before {
-  content: "/";
-  color: var(--text-3);
-}
-.evt.search .evt-subject .search-pattern::after {
-  content: "/";
-  color: var(--text-3);
-}
-.search-results { padding: 4px 4px 6px; }
-.search-result {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 10px;
-  padding: 4px 10px;
+/* ============================================================
+   P1 (2026-08-08) — .trow single-line system
+   Values copied from docs/mockups/2026-08-05-transcript-redesign-acd.html
+   (token-based; all three themes resolve automatically).
+   Rows: caret (expandable only) + mono verb + subject + right meta.
+   No per-line timestamps; meta carries state only (matches, +N/−N,
+   error, running timer).
+   ============================================================ */
+.trow {
+  position: relative;
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 8px 3px 28px;
   border-radius: var(--r-1);
-  cursor: pointer;
+  font-size: var(--fz-11);
+  color: var(--text-2);
+  cursor: default;
+  user-select: text;
+}
+.trow.expandable { cursor: pointer; }
+.trow.expandable:hover { background: var(--surface-2); }
+/* Clickable but not inline-expandable (e.g. a large diff that pushes the
+ * inspector, an agent row that opens the chat panel): hover affordance,
+ * no caret. */
+.trow.clickable { cursor: pointer; }
+.trow.clickable:hover { background: var(--surface-2); }
+.trow-caret {
+  position: absolute; left: 11px; top: 50%;
+  width: 9px; height: 9px;
+  color: var(--text-3);
+  transform: translateY(-50%);
+  transition: transform 120ms var(--ease);
+}
+.trow.open > .trow-caret { transform: translateY(-50%) rotate(90deg); }
+.trow-verb {
+  font-family: var(--font-mono);
+  font-size: 10px; font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+.trow-subject {
   font-family: var(--font-mono);
   font-size: 11px;
-}
-.search-result:hover { background: var(--surface-2); }
-.search-result .sr-loc {
-  color: var(--text-3);
-  min-width: 180px;
+  color: var(--text);
+  min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-
-/* --- 7. web_search --- */
-.evt.web {
-  margin: 2px 0;
-  background: transparent;
-}
-.evt.web .evt-head {
-  padding: 3px 8px 3px 28px;
-  cursor: default;
-}
-.evt.web .evt-subject { color: var(--text-2); }
-
-/* --- 7a. turn-actions (folded action stretch between text replies) --- */
-.evt.actions {
-  background: transparent;
-  margin: 4px 0;
-  border-left: 2px solid var(--surface-3);
-  border-radius: 0;
-}
-.evt.actions > .evt-head {
-  padding: 4px 10px 4px 28px;
-}
-.evt.actions .evt-verb { color: var(--text-3); font-weight: 500; }
-.evt.actions .evt-subject { color: var(--text-2); font-family: var(--font-sans); font-size: 12px; }
-.evt.actions > .evt-body.actions-body {
-  background: transparent;
-  padding: 2px 0 4px 0;
-  max-height: none;
-  overflow: visible;
-}
-/* Children inside an actions block: tighten spacing, drop their own border
- * since the block already has the left rail. */
-.evt.actions > .evt-body.actions-body > .evt {
-  margin: 0;
-}
-
-/* --- 8. agent_spawn --- */
-.evt.agent {
-  background: oklch(from var(--claude) l c h / 0.08);
-  border-radius: var(--r-2);
-}
-.evt.agent .evt-verb { color: var(--claude); }
-.evt.agent .evt-subject { color: var(--text); font-family: var(--font-sans); font-size: 12px; }
-.evt.agent .evt-body {
-  padding: 8px 12px;
-  font-family: var(--font-sans);
-  font-size: 12px;
-  color: var(--text-2);
-  background: var(--surface);
-  line-height: 1.55;
-}
-
-/* --- 9. approval_requested: extended styling on existing .approval ---
-   Terminal states keep a single semantic hue on icon + status pill;
-   the shell stays neutral (see coding.css "Approval card"). */
-.approval.resolved .approval-ico { background: var(--ok-soft); color: var(--ok); }
-.approval.resolved .approval-risk { background: var(--ok-soft); color: var(--ok); }
-.approval.declined .approval-ico { background: var(--danger-soft); color: var(--danger); }
-.approval.declined .approval-risk { background: var(--danger-soft); color: var(--danger); }
-.approval-resolved-note {
-  padding: 0 12px 10px;
+.trow-subject.dim { color: var(--text-2); }
+/* Dimmed trailing reason (auto-block classifier denial) */
+.trow-subject .dim-reason { margin-left: 8px; color: var(--text-3); }
+.trow-meta {
+  margin-left: auto;
+  display: flex; align-items: center; gap: 8px;
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--text-3);
-  display: flex; align-items: center; gap: 6px;
+  flex-shrink: 0;
 }
-.approval-resolved-note strong { color: var(--text); font-weight: 600; }
-.approval-resolved-note .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--text-3); }
+.trow-meta .add { color: var(--ok); }
+.trow-meta .del { color: var(--danger); }
+.trow-meta .err { color: var(--danger); font-weight: 600; }
+/* running state: breathing dot + live timer (`running · 8s`) */
+.trow-run {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--accent-text);
+}
+.trow-run::before {
+  content: ""; width: 5px; height: 5px; border-radius: 50%;
+  background: currentColor;
+  animation: breath 1.8s ease-in-out infinite;
+}
+/* Level-3 rows: hover-revealed "detail opens in panel 2" hint */
+.trow-ext {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--text-3);
+  opacity: 0;
+  transition: opacity 100ms var(--ease);
+}
+.trow.expandable:hover .trow-ext,
+.trow.clickable:hover .trow-ext { opacity: 1; }
+
+/* Level-2 detail: in-place expansion for small content */
+.trow-detail {
+  margin: 2px 8px 4px 28px;
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.65;
+  overflow: hidden;
+}
+.trow-detail.cmd { padding: 7px 11px; color: var(--text-2); white-space: pre-wrap; }
+.trow-detail.cmd .dim { color: var(--text-3); }
+/* Over the level-2 threshold (>10 output lines / long reasoning) P1 keeps
+ * the inline expand but caps the height and scrolls (panel 2 is P3). */
+.trow-detail.scroll { max-height: 200px; overflow-y: auto; }
+/* Inline mini diff (single file, ≤30 lines) */
+.trow-detail.diff { padding: 4px 0; }
+.dline { display: flex; padding: 0 11px; white-space: pre; }
+.dline .dsign { width: 12px; flex-shrink: 0; color: var(--text-3); }
+.dline.add { background: oklch(from var(--ok) l c h / 0.08); }
+.dline.add .dsign, .dline.add .dtext { color: var(--ok); }
+.dline.del { background: oklch(from var(--danger) l c h / 0.08); }
+.dline.del .dsign, .dline.del .dtext { color: var(--danger); }
+.dline.ctx .dtext { color: var(--text-2); }
+.dline.hunk { color: var(--text-3); padding-top: 3px; padding-bottom: 3px; }
+
+/* Search pattern slashes inside a trow subject (was .evt.search scoped) */
+.trow-subject .search-pattern::before,
+.trow-subject .search-pattern::after {
+  color: var(--text-3);
+}
+.trow-subject .search-pattern::before { content: "/"; }
+.trow-subject .search-pattern::after { content: "/"; }
+
+/* ============================================================
+   P2 (2026-08-08) — completed-turn fold: .turnsum summary row.
+   Doubles as the turn boundary; the stats are scannable state counts;
+   clicking restores the full process list on a left guide rail.
+   ============================================================ */
+.turnsum {
+  position: relative;
+  display: flex; align-items: center; gap: 8px;
+  margin: 4px 0;
+  padding: 6px 10px 6px 28px;
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  font-size: var(--fz-11);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background 80ms;
+  user-select: text;
+}
+.turnsum:hover { background: var(--surface-3); }
+.turnsum-caret {
+  position: absolute; left: 11px; top: 50%;
+  width: 9px; height: 9px; color: var(--text-3);
+  transform: translateY(-50%);
+  transition: transform 120ms var(--ease);
+}
+.turnsum.open > .turnsum-caret { transform: translateY(-50%) rotate(90deg); }
+.turnsum-lead { font-weight: 600; color: var(--text); font-size: var(--fz-12); }
+.turnsum-stats {
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3);
+  min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.turnsum-stats .sep { color: var(--hairline); }
+.turnsum-stats .add { color: var(--ok); }
+.turnsum-stats .del { color: var(--danger); }
+.turnsum-stats .err { color: var(--danger); font-weight: 600; }
+.turnsum-time {
+  margin-left: auto;
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3);
+  flex-shrink: 0;
+}
+/* The expanded summary restores the process rows on a left guide rail —
+ * same .trow set as the live transcript. */
+.turnsum-body {
+  margin: 2px 0 6px 17px;
+  padding-left: 11px;
+  border-left: 1px solid var(--hairline);
+  display: flex; flex-direction: column; gap: 1px;
+}
+
+/* Session meta: status as a centered plain-text line (pill removed) */
+.status-line {
+  align-self: center;
+  margin: 10px auto;
+  font-family: var(--font-mono); font-size: 10.5px;
+  color: var(--text-3); letter-spacing: 0.08em;
+}
+
+/* Minimal error card content (shell is the neutral .approval): a small
+ * danger label + the error text, no icon/title/pill/timestamp. */
+.error-label {
+  padding: 10px 14px 0;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.06em; color: var(--danger);
+  text-transform: uppercase;
+}
+.error-text {
+  padding: 5px 14px 11px;
+  font-size: 11.5px; color: var(--text-2); line-height: 1.55;
+}

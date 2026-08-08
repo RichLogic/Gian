@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — Workspace-domain definitions (Phase 3a of
- * `docs/proposals/ui-operation-layer.md`). Every Workspace mutation the UI
+ * `docs/archive/proposals/ui-operation-layer.md`). Every Workspace mutation the UI
  * can trigger is registered here; SpacesView, WorkspacesPanel, the App
  * sidebar pin, and the workspace-create flows dispatch by name instead of
  * calling the workspace REST helpers directly.

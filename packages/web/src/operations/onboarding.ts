@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — Onboarding-domain definitions (Phase 3b of
- * `docs/proposals/ui-operation-layer.md`): `onboarding.saveProjectRoot` and
+ * `docs/archive/proposals/ui-operation-layer.md`): `onboarding.saveProjectRoot` and
  * `onboarding.complete`, both PENDING REST. The OnboardingView finish chain
  * sequences them (save → complete) with `waitForRunSettle`; each result is
  * recorded on the run (`run.result`) — the saved root for the input's

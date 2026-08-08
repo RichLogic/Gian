@@ -16,18 +16,30 @@ import type {
 import { openDatabase } from '../src/storage/db.js';
 import { SessionManager } from '../src/session/manager.js';
 import type { ProxyManager } from '../src/proxy/manager.js';
-import type { ProxyClient, NotificationHandler } from '../src/proxy/types.js';
+import type { ProxyClient, NotificationHandler, StartTurnParams } from '../src/proxy/types.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import { ApprovalManager } from '../src/approval/index.js';
 import { QueueManager } from '../src/queue/index.js';
 import { writeAttachment } from '../src/storage/attachments.js';
-import { listGitWorktrees } from '../src/workspace/git.js';
+import { listGitWorktreesAsync } from '../src/workspace/git.js';
 import { createGitRepo } from './fixtures/git-repo.js';
 import { installEventStorageV3 } from '../src/storage/event-storage-v3-schema.js';
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('condition timed out');
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
 
 class StubProxyClient implements ProxyClient {
   readonly executor = 'claude' as const;
   notificationHandlers: NotificationHandler[] = [];
+  startTurnCalls: StartTurnParams[] = [];
+  exitHandlers: Array<(code: number | null) => void> = [];
+  handlerCountsAtCreate: Array<{ notifications: number; exits: number }> = [];
+  notificationDuringCreate: ProxyNotification | null = null;
 
   async initialize() {
     return { mode: 'spawn' as const, protocolVersion: '0.1.0', methods: [] };
@@ -53,6 +65,10 @@ class StubProxyClient implements ProxyClient {
     claudeSessionId?: string;
     threadId?: string;
   }) {
+    this.handlerCountsAtCreate.push({
+      notifications: this.notificationHandlers.length,
+      exits: this.exitHandlers.length,
+    });
     this.lastCreateParams = params;
     if (this.failNextCreate) {
       const err = this.failNextCreate;
@@ -62,7 +78,12 @@ class StubProxyClient implements ProxyClient {
     // Mirror cc-proxy: re-use the supplied claudeSessionId on adoption,
     // otherwise mint a fresh native id. The proxy's own `id` mirrors the
     // native id so a single value flows through both sides.
-    const nativeSessionId = params.claudeSessionId ?? `cc_${randomUUID()}`;
+    const nativeSessionId = params.threadId ?? params.claudeSessionId ?? `cc_${randomUUID()}`;
+    if (this.notificationDuringCreate) {
+      const notification = this.notificationDuringCreate;
+      this.notificationDuringCreate = null;
+      this.fire(notification);
+    }
     return {
       session: {
         id: nativeSessionId,
@@ -79,7 +100,8 @@ class StubProxyClient implements ProxyClient {
   }
   async interruptTurn() { /* no-op */ }
   async respondApproval() { /* no-op */ }
-  async startTurn() {
+  async startTurn(params: StartTurnParams) {
+    this.startTurnCalls.push(params);
     return {
       session: {
         id: 'proxy_x',
@@ -95,7 +117,8 @@ class StubProxyClient implements ProxyClient {
   }
   async closeSession() { /* no-op */ }
   async shutdown() { /* no-op */ }
-  forceKill() { /* no-op */ }
+  forceKillCalls = 0;
+  forceKill() { this.forceKillCalls += 1; }
 
   onNotification(handler: NotificationHandler) {
     this.notificationHandlers.push(handler);
@@ -103,8 +126,11 @@ class StubProxyClient implements ProxyClient {
       this.notificationHandlers = this.notificationHandlers.filter(h => h !== handler);
     };
   }
-  onExit() {
-    return () => {};
+  onExit(handler: (code: number | null) => void) {
+    this.exitHandlers.push(handler);
+    return () => {
+      this.exitHandlers = this.exitHandlers.filter(h => h !== handler);
+    };
   }
 
   fire(notification: ProxyNotification): void {
@@ -114,11 +140,23 @@ class StubProxyClient implements ProxyClient {
 
 class FakeProxyManager {
   client = new StubProxyClient();
+  private active: StubProxyClient | null = this.client;
+  forceDisposeCalls: string[] = [];
   async getOrCreate(): Promise<ProxyClient> {
-    return this.client;
+    if (!this.active) {
+      this.client = new StubProxyClient();
+      this.active = this.client;
+    }
+    return this.active;
   }
-  get(): ProxyClient {
-    return this.client;
+  get(): ProxyClient | undefined {
+    return this.active ?? undefined;
+  }
+  forceDispose(sessionId: string): void {
+    this.forceDisposeCalls.push(sessionId);
+    const client = this.active;
+    this.active = null;
+    client?.forceKill();
   }
   async dispose(): Promise<void> {}
   async closeAll(): Promise<void> { /* no-op */ }
@@ -541,7 +579,7 @@ test('failed Kimi native discovery disposes its unattached facade for retry', as
 });
 
 test('Kimi adoption coalesces replay chunks and keeps assistant IDs turn-local', async () => {
-  const { dir, db, wsId, proxyMgr, sessions } = setupKimi();
+  const { dir, db, wsId, proxyMgr, broadcaster, sessions } = setupKimi();
   proxyMgr.client.replayUpdates = [
     {
       sessionId: 'kimi-history',
@@ -587,6 +625,11 @@ test('Kimi adoption coalesces replay chunks and keeps assistant IDs turn-local',
       nativeSessionId: 'kimi-history',
     });
     assert.deepEqual(adopted.replay, { turns: 2, events: 4 });
+    assert.ok(broadcaster.messages.some(message => (
+      message.type === 'session:created'
+      && message.session.id === adopted.session.id
+      && message.origin === 'native-adopt'
+    )));
 
     const events = sessions.listEvents(adopted.session.id);
     assert.deepEqual(
@@ -865,6 +908,28 @@ test('sendMessage with localImage items echoes attachments in user_message paylo
   }
 });
 
+test('sendMessage forwards Codex skill items unchanged to the Proxy turn', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'codex' });
+
+    await sessions.sendMessage(session.id, '/project-check', [{
+      type: 'skill',
+      name: 'project-check',
+      path: '/tmp/test-ws/.codex/skills/project-check/SKILL.md',
+    }]);
+
+    assert.deepEqual(proxyMgr.client.startTurnCalls.at(-1)?.input, [{
+      type: 'skill',
+      name: 'project-check',
+      path: '/tmp/test-ws/.codex/skills/project-check/SKILL.md',
+    }]);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('sendMessage accepts only session-owned localFile snapshots and echoes their metadata', async () => {
   const { dir, db, wsId, sessions } = setup();
   const previousDataDir = process.env.GIAN_DATA_DIR;
@@ -927,9 +992,11 @@ test('sendMessage creates turn, persists user_message, broadcasts envelope', asy
     assert.equal(turns[0]!.turn_number, 1);
     assert.equal(turns[0]!.status, 'running');
 
-    const events = db.prepare('SELECT type, data FROM events WHERE session_id = ?').all(session.id) as Array<{
+    const events = db.prepare('SELECT type, call_id, data, created_at FROM events WHERE session_id = ?').all(session.id) as Array<{
       type: string;
+      call_id: string;
       data: string;
+      created_at: string;
     }>;
     const userMsg = events.find(e => e.type === 'user_message');
     assert.ok(userMsg, 'user_message event persisted');
@@ -940,8 +1007,22 @@ test('sendMessage creates turn, persists user_message, broadcasts envelope', asy
 
     const userEvents = broadcaster.messages.filter(
       m => m.type === 'event' && (m as { event: string }).event === 'user_message',
-    );
+    ) as Array<{ call_id: string; ts: number }>;
     assert.equal(userEvents.length, 1);
+    assert.equal(
+      userEvents[0]!.call_id,
+      userMsg!.call_id,
+      'persisted and broadcast user_message must share one stable call_id',
+    );
+    assert.match(userMsg!.created_at, /Z$/, 'new user_message timestamps must carry UTC');
+    assert.equal(
+      userEvents[0]!.ts,
+      Date.parse(userMsg!.created_at),
+      'persisted and broadcast user_message must share one timestamp',
+    );
+    const replayed = sessions.listEvents(session.id).find(event => event.event === 'user_message');
+    assert.equal(replayed?.call_id, userEvents[0]!.call_id);
+    assert.equal(replayed?.ts, userEvents[0]!.ts);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -1148,6 +1229,73 @@ test('user-initiated stop settles status=done WITHOUT marking unread', async () 
   }
 });
 
+test('Codex force recover replaces the facade and never accumulates notification handlers', async () => {
+  const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'codex' });
+    const first = proxyMgr.client;
+    assert.equal(first.notificationHandlers.length, 1);
+    assert.equal(first.exitHandlers.length, 1);
+    assert.deepEqual(first.handlerCountsAtCreate, [{ notifications: 1, exits: 1 }]);
+
+    await sessions.forceRecover(session.id);
+    assert.equal(first.notificationHandlers.length, 0, 'first facade is detached during recover');
+    assert.equal(first.exitHandlers.length, 0, 'first exit callback is detached during recover');
+    assert.equal(first.forceKillCalls, 1);
+
+    await sessions.sendMessage(session.id, 'after first recovery');
+    const second = proxyMgr.client;
+    assert.notEqual(second, first, 'first post-recovery turn uses a fresh facade');
+    assert.equal(second.notificationHandlers.length, 1);
+    assert.equal(second.exitHandlers.length, 1);
+    assert.deepEqual(
+      second.handlerCountsAtCreate,
+      [{ notifications: 1, exits: 1 }],
+      'replacement callbacks are attached before native create/adopt starts',
+    );
+
+    await sessions.forceRecover(session.id);
+    assert.equal(second.notificationHandlers.length, 0, 'second facade is also detached');
+    assert.equal(second.exitHandlers.length, 0, 'second exit callback is also detached');
+    assert.equal(second.forceKillCalls, 1);
+
+    await sessions.sendMessage(session.id, 'after second recovery');
+    const third = proxyMgr.client;
+    assert.notEqual(third, second, 'second post-recovery turn uses another fresh facade');
+    assert.equal(third.notificationHandlers.length, 1, 'only one Host callback is attached');
+    assert.equal(third.exitHandlers.length, 1, 'only one Host exit callback is attached');
+    assert.deepEqual(third.handlerCountsAtCreate, [{ notifications: 1, exits: 1 }]);
+    assert.deepEqual(proxyMgr.forceDisposeCalls, [session.id, session.id]);
+
+    broadcaster.messages.length = 0;
+    third.fire({
+      method: 'output.text.delta',
+      params: {
+        sessionId: 'proxy_after_second_recovery',
+        turnId: 'native_turn_after_second_recovery',
+        data: { delta: 'pong', itemId: 'msg_after_second_recovery' },
+      },
+    });
+
+    const liveDeltas = broadcaster.messages.filter(message => (
+      message.type === 'event'
+      && message.session_id === session.id
+      && message.event === 'output.text.delta'
+    ));
+    assert.equal(liveDeltas.length, 1, 'one Proxy delta produces one WebSocket event');
+
+    const stored = db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM events
+       WHERE session_id = ? AND type = 'output.text.delta'`,
+    ).get(session.id) as { count: number };
+    assert.equal(stored.count, 1, 'one Proxy delta produces one persisted event');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('setUnread toggles the flag, broadcasts, and does NOT bump updated_at', async () => {
   const { dir, db, wsId, sessions, broadcaster } = setup();
   try {
@@ -1298,6 +1446,17 @@ test('sendMessage rehydrates proxy session after host restart via native_session
   );
 
   try {
+    const rotatedDuringAdopt = 'cc_rotated_during_adopt';
+    proxyMgr.client.notificationDuringCreate = {
+      method: 'session.rotated',
+      params: {
+        sessionId: originalNativeId,
+        data: {
+          oldNativeSessionId: originalNativeId,
+          newNativeSessionId: rotatedDuringAdopt,
+        },
+      },
+    };
     await sessions.sendMessage(sessionId, 'after restart');
 
     // Adoption: createSession was called with the persisted claudeSessionId.
@@ -1306,6 +1465,13 @@ test('sendMessage rehydrates proxy session after host restart via native_session
       proxyMgr.client.lastCreateParams!.claudeSessionId,
       originalNativeId,
       'createSession passed persisted native_session_id as claudeSessionId for adoption',
+    );
+    assert.equal(
+      (db.prepare('SELECT native_session_id FROM sessions WHERE id = ?').get(sessionId) as {
+        native_session_id: string;
+      }).native_session_id,
+      rotatedDuringAdopt,
+      'a notification emitted during native adoption is handled instead of dropped',
     );
 
     const turnCount = (db.prepare('SELECT COUNT(*) AS c FROM turns WHERE session_id = ?').get(sessionId) as { c: number }).c;
@@ -1381,7 +1547,7 @@ test('command_execution with `git worktree add` records detected_worktree_path a
 
     // The agent "already ran" the command: the worktree exists on disk.
     repo.git(['worktree', 'add', '-b', 'feature/agent', `${repo.path}-agent`, 'main']);
-    const wtPath = listGitWorktrees(wsPath).find(w => w.branch === 'feature/agent')!.path;
+    const wtPath = (await listGitWorktreesAsync(wsPath)).find(w => w.branch === 'feature/agent')!.path;
 
     const session = await sessions.createSession({ workspace_id: repoWsId, executor: 'claude' });
     await sessions.sendMessage(session.id, 'make a worktree');
@@ -1397,6 +1563,13 @@ test('command_execution with `git worktree add` records detected_worktree_path a
 
     fireBash(`git worktree add -b feature/agent ${wtPath} main`);
 
+    await waitFor(() => {
+      const current = db
+        .prepare('SELECT detected_worktree_path FROM sessions WHERE id = ?')
+        .get(session.id) as { detected_worktree_path: string | null };
+      return current.detected_worktree_path === wtPath;
+    });
+
     const row = db
       .prepare('SELECT detected_worktree_path FROM sessions WHERE id = ?')
       .get(session.id) as { detected_worktree_path: string | null };
@@ -1407,6 +1580,14 @@ test('command_execution with `git worktree add` records detected_worktree_path a
         && (m as { session: { detected_worktree_path?: string | null } }).session.detected_worktree_path,
     );
     assert.equal(updates.length, 1, 'one session:updated broadcast carries the detected path');
+    const gitUpdates = broadcaster.messages.filter(
+      m => m.type === 'workspace:git-updated',
+    );
+    assert.deepEqual(gitUpdates, [{
+      type: 'workspace:git-updated',
+      workspace_id: repoWsId,
+      reason: 'worktree-detected',
+    }], 'detection invalidates cached worktree listings for the workspace');
 
     // Idempotent: the completion event re-carries the same command — no
     // second write, no second broadcast.
@@ -1416,6 +1597,11 @@ test('command_execution with `git worktree add` records detected_worktree_path a
         && (m as { session: { detected_worktree_path?: string | null } }).session.detected_worktree_path,
     );
     assert.equal(updatesAfter.length, 1, 'same path again does not rebroadcast');
+    assert.equal(
+      broadcaster.messages.filter(m => m.type === 'workspace:git-updated').length,
+      1,
+      'same detected path does not trigger another worktree refresh',
+    );
 
     // Guards: a path that is NOT a worktree of the workspace repo is ignored…
     fireBash('git worktree add /not/a/real/worktree');
@@ -1425,6 +1611,11 @@ test('command_execution with `git worktree add` records detected_worktree_path a
       .prepare('SELECT detected_worktree_path FROM sessions WHERE id = ?')
       .get(session.id) as { detected_worktree_path: string | null };
     assert.equal(rowAfter.detected_worktree_path, wtPath, 'guards reject bogus detections');
+    assert.equal(
+      broadcaster.messages.filter(m => m.type === 'workspace:git-updated').length,
+      1,
+      'rejected detections do not trigger worktree refreshes',
+    );
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -1442,7 +1633,7 @@ test('worktree detection never disturbs Gian-owned worktree sessions', async () 
       .run(repoWsId, 'repo-ws', wsPath);
 
     repo.git(['worktree', 'add', '-b', 'feature/agent', `${repo.path}-agent`, 'main']);
-    const wtPath = listGitWorktrees(wsPath).find(w => w.branch === 'feature/agent')!.path;
+    const wtPath = (await listGitWorktreesAsync(wsPath)).find(w => w.branch === 'feature/agent')!.path;
 
     const session = await sessions.createSession({ workspace_id: repoWsId, executor: 'claude' });
     // Simulate a Gian-owned worktree session (managed by merge/discard).

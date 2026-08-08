@@ -2,16 +2,14 @@ import { access, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { runProtectedCommand } from './protected-command.js';
 import type {
   CliRuntimeProvider,
   InstalledRuntime,
   RuntimeProbe,
+  RuntimeProcessGroupProtector,
   RuntimeSource,
 } from './types.js';
-
-const execFileAsync = promisify(execFile);
 
 export interface KimiRuntimeProviderOptions {
   dataDir: string;
@@ -80,18 +78,25 @@ export class KimiRuntimeProvider implements CliRuntimeProvider {
     return installed;
   }
 
-  async probe(runtime: InstalledRuntime): Promise<RuntimeProbe> {
+  async probe(
+    runtime: InstalledRuntime,
+    protector?: RuntimeProcessGroupProtector,
+  ): Promise<RuntimeProbe> {
     if (!isAbsolute(runtime.binaryPath)) {
       throw new Error('resolved Kimi binary path is not absolute');
     }
     await access(runtime.binaryPath, constants.X_OK);
-    const result = await execFileAsync(runtime.binaryPath, ['--version'], {
-      timeout: 8_000,
+    const result = await runProtectedCommand({
+      command: runtime.binaryPath,
+      args: ['--version'],
+      timeoutMs: 8_000,
       maxBuffer: 1024 * 1024,
       env: {
         ...process.env,
         ...this.managedEnv(),
       },
+      label: 'kimi --version',
+      ...(protector ? { protector } : {}),
     });
     const version = firstVersion(`${result.stdout}\n${result.stderr}`);
     if (!version) {

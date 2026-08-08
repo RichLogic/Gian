@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — Task-domain definitions (Phase 3a of
- * `docs/proposals/ui-operation-layer.md`). Every Task mutation the UI can
+ * `docs/archive/proposals/ui-operation-layer.md`). Every Task mutation the UI can
  * trigger is registered here on the product registry; TasksView (and the
  * App-level subtask banner) dispatch by name instead of calling `ws.send` /
  * the subtask REST helpers directly.

@@ -9,7 +9,11 @@ import type {
   Task,
   Workspace,
 } from '@gian/shared';
-import { loadSessions, loadTasks, loadWorkingTrees, loadWorkspaces, type WorkingTree } from '../api.js';
+import { loadSessions, loadTasks, loadWorkspaces } from '../api.js';
+import {
+  invalidateSlashCacheForWorkspace,
+  SLASH_CACHE_INVALIDATED_EVENT,
+} from '../components/composer/capabilities.js';
 import { toast } from '../feedback.js';
 import { maybeNotifyForEnvelope } from '../notifications.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
@@ -46,7 +50,9 @@ interface UseAppSocketInput {
   setWsAttempt: Setter<number>;
   setAuthed: Setter<boolean>;
   setWorkspaces: Setter<Workspace[]>;
-  setWorkingTrees: Setter<WorkingTree[]>;
+  /** Optional for embedded/test socket consumers that do not render the
+   *  worktree selector. The full App always supplies the refresh callback. */
+  refreshWorkingTrees?: () => void;
   setSessions: Setter<Session[]>;
   setTasks: Setter<Task[]>;
   setSystemConfig: Setter<SystemConfig | null>;
@@ -96,7 +102,9 @@ export function useAppSocket(input: UseAppSocketInput): void {
         }));
       }
       const displayType = displayTypeForEnvelope(envelope);
-      if (displayType === 'plan' || displayType === 'state.turn-completed') {
+      if (displayType === 'plan'
+          || displayType === 'state.turn-completed'
+          || displayType === 'state.error') {
         current.setPlanStateBySession(previous => {
           const existing = previous[envelope.session_id] ?? { completed: false };
           const next = applyPlanLifecycle(existing, envelope);
@@ -134,6 +142,9 @@ export function useAppSocket(input: UseAppSocketInput): void {
           current.setTasks(message.tasks);
           current.setSystemConfig(message.config);
           current.setRunner(message.runner);
+          // A reconnect may have missed workspace:git-updated broadcasts.
+          // Force a fresh scan whenever the Host sends authoritative state.
+          current.refreshWorkingTrees?.();
           // Defensive absorption: any overlay whose value the sync already
           // reflects is dropped immediately (§4.3).
           for (const session of message.sessions) {
@@ -156,13 +167,28 @@ export function useAppSocket(input: UseAppSocketInput): void {
           }
           return;
         case 'workspace:git-updated':
-          void loadWorkingTrees({ refresh: true }).then(current.setWorkingTrees);
+          invalidateSlashCacheForWorkspace(message.workspace_id);
+          window.dispatchEvent(new CustomEvent(SLASH_CACHE_INVALIDATED_EVENT, {
+            detail: { workspaceId: message.workspace_id },
+          }));
+          current.refreshWorkingTrees?.();
           return;
         case 'session:created': {
+          // Native adoption has an independent HTTP result and WS broadcast.
+          // The Host-originated cause makes both delivery orders safe: this
+          // frame only converges canonical state, while ordinary create
+          // frames still own selection and pendingFirstMessage even if a
+          // reconnect state_sync already exposed their session id.
+          const nativeAdopt = message.origin === 'native-adopt';
+          current.sessionsRef.current = [
+            message.session,
+            ...current.sessionsRef.current.filter(session => session.id !== message.session.id),
+          ];
           current.setSessions(previous => [
             message.session,
             ...previous.filter(session => session.id !== message.session.id),
           ]);
+          if (nativeAdopt) return;
           current.setActiveSessionId(message.session.id);
           // The creating/forking busy state is driven by the pending
           // operation run in App and ends on operation:result — nothing to
@@ -179,7 +205,16 @@ export function useAppSocket(input: UseAppSocketInput): void {
               exec: message.session.executor,
             });
           } else {
-            current.setItemsBySession(previous => ({ ...previous, [message.session.id]: [] }));
+            // Native adoption broadcasts session:created around the same time
+            // its HTTP response selects the session and hydrates replayed
+            // history. The WS and HTTP connections may arrive in either
+            // order, so never erase a transcript that hydration already
+            // populated; initialize only a genuinely unseen session.
+            current.setItemsBySession(previous => (
+              previous[message.session.id] === undefined
+                ? { ...previous, [message.session.id]: [] }
+                : previous
+            ));
           }
           return;
         }
@@ -264,7 +299,8 @@ export function useAppSocket(input: UseAppSocketInput): void {
             : message.runner as RunnerInfo);
           return;
         case 'error': {
-          if (message.session_id && message.code === 'MESSAGE_SEND_FAILED') {
+          if (message.session_id
+            && (message.request_type === 'message:send' || message.code === 'MESSAGE_SEND_FAILED')) {
             const sessionId = message.session_id;
             if (!message.request_id) {
               // UNCORRELATED legacy fallback only: correlated send failures

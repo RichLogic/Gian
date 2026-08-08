@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — Approval-domain definition (Phase 2b of
- * `docs/proposals/ui-operation-layer.md`).
+ * `docs/archive/proposals/ui-operation-layer.md`).
  *
  * `approval.resolve` is pending (proposal §5): clicking any decision
  * immediately disables the submitted card and labels it resolving — the card

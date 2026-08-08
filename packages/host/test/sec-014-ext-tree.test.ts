@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { makeTestApp, type TestAppCtx } from './fixtures/test-app.js';
 import { createGitRepo, type GitRepo } from './fixtures/git-repo.js';
-import { listGitWorktrees } from '../src/workspace/git.js';
+import { listGitWorktreesAsync } from '../src/workspace/git.js';
 
 interface Ctx {
   appCtx: TestAppCtx;
@@ -40,7 +40,7 @@ async function setup(): Promise<Ctx> {
 
   const requested = `${repo.path}-agent-wt`;
   repo.git(['worktree', 'add', '-b', 'feature/agent', requested, 'main']);
-  const worktreePath = listGitWorktrees(workspacePath)
+  const worktreePath = (await listGitWorktreesAsync(workspacePath))
     .find(w => w.branch === 'feature/agent')!.path;
 
   return {
@@ -125,7 +125,7 @@ test('PERF-002: /api/working_trees reuses its scan cache until an explicit refre
     assert.equal(initial.status, 200);
 
     ctx.repo.git(['worktree', 'add', '-b', 'feature/agent-2', requested, 'main']);
-    secondPath = listGitWorktrees(ctx.workspacePath)
+    secondPath = (await listGitWorktreesAsync(ctx.workspacePath))
       .find(worktree => worktree.branch === 'feature/agent-2')!.path;
 
     const cached = await ctx.appCtx.fetch('/api/working_trees');

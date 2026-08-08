@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Executor, Session, Task, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
+import type { RailLayoutController } from '../components/RailLayout.js';
 import { ModeDropdown } from '../components/ModeDropdown.js';
 import type { Mode } from '../components/Topbar.js';
 import { StatusIcon, statusGlyphShown, relTime } from './session-list-status.js';
@@ -103,6 +104,7 @@ export function TasksView({
   subtaskMain,
   onSelectSubtask,
   onWorkspaceCreated,
+  railLayout,
 }: {
   /** Top-level app mode — the sidebar's mode dropdown reads/drives this. */
   mode: Mode;
@@ -125,10 +127,13 @@ export function TasksView({
   /** NewSessionView lets the user create a workspace inline; App owns the
    *  workspace list. */
   onWorkspaceCreated: (workspace: Workspace) => void;
+  /** App-owned four-panel layout. Optional for isolated component renders. */
+  railLayout?: RailLayoutController;
 }) {
   const t = useT();
   const dispatch = useOperationDispatch();
-  const rail = useResizableWidth('rail.w', 272, 200, 480, 'left');
+  const fallbackRail = useResizableWidth('rail.w', 272, 200, 480, 'left');
+  const rail = railLayout ?? fallbackRail;
 
   // Task-context new-session form (sidebar task-row "+" and the ⌘J/⌘K
   // "new subtask" shortcut open it): the shared NewSessionView with the task
@@ -161,10 +166,11 @@ export function TasksView({
   // each view collapses its own rail. Sessions (CodingView) already listens —
   // Tasks was missing this, so the brand button did nothing here.
   useEffect(() => {
+    if (railLayout) return;
     const onToggle = () => rail.setCollapsed(!rail.collapsed);
     window.addEventListener('gian.toggle-rail', onToggle);
     return () => window.removeEventListener('gian.toggle-rail', onToggle);
-  }, [rail]);
+  }, [rail.collapsed, rail.setCollapsed, railLayout]);
 
   // ⌘J / ⌘K (use-app-shortcuts) opens the new-session form for the selected
   // task with the chosen agent preselected — same form the task-row "+" opens.

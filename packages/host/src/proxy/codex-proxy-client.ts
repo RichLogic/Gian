@@ -14,6 +14,10 @@ import type {
   RespondApprovalParams,
   StartTurnParams,
 } from './types.js';
+import {
+  createProxyProcessShutdownState,
+  shutdownProxyProcess,
+} from './process-shutdown.js';
 
 export interface CodexProxyHostOptions {
   /** Absolute path to codex-proxy spawn.js entry. */
@@ -55,6 +59,10 @@ export class CodexProxyHost {
   private exitHandlers = new Set<(code: number | null) => void>();
   private log: (msg: string) => void;
   private exited = false;
+  private processGroupCleanup: Promise<void> | null = null;
+  private readonly processGroupShutdownState = createProxyProcessShutdownState();
+  private exitCode: number | null | undefined;
+  private exitNotified = false;
   private initialized: Promise<InitializeResult> | null = null;
   private capabilities_: Promise<ProxyCapabilities> | null = null;
 
@@ -68,6 +76,7 @@ export class CodexProxyHost {
     this.child = spawn(nodeBin, [opts.entry, ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, ...opts.env },
+      detached: true,
     });
 
     this.bindStdout();
@@ -159,8 +168,20 @@ export class CodexProxyHost {
   }
 
   onHostExit(handler: (code: number | null) => void): () => void {
+    if (this.exitNotified) {
+      const code = this.exitCode ?? null;
+      let active = true;
+      queueMicrotask(() => {
+        if (active) handler(code);
+      });
+      return () => { active = false; };
+    }
     this.exitHandlers.add(handler);
     return () => this.exitHandlers.delete(handler);
+  }
+
+  isExited(): boolean {
+    return this.exited;
   }
 
   hasSessions(): boolean {
@@ -168,15 +189,21 @@ export class CodexProxyHost {
   }
 
   async shutdown(): Promise<void> {
-    if (this.exited) return;
-    try {
-      await this.request<unknown>('shutdown');
-    } catch {
-      // proxy may exit before responding
+    await this.cleanupProcessGroup(() => this.request<unknown>('shutdown'));
+  }
+
+  /** @internal Detached children use their spawn PID as the protected PGID. */
+  processGroupId(): number {
+    const pid = this.child.pid;
+    if (pid === undefined || pid <= 0) {
+      throw new Error('Codex Proxy process group is unavailable.');
     }
-    if (!this.exited) {
-      this.child.kill('SIGTERM');
-    }
+    return pid;
+  }
+
+  /** @internal Registration already observed ESRCH for this exact group. */
+  observeProcessGroupAbsence(): void {
+    this.processGroupShutdownState.observeAbsence();
   }
 
   private bindStdout(): void {
@@ -205,13 +232,56 @@ export class CodexProxyHost {
   private bindExit(): void {
     this.child.on('exit', code => {
       this.exited = true;
+      this.exitCode = code;
       const err = new Error(`codex-proxy exited (code=${code ?? 'null'})`);
       for (const pending of this.pending.values()) pending.reject(err);
       this.pending.clear();
-      for (const session of this.sessions.values()) session.notifyHostExit(code);
-      this.sessions.clear();
-      for (const handler of this.exitHandlers) handler(code);
+      void this.cleanupProcessGroup()
+        .then(() => this.notifyExit(code))
+        .catch(error => this.log(
+          `[codex-proxy] process-group cleanup failed; retaining runtime claim: ${String(error)}`,
+        ));
     });
+  }
+
+  private cleanupProcessGroup(
+    requestShutdown?: () => Promise<unknown>,
+  ): Promise<void> {
+    if (!this.processGroupCleanup) {
+      const cleanup = shutdownProxyProcess({
+        child: this.child,
+        isExited: () => this.exited,
+        ...(requestShutdown ? { requestShutdown } : {}),
+        label: 'Codex Proxy',
+        state: this.processGroupShutdownState,
+      });
+      this.processGroupCleanup = cleanup;
+      void cleanup.catch(() => {
+        if (this.processGroupCleanup === cleanup) this.processGroupCleanup = null;
+      });
+    }
+    return this.processGroupCleanup;
+  }
+
+  private notifyExit(code: number | null): void {
+    if (this.exitNotified) return;
+    this.exitNotified = true;
+    const sessions = [...this.sessions.values()];
+    this.sessions.clear();
+    for (const session of sessions) {
+      try {
+        session.notifyHostExit(code);
+      } catch (error) {
+        this.log(`[codex-proxy] session exit notification threw: ${String(error)}`);
+      }
+    }
+    for (const handler of this.exitHandlers) {
+      try {
+        handler(code);
+      } catch (error) {
+        this.log(`[codex-proxy] exit handler threw: ${String(error)}`);
+      }
+    }
   }
 
   private dispatch(message: unknown): void {
@@ -288,8 +358,19 @@ export class CodexProxySessionClient implements ProxyClient {
   private exitHandlers = new Set<(code: number | null) => void>();
   private proxySessionId: string | null = null;
   private closed = false;
+  private exitNotified = false;
+  private exitCode: number | null | undefined;
 
   constructor(private host: CodexProxyHost) {}
+
+  isExited(): boolean {
+    return this.host.isExited();
+  }
+
+  /** @internal Exact shared runtime owner for identity-safe cleanup. */
+  runtimeHost(): CodexProxyHost {
+    return this.host;
+  }
 
   initialize(): Promise<InitializeResult> {
     return this.host.initialize();
@@ -378,6 +459,18 @@ export class CodexProxySessionClient implements ProxyClient {
   }
 
   onExit(handler: (code: number | null) => void): () => void {
+    if (this.exitNotified) {
+      const code = this.exitCode ?? null;
+      let active = true;
+      queueMicrotask(() => {
+        if (active) {
+          try { handler(code); } catch (error) {
+            console.error('[codex-proxy] late session exit handler threw:', error);
+          }
+        }
+      });
+      return () => { active = false; };
+    }
     this.exitHandlers.add(handler);
     return () => this.exitHandlers.delete(handler);
   }
@@ -396,6 +489,15 @@ export class CodexProxySessionClient implements ProxyClient {
 
   /** @internal — called when the shared host process exits. */
   notifyHostExit(code: number | null): void {
-    for (const handler of this.exitHandlers) handler(code);
+    if (this.exitNotified) return;
+    this.exitNotified = true;
+    this.exitCode = code;
+    for (const handler of this.exitHandlers) {
+      try {
+        handler(code);
+      } catch (error) {
+        console.error('[codex-proxy] session exit handler threw:', error);
+      }
+    }
   }
 }

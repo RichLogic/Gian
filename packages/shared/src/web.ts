@@ -70,6 +70,9 @@ export interface SessionUpdatedMessage {
 export interface SessionCreatedMessage {
   type: 'session:created';
   session: Session;
+  /** Creation path that owns the broadcast. Optional for compatibility with
+   *  older Hosts; absent messages keep the ordinary interactive behavior. */
+  origin?: 'interactive-create' | 'native-adopt' | 'task-create';
 }
 
 export interface SessionDeletedMessage {
@@ -210,7 +213,7 @@ export interface WorkspaceGitUpdatedMessage {
   type: 'workspace:git-updated';
   workspace_id: string;
   /** Free-form reason — shown in dev console when debugging refresh storms. */
-  reason: 'fetch' | 'branch-created' | 'merge' | 'drop' | 'session-deleted';
+  reason: 'fetch' | 'branch-created' | 'merge' | 'drop' | 'session-deleted' | 'worktree-detected';
 }
 
 /**
@@ -230,6 +233,10 @@ export interface TermReplayMessage {
   term_id: string;
   chunks: string[];
   alive: boolean;
+  /** Present when the PTY has exited, so a reconnect can restore the same
+   *  terminal status that a live `term:exited` frame would have shown. */
+  code: number | null;
+  signal: string | null;
 }
 
 export interface TermExitedMessage {
@@ -294,10 +301,10 @@ export interface MessageSendMessage {
    */
   items?: InputItem[];
   /**
-   * Single-turn bypass: when true, this turn runs with all approvals skipped
-   * regardless of session.approval_mode. Does NOT mutate the stored mode —
-   * the next turn returns to whatever approval_mode the session had. UI
-   * surfaces this as the ⚡ button next to the PLAN/ASK/AUTO segmented control.
+   * Claude-only single-turn bypass: when true, this turn runs with all
+   * approvals skipped regardless of session.approval_mode. Does NOT mutate
+   * the stored mode — the next turn returns to the persisted approval_mode.
+   * Receivers must reject this flag for every other executor.
    */
   oneShotBypass?: boolean;
   /** Correlation id — see `OperationResultMessage`. */

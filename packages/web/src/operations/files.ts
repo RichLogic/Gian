@@ -1,6 +1,6 @@
 /**
  * UI Operation Layer — external file-open definition (Phase 3b of
- * `docs/proposals/ui-operation-layer.md`): `files.openExternal` (PENDING
+ * `docs/archive/proposals/ui-operation-layer.md`): `files.openExternal` (PENDING
  * REST) backs every "open this file outside Gian" action — the Sheet "Open
  * with…" menu (registered editor / named app / system default / Finder /
  * Terminal) and the git pane's "Reveal in Finder" (the reveal helper moved

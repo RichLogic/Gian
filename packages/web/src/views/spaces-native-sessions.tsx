@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ApprovalMode, Executor, NativeSession, Workspace } from '@gian/shared';
+import type { ApprovalMode, Executor, NativeSession, Session, Workspace } from '@gian/shared';
 import { loadNativeSessions } from '../api.js';
 import { confirm } from '../feedback.js';
 import {
@@ -46,9 +46,11 @@ function HelpHint({ children }: { children: React.ReactNode }) {
 export function NativeSessionsPane({
   workspace,
   onChange,
+  onSessionAdopted,
 }: {
   workspace: Workspace;
   onChange: () => void;
+  onSessionAdopted: (session: Session) => void;
 }) {
   const [sessions, setSessions] = useState<NativeSession[]>([]);
   const [loading, setLoading] = useState(true);
@@ -168,10 +170,11 @@ export function NativeSessionsPane({
         <AdoptDialog
           source={adoptingFor}
           onCancel={() => setAdoptingFor(null)}
-          onAdopted={() => {
+          onAdopted={session => {
             setAdoptingFor(null);
             void refresh();
             onChange();
+            onSessionAdopted(session);
           }}
           workspaceId={workspace.id}
         />
@@ -226,6 +229,7 @@ function NativeSessionRow({
   return (
     <div
       className="wt-row"
+      data-testid={`native-session-${session.executor}-${session.id}`}
       style={{ gridTemplateColumns: '18px 1fr 110px 22px' }}
     >
       <span className="wt-ico" title={session.executor}>
@@ -306,7 +310,7 @@ function AdoptDialog({
   source: NativeSession;
   workspaceId: string;
   onCancel: () => void;
-  onAdopted: () => void;
+  onAdopted: (session: Session) => void;
 }) {
   const dispatch = useOperationDispatch();
   const [name, setName] = useState('');
@@ -323,7 +327,13 @@ function AdoptDialog({
   useEffect(() => {
     if (!adoptRun) return;
     if (adoptRun.phase === 'confirmed') {
-      onAdopted();
+      const session = adoptRun.result as Session | undefined;
+      if (!session) {
+        setError('Adopt succeeded without a session result');
+        setAdoptRunId(undefined);
+        return;
+      }
+      onAdopted(session);
     } else if (adoptRun.phase === 'failed') {
       setError(adoptRun.error ?? 'Adopt failed');
       setAdoptRunId(undefined);
@@ -442,4 +452,3 @@ function relTime(iso: string): string {
   const d = Math.floor(h / 24);
   return `${d}d ago`;
 }
-
