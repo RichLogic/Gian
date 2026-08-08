@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { acquireQualityLock } from './quality-lock.mjs';
@@ -20,6 +20,17 @@ export const PREPACKAGE_STEPS = [
     args: ['--filter', '@gian/desktop', 'test:smoke:run'],
   },
 ];
+
+export function resolvePrepackageSteps({
+  hasTraceability = existsSync(join(rootDir, 'docs', 'quality', 'traceability.md')),
+  hasE2e = existsSync(join(rootDir, 'e2e')),
+} = {}) {
+  return PREPACKAGE_STEPS.filter((step) => {
+    if (step.id === 'traceability') return hasTraceability;
+    if (step.id === 'e2e') return hasE2e;
+    return true;
+  });
+}
 
 function pnpmInvocation(args) {
   const pnpmEntry = process.env.npm_execpath;
@@ -79,7 +90,7 @@ export function main() {
     console.log('Gian prepackage quality gate');
     console.log(`Revision: ${revision}${dirty ? ' (working tree has changes)' : ''}`);
 
-    for (const step of PREPACKAGE_STEPS) {
+    for (const step of resolvePrepackageSteps()) {
       if (failed) {
         results.push({ ...step, status: 'SKIP' });
         continue;

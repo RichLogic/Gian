@@ -15,7 +15,8 @@ import {
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 
-test('dev environment pins isolated GianDev services and desktop targets', () => {
+test('dev environment pins isolated GianDev services and desktop targets', async () => {
+  const rootPackage = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf8'));
   const identity = {
     runtimeId: 'gian-0.3.0-abcd1234',
     worktree: '/tmp/gian-0.3.0',
@@ -45,7 +46,7 @@ test('dev environment pins isolated GianDev services and desktop targets', () =>
   assert.equal(env.GIAN_DESKTOP_WEB_URL, DEV_WEB_URL);
   assert.equal(env.GIAN_DESKTOP_DISABLE_HOST_MANAGEMENT, '1');
   assert.equal(env.GIAN_GITHUB_CLIENT_ID, DEFAULT_GITHUB_CLIENT_ID);
-  assert.equal(env.GIAN_RELEASE_VERSION, '0.3.0');
+  assert.equal(env.GIAN_RELEASE_VERSION, rootPackage.version);
   assert.equal(env.GIAN_DEV_RUNTIME_ID, identity.runtimeId);
   assert.equal(env.GIAN_DEV_WORKTREE, identity.worktree);
   assert.equal(env.GIAN_DESKTOP_LABEL, identity.label);

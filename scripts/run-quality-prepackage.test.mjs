@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   formatPrepackageSummary,
   PREPACKAGE_STEPS,
+  resolvePrepackageSteps,
 } from './run-quality-prepackage.mjs';
 
 test('prepackage gate runs the deterministic checks in dependency order', () => {
@@ -15,6 +16,13 @@ test('prepackage gate runs the deterministic checks in dependency order', () => 
     'e2e',
     'desktop',
   ]);
+});
+
+test('prepackage gate skips quality inputs deliberately excluded from the public release tree', () => {
+  assert.deepEqual(
+    resolvePrepackageSteps({ hasTraceability: false, hasE2e: false }).map(step => step.id),
+    ['typecheck', 'tests', 'build', 'docs', 'desktop'],
+  );
 });
 
 test('prepackage summary distinguishes pass and blocked packaging', () => {

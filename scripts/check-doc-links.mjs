@@ -9,7 +9,10 @@ const markdownLink = /\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+['"][^'"]*['"])?\)/g;
 async function collect(relativePath) {
   const absolutePath = path.join(root, relativePath);
   const entries = await readdir(absolutePath, { withFileTypes: true }).catch(() => null);
-  if (!entries) return relativePath.endsWith('.md') ? [relativePath] : [];
+  if (!entries) {
+    if (!relativePath.endsWith('.md')) return [];
+    return access(absolutePath).then(() => [relativePath]).catch(() => []);
+  }
 
   const nested = await Promise.all(entries.map((entry) => {
     const child = path.join(relativePath, entry.name);

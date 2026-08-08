@@ -41,7 +41,7 @@ pnpm test
 pnpm build
 ```
 
-Release tags also run the signed and notarized macOS packaging workflow.
+Release tags also build the unsigned macOS Apple Silicon beta package.
 
 ## Monorepo layout
 
@@ -52,7 +52,6 @@ packages/web/      React SPA (Vite)
 packages/desktop/  Electron launcher and macOS packaging
 packages/proxies/  independently released Agent protocol adapters
 scripts/           development and release tooling
-docs/              architecture, protocol, roadmap, AI/quality/ADR docs
 ```
 
 Changes to `packages/shared/src/` affect all three packages — rebuild shared
@@ -64,7 +63,6 @@ pnpm -F @gian/shared build
 
 ## Agent-assisted development
 
-This repo uses a team-of-agents workflow. Follow
-[`docs/collaboration.md`](docs/collaboration.md) for Issue ownership, branch and
-worktree isolation, review, and handoff rules. Historical milestones are kept
-under [`docs/archive/`](docs/archive/); they are not an active backlog.
+Use GitHub Issues for bug reports, feature requests, and implementation
+discussion. Keep each branch and pull request focused, describe the user-visible
+impact, and include the checks you ran.
