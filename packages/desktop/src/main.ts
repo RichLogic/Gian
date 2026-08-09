@@ -88,6 +88,10 @@ const desktopToken = app.isPackaged
   ? smokeDesktopToken || randomBytes(32).toString('base64url')
   : null;
 const desktopInstanceId = app.isPackaged ? randomUUID() : null;
+const managedHostReleaseVersion = resolveManagedHostReleaseVersion(
+  app.getVersion(),
+  process.env,
+);
 
 let mainWindow: BrowserWindow | null = null;
 let browserController: BrowserController | null = null;
@@ -170,7 +174,7 @@ function startProductionHost(): void {
     instanceId: desktopInstanceId,
     env: {
       ...process.env,
-      GIAN_RELEASE_VERSION: resolveManagedHostReleaseVersion(app.getVersion(), process.env),
+      GIAN_RELEASE_VERSION: managedHostReleaseVersion,
       GIAN_RELEASE_REPOSITORY:
         process.env['GIAN_RELEASE_REPOSITORY'] ?? 'RichLogic/Gian',
     },
@@ -279,7 +283,7 @@ async function loadGianSurface(window: BrowserWindow): Promise<boolean> {
         ? { requestHeaders: { [DESKTOP_TOKEN_HEADER]: desktopToken } }
         : {}),
       ...(desktopInstanceId ? { expectedInstanceId: desktopInstanceId } : {}),
-      expectedVersion: app.getVersion(),
+      expectedVersion: managedHostReleaseVersion,
     });
     if (window.isDestroyed()) return false;
 

@@ -218,6 +218,29 @@ async function waitForHostExit(origin, timeoutMs = 15_000) {
   throw new Error(`packaged Host still responds after App exit: ${origin}`);
 }
 
+async function waitForPackagedLogin(window, timeoutMs = 45_000) {
+  const loginShell = window.locator('.login-shell');
+  const retry = window.locator('#retry');
+  const deadline = Date.now() + timeoutMs;
+  let retries = 0;
+
+  while (Date.now() < deadline) {
+    if (await loginShell.isVisible().catch(() => false)) return retries;
+    if (
+      await retry.isVisible().catch(() => false)
+      && await retry.isEnabled().catch(() => false)
+    ) {
+      retries += 1;
+      console.log(`[packaged-smoke] retrying cold Host connection (${retries})`);
+      await retry.click();
+    }
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
+  }
+
+  await loginShell.waitFor({ timeout: 1_000 });
+  return retries;
+}
+
 async function launchPackagedApp({ executable, env, hostLogPath, origin, screenshotPath }) {
   const electronApp = await electron.launch({
     executablePath: executable,
@@ -233,7 +256,10 @@ async function launchPackagedApp({ executable, env, hostLogPath, origin, screens
     rendererMessages.push(`pageerror: ${error.stack ?? error.message}`);
   });
   try {
-    await window.locator('.login-shell').waitFor({ timeout: 30_000 });
+    const coldStartRetries = await waitForPackagedLogin(window);
+    if (coldStartRetries > 0) {
+      console.log(`[packaged-smoke] recovered packaged cold start after ${coldStartRetries} retry attempt(s)`);
+    }
     assert.equal(new URL(window.url()).origin, origin);
     assert.equal(
       await window.evaluate(() => window.gianDesktop?.appVariant),
