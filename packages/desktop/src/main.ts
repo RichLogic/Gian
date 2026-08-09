@@ -26,6 +26,7 @@ import {
   isTrustedDesktopUrl,
   resolveDesktopApplicationIdentity,
   resolveDesktopDisplayName,
+  resolveManagedHostReleaseVersion,
   resolveDesktopTargets,
   resolveDesktopWindowChrome,
 } from './config.js';
@@ -169,7 +170,7 @@ function startProductionHost(): void {
     instanceId: desktopInstanceId,
     env: {
       ...process.env,
-      GIAN_RELEASE_VERSION: app.getVersion(),
+      GIAN_RELEASE_VERSION: resolveManagedHostReleaseVersion(app.getVersion(), process.env),
       GIAN_RELEASE_REPOSITORY:
         process.env['GIAN_RELEASE_REPOSITORY'] ?? 'RichLogic/Gian',
     },

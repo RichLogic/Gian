@@ -9,6 +9,7 @@ import {
   PROD_HOST_URL,
   resolveDesktopApplicationIdentity,
   resolveDesktopDisplayName,
+  resolveManagedHostReleaseVersion,
   resolveDesktopTargets,
   resolveDesktopWindowChrome,
 } from '../src/config.js';
@@ -117,6 +118,17 @@ test('packaged smoke may manage a custom loopback Host without using 8990', () =
       GIAN_DESKTOP_SMOKE_MANAGE_HOST: '1',
     },
   }).manageHost, false);
+});
+
+test('only the packaged-smoke harness can pin a prior public Proxy release', () => {
+  assert.equal(resolveManagedHostReleaseVersion('0.4.1', {}), '0.4.1');
+  assert.equal(resolveManagedHostReleaseVersion('0.4.1', {
+    GIAN_DESKTOP_SMOKE_RELEASE_VERSION: '0.4.0',
+  }), '0.4.1');
+  assert.equal(resolveManagedHostReleaseVersion('0.4.1', {
+    GIAN_DESKTOP_SMOKE_MANAGE_HOST: '1',
+    GIAN_DESKTOP_SMOKE_RELEASE_VERSION: ' 0.4.0 ',
+  }), '0.4.0');
 });
 
 test('desktop targets must be plain HTTP origins', () => {

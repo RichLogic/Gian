@@ -25,6 +25,7 @@ const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const requireFromHost = createRequire(join(rootDir, 'packages', 'host', 'package.json'));
 const Database = requireFromHost('better-sqlite3');
 const defaultAppPath = join(rootDir, 'packages', 'desktop', 'release', 'mac-arm64', 'Gian.app');
+const PACKAGED_SMOKE_PROXY_VERSION = '0.4.0';
 
 async function reservePort() {
   const server = createServer();
@@ -128,6 +129,7 @@ export function createPackagedSmokeEnvironment(source, {
     GIAN_DATA_DIR: dataDir,
     GIAN_DESKTOP_HOST_URL: `http://127.0.0.1:${hostPort}`,
     GIAN_DESKTOP_SMOKE_MANAGE_HOST: '1',
+    GIAN_DESKTOP_SMOKE_RELEASE_VERSION: PACKAGED_SMOKE_PROXY_VERSION,
     GIAN_DESKTOP_SMOKE_TOKEN: desktopToken,
     GIAN_DESKTOP_USER_DATA_DIR: userDataDir,
     GIAN_GITHUB_CLIENT_ID: 'gian-packaged-smoke-client',
@@ -550,19 +552,19 @@ async function completePackagedOnboarding({
     .waitFor({ timeout: 30_000 });
   assert.match(await claude.innerText(), /9\.8\.7/);
 
-  // This is intentionally the public v0.3.0 GitHub Release, not a routed
+  // This is intentionally the previous public GitHub Release, not a routed
   // fixture. AgentManager verifies API asset digests, the exact .sha256 file,
   // archive bytes, self-test and compatibility before the atomic activation.
   await claude.locator('.onboarding-agent-summary button').click();
   await claude.locator('.onboarding-agent-components .ready', { hasText: 'Proxy' })
     .waitFor({ timeout: 120_000 });
   await claude.locator('.onboarding-agent-summary button').waitFor({ state: 'detached' });
-  assert.match(await claude.innerText(), /0\.3\.0.*GitHub|GitHub.*0\.3\.0/s);
+  assert.match(await claude.innerText(), /0\.4\.0.*GitHub|GitHub.*0\.4\.0/s);
 
   const activatedProxy = await realpath(join(dataDir, 'plugins', 'claude', 'current'));
   assert.equal(
     activatedProxy,
-    await realpath(join(dataDir, 'plugins', 'claude', '0.3.0')),
+    await realpath(join(dataDir, 'plugins', 'claude', PACKAGED_SMOKE_PROXY_VERSION)),
   );
   await Promise.all([
     assertFile(join(activatedProxy, 'manifest.json')),
