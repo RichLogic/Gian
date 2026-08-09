@@ -52,6 +52,7 @@ interface BrowserControllerOptions {
 interface BrowserTab {
   id: string;
   view: WebContentsView | null;
+  attached: boolean;
   requestedVisible: boolean;
   bounds: GianBrowserBounds;
   lastError?: string;
@@ -187,6 +188,17 @@ export class BrowserController {
 
   setLayout(tabId: string, bounds: GianBrowserBounds, visible: boolean): boolean {
     const tab = this.ensureTab(tabId);
+    if (visible) {
+      // Renderer layout messages are asynchronous and native views always sit
+      // above the renderer DOM. Enforce the exclusivity invariant in the main
+      // process as well: a newly visible Browser tab must detach every sibling
+      // even if that sibling's `visible=false` message is still in flight.
+      for (const sibling of this.tabs.values()) {
+        if (sibling === tab) continue;
+        sibling.requestedVisible = false;
+        this.applyVisibility(sibling);
+      }
+    }
     if (!validBounds(bounds, this.options.window)) {
       // Never leave a previously valid native view painted over a new,
       // transiently invalid DOM layout (panel animation/resize/window edge).
@@ -345,6 +357,7 @@ export class BrowserController {
     const tab: BrowserTab = {
       id: tabId,
       view: null,
+      attached: false,
       requestedVisible: false,
       bounds: { ...EMPTY_BOUNDS },
       navigationCommand: 0,
@@ -371,7 +384,6 @@ export class BrowserController {
     });
     tab.view = view;
     view.setBounds(tab.bounds);
-    this.options.window.contentView.addChildView(view);
     this.hardenView(tab, view.webContents);
     this.applyVisibility(tab);
     this.emitState(tab);
@@ -415,9 +427,10 @@ export class BrowserController {
     const view = tab.view;
     tab.view = null;
     if (!view) return;
-    if (!this.options.window.isDestroyed()) {
+    if (tab.attached && !this.options.window.isDestroyed()) {
       this.options.window.contentView.removeChildView(view);
     }
+    tab.attached = false;
     if (!view.webContents.isDestroyed()) view.webContents.close({ waitForBeforeUnload: false });
   }
 
@@ -447,12 +460,30 @@ export class BrowserController {
     const windowVisible = !this.options.window.isDestroyed()
       && this.options.window.isVisible()
       && !this.options.window.isMinimized();
-    tab.view.setVisible(
-      tab.requestedVisible
+    const visible = tab.requestedVisible
       && windowVisible
       && tab.bounds.width > 0
-      && tab.bounds.height > 0,
-    );
+      && tab.bounds.height > 0;
+
+    if (visible) {
+      if (!tab.attached) {
+        this.options.window.contentView.addChildView(tab.view);
+        tab.attached = true;
+      }
+      tab.view.setBounds(tab.bounds);
+      tab.view.setVisible(true);
+      return;
+    }
+
+    // setVisible(false) alone has proved insufficient on macOS during rapid
+    // Sheet/Tab transitions: a stale native surface can keep painting and
+    // intercepting input above the new renderer UI. Detaching preserves the
+    // WebContents/session/history while making overlay impossible.
+    tab.view.setVisible(false);
+    if (tab.attached && !this.options.window.isDestroyed()) {
+      this.options.window.contentView.removeChildView(tab.view);
+      tab.attached = false;
+    }
   }
 
   private applyAllVisibility(): void {

@@ -5,8 +5,16 @@ import {
   loadEvents,
   type EventHistoryLoadErrorKind,
 } from '../api.js';
-import { applyEnvelope, applyPlanLifecycle, type PlanLifecycleState } from '../transcript/apply.js';
+import {
+  applyEnvelope,
+  applyPlanLifecycle,
+  displayTypeForEnvelope,
+  type PlanLifecycleState,
+} from '../transcript/apply.js';
 import type { TranscriptItem } from '../types.js';
+import {
+  transcriptItemMergeIdentity,
+} from '../transcript/identity.js';
 
 interface TranscriptHydrationInput {
   activeSessionId: string | null;
@@ -128,6 +136,23 @@ export function useTranscriptHydration({
           ...previous,
           [sessionId]: mergeLatestItems(previous[sessionId] ?? [], items),
         }));
+        // Refresh is authoritative for lifecycle frames too. Fold it over the
+        // retained plan so a plan update just outside the latest page still
+        // observes a newly fetched terminal event.
+        setPlanStateBySession(previous => {
+          const existing = previous[sessionId] ?? { completed: false };
+          const plan = page.events
+            .filter(event => {
+              if (event.turn < (existing.turn ?? 0)) return false;
+              const type = displayTypeForEnvelope(event);
+              return type === 'state.turn-completed' || type === 'state.error';
+            })
+            .reduce<PlanLifecycleState>(
+            (current, event) => applyPlanLifecycle(current, event),
+            existing,
+          );
+          return plan === existing ? previous : { ...previous, [sessionId]: plan };
+        });
       }
       setHistoryBySession(previous => ({
         ...previous,
@@ -267,46 +292,44 @@ export function useTranscriptHydration({
   return { historyBySession, loadOlder, retry, markLive };
 }
 
-function transcriptKey(item: TranscriptItem): string {
-  return `${item.kind}:${item.id}`;
-}
-
 /** Historical first page arrives after live events in reconnect races. */
 function mergeHydratedItems(history: TranscriptItem[], live: TranscriptItem[]): TranscriptItem[] {
   if (live.length === 0) return history;
-  const next = history.slice();
-  const index = new Map(next.map((item, position) => [transcriptKey(item), position]));
+  let next = history.slice();
   for (const item of live) {
-    const position = index.get(transcriptKey(item));
-    if (position !== undefined) {
-      next[position] = item;
-      continue;
-    }
     if (item.kind === 'user' && item.pending && next.some(candidate => (
       candidate.kind === 'user' && candidate.text === item.text
     ))) continue;
-    index.set(transcriptKey(item), next.length);
-    next.push(item);
+    next = upsertMergedItem(next, item);
   }
   return next;
 }
 
 function prependOlderItems(older: TranscriptItem[], current: TranscriptItem[]): TranscriptItem[] {
-  const currentKeys = new Set(current.map(transcriptKey));
-  return [...older.filter(item => !currentKeys.has(transcriptKey(item))), ...current];
+  const currentKeys = new Set(current.map(transcriptItemMergeIdentity));
+  return [...older.filter(item => !currentKeys.has(transcriptItemMergeIdentity(item))), ...current];
 }
 
 function mergeLatestItems(current: TranscriptItem[], latest: TranscriptItem[]): TranscriptItem[] {
-  const next = current.slice();
-  const index = new Map(next.map((item, position) => [transcriptKey(item), position]));
+  let next = current.slice();
   for (const item of latest) {
-    const position = index.get(transcriptKey(item));
-    if (position === undefined) {
-      index.set(transcriptKey(item), next.length);
-      next.push(item);
-    } else {
-      next[position] = item;
-    }
+    next = upsertMergedItem(next, item);
   }
+  return next;
+}
+
+/** Replace every stale projection for a logical item while preserving the
+ * first one's position. Exact identities cover ordinary rows; the merge
+ * identity also reconciles generic/specialized tool-card projections. */
+function upsertMergedItem(items: TranscriptItem[], item: TranscriptItem): TranscriptItem[] {
+  const identity = transcriptItemMergeIdentity(item);
+  const matches = items.flatMap((candidate, index) => (
+    transcriptItemMergeIdentity(candidate) === identity ? [index] : []
+  ));
+  if (matches.length === 0) return [...items, item];
+  const first = matches[0]!;
+  const matchSet = new Set(matches);
+  const next = items.filter((_candidate, index) => !matchSet.has(index));
+  next.splice(first, 0, item);
   return next;
 }

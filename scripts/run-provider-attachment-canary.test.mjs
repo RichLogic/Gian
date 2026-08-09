@@ -1,0 +1,133 @@
+import assert from 'node:assert/strict';
+import { readFile, stat } from 'node:fs/promises';
+import test from 'node:test';
+
+import { runProviderAttachmentCanary } from './run-provider-attachment-canary.mjs';
+
+const scriptUrl = new URL('./run-provider-attachment-canary.mjs', import.meta.url);
+const fakeProxyPath = new URL('./fixtures/fake-provider-attachment-proxy.mjs', import.meta.url).pathname;
+
+class ExplodingClient {
+  constructor() {
+    throw new Error('client must not be constructed');
+  }
+}
+
+test('attachment canary refuses before constructing a client without explicit authorization', async () => {
+  const previous = process.env.GIAN_ALLOW_REAL_AGENT_TURN;
+  delete process.env.GIAN_ALLOW_REAL_AGENT_TURN;
+  try {
+    await assert.rejects(
+      runProviderAttachmentCanary({ provider: 'codex', ClientClass: ExplodingClient }),
+      /Refusing to send a quota-consuming provider model turn/,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.GIAN_ALLOW_REAL_AGENT_TURN;
+    else process.env.GIAN_ALLOW_REAL_AGENT_TURN = previous;
+  }
+});
+
+test('Kimi attachment canary fails closed when its session-store activation does not pass', async () => {
+  await assert.rejects(
+    runProviderAttachmentCanary({
+      provider: 'kimi',
+      allowRealAgentTurn: true,
+      binaryPath: process.execPath,
+      kimiActivationImpl: async () => ({ compatible: false, activationRecorded: false }),
+      ClientClass: ExplodingClient,
+    }),
+    /session store activation did not pass/,
+  );
+});
+
+for (const provider of ['claude', 'codex', 'kimi']) {
+  test(`${provider} attachment canary sends localFile through one real JSONL proxy process`, async () => {
+    const summary = await runProviderAttachmentCanary({
+      provider,
+      allowRealAgentTurn: true,
+      binaryPath: process.execPath,
+      proxyPath: fakeProxyPath,
+      timeoutMs: 2_000,
+      ...(provider === 'kimi'
+        ? { kimiActivationImpl: async () => ({ compatible: true, activationRecorded: true }) }
+        : {}),
+    });
+
+    assert.deepEqual(summary, {
+      provider,
+      quotaConsuming: true,
+      modelTurnSent: true,
+      localFileSent: true,
+      attachmentCount: provider === 'codex' ? 2 : 1,
+      attachmentContentObserved: true,
+      sameTurnSteered: provider === 'codex',
+      completed: true,
+      sessionClosed: true,
+      ephemeralThread: provider === 'codex',
+      sessionStoreActivated: provider === 'kimi',
+      runtimeStopped: true,
+    });
+  });
+}
+
+test('attachment canary rejects a response that did not read the fixture', async () => {
+  let canaryRoot;
+  class MissingContentClient {
+    constructor() {
+      this.listeners = new Map();
+    }
+    on(name, listener) {
+      this.listeners.set(name, listener);
+    }
+    off(name) {
+      this.listeners.delete(name);
+    }
+    async ensureStarted() {}
+    async request(method, params) {
+      if (method === 'initialize') return { methods: ['session.create', 'turn.start'] };
+      if (method === 'session.create') {
+        canaryRoot = params.cwd;
+        return { session: { id: 'session-1' } };
+      }
+      if (method === 'turn.start') {
+        queueMicrotask(() => {
+          this.listeners.get('notification')?.({
+            method: 'output.text',
+            params: { sessionId: 'session-1', turnId: 'turn-1', data: { text: 'guessed' } },
+          });
+          this.listeners.get('notification')?.({
+            method: 'turn.completed',
+            params: { sessionId: 'session-1', turnId: 'turn-1', data: { status: 'completed' } },
+          });
+        });
+        return { turn: { id: 'turn-1' } };
+      }
+      return { ok: true };
+    }
+    async stop() {
+      this.listeners.get('runtimeStopped')?.();
+    }
+  }
+
+  await assert.rejects(
+    runProviderAttachmentCanary({
+      provider: 'claude',
+      allowRealAgentTurn: true,
+      binaryPath: process.execPath,
+      ClientClass: MissingContentClient,
+      timeoutMs: 1_000,
+    }),
+    /unique content available only inside the attachment/,
+  );
+  await assert.rejects(stat(canaryRoot), { code: 'ENOENT' });
+});
+
+test('attachment canary source keeps its quota gate and localFile contract visible', async () => {
+  const source = await readFile(scriptUrl, 'utf8');
+  assert.match(source, /GIAN_ALLOW_REAL_AGENT_TURN/);
+  assert.match(source, /type: 'localFile'/);
+  assert.match(source, /provider === 'codex' \? \{ ephemeral: true \}/);
+  assert.match(source, /client\.request\('turn\.steer'/);
+  assert.match(source, /runDefaultKimiPreflight/);
+  assert.match(source, /attachmentContentObserved: true/);
+});

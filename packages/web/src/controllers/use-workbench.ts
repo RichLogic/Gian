@@ -5,16 +5,12 @@ import {
   loadApps,
   loadDiff,
   loadFile,
-  type ChangeScope,
   type WorkingTree,
 } from '../api.js';
 import {
   IMAGE_EXTS,
-  normalizeDiffQueryIdentity,
   insertGroupPreviewTab,
   openCategoryFor,
-  tabMatchesDiffQuery,
-  type DiffQueryIdentity,
   type FileViewMode,
   type RailId,
   type SheetGroup,
@@ -23,6 +19,7 @@ import {
 } from '../components/sheet-model.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
 import { buildFileRefIndex, makeFileLinkifyRehype } from '../transcript/linkify-files.js';
+import { transcriptItemIdentity } from '../transcript/identity.js';
 import type { DiffItem } from '../types.js';
 import { longestRootMatch } from '../utils/paths.js';
 import { resolveFilePanelRoute } from '../presentation/file-panel.js';
@@ -229,6 +226,65 @@ export function useWorkbench({
     }
   }, [viewState, wbTabs.length]);
 
+  /** Create the singleton Changes multi-diff tab if the diffs group doesn't
+   *  have one. Non-stealing: an already-active text detail tab keeps the
+   *  foreground; the new tab is only selected when the group has no
+   *  selection. */
+  function ensureChangesTab(): void {
+    if (wbTabs.some(t => t.group === 'diffs' && t.kind === 'changes')) {
+      setViewState(v => v === 'main' ? 'both' : v);
+      return;
+    }
+    const tab: SheetTab = {
+      id: 'tab-changes',
+      group: 'diffs',
+      name: appT('inspector.changes'),
+      kind: 'changes',
+      icoKind: 'diff',
+      ico: '±',
+      preview: false,
+    };
+    setWbTabs(prev => prev.some(t => t.group === 'diffs' && t.kind === 'changes') ? prev : [...prev, tab]);
+    setActiveTabByGroup(a => ({ ...a, diffs: a.diffs ?? tab.id }));
+    setViewState(v => v === 'main' ? 'both' : v);
+  }
+
+  /** Diffs-rail entry (GitBadge, transcript "show changes" entries): opens
+   *  the rail and puts the singleton Changes multi-diff tab in front,
+   *  creating it on first use. The tab is a shell — its body reads the
+   *  use-changes-diff store for the viewed working tree. */
+  function showChangesDiff(): void {
+    setChatPanel(null);
+    setActiveRail('diffs');
+    const existing = wbTabs.find(t => t.group === 'diffs' && t.kind === 'changes');
+    if (existing) {
+      revealSheetTab('diffs', existing.id);
+      return;
+    }
+    const tab: SheetTab = {
+      id: 'tab-changes',
+      group: 'diffs',
+      name: appT('inspector.changes'),
+      kind: 'changes',
+      icoKind: 'diff',
+      ico: '±',
+      preview: false,
+    };
+    setWbTabs(prev => prev.some(t => t.group === 'diffs' && t.kind === 'changes') ? prev : [...prev, tab]);
+    revealSheetTab('diffs', tab.id);
+  }
+
+  // Auto-ensure the singleton Changes tab while the diffs rail is active with
+  // a working tree — e.g. after the user closed it from a [Changes][text…]
+  // strip. Without a working tree the rail keeps its ordinary empty state.
+  useEffect(() => {
+    if (activeRail !== 'diffs') return;
+    if (!viewedWorkingTreeId(activeSession)) return;
+    if (wbTabs.some(t => t.group === 'diffs' && t.kind === 'changes')) return;
+    ensureChangesTab();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeRail, wbTabs, activeSession, workingTrees]);
+
   const sheetActions = useMemo(() => {
     function syncFilesInspectorToTab(tab: SheetTab | undefined): void {
       if (tab?.group !== 'files' || tab.kind !== 'file') return;
@@ -313,7 +369,7 @@ export function useWorkbench({
 
   /** Open a rail (no-op if already active). Lazily seeds the singleton
    *  content some rails need: the first terminal, the settings tab, the
-   *  diffs rail's flat all-files diff. */
+   *  diffs rail's Changes multi-diff tab. */
   function activateRail(rail: RailId): void {
     setChatPanel(null);
     if (rail === 'files') setFilesInspectorSuppressed(false);
@@ -335,6 +391,14 @@ export function useWorkbench({
       const tab = createBrowserTab(0);
       setWbTabs(prev => [...prev, tab]);
       revealSheetTab('browser', tab.id);
+      return;
+    }
+    if (rail === 'diffs') {
+      // Ensure the singleton Changes tab exists — but a plain rail activation
+      // (dock click, railMemory restore) must NOT steal the active tab from
+      // a text detail the user is reading; showChangesDiff() is the stealing
+      // entry and is called explicitly by the show-changes flows.
+      ensureChangesTab();
       return;
     }
     if (rail === 'history') {
@@ -423,20 +487,17 @@ export function useWorkbench({
   }
 
   /** Which tab an async fill belongs to. File previews use kind + path;
-   *  queried diffs add their normalized comparison identity, and transcript
-   *  diffs use the stable event tab id. This prevents late loads from
-   *  clobbering the same path under another comparison. */
+   *  transcript text fills use the stable event tab id. This prevents late
+   *  loads from clobbering the same path under another tab. */
   interface TabMatch {
-    kind: 'file' | 'diff';
+    kind: 'file' | 'text';
     fullPath?: string;
-    diffQuery?: DiffQueryIdentity;
     id?: string;
   }
 
   function tabMatches(t: SheetTab, match: TabMatch): boolean {
     if (t.kind !== match.kind || t.fullPath !== match.fullPath) return false;
-    if (match.id && t.id !== match.id) return false;
-    return !match.diffQuery || tabMatchesDiffQuery(t, match.diffQuery);
+    return !match.id || t.id === match.id;
   }
 
   /** Re-enter the loading state and re-run an async tab fill — the Sheet
@@ -632,137 +693,16 @@ export function useWorkbench({
     void openFileInSheet(abs, false, line);
   }
 
-  interface DiffTabFill extends DiffQueryIdentity {
-    rel: string;
-    fullPath: string;
-  }
-
-  /** Async fill of a diff tab created in the loading state (same contract as
-   *  fillFileTab): diff text on success, error + retry on failure, and no
-   *  clobbering of a tab that was replaced while the load was in flight. */
-  async function fillDiffTab(fill: DiffTabFill): Promise<void> {
-    const match: TabMatch = { kind: 'diff', fullPath: fill.fullPath, diffQuery: fill };
-    let diffText: string | null = null;
-    try {
-      diffText = await loadDiff(fill.workingTreeId, fill.rel, fill.scope, fill.sha, fill.base);
-    } catch {
-      diffText = null;
-    }
-    setWbTabs(prev => prev.map(t => {
-      if (!tabMatches(t, match) || !t.loading) return t;
-      if (diffText !== null) return { ...t, loading: undefined, diffText, loadError: undefined };
-      return {
-        ...t,
-        loading: undefined,
-        loadError: appT('sheet.loadFailed'),
-        retryLoad: () => retryTabLoad(match, () => fillDiffTab(fill)),
-      };
-    }));
-  }
-
-  /** Open a unified diff for a changed file in the Sheet workbench. The
-   *  Changes inspector routes row clicks here so the diff lands in the
-   *  workbench (full width) rather than crammed into the narrow inspector.
-   *
-   *  Query timing (Phase 3b, proposal §4.5): the tab is created and selected
-   *  IMMEDIATELY with a loading body, then filled (or failed, with retry). */
-  async function openDiffInSheet(rel: string, permanent: boolean = false, scope: ChangeScope = 'all', sha?: string | null, base?: string | null): Promise<void> {
-    setChatPanel(null);
-    const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
-    // Follows the view-level override (branch picker) — the diff sheet shows
-    // the tree the user is LOOKING at.
-    const wtId = sess ? viewedWorkingTreeId(sess) : null;
-    const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
-    if (!wt) return;
-    const name = rel.split('/').pop() || rel;
-    const fullPath = `${wt.path}/${rel}`;
-    const diffQuery = normalizeDiffQueryIdentity(wt.id, scope, sha, base, activeSessionId);
-
-    // Promote short-circuit (render snapshot): a permanent diff tab for this
-    // exact query is only re-activated — no reload. The updater below repeats
-    // the check against the latest state for correctness under batching.
-    const promoted = wbTabs.some(t => t.group === 'diffs' && t.fullPath === fullPath
-      && !t.preview && tabMatchesDiffQuery(t, diffQuery));
-    setActiveRail('diffs');
-    setWbTabs(prev => {
-      let tabs = [...prev];
-      // If a non-permanent preview tab is already open in this group (diff or
-      // level-3 text detail), replace it in place.
-      const existingPreview = tabs.find(t => t.group === 'diffs' && t.preview);
-      if (existingPreview) {
-        tabs = tabs.filter(t => t.id !== existingPreview.id);
-      }
-      // Promote only an exact query match. The same path under another scope,
-      // commit, base, or working tree is a different diff.
-      const existingPerm = tabs.find(t => t.group === 'diffs' && t.fullPath === fullPath
-        && !t.preview && tabMatchesDiffQuery(t, diffQuery));
-      if (existingPerm) {
-        revealSheetTab('diffs', existingPerm.id);
-        return tabs;
-      }
-      const id = 'tab-diff-' + Date.now();
-      const tab: SheetTab = {
-        id,
-        group: 'diffs',
-        name,
-        kind: 'diff',
-        icoKind: 'diff',
-        ico: '±',
-        fullPath,
-        workingTreeId: wt.id,
-        sessionId: diffQuery.sessionId ?? undefined,
-        diffScope: diffQuery.scope,
-        diffSha: diffQuery.sha,
-        diffBase: diffQuery.base,
-        diffPaths: [rel],
-        preview: !permanent,
-        loading: true,
-      };
-      tabs.push(tab);
-      revealSheetTab('diffs', id);
-      return tabs;
-    });
-    if (promoted) return;
-    void fillDiffTab({ ...diffQuery, rel, fullPath });
-  }
-
-  /** Reveal a file inside the active stacked diff instead of replacing the
-   * overview with a single-file preview. Query identity is checked before
-   * the DOM anchor so a stale tree/scope/ref cannot capture the click. */
-  function revealOpenDiffPath(rel: string, scope: ChangeScope, sha?: string | null, base?: string | null): boolean {
-    if (activeRail !== 'diffs') return false;
-    const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
-    const wtId = sess ? viewedWorkingTreeId(sess) : null;
-    const activeId = activeTabByGroup.diffs;
-    const tab = activeId ? wbTabs.find(t => t.id === activeId) : null;
-    if (!wtId || !tab || (tab.diffPaths?.length ?? 0) < 2 || !tab.diffPaths?.includes(rel)) return false;
-    const diffQuery = normalizeDiffQueryIdentity(wtId, scope, sha, base, activeSessionId);
-    if (!tabMatchesDiffQuery(tab, diffQuery)) return false;
-
-    const blocks = document.querySelectorAll<HTMLElement>('.sheet-diff-file[data-path]');
-    for (const block of blocks) {
-      if (block.dataset.path !== rel) continue;
-      const group = block.closest<HTMLElement>('.sheet-group');
-      const slot = block.closest<HTMLElement>('.sheet-tab-slot');
-      const sheet = block.closest<HTMLElement>('.sheet');
-      if (group?.dataset.activeTabId !== tab.id
-        || group.style.display === 'none'
-        || slot?.style.display === 'none'
-        || sheet?.style.display === 'none') continue;
-      block.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      return true;
-    }
-    return false;
-  }
-
   /** Async fill of a transcript diff tab. Files whose event carried no hunks
    *  load their text from the working tree; when every needed load failed,
-   *  the tab lands in the error state with retry. */
+   *  the tab lands in the error state with retry. The assembled unified diff
+   *  renders as a mono text body — panel-2 diff REVIEW lives in the singleton
+   *  Changes multi-diff view; these tabs are ad-hoc event payloads. */
   async function fillTranscriptDiffTab(tabId: string, item: DiffItem, wtId: string, match: TabMatch): Promise<void> {
     const chunks = await Promise.all(item.files.map(async file => {
       if (file.hunks.length === 0) {
-        const text = await loadDiff(wtId, file.path, 'all').catch(() => null);
-        return { text, failed: text === null };
+        const result = await loadDiff(wtId, file.path, 'all').catch(() => null);
+        return { text: result?.diff ?? null, failed: result === null };
       }
       return {
         failed: false,
@@ -776,7 +716,7 @@ export function useWorkbench({
               `${line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}${line.text}`),
           ]),
         ].join('\n'),
-      };
+      } as { text: string | null; failed: boolean };
     }));
     const diffText = chunks.map(chunk => chunk.text).filter(Boolean).join('\n');
     const failed = chunks.some(chunk => chunk.failed);
@@ -790,13 +730,14 @@ export function useWorkbench({
           retryLoad: () => retryTabLoad(match, () => fillTranscriptDiffTab(tabId, item, wtId, match)),
         };
       }
-      return { ...t, loading: undefined, diffText, loadError: undefined };
+      return { ...t, loading: undefined, text: diffText, loadError: undefined };
     }));
   }
 
-  /** Route a transcript diff to the Diffs rail. Native file_change events may
-   *  contain full hunks or only changed paths; load missing text from the
-   *  working tree so both shapes land in the same diff viewer.
+  /** Route a transcript diff to the Diffs rail as a preview text tab holding
+   *  the assembled unified diff. Native file_change events may contain full
+   *  hunks or only changed paths; load missing text from the working tree so
+   *  both shapes land in the same viewer.
    *
    *  Query timing (Phase 3b, proposal §4.5): the tab is created and selected
    *  IMMEDIATELY with a loading body, then filled (or failed, with retry). */
@@ -812,69 +753,59 @@ export function useWorkbench({
     const name = single
       ? single.path.split('/').pop() || single.path
       : `${item.files.length} files`;
-    const diffQuery = normalizeDiffQueryIdentity(wt.id, 'lastturn', null, null, activeSessionId);
 
     setActiveRail('diffs');
-    const id = `tab-diff-event-${item.id}`;
+    const id = `tab-diff-event-${activeSessionId ?? 'global'}-${transcriptItemIdentity(item)}`;
     setWbTabs(prev => {
+      const existing = prev.find(tab => tab.id === id);
+      if (existing) {
+        revealSheetTab('diffs', id);
+        return prev;
+      }
       const tab: SheetTab = {
         id,
         group: 'diffs',
         name,
-        kind: 'diff',
+        kind: 'text',
+        textDiff: true,
         icoKind: 'diff',
         ico: '±',
         fullPath,
         workingTreeId: wt.id,
-        sessionId: diffQuery.sessionId ?? undefined,
-        diffScope: diffQuery.scope,
-        diffSha: diffQuery.sha,
-        diffBase: diffQuery.base,
-        diffPaths: [...new Set(item.files.map(file => file.path))],
+        sessionId: activeSessionId ?? undefined,
         preview: true,
         loading: true,
       };
       revealSheetTab('diffs', id);
-      // Preview replacement spans every 'diffs'-group preview tab (diff or
-      // level-3 text detail): one preview tab at a time.
+      // Preview replacement spans every 'diffs'-group preview tab (transcript
+      // diff or level-3 text detail): one preview tab at a time. The
+      // singleton Changes tab is never preview, so it always survives.
       return insertGroupPreviewTab(prev, 'diffs', tab);
     });
-    void fillTranscriptDiffTab(id, item, wt.id, { kind: 'diff', fullPath, diffQuery, id });
+    void fillTranscriptDiffTab(id, item, wt.id, { kind: 'text', fullPath, id });
   }
 
   /** Open a commit's change-set review in the Sheet workbench (History rail).
-   *  V2 preview semantics like files/diffs: single-click replaces the preview
-   *  tab in place, permanent pins. Tab identity is {workingTreeId, full sha} —
-   *  the short sha is only ever a label (git-history proposal §5). */
-  function openCommitInSheet(input: { workingTreeId: string; sha: string; subject?: string }, permanent: boolean = false): void {
+   *  History is a SINGLETON group: at most one commit tab exists — clicking
+   *  another commit reuses that tab and replaces its identity in place (stale
+   *  fields must not leak into the new commit), so the tab strip is hidden.
+   *  Tab identity is {workingTreeId, full sha} — the short sha is only ever a
+   *  label (git-history proposal §5). */
+  function openCommitInSheet(input: { workingTreeId: string; sha: string; subject?: string }): void {
     setChatPanel(null);
     setActiveRail('history');
     const name = input.subject ? `${input.sha.slice(0, 7)} · ${input.subject}` : input.sha.slice(0, 7);
     setWbTabs(prev => {
-      let tabs = [...prev];
-      const sameCommit = (t: SheetTab) =>
-        t.group === 'history' && t.kind === 'commit' && t.commitSha === input.sha && t.workingTreeId === input.workingTreeId;
-      const existingPreview = tabs.find(t => t.group === 'history' && t.kind === 'commit' && t.preview);
-      if (existingPreview) {
-        if (permanent && sameCommit(existingPreview)) {
-          tabs = tabs.map(t => t.id === existingPreview.id ? { ...t, preview: false } : t);
-          revealSheetTab('history', existingPreview.id);
-          return tabs;
+      const existing = prev.find(t => t.group === 'history' && t.kind === 'commit');
+      if (existing) {
+        if (existing.commitSha === input.sha && existing.workingTreeId === input.workingTreeId) {
+          revealSheetTab('history', existing.id);
+          return prev;
         }
-        if (!permanent) {
-          // Replace the preview tab's identity — like insertFileTab, stale
-          // fields must not leak into the new commit.
-          tabs = tabs.map(t => t.id === existingPreview.id
-            ? { ...t, commitSha: input.sha, workingTreeId: input.workingTreeId, name, orphaned: undefined }
-            : t);
-          revealSheetTab('history', existingPreview.id);
-          return tabs;
-        }
-        tabs = tabs.filter(t => t.id !== existingPreview.id);
-      }
-      const existingPerm = tabs.find(t => sameCommit(t) && !t.preview);
-      if (existingPerm) {
-        revealSheetTab('history', existingPerm.id);
+        const tabs = prev.map(t => t.id === existing.id
+          ? { ...t, commitSha: input.sha, workingTreeId: input.workingTreeId, name, orphaned: undefined, preview: false }
+          : t);
+        revealSheetTab('history', existing.id);
         return tabs;
       }
       const id = 'tab-commit-' + Date.now();
@@ -885,13 +816,12 @@ export function useWorkbench({
         kind: 'commit',
         icoKind: 'commit',
         ico: '●',
-        preview: !permanent,
+        preview: false,
         commitSha: input.sha,
         workingTreeId: input.workingTreeId,
       };
-      tabs.push(tab);
       revealSheetTab('history', id);
-      return tabs;
+      return [...prev, tab];
     });
   }
 
@@ -925,8 +855,25 @@ export function useWorkbench({
   }): void {
     setChatPanel(null);
     setActiveRail('diffs');
-    const id = `tab-text-${payload.sourceId ?? Date.now()}`;
+    // Provider ids are scoped to a transcript stream, not globally. Include
+    // the active session so opening the same native item id in another chat
+    // cannot reveal or update the previous chat's panel-2 preview tab.
+    const id = `tab-text-${activeSessionId ?? 'global'}-${payload.sourceId ?? Date.now()}`;
     setWbTabs(prev => {
+      const existing = prev.find(tab => tab.id === id);
+      if (existing) {
+        revealSheetTab('diffs', id);
+        // A pinned detail stays pinned when reopened; a still-previewing tab
+        // keeps preview semantics. Refresh the body in place either way.
+        return prev.map(tab => tab.id === id
+          ? {
+              ...tab,
+              name: payload.title,
+              text: payload.text,
+              sessionId: activeSessionId ?? undefined,
+            }
+          : tab);
+      }
       const tab: SheetTab = {
         id,
         group: 'diffs',
@@ -1071,8 +1018,7 @@ export function useWorkbench({
     toggleRail,
     openFileInSheet,
     openRelativeFileHref,
-    openDiffInSheet,
-    revealOpenDiffPath,
+    showChangesDiff,
     openTranscriptDiffInSheet,
     openCommitInSheet,
     revalidateHistoryTabs,

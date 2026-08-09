@@ -23,7 +23,7 @@ import { listGitWorktreesAsync } from '../workspace/git.js';
 import { detectWorktreeAddPath } from './worktree-detect.js';
 import { executorConfigFromOptions, type SessionRepository } from './repository.js';
 import type { SessionHistoryStore } from './history-store.js';
-import type { TurnRuntime } from './turn-runtime.js';
+import type { ActiveTurn, TurnRuntime } from './turn-runtime.js';
 import type { ProxySessionCoordinator } from './proxy-session-coordinator.js';
 import {
   parseAcpUsageUpdate,
@@ -40,6 +40,13 @@ function isReplaceableSnapshot(event: ChatEvent): boolean {
   if (!update || typeof update !== 'object' || Array.isArray(update)) return false;
   const kind = (update as Record<string, unknown>).sessionUpdate;
   return kind === 'tool_call' || kind === 'tool_call_update';
+}
+
+function notificationProviderTurnId(notification: ProxyNotification): string | null {
+  const value = notification.params?.turnId;
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return null;
 }
 
 const SNAPSHOT_FLUSH_MS = 120;
@@ -117,20 +124,6 @@ export class SessionEventCoordinator {
     let eventCount = 0;
     let pendingUserText = '';
 
-    const ensureTurn = (): string => {
-      if (turnId) return turnId;
-      turnNumber += 1;
-      turnId = randomUUID();
-      this.db
-        .prepare(
-          `INSERT INTO turns
-            (id, session_id, turn_number, status, created_at, completed_at)
-           VALUES (?, ?, ?, 'completed', ?, ?)`,
-        )
-        .run(turnId, sessionId, turnNumber, timestamp, timestamp);
-      return turnId;
-    };
-
     const insert = (
       activeTurnId: string,
       callId: string,
@@ -149,10 +142,53 @@ export class SessionEventCoordinator {
       if (result.inserted) eventCount += 1;
     };
 
+    const lifecycleData = (
+      activeTurnId: string,
+      status: 'running' | 'completed',
+      type: 'state.turn-started' | 'state.turn-completed',
+    ): Record<string, unknown> => ({
+      __gian_event: 2,
+      provider: 'kimi',
+      raw: { turnId: activeTurnId, status },
+      display: { type, data: { turnId: activeTurnId } },
+    });
+
+    const ensureTurn = (): string => {
+      if (turnId) return turnId;
+      turnNumber += 1;
+      turnId = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO turns
+            (id, session_id, turn_number, status, created_at, completed_at)
+           VALUES (?, ?, ?, 'completed', ?, ?)`,
+        )
+        .run(turnId, sessionId, turnNumber, timestamp, timestamp);
+      insert(
+        turnId,
+        `gian:turn-started:${turnId}`,
+        'gian.turn.started',
+        lifecycleData(turnId, 'running', 'state.turn-started'),
+      );
+      return turnId;
+    };
+
+    const finalizeTurn = (): void => {
+      if (!turnId) return;
+      const completedTurnId = turnId;
+      this.history.compactTurnStreams(completedTurnId);
+      insert(
+        completedTurnId,
+        `gian:turn-completed:${completedTurnId}`,
+        'gian.turn.completed',
+        lifecycleData(completedTurnId, 'completed', 'state.turn-completed'),
+      );
+      turnId = null;
+    };
+
     const flushUserMessage = (): void => {
       if (!pendingUserText) return;
-      if (turnId) this.history.compactTurnStreams(turnId);
-      turnId = null;
+      finalizeTurn();
       insert(ensureTurn(), randomUUID(), 'user_message', { text: pendingUserText });
       pendingUserText = '';
     };
@@ -206,7 +242,7 @@ export class SessionEventCoordinator {
       }
     }
     flushUserMessage();
-    if (turnId) this.history.compactTurnStreams(turnId);
+    finalizeTurn();
 
     if (turnNumber > 0) {
       this.db
@@ -331,7 +367,14 @@ export class SessionEventCoordinator {
     sessionId: string,
     notification: ProxyNotification,
   ): void {
-    if (notification.method === 'turn.completed' || notification.method === 'turn.failed') {
+    const providerTurnId = notificationProviderTurnId(notification);
+    const runtimeErrorHasTurn = notification.method === 'runtime.error'
+      && providerTurnId !== null;
+    if (
+      notification.method === 'turn.completed'
+      || notification.method === 'turn.failed'
+      || runtimeErrorHasTurn
+    ) {
       this.flushSnapshots(sessionId);
     }
     // session.rotated: cc-proxy emits this when /clear creates a new native
@@ -342,23 +385,13 @@ export class SessionEventCoordinator {
       return;
     }
 
-    if (notification.method === 'token_usage.updated') {
-      const session = this.sessions.get(sessionId);
-      const update = parseTokenUsageUpdate(notification.params?.data, session.executor);
-      if (update) this.persistTokenUsage(sessionId, notification.params?.turnId, update);
-      return;
-    }
-
     // Provider debug chatter is intentionally neither history nor UI state.
     if (notification.method === 'debug') return;
 
+    let acpUsage: ParsedTokenUsageUpdate | null = null;
     if (notification.method === 'acp.sessionUpdate') {
       const payload = notification.params?.data as { update?: unknown } | undefined;
-      const usage = parseAcpUsageUpdate(payload);
-      if (usage) {
-        this.persistTokenUsage(sessionId, notification.params?.turnId, usage);
-        return;
-      }
+      acpUsage = parseAcpUsageUpdate(payload);
       const update = payload?.update as
         | { sessionUpdate?: unknown; configOptions?: unknown }
         | undefined;
@@ -380,13 +413,43 @@ export class SessionEventCoordinator {
       }
     }
 
+    // Usage is session accounting rather than transcript content. Codex can
+    // legitimately report a short-lived compaction turn id inside one outer
+    // Host turn, so do not use these samples to establish generation binding.
+    if (notification.method === 'token_usage.updated') {
+      const session = this.sessions.get(sessionId);
+      const update = parseTokenUsageUpdate(notification.params?.data, session.executor);
+      if (update) this.persistTokenUsage(sessionId, providerTurnId ?? undefined, update);
+      return;
+    }
+    if (acpUsage) {
+      this.persistTokenUsage(sessionId, providerTurnId ?? undefined, acpUsage);
+      return;
+    }
+
+    // Bind every provider-scoped notification to one Host turn generation.
+    // Settled provider ids are tombstoned, so an old output/tool/end arriving
+    // after a stop cannot attach itself to the next active turn.
+    const active = this.turns.get(sessionId);
+    if (providerTurnId) {
+      if (!active || !this.turns.bindProviderTurn(sessionId, active.id, providerTurnId)) {
+        return;
+      }
+    }
+    if (notification.method === 'runtime.error' && !runtimeErrorHasTurn) return;
+
+    // Transcript events require a real persisted turn. Provider callbacks can
+    // arrive after a local stop (or host-level runtime.error can be fanned out
+    // while idle); dropping those stale diagnostics is safer than inventing a
+    // random turn id that violates the events.turn_id foreign key.
+    if (!active) return;
+
     // Project/dispatch BEFORE handleLifecycle. handleLifecycle calls
     // completeTurn on turn.completed/failed, which deletes the activeTurns
-    // map entry; if that runs first, dispatchChatEvent would persist the event
-    // with a fresh random turn_id that doesn't exist in `turns` and trip the
-    // FK constraint.
-    const events = this.runProjector(sessionId, notification);
-    for (const event of events) this.dispatchChatEvent(event);
+    // map entry, so both projection and persistence use the captured active
+    // turn rather than re-reading mutable lifecycle state.
+    const events = this.runProjector(sessionId, notification, active.number);
+    for (const event of events) this.dispatchChatEvent(event, active.id);
 
     this.handleLifecycle(sessionId, notification);
   }
@@ -467,31 +530,36 @@ export class SessionEventCoordinator {
   /** Provider lifecycle hook for turn bookkeeping (status + queue). */
   private handleLifecycle(sessionId: string, n: ProxyNotification): void {
     if (n.method === 'turn.completed') {
-      this.completeTurn(sessionId, 'completed');
+      const settled = this.completeTurn(sessionId, 'completed');
       // Live Sync v2: proxy finished writing this turn to the JSONL; advance
       // watcher offset to current EOF so we skip our own writes and resume
       // tailing for any external CLI appends from here.
       this.watcher?.resume(sessionId);
-      this.maybeAutoSendNext(sessionId);
-    } else if (n.method === 'turn.failed') {
-      this.completeTurn(sessionId, 'error');
+      if (settled !== 'stopped') this.maybeAutoSendNext(sessionId);
+    } else if (
+      n.method === 'turn.failed'
+      || (
+        n.method === 'runtime.error'
+        && notificationProviderTurnId(n) !== null
+      )
+    ) {
+      const settled = this.completeTurn(sessionId, 'error');
       this.watcher?.resume(sessionId);
-      this.maybeAutoSendNext(sessionId);
+      if (settled !== 'stopped') this.maybeAutoSendNext(sessionId);
     }
   }
 
   private runProjector(
     sessionId: string,
     notification: ProxyNotification,
+    turn: number,
   ): ChatEvent[] {
     const session = this.sessions.get(sessionId);
-    const turn = this.turns.get(sessionId)?.number ?? 0;
     return projectNotification(session.executor, notification, sessionId, turn);
   }
 
   /** Persist the native event and broadcast its optional UI projection. */
-  private dispatchChatEvent(e: ChatEvent): void {
-    const turnId = this.activeTurnId(e.session_id);
+  private dispatchChatEvent(e: ChatEvent, turnId: string): void {
     if (isReplaceableSnapshot(e)) {
       const key = `${e.session_id}\u0000${turnId}\u0000${e.event}\u0000${e.call_id}`;
       const pending = this.pendingSnapshots.get(key);
@@ -550,7 +618,7 @@ export class SessionEventCoordinator {
       provider: e.provider,
       ...(e.display ? { display: e.display } : {}),
     });
-    this.afterChatEvent(e);
+    this.afterChatEvent(e, turnId);
     for (const fn of this.eventSubscribers) {
       try { fn(e); } catch {}
     }
@@ -561,12 +629,12 @@ export class SessionEventCoordinator {
    * specific event types — used by Approval (Track C) to register pending
    * approvals into the global list.
    */
-  private afterChatEvent(e: ChatEvent): void {
+  private afterChatEvent(e: ChatEvent, turnId: string): void {
     if (e.display?.type === 'interaction.approval' || e.display?.type === 'interaction.question') {
       const d = e.display.data as import('@gian/shared').ApprovalRequestedData;
       void this.approvals.request({
         sessionId: e.session_id,
-        turnId: this.activeTurnId(e.session_id),
+        turnId,
         category: d.category,
         risk: d.risk,
         description: d.description,
@@ -683,10 +751,6 @@ export class SessionEventCoordinator {
     return true;
   }
 
-  private activeTurnId(sessionId: string): string {
-    return this.turns.get(sessionId)?.id ?? randomUUID();
-  }
-
   handleProxyExit(sessionId: string, code: number | null): void {
     // Pending approvals that were in flight against this proxy will never
     // resolve now — drop them so the UI's approval list stays accurate.
@@ -703,23 +767,42 @@ export class SessionEventCoordinator {
     this.completeTurn(sessionId, 'error');
   }
 
+  /** Finish DB-only turns recovered after the in-memory runtime was lost. */
+  settleOrphanedTurns(
+    sessionId: string,
+    turns: ActiveTurn[],
+    status: 'error' | 'stopped',
+    completedAt: string,
+  ): void {
+    for (const turn of turns) {
+      this.ensureTerminalBoundary(sessionId, turn, status, completedAt);
+      this.compactTerminalTurn(turn.id);
+    }
+  }
+
   completeTurn(
     sessionId: string,
     status: 'completed' | 'error' | 'stopped',
-  ): void {
+  ): 'completed' | 'error' | 'stopped' | null {
+    // Coalesced snapshots still live only in memory until their short timer
+    // fires. Persist them before the terminal boundary and before stream
+    // compaction, otherwise a fast stop/error can reorder or lose final tool
+    // detail relative to the folded turn.
+    this.flushSnapshots(sessionId);
     const now = new Date().toISOString();
-    const active = this.turns.finish(sessionId, status, now);
-    if (!active) return;
-    try {
-      this.history.compactTurnStreams(active.id);
-    } catch (error) {
-      console.warn(`[session] failed to compact turn streams turn=${active.id}`, error);
-    }
+    const current = this.turns.get(sessionId);
+    const terminalStatus = current && this.turns.isStopRequested(sessionId, current.id)
+      ? 'stopped'
+      : status;
+    const active = this.turns.finish(sessionId, terminalStatus, now);
+    if (!active) return null;
+    this.ensureTerminalBoundary(sessionId, active, terminalStatus, now);
+    this.compactTerminalTurn(active.id);
     // 'stopped' (user-initiated interrupt) is logically a clean termination,
     // not an error — the session lands at 'done' so the UI doesn't show a red
     // error pill. Only true failures land at 'error'.
-    const sessionStatus = status === 'error' ? 'error' : 'done';
-    if (status === 'stopped') {
+    const sessionStatus = terminalStatus === 'error' ? 'error' : 'done';
+    if (terminalStatus === 'stopped') {
       // User-initiated interrupt: they're looking at it, so don't mark unread.
       this.db
         .prepare(`UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?`)
@@ -732,6 +815,42 @@ export class SessionEventCoordinator {
         .prepare(`UPDATE sessions SET status = ?, unread = 1, updated_at = ? WHERE id = ?`)
         .run(sessionStatus, now, sessionId);
       this.broadcastSessionUpdated(sessionId, { status: sessionStatus, unread: 1, updated_at: now });
+    }
+    return terminalStatus;
+  }
+
+  private ensureTerminalBoundary(
+    sessionId: string,
+    active: ActiveTurn,
+    status: 'completed' | 'error' | 'stopped',
+    completedAt: string,
+  ): void {
+    if (!this.history.hasTurnCompletionBoundary(active.id)) {
+      const session = this.sessions.get(sessionId);
+      const terminal: ChatEvent<'state.turn-completed'> = {
+        session_id: sessionId,
+        turn: active.number,
+        call_id: `gian:turn-completed:${active.id}`,
+        ts: Date.parse(completedAt),
+        provider: session.executor,
+        event: 'gian.turn.completed',
+        data: { turnId: active.id, status },
+        display: {
+          type: 'state.turn-completed',
+          data: { turnId: active.id },
+        },
+      };
+      // Broadcast before potentially expensive terminal compaction so every
+      // client can fold the turn even when maintenance later fails.
+      this.persistAndBroadcast(terminal, active.id);
+    }
+  }
+
+  private compactTerminalTurn(turnId: string): void {
+    try {
+      this.history.compactTurnStreams(turnId);
+    } catch (error) {
+      console.warn(`[session] failed to compact turn streams turn=${turnId}`, error);
     }
   }
 

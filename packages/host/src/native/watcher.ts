@@ -36,6 +36,7 @@ import { parseCcLine, parseCodexLine, type ParsedLine } from './replay.js';
 
 const DEBOUNCE_MS = 100;
 const POLL_INTERVAL_MS = 5000;
+const TERMINAL_TAIL_BYTES = 64 * 1024;
 
 interface WatchedSession {
   sessionId: string;
@@ -89,6 +90,9 @@ export class NativeJsonlWatcher {
       currentTurnNumber: latestTurn?.turnNumber ?? 0,
     };
     this.sessions.set(sessionId, state);
+    if (latestTurn?.status === 'running') {
+      this.recoverTerminalFromTail(state, initialOffset);
+    }
     this.attachWatcher(state);
     state.pollTimer = setInterval(() => this.scheduleSync(state), POLL_INTERVAL_MS);
   }
@@ -222,27 +226,43 @@ export class NativeJsonlWatcher {
     const parser = state.executor === 'claude' ? parseCcLine : parseCodexLine;
     const lines = toProcess.split('\n');
     for (const line of lines) {
+      const metadata = inspectNativeLine(line, state.executor);
       const parsed = parser(line);
-      if (!parsed) continue;
-      this.applyParsed(state, parsed);
+      if (parsed) this.applyParsed(state, parsed, metadata.timestamp);
+      if (metadata.completed) {
+        this.completeCurrentTurn(state, metadata.timestamp ?? new Date().toISOString());
+      }
     }
   }
 
   /** Insert events + broadcast for one parsed line, opening a new turn at
    *  user-message boundaries. */
-  private applyParsed(state: WatchedSession, parsed: ParsedLine): void {
+  private applyParsed(
+    state: WatchedSession,
+    parsed: ParsedLine,
+    timestamp: string | undefined,
+  ): void {
     if (parsed.boundary === 'turn-start') {
+      // A terminal record may be absent from the observed tail (older files,
+      // interrupted writes, or watcher restart). The next real user message
+      // is also a definitive boundary for the prior running turn. Close it
+      // before opening the next turn so live and replay lifecycle agree.
+      const boundaryAt = timestamp ?? new Date().toISOString();
+      this.completeCurrentTurn(state, boundaryAt);
+
       // Open a new turn row. Use the next available turn_number — re-query
       // every time so concurrent proxy turns can't clash with us.
       state.currentTurnNumber = this.lastTurnNumber(state.sessionId) + 1;
       state.currentTurnId = randomUUID();
-      const now = new Date().toISOString();
       this.db
         .prepare(
           `INSERT INTO turns (id, session_id, turn_number, status, created_at, completed_at)
-           VALUES (?, ?, ?, 'completed', ?, ?)`,
+           VALUES (?, ?, ?, 'running', ?, NULL)`,
         )
-        .run(state.currentTurnId, state.sessionId, state.currentTurnNumber, now, now);
+        .run(state.currentTurnId, state.sessionId, state.currentTurnNumber, boundaryAt);
+
+      this.persistLifecycle(state, 'started', boundaryAt);
+      this.persistSessionStatus(state.sessionId, 'running');
     }
 
     if (!state.currentTurnId) {
@@ -262,19 +282,28 @@ export class NativeJsonlWatcher {
     callId: string,
     type: string,
     data: Record<string, unknown>,
+    options: { replaceSnapshot?: boolean; createdAt?: string } = {},
   ): void {
+    let inserted = true;
     try {
-      this.events.persist({
+      const result = this.events.persist({
         sessionId: state.sessionId,
         turnId: state.currentTurnId!,
         callId,
         type,
         data,
+        replaceSnapshot: options.replaceSnapshot,
+        createdAt: options.createdAt,
       });
+      inserted = result.inserted;
     } catch (err) {
       console.error('[jsonl-watcher] event insert failed', state.sessionId, err);
       return;
     }
+    // Lifecycle writes use a stable snapshot identity. If another watcher
+    // pass already persisted it, do not rebroadcast the same boundary.
+    if (options.replaceSnapshot && !inserted) return;
+
     const stored = data.__gian_event === 2 ? data : null;
     const raw = stored?.raw && typeof stored.raw === 'object' && !Array.isArray(stored.raw)
       ? stored.raw as Record<string, unknown>
@@ -289,7 +318,7 @@ export class NativeJsonlWatcher {
       turn: state.currentTurnNumber,
       call_id: callId,
       event: type,
-      ts: Date.now(),
+      ts: options.createdAt ? Date.parse(options.createdAt) : Date.now(),
       data: raw,
       ...(provider === 'claude' || provider === 'codex' || provider === 'kimi' ? { provider } : {}),
       ...(display ? { display } : {}),
@@ -301,33 +330,217 @@ export class NativeJsonlWatcher {
     }
   }
 
+  /** Persist one Gian-owned lifecycle boundary exactly once per turn. */
+  private persistLifecycle(
+    state: WatchedSession,
+    lifecycle: 'started' | 'completed',
+    createdAt: string,
+  ): void {
+    const turnId = state.currentTurnId;
+    if (!turnId) return;
+
+    const displayType = lifecycle === 'started'
+      ? 'state.turn-started'
+      : 'state.turn-completed';
+    const eventType = lifecycle === 'started'
+      ? 'gian.turn.started'
+      : 'gian.turn.completed';
+
+    // A replay or provider-owned live path may already have supplied the
+    // same display lifecycle with a different call id/type. Treat that as
+    // terminal evidence too, otherwise watcher restart would duplicate it.
+    if (this.hasLifecycleEvent(state.sessionId, turnId, lifecycle)) return;
+
+    this.persistAndBroadcast(
+      state,
+      `gian:${turnId}:${lifecycle}`,
+      eventType,
+      {
+        __gian_event: 2,
+        provider: state.executor,
+        raw: {
+          turnId,
+          status: lifecycle === 'started' ? 'running' : 'completed',
+        },
+        display: {
+          type: displayType,
+          data: { turnId },
+        },
+      },
+      { replaceSnapshot: true, createdAt },
+    );
+  }
+
+  /**
+   * Finalize the current turn before emitting its terminal lifecycle. An
+   * existing lifecycle (replay/provider/restart) is authoritative: preserve
+   * its completed_at, but heal a partially-written running/null row.
+   */
+  private completeCurrentTurn(state: WatchedSession, completedAt: string): void {
+    const turnId = state.currentTurnId;
+    if (!turnId) return;
+    const row = this.db
+      .prepare(
+        `SELECT status, completed_at
+         FROM turns
+         WHERE id = ? AND session_id = ?`,
+      )
+      .get(turnId, state.sessionId) as {
+        status: string;
+        completed_at: string | null;
+      } | undefined;
+    if (!row) {
+      state.currentTurnId = null;
+      return;
+    }
+
+    const terminalStatus = row.status === 'completed'
+      || row.status === 'error'
+      || row.status === 'stopped';
+    const alreadyCompleted = this.hasLifecycleEvent(state.sessionId, turnId, 'completed');
+    if (terminalStatus && alreadyCompleted) {
+      state.currentTurnId = null;
+      return;
+    }
+
+    // A terminal DB row is authoritative even when its lifecycle event was
+    // lost. Preserve both its status and completed_at and repair only the
+    // missing boundary. Running/partial rows are healed in place.
+    const effectiveCompletedAt = normalizedTimestamp(row.completed_at) ?? completedAt;
+    if (!terminalStatus || row.completed_at == null) {
+      this.db
+        .prepare(
+          `UPDATE turns
+           SET status = CASE
+                 WHEN status IN ('completed', 'error', 'stopped') THEN status
+                 ELSE 'completed'
+               END,
+               completed_at = COALESCE(completed_at, ?)
+           WHERE id = ? AND session_id = ?`,
+        )
+        .run(effectiveCompletedAt, turnId, state.sessionId);
+    }
+    this.persistLifecycle(state, 'completed', effectiveCompletedAt);
+    this.persistSessionStatus(
+      state.sessionId,
+      row.status === 'error' ? 'error' : 'done',
+      row.status === 'stopped' ? 0 : 1,
+    );
+    state.currentTurnId = null;
+  }
+
+  /**
+   * Restart repair for the narrow crash window where the native terminal line
+   * reached disk but Host died before persisting it. Read only a bounded tail
+   * and inspect the last complete JSON record; historical content is never
+   * replayed from this path.
+   */
+  private recoverTerminalFromTail(state: WatchedSession, fileSize: number): void {
+    if (!state.currentTurnId || fileSize <= 0 || !existsSync(state.filePath)) return;
+    const start = Math.max(0, fileSize - TERMINAL_TAIL_BYTES);
+    let tail: string;
+    try {
+      const fd = openSync(state.filePath, 'r');
+      try {
+        const buffer = Buffer.alloc(fileSize - start);
+        readSync(fd, buffer, 0, buffer.length, start);
+        tail = buffer.toString('utf8');
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      return;
+    }
+    if (start > 0) {
+      const firstNewline = tail.indexOf('\n');
+      if (firstNewline === -1) return;
+      tail = tail.slice(firstNewline + 1);
+    }
+    const candidates = tail.split('\n').map(line => line.trim()).filter(Boolean);
+    for (let index = candidates.length - 1; index >= 0; index--) {
+      const line = candidates[index]!;
+      try {
+        JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const metadata = inspectNativeLine(line, state.executor);
+      if (metadata.completed) {
+        this.completeCurrentTurn(state, metadata.timestamp ?? new Date().toISOString());
+      }
+      return;
+    }
+  }
+
+  private hasLifecycleEvent(
+    sessionId: string,
+    turnId: string,
+    lifecycle: 'started' | 'completed',
+  ): boolean {
+    const rows = this.db
+      .prepare(
+        `SELECT type, data
+         FROM events
+         WHERE session_id = ? AND turn_id = ?`,
+      )
+      .all(sessionId, turnId) as Array<{ type: string; data: string }>;
+    const displayType = lifecycle === 'started'
+      ? 'state.turn-started'
+      : 'state.turn-completed';
+    const nativeTypes = lifecycle === 'started'
+      ? new Set(['gian.turn.started', 'turn.started', 'turn_started'])
+      : new Set(['gian.turn.completed', 'turn.completed', 'turn_completed']);
+
+    return rows.some(row => {
+      if (nativeTypes.has(row.type)) return true;
+      const decoded = this.events.decode(row.data);
+      const display = decoded.display;
+      return !!display
+        && typeof display === 'object'
+        && !Array.isArray(display)
+        && (display as { type?: unknown }).type === displayType;
+    });
+  }
+
   private lastTurnNumber(sessionId: string): number {
     return this.latestTurn(sessionId)?.turnNumber ?? 0;
   }
 
-  private latestTurn(sessionId: string): { id: string; turnNumber: number } | null {
+  private latestTurn(sessionId: string): {
+    id: string;
+    turnNumber: number;
+    status: string;
+  } | null {
     const row = this.db
       .prepare(
-        `SELECT id, turn_number
+        `SELECT id, turn_number, status
          FROM turns
          WHERE session_id = ?
          ORDER BY turn_number DESC
          LIMIT 1`,
       )
-      .get(sessionId) as { id: string; turn_number: number } | undefined;
+      .get(sessionId) as { id: string; turn_number: number; status: string } | undefined;
     if (!row) return null;
-    return { id: row.id, turnNumber: row.turn_number };
+    return { id: row.id, turnNumber: row.turn_number, status: row.status };
   }
 
-  private persistSessionStatus(sessionId: string, status: 'pending' | 'running'): void {
+  private persistSessionStatus(
+    sessionId: string,
+    status: 'pending' | 'running' | 'done' | 'error',
+    unread?: 0 | 1,
+  ): void {
     const now = new Date().toISOString();
-    const result = this.db
-      .prepare('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
-      .run(status, now, sessionId);
+    const result = unread === undefined
+      ? this.db
+          .prepare('UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?')
+          .run(status, now, sessionId)
+      : this.db
+          .prepare('UPDATE sessions SET status = ?, unread = ?, updated_at = ? WHERE id = ?')
+          .run(status, unread, now, sessionId);
     if (result.changes <= 0) return;
     this.broadcaster.broadcast({
       type: 'session:updated',
-      session: { id: sessionId, status, updated_at: now },
+      session: { id: sessionId, status, ...(unread === undefined ? {} : { unread }), updated_at: now },
     });
   }
 }
@@ -338,4 +551,51 @@ function safeSize(filePath: string): number {
   } catch {
     return 0;
   }
+}
+
+interface NativeLineMetadata {
+  timestamp?: string;
+  completed: boolean;
+}
+
+/**
+ * Inspect only explicit native lifecycle evidence. Do not infer completion
+ * from EOF, quiet periods, or the last visible assistant message.
+ */
+function inspectNativeLine(
+  line: string,
+  executor: 'claude' | 'codex',
+): NativeLineMetadata {
+  let parsed: Record<string, unknown>;
+  try {
+    const value = JSON.parse(line) as unknown;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return { completed: false };
+    }
+    parsed = value as Record<string, unknown>;
+  } catch {
+    return { completed: false };
+  }
+
+  const timestamp = normalizedTimestamp(parsed.timestamp);
+  if (executor === 'codex') {
+    const payload = parsed.payload;
+    const completed = parsed.type === 'event_msg'
+      && !!payload
+      && typeof payload === 'object'
+      && !Array.isArray(payload)
+      && (payload as { type?: unknown }).type === 'task_complete';
+    return { timestamp, completed };
+  }
+
+  const completed = parsed.type === 'system'
+    && parsed.subtype === 'turn_duration'
+    && parsed.isSidechain !== true;
+  return { timestamp, completed };
+}
+
+function normalizedTimestamp(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const millis = Date.parse(value);
+  return Number.isFinite(millis) ? new Date(millis).toISOString() : undefined;
 }

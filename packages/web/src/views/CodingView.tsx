@@ -252,6 +252,7 @@ export function CodingView(p: CodingViewProps) {
         />
       ) : p.activeSession ? (
         <SessionMain
+          key={p.activeSession.id}
           session={p.activeSession}
           workspace={p.activeWorkspace}
           items={p.itemsBySession[p.activeSession.id] ?? []}

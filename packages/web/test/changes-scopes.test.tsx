@@ -9,11 +9,15 @@
 //   picker, Branch shows `<head> → <base ⌄>` with a searchable branch list.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Inspector } from '../src/components/Inspector.js';
 import { renderWithOperations } from './operation-test-utils.js';
 import { LocaleProvider } from '../src/i18n/index.js';
+import {
+  __resetChangesDiffForTests,
+  applyChangesScopeRequest,
+} from '../src/controllers/use-changes-diff.js';
 
 vi.mock('../src/api.js', () => ({
   loadChanged: vi.fn().mockResolvedValue([
@@ -32,14 +36,7 @@ const loadChanged = vi.mocked(api.loadChanged);
 const loadCommits = vi.mocked(api.loadCommits);
 const loadBranchList = vi.mocked(api.loadBranchList);
 
-function renderChanges(opts: {
-  scopeRequest?: {
-    scope: 'all' | 'unstaged' | 'staged' | 'commit' | 'branch' | 'lastturn';
-    requestId: number;
-    sessionId?: string;
-    turn?: number;
-  };
-} = {}) {
+function renderChanges() {
   renderWithOperations(
     <LocaleProvider locale="en">
       <Inspector
@@ -47,9 +44,7 @@ function renderChanges(opts: {
         workingTreeId="wt:s1"
         workingTrees={[]}
         onOpenFile={vi.fn()}
-        scopeRequest={opts.scopeRequest ?? null}
         activeSessionId="session-current"
-        onOpenDiff={vi.fn()}
         canCommit={false}
         onComposePrompt={vi.fn()}
       />
@@ -70,6 +65,7 @@ async function pickScope(user: ReturnType<typeof userEvent.setup>, name: RegExp)
 describe('Changes scope picker', () => {
   beforeEach(() => {
     localStorage.clear();
+    __resetChangesDiffForTests();
     loadChanged.mockClear();
     loadCommits.mockClear();
     loadBranchList.mockClear();
@@ -167,23 +163,20 @@ describe('Changes scope picker', () => {
     await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'all', null, null, 'session-current', undefined));
   });
 
-  it('an external scopeRequest (GitBadge click) forces All changes and persists it', async () => {
+  it('an external scope request (GitBadge click) forces All changes and persists it', async () => {
     localStorage.setItem('gian.changes.scope', 'branch');
-    renderChanges({ scopeRequest: { scope: 'all', requestId: 1 } });
+    renderChanges();
+    // App writes the use-changes-diff store directly (the inspector's old
+    // scopeRequest prop is gone).
+    act(() => applyChangesScopeRequest('wt:s1', 'all'));
     await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'all', null, null, 'session-current', undefined));
     expect(document.querySelector('.changes-scope-btn')?.textContent).toContain('All changes');
     expect(localStorage.getItem('gian.changes.scope')).toBe('all');
   });
 
   it('pins a Diff-chip request to its exact session and turn', async () => {
-    renderChanges({
-      scopeRequest: {
-        scope: 'lastturn',
-        requestId: 2,
-        sessionId: 'session-card',
-        turn: 7,
-      },
-    });
+    renderChanges();
+    act(() => applyChangesScopeRequest('wt:s1', 'lastturn', { sessionId: 'session-card', turn: 7 }));
     await waitFor(() => expect(loadChanged).toHaveBeenCalledWith(
       'wt:s1',
       'lastturn',

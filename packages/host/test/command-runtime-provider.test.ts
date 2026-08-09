@@ -39,3 +39,34 @@ test('command runtime keeps the launcher path and its companion runtime on PATH'
   assert.equal(lease.env.PATH?.split(delimiter)[0], dirname(launcher));
   await lease.release();
 });
+
+test('active command runtime detects launcher and companion content changes', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-command-runtime-snapshot-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const bin = join(root, 'bin');
+  const launcher = join(bin, 'codex');
+  const script = join(root, 'package', 'codex.js');
+  const companion = join(bin, 'node');
+  await mkdir(bin, { recursive: true });
+  await mkdir(dirname(script), { recursive: true });
+  await writeFile(script, '#!/bin/sh\nprintf "codex 1.0.0\\n"\n');
+  await chmod(script, 0o755);
+  await symlink(script, launcher);
+  await writeFile(companion, 'node-runtime-v1');
+
+  const provider = new CommandRuntimeProvider({
+    id: 'codex',
+    command: 'codex',
+    configuredPath: () => launcher,
+    officialPaths: () => [],
+    pathEnv: () => '',
+  });
+  const runtimes = new CliRuntimeManager([provider], root);
+  const lease = await runtimes.acquire('codex');
+  assert.deepEqual(await runtimes.detectExternalChanges(), []);
+
+  await writeFile(companion, 'node-runtime-v2');
+  assert.deepEqual(await runtimes.detectExternalChanges(), ['codex']);
+  await lease.release();
+});

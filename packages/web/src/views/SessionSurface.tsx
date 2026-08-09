@@ -87,6 +87,7 @@ export function SessionSurface({
           <PlanOpenContext.Provider value={onOpenPlan}>
             <ChatPanelOpenContext.Provider value={onOpenChat}>
               <SessionMain
+                key={session.id}
                 session={session}
                 workspace={workspace}
                 items={items}

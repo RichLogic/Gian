@@ -272,3 +272,27 @@ test('runtime resolution failure retires its shared updater claim', async t => {
   const updater = await acquireAgentUpdateLock(lockDir, 'kimi', 'post-failure updater');
   await updater.release();
 });
+
+test('runtime resolution rejects content that changes across its version probe', async t => {
+  const lockDir = mkdtempSync(join(tmpdir(), 'gian-kimi-runtime-snapshot-race-'));
+  t.after(() => rmSync(lockDir, { recursive: true, force: true }));
+  let snapshotCalls = 0;
+  const provider: CliRuntimeProvider = {
+    id: 'kimi',
+    async inspectInstalled() {
+      return [{ cli: 'kimi', binaryPath: '/managed/kimi', source: 'managed' }];
+    },
+    async probe(runtime) {
+      return { ...runtime, version: '0.29.2' };
+    },
+    async snapshot() {
+      snapshotCalls += 1;
+      return snapshotCalls === 1 ? 'before' : 'after';
+    },
+    managedEnv() { return {}; },
+  };
+  const manager = new CliRuntimeManager([provider], lockDir);
+
+  await assert.rejects(manager.acquire('kimi'), /content changed while its version was being probed/);
+  assert.equal(snapshotCalls, 2);
+});

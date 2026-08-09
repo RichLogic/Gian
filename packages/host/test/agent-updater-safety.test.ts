@@ -326,6 +326,50 @@ test('pinned official installer runs with vendor updater isolation', async t => 
   assert.equal(result.agent.cli.path, cliPath);
 });
 
+for (const fixture of [
+  { id: 'claude', relativePath: ['.local', 'bin', 'claude'], version: 'claude 9.9.1' },
+  { id: 'codex', relativePath: ['.local', 'bin', 'codex'], version: 'codex-cli 9.9.2' },
+  { id: 'kimi', relativePath: ['.kimi-code', 'bin', 'kimi'], version: 'kimi 9.9.3' },
+] as const) {
+  test(`official ${fixture.id} installer lands on its supported user path`, async t => {
+    const root = await mkdtemp(join(tmpdir(), `gian-${fixture.id}-official-path-`));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const homeDir = join(root, 'home');
+    const cliPath = join(homeDir, ...fixture.relativePath);
+    const proxyPath = join(root, 'proxy.mjs');
+    await writeFile(proxyPath, 'export {};\n');
+    const installer = Buffer.from([
+      '#!/bin/sh',
+      'set -eu',
+      'test "$NON_INTERACTIVE" = "1"',
+      `mkdir -p "$HOME/${fixture.relativePath.slice(0, -1).join('/')}"`,
+      `printf '%s\\n' '#!/bin/sh' "printf '%s\\\\n' '${fixture.version}'" > "$HOME/${fixture.relativePath.join('/')}"`,
+      `chmod 700 "$HOME/${fixture.relativePath.join('/')}"`,
+      '',
+    ].join('\n'));
+    const installerDigest = createHash('sha256').update(installer).digest('hex');
+    const manager = await AgentManager.create({
+      dataDir: join(root, 'data'),
+      releaseVersion: '0.1.0',
+      managedProxies: false,
+      developmentProxyEntries: {
+        claude: proxyPath,
+        codex: proxyPath,
+        kimi: proxyPath,
+      },
+      homeDir,
+      pathEnv: '',
+      fetchImpl: async () => new Response(installer),
+      officialInstallerSha256: { [fixture.id]: installerDigest },
+    });
+
+    const result = await manager.installOfficialCli(fixture.id);
+    assert.equal(result.agent.cli.state, 'ready');
+    assert.equal(result.agent.cli.path, cliPath);
+    assert.equal(result.agent.cli.source, 'official-user');
+  });
+}
+
 test('install route cannot replace an in-use CLI and re-probes after the last lease drains', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-official-installer-runtime-'));
   t.after(() => rm(root, { recursive: true, force: true }));

@@ -218,7 +218,9 @@ test('paged history does not materialize diagnostic raw artifacts', () => {
 test('terminal turn compaction merges text deltas into one persisted projection', () => {
   withTestDb(db => {
     const history = new SessionHistoryStore(db);
-    for (let index = 0; index < 300; index++) {
+    const fragmentCount = 1_205;
+    const firstFragmentAt = Date.parse('2026-08-09T02:00:00.000Z');
+    for (let index = 0; index < fragmentCount; index++) {
       history.appendEvent('s1', 't1', 'answer', 'output.text.delta', {
         __gian_event: 2,
         provider: 'codex',
@@ -227,15 +229,84 @@ test('terminal turn compaction merges text deltas into one persisted projection'
           type: 'message',
           data: { itemId: 'answer', text: `${index},`, delta: true },
         },
-      });
+      }, { createdAt: new Date(firstFragmentAt + index).toISOString() });
     }
-    const expected = Array.from({ length: 300 }, (_, index) => `${index},`).join('');
-    assert.equal(history.compactTurnStreams('t1'), 299);
+    const expected = Array.from({ length: fragmentCount }, (_, index) => `${index},`).join('');
+    assert.equal(history.compactTurnStreams('t1'), fragmentCount - 1);
     assert.equal(
       (db.prepare('SELECT COUNT(*) AS n FROM events WHERE turn_id = ?').get('t1') as { n: number }).n,
       1,
     );
     assert.equal(history.finalAssistantText('t1'), expected);
-    assert.equal(history.listEventPage('s1', null).events[0]?.display?.data.text, expected);
+    const compacted = history.listEventPage('s1', null).events[0];
+    assert.equal(compacted?.display?.data.text, expected);
+    assert.equal(compacted?.ts, firstFragmentAt, 'compaction retains the stream start timestamp');
+  });
+});
+
+test('persisted stream compaction keeps reasoning summary and full variants separate', () => {
+  withTestDb(db => {
+    const history = new SessionHistoryStore(db);
+    const append = (kind: 'summary' | 'full', text: string): void => {
+      history.appendEvent('s1', 't1', 'shared-reasoning-id', 'output.reasoning.delta', {
+        __gian_event: 2,
+        provider: 'codex',
+        raw: { delta: text, kind },
+        display: {
+          type: 'activity.reasoning',
+          data: {
+            itemId: 'shared-reasoning-id',
+            kind,
+            text,
+            delta: true,
+          },
+        },
+      });
+    };
+    append('summary', 'summary ');
+    append('full', 'full ');
+    append('summary', 'done');
+    append('full', 'trace');
+
+    assert.deepEqual(history.compactTurnStreamsDetailed('t1'), {
+      groups: 2,
+      removed: 2,
+    });
+    const reasoning = history.listEvents('s1').map(event => ({
+      kind: event.display?.data.kind,
+      text: event.display?.data.text,
+    })).sort((left, right) => String(left.kind).localeCompare(String(right.kind)));
+    assert.deepEqual(reasoning, [
+      { kind: 'full', text: 'full trace' },
+      { kind: 'summary', text: 'summary done' },
+    ]);
+  });
+});
+
+test('snapshot compaction deletes oversized groups in bounded batches', () => {
+  withTestDb(db => {
+    const history = new SessionHistoryStore(db);
+    const snapshotCount = 1_205;
+    for (let index = 0; index < snapshotCount; index++) {
+      history.appendEvent('s1', 't1', `diff-${index}`, 'diff.updated', {
+        __gian_event: 2,
+        provider: 'codex',
+        raw: { diff: `snapshot ${index}` },
+        display: {
+          type: 'activity.file-change',
+          data: { files: [], diff: `snapshot ${index}` },
+        },
+      });
+    }
+
+    assert.deepEqual(history.compactTurnSnapshots('t1'), {
+      groups: 1,
+      removed: snapshotCount - 1,
+    });
+    const rows = db.prepare('SELECT call_id FROM events WHERE turn_id = ?').all('t1') as Array<{
+      call_id: string;
+    }>;
+    assert.deepEqual(rows, [{ call_id: 'diff:t1' }]);
+    assert.equal(history.listEvents('s1')[0]?.display?.data.diff, `snapshot ${snapshotCount - 1}`);
   });
 });

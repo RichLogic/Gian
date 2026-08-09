@@ -1,12 +1,11 @@
 import type { OpenAppPrefs, OpenFileCategory } from '@gian/shared';
-import type { ChangeScope } from '../api.js';
 
 export type SheetTabKind =
   | 'file'
   | 'term'
   | 'settings'
   | 'plan'
-  | 'diff'
+  | 'changes'
   | 'commit'
   | 'text'
   | 'workspace'
@@ -75,16 +74,7 @@ export interface SheetTab {
   scrollLine?: number;
   fullPath?: string;
   workingTreeId?: string;
-  /** Normalized query identity for a diff tab. Only `commit` keeps `sha`,
-   *  only `branch` keeps `base`, and `lastturn` is session-scoped. */
-  diffScope?: ChangeScope;
-  diffSha?: string | null;
-  diffBase?: string | null;
-  /** Paths rendered by a stacked diff. Used to validate anchor reveals
-   *  against the active tab before touching the DOM. */
-  diffPaths?: string[];
   planBody?: string;
-  diffText?: string;
   /** Commit tabs (history group): the FULL sha — selection identity is
    *  {workingTreeId, sha}; the 7-char short sha only ever appears in labels
    *  (git-history proposal §5). */
@@ -95,6 +85,9 @@ export interface SheetTab {
   /** Level-3 transcript detail body (P3): full command output / reasoning
    *  trace / long result list for `kind: 'text'` tabs. */
   text?: string;
+  /** True when `text` holds a unified diff (transcript event diff snapshot) —
+   *  render it with the colored DiffBody instead of the plain TextBody. */
+  textDiff?: boolean;
   rawSrc?: string;
   fileTreePath?: string;
   loadError?: string;
@@ -104,39 +97,6 @@ export interface SheetTab {
   /** Error-state retry: re-runs the tab's content load (set by the loader
    *  alongside `loadError`). */
   retryLoad?: () => void;
-}
-
-export interface DiffQueryIdentity {
-  workingTreeId: string;
-  scope: ChangeScope;
-  sha: string | null;
-  base: string | null;
-  sessionId: string | null;
-}
-
-export function normalizeDiffQueryIdentity(
-  workingTreeId: string,
-  scope: ChangeScope,
-  sha?: string | null,
-  base?: string | null,
-  sessionId?: string | null,
-): DiffQueryIdentity {
-  return {
-    workingTreeId,
-    scope,
-    sha: scope === 'commit' ? sha ?? null : null,
-    base: scope === 'branch' ? base ?? null : null,
-    sessionId: scope === 'lastturn' ? sessionId ?? null : null,
-  };
-}
-
-export function tabMatchesDiffQuery(tab: SheetTab, query: DiffQueryIdentity): boolean {
-  return tab.kind === 'diff'
-    && tab.workingTreeId === query.workingTreeId
-    && tab.diffScope === query.scope
-    && (tab.diffSha ?? null) === query.sha
-    && (tab.diffBase ?? null) === query.base
-    && (tab.sessionId ?? null) === query.sessionId;
 }
 
 export interface SheetActions {

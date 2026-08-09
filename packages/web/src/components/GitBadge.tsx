@@ -37,7 +37,7 @@ export function GitBadge({
       let added = 0, removed = 0;
       for (const r of rows) { added += r.added; removed += r.removed; }
       setStats({ added, removed, count: rows.length });
-    });
+    }).catch(() => { /* badge stays hidden on a failed poll */ });
     return () => { alive = false; };
   }, [workingTreeId, refreshKey]);
 

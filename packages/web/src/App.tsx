@@ -18,6 +18,7 @@ import { injectComposerDraft } from './components/Composer.js';
 import type { ChangeScope } from './api.js';
 import { GitHistoryRequestError, loadGitHistoryCommitReachability } from './api.js';
 import { useHistoryMovementRevision } from './controllers/use-history.js';
+import { applyChangesScopeRequest, requestChangesDiffAnchor } from './controllers/use-changes-diff.js';
 import './operations/git-history.js';
 import { FileRefRehypeContext } from './transcript/items.js';
 import type { PlanLifecycleState } from './transcript/apply.js';
@@ -116,6 +117,8 @@ const HistoryInspector = lazy(() =>
   import('./components/HistoryInspector.js').then(module => ({ default: module.HistoryInspector })));
 const HistoryCommitBody = lazy(() =>
   import('./components/HistoryCommitBody.js').then(module => ({ default: module.HistoryCommitBody })));
+const ChangesDiffBody = lazy(() =>
+  import('./components/ChangesDiffBody.js').then(module => ({ default: module.ChangesDiffBody })));
 const WorkspaceDetailBody = lazy(() =>
   import('./components/WorkspacesPanel.js').then(module => ({ default: module.WorkspaceDetailBody })));
 const LoginView = lazy(() =>
@@ -201,6 +204,8 @@ export function App() {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeSubtaskId, setActiveSubtaskId] = useState<string | null>(null);
   const [itemsBySession, setItemsBySession] = useState<Record<string, TranscriptItem[]>>({});
+  const itemsBySessionRef = useRef<Record<string, TranscriptItem[]>>({});
+  itemsBySessionRef.current = itemsBySession;
   const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
   const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
   const [mode, setMode] = useState<Mode>('tasks');
@@ -547,8 +552,7 @@ export function App() {
     toggleRail,
     openFileInSheet,
     openRelativeFileHref,
-    openDiffInSheet,
-    revealOpenDiffPath,
+    showChangesDiff,
     openTranscriptDiffInSheet,
     openCommitInSheet,
     revalidateHistoryTabs,
@@ -573,27 +577,28 @@ export function App() {
   });
 
   // The top-right GitBadge reports the All-changes numbers, so clicking it
-  // must land the Changes inspector on that same scope (requestId forces a
-  // re-apply even when the inspector is already mounted on another scope).
-  const [changesScopeRequest, setChangesScopeRequest] = useState<{
-    scope: ChangeScope;
-    requestId: number;
-    sessionId?: string;
-    turn?: number;
-  } | null>(null);
+  // must land the Changes surface on that same scope. The scope lives in the
+  // use-changes-diff store now (shared by the panel-3 inspector and panel 2's
+  // multi-diff view) — these entries write the store and open the rail.
   const showChanges = (
     scope: ChangeScope,
     target?: { sessionId: string; turn: number },
   ) => {
-    setChangesScopeRequest({ scope, requestId: Date.now(), ...target });
-    activateRail('diffs');
+    const wtId = viewedWorkingTreeId(activeSession);
+    if (wtId) applyChangesScopeRequest(wtId, scope, target);
+    showChangesDiff();
   };
   const showAllChanges = () => showChanges('all');
   // A file selected from the transcript underbar's Diff panel opens the
-  // Diffs inspector with both its exact turn scope and selected file intact.
+  // Diffs rail on that exact turn's scope and jumps panel 2's multi-diff
+  // view to the file's block. It intentionally steals the view.
   const showLastTurnChanges = (session: Session, turn: number, path: string) => {
-    showChanges('lastturn', { sessionId: session.id, turn });
-    void openDiffInSheet(path, false, 'lastturn');
+    const wtId = viewedWorkingTreeId(session);
+    if (wtId) {
+      applyChangesScopeRequest(wtId, 'lastturn', { sessionId: session.id, turn });
+      requestChangesDiffAnchor(wtId, path);
+    }
+    showChangesDiff();
   };
 
   // Git History (Issue #3): when a fetch reports refsChanged for the viewed
@@ -635,6 +640,7 @@ export function App() {
     authStatus: runtimeAuthStatus,
     ws,
     sessionsRef,
+    itemsBySessionRef,
     activeSessionIdRef,
     pendingFirstMessageRef,
     setWsState,
@@ -721,6 +727,7 @@ export function App() {
     setWbTabs(prev => prev.map(tab => {
       if (tab.kind === 'settings') return { ...tab, name: appT('sheet.tab.settings') };
       if (tab.kind === 'plan') return { ...tab, name: appT('sheet.tab.plan') };
+      if (tab.kind === 'changes') return { ...tab, name: appT('inspector.changes') };
       return tab;
     }));
   }, [appT]);
@@ -1200,11 +1207,16 @@ export function App() {
                 if (t.kind === 'commit') {
                   return (
                     <Suspense fallback={null}>
-                    <HistoryCommitBody
-                      tab={t}
-                      onOpenCommit={(commit, permanent) => {
-                        if (t.workingTreeId) openCommitInSheet({ workingTreeId: t.workingTreeId, ...commit }, permanent);
-                      }}
+                    <HistoryCommitBody tab={t} />
+                    </Suspense>
+                  );
+                }
+                if (t.kind === 'changes') {
+                  return (
+                    <Suspense fallback={null}>
+                    <ChangesDiffBody
+                      workingTreeId={activeWtForSession?.id ?? null}
+                      tree={activeWtForSession ?? null}
                     />
                     </Suspense>
                   );
@@ -1255,8 +1267,8 @@ export function App() {
                     ? tab.commitSha ?? null
                     : null;
                 })()}
-                onOpenCommit={(commit, permanent) => {
-                  if (historyWtId) openCommitInSheet({ workingTreeId: historyWtId, ...commit }, permanent);
+                onOpenCommit={(commit) => {
+                  if (historyWtId) openCommitInSheet({ workingTreeId: historyWtId, ...commit });
                 }}
               />
               </Suspense>
@@ -1266,7 +1278,6 @@ export function App() {
                 workingTreeId={viewedWorkingTreeId(activeSession)}
                 workingTrees={workingTrees}
                 revealFile={fileReveal}
-                scopeRequest={changesScopeRequest}
                 activeSessionId={activeSessionId}
                 onOpenFile={(rel, perm) => {
                   const sess = activeSession;
@@ -1275,10 +1286,6 @@ export function App() {
                   if (!wt) return;
                   const abs = `${wt.path}/${rel}`;
                   void openFileInSheet(abs, perm);
-                }}
-                onOpenDiff={(rel, perm, scope, sha, base) => {
-                  if (!perm && revealOpenDiffPath(rel, scope, sha, base)) return;
-                  void openDiffInSheet(rel, perm, scope, sha, base);
                 }}
                 canCommit={!!activeSession}
                 onComposePrompt={text => { if (activeSessionId) injectComposerDraft(activeSessionId, text); }}

@@ -58,12 +58,20 @@ const I = {
   history: 'M3 3v5h5 M3.05 13A9 9 0 1 0 6 5.3L3 8 M12 7v5l4 2',
 };
 
-/* ---- graph geometry (22px gutter, lanes at x=8/16, node center y=14) ---- */
-const LANE_X = [8, 16];
-const LANE_COLOR = ['var(--accent)', 'var(--ok)'];
+/* ---- graph geometry (38px gutter, 4 lanes, node center y=14) ---- */
+const LANE_X = [7, 15, 23, 31];
+const GW = 38;
+/* Chain palette (Air-style): colors follow the branch chain, not the lane —
+ * lane 0's main line is always --lane-1 (blue); each freshly claimed branch
+ * chain takes the next entry and keeps it until its lane ends. Tokens per
+ * theme live in tokens.css. */
+const LANE_COLOR = [
+  'var(--lane-1)', 'var(--lane-2)', 'var(--lane-3)', 'var(--lane-4)',
+  'var(--lane-5)', 'var(--lane-6)', 'var(--lane-7)', 'var(--lane-8)',
+];
+const laneColor = (i: number): string => LANE_COLOR[i % LANE_COLOR.length]!;
 const CY = 14;
-const ROWH = 46;
-const DAYH = 24;
+const ROWH = 28;
 
 function laneStroke(dashed: boolean): string {
   return dashed ? '3 2.5' : '';
@@ -71,59 +79,38 @@ function laneStroke(dashed: boolean): string {
 
 function GraphCell({ row, head, selected }: { row: HistoryGraphRow; head: boolean; selected: boolean }) {
   const x = LANE_X[row.lane]!;
-  const col = LANE_COLOR[row.lane]!;
+  const col = laneColor(row.color);
   return (
-    <svg width="22" height={ROWH} aria-hidden="true">
+    <svg width={GW} height={ROWH} aria-hidden="true">
       {row.linesTop.map(l => (
         <line key={`t${l.lane}`} x1={LANE_X[l.lane]} y1={0} x2={LANE_X[l.lane]} y2={CY}
-              style={{ stroke: LANE_COLOR[l.lane], strokeWidth: 1.5 }}
+              style={{ stroke: laneColor(l.color), strokeWidth: 1.5 }}
               strokeDasharray={laneStroke(l.dashed)} />
       ))}
       {row.linesBottom.map(l => (
         <line key={`b${l.lane}`} x1={LANE_X[l.lane]} y1={CY} x2={LANE_X[l.lane]} y2={ROWH}
-              style={{ stroke: LANE_COLOR[l.lane], strokeWidth: 1.5 }}
+              style={{ stroke: laneColor(l.color), strokeWidth: 1.5 }}
               strokeDasharray={laneStroke(l.dashed)} />
       ))}
       {row.curves.map((c, i) => c.dir === 'down' ? (
         <path key={i}
-              d={`M ${LANE_X[c.fromLane]} ${CY} L ${LANE_X[c.fromLane]} ${CY + 7} C ${LANE_X[c.fromLane]} ${CY + 20}, ${LANE_X[c.toLane]} ${ROWH - 12}, ${LANE_X[c.toLane]} ${ROWH}`}
-              style={{ fill: 'none', stroke: LANE_COLOR[c.toLane], strokeWidth: 1.5 }}
+              d={`M ${LANE_X[c.fromLane]} ${CY} L ${LANE_X[c.fromLane]} ${CY + 3} C ${LANE_X[c.fromLane]} ${CY + 10}, ${LANE_X[c.toLane]} ${ROWH - 7}, ${LANE_X[c.toLane]} ${ROWH}`}
+              style={{ fill: 'none', stroke: laneColor(c.color), strokeWidth: 1.5 }}
               strokeDasharray={laneStroke(c.dashed)} />
       ) : (
         <path key={i}
               d={`M ${LANE_X[c.fromLane]} 0 C ${LANE_X[c.fromLane]} ${CY - 8}, ${LANE_X[c.toLane]} ${CY - 6}, ${LANE_X[c.toLane]} ${CY}`}
-              style={{ fill: 'none', stroke: LANE_COLOR[c.fromLane], strokeWidth: 1.5 }}
+              style={{ fill: 'none', stroke: laneColor(c.color), strokeWidth: 1.5 }}
               strokeDasharray={laneStroke(c.dashed)} />
       ))}
       {head && (
         <circle cx={x} cy={CY} r={6.2}
-                style={{ fill: 'none', stroke: 'var(--accent)', strokeOpacity: 0.45, strokeWidth: 1.5 }} />
+                style={{ fill: 'none', stroke: col, strokeOpacity: 0.45, strokeWidth: 1.5 }} />
       )}
       <circle cx={x} cy={CY} r={3.5}
               style={{ fill: selected ? col : 'var(--surface)', stroke: col, strokeWidth: 1.5 }} />
     </svg>
   );
-}
-
-function DayGraphCell({ lanes }: { lanes: Array<{ lane: number; dashed: boolean }> }) {
-  return (
-    <svg width="22" height={DAYH} aria-hidden="true">
-      {lanes.map(l => (
-        <line key={l.lane} x1={LANE_X[l.lane]} y1={0} x2={LANE_X[l.lane]} y2={DAYH}
-              style={{ stroke: LANE_COLOR[l.lane], strokeWidth: 1.5 }}
-              strokeDasharray={laneStroke(l.dashed)} />
-      ))}
-    </svg>
-  );
-}
-
-/* ---- day bands ---- */
-function dayLabel(iso: string, todayStart: number, yesterdayStart: number, locale: string, t: (k: string) => string): string {
-  const ts = Date.parse(iso);
-  if (Number.isNaN(ts)) return '';
-  if (ts >= todayStart) return t('history.day.today');
-  if (ts >= yesterdayStart) return t('history.day.yesterday');
-  return new Date(ts).toLocaleDateString(locale, { month: 'short', day: 'numeric' });
 }
 
 function refChipIcon(kind: GitHistoryRef['kind']): string {
@@ -135,7 +122,7 @@ interface Props {
   /** Full sha of the commit shown in the active history tab for THIS tree —
    *  the selected row. Null when no commit is open. */
   selectedSha: string | null;
-  onOpenCommit: (commit: { sha: string; subject: string }, permanent: boolean) => void;
+  onOpenCommit: (commit: { sha: string; subject: string }) => void;
 }
 
 export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: Props) {
@@ -248,34 +235,26 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
 
   const graphRows = useMemo(() => assignHistoryLanes(state.items), [state.items]);
 
-  /* Day-band + commit row merge; graph lanes ride through the band using the
-   * following commit row's incoming lanes. */
-  const listRows = useMemo(() => {
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const yesterdayStart = todayStart - 86_400_000;
-    const locale = document.documentElement.lang || 'en';
-    const rows: Array<
-      | { type: 'day'; label: string; lanes: Array<{ lane: number; dashed: boolean }> }
-      | { type: 'commit'; commit: GitHistoryCommit; graph: HistoryGraphRow }
-    > = [];
-    let lastLabel: string | null = null;
-    state.items.forEach((commit, i) => {
-      const label = dayLabel(commit.authoredAt, todayStart, yesterdayStart, locale, t);
-      const graph = graphRows[i]!;
-      if (label !== lastLabel) {
-        rows.push({ type: 'day', label, lanes: graph.linesTop.length > 0 ? graph.linesTop : graph.linesBottom });
-        lastLabel = label;
-      }
-      rows.push({ type: 'commit', commit, graph });
-    });
-    return rows;
-  }, [state.items, graphRows, t]);
+  /* Infinite scroll: a sentinel below the list auto-fetches the next cursor
+   * page when it scrolls into view (same IO pattern as the lazy file diffs).
+   * Manual retry stays for a failed page; the end-of-history count stays. */
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || !workingTreeId || !state.nextCursor || state.loadingMore || state.loadMoreError) return;
+    if (typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver(entries => {
+      if (entries.some(e => e.isIntersecting)) loadMoreHistory(workingTreeId);
+    }, { root: scrollRef.current, rootMargin: '120px' });
+    io.observe(el);
+    return () => io.disconnect();
+    // A failed page never auto-retries — the error row keeps a manual Retry.
+  }, [workingTreeId, state.nextCursor, state.loadingMore, state.loadMoreError, state.items.length]);
 
   const headSha = state.headSha;
 
-  function openCommit(commit: GitHistoryCommit, permanent: boolean): void {
-    onOpenCommit({ sha: commit.sha, subject: commit.subject }, permanent);
+  function openCommit(commit: GitHistoryCommit): void {
+    onOpenCommit({ sha: commit.sha, subject: commit.subject });
   }
 
   function onListKeyDown(e: React.KeyboardEvent, commit: GitHistoryCommit): void {
@@ -292,7 +271,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
       }
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      openCommit(commit, e.shiftKey);
+      openCommit(commit);
     }
   }
 
@@ -325,10 +304,10 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
   const filtersActive = !!(state.ref || state.author || state.query);
   const refLabel = state.ref
     ? state.availableRefs.find(r => r.name === state.ref)?.shortName ?? state.ref
-    : t('history.filter.allBranches');
+    : t('history.filter.branch');
   const authorLabel = state.author
     ? state.availableAuthors.find(a => a.email === state.author)?.name ?? state.author
-    : t('history.filter.allAuthors');
+    : t('history.filter.authors');
 
   return (
     <aside className="inspector" aria-label={t('dock.history')}>
@@ -462,7 +441,9 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
             </>
           )}
         </span>
-        <span className="h-menu-anchor">
+        {/* The author menu is the rightmost chip — right-align its menu so it
+         *  can never fly out past the panel edge and cover the rail. */}
+        <span className="h-menu-anchor end">
           <button className={`h-chip${state.author ? ' on' : ''}`} aria-haspopup="menu"
                   aria-expanded={openMenu === 'author'} title={t('history.filter.authorTitle')}
                   onClick={() => { setOpenMenu(m => (m === 'author' ? null : 'author')); setMenuSearch(''); }}>
@@ -489,7 +470,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
                     <button key={a.email} role="menuitemradio" aria-checked={state.author === a.email}
                             className={state.author === a.email ? 'active' : ''}
                             onClick={() => { if (workingTreeId) setHistoryAuthor(workingTreeId, a.email); setOpenMenu(null); }}>
-                      <span className="ck">{state.author === a.email ? '✓' : ''}</span>{a.name}
+                      <span className="ck">{state.author === a.email ? '✓' : ''}</span><span className="nm">{a.name}</span>
                       <span className="sub">{a.email}</span>
                     </button>
                   ))}
@@ -566,43 +547,28 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
 
         {state.items.length > 0 && (
           <div className="h-list" role="listbox" aria-label={t('history.listbox')}>
-            {listRows.map((row, i) => row.type === 'day' ? (
-              <div className="h-day" key={`day-${row.label}-${i}`}>
-                <span className="g"><DayGraphCell lanes={row.lanes} /></span>
-                <span>{row.label}</span>
-              </div>
-            ) : (
+            {state.items.map((commit, i) => (
               <div
-                key={row.commit.sha}
-                className={`h-row${selectedSha === row.commit.sha ? ' sel' : ''}`}
+                key={commit.sha}
+                className={`h-row${selectedSha === commit.sha ? ' sel' : ''}`}
                 role="option"
-                aria-selected={selectedSha === row.commit.sha}
-                tabIndex={(focusSha ?? selectedSha ?? state.items[0]?.sha) === row.commit.sha ? 0 : -1}
-                data-sha={row.commit.sha.slice(0, 7)}
-                title={`${row.commit.subject} — ${row.commit.sha.slice(0, 7)} · ${row.commit.author.name}`}
-                onClick={() => openCommit(row.commit, false)}
-                onDoubleClick={() => openCommit(row.commit, true)}
-                onKeyDown={e => onListKeyDown(e, row.commit)}
-                onFocus={() => setFocusState({ workingTreeId: workingTreeId!, sha: row.commit.sha })}
+                aria-selected={selectedSha === commit.sha}
+                tabIndex={(focusSha ?? selectedSha ?? state.items[0]?.sha) === commit.sha ? 0 : -1}
+                data-sha={commit.sha.slice(0, 7)}
+                title={`${commit.subject} — ${commit.sha.slice(0, 7)} · ${commit.author.name} · ${relTime(commit.authoredAt)}`}
+                onClick={() => openCommit(commit)}
+                onKeyDown={e => onListKeyDown(e, commit)}
+                onFocus={() => setFocusState({ workingTreeId: workingTreeId!, sha: commit.sha })}
               >
                 <span className="g">
-                  <GraphCell row={row.graph} head={headSha === row.commit.sha}
-                             selected={selectedSha === row.commit.sha} />
+                  <GraphCell row={graphRows[i]!} head={headSha === commit.sha}
+                             selected={selectedSha === commit.sha} />
                 </span>
-                <span className="c">
-                  <span className="l1">
-                    {refChips(row.commit)}
-                    <span className="subject">{row.commit.subject}</span>
-                  </span>
-                  <span className="l2">
-                    <span className="sha">{row.commit.sha.slice(0, 7)}</span>
-                    <span className="sep">·</span>
-                    <span className="who">{row.commit.author.name}</span>
-                    {row.commit.isMerge && <span className="merge-tag">{t('history.tag.merge')}</span>}
-                    {row.commit.isRoot && <span className="merge-tag">{t('history.tag.root')}</span>}
-                    <span className="when">{relTime(row.commit.authoredAt)}</span>
-                  </span>
-                </span>
+                <span className="subject">{commit.subject}</span>
+                {(() => {
+                  const chips = refChips(commit);
+                  return chips ? <span className="refs">{chips}</span> : null;
+                })()}
               </div>
             ))}
           </div>
@@ -617,11 +583,14 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
                 <button className="btn secondary sm" onClick={() => loadMoreHistory(workingTreeId)}>{t('common.retry')}</button>
               </div>
             ) : state.nextCursor ? (
-              <button className="btn secondary sm" data-testid="history-load-more"
-                      disabled={state.loadingMore}
-                      onClick={() => loadMoreHistory(workingTreeId)}>
-                {state.loadingMore ? <><span className="spinner" /> {t('history.loadingMore')}</> : t('history.loadMore')}
-              </button>
+              <>
+                <div className="h-sentinel" ref={sentinelRef} aria-hidden="true" />
+                {state.loadingMore && (
+                  <span className="h-loading-more" role="status">
+                    <span className="spinner" aria-hidden="true" /> {t('history.loadingMore')}
+                  </span>
+                )}
+              </>
             ) : null}
             <span className="count">
               {t('history.count').replace('{n}', String(state.items.length))}{state.nextCursor ? '' : ` · ${t('history.countEnd')}`}

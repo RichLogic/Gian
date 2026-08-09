@@ -6,6 +6,7 @@ import type { ApprovalActionContext, ApprovalItem, StatusItem, TranscriptItem } 
 import { formatTime } from '../utils/format.js';
 import { AgentSpawnRow, ApprovalCard, AssistantMessage, AutoNoticeCard, Caret, CommandCard, CompactionRow, DiffCard, FileReadCard, FileSearchCard, formatElapsed, MinimalErrorCard, ReasoningCard, ToolEvent, UserMessage, useStableExpand, WebSearchRow } from './items.js';
 import { GianMascot } from '../components/GianMascot.js';
+import { transcriptItemIdentity } from './identity.js';
 
 /**
  * P2 render-time grouping (2026-08-08): a completed turn folds ALL of its
@@ -125,27 +126,29 @@ export function renderItem(
   isCurrentUser?: boolean,
   hideAvatar?: boolean,
   showFooter?: boolean,
+  turnCompleted?: boolean,
 ) {
+  const identity = transcriptItemIdentity(item);
   switch (item.kind) {
     case 'user':
       if (isCurrentUser && currentUserRef) {
         return (
-          <div key={item.id} ref={currentUserRef} data-current-user="true">
+          <div key={identity} ref={currentUserRef} data-current-user="true">
             <UserMessage item={item} />
           </div>
         );
       }
-      return <UserMessage key={item.id} item={item} />;
+      return <UserMessage key={identity} item={item} />;
     case 'assistant':
-      return <AssistantMessage key={item.id} item={item} hideAvatar={hideAvatar} showFooter={showFooter} />;
+      return <AssistantMessage key={identity} item={item} hideAvatar={hideAvatar} showFooter={showFooter} />;
     case 'reasoning':
-      return <ReasoningCard key={item.id} item={item} />;
+      return <ReasoningCard key={identity} item={item} />;
     case 'tool':
-      return <ToolEvent key={item.id} item={item} />;
+      return <ToolEvent key={identity} item={item} turnCompleted={turnCompleted} />;
     case 'approval':
-      return <ApprovalCard key={item.id} item={item} onApprove={onApprove} />;
+      return <ApprovalCard key={identity} item={item} onApprove={onApprove} />;
     case 'diff':
-      return <DiffCard key={item.id} item={item} />;
+      return <DiffCard key={identity} item={item} />;
     case 'turn-start':
       // Hidden per design (PR5/A1) — TURN N dividers removed from transcript UI.
       // Data still flows through items[] / DB; only the visual divider is suppressed.
@@ -153,23 +156,23 @@ export function renderItem(
     case 'turn-end':
       return null; // Skip, separator already shown by next turn-start
     case 'error':
-      return <TranscriptErrorCard key={item.id} item={item} />;
+      return <TranscriptErrorCard key={identity} item={item} />;
     case 'status':
-      return <div key={item.id} className="status-line">{item.text}</div>;
+      return <div key={identity} className="status-line">{item.text}</div>;
     case 'compaction':
-      return <CompactionRow key={item.id} item={item} />;
+      return <CompactionRow key={identity} item={item} />;
     case 'command':
-      return <CommandCard key={item.id} item={item} />;
+      return <CommandCard key={identity} item={item} turnCompleted={turnCompleted} />;
     case 'file-read':
-      return <FileReadCard key={item.id} item={item} />;
+      return <FileReadCard key={identity} item={item} />;
     case 'file-search':
-      return <FileSearchCard key={item.id} item={item} />;
+      return <FileSearchCard key={identity} item={item} />;
     case 'web-search':
-      return <WebSearchRow key={item.id} item={item} />;
+      return <WebSearchRow key={identity} item={item} />;
     case 'agent-spawn':
-      return <AgentSpawnRow key={item.id} item={item} />;
+      return <AgentSpawnRow key={identity} item={item} turnCompleted={turnCompleted} />;
     case 'auto-notice':
-      return <AutoNoticeCard key={item.id} item={item} />;
+      return <AutoNoticeCard key={identity} item={item} />;
   }
 }
 
@@ -249,7 +252,15 @@ function TurnSumBlock({
       </div>
       {open && (
         <div className="turnsum-body">
-          {block.items.map(child => renderItem(child, onApprove))}
+          {block.items.map(child => renderItem(
+            child,
+            onApprove,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            true,
+          ))}
         </div>
       )}
     </>
@@ -363,13 +374,13 @@ export function Transcript({
   // closest(). Jam scrollTop twice — synchronously and on next rAF — to absorb
   // async layout shifts from ReactMarkdown / syntax highlight that grow the
   // transcript after the initial measurement.
-  const firstId = items[0]?.id;
+  const firstId = items[0] ? transcriptItemIdentity(items[0]) : undefined;
   // Most recent user message — a new one means the user just sent/steered, so
   // the view re-pins to the bottom even if they had scrolled up.
   let lastUserId: string | undefined;
   for (let i = items.length - 1; i >= 0; i--) {
     const it = items[i]!;
-    if (it.kind === 'user') { lastUserId = it.id; break; }
+    if (it.kind === 'user') { lastUserId = transcriptItemIdentity(it); break; }
   }
   const idsRef = useRef<{ firstId?: string; lastUserId?: string }>({});
   useLayoutEffect(() => {
@@ -482,7 +493,7 @@ export function Transcript({
           blocks.forEach((item, bi) => {
             if (item.kind === 'turnsum') {
               prevSender = null;
-              out.push(<TurnSumBlock key={item.id} block={item} onApprove={onApprove} />);
+              out.push(<TurnSumBlock key={`turnsum:${item.turn}:${item.id}`} block={item} onApprove={onApprove} />);
             } else {
               let hideAvatar = false;
               // Assistant footer (time + copy) renders on the TAIL of a
@@ -509,7 +520,9 @@ export function Transcript({
                 item,
                 onApprove,
                 currentUserRef,
-                item.kind === 'user' && currentUser !== null && item.id === currentUser.id,
+                item.kind === 'user'
+                  && currentUser !== null
+                  && transcriptItemIdentity(item) === transcriptItemIdentity(currentUser),
                 hideAvatar,
                 isTail,
               ));

@@ -27,6 +27,7 @@ import type {
   Executor,
 } from '@gian/shared';
 import { CommandRuntimeProvider } from '../runtime/command-provider.js';
+import { KimiSessionStoreRuntimeProvider } from '../runtime/kimi-session-store.js';
 import { runProtectedCommand } from '../runtime/protected-command.js';
 import type { CliRuntimeProvider, RuntimeProbe } from '../runtime/types.js';
 import { shutdownProxyProcess } from '../proxy/process-shutdown.js';
@@ -99,6 +100,7 @@ export interface AgentManagerOptions {
   developmentProxyEntries?: Partial<Record<Executor, string>>;
   environmentCliPaths?: Partial<Record<Executor, string>>;
   homeDir?: string;
+  kimiCodeHome?: string;
   pathEnv?: string;
   fetchImpl?: typeof fetch;
   /** Test/release-audit override for the reviewed official installer pin. */
@@ -343,10 +345,11 @@ async function existsReadable(path: string): Promise<boolean> {
 export class AgentManager {
   private readonly configPath: string;
   private readonly homeDir: string;
+  private readonly kimiCodeHome: string;
   private readonly fetchImpl: typeof fetch;
   private readonly releaseVersion: string;
   private readonly releaseRepository: string;
-  private readonly providers = new Map<Executor, CommandRuntimeProvider>();
+  private readonly providers = new Map<Executor, CliRuntimeProvider>();
   private readonly operations = new Map<string, Promise<AgentInstallResult>>();
   private readonly statusCache = new Map<Executor, { value: AgentInstallStatus; expiresAt: number }>();
   private readonly statusProbes = new Map<Executor, {
@@ -360,23 +363,45 @@ export class AgentManager {
   private constructor(private readonly options: AgentManagerOptions) {
     this.configPath = join(options.dataDir, CONFIG_FILE);
     this.homeDir = options.homeDir ?? homedir();
+    this.kimiCodeHome = options.kimiCodeHome
+      ?? process.env.KIMI_CODE_HOME
+      ?? join(this.homeDir, '.kimi-code');
+    if (!isAbsolute(this.kimiCodeHome)) {
+      throw new Error('KIMI_CODE_HOME must be an absolute path.');
+    }
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.releaseVersion = safeReleaseValue(options.releaseVersion, 'release version');
     this.releaseRepository = normalizeRepository(
       options.releaseRepository ?? 'RichLogic/Gian',
     );
     for (const definition of Object.values(AGENTS)) {
-      this.providers.set(definition.id, new CommandRuntimeProvider({
+      const defaultKimiBinary = join(this.kimiCodeHome, 'bin', 'kimi');
+      const officialPaths = () => definition.id === 'kimi'
+        ? [
+          defaultKimiBinary,
+          ...definition.officialPaths(this.homeDir).filter(path => path !== defaultKimiBinary),
+        ]
+        : definition.officialPaths(this.homeDir);
+      const commandProvider = new CommandRuntimeProvider({
         id: definition.id,
         command: definition.command,
         configuredPath: () => (
           this.config.cliPaths[definition.id] ??
           this.options.environmentCliPaths?.[definition.id]
         ),
-        officialPaths: () => definition.officialPaths(this.homeDir),
+        officialPaths,
         pathEnv: () => options.pathEnv ?? process.env.PATH,
-        env: managedRuntimeEnvironment(definition.id),
-      }));
+        env: {
+          ...managedRuntimeEnvironment(definition.id),
+          ...(definition.id === 'kimi' ? { KIMI_CODE_HOME: this.kimiCodeHome } : {}),
+        },
+      });
+      this.providers.set(
+        definition.id,
+        definition.id === 'kimi'
+          ? new KimiSessionStoreRuntimeProvider(commandProvider, this.kimiCodeHome)
+          : commandProvider,
+      );
     }
   }
 
@@ -1297,6 +1322,11 @@ export class AgentManager {
       env: {
         ...process.env,
         ...managedRuntimeEnvironment(id),
+        // Install into the same home whose official paths AgentManager probes.
+        // This is normally process HOME, while packaged/acceptance harnesses
+        // deliberately supply an isolated home so vendor installers cannot
+        // leak files into the invoking user's profile.
+        HOME: this.homeDir,
         NON_INTERACTIVE: '1',
       },
     });

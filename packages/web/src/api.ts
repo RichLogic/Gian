@@ -391,7 +391,9 @@ export async function loadChanged(
   if (scope === 'lastturn' && turn != null) params.set('turn', String(turn));
   const q = params.size ? `?${params.toString()}` : '';
   const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/changed${q}`);
-  if (!res.ok) return [];
+  // Throws on failure: the changes-diff store's list status must distinguish
+  // a failed load (error state + retry) from a scope with no changes.
+  if (!res.ok) throw new Error(`Changed-files load failed (${res.status})`);
   return (await res.json()) as ChangedEntry[];
 }
 
@@ -598,23 +600,32 @@ export async function loadNativeConfig(
   };
 }
 
+export interface FileDiffResult {
+  diff: string;
+  /** True when the host capped the patch at its safe-output prefix. The
+   *  working-tree /diff route does not truncate today, but the history route
+   *  does — keep the flag wired so a future cap surfaces instead of silently
+   *  rendering a partial patch. */
+  truncated: boolean;
+}
+
 export async function loadDiff(
   workingTreeId: string,
   path: string,
   scope: ChangeScope = 'all',
   sha?: string | null,
   base?: string | null,
-): Promise<string> {
+): Promise<FileDiffResult> {
   const params = new URLSearchParams({ path });
   if (scope !== 'all') params.set('scope', scope);
   if (scope === 'commit' && sha) params.set('sha', sha);
   if (scope === 'branch' && base) params.set('base', base);
   const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/diff?${params.toString()}`);
-  // Throws on failure (Phase 3b): the diff tab's loading→fill-or-fail timing
+  // Throws on failure (Phase 3b): the diff view's loading→fill-or-fail timing
   // must distinguish a failed load (error state + retry) from an empty diff.
   if (!res.ok) throw new Error(`Diff load failed (${res.status})`);
-  const body = (await res.json()) as { diff: string };
-  return body.diff ?? '';
+  const body = (await res.json()) as { diff: string; truncated?: boolean };
+  return { diff: body.diff ?? '', truncated: body.truncated === true };
 }
 
 export interface WorkspacePatch {

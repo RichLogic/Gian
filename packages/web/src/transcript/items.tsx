@@ -12,6 +12,7 @@ import {
 import type { AgentSpawnItem, AutoNoticeItem, CommandItem, CompactionItem, DiffItem, FileReadItem, FileSearchItem, MsgItem, ReasoningItem, ToolItem, WebSearchItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
 import { Caret } from './approval-cards.js';
+import { transcriptItemIdentity } from './identity.js';
 export { ApprovalCard, Caret } from './approval-cards.js';
 
 /**
@@ -46,7 +47,7 @@ export interface TranscriptDetailPayload {
   title: string;
   /** Full detail text (mono, pre-wrap body). */
   text: string;
-  /** Transcript item id, for a stable tab identity across re-opens. */
+  /** Logical transcript item id, for a stable tab identity across re-opens. */
   sourceId?: string;
 }
 export const TranscriptDetailOpenContext = createContext<
@@ -260,6 +261,7 @@ function FileLink({
 /** Level-2 thresholds (locked in docs/work-items/transcript-redesign-acd.md). */
 const INLINE_OUTPUT_LINES = 10;
 const INLINE_DIFF_LINES = 30;
+const INLINE_DETAIL_COLUMNS = 120;
 
 /** Re-render once a second while `active` so running timers tick. */
 function useNowSeconds(active: boolean): number {
@@ -376,6 +378,7 @@ export function DiffCard({ item }: { item: DiffItem }) {
           subject={subject}
           subjectTitle={subject}
           meta={stats}
+          dataAttrs={{ 'data-testid': `diff-${item.id}` }}
           expandable
           open={open}
           onToggle={toggle}
@@ -407,22 +410,37 @@ export function DiffCard({ item }: { item: DiffItem }) {
       subject={subject}
       subjectTitle={subject}
       meta={<>{openDiff && <PanelExtHint />}{stats}</>}
+      dataAttrs={{ 'data-testid': `diff-${item.id}` }}
       onRowClick={() => openDiff?.(item)}
       caret
     />
   );
 }
 
-export function ToolEvent({ item }: { item: ToolItem }) {
+export function ToolEvent({
+  item,
+  turnCompleted = false,
+}: {
+  item: ToolItem;
+  turnCompleted?: boolean;
+}) {
   const t = useT();
   const { open, toggle } = useStableExpand();
   const openDetail = useContext(TranscriptDetailOpenContext);
   const hasDetail = !!(item.summary || item.output);
-  const outputLines = item.output ? item.output.split('\n').length : 0;
-  const running = item.status === 'running' || item.status === 'pending';
-  // Level 3: a long tool output opens in panel 2 rather than scrolling
-  // inline. Args-only or short-output tools keep the inline detail.
-  if (!running && item.output && outputLines > INLINE_OUTPUT_LINES && openDetail) {
+  // Historical tool cards all re-render while the current item streams. Keep
+  // JSON parsing/stringifying bounded to a card whose own payload changed.
+  const detail = useMemo(
+    () => measureToolDetail(item.summary, item.output),
+    [item.summary, item.output],
+  );
+  const detailNeedsPanel = detail.lines > INLINE_OUTPUT_LINES || detail.summaryTruncated;
+  const running = !turnCompleted && (item.status === 'running' || item.status === 'pending');
+  // Level 3: measure the complete detail, not just output. Tool arguments are
+  // often a one-line JSON object and the inline key/value view deliberately
+  // truncates long values; both forms must still offer the full value in
+  // panel 2. Running tools remain inline so live output does not jump panels.
+  if (!running && hasDetail && detailNeedsPanel && openDetail) {
     return (
       <TRow
         verb={t('transcript.tool')}
@@ -432,13 +450,13 @@ export function ToolEvent({ item }: { item: ToolItem }) {
           <>
             <PanelExtHint />
             {item.status === 'error' && <span className="err">error</span>}
-            <span>{outputLines} {t(outputLines === 1 ? 'transcript.line' : 'transcript.lines')}</span>
+            <span>{detail.lines} {t(detail.lines === 1 ? 'transcript.line' : 'transcript.lines')}</span>
           </>
         }
         onRowClick={() => openDetail({
           title: `${t('transcript.tool')}: ${item.name}`,
-          text: item.output!,
-          sourceId: item.id,
+          text: detail.text,
+          sourceId: transcriptItemIdentity(item),
         })}
         caret
       />
@@ -460,12 +478,52 @@ export function ToolEvent({ item }: { item: ToolItem }) {
         onToggle={toggle}
       />
       {open && hasDetail && (
-        <div className={`trow-detail${outputLines > INLINE_OUTPUT_LINES ? ' scroll' : ''}`}>
+        <div className={`trow-detail${detailNeedsPanel ? ' scroll' : ''}`}>
           {item.summary && <ToolArgs raw={item.summary} />}
           {item.output && <pre className="tool-output">{item.output}</pre>}
         </div>
       )}
     </>
+  );
+}
+
+/** Build full panel text and its routing metadata in one parse. With both
+ * input and output present, retain the inline card's input-first ordering. */
+function measureToolDetail(summary: string, output: string | undefined): {
+  text: string;
+  lines: number;
+  summaryTruncated: boolean;
+} {
+  let input = summary;
+  let summaryTruncated = false;
+  if (summary) {
+    try {
+      const parsed = JSON.parse(summary) as unknown;
+      input = JSON.stringify(parsed, null, 2);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        summaryTruncated = Object.values(parsed as Record<string, unknown>).some(value => {
+          if (typeof value === 'string') return value.length > INLINE_DETAIL_COLUMNS;
+          if (value && typeof value === 'object') {
+            return JSON.stringify(value).length > INLINE_DETAIL_COLUMNS;
+          }
+          return false;
+        });
+      }
+    } catch {
+      // A provider may send a plain-text summary; keep it losslessly.
+    }
+  }
+  const text = !input ? output ?? '' : !output ? input : `${input}\n\n${output}`;
+  return { text, lines: visualLineCount(text), summaryTruncated };
+}
+
+/** Estimate wrapped rows as well as explicit newlines. A giant one-line JSON
+ * value is visually long even though `split('\\n')` reports one line. */
+function visualLineCount(text: string): number {
+  if (!text) return 0;
+  return text.split('\n').reduce(
+    (count, line) => count + Math.max(1, Math.ceil(line.length / INLINE_DETAIL_COLUMNS)),
+    0,
   );
 }
 
@@ -562,7 +620,7 @@ export function UserMessage({ item }: { item: MsgItem }) {
   const hasText = item.text.length > 0;
   const attachments = item.attachments ?? [];
   return (
-    <div className={`msg user${stateCls}`} data-msg-id={item.id}>
+    <div className={`msg user${stateCls}`} data-msg-id={transcriptItemIdentity(item)}>
       <div className="msg-body">
         {attachments.length > 0 && (
           <div className="msg-attachments user-attachments">
@@ -687,7 +745,11 @@ export function ReasoningCard({ item }: { item: ReasoningItem }) {
             <span>{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>
           </>
         }
-        onRowClick={() => openDetail({ title: label, text: item.text, sourceId: item.id })}
+        onRowClick={() => openDetail({
+          title: label,
+          text: item.text,
+          sourceId: transcriptItemIdentity(item),
+        })}
         caret
         dataAttrs={{ 'data-variant': item.variant }}
       />
@@ -713,16 +775,29 @@ export function ReasoningCard({ item }: { item: ReasoningItem }) {
   );
 }
 
-export function CommandCard({ item }: { item: CommandItem }) {
+export function CommandCard({
+  item,
+  turnCompleted = false,
+}: {
+  item: CommandItem;
+  turnCompleted?: boolean;
+}) {
   const t = useT();
   const { open, toggle } = useStableExpand();
   const openDetail = useContext(TranscriptDetailOpenContext);
   const outputText = item.stdout + (item.stderr ? `\n${item.stderr}` : '');
   const hasOutput = outputText.length > 0;
-  const lineCount = hasOutput ? outputText.split('\n').length : 0;
+  const lineCount = hasOutput ? visualLineCount(outputText) : 0;
+  const running = !turnCompleted && item.status === 'running';
+  const finishedMeta = (
+    <>
+      {item.status === 'error' && <span className="err">error</span>}
+      {item.exitCode !== undefined && <span>exit {item.exitCode}</span>}
+    </>
+  );
   // Level 3 (P3): a finished command with >10 output lines opens the full
   // output in panel 2. Running commands keep streaming inline.
-  if (hasOutput && lineCount > INLINE_OUTPUT_LINES && item.status !== 'running' && openDetail) {
+  if (hasOutput && lineCount > INLINE_OUTPUT_LINES && !running && openDetail) {
     return (
       <TRow
         verb={t('transcript.command.run')}
@@ -731,16 +806,17 @@ export function CommandCard({ item }: { item: CommandItem }) {
         meta={
           <>
             <PanelExtHint />
-            {item.status === 'error' && <span className="err">error</span>}
+            {finishedMeta}
             <span>{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>
           </>
         }
         onRowClick={() => openDetail({
           title: `${t('transcript.command.run')}: ${item.command}`,
           text: outputText,
-          sourceId: item.id,
+          sourceId: transcriptItemIdentity(item),
         })}
         caret
+        dataAttrs={{ 'data-testid': `command-${item.id}` }}
       />
     );
   }
@@ -751,17 +827,17 @@ export function CommandCard({ item }: { item: CommandItem }) {
         subject={item.command}
         subjectTitle={item.cwd ? `${item.command} — ${item.cwd}` : item.command}
         meta={
-          item.status === 'running' ? <RunningMeta since={item.ts} />
-          : item.status === 'error' ? <span className="err">error</span>
-          : undefined
+          running ? <RunningMeta since={item.ts} />
+          : finishedMeta
         }
         expandable={hasOutput}
         open={open}
         onToggle={toggle}
+        dataAttrs={{ 'data-testid': `command-${item.id}` }}
       />
       {open && hasOutput && (
         <div className={`trow-detail cmd${lineCount > INLINE_OUTPUT_LINES ? ' scroll' : ''}`}>
-          {item.status === 'running'
+          {running
             ? (
               <div className="cmd-stream">
                 <span>{item.stdout}</span>
@@ -816,7 +892,7 @@ export function FileSearchCard({ item }: { item: FileSearchItem }) {
         onRowClick={() => openDetail({
           title: `${verb}: /${item.pattern}/`,
           text: item.matches!.join('\n'),
-          sourceId: item.id,
+          sourceId: transcriptItemIdentity(item),
         })}
         caret
       />
@@ -930,9 +1006,18 @@ export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
   );
 }
 
-export function AgentSpawnRow({ item }: { item: AgentSpawnItem }) {
+export function AgentSpawnRow({
+  item,
+  turnCompleted = false,
+}: {
+  item: AgentSpawnItem;
+  turnCompleted?: boolean;
+}) {
   const t = useT();
   const openChatPanel = useContext(ChatPanelOpenContext);
+  const identity = transcriptItemIdentity(item);
+  const stillRunning = item.status === 'running'
+    && (!turnCompleted || item.background === true);
   // Plain trow (the pre-redesign orange shell is gone); the row has no
   // inline detail — click opens the agent's chat panel instead.
   return (
@@ -941,12 +1026,13 @@ export function AgentSpawnRow({ item }: { item: AgentSpawnItem }) {
       subject={item.description}
       subjectTitle={item.description}
       meta={
-        item.status === 'running' ? <RunningMeta since={item.ts} />
+        stillRunning ? <RunningMeta since={item.ts} />
+        : item.status === 'running' ? <span>{t('coding.status.interrupted')}</span>
         : item.status === 'error' ? <span className="err">error</span>
         : undefined
       }
-      onRowClick={() => openChatPanel?.({ kind: 'agent', id: item.id })}
-      dataAttrs={{ 'data-agent-id': item.id, 'data-provider': item.provider, title: t('transcript.agentOpen') }}
+      onRowClick={() => openChatPanel?.({ kind: 'agent', id: identity })}
+      dataAttrs={{ 'data-agent-id': identity, 'data-provider': item.provider, title: t('transcript.agentOpen') }}
     />
   );
 }

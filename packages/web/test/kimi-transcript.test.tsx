@@ -68,6 +68,67 @@ describe('Kimi transcript events', () => {
     expect(screen.getByText('deployment failed')).toBeInTheDocument();
   });
 
+  it('replaces a generic tool projection with its specialized card in the same turn', () => {
+    let items = applyEnvelope([], envelope('tool_execution', 'shared-call', {
+      itemId: 'shared-call',
+      title: 'Read file',
+      status: 'running',
+    }), 'kimi');
+    items = applyEnvelope(items, envelope('file_read', 'shared-call', {
+      path: '/workspace/package.json',
+    }), 'kimi');
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: 'file-read',
+      id: 'shared-call',
+      turn: 1,
+      path: '/workspace/package.json',
+    });
+  });
+
+  it('replaces an early generic tool projection when a sparse update identifies an agent', () => {
+    let items = applyEnvelope([], envelope('tool_execution', 'agent-call', {
+      itemId: 'agent-call',
+      title: 'Tool',
+      status: 'running',
+      input: { repository: 'openai/gian' },
+    }), 'kimi');
+    items = applyEnvelope(items, envelope('agent_spawn', 'agent-call', {
+      description: 'Inspect the repository',
+      status: 'running',
+      input: { subagent_type: 'Explore' },
+    }), 'kimi');
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: 'agent-spawn',
+      id: 'agent-call',
+      turn: 1,
+      description: 'Inspect the repository',
+      input: {
+        repository: 'openai/gian',
+        subagent_type: 'Explore',
+      },
+    });
+  });
+
+  it('does not replace a tool from another turn when the provider reuses its call id', () => {
+    let items = applyEnvelope([], envelope('tool_execution', 'shared-call', {
+      itemId: 'shared-call', title: 'First turn tool', status: 'running',
+    }), 'kimi');
+    items = applyEnvelope(items, {
+      ...envelope('file_read', 'shared-call', { path: '/workspace/second-turn.ts' }),
+      turn: 2,
+    }, 'kimi');
+
+    expect(items).toHaveLength(2);
+    expect(items).toMatchObject([
+      { kind: 'tool', id: 'shared-call', turn: 1 },
+      { kind: 'file-read', id: 'shared-call', turn: 2 },
+    ]);
+  });
+
   it('renders executor-owned approval labels and returns the exact option ID', () => {
     const onApprove = vi.fn();
     const item: ApprovalItem = {

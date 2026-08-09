@@ -41,6 +41,17 @@ function userMessageEnvelope(sessionId = 's1'): EventEnvelope {
   };
 }
 
+function planEvent(turn: number, text: string): EventEnvelope {
+  return {
+    session_id: 's1',
+    turn,
+    call_id: `plan-${turn}`,
+    event: 'plan_update',
+    ts: turn * 100,
+    data: { text, delta: true },
+  };
+}
+
 function useHarness({
   activeSessionId = 's1',
   connectionReady = true,
@@ -51,7 +62,7 @@ function useHarness({
   initialItems?: Record<string, TranscriptItem[]>;
 } = {}) {
   const [items, setItems] = useState<Record<string, TranscriptItem[]>>(initialItems);
-  const [, setPlans] = useState<Record<string, PlanLifecycleState>>({});
+  const [plans, setPlans] = useState<Record<string, PlanLifecycleState>>({});
   const history = useTranscriptHydration({
     activeSessionId,
     connectionReady,
@@ -69,7 +80,7 @@ function useHarness({
       ),
     }));
   };
-  return { ...history, items, applyLive };
+  return { ...history, items, plans, applyLive };
 }
 
 describe('transcript history load state', () => {
@@ -116,6 +127,40 @@ describe('transcript history load state', () => {
     await waitFor(() => expect(result.current.historyBySession.s1?.phase).toBe('complete'));
     expect(result.current.items.s1?.map(item => item.id)).toEqual(['history-offline-ws']);
     expect(loadEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconciles generic and specialized projections of one tool across hydration races', async () => {
+    vi.mocked(loadEvents).mockResolvedValueOnce({
+      events: [{
+        session_id: 's1',
+        turn: 2,
+        call_id: 'shared-tool',
+        event: 'tool_execution',
+        ts: 100,
+        data: {
+          itemId: 'shared-tool',
+          title: 'Tool',
+          status: 'running',
+          input: { path: '/tmp/a.ts' },
+        },
+      }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const liveSpecialized: TranscriptItem = {
+      kind: 'file-read',
+      id: 'shared-tool',
+      path: '/tmp/a.ts',
+      ts: 110,
+      turn: 2,
+    };
+
+    const { result } = renderHook(() => useHarness({
+      initialItems: { s1: [liveSpecialized] },
+    }));
+
+    await waitFor(() => expect(result.current.historyBySession.s1?.phase).toBe('complete'));
+    expect(result.current.items.s1).toEqual([liveSpecialized]);
   });
 
   it('keeps a same-session 500 failure stable and preserves live transcript items', async () => {
@@ -258,6 +303,23 @@ describe('transcript history load state', () => {
     expect(result.current.items.s1?.[0]).not.toHaveProperty('pending');
   });
 
+  it('keeps provider ids reused by different turns distinct while history and live state merge', async () => {
+    const historical = userEvent('provider-reused', 1, 'turn one');
+    const liveEnvelope = userEvent('provider-reused', 2, 'turn two');
+    const liveItems = applyEnvelope([], liveEnvelope, 'codex');
+    vi.mocked(loadEvents).mockResolvedValueOnce({
+      events: [historical], nextCursor: null, hasMore: false,
+    });
+
+    const { result } = renderHook(() => useHarness({ initialItems: { s1: liveItems } }));
+    await waitFor(() => expect(result.current.historyBySession.s1?.phase).toBe('complete'));
+
+    expect(result.current.items.s1).toMatchObject([
+      { kind: 'user', id: 'provider-reused', turn: 1, text: 'turn one' },
+      { kind: 'user', id: 'provider-reused', turn: 2, text: 'turn two' },
+    ]);
+  });
+
   it('does not duplicate a historical user message when the matching live event arrives later', async () => {
     const canonical = userMessageEnvelope();
     const live = { ...canonical, ts: canonical.ts + 250 };
@@ -309,5 +371,52 @@ describe('transcript history load state', () => {
       id: canonical.call_id,
       text: canonical.data.text,
     });
+  });
+
+  it('does not replay overlapping plan deltas when re-entry refreshes the latest page', async () => {
+    const plan = planEvent(5, '- [ ] inspect');
+    vi.mocked(loadEvents)
+      .mockResolvedValueOnce({ events: [plan], nextCursor: null, hasMore: false })
+      .mockResolvedValueOnce({ events: [], nextCursor: null, hasMore: false })
+      .mockResolvedValueOnce({ events: [plan], nextCursor: null, hasMore: false });
+
+    const { result, rerender } = renderHook(
+      ({ activeSessionId }) => useHarness({ activeSessionId }),
+      { initialProps: { activeSessionId: 's1' as string | null } },
+    );
+    await waitFor(() => expect(result.current.plans.s1?.text).toBe('- [ ] inspect'));
+    rerender({ activeSessionId: 's2' });
+    await waitFor(() => expect(result.current.historyBySession.s2?.phase).toBe('complete'));
+    rerender({ activeSessionId: 's1' });
+    await waitFor(() => expect(loadEvents).toHaveBeenNthCalledWith(3, 's1'));
+
+    expect(result.current.plans.s1).toMatchObject({
+      text: '- [ ] inspect',
+      status: 'active',
+      turn: 5,
+    });
+  });
+
+  it('ignores refresh terminal events older than the current plan lifecycle', async () => {
+    const plan = planEvent(5, '- [ ] inspect');
+    const oldEnd: EventEnvelope = {
+      session_id: 's1', turn: 4, call_id: 'end-4', event: 'turn_completed', ts: 450, data: {},
+    };
+    vi.mocked(loadEvents)
+      .mockResolvedValueOnce({ events: [plan], nextCursor: null, hasMore: false })
+      .mockResolvedValueOnce({ events: [], nextCursor: null, hasMore: false })
+      .mockResolvedValueOnce({ events: [oldEnd], nextCursor: null, hasMore: false });
+
+    const { result, rerender } = renderHook(
+      ({ activeSessionId }) => useHarness({ activeSessionId }),
+      { initialProps: { activeSessionId: 's1' as string | null } },
+    );
+    await waitFor(() => expect(result.current.plans.s1?.status).toBe('active'));
+    rerender({ activeSessionId: 's2' });
+    await waitFor(() => expect(result.current.historyBySession.s2?.phase).toBe('complete'));
+    rerender({ activeSessionId: 's1' });
+    await waitFor(() => expect(loadEvents).toHaveBeenNthCalledWith(3, 's1'));
+
+    expect(result.current.plans.s1).toMatchObject({ status: 'active', turn: 5 });
   });
 });

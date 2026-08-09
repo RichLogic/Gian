@@ -14,6 +14,7 @@ import {
   invalidateSlashCacheForWorkspace,
   SLASH_CACHE_INVALIDATED_EVENT,
 } from '../components/composer/capabilities.js';
+import { invalidateAllChangesDiffs } from './use-changes-diff.js';
 import { toast } from '../feedback.js';
 import { maybeNotifyForEnvelope } from '../notifications.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
@@ -31,6 +32,7 @@ import {
   applyErrorEnvelopeToSession,
   applyPlanLifecycle,
   displayTypeForEnvelope,
+  ensureLatestTurnEnd,
   nextPendingFromEnvelope,
   type PlanLifecycleState,
 } from '../transcript/apply.js';
@@ -44,6 +46,7 @@ interface UseAppSocketInput {
   authStatus: AppAuthStatus;
   ws: GianWs;
   sessionsRef: MutableRefObject<Session[]>;
+  itemsBySessionRef: MutableRefObject<Record<string, TranscriptItem[]>>;
   activeSessionIdRef: MutableRefObject<string | null>;
   pendingFirstMessageRef: MutableRefObject<string | null>;
   setWsState: Setter<WsState>;
@@ -138,6 +141,10 @@ export function useAppSocket(input: UseAppSocketInput): void {
           return;
         case 'state_sync':
           current.setWorkspaces(message.workspaces);
+          // Message handling can continue in the same task before React runs
+          // an effect. Keep lifecycle guards on the authoritative sync state,
+          // not the previous render's ref snapshot.
+          current.sessionsRef.current = message.sessions;
           current.setSessions(message.sessions);
           current.setTasks(message.tasks);
           current.setSystemConfig(message.config);
@@ -145,6 +152,7 @@ export function useAppSocket(input: UseAppSocketInput): void {
           // A reconnect may have missed workspace:git-updated broadcasts.
           // Force a fresh scan whenever the Host sends authoritative state.
           current.refreshWorkingTrees?.();
+          invalidateAllChangesDiffs();
           // Defensive absorption: any overlay whose value the sync already
           // reflects is dropped immediately (§4.3).
           for (const session of message.sessions) {
@@ -172,6 +180,10 @@ export function useAppSocket(input: UseAppSocketInput): void {
             detail: { workspaceId: message.workspace_id },
           }));
           current.refreshWorkingTrees?.();
+          // The Diffs rail's Changes multi-diff store is tree-scoped and
+          // doesn't track workspace membership — refresh every loaded tree
+          // (in practice only the viewed one holds state).
+          invalidateAllChangesDiffs();
           return;
         case 'session:created': {
           // Native adoption has an independent HTTP result and WS broadcast.
@@ -220,6 +232,8 @@ export function useAppSocket(input: UseAppSocketInput): void {
         }
         case 'session:updated': {
           const partial = message.session;
+          const priorStatus = current.sessionsRef.current
+            .find(session => session.id === partial.id)?.status;
           const fromTurnEnd = partial.status === 'done' || partial.status === 'error';
           if (partial.unread === 1 && fromTurnEnd
             && partial.id === current.activeSessionIdRef.current) {
@@ -227,9 +241,60 @@ export function useAppSocket(input: UseAppSocketInput): void {
           }
           if (partial.status === 'running' || partial.status === 'pending') {
             current.setPendingBySession(previous => ({ ...previous, [partial.id]: true }));
-          } else if (partial.status === 'done' || partial.status === 'error') {
+          } else if (fromTurnEnd) {
             current.setPendingBySession(previous => ({ ...previous, [partial.id]: false }));
+            // The session lifecycle broadcast is authoritative even when the
+            // subscribed event frame was lost during a switch/reconnect. Fold
+            // the newest turn already in memory now; a later real completion
+            // event is idempotent with this synthetic boundary.
+            const updatedAt = typeof partial.updated_at === 'string'
+              ? Date.parse(partial.updated_at)
+              : Number.NaN;
+            // Only a live/pending → terminal transition is a turn boundary.
+            // Later rename/archive updates can include status=done too; they
+            // must not timestamp a legacy turn with the mutation time.
+            if (priorStatus == null || priorStatus === 'running' || priorStatus === 'pending') {
+              const terminalTs = Number.isFinite(updatedAt) ? updatedAt : 0;
+              current.setItemsBySession(previous => {
+                const list = previous[partial.id];
+                if (!list) return previous;
+                const next = ensureLatestTurnEnd(list, partial.id, terminalTs);
+                return next === list ? previous : { ...previous, [partial.id]: next };
+              });
+              // An inactive session is not subscribed to event frames, so its
+              // plan may otherwise remain "active" forever even though the
+              // authoritative session lifecycle already reached terminal.
+              current.setPlanStateBySession(previous => {
+                const existing = previous[partial.id];
+                if (!existing?.text) return previous;
+                const transcript = current.itemsBySessionRef.current[partial.id] ?? [];
+                let latestTurn = existing.turn ?? 0;
+                for (const item of transcript) latestTurn = Math.max(latestTurn, item.turn);
+                const terminal: EventEnvelope = {
+                  session_id: partial.id,
+                  turn: latestTurn,
+                  call_id: `session-terminal:${partial.id}:${latestTurn}`,
+                  event: partial.status === 'error' ? 'turn.failed' : 'turn.completed',
+                  ts: terminalTs,
+                  data: partial.status === 'error'
+                    ? { message: 'Session ended with an error', retryable: true }
+                    : { turnId: String(latestTurn) },
+                  display: partial.status === 'error'
+                    ? {
+                        type: 'state.error',
+                        data: { message: 'Session ended with an error', retryable: true },
+                      }
+                    : {
+                        type: 'state.turn-completed',
+                        data: { turnId: String(latestTurn) },
+                      },
+                };
+                const next = applyPlanLifecycle(existing, terminal);
+                return next === existing ? previous : { ...previous, [partial.id]: next };
+              });
+            }
           }
+          current.sessionsRef.current = applySessionUpdate(current.sessionsRef.current, partial);
           current.setSessions(previous => applySessionUpdate(previous, partial));
           current.operationStore.absorbMatchingOverlays(
             sessionEntityKey(partial.id),

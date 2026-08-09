@@ -239,8 +239,8 @@ describe('session persistent context projection', () => {
       sessionId: 'session-1',
     });
     expect(sameTurn.agents.map(item => item.id)).toEqual([
-      'agent-running',
-      'agent-1',
+      '1:agent-spawn:agent-running',
+      '1:agent-spawn:agent-1',
     ]);
 
     const nextTurnWithoutCompletion: TranscriptItem = {
@@ -260,8 +260,8 @@ describe('session persistent context projection', () => {
       sessionId: 'session-1',
     });
     expect(afterTurn.agents.map(item => [item.id, item.status])).toEqual([
-      ['agent-running', 'interrupted'],
-      ['agent-1', 'done'],
+      ['1:agent-spawn:agent-running', 'interrupted'],
+      ['1:agent-spawn:agent-1', 'done'],
     ]);
 
     const history = projectSessionContext({
@@ -283,7 +283,23 @@ describe('session persistent context projection', () => {
       sessionId: 'session-1',
     });
     expect(projected.agents.map(item => [item.id, item.status])).toEqual([
-      ['background', 'running'],
+      ['1:agent-spawn:background', 'running'],
+    ]);
+  });
+
+  it('keeps reused provider agent ids isolated across turns', () => {
+    const projected = projectSessionContext({
+      items: [
+        agent({ id: 'reused', turn: 1, status: 'done', updatedAt: 100 }),
+        agent({ id: 'reused', turn: 2, description: 'Second run', updatedAt: 200 }),
+      ],
+      sessionId: 'session-1',
+      includeAgentHistory: true,
+    });
+
+    expect(projected.agents.map(item => [item.id, item.description])).toEqual([
+      ['2:agent-spawn:reused', 'Second run'],
+      ['1:agent-spawn:reused', 'Inspect the event pipeline'],
     ]);
   });
 

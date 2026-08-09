@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, screen, fireEvent, waitFor } from '@testing-library/react';
 import { HistoryInspector } from '../src/components/HistoryInspector.js';
 import { renderWithOperations } from './operation-test-utils.js';
@@ -87,13 +87,34 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+/* Controllable IntersectionObserver — jsdom has none. Drives the
+ * infinite-scroll sentinel. */
+class FakeIO {
+  static instances: FakeIO[] = [];
+  cb: IntersectionObserverCallback;
+  constructor(cb: IntersectionObserverCallback) {
+    this.cb = cb;
+    FakeIO.instances.push(this);
+  }
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+  trigger() { this.cb([{ isIntersecting: true } as IntersectionObserverEntry], this as unknown as IntersectionObserver); }
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  FakeIO.instances = [];
+  vi.stubGlobal('IntersectionObserver', FakeIO);
   fetchGitHistory.mockResolvedValue({ ok: true, fetchedAt: new Date().toISOString(), refsChanged: false, coalesced: false });
 });
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe('HistoryInspector', () => {
-  it('renders the timeline with graph, refs chips, and type tags', async () => {
+  it('renders the single-line timeline with graph and trailing refs chips', async () => {
     const wt = nextTree();
     loadGitHistory.mockResolvedValue(page({
       headSha: 'aaa111',
@@ -107,24 +128,23 @@ describe('HistoryInspector', () => {
     await screen.findByText('tip commit');
     expect(document.querySelectorAll('.h-row').length).toBe(3);
     expect(document.querySelector('.h-row .g svg')).toBeTruthy();
-    expect(document.querySelector('.h-ref.local')?.textContent).toContain('main');
-    expect(document.querySelector('.h-ref.head')?.textContent).toContain('HEAD');
-    expect(screen.getByText('MERGE')).toBeTruthy();
-    expect(screen.getByText('ROOT')).toBeTruthy();
-    // day band present (all fixtures land today/yesterday)
-    expect(document.querySelector('.h-day')).toBeTruthy();
+    // refs trail the subject at the row end; author/sha/time stay on the tooltip
+    const tipRow = screen.getByText('tip commit').closest('.h-row')!;
+    expect(tipRow.querySelector('.refs .h-ref.local')?.textContent).toContain('main');
+    expect(tipRow.querySelector('.refs .h-ref.head')?.textContent).toContain('HEAD');
+    expect(tipRow.querySelector('.refs')).toBe(tipRow.lastElementChild);
+    expect(tipRow.getAttribute('title')).toContain('aaa111 · Rich');
+    expect(screen.queryByText('MERGE')).toBeNull();
   });
 
-  it('single click opens a preview, double click pins', async () => {
+  it('clicking a commit row opens it (singleton tab — no preview/pin split)', async () => {
     const wt = nextTree();
     const c1 = commit({ sha: 'aaa111', subject: 'clickable' });
     loadGitHistory.mockResolvedValue(page({ items: [c1] }));
     const { onOpenCommit } = renderInspector(wt);
     const row = await screen.findByText('clickable');
     fireEvent.click(row.closest('.h-row')!);
-    expect(onOpenCommit).toHaveBeenCalledWith({ sha: 'aaa111', subject: 'clickable' }, false);
-    fireEvent.doubleClick(row.closest('.h-row')!);
-    expect(onOpenCommit).toHaveBeenCalledWith({ sha: 'aaa111', subject: 'clickable' }, true);
+    expect(onOpenCommit).toHaveBeenCalledWith({ sha: 'aaa111', subject: 'clickable' });
   });
 
   it('branch and author filters refetch with the full ref / email', async () => {
@@ -156,7 +176,7 @@ describe('HistoryInspector', () => {
     await waitFor(() => expect(loadGitHistory).toHaveBeenLastCalledWith(wt, expect.objectContaining({ q: 'oauth' })), { timeout: 1500 });
   });
 
-  it('load more appends the next cursor page; failure offers retry', async () => {
+  it('scrolling to the sentinel auto-loads the next cursor page; failure offers manual retry and never auto-retries', async () => {
     const wt = nextTree();
     loadGitHistory
       .mockResolvedValueOnce(page({ items: [commit({ sha: 'aaa111', subject: 'page one' })], nextCursor: 'cur1' }))
@@ -164,11 +184,16 @@ describe('HistoryInspector', () => {
       .mockResolvedValueOnce(page({ items: [commit({ sha: 'bbb222', subject: 'page two' })], nextCursor: null }));
     renderInspector(wt);
     await screen.findByText('page one');
-    fireEvent.click(screen.getByTestId('history-load-more'));
+    expect(document.querySelector('.h-sentinel')).toBeTruthy();
+    act(() => FakeIO.instances.at(-1)!.trigger());
     await screen.findByText("Couldn't load older commits.");
+    // failed page: no sentinel, no automatic retry happened
+    expect(loadGitHistory).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByText('Retry'));
     await screen.findByText('page two');
-    expect(screen.queryByTestId('history-load-more')).toBeNull();
+    // end of history: no sentinel, end count shown
+    expect(document.querySelector('.h-sentinel')).toBeNull();
+    expect(screen.getByText(/end of loaded history/)).toBeTruthy();
   });
 
   it('keeps the previous page visible and reports a refresh failure', async () => {
@@ -197,7 +222,7 @@ describe('HistoryInspector', () => {
       .mockResolvedValueOnce(page({ items: [commit({ sha: 'ccc333', subject: 'fresh page' })] }));
     renderInspector(wt);
     await screen.findByText('stale page');
-    fireEvent.click(screen.getByTestId('history-load-more'));
+    act(() => FakeIO.instances.at(-1)!.trigger());
     await screen.findByText('fresh page');
     expect(document.querySelector('.h-moved')).toBeTruthy();
     // dismiss

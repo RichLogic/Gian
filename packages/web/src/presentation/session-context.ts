@@ -1,4 +1,5 @@
 import type { ApprovalItem, AgentSpawnItem, TranscriptItem } from '../types.js';
+import { transcriptItemIdentity } from '../transcript/identity.js';
 
 export type PlanDisplayStatus =
   | 'active'
@@ -170,14 +171,15 @@ function projectAgents(
   }
   for (const item of items) {
     if (item.kind !== 'agent-spawn') continue;
-    const previous = byId.get(item.id);
+    const identity = transcriptItemIdentity(item);
+    const previous = byId.get(identity);
     const input = item.input
       ? { ...(previous?.input ?? {}), ...item.input }
       : previous?.input;
     const agentType = item.agentType ?? previous?.agentType;
-    byId.set(item.id, {
+    byId.set(identity, {
       kind: 'agent-run',
-      id: item.id,
+      id: identity,
       provider: item.provider,
       agentId: item.agentId ?? previous?.agentId,
       description: item.description

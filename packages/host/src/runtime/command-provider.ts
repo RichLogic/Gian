@@ -3,6 +3,7 @@ import { access, realpath } from 'node:fs/promises';
 import { delimiter, dirname, isAbsolute, resolve } from 'node:path';
 import type { Executor } from '@gian/shared';
 import { runProtectedCommand } from './protected-command.js';
+import { runtimeContentSnapshot } from './content-snapshot.js';
 import type {
   CliRuntimeProvider,
   InstalledRuntime,
@@ -143,6 +144,10 @@ export class CommandRuntimeProvider implements CliRuntimeProvider {
 
   managedEnv(): Readonly<Record<string, string>> {
     return this.options.env ?? {};
+  }
+
+  snapshot(runtime: InstalledRuntime | RuntimeProbe): Promise<string> {
+    return runtimeContentSnapshot(runtime.binaryPath, ['node']);
   }
 
   private runtimeEnv(runtime: InstalledRuntime): Readonly<Record<string, string>> {

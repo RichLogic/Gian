@@ -58,6 +58,7 @@ describe('useAppSocket working-tree refresh', () => {
       authStatus: 'authenticated',
       ws: ws as unknown as GianWs,
       sessionsRef: { current: [] },
+      itemsBySessionRef: { current: {} },
       activeSessionIdRef: { current: null },
       pendingFirstMessageRef: { current: null },
       setWsState: setter,

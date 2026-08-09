@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { SessionHistoryStore } from '../src/session/history-store.js';
+import type { EventEnvelope } from '@gian/shared';
+import {
+  SessionHistoryStore,
+  compactHistoryEnvelopes,
+} from '../src/session/history-store.js';
 import { openDatabase } from '../src/storage/db.js';
 
 test('replaceable snapshots update one persisted event while append events remain a log', () => {
@@ -148,15 +152,167 @@ test('history treats offset-less SQLite event timestamps as UTC', () => {
     for (const event of allEvents) {
       assert.equal(event.ts, expected.get(event.call_id));
     }
-    const pageEvents = history.listEventPage('s1', null).events;
+    const page = history.listEventPage('s1', null).events;
+    const pageEvents = page.filter(event => expected.has(event.call_id));
     assert.equal(pageEvents.length, expected.size);
     for (const event of pageEvents) {
       assert.equal(event.ts, expected.get(event.call_id));
     }
+    assert.equal(
+      page.filter(event => event.display?.type === 'state.turn-completed').length,
+      1,
+      'terminal status synthesizes a boundary even when completed_at is absent',
+    );
     db.close();
   } finally {
     if (previousTimezone === undefined) delete process.env.TZ;
     else process.env.TZ = previousTimezone;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('history pages synthesize one stable completion boundary for legacy terminal turns', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-history-terminal-'));
+  try {
+    const db = openDatabase(dir);
+    db.exec(`
+      INSERT INTO workspaces(id,name,path,sort_order,hidden,created_at,updated_at)
+      VALUES('w1','workspace','/tmp',0,0,datetime('now'),datetime('now'));
+      INSERT INTO sessions(id,name,type,workspace_id,executor,approval_mode,status,archived,unread,native_session_id,created_at,updated_at)
+      VALUES('s1','session','primary','w1','kimi','plan','done',0,0,'native',datetime('now'),datetime('now'));
+      INSERT INTO turns(id,session_id,turn_number,status,created_at,completed_at) VALUES
+        ('t1','s1',1,'completed','2026-08-09T01:00:00.000Z',NULL),
+        ('t2','s1',2,'completed','2026-08-09T01:01:00.000Z','2026-08-09T01:01:05.000Z'),
+        ('t3','s1',3,'running','2026-08-09T01:02:00.000Z',NULL);
+    `);
+    const history = new SessionHistoryStore(db);
+    history.appendEvent(
+      's1',
+      't1',
+      'thought-1',
+      'reasoning',
+      { text: 'legacy thought' },
+      { createdAt: '2026-08-09T01:00:04.000Z' },
+    );
+    history.appendEvent(
+      's1',
+      't1',
+      'late-tool',
+      'tool.use',
+      { input: 'last event' },
+      { createdAt: '2026-08-09T01:00:05.000Z' },
+    );
+    history.appendEvent('s1', 't2', 'provider-turn-2', 'state.turn-completed', {
+      __gian_event: 2,
+      provider: 'kimi',
+      raw: { turnId: 't2' },
+      display: { type: 'state.turn-completed', data: { turnId: 't2' } },
+    });
+    history.appendEvent('s1', 't3', 'thought-3', 'reasoning', { text: 'still live' });
+    const persistedBefore = (db.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n;
+
+    const first = history.listEventPage('s1', null, 3);
+    const second = history.listEventPage('s1', null, 3);
+    const completions = first.events.filter(event => event.display?.type === 'state.turn-completed');
+    assert.deepEqual(completions.map(event => event.turn), [1, 2]);
+    assert.equal(completions.filter(event => event.turn === 1).length, 1);
+    assert.equal(completions.filter(event => event.turn === 2).length, 1);
+    assert.equal(completions.find(event => event.turn === 1)?.call_id, 'gian:turn-completed:t1');
+    assert.equal(completions.find(event => event.turn === 1)?.ts, Date.parse('2026-08-09T01:00:05.000Z'));
+    assert.equal(history.hasTurnCompletionBoundary('t2'), true);
+    assert.deepEqual(
+      second.events.map(event => [event.turn, event.call_id]),
+      first.events.map(event => [event.turn, event.call_id]),
+      'repeated reads must synthesize the same identities without duplicates',
+    );
+    assert.equal(
+      (db.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n,
+      persistedBefore,
+      'history repair is a read-only projection',
+    );
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('in-memory compaction keeps reasoning summary and full streams distinct', () => {
+  const fragment = (kind: 'summary' | 'full', text: string, ts: number): EventEnvelope => ({
+    session_id: 's1',
+    turn: 1,
+    call_id: 'shared-reasoning-id',
+    event: 'output.reasoning.delta',
+    ts,
+    data: { delta: text },
+    provider: 'codex',
+    display: {
+      type: 'activity.reasoning',
+      data: {
+        itemId: 'shared-reasoning-id',
+        kind,
+        text,
+        delta: true,
+      },
+    },
+  });
+  const compacted = compactHistoryEnvelopes([
+    fragment('summary', 'summary ', 1),
+    fragment('full', 'full ', 2),
+    fragment('summary', 'done', 3),
+    fragment('full', 'trace', 4),
+  ]);
+  assert.equal(compacted.length, 2);
+  assert.deepEqual(
+    compacted.map(event => ({
+      kind: event.display?.data.kind,
+      text: event.display?.data.text,
+    })).sort((left, right) => String(left.kind).localeCompare(String(right.kind))),
+    [
+      { kind: 'full', text: 'full trace' },
+      { kind: 'summary', text: 'summary done' },
+    ],
+  );
+});
+
+test('terminal history canonicalizes duplicate early ends to one final provider boundary', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-history-terminal-order-'));
+  try {
+    const db = openDatabase(dir);
+    db.exec(`
+      INSERT INTO workspaces(id,name,path,sort_order,hidden,created_at,updated_at)
+      VALUES('w1','workspace','/tmp',0,0,datetime('now'),datetime('now'));
+      INSERT INTO sessions(id,name,type,workspace_id,executor,approval_mode,status,archived,unread,native_session_id,created_at,updated_at)
+      VALUES('s1','session','primary','w1','codex','plan','done',0,0,'native',datetime('now'),datetime('now'));
+      INSERT INTO turns(id,session_id,turn_number,status,created_at,completed_at)
+      VALUES('t1','s1',1,'completed','2026-08-09T05:00:00.000Z','2026-08-09T05:00:03.000Z');
+    `);
+    const history = new SessionHistoryStore(db);
+    history.appendEvent('s1', 't1', 'early-provider', 'turn.completed', {
+      __gian_event: 2,
+      provider: 'codex',
+      raw: { summary: 'provider metadata' },
+      display: { type: 'state.turn-completed', data: { turnId: 'native-t1', summary: 'kept' } },
+    }, { createdAt: '2026-08-09T05:00:03.000Z' });
+    history.appendEvent('s1', 't1', 'late-tool', 'tool.output', {
+      __gian_event: 2,
+      provider: 'codex',
+      raw: { output: 'late' },
+      display: { type: 'activity.tool', data: { itemId: 'late-tool', title: 'Tool', status: 'success' } },
+    }, { createdAt: '2026-08-09T05:00:05.000Z' });
+    history.appendEvent('s1', 't1', 'duplicate-gian', 'gian.turn.completed', {
+      __gian_event: 2,
+      provider: 'codex',
+      raw: { turnId: 't1' },
+      display: { type: 'state.turn-completed', data: { turnId: 't1' } },
+    }, { createdAt: '2026-08-09T05:00:04.000Z' });
+
+    const events = history.listEventPage('s1', null, 1).events;
+    assert.deepEqual(events.map(event => event.call_id), ['late-tool', 'early-provider']);
+    assert.equal(events[1]?.event, 'turn.completed');
+    assert.equal(events[1]?.display?.data.summary, 'kept');
+    assert.equal(events[1]?.ts, Date.parse('2026-08-09T05:00:05.000Z'));
+    db.close();
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

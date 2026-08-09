@@ -26,6 +26,8 @@ import type {
   TranscriptItem,
 } from '../src/types.js';
 import { Transcript } from '../src/transcript/Transcript.js';
+import { applyEnvelope } from '../src/transcript/apply.js';
+import type { EventEnvelope } from '@gian/shared';
 
 function userMsg(overrides: Partial<MsgItem> = {}): MsgItem {
   return { kind: 'user', id: 'u-1', text: 'do the thing', exec: 'claude', ts: 500, turn: 1, ...overrides };
@@ -79,11 +81,56 @@ function renderTranscript(items: TranscriptItem[]) {
   return render(<Transcript items={items} pending={false} onApprove={vi.fn()} />);
 }
 
+function kimiDisplayEnvelope(
+  type: 'activity.reasoning' | 'message' | 'state.turn-completed',
+  data: Record<string, unknown>,
+): EventEnvelope {
+  const turnId = 'turn_kimi_shared';
+  return {
+    session_id: 'kimi-session',
+    turn: 7,
+    call_id: turnId,
+    event: type === 'state.turn-completed' ? 'turn.completed' : 'acp.sessionUpdate',
+    ts: type === 'state.turn-completed' ? 3_000 : type === 'message' ? 2_000 : 1_000,
+    data: {},
+    display: { type, data } as EventEnvelope['display'],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 完成即折 — completed turns fold into one .turnsum row
 // ---------------------------------------------------------------------------
 
 describe('P2 turnsum: 完成即折', () => {
+  it('reconciles Kimi reasoning and assistant rows sharing one provider id from live to complete', () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      let items: TranscriptItem[] = [];
+      items = applyEnvelope(items, kimiDisplayEnvelope('activity.reasoning', {
+        itemId: 'turn_kimi_shared', text: 'checking the implementation', kind: 'full', delta: true,
+      }), 'kimi');
+      items = applyEnvelope(items, kimiDisplayEnvelope('message', {
+        itemId: 'turn_kimi_shared', text: 'The fix is ready.', delta: true,
+      }), 'kimi');
+
+      const view = renderTranscript(items);
+      expect(view.container.querySelectorAll('.trow[data-variant="full"]')).toHaveLength(1);
+      expect(screen.getByText('The fix is ready.')).toBeInTheDocument();
+
+      items = applyEnvelope(items, kimiDisplayEnvelope('state.turn-completed', {
+        turnId: 'turn_kimi_shared',
+      }), 'kimi');
+      view.rerender(<Transcript items={items} pending={false} onApprove={vi.fn()} />);
+
+      expect(view.container.querySelectorAll('.transcript > .trow[data-variant="full"]')).toHaveLength(0);
+      expect(view.container.querySelectorAll('.turnsum')).toHaveLength(1);
+      expect(screen.getByText('The fix is ready.')).toBeInTheDocument();
+      expect(consoleError.mock.calls.flat().join(' ')).not.toMatch(/same key|unique "key"/i);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it('a completed turn folds its process events into a summary row; live turns stay flat', () => {
     const completed: TranscriptItem[] = [
       userMsg(), command(), fileRead(), diff(), turnEnd(), assistantMsg(),

@@ -101,14 +101,43 @@ function setupCcHarness(): Harness {
   };
 }
 
-function ccUserLine(text: string): string {
-  return JSON.stringify({ type: 'user', message: { content: text } }) + '\n';
+function ccUserLine(text: string, timestamp?: string): string {
+  return JSON.stringify({
+    type: 'user',
+    message: { content: text },
+    ...(timestamp ? { timestamp } : {}),
+  }) + '\n';
 }
 
-function ccAssistantTextLine(text: string): string {
+function ccAssistantTextLine(
+  text: string,
+  options: { timestamp?: string; stopReason?: string; isSidechain?: boolean } = {},
+): string {
   return JSON.stringify({
     type: 'assistant',
-    message: { content: [{ type: 'text', text }] },
+    message: {
+      content: [{ type: 'text', text }],
+      ...(options.stopReason ? { stop_reason: options.stopReason } : {}),
+    },
+    ...(options.timestamp ? { timestamp: options.timestamp } : {}),
+    ...(options.isSidechain === true ? { isSidechain: true } : {}),
+  }) + '\n';
+}
+
+function codexEventLine(payload: Record<string, unknown>, timestamp?: string): string {
+  return JSON.stringify({
+    type: 'event_msg',
+    payload,
+    ...(timestamp ? { timestamp } : {}),
+  }) + '\n';
+}
+
+function ccTurnDurationLine(timestamp: string): string {
+  return JSON.stringify({
+    type: 'system',
+    subtype: 'turn_duration',
+    durationMs: 8_000,
+    timestamp,
   }) + '\n';
 }
 
@@ -174,30 +203,431 @@ test('appends one user + one assistant line → events persisted + broadcast', a
       const n = (h.db
         .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
         .get(h.sessionId) as { n: number }).n;
-      return n >= 2;
+      return n >= 3;
     });
 
     const rows = h.db
       .prepare(`SELECT type, data FROM events WHERE session_id = ? ORDER BY rowid ASC`)
       .all(h.sessionId) as Array<{ type: string; data: string }>;
 
-    assert.equal(rows.length, 2);
-    assert.equal(rows[0]!.type, 'user_message');
-    const u = JSON.parse(rows[0]!.data) as { text: string };
+    assert.equal(rows.length, 3);
+    assert.equal(rows[0]!.type, 'gian.turn.started');
+    assert.equal(rows[1]!.type, 'user_message');
+    const u = JSON.parse(rows[1]!.data) as { text: string };
     assert.equal(u.text, 'hello from terminal');
-    assert.equal(rows[1]!.type, 'output.text');
-    const a = displayData(rows[1]!.data) as { text: string };
+    assert.equal(rows[2]!.type, 'output.text');
+    const a = displayData(rows[2]!.data) as { text: string };
     assert.equal(a.text, 'hi back');
 
     // Turn row created at user-message boundary.
-    const turnCount = (h.db
-      .prepare('SELECT COUNT(*) AS n FROM turns WHERE session_id = ?')
-      .get(h.sessionId) as { n: number }).n;
-    assert.equal(turnCount, 1, 'one turn row inserted at user-message boundary');
+    const turn = h.db
+      .prepare('SELECT status, completed_at FROM turns WHERE session_id = ?')
+      .get(h.sessionId) as { status: string; completed_at: string | null };
+    assert.equal(turn.status, 'running');
+    assert.equal(turn.completed_at, null, 'latest turn stays open without an explicit terminal');
+    const session = h.db
+      .prepare('SELECT status FROM sessions WHERE id = ?')
+      .get(h.sessionId) as { status: string };
+    assert.equal(session.status, 'running');
+    assert.ok(h.broadcaster.messages.some(message => (
+      message.type === 'session:updated' && message.session.status === 'running'
+    )));
 
-    // Broadcaster received both events as `event` messages.
+    // Broadcaster received the lifecycle boundary and both content events.
     const eventMsgs = h.broadcaster.messages.filter(m => m.type === 'event');
-    assert.equal(eventMsgs.length, 2);
+    assert.equal(eventMsgs.length, 3);
+    assert.equal(eventMsgs[0]!.display?.type, 'state.turn-started');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('claude turn_duration explicitly completes the current turn', async () => {
+  const h = setupCcHarness();
+  try {
+    const startedAt = '2026-08-09T00:30:00.000Z';
+    const completedAt = '2026-08-09T00:30:08.000Z';
+    h.watcher.start(h.sessionId, h.filePath, 'claude');
+    await new Promise(r => setTimeout(r, WATCH_ATTACH_MS));
+
+    appendFileSync(h.filePath, ccUserLine('finish explicitly', startedAt));
+    appendFileSync(h.filePath, ccAssistantTextLine('done', {
+      timestamp: '2026-08-09T00:30:07.000Z',
+      stopReason: 'end_turn',
+    }));
+
+    await waitFor(() => {
+      const n = (h.db
+        .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
+        .get(h.sessionId) as { n: number }).n;
+      return n >= 3;
+    });
+    const beforeDuration = h.db
+      .prepare('SELECT status, completed_at FROM turns WHERE session_id = ?')
+      .get(h.sessionId) as { status: string; completed_at: string | null };
+    assert.deepEqual(beforeDuration, { status: 'running', completed_at: null });
+
+    appendFileSync(h.filePath, ccTurnDurationLine(completedAt));
+    await waitFor(() => {
+      const n = (h.db
+        .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
+        .get(h.sessionId) as { n: number }).n;
+      return n >= 4;
+    });
+
+    const types = (h.db
+      .prepare('SELECT type FROM events WHERE session_id = ? ORDER BY rowid ASC')
+      .all(h.sessionId) as Array<{ type: string }>).map(row => row.type);
+    assert.deepEqual(types, [
+      'gian.turn.started',
+      'user_message',
+      'output.text',
+      'gian.turn.completed',
+    ]);
+    const turn = h.db
+      .prepare('SELECT status, created_at, completed_at FROM turns WHERE session_id = ?')
+      .get(h.sessionId) as {
+        status: string;
+        created_at: string;
+        completed_at: string | null;
+      };
+    assert.deepEqual(turn, {
+      status: 'completed',
+      created_at: startedAt,
+      completed_at: completedAt,
+    });
+    const session = h.db
+      .prepare('SELECT status, unread FROM sessions WHERE id = ?')
+      .get(h.sessionId) as { status: string; unread: number };
+    assert.deepEqual(session, { status: 'done', unread: 1 });
+    assert.ok(h.broadcaster.messages.some(message => (
+      message.type === 'session:updated'
+      && message.session.status === 'done'
+      && message.session.unread === 1
+    )));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('restart repairs a running DB turn from the bounded native EOF terminal', () => {
+  const h = setupCcHarness();
+  try {
+    const turnId = randomUUID();
+    const startedAt = '2026-08-09T00:40:00.000Z';
+    const completedAt = '2026-08-09T00:40:09.000Z';
+    h.db.prepare(
+      `INSERT INTO turns (id, session_id, turn_number, status, created_at, completed_at)
+       VALUES (?, ?, 1, 'running', ?, NULL)`,
+    ).run(turnId, h.sessionId, startedAt);
+    h.db.prepare(`UPDATE sessions SET status = 'running' WHERE id = ?`).run(h.sessionId);
+    writeFileSync(
+      h.filePath,
+      ccUserLine('already mirrored', startedAt)
+      + ccAssistantTextLine('already mirrored reply')
+      + ccTurnDurationLine(completedAt),
+    );
+
+    h.watcher.start(h.sessionId, h.filePath, 'claude');
+
+    const turn = h.db
+      .prepare('SELECT status, completed_at FROM turns WHERE id = ?')
+      .get(turnId) as { status: string; completed_at: string | null };
+    assert.deepEqual(turn, { status: 'completed', completed_at: completedAt });
+    const rows = h.db
+      .prepare('SELECT type, created_at FROM events WHERE turn_id = ? ORDER BY rowid')
+      .all(turnId) as Array<{ type: string; created_at: string }>;
+    assert.deepEqual(rows, [{ type: 'gian.turn.completed', created_at: completedAt }]);
+    assert.equal(
+      h.broadcaster.messages.filter(message => message.type === 'event').length,
+      1,
+      'bounded recovery adds only the missing boundary and never replays the tail',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('terminal DB row without lifecycle preserves completion time and adds only its boundary', async () => {
+  const h = setupCcHarness();
+  try {
+    const turnId = randomUUID();
+    const completedAt = '2026-08-09T00:50:03.000Z';
+    h.db.prepare(
+      `INSERT INTO turns (id, session_id, turn_number, status, created_at, completed_at)
+       VALUES (?, ?, 1, 'completed', '2026-08-09T00:50:00.000Z', ?)`,
+    ).run(turnId, h.sessionId, completedAt);
+    h.watcher.start(h.sessionId, h.filePath, 'claude');
+    await new Promise(r => setTimeout(r, WATCH_ATTACH_MS));
+
+    appendFileSync(h.filePath, ccTurnDurationLine('2026-08-09T00:50:30.000Z'));
+    await waitFor(() => (
+      h.db.prepare('SELECT COUNT(*) AS n FROM events WHERE turn_id = ?')
+        .get(turnId) as { n: number }
+    ).n === 1);
+
+    const turn = h.db
+      .prepare('SELECT status, completed_at FROM turns WHERE id = ?')
+      .get(turnId) as { status: string; completed_at: string | null };
+    assert.deepEqual(turn, { status: 'completed', completed_at: completedAt });
+    const boundary = h.db
+      .prepare('SELECT type, created_at FROM events WHERE turn_id = ?')
+      .get(turnId) as { type: string; created_at: string };
+    assert.deepEqual(boundary, { type: 'gian.turn.completed', created_at: completedAt });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('next user boundary completes the prior turn before starting the next one', async () => {
+  const h = setupCcHarness();
+  try {
+    const firstStartedAt = '2026-08-09T01:00:00.000Z';
+    const secondStartedAt = '2026-08-09T01:00:10.000Z';
+    h.watcher.start(h.sessionId, h.filePath, 'claude');
+    await new Promise(r => setTimeout(r, WATCH_ATTACH_MS));
+
+    appendFileSync(h.filePath, ccUserLine('first turn', firstStartedAt));
+    appendFileSync(h.filePath, ccAssistantTextLine('first reply'));
+    appendFileSync(h.filePath, ccUserLine('second turn', secondStartedAt));
+    appendFileSync(h.filePath, ccAssistantTextLine('second reply'));
+
+    await waitFor(() => {
+      const n = (h.db
+        .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
+        .get(h.sessionId) as { n: number }).n;
+      return n >= 7;
+    });
+
+    const rows = h.db
+      .prepare(
+        `SELECT turn_id, type, data, created_at
+         FROM events
+         WHERE session_id = ?
+         ORDER BY rowid ASC`,
+      )
+      .all(h.sessionId) as Array<{
+        turn_id: string;
+        type: string;
+        data: string;
+        created_at: string;
+      }>;
+    assert.deepEqual(rows.map(row => row.type), [
+      'gian.turn.started',
+      'user_message',
+      'output.text',
+      'gian.turn.completed',
+      'gian.turn.started',
+      'user_message',
+      'output.text',
+    ]);
+    assert.equal(rows[0]!.turn_id, rows[3]!.turn_id);
+    assert.notEqual(rows[3]!.turn_id, rows[4]!.turn_id);
+    assert.equal(displayData(rows[3]!.data).turnId, rows[3]!.turn_id);
+    assert.equal(rows[3]!.created_at, secondStartedAt);
+
+    const turns = h.db
+      .prepare(
+        `SELECT turn_number, status, created_at, completed_at
+         FROM turns
+         WHERE session_id = ?
+         ORDER BY turn_number ASC`,
+      )
+      .all(h.sessionId) as Array<{
+        turn_number: number;
+        status: string;
+        created_at: string;
+        completed_at: string | null;
+      }>;
+    assert.deepEqual(turns, [
+      {
+        turn_number: 1,
+        status: 'completed',
+        created_at: firstStartedAt,
+        completed_at: secondStartedAt,
+      },
+      {
+        turn_number: 2,
+        status: 'running',
+        created_at: secondStartedAt,
+        completed_at: null,
+      },
+    ]);
+
+    const lifecycle = h.broadcaster.messages
+      .filter(m => m.type === 'event')
+      .map(m => m.display?.type)
+      .filter(type => type === 'state.turn-started' || type === 'state.turn-completed');
+    assert.deepEqual(lifecycle, [
+      'state.turn-started',
+      'state.turn-completed',
+      'state.turn-started',
+    ]);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('existing completed lifecycle is neither persisted nor broadcast twice', async () => {
+  const h = setupCcHarness();
+  try {
+    const turnId = randomUUID();
+    const now = new Date().toISOString();
+    h.db
+      .prepare(
+        `INSERT INTO turns (id, session_id, turn_number, status, created_at, completed_at)
+         VALUES (?, ?, 1, 'completed', ?, ?)`,
+      )
+      .run(turnId, h.sessionId, now, now);
+    h.db
+      .prepare(
+        `INSERT INTO events (id, session_id, turn_id, call_id, type, data, created_at)
+         VALUES (?, ?, ?, ?, 'gian.turn.completed', ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        h.sessionId,
+        turnId,
+        randomUUID(),
+        JSON.stringify({
+          __gian_event: 2,
+          provider: 'claude',
+          raw: { turnId, status: 'completed' },
+          display: { type: 'state.turn-completed', data: { turnId } },
+        }),
+        now,
+      );
+
+    h.watcher.start(h.sessionId, h.filePath, 'claude');
+    await new Promise(r => setTimeout(r, WATCH_ATTACH_MS));
+    appendFileSync(
+      h.filePath,
+      ccUserLine('new external turn', '2026-08-09T02:00:00.000Z'),
+    );
+
+    await waitFor(() => {
+      const n = (h.db
+        .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
+        .get(h.sessionId) as { n: number }).n;
+      return n >= 3;
+    });
+
+    const completedCount = (h.db
+      .prepare(
+        `SELECT COUNT(*) AS n
+         FROM events
+         WHERE session_id = ? AND turn_id = ? AND type = 'gian.turn.completed'`,
+      )
+      .get(h.sessionId, turnId) as { n: number }).n;
+    assert.equal(completedCount, 1);
+    const turns = h.db
+      .prepare(
+        `SELECT turn_number, status, completed_at
+         FROM turns
+         WHERE session_id = ?
+         ORDER BY turn_number ASC`,
+      )
+      .all(h.sessionId) as Array<{
+        turn_number: number;
+        status: string;
+        completed_at: string | null;
+      }>;
+    assert.deepEqual(turns, [
+      { turn_number: 1, status: 'completed', completed_at: now },
+      { turn_number: 2, status: 'running', completed_at: null },
+    ]);
+    const broadcastCompleted = h.broadcaster.messages.filter(
+      m => m.type === 'event' && m.display?.type === 'state.turn-completed',
+    );
+    assert.equal(broadcastCompleted.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('restart completes the anchored running turn at the next user boundary', async () => {
+  const h = setupCcHarness();
+  try {
+    const turnId = randomUUID();
+    const startedAt = '2026-08-09T03:00:00.000Z';
+    const nextUserAt = '2026-08-09T03:00:12.000Z';
+    h.db
+      .prepare(
+        `INSERT INTO turns (id, session_id, turn_number, status, created_at, completed_at)
+         VALUES (?, ?, 1, 'running', ?, NULL)`,
+      )
+      .run(turnId, h.sessionId, startedAt);
+    h.db
+      .prepare(
+        `INSERT INTO events (id, session_id, turn_id, call_id, type, data, created_at)
+         VALUES (?, ?, ?, ?, 'gian.turn.started', ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        h.sessionId,
+        turnId,
+        `gian:${turnId}:started`,
+        JSON.stringify({
+          __gian_event: 2,
+          provider: 'claude',
+          raw: { turnId, status: 'running' },
+          display: { type: 'state.turn-started', data: { turnId } },
+        }),
+        startedAt,
+      );
+
+    h.watcher.start(h.sessionId, h.filePath, 'claude');
+    await new Promise(r => setTimeout(r, WATCH_ATTACH_MS));
+    appendFileSync(h.filePath, ccUserLine('turn after restart', nextUserAt));
+
+    await waitFor(() => {
+      const n = (h.db
+        .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
+        .get(h.sessionId) as { n: number }).n;
+      return n >= 4;
+    });
+
+    const turns = h.db
+      .prepare(
+        `SELECT id, turn_number, status, created_at, completed_at
+         FROM turns
+         WHERE session_id = ?
+         ORDER BY turn_number ASC`,
+      )
+      .all(h.sessionId) as Array<{
+        id: string;
+        turn_number: number;
+        status: string;
+        created_at: string;
+        completed_at: string | null;
+      }>;
+    assert.deepEqual(turns.map(turn => ({
+      turn_number: turn.turn_number,
+      status: turn.status,
+      created_at: turn.created_at,
+      completed_at: turn.completed_at,
+    })), [
+      {
+        turn_number: 1,
+        status: 'completed',
+        created_at: startedAt,
+        completed_at: nextUserAt,
+      },
+      {
+        turn_number: 2,
+        status: 'running',
+        created_at: nextUserAt,
+        completed_at: null,
+      },
+    ]);
+
+    const lifecycle = h.broadcaster.messages
+      .filter(m => m.type === 'event')
+      .map(m => ({ turn: m.turn, type: m.display?.type }));
+    assert.deepEqual(lifecycle.slice(0, 2), [
+      { turn: 1, type: 'state.turn-completed' },
+      { turn: 2, type: 'state.turn-started' },
+    ]);
   } finally {
     h.cleanup();
   }
@@ -232,16 +662,17 @@ test('pause suppresses sync; resume advances offset to skip proxy-written bytes'
       const n = (h.db
         .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
         .get(h.sessionId) as { n: number }).n;
-      return n >= 2;
+      return n >= 3;
     });
 
     const rows = h.db
       .prepare(`SELECT type, data FROM events WHERE session_id = ? ORDER BY rowid ASC`)
       .all(h.sessionId) as Array<{ type: string; data: string }>;
-    assert.equal(rows.length, 2, 'only post-resume lines synced');
-    const u = JSON.parse(rows[0]!.data) as { text: string };
+    assert.equal(rows.length, 3, 'only post-resume lifecycle + lines synced');
+    assert.equal(rows[0]!.type, 'gian.turn.started');
+    const u = JSON.parse(rows[1]!.data) as { text: string };
     assert.equal(u.text, 'external follow-up');
-    const a = displayData(rows[1]!.data) as { text: string };
+    const a = displayData(rows[2]!.data) as { text: string };
     assert.equal(a.text, 'external response');
   } finally {
     h.cleanup();
@@ -281,20 +712,20 @@ test('two sessions watched independently — neither cross-contaminates', async 
       const n2 = (h.db
         .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
         .get(sessionId2) as { n: number }).n;
-      return n1 >= 1 && n2 >= 1;
+      return n1 >= 2 && n2 >= 2;
     });
 
     const rows1 = h.db
-      .prepare(`SELECT data FROM events WHERE session_id = ?`)
-      .all(h.sessionId) as Array<{ data: string }>;
+      .prepare(`SELECT type, data FROM events WHERE session_id = ? ORDER BY rowid ASC`)
+      .all(h.sessionId) as Array<{ type: string; data: string }>;
     const rows2 = h.db
-      .prepare(`SELECT data FROM events WHERE session_id = ?`)
-      .all(sessionId2) as Array<{ data: string }>;
+      .prepare(`SELECT type, data FROM events WHERE session_id = ? ORDER BY rowid ASC`)
+      .all(sessionId2) as Array<{ type: string; data: string }>;
 
-    assert.equal(rows1.length, 1);
-    assert.equal(rows2.length, 1);
-    assert.equal((JSON.parse(rows1[0]!.data) as { text: string }).text, 'to session 1');
-    assert.equal((JSON.parse(rows2[0]!.data) as { text: string }).text, 'to session 2');
+    assert.deepEqual(rows1.map(row => row.type), ['gian.turn.started', 'user_message']);
+    assert.deepEqual(rows2.map(row => row.type), ['gian.turn.started', 'user_message']);
+    assert.equal((JSON.parse(rows1[1]!.data) as { text: string }).text, 'to session 1');
+    assert.equal((JSON.parse(rows2[1]!.data) as { text: string }).text, 'to session 2');
   } finally {
     h.cleanup();
   }
@@ -310,7 +741,7 @@ test('stop() halts further syncing for that session', async () => {
       const n = (h.db
         .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
         .get(h.sessionId) as { n: number }).n;
-      return n >= 1;
+      return n >= 2;
     });
 
     h.watcher.stop(h.sessionId);
@@ -321,7 +752,7 @@ test('stop() halts further syncing for that session', async () => {
     const n = (h.db
       .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
       .get(h.sessionId) as { n: number }).n;
-    assert.equal(n, 1, 'no events synced after stop');
+    assert.equal(n, 2, 'no events synced after stop');
   } finally {
     h.cleanup();
   }
@@ -341,18 +772,19 @@ test('claude AskUserQuestion tool_use is mirrored as a question approval card an
       const n = (h.db
         .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
         .get(h.sessionId) as { n: number }).n;
-      return n >= 3;
+      return n >= 4;
     });
 
     const rows = h.db
       .prepare(`SELECT type, call_id, data FROM events WHERE session_id = ? ORDER BY rowid ASC`)
       .all(h.sessionId) as Array<{ type: string; call_id: string; data: string }>;
 
-    assert.equal(rows.length, 3);
-    assert.equal(rows[0]!.type, 'user_message');
-    assert.equal(rows[1]!.type, 'approval.requested');
-    assert.equal(rows[1]!.call_id, 'toolu-question');
-    const question = displayData(rows[1]!.data) as {
+    assert.equal(rows.length, 4);
+    assert.equal(rows[0]!.type, 'gian.turn.started');
+    assert.equal(rows[1]!.type, 'user_message');
+    assert.equal(rows[2]!.type, 'approval.requested');
+    assert.equal(rows[2]!.call_id, 'toolu-question');
+    const question = displayData(rows[2]!.data) as {
       approvalId: string;
       category: string;
       questions?: Array<{ question: string; options: Array<{ label: string }> }>;
@@ -362,9 +794,9 @@ test('claude AskUserQuestion tool_use is mirrored as a question approval card an
     assert.equal(question.questions?.[0]?.question, '晚饭想吃什么？');
     assert.equal(question.questions?.[0]?.options[0]?.label, '中餐');
 
-    assert.equal(rows[2]!.type, 'approval.resolved');
-    assert.equal(rows[2]!.call_id, 'toolu-question');
-    const resolved = displayData(rows[2]!.data) as {
+    assert.equal(rows[3]!.type, 'approval.resolved');
+    assert.equal(rows[3]!.call_id, 'toolu-question');
+    const resolved = displayData(rows[3]!.data) as {
       approvalId: string;
       decision: string;
       auto: boolean;
@@ -437,6 +869,8 @@ test('claude AskUserQuestion appended after watcher restart is attached to lates
 test('codex executor — session_meta header skipped, event_msg lines synced', async () => {
   const h = setupCcHarness();
   try {
+    const startedAt = '2026-08-09T04:00:00.000Z';
+    const completedAt = '2026-08-09T04:00:09.000Z';
     appendFileSync(h.filePath, JSON.stringify({
       type: 'session_meta',
       payload: { id: 'thread-x', cwd: '/tmp/ws' },
@@ -445,28 +879,46 @@ test('codex executor — session_meta header skipped, event_msg lines synced', a
     h.watcher.start(h.sessionId, h.filePath, 'codex');
     await new Promise(r => setTimeout(r, WATCH_ATTACH_MS));
 
-    appendFileSync(h.filePath, JSON.stringify({
-      type: 'event_msg',
-      payload: { type: 'user_message', message: 'codex hi' },
-    }) + '\n');
-    appendFileSync(h.filePath, JSON.stringify({
-      type: 'event_msg',
-      payload: { type: 'agent_message', message: 'codex reply' },
-    }) + '\n');
+    appendFileSync(
+      h.filePath,
+      codexEventLine({ type: 'user_message', message: 'codex hi' }, startedAt),
+    );
+    appendFileSync(
+      h.filePath,
+      codexEventLine({ type: 'agent_message', message: 'codex reply' }),
+    );
+    appendFileSync(
+      h.filePath,
+      codexEventLine({ type: 'task_complete', turn_id: 'native-turn-1' }, completedAt),
+    );
 
     await waitFor(() => {
       const n = (h.db
         .prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?')
         .get(h.sessionId) as { n: number }).n;
-      return n >= 2;
+      return n >= 4;
     });
 
     const rows = h.db
       .prepare(`SELECT type, data FROM events WHERE session_id = ? ORDER BY rowid ASC`)
       .all(h.sessionId) as Array<{ type: string; data: string }>;
-    assert.equal(rows.length, 2);
-    assert.equal(rows[0]!.type, 'user_message');
-    assert.equal(rows[1]!.type, 'codex.event_msg.agent_message');
+    assert.equal(rows.length, 4);
+    assert.equal(rows[0]!.type, 'gian.turn.started');
+    assert.equal(rows[1]!.type, 'user_message');
+    assert.equal(rows[2]!.type, 'codex.event_msg.agent_message');
+    assert.equal(rows[3]!.type, 'gian.turn.completed');
+    const turn = h.db
+      .prepare('SELECT status, created_at, completed_at FROM turns WHERE session_id = ?')
+      .get(h.sessionId) as {
+        status: string;
+        created_at: string;
+        completed_at: string | null;
+      };
+    assert.deepEqual(turn, {
+      status: 'completed',
+      created_at: startedAt,
+      completed_at: completedAt,
+    });
   } finally {
     h.cleanup();
   }

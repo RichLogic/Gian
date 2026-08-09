@@ -234,6 +234,17 @@ test('ERR-017: install --check validates the host platform with special paths', 
   assert.match(result.stdout, new RegExp(`Rendered ${installerPlatform} unit successfully`));
 });
 
+test('DAEMON-001: install --check renders the Linux systemd user unit', async t => {
+  if (!requireInstallerHost(t)) return;
+  const fixture = await installFixture();
+  t.after(() => rm(fixture.base, { recursive: true, force: true }));
+  await setFakeRuntime(fixture.bin, 'Linux', 'v22.18.0');
+
+  const result = await runCheck(fixture);
+  assert.match(result.stdout, /Rendered linux unit successfully/);
+  assert.match(result.stdout, /Launch PATH/);
+});
+
 test('ERR-017: install failure matrix rejects unsupported Node and missing build entry', async t => {
   const fixture = await installFixture();
   t.after(() => rm(fixture.base, { recursive: true, force: true }));
@@ -257,6 +268,24 @@ test('ERR-017: install failure matrix rejects unsupported Node and missing build
     assert.match(error.stderr, /Built entry point not found/);
     return true;
   });
+});
+
+test('ERR-017: a Homebrew Node 25 shadowing an nvm Node 22 fails explicitly', async t => {
+  const fixture = await installFixture();
+  t.after(() => rm(fixture.base, { recursive: true, force: true }));
+  const brewBin = join(fixture.base, 'homebrew', 'bin');
+  await mkdir(brewBin, { recursive: true });
+  await setFakeRuntime(fixture.bin, 'Darwin', 'v22.18.0');
+  await writeExecutable(join(brewBin, 'node'), '#!/bin/sh\nprintf "v25.0.0\\n"\n');
+
+  await assert.rejects(
+    runCheck(fixture, { path: `${brewBin}:${fixture.bin}:/usr/bin:/bin` }),
+    error => {
+      assert.match(error.stderr, /Node v25\+ silently breaks better-sqlite3/);
+      assert.match(error.stderr, /brew is shadowing nvm/);
+      return true;
+    },
+  );
 });
 
 test('ERR-017: missing provider CLIs stay non-fatal and identify every deferred install', async t => {

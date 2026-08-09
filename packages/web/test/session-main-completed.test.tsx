@@ -4,7 +4,7 @@ import type { Session, Workspace } from '@gian/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { SessionMain } from '../src/views/SessionMain.js';
-import type { QueueEntry } from '../src/types.js';
+import type { QueueEntry, TranscriptItem } from '../src/types.js';
 import { sessionContractFixture } from './fixtures/ws-contract.js';
 
 vi.mock('../src/api.js', () => {
@@ -32,19 +32,8 @@ const workspace: Workspace = {
 
 const queuedFollowUp: QueueEntry[] = [{ id: 'queue-closed-session', text: 'queued follow-up' }];
 
-function expectReadOnlyQueue(): void {
-  const drawer = screen.getByText('queued follow-up').closest('.queue-drawer');
-  expect(drawer).not.toBeNull();
-  expect(drawer!.querySelector('.qd-count')).toHaveTextContent('1');
-  const queueUi = within(drawer as HTMLElement);
-  expect(queueUi.queryByRole('button', { name: 'Send now' })).not.toBeInTheDocument();
-  expect(queueUi.queryByRole('button', { name: 'Clear' })).not.toBeInTheDocument();
-  expect(queueUi.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
-  expect(queueUi.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
-}
-
-function renderSession(session: Session, queue: QueueEntry[] = []) {
-  const callbacks = {
+function sessionCallbacks() {
+  return {
     onSend: vi.fn(),
     onSendSkill: vi.fn(),
     onStop: vi.fn(),
@@ -65,12 +54,20 @@ function renderSession(session: Session, queue: QueueEntry[] = []) {
     onShowChanges: vi.fn(),
     onShowLastTurnChanges: vi.fn(),
   };
-  render(
+}
+
+function sessionMainElement(
+  session: Session,
+  items: TranscriptItem[],
+  queue: QueueEntry[],
+  callbacks: ReturnType<typeof sessionCallbacks>,
+) {
+  return (
     <LocaleProvider locale="en">
       <SessionMain
         session={session}
         workspace={workspace}
-        items={[]}
+        items={items}
         hydrated
         pending={false}
         queue={queue}
@@ -78,10 +75,49 @@ function renderSession(session: Session, queue: QueueEntry[] = []) {
         branch={null}
         {...callbacks}
       />
-    </LocaleProvider>,
+    </LocaleProvider>
   );
+}
+
+function expectReadOnlyQueue(): void {
+  const drawer = screen.getByText('queued follow-up').closest('.queue-drawer');
+  expect(drawer).not.toBeNull();
+  expect(drawer!.querySelector('.qd-count')).toHaveTextContent('1');
+  const queueUi = within(drawer as HTMLElement);
+  expect(queueUi.queryByRole('button', { name: 'Send now' })).not.toBeInTheDocument();
+  expect(queueUi.queryByRole('button', { name: 'Clear' })).not.toBeInTheDocument();
+  expect(queueUi.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+  expect(queueUi.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
+}
+
+function renderSession(session: Session, queue: QueueEntry[] = []) {
+  const callbacks = sessionCallbacks();
+  render(sessionMainElement(session, [], queue, callbacks));
   return callbacks;
 }
+
+describe('Session transcript isolation', () => {
+  beforeEach(() => localStorage.clear());
+
+  it('remounts transcript-local card state when the session changes', async () => {
+    const callbacks = sessionCallbacks();
+    const sessionA = sessionContractFixture({ id: 'session-a', status: 'done' });
+    const sessionB = sessionContractFixture({ id: 'session-b', status: 'done' });
+    const reasoning = (text: string): TranscriptItem => ({
+      kind: 'reasoning', id: 'provider-reused-id', variant: 'full',
+      text, ts: 1_000, turn: 1,
+    });
+    const view = render(sessionMainElement(sessionA, [reasoning('thought from A')], [], callbacks));
+
+    await userEvent.click(screen.getByText('thought from A'));
+    expect(view.container.querySelector('.trow-detail')).toHaveTextContent('thought from A');
+
+    view.rerender(sessionMainElement(sessionB, [reasoning('thought from B')], [], callbacks));
+    expect(screen.queryByText('thought from A')).not.toBeInTheDocument();
+    expect(screen.getByText('thought from B')).toBeInTheDocument();
+    expect(view.container.querySelector('.trow-detail')).toBeNull();
+  });
+});
 
 describe('SES-COMPLETE-001: completed Session composer', () => {
   beforeEach(() => localStorage.clear());

@@ -16,6 +16,18 @@ interface StoredEventRow {
   turn_number: number | null;
 }
 
+interface StoredTurnPageRow {
+  id: string;
+  turn_number: number;
+  status: string;
+  created_at: string;
+  completed_at: string | null;
+}
+
+/** Stay below both modern and legacy SQLite variable limits. */
+const EVENT_DELETE_BATCH_SIZE = 500;
+const TERMINAL_TURN_STATUSES = new Set(['completed', 'error', 'stopped']);
+
 export interface EventHistoryPage {
   events: EventEnvelope[];
   nextCursor: number | null;
@@ -63,16 +75,13 @@ export class SessionHistoryStore {
     const orderColumn = this.events.usesSequence ? 'sequence' : 'rowid';
     const turnRows = this.db
       .prepare(
-        `SELECT id, turn_number
+        `SELECT id, turn_number, status, created_at, completed_at
          FROM turns
          WHERE session_id = ? AND (? IS NULL OR turn_number < ?)
          ORDER BY turn_number DESC
          LIMIT ?`,
       )
-      .all(sessionId, beforeTurn, beforeTurn, limit + 1) as Array<{
-        id: string;
-        turn_number: number;
-      }>;
+      .all(sessionId, beforeTurn, beforeTurn, limit + 1) as StoredTurnPageRow[];
     const selected = turnRows.slice(0, limit);
     if (selected.length === 0) return { events: [], nextCursor: null, hasMore: false };
 
@@ -124,10 +133,11 @@ export class SessionHistoryStore {
       : undefined;
     const hasMore = turnRows.length > limit || coldRebuild?.complete === 0;
     const oldestTurn = Math.min(...selected.map(turn => turn.turn_number));
+    const compacted = compactHistoryEnvelopes(
+      rows.map(row => eventEnvelope(this.events, sessionId, row, false)),
+    );
     return {
-      events: compactHistoryEnvelopes(
-        rows.map(row => eventEnvelope(this.events, sessionId, row, false)),
-      ),
+      events: synthesizeTerminalBoundaries(sessionId, selected, compacted),
       nextCursor: hasMore ? oldestTurn : null,
       hasMore,
     };
@@ -191,9 +201,7 @@ export class SessionHistoryStore {
         if (group.length < 2) continue;
         groupCount += 1;
         const obsolete = group.slice(0, -1).map(item => item.row.id);
-        const placeholders = obsolete.map(() => '?').join(', ');
-        this.db.prepare(`DELETE FROM events WHERE id IN (${placeholders})`).run(...obsolete);
-        removed += obsolete.length;
+        removed += deleteEventsById(this.db, obsolete);
       }
     })();
     return { groups: groupCount, removed };
@@ -225,6 +233,24 @@ export class SessionHistoryStore {
     });
   }
 
+  /** True when this turn already carries a provider or Gian-owned fold boundary. */
+  hasTurnCompletionBoundary(turnId: string): boolean {
+    const rows = this.db.prepare(
+      `SELECT e.id, e.session_id, e.call_id, e.type, e.data, e.created_at,
+              t.turn_number
+       FROM events e
+       JOIN turns t ON t.id = e.turn_id
+       WHERE e.turn_id = ?
+         AND e.type IN (
+           'turn.completed', 'turn_completed', 'state.turn-completed', 'gian.turn.completed'
+         )`,
+    ).all(turnId) as StoredEventRow[];
+    return rows.some(row => (
+      eventEnvelope(this.events, row.session_id, row, true).display?.type
+        === 'state.turn-completed'
+    ));
+  }
+
   /** Merge safe streaming fragments once a turn is terminal. */
   compactTurnStreams(turnId: string): number {
     return this.compactTurnStreamsDetailed(turnId).removed;
@@ -246,9 +272,8 @@ export class SessionHistoryStore {
     const groups = new Map<string, Array<{ row: StoredEventRow; event: EventEnvelope }>>();
     for (const row of rows) {
       const event = eventEnvelope(this.events, row.session_id, row, true);
-      const display = event.display;
-      if (!display || !isCompactableEvent(event)) continue;
-      const key = `${display.type}\u0000${event.call_id}`;
+      const key = streamIdentity(event);
+      if (!key) continue;
       const group = groups.get(key) ?? [];
       group.push({ row, event });
       groups.set(key, group);
@@ -273,11 +298,17 @@ export class SessionHistoryStore {
           },
           display: merged.display,
         });
+        const firstCreatedAt = group[0]!.row.created_at;
+        if (retained.row.created_at !== firstCreatedAt) {
+          // The retained row keeps the newest sequence position, while its
+          // timestamp remains the first fragment's start time. Live reducers
+          // already preserve that timestamp, so replay must match them.
+          this.db.prepare('UPDATE events SET created_at = ? WHERE id = ?')
+            .run(firstCreatedAt, retained.row.id);
+        }
         const obsolete = group.slice(0, -1).map(item => item.row.id);
-        const placeholders = obsolete.map(() => '?').join(', ');
-        this.db.prepare(`DELETE FROM events WHERE id IN (${placeholders})`).run(...obsolete);
+        removed += deleteEventsById(this.db, obsolete);
         groupCount += 1;
-        removed += obsolete.length;
       }
     })();
     return { groups: groupCount, removed };
@@ -350,6 +381,84 @@ function parseStoredEventTimestamp(createdAt: string): number {
   return Date.parse(normalized);
 }
 
+function synthesizeTerminalBoundaries(
+  sessionId: string,
+  turns: StoredTurnPageRow[],
+  events: EventEnvelope[],
+): EventEnvelope[] {
+  const eventsByTurn = new Map<number, EventEnvelope[]>();
+  for (const event of events) {
+    const list = eventsByTurn.get(event.turn) ?? [];
+    list.push(event);
+    eventsByTurn.set(event.turn, list);
+  }
+
+  const out: EventEnvelope[] = [];
+  for (const turn of [...turns].sort((left, right) => left.turn_number - right.turn_number)) {
+    const turnEvents = eventsByTurn.get(turn.turn_number) ?? [];
+    if (!TERMINAL_TURN_STATUSES.has(turn.status)) {
+      out.push(...turnEvents);
+      continue;
+    }
+
+    // Legacy/provider histories can contain an early completion followed by
+    // late tool output, or multiple completion notifications for one turn.
+    // Hydration must always expose one terminal boundary at the physical end
+    // of the logical turn. Prefer the latest provider-owned boundary over a
+    // Gian fallback so provider summaries/metadata survive canonicalization.
+    const boundaries = turnEvents.filter(
+      event => event.display?.type === 'state.turn-completed',
+    );
+    const content = turnEvents.filter(
+      event => event.display?.type !== 'state.turn-completed',
+    );
+    out.push(...content);
+
+    const completedAt = turn.completed_at == null
+      ? Number.NaN
+      : parseStoredEventTimestamp(turn.completed_at);
+    const createdAt = parseStoredEventTimestamp(turn.created_at);
+    const lastEventAt = content.reduce<number | undefined>(
+      (latest, event) => latest === undefined ? event.ts : Math.max(latest, event.ts),
+      undefined,
+    );
+    const providerBoundary = [...boundaries].reverse().find(
+      event => event.event === 'turn.completed' || event.event === 'turn_completed',
+    );
+    const retained = providerBoundary ?? boundaries[boundaries.length - 1];
+    const retainedAt = retained?.ts;
+    const baseTimestamp = Number.isFinite(retainedAt)
+      ? retainedAt!
+      : (Number.isFinite(completedAt) ? completedAt : (lastEventAt ?? createdAt));
+    const ts = Math.max(baseTimestamp, lastEventAt ?? Number.NEGATIVE_INFINITY);
+    out.push(retained
+      ? { ...retained, ts }
+      : {
+          session_id: sessionId,
+          turn: turn.turn_number,
+          call_id: `gian:turn-completed:${turn.id}`,
+          event: 'gian.turn.completed',
+          ts,
+          data: {},
+          display: {
+            type: 'state.turn-completed',
+            data: { turnId: turn.id },
+          },
+        });
+  }
+  return out;
+}
+
+function deleteEventsById(db: Db, eventIds: string[]): number {
+  let removed = 0;
+  for (let start = 0; start < eventIds.length; start += EVENT_DELETE_BATCH_SIZE) {
+    const batch = eventIds.slice(start, start + EVENT_DELETE_BATCH_SIZE);
+    const placeholders = batch.map(() => '?').join(', ');
+    removed += db.prepare(`DELETE FROM events WHERE id IN (${placeholders})`).run(...batch).changes;
+  }
+  return removed;
+}
+
 function eventEnvelope(
   events: EventStore,
   sessionId: string,
@@ -392,7 +501,11 @@ export function compactHistoryEnvelopes(events: EventEnvelope[]): EventEnvelope[
       out.push(event);
       continue;
     }
-    const key = `${event.turn}\u0000${display.type}\u0000${event.call_id}`;
+    const key = streamIdentity(event);
+    if (!key) {
+      out.push(event);
+      continue;
+    }
     const existingIndex = compacted.get(key);
     if (existingIndex === undefined) {
       compacted.set(key, out.length);
@@ -445,18 +558,28 @@ export function compactHistoryEnvelopes(events: EventEnvelope[]): EventEnvelope[
       };
     }
     // The persisted compactor retains the newest physical row. Move the
-    // canonical projection to that same chronological position so a
-    // pre-migration replay and its one-row representation order identically.
+    // canonical projection to that same sequence position, but retain the
+    // first fragment timestamp just like the live reducer does.
     out[existingIndex] = undefined;
     compacted.set(key, out.length);
     out.push({
       ...existing,
-      ts: event.ts,
       data: event.data,
       display: { type: display.type, data: nextData } as unknown as ChatDisplay,
     });
   }
   return out.filter((event): event is EventEnvelope => event !== undefined);
+}
+
+/** Stable logical identity shared by persisted and in-memory stream compaction. */
+function streamIdentity(event: EventEnvelope): string | null {
+  const display = event.display;
+  if (!display || !isCompactableEvent(event)) return null;
+  const data = display.data as unknown as Record<string, unknown>;
+  const variant = display.type === 'activity.reasoning'
+    ? (data.kind === 'summary' ? 'summary' : 'full')
+    : '';
+  return `${event.turn}\u0000${display.type}\u0000${event.call_id}\u0000${variant}`;
 }
 
 export function canonicalizeHistoryEnvelopes(events: EventEnvelope[]): EventEnvelope[] {
@@ -540,6 +663,7 @@ function legacyDisplay(type: string, data: Record<string, unknown>): ChatDisplay
     auto_circuit_breaker: 'activity.circuit-breaker',
     turn_started: 'state.turn-started',
     turn_completed: 'state.turn-completed',
+    'state.turn-completed': 'state.turn-completed',
     session_error: 'state.error',
     'output.text': 'message',
     'output.text.delta': 'message',

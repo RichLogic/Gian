@@ -165,16 +165,27 @@ export class SessionManager {
     if (!proxySessionId) throw new Error(`session not initialized: ${sessionId}`);
     const client = this.proxy.get(sessionId);
     if (!client) throw new Error(`no proxy for session: ${sessionId}`);
-    await client.interruptTurn(proxySessionId);
-    // Settle locally: cc-proxy's interruptTurn just kills the runtime and
-    // never emits turn.completed/failed, so handleLifecycle won't fire. For
-    // codex the turn-failed notification *will* arrive but completeTurn is
-    // idempotent (early-returns when activeTurns has nothing). Either way,
-    // make sure the UI's spinner clears.
-    if (this.turns.has(sessionId)) {
-      this.completeTurn(sessionId, 'stopped');
-      this.watcher?.resume(sessionId);
+
+    // Mark the generation before awaiting the RPC so a synchronous provider
+    // terminal is interpreted as the requested stop. Do not settle eagerly:
+    // if interrupt rejects, the agent may still be running and Host must keep
+    // accepting its events so the user can retry or force-recover.
+    const stopping = this.turns.requestStop(sessionId);
+    try {
+      await client.interruptTurn(proxySessionId);
+    } catch (error) {
+      if (stopping && this.turns.get(sessionId)?.id !== stopping.id) {
+        // A synchronous provider terminal already proved this generation is
+        // settled; the interrupt transport's late rejection cannot undo it.
+        return;
+      }
+      if (stopping) this.turns.cancelStop(sessionId, stopping.id);
+      throw error;
     }
+    if (stopping && this.turns.get(sessionId)?.id === stopping.id) {
+      this.completeTurn(sessionId, 'stopped');
+    }
+    if (!this.turns.has(sessionId)) this.watcher?.resume(sessionId);
   }
 
   /**
@@ -207,7 +218,8 @@ export class SessionManager {
     // in-memory `activeTurns` entry. If the host restarted while a turn was
     // running, activeTurns is empty but the row still says 'running' — it's
     // an orphan; mark it 'stopped' so it doesn't haunt later queries.
-    this.turns.stopOrphaned(sessionId, now);
+    const orphaned = this.turns.stopOrphaned(sessionId, now);
+    this.events.settleOrphanedTurns(sessionId, orphaned, 'stopped', now);
 
     // Force the session row to a clean status. completeTurn already did this
     // if a turn was active in memory; otherwise the row might still say
@@ -324,7 +336,7 @@ export class SessionManager {
     // path used to overwrite session.status to 'error' even though the
     // prior turn is still legitimately running on the proxy side.
     // Callers (WS handler) should route to enqueueMessage when this throws.
-    if (this.turns.has(sessionId)) {
+    if (this.hasRunningTurn(sessionId)) {
       throw new Error(`turn already in flight for session ${sessionId}; enqueue instead`);
     }
     const proxySessionId = await this.proxySessions.ensure(session);
@@ -334,6 +346,13 @@ export class SessionManager {
       ? await ensureSessionAttachmentDir(sessionId, this.dataDir)
       : null;
 
+    // `ensure()` (and Codex attachment preparation) can yield long enough for
+    // an external watcher turn or another send to claim the session. Recheck
+    // immediately before the synchronous DB/runtime reservation so neither
+    // path can overwrite the active generation.
+    if (this.hasRunningTurn(sessionId)) {
+      throw new Error(`turn already in flight for session ${sessionId}; enqueue instead`);
+    }
 
     const turnId = randomUUID();
     const now = new Date().toISOString();
@@ -390,7 +409,7 @@ export class SessionManager {
       ? translateItemsForExecutor(session.executor, items)
       : [{ type: 'text' as const, text }];
     try {
-      await client.startTurn({
+      const started = await client.startTurn({
         sessionId: proxySessionId,
         input: dispatchItems,
         ...(codexAttachmentRoot
@@ -409,6 +428,7 @@ export class SessionManager {
         ...(session.executor === 'claude' && session.name ? { displayName: session.name } : {}),
         ...policyParams,
       });
+      this.turns.bindProviderTurn(sessionId, turnId, started.turn.id, true);
     } catch (err) {
       // startTurn rejected. The host already optimistically wrote
       // turn=running / session=running and paused the watcher above; roll
@@ -872,6 +892,18 @@ export class SessionManager {
     status: 'completed' | 'error' | 'stopped',
   ): void {
     this.events.completeTurn(sessionId, status);
+  }
+
+  private hasRunningTurn(sessionId: string): boolean {
+    if (this.turns.has(sessionId)) return true;
+    return !!this.db
+      .prepare(
+        `SELECT 1
+         FROM turns
+         WHERE session_id = ? AND status = 'running'
+         LIMIT 1`,
+      )
+      .get(sessionId);
   }
 
   /** Persist and broadcast one canonical user-message envelope. Both paths

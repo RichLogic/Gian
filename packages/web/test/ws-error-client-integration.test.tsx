@@ -18,6 +18,7 @@ import {
 import { createOperationStore, type OperationStore } from '../src/operations/store.js';
 import { OperationDispatcherProvider, OperationStoreProvider } from '../src/operations/use-operations.js';
 import { UserMessage } from '../src/transcript/items.js';
+import type { PlanLifecycleState } from '../src/transcript/apply.js';
 import type { TranscriptItem } from '../src/types.js';
 import { GianWs } from '../src/ws.js';
 import { sessionContractFixture, stateSyncFixture } from './fixtures/ws-contract.js';
@@ -43,6 +44,8 @@ interface HarnessProps {
   initialSessions?: Session[];
   initialActiveSessionId?: string;
   pendingFirstMessage?: string | null;
+  initialItemsBySession?: Record<string, TranscriptItem[]>;
+  initialPlanStateBySession?: Record<string, PlanLifecycleState>;
 }
 
 function ClientReducerHarness({
@@ -52,12 +55,19 @@ function ClientReducerHarness({
   initialSessions = [],
   initialActiveSessionId = 'session-wire',
   pendingFirstMessage = null,
+  initialItemsBySession = {},
+  initialPlanStateBySession = {},
 }: HarnessProps) {
   const [authed, setAuthed] = useState(false);
-  const [itemsBySession, setItemsBySession] = useState<Record<string, TranscriptItem[]>>({});
+  const [itemsBySession, setItemsBySession] = useState<Record<string, TranscriptItem[]>>(initialItemsBySession);
   const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
+  const [planStateBySession, setPlanStateBySession] = useState<
+    Record<string, PlanLifecycleState>
+  >(initialPlanStateBySession);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(initialActiveSessionId);
   const sessionsRef = useRef<Session[]>(initialSessions);
+  const itemsBySessionRef = useRef<Record<string, TranscriptItem[]>>(initialItemsBySession);
+  itemsBySessionRef.current = itemsBySession;
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
   const pendingFirstMessageRef = useRef<string | null>(pendingFirstMessage);
@@ -74,13 +84,13 @@ function ClientReducerHarness({
     authStatus: 'authenticated',
     ws,
     sessionsRef,
+    itemsBySessionRef,
     activeSessionIdRef,
     pendingFirstMessageRef,
     setWsState: ignoreState,
     setWsAttempt: ignoreState,
     setAuthed,
     setWorkspaces: ignoreState,
-    setWorkingTrees: ignoreState,
     setSessions: setSessionsRef,
     setTasks: ignoreState,
     setSystemConfig: ignoreState,
@@ -91,7 +101,7 @@ function ClientReducerHarness({
     setItemsBySession,
     setPendingBySession,
     setQueueBySession: ignoreState,
-    setPlanStateBySession: ignoreState,
+    setPlanStateBySession,
     markSessionHistoryLive: () => {},
     operationStore: store,
     ops,
@@ -114,6 +124,7 @@ function ClientReducerHarness({
               pendingFirstMessage: pendingFirstMessageRef.current,
               itemsBySession,
               pendingBySession,
+              planStateBySession,
             })}
           </pre>
         </LocaleProvider>
@@ -127,7 +138,9 @@ interface Snapshot {
   activeSessionId: string | null;
   pendingFirstMessage: string | null;
   itemsBySession: Record<string, Array<{
+    kind?: TranscriptItem['kind'];
     id?: string;
+    turn?: number;
     sendRunId?: string;
     sendCanonical?: boolean;
     sendRetry?: { sessionId: string; text: string };
@@ -135,6 +148,7 @@ interface Snapshot {
     failed?: boolean;
   }>>;
   pendingBySession: Record<string, boolean>;
+  planStateBySession: Record<string, PlanLifecycleState>;
 }
 
 function snapshot(): Snapshot {
@@ -142,6 +156,170 @@ function snapshot(): Snapshot {
 }
 
 describe('WS-003: Host dispatch failure through the real Web client chain', () => {
+  it('closes the latest in-memory turn once when only a terminal session update arrives', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const session = sessionContractFixture({
+      id: 'session-wire', status: 'running', executor: 'kimi',
+    });
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        initialSessions={[session]}
+        initialItemsBySession={{
+          'session-wire': [
+            {
+              kind: 'reasoning', id: 'shared-turn-id', variant: 'full',
+              text: 'still visible', ts: 1_000, turn: 7,
+            },
+          ],
+        }}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [session] }));
+
+      const terminalUpdate = {
+        type: 'session:updated' as const,
+        session: {
+          id: 'session-wire', status: 'done' as const,
+          updated_at: '2026-08-09T02:12:25.000Z',
+        },
+      };
+      act(() => socket.fakeMessage(terminalUpdate));
+      expect(snapshot().pendingBySession['session-wire']).toBe(false);
+      expect(snapshot().itemsBySession['session-wire']?.filter(item => item.kind === 'turn-end'))
+        .toMatchObject([{ turn: 7 }]);
+
+      // A duplicate session update and a late real event converge on the same
+      // turn boundary instead of creating multiple TurnSum triggers.
+      act(() => socket.fakeMessage(terminalUpdate));
+      act(() => socket.fakeMessage({
+        type: 'event',
+        session_id: 'session-wire',
+        turn: 7,
+        call_id: 'provider-turn-complete',
+        event: 'turn_completed',
+        ts: Date.parse('2026-08-09T02:12:25.000Z'),
+        data: {},
+      }));
+      expect(snapshot().itemsBySession['session-wire']?.filter(item => item.kind === 'turn-end'))
+        .toMatchObject([{ id: 'provider-turn-complete', turn: 7 }]);
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+    }
+  });
+
+  it('uses same-task state_sync status when a terminal update immediately follows reconnect', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const done = sessionContractFixture({ id: 'session-wire', status: 'done', executor: 'kimi' });
+    const running = { ...done, status: 'running' as const };
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        initialSessions={[done]}
+        initialItemsBySession={{
+          'session-wire': [{
+            kind: 'reasoning', id: 'r7', variant: 'full', text: 'live', ts: 700, turn: 7,
+          }],
+        }}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => {
+        socket.fakeMessage({ ...stateSyncFixture(), sessions: [running] });
+        socket.fakeMessage({
+          type: 'session:updated',
+          session: { id: running.id, status: 'done', updated_at: '2026-08-09T02:12:25.000Z' },
+        });
+      });
+
+      expect(snapshot().itemsBySession['session-wire']?.filter(item => item.kind === 'turn-end'))
+        .toMatchObject([{ turn: 7 }]);
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+    }
+  });
+
+  it('finalizes an active plan from session lifecycle alone using the latest transcript turn', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const running = sessionContractFixture({
+      id: 'session-wire', status: 'running', executor: 'kimi',
+    });
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        initialSessions={[running]}
+        initialItemsBySession={{
+          'session-wire': [{
+            kind: 'assistant', id: 'a7', text: 'finished', exec: 'kimi', ts: 700, turn: 7,
+          }],
+        }}
+        initialPlanStateBySession={{
+          'session-wire': {
+            text: '- [x] inspect\n- [x] test', completed: false, status: 'active', turn: 5,
+          },
+        }}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [running] }));
+      act(() => socket.fakeMessage({
+        type: 'session:updated',
+        session: { id: running.id, status: 'done', updated_at: '2026-08-09T02:12:25.000Z' },
+      }));
+
+      expect(snapshot().planStateBySession['session-wire']).toMatchObject({
+        completed: true,
+        status: 'completed',
+        turn: 7,
+      });
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+    }
+  });
+
   it('skips native adoption in both delivery orders but lets a known ordinary create consume', async () => {
     const wsFirstAdopted = sessionContractFixture({
       id: 'session-adopted-ws-first', name: 'Adopted before HTTP',

@@ -1,9 +1,10 @@
-import { useContext, useEffect, useMemo, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useT } from '../i18n/index.js';
 import { ChatPanelOpenContext } from '../presentation/chat-panel.js';
 import { projectSessionContext, type AgentRunDisplayItem } from '../presentation/session-context.js';
 import type { TranscriptItem } from '../types.js';
 import { MarkdownText } from '../transcript/items.js';
+import { useUnderbarPanelController } from './UnderbarPanelGroup.js';
 import '../styles/context-strip.css';
 
 /**
@@ -33,8 +34,24 @@ export function PlanChip({
 }) {
   const t = useT();
   const openChatPanel = useContext(ChatPanelOpenContext);
-  const [planOpen, setPlanOpen] = useState(false);
-  const [agentsOpen, setAgentsOpen] = useState(false);
+  const panelController = useUnderbarPanelController();
+  const [standalonePanel, setStandalonePanel] = useState<'plan' | 'agent' | null>(null);
+  const planOpen = panelController
+    ? panelController.openPanel === 'plan'
+    : standalonePanel === 'plan';
+  const agentsOpen = panelController
+    ? panelController.openPanel === 'agent'
+    : standalonePanel === 'agent';
+  const groupedClosePanel = panelController?.closePanel;
+  const groupedTogglePanel = panelController?.togglePanel;
+  const closePanels = useCallback(() => {
+    if (groupedClosePanel) groupedClosePanel();
+    else setStandalonePanel(null);
+  }, [groupedClosePanel]);
+  const togglePanel = useCallback((panel: 'plan' | 'agent') => {
+    if (groupedTogglePanel) groupedTogglePanel(panel);
+    else setStandalonePanel(current => current === panel ? null : panel);
+  }, [groupedTogglePanel]);
   const context = useMemo(
     () => projectSessionContext({
       items,
@@ -48,14 +65,14 @@ export function PlanChip({
   );
 
   useEffect(() => {
-    setPlanOpen(false);
-    setAgentsOpen(false);
+    setStandalonePanel(null);
   }, [sessionId]);
 
   useEffect(() => {
-    if (!context.plan) setPlanOpen(false);
-    if (context.agents.length === 0) setAgentsOpen(false);
-  }, [context.plan, context.agents.length]);
+    if ((planOpen && !context.plan) || (agentsOpen && context.agents.length === 0)) {
+      closePanels();
+    }
+  }, [agentsOpen, closePanels, context.agents.length, context.plan, planOpen]);
 
   if (!context.plan && context.agents.length === 0) return null;
 
@@ -77,6 +94,7 @@ export function PlanChip({
           id={`context-plan-${sessionId}`}
           className="context-plan-panel"
           aria-label="Plan"
+          data-underbar-panel-interactive
         >
           <header className="context-plan-panel-head">
             <div>
@@ -93,7 +111,7 @@ export function PlanChip({
                 className="context-panel-close"
                 aria-label={t('common.close')}
                 title={t('common.close')}
-                onClick={() => setPlanOpen(false)}
+                onClick={closePanels}
               >
                 <span aria-hidden>&times;</span>
               </button>
@@ -106,7 +124,11 @@ export function PlanChip({
       )}
 
       {agentsOpen && (
-        <section className="context-agent-panel" aria-label={t('transcript.agentRuns')}>
+        <section
+          className="context-agent-panel"
+          aria-label={t('transcript.agentRuns')}
+          data-underbar-panel-interactive
+        >
           <header className="context-agent-panel-head">
             <div>
               <strong>{t('transcript.agentRuns')}</strong>
@@ -119,7 +141,7 @@ export function PlanChip({
               className="context-panel-close"
               aria-label={t('common.close')}
               title={t('common.close')}
-              onClick={() => setAgentsOpen(false)}
+              onClick={closePanels}
             >
               <span aria-hidden>&times;</span>
             </button>
@@ -130,7 +152,7 @@ export function PlanChip({
                 key={agent.id}
                 agent={agent}
                 onSelect={() => {
-                  setAgentsOpen(false);
+                  closePanels();
                   if (openChatPanel) openChatPanel({ kind: 'agent', id: agent.id });
                   else jumpToAgent(agent.id);
                 }}
@@ -152,10 +174,8 @@ export function PlanChip({
             className="plan-chip"
             aria-expanded={planOpen}
             aria-controls={`context-plan-${sessionId}`}
-            onClick={() => {
-              setPlanOpen(open => !open);
-              setAgentsOpen(false);
-            }}
+            data-underbar-panel-interactive
+            onClick={() => togglePanel('plan')}
             title={t('transcript.planViewLatest')}
           >
             <span className="plan-chip-label">Plan</span>
@@ -179,10 +199,8 @@ export function PlanChip({
             type="button"
             className="context-chip context-agent-trigger"
             aria-expanded={agentsOpen}
-            onClick={() => {
-              setAgentsOpen(open => !open);
-              setPlanOpen(false);
-            }}
+            data-underbar-panel-interactive
+            onClick={() => togglePanel('agent')}
             title={t('transcript.agentViewRuns')}
           >
             <span>{t('transcript.agent')}</span>

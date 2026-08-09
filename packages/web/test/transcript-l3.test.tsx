@@ -13,7 +13,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { CommandItem, FileSearchItem, ReasoningItem, ToolItem } from '../src/types.js';
+import type { CommandItem, FileSearchItem, ReasoningItem, ToolItem, TranscriptItem } from '../src/types.js';
 import {
   CommandCard,
   FileSearchCard,
@@ -24,6 +24,7 @@ import {
 } from '../src/transcript/items.js';
 import { insertGroupPreviewTab, type SheetTab } from '../src/components/sheet-model.js';
 import { Sheet } from '../src/components/Sheet.js';
+import { Transcript } from '../src/transcript/Transcript.js';
 
 function commandItem(overrides: Partial<CommandItem> = {}): CommandItem {
   return {
@@ -65,7 +66,7 @@ describe('P3 level-3 routing', () => {
     expect(openDetail).toHaveBeenCalledWith({
       title: 'Run: pnpm test',
       text: LONG_OUTPUT,
-      sourceId: 'cmd-1',
+      sourceId: '1:command:cmd-1',
     } satisfies TranscriptDetailPayload);
     // No inline detail — panel 2 owns the content now.
     expect(container.querySelector('.trow-detail')).toBeNull();
@@ -93,7 +94,9 @@ describe('P3 level-3 routing', () => {
     expect(container.querySelector('.trow-ext')).not.toBeNull();
 
     await user.click(row);
-    expect(openDetail).toHaveBeenCalledWith({ title: 'Reasoning', text: longText, sourceId: 'r-1' });
+    expect(openDetail).toHaveBeenCalledWith({
+      title: 'Reasoning', text: longText, sourceId: '1:reasoning:full:r-1',
+    });
   });
 
   it('a short reasoning stays level 2 (inline, no hint)', () => {
@@ -115,7 +118,106 @@ describe('P3 level-3 routing', () => {
     expect(openDetail).toHaveBeenCalledWith({
       title: 'Tool: mcp__github__create_issue',
       text: LONG_OUTPUT,
-      sourceId: 'tool-1',
+      sourceId: '1:tool:tool-1',
+    });
+  });
+
+  it('counts wrapped rows for a giant one-line tool output and preserves the full text', async () => {
+    const user = userEvent.setup();
+    const output = 'x'.repeat(120 * 10 + 1);
+    const item: ToolItem = {
+      kind: 'tool', id: 'tool-one-line', name: 'mcp__demo__dump',
+      summary: '', status: 'success', output, ts: 1, turn: 2,
+    };
+    const { container, openDetail } = renderWithDetail(<ToolEvent item={item} />);
+
+    expect(container.querySelector('.trow-ext')).not.toBeNull();
+    await user.click(container.querySelector('.trow') as HTMLElement);
+    expect(openDetail).toHaveBeenCalledWith({
+      title: 'Tool: mcp__demo__dump',
+      text: output,
+      sourceId: '2:tool:tool-one-line',
+    });
+  });
+
+  it('keeps exactly ten wrapped rows inline', () => {
+    const item: ToolItem = {
+      kind: 'tool', id: 'tool-threshold', name: 'mcp__demo__dump',
+      summary: '', status: 'success', output: 'x'.repeat(120 * 10), ts: 1, turn: 2,
+    };
+    const { container } = renderWithDetail(<ToolEvent item={item} />);
+
+    expect(container.querySelector('.trow-ext')).toBeNull();
+    expect(container.querySelector('.trow')).toHaveClass('expandable');
+  });
+
+  it('routes a stale-running long tool after its enclosing turn is terminal', async () => {
+    const user = userEvent.setup();
+    const output = Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join('\n');
+    const tool: ToolItem = {
+      kind: 'tool', id: 'stale-running', name: 'mcp__demo__run',
+      summary: '', status: 'running', output, ts: 10, turn: 5,
+    };
+    const items: TranscriptItem[] = [
+      tool,
+      { kind: 'turn-end', id: 'end-5', text: 'complete', ts: 20, turn: 5 },
+    ];
+    const { container, openDetail } = renderWithDetail(
+      <Transcript items={items} pending={false} onApprove={() => {}} />,
+    );
+
+    await user.click(container.querySelector('.turnsum') as HTMLElement);
+    const row = container.querySelector('.turnsum-body .trow') as HTMLElement;
+    expect(row.querySelector('.trow-ext')).not.toBeNull();
+    expect(row.querySelector('.trow-run')).toBeNull();
+    await user.click(row);
+    expect(openDetail).toHaveBeenCalledWith({
+      title: 'Tool: mcp__demo__run',
+      text: output,
+      sourceId: '5:tool:stale-running',
+    });
+  });
+
+  it('routes long tool input to panel 2 even when the tool has no output', async () => {
+    const user = userEvent.setup();
+    const input = JSON.stringify({
+      repository: 'openai/gian',
+      title: 'Regression',
+      body: 'x'.repeat(240),
+    });
+    const item: ToolItem = {
+      kind: 'tool', id: 'tool-input', name: 'mcp__github__create_issue',
+      summary: input, status: 'success', ts: 1, turn: 3,
+    };
+    const { container, openDetail } = renderWithDetail(<ToolEvent item={item} />);
+
+    expect(container.querySelector('.trow-ext')).not.toBeNull();
+    expect(container.querySelector('.trow-detail')).toBeNull();
+    await user.click(container.querySelector('.trow') as HTMLElement);
+    expect(openDetail).toHaveBeenCalledWith({
+      title: 'Tool: mcp__github__create_issue',
+      text: JSON.stringify(JSON.parse(input), null, 2),
+      sourceId: '3:tool:tool-input',
+    });
+  });
+
+  it('measures combined tool input and output instead of output alone', async () => {
+    const user = userEvent.setup();
+    const summary = JSON.stringify(Object.fromEntries(
+      Array.from({ length: 8 }, (_, index) => [`arg${index}`, index]),
+    ));
+    const item: ToolItem = {
+      kind: 'tool', id: 'tool-combined', name: 'mcp__demo__run',
+      summary, status: 'success', output: 'one\ntwo\nthree', ts: 1, turn: 4,
+    };
+    const { container, openDetail } = renderWithDetail(<ToolEvent item={item} />);
+
+    expect(container.querySelector('.trow-ext')).not.toBeNull();
+    await user.click(container.querySelector('.trow') as HTMLElement);
+    expect(openDetail).toHaveBeenCalledWith({
+      title: 'Tool: mcp__demo__run',
+      text: `${JSON.stringify(JSON.parse(summary), null, 2)}\n\none\ntwo\nthree`,
+      sourceId: '4:tool:tool-combined',
     });
   });
 
@@ -132,7 +234,7 @@ describe('P3 level-3 routing', () => {
     expect(openDetail).toHaveBeenCalledWith({
       title: 'Grep: /useStableExpand/',
       text: matches.join('\n'),
-      sourceId: 'fs-1',
+      sourceId: '1:file-search:fs-1',
     });
   });
 
@@ -196,15 +298,21 @@ describe('P3 Sheet text tabs', () => {
     setTabViewMode: vi.fn(),
     setTabName: vi.fn(),
   };
+  // The diffs group hides its tab strip while only the singleton Changes tab
+  // exists; a text detail tab brings the strip back ([Changes][text…]).
+  const changesTab: SheetTab = {
+    id: 'tab-changes', group: 'diffs', name: 'Diffs', kind: 'changes', icoKind: 'diff', ico: '±',
+  };
 
   it('renders a text tab with its full mono body', () => {
     const t = tab('txt-1', { name: 'Run: pnpm test', preview: true, text: LONG_OUTPUT });
     const { container } = render(
-      <Sheet tabs={[t]} activeByGroup={{ diffs: 'txt-1' }} activeGroup="diffs" actions={actions} />,
+      <Sheet tabs={[changesTab, t]} activeByGroup={{ diffs: 'txt-1' }} activeGroup="diffs"
+             actions={actions} renderTab={() => null} />,
     );
-    const tabEl = container.querySelector('.sheet-tab');
-    expect(tabEl).toHaveClass('preview');
-    expect(tabEl).toHaveTextContent('Run: pnpm test');
+    const tabEl = container.querySelector('.sheet-tab.preview');
+    expect(tabEl).not.toBeNull();
+    expect(tabEl!).toHaveTextContent('Run: pnpm test');
     const body = container.querySelector('.sheet-text');
     expect(body).not.toBeNull();
     expect(body!.textContent).toBe(LONG_OUTPUT);
@@ -214,9 +322,10 @@ describe('P3 Sheet text tabs', () => {
     const user = userEvent.setup();
     const t = tab('txt-2', { name: 'Reasoning', preview: true, text: 'trace' });
     const { container } = render(
-      <Sheet tabs={[t]} activeByGroup={{ diffs: 'txt-2' }} activeGroup="diffs" actions={actions} />,
+      <Sheet tabs={[changesTab, t]} activeByGroup={{ diffs: 'txt-2' }} activeGroup="diffs"
+             actions={actions} renderTab={() => null} />,
     );
-    await user.dblClick(container.querySelector('.sheet-tab') as HTMLElement);
+    await user.dblClick(container.querySelector('.sheet-tab.preview') as HTMLElement);
     expect(actions.pinTab).toHaveBeenCalledWith('txt-2');
   });
 });

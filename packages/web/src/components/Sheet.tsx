@@ -278,10 +278,10 @@ function splitHunkRows(header: string, lines: Array<{ kind: 'add' | 'del' | 'ctx
  *  `parseUnifiedDiff` so the format matches DiffCard / Changes events.
  *  `split` swaps the single-column unified view for a side-by-side
  *  (old | new) view; `wrap` mirrors the sheet's word-wrap preference.
- *  Each file block carries `data-path` (kept from the anchor-jump
- *  experiment — harmless, useful for future cross-linking).
- *  Exported for the History commit change-set body (Issue #3) — History,
- *  Changes and ref-compare all share this one renderer. */
+ *  Each file block carries `data-path` so cross-panel anchors (the Changes
+ *  inspector's row click) can target one file inside a stacked diff.
+ *  Exported for the History commit change-set body and the Diffs rail's
+ *  Changes multi-diff view — both share this one renderer. */
 export function DiffBody({ diffText, path, split, wrap }: { diffText: string; path?: string; split?: boolean; wrap?: boolean }) {
   const t = useT();
   const files = parseUnifiedDiff(diffText);
@@ -348,7 +348,7 @@ const SYSTEM_OPENERS: Array<{ name: 'finder' | 'terminal'; key: string; app: str
 ];
 
 function FileActions({
-  tab, caps, actions, tr, wrap, onToggleWrap, split, onToggleSplit, externalEditors, openApps, onOpenWith, onConfigureEditors,
+  tab, caps, actions, tr, wrap, onToggleWrap, externalEditors, openApps, onOpenWith, onConfigureEditors,
 }: {
   tab: SheetTab;
   caps: { canPreviewInApp: boolean; canOpenInBrowser: boolean; mime: string | null };
@@ -356,8 +356,6 @@ function FileActions({
   tr: ReturnType<typeof useT>;
   wrap: boolean;
   onToggleWrap: () => void;
-  split: boolean;
-  onToggleSplit: () => void;
   externalEditors?: Array<{ id: string; name: string }>;
   openApps?: OpenAppPrefs;
   onOpenWith?: (tab: SheetTab, target: SheetOpenWith) => void;
@@ -505,12 +503,6 @@ function FileActions({
                     onClick={() => { onToggleWrap(); setMenu(null); }}>
               {wrap ? tr('sheet.wordwrap.disable') : tr('sheet.wordwrap.enable')}
             </button>
-            {tab.kind === 'diff' && (
-              <button className="sheet-act-item" role="menuitem"
-                      onClick={() => { onToggleSplit(); setMenu(null); }}>
-                {split ? tr('sheet.diffview.toUnified') : tr('sheet.diffview.toSplit')}
-              </button>
-            )}
           </div>
         )}
       </span>
@@ -520,7 +512,7 @@ function FileActions({
 
 export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, onAddTab, renderEmpty, hidden, externalEditors, openApps, onOpenWith, onConfigureEditors }: Props) {
   const tr = useT();
-  // Word-wrap preference for file/diff bodies. Wrap is the historical default
+  // Word-wrap preference for file bodies. Wrap is the historical default
   // (`.txt { white-space: pre-wrap }`); toggling off switches to `pre` +
   // horizontal scroll. Persisted so it sticks across tabs and reloads.
   const [wrap, setWrap] = useState<boolean>(() => {
@@ -529,17 +521,6 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
   const toggleWrap = () => setWrap(w => {
     const next = !w;
     try { localStorage.setItem('gian.sheet.wordwrap', next ? 'on' : 'off'); } catch { /* storage disabled */ }
-    return next;
-  });
-  // Split (side-by-side) vs unified diff view. Unified is the default; persisted
-  // alongside word-wrap so it sticks across tabs and reloads. Only affects diff
-  // tabs — the toggle is conditioned on the active tab being a diff.
-  const [split, setSplit] = useState<boolean>(() => {
-    try { return localStorage.getItem('gian.sheet.diffsplit') === 'on'; } catch { return false; }
-  });
-  const toggleSplit = () => setSplit(s => {
-    const next = !s;
-    try { localStorage.setItem('gian.sheet.diffsplit', next ? 'on' : 'off'); } catch { /* storage disabled */ }
     return next;
   });
   const byGroup = new Map<SheetGroup, SheetTab[]>();
@@ -569,11 +550,9 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
         const caps = fileCapabilities(tab);
         // File tabs always get the action bar now (copy / open-with / wrap
         // live there too — not just the md-preview & browser affordances).
-        // Diff tabs also get it so the unified⇄split toggle has a home; the
-        // file-only affordances self-hide via caps / missing `lines`.
-        const showActions = tab.kind === 'file' || tab.kind === 'diff';
+        const showActions = tab.kind === 'file';
         // Path row: the full path + the action buttons, shown only for tabs
-        // that have a path (file/diff). Terminal/settings have none → no row.
+        // that have a path (file). Terminal/settings have none → no row.
         // Split into dir + filename so the filename is never truncated; the
         // directory part ellipsizes on the left when the path is too long.
         const showPathRow = showActions && !!tab.fullPath;
@@ -581,18 +560,24 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
         const pathDir = pathSlash >= 0 ? tab.fullPath!.slice(0, pathSlash + 1) : '';
         const pathFile = tab.fullPath ? (pathSlash >= 0 ? tab.fullPath.slice(pathSlash + 1) : tab.fullPath) : '';
         // Host-rendered groups with their own live state keep every tab mounted
-        // in its own slot, hidden with display:none when inactive. File/diff/plan bodies are stateless
+        // in its own slot, hidden with display:none when inactive. File/plan bodies are stateless
         // renders of tab data, so those groups render only the active tab.
-        // History commit tabs hold lazily-loaded detail/diff state and scroll —
-        // they get slots too so switching commits never refetches.
+        // History commit tabs and the diffs group's Changes multi-diff view
+        // hold lazily-loaded detail/diff state and scroll — they get slots too
+        // so switching tabs or rails never refetches.
         const slotGroup = g === 'term' || g === 'browser' || g === 'workspaces'
-          || g === 'settings' || g === 'history';
-        // Singleton groups (workspaces/settings) can only ever hold one tab —
-        // the tab strip would be a one-tab header of pure noise, so their
-        // content renders headerless (items carry their own headers).
+          || g === 'settings' || g === 'history' || g === 'diffs';
+        // Singleton groups (workspaces/settings/history) can only ever hold
+        // one tab — the tab strip would be a one-tab header of pure noise, so
+        // their content renders headerless (items carry their own headers).
+        // HistoryCommitBody shows the commit's own sha/subject/stats header.
+        // The diffs group hides its strip while only the singleton Changes tab
+        // exists; a text detail tab brings the strip back ([Changes][text…])
+        // so the user can click back or close it.
         // Browser deliberately keeps the standard tab strip so it matches the
         // established Terminal surface and can be closed/reopened from Dock.
-        const hideTabStrip = g === 'workspaces' || g === 'settings';
+        const hideTabStrip = g === 'workspaces' || g === 'settings' || g === 'history'
+          || (g === 'diffs' && gTabs.length <= 1);
         return (
           <div
             className="sheet-group"
@@ -661,7 +646,27 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
                       key={slotTab.id}
                       style={slotTab.id === activeId ? undefined : { display: 'none' }}
                     >
-                      {renderTab?.(slotTab)}
+                      {/* Text detail tabs (diffs group) render inline — their
+                          body is tab data, no host round-trip — including the
+                          loading/error states of their async fill. */}
+                      {slotTab.loading
+                        ? <div className="sheet-empty"><span className="spinner" aria-hidden="true" /> {tr('sheet.loading')}</div>
+                        : slotTab.kind === 'text' && slotTab.loadError
+                          ? (
+                            <div className="sheet-empty">
+                              {slotTab.loadError}
+                              {slotTab.retryLoad && (
+                                <button className="btn sm secondary" type="button" onClick={slotTab.retryLoad}>
+                                  {tr('sheet.retry')}
+                                </button>
+                              )}
+                            </div>
+                          )
+                          : slotTab.kind === 'text' && slotTab.text !== undefined
+                            ? slotTab.textDiff
+                              ? <DiffBody diffText={slotTab.text} path={slotTab.fullPath ?? slotTab.name} wrap={wrap} />
+                              : <TextBody text={slotTab.text} />
+                            : renderTab?.(slotTab)}
                     </div>
                   ))
                 : (
@@ -679,8 +684,6 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
                             tr={tr}
                             wrap={wrap}
                             onToggleWrap={toggleWrap}
-                            split={split}
-                            onToggleSplit={toggleSplit}
                             externalEditors={externalEditors}
                             openApps={openApps}
                             onOpenWith={onOpenWith}
@@ -690,7 +693,7 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
                       )}
                       {tab.loading
                         ? <div className="sheet-empty"><span className="spinner" aria-hidden="true" /> {tr('sheet.loading')}</div>
-                        : (tab.kind === 'file' || tab.kind === 'diff') && tab.loadError
+                        : tab.kind === 'file' && tab.loadError
                         ? (
                           <div className="sheet-empty">
                             {tab.loadError}
@@ -709,13 +712,13 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
                           ? <FileBody lines={tab.lines} scrollLine={tab.scrollLine} />
                           : tab.kind === 'plan' && tab.planBody
                             ? <PlanBody source={tab.planBody} />
-                            : tab.kind === 'diff' && tab.diffText !== undefined
-                              ? <DiffBody diffText={tab.diffText} path={tab.fullPath ?? tab.name} split={split} wrap={wrap} />
-                              : tab.kind === 'text' && tab.text !== undefined
-                                ? <TextBody text={tab.text} />
-                                : renderTab
-                                  ? renderTab(tab)
-                                  : null}
+                            : tab.kind === 'text' && tab.text !== undefined
+                              ? tab.textDiff
+                                ? <DiffBody diffText={tab.text} path={tab.fullPath ?? tab.name} wrap={wrap} />
+                                : <TextBody text={tab.text} />
+                              : renderTab
+                                ? renderTab(tab)
+                                : null}
                     </>
                   )}
             </div>

@@ -1,7 +1,17 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
-import { loadTree, loadChanged, loadCommits, loadBranchList, loadAllFiles } from '../api.js';
+import { loadTree, loadCommits, loadBranchList, loadAllFiles } from '../api.js';
 import type { TreeEntry, ChangedEntry, BranchCommit, BranchList, WorkingTree, ChangeScope } from '../api.js';
+import {
+  ensureChangesDiffLoaded,
+  refreshChangesDiff,
+  requestChangesDiffAnchor,
+  setChangesDiffBase,
+  setChangesDiffCommit,
+  setChangesDiffScope,
+  setChangesDiffSession,
+  useChangesDiffState,
+} from '../controllers/use-changes-diff.js';
 import { gitIndexEntityKey } from '../operations/git.js';
 import { useOperationDispatch, useOperationRun, usePendingOperations } from '../operations/use-operations.js';
 import { useT } from '../i18n/index.js';
@@ -51,22 +61,9 @@ interface Props {
   onOpenFile: (path: string, permanent: boolean) => void;
   /** Files tab: expand, select, and scroll to a file opened from elsewhere. */
   revealFile?: { workingTreeId: string; path: string; requestId: number } | null;
-  /** Changes tab: force a scope from outside (the GitBadge lands on All
-   *  changes because that's the scope whose numbers it reports). requestId
-   *  re-triggers the apply even when the scope value didn't change. */
-  scopeRequest?: {
-    scope: ChangeScope;
-    requestId: number;
-    sessionId?: string;
-    turn?: number;
-  } | null;
   /** Active session — forwarded to the host on the Last-turn scope, whose
    *  `ws:`/`ext:` trees don't carry a session of their own. */
   activeSessionId?: string | null;
-  /** Changes tab: open the file's diff in Sheet, in the currently-selected
-   *  scope (and pinned commit / compare base, for the Committed / Branch
-   *  second-row pickers) so the diff matches what the row represents. */
-  onOpenDiff: (path: string, permanent: boolean, scope: ChangeScope, sha?: string | null, base?: string | null) => void;
   /** True when an active session is bound to this working tree, so git-action
    *  prompts can be dropped into its composer. False → footer buttons disabled. */
   canCommit: boolean;
@@ -75,7 +72,7 @@ interface Props {
   onComposePrompt: (text: string) => void;
 }
 
-export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, revealFile, scopeRequest, activeSessionId, onOpenDiff, canCommit, onComposePrompt }: Props) {
+export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, revealFile, activeSessionId, canCommit, onComposePrompt }: Props) {
   if (tab === 'files') {
     return (
       <FilesInspector
@@ -86,7 +83,7 @@ export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, reveal
       />
     );
   }
-  return <ChangesInspector workingTreeId={workingTreeId} scopeRequest={scopeRequest} activeSessionId={activeSessionId} onOpenDiff={onOpenDiff} canCommit={canCommit} onComposePrompt={onComposePrompt} />;
+  return <ChangesInspector workingTreeId={workingTreeId} activeSessionId={activeSessionId} canCommit={canCommit} onComposePrompt={onComposePrompt} />;
 }
 
 // ─── Files Inspector ────────────────────────────────────────────────────────
@@ -358,9 +355,11 @@ function TreeFile({
 }
 
 // ─── Changes Inspector ──────────────────────────────────────────────────────
-// Click a changed file → its diff opens in the Sheet workbench (V1 behavior).
-// The changed files are presented as a collapsible file tree (built client-side
-// from the flat /changed list), reusing the FILES tree chrome.
+// Click a changed file → panel 2's singleton Changes multi-diff view jumps to
+// that file's block (expand + scroll). All scope/list state lives in the
+// use-changes-diff store (keyed by working tree); this component is a view
+// over it. The changed files are presented as a collapsible file tree (built
+// client-side from the flat /changed list), reusing the FILES tree chrome.
 
 function sigBadge(kind: ChangedEntry['kind']) {
   if (kind === 'create') return { cls: 'add', txt: 'A' };
@@ -414,12 +413,9 @@ function sortChangeNodes(nodes: ChangeNode[]): void {
 
 interface ChangeTreeProps {
   scope: ChangeScope;
-  /** Pinned commit for the `commit` scope (second-row picker). */
-  commitSha: string | null;
-  /** Explicit compare base for the `branch` scope (null = auto-detected). */
-  baseBranch: string | null;
   busyPath: string | null;
-  onOpenDiff: (path: string, permanent: boolean, scope: ChangeScope, sha?: string | null, base?: string | null) => void;
+  /** Jump panel 2's Changes multi-diff view to this file's diff block. */
+  onReveal: (path: string) => void;
   onToggleStage: (e: ReactMouseEvent, c: ChangedEntry) => void;
   t: (key: string) => string;
 }
@@ -456,8 +452,8 @@ function ChangeLeaf({ entry, name, depth, ctx }: { entry: ChangedEntry; name: st
       className={`tree-item changes-leaf ${entry.staged ? 'staged' : ''}`}
       style={{ paddingLeft: 6 + depth * 10 }}
       title={entry.path}
-      onClick={() => ctx.onOpenDiff(entry.path, false, ctx.scope, ctx.commitSha, ctx.baseBranch)}
-      onDoubleClick={() => ctx.onOpenDiff(entry.path, true, ctx.scope, ctx.commitSha, ctx.baseBranch)}
+      onClick={() => ctx.onReveal(entry.path)}
+      onDoubleClick={() => ctx.onReveal(entry.path)}
     >
       <span className="tree-caret" />
       <span className={`files-badge ${cls}`}>{txt}</span>
@@ -502,36 +498,24 @@ const SCOPE_SEP_BEFORE: ReadonlySet<ChangeScope> = new Set(['all', 'commit']);
 
 function ChangesInspector({
   workingTreeId,
-  scopeRequest,
   activeSessionId,
-  onOpenDiff,
   canCommit,
   onComposePrompt,
 }: {
   workingTreeId: string | null;
-  scopeRequest?: {
-    scope: ChangeScope;
-    requestId: number;
-    sessionId?: string;
-    turn?: number;
-  } | null;
   activeSessionId?: string | null;
-  onOpenDiff: (path: string, permanent: boolean, scope: ChangeScope, sha?: string | null, base?: string | null) => void;
   canCommit: boolean;
   onComposePrompt: (text: string) => void;
 }) {
   const t = useT();
   const dispatch = useOperationDispatch();
-  const [scope, setScope] = useState<ChangeScope>(() => {
-    try {
-      const s = localStorage.getItem('gian.changes.scope');
-      // Accept the Codex-aligned scopes (all = "All changes").
-      if (s === 'all' || s === 'unstaged' || s === 'staged' || s === 'commit' || s === 'branch' || s === 'lastturn') return s;
-    } catch { /* storage disabled */ }
-    return 'branch';
-  });
-  const [changes, setChanges] = useState<ChangedEntry[]>([]);
-  const [reloadKey, setReloadKey] = useState(0);
+  // Scope, pinned commit/base, last-turn target and the changed-file list all
+  // live in the use-changes-diff store (keyed by working tree) — shared with
+  // panel 2's multi-diff view and surviving inspector unmounts (rail
+  // collapse). This component is a view over that store plus its pickers.
+  const diffState = useChangesDiffState(workingTreeId);
+  const { scope, commitSha, baseBranch } = diffState;
+  const changes = diffState.files;
   // Stage/unstage busy state is derived from the in-flight git.stage /
   // git.unstage runs (Phase 3b — the runs replaced the local busyPath flag);
   // the tracked run reloads the changed list once the index write confirms.
@@ -549,54 +533,31 @@ function ChangesInspector({
     : null;
   const [menuOpen, setMenuOpen] = useState(false);
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
-  const [lastTurnTarget, setLastTurnTarget] = useState<{
-    sessionId: string;
-    turn: number;
-  } | null>(null);
-  // Second-row pickers (Codex's two-row Review UI — no nested dropdowns):
-  // the Committed row pins a commit (null = HEAD's delta, the legacy `commit`
-  // behavior); the Branch row pins a compare base (null = auto-detected).
-  const [commitSha, setCommitSha] = useState<string | null>(null);
+  // Second-row pickers (Codex's two-row Review UI — no nested dropdowns): the
+  // Committed row pins a commit (null = HEAD's delta), the Branch row pins a
+  // compare base (null = auto-detected). The lists are local picker data; the
+  // pinned values live in the store.
   const [commits, setCommits] = useState<BranchCommit[]>([]);
   const [commitsLoaded, setCommitsLoaded] = useState(false);
-  const [baseBranch, setBaseBranch] = useState<string | null>(null);
   const [branches, setBranches] = useState<BranchList | null>(null);
   const [rowMenuOpen, setRowMenuOpen] = useState(false);
   const [rowSearch, setRowSearch] = useState('');
 
+  // Forward the active session — the Last-turn scope's fallback for trees
+  // that carry no session of their own. Declared BEFORE the ensure effect so
+  // the first list load already carries it (store updates are synchronous).
   useEffect(() => {
-    if (!workingTreeId) {
-      setChanges([]);
-      return;
-    }
-    let cancelled = false;
-    const targetSession = scope === 'lastturn'
-      ? lastTurnTarget?.sessionId ?? activeSessionId
-      : activeSessionId;
-    const targetTurn = scope === 'lastturn' ? lastTurnTarget?.turn : undefined;
-    void loadChanged(
-      workingTreeId,
-      scope,
-      commitSha,
-      baseBranch,
-      targetSession,
-      targetTurn,
-    ).then(list => {
-      if (!cancelled) setChanges(list);
-    });
-    return () => { cancelled = true; };
-  }, [workingTreeId, scope, commitSha, baseBranch, reloadKey, activeSessionId, lastTurnTarget]);
+    if (workingTreeId) setChangesDiffSession(workingTreeId, activeSessionId ?? null);
+  }, [workingTreeId, activeSessionId]);
+
+  useEffect(() => {
+    if (workingTreeId) ensureChangesDiffLoaded(workingTreeId);
+  }, [workingTreeId]);
 
   useEffect(() => {
     setCommits([]);
     setCommitsLoaded(false);
-    setCommitSha(null);
     setBranches(null);
-    // The compare base is remembered per working tree (it answers "where did
-    // THIS tree's branch come from", which differs across trees).
-    try {
-      setBaseBranch(workingTreeId ? localStorage.getItem(`gian.changes.base.${workingTreeId}`) : null);
-    } catch { setBaseBranch(null); }
   }, [workingTreeId]);
 
   useEffect(() => {
@@ -620,35 +581,13 @@ function ChangesInspector({
   }, [scope, workingTreeId, branches]);
 
   function pickScope(next: ChangeScope) {
-    setScope(next);
-    setLastTurnTarget(null);
-    if (next !== 'commit') setCommitSha(null);
-    try { localStorage.setItem('gian.changes.scope', next); } catch { /* storage disabled */ }
+    if (!workingTreeId) return;
+    setChangesDiffScope(workingTreeId, next);
   }
 
-  // External scope request (GitBadge click → All changes). Keyed on
-  // requestId so repeated clicks re-apply even when the scope is unchanged.
-  const scopeRequestId = scopeRequest?.requestId;
-  useEffect(() => {
-    if (scopeRequestId == null || !scopeRequest) return;
-    pickScope(scopeRequest.scope);
-    if (scopeRequest.scope === 'lastturn'
-        && scopeRequest.sessionId
-        && scopeRequest.turn != null) {
-      setLastTurnTarget({
-        sessionId: scopeRequest.sessionId,
-        turn: scopeRequest.turn,
-      });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeRequestId]);
-
   function pickBase(branch: string | null) {
-    setBaseBranch(branch);
-    try {
-      const key = `gian.changes.base.${workingTreeId}`;
-      if (branch) localStorage.setItem(key, branch); else localStorage.removeItem(key);
-    } catch { /* storage disabled */ }
+    if (!workingTreeId) return;
+    setChangesDiffBase(workingTreeId, branch);
     setRowMenuOpen(false);
   }
 
@@ -662,7 +601,7 @@ function ChangesInspector({
     if (!stageRun) return;
     if (stageRun.phase === 'confirmed') {
       setStageRunId(undefined);
-      setReloadKey(k => k + 1);
+      if (workingTreeId) refreshChangesDiff(workingTreeId);
     } else if (stageRun.phase === 'failed' || stageRun.phase === 'timed-out') {
       setStageRunId(undefined);
     }
@@ -724,7 +663,8 @@ function ChangesInspector({
             </>
           )}
         </div>
-        <button className="iconbtn" title={t('common.refresh')} onClick={() => setReloadKey(k => k + 1)}>
+        <button className="iconbtn" title={t('common.refresh')}
+                onClick={() => { if (workingTreeId) refreshChangesDiff(workingTreeId); }}>
           <Icon d={I.refresh} />
         </button>
       </div>
@@ -793,7 +733,7 @@ function ChangesInspector({
                         aria-checked={commitSha === null}
                         type="button"
                         className={commitSha === null ? 'active' : ''}
-                        onClick={() => { setCommitSha(null); setRowMenuOpen(false); }}
+                        onClick={() => { if (workingTreeId) setChangesDiffCommit(workingTreeId, null); setRowMenuOpen(false); }}
                       >
                         <span className="ck">{commitSha === null ? '✓' : ''}</span>
                         {t('changes.scope.latestCommit')}
@@ -811,7 +751,7 @@ function ChangesInspector({
                             type="button"
                             className={commitSha === cm.sha ? 'active' : ''}
                             title={cm.sha}
-                            onClick={() => { setCommitSha(cm.sha); setRowMenuOpen(false); }}
+                            onClick={() => { if (workingTreeId) setChangesDiffCommit(workingTreeId, cm.sha); setRowMenuOpen(false); }}
                           >
                             <span className="ck">{commitSha === cm.sha ? '✓' : ''}</span>
                             <span className="subj">{cm.subject}</span>
@@ -832,7 +772,15 @@ function ChangesInspector({
           <span className="add">+{total.add}</span>
           <span className="del">−{total.del}</span>
         </div>
-        {changes.length === 0 ? (
+        {diffState.status === 'error' ? (
+          <div className="changes-empty">
+            {t('changes.diff.loadFailed')}{' '}
+            <button className="btn sm secondary" type="button"
+                    onClick={() => { if (workingTreeId) refreshChangesDiff(workingTreeId); }}>
+              {t('common.retry')}
+            </button>
+          </div>
+        ) : changes.length === 0 ? (
           <div className="changes-empty">{t('changes.empty')}</div>
         ) : (
           <div className="tree">
@@ -841,7 +789,13 @@ function ChangesInspector({
                 key={node.path}
                 node={node}
                 depth={0}
-                ctx={{ scope, commitSha, baseBranch, busyPath, onOpenDiff, onToggleStage: (e, c) => { void toggleStage(e, c); }, t }}
+                ctx={{
+                  scope,
+                  busyPath,
+                  onReveal: path => { if (workingTreeId) requestChangesDiffAnchor(workingTreeId, path); },
+                  onToggleStage: (e, c) => { void toggleStage(e, c); },
+                  t,
+                }}
               />
             ))}
           </div>

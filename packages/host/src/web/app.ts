@@ -30,6 +30,7 @@ import { bootJsonlWatchers } from './watcher-bootstrap.js';
 import { resolveWebDistDir, staticFiles } from './static-files.js';
 import { buildHealthPayload } from './health.js';
 import { requireDesktopClient } from './desktop-boundary.js';
+import { RuntimeGuardian } from '../runtime/guardian.js';
 
 export interface AppContext {
   db: Db;
@@ -41,6 +42,8 @@ export interface AppContext {
   codexBin?: string;
   runtimeManager?: CliRuntimeManager;
   agentManager?: AgentManager;
+  /** Test seam; production uses the guardian's five-minute cadence. */
+  runtimeGuardianIntervalMs?: number;
 }
 
 export interface AppHandle {
@@ -62,6 +65,19 @@ export function createApp(ctx: AppContext): AppHandle {
     codexBin: ctx.codexBin,
     runtimeManager: ctx.runtimeManager,
   });
+  const runtimeGuardian = ctx.runtimeManager
+    ? new RuntimeGuardian({
+        runtimes: ctx.runtimeManager,
+        closeRuntimeOwner: executor => proxy.closeByExecutor(executor),
+        ...(ctx.runtimeGuardianIntervalMs
+          ? { intervalMs: ctx.runtimeGuardianIntervalMs }
+          : {}),
+        log: (message, error) => error === undefined
+          ? console.warn(message)
+          : console.warn(message, error),
+      })
+    : undefined;
+  runtimeGuardian?.start();
   const approvals = new ApprovalManager(broadcaster);
   const queue = new QueueManager(ctx.db);
   const watcher = new NativeJsonlWatcher(ctx.db, broadcaster);
@@ -180,6 +196,7 @@ export function createApp(ctx: AppContext): AppHandle {
     shutdown: async () => {
       watcher.stopAll();
       await term.closeAll();
+      await runtimeGuardian?.stop();
       await proxy.closeAll();
     },
   };

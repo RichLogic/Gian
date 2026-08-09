@@ -66,7 +66,7 @@ describe('chat-owned Plan and Agent detail', () => {
 
     await user.click(screen.getByRole('button', { name: /Agent/i }));
     await user.click(screen.getByRole('button', { name: /Inspect the event reducer/i }));
-    expect(open).toHaveBeenLastCalledWith({ kind: 'agent', id: item.id });
+    expect(open).toHaveBeenLastCalledWith({ kind: 'agent', id: '3:agent-spawn:agent-call-1' });
 
     unmount();
     render(
@@ -75,13 +75,13 @@ describe('chat-owned Plan and Agent detail', () => {
       </ChatPanelOpenContext.Provider>,
     );
     await user.click(screen.getByRole('button', { name: /Inspect the event reducer/i }));
-    expect(open).toHaveBeenLastCalledWith({ kind: 'agent', id: item.id });
+    expect(open).toHaveBeenLastCalledWith({ kind: 'agent', id: '3:agent-spawn:agent-call-1' });
   });
 
   it('shows the provider-native Kimi fields without inventing missing metrics', () => {
     render(
       <ChatContextPanel
-        target={{ kind: 'agent', id: 'agent-call-1', sessionId: 'session-1' }}
+        target={{ kind: 'agent', id: '3:agent-spawn:agent-call-1', sessionId: 'session-1' }}
         items={[kimiAgent()]}
         onClose={() => {}}
       />,

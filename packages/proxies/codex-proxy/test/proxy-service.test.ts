@@ -157,6 +157,10 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
     this.emit('serverRequest', message);
   }
 
+  emitRuntimeStopped() {
+    this.emit('runtimeStopped');
+  }
+
   setCompletedTurn(threadId: string, turnId: string) {
     const thread = this.threads.get(threadId) as {
       preview: string;
@@ -313,6 +317,42 @@ test('turn.steer without an active turn rejects with NO_ACTIVE_TURN', async () =
       },
     );
     assert.equal(harness.runtime.steerCalls.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('runtimeStopped emits one session-scoped turn.failed before clearing an active turn', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+    const started = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'keep working' }],
+    }, 73);
+
+    harness.runtime.emitRuntimeStopped();
+    await waitFor(() => harness.events.some(event => event.method === 'turn.failed'));
+
+    const failed = harness.events.filter(event => event.method === 'turn.failed');
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0]?.params.sessionId, created.session.id);
+    assert.equal(failed[0]?.params.turnId, started.turn.id);
+    assert.deepEqual(failed[0]?.params.data, {
+      turnId: started.turn.id,
+      code: 'RUNTIME_STOPPED',
+      message: 'Codex runtime stopped while the session had an active turn.',
+    });
+    const current = harness.service.getSession({ sessionId: created.session.id }).session;
+    assert.equal(current.status, 'stale');
+
+    harness.runtime.emitRuntimeStopped();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(
+      harness.events.filter(event => event.method === 'turn.failed').length,
+      1,
+      'a cleared generation must not emit another terminal event',
+    );
   } finally {
     await harness.cleanup();
   }

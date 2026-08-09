@@ -19,8 +19,8 @@
   grid-template-rows: var(--topbar-h) 1fr;
   /* Both dimensions must be explicit, otherwise the grid auto-sizes to its
      content width and the Workbench/Dock can push past the viewport. */
-  width: 100vw;
-  height: 100vh;
+  width: var(--gian-browser-viewport-width, 100vw);
+  height: var(--gian-browser-viewport-height, 100vh);
   min-width: 0;
   background: var(--bg);
   overflow: hidden;

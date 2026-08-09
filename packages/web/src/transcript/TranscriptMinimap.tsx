@@ -2,21 +2,32 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { MsgItem, TranscriptItem } from '../types.js';
 import { useT } from '../i18n/index.js';
 import { useMinimapEnabled } from '../display-prefs.js';
+import { transcriptItemIdentity } from './identity.js';
 
-/** Hide the right-edge outline before it would overlap the transcript body. */
-const PANEL_MIN_WIDTH_PX = 640;
+/**
+ * Keep the right-edge outline outside the 820px transcript column. At narrower
+ * panel widths the rail would sit on top of message text, so hide it entirely.
+ */
+const PANEL_MIN_WIDTH_PX = 960;
 /** A compact outline is useful only once there is something to navigate. */
 const MIN_MESSAGES = 3;
 /** Codex keeps the outline as a compact stack rather than filling the screen. */
 const MAX_STACK_HEIGHT_PX = 288;
 const MARKER_GAP_PX = 15;
 const LANDING_PX = 24;
+const BOTTOM_PX = 40;
 
 interface MinimapMarker {
   id: string;
   prompt: string;
   response: string;
   tickWidth: number;
+}
+
+interface MessageOffset {
+  id: string;
+  offset: number;
+  height: number;
 }
 
 function previewText(text: string, limit: number): string {
@@ -54,7 +65,7 @@ export function projectMinimapMarkers(items: TranscriptItem[]): MinimapMarker[] 
     // Codex's pale ticks vary with prompt density. Keep that signal bounded so
     // a long prompt never turns into the active-position bar by itself.
     const tickWidth = Math.min(24, Math.max(8, 8 + Math.round(Math.sqrt(prompt.length) * 1.25)));
-    markers.push({ id: item.id, prompt, response, tickWidth });
+    markers.push({ id: transcriptItemIdentity(item), prompt, response, tickWidth });
   }
   return markers;
 }
@@ -75,11 +86,25 @@ function messageNode(scrollEl: HTMLElement, id: string): HTMLElement | null {
   return null;
 }
 
+function measureMessageOffsets(
+  scrollEl: HTMLElement,
+  markers: MinimapMarker[],
+): MessageOffset[] {
+  return markers.flatMap(marker => {
+    const node = messageNode(scrollEl, marker.id);
+    return node ? [{ id: marker.id, offset: node.offsetTop, height: node.offsetHeight }] : [];
+  });
+}
+
+function isMessageVisible(scrollEl: HTMLElement, offset: MessageOffset | undefined): boolean {
+  return !!offset && offset.offset + offset.height > scrollEl.scrollTop;
+}
+
 /**
  * Codex-style transcript outline:
  *  - one compact right-edge tick per user turn;
- *  - tick length hints at prompt size, while the current turn is dark/long;
- *  - hover/focus previews both the prompt and the first assistant response;
+ *  - resting ticks stay quiet; hovering the rail reveals their relative size;
+ *  - hover/focus expands to the left with the prompt and first response;
  *  - click scrolls the transcript to that user turn.
  *
  * This component must be a direct child of `.main`. Its absolute rail is then
@@ -227,5 +252,168 @@ export function TranscriptMinimap({ items }: { items: TranscriptItem[] }) {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * The existing previous/next/bottom controls are independent from the optional
+ * minimap preference. They live in the composer underbar and appear whenever a
+ * user message is outside the current viewport (or the viewport is unpinned).
+ */
+export function TranscriptNavigation({ items }: { items: TranscriptItem[] }) {
+  const t = useT();
+  const anchorRef = useRef<HTMLSpanElement>(null);
+  const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
+  const [atBottom, setAtBottom] = useState(true);
+  const [navVisible, setNavVisible] = useState(false);
+  const [canPrev, setCanPrev] = useState(false);
+  const [canNext, setCanNext] = useState(false);
+  const offsetsRef = useRef<MessageOffset[]>([]);
+  const markers = useMemo(() => projectMinimapMarkers(items), [items]);
+  const markerIds = markers.map(marker => marker.id).join('|');
+
+  useEffect(() => {
+    const main = anchorRef.current?.closest('.main');
+    setScrollEl((main?.querySelector('.main-scroll') as HTMLElement | null) ?? null);
+  }, []);
+
+  useEffect(() => {
+    if (!scrollEl) return;
+    const mainEl = scrollEl.closest('.main') as HTMLElement | null;
+    let measureRaf = 0;
+    let scrollRaf = 0;
+
+    const updateNavigation = () => {
+      const offsets = offsetsRef.current;
+      const top = scrollEl.scrollTop;
+      const bottom = top + scrollEl.clientHeight;
+      setAtBottom(scrollEl.scrollHeight - bottom <= BOTTOM_PX);
+      setNavVisible(offsets.some(offset => (
+        offset.offset + offset.height <= top || offset.offset >= bottom
+      )));
+
+      const index = anchorIndexOf(offsets, top);
+      const current = offsets[index];
+      setCanPrev(index > 0 || !isMessageVisible(scrollEl, current));
+      setCanNext(offsets.length > 0 && index < offsets.length - 1);
+    };
+
+    const measure = () => {
+      offsetsRef.current = measureMessageOffsets(scrollEl, markers);
+      updateNavigation();
+    };
+    const onScroll = () => {
+      if (scrollRaf) return;
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = 0;
+        updateNavigation();
+      });
+    };
+    const scheduleMeasure = () => {
+      if (measureRaf) return;
+      measureRaf = requestAnimationFrame(() => {
+        measureRaf = 0;
+        measure();
+      });
+    };
+
+    scrollEl.addEventListener('scroll', onScroll, { passive: true });
+    const resizeObserver = new ResizeObserver(scheduleMeasure);
+    resizeObserver.observe(scrollEl);
+    if (mainEl) resizeObserver.observe(mainEl);
+    const transcript = scrollEl.querySelector('.transcript');
+    if (transcript) resizeObserver.observe(transcript);
+    measure();
+    const initial = requestAnimationFrame(measure);
+
+    return () => {
+      scrollEl.removeEventListener('scroll', onScroll);
+      resizeObserver.disconnect();
+      cancelAnimationFrame(initial);
+      if (scrollRaf) cancelAnimationFrame(scrollRaf);
+      if (measureRaf) cancelAnimationFrame(measureRaf);
+    };
+    // ResizeObserver covers streamed content whose anchors do not change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollEl, markerIds]);
+
+  const scrollToOffset = (offset: number) => {
+    scrollEl?.scrollTo({
+      top: Math.max(0, offset - LANDING_PX),
+      behavior: 'smooth',
+    });
+  };
+  const goPrev = () => {
+    if (!scrollEl) return;
+    const offsets = offsetsRef.current;
+    const index = anchorIndexOf(offsets, scrollEl.scrollTop);
+    const current = offsets[index];
+    if (current && !isMessageVisible(scrollEl, current)) {
+      scrollToOffset(current.offset);
+      return;
+    }
+    const previous = offsets[index - 1];
+    if (previous) scrollToOffset(previous.offset);
+  };
+  const goNext = () => {
+    if (!scrollEl) return;
+    const offsets = offsetsRef.current;
+    const next = offsets[anchorIndexOf(offsets, scrollEl.scrollTop) + 1];
+    if (next) scrollToOffset(next.offset);
+  };
+  const scrollToBottom = () => {
+    scrollEl?.scrollTo({ top: scrollEl.scrollHeight, behavior: 'smooth' });
+  };
+
+  return (
+    <>
+      <span ref={anchorRef} hidden />
+      {(navVisible || !atBottom) && (
+        <div className="transcript-navbtns">
+          {!atBottom && (
+            <button
+              type="button"
+              className="tn-btn"
+              onClick={scrollToBottom}
+              title={t('minimap.scrollBottom')}
+              aria-label={t('minimap.scrollBottom')}
+            >
+              <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 4.5l5 5 5-5" />
+                <path d="M3 8.5l5 5 5-5" />
+              </svg>
+            </button>
+          )}
+          {navVisible && (
+            <>
+              <button
+                type="button"
+                className="tn-btn"
+                onClick={goPrev}
+                disabled={!canPrev}
+                title={t('minimap.prev')}
+                aria-label={t('minimap.prev')}
+              >
+                <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M4 10l4-4 4 4" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                className="tn-btn"
+                onClick={goNext}
+                disabled={!canNext}
+                title={t('minimap.next')}
+                aria-label={t('minimap.next')}
+              >
+                <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M4 6l4 4 4-4" />
+                </svg>
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </>
   );
 }

@@ -160,84 +160,64 @@ describe('Sheet tab query timing (§4.5)', () => {
     });
   });
 
-  it('openDiffInSheet creates the diff tab loading BEFORE loadDiff resolves, then fills it', async () => {
-    const pending = deferred<string>();
+  it('the diffs rail auto-ensures exactly one singleton Changes tab', async () => {
+    const { result } = renderWorkbench();
+
+    act(() => result.current.activateRail('diffs'));
+    await waitFor(() => {
+      expect(result.current.wbTabs.filter(t => t.kind === 'changes')).toHaveLength(1);
+    });
+    const tab = result.current.wbTabs.find(t => t.kind === 'changes')!;
+    expect(tab.group).toBe('diffs');
+    expect(result.current.activeTabByGroup.diffs).toBe(tab.id);
+
+    // Re-activating the rail never duplicates the singleton.
+    act(() => result.current.activateRail('diffs'));
+    await waitFor(() => {
+      expect(result.current.wbTabs.filter(t => t.kind === 'changes')).toHaveLength(1);
+    });
+  });
+
+  it('the Changes tab is re-ensured (without stealing a text tab) after it was closed', async () => {
+    const { result } = renderWorkbench();
+    act(() => result.current.activateRail('diffs'));
+    await waitFor(() => expect(result.current.wbTabs.some(t => t.kind === 'changes')).toBe(true));
+
+    // A transcript text detail opens alongside and takes the foreground.
+    const item: DiffItem = {
+      kind: 'diff',
+      id: 'd1',
+      files: [{ path: 'src/a.ts', add: 1, del: 0, hunks: [] }],
+      ts: 1,
+      turn: 1,
+    };
+    const pending = deferred<api.FileDiffResult>();
     vi.mocked(api.loadDiff).mockImplementation(() => pending.promise);
-    const { result } = renderWorkbench();
-
-    act(() => { void result.current.openDiffInSheet('src/a.ts'); });
-
+    act(() => { void result.current.openTranscriptDiffInSheet(item); });
     await waitFor(() => {
-      const tab = result.current.wbTabs.find(t => t.kind === 'diff');
-      expect(tab).toBeDefined();
-      expect(tab!.loading).toBe(true);
-      expect(tab!.diffText).toBeUndefined();
+      expect(result.current.activeTabByGroup.diffs).toBe('tab-diff-event-s1-1:diff:d1');
     });
+    await act(async () => pending.resolve({ diff: 'x', truncated: false }));
 
-    await act(async () => pending.resolve('diff --git a/src/a.ts b/src/a.ts'));
+    // Closing the Changes tab while the rail is active re-creates it, and the
+    // text detail keeps the foreground.
+    const changesId = result.current.wbTabs.find(t => t.kind === 'changes')!.id;
+    act(() => result.current.sheetActions.closeTab(changesId));
     await waitFor(() => {
-      const tab = result.current.wbTabs.find(t => t.kind === 'diff');
-      expect(tab!.loading).toBeUndefined();
-      expect(tab!.diffText).toBe('diff --git a/src/a.ts b/src/a.ts');
+      expect(result.current.wbTabs.filter(t => t.kind === 'changes')).toHaveLength(1);
     });
-  });
+    expect(result.current.activeTabByGroup.diffs).toBe('tab-diff-event-s1-1:diff:d1');
 
-  it('openDiffInSheet shows the error state and retries when loadDiff rejects', async () => {
-    const first = deferred<string>();
-    vi.mocked(api.loadDiff).mockImplementation(() => first.promise);
-    const { result } = renderWorkbench();
-
-    act(() => { void result.current.openDiffInSheet('src/a.ts'); });
-    await waitFor(() => expect(result.current.wbTabs.find(t => t.kind === 'diff')?.loading).toBe(true));
-    await act(async () => first.reject(new Error('Diff load failed (500)')));
+    // showChangesDiff (GitBadge / transcript show-changes entries) DOES steal.
+    act(() => result.current.showChangesDiff());
     await waitFor(() => {
-      const tab = result.current.wbTabs.find(t => t.kind === 'diff');
-      expect(tab!.loadError).toBe('sheet.loadFailed');
-      expect(tab!.retryLoad).toBeDefined();
+      expect(result.current.activeTabByGroup.diffs)
+        .toBe(result.current.wbTabs.find(t => t.kind === 'changes')!.id);
     });
-
-    const second = deferred<string>();
-    vi.mocked(api.loadDiff).mockImplementation(() => second.promise);
-    act(() => result.current.wbTabs.find(t => t.kind === 'diff')!.retryLoad!());
-    await act(async () => second.resolve('diff text'));
-    await waitFor(() => {
-      const tab = result.current.wbTabs.find(t => t.kind === 'diff');
-      expect(tab!.diffText).toBe('diff text');
-      expect(tab!.loadError).toBeUndefined();
-    });
-  });
-
-  it('keeps permanent same-path diffs and async fills separate by query identity', async () => {
-    const first = deferred<string>();
-    const second = deferred<string>();
-    vi.mocked(api.loadDiff).mockImplementation((_wt, _path, _scope, sha) => {
-      if (sha === 'commit-a') return first.promise;
-      if (sha === 'commit-b') return second.promise;
-      throw new Error(`unexpected sha: ${sha}`);
-    });
-    const { result } = renderWorkbench();
-
-    act(() => { void result.current.openDiffInSheet('src/a.ts', true, 'commit', 'commit-a'); });
-    await waitFor(() => expect(result.current.wbTabs.filter(t => t.kind === 'diff')).toHaveLength(1));
-    act(() => { void result.current.openDiffInSheet('src/a.ts', true, 'commit', 'commit-b'); });
-    await waitFor(() => expect(result.current.wbTabs.filter(t => t.kind === 'diff')).toHaveLength(2));
-
-    await act(async () => second.resolve('diff for B'));
-    await act(async () => first.resolve('diff for A'));
-    await waitFor(() => {
-      const diffs = result.current.wbTabs.filter(t => t.kind === 'diff');
-      expect(diffs.find(t => t.diffSha === 'commit-a')?.diffText).toBe('diff for A');
-      expect(diffs.find(t => t.diffSha === 'commit-b')?.diffText).toBe('diff for B');
-    });
-
-    act(() => { void result.current.openDiffInSheet('src/a.ts', true, 'commit', 'commit-a'); });
-    await waitFor(() => expect(result.current.activeTabByGroup.diffs)
-      .toBe(result.current.wbTabs.find(t => t.diffSha === 'commit-a')?.id));
-    expect(api.loadDiff).toHaveBeenCalledTimes(2);
   });
 
   it('openTranscriptDiffInSheet creates the tab loading, then fills hunk-less files from the tree', async () => {
-    const pending = deferred<string>();
+    const pending = deferred<api.FileDiffResult>();
     vi.mocked(api.loadDiff).mockImplementation(() => pending.promise);
     const { result } = renderWorkbench();
     const item: DiffItem = {
@@ -250,14 +230,74 @@ describe('Sheet tab query timing (§4.5)', () => {
 
     act(() => { void result.current.openTranscriptDiffInSheet(item); });
     await waitFor(() => {
-      const tab = result.current.wbTabs.find(t => t.id === 'tab-diff-event-d1');
+      const tab = result.current.wbTabs.find(t => t.id === 'tab-diff-event-s1-1:diff:d1');
       expect(tab).toBeDefined();
+      expect(tab!.kind).toBe('text');
       expect(tab!.loading).toBe(true);
     });
 
-    await act(async () => pending.resolve('loaded diff'));
+    await act(async () => pending.resolve({ diff: 'loaded diff', truncated: false }));
     await waitFor(() => {
-      expect(result.current.wbTabs.find(t => t.id === 'tab-diff-event-d1')?.diffText).toBe('loaded diff');
+      expect(result.current.wbTabs.find(t => t.id === 'tab-diff-event-s1-1:diff:d1')?.text).toBe('loaded diff');
+    });
+  });
+
+  it('reopens a pinned transcript detail in place instead of duplicating its tab id', async () => {
+    const { result } = renderWorkbench();
+    act(() => result.current.openTranscriptTextInSheet({
+      title: 'Tool: first',
+      text: 'first body',
+      sourceId: '4:tool:shared',
+    }));
+    await waitFor(() => expect(result.current.wbTabs.filter(t => t.kind === 'text')).toHaveLength(1));
+    const id = result.current.wbTabs.find(t => t.kind === 'text')!.id;
+
+    act(() => result.current.sheetActions.pinTab(id));
+    await waitFor(() => expect(result.current.wbTabs.find(t => t.id === id)?.preview).toBe(false));
+    act(() => result.current.openTranscriptTextInSheet({
+      title: 'Tool: refreshed',
+      text: 'refreshed body',
+      sourceId: '4:tool:shared',
+    }));
+
+    await waitFor(() => {
+      const tabs = result.current.wbTabs.filter(t => t.id === id);
+      expect(tabs).toHaveLength(1);
+      expect(tabs[0]).toMatchObject({
+        preview: false,
+        name: 'Tool: refreshed',
+        text: 'refreshed body',
+      });
+      expect(result.current.activeTabByGroup.diffs).toBe(id);
+    });
+  });
+
+  it('scopes transcript diff tabs by session and turn when provider ids repeat', async () => {
+    const { result } = renderWorkbench();
+    const hunk = {
+      header: '@@ -1 +1 @@',
+      lines: [{ kind: 'add' as const, text: 'next' }],
+    };
+    const first: DiffItem = {
+      kind: 'diff', id: 'reused', turn: 1, ts: 1,
+      files: [{ path: 'src/a.ts', add: 1, del: 0, hunks: [hunk] }],
+    };
+    const second: DiffItem = { ...first, turn: 2, ts: 2 };
+
+    act(() => { void result.current.openTranscriptDiffInSheet(first); });
+    await waitFor(() => expect(result.current.wbTabs.filter(t => t.textDiff)).toHaveLength(1));
+    const firstId = result.current.wbTabs.find(t => t.textDiff)!.id;
+    act(() => result.current.sheetActions.pinTab(firstId));
+    act(() => { void result.current.openTranscriptDiffInSheet(first); });
+    await waitFor(() => expect(result.current.wbTabs.filter(t => t.id === firstId)).toHaveLength(1));
+
+    act(() => { void result.current.openTranscriptDiffInSheet(second); });
+    await waitFor(() => {
+      const ids = result.current.wbTabs.filter(t => t.textDiff).map(t => t.id);
+      expect(ids).toEqual([
+        'tab-diff-event-s1-1:diff:reused',
+        'tab-diff-event-s1-2:diff:reused',
+      ]);
     });
   });
 
@@ -332,56 +372,64 @@ describe('Sheet tab query timing (§4.5)', () => {
     });
   });
 
-  it('History commit previews replace in place, pin independently, and preserve Diffs state', async () => {
-    vi.mocked(api.loadDiff).mockResolvedValue('diff text');
+  it('History commit tab is a singleton: opening another commit replaces it in place and preserves Diffs state', async () => {
     const { result } = renderWorkbench();
 
-    act(() => { void result.current.openDiffInSheet('src/a.ts'); });
-    await waitFor(() => expect(result.current.wbTabs.find(t => t.kind === 'diff')?.diffText).toBe('diff text'));
-    const diffTab = result.current.wbTabs.find(t => t.kind === 'diff')!;
+    act(() => result.current.activateRail('diffs'));
+    await waitFor(() => expect(result.current.wbTabs.some(t => t.kind === 'changes')).toBe(true));
+    const changesTab = result.current.wbTabs.find(t => t.kind === 'changes')!;
 
     act(() => result.current.openCommitInSheet({
       workingTreeId: tree.id,
       sha: 'a'.repeat(40),
       subject: 'first',
-    }, false));
+    }));
     await waitFor(() => expect(result.current.wbTabs.find(t => t.kind === 'commit')).toBeDefined());
-    const previewId = result.current.wbTabs.find(t => t.kind === 'commit')!.id;
+    const tabId = result.current.wbTabs.find(t => t.kind === 'commit')!.id;
 
     act(() => result.current.openCommitInSheet({
       workingTreeId: tree.id,
       sha: 'b'.repeat(40),
       subject: 'second',
-    }, false));
+    }));
     await waitFor(() => {
       const commits = result.current.wbTabs.filter(t => t.kind === 'commit');
       expect(commits).toHaveLength(1);
-      expect(commits[0]).toMatchObject({ id: previewId, commitSha: 'b'.repeat(40), preview: true });
+      expect(commits[0]).toMatchObject({ id: tabId, commitSha: 'b'.repeat(40), preview: false });
     });
 
+    // Re-opening the same commit is a no-op reveal.
     act(() => result.current.openCommitInSheet({
       workingTreeId: tree.id,
       sha: 'b'.repeat(40),
       subject: 'second',
-    }, true));
-    await waitFor(() => expect(result.current.wbTabs.find(t => t.id === previewId)?.preview).toBe(false));
+    }));
+    await waitFor(() => {
+      const commits = result.current.wbTabs.filter(t => t.kind === 'commit');
+      expect(commits).toHaveLength(1);
+      expect(commits[0]).toMatchObject({ id: tabId, commitSha: 'b'.repeat(40) });
+    });
 
     act(() => result.current.openCommitInSheet({
       workingTreeId: tree.id,
       sha: 'c'.repeat(40),
       subject: 'third',
-    }, false));
-    await waitFor(() => expect(result.current.wbTabs.filter(t => t.kind === 'commit')).toHaveLength(2));
+    }));
+    await waitFor(() => {
+      const commits = result.current.wbTabs.filter(t => t.kind === 'commit');
+      expect(commits).toHaveLength(1);
+      expect(commits[0]).toMatchObject({ id: tabId, commitSha: 'c'.repeat(40) });
+    });
 
-    expect(result.current.wbTabs.find(t => t.id === diffTab.id)).toEqual(diffTab);
-    expect(result.current.activeTabByGroup.diffs).toBe(diffTab.id);
+    expect(result.current.wbTabs.find(t => t.id === changesTab.id)).toEqual(changesTab);
+    expect(result.current.activeTabByGroup.diffs).toBe(changesTab.id);
     expect(result.current.activeRail).toBe('history');
   });
 
   it('History orphan revalidation preserves a prior marker when a probe is inconclusive', async () => {
     const { result } = renderWorkbench();
     const sha = 'd'.repeat(40);
-    act(() => result.current.openCommitInSheet({ workingTreeId: tree.id, sha }, true));
+    act(() => result.current.openCommitInSheet({ workingTreeId: tree.id, sha }));
     await waitFor(() => expect(result.current.wbTabs.find(t => t.kind === 'commit')).toBeDefined());
 
     act(() => result.current.revalidateHistoryTabs(tree.id, candidate => candidate === sha));

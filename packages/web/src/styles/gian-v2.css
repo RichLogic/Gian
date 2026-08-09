@@ -507,16 +507,20 @@ button.sb-section:hover { color: var(--text); }
   position: relative; /* containing block for the transcript minimap rail */
 }
 
-/* Codex-style transcript outline. The rail is a direct `.main` child and JS
-   aligns it to the scroll viewport; the compact stack stays centred instead
-   of stretching sparse turns over the full screen. */
+/* Codex-style transcript outline. The quiet state is a slim RIGHT-edge stack;
+   hovering the rail reveals message-length variation and opens the selected
+   turn preview inward to the left. */
 .transcript-minimap {
   position: absolute;
-  right: 10px;
+  right: 20px;
   width: 46px;
   z-index: 8;
   pointer-events: none;
+  opacity: 0.72;
+  transition: opacity 120ms var(--ease);
 }
+.transcript-minimap:hover,
+.transcript-minimap:focus-within { opacity: 1; }
 .transcript-minimap.is-hidden { display: none; }
 
 .tm-stack {
@@ -544,14 +548,24 @@ button.sb-section:hover { color: var(--text); }
   pointer-events: auto;
 }
 .tm-tick {
-  width: var(--tm-tick-width, 10px);
+  width: 8px;
   height: 2.5px;
   border-radius: 999px;
   background: oklch(from var(--text) l c h / 0.18);
   transition: width 120ms var(--ease), background 120ms var(--ease);
 }
-.tm-item:hover .tm-tick,
+.transcript-minimap:hover .tm-tick,
+.transcript-minimap:focus-within .tm-tick {
+  width: var(--tm-tick-width, 10px);
+}
 .tm-item.active .tm-tick {
+  width: 12px;
+  background: oklch(from var(--text) l c h / 0.88);
+}
+.transcript-minimap:hover .tm-item.active .tm-tick,
+.transcript-minimap:focus-within .tm-item.active .tm-tick,
+.tm-item:hover .tm-tick,
+.tm-item:focus-visible .tm-tick {
   width: 34px;
   background: oklch(from var(--text) l c h / 0.88);
 }
@@ -566,8 +580,8 @@ button.sb-section:hover { color: var(--text); }
   top: 50%;
   transform: translateY(-50%) translateX(-6px) scale(0.98);
   display: flex;
-  width: min(480px, calc(100vw - 100px));
-  max-height: 132px;
+  width: min(500px, calc(100vw - 100px));
+  max-height: 176px;
   padding: 14px 16px;
   overflow: hidden;
   flex-direction: column;
@@ -622,6 +636,21 @@ button.sb-section:hover { color: var(--text); }
   padding: 0 16px;
 }
 
+/* Existing message navigation remains separate from the optional minimap.
+   It appears only when messages are outside the viewport or the transcript is
+   unpinned, and stays flush right in the composer underbar. */
+.transcript-navbtns {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  height: 28px;
+  padding: 0 2px;
+  border-radius: var(--r-2);
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+}
+
 /* The strip shell is built to stand alone (own width math + auto margins);
    inside the underbar the ROW owns the geometry — the shell shrinks to its
    chip so the Last-turn chip packs next to it on the left. Pop-up panels are
@@ -634,6 +663,29 @@ button.sb-section:hover { color: var(--text); }
   margin: 0;
   align-self: auto;
   position: static; /* let pop-up panels anchor to the underbar row instead */
+}
+
+.tn-btn {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+  border: 0;
+  background: none;
+  color: var(--text-2, var(--text));
+  cursor: pointer;
+  transition: background 120ms var(--ease), color 120ms var(--ease), opacity 120ms var(--ease);
+}
+.tn-btn:hover:not(:disabled) {
+  color: var(--accent);
+  background: oklch(from var(--accent) l c h / 0.12);
+}
+.tn-btn:disabled { opacity: 0.3; cursor: default; }
+.tn-btn:focus-visible {
+  outline: 2px solid var(--accent-ring, var(--accent));
+  outline-offset: 1px;
 }
 
 /* Workbench xterm needs a sized parent or it collapses to zero. */
@@ -2706,6 +2758,10 @@ button.sb-section:hover { color: var(--text); }
 .h-chip .x:hover { opacity: 1; }
 
 .h-menu-anchor { position: relative; display: inline-flex; min-width: 0; flex: 0 1 auto; }
+/* Right-edge anchors (e.g. the History author chip) fly their menu out to the
+ * LEFT so it can never extend past the inspector edge and cover the rail —
+ * .inspector deliberately has no overflow:hidden (see its comment). */
+.h-menu-anchor.end .h-menu { left: auto; right: 0; }
 .h-menu {
   position: absolute; top: calc(100% + 4px); left: 0; z-index: 60;
   min-width: 180px; max-width: 260px; max-height: 260px; overflow-y: auto;
@@ -2718,7 +2774,7 @@ button.sb-section:hover { color: var(--text); }
 .h-menu-search { flex: none; margin: 2px 2px 4px; padding: 5px 8px; border: 1px solid var(--hairline); border-radius: var(--r-1); background: var(--surface); color: var(--text); font: var(--fz-12)/1.3 var(--font-sans); outline: none; }
 .h-menu-search:focus { border-color: var(--text-3); }
 .h-menu button {
-  display: flex; align-items: baseline; gap: 8px; text-align: left;
+  display: flex; align-items: baseline; gap: 8px; text-align: left; min-width: 0;
   padding: 6px 8px; border: 0; background: transparent; color: var(--text);
   border-radius: var(--r-1); font: var(--fz-12)/1.3 var(--font-sans);
   white-space: nowrap; cursor: pointer;
@@ -2726,23 +2782,15 @@ button.sb-section:hover { color: var(--text); }
 .h-menu button:hover { background: var(--surface-2); }
 .h-menu button.active { font-weight: 600; }
 .h-menu .ck { width: 12px; flex: none; align-self: center; color: var(--accent); font-size: 11px; text-align: center; }
+.h-menu .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; max-width: 120px; align-self: center; }
 .h-menu .sub { margin-left: auto; padding-left: 10px; flex: none; font: 9.5px/1.3 var(--font-mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
 .h-menu-sep { height: 1px; margin: 4px 6px; background: var(--hairline); }
 .h-menu-backdrop { position: fixed; inset: 0; z-index: 55; }
 
-.h-day {
-  display: grid; grid-template-columns: 22px 1fr; align-items: center;
-  height: 24px; margin-top: 2px;
-  font: 600 10px/1 var(--font-mono); color: var(--text-3); letter-spacing: 0.08em; text-transform: uppercase;
-}
-.h-day:first-child { margin-top: 0; }
-.h-day .g { position: relative; display: block; }
-.h-day .g svg { display: block; width: 22px; overflow: visible; }
-
 .h-list { position: relative; }
 .h-row {
-  display: grid; grid-template-columns: 22px 1fr;
-  min-height: 46px;
+  display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 5px;
+  min-height: 28px; padding-right: 6px;
   border-radius: var(--r-2);
   cursor: pointer; position: relative;
   color: var(--text-2);
@@ -2752,26 +2800,13 @@ button.sb-section:hover { color: var(--text); }
 .h-row.sel { background: var(--accent-soft); }
 .h-row.sel:hover { background: var(--accent-soft); }
 .h-row .g { position: relative; display: block; }
-.h-row .g svg { display: block; width: 22px; overflow: visible; }
-.h-row .c { min-width: 0; padding: 5px 6px 5px 0; display: flex; flex-direction: column; gap: 2px; }
-.h-row .l1 { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.h-row .g svg { display: block; width: 38px; overflow: visible; }
 .h-row .subject {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font: 500 var(--fz-12)/1.35 var(--font-sans); color: var(--text);
 }
 .h-row.sel .subject { color: var(--accent-text); }
-.h-row .l2 { display: flex; align-items: center; gap: 5px; min-width: 0; font: 10.5px/1.3 var(--font-mono); color: var(--text-3); }
-.h-row .l2 .sha { color: var(--text-2); }
-.h-row.sel .l2 .sha { color: var(--accent-text); }
-.h-row .l2 .sep { opacity: 0.5; }
-.h-row .l2 .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.h-row .l2 .when { flex: none; margin-left: auto; padding-left: 6px; }
-.h-row .merge-tag {
-  flex: none; padding: 1px 5px; border-radius: var(--r-1);
-  background: var(--surface-3); color: var(--text-2);
-  font: 600 9px/1.4 var(--font-mono); letter-spacing: 0.04em;
-}
-.h-row.sel .merge-tag { background: oklch(from var(--accent) l c h / 0.22); color: var(--accent-text); }
+.h-row .refs { flex: none; display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
 
 .h-ref {
   flex: none; display: inline-flex; align-items: center; gap: 3px;
@@ -2789,6 +2824,10 @@ button.sb-section:hover { color: var(--text); }
 .h-foot { padding: 8px 6px 2px; display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
 .h-foot .count { text-align: center; font: 10px/1.3 var(--font-mono); color: var(--text-3); }
 .h-foot .btn { align-self: center; }
+/* Infinite-scroll trigger: zero-height strip below the list; the spinner row
+ * appears while the next cursor page is in flight. */
+.h-sentinel { height: 1px; }
+.h-loading-more { display: inline-flex; align-items: center; justify-content: center; gap: 6px; font: 10px/1.3 var(--font-mono); color: var(--text-3); }
 .h-foot-err {
   display: flex; align-items: center; gap: 7px;
   padding: 7px 9px; border-radius: var(--r-2);
@@ -2814,16 +2853,6 @@ button.sb-section:hover { color: var(--text); }
 
 /* ---------- panel 2: commit change-set review ---------- */
 .cs-root { display: flex; flex-direction: column; min-height: 100%; background: var(--surface); }
-.cs-bar {
-  position: sticky; top: 0; z-index: 6;
-  flex: none; display: flex; align-items: center; gap: 8px;
-  padding: 4px 6px 4px 10px;
-  background: var(--surface); border-bottom: 1px solid var(--hairline);
-}
-.cs-bar .ext-ico.commit { color: var(--accent-text); width: 14px; height: 14px; display: inline-flex; flex: none; }
-.cs-bar-title { flex: 1 1 auto; min-width: 0; display: inline-flex; align-items: baseline; overflow: hidden; font: var(--fz-11)/1.5 var(--font-mono); color: var(--text-3); }
-.cs-bar-sha { flex: none; color: var(--accent-text); font-weight: 600; }
-.cs-bar-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--text-2); margin-left: 8px; }
 
 .cs-banner {
   display: flex; align-items: flex-start; gap: 8px;
@@ -2849,21 +2878,16 @@ button.sb-section:hover { color: var(--text); }
 }
 .cs-sha-btn:hover { filter: brightness(0.97); }
 .cs-sha-btn svg { width: 11px; height: 11px; }
-.cs-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.cs-row .lbl { flex: none; width: 52px; font: 600 10px/1 var(--font-mono); color: var(--text-3); letter-spacing: 0.06em; text-transform: uppercase; }
-.cs-parent {
-  display: inline-flex; align-items: center; gap: 4px;
-  font: 500 var(--fz-11)/1.4 var(--font-mono); color: var(--text-2);
-  padding: 2px 7px; border-radius: var(--r-pill); background: var(--surface-2);
-  border: 0; cursor: pointer;
-}
-.cs-parent:hover { background: var(--surface-3); color: var(--text); }
-.cs-parent svg { width: 10px; height: 10px; color: var(--text-3); }
+/* Toolbar under the header divider: file stats left, view actions right
+ * (collapse-all / unified⇄split / word-wrap / ⋯). */
+.cs-toolbar { flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 16px; border-bottom: 1px solid var(--hairline); }
+.cs-toolbar .cs-stats { flex: 1 1 auto; min-width: 0; margin-top: 0; }
+.cs-actions { flex: none; display: inline-flex; align-items: center; gap: 2px; }
 .cs-stats { display: flex; align-items: center; gap: 10px; margin-top: 10px; font: 600 10.5px/1 var(--font-mono); color: var(--text-3); letter-spacing: 0.05em; }
 .cs-stats .files { color: var(--text-2); }
 .cs-stats .add { color: var(--ok); } .cs-stats .del { color: var(--danger); }
 .cs-base {
-  display: inline-flex; align-items: center; gap: 5px; margin-top: 10px;
+  display: inline-flex; align-items: center; gap: 5px;
   padding: 4px 8px; border-radius: var(--r-2);
   background: var(--surface-2); font: 500 var(--fz-11)/1.3 var(--font-sans); color: var(--text-2);
 }
@@ -2881,7 +2905,7 @@ button.sb-section:hover { color: var(--text); }
 }
 .cs-file-head:hover { background: var(--surface-2); }
 .cs-file-head:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -2px; }
-.cs-file-head .caret { width: 10px; flex: none; color: var(--text-3); font-size: 9px; transition: transform 120ms var(--ease); }
+.cs-file-head .caret { width: 12px; height: 12px; flex: none; display: inline-flex; align-items: center; justify-content: center; color: var(--text-3); transition: transform 120ms var(--ease); }
 .cs-file.collapsed .cs-file-head .caret { transform: rotate(-90deg); }
 .cs-badge { width: 16px; height: 16px; flex: none; display: inline-flex; align-items: center; justify-content: center; font: 600 10.5px/1 var(--font-mono); }
 .cs-badge.add { color: var(--ok); } .cs-badge.mod { color: var(--warn); } .cs-badge.del { color: var(--danger); }
@@ -2905,12 +2929,17 @@ button.sb-section:hover { color: var(--text); }
 .cs-file-note.err { background: var(--danger-soft); }
 .cs-file-note.err svg { color: var(--danger); }
 
-/* The commit body governs its own diff wrapping (toggles in the cs-bar) —
+/* The commit body governs its own diff wrapping (toggles in the toolbar) —
    these rules must beat the sheet-level `.sheet-content.nowrap` default. */
 .sheet-content .cs-root .sheet-diff-ln .txt,
 .sheet-content .cs-root .sheet-diff-side .txt { white-space: pre-wrap; overflow-wrap: anywhere; }
 .sheet-content .cs-root.cs-nowrap .sheet-diff-ln .txt,
 .sheet-content .cs-root.cs-nowrap .sheet-diff-side .txt { white-space: pre; overflow-wrap: normal; }
+/* nowrap: each file body scrolls horizontally as one unit, and split sides
+ * clip so a long old-side line can never paint over the new side. */
+.cs-root.cs-nowrap .cs-file-body { overflow-x: auto; }
+.cs-root.cs-nowrap .cs-file-body .sheet-diff { width: max-content; min-width: 100%; }
+.cs-root.cs-nowrap .sheet-diff.split .sheet-diff-side { overflow: hidden; }
 
 /* skeleton shimmer for lazily-loaded file diffs */
 .sk { margin: 6px 12px 10px 34px; display: flex; flex-direction: column; gap: 5px; }

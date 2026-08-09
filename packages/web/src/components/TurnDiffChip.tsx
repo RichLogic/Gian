@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useT } from '../i18n/index.js';
 import { projectTurnDiff } from '../presentation/turn-diff.js';
 import type { TranscriptItem } from '../types.js';
+import { useUnderbarPanelController } from './UnderbarPanelGroup.js';
 
 /**
  * Underbar chip for the current turn's file changes — the transcript-level
@@ -24,16 +25,33 @@ export function TurnDiffChip({
   onShowLastTurn: (turn: number, path: string) => void;
 }) {
   const t = useT();
-  const [open, setOpen] = useState(false);
+  const panelController = useUnderbarPanelController();
+  const [standaloneOpen, setStandaloneOpen] = useState(false);
+  const open = panelController
+    ? panelController.openPanel === 'diff'
+    : standaloneOpen;
+  const groupedOpenPanelRef = useRef(panelController?.openPanel);
+  groupedOpenPanelRef.current = panelController?.openPanel;
+  const groupedClosePanel = panelController?.closePanel;
+  const groupedTogglePanel = panelController?.togglePanel;
+  const closePanel = useCallback(() => {
+    if (groupedClosePanel) groupedClosePanel();
+    else setStandaloneOpen(false);
+  }, [groupedClosePanel]);
+  const togglePanel = useCallback(() => {
+    if (groupedTogglePanel) groupedTogglePanel('diff');
+    else setStandaloneOpen(value => !value);
+  }, [groupedTogglePanel]);
   const diff = useMemo(() => projectTurnDiff(items), [items]);
 
   useEffect(() => {
-    setOpen(false);
-  }, [sessionId, diff?.turn]);
+    setStandaloneOpen(false);
+    if (groupedOpenPanelRef.current === 'diff') groupedClosePanel?.();
+  }, [diff?.turn, groupedClosePanel, sessionId]);
 
   useEffect(() => {
-    if (!diff) setOpen(false);
-  }, [diff]);
+    if (!diff && open) closePanel();
+  }, [closePanel, diff, open]);
 
   if (!diff) return null;
 
@@ -46,6 +64,7 @@ export function TurnDiffChip({
         <section
           className="context-agent-panel turn-diff-panel"
           aria-label={t('changes.scope.lastTurn')}
+          data-underbar-panel-interactive
         >
           <header className="context-agent-panel-head">
             <div>
@@ -60,7 +79,7 @@ export function TurnDiffChip({
               className="context-panel-close"
               aria-label={t('common.close')}
               title={t('common.close')}
-              onClick={() => setOpen(false)}
+              onClick={closePanel}
             >
               <span aria-hidden>&times;</span>
             </button>
@@ -73,7 +92,7 @@ export function TurnDiffChip({
                 className="turn-diff-row"
                 title={file.path}
                 onClick={() => {
-                  setOpen(false);
+                  closePanel();
                   onShowLastTurn(diff.turn, file.path);
                 }}
               >
@@ -92,7 +111,8 @@ export function TurnDiffChip({
         className="context-chip turn-diff-chip"
         aria-expanded={open}
         title={t('changes.scope.lastTurn')}
-        onClick={() => setOpen(value => !value)}
+        data-underbar-panel-interactive
+        onClick={togglePanel}
       >
         <span>{diff.files.length} {t('changes.files')}</span>
         {(totalAdd > 0 || totalDel > 0) && (

@@ -12,9 +12,13 @@ import { GitBadge } from '../components/GitBadge.js';
 import { PlanChip } from '../components/PlanChip.js';
 import { QueueList } from '../components/QueueList.js';
 import { TurnDiffChip } from '../components/TurnDiffChip.js';
+import { UnderbarPanelGroup } from '../components/UnderbarPanelGroup.js';
 import { useT } from '../i18n/index.js';
 import { Transcript } from '../transcript/Transcript.js';
-import { TranscriptMinimap } from '../transcript/TranscriptMinimap.js';
+import {
+  TranscriptMinimap,
+  TranscriptNavigation,
+} from '../transcript/TranscriptMinimap.js';
 import type { ApprovalActionContext, QueueEntry, TranscriptItem } from '../types.js';
 import { isTurnRunning } from '../session-routing.js';
 import type { TranscriptHistoryState } from '../controllers/use-transcript-hydration.js';
@@ -168,6 +172,7 @@ export function SessionMain({
       )}
       <div className="main-scroll">
         <Transcript
+          key={session.id}
           items={items}
           hydrated={hydrated}
           hasOlder={history?.hasMore ?? false}
@@ -191,7 +196,7 @@ export function SessionMain({
           : undefined}
         readOnly={terminal || sessionCompleted}
       />
-      <div className="main-underbar">
+      <UnderbarPanelGroup sessionId={session.id}>
         <PlanChip
           items={items}
           planText={planText}
@@ -205,7 +210,8 @@ export function SessionMain({
           sessionId={session.id}
           onShowLastTurn={onShowLastTurnChanges}
         />
-      </div>
+        <TranscriptNavigation items={items} />
+      </UnderbarPanelGroup>
       <Composer
         session={session}
         onSend={onSend}

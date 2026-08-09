@@ -192,6 +192,16 @@ body[data-theme="light"] {
 
   --ok:    oklch(0.58 0.13 150);
   --ok-soft: oklch(0.58 0.13 150 / 0.13);
+  /* History DAG chain palette (Air-style): 1 = main line, 2-8 cycle through
+   * freshly claimed branch chains. Independent of --accent. */
+  --lane-1: oklch(0.55 0.14 250);
+  --lane-2: oklch(0.58 0.12 195);
+  --lane-3: oklch(0.55 0.15 300);
+  --lane-4: oklch(0.62 0.14 55);
+  --lane-5: oklch(0.56 0.16 25);
+  --lane-6: oklch(0.58 0.13 150);
+  --lane-7: oklch(0.68 0.12 85);
+  --lane-8: oklch(0.55 0.14 340);
   --warn:  oklch(0.70 0.14 75);
   --warn-soft: oklch(0.70 0.14 75 / 0.15);
   --danger: oklch(0.58 0.18 25);
@@ -232,6 +242,16 @@ body[data-theme="warm"] {
 
   --ok:    oklch(0.55 0.13 150);
   --ok-soft: oklch(0.55 0.13 150 / 0.14);
+  /* History DAG chain palette (Air-style): 1 = main line, 2-8 cycle through
+   * freshly claimed branch chains. Independent of --accent. */
+  --lane-1: oklch(0.52 0.14 250);
+  --lane-2: oklch(0.55 0.12 195);
+  --lane-3: oklch(0.52 0.15 300);
+  --lane-4: oklch(0.58 0.14 55);
+  --lane-5: oklch(0.53 0.16 28);
+  --lane-6: oklch(0.55 0.13 150);
+  --lane-7: oklch(0.64 0.12 85);
+  --lane-8: oklch(0.52 0.14 340);
   --warn:  oklch(0.65 0.14 65);
   --warn-soft: oklch(0.65 0.14 65 / 0.16);
   --danger: oklch(0.55 0.18 30);
@@ -277,6 +297,16 @@ body[data-theme="dark"] {
 
   --ok:    oklch(0.75 0.14 150);
   --ok-soft: oklch(0.75 0.14 150 / 0.16);
+  /* History DAG chain palette (Air-style): 1 = main line, 2-8 cycle through
+   * freshly claimed branch chains. Independent of --accent. */
+  --lane-1: oklch(0.74 0.13 250);
+  --lane-2: oklch(0.76 0.11 195);
+  --lane-3: oklch(0.74 0.14 300);
+  --lane-4: oklch(0.78 0.13 60);
+  --lane-5: oklch(0.72 0.15 25);
+  --lane-6: oklch(0.75 0.14 150);
+  --lane-7: oklch(0.82 0.12 90);
+  --lane-8: oklch(0.73 0.13 340);
   --warn:  oklch(0.80 0.14 80);
   --warn-soft: oklch(0.80 0.14 80 / 0.18);
   --danger: oklch(0.72 0.17 25);

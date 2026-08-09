@@ -888,6 +888,19 @@ export class CodexProxyService {
 
   private async handleRuntimeStopped() {
     for (const session of this.sessionsById.values()) {
+      const context = this.activeTurnsByThreadId.get(session.threadId);
+      if (context) {
+        this.emitEvent('turn.failed', {
+          requestId: context.requestId,
+          sessionId: session.id,
+          turnId: context.turnId,
+          data: {
+            turnId: context.turnId,
+            code: 'RUNTIME_STOPPED',
+            message: 'Codex runtime stopped while the session had an active turn.',
+          },
+        });
+      }
       this.updateSession(session, {
         status: session.activeTurnId ? 'stale' : session.status,
         lastError: session.activeTurnId ? 'Codex runtime stopped while the session had an active turn.' : session.lastError,

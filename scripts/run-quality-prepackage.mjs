@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { acquireQualityLock } from './quality-lock.mjs';
+import { runLoggedCommand } from './run-logged-command.mjs';
 import { sanitizedTestEnv } from './run-tests.mjs';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -70,7 +71,7 @@ export function formatPrepackageSummary(results, logPath) {
   return lines.join('\n');
 }
 
-export function main() {
+export async function main() {
   const lock = acquireQualityLock({ command: 'quality:prepackage', rootDir });
   try {
     const env = sanitizedTestEnv();
@@ -99,23 +100,17 @@ export function main() {
       console.log(`\n==> ${step.label}`);
       const startedAt = Date.now();
       const command = pnpmInvocation(step.args);
-      const result = spawnSync(command.command, command.args, {
+      appendFileSync(logPath, `\n==> ${step.label}\n`);
+      const result = await runLoggedCommand(command.command, command.args, {
         cwd: rootDir,
         env,
-        encoding: 'utf8',
-        maxBuffer: 50 * 1024 * 1024,
+        logPath,
       });
       const status = !result.error && result.status === 0 ? 'PASS' : 'FAIL';
       const elapsed = duration(startedAt);
-      const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-      appendFileSync(logPath, `\n==> ${step.label}\n${output}`);
       results.push({ ...step, status, duration: elapsed });
       console.log(`[${status}] ${step.label} (${elapsed})`);
       if (result.error) console.error(result.error);
-      if (status === 'FAIL' && output) {
-        console.error('\nLast output from the failed step:');
-        console.error(output.trimEnd().split('\n').slice(-40).join('\n'));
-      }
       failed = status === 'FAIL';
     }
 
@@ -127,5 +122,8 @@ export function main() {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  process.exitCode = main();
+  main().then(code => { process.exitCode = code; }).catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+  });
 }

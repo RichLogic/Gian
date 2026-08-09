@@ -102,19 +102,18 @@ afterEach(() => {
 });
 
 describe('HistoryCommitBody', () => {
-  it('renders the commit header (subject, author, refs, parents, stats)', async () => {
-    render(<HistoryCommitBody tab={tab()} onOpenCommit={() => {}} />);
+  it('renders the commit header (subject, sha, author, stats)', async () => {
+    render(<HistoryCommitBody tab={tab()} />);
     await waitFor(() => expect(document.querySelector('.cs-subject')?.textContent).toBe('feat: wire history rail'));
     expect(screen.getByText('Rich')).toBeTruthy();
-    expect(screen.getByText('main')).toBeTruthy();
-    expect(screen.getByText('ba5e1fu')).toBeTruthy(); // parent chip
+    expect(document.querySelector('.cs-sha-btn')?.textContent).toContain('c0ffee1');
     expect(screen.getByText(/2 files/)).toBeTruthy();
     expect(document.querySelector('.cs-stats .add')?.textContent).toBe('+3');
     expect(document.querySelector('.cs-stats .del')?.textContent).toBe('−1');
   });
 
   it('file patches load lazily — only after the block intersects', async () => {
-    render(<HistoryCommitBody tab={tab()} onOpenCommit={() => {}} />);
+    render(<HistoryCommitBody tab={tab()} />);
     await waitFor(() => expect(document.querySelector('.cs-subject')?.textContent).toBe('feat: wire history rail'));
     // skeletons rendered, nothing fetched yet (no intersection)
     expect(document.querySelectorAll('.sk').length).toBe(1); // binary file shows a note, not a skeleton
@@ -131,14 +130,14 @@ describe('HistoryCommitBody', () => {
   });
 
   it('binary files never fetch — they render the binary note', async () => {
-    render(<HistoryCommitBody tab={tab()} onOpenCommit={() => {}} />);
+    render(<HistoryCommitBody tab={tab()} />);
     await screen.findByText('Binary file — no textual diff.');
     expect(loadGitHistoryFileDiff).not.toHaveBeenCalled();
   });
 
   it('per-file failure offers retry without touching other files', async () => {
     loadGitHistoryFileDiff.mockRejectedValueOnce(new Error('git died'));
-    render(<HistoryCommitBody tab={tab()} onOpenCommit={() => {}} />);
+    render(<HistoryCommitBody tab={tab()} />);
     await waitFor(() => expect(document.querySelector('.cs-subject')?.textContent).toBe('feat: wire history rail'));
     act(() => FakeIO.instances[0]!.trigger());
     await screen.findByText("Couldn't load this file's diff.");
@@ -149,7 +148,7 @@ describe('HistoryCommitBody', () => {
 
   it('truncated patches render the host-truncation note', async () => {
     loadGitHistoryFileDiff.mockResolvedValue({ ...DIFF, truncated: true });
-    render(<HistoryCommitBody tab={tab()} onOpenCommit={() => {}} />);
+    render(<HistoryCommitBody tab={tab()} />);
     await waitFor(() => expect(document.querySelector('.cs-subject')?.textContent).toBe('feat: wire history rail'));
     act(() => FakeIO.instances[0]!.trigger());
     await screen.findByText(/truncated/);
@@ -157,33 +156,33 @@ describe('HistoryCommitBody', () => {
 
   it('merge commits pin the first-parent base strip; root commits the empty-tree note', async () => {
     loadGitHistoryCommit.mockResolvedValueOnce(detail({ isMerge: true, parents: ['p1first', 'p2second'] }));
-    const { unmount } = render(<HistoryCommitBody tab={tab()} onOpenCommit={() => {}} />);
+    const { unmount } = render(<HistoryCommitBody tab={tab()} />);
     await screen.findByText(/Diff vs first parent/);
-    expect(screen.getByText('p1first')).toBeTruthy();
-    expect(screen.getByText('p2secon')).toBeTruthy();
     unmount();
 
     loadGitHistoryCommit.mockResolvedValueOnce(detail({ isRoot: true, parents: [], isMerge: false }));
-    render(<HistoryCommitBody tab={tab({ id: 't3' })} onOpenCommit={() => {}} />);
+    render(<HistoryCommitBody tab={tab({ id: 't3' })} />);
     await screen.findByText(/empty tree/);
-    expect(screen.getByText(/none \(root commit\)/)).toBeTruthy();
   });
 
-  it('clicking a parent chip opens that commit as a preview', async () => {
-    const onOpenCommit = vi.fn();
-    render(<HistoryCommitBody tab={tab()} onOpenCommit={onOpenCommit} />);
+  it('the toolbar collapse-all toggle folds and restores every file block', async () => {
+    render(<HistoryCommitBody tab={tab()} />);
     await waitFor(() => expect(document.querySelector('.cs-subject')?.textContent).toBe('feat: wire history rail'));
-    fireEvent.click(screen.getByText('ba5e1fu'));
-    expect(onOpenCommit).toHaveBeenCalledWith({ sha: 'ba5e1full' }, false);
+    const toggle = screen.getByLabelText('Collapse all files');
+    expect(document.querySelectorAll('.cs-file.collapsed').length).toBe(0);
+    fireEvent.click(toggle);
+    expect(document.querySelectorAll('.cs-file.collapsed').length).toBe(2);
+    fireEvent.click(screen.getByLabelText('Expand all files'));
+    expect(document.querySelectorAll('.cs-file.collapsed').length).toBe(0);
   });
 
   it('orphaned tabs show the snapshot banner', async () => {
-    render(<HistoryCommitBody tab={tab({ orphaned: true })} onOpenCommit={() => {}} />);
+    render(<HistoryCommitBody tab={tab({ orphaned: true })} />);
     await screen.findByText(/no longer reachable/);
   });
 
   it('file blocks collapse and expand', async () => {
-    render(<HistoryCommitBody tab={tab()} onOpenCommit={() => {}} />);
+    render(<HistoryCommitBody tab={tab()} />);
     await waitFor(() => expect(document.querySelector('.cs-subject')?.textContent).toBe('feat: wire history rail'));
     const head = document.querySelector('.cs-file-head')!;
     fireEvent.click(head);
@@ -213,7 +212,6 @@ describe('HistoryCommitBody', () => {
     const { rerender } = render(
       <HistoryCommitBody
         tab={tab({ commitSha: 'first-full', name: 'first' })}
-        onOpenCommit={() => {}}
       />,
     );
     await waitFor(() => expect(document.querySelector('.cs-subject')?.textContent).toBe('first preview'));
@@ -223,7 +221,6 @@ describe('HistoryCommitBody', () => {
     rerender(
       <HistoryCommitBody
         tab={tab({ commitSha: 'second-full', name: 'second' })}
-        onOpenCommit={() => {}}
       />,
     );
     await waitFor(() => expect(document.querySelector('.cs-subject')?.textContent).toBe('second preview'));
@@ -242,13 +239,11 @@ describe('HistoryCommitBody', () => {
     const { rerender } = render(
       <HistoryCommitBody
         tab={tab({ commitSha: 'first-full', name: 'first' })}
-        onOpenCommit={() => {}}
       />,
     );
     rerender(
       <HistoryCommitBody
         tab={tab({ commitSha: 'second-full', name: 'second' })}
-        onOpenCommit={() => {}}
       />,
     );
     await act(async () => second.resolve(detail({ sha: 'second-full', subject: 'second wins' })));

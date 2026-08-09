@@ -6,6 +6,32 @@ not listed.
 
 All releases below are unsigned macOS Apple Silicon beta builds.
 
+## [0.4.1] - 2026-08-09
+
+### Added
+
+- Added a singleton multi-diff inspector that keeps file, history, and
+  transcript diffs in one consistent review surface.
+- Added stronger release canaries for Codex compatibility and steering, Kimi
+  session-store compatibility and lifecycle behavior, and provider attachments.
+
+### Changed
+
+- Refined Git History with compact single-line commits, branch-chain graph
+  colors, clearer filters, bounded lanes, and continuous loading.
+- Made Plan, Agent, and Diff underbar panels mutually exclusive, with predictable
+  toggle, outside-click, and Escape behavior.
+- Improved transcript minimap and message navigation behavior across narrow and
+  wide chat layouts.
+
+### Fixed
+
+- Stabilized transcript identities, hydration, terminal state, and history
+  recovery so provider updates cannot leave duplicate or stale cards behind.
+- Preserved color-rendered transcript diffs while reusing pinned detail tabs.
+- Hardened Browser view detachment, Agent runtime replacement, Proxy exit
+  recovery, watcher restart behavior, and Kimi session-store downgrade safety.
+
 ## [0.4.0] - 2026-08-08
 
 ### Added

@@ -23,21 +23,17 @@ import type {
   TranscriptItem,
   WebSearchItem,
 } from '../types.js';
+import {
+  isToolProjectionItem,
+  transcriptIdentity,
+  transcriptItemIdentity,
+} from './identity.js';
 
 const ATTACHED_IMAGE_RE = /\[Attached image:\s*([^\]]+?)\s*\]/g;
 const IMAGE_EXT_MIME: Record<string, string> = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
   webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', heic: 'image/heic',
 };
-
-const TOOL_ITEM_KINDS = new Set<TranscriptItem['kind']>([
-  'command',
-  'tool',
-  'file-read',
-  'file-search',
-  'web-search',
-  'diff',
-]);
 
 const LEGACY_DISPLAY_TYPES: Record<string, DisplayEventType | undefined> = {
   assistant_text: 'message',
@@ -79,12 +75,22 @@ function upsertToolItem(
   items: TranscriptItem[],
   item: TranscriptItem,
 ): TranscriptItem[] {
-  const index = items.findIndex(
-    current => current.id === item.id && TOOL_ITEM_KINDS.has(current.kind),
-  );
-  if (index < 0) return [...items, item];
-  const next = items.slice();
-  next[index] = item;
+  if (!isToolProjectionItem(item)) return [...items, item];
+  const matches = items.flatMap((current, index) => (
+    current.turn === item.turn
+    && current.id === item.id
+    && isToolProjectionItem(current)
+      ? [index]
+      : []
+  ));
+  if (matches.length === 0) return [...items, item];
+  // A reconnect race can briefly surface both the generic and specialized
+  // projection. Replace the first in place and retire every duplicate so a
+  // later live event cannot leave the stale card behind.
+  const first = matches[0]!;
+  const matchSet = new Set(matches);
+  const next = items.filter((_current, index) => !matchSet.has(index));
+  next.splice(first, 0, item);
   return next;
 }
 
@@ -166,7 +172,8 @@ export function applyEnvelope(
           : (data.text ?? ''),
     );
     if (!chunk) return items;
-    const idx = items.findIndex(i => i.kind === 'assistant' && i.id === itemId);
+    const identity = transcriptIdentity(env.turn, 'assistant', itemId);
+    const idx = items.findIndex(i => transcriptItemIdentity(i) === identity);
     if (idx >= 0) {
       const existing = items[idx] as MsgItem;
       const next = items.slice();
@@ -189,7 +196,8 @@ export function applyEnvelope(
     const chunk = String(data.text ?? '');
     if (!chunk) return items;
     const variant = data.kind === 'summary' ? 'summary' : 'full';
-    const idx = items.findIndex(i => i.kind === 'reasoning' && i.id === itemId);
+    const identity = transcriptIdentity(env.turn, 'reasoning', itemId, variant);
+    const idx = items.findIndex(i => transcriptItemIdentity(i) === identity);
     if (idx >= 0) {
       const existing = items[idx] as ReasoningItem;
       const next = items.slice();
@@ -221,7 +229,8 @@ export function applyEnvelope(
     const itemId = String(data.itemId ?? env.call_id);
     if (data.stdoutDelta !== undefined) {
       // streaming delta — update existing item or create
-      const idx = items.findIndex(i => i.kind === 'command' && i.id === itemId);
+      const identity = transcriptIdentity(env.turn, 'command', itemId);
+      const idx = items.findIndex(i => transcriptItemIdentity(i) === identity);
       if (idx >= 0) {
         const existing = items[idx] as CommandItem;
         const next = items.slice();
@@ -234,7 +243,8 @@ export function applyEnvelope(
       }
     }
     // full event or first delta
-    const idx = items.findIndex(i => i.kind === 'command' && i.id === itemId);
+    const identity = transcriptIdentity(env.turn, 'command', itemId);
+    const idx = items.findIndex(i => transcriptItemIdentity(i) === identity);
     if (idx >= 0) {
       // update status / exitCode on an existing card
       const existing = items[idx] as CommandItem;
@@ -265,7 +275,8 @@ export function applyEnvelope(
 
   if (ev === 'activity.tool') {
     const itemId = String(data.itemId ?? env.call_id);
-    const existing = items.find(item => item.kind === 'tool' && item.id === itemId) as ToolItem | undefined;
+    const identity = transcriptIdentity(env.turn, 'tool', itemId);
+    const existing = items.find(item => transcriptItemIdentity(item) === identity) as ToolItem | undefined;
     const summary = data.input === undefined
       ? existing?.summary ?? ''
       : typeof data.input === 'string'
@@ -337,18 +348,44 @@ export function applyEnvelope(
   // ── agent_spawn (unified) ──
   if (ev === 'agent') {
     const itemId = String(env.call_id);
+    const existingProjection = items.find(candidate => (
+      candidate.turn === env.turn
+      && candidate.id === itemId
+      && isToolProjectionItem(candidate)
+    ));
+    const existingAgent = existingProjection?.kind === 'agent-spawn'
+      ? existingProjection
+      : undefined;
+    const inheritedTool = existingProjection?.kind === 'tool'
+      ? existingProjection
+      : undefined;
+    let inheritedInput: Record<string, unknown> | undefined;
+    if (inheritedTool?.summary) {
+      try {
+        const parsed = JSON.parse(inheritedTool.summary) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          inheritedInput = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Non-JSON summaries remain a generic-tool preview only.
+      }
+    }
     const status: AgentSpawnItem['status'] =
-      data.status === 'done' || data.status === 'error' ? data.status : 'running';
+      data.status === 'done' || data.status === 'error'
+        ? data.status
+        : data.status === 'running'
+          ? 'running'
+          : existingAgent?.status ?? 'running';
     const description = typeof data.description === 'string' ? data.description : '';
-    const idx = items.findIndex(i => i.kind === 'agent-spawn' && i.id === itemId);
+    const identity = transcriptIdentity(env.turn, 'agent-spawn', itemId);
+    const idx = items.findIndex(i => transcriptItemIdentity(i) === identity);
     if (idx >= 0) {
       const existing = items[idx] as AgentSpawnItem;
       const nextDescription =
         description && description.toLowerCase() !== 'agent'
           ? description
           : existing.description || description;
-      const next = items.slice();
-      next[idx] = {
+      return upsertToolItem(items, {
         ...existing,
         provider: executor,
         description: nextDescription,
@@ -367,33 +404,37 @@ export function applyEnvelope(
         completedAt: typeof data.completedAt === 'number'
           ? data.completedAt
           : status === 'running' ? existing.completedAt : env.ts,
-      };
-      return next;
+      });
     }
+    const input = data.input && typeof data.input === 'object'
+      ? { ...(inheritedInput ?? {}), ...(data.input as Record<string, unknown>) }
+      : inheritedInput;
     const item: AgentSpawnItem = {
       kind: 'agent-spawn',
       id: itemId,
       provider: executor,
       agentId: typeof data.agentId === 'string' ? data.agentId : undefined,
-      description,
+      description: description && description.toLowerCase() !== 'agent'
+        ? description
+        : inheritedTool?.name ?? description,
       status,
       taskId: typeof data.taskId === 'string' ? data.taskId : undefined,
       agentType: typeof data.agentType === 'string' ? data.agentType : undefined,
       model: typeof data.model === 'string' ? data.model : undefined,
-      output: typeof data.output === 'string' ? data.output : undefined,
+      output: typeof data.output === 'string' ? data.output : inheritedTool?.output,
       outputFile: typeof data.outputFile === 'string' ? data.outputFile : undefined,
       background: typeof data.background === 'boolean' ? data.background : undefined,
-      input: data.input && typeof data.input === 'object'
-        ? data.input as Record<string, unknown>
-        : undefined,
-      startedAt: typeof data.startedAt === 'number' ? data.startedAt : env.ts,
+      input,
+      startedAt: typeof data.startedAt === 'number'
+        ? data.startedAt
+        : inheritedTool?.ts ?? env.ts,
       updatedAt: env.ts,
       completedAt: typeof data.completedAt === 'number'
         ? data.completedAt
         : status === 'running' ? undefined : env.ts,
       ts: env.ts, turn: env.turn,
     };
-    return [...items, item];
+    return upsertToolItem(items, item);
   }
 
   // ── approval_requested (unified + legacy) ──
@@ -488,7 +529,7 @@ export function applyEnvelope(
 
   // ── turn_completed (unified) / turn.started / turn.completed (legacy) ──
   if (ev === 'state.turn-completed') {
-    return [...items, { kind: 'turn-end', id: env.call_id, text: `Turn ${env.turn} · complete`, ts: env.ts, turn: env.turn }];
+    return ensureTurnEnd(items, env.turn, env.call_id, env.ts);
   }
 
   // ── user_message — host-side event (not a proxy event, so no normalizer);
@@ -598,9 +639,8 @@ export function applyEnvelope(
     // HTTP hydration, latest-page refresh and the live WS frame can arrive in
     // any order. Upsert the canonical item and also retire a matching pending
     // echo if both are temporarily present in state.
-    const canonicalIndex = base.findIndex(candidate => (
-      candidate.kind === 'user' && candidate.id === item.id
-    ));
+    const identity = transcriptItemIdentity(item);
+    const canonicalIndex = base.findIndex(candidate => transcriptItemIdentity(candidate) === identity);
     if (canonicalIndex >= 0) {
       const next = base.slice();
       const existingCanonical = base[canonicalIndex]!;
@@ -627,6 +667,63 @@ export function applyEnvelope(
   }
 
   return items;
+}
+
+/** Add one terminal boundary per turn, regardless of which terminal signal won
+ * the event/session-update race. The boundary is render-only transcript state;
+ * provider ids remain untouched. */
+export function ensureTurnEnd(
+  items: TranscriptItem[],
+  turn: number,
+  id: string,
+  ts: number,
+): TranscriptItem[] {
+  const existingIndex = items.findIndex(item => item.kind === 'turn-end' && item.turn === turn);
+  if (existingIndex >= 0) {
+    const existing = items[existingIndex]!;
+    // Replace the client-only fallback when the canonical provider/history
+    // boundary arrives. This preserves one logical boundary while recovering
+    // the authoritative id and completion timestamp.
+    if (existing.id.startsWith('session-terminal:') && !id.startsWith('session-terminal:')) {
+      const next = items.slice();
+      next[existingIndex] = {
+        kind: 'turn-end', id, text: `Turn ${turn} · complete`, ts, turn,
+      };
+      return next;
+    }
+    return items;
+  }
+  return [
+    ...items,
+    { kind: 'turn-end', id, text: `Turn ${turn} · complete`, ts, turn },
+  ];
+}
+
+/** A terminal `session:updated` can arrive when the corresponding event frame
+ * was missed. Close the newest turn already present in memory; later delivery
+ * of the real turn-completed event is absorbed by `ensureTurnEnd`. */
+export function ensureLatestTurnEnd(
+  items: TranscriptItem[],
+  sessionId: string,
+  terminalTs: number,
+): TranscriptItem[] {
+  let latestTurn: number | null = null;
+  let latestTurnTs = 0;
+  for (const item of items) {
+    if (latestTurn === null || item.turn > latestTurn) {
+      latestTurn = item.turn;
+      latestTurnTs = item.ts;
+    } else if (item.turn === latestTurn) {
+      latestTurnTs = Math.max(latestTurnTs, item.ts);
+    }
+  }
+  if (latestTurn === null) return items;
+  return ensureTurnEnd(
+    items,
+    latestTurn,
+    `session-terminal:${sessionId}:${latestTurn}`,
+    Math.max(terminalTs, latestTurnTs),
+  );
 }
 
 /**

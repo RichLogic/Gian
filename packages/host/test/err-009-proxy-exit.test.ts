@@ -304,11 +304,43 @@ test('ERR-009: after proxy exit, the cached proxySessionId is dropped so the nex
     // Exit while idle (turn still running but no notification arrived).
     ctx.proxyMgr.client.fireExit(1);
     await tick();
+    assert.equal(ctx.proxyMgr.client.notificationHandlers.length, 0,
+      'crash cleanup detaches the old notification callback');
+    assert.equal(ctx.proxyMgr.client.exitHandlers.length, 0,
+      'crash cleanup detaches the old exit callback');
 
     // sendMessage must succeed by re-doing the proxy bring-up. The fake
     // proxy never breaks, so we mainly check we don't throw `no proxy for
     // session` from a stale cache.
     await ctx.sessions.sendMessage(session.id, 'after restart');
+    assert.equal(ctx.proxyMgr.client.notificationHandlers.length, 1,
+      'reconnect installs exactly one notification callback');
+    assert.equal(ctx.proxyMgr.client.exitHandlers.length, 1,
+      'reconnect installs exactly one exit callback');
+
+    ctx.broadcaster.messages.length = 0;
+    ctx.proxyMgr.client.fire({
+      method: 'output.text',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'proxy_turn',
+        data: { text: 'once after crash', itemId: 'message_after_crash' },
+      },
+    });
+    assert.equal(
+      ctx.broadcaster.messages.filter(message => (
+        message.type === 'event' && message.event === 'output.text'
+      )).length,
+      1,
+      'one post-crash notification produces one WebSocket event',
+    );
+    assert.equal(
+      (ctx.db.prepare(
+        "SELECT COUNT(*) AS count FROM events WHERE session_id = ? AND type = 'output.text'",
+      ).get(session.id) as { count: number }).count,
+      1,
+      'one post-crash notification produces one persisted event',
+    );
 
     const turns = ctx.db.prepare(`SELECT COUNT(*) AS c FROM turns WHERE session_id = ?`)
       .get(session.id) as { c: number };

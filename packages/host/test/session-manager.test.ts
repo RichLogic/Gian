@@ -34,12 +34,21 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
 }
 
 class StubProxyClient implements ProxyClient {
-  readonly executor = 'claude' as const;
+  readonly executor: Executor;
   notificationHandlers: NotificationHandler[] = [];
   startTurnCalls: StartTurnParams[] = [];
   exitHandlers: Array<(code: number | null) => void> = [];
   handlerCountsAtCreate: Array<{ notifications: number; exits: number }> = [];
   notificationDuringCreate: ProxyNotification | null = null;
+  notificationDuringInterrupt: ProxyNotification | null = null;
+  interruptError: Error | null = null;
+  startTurnIds: string[] = [];
+  createSessionGate: Promise<void> | null = null;
+  onCreateSessionStarted: (() => void) | null = null;
+
+  constructor(executor: Executor = 'claude') {
+    this.executor = executor;
+  }
 
   async initialize() {
     return { mode: 'spawn' as const, protocolVersion: '0.1.0', methods: [] };
@@ -65,6 +74,8 @@ class StubProxyClient implements ProxyClient {
     claudeSessionId?: string;
     threadId?: string;
   }) {
+    this.onCreateSessionStarted?.();
+    if (this.createSessionGate) await this.createSessionGate;
     this.handlerCountsAtCreate.push({
       notifications: this.notificationHandlers.length,
       exits: this.exitHandlers.length,
@@ -98,7 +109,18 @@ class StubProxyClient implements ProxyClient {
       nativeSessionId,
     };
   }
-  async interruptTurn() { /* no-op */ }
+  async interruptTurn() {
+    if (this.notificationDuringInterrupt) {
+      const notification = this.notificationDuringInterrupt;
+      this.notificationDuringInterrupt = null;
+      this.fire(notification);
+    }
+    if (this.interruptError) {
+      const error = this.interruptError;
+      this.interruptError = null;
+      throw error;
+    }
+  }
   async respondApproval() { /* no-op */ }
   async startTurn(params: StartTurnParams) {
     this.startTurnCalls.push(params);
@@ -112,7 +134,7 @@ class StubProxyClient implements ProxyClient {
         updatedAt: '2026-04-26T00:00:00.000Z',
         lastError: null,
       },
-      turn: { id: 'proxy_turn' },
+      turn: { id: this.startTurnIds.shift() ?? 'proxy_turn' },
     };
   }
   async closeSession() { /* no-op */ }
@@ -141,10 +163,17 @@ class StubProxyClient implements ProxyClient {
 class FakeProxyManager {
   client = new StubProxyClient();
   private active: StubProxyClient | null = this.client;
+  private initialized = false;
   forceDisposeCalls: string[] = [];
-  async getOrCreate(): Promise<ProxyClient> {
-    if (!this.active) {
-      this.client = new StubProxyClient();
+  async getOrCreate(_sessionId?: string, executor: Executor = 'claude'): Promise<ProxyClient> {
+    if (!this.initialized) {
+      this.initialized = true;
+      if (this.client.executor !== executor) {
+        this.client = new StubProxyClient(executor);
+        this.active = this.client;
+      }
+    } else if (!this.active) {
+      this.client = new StubProxyClient(executor);
       this.active = this.client;
     }
     return this.active;
@@ -624,7 +653,7 @@ test('Kimi adoption coalesces replay chunks and keeps assistant IDs turn-local',
       cwd: '/tmp/test-ws',
       nativeSessionId: 'kimi-history',
     });
-    assert.deepEqual(adopted.replay, { turns: 2, events: 4 });
+    assert.deepEqual(adopted.replay, { turns: 2, events: 8 });
     assert.ok(broadcaster.messages.some(message => (
       message.type === 'session:created'
       && message.session.id === adopted.session.id
@@ -640,6 +669,14 @@ test('Kimi adoption coalesces replay chunks and keeps assistant IDs turn-local',
       .filter(event => event.display?.type === 'message')
       .map(event => event.display?.data.itemId);
     assert.equal(new Set(assistantIds).size, 2);
+    assert.deepEqual(
+      events.filter(event => event.display?.type === 'state.turn-started').map(event => event.turn),
+      [1, 2],
+    );
+    assert.deepEqual(
+      events.filter(event => event.display?.type === 'state.turn-completed').map(event => event.turn),
+      [1, 2],
+    );
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -699,7 +736,7 @@ test('Kimi adoption replaces replayed tool snapshots instead of amplifying histo
       cwd: '/tmp/test-ws',
       nativeSessionId: 'kimi-tool-history',
     });
-    assert.deepEqual(adopted.replay, { turns: 1, events: 2 });
+    assert.deepEqual(adopted.replay, { turns: 1, events: 4 });
 
     const toolEvents = sessions.listEvents(adopted.session.id)
       .filter(event => event.event === 'acp.sessionUpdate');
@@ -1029,6 +1066,111 @@ test('sendMessage creates turn, persists user_message, broadcasts envelope', asy
   }
 });
 
+test('sendMessage rejects a DB-only external running turn without registering a runtime', async () => {
+  const { dir, db, wsId, sessions, proxyMgr } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    db.prepare(
+      `INSERT INTO turns(id, session_id, turn_number, status, created_at)
+       VALUES('external-running', ?, 1, 'running', '2026-08-09T06:00:00.000Z')`,
+    ).run(session.id);
+    db.prepare(`UPDATE sessions SET status = 'running' WHERE id = ?`).run(session.id);
+
+    await assert.rejects(
+      sessions.sendMessage(session.id, 'must queue'),
+      /turn already in flight.*enqueue instead/,
+    );
+    assert.equal(proxyMgr.client.startTurnCalls.length, 0);
+    assert.equal(
+      (db.prepare('SELECT COUNT(*) AS n FROM turns WHERE session_id = ?')
+        .get(session.id) as { n: number }).n,
+      1,
+    );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('two concurrent sends reserve one turn and reject the other before optimistic writes', async () => {
+  const { dir, db, wsId, sessions, proxyMgr } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    const results = await Promise.allSettled([
+      sessions.sendMessage(session.id, 'first contender'),
+      sessions.sendMessage(session.id, 'second contender'),
+    ]);
+    assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+    const rejected = results.find(result => result.status === 'rejected') as PromiseRejectedResult;
+    assert.match(String(rejected.reason), /turn already in flight.*enqueue instead/);
+    assert.equal(proxyMgr.client.startTurnCalls.length, 1);
+    assert.equal(
+      (db.prepare('SELECT COUNT(*) AS n FROM turns WHERE session_id = ?')
+        .get(session.id) as { n: number }).n,
+      1,
+    );
+    assert.equal(
+      (db.prepare("SELECT COUNT(*) AS n FROM events WHERE session_id = ? AND type = 'user_message'")
+        .get(session.id) as { n: number }).n,
+      1,
+    );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sendMessage rechecks DB ownership after delayed proxy adoption', async () => {
+  const first = setup();
+  const session = await first.sessions.createSession({
+    workspace_id: first.wsId,
+    executor: 'claude',
+  });
+  first.db.close();
+
+  const db = openDatabase(first.dir);
+  const proxyMgr = new FakeProxyManager();
+  const broadcaster = new CapturingBroadcaster();
+  const approvals = new ApprovalManager(broadcaster as unknown as WsBroadcaster);
+  const queue = new QueueManager(db);
+  const sessions = new SessionManager(
+    db,
+    proxyMgr as unknown as ProxyManager,
+    broadcaster as unknown as WsBroadcaster,
+    approvals,
+    queue,
+    first.dir,
+  );
+  let releaseCreate!: () => void;
+  let markCreateStarted!: () => void;
+  proxyMgr.client.createSessionGate = new Promise(resolve => { releaseCreate = resolve; });
+  const createStarted = new Promise<void>(resolve => { markCreateStarted = resolve; });
+  proxyMgr.client.onCreateSessionStarted = markCreateStarted;
+
+  try {
+    const pending = sessions.sendMessage(session.id, 'racing send');
+    await createStarted;
+    db.prepare(
+      `INSERT INTO turns(id, session_id, turn_number, status, created_at)
+       VALUES('external-during-ensure', ?, 1, 'running', '2026-08-09T06:10:00.000Z')`,
+    ).run(session.id);
+    db.prepare(`UPDATE sessions SET status = 'running' WHERE id = ?`).run(session.id);
+    releaseCreate();
+
+    await assert.rejects(pending, /turn already in flight.*enqueue instead/);
+    assert.equal(proxyMgr.client.startTurnCalls.length, 0);
+    assert.equal(
+      (db.prepare('SELECT COUNT(*) AS n FROM turns WHERE session_id = ?')
+        .get(session.id) as { n: number }).n,
+      1,
+    );
+  } finally {
+    releaseCreate();
+    db.close();
+    rmSync(first.dir, { recursive: true, force: true });
+  }
+});
+
 test('proxy notification persists event and broadcasts; turn.completed updates statuses', async () => {
   const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
   try {
@@ -1069,11 +1211,108 @@ test('proxy notification persists event and broadcasts; turn.completed updates s
     const broadcastEvents = broadcaster.messages.filter(m => m.type === 'event') as Array<{ event: string }>;
     assert.ok(broadcastEvents.some(e => e.event === 'output.text'));
     assert.ok(broadcastEvents.some(e => e.event === 'turn.completed'));
+    assert.equal(
+      sessions.listEvents(session.id)
+        .filter(event => event.display?.type === 'state.turn-completed').length,
+      1,
+      'provider completion is already the canonical boundary',
+    );
+    assert.equal(
+      broadcastEvents.filter(event => event.event === 'gian.turn.completed').length,
+      0,
+      'Gian must not broadcast a duplicate when the provider supplied completion',
+    );
     const doneUpdate = broadcaster.messages.find(
       (m): m is { type: 'session:updated'; session: { status?: string; unread?: number } } =>
         m.type === 'session:updated' && (m as { session: { status?: string } }).session.status === 'done',
     );
     assert.ok(doneUpdate && doneUpdate.session.unread === 1, 'turn.completed broadcasts unread:1');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('turn.failed persists and broadcasts one Gian-owned terminal boundary', async () => {
+  const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    await sessions.sendMessage(session.id, 'fail this turn');
+    broadcaster.messages.length = 0;
+
+    proxyMgr.client.fire({
+      method: 'turn.failed',
+      params: {
+        sessionId: 'proxy_x',
+        data: { message: 'provider failed' },
+      },
+    });
+
+    const events = sessions.listEvents(session.id);
+    assert.equal(events.filter(event => event.display?.type === 'state.error').length, 1);
+    const completions = events.filter(event => event.display?.type === 'state.turn-completed');
+    assert.equal(completions.length, 1);
+    assert.equal(completions[0]?.event, 'gian.turn.completed');
+    assert.equal(
+      broadcaster.messages.filter(message => (
+        message.type === 'event' && message.event === 'gian.turn.completed'
+      )).length,
+      1,
+    );
+    assert.equal(sessions.getSession(session.id).status, 'error');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('turn-scoped runtime.error settles an active Codex turn without waiting for proxy exit', async () => {
+  const { dir, db, wsId, sessions, proxyMgr } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'codex' });
+    proxyMgr.client.startTurnIds.push('codex-runtime-turn');
+    await sessions.sendMessage(session.id, 'trigger runtime failure');
+
+    proxyMgr.client.fire({
+      method: 'runtime.error',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'codex-runtime-turn',
+        data: { code: 'RUNTIME_STOPPED', message: 'app-server stopped' },
+      },
+    });
+
+    const turn = db.prepare(
+      'SELECT status, completed_at FROM turns WHERE session_id = ?',
+    ).get(session.id) as { status: string; completed_at: string | null };
+    assert.equal(turn.status, 'error');
+    assert.ok(turn.completed_at);
+    assert.equal(sessions.getSession(session.id).status, 'error');
+    const events = sessions.listEvents(session.id);
+    assert.equal(events.filter(event => event.display?.type === 'state.error').length, 1);
+    assert.equal(events.filter(event => event.display?.type === 'state.turn-completed').length, 1);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('host-level runtime.error while idle does not invent a transcript turn', async () => {
+  const { dir, db, wsId, sessions, proxyMgr } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'codex' });
+    assert.doesNotThrow(() => proxyMgr.client.fire({
+      method: 'runtime.error',
+      params: {
+        data: { code: 'PROTOCOL_ERROR', message: 'host-level diagnostic' },
+      },
+    }));
+    assert.equal(sessions.listEvents(session.id).length, 0);
+    assert.equal(
+      (db.prepare('SELECT COUNT(*) AS n FROM turns WHERE session_id = ?')
+        .get(session.id) as { n: number }).n,
+      0,
+    );
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -1092,7 +1331,7 @@ test('P0 coalesces a burst of Codex diff snapshots into one final event', async 
         method: 'diff.updated',
         params: {
           sessionId: 'proxy_x',
-          turnId: 'stable-diff-turn',
+          turnId: 'proxy_turn',
           data: {
             diff: `diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new-${update}`,
           },
@@ -1111,7 +1350,7 @@ test('P0 coalesces a burst of Codex diff snapshots into one final event', async 
     assert.equal(rows.n, 1);
     const diff = sessions.listEvents(session.id)
       .find(event => event.event === 'diff.updated');
-    assert.equal(diff?.call_id, 'stable-diff-turn');
+    assert.equal(diff?.call_id, 'proxy_turn');
     assert.match(String(diff?.display?.data.diff), /new-299$/);
     assert.equal(
       broadcaster.messages.filter(message => (
@@ -1214,15 +1453,249 @@ test('session usage survives compact invalidation, deduplicates deltas, and rese
 });
 
 test('user-initiated stop settles status=done WITHOUT marking unread', async () => {
-  const { dir, db, wsId, sessions } = setup();
+  const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
   try {
     const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
     await sessions.sendMessage(session.id, 'ping'); // opens an active turn
+    const client = proxyMgr.client;
+    sessions.enqueueMessage(session.id, 'must remain queued');
     await sessions.stopTurn(session.id);            // → completeTurn('stopped')
 
     const row = db.prepare('SELECT status, unread FROM sessions WHERE id = ?').get(session.id) as { status: string; unread: number };
     assert.equal(row.status, 'done');
     assert.equal(row.unread, 0, 'a turn the user stopped themselves is not unread');
+    const completions = sessions.listEvents(session.id)
+      .filter(event => event.display?.type === 'state.turn-completed');
+    assert.equal(completions.length, 1);
+    assert.equal(completions[0]?.event, 'gian.turn.completed');
+    assert.ok(broadcaster.messages.some(message => (
+      message.type === 'event' && message.event === 'gian.turn.completed'
+    )), 'local stop broadcasts the same persisted fold boundary');
+    assert.equal(proxyMgr.client.startTurnCalls.length, 1, 'local stop must not auto-send queued work');
+    assert.equal(sessions.getQueueLength(session.id), 1);
+    assert.equal(client.notificationHandlers.length, 1, 'stop keeps exactly one live notification binding');
+    assert.equal(client.exitHandlers.length, 1, 'stop keeps exactly one live exit binding');
+
+    await sessions.sendMessage(session.id, 'after stop');
+    broadcaster.messages.length = 0;
+    client.fire({
+      method: 'output.text',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'proxy_turn',
+        data: { text: 'continued', itemId: 'message_after_stop' },
+      },
+    });
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'event' && message.event === 'output.text').length,
+      1,
+      'one post-stop notification produces one WebSocket event',
+    );
+    assert.equal(
+      (db.prepare(
+        "SELECT COUNT(*) AS count FROM events WHERE session_id = ? AND type = 'output.text'",
+      ).get(session.id) as { count: number }).count,
+      1,
+      'one post-stop notification produces one persisted event',
+    );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('provider terminal emitted inside interrupt settles stopped and does not drain queue', async () => {
+  const { dir, db, wsId, sessions, proxyMgr } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    proxyMgr.client.startTurnIds.push('stop-race-turn');
+    await sessions.sendMessage(session.id, 'ping');
+    sessions.enqueueMessage(session.id, 'stay queued');
+    proxyMgr.client.notificationDuringInterrupt = {
+      method: 'turn.completed',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'stop-race-turn',
+        data: { status: 'completed' },
+      },
+    };
+
+    await sessions.stopTurn(session.id);
+
+    const turn = db.prepare(
+      'SELECT status FROM turns WHERE session_id = ?',
+    ).get(session.id) as { status: string };
+    assert.equal(turn.status, 'stopped');
+    assert.equal(sessions.getSession(session.id).status, 'done');
+    assert.equal(sessions.getSession(session.id).unread, 0);
+    assert.equal(proxyMgr.client.startTurnCalls.length, 1);
+    assert.equal(sessions.getQueueLength(session.id), 1);
+    assert.equal(
+      sessions.listEvents(session.id)
+        .filter(event => event.display?.type === 'state.turn-completed').length,
+      1,
+    );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rejected interrupt clears stop intent and keeps the generation running', async () => {
+  const { dir, db, wsId, sessions, proxyMgr } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    proxyMgr.client.startTurnIds.push('interrupt-retry-turn');
+    await sessions.sendMessage(session.id, 'keep working');
+    proxyMgr.client.interruptError = new Error('interrupt transport failed');
+
+    await assert.rejects(sessions.stopTurn(session.id), /interrupt transport failed/);
+    assert.equal(
+      (db.prepare('SELECT status FROM turns WHERE session_id = ?').get(session.id) as { status: string }).status,
+      'running',
+    );
+    assert.equal(sessions.getSession(session.id).status, 'running');
+
+    proxyMgr.client.fire({
+      method: 'output.text',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'interrupt-retry-turn',
+        data: { text: 'still alive' },
+      },
+    });
+    assert.ok(sessions.listEvents(session.id).some(event => event.event === 'output.text'));
+
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'interrupt-retry-turn',
+        data: { status: 'completed' },
+      },
+    });
+    assert.equal(
+      (db.prepare('SELECT status FROM turns WHERE session_id = ?').get(session.id) as { status: string }).status,
+      'completed',
+      'cleared intent lets the eventual natural terminal retain its provider status',
+    );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('late output and terminal from a stopped provider generation cannot pollute the next turn', async () => {
+  const { dir, db, wsId, sessions, proxyMgr } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    proxyMgr.client.startTurnIds.push('old-provider-turn');
+    await sessions.sendMessage(session.id, 'old turn');
+    await sessions.stopTurn(session.id);
+
+    proxyMgr.client.startTurnIds.push('new-provider-turn');
+    await sessions.sendMessage(session.id, 'new turn');
+    const before = sessions.listEvents(session.id).length;
+    assert.doesNotThrow(() => proxyMgr.client.fire({
+      method: 'output.text',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'old-provider-turn',
+        data: { text: 'late old output' },
+      },
+    }));
+    assert.doesNotThrow(() => proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'old-provider-turn',
+        data: { status: 'completed' },
+      },
+    }));
+
+    assert.equal(sessions.listEvents(session.id).length, before);
+    const turns = db.prepare(
+      'SELECT status FROM turns WHERE session_id = ? ORDER BY turn_number',
+    ).all(session.id) as Array<{ status: string }>;
+    assert.deepEqual(turns.map(turn => turn.status), ['stopped', 'running']);
+    assert.equal(sessions.getSession(session.id).status, 'running');
+
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'new-provider-turn',
+        data: { status: 'completed' },
+      },
+    });
+    assert.deepEqual(
+      (db.prepare('SELECT status FROM turns WHERE session_id = ? ORDER BY turn_number')
+        .all(session.id) as Array<{ status: string }>).map(turn => turn.status),
+      ['stopped', 'completed'],
+    );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('local completion flushes the final pending snapshot before the fold boundary', async () => {
+  const { dir, db, wsId, sessions, proxyMgr } = setup(undefined, true);
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'codex' });
+    await sessions.sendMessage(session.id, 'change it');
+    for (const revision of ['old', 'final']) {
+      proxyMgr.client.fire({
+        method: 'diff.updated',
+        params: {
+          sessionId: 'proxy_x',
+          turnId: 'proxy_turn',
+          data: { diff: revision },
+        },
+      });
+    }
+    await sessions.stopTurn(session.id);
+
+    const events = sessions.listEvents(session.id);
+    const diff = events.filter(event => event.event === 'diff.updated');
+    assert.equal(diff.length, 1);
+    assert.equal(diff[0]?.display?.data.diff, 'final');
+    const terminalIndex = events.findIndex(event => event.display?.type === 'state.turn-completed');
+    assert.ok(events.findIndex(event => event.event === 'diff.updated') < terminalIndex);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('forceRecover persists a terminal boundary for a DB-only orphaned turn', async () => {
+  const { dir, db, wsId, sessions, broadcaster } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    db.prepare(
+      `INSERT INTO turns(id, session_id, turn_number, status, created_at)
+       VALUES('orphan-turn', ?, 1, 'running', '2026-08-09T03:00:00.000Z')`,
+    ).run(session.id);
+    db.prepare(`UPDATE sessions SET status = 'running' WHERE id = ?`).run(session.id);
+    broadcaster.messages.length = 0;
+
+    await sessions.forceRecover(session.id);
+
+    const turn = db.prepare(
+      'SELECT status, completed_at FROM turns WHERE id = ?',
+    ).get('orphan-turn') as { status: string; completed_at: string | null };
+    assert.equal(turn.status, 'stopped');
+    assert.ok(turn.completed_at);
+    const completions = sessions.listEvents(session.id)
+      .filter(event => event.display?.type === 'state.turn-completed');
+    assert.equal(completions.length, 1);
+    assert.equal(completions[0]?.call_id, 'gian:turn-completed:orphan-turn');
+    assert.equal(
+      broadcaster.messages.filter(message => (
+        message.type === 'event' && message.event === 'gian.turn.completed'
+      )).length,
+      1,
+    );
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -1234,6 +1707,7 @@ test('Codex force recover replaces the facade and never accumulates notification
   try {
     const session = await sessions.createSession({ workspace_id: wsId, executor: 'codex' });
     const first = proxyMgr.client;
+    assert.equal(first.executor, 'codex');
     assert.equal(first.notificationHandlers.length, 1);
     assert.equal(first.exitHandlers.length, 1);
     assert.deepEqual(first.handlerCountsAtCreate, [{ notifications: 1, exits: 1 }]);
@@ -1272,7 +1746,7 @@ test('Codex force recover replaces the facade and never accumulates notification
       method: 'output.text.delta',
       params: {
         sessionId: 'proxy_after_second_recovery',
-        turnId: 'native_turn_after_second_recovery',
+        turnId: 'proxy_turn',
         data: { delta: 'pong', itemId: 'msg_after_second_recovery' },
       },
     });
@@ -1295,6 +1769,74 @@ test('Codex force recover replaces the facade and never accumulates notification
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+for (const executor of ['claude', 'kimi'] as const) {
+  test(`${executor} force recover replaces only its facade and preserves single delivery`, async () => {
+    const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
+    try {
+      const session = await sessions.createSession({ workspace_id: wsId, executor });
+      const first = proxyMgr.client;
+      assert.equal(first.executor, executor);
+      assert.equal(first.notificationHandlers.length, 1);
+      assert.equal(first.exitHandlers.length, 1);
+
+      await sessions.sendMessage(session.id, 'before recovery');
+      await sessions.forceRecover(session.id);
+      assert.equal(first.notificationHandlers.length, 0);
+      assert.equal(first.exitHandlers.length, 0);
+
+      await sessions.sendMessage(session.id, 'after recovery');
+      const replacement = proxyMgr.client;
+      assert.notEqual(replacement, first);
+      assert.equal(replacement.executor, executor);
+      assert.equal(replacement.notificationHandlers.length, 1);
+      assert.equal(replacement.exitHandlers.length, 1);
+
+      const notification: ProxyNotification = executor === 'claude'
+        ? {
+            method: 'output.text',
+            params: {
+              sessionId: 'native_claude_recovered',
+              turnId: 'proxy_turn',
+              data: { text: 'claude recovered', itemId: 'claude_message_recovered' },
+            },
+          }
+        : {
+            method: 'acp.sessionUpdate',
+            params: {
+              sessionId: 'native_kimi_recovered',
+              turnId: 'proxy_turn',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'kimi recovered' },
+                  _meta: { itemId: 'kimi_message_recovered' },
+                },
+              },
+            },
+          };
+      broadcaster.messages.length = 0;
+      replacement.fire(notification);
+
+      const eventType = executor === 'claude' ? 'output.text' : 'acp.sessionUpdate';
+      assert.equal(
+        broadcaster.messages.filter(message => message.type === 'event' && message.event === eventType).length,
+        1,
+        `${executor}: one recovered notification produces one WebSocket event`,
+      );
+      assert.equal(
+        (db.prepare(
+          'SELECT COUNT(*) AS count FROM events WHERE session_id = ? AND type = ?',
+        ).get(session.id, eventType) as { count: number }).count,
+        1,
+        `${executor}: one recovered notification produces one persisted event`,
+      );
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
 
 test('setUnread toggles the flag, broadcasts, and does NOT bump updated_at', async () => {
   const { dir, db, wsId, sessions, broadcaster } = setup();
@@ -1417,6 +1959,10 @@ test('sendMessage rehydrates proxy session after host restart via native_session
   try {
     const session = await first.sessions.createSession({ workspace_id: first.wsId, executor: 'claude' });
     await first.sessions.sendMessage(session.id, 'before restart');
+    first.proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: { sessionId: 'proxy_x', data: { status: 'completed' } },
+    });
     sessionId = session.id;
     originalNativeId = (first.db
       .prepare('SELECT native_session_id FROM sessions WHERE id = ?')
@@ -1472,6 +2018,23 @@ test('sendMessage rehydrates proxy session after host restart via native_session
       }).native_session_id,
       rotatedDuringAdopt,
       'a notification emitted during native adoption is handled instead of dropped',
+    );
+    assert.equal(proxyMgr.client.notificationHandlers.length, 1, 'ordinary resume binds one notification callback');
+    assert.equal(proxyMgr.client.exitHandlers.length, 1, 'ordinary resume binds one exit callback');
+
+    broadcaster.messages.length = 0;
+    proxyMgr.client.fire({
+      method: 'output.text',
+      params: {
+        sessionId: rotatedDuringAdopt,
+        turnId: 'proxy_turn',
+        data: { text: 'resumed once', itemId: 'message_after_resume' },
+      },
+    });
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'event' && message.event === 'output.text').length,
+      1,
+      'one notification after ordinary resume produces one WebSocket event',
     );
 
     const turnCount = (db.prepare('SELECT COUNT(*) AS c FROM turns WHERE session_id = ?').get(sessionId) as { c: number }).c;

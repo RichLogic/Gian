@@ -117,11 +117,12 @@ describe('P1 command output threshold routing', () => {
     expect(container.querySelector('.trow-detail')!.textContent).toBe('out\nboom');
   });
 
-  it('a failed command shows an error meta, not a status badge', () => {
-    const { container } = render(<CommandCard item={commandItem({ status: 'error', stdout: 'x' })} />);
+  it('a failed command shows error and exit-code meta, not a status badge', () => {
+    const { container } = render(<CommandCard item={commandItem({ status: 'error', exitCode: 2, stdout: 'x' })} />);
     const err = container.querySelector('.trow-meta .err');
     expect(err).not.toBeNull();
     expect(err).toHaveTextContent('error');
+    expect(container.querySelector('.trow-meta')).toHaveTextContent('exit 2');
     expect(container.querySelector('.evt-status')).toBeNull();
   });
 });

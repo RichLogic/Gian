@@ -11,6 +11,8 @@ describe('device zoom preference', () => {
   beforeEach(() => {
     localStorage.clear();
     document.documentElement.style.removeProperty('zoom');
+    document.documentElement.style.removeProperty('--gian-browser-viewport-width');
+    document.documentElement.style.removeProperty('--gian-browser-viewport-height');
     delete window.gianDesktop;
   });
 
@@ -26,6 +28,10 @@ describe('device zoom preference', () => {
     await waitFor(() => expect(document.documentElement.style.zoom).toBe('1'));
     act(() => { setZoomPercent(120); });
     await waitFor(() => expect(document.documentElement.style.zoom).toBe('1.2'));
+    expect(document.documentElement.style.getPropertyValue('--gian-browser-viewport-width'))
+      .toBe(`${100 / 1.2}vw`);
+    expect(document.documentElement.style.getPropertyValue('--gian-browser-viewport-height'))
+      .toBe(`${100 / 1.2}vh`);
   });
 
   it('syncs native Cmd +/- changes back into the stored preference', async () => {
@@ -44,6 +50,8 @@ describe('device zoom preference', () => {
 
     renderHook(() => useAppZoom());
     await waitFor(() => expect(set).toHaveBeenCalledWith(100));
+    expect(document.documentElement.style.getPropertyValue('--gian-browser-viewport-width')).toBe('');
+    expect(document.documentElement.style.getPropertyValue('--gian-browser-viewport-height')).toBe('');
     act(() => { notify?.(130); });
     await waitFor(() => expect(getZoomPercent()).toBe(130));
     await waitFor(() => expect(set).toHaveBeenCalledWith(130));

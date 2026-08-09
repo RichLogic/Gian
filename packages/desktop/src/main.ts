@@ -76,7 +76,16 @@ const targets = resolveDesktopTargets({
   isPackaged: app.isPackaged,
   platform: process.platform,
 });
-const desktopToken = app.isPackaged ? randomBytes(32).toString('base64url') : null;
+// Packaged smoke has to follow a real app.relaunch() into a process that is no
+// longer attached to Playwright. A harness-scoped stable token lets that test
+// query the replacement Host directly. Production keeps a fresh random token;
+// the override is accepted only alongside the existing packaged-smoke flag.
+const smokeDesktopToken = process.env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] === '1'
+  ? process.env['GIAN_DESKTOP_SMOKE_TOKEN']?.trim()
+  : undefined;
+const desktopToken = app.isPackaged
+  ? smokeDesktopToken || randomBytes(32).toString('base64url')
+  : null;
 const desktopInstanceId = app.isPackaged ? randomUUID() : null;
 
 let mainWindow: BrowserWindow | null = null;

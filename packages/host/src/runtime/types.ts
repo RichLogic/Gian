@@ -24,6 +24,12 @@ export interface CliRuntimeProvider {
     runtime: InstalledRuntime,
     protector?: RuntimeProcessGroupProtector,
   ): Promise<RuntimeProbe>;
+  /** Stable identity of every provider-owned byte that determines what this
+   * launcher executes. Optional only for synthetic/test providers. */
+  snapshot?(runtime: InstalledRuntime | RuntimeProbe): Promise<string>;
+  /** Commit provider-specific compatibility state immediately before this
+   * exact probe becomes leaseable. Status/proxy probes intentionally skip it. */
+  activate?(runtime: RuntimeProbe): Promise<void>;
   managedEnv(): Readonly<Record<string, string>>;
 }
 

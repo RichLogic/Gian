@@ -21,10 +21,10 @@ const GROUP_OF_RAIL: Record<RailId, SheetGroup | null> = {
 };
 
 const diffsTab: SheetTab = {
-  id: 'diff-1',
+  id: 'changes-1',
   group: 'diffs',
-  name: 'manager.ts',
-  kind: 'diff',
+  name: 'Diffs',
+  kind: 'changes',
   icoKind: 'diff',
   ico: '',
 } as SheetTab;
@@ -36,7 +36,7 @@ function useHarness() {
     subtaskActive: false,
     activeRail: 'diffs',
     tabs: [diffsTab],
-    activeTabByGroup: { diffs: 'diff-1' },
+    activeTabByGroup: { diffs: 'changes-1' },
     viewState: 'both',
     chatPanel: null,
     filesInspectorSuppressed: false,

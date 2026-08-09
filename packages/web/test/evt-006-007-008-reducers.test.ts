@@ -55,13 +55,31 @@ function planUpdate(
   };
 }
 
-function turnEnvelope(event: 'turn_started' | 'turn_completed'): EventEnvelope {
+function assistantText(
+  itemId: string,
+  text: string,
+  opts: { turn?: number; ts?: number } = {},
+): EventEnvelope {
   return {
     session_id: 'sess-1',
-    turn: 1,
-    call_id: 'turn-evt',
+    turn: opts.turn ?? 1,
+    call_id: itemId,
+    event: 'assistant_text',
+    ts: opts.ts ?? 1_700_000_000_000,
+    data: { itemId, text, delta: true },
+  };
+}
+
+function turnEnvelope(
+  event: 'turn_started' | 'turn_completed',
+  opts: { turn?: number; callId?: string; ts?: number } = {},
+): EventEnvelope {
+  return {
+    session_id: 'sess-1',
+    turn: opts.turn ?? 1,
+    call_id: opts.callId ?? 'turn-evt',
     event,
-    ts: 1_700_000_000_000,
+    ts: opts.ts ?? 1_700_000_000_000,
     data: {},
   };
 }
@@ -107,6 +125,37 @@ describe('EVT-006: Codex reasoning summary vs full accumulation', () => {
     expect(byId['r-summary']!.text).toBe('sum1-sum2');
     expect(byId['r-full']!.variant).toBe('full');
     expect(byId['r-full']!.text).toBe('full1-full2');
+  });
+
+  it('keeps summary and full streams separate even when the provider reuses one itemId', () => {
+    let items: TranscriptItem[] = [];
+    items = applyEnvelope(items, reasoning('summary', 'shared', 'summary'), 'codex');
+    items = applyEnvelope(items, reasoning('full', 'shared', 'full'), 'codex');
+    items = applyEnvelope(items, reasoning('summary', 'shared', ' update'), 'codex');
+
+    expect(items).toHaveLength(2);
+    expect(items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'reasoning', id: 'shared', variant: 'summary', text: 'summary update' }),
+      expect.objectContaining({ kind: 'reasoning', id: 'shared', variant: 'full', text: 'full' }),
+    ]));
+  });
+
+  it('does not merge reused message/reasoning ids across turns', () => {
+    let items: TranscriptItem[] = [];
+    items = applyEnvelope(items, assistantText('reused', 'turn one', { turn: 1 }), 'kimi');
+    items = applyEnvelope(items, assistantText('reused', 'turn two', { turn: 2 }), 'kimi');
+    items = applyEnvelope(items, reasoning('full', 'reused', 'thought one', { turn: 1 }), 'kimi');
+    items = applyEnvelope(items, reasoning('full', 'reused', 'thought two', { turn: 2 }), 'kimi');
+
+    expect(items).toHaveLength(4);
+    expect(items.filter(item => item.kind === 'assistant')).toMatchObject([
+      { id: 'reused', turn: 1, text: 'turn one' },
+      { id: 'reused', turn: 2, text: 'turn two' },
+    ]);
+    expect(items.filter(item => item.kind === 'reasoning')).toMatchObject([
+      { id: 'reused', turn: 1, text: 'thought one' },
+      { id: 'reused', turn: 2, text: 'thought two' },
+    ]);
   });
 
   it('EVT-006: a non-delta full snapshot REPLACES the accumulated text (delta:false branch)', () => {
@@ -251,6 +300,18 @@ describe('EVT-008: turn_started / turn_completed do not produce transcript rows'
     const sep = after[1] as { kind: string; text: string };
     expect(sep.kind).toBe('turn-end');
     expect(sep.text).toBe('Turn 1 · complete');
+  });
+
+  it('absorbs duplicate completion signals for the same turn', () => {
+    const once = applyEnvelope([], turnEnvelope('turn_completed', {
+      turn: 4, callId: 'provider-complete', ts: 10,
+    }), 'kimi');
+    const twice = applyEnvelope(once, turnEnvelope('turn_completed', {
+      turn: 4, callId: 'late-complete', ts: 11,
+    }), 'kimi');
+
+    expect(twice).toBe(once);
+    expect(twice.filter(item => item.kind === 'turn-end' && item.turn === 4)).toHaveLength(1);
   });
 });
 

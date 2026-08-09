@@ -27,15 +27,15 @@ describe('projectMinimapMarkers', () => {
   it('pairs each user turn with its first assistant response', () => {
     expect(projectMinimapMarkers(items)).toMatchObject([
       {
-        id: 'u1',
+        id: '1:user:u1',
         prompt: 'Summarize the project modules',
         response: 'The desktop app owns the Host and Web lifecycle.',
       },
       {
-        id: 'u2',
+        id: '2:user:u2',
         response: 'The Browser runs without Node integration.',
       },
-      { id: 'u3', response: '' },
+      { id: '3:user:u3', response: '' },
     ]);
   });
 });
@@ -48,13 +48,15 @@ describe('TranscriptMinimap', () => {
     const originalClientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight');
     const originalOffsetTop = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetTop');
     Object.defineProperties(HTMLElement.prototype, {
-      clientWidth: { configurable: true, get: () => 900 },
+      clientWidth: { configurable: true, get: () => 1_000 },
       clientHeight: { configurable: true, get: () => 600 },
       offsetTop: {
         configurable: true,
         get() {
           const id = this.getAttribute?.('data-msg-id');
-          return id === 'u1' ? 40 : id === 'u2' ? 240 : id === 'u3' ? 440 : 0;
+          return id === '1:user:u1' ? 40
+            : id === '2:user:u2' ? 240
+              : id === '3:user:u3' ? 440 : 0;
         },
       },
     });
@@ -67,9 +69,9 @@ describe('TranscriptMinimap', () => {
             ref={node => { if (node) node.scrollTo = scrollTo; }}
           >
             <div className="transcript">
-              <div data-msg-id="u1" />
-              <div data-msg-id="u2" />
-              <div data-msg-id="u3" />
+              <div data-msg-id="1:user:u1" />
+              <div data-msg-id="2:user:u2" />
+              <div data-msg-id="3:user:u3" />
             </div>
           </div>
           <TranscriptMinimap items={items} />
@@ -82,7 +84,6 @@ describe('TranscriptMinimap', () => {
       expect(document.querySelectorAll('.tm-item')).toHaveLength(3);
       expect(document.querySelector('.tm-stack')).toHaveStyle({ height: '42px' });
       expect(screen.getByText('The Browser runs without Node integration.')).toBeInTheDocument();
-      expect(document.querySelector('.transcript-navbtns')).toBeNull();
 
       await userEvent.click(second);
       expect(scrollTo).toHaveBeenCalledWith({ top: 216, behavior: 'smooth' });
@@ -106,9 +107,9 @@ describe('TranscriptMinimap', () => {
         <div className="main">
           <div className="main-scroll">
             <div className="transcript">
-              <div data-msg-id="u1" />
-              <div data-msg-id="u2" />
-              <div data-msg-id="u3" />
+              <div data-msg-id="1:user:u1" />
+              <div data-msg-id="2:user:u2" />
+              <div data-msg-id="3:user:u3" />
             </div>
           </div>
           <TranscriptMinimap items={items} />

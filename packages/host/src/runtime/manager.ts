@@ -11,6 +11,7 @@ import type {
 
 interface ActiveRuntime {
   probe: RuntimeProbe;
+  snapshot?: string;
   env: Readonly<Record<string, string>>;
   leases: number;
   generation: number;
@@ -115,12 +116,26 @@ export class CliRuntimeManager {
       }
 
       const failures: string[] = [];
+      let dataVersionFailure: unknown;
+      let dataVersionFailureCount = 0;
       let resolved: ActiveRuntime | undefined;
       for (const candidate of installed) {
         try {
+          const snapshotBeforeProbe = await provider.snapshot?.(candidate);
           const probe = await provider.probe(candidate, claim);
+          const snapshot = await provider.snapshot?.(probe);
+          if (
+            snapshotBeforeProbe !== undefined
+            && snapshot !== snapshotBeforeProbe
+          ) {
+            throw new Error(
+              `${cli} CLI runtime content changed while its version was being probed`,
+            );
+          }
+          await provider.activate?.(probe);
           resolved = {
             probe,
+            ...(snapshot ? { snapshot } : {}),
             env: Object.freeze({ ...provider.managedEnv(), ...probe.env }),
             leases: 0,
             generation,
@@ -130,6 +145,14 @@ export class CliRuntimeManager {
           };
           break;
         } catch (error) {
+          if (
+            error
+            && typeof error === 'object'
+            && (error as { code?: unknown }).code === 'DATA_VERSION_INCOMPATIBLE'
+          ) {
+            dataVersionFailure ??= error;
+            dataVersionFailureCount += 1;
+          }
           failures.push(
             `${candidate.binaryPath}: ${error instanceof Error ? error.message : String(error)}`,
           );
@@ -140,6 +163,9 @@ export class CliRuntimeManager {
       }
 
       if (!resolved) {
+        if (dataVersionFailure && dataVersionFailureCount === failures.length) {
+          throw dataVersionFailure;
+        }
         throw Object.assign(
           new Error(`No usable ${cli} CLI runtime found. ${failures.join(' | ')}`),
           { code: 'RUNTIME_PROBE_FAILED' },
@@ -189,6 +215,28 @@ export class CliRuntimeManager {
       });
     }
     return !wasResolving && (!active || active.leases === 0);
+  }
+
+  /** Detect externally mutated launcher/runtime bytes without disturbing a
+   * healthy active generation. Snapshot errors (including a removed binary)
+   * count as a change so the guardian fails closed and retires its owner. */
+  async detectExternalChanges(): Promise<Executor[]> {
+    const checks = Array.from(this.active.entries()).map(async ([cli, active]) => {
+      if (active.retired || !active.snapshot) return null;
+      const provider = this.providers.get(cli);
+      if (!provider?.snapshot) return null;
+      let changed = false;
+      try {
+        changed = await provider.snapshot(active.probe) !== active.snapshot;
+      } catch {
+        changed = true;
+      }
+      if (!changed || active.retired || this.active.get(cli) !== active) return null;
+      if ((this.generations.get(cli) ?? 0) !== active.generation) return null;
+      return cli;
+    });
+    const changed = await Promise.all(checks);
+    return changed.filter((cli): cli is Executor => cli !== null);
   }
 
   /** Retire every idle exact runtime and retry any previously failed claim

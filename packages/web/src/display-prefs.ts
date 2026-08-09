@@ -111,11 +111,19 @@ export function useAppZoom(): void {
     const zoom = desktopBridge()?.zoom;
     if (zoom) {
       document.documentElement.style.removeProperty('zoom');
+      document.documentElement.style.removeProperty('--gian-browser-viewport-width');
+      document.documentElement.style.removeProperty('--gian-browser-viewport-height');
       void zoom.set(percent).then(applied => {
         if (typeof applied === 'number') setZoomPercent(applied);
       });
       return;
     }
-    document.documentElement.style.zoom = String(percent / 100);
+    const scale = percent / 100;
+    document.documentElement.style.zoom = String(scale);
+    // CSS `zoom` enlarges a 100vw/100vh child beyond the physical viewport.
+    // Compensate the app shell's logical size so zoom behaves like native page
+    // zoom: text grows, while every panel remains inside the usable window.
+    document.documentElement.style.setProperty('--gian-browser-viewport-width', `${100 / scale}vw`);
+    document.documentElement.style.setProperty('--gian-browser-viewport-height', `${100 / scale}vh`);
   }, [percent]);
 }

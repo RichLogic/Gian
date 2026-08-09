@@ -4,6 +4,10 @@ import { Inspector } from '../src/components/Inspector.js';
 import { renderWithOperations } from './operation-test-utils.js';
 import type { WorkingTree, ChangedEntry } from '../src/api.js';
 import * as api from '../src/api.js';
+import {
+  __resetChangesDiffForTests,
+  getChangesDiffState,
+} from '../src/controllers/use-changes-diff.js';
 
 vi.mock('../src/api.js', async () => {
   const actual = await vi.importActual<typeof import('../src/api.js')>('../src/api.js');
@@ -28,10 +32,8 @@ const stagedRow: ChangedEntry = { path: 'src/b.ts', kind: 'update', staged: true
 
 function renderChanges(opts: {
   canCommit?: boolean;
-  onOpenDiff?: ReturnType<typeof vi.fn>;
   onComposePrompt?: ReturnType<typeof vi.fn>;
 } = {}) {
-  const onOpenDiff = opts.onOpenDiff ?? vi.fn();
   const onComposePrompt = opts.onComposePrompt ?? vi.fn();
   renderWithOperations(
     <Inspector
@@ -39,12 +41,11 @@ function renderChanges(opts: {
       workingTreeId="ws:demo"
       workingTrees={workingTrees}
       onOpenFile={() => {}}
-      onOpenDiff={onOpenDiff}
       canCommit={opts.canCommit ?? true}
       onComposePrompt={onComposePrompt}
     />,
   );
-  return { onOpenDiff, onComposePrompt };
+  return { onComposePrompt };
 }
 
 // Open the custom scope dropdown and pick a scope by its visible label.
@@ -62,28 +63,32 @@ function pickScope(value: keyof typeof SCOPE_LABEL): void {
 describe('Inspector CHANGES', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetChangesDiffForTests();
     try { localStorage.removeItem('gian.changes.scope'); } catch { /* noop */ }
     (api.loadChanged as ReturnType<typeof vi.fn>).mockResolvedValue([]);
   });
 
   it('defaults to the "branch" scope', async () => {
     renderChanges();
-    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'branch', null, null, undefined, undefined));
+    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'branch', null, null, null, undefined));
   });
 
   it('switching the scope re-fetches with that scope', async () => {
     renderChanges();
     await waitFor(() => expect(api.loadChanged).toHaveBeenCalled());
     pickScope('staged');
-    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'staged', null, null, undefined, undefined));
+    await waitFor(() => expect(api.loadChanged).toHaveBeenCalledWith('ws:demo', 'staged', null, null, null, undefined));
   });
 
-  it('clicking a row opens its diff in the current scope', async () => {
+  it('clicking a row requests a panel-2 anchor for that file (expand + scroll)', async () => {
     (api.loadChanged as ReturnType<typeof vi.fn>).mockResolvedValue([unstagedRow]);
-    const { onOpenDiff } = renderChanges();
+    renderChanges();
     fireEvent.click(await screen.findByText('a.ts'));
-    // Default scope is now Branch.
-    expect(onOpenDiff).toHaveBeenCalledWith('src/a.ts', false, 'branch', null, null);
+    // No diff tab anymore: the store records a one-shot anchor request that
+    // the mounted ChangesDiffBody consumes (expand block + scrollIntoView).
+    const anchor = getChangesDiffState('ws:demo').anchor;
+    expect(anchor?.path).toBe('src/a.ts');
+    expect(getChangesDiffState('ws:demo').collapsed['src/a.ts']).toBe(false);
   });
 
   it('Stage on an unstaged row calls stageFile then reloads', async () => {

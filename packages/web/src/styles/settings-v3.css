@@ -15,6 +15,7 @@
   display: flex;
   align-items: stretch;
   min-height: 100%;
+  container-type: inline-size;
 }
 
 .s2-group {
@@ -85,7 +86,7 @@
 
 /* Per-card kv-grid override (the global base is 160px + mono dt). */
 .s2-card .kv-grid {
-  grid-template-columns: 116px 1fr;
+  grid-template-columns: 116px minmax(0, 1fr);
   row-gap: 13px;
   column-gap: 14px;
 }
@@ -102,7 +103,17 @@
 .s2-card .kv-grid dd {
   font-family: var(--font-sans);
   color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
+
+/* The Settings sheet can be narrower than the prototype card, especially
+   after browser-only zoom is applied. Keep every appearance control inside
+   its grid cell instead of clipping the trailing themes/accents. */
+.s2-card .theme-row,
+.s2-card .accent-row { flex-wrap: wrap; }
+.s2-card .theme-chip { flex: 1 1 58px; }
+.s2-card .accent-row { gap: 4px; }
 
 /* Shortcuts: labels can be long (both locales) — give them the flexible
    column and pin the keycaps to a clean right-hand column. */
@@ -121,15 +132,18 @@
 /* Segmented controls in settings read a size up from the dense global default
    so they match the card's 12px label rhythm. */
 .s2-card .segm-item {
+  flex: 1 1 0;
+  min-width: 0;
   font-size: var(--fz-12);
-  padding: 5px 12px;
+  padding: 5px 6px;
 }
+.s2-card .segm { display: flex; width: 100%; }
 
 .appearance-zoom {
   display: grid;
-  grid-template-columns: 28px minmax(92px, 180px) 44px 28px;
+  grid-template-columns: 28px minmax(0, 1fr) 36px 28px;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 .appearance-zoom button {
   width: 28px;
@@ -147,7 +161,7 @@
   color: var(--text);
 }
 .appearance-zoom button:disabled { opacity: 0.4; cursor: default; }
-.appearance-zoom input { width: 100%; accent-color: var(--accent); }
+.appearance-zoom input { width: 100%; min-width: 0; accent-color: var(--accent); }
 .appearance-zoom output {
   color: var(--text-2);
   font: 500 var(--fz-12)/1 var(--font-mono);
@@ -158,6 +172,18 @@
    ring so they stay visible against the active chip's accent-soft fill. */
 .s2-card .theme-chip .swatches i {
   box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+/* Default workbench widths leave Settings with roughly 340–410 logical px.
+   Stack labels above values there so zoomed controls keep useful hit targets
+   instead of degenerating into one-character columns. */
+@container (max-width: 420px) {
+  .s2-card .kv-grid {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 6px;
+  }
+  .s2-card .kv-grid dt { align-self: auto; }
+  .s2-card .kv-grid dd:not(:last-child) { margin-bottom: 8px; }
 }
 
 .s2-help {
