@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { NativeSession, Session } from '@gian/shared';
+import type { ApprovalMode, Executor, NativeSession, Session } from '@gian/shared';
 import type { ProxyManager } from '../proxy/manager.js';
 import type { Db } from '../storage/db.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
@@ -11,6 +11,7 @@ interface NativeSessionCallbacks {
     sessionId: string,
     updates: unknown[],
     timestamp: string,
+    replayStreamId?: string,
   ) => { turns: number; events: number };
 }
 
@@ -25,11 +26,25 @@ export class NativeSessionService {
   ) {}
 
   async listKimi(cwd: string): Promise<NativeSession[]> {
-    const cacheKey = '__native_sessions_kimi__';
-    const client = await this.proxy.getOrCreate(cacheKey, 'kimi');
+    return (await this.listFromProxy('kimi', cwd, false)) ?? [];
+  }
+
+  async listPlugin(executor: Executor, cwd: string): Promise<NativeSession[] | null> {
+    return this.listFromProxy(executor, cwd, true);
+  }
+
+  private async listFromProxy(
+    executor: Executor,
+    cwd: string,
+    requireProtocolV1: boolean,
+  ): Promise<NativeSession[] | null> {
+    if (requireProtocolV1 && !this.proxy.usesProtocolV1(executor)) return null;
+    const cacheKey = `__native_sessions_${executor}__`;
+    const client = await this.proxy.getOrCreate(cacheKey, executor);
     try {
+      if (requireProtocolV1 && !client.protocolV1) return null;
       await client.initialize();
-      if (!client.listNativeSessions) return [];
+      if (!client.listNativeSessions) return requireProtocolV1 ? null : [];
       const rows: unknown[] = [];
       const seenCursors = new Set<string>();
       let cursor: string | undefined;
@@ -55,7 +70,7 @@ export class NativeSessionService {
         const title = typeof item.title === 'string' ? item.title : '';
         return [{
           id: item.sessionId,
-          executor: 'kimi' as const,
+          executor,
           filePath: '',
           cwd: typeof item.cwd === 'string' ? item.cwd : cwd,
           updatedAt: typeof item.updatedAt === 'string'
@@ -78,12 +93,23 @@ export class NativeSessionService {
     nativeSessionId: string;
     name?: string;
   }): Promise<{ session: Session; replay: { turns: number; events: number } }> {
+    return this.adopt({ ...input, executor: 'kimi' });
+  }
+
+  async adopt(input: {
+    workspaceId: string;
+    cwd: string;
+    executor: Executor;
+    nativeSessionId: string;
+    name?: string;
+    approvalMode?: ApprovalMode;
+  }): Promise<{ session: Session; replay: { turns: number; events: number } }> {
     const duplicate = this.db
-      .prepare("SELECT id FROM sessions WHERE executor = 'kimi' AND native_session_id = ?")
-      .get(input.nativeSessionId) as { id: string } | undefined;
+      .prepare('SELECT id FROM sessions WHERE executor = ? AND native_session_id = ?')
+      .get(input.executor, input.nativeSessionId) as { id: string } | undefined;
     if (duplicate) {
       throw Object.assign(
-        new Error(`Kimi session is already adopted as ${duplicate.id}`),
+        new Error(`${input.executor} session is already adopted as ${duplicate.id}`),
         { code: 'SESSION_ALREADY_EXISTS', sessionId: duplicate.id },
       );
     }
@@ -93,7 +119,7 @@ export class NativeSessionService {
     try {
       broughtUp = await this.proxySessions.bringUp({
         sessionId,
-        executor: 'kimi',
+        executor: input.executor,
         cwd: input.cwd,
         model: null,
         nativeSessionId: input.nativeSessionId,
@@ -118,19 +144,26 @@ export class NativeSessionService {
                worktree_path, branch, base_branch, worktree_outcome,
                native_session_id, created_at, updated_at)
              VALUES
-              (?, ?, 'coding', ?, 'kimi', NULL, NULL, ?, 'web', 'new', 0,
+              (?, ?, 'coding', ?, ?, NULL, ?, ?, 'web', 'new', 0,
                NULL, NULL, NULL, NULL, ?, ?, ?)`,
           )
           .run(
             sessionId,
             name,
             input.workspaceId,
+            input.executor,
+            input.executor === 'kimi' ? null : input.approvalMode ?? 'ask',
             JSON.stringify(executorConfigFromOptions(broughtUp.configOptions)),
             input.nativeSessionId,
             now,
             now,
           );
-        replay = this.callbacks.persistKimiReplay(sessionId, broughtUp.replayUpdates, now);
+        replay = this.callbacks.persistKimiReplay(
+          sessionId,
+          broughtUp.replayUpdates,
+          now,
+          broughtUp.replayStreamId,
+        );
       })();
     } catch (error) {
       await this.proxy.dispose(sessionId).catch(() => undefined);

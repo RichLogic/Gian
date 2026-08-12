@@ -9,6 +9,7 @@ import type {
 import type { Mode } from '../components/Topbar.js';
 import { confirm as confirmDialog } from '../feedback.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
+import { worktreeDisplayName } from '../presentation/wt-view.js';
 
 interface TopbarModelInput {
   mode: Mode;
@@ -16,7 +17,7 @@ interface TopbarModelInput {
   activeSubtaskId: string | null;
   activeSession: Session | null;
   activeWorkspace: Workspace | null;
-  activeBranch: string | null;
+  activeWorktreeName: string | null;
   workingTrees: WorkingTree[];
   refreshWorkingTrees: () => void;
   wtView: { sessionId: string; wtId: string } | null;
@@ -45,7 +46,7 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
     activeSubtaskId,
     activeSession,
     activeWorkspace,
-    activeBranch,
+    activeWorktreeName,
     workingTrees,
     refreshWorkingTrees,
     wtView,
@@ -81,11 +82,11 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
         editing: renaming,
         menuAnchor: !completed,
       });
-      if (activeBranch) {
+      if (activeWorktreeName) {
         segments.push({
           kind: 'branch',
-          label: activeBranch,
-          copyHint: `${t('common.copy')} "${activeBranch}"`,
+          label: activeWorktreeName,
+          copyHint: `${t('common.copy')} "${activeWorktreeName}"`,
         });
       }
       return segments;
@@ -104,7 +105,7 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
       }];
     }
     return [];
-  }, [activeBranch, activeSession, activeSubtaskId, activeTaskId, activeWorkspace, mode, renaming, t]);
+  }, [activeSession, activeSubtaskId, activeTaskId, activeWorkspace, activeWorktreeName, mode, renaming, t]);
 
   const sessionMenu = useMemo<SessionMenuActions | null>(() => {
     const isSubtask = mode === 'tasks' && !!activeSubtaskId;
@@ -150,7 +151,7 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
 
   const branchMenu = useMemo<BranchMenuActions | null>(() => {
     const visible = (mode === 'sessions' || (mode === 'tasks' && activeSubtaskId))
-      && !!activeBranch;
+      && !!activeWorktreeName;
     if (!visible || !activeSession) return null;
     // Completed conversation: no worktree dropdown either (2026-08-05).
     if (activeSession.completed_at != null) return null;
@@ -161,18 +162,13 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
         .filter(tree => tree.workspace_id === activeSession.workspace_id)
         .map(tree => ({
           id: tree.id,
-          // Label = the branch/worktree you switch to, same column for every
-          // row (2026-08-03: the workspace's own checkout no longer gets
-          // "Primary" as its label — that moved to the detail slot). For
-          // agent worktrees the detail is the owning session's name, but only
-          // when it adds information — a worktree whose session is named
-          // after the branch would otherwise show the same text twice.
-          label: tree.branch ?? tree.session_name ?? tree.label,
+          // The worktree directory is the identity being switched. Branch is
+          // secondary context only; using it as the label made this look like
+          // a local-branch picker even though the rows were real worktrees.
+          label: worktreeDisplayName(tree),
           detail: tree.kind === 'workspace'
-            ? t('files.picker.primary')
-            : (tree.session_name && tree.session_name !== tree.branch
-                ? tree.session_name
-                : null),
+            ? [tree.branch, t('files.picker.primary')].filter(Boolean).join(' · ')
+            : tree.branch,
           active: tree.id === viewedId,
         }))
         // The currently-viewed tree always leads the list (2026-08-03); the
@@ -185,7 +181,7 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
         setWtView({ sessionId: activeSession.id, wtId: id });
       },
     };
-  }, [activeBranch, activeSession, activeSubtaskId, mode, refreshWorkingTrees, setWtView, t, viewedWorkingTreeId, workingTrees, wtView]);
+  }, [activeSession, activeSubtaskId, activeWorktreeName, mode, refreshWorkingTrees, setWtView, t, viewedWorkingTreeId, workingTrees, wtView]);
 
   const onRenameSubmit = useCallback((value: string) => {
     setRenaming(false);

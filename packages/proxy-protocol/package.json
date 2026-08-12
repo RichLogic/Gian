@@ -1,0 +1,35 @@
+{
+  "name": "@gian/proxy-protocol",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./schemas": {
+      "types": "./dist/src/schemas.d.ts",
+      "default": "./dist/src/schemas.js"
+    },
+    "./conformance": {
+      "types": "./dist/src/conformance.d.ts",
+      "default": "./dist/src/conformance.js"
+    }
+  },
+  "scripts": {
+    "build": "pnpm run clean && tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "pnpm run build && node --test dist/test/*.test.js",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.2",
+    "typescript": "^5.9.3"
+  }
+}

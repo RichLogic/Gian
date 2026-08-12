@@ -193,6 +193,72 @@ test('FILE-011: lastturn scope returns only the files the agent touched in its m
   }
 });
 
+test('FILE-011: lastturn survives a local commit and rebases task-worktree paths', async () => {
+  const ctx = await setup();
+  try {
+    const committed = ctx.repo.commit(
+      'src/app.ts',
+      "console.log('init')\nconsole.log('committed in turn')\n",
+      'agent turn commit',
+    );
+    assert.equal(ctx.repo.git(['status', '--porcelain']), '', 'fixture is clean after commit');
+
+    const sessionId = seedSession(ctx, [{ turnNumber: 1, paths: [] }]);
+    const turn = ctx.appCtx.db.prepare(
+      'SELECT id FROM turns WHERE session_id = ? AND turn_number = 1',
+    ).get(sessionId) as { id: string };
+    const taskPath = join(`${ctx.repo.path}-task-worktree`, 'src/app.ts');
+    const committedDiff = ctx.repo.git([
+      'diff', `${committed}~1`, committed, '--', 'src/app.ts',
+    ]);
+    const taskWorktreeDiff = committedDiff
+      .replaceAll('a/src/app.ts', `a/${taskPath}`)
+      .replaceAll('b/src/app.ts', `b/${taskPath}`);
+    ctx.appCtx.db.prepare(
+      `INSERT INTO events (id, session_id, turn_id, call_id, type, data)
+       VALUES (?, ?, ?, ?, 'diff.updated', ?)`,
+    ).run(
+      randomUUID(),
+      sessionId,
+      turn.id,
+      randomUUID(),
+      JSON.stringify({
+        display: {
+          type: 'activity.file-change',
+          data: {
+            files: [{ path: taskPath, kind: 'update', added: 1, removed: 0 }],
+            diff: taskWorktreeDiff,
+          },
+        },
+      }),
+    );
+
+    const changedResponse = await ctx.appCtx.fetch(
+      `/api/working_trees/${ctx.wsTreeId}/changed?scope=lastturn&session=${sessionId}&turn=1`,
+    );
+    assert.equal(changedResponse.status, 200);
+    const changed = await changedResponse.json() as ChangedEntry[];
+    assert.deepEqual(changed, [{
+      path: 'src/app.ts',
+      kind: 'update',
+      staged: false,
+      added: 1,
+      removed: 0,
+    }]);
+
+    const diffResponse = await ctx.appCtx.fetch(
+      `/api/working_trees/${ctx.wsTreeId}/diff?path=src%2Fapp.ts&scope=lastturn&session=${sessionId}&turn=1`,
+    );
+    assert.equal(diffResponse.status, 200);
+    const body = await diffResponse.json() as { diff: string };
+    assert.match(body.diff, /^diff --git a\/src\/app\.ts b\/src\/app\.ts/m);
+    assert.match(body.diff, /committed in turn/);
+    assert.doesNotMatch(body.diff, /task-worktree/);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test('FILE-011: lastturn scope can pin the exact turn represented by a Diff chip', async () => {
   const ctx = await setup();
   try {

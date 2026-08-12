@@ -18,6 +18,7 @@ import {
   createProxyProcessShutdownState,
   shutdownProxyProcess,
 } from './process-shutdown.js';
+import { redactSensitiveText } from '../logging/redact.js';
 
 export interface CodexProxyHostOptions {
   /** Absolute path to codex-proxy spawn.js entry. */
@@ -67,7 +68,8 @@ export class CodexProxyHost {
   private capabilities_: Promise<ProxyCapabilities> | null = null;
 
   constructor(opts: CodexProxyHostOptions) {
-    this.log = opts.log ?? (() => {});
+    const log = opts.log ?? (() => {});
+    this.log = message => log(redactSensitiveText(message));
 
     const nodeBin = opts.nodeBin ?? process.execPath;
     const args = ['--data-dir', opts.dataDir];
@@ -158,12 +160,14 @@ export class CodexProxyHost {
     return this.request<{ ok: true }>('session.setName', { sessionId, name });
   }
 
-  async closeSession(sessionId: string): Promise<void> {
-    this.sessions.delete(sessionId);
+  async closeSession(sessionId: string, force = false): Promise<void> {
+    if (!force) this.sessions.delete(sessionId);
     try {
-      await this.request<unknown>('session.close', { sessionId });
+      await this.request<unknown>('session.close', { sessionId, ...(force ? { force: true } : {}) });
+      this.sessions.delete(sessionId);
     } catch (err) {
       this.log(`[codex-proxy] session.close failed: ${String(err)}`);
+      if (force) throw err;
     }
   }
 
@@ -441,15 +445,18 @@ export class CodexProxySessionClient implements ProxyClient {
     }
   }
 
-  /** Codex shares a single host across sessions, so we can't SIGKILL.
-   *  Fire-and-forget the session-close RPC and flip our facade closed; if
-   *  the codex side is wedged the call will never return but we don't
-   *  block the recovery flow. */
-  forceKill(): void {
+  /** Codex shares a single host across sessions, so recovery force-closes
+   *  only this proxy session and waits for its native active turn to stop. */
+  async forceKill(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    if (this.proxySessionId) {
-      void this.host.closeSession(this.proxySessionId).catch(() => {});
+    try {
+      if (this.proxySessionId) {
+        await this.host.closeSession(this.proxySessionId, true);
+      }
+    } catch (error) {
+      this.closed = false;
+      throw error;
     }
   }
 

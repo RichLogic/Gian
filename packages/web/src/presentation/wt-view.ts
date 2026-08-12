@@ -7,6 +7,15 @@
 
 const KEY_PREFIX = 'gian.wt.view.';
 
+/** The picker identifies a checkout by its worktree directory, never by the
+ *  branch checked out inside it. `label` remains the fallback for unusual
+ *  roots whose path has no final component. */
+export function worktreeDisplayName(tree: { path: string; label: string }): string {
+  const path = tree.path.replace(/[\\/]+$/, '');
+  const name = path.split(/[\\/]/).pop();
+  return name || tree.label;
+}
+
 /** The wtId the user (or worktree auto-detect) last picked for this session,
  *  or null. Never throws — storage can be disabled. */
 export function readWtViewOverride(sessionId: string): string | null {

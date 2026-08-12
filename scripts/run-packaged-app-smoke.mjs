@@ -25,7 +25,6 @@ const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const requireFromHost = createRequire(join(rootDir, 'packages', 'host', 'package.json'));
 const Database = requireFromHost('better-sqlite3');
 const defaultAppPath = join(rootDir, 'packages', 'desktop', 'release', 'mac-arm64', 'Gian.app');
-const PACKAGED_SMOKE_PROXY_VERSION = '0.4.0';
 
 async function reservePort() {
   const server = createServer();
@@ -129,7 +128,6 @@ export function createPackagedSmokeEnvironment(source, {
     GIAN_DATA_DIR: dataDir,
     GIAN_DESKTOP_HOST_URL: `http://127.0.0.1:${hostPort}`,
     GIAN_DESKTOP_SMOKE_MANAGE_HOST: '1',
-    GIAN_DESKTOP_SMOKE_RELEASE_VERSION: PACKAGED_SMOKE_PROXY_VERSION,
     GIAN_DESKTOP_SMOKE_TOKEN: desktopToken,
     GIAN_DESKTOP_USER_DATA_DIR: userDataDir,
     GIAN_GITHUB_CLIENT_ID: 'gian-packaged-smoke-client',
@@ -218,29 +216,6 @@ async function waitForHostExit(origin, timeoutMs = 15_000) {
   throw new Error(`packaged Host still responds after App exit: ${origin}`);
 }
 
-async function waitForPackagedLogin(window, timeoutMs = 45_000) {
-  const loginShell = window.locator('.login-shell');
-  const retry = window.locator('#retry');
-  const deadline = Date.now() + timeoutMs;
-  let retries = 0;
-
-  while (Date.now() < deadline) {
-    if (await loginShell.isVisible().catch(() => false)) return retries;
-    if (
-      await retry.isVisible().catch(() => false)
-      && await retry.isEnabled().catch(() => false)
-    ) {
-      retries += 1;
-      console.log(`[packaged-smoke] retrying cold Host connection (${retries})`);
-      await retry.click();
-    }
-    await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
-  }
-
-  await loginShell.waitFor({ timeout: 1_000 });
-  return retries;
-}
-
 async function launchPackagedApp({ executable, env, hostLogPath, origin, screenshotPath }) {
   const electronApp = await electron.launch({
     executablePath: executable,
@@ -256,10 +231,7 @@ async function launchPackagedApp({ executable, env, hostLogPath, origin, screens
     rendererMessages.push(`pageerror: ${error.stack ?? error.message}`);
   });
   try {
-    const coldStartRetries = await waitForPackagedLogin(window);
-    if (coldStartRetries > 0) {
-      console.log(`[packaged-smoke] recovered packaged cold start after ${coldStartRetries} retry attempt(s)`);
-    }
+    await window.locator('.login-shell').waitFor({ timeout: 30_000 });
     assert.equal(new URL(window.url()).origin, origin);
     assert.equal(
       await window.evaluate(() => window.gianDesktop?.appVariant),
@@ -578,19 +550,38 @@ async function completePackagedOnboarding({
     .waitFor({ timeout: 30_000 });
   assert.match(await claude.innerText(), /9\.8\.7/);
 
-  // This is intentionally the previous public GitHub Release, not a routed
+  // This intentionally uses the public GitHub release channel, not a routed
   // fixture. AgentManager verifies API asset digests, the exact .sha256 file,
   // archive bytes, self-test and compatibility before the atomic activation.
   await claude.locator('.onboarding-agent-summary button').click();
-  await claude.locator('.onboarding-agent-components .ready', { hasText: 'Proxy' })
-    .waitFor({ timeout: 120_000 });
+  try {
+    await Promise.race([
+      claude.locator('.onboarding-agent-components .ready', { hasText: 'Proxy' })
+        .waitFor({ timeout: 120_000 }),
+      onboarding.getByRole('alert').waitFor({ timeout: 120_000 }).then(async () => {
+        throw new Error(`Proxy installation failed: ${await onboarding.getByRole('alert').innerText()}`);
+      }),
+    ]);
+  } catch (error) {
+    const hostLog = await readFile(join(dataDir, 'logs', 'desktop-host.log'), 'utf8')
+      .catch(() => '<unavailable>');
+    const onboardingState = await onboarding.innerText().catch(() => '<unavailable>');
+    throw new Error([
+      `Packaged Claude Proxy installation did not become ready: ${error}`,
+      `Onboarding state:\n${onboardingState}`,
+      `Host log tail:\n${hostLog.slice(-8_000)}`,
+    ].join('\n\n'));
+  }
   await claude.locator('.onboarding-agent-summary button').waitFor({ state: 'detached' });
-  assert.match(await claude.innerText(), /0\.4\.0.*GitHub|GitHub.*0\.4\.0/s);
+  const agentText = await claude.innerText();
+  const installedVersion = agentText.match(/Proxy\s+(\d+\.\d+\.\d+)/)?.[1];
+  assert.ok(installedVersion, `could not read installed Claude Proxy version: ${agentText}`);
+  assert.match(agentText, /GitHub/);
 
   const activatedProxy = await realpath(join(dataDir, 'plugins', 'claude', 'current'));
   assert.equal(
     activatedProxy,
-    await realpath(join(dataDir, 'plugins', 'claude', PACKAGED_SMOKE_PROXY_VERSION)),
+    await realpath(join(dataDir, 'plugins', 'claude', installedVersion)),
   );
   await Promise.all([
     assertFile(join(activatedProxy, 'manifest.json')),

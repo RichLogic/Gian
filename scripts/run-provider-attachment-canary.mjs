@@ -357,7 +357,7 @@ export async function runProviderAttachmentCanary(options = {}) {
     const input = [
       {
         type: 'text',
-        text: 'Read the attached plain-text file, then draft several sentences explaining what you read. Do not use any other tools.',
+        text: 'Use the file-reading capability available to you to read the attached plain-text file. Reply with its exact complete content and nothing else.',
       },
       {
         type: 'localFile',

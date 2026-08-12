@@ -8,6 +8,73 @@ import { openDatabase } from '../src/storage/db.js';
 import { registerWorkingTreeRoutes } from '../src/web/routes/working-trees.js';
 import { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import type { GitWorktreeInfo } from '../src/workspace/git.js';
+import { GIT_MAX_CONCURRENCY } from '../src/workspace/async-command.js';
+
+test('ordinary concurrent working-tree requests coalesce and populate one shared cache', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-working-tree-coalesce-'));
+  const db = openDatabase(dir);
+  try {
+    db.prepare('INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)')
+      .run('workspace-1', 'repo', '/repo/main');
+    let scanCalls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const listGitWorktreesAsync = async (path: string): Promise<GitWorktreeInfo[]> => {
+      scanCalls++;
+      await gate;
+      return [{ path, branch: 'main', head: 'aaaa1111' }];
+    };
+    const app = new Hono();
+    registerWorkingTreeRoutes(app, db, new WsBroadcaster(), { listGitWorktreesAsync });
+
+    const first = app.request('/api/working_trees');
+    const second = app.request('/api/working_trees');
+    await waitUntil(() => scanCalls === 1);
+    assert.equal(scanCalls, 1, 'same-signature ordinary requests must share the pending scan');
+    release();
+
+    const [firstRows, secondRows] = await Promise.all([first.then(jsonRows), second.then(jsonRows)]);
+    assert.deepEqual(firstRows, secondRows);
+    await jsonRows(await app.request('/api/working_trees'));
+    assert.equal(scanCalls, 1, 'the coalesced result must seed the ordinary TTL cache');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('workspace discovery fan-out uses the fixed concurrency budget', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-working-tree-fanout-'));
+  const db = openDatabase(dir);
+  try {
+    for (let i = 0; i < 11; i++) {
+      db.prepare('INSERT INTO workspaces (id, name, path, sort_order) VALUES (?, ?, ?, ?)')
+        .run(`workspace-${i}`, `repo-${i}`, `/repo/${i}`, i);
+    }
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    const listGitWorktreesAsync = async (path: string): Promise<GitWorktreeInfo[]> => {
+      calls++;
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise(resolve => setImmediate(resolve));
+      active--;
+      return [{ path, branch: 'main', head: 'aaaa1111' }];
+    };
+    const app = new Hono();
+    registerWorkingTreeRoutes(app, db, new WsBroadcaster(), { listGitWorktreesAsync });
+
+    const rows = await jsonRows(await app.request('/api/working_trees'));
+    assert.equal(rows.length, 11);
+    assert.equal(calls, 11, 'every workspace is discovered once');
+    assert.equal(maxActive, GIT_MAX_CONCURRENCY,
+      'fan-out should fill, but never exceed, the shared Git concurrency budget');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('refresh=1 waits for an ordinary in-flight scan and then replaces its cache', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'gian-working-tree-refresh-'));

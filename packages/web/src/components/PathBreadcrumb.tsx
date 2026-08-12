@@ -34,9 +34,8 @@ export interface SessionMenuActions {
 
 /** The branch segment's worktree dropdown (view-level working-tree switch).
  *  Items are the workspace's working trees; `onPick` selects one. Every item
- *  shows the branch/worktree name as the label ("Primary" marks the workspace
- *  checkout in the detail slot) and the owning session's name as detail when
- *  it adds information. */
+ *  shows the worktree directory name as its label; branch and "Primary" are
+ *  secondary detail only. */
 export interface BranchMenuActions {
   items: Array<{ id: string; label: string; detail?: string | null; active?: boolean }>;
   /** Refresh the available working trees immediately before opening. */

@@ -145,7 +145,7 @@ describe('CLI-aligned composer controls', () => {
         scope: 'session',
       },
       {
-        id: 'thought_level',
+        id: 'thinking',
         name: 'Thought',
         category: 'thought_level',
         type: 'select',
@@ -175,7 +175,7 @@ describe('CLI-aligned composer controls', () => {
       native_config_options: options,
       executor_config: {
         schemaVersion: 1,
-        values: { model: 'kimi-k2', thought_level: 'high', mode: 'yolo' },
+        values: { model: 'kimi-k2', thinking: 'high', mode: 'yolo' },
       },
     }));
 
@@ -183,6 +183,10 @@ describe('CLI-aligned composer controls', () => {
     expect(screen.getByRole('button', { name: /Kimi K2/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /High/ })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Fast' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: /High/ }));
+    await user.click(await screen.findByText('Medium', { selector: '.mp-row-title' }));
+    expect(callbacks.onSetNativeConfig).toHaveBeenCalledWith('thinking', 'medium');
 
     const mode = screen.getByRole('button', { name: /yolo/ });
     expect(mode.textContent).not.toContain('YOLO');

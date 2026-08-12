@@ -37,6 +37,9 @@ const DEFERRED_NOTIFICATION_METHODS: ReadonlyArray<{ method: string; reason: str
   // both emit it when stdin parsing fails. It exits via the host's child
   // process handler, not the normalizer pipeline.
   { method: 'protocol.error', reason: 'CLI transport error, not a session notification.' },
+  // cc-proxy's v1 adapter consumes this internal service event to produce
+  // tool.completed. The legacy CLI drops it before writing to stdout.
+  { method: 'tool.result', reason: 'Internal Claude v1 adapter bridge, not a legacy wire notification.' },
 ];
 
 // ---------------------------------------------------------------------------

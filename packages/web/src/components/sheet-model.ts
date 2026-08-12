@@ -82,8 +82,8 @@ export interface SheetTab {
   /** Set when a fetch rewrote history and this commit is no longer reachable —
    *  the body shows the snapshot with a banner instead of silently closing. */
   orphaned?: boolean;
-  /** Level-3 transcript detail body (P3): full command output / reasoning
-   *  trace / long result list for `kind: 'text'` tabs. */
+  /** Plain text body for `kind: 'text'` tabs, currently used by transcript
+   *  diff snapshots whose native event did not include rendered hunks. */
   text?: string;
   /** True when `text` holds a unified diff (transcript event diff snapshot) —
    *  render it with the colored DiffBody instead of the plain TextBody. */

@@ -153,7 +153,11 @@ export interface AgentSpawnItem {
 export interface AutoNoticeItem {
   kind: 'auto-notice';
   id: string;
-  variant: 'classifier-denied' | 'circuit-breaker';
+  variant: 'classifier-denied' | 'circuit-breaker' | 'notice';
+  severity?: 'info' | 'warning' | 'error';
+  code?: string;
+  title?: string;
+  message?: string;
   /** What the classifier blocked (classifier-denied only). */
   action?: string;
   /** Classifier rule text (classifier-denied only). */

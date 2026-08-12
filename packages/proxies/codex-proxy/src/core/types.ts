@@ -218,6 +218,9 @@ export interface SessionSnapshotParams {
 
 export interface CloseSessionParams {
   sessionId: string;
+  /** Recovery-only: interrupt the runtime's actual in-progress turn before
+   * detaching, even when proxy-local turn state has drifted. */
+  force?: boolean;
 }
 
 export interface JsonRpcLikeRequest {

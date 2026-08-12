@@ -30,7 +30,7 @@
  * stays visible with a pending affordance (TasksView) until `task:deleted`
  * lands — a failed delete never requires a surprising reinsert (§5).
  */
-import type { Executor, Session, Task } from '@gian/shared';
+import type { ApprovalMode, Executor, Session, Task, ThinkingEffort } from '@gian/shared';
 
 import { completeSubtask, createSubtask, reopenSubtask } from '../api.js';
 import { toast } from '../feedback.js';
@@ -117,6 +117,11 @@ export interface TaskCreateSubtaskInput {
   workspaceId: string;
   executor: Executor;
   name?: string;
+  /** New-session composer chips (issue #57 v2) — same semantics as
+   *  SessionCreateInput; approvalMode is claude/codex-only. */
+  model?: string;
+  approvalMode?: ApprovalMode | null;
+  thinkingEffort?: ThinkingEffort | null;
 }
 
 const taskCreateSubtask: OperationDefinition<TaskCreateSubtaskInput, Session> = {
@@ -130,6 +135,9 @@ const taskCreateSubtask: OperationDefinition<TaskCreateSubtaskInput, Session> = 
       workspace_id: input.workspaceId,
       executor: input.executor,
       ...(input.name ? { name: input.name } : {}),
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.executor !== 'kimi' && input.approvalMode ? { approval_mode: input.approvalMode } : {}),
+      ...(input.thinkingEffort ? { thinking_effort: input.thinkingEffort } : {}),
     });
     if (!session) throw new Error('create subtask failed');
     return session;

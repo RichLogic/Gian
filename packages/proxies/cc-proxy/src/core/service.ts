@@ -118,6 +118,10 @@ export class CcProxyService {
       this.handleToolUse(sessionId, toolName, input, callId);
     });
 
+    this.runtime.on('toolResult', (sessionId, callId, output, isError) => {
+      this.handleToolResult(sessionId, callId, output, isError);
+    });
+
     this.runtime.on('agentTask', (sessionId, update) => {
       this.handleAgentTask(sessionId, update);
     });
@@ -134,8 +138,8 @@ export class CcProxyService {
       this.handleTokenUsage(sessionId, usage);
     });
 
-    this.runtime.on('processExited', (sessionId, code, signal) => {
-      this.handleProcessExited(sessionId, code, signal);
+    this.runtime.on('processExited', (sessionId, code, signal, errorDetail) => {
+      this.handleProcessExited(sessionId, code, signal, errorDetail);
     });
 
     this.runtime.on('debug', (message) => {
@@ -545,6 +549,23 @@ export class CcProxyService {
     });
   }
 
+  private handleToolResult(
+    sessionId: string,
+    callId: string,
+    output: unknown,
+    isError: boolean,
+  ) {
+    const session = this.sessionsById.get(sessionId);
+    if (!session) return;
+    const context = this.activeTurns.get(sessionId);
+    this.emitEvent('tool.result', {
+      requestId: context?.requestId,
+      sessionId: session.id,
+      turnId: context?.turnId ?? session.activeTurnId,
+      data: { callId, output, isError },
+    });
+  }
+
   private handleAgentTask(sessionId: string, update: ClaudeAgentTaskUpdate) {
     const session = this.sessionsById.get(sessionId);
     if (!session) return;
@@ -682,7 +703,12 @@ export class CcProxyService {
     });
   }
 
-  private handleProcessExited(sessionId: string, code: number | null, signal: string | null) {
+  private handleProcessExited(
+    sessionId: string,
+    code: number | null,
+    signal: string | null,
+    errorDetail?: string,
+  ) {
     const session = this.sessionsById.get(sessionId);
     if (!session) return;
 
@@ -701,7 +727,9 @@ export class CcProxyService {
     }
 
     const hadActiveTurn = session.activeTurnId !== null;
-    const errorMessage = hadActiveTurn ? `Claude Code process exited (code=${code}, signal=${signal})` : null;
+    const errorMessage = hadActiveTurn
+      ? errorDetail?.trim() || `Claude Code process exited (code=${code}, signal=${signal})`
+      : null;
 
     const updated = this.updateSession(session, {
       activeTurnId: null,

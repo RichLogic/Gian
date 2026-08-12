@@ -82,7 +82,6 @@ function sessionMainElement(
 function expectReadOnlyQueue(): void {
   const drawer = screen.getByText('queued follow-up').closest('.queue-drawer');
   expect(drawer).not.toBeNull();
-  expect(drawer!.querySelector('.qd-count')).toHaveTextContent('1');
   const queueUi = within(drawer as HTMLElement);
   expect(queueUi.queryByRole('button', { name: 'Send now' })).not.toBeInTheDocument();
   expect(queueUi.queryByRole('button', { name: 'Clear' })).not.toBeInTheDocument();

@@ -24,6 +24,7 @@ import {
   createProxyProcessShutdownState,
   shutdownProxyProcess,
 } from './process-shutdown.js';
+import { redactSensitiveText } from '../logging/redact.js';
 
 export interface KimiProxyHostOptions {
   entry: string;
@@ -247,7 +248,8 @@ export class KimiProxyHost {
   private capabilities_: Promise<KimiCapabilities> | null = null;
 
   constructor(options: KimiProxyHostOptions) {
-    this.log = options.log ?? (() => {});
+    const log = options.log ?? (() => {});
+    this.log = message => log(redactSensitiveText(message));
     this.child = spawn(
       options.nodeBin ?? process.execPath,
       [options.entry, '--kimi-bin', options.kimiBin],

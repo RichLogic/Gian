@@ -67,6 +67,7 @@ function useHarness({
     activeSessionId,
     connectionReady,
     sessions: [session, otherSession],
+    itemsBySession: items,
     setItemsBySession: setItems,
     setPlanStateBySession: setPlans,
   });
@@ -301,6 +302,87 @@ describe('transcript history load state', () => {
       text: canonical.data.text,
     });
     expect(result.current.items.s1?.[0]).not.toHaveProperty('pending');
+  });
+
+  it('replaces stale transcript items when a replay stream is rebuilt', async () => {
+    vi.mocked(loadEvents)
+      .mockResolvedValueOnce({
+        events: [userEvent('old-turn', 1, 'old history')],
+        nextCursor: null,
+        hasMore: false,
+      })
+      .mockResolvedValueOnce({
+        events: [userEvent('rewritten-turn', 1, 'rewritten history')],
+        nextCursor: null,
+        hasMore: false,
+      });
+    const { result } = renderHook(() => useHarness());
+    await waitFor(() => expect(result.current.items.s1?.map(item => item.id)).toEqual(['old-turn']));
+
+    act(() => result.current.rebuild('s1', 'codex'));
+
+    await waitFor(() => expect(result.current.items.s1?.map(item => item.id)).toEqual([
+      'rewritten-turn',
+    ]));
+    expect(loadEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it('queues a replay rebuild that arrives during an in-flight history load', async () => {
+    let resolveInitial!: (page: Awaited<ReturnType<typeof loadEvents>>) => void;
+    vi.mocked(loadEvents)
+      .mockReturnValueOnce(new Promise(resolve => { resolveInitial = resolve; }))
+      .mockResolvedValueOnce({
+        events: [userEvent('rebuilt-after-load', 1, 'new history')],
+        nextCursor: null,
+        hasMore: false,
+      });
+    const { result } = renderHook(() => useHarness({
+      initialItems: { s1: applyEnvelope([], userEvent('stale-live', 1, 'stale'), 'codex') },
+    }));
+
+    act(() => result.current.rebuild('s1', 'codex'));
+    await act(async () => {
+      resolveInitial({
+        events: [userEvent('stale-page', 1, 'stale page')],
+        nextCursor: null,
+        hasMore: false,
+      });
+    });
+
+    await waitFor(() => expect(result.current.items.s1?.map(item => item.id)).toEqual([
+      'rebuilt-after-load',
+    ]));
+    expect(loadEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it('retains live events that arrive while a replay rebuild page is loading', async () => {
+    let resolveRebuild!: (page: Awaited<ReturnType<typeof loadEvents>>) => void;
+    vi.mocked(loadEvents)
+      .mockResolvedValueOnce({
+        events: [userEvent('old-before-rebuild', 1, 'old')],
+        nextCursor: null,
+        hasMore: false,
+      })
+      .mockReturnValueOnce(new Promise(resolve => { resolveRebuild = resolve; }));
+    const { result } = renderHook(() => useHarness());
+    await waitFor(() => expect(result.current.items.s1?.map(item => item.id)).toEqual([
+      'old-before-rebuild',
+    ]));
+
+    act(() => result.current.rebuild('s1', 'codex'));
+    act(() => result.current.applyLive(userEvent('live-during-rebuild', 2, 'live')));
+    await act(async () => {
+      resolveRebuild({
+        events: [userEvent('rewritten-snapshot', 1, 'rewritten')],
+        nextCursor: null,
+        hasMore: false,
+      });
+    });
+
+    await waitFor(() => expect(result.current.items.s1?.map(item => item.id)).toEqual([
+      'rewritten-snapshot',
+      'live-during-rebuild',
+    ]));
   });
 
   it('keeps provider ids reused by different turns distinct while history and live state merge', async () => {

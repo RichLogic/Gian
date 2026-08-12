@@ -6,6 +6,36 @@ not listed.
 
 All releases below are unsigned macOS Apple Silicon beta builds.
 
+## [0.4.2] - 2026-08-12
+
+### Added
+
+- Added independently versioned Claude, Codex, and Kimi Proxy plugins using
+  the `gian.proxy/1` compatibility contract, so compatible Agent integrations
+  can update separately from the desktop app.
+- Added a composer-first new-session flow with workspace, Agent, model, effort,
+  mode, and service-tier selection before the first message is sent.
+
+### Changed
+
+- Upgraded the bundled Host runtime and all source, CI, release, and daemon
+  install gates to Node.js 24 LTS.
+- Refined Diffs, Git History, worktree identity, queue presentation, and
+  inspector controls for denser and more predictable review workflows.
+- Improved transcript, session, Provider retry, and multi-window recovery so
+  stale progress and failed optimistic state do not survive canonical refreshes.
+
+### Fixed
+
+- Fixed Event Storage v3 migration verification for JSON artifacts that
+  contain nested artifact references, so valid transitive links no longer stop
+  an otherwise lossless offline migration.
+- Fixed Claude OAuth and API terminal errors being projected as successful
+  completed replies; Gian now keeps the provider error and ends the turn as
+  failed.
+- Fixed fresh packaged profiles failing before onboarding when no managed
+  Agent Proxy has been installed yet.
+
 ## [0.4.1] - 2026-08-09
 
 ### Added

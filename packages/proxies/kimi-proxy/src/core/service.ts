@@ -136,6 +136,7 @@ interface ModelCapability {
 interface ProbedCapabilities {
   modes: ModeCapability[];
   models: ModelCapability[];
+  sessionOptions: SessionConfigOption[];
 }
 
 type SelectConfigOption = Extract<SessionConfigOption, { type: 'select' }>;
@@ -193,7 +194,7 @@ function modesFromConfigOptions(options: SessionConfigOption[]): ModeCapability[
   }));
 }
 
-/** Kimi thinking levels are session-global (one thought_level select, not
+/** Kimi thinking levels are session-global (one thought-level select, not
  *  per-model), so extract them once and attach the same list to every model
  *  — the generic Settings UI reads supportedThinking off the selected model. */
 function thinkingLevelsFromConfigOptions(options: SessionConfigOption[]): string[] {
@@ -227,6 +228,7 @@ function capabilitiesFromConfigOptions(options: SessionConfigOption[]): ProbedCa
   return {
     modes: modesFromConfigOptions(options),
     models: modelsFromConfigOptions(options, thinkingLevelsFromConfigOptions(options)),
+    sessionOptions: [...options],
   };
 }
 
@@ -291,7 +293,7 @@ export function parseKimiStatusContext(
 
 export class KimiProxyService {
   private readonly runtime: KimiAcpClient;
-  private readonly emitEvent: ProxyEventSink;
+  private emitEvent: ProxyEventSink;
   private readonly sessionsById = new Map<string, SessionRecord>();
   private readonly proxyIdByNativeId = new Map<string, string>();
   private readonly activeTurns = new Map<string, ActiveTurn>();
@@ -325,6 +327,10 @@ export class KimiProxyService {
     await this.runtime.ensureStarted();
   }
 
+  setEventSink(handler: ProxyEventSink): void {
+    this.emitEvent = handler;
+  }
+
   initializePayload(): InitializePayload {
     return {
       mode: 'spawn',
@@ -353,6 +359,7 @@ export class KimiProxyService {
       ...await this.runtime.ensureStarted(),
       modes: probed.modes,
       models: probed.models,
+      sessionOptions: probed.sessionOptions,
     };
   }
 
@@ -370,7 +377,11 @@ export class KimiProxyService {
     if (this.probedCapabilities) return this.probedCapabilities;
     for (const session of this.sessionsById.values()) {
       const probed = capabilitiesFromConfigOptions(session.configOptions);
-      if (probed.modes.length > 0 || probed.models.length > 0) {
+      if (
+        probed.modes.length > 0
+        || probed.models.length > 0
+        || probed.sessionOptions.length > 0
+      ) {
         this.probedCapabilities = probed;
         return probed;
       }
@@ -384,7 +395,7 @@ export class KimiProxyService {
       this.probedCapabilities = probed;
       return probed;
     } catch {
-      return { modes: [], models: [] };
+      return { modes: [], models: [], sessionOptions: [] };
     }
   }
 

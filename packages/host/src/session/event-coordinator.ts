@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   EventEnvelope,
   ExecutorConfigState,
@@ -8,6 +8,12 @@ import type {
   Session,
   ChatEvent,
 } from '@gian/shared';
+import {
+  ProxyProtocolError,
+  protocolViolation,
+  proxyNotificationSchema,
+  type ProxyNotification as ProtocolV1Notification,
+} from '@gian/proxy-protocol';
 import type { ApprovalManager } from '../approval/index.js';
 import { projectNotification } from '../event/index.js';
 import { locateNativeJsonl } from '../native/locate-jsonl.js';
@@ -16,6 +22,7 @@ import {
   normalizeKimiConfigOptions,
   normalizeKimiSlashCommands,
 } from '../proxy/kimi-proxy-client.js';
+import { normalizeProtocolConfigOptions } from '../proxy/kimi-protocol-v1-client.js';
 import type { QueueManager } from '../queue/index.js';
 import type { Db } from '../storage/db.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
@@ -24,6 +31,7 @@ import { detectWorktreeAddPath } from './worktree-detect.js';
 import { executorConfigFromOptions, type SessionRepository } from './repository.js';
 import type { SessionHistoryStore } from './history-store.js';
 import type { ActiveTurn, TurnRuntime } from './turn-runtime.js';
+import type { AutoTitleService } from './auto-title.js';
 import type { ProxySessionCoordinator } from './proxy-session-coordinator.js';
 import {
   parseAcpUsageUpdate,
@@ -34,6 +42,10 @@ import { kimiContentText } from './input-items.js';
 
 function isReplaceableSnapshot(event: ChatEvent): boolean {
   if (event.event === 'diff.updated') return true;
+  if (
+    event.display?.type === 'state.turn-started'
+    || event.display?.type === 'state.turn-completed'
+  ) return true;
   if (event.event === 'codex.agent' && event.display?.type === 'agent') return true;
   if (event.event !== 'acp.sessionUpdate') return false;
   const update = event.data.update;
@@ -47,6 +59,15 @@ function notificationProviderTurnId(notification: ProxyNotification): string | n
   if (typeof value === 'string' && value.length > 0) return value;
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   return null;
+}
+
+function protocolEventPayloadHash(notification: ProtocolV1Notification): string {
+  return createHash('sha256').update(JSON.stringify({
+    method: notification.method,
+    ...('turnId' in notification.params ? { turnId: notification.params.turnId } : {}),
+    emittedAt: notification.params.emittedAt,
+    data: notification.params.data,
+  })).digest('hex');
 }
 
 const SNAPSHOT_FLUSH_MS = 120;
@@ -65,6 +86,11 @@ export class SessionEventCoordinator {
   }>();
   private pendingWorktreeDetectionCommands = new Map<string, string>();
   private activeWorktreeDetections = new Set<string>();
+  private replayRefreshes = new Map<string, Promise<void>>();
+  private replayRefreshDirty = new Set<string>();
+  private replayRetryAttempts = new Map<string, number>();
+  private replayRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private replayRefreshCancelled = new Set<string>();
 
   constructor(
     private db: Db,
@@ -76,6 +102,7 @@ export class SessionEventCoordinator {
     private queue: QueueManager,
     private watcher: NativeJsonlWatcher | null,
     private proxySessions: ProxySessionCoordinator,
+    private autoTitle: AutoTitleService,
     private callbacks: EventCoordinatorCallbacks,
   ) {}
 
@@ -89,6 +116,12 @@ export class SessionEventCoordinator {
 
   forgetConversationUsage(sessionId: string): void {
     this.conversationUsageTurns.delete(sessionId);
+    this.replayRefreshDirty.delete(sessionId);
+    this.replayRetryAttempts.delete(sessionId);
+    const retry = this.replayRetryTimers.get(sessionId);
+    if (retry) clearTimeout(retry);
+    this.replayRetryTimers.delete(sessionId);
+    if (this.replayRefreshes.has(sessionId)) this.replayRefreshCancelled.add(sessionId);
   }
 
   persistNativeConfigSnapshot(
@@ -118,7 +151,22 @@ export class SessionEventCoordinator {
     sessionId: string,
     updates: unknown[],
     timestamp: string,
+    replayStreamId?: string,
   ): { turns: number; events: number } {
+    const standard = updates.flatMap((update) => {
+      const parsed = proxyNotificationSchema.safeParse(update);
+      return parsed.success ? [parsed.data] : [];
+    });
+    if (standard.length > 0 && standard.length === updates.length) {
+      return this.persistProtocolV1Replay(
+        sessionId,
+        standard,
+        timestamp,
+        false,
+        replayStreamId,
+      );
+    }
+
     let turnNumber = 0;
     let turnId: string | null = null;
     let eventCount = 0;
@@ -250,6 +298,182 @@ export class SessionEventCoordinator {
         .run(sessionId);
     }
     return { turns: turnNumber, events: eventCount };
+  }
+
+  private persistProtocolV1Replay(
+    sessionId: string,
+    notifications: ProtocolV1Notification[],
+    fallbackTimestamp: string,
+    broadcast = false,
+    replayStreamId?: string,
+  ): { turns: number; events: number } {
+    const broadcasts: Array<{ event: ChatEvent; turnId: string }> = [];
+    const persist = this.db.transaction(() => this.persistProtocolV1ReplayTransaction(
+      sessionId,
+      notifications,
+      fallbackTimestamp,
+      broadcast ? broadcasts : null,
+      replayStreamId,
+    ));
+    const result = persist();
+    for (const item of broadcasts) this.broadcastChatEvent(item.event, item.turnId);
+    if (broadcast && result.rebuilt) {
+      this.broadcaster.broadcast({ type: 'session:history-rebuilt', session_id: sessionId });
+    }
+    return { turns: result.turns, events: result.events };
+  }
+
+  private persistProtocolV1ReplayTransaction(
+    sessionId: string,
+    notifications: ProtocolV1Notification[],
+    fallbackTimestamp: string,
+    broadcasts: Array<{ event: ChatEvent; turnId: string }> | null,
+    replayStreamId?: string,
+  ): { turns: number; events: number; rebuilt: boolean } {
+    const provider = this.sessions.get(sessionId).executor;
+    const turns = new Map<string, {
+      id: string;
+      number: number;
+      inserted: boolean;
+      replayOwned: boolean;
+    }>();
+    let turnCount = 0;
+    let eventCount = 0;
+    let rebuilt = false;
+
+    if (replayStreamId) {
+      const current = this.db.prepare(
+        'SELECT replay_stream_id FROM proxy_replay_streams WHERE session_id = ?',
+      ).get(sessionId) as { replay_stream_id: string } | undefined;
+      if (current && current.replay_stream_id !== replayStreamId) {
+        const deleted = this.db.prepare(
+          `DELETE FROM turns
+           WHERE id IN (
+             SELECT turn_id FROM proxy_replay_turns
+             WHERE session_id = ? AND replay_owned = 1
+           )`,
+        ).run(sessionId);
+        rebuilt = deleted.changes > 0;
+      }
+      this.db.prepare(
+        `INSERT INTO proxy_replay_streams (session_id, replay_stream_id)
+         VALUES (?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET replay_stream_id = excluded.replay_stream_id`,
+      ).run(sessionId, replayStreamId);
+    }
+
+    const ensureTurn = (providerTurnId: string, createdAt: string) => {
+      const existing = turns.get(providerTurnId);
+      if (existing) return existing;
+      const persisted = this.db.prepare(
+        `SELECT replay.turn_id AS id, turns.turn_number AS number,
+                replay.replay_owned AS replay_owned
+         FROM proxy_replay_turns replay
+         JOIN turns ON turns.id = replay.turn_id
+         WHERE replay.session_id = ? AND replay.provider_turn_id = ?`,
+      ).get(sessionId, providerTurnId) as {
+        id: string;
+        number: number;
+        replay_owned: number;
+      } | undefined;
+      if (persisted) {
+        const turn = {
+          id: persisted.id,
+          number: persisted.number,
+          inserted: false,
+          replayOwned: persisted.replay_owned === 1,
+        };
+        turns.set(providerTurnId, turn);
+        return turn;
+      }
+      const latest = this.db.prepare(
+        'SELECT COALESCE(MAX(turn_number), 0) AS number FROM turns WHERE session_id = ?',
+      ).get(sessionId) as { number: number };
+      const turn = {
+        id: randomUUID(),
+        number: latest.number + 1,
+        inserted: true,
+        replayOwned: true,
+      };
+      this.db
+        .prepare(
+          `INSERT INTO turns
+            (id, session_id, turn_number, status, created_at, completed_at)
+           VALUES (?, ?, ?, 'completed', ?, ?)`,
+        )
+        .run(turn.id, sessionId, turn.number, createdAt, createdAt);
+      this.db.prepare(
+        `INSERT INTO proxy_replay_turns
+          (session_id, provider_turn_id, turn_id)
+         VALUES (?, ?, ?)`,
+      ).run(sessionId, providerTurnId, turn.id);
+      turns.set(providerTurnId, turn);
+      turnCount += 1;
+      return turn;
+    };
+
+    for (const notification of notifications) {
+      if (!('sessionId' in notification.params)) continue;
+      if (notification.params.sessionId !== sessionId) continue;
+      if (!('turnId' in notification.params)) continue;
+
+      const createdAt = notification.params.emittedAt || fallbackTimestamp;
+      const payloadHash = protocolEventPayloadHash(notification);
+      const existingEvent = this.db.prepare(
+        `SELECT payload_sha256
+         FROM proxy_replay_events
+         WHERE session_id = ? AND event_id = ?`,
+      ).get(sessionId, notification.params.eventId) as { payload_sha256: string } | undefined;
+      if (existingEvent) {
+        if (existingEvent.payload_sha256 !== payloadHash) {
+          throw protocolViolation(
+            `Proxy replay event ${notification.params.eventId} changed after persistence.`,
+          );
+        }
+        continue;
+      }
+      const turn = ensureTurn(notification.params.turnId, createdAt);
+      // Gian already persists the input before starting a live turn. Replay
+      // later confirms that input, but must not render it a second time.
+      const projected = notification.method === 'input.recorded' && !turn.replayOwned
+        ? []
+        : projectNotification(
+            provider,
+            notification as unknown as ProxyNotification,
+            sessionId,
+            turn.number,
+          );
+      for (const event of projected) {
+        const result = this.history.appendEvent(
+          sessionId,
+          turn.id,
+          event.call_id,
+          event.event,
+          {
+            __gian_event: 2,
+            provider: event.provider,
+            raw: event.data,
+            ...(event.display ? { display: event.display } : {}),
+          },
+          { replaceSnapshot: isReplaceableSnapshot(event), createdAt },
+        );
+        if (result.inserted) {
+          eventCount += 1;
+          broadcasts?.push({ event, turnId: turn.id });
+        }
+      }
+      this.db.prepare(
+        `INSERT INTO proxy_replay_events
+          (session_id, event_id, turn_id, payload_sha256)
+         VALUES (?, ?, ?, ?)`,
+      ).run(sessionId, notification.params.eventId, turn.id, payloadHash);
+    }
+
+    for (const turn of turns.values()) this.history.compactTurnStreams(turn.id);
+    if (notifications.length > 0) {
+      this.db.prepare(`UPDATE sessions SET status = 'done' WHERE id = ?`).run(sessionId);
+    }
+    return { turns: turnCount, events: eventCount, rebuilt };
   }
 
   private persistTokenUsage(
@@ -384,6 +608,27 @@ export class SessionEventCoordinator {
       this.handleSessionRotated(sessionId, notification);
       return;
     }
+    if (notification.method === 'session.updated') {
+      const data = notification.params?.data as
+        | {
+            nativeSession?: { id?: unknown };
+            configOptions?: Parameters<typeof normalizeProtocolConfigOptions>[0];
+            reason?: unknown;
+          }
+        | undefined;
+      if (data?.configOptions) {
+        const options = normalizeProtocolConfigOptions(data.configOptions);
+        this.persistNativeConfigSnapshot(sessionId, executorConfigFromOptions(options), options);
+      }
+      const nativeSessionId = data?.nativeSession?.id;
+      if (typeof nativeSessionId === 'string' && nativeSessionId) {
+        this.handleSessionRotated(sessionId, notification, nativeSessionId, false);
+      }
+      if (data?.reason === 'native-history-changed') {
+        this.refreshProtocolReplay(sessionId);
+      }
+      return;
+    }
 
     // Provider debug chatter is intentionally neither history nor UI state.
     if (notification.method === 'debug') return;
@@ -416,7 +661,7 @@ export class SessionEventCoordinator {
     // Usage is session accounting rather than transcript content. Codex can
     // legitimately report a short-lived compaction turn id inside one outer
     // Host turn, so do not use these samples to establish generation binding.
-    if (notification.method === 'token_usage.updated') {
+    if (notification.method === 'token_usage.updated' || notification.method === 'usage.updated') {
       const session = this.sessions.get(sessionId);
       const update = parseTokenUsageUpdate(notification.params?.data, session.executor);
       if (update) this.persistTokenUsage(sessionId, providerTurnId ?? undefined, update);
@@ -448,10 +693,156 @@ export class SessionEventCoordinator {
     // completeTurn on turn.completed/failed, which deletes the activeTurns
     // map entry, so both projection and persistence use the captured active
     // turn rather than re-reading mutable lifecycle state.
-    const events = this.runProjector(sessionId, notification, active.number);
-    for (const event of events) this.dispatchChatEvent(event, active.id);
+    const standard = proxyNotificationSchema.safeParse(notification);
+    if (standard.success) {
+      try {
+        this.persistProtocolV1LiveEvent(sessionId, standard.data, active);
+      } catch (error) {
+        if (!(error instanceof ProxyProtocolError) || !error.fatal) throw error;
+        console.error(`[proxy-live] ${sessionId} protocol fault`, error);
+        this.proxySessions.abort(sessionId);
+        return;
+      }
+    } else {
+      const events = this.runProjector(sessionId, notification, active.number);
+      for (const event of events) this.dispatchChatEvent(event, active.id);
+    }
 
     this.handleLifecycle(sessionId, notification);
+  }
+
+  private persistProtocolV1LiveEvent(
+    sessionId: string,
+    notification: ProtocolV1Notification,
+    active: ActiveTurn,
+  ): boolean {
+    if (!('turnId' in notification.params)) return true;
+    const providerTurnId = notification.params.turnId;
+    const eventId = notification.params.eventId;
+    const payloadHash = protocolEventPayloadHash(notification);
+    const existing = this.db.prepare(
+      `SELECT payload_sha256
+       FROM proxy_replay_events
+       WHERE session_id = ? AND event_id = ?`,
+    ).get(sessionId, eventId) as { payload_sha256: string } | undefined;
+    if (existing) {
+      if (existing.payload_sha256 !== payloadHash) {
+        throw protocolViolation(
+          `Proxy live event ${eventId} changed after persistence.`,
+        );
+      }
+      return false;
+    }
+
+    const events = this.runProjector(
+      sessionId,
+      notification as unknown as ProxyNotification,
+      active.number,
+    );
+    const persist = this.db.transaction(() => {
+      const mapped = this.db.prepare(
+        `SELECT turn_id
+         FROM proxy_replay_turns
+         WHERE session_id = ? AND provider_turn_id = ?`,
+      ).get(sessionId, providerTurnId) as { turn_id: string } | undefined;
+      if (mapped && mapped.turn_id !== active.id) {
+        throw protocolViolation(
+          `Proxy turn ${providerTurnId} changed Host turn ownership.`,
+        );
+      }
+      if (!mapped) {
+        this.db.prepare(
+          `INSERT INTO proxy_replay_turns
+            (session_id, provider_turn_id, turn_id, replay_owned)
+           VALUES (?, ?, ?, 0)`,
+        ).run(sessionId, providerTurnId, active.id);
+      }
+      for (const event of events) {
+        this.history.appendEvent(
+          sessionId,
+          active.id,
+          event.call_id,
+          event.event,
+          {
+            __gian_event: 2,
+            provider: event.provider,
+            raw: event.data,
+            ...(event.display ? { display: event.display } : {}),
+          },
+          { replaceSnapshot: isReplaceableSnapshot(event) },
+        );
+      }
+      this.db.prepare(
+        `INSERT INTO proxy_replay_events
+          (session_id, event_id, turn_id, payload_sha256)
+         VALUES (?, ?, ?, ?)`,
+      ).run(sessionId, eventId, active.id, payloadHash);
+    });
+    persist();
+    for (const event of events) this.broadcastChatEvent(event, active.id);
+    return true;
+  }
+
+  private refreshProtocolReplay(sessionId: string): void {
+    if (this.replayRefreshCancelled.has(sessionId)) return;
+    if (this.replayRefreshes.has(sessionId)) {
+      this.replayRefreshDirty.add(sessionId);
+      return;
+    }
+    const retryTimer = this.replayRetryTimers.get(sessionId);
+    if (retryTimer) clearTimeout(retryTimer);
+    this.replayRetryTimers.delete(sessionId);
+    let fatal = false;
+    let transientFailure = false;
+    const pending = this.proxySessions.replay(sessionId).then(replay => {
+      const parsed = replay.events.map(update => proxyNotificationSchema.safeParse(update));
+      const invalid = parsed.find(result => !result.success);
+      if (invalid && !invalid.success) {
+        throw protocolViolation(`Proxy replay returned an invalid event: ${invalid.error.message}`);
+      }
+      const notifications = parsed.flatMap(result => result.success ? [result.data] : []);
+      this.persistProtocolV1Replay(
+        sessionId,
+        notifications,
+        new Date().toISOString(),
+        true,
+        replay.replayStreamId,
+      );
+      this.replayRetryAttempts.delete(sessionId);
+    }).catch(error => {
+      console.error(`[proxy-replay] ${sessionId} refresh failed`, error);
+      fatal = error instanceof ProxyProtocolError && error.fatal;
+      if (fatal) this.proxySessions.abort(sessionId);
+      else transientFailure = true;
+    }).finally(() => {
+      if (this.replayRefreshes.get(sessionId) === pending) {
+        this.replayRefreshes.delete(sessionId);
+      }
+      if (this.replayRefreshCancelled.delete(sessionId)) return;
+      const dirty = this.replayRefreshDirty.delete(sessionId);
+      if (dirty && !fatal) {
+        this.refreshProtocolReplay(sessionId);
+        return;
+      }
+      if (transientFailure) this.scheduleProtocolReplayRetry(sessionId);
+    });
+    this.replayRefreshes.set(sessionId, pending);
+  }
+
+  private scheduleProtocolReplayRetry(sessionId: string): void {
+    const attempt = (this.replayRetryAttempts.get(sessionId) ?? 0) + 1;
+    this.replayRetryAttempts.set(sessionId, attempt);
+    if (attempt > 3) {
+      console.error(`[proxy-replay] ${sessionId} exhausted transient refresh retries`);
+      this.replayRetryAttempts.delete(sessionId);
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.replayRetryTimers.delete(sessionId);
+      this.refreshProtocolReplay(sessionId);
+    }, 250 * (2 ** (attempt - 1)));
+    timer.unref();
+    this.replayRetryTimers.set(sessionId, timer);
   }
 
   /**
@@ -470,11 +861,13 @@ export class SessionEventCoordinator {
   private handleSessionRotated(
     gianSessionId: string,
     notification: ProxyNotification,
+    standardNativeSessionId?: string,
+    manageWatcher = true,
   ): void {
     const data = notification.params?.data as
       | { oldNativeSessionId?: string; newNativeSessionId?: string }
       | undefined;
-    const newNativeSessionId = data?.newNativeSessionId;
+    const newNativeSessionId = standardNativeSessionId ?? data?.newNativeSessionId;
     if (!newNativeSessionId || typeof newNativeSessionId !== 'string') {
       return;
     }
@@ -512,7 +905,7 @@ export class SessionEventCoordinator {
 
     // Live Sync v2: native id rotated → JSONL path changed. Stop the old
     // watcher and start a new one against the rotated file.
-    if (this.watcher) {
+    if (this.watcher && manageWatcher) {
       this.watcher.stop(gianSessionId);
       const session = this.sessions.get(gianSessionId);
       if (session.executor === 'kimi') return;
@@ -607,6 +1000,10 @@ export class SessionEventCoordinator {
       storedData,
       { replaceSnapshot: isReplaceableSnapshot(e) },
     );
+    this.broadcastChatEvent(e, turnId);
+  }
+
+  private broadcastChatEvent(e: ChatEvent, turnId: string): void {
     this.broadcaster.broadcast({
       type: 'event',
       session_id: e.session_id,
@@ -644,6 +1041,21 @@ export class SessionEventCoordinator {
       }).catch(err => {
         console.error('[approval] request failed', err);
       });
+    }
+    if (e.display?.type === 'interaction.resolved') {
+      const d = e.display.data as import('@gian/shared').ApprovalResolvedData;
+      const pending = this.approvals.getPending(d.approvalId);
+      const selected = d.nativeOptionId
+        ? pending?.nativeOptions?.find(option => option.optionId === d.nativeOptionId)
+        : undefined;
+      const decision: import('@gian/shared').ApprovalDecision = selected?.kind.startsWith('reject')
+        ? 'decline'
+        : selected?.kind === 'allow_session' || selected?.kind === 'allow_always'
+          ? 'allow_session'
+          : selected?.kind === 'allow_once'
+            ? 'allow_once'
+            : d.decision;
+      this.approvals.resolve(d.approvalId, decision, d.auto ? 'auto' : 'web');
     }
     if (e.display?.type === 'activity.command') {
       const d = e.display.data as import('@gian/shared').CommandExecutionData;
@@ -815,6 +1227,12 @@ export class SessionEventCoordinator {
         .prepare(`UPDATE sessions SET status = ?, unread = 1, updated_at = ? WHERE id = ?`)
         .run(sessionStatus, now, sessionId);
       this.broadcastSessionUpdated(sessionId, { status: sessionStatus, unread: 1, updated_at: now });
+    }
+    if (terminalStatus === 'completed') {
+      // Issue #57: an unnamed session derives its title from the agent's
+      // native title (or the first user message) once turns start completing.
+      // Fire-and-forget; failures are logged inside AutoTitleService.
+      void this.autoTitle.maybeAutoTitle(sessionId);
     }
     return terminalStatus;
   }

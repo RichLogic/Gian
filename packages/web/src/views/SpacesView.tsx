@@ -117,10 +117,11 @@ export function SpacesView({
           <NewWorkspaceForm
             form={newWs.form}
             saving={newWs.saving}
+            cloning={newWs.cloning}
             error={newWs.error}
-            projectRoot={workspaceRoot}
             onChange={f => newWs.setForm(prev => ({ ...prev, ...f }))}
             onSubmit={newWs.submit}
+            onClone={newWs.clone}
             onCancel={() => newWs.setOpen(false)}
           />
         ) : null}

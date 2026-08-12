@@ -473,15 +473,6 @@
   text-transform: none; letter-spacing: 0.06em;
   display: flex; align-items: center; gap: 6px;
 }
-.qd-count {
-  padding: 0 5px; border-radius: var(--r-pill);
-  background: var(--warn-soft); color: var(--warn);
-  font-size: 10px; font-weight: 700;
-}
-.qd-sub {
-  font-size: 10.5px; color: var(--text-3);
-  margin-left: 4px;
-}
 .qd-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; }
 .qd-body {
   padding: 4px 6px 6px;
@@ -690,7 +681,6 @@
 .context-usage-conversation {
   margin-top: 9px;
   padding-top: 9px;
-  border-top: 1px solid var(--hairline);
 }
 .context-usage-breakdown {
   display: flex;
@@ -1535,6 +1525,9 @@
 .spaces-list-row:hover .spaces-ws-meta,
 .spaces-list-row.active .spaces-ws-meta { display: none; }
 
+/* New workspace form (issue #57, 2026-08-11 redesign): one vertical stack —
+   Name, Directory (+Browse…), Git URL (+Clone). The panel is mostly empty,
+   so the form uses generous vertical spacing instead of a cramped grid. */
 .spaces-new-form {
   display: flex;
   flex-direction: column;
@@ -1544,27 +1537,29 @@
   background: var(--surface-2);
   border-radius: var(--r-2);
 }
-.spaces-new-form .input { width: 100%; }
-.spaces-new-form .select { width: 100%; }
-.spaces-new-source { align-self: stretch; }
-.spaces-new-source .segm-item { flex: 1; }
-.spaces-new-path-row {
+.wsn-form {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 48px 32px 24px;
+}
+.wsn-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
-.spaces-new-path-row .input { flex: 1; min-width: 0; }
+.wsn-row .input { flex: 1; min-width: 0; }
+.wsn-row .btn { flex-shrink: 0; }
+.wsn-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
 .spaces-browse-btn { flex-shrink: 0; }
-
-.spaces-path-preview {
-  display: flex; align-items: center; gap: 6px;
-  padding: 4px 8px;
-  font-family: var(--font-mono);
-  font-size: var(--fz-11);
-  color: var(--text-3);
-}
-.spaces-path-preview-lbl { color: var(--text-3); }
-.spaces-path-preview-val { color: var(--text-2); word-break: break-all; }
 
 .spaces-claude-md {
   flex: 1;
@@ -1599,7 +1594,6 @@
   min-width: 320px;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--hairline);
   background: var(--surface);
   padding: 12px;
   gap: 8px;
@@ -1612,7 +1606,6 @@
 .spaces-inspector-head {
   display: flex; align-items: center; gap: 8px;
   padding-bottom: 6px;
-  border-bottom: 1px solid var(--hairline);
 }
 .spaces-inspector-title {
   flex: 1;
@@ -1631,7 +1624,6 @@
 .spaces-inspector-foot {
   display: flex; align-items: center; gap: 8px;
   padding-top: 6px;
-  border-top: 1px solid var(--hairline);
 }
 .spaces-inspector-foot-spacer { flex: 1; }
 .spaces-new-form-actions {
@@ -1757,7 +1749,6 @@
 .pal-search-row {
   display: flex; align-items: center; gap: 8px;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--hairline);
   flex-shrink: 0;
 }
 .pal-search-ico {
@@ -1848,7 +1839,6 @@
 .pal-footer {
   display: flex; align-items: center; gap: 16px;
   padding: 7px 14px;
-  border-top: 1px solid var(--hairline);
   flex-shrink: 0;
   font-size: 10.5px;
   color: var(--text-3);
@@ -1870,7 +1860,6 @@
   display: flex; align-items: center; gap: 8px;
   padding: 8px 14px;
   font-size: var(--fz-12);
-  border-bottom: 1px solid var(--hairline);
   background: var(--surface-2);
 }
 .session-banner.merged { color: var(--text-2); }
@@ -1953,7 +1942,6 @@
 .ws-kebab-divider {
   height: 1px;
   margin: 4px 6px;
-  background: var(--hairline);
 }
 
 /* ============================================================
@@ -1993,7 +1981,6 @@
 }
 .adopt-dialog-head {
   padding: 18px 20px 12px;
-  border-bottom: 1px solid var(--hairline);
 }
 .adopt-dialog-title {
   font-size: var(--fz-16);
@@ -2039,7 +2026,6 @@
   display: flex; justify-content: flex-end; gap: 8px;
   padding: 14px 20px;
   background: var(--surface-2);
-  border-top: 1px solid var(--hairline);
 }
 @keyframes pop-in {
   from { opacity: 0; transform: scale(0.96); }

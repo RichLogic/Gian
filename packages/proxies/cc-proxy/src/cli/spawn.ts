@@ -1,4 +1,15 @@
 import { createInterface } from 'node:readline';
+import {
+  CORE_METHODS,
+  OPTIONAL_METHOD_CAPABILITIES,
+  PROTOCOL_V1,
+  ProxyProtocolError,
+  parseNdjsonObject,
+  parseProxyRequest,
+  readNdjsonLines,
+  type ProxyNotification,
+  type ProxyRequest,
+} from '@gian/proxy-protocol';
 
 import { CcProxyService } from '../core/service.js';
 import type {
@@ -12,13 +23,28 @@ import type {
   StartTurnParams,
 } from '../core/types.js';
 import { ClaudeMcpRuntime } from '../runtime/claude-mcp-runtime.js';
-import { createProtocolWriter, protocolError } from '../transport/protocol.js';
+import { createProtocolWriter, protocolError, writeJsonLine } from '../transport/protocol.js';
+import { ClaudeProtocolV1Adapter, claudeProtocolError } from '../protocol/v1-adapter.js';
 
 const SELF_TEST_FLAG = '--self-test';
+const PLUGIN_VERSION = '0.1.0';
+const V1_METHODS = new Set<string>([
+  ...CORE_METHODS,
+  ...Object.keys(OPTIONAL_METHOD_CAPABILITIES),
+]);
 
-function runSelfTest(argv: string[]): boolean {
+function protocolV1Enabled(): boolean {
+  return (process.env.GIAN_PROTOCOL_VERSIONS ?? '')
+    .split(',')
+    .map(value => value.trim())
+    .includes(PROTOCOL_V1);
+}
+
+function runSelfTest(argv: string[], v1: boolean): boolean {
   if (!argv.includes(SELF_TEST_FLAG)) return false;
-  process.stdout.write(`${JSON.stringify({ schemaVersion: 1, id: 'claude', ok: true })}\n`);
+  process.stdout.write(`${JSON.stringify(v1
+    ? { schemaVersion: 2, id: 'claude', pluginVersion: PLUGIN_VERSION, ok: true }
+    : { schemaVersion: 1, id: 'claude', ok: true })}\n`);
   return true;
 }
 
@@ -35,10 +61,85 @@ function parseArgs(argv: string[]) {
   }
 }
 
+function createV1Writer() {
+  return {
+    result(id: string | number, result: unknown) {
+      writeJsonLine(process.stdout, { id, result });
+    },
+    error(id: string | number, error: unknown) {
+      writeJsonLine(process.stdout, { id, error: claudeProtocolError(error) });
+    },
+    notification(notification: ProxyNotification) {
+      writeJsonLine(process.stdout, notification);
+    },
+  };
+}
+
+function usableRequestId(value: unknown): string | number | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const id = (value as { id?: unknown }).id;
+  return (typeof id === 'string' && id.length > 0) || Number.isSafeInteger(id)
+    ? id as string | number
+    : null;
+}
+
+async function runV1Loop(service: CcProxyService): Promise<void> {
+  const writer = createV1Writer();
+  const adapter = new ClaudeProtocolV1Adapter(
+    service,
+    PLUGIN_VERSION,
+    notification => writer.notification(notification),
+  );
+  for await (const line of readNdjsonLines(process.stdin)) {
+    const value = parseNdjsonObject(line);
+    if (value === null) continue;
+    const id = usableRequestId(value);
+    const method = typeof value.method === 'string' ? value.method : null;
+    if (method && !V1_METHODS.has(method)) {
+      if (id === null) {
+        throw new ProxyProtocolError('PROTOCOL_VIOLATION', 'Unknown method omitted a usable id.', true);
+      }
+      writer.error(id, new ProxyProtocolError(
+        'METHOD_NOT_FOUND',
+        `Unknown method "${method}".`,
+        false,
+      ));
+      continue;
+    }
+
+    let request: ProxyRequest;
+    try {
+      request = parseProxyRequest(value);
+    } catch (error) {
+      if (id === null) throw error;
+      writer.error(id, error);
+      continue;
+    }
+
+    try {
+      const result = await adapter.handle(request);
+      writer.result(request.id, result);
+      if (request.method === 'shutdown') {
+        process.stdin.pause();
+        await service.close();
+        return;
+      }
+    } catch (error) {
+      writer.error(request.id, error);
+    }
+  }
+  process.stdin.pause();
+  await service.close();
+}
+
 async function main() {
   const argv = process.argv.slice(2);
-  if (runSelfTest(argv)) return;
+  const v1 = protocolV1Enabled();
+  if (runSelfTest(argv, v1)) return;
   parseArgs(argv);
+  if (v1 && process.env.GIAN_RUNTIME_BIN) {
+    process.env.CLAUDE_BIN = process.env.GIAN_RUNTIME_BIN;
+  }
   const writer = createProtocolWriter(process.stdout);
 
   // Crash safety net. Without these, any async error in event handlers
@@ -52,9 +153,25 @@ async function main() {
     const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err);
     try { console.error(`[cc-proxy:${kind}]`, msg); } catch {}
     try {
-      writer.notification('runtime.error', {
-        data: { code: kind, message: msg },
-      });
+      if (v1) {
+        writeJsonLine(process.stdout, {
+          method: 'runtime.error',
+          params: {
+            eventId: `crash-${Date.now()}`,
+            emittedAt: new Date().toISOString(),
+            data: {
+              code: 'RUNTIME_ERROR',
+              message: msg,
+              retryable: false,
+              data: { kind },
+            },
+          },
+        });
+      } else {
+        writer.notification('runtime.error', {
+          data: { code: kind, message: msg },
+        });
+      }
     } catch {}
     // Give stdout a tick to flush before tearing down.
     setTimeout(() => process.exit(1), 50);
@@ -66,10 +183,22 @@ async function main() {
   const service = new CcProxyService({
     runtime,
     emitEvent(method, params) {
+      if (v1) {
+        if (method === 'debug') console.error(`[cc-proxy] ${JSON.stringify(params)}`);
+        return;
+      }
+      // Internal bridge used by the v1 adapter to pair native Claude tool
+      // results. It is not part of the legacy wire contract.
+      if (method === 'tool.result') return;
       writer.notification(method, params);
     },
   });
   await service.initialize();
+
+  if (v1) {
+    await runV1Loop(service);
+    return;
+  }
 
   const shutdown = async (code = 0) => {
     await service.close();

@@ -128,6 +128,17 @@ describe('session persistent context projection', () => {
       planTurn: 1,
       sessionId: 'session-1',
     }).plan?.status).toBe('paused');
+
+    const nextTurnEnd: TranscriptItem = {
+      kind: 'turn-end', id: 'end-2', text: 'done', ts: 400, turn: 2,
+    };
+    expect(projectSessionContext({
+      items: [turnEnd, nextTurn, nextTurnEnd],
+      planText: '- [ ] inspect',
+      planStatus: 'paused',
+      planTurn: 1,
+      sessionId: 'session-1',
+    }).plan).toBeNull();
   });
 
   it('keeps an accepted Claude plan through idle and removes it on the next turn', () => {
@@ -357,11 +368,15 @@ describe('PlanChip persistent Agent runs panel', () => {
     );
 
     const trigger = screen.getByRole('button', { name: /Agent/i });
+    expect(trigger).toHaveTextContent('Agent1/2');
+    expect(trigger).not.toHaveTextContent('running');
+    expect(trigger).not.toHaveTextContent('done');
     expect(trigger).toHaveAttribute('aria-expanded', 'false');
     await user.click(trigger);
 
     expect(trigger).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByRole('region', { name: 'Agent runs' })).toBeInTheDocument();
+    const panel = screen.getByRole('region', { name: 'Agent runs' });
+    expect(panel.querySelector('.context-agent-panel-head')).toHaveTextContent('Agent runs1/2');
     expect(screen.getByText('Claude')).toBeInTheDocument();
     expect(screen.getByText('Codex')).toBeInTheDocument();
     expect(screen.getByText('Reducer is stable.')).toBeInTheDocument();

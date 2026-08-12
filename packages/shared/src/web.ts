@@ -67,6 +67,11 @@ export interface SessionUpdatedMessage {
   session: Pick<Session, 'id'> & Partial<Session>;
 }
 
+export interface SessionHistoryRebuiltMessage {
+  type: 'session:history-rebuilt';
+  session_id: string;
+}
+
 export interface SessionCreatedMessage {
   type: 'session:created';
   session: Session;
@@ -251,6 +256,7 @@ export type ServerToClientMessage =
   | StateSyncMessage
   | EventMessage
   | SessionUpdatedMessage
+  | SessionHistoryRebuiltMessage
   | SessionCreatedMessage
   | SessionDeletedMessage
   | TaskCreatedMessage
@@ -277,6 +283,9 @@ export interface SessionCreateMessage {
   model?: string;
   /** Required for Claude/Codex. Kimi uses executor-native configuration. */
   approval_mode?: ApprovalMode;
+  /** Optional thinking effort for the new session (new-session composer
+   *  chip); omitted/null falls back to the configured default. */
+  thinking_effort?: import('./model.js').ThinkingEffort | null;
   /** Correlation id — see `OperationResultMessage`. */
   request_id?: string;
 }

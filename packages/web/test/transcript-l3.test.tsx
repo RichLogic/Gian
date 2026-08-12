@@ -3,12 +3,11 @@
 //   - over-threshold rows (output >10 lines, long reasoning, long result
 //     lists, tool output >10 lines) become clickable `.trow` rows with the
 //     hover `⇥ panel` hint and open their FULL content in panel 2 via
-//     TranscriptDetailOpenContext — instead of the P1 stopgaps (inline
-//     scroll cap / inspector push);
+//     ChatPanelOpenContext — instead of the P1 stopgaps (inline scroll cap /
+//     Diffs-owned Sheet tabs);
 //   - in-threshold rows never render the hint (level 2 stays inline);
-//   - the panel-2 preview-tab semantics: one preview tab at a time
-//     (insertGroupPreviewTab), pinned tabs are never evicted;
-//   - the Sheet renders a `text` tab's body.
+//   - transcript details identify themselves as chat-owned panel-2 content;
+//   - independent diff-event text tabs keep their Sheet preview semantics.
 
 import { describe, it, expect, vi } from 'vitest';
 import { render } from '@testing-library/react';
@@ -19,9 +18,8 @@ import {
   FileSearchCard,
   ReasoningCard,
   ToolEvent,
-  TranscriptDetailOpenContext,
-  type TranscriptDetailPayload,
 } from '../src/transcript/items.js';
+import { ChatPanelOpenContext, type ChatPanelRequest } from '../src/presentation/chat-panel.js';
 import { insertGroupPreviewTab, type SheetTab } from '../src/components/sheet-model.js';
 import { Sheet } from '../src/components/Sheet.js';
 import { Transcript } from '../src/transcript/Transcript.js';
@@ -37,9 +35,9 @@ const LONG_OUTPUT = Array.from({ length: 25 }, (_, i) => `line ${i + 1}`).join('
 
 function renderWithDetail(node: React.ReactElement, openDetail = vi.fn()) {
   const utils = render(
-    <TranscriptDetailOpenContext.Provider value={openDetail}>
+    <ChatPanelOpenContext.Provider value={openDetail}>
       {node}
-    </TranscriptDetailOpenContext.Provider>,
+    </ChatPanelOpenContext.Provider>,
   );
   return { ...utils, openDetail };
 }
@@ -64,10 +62,11 @@ describe('P3 level-3 routing', () => {
 
     await user.click(row);
     expect(openDetail).toHaveBeenCalledWith({
+      kind: 'transcript-detail',
       title: 'Run: pnpm test',
       text: LONG_OUTPUT,
       sourceId: '1:command:cmd-1',
-    } satisfies TranscriptDetailPayload);
+    } satisfies ChatPanelRequest);
     // No inline detail — panel 2 owns the content now.
     expect(container.querySelector('.trow-detail')).toBeNull();
   });
@@ -95,6 +94,7 @@ describe('P3 level-3 routing', () => {
 
     await user.click(row);
     expect(openDetail).toHaveBeenCalledWith({
+      kind: 'transcript-detail',
       title: 'Reasoning', text: longText, sourceId: '1:reasoning:full:r-1',
     });
   });
@@ -116,6 +116,7 @@ describe('P3 level-3 routing', () => {
     expect(container.querySelector('.trow-ext')).not.toBeNull();
     await user.click(container.querySelector('.trow') as HTMLElement);
     expect(openDetail).toHaveBeenCalledWith({
+      kind: 'transcript-detail',
       title: 'Tool: mcp__github__create_issue',
       text: LONG_OUTPUT,
       sourceId: '1:tool:tool-1',
@@ -134,6 +135,7 @@ describe('P3 level-3 routing', () => {
     expect(container.querySelector('.trow-ext')).not.toBeNull();
     await user.click(container.querySelector('.trow') as HTMLElement);
     expect(openDetail).toHaveBeenCalledWith({
+      kind: 'transcript-detail',
       title: 'Tool: mcp__demo__dump',
       text: output,
       sourceId: '2:tool:tool-one-line',
@@ -172,6 +174,7 @@ describe('P3 level-3 routing', () => {
     expect(row.querySelector('.trow-run')).toBeNull();
     await user.click(row);
     expect(openDetail).toHaveBeenCalledWith({
+      kind: 'transcript-detail',
       title: 'Tool: mcp__demo__run',
       text: output,
       sourceId: '5:tool:stale-running',
@@ -195,6 +198,7 @@ describe('P3 level-3 routing', () => {
     expect(container.querySelector('.trow-detail')).toBeNull();
     await user.click(container.querySelector('.trow') as HTMLElement);
     expect(openDetail).toHaveBeenCalledWith({
+      kind: 'transcript-detail',
       title: 'Tool: mcp__github__create_issue',
       text: JSON.stringify(JSON.parse(input), null, 2),
       sourceId: '3:tool:tool-input',
@@ -215,6 +219,7 @@ describe('P3 level-3 routing', () => {
     expect(container.querySelector('.trow-ext')).not.toBeNull();
     await user.click(container.querySelector('.trow') as HTMLElement);
     expect(openDetail).toHaveBeenCalledWith({
+      kind: 'transcript-detail',
       title: 'Tool: mcp__demo__run',
       text: `${JSON.stringify(JSON.parse(summary), null, 2)}\n\none\ntwo\nthree`,
       sourceId: '4:tool:tool-combined',
@@ -232,6 +237,7 @@ describe('P3 level-3 routing', () => {
     expect(container.querySelector('.trow-ext')).not.toBeNull();
     await user.click(container.querySelector('.trow') as HTMLElement);
     expect(openDetail).toHaveBeenCalledWith({
+      kind: 'transcript-detail',
       title: 'Grep: /useStableExpand/',
       text: matches.join('\n'),
       sourceId: '1:file-search:fs-1',
@@ -250,14 +256,14 @@ describe('P3 level-3 routing', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Preview-tab semantics (sheet-model)
+// Diff-event preview-tab semantics (sheet-model)
 // ---------------------------------------------------------------------------
 
 function tab(id: string, over: Partial<SheetTab> = {}): SheetTab {
   return { id, group: 'diffs', name: id, kind: 'text', icoKind: 'term', ico: '›', ...over };
 }
 
-describe('P3 preview tab semantics (insertGroupPreviewTab)', () => {
+describe('diff-event preview tab semantics (insertGroupPreviewTab)', () => {
   it('appends when the group has no preview tab', () => {
     const tabs = [tab('a'), tab('b', { preview: false })];
     const next = insertGroupPreviewTab(tabs, 'diffs', tab('c', { preview: true }));
@@ -287,10 +293,10 @@ describe('P3 preview tab semantics (insertGroupPreviewTab)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Sheet: text tab body + pin on double-click
+// Sheet: diff-event text tab body + pin on double-click
 // ---------------------------------------------------------------------------
 
-describe('P3 Sheet text tabs', () => {
+describe('diff-event Sheet text tabs', () => {
   const actions = {
     activateTab: vi.fn(),
     closeTab: vi.fn(),

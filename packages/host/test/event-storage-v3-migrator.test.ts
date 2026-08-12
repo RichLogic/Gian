@@ -166,6 +166,38 @@ function insertMigrationFixture(db: Db): void {
         },
       }),
     );
+    insert.run(
+      'nested-artifact-event',
+      'codex-session',
+      'codex-turn-2',
+      'nested-artifact',
+      'tool.output',
+      JSON.stringify({
+        __gian_event: 2,
+        provider: 'codex',
+        raw: {
+          update: {
+            content: [{ content: 'nested-large-output\n'.repeat(1_200) }],
+            metadataA: 'a'.repeat(9_000),
+            metadataB: 'b'.repeat(9_000),
+          },
+        },
+        display: {
+          type: 'activity.tool',
+          data: { itemId: 'nested-artifact', title: 'Nested', status: 'success' },
+        },
+      }),
+    );
+    insert.run(
+      'wide-fallback-event',
+      'codex-session',
+      'codex-turn-2',
+      'wide-fallback',
+      'diagnostic',
+      JSON.stringify(Object.fromEntries(
+        Array.from({ length: 9 }, (_, index) => [`wide${index}`, `${index}`.repeat(15_000)]),
+      )),
+    );
   })();
 }
 
@@ -255,13 +287,23 @@ test('offline migration is backup-first, lossless, compacting, verifiable, vacuu
     const large = history.listEvents('codex-session').find(event => event.call_id === 'large');
     assert.equal(large?.data.output, 'large-output\n'.repeat(3_000));
     assert.equal(large?.display?.data.output, 'large-output\n'.repeat(3_000));
+    const nested = history.listEvents('codex-session')
+      .find(event => event.call_id === 'nested-artifact');
+    assert.equal(
+      (nested?.data.update as { content?: Array<{ content?: string }> } | undefined)
+        ?.content?.[0]?.content,
+      'nested-large-output\n'.repeat(1_200),
+    );
+    const wide = history.listEvents('codex-session')
+      .find(event => event.call_id === 'wide-fallback');
+    assert.equal(wide?.data.wide8, '8'.repeat(15_000));
     assert.equal(
       (migrated.prepare('SELECT COUNT(*) AS n FROM event_artifacts').get() as { n: number }).n,
-      1,
+      4,
     );
     assert.equal(
       (migrated.prepare('SELECT COUNT(*) AS n FROM event_artifact_links').get() as { n: number }).n,
-      2,
+      5,
     );
     migrated.close();
 

@@ -20,6 +20,7 @@ export type DisplayEventType =
   | 'activity.file-search'
   | 'activity.web-search'
   | 'activity.tool'
+  | 'activity.notice'
   | 'activity.classifier-denied'
   | 'activity.circuit-breaker'
   | 'plan'
@@ -366,6 +367,13 @@ export interface SessionErrorData {
   code?: string;
 }
 
+export interface NoticeData {
+  severity: 'info' | 'warning' | 'error';
+  code: string;
+  title: string;
+  message: string;
+}
+
 // ---------------------------------------------------------------------------
 // Lookup map: display selector → view-data interface
 // ---------------------------------------------------------------------------
@@ -380,6 +388,7 @@ export type DisplayDataByType = {
   'activity.file-search': FileSearchData;
   'activity.web-search': WebSearchData;
   'activity.tool': ToolExecutionData;
+  'activity.notice': NoticeData;
   agent: AgentSpawnData;
   'interaction.question': ApprovalRequestedData;
   'interaction.approval': ApprovalRequestedData;

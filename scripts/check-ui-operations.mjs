@@ -6,7 +6,7 @@
  * WARN MODE (default, `pnpm quality:operations` — for humans): every
  * violation is printed with rule id and file:line, exit code stays 0.
  * `--strict` exits 1 on any violation. STRICT WIRING (Phase 4): the test/CI
- * entry point `scripts/run-tests.mjs` (`pnpm test`, which the release
+ * entry point `scripts/run-tests.mjs` (`pnpm test` and `pnpm test:all`; the release
  * workflow's "Verify source" step runs) invokes this script with `--strict`,
  * so adding a direct mutation from a view or an unclassified Host command
  * fails locally and in CI (proposal §7 Phase 4).
@@ -79,6 +79,7 @@ export const REST_MUTATION_TO_OPERATION = {
   deleteWorkspace: ['workspace.delete'],
   saveClaudeMd: ['workspace.saveClaudeMd'],
   pickWorkspaceFolder: ['workspace.pickFolder'],
+  cloneWorkspaceRepo: ['workspace.cloneRepo'],
   fetchRemotes: ['git.fetch'],
   fetchGitHistory: ['git.historyFetch'],
   abortPendingGitOp: ['git.abortPendingOp'],

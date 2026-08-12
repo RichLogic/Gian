@@ -32,7 +32,7 @@ function kimiAgent(overrides: Partial<AgentSpawnItem> = {}): AgentSpawnItem {
   };
 }
 
-describe('chat-owned Plan and Agent detail', () => {
+describe('chat-owned panel 2 detail', () => {
   it('keeps Plan inline with no separate Chat panel action', async () => {
     const user = userEvent.setup();
     const open = vi.fn();
@@ -95,6 +95,25 @@ describe('chat-owned Plan and Agent detail', () => {
     expect(screen.getByText(/Read the reducer/)).toBeInTheDocument();
     expect(screen.getByText(/Found and repaired/)).toBeInTheDocument();
     expect(screen.queryByText(/tokens/i)).not.toBeInTheDocument();
+  });
+
+  it('renders full transcript detail without assigning it to a workbench rail', () => {
+    render(
+      <ChatContextPanel
+        target={{
+          kind: 'transcript-detail',
+          title: 'Tool: Asking user questions',
+          text: '{\n  "question": "Which path?"\n}',
+          sourceId: '4:tool:ask',
+          sessionId: 'session-1',
+        }}
+        items={[]}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole('complementary', { name: 'Tool: Asking user questions' })).toBeInTheDocument();
+    expect(screen.getByText(/Which path/)).toHaveClass('chat-context-detail');
   });
 });
 

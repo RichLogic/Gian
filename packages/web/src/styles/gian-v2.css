@@ -76,14 +76,12 @@
   background: var(--bg);
 }
 
-/* Hairline between the window-chrome button cluster and the path breadcrumb —
- * same divider idiom as Air's titlebar. */
+/* Spacer between the window-chrome button cluster and the path breadcrumb — dividers are hidden by design; this is spacing only. */
 .tb-divider {
   width: 1px;
   height: 16px;
   flex: none;
   margin: 0 4px;
-  background: var(--hairline);
 }
 .tb-toggle {
   width: 26px; height: 26px;
@@ -730,17 +728,6 @@ button.sb-section:hover { color: var(--text); }
 .msg.user.stuck {
   box-shadow: 0 6px 14px -10px rgba(0,0,0,0.18);
 }
-.msg.user.stuck::after {
-  /* hairline at the bottom — sits just under the gradient fade */
-  content: "";
-  position: absolute;
-  left: -20px; right: -20px;
-  bottom: -1px;
-  height: 1px;
-  background: var(--hairline);
-  opacity: 0.55;
-  pointer-events: none;
-}
 .msg-body { flex: 1; min-width: 0; }
 .msg.user .msg-body { display: flex; flex-direction: column; align-items: flex-end; }
 .msg-time {
@@ -1281,7 +1268,6 @@ button.sb-section:hover { color: var(--text); }
 .sheet-open-split .sheet-open-caret {
   width: 16px;
   border-radius: 0 var(--r-2) var(--r-2) 0;
-  border-left: 1px solid var(--hairline);
 }
 .sheet-open-split .sheet-open-main:hover,
 .sheet-open-split .sheet-open-caret:hover,
@@ -1315,7 +1301,7 @@ button.sb-section:hover { color: var(--text); }
 .app-icon { border-radius: var(--r-1); object-fit: contain; flex: none; vertical-align: middle; }
 .app-icon-fallback { display: inline-block; background: var(--surface-3); border-radius: var(--r-1); }
 .sheet-act-item.dim { color: var(--text-3); }
-.sheet-act-sep { height: 1px; background: var(--hairline); margin: 4px 2px; }
+.sheet-act-sep { height: 1px; margin: 4px 2px; }
 
 .sheet-content {
   flex: 1; min-height: 0;
@@ -1497,6 +1483,10 @@ button.sb-section:hover { color: var(--text); }
   min-height: 0;
   margin: var(--sp-2) 0 var(--sp-2) 0;
 }
+.changes-inspector {
+  min-width: 0;
+  container-type: inline-size;
+}
 .insp-head {
   flex: none;
   height: var(--panel-header-h);
@@ -1596,20 +1586,6 @@ button.sb-section:hover { color: var(--text); }
 }
 .tree-children { padding-left: 6px; }
 
-.changes-summary {
-  display: flex; align-items: center; gap: 12px;
-  padding: 8px 12px;
-  margin: 0 2px 4px;
-  font: 600 10.5px/1 var(--font-mono);
-  color: var(--text-3);
-  background: var(--surface-2);
-  border-radius: var(--r-1);
-  text-transform: none;
-  letter-spacing: 0.05em;
-}
-.changes-summary .count { color: var(--text-2); }
-.changes-summary .add { color: var(--ok); margin-left: auto; }
-.changes-summary .del { color: var(--warn); }
 .changes-foot {
   flex: none;
   padding: 10px 12px;
@@ -1632,23 +1608,34 @@ button.sb-section:hover { color: var(--text); }
   margin-top: 2px;
 }
 
-/* Diff-source scope picker in the Changes inspector header. Custom dropdown
-   (not a native <select>) so it can show a ✓ on the active scope, matching
-   Codex's picker. Trigger chrome mirrors the old <select>. */
-.insp-head .changes-scope { margin-left: auto; position: relative; }
+/* The diff-source picker sits right-aligned in the title row; the contextual
+   Branch / Committed picker gets a right-aligned row below. */
+.insp-head .changes-scope {
+  margin-left: auto;
+  position: relative;
+  min-width: 0;
+}
+.changes-controls {
+  flex: none;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 10px 8px;
+}
 .changes-scope-btn {
   display: inline-flex; align-items: center; gap: 4px;
-  font: 600 10px/1 var(--font-mono);
+  font: 600 var(--fz-11)/1 var(--font-mono);
   text-transform: none;
   letter-spacing: 0.04em;
   color: var(--text-2);
-  background: var(--surface-2);
-  border: 1px solid var(--hairline);
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: var(--r-1);
   padding: 3px 6px;
   cursor: pointer;
 }
-.changes-scope-btn:hover { color: var(--text); }
+.changes-scope-btn:hover { color: var(--text); background: var(--surface-2); }
 .changes-scope-btn .caret { font-size: 8px; opacity: 0.7; }
 .changes-scope-menu {
   position: absolute;
@@ -1675,11 +1662,11 @@ button.sb-section:hover { color: var(--text); }
 }
 .changes-scope-menu button:hover { background: var(--surface-2); }
 .changes-scope-menu button.active { color: var(--text); font-weight: 600; }
-/* Hairline between scope groups: working-tree slices | history | Last Turn. */
+/* Spacer between scope groups: working-tree slices | history | Last Turn.
+ * The separator hairline is hidden by design — spacing only. */
 .changes-scope-sep {
   height: 1px;
   margin: 4px 6px;
-  background: var(--hairline);
 }
 .changes-scope-menu .ck {
   width: 12px; flex: none;
@@ -1687,43 +1674,58 @@ button.sb-section:hover { color: var(--text); }
   font-size: 11px; text-align: center;
 }
 
-/* Second row under the Changes header (Codex's two-row Review UI — no nested
-   dropdowns): for Branch, `<head> → <base ⌄>`; for Committed, the pinned
-   commit picker. The dropdown is a flat searchable list. */
+/* Contextual second row: for Branch, `<head> → <base ⌄>`; for Committed,
+   the pinned commit picker. */
 .changes-base-row {
-  flex: none;
-  display: flex; align-items: center; gap: 6px;
-  padding: 4px 12px 6px;
-  border-top: 1px solid var(--hairline);
-  font: var(--fz-12)/1.3 var(--font-sans);
-  color: var(--text-3);
+  flex: 0 1 auto;
+  margin-left: auto;
+  min-width: 0;
+  max-width: 100%;
+  display: flex; align-items: center; gap: 4px;
+  font: 600 var(--fz-11)/1 var(--font-mono);
+  letter-spacing: 0.04em;
+  color: var(--text-2);
 }
 .changes-base-row .base-head {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   max-width: 40%;
 }
 .changes-base-row .base-arrow { flex: none; opacity: 0.6; }
-.changes-base { position: relative; min-width: 0; flex: 1; display: flex; }
+.changes-base {
+  position: relative;
+  min-width: 0;
+  display: flex;
+}
 .changes-base-btn {
   display: inline-flex; align-items: center; gap: 4px;
   max-width: 100%;
-  padding: 2px 6px;
-  border: 0; background: transparent;
-  color: var(--text);
+  padding: 3px 6px;
+  border: 1px solid transparent; background: transparent;
+  color: var(--text-2);
   border-radius: var(--r-1);
-  font: var(--fz-12)/1.3 var(--font-sans);
+  font: 600 var(--fz-11)/1 var(--font-mono);
+  letter-spacing: 0.04em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   cursor: pointer;
 }
-.changes-base-btn:hover { background: var(--surface-2); }
+.changes-base-btn:hover { color: var(--text); background: var(--surface-2); }
+.changes-base-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .changes-base-btn .caret { font-size: 8px; opacity: 0.7; flex: none; }
 .changes-base-menu {
   position: absolute;
-  top: calc(100% + 4px); left: 0;
+  top: calc(100% + 4px); right: 0;
   z-index: 31;
-  min-width: 220px;
-  max-width: 300px;
+  box-sizing: border-box;
+  width: min(300px, calc(100cqi - 24px));
+  min-width: min(220px, calc(100cqi - 24px));
+  max-width: calc(100cqi - 24px);
   max-height: 260px;
+  overflow-x: hidden;
   overflow-y: auto;
   display: flex; flex-direction: column;
   padding: 4px;
@@ -1734,6 +1736,9 @@ button.sb-section:hover { color: var(--text); }
 }
 .changes-base-search {
   flex: none;
+  box-sizing: border-box;
+  width: calc(100% - 4px);
+  min-width: 0;
   margin: 2px 2px 4px;
   padding: 5px 8px;
   border: 1px solid var(--hairline);
@@ -1745,7 +1750,12 @@ button.sb-section:hover { color: var(--text); }
 }
 .changes-base-search:focus { border-color: var(--text-3); }
 .changes-base-menu button {
+  flex: none;
   display: flex; align-items: baseline; gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
   text-align: left;
   padding: 6px 8px;
   border: 0; background: transparent;
@@ -1765,6 +1775,13 @@ button.sb-section:hover { color: var(--text); }
 .changes-base-menu .subj {
   flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.changes-base-menu .branch-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .changes-base-menu .rel {
   flex: 0 0 auto;
@@ -2066,7 +2083,6 @@ button.sb-section:hover { color: var(--text); }
 }
 .detail-tabs {
   display: flex; gap: 18px;
-  border-bottom: 1px solid var(--hairline);
   margin-bottom: 20px;
 }
 .detail-tab {
@@ -2172,7 +2188,6 @@ button.sb-section:hover { color: var(--text); }
   border-radius: var(--r-2);
 }
 .wt-row:hover { background: var(--surface); }
-.wt-row + .wt-row { box-shadow: inset 0 1px var(--hairline-2); }
 .wt-ico { color: var(--text-3); display: inline-flex; align-items: center; justify-content: center; }
 .wt-branch {
   font: 500 var(--fz-13)/1.3 var(--font-mono);
@@ -2302,7 +2317,6 @@ button.sb-section:hover { color: var(--text); }
 .exec-row + .exec-row {
   margin-top: 14px;
   padding-top: 14px;
-  border-top: 1px solid var(--hairline);
 }
 .exec-head {
   display: flex; align-items: center; gap: 8px;
@@ -2373,7 +2387,7 @@ button.sb-section:hover { color: var(--text); }
   font: 10px/1 var(--font-mono);
   color: var(--text-3);
 }
-.session-menu .rule { height: 1px; background: var(--hairline); margin: 4px 4px; }
+.session-menu .rule { height: 1px; margin: 4px 4px; }
 
 /* ============================================================
    v3 REVIEW PASS — dock groups, hints, etc.
@@ -2422,7 +2436,6 @@ button.sb-section:hover { color: var(--text); }
   width: 18px;
   height: 1px;
   margin: 4px auto;
-  background: var(--hairline);
   flex: none;
 }
 /* per-group hover affordance to reinforce visual difference */
@@ -2740,28 +2753,26 @@ button.sb-section:hover { color: var(--text); }
 .h-detached svg { width: 12px; height: 12px; flex: none; color: var(--warn); }
 .h-detached code { font: 600 10.5px/1 var(--font-mono); color: var(--text); }
 
-.h-filters { flex: none; display: flex; align-items: center; gap: 6px; padding: 0 10px 8px; }
+.h-filters { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 0 10px 8px; }
 .h-chip {
   display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%;
-  font: 600 10px/1 var(--font-mono); letter-spacing: 0.04em;
-  color: var(--text-2); background: var(--surface-2);
-  border: 1px solid var(--hairline); border-radius: var(--r-1); padding: 3px 6px; cursor: pointer;
+  font: 600 var(--fz-11)/1 var(--font-mono); letter-spacing: 0.04em;
+  color: var(--text-2); background: transparent;
+  border: 1px solid transparent; border-radius: var(--r-1); padding: 3px 6px; cursor: pointer;
 }
-.h-chip:hover { color: var(--text); }
+.h-chip:hover { color: var(--text); background: var(--surface-2); }
 .h-chip:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -1px; }
 .h-chip svg { width: 10px; height: 10px; flex: none; color: var(--text-3); }
 .h-chip .v { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .h-chip .caret { font-size: 8px; opacity: 0.7; flex: none; }
 .h-chip.on { color: var(--accent-text); background: var(--accent-soft); border-color: oklch(from var(--accent) l c h / 0.35); }
 .h-chip.on svg { color: var(--accent-text); }
-.h-chip .x { flex: none; font-size: 10px; opacity: 0.7; padding: 0 1px; }
-.h-chip .x:hover { opacity: 1; }
 
 .h-menu-anchor { position: relative; display: inline-flex; min-width: 0; flex: 0 1 auto; }
-/* Right-edge anchors (e.g. the History author chip) fly their menu out to the
- * LEFT so it can never extend past the inspector edge and cover the rail —
+/* The inspector's right-aligned filter chips fly their menus out to the LEFT
+ * so they can never extend past the panel edge and cover the rail —
  * .inspector deliberately has no overflow:hidden (see its comment). */
-.h-menu-anchor.end .h-menu { left: auto; right: 0; }
+.h-filters .h-menu { left: auto; right: 0; }
 .h-menu {
   position: absolute; top: calc(100% + 4px); left: 0; z-index: 60;
   min-width: 180px; max-width: 260px; max-height: 260px; overflow-y: auto;
@@ -2784,7 +2795,7 @@ button.sb-section:hover { color: var(--text); }
 .h-menu .ck { width: 12px; flex: none; align-self: center; color: var(--accent); font-size: 11px; text-align: center; }
 .h-menu .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; max-width: 120px; align-self: center; }
 .h-menu .sub { margin-left: auto; padding-left: 10px; flex: none; font: 9.5px/1.3 var(--font-mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
-.h-menu-sep { height: 1px; margin: 4px 6px; background: var(--hairline); }
+.h-menu-sep { height: 1px; margin: 4px 6px; }
 .h-menu-backdrop { position: fixed; inset: 0; z-index: 55; }
 
 .h-list { position: relative; }
@@ -2863,8 +2874,8 @@ button.sb-section:hover { color: var(--text); }
 .cs-banner svg { width: 13px; height: 13px; flex: none; margin-top: 1px; color: var(--warn); }
 .cs-banner b { font-weight: 600; }
 
-.cs-head { flex: none; padding: 14px 16px 12px; border-bottom: 1px solid var(--hairline); }
-.cs-head-skeleton { flex: none; padding: 16px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--hairline); }
+.cs-head { flex: none; padding: 14px 16px 12px; }
+.cs-head-skeleton { flex: none; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
 .cs-subject { font: 600 var(--fz-14)/1.35 var(--font-sans); letter-spacing: -0.01em; color: var(--text); }
 .cs-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-top: 8px; font: var(--fz-11)/1.4 var(--font-sans); color: var(--text-2); }
 .cs-author { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; color: var(--text); }
@@ -2878,9 +2889,9 @@ button.sb-section:hover { color: var(--text); }
 }
 .cs-sha-btn:hover { filter: brightness(0.97); }
 .cs-sha-btn svg { width: 11px; height: 11px; }
-/* Toolbar under the header divider: file stats left, view actions right
+/* Toolbar under the header: file stats left, view actions right
  * (collapse-all / unified⇄split / word-wrap / ⋯). */
-.cs-toolbar { flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 16px; border-bottom: 1px solid var(--hairline); }
+.cs-toolbar { flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 16px; }
 .cs-toolbar .cs-stats { flex: 1 1 auto; min-width: 0; margin-top: 0; }
 .cs-actions { flex: none; display: inline-flex; align-items: center; gap: 2px; }
 .cs-stats { display: flex; align-items: center; gap: 10px; margin-top: 10px; font: 600 10.5px/1 var(--font-mono); color: var(--text-3); letter-spacing: 0.05em; }
@@ -2894,8 +2905,6 @@ button.sb-section:hover { color: var(--text); }
 .cs-base svg { width: 11px; height: 11px; color: var(--text-3); flex: none; }
 
 .cs-files { flex: none; padding: 8px 0 18px; }
-.cs-file { border-top: 1px solid var(--hairline-2); }
-.cs-file:first-child { border-top: 0; }
 .cs-file + .cs-file { margin-top: 4px; }
 .cs-file-head {
   display: flex; align-items: center; gap: 8px;

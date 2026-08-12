@@ -9,6 +9,7 @@ import { useState } from 'react';
 import { describe, expect, it } from 'vitest';
 import { useWorkbenchLayout } from '../src/controllers/use-workbench-layout.js';
 import type { RailId, SheetGroup, SheetTab } from '../src/components/sheet-model.js';
+import type { ChatPanelTarget } from '../src/presentation/chat-panel.js';
 
 const GROUP_OF_RAIL: Record<RailId, SheetGroup | null> = {
   files: 'files',
@@ -29,7 +30,7 @@ const diffsTab: SheetTab = {
   ico: '',
 } as SheetTab;
 
-function useHarness() {
+function useHarness(chatPanel: ChatPanelTarget | null = null) {
   const [p3Collapsed, setP3Collapsed] = useState(false);
   const layout = useWorkbenchLayout({
     mode: 'sessions',
@@ -38,7 +39,7 @@ function useHarness() {
     tabs: [diffsTab],
     activeTabByGroup: { diffs: 'changes-1' },
     viewState: 'both',
-    chatPanel: null,
+    chatPanel,
     filesInspectorSuppressed: false,
     p3Collapsed,
     setP3Collapsed,
@@ -61,6 +62,31 @@ describe('useWorkbenchLayout panel-3 gating', () => {
     expect(result.current.layout.inspectorVisible).toBe(false);
     expect(result.current.layout.inspectorAvailable).toBe(true);
     expect(result.current.layout.sheetVisible).toBe(true);
+  });
+
+  it('gives chat-owned transcript detail exclusive use of panel 2 and restores the rail scene on close', () => {
+    const detail: ChatPanelTarget = {
+      kind: 'transcript-detail',
+      title: 'Tool: Asking user questions',
+      text: '{"question":"Which path?"}',
+      sourceId: '4:tool:ask',
+      sessionId: 'session-1',
+    };
+    const { result, rerender } = renderHook(
+      ({ chatPanel }) => useHarness(chatPanel),
+      { initialProps: { chatPanel: detail as ChatPanelTarget | null } },
+    );
+
+    expect(result.current.layout.activeGroup).toBe('diffs');
+    expect(result.current.layout.sheetMounted).toBe(true);
+    expect(result.current.layout.sheetVisible).toBe(false);
+    expect(result.current.layout.inspectorAvailable).toBe(false);
+    expect(result.current.layout.inspectorVisible).toBe(false);
+
+    rerender({ chatPanel: null });
+    expect(result.current.layout.sheetVisible).toBe(true);
+    expect(result.current.layout.inspectorAvailable).toBe(true);
+    expect(result.current.layout.inspectorVisible).toBe(true);
   });
 
   it('history rail: inspector maps to history and panel 2 stays visible with zero tabs', () => {

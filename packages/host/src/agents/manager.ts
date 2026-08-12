@@ -15,9 +15,18 @@ import {
 } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative } from 'node:path';
-import { createInterface } from 'node:readline';
 import { once } from 'node:events';
 import { promisify } from 'node:util';
+import {
+  HostProtocolValidator,
+  PROTOCOL_NAME,
+  PROTOCOL_V1,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  manifestV2Schema,
+  protocolRangeIncludes,
+  readNdjsonLines,
+  type ManifestV2,
+} from '@gian/proxy-protocol';
 import type {
   AgentCliStatus,
   AgentInstallResult,
@@ -44,6 +53,7 @@ const CONFIG_LOCK_AGENT_ID = '__agent-config__';
 const PROXY_ENTRY = 'proxy.mjs';
 const MAX_INSTALLER_BYTES = 2 * 1024 * 1024;
 const MAX_PROXY_BYTES = 64 * 1024 * 1024;
+const MAX_PROXY_MANIFEST_BYTES = 64 * 1024;
 const PROXY_SELF_TEST_TIMEOUT_MS = 5_000;
 const PROXY_COMPATIBILITY_TIMEOUT_MS = 30_000;
 const STATUS_CACHE_TTL_MS = 30_000;
@@ -79,11 +89,23 @@ interface AgentConfigFile {
   proxyDefaults: Partial<Record<Executor, AgentProxyDefaults>>;
 }
 
-interface ProxyManifest {
+interface LegacyProxyManifest {
   schemaVersion: 1;
   id: Executor;
   version: string;
   entry: typeof PROXY_ENTRY;
+}
+
+type ManagedProxyManifestV2 = Omit<ManifestV2, 'id'> & { id: Executor };
+type ProxyManifest = LegacyProxyManifest | ManagedProxyManifestV2;
+type ProxyWireProtocol = 'legacy' | typeof PROTOCOL_NAME;
+
+export interface ProxyLaunchDescriptor {
+  entryPath: string;
+  protocolV1?: {
+    pluginVersion: string;
+    processScope: ManagedProxyManifestV2['process']['scope'];
+  };
 }
 
 interface ProxyProtocolResponse {
@@ -97,6 +119,9 @@ export interface AgentManagerOptions {
   releaseVersion: string;
   releaseRepository?: string;
   managedProxies: boolean;
+  /** Production release channel for independently tagged Proxy plugins.
+   * Kept opt-in so older release fixtures can still exercise schema v1. */
+  independentProxyReleases?: boolean;
   developmentProxyEntries?: Partial<Record<Executor, string>>;
   environmentCliPaths?: Partial<Record<Executor, string>>;
   homeDir?: string;
@@ -114,6 +139,8 @@ export interface AgentManagerOptions {
     id: Executor;
     version: string;
     entryPath: string;
+    protocol: ProxyWireProtocol;
+    processScope?: ManagedProxyManifestV2['process']['scope'];
   }) => Promise<void>;
   /** Test seam for the single atomic activation commit. Production always
    * uses fs.rename; a rejection proves the prior pointer remains untouched. */
@@ -207,6 +234,29 @@ function isCompatibleProxyVersion(proxyVersion: string, releaseVersion: string):
   return hotfixMatch?.[1] === proxyVersion;
 }
 
+function isLegacyProxyManifest(manifest: ProxyManifest): manifest is LegacyProxyManifest {
+  return manifest.schemaVersion === 1;
+}
+
+function proxyManifestVersion(manifest: ProxyManifest): string {
+  return isLegacyProxyManifest(manifest) ? manifest.version : manifest.pluginVersion;
+}
+
+function proxyManifestProtocol(manifest: ProxyManifest): ProxyWireProtocol {
+  return isLegacyProxyManifest(manifest) ? 'legacy' : manifest.protocol.name;
+}
+
+function isCompatibleProxyManifest(
+  manifest: ProxyManifest,
+  releaseVersion: string,
+): boolean {
+  return isLegacyProxyManifest(manifest)
+    ? isCompatibleProxyVersion(manifest.version, releaseVersion)
+    : SUPPORTED_PROTOCOL_VERSIONS.some(version => (
+      protocolRangeIncludes(manifest.protocol.range, version)
+    ));
+}
+
 function normalizeRepository(value: string): string {
   const trimmed = value.trim();
   if (!/^[0-9A-Za-z_.-]+\/[0-9A-Za-z_.-]+$/.test(trimmed)) {
@@ -280,6 +330,100 @@ export function parseReleaseAssetDigests(
     }
   }
   return digests;
+}
+
+interface ProxyRelease {
+  tag: string;
+  version: string;
+}
+
+interface ProxyReleaseCandidate extends ProxyRelease {
+  metadata: Record<string, unknown>;
+  semver: ParsedSemver;
+}
+
+interface ParsedSemver {
+  core: [number, number, number];
+  prerelease: Array<number | string>;
+}
+
+function parseSemver(value: string): ParsedSemver | null {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value);
+  if (!match) return null;
+  return {
+    core: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: match[4]
+      ? match[4].split('.').map(part => /^\d+$/.test(part) ? Number(part) : part)
+      : [],
+  };
+}
+
+function compareSemver(left: ParsedSemver, right: ParsedSemver): number {
+  for (let index = 0; index < left.core.length; index += 1) {
+    if (left.core[index] !== right.core[index]) {
+      return left.core[index]! - right.core[index]!;
+    }
+  }
+  if (left.prerelease.length === 0 || right.prerelease.length === 0) {
+    return left.prerelease.length === right.prerelease.length
+      ? 0
+      : left.prerelease.length === 0 ? 1 : -1;
+  }
+  const length = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = left.prerelease[index];
+    const rightPart = right.prerelease[index];
+    if (leftPart === undefined || rightPart === undefined) {
+      return leftPart === rightPart ? 0 : leftPart === undefined ? -1 : 1;
+    }
+    if (leftPart === rightPart) continue;
+    if (typeof leftPart === 'number' && typeof rightPart === 'number') {
+      return leftPart - rightPart;
+    }
+    if (typeof leftPart === 'number') return -1;
+    if (typeof rightPart === 'number') return 1;
+    return leftPart.localeCompare(rightPart);
+  }
+  return 0;
+}
+
+function parseIndependentProxyReleaseCandidates(
+  value: unknown,
+  id: Executor,
+): ProxyReleaseCandidate[] {
+  if (!Array.isArray(value)) {
+    throw new Error('GitHub Proxy release listing is invalid.');
+  }
+  const prefix = `proxy-${id}-v`;
+  const candidates: ProxyReleaseCandidate[] = [];
+  for (const candidate of value) {
+    const release = objectRecord(candidate);
+    if (!release) continue;
+    const tag = release['tag_name'];
+    if (
+      typeof tag !== 'string'
+      || !tag.startsWith(prefix)
+      || release['draft'] === true
+      || release['prerelease'] === true
+    ) continue;
+    const version = tag.slice(prefix.length);
+    const semver = parseSemver(version);
+    if (!semver || semver.prerelease.length > 0) continue;
+    candidates.push({ tag, version, metadata: release, semver });
+  }
+  candidates.sort((left, right) => compareSemver(right.semver, left.semver));
+  if (candidates.length === 0) {
+    throw new Error(`No stable independent ${id} Proxy release was found.`);
+  }
+  return candidates;
+}
+
+export function parseIndependentProxyRelease(
+  value: unknown,
+  id: Executor,
+): ProxyRelease {
+  const selected = parseIndependentProxyReleaseCandidates(value, id)[0]!;
+  return { tag: selected.tag, version: selected.version };
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | null {
@@ -442,6 +586,45 @@ export class AgentManager {
       return entry;
     }
     return join(this.options.dataDir, 'plugins', id, 'current', PROXY_ENTRY);
+  }
+
+  async proxyLaunchDescriptor(id: Executor): Promise<ProxyLaunchDescriptor> {
+    if (!this.options.managedProxies) {
+      return { entryPath: this.proxyEntry(id) };
+    }
+    const agentRoot = join(this.options.dataDir, 'plugins', id);
+    let current: string;
+    try {
+      current = await realpath(join(agentRoot, 'current'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        try {
+          await lstat(join(agentRoot, 'current'));
+        } catch (currentError) {
+          if ((currentError as NodeJS.ErrnoException).code === 'ENOENT') {
+            // A fresh profile has no managed Proxy yet. The Host still needs
+            // to reach onboarding, where installation is offered; this
+            // nominal path is not spawned until the Agent becomes ready.
+            return { entryPath: this.proxyEntry(id) };
+          }
+          throw currentError;
+        }
+      }
+      throw error;
+    }
+    const contained = await this.assertDirectProxyDirectory(agentRoot, current);
+    const manifest = await this.validateProxyDirectory(contained, id);
+    return {
+      entryPath: join(contained, manifest.entry),
+      ...(!isLegacyProxyManifest(manifest)
+        ? {
+            protocolV1: {
+              pluginVersion: manifest.pluginVersion,
+              processScope: manifest.process.scope,
+            },
+          }
+        : {}),
+    };
   }
 
   async list(refresh = false): Promise<AgentInstallStatus[]> {
@@ -740,10 +923,14 @@ export class AgentManager {
         throw new Error('Managed proxy packages support macOS Apple Silicon only.');
       }
 
-      const filename = `gian-proxy-${id}-${this.releaseVersion}-darwin-arm64.tar.gz`;
-      const baseUrl = `https://github.com/${this.releaseRepository}/releases/download/v${this.releaseVersion}`;
+      const release = await this.resolveProxyRelease(id);
+      const filename = `gian-proxy-${id}-${release.version}-darwin-arm64.tar.gz`;
+      const baseUrl = `https://github.com/${this.releaseRepository}/releases/download/${release.tag}`;
       const checksumFilename = `${filename}.sha256`;
-      const officialDigests = await this.releaseAssetDigests([filename, checksumFilename]);
+      const officialDigests = await this.releaseAssetDigests(
+        release.tag,
+        [filename, checksumFilename],
+      );
       const [archive, checksumFile] = await Promise.all([
         this.download(`${baseUrl}/${filename}`, MAX_PROXY_BYTES),
         this.download(`${baseUrl}/${checksumFilename}`, 4_096),
@@ -762,7 +949,6 @@ export class AgentManager {
       const staging = join(agentRoot, `.staging-${randomUUID()}`);
       const archivePath = join(staging, filename);
       const extracted = join(staging, 'package');
-      const finalDir = join(agentRoot, this.releaseVersion);
       await mkdir(extracted, { recursive: true });
       try {
         await writeFile(archivePath, archive);
@@ -770,15 +956,36 @@ export class AgentManager {
           timeout: 60_000,
           maxBuffer: 2 * 1024 * 1024,
         });
-        await this.validateProxyDirectory(extracted, id, this.releaseVersion);
+        const extractedManifest = await this.validateProxyDirectory(extracted, id);
+        if (isLegacyProxyManifest(extractedManifest) && (
+          this.options.independentProxyReleases
+          || extractedManifest.version !== this.releaseVersion
+        )) {
+          throw new Error(`Invalid ${id} proxy manifest.`);
+        }
+        if (
+          !isLegacyProxyManifest(extractedManifest)
+          && this.options.independentProxyReleases
+          && extractedManifest.pluginVersion !== release.version
+        ) {
+          throw new Error(`${id} Proxy manifest version does not match release ${release.tag}.`);
+        }
+        if (!isCompatibleProxyManifest(extractedManifest, this.releaseVersion)) {
+          throw new Error(`${id} Proxy does not support ${PROTOCOL_NAME}/${PROTOCOL_V1}.`);
+        }
+        const candidateVersion = safeReleaseValue(
+          proxyManifestVersion(extractedManifest),
+          `${id} Proxy version`,
+        );
+        const finalDir = join(agentRoot, candidateVersion);
         try {
           await rename(extracted, finalDir);
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code;
           if (code !== 'EEXIST' && code !== 'ENOTEMPTY') throw error;
-          await this.validateProxyDirectory(finalDir, id, this.releaseVersion);
+          await this.validateProxyDirectory(finalDir, id, candidateVersion);
         }
-        await this.activateProxy(agentRoot, id, this.releaseVersion, updateOwner);
+        await this.activateProxy(agentRoot, id, candidateVersion, updateOwner);
       } finally {
         await rm(staging, { recursive: true, force: true });
       }
@@ -894,12 +1101,13 @@ export class AgentManager {
       const current = await realpath(join(agentRoot, 'current'));
       const contained = await this.assertDirectProxyDirectory(agentRoot, current);
       const manifest = await this.validateProxyDirectory(contained, id);
+      const version = proxyManifestVersion(manifest);
       return {
-        state: isCompatibleProxyVersion(manifest.version, this.releaseVersion)
+        state: isCompatibleProxyManifest(manifest, this.releaseVersion)
           ? 'ready'
           : 'outdated',
         path: join(contained, manifest.entry),
-        version: manifest.version,
+        version,
         source: 'github-release',
       };
     } catch (error) {
@@ -922,17 +1130,33 @@ export class AgentManager {
     expectedVersion?: string,
   ): Promise<ProxyManifest> {
     const raw = await readFile(join(directory, 'manifest.json'), 'utf8');
-    const manifest = JSON.parse(raw) as Partial<ProxyManifest>;
-    if (
-      manifest.schemaVersion !== 1 ||
-      manifest.id !== id ||
-      manifest.entry !== PROXY_ENTRY ||
-      typeof manifest.version !== 'string' ||
-      (expectedVersion && manifest.version !== expectedVersion)
-    ) {
+    const candidate = JSON.parse(raw) as unknown;
+    let validated: ProxyManifest;
+    const legacy = objectRecord(candidate);
+    if (legacy?.['schemaVersion'] === 1) {
+      if (
+        legacy['id'] !== id
+        || legacy['entry'] !== PROXY_ENTRY
+        || typeof legacy['version'] !== 'string'
+        || (expectedVersion && legacy['version'] !== expectedVersion)
+      ) {
+        throw new Error(`Invalid ${id} proxy manifest.`);
+      }
+      validated = candidate as LegacyProxyManifest;
+    } else {
+      const parsed = manifestV2Schema.safeParse(candidate);
+      if (
+        !parsed.success
+        || parsed.data.id !== id
+        || (expectedVersion && parsed.data.pluginVersion !== expectedVersion)
+      ) {
+        throw new Error(`Invalid ${id} proxy manifest.`);
+      }
+      validated = parsed.data as ManagedProxyManifestV2;
+    }
+    if (validated.id !== id) {
       throw new Error(`Invalid ${id} proxy manifest.`);
     }
-    const validated = manifest as ProxyManifest;
     const resolvedDirectory = await realpath(directory);
     const entry = join(resolvedDirectory, validated.entry);
     const entryInfo = await lstat(entry);
@@ -960,6 +1184,15 @@ export class AgentManager {
         timeout: PROXY_SELF_TEST_TIMEOUT_MS,
         maxBuffer: 64 * 1024,
         encoding: 'utf8',
+        env: {
+          ...process.env,
+          ...(!isLegacyProxyManifest(manifest)
+            ? {
+                GIAN_PLUGIN_ID: manifest.id,
+                GIAN_PROTOCOL_VERSIONS: SUPPORTED_PROTOCOL_VERSIONS.join(','),
+              }
+            : {}),
+        },
       });
       stdout = String(result.stdout).trim();
       stderr = String(result.stderr).trim();
@@ -968,7 +1201,12 @@ export class AgentManager {
       throw new Error(`${manifest.id} proxy self-test failed: ${detail}`);
     }
 
-    let response: { schemaVersion?: unknown; id?: unknown; ok?: unknown };
+    let response: {
+      schemaVersion?: unknown;
+      id?: unknown;
+      pluginVersion?: unknown;
+      ok?: unknown;
+    };
     try {
       response = JSON.parse(stdout) as typeof response;
     } catch {
@@ -976,11 +1214,12 @@ export class AgentManager {
         `${manifest.id} proxy self-test returned invalid JSON${stderr ? `: ${stderr}` : '.'}`,
       );
     }
-    if (
-      response.schemaVersion !== 1
-      || response.id !== manifest.id
-      || response.ok !== true
-    ) {
+    const validLegacy = isLegacyProxyManifest(manifest)
+      && response.schemaVersion === 1;
+    const validV2 = !isLegacyProxyManifest(manifest)
+      && response.schemaVersion === 2
+      && response.pluginVersion === manifest.pluginVersion;
+    if ((!validLegacy && !validV2) || response.id !== manifest.id || response.ok !== true) {
       throw new Error(`${manifest.id} proxy self-test returned an invalid result.`);
     }
   }
@@ -997,6 +1236,9 @@ export class AgentManager {
     const candidate = join(agentRoot, version);
     const resolvedCandidate = await this.assertDirectProxyDirectory(agentRoot, candidate);
     const manifest = await this.validateProxyDirectory(resolvedCandidate, id, version);
+    if (!isCompatibleProxyManifest(manifest, this.releaseVersion)) {
+      throw new Error(`${id} Proxy does not support ${PROTOCOL_NAME}/${PROTOCOL_V1}.`);
+    }
     // Compatibility is a gate before the atomic pointer swap. While this is
     // pending or failing, every reader continues to resolve the old `current`.
     const activationProbe = this.options.proxyActivationProbe ?? (
@@ -1004,8 +1246,12 @@ export class AgentManager {
     );
     const probeInput = {
       id,
-      version,
+      version: proxyManifestVersion(manifest),
       entryPath: join(resolvedCandidate, manifest.entry),
+      protocol: proxyManifestProtocol(manifest),
+      ...(!isLegacyProxyManifest(manifest)
+        ? { processScope: manifest.process.scope }
+        : {}),
     };
     await activationProbe(probeInput);
 
@@ -1111,6 +1357,8 @@ export class AgentManager {
     id: Executor;
     version: string;
     entryPath: string;
+    protocol: ProxyWireProtocol;
+    processScope?: ManagedProxyManifestV2['process']['scope'];
   }, updateOwner: AgentUpdateLease): Promise<void> {
     const runtime = await this.resolveCompatibilityRuntime(input.id, updateOwner);
     const probeDirectory = join(
@@ -1120,12 +1368,14 @@ export class AgentManager {
     );
     await mkdir(probeDirectory, { recursive: true, mode: 0o700 });
     const args = [input.entryPath];
-    if (input.id === 'claude') {
-      args.push('--data-dir', probeDirectory);
-    } else if (input.id === 'codex') {
-      args.push('--data-dir', probeDirectory, '--codex-bin', runtime.binaryPath);
-    } else {
-      args.push('--kimi-bin', runtime.binaryPath);
+    if (input.protocol === 'legacy') {
+      if (input.id === 'claude') {
+        args.push('--data-dir', probeDirectory);
+      } else if (input.id === 'codex') {
+        args.push('--data-dir', probeDirectory, '--codex-bin', runtime.binaryPath);
+      } else {
+        args.push('--kimi-bin', runtime.binaryPath);
+      }
     }
     let reservation: Awaited<ReturnType<AgentUpdateLease['reserveProcessGroup']>>;
     try {
@@ -1149,9 +1399,18 @@ export class AgentManager {
         env: {
           ...process.env,
           ...runtime.env,
-          ...(input.id === 'claude' ? { CLAUDE_BIN: runtime.binaryPath } : {}),
-          ...(input.id === 'codex' ? { CODEX_BIN: runtime.binaryPath } : {}),
-          ...(input.id === 'kimi' ? { KIMI_BIN: runtime.binaryPath } : {}),
+          ...(input.protocol === PROTOCOL_NAME
+            ? {
+                GIAN_PLUGIN_ID: input.id,
+                GIAN_PLUGIN_DATA_DIR: probeDirectory,
+                GIAN_RUNTIME_BIN: runtime.binaryPath,
+                GIAN_PROTOCOL_VERSIONS: SUPPORTED_PROTOCOL_VERSIONS.join(','),
+              }
+            : {
+                ...(input.id === 'claude' ? { CLAUDE_BIN: runtime.binaryPath } : {}),
+                ...(input.id === 'codex' ? { CODEX_BIN: runtime.binaryPath } : {}),
+                ...(input.id === 'kimi' ? { KIMI_BIN: runtime.binaryPath } : {}),
+              }),
         },
       });
     } catch (error) {
@@ -1180,8 +1439,7 @@ export class AgentManager {
     child.once('exit', () => {
       exited = true;
     });
-    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-    const iterator = lines[Symbol.asyncIterator]();
+    const iterator = readNdjsonLines(child.stdout)[Symbol.asyncIterator]();
     let timeout!: ReturnType<typeof setTimeout>;
     const deadline = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => reject(new Error(
@@ -1193,9 +1451,21 @@ export class AgentManager {
       const pipeFailure = stdinError as Error | null;
       return spawnFailure?.message || pipeFailure?.message || stderr.trim() || 'process exited';
     };
+    const validator = input.protocol === PROTOCOL_NAME
+      ? new HostProtocolValidator({
+          pluginId: input.id,
+          ...(input.processScope ? { processScope: input.processScope } : {}),
+        })
+      : null;
 
-    const request = async (id: number, method: string): Promise<unknown> => {
-      const frame = `${JSON.stringify({ id, method })}\n`;
+    const request = async (
+      id: number,
+      method: string,
+      params: Record<string, unknown> = {},
+    ): Promise<unknown> => {
+      const payload = validator ? { id, method, params } : { id, method };
+      if (validator) validator.registerRequest(payload);
+      const frame = `${JSON.stringify(payload)}\n`;
       if (exited || spawnError || stdinError) {
         throw new Error(`${input.id} Proxy compatibility process stopped: ${processFailureDetail()}`);
       }
@@ -1206,6 +1476,18 @@ export class AgentManager {
         const next = await Promise.race([iterator.next(), deadline]);
         if (next.done) {
           throw new Error(`${input.id} Proxy compatibility process stopped: ${processFailureDetail()}`);
+        }
+        if (validator) {
+          const accepted = validator.acceptLine(next.value);
+          if (accepted === null || !('id' in accepted)) continue;
+          if (accepted.id !== id) continue;
+          if (accepted.error !== undefined) {
+            const error = objectRecord(accepted.error);
+            throw new Error(
+              `${input.id} Proxy ${method} failed: ${String(error?.['message'] ?? error?.['code'])}`,
+            );
+          }
+          return accepted.result;
         }
         let response: ProxyProtocolResponse;
         try {
@@ -1238,16 +1520,31 @@ export class AgentManager {
       if (registration === 'already-empty') {
         throw new Error(`${input.id} Proxy compatibility process exited before registration.`);
       }
-      validateProxyInitialize(input.id, await request(1, 'initialize'));
-      validateProxyCapabilities(input.id, await request(2, 'capabilities.list'));
-      await request(3, 'shutdown');
+      if (validator) {
+        await request(1, 'initialize', {
+          protocol: {
+            name: PROTOCOL_NAME,
+            versions: [...SUPPORTED_PROTOCOL_VERSIONS],
+          },
+          host: { name: 'Gian', version: this.releaseVersion },
+        });
+        if (validator.initializeResult?.plugin.version !== input.version) {
+          throw new Error(`${input.id} Proxy handshake version does not match its manifest.`);
+        }
+        await request(2, 'catalog.list');
+        await request(3, 'shutdown');
+      } else {
+        validateProxyInitialize(input.id, await request(1, 'initialize'));
+        validateProxyCapabilities(input.id, await request(2, 'capabilities.list'));
+        await request(3, 'shutdown');
+      }
     } catch (error) {
       operationFailed = true;
       operationError = error;
     }
 
     clearTimeout(timeout);
-    lines.close();
+    await iterator.return?.(undefined);
     try { child.stdin.end(); } catch { /* pipe already closed */ }
     const cleanupErrors: unknown[] = [];
     let groupConfirmedEmpty = registrationAlreadyEmpty;
@@ -1332,10 +1629,74 @@ export class AgentManager {
     });
   }
 
+  private async resolveProxyRelease(id: Executor): Promise<ProxyRelease> {
+    if (!this.options.independentProxyReleases) {
+      return { tag: `v${this.releaseVersion}`, version: this.releaseVersion };
+    }
+    const url = `https://api.github.com/repos/${this.releaseRepository}/releases?per_page=100`;
+    const response = await this.fetchImpl(url, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(60_000),
+      headers: {
+        accept: 'application/vnd.github+json',
+        'x-github-api-version': '2022-11-28',
+      },
+    });
+    if (!response.ok) {
+      throw new Error(`GitHub Proxy release lookup failed (${response.status}): ${url}`);
+    }
+    const declared = Number(response.headers.get('content-length') ?? 0);
+    if (declared > 512 * 1024) {
+      throw new Error(`GitHub Proxy release metadata is too large: ${url}`);
+    }
+    const raw = Buffer.from(await response.arrayBuffer());
+    if (raw.length === 0 || raw.length > 512 * 1024) {
+      throw new Error(`GitHub Proxy release metadata size is invalid: ${url}`);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw.toString('utf8')) as unknown;
+    } catch {
+      throw new Error(`GitHub Proxy release metadata is not valid JSON: ${url}`);
+    }
+    const candidates = parseIndependentProxyReleaseCandidates(parsed, id);
+    for (const candidate of candidates) {
+      const archiveName = `gian-proxy-${id}-${candidate.version}-darwin-arm64.tar.gz`;
+      const manifestName = `${archiveName}.manifest.json`;
+      const digests = parseReleaseAssetDigests(candidate.metadata, candidate.tag, [manifestName]);
+      const manifestUrl = `https://github.com/${this.releaseRepository}/releases/download/${candidate.tag}/${manifestName}`;
+      const manifestBody = await this.download(manifestUrl, MAX_PROXY_MANIFEST_BYTES);
+      const actualDigest = createHash('sha256').update(manifestBody).digest('hex');
+      if (actualDigest !== digests.get(manifestName)) {
+        throw new Error(`${id} Proxy release manifest failed official integrity verification.`);
+      }
+      let manifestValue: unknown;
+      try {
+        manifestValue = JSON.parse(manifestBody.toString('utf8')) as unknown;
+      } catch {
+        throw new Error(`${id} Proxy release manifest is not valid JSON.`);
+      }
+      const manifest = manifestV2Schema.safeParse(manifestValue);
+      if (
+        !manifest.success
+        || manifest.data.id !== id
+        || manifest.data.pluginVersion !== candidate.version
+      ) {
+        throw new Error(`${id} Proxy release manifest does not match ${candidate.tag}.`);
+      }
+      if (isCompatibleProxyManifest(manifest.data as ManagedProxyManifestV2, this.releaseVersion)) {
+        return { tag: candidate.tag, version: candidate.version };
+      }
+    }
+    throw new Error(
+      `No stable ${id} Proxy release supports ${PROTOCOL_NAME}/${SUPPORTED_PROTOCOL_VERSIONS.join(',')}.`,
+    );
+  }
+
   private async releaseAssetDigests(
+    tag: string,
     filenames: readonly string[],
   ): Promise<ReadonlyMap<string, string>> {
-    const tag = `v${this.releaseVersion}`;
     const url = `https://api.github.com/repos/${this.releaseRepository}/releases/tags/${tag}`;
     const response = await this.fetchImpl(url, {
       redirect: 'follow',

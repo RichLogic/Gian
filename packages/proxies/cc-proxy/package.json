@@ -1,6 +1,6 @@
 {
   "name": "@gian/cc-proxy",
-  "version": "0.4.1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "./dist/src/cli/spawn.js",
@@ -9,9 +9,8 @@
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "start": "node dist/src/cli/spawn.js",
-    "test": "pnpm run build && node --test dist/test/*.test.js dist/test/unit/**/*.test.js",
+    "test": "pnpm run build && node --test --test-concurrency=1 dist/test/*.test.js",
     "test:smoke": "pnpm run build && node --test dist/test/smoke.test.js",
-    "test:unit": "pnpm run build && node --test dist/test/service.test.js dist/test/unit/**/*.test.js",
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "devDependencies": {
@@ -19,6 +18,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@gian/proxy-protocol": "workspace:*",
     "@gian/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.3.6"

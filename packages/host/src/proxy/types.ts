@@ -12,6 +12,8 @@ import type {
 
 export interface ProxyClient {
   readonly executor: Executor;
+  /** Present only on clients speaking the vendor-neutral gian.proxy/1 contract. */
+  readonly protocolV1?: true;
   /** Synchronous lifecycle snapshot used to make cache publication atomic
    * with respect to Node's single-threaded exit callbacks. */
   isExited(): boolean;
@@ -44,6 +46,7 @@ export interface ProxyClient {
     nativeSessionId: string;
     configOptions?: NativeConfigOption[];
     replayUpdates?: unknown[];
+    replayStreamId?: string;
   }>;
   startTurn(params: StartTurnParams): Promise<{ session: ProxySession; turn: { id: string } }>;
   interruptTurn(sessionId: string): Promise<void>;
@@ -57,10 +60,9 @@ export interface ProxyClient {
   /**
    * Set the underlying native session's display name (SESSION-NAME-001).
    * codex-proxy implements this via the app-server `thread/name/set` RPC so
-   * the name shows in `codex resume` / Codex app listings. cc-proxy does NOT
-   * implement it — Claude's display name is set host-side (a `--name` flag on
-   * the first turn, or by appending a `custom-title` line to the
-   * session JSONL on rename), so the method is optional.
+   * the name shows in `codex resume` / Codex app listings. gian.proxy/1
+   * cc-proxy implements `session.rename` and owns Claude's `custom-title`
+   * storage detail. Legacy cc-proxy still uses Host-side compatibility code.
    */
   setName?(name: string): Promise<void>;
   /** Executor-native session configuration (Kimi ACP today). */
@@ -74,6 +76,9 @@ export interface ProxyClient {
   }>;
   /** Executor-native session discovery (Kimi ACP session/list today). */
   listNativeSessions?(params?: { cwd?: string; cursor?: string }): Promise<unknown>;
+  /** Reload normalized native history after a protocol-v1 plugin reports that
+   * its attached native history changed outside Gian. */
+  replaySession?(): Promise<unknown[] | ProxyReplayResult>;
   shutdown(): Promise<void>;
   /**
    * Tear the proxy session down without waiting on a graceful RPC. cc-proxy
@@ -82,9 +87,14 @@ export interface ProxyClient {
    * Used by SessionManager.forceRecover when interruptTurn cannot unstick a
    * session.
    */
-  forceKill(): void;
+  forceKill(): void | Promise<void>;
   onNotification(handler: NotificationHandler): () => void;
   onExit(handler: (code: number | null) => void): () => void;
+}
+
+export interface ProxyReplayResult {
+  replayStreamId?: string;
+  events: unknown[];
 }
 
 export interface CreateSessionParams {
@@ -119,6 +129,9 @@ export interface CreateSessionParams {
  */
 export interface StartTurnParams {
   sessionId: string;
+  /** Host-owned stable turn identity used by gian.proxy/1 clients. Legacy
+   * proxies ignore it and continue returning their provider turn id. */
+  turnId?: string;
   input: InputItem[];
   /** Codex runtime workspace roots in addition to the session cwd. The Host
    *  uses this for the session-owned attachment directory. */

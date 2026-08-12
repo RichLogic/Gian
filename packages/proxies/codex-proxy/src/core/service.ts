@@ -91,6 +91,32 @@ function extractTurnId(params: unknown): string | null {
   return null;
 }
 
+function runtimeErrorWillRetry(params: unknown) {
+  return Boolean(
+    params
+    && typeof params === 'object'
+    && (params as Record<string, unknown>).willRetry === true,
+  );
+}
+
+function inProgressTurnId(snapshot: unknown): string | null {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  const turns = (snapshot as { turns?: unknown }).turns;
+  if (!Array.isArray(turns)) return null;
+  for (let index = turns.length - 1; index >= 0; index--) {
+    const turn = turns[index];
+    if (!turn || typeof turn !== 'object') continue;
+    const record = turn as { id?: unknown; status?: unknown };
+    if (
+      typeof record.id === 'string'
+      && (record.status === 'inProgress' || record.status === 'running')
+    ) {
+      return record.id;
+    }
+  }
+  return null;
+}
+
 function approvalTitle(method: string) {
   switch (method) {
     case 'item/commandExecution/requestApproval':
@@ -458,7 +484,7 @@ export class CodexProxyService {
     const session = this.requireSessionById(params.sessionId);
     const name = typeof params.name === 'string'
       // eslint-disable-next-line no-control-regex
-      ? params.name.replace(/[\x00-\x1F\x7F]/g, ' ').trim().slice(0, 200)
+      ? [...params.name.replace(/[\x00-\x1F\x7F]/g, ' ').trim()].slice(0, 200).join('')
       : '';
     if (!name) return { ok: true as const };
     if (!this.runtime.setThreadName) {
@@ -633,14 +659,40 @@ export class CodexProxyService {
 
   async closeSession(params: CloseSessionParams) {
     const session = this.requireSessionById(params.sessionId);
-    if (session.activeTurnId) {
+    if (session.activeTurnId && !params.force) {
       throw createAppError(409, 'SESSION_BUSY', 'Stop the active turn before closing the session.');
+    }
+
+    if (params.force) {
+      // Proxy-local activeTurnId can diverge from Codex after a retryable
+      // stream error was misclassified as terminal. Read the runtime's own
+      // thread state so Force Recover interrupts the turn Codex actually owns.
+      const snapshot = await this.runtime.readThread(session.threadId);
+      const activeTurnId = inProgressTurnId(snapshot.thread);
+      if (activeTurnId) {
+        try {
+          await this.runtime.interruptTurn(session.threadId, activeTurnId);
+        } catch (error) {
+          // Completion can race the interrupt after thread/read. Treat that as
+          // recovered only when a fresh runtime snapshot confirms no turn is
+          // still active; otherwise preserve the real interrupt failure.
+          let stillActive: boolean;
+          try {
+            const refreshed = await this.runtime.readThread(session.threadId);
+            stillActive = inProgressTurnId(refreshed.thread) !== null;
+          } catch {
+            throw error;
+          }
+          if (stillActive) throw error;
+        }
+      }
     }
 
     if (typeof this.runtime.unsubscribeThread === 'function') {
       await this.runtime.unsubscribeThread(session.threadId).catch(() => undefined);
     }
 
+    this.activeTurnsByThreadId.delete(session.threadId);
     this.removeSession(session);
     return { ok: true };
   }
@@ -1117,6 +1169,11 @@ export class CodexProxyService {
     }
 
     if (message.method === 'error') {
+      // Codex owns response-stream retries and will publish the eventual turn
+      // completion or terminal error. Keep the active turn intact meanwhile.
+      if (runtimeErrorWillRetry(message.params)) {
+        return;
+      }
       const updatedSession = this.updateSession(session, {
         status: 'error',
         activeTurnId: null,

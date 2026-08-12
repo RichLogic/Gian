@@ -70,7 +70,14 @@ export interface CodingViewProps {
   onLoadOlder: (sessionId: string, executor: Executor) => void;
   onRetryHistory: (sessionId: string, executor: Executor) => void;
   onSelectSession: (id: string) => void;
-  onWorkspaceCreated: (ws: Workspace) => void;
+  /** Open the Workspaces "New workspace" sheet tab (new-session page's
+   *  workspace drop "+ New workspace" row). */
+  onNewWorkspace: () => void;
+  /** App-driven request to open the new-session page with this workspace
+   *  preselected (auto-return after creating one from the New Workspace
+   *  sheet). Consumed once via onConsumeOpenNewForWorkspace. */
+  openNewForWorkspace?: string | null;
+  onConsumeOpenNewForWorkspace?: () => void;
   onCreateSession: (input: CreateSessionInput) => OperationRun;
   /** Latest create run, owned by App so timed-out attempts survive this
    * view unmounting during mode switches. */
@@ -169,6 +176,17 @@ export function CodingView(p: CodingViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [createRun?.phase]);
 
+  // Auto-return from the New Workspace sheet: App re-opens the new-session
+  // page with the just-created workspace preselected.
+  useEffect(() => {
+    if (p.openNewForWorkspace == null) return;
+    setNewForWs(p.openNewForWorkspace);
+    if (!preserveCreateRun) p.onClearSessionCreateRun();
+    setShowNew(true);
+    p.onConsumeOpenNewForWorkspace?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.openNewForWorkspace]);
+
   async function verifyUnknownCreate() {
     if (!createUnknown || verifyingCreate) return;
     setVerifyingCreate(true);
@@ -239,7 +257,7 @@ export function CodingView(p: CodingViewProps) {
           workspaces={p.workspaces}
           initialWorkspaceId={newForWs}
           onCancel={resetNewSession}
-          onWorkspaceCreated={p.onWorkspaceCreated}
+          onNewWorkspace={p.onNewWorkspace}
           creating={creatingSession}
           createError={verifyCreateError ?? createError}
           createUnknown={createUnknown}

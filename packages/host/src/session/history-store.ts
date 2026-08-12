@@ -143,6 +143,28 @@ export class SessionHistoryStore {
     };
   }
 
+  /** Text of the session's first persisted user message, or null when none
+   *  exists (or the row is undecodable). Used by auto-title as the fallback
+   *  name source. */
+  firstUserMessageText(sessionId: string): string | null {
+    const order = this.events.usesSequence ? 'sequence' : 'rowid';
+    const row = this.db
+      .prepare(
+        `SELECT data FROM events
+         WHERE session_id = ? AND type = 'user_message'
+         ORDER BY ${order} ASC
+         LIMIT 1`,
+      )
+      .get(sessionId) as { data: string } | undefined;
+    if (!row) return null;
+    try {
+      const text = this.events.decode(row.data).text;
+      return typeof text === 'string' && text ? text : null;
+    } catch {
+      return null;
+    }
+  }
+
   countTurns(sessionId: string): number {
     const row = this.db
       .prepare('SELECT COUNT(*) AS n FROM turns WHERE session_id = ?')

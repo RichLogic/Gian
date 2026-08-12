@@ -85,7 +85,7 @@ export function PlanChip({
       : context.interruptedAgents > 0
         ? 'context-chip-dot--interrupted'
       : 'context-chip-dot--done';
-  const agentSummary = formatAgentSummary(context, t);
+  const agentProgress = formatAgentProgress(context);
 
   return (
     <div className="context-strip-shell">
@@ -133,7 +133,7 @@ export function PlanChip({
             <div>
               <strong>{t('transcript.agentRuns')}</strong>
               <span>
-                {agentSummary}
+                {agentProgress}
               </span>
             </div>
             <button
@@ -204,8 +204,7 @@ export function PlanChip({
             title={t('transcript.agentViewRuns')}
           >
             <span>{t('transcript.agent')}</span>
-            <span className="context-chip-count">{context.agents.length}</span>
-            <span className="context-chip-meta">{agentSummary}</span>
+            <span className="context-chip-meta">{agentProgress}</span>
             <span className={`context-chip-dot ${agentStateClass}`} aria-hidden />
           </button>
         )}
@@ -277,24 +276,10 @@ function planStatusLabel(status: 'active' | 'paused' | 'completed' | 'awaiting-r
   return t('transcript.planAccepted');
 }
 
-function formatAgentSummary(
+function formatAgentProgress(
   context: ReturnType<typeof projectSessionContext>,
-  t: (key: string) => string,
 ): string {
-  const parts: string[] = [];
-  if (context.runningAgents > 0) {
-    parts.push(`${context.runningAgents} ${t('coding.status.running').toLowerCase()}`);
-  }
-  if (context.completedAgents > 0) {
-    parts.push(`${context.completedAgents} ${t('coding.status.done').toLowerCase()}`);
-  }
-  if (context.failedAgents > 0) {
-    parts.push(`${context.failedAgents} ${t('coding.status.error').toLowerCase()}`);
-  }
-  if (context.interruptedAgents > 0) {
-    parts.push(`${context.interruptedAgents} ${t('coding.status.interrupted').toLowerCase()}`);
-  }
-  return parts.join(' · ');
+  return `${context.completedAgents}/${context.agents.length}`;
 }
 
 function jumpToAgent(agentId: string) {

@@ -200,7 +200,6 @@
 .s2-card .exec-row + .exec-row {
   margin-top: 15px;
   padding-top: 15px;
-  border-top: 1px solid var(--hairline);
 }
 
 .settings-account {

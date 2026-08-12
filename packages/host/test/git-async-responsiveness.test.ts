@@ -131,6 +131,11 @@ test('command deadline rejects and cleans up the complete child process group', 
   const dir = await mkdtemp(join(tmpdir(), 'gian-command-timeout-'));
   const fixture = join(dir, 'hang.cjs');
   const pidsFile = join(dir, 'pids.json');
+  // The nested Node fixture must spawn its descendant and publish both PIDs
+  // before the deadline; 100ms is not enough when the full suite saturates
+  // the machine, and then the test observes fixture startup rather than
+  // process-group cleanup.
+  const timeoutMs = 1_000;
   try {
     await writeFile(fixture, String.raw`
 const { spawn } = require('node:child_process');
@@ -144,7 +149,7 @@ setInterval(() => {}, 1000);
 `, 'utf8');
 
     const failure = await runCommand(process.execPath, [fixture, pidsFile], {
-      timeoutMs: 100,
+      timeoutMs,
       terminateGraceMs: 40,
     }).then(
       () => null,
@@ -152,7 +157,7 @@ setInterval(() => {}, 1000);
     );
     assert.ok(failure instanceof CommandExecutionError);
     assert.equal(failure.timedOut, true);
-    assert.match(failure.message, /timed out after 100ms/);
+    assert.match(failure.message, new RegExp(`timed out after ${timeoutMs}ms`));
 
     const pids = JSON.parse(await readFile(pidsFile, 'utf8')) as { parent: number; child: number };
     await waitFor(() => !processIsAlive(pids.parent) && !processIsAlive(pids.child));

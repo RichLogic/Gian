@@ -943,6 +943,7 @@ function nonEventTableFingerprints(db: Db): Record<string, { rows: number; sha25
 
 function verifyArtifacts(db: Db): { artifacts: number; links: number; chunks: number } {
   const events = new EventStore(db, { mode: 'migration' });
+  const artifactSources = new Map<string, { format: 'text' | 'json' | 'data-url'; source: Buffer }>();
   const artifacts = db.prepare(
     `SELECT id, mime_type, format, encoding, byte_length, stored_size, chunk_count
      FROM event_artifacts ORDER BY id`,
@@ -980,6 +981,7 @@ function verifyArtifacts(db: Db): { artifacts: number; links: number; chunks: nu
       .update(source)
       .digest('hex')}`;
     if (expected !== artifact.id) throw new Error(`artifact ${artifact.id} hash mismatch`);
+    artifactSources.set(artifact.id, { format: artifact.format, source });
     chunkTotal += chunks.length;
   }
   const dangling = scalar(db, `
@@ -994,7 +996,7 @@ function verifyArtifacts(db: Db): { artifacts: number; links: number; chunks: nu
     data: string;
   }>) {
     const parsed = JSON.parse(row.data) as unknown;
-    const expectedRefs = collectArtifactRefs(parsed);
+    const expectedRefs = collectArtifactRefs(parsed, artifactSources);
     const actualRefs = (db.prepare(
       `SELECT artifact_id AS artifactId, path
        FROM event_artifact_links WHERE event_id = ? ORDER BY path`,
@@ -1011,32 +1013,46 @@ function verifyArtifacts(db: Db): { artifacts: number; links: number; chunks: nu
   };
 }
 
-function collectArtifactRefs(value: unknown): Array<{ artifactId: string; path: string }> {
+function collectArtifactRefs(
+  value: unknown,
+  artifacts: ReadonlyMap<string, { format: 'text' | 'json' | 'data-url'; source: Buffer }>,
+): Array<{ artifactId: string; path: string }> {
   const refs: Array<{ artifactId: string; path: string }> = [];
+  const visit = (candidate: unknown, path: string, ancestors: ReadonlySet<string>): void => {
+    if (isArtifactReference(candidate)) {
+      refs.push({ artifactId: candidate.id, path: path || '$' });
+      const artifact = artifacts.get(candidate.id);
+      if (artifact?.format === 'json') {
+        if (ancestors.has(candidate.id)) {
+          throw new Error(`artifact ${candidate.id} contains a reference cycle`);
+        }
+        const nextAncestors = new Set(ancestors);
+        nextAncestors.add(candidate.id);
+        visit(JSON.parse(artifact.source.toString('utf8')) as unknown, path, nextAncestors);
+      }
+      return;
+    }
+    if (Array.isArray(candidate)) {
+      candidate.forEach((item, index) => visit(item, `${path}[${index}]`, ancestors));
+      return;
+    }
+    if (!isRecord(candidate)) return;
+    for (const [key, item] of Object.entries(candidate)) {
+      visit(item, path ? `${path}.${key}` : key, ancestors);
+    }
+  };
   if (
     isRecord(value)
     && value.__gian_event === 3
     && isArtifactReference(value.payload)
   ) {
-    refs.push({ artifactId: value.payload.id, path: '$payload' });
-    return refs;
+    visit(value.payload, '$payload', new Set());
+  } else {
+    visit(value, '', new Set());
   }
-  const visit = (candidate: unknown, path: string): void => {
-    if (isArtifactReference(candidate)) {
-      refs.push({ artifactId: candidate.id, path: path || '$' });
-      return;
-    }
-    if (Array.isArray(candidate)) {
-      candidate.forEach((item, index) => visit(item, `${path}[${index}]`));
-      return;
-    }
-    if (!isRecord(candidate)) return;
-    for (const [key, item] of Object.entries(candidate)) {
-      visit(item, path ? `${path}.${key}` : key);
-    }
-  };
-  visit(value, '');
-  return refs.sort((left, right) => left.path.localeCompare(right.path));
+  return refs.sort((left, right) => (
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0
+  ));
 }
 
 function isArtifactReference(value: unknown): value is { id: string } {

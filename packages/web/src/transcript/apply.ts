@@ -454,11 +454,23 @@ export function applyEnvelope(
   // ── approval_resolved (unified + legacy) ──
   if (ev === 'interaction.resolved') {
     const approvalId = String(data.approvalId ?? '');
-    const decision = String(data.decision ?? '');
     if (!approvalId) return items;
     const idx = items.findIndex(i => i.kind === 'approval' && i.approvalId === approvalId);
     if (idx < 0) return items;
     const existing = items[idx] as ApprovalItem;
+    const nativeOptionId = typeof data.nativeOptionId === 'string'
+      ? data.nativeOptionId
+      : undefined;
+    const nativeKind = nativeOptionId
+      ? existing.nativeOptions?.find(option => option.optionId === nativeOptionId)?.kind
+      : undefined;
+    const decision = nativeKind?.startsWith('reject')
+      ? 'decline'
+      : nativeKind === 'allow_session' || nativeKind === 'allow_always'
+        ? 'allow_session'
+        : nativeKind === 'allow_once'
+          ? 'allow_once'
+          : String(data.decision ?? '');
     // A late auto-decline during session shutdown must NOT clobber a card the user already
     // answered. Once an approval is non-pending, ignore any `auto:true` resolve.
     if (data.auto === true && existing.status !== 'pending') {
@@ -475,8 +487,8 @@ export function applyEnvelope(
       status: mapApprovalDecision(decision),
       resolvedAt: env.ts,
       ...(answeredWith ? { answeredWith } : {}),
-      ...(typeof data.nativeOptionId === 'string'
-        ? { nativeOptionId: data.nativeOptionId }
+      ...(nativeOptionId
+        ? { nativeOptionId }
         : {}),
     };
     return next;
@@ -510,6 +522,24 @@ export function applyEnvelope(
       trigger: data.trigger === 'total' ? 'total' : 'consecutive',
       consecutive: Number(data.consecutive ?? 0),
       total: Number(data.total ?? 0),
+      ts: env.ts, turn: env.turn,
+    };
+    return [...items, item];
+  }
+
+  if (ev === 'activity.notice') {
+    const severity = data.severity === 'error' || data.severity === 'warning'
+      ? data.severity
+      : 'info';
+    const item: AutoNoticeItem = {
+      kind: 'auto-notice', id: env.call_id,
+      variant: 'notice',
+      severity,
+      code: String(data.code ?? ''),
+      title: String(data.title ?? ''),
+      message: String(data.message ?? ''),
+      consecutive: 0,
+      total: 0,
       ts: env.ts, turn: env.turn,
     };
     return [...items, item];
@@ -856,21 +886,25 @@ export function applyPlanLifecycle(
       turn: env.turn,
     };
   }
-  if (type === 'state.turn-completed' && prev.text) {
+  if (type === 'state.turn-completed' && prev.text
+      && prev.status !== 'paused' && prev.status !== 'completed'
+      && env.turn >= (prev.turn ?? 0)) {
     const completed = isPlanChecklistComplete(prev.text);
     return {
       ...prev,
       completed,
       status: completed ? 'completed' : 'paused',
-      turn: env.turn,
+      turn: prev.turn ?? env.turn,
     };
   }
-  if (type === 'state.error' && prev.text) {
+  if (type === 'state.error' && prev.text
+      && prev.status !== 'paused' && prev.status !== 'completed'
+      && env.turn >= (prev.turn ?? 0)) {
     return {
       ...prev,
       completed: false,
       status: 'paused',
-      turn: env.turn,
+      turn: prev.turn ?? env.turn,
     };
   }
   return prev;

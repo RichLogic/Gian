@@ -50,6 +50,15 @@ const tree: WorkingTree = {
   session_name: null,
 };
 
+const viewedTree: WorkingTree = {
+  ...tree,
+  id: 'ext:workspace-1:d3Q',
+  kind: 'worktree',
+  label: 'w1-message-system-design',
+  path: '/tmp/worktrees/w1-message-system-design',
+  branch: 'codex/message-system-design',
+};
+
 const session: Session = {
   id: 's1',
   name: 'demo',
@@ -82,7 +91,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function renderWorkbench(strict = false) {
+function renderWorkbench(strict = false, workingTrees: WorkingTree[] = [tree]) {
   return renderHook(() => useWorkbench({
     authStatus: 'authenticated',
     dispatch: vi.fn(),
@@ -91,7 +100,7 @@ function renderWorkbench(strict = false) {
     activeSession: session,
     activeWorkspace: workspace,
     workspaces: [workspace],
-    workingTrees: [tree],
+    workingTrees,
     mode: 'sessions',
     activeSubtaskId: null,
     t: key => key,
@@ -101,6 +110,7 @@ function renderWorkbench(strict = false) {
 describe('Sheet tab query timing (§4.5)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
     delete window.gianDesktop;
     vi.mocked(api.loadAllFiles).mockResolvedValue([]);
     vi.mocked(api.loadApps).mockResolvedValue([]);
@@ -158,6 +168,27 @@ describe('Sheet tab query timing (§4.5)', () => {
       expect(tab!.loadError).toBeUndefined();
       expect(tab!.lines).toEqual([['1', 'recovered']]);
     });
+  });
+
+  it('opens a workspace-root link from the viewed worktree and shows its canonical path', async () => {
+    localStorage.setItem('gian.wt.view.s1', viewedTree.id);
+    vi.mocked(api.loadAllFiles).mockImplementation(async workingTreeId =>
+      workingTreeId === viewedTree.id ? ['docs/message-system-design.md'] : []);
+    vi.mocked(api.loadFile).mockResolvedValue({ content: '# Message system', size: 16 });
+    const { result } = renderWorkbench(false, [tree, viewedTree]);
+
+    await act(async () => {
+      await result.current.openFileInSheet('/tmp/w1/docs/message-system-design.md');
+    });
+
+    await waitFor(() => expect(api.loadFile).toHaveBeenCalledWith(
+      viewedTree.id,
+      'docs/message-system-design.md',
+    ));
+    const tab = result.current.wbTabs.find(t => t.kind === 'file');
+    expect(tab?.workingTreeId).toBe(viewedTree.id);
+    expect(tab?.fullPath).toBe('/tmp/worktrees/w1-message-system-design/docs/message-system-design.md');
+    expect(tab?.loadError).toBeUndefined();
   });
 
   it('the diffs rail auto-ensures exactly one singleton Changes tab', async () => {
@@ -239,36 +270,6 @@ describe('Sheet tab query timing (§4.5)', () => {
     await act(async () => pending.resolve({ diff: 'loaded diff', truncated: false }));
     await waitFor(() => {
       expect(result.current.wbTabs.find(t => t.id === 'tab-diff-event-s1-1:diff:d1')?.text).toBe('loaded diff');
-    });
-  });
-
-  it('reopens a pinned transcript detail in place instead of duplicating its tab id', async () => {
-    const { result } = renderWorkbench();
-    act(() => result.current.openTranscriptTextInSheet({
-      title: 'Tool: first',
-      text: 'first body',
-      sourceId: '4:tool:shared',
-    }));
-    await waitFor(() => expect(result.current.wbTabs.filter(t => t.kind === 'text')).toHaveLength(1));
-    const id = result.current.wbTabs.find(t => t.kind === 'text')!.id;
-
-    act(() => result.current.sheetActions.pinTab(id));
-    await waitFor(() => expect(result.current.wbTabs.find(t => t.id === id)?.preview).toBe(false));
-    act(() => result.current.openTranscriptTextInSheet({
-      title: 'Tool: refreshed',
-      text: 'refreshed body',
-      sourceId: '4:tool:shared',
-    }));
-
-    await waitFor(() => {
-      const tabs = result.current.wbTabs.filter(t => t.id === id);
-      expect(tabs).toHaveLength(1);
-      expect(tabs[0]).toMatchObject({
-        preview: false,
-        name: 'Tool: refreshed',
-        text: 'refreshed body',
-      });
-      expect(result.current.activeTabByGroup.diffs).toBe(id);
     });
   });
 

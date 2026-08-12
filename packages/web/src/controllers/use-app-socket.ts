@@ -68,6 +68,7 @@ interface UseAppSocketInput {
   setQueueBySession: Setter<Record<string, QueueEntry[]>>;
   setPlanStateBySession: Setter<Record<string, PlanLifecycleState>>;
   markSessionHistoryLive: (sessionId: string) => void;
+  rebuildSessionHistory: (sessionId: string, executor: Executor) => void;
   /** Operation store — canonical session data applied here defensively
    *  absorbs matching overlays (proposal §4.3). */
   operationStore: OperationStore;
@@ -146,6 +147,24 @@ export function useAppSocket(input: UseAppSocketInput): void {
           // not the previous render's ref snapshot.
           current.sessionsRef.current = message.sessions;
           current.setSessions(message.sessions);
+          // `state_sync` is the reconnect authority for session lifecycle.
+          // Reconcile transient pending state too, otherwise a missed terminal
+          // frame can leave Composer saying "Turn running" indefinitely. Keep
+          // a genuine optimistic send pending until its canonical echo lands.
+          current.setPendingBySession(previous => {
+            let next = previous;
+            for (const session of message.sessions) {
+              const hasPendingEcho = (current.itemsBySessionRef.current[session.id] ?? [])
+                .some(item => item.kind === 'user' && item.pending === true && !item.failed);
+              const pending = session.status === 'running'
+                || session.status === 'pending'
+                || hasPendingEcho;
+              if (previous[session.id] === pending) continue;
+              if (next === previous) next = { ...previous };
+              next[session.id] = pending;
+            }
+            return next;
+          });
           current.setTasks(message.tasks);
           current.setSystemConfig(message.config);
           current.setRunner(message.runner);
@@ -300,6 +319,12 @@ export function useAppSocket(input: UseAppSocketInput): void {
             sessionEntityKey(partial.id),
             field => (partial as Record<string, unknown>)[field],
           );
+          return;
+        }
+        case 'session:history-rebuilt': {
+          const executor = current.sessionsRef.current
+            .find(session => session.id === message.session_id)?.executor ?? 'claude';
+          current.rebuildSessionHistory(message.session_id, executor);
           return;
         }
         case 'session:native-config':

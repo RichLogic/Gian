@@ -135,6 +135,11 @@ export interface SessionCreateInput {
   workspaceId: string;
   executor: Executor;
   name?: string;
+  /** New-session composer chips (issue #57 v2): omitted fields fall back to
+   *  the host's configured defaults. approvalMode is claude/codex-only. */
+  model?: string;
+  approvalMode?: ApprovalMode | null;
+  thinkingEffort?: ThinkingEffort | null;
 }
 
 const sessionCreate: OperationDefinition<SessionCreateInput> = {
@@ -147,6 +152,9 @@ const sessionCreate: OperationDefinition<SessionCreateInput> = {
     workspace_id: input.workspaceId,
     executor: input.executor,
     ...(input.name ? { name: input.name } : {}),
+    ...(input.model ? { model: input.model } : {}),
+    ...(input.executor !== 'kimi' && input.approvalMode ? { approval_mode: input.approvalMode } : {}),
+    ...(input.thinkingEffort ? { thinking_effort: input.thinkingEffort } : {}),
   }),
   timeoutMs: CREATE_TIMEOUT_MS,
 };

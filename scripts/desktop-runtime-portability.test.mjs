@@ -44,7 +44,7 @@ test('Homebrew and rpath dependencies are rejected before packaging', () => {
       assert.match(error.message, /Node runtime is not portable/);
       assert.match(error.message, /@rpath\/libnode\.127\.dylib/);
       assert.match(error.message, /\/opt\/homebrew\/opt\/openssl@3/);
-      assert.match(error.message, /official Node\.js 22 macOS arm64 binary/);
+      assert.match(error.message, /official Node\.js 24 macOS arm64 binary/);
       return true;
     },
   );

@@ -4,6 +4,14 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { Hono } from 'hono';
+import { registerGitHistoryRoutes } from '../src/web/routes/git-history.js';
+import { WsBroadcaster } from '../src/web/ws-broadcast.js';
+import {
+  GitCommandError,
+  type GitCommandResult,
+  type runGit,
+} from '../src/workspace/git-runner.js';
 import { makeTestApp, type TestAppCtx } from './fixtures/test-app.js';
 import { bareUpstream, createGitRepo, type GitRepo } from './fixtures/git-repo.js';
 
@@ -112,6 +120,40 @@ async function setupHistory(): Promise<Ctx> {
 async function page(ctx: Ctx, query = ''): Promise<{ response: Response; body: HistoryPage }> {
   const response = await ctx.app.fetch(`/api/working_trees/${ctx.treeId}/history${query}`);
   return { response, body: await response.json() as HistoryPage };
+}
+
+function fetchRouteHarness(
+  repo: GitRepo,
+  fetchGit: typeof runGit,
+  fingerprintRefs?: () => Promise<string | null>,
+): {
+  fetch: () => Promise<Response>;
+  broadcasts: unknown[];
+} {
+  const app = new Hono();
+  const broadcaster = new WsBroadcaster();
+  const broadcasts: unknown[] = [];
+  broadcaster.add({
+    send(data: string) {
+      broadcasts.push(JSON.parse(data) as unknown);
+    },
+  } as never);
+  registerGitHistoryRoutes(
+    app,
+    broadcaster,
+    () => ({ path: repo.path, workspace_id: 'workspace-fetch', session_id: null }),
+    { fetchGit, ...(fingerprintRefs ? { fingerprintRefs } : {}) },
+  );
+  return {
+    fetch: () => app.fetch(new Request('http://test.invalid/api/working_trees/ws:test/fetch', {
+      method: 'POST',
+    })),
+    broadcasts,
+  };
+}
+
+function gitResult(): GitCommandResult {
+  return { exitCode: 0, stdout: '', stderr: '', truncated: false };
 }
 
 test('GIT-HISTORY-001: topology page exposes graph parents, refs, authors, and opaque pagination', async () => {
@@ -423,5 +465,118 @@ test('GIT-HISTORY-003: worktree Fetch presents authentication failure without le
   } finally {
     rmSync(fakeSshDir, { recursive: true, force: true });
     await ctx.cleanup();
+  }
+});
+
+test('GIT-HISTORY-003: concurrent Fetch requests share one repository command', async () => {
+  const repo = createGitRepo();
+  let calls = 0;
+  let release!: () => void;
+  let markStarted!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { markStarted = resolve; });
+  const fetchGit: typeof runGit = async () => {
+    calls += 1;
+    markStarted();
+    await pending;
+    return gitResult();
+  };
+  const route = fetchRouteHarness(repo, fetchGit, async () => 'stable');
+  try {
+    const first = route.fetch();
+    const second = route.fetch();
+    await started;
+    assert.equal(calls, 1);
+    release();
+    const [firstResponse, secondResponse] = await Promise.all([first, second]);
+    assert.equal(firstResponse.status, 200);
+    assert.equal(secondResponse.status, 200);
+    const bodies = await Promise.all([
+      firstResponse.json() as Promise<{ coalesced: boolean }>,
+      secondResponse.json() as Promise<{ coalesced: boolean }>,
+    ]);
+    assert.deepEqual(bodies.map(body => body.coalesced).sort(), [false, true]);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('GIT-HISTORY-003: Fetch timeout is an explicit unknown outcome', async () => {
+  const repo = createGitRepo();
+  const route = fetchRouteHarness(repo, async (_cwd, args) => {
+    throw new GitCommandError({
+      kind: 'timeout',
+      args,
+      message: 'timed out with secret-token-that-must-not-escape',
+      stderr: 'Authorization: Bearer secret-token-that-must-not-escape',
+    });
+  });
+  try {
+    const response = await route.fetch();
+    assert.equal(response.status, 504);
+    const body = await response.json() as {
+      error: { code: string; unknownOutcome: boolean; refsChanged: boolean };
+    };
+    assert.deepEqual(body.error, {
+      code: 'git_timeout',
+      message: 'Git command timed out',
+      retryable: true,
+      unknownOutcome: true,
+      refsChanged: false,
+    });
+    assert.equal(JSON.stringify(body).includes('secret-token'), false);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('GIT-HISTORY-003: partial ref update is broadcast and reported as unknown', async () => {
+  const repo = createGitRepo();
+  const head = repo.git(['rev-parse', 'HEAD']);
+  const route = fetchRouteHarness(repo, async (_cwd, args) => {
+    repo.git(['update-ref', 'refs/remotes/origin/partial', head]);
+    throw new GitCommandError({
+      kind: 'command',
+      args,
+      message: 'later remote failed',
+      stderr: 'https://user:password@example.invalid/private.git failed',
+    });
+  });
+  try {
+    const response = await route.fetch();
+    assert.equal(response.status, 502);
+    const body = await response.json() as {
+      error: { code: string; unknownOutcome: boolean; refsChanged: boolean };
+    };
+    assert.equal(body.error.code, 'git_command_failed');
+    assert.equal(body.error.unknownOutcome, true);
+    assert.equal(body.error.refsChanged, true);
+    assert.deepEqual(route.broadcasts, [{
+      type: 'workspace:git-updated', workspace_id: 'workspace-fetch', reason: 'fetch',
+    }]);
+    assert.equal(JSON.stringify(body).includes('password'), false);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('GIT-HISTORY-003: a failed Fetch releases the coalescing slot for retry', async () => {
+  const repo = createGitRepo();
+  let calls = 0;
+  const route = fetchRouteHarness(repo, async (_cwd, args) => {
+    calls += 1;
+    if (calls === 1) {
+      throw new GitCommandError({ kind: 'command', args, message: 'first failed' });
+    }
+    return gitResult();
+  });
+  try {
+    assert.equal((await route.fetch()).status, 502);
+    const retry = await route.fetch();
+    assert.equal(retry.status, 200);
+    assert.equal(calls, 2);
+    assert.equal(((await retry.json()) as { coalesced: boolean }).coalesced, false);
+  } finally {
+    repo.cleanup();
   }
 });

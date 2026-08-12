@@ -1,23 +1,19 @@
 import { useEffect, useState } from 'react';
-import type { PickFolderResult } from '../api.js';
+import type { CloneWorkspaceRepoResult, PickFolderResult } from '../api.js';
 import { useT } from '../i18n/index.js';
 import { useOperationDispatch, useOperationRun } from '../operations/use-operations.js';
 
-type NewWorkspaceSource = 'new' | 'adopt';
-
 export interface NewWorkspaceFormState {
-  source: NewWorkspaceSource;
   name: string;
-  gitRemote: string;
   path: string;
+  gitUrl: string;
   nameTouched: boolean;
 }
 
 const EMPTY_FORM: NewWorkspaceFormState = {
-  source: 'new',
   name: '',
-  gitRemote: '',
   path: '',
+  gitUrl: '',
   nameTouched: false,
 };
 
@@ -33,6 +29,11 @@ export function useNewWorkspace(onChange: () => void) {
   const [createRunId, setCreateRunId] = useState<string | undefined>(undefined);
   const createRun = useOperationRun(createRunId);
   const saving = createRun?.phase === 'pending';
+  // Clone-only run (issue #57): materializes the remote under the workspace
+  // root and fills the Directory field; registration happens on Create.
+  const [cloneRunId, setCloneRunId] = useState<string | undefined>(undefined);
+  const cloneRun = useOperationRun(cloneRunId);
+  const cloning = cloneRun?.phase === 'pending';
 
   function reset() {
     setForm(EMPTY_FORM);
@@ -53,34 +54,61 @@ export function useNewWorkspace(onChange: () => void) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [createRun?.phase]);
 
+  useEffect(() => {
+    if (!cloneRun) return;
+    if (cloneRun.phase === 'confirmed') {
+      const result = cloneRun.result as CloneWorkspaceRepoResult | undefined;
+      setCloneRunId(undefined);
+      if (result?.path) {
+        setForm(previous => ({
+          ...previous,
+          path: result.path!,
+          // Adopt the clone's directory name unless the user typed one.
+          ...(!previous.nameTouched && result.name ? { name: result.name } : {}),
+        }));
+      }
+    } else if (cloneRun.phase === 'failed') {
+      setError(cloneRun.error ?? 'Clone failed');
+      setCloneRunId(undefined);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cloneRun?.phase]);
+
   function submit() {
     if (!form.name) {
       setError('Name is required');
       return;
     }
-    if (form.source === 'adopt' && !form.path.trim()) {
-      setError('Path is required');
+    if (!form.path.trim()) {
+      setError('Directory is required — browse to one, or clone a Git URL below');
       return;
     }
     setError(null);
     const run = dispatch('workspace.create', {
       name: form.name,
-      ...(form.source === 'adopt'
-        ? { path: form.path.trim() }
-        : { ...(form.gitRemote.trim() ? { gitRemote: form.gitRemote.trim() } : {}) }),
+      path: form.path.trim(),
     });
     setCreateRunId(run.id);
   }
 
-  return { open, setOpen, form, setForm, saving, error, submit, reset };
+  function clone() {
+    const gitRemote = form.gitUrl.trim();
+    if (!gitRemote || cloning) return;
+    setError(null);
+    const run = dispatch('workspace.cloneRepo', {
+      gitRemote,
+      ...(form.name ? { name: form.name } : {}),
+    });
+    setCloneRunId(run.id);
+  }
+
+  return { open, setOpen, form, setForm, saving, cloning, error, submit, clone, reset };
 }
 
 export function NewWorkspacePanel({
-  projectRoot,
   onChange,
   onClose,
 }: {
-  projectRoot: string;
   onChange: () => void;
   onClose: () => void;
 }) {
@@ -93,10 +121,11 @@ export function NewWorkspacePanel({
       <NewWorkspaceForm
         form={workspace.form}
         saving={workspace.saving}
+        cloning={workspace.cloning}
         error={workspace.error}
-        projectRoot={projectRoot}
         onChange={patch => workspace.setForm(previous => ({ ...previous, ...patch }))}
         onSubmit={workspace.submit}
+        onClone={workspace.clone}
         onCancel={onClose}
       />
     </div>
@@ -106,106 +135,106 @@ export function NewWorkspacePanel({
 export function NewWorkspaceForm({
   form,
   saving,
+  cloning,
   error,
-  projectRoot,
   onChange,
   onSubmit,
+  onClone,
   onCancel,
 }: {
   form: NewWorkspaceFormState;
   saving: boolean;
+  cloning: boolean;
   error: string | null;
-  projectRoot: string;
   onChange: (patch: Partial<NewWorkspaceFormState>) => void;
   onSubmit: () => void;
+  onClone: () => void;
   onCancel: () => void;
 }) {
   const t = useT();
-  const isAdopt = form.source === 'adopt';
-  const pathPreview = isAdopt
-    ? form.path.trim()
-    : form.name
-      ? `${projectRoot.replace(/\/$/, '')}/${form.name}`
-      : '';
 
   function changePath(value: string) {
     const patch: Partial<NewWorkspaceFormState> = { path: value };
-    if (isAdopt && !form.nameTouched) {
+    if (!form.nameTouched) {
       const tail = value.trim().replace(/\/+$/, '').split('/').filter(Boolean).pop() ?? '';
       patch.name = tail.replace(/[^a-zA-Z0-9._-]/g, '-');
     }
     onChange(patch);
   }
 
-  const submitDisabled = saving || !form.name || (isAdopt && !form.path.trim());
+  const submitDisabled = saving || cloning || !form.name || !form.path.trim();
   return (
-    <div className="spaces-new-form">
-      <div className="segm spaces-new-source" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={!isAdopt}
-          className={`segm-item${!isAdopt ? ' active' : ''}`}
-          onClick={() => onChange({ source: 'new' })}
-        >
-          New
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={isAdopt}
-          className={`segm-item${isAdopt ? ' active' : ''}`}
-          onClick={() => onChange({ source: 'adopt' })}
-        >
-          Adopt path
-        </button>
+    <div className="wsn-form">
+      <div className="field">
+        <div className="field-lbl">
+          <span>Name</span>
+          <span className="field-hint">a-z A-Z 0-9 . _ -</span>
+        </div>
+        <input
+          className="input"
+          aria-label="Workspace name"
+          placeholder="my-project"
+          value={form.name}
+          onChange={event => onChange({ name: event.target.value, nameTouched: true })}
+          autoFocus
+        />
       </div>
-      {isAdopt && (
-        <div className="spaces-new-path-row">
+
+      <div className="field">
+        <div className="field-lbl">
+          <span>Directory</span>
+          <span className="field-hint">absolute path</span>
+        </div>
+        <div className="wsn-row">
           <input
             className="input"
             aria-label="Workspace path"
-            placeholder="/Users/you/Code/some-project or ~/Code/some-project"
+            placeholder="/Users/you/Code/some-project"
             value={form.path}
             onChange={event => changePath(event.target.value)}
-            autoFocus
             spellCheck={false}
           />
           <BrowseFolderButton
-            disabled={saving}
+            disabled={saving || cloning}
             onPicked={changePath}
           />
         </div>
-      )}
-      <input
-        className="input"
-        aria-label="Workspace name"
-        placeholder="Name (a-z A-Z 0-9 . _ -)"
-        value={form.name}
-        onChange={event => onChange({ name: event.target.value, nameTouched: true })}
-        autoFocus={!isAdopt}
-      />
-      {!isAdopt && (
-        <input
-          className="input"
-          aria-label="Git remote URL"
-          placeholder="Git remote URL (optional)"
-          value={form.gitRemote}
-          onChange={event => onChange({ gitRemote: event.target.value })}
-        />
-      )}
-      {pathPreview && (
-        <div className="spaces-path-preview">
-          <span className="spaces-path-preview-lbl">→</span>
-          <span className="spaces-path-preview-val">{pathPreview}</span>
+      </div>
+
+      <div className="field">
+        <div className="field-lbl">
+          <span>Git URL</span>
+          <span className="field-hint">clone fills the directory above</span>
         </div>
-      )}
+        <div className="wsn-row">
+          <input
+            className="input"
+            aria-label="Git URL"
+            placeholder="git@github.com:you/repo.git"
+            value={form.gitUrl}
+            onChange={event => onChange({ gitUrl: event.target.value })}
+            spellCheck={false}
+          />
+          <button
+            type="button"
+            className="btn sm ghost wsn-clone"
+            data-testid="ws-clone"
+            onClick={onClone}
+            disabled={cloning || saving || !form.gitUrl.trim()}
+          >
+            {cloning ? (
+              <span className="ns-busy"><span className="ns-spinner" aria-hidden="true" />Cloning…</span>
+            ) : 'Clone'}
+          </button>
+        </div>
+      </div>
+
       {error && <p className="spaces-error">{error}</p>}
-      <div className="spaces-new-form-actions">
+      <div className="wsn-actions">
         <button className="btn sm ghost" onClick={onCancel} disabled={saving}>
           {t('spaces.form.cancel')}
         </button>
-        <button className="btn sm primary" onClick={onSubmit} disabled={submitDisabled}>
+        <button className="btn sm primary" data-testid="ws-create" onClick={onSubmit} disabled={submitDisabled}>
           {saving ? t('spaces.form.creating') : t('spaces.form.create')}
         </button>
       </div>

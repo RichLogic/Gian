@@ -7,8 +7,8 @@ import { assertPortableMacNodeRuntime } from './desktop-runtime-portability.mjs'
 if (process.platform !== 'darwin' || process.arch !== 'arm64') {
   throw new Error('Gian v0.1 desktop runtime must be prepared on macOS arm64.');
 }
-if (process.versions.node.split('.')[0] !== '22') {
-  throw new Error(`Gian desktop runtime requires Node 22, received ${process.version}.`);
+if (process.versions.node.split('.')[0] !== '24') {
+  throw new Error(`Gian desktop runtime requires Node 24, received ${process.version}.`);
 }
 
 const linkedLibraries = execFileSync('/usr/bin/otool', ['-L', process.execPath], {

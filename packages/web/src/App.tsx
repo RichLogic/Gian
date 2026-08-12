@@ -22,7 +22,7 @@ import { applyChangesScopeRequest, requestChangesDiffAnchor } from './controller
 import './operations/git-history.js';
 import { FileRefRehypeContext } from './transcript/items.js';
 import type { PlanLifecycleState } from './transcript/apply.js';
-import { DiffOpenContext, FileLinkOpenContext, ImageZoomContext, PlanOpenContext, RelativeLinkOpenContext, TranscriptDetailOpenContext } from './transcript/items.js';
+import { DiffOpenContext, FileLinkOpenContext, ImageZoomContext, PlanOpenContext, RelativeLinkOpenContext } from './transcript/items.js';
 import { ImageLightbox, type ZoomImage } from './components/ImageLightbox.js';
 import { Topbar } from './components/Topbar.js';
 import type { Mode } from './components/Topbar.js';
@@ -47,8 +47,9 @@ import type { SystemConfig } from '@gian/shared';
 import type { QueueEntry, TranscriptItem } from './types.js';
 import { applyGianIconAppearance } from './brand-icon.js';
 import { ChatPanelOpenContext } from './presentation/chat-panel.js';
-import { readWtAutoApplied, writeWtAutoApplied } from './presentation/wt-view.js';
+import { readWtAutoApplied, worktreeDisplayName, writeWtAutoApplied } from './presentation/wt-view.js';
 import { useSessionCommands } from './controllers/use-session-commands.js';
+import { reloadFailedSessionMetadata } from './controllers/session-failure-reload.js';
 import { useAppAuth } from './controllers/use-app-auth.js';
 import { useOnboarding } from './controllers/use-onboarding.js';
 import { useAppSocket } from './controllers/use-app-socket.js';
@@ -235,6 +236,32 @@ export function App() {
   );
   const [runner, setRunner] = useState<RunnerInfo | null>(null);
   const pendingFirstMessageRef = useRef<string | null>(null);
+  // New-session → New Workspace sheet round trip (issue #57 v2): the view
+  // flags localStorage before opening the sheet; when the sheet's create
+  // lands we return to a fresh new-session page with that workspace
+  // preselected (the view's own draft restores message/agent/chips).
+  const [newSessionForWs, setNewSessionForWs] = useState<string | null>(null);
+  const workspaceIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    workspaceIdsRef.current = new Set(workspaces.map(w => w.id));
+  }, [workspaces]);
+
+  function handleWorkspaceListChanged() {
+    void loadWorkspaces().then(list => {
+      setWorkspaces(list);
+      let flagged = false;
+      try {
+        flagged = localStorage.getItem('gian.new-session.return.v1') === '1';
+        if (flagged) localStorage.removeItem('gian.new-session.return.v1');
+      } catch { /* best-effort */ }
+      if (!flagged) return;
+      const created = list.find(w => !workspaceIdsRef.current.has(w.id) && w.name !== '__gian_root__');
+      startTransition(() => setMode('sessions'));
+      // '' still reopens the page (no preselect) when the new row could not
+      // be identified — the view falls back to the remembered/first choice.
+      setNewSessionForWs(created?.id ?? '');
+    });
+  }
   // Streamed plan text plus its turn-end lifecycle. Keeping completion beside
   // the text lets a successful turn hide the shortcut without deleting the
   // plan that an already-open/history detail view may still need.
@@ -264,6 +291,10 @@ export function App() {
   // The unresolved-reload handler (Phase 3a) is wired via a ref because it
   // needs appT (declared below) for the mismatch warning toast.
   const unresolvedReloadRef = useRef<(entityKey: string) => void>(() => {});
+  const failedReloadRef = useRef<(run: Parameters<typeof reloadFailedSessionMetadata>[0]) => void>(() => {});
+  failedReloadRef.current = run => {
+    void reloadFailedSessionMetadata(run, setSessions).catch(() => undefined);
+  };
 
   // Operation dispatcher bound to the real socket. readCanonicalField reads
   // the CANONICAL sessions/queues/tasks/workspaces (via the refs, never the
@@ -305,6 +336,7 @@ export function App() {
         return undefined;
       },
       onUnresolved: entityKey => unresolvedReloadRef.current(entityKey),
+      onFailed: run => failedReloadRef.current(run),
     }),
     [operationStore, ws],
   );
@@ -368,6 +400,14 @@ export function App() {
   const sessionCreateRun = useStoreOperationRun(operationStore, sessionCreateRunId);
   const creatingSession = pendingRuns.some(run => run.name === 'session.create');
   const forkingSession = pendingRuns.some(run => run.name === 'session.fork');
+  // A failed / unknown-outcome create must not leave a stale first message in
+  // pendingFirstMessageRef — the session:created handler consumes it for ANY
+  // create, so an orphan would leak into the next session created anywhere.
+  useEffect(() => {
+    if (sessionCreateRun?.phase === 'failed' || sessionCreateRun?.phase === 'timed-out') {
+      pendingFirstMessageRef.current = null;
+    }
+  }, [sessionCreateRun?.phase]);
   // Rendered sessions = canonical + overlays (proposal §4.3). Canonical
   // `sessions` stays untouched for refs, effects, and the reload paths.
   const displaySessions = useStoreSessionsWithOverlays(operationStore, sessions);
@@ -396,13 +436,6 @@ export function App() {
     applyGianIconAppearance(displayConfig.theme, displayConfig.accent);
   }, [displayConfig?.theme, displayConfig?.accent,
       displayConfig?.font_scale_chat, displayConfig?.locale]);
-  // Shared "workspace created" handler — append-if-missing so the operation
-  // layer's reconcile sink (which already upserts) and the view callback
-  // never double-append the same workspace.
-  const upsertWorkspace = useCallback((workspace: Workspace) => {
-    setWorkspaces(previous =>
-      previous.some(w => w.id === workspace.id) ? previous : [...previous, workspace]);
-  }, []);
   // Latest active session id for stable event and unread handlers.
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
   useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);
@@ -429,10 +462,12 @@ export function App() {
     loadOlder,
     retry: retryHistory,
     markLive: markSessionHistoryLive,
+    rebuild: rebuildSessionHistory,
   } = useTranscriptHydration({
     activeSessionId,
     connectionReady: wsState === 'open' && authed,
     sessions,
+    itemsBySession,
     setItemsBySession,
     setPlanStateBySession,
   });
@@ -556,7 +591,6 @@ export function App() {
     openTranscriptDiffInSheet,
     openCommitInSheet,
     revalidateHistoryTabs,
-    openTranscriptTextInSheet,
     openChatPanel,
     addTerminalTab,
     addBrowserTab,
@@ -660,6 +694,7 @@ export function App() {
     setQueueBySession,
     setPlanStateBySession,
     markSessionHistoryLive,
+    rebuildSessionHistory,
     operationStore,
     ops,
   });
@@ -738,9 +773,9 @@ export function App() {
   const activeWtForSession = activeSession
     ? workingTrees.find(t => t.id === viewedWorkingTreeId(activeSession))
     : null;
-  // An overridden tree may have no branch (detached / primary); fall back to
-  // its label so the segment still has something to show.
-  const activeBranch = activeWtForSession?.branch ?? activeWtForSession?.label ?? null;
+  const activeWorktreeName = activeWtForSession
+    ? worktreeDisplayName(activeWtForSession)
+    : null;
   const {
     pathSegments,
     sessionMenu,
@@ -753,7 +788,7 @@ export function App() {
     activeSubtaskId,
     activeSession,
     activeWorkspace,
-    activeBranch,
+    activeWorktreeName,
     workingTrees,
     refreshWorkingTrees,
     wtView,
@@ -839,7 +874,6 @@ export function App() {
     : null;
   const subtaskWorkingTreeId = defaultWorkingTreeIdFor(subtask);
   const subtaskMain = subtask ? (
-    <TranscriptDetailOpenContext.Provider value={(payload) => { openTranscriptTextInSheet(payload); }}>
     <SessionSurface
       session={subtask}
       workspace={subtaskWorkspace}
@@ -868,7 +902,6 @@ export function App() {
       onShowChanges={showAllChanges}
       onShowLastTurnChanges={(turn, path) => showLastTurnChanges(subtask, turn, path)}
     />
-    </TranscriptDetailOpenContext.Provider>
   ) : null;
 
   if (authStatus === 'checking') {
@@ -971,7 +1004,6 @@ export function App() {
           <RelativeLinkOpenContext.Provider value={openRelativeFileHref}>
           <FileRefRehypeContext.Provider value={fileRehype}>
           <DiffOpenContext.Provider value={(item) => { void openTranscriptDiffInSheet(item); }}>
-          <TranscriptDetailOpenContext.Provider value={(payload) => { openTranscriptTextInSheet(payload); }}>
           <PlanOpenContext.Provider value={(payload) => {
             if (activeSessionId) openChatPanel(activeSessionId, { kind: 'plan', id: payload.id });
           }}>
@@ -995,12 +1027,23 @@ export function App() {
               onLoadOlder={(sessionId, executor) => loadOlder(sessionId, executor)}
               onRetryHistory={(sessionId, executor) => retryHistory(sessionId, executor)}
               onSelectSession={selectSession}
-              onWorkspaceCreated={upsertWorkspace}
+              onNewWorkspace={openNewWorkspaceInSheet}
+              openNewForWorkspace={newSessionForWs}
+              onConsumeOpenNewForWorkspace={() => setNewSessionForWs(null)}
               onCreateSession={(input) => {
+                // First message rides the dormant pendingFirstMessage channel:
+                // the session:created socket handler consumes it and dispatches
+                // the send once the session exists (use-app-socket.ts).
+                pendingFirstMessageRef.current = input.firstMessage?.trim()
+                  ? input.firstMessage
+                  : null;
                 const run = ops.dispatch('session.create', {
                   workspaceId: input.workspaceId,
                   executor: input.executor,
                   ...(input.name ? { name: input.name } : {}),
+                  ...(input.model ? { model: input.model } : {}),
+                  ...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
+                  ...(input.thinkingEffort ? { thinkingEffort: input.thinkingEffort } : {}),
                 });
                 setSessionCreateRunId(run.id);
                 return run;
@@ -1048,7 +1091,6 @@ export function App() {
             />
           </ChatPanelOpenContext.Provider>
           </PlanOpenContext.Provider>
-          </TranscriptDetailOpenContext.Provider>
           </DiffOpenContext.Provider>
           </FileRefRehypeContext.Provider>
           </RelativeLinkOpenContext.Provider>
@@ -1077,7 +1119,8 @@ export function App() {
               activeTaskId={activeTaskId}
               activeSubtaskId={activeSubtaskId}
               onSelectSubtask={(taskId, subtaskId) => { setActiveTaskId(taskId); setActiveSubtaskId(subtaskId); }}
-              onWorkspaceCreated={upsertWorkspace}
+              onNewWorkspace={openNewWorkspaceInSheet}
+              onSetPendingFirstMessage={text => { pendingFirstMessageRef.current = text; }}
               subtaskMain={subtaskMain}
               railLayout={panelLayout.railLayout}
             />
@@ -1184,8 +1227,7 @@ export function App() {
                 if (t.kind === 'new-workspace') {
                   return (
                     <NewWorkspacePanel
-                      projectRoot={systemConfig?.workspace_root ?? '~/Coding'}
-                      onChange={() => void loadWorkspaces().then(setWorkspaces)}
+                      onChange={handleWorkspaceListChanged}
                       onClose={() => sheetActions.closeTab(t.id)}
                     />
                   );
@@ -1216,7 +1258,6 @@ export function App() {
                     <Suspense fallback={null}>
                     <ChangesDiffBody
                       workingTreeId={activeWtForSession?.id ?? null}
-                      tree={activeWtForSession ?? null}
                     />
                     </Suspense>
                   );
@@ -1281,7 +1322,7 @@ export function App() {
                 activeSessionId={activeSessionId}
                 onOpenFile={(rel, perm) => {
                   const sess = activeSession;
-                  const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
+                  const wtId = sess ? viewedWorkingTreeId(sess) : null;
                   const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
                   if (!wt) return;
                   const abs = `${wt.path}/${rel}`;

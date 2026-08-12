@@ -40,6 +40,8 @@ vi.mock('../src/api.js', () => ({
   createSubtask: vi.fn(),
   createWorkspace: vi.fn(),
   peekAgents: vi.fn(() => null),
+  loadProxyModels: vi.fn().mockResolvedValue([]),
+  loadProxyCapabilities: vi.fn().mockResolvedValue({ protocolVersion: 'test', models: [], modes: [], slashCommands: [] }),
   loadAgents: vi.fn().mockResolvedValue([
     { id: 'codex', name: 'Codex', ready: true, cli: { state: 'ready', path: '/bin/codex', version: '1.0.0', source: 'path' }, proxy: { state: 'ready', path: '/proxy/codex', version: '0.1.0', source: 'github-release' }, officialInstallUrl: 'https://example.invalid' },
   ]),
@@ -128,6 +130,7 @@ function operationHarness() {
 function renderTasks(props: Partial<Parameters<typeof TasksView>[0]> = {}) {
   const onSelectTask = vi.fn();
   const onSelectSubtask = vi.fn();
+  const onSetPendingFirstMessage = vi.fn();
   const harness = operationHarness();
   render(
     <LocaleProvider locale="en">
@@ -144,13 +147,14 @@ function renderTasks(props: Partial<Parameters<typeof TasksView>[0]> = {}) {
           subtaskMain={null}
           onSelectTask={onSelectTask}
           onSelectSubtask={onSelectSubtask}
-          onWorkspaceCreated={vi.fn()}
+          onNewWorkspace={vi.fn()}
+          onSetPendingFirstMessage={onSetPendingFirstMessage}
           {...props}
         />
       </harness.wrapper>
     </LocaleProvider>,
   );
-  return { onSelectTask, onSelectSubtask, opSent: harness.sent };
+  return { onSelectTask, onSelectSubtask, onSetPendingFirstMessage, opSent: harness.sent };
 }
 
 beforeEach(() => {
@@ -253,12 +257,17 @@ describe('task group row actions', () => {
   });
 
   it('opens the task-context new-session form from "+" and creates a subtask', async () => {
-    const { onSelectSubtask } = renderTasks({ tasks: [task()], activeTaskId: 'task-1' });
+    const { onSelectSubtask, onSetPendingFirstMessage } = renderTasks({ tasks: [task()], activeTaskId: 'task-1' });
     await userEvent.click(screen.getByTestId('task-new-session-task-1'));
     // Task context is shown read-only.
     expect(screen.getByTestId('ns-task-name')).toHaveTextContent('My task');
     vi.mocked(createSubtask).mockResolvedValue(subtask({ id: 'sub-new' }));
-    await userEvent.click(await screen.findByRole('button', { name: 'Create session' }));
+    // The composer auto-selects the only ready agent (codex in this mock);
+    // Send enables once a first message is typed.
+    await userEvent.type(await screen.findByTestId('ns-message-input'), 'first subtask message');
+    await userEvent.click(screen.getByTestId('ns-send'));
+    // The first message is stashed for the session:created socket handler…
+    expect(onSetPendingFirstMessage).toHaveBeenCalledWith('first subtask message');
     await waitFor(() => {
       expect(createSubtask).toHaveBeenCalledWith('task-1', {
         workspace_id: 'ws-1',
@@ -341,7 +350,7 @@ describe('subtask row actions', () => {
             subtaskMain={null}
             onSelectTask={vi.fn()}
             onSelectSubtask={vi.fn()}
-            onWorkspaceCreated={vi.fn()}
+            onNewWorkspace={vi.fn()}
           />
         </harness.wrapper>
       </LocaleProvider>,
@@ -364,7 +373,7 @@ describe('subtask row actions', () => {
             subtaskMain={null}
             onSelectTask={vi.fn()}
             onSelectSubtask={vi.fn()}
-            onWorkspaceCreated={vi.fn()}
+            onNewWorkspace={vi.fn()}
           />
         </harness.wrapper>
       </LocaleProvider>,
@@ -409,7 +418,7 @@ describe('task detail placeholder', () => {
             subtaskMain={null}
             onSelectTask={vi.fn()}
             onSelectSubtask={vi.fn()}
-            onWorkspaceCreated={vi.fn()}
+            onNewWorkspace={vi.fn()}
           />
         </harness.wrapper>
       </LocaleProvider>,

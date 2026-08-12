@@ -28,6 +28,7 @@ import {
 } from './lifecycle-service.js';
 import { ProxySessionCoordinator } from './proxy-session-coordinator.js';
 import { SessionEventCoordinator } from './event-coordinator.js';
+import { AutoTitleService } from './auto-title.js';
 import { SubtaskLifecycle } from './subtask-lifecycle.js';
 import { NativeSessionService } from './native-session-service.js';
 import { assertApprovalModeAllowed, proxyTurnParamsFor } from './executor-policy.js';
@@ -64,6 +65,7 @@ export class SessionManager {
   private turns: TurnRuntime;
   private lifecycle: SessionLifecycleService;
   private proxySessions: ProxySessionCoordinator;
+  private autoTitle: AutoTitleService;
   private events: SessionEventCoordinator;
   private subtasks: SubtaskLifecycle;
   private nativeSessions: NativeSessionService;
@@ -95,6 +97,13 @@ export class SessionManager {
         onSessionUpdated: (sessionId, partial) => this.broadcastSessionUpdated(sessionId, partial),
       },
     );
+    this.autoTitle = new AutoTitleService({
+      db,
+      sessions: this.sessions,
+      history: this.history,
+      proxy,
+      rename: (sessionId, name) => this.renameSession(sessionId, name),
+    });
     this.events = new SessionEventCoordinator(
       db,
       this.sessions,
@@ -105,6 +114,7 @@ export class SessionManager {
       queue,
       watcher,
       this.proxySessions,
+      this.autoTitle,
       {
         sendMessage: (sessionId, text, items) => this.sendMessage(sessionId, text, items),
       },
@@ -119,8 +129,8 @@ export class SessionManager {
       this.sessions,
       broadcaster,
       {
-        persistKimiReplay: (sessionId, updates, timestamp) =>
-          this.persistKimiReplay(sessionId, updates, timestamp),
+        persistKimiReplay: (sessionId, updates, timestamp, replayStreamId) =>
+          this.persistKimiReplay(sessionId, updates, timestamp, replayStreamId),
       },
     );
     this.lifecycle = new SessionLifecycleService(
@@ -151,6 +161,13 @@ export class SessionManager {
     return this.nativeSessions.listKimi(cwd);
   }
 
+  async listPluginNativeSessions(
+    executor: Executor,
+    cwd: string,
+  ): Promise<import('@gian/shared').NativeSession[] | null> {
+    return this.nativeSessions.listPlugin(executor, cwd);
+  }
+
   async adoptKimiNativeSession(input: {
     workspaceId: string;
     cwd: string;
@@ -158,6 +175,17 @@ export class SessionManager {
     name?: string;
   }): Promise<{ session: Session; replay: { turns: number; events: number } }> {
     return this.nativeSessions.adoptKimi(input);
+  }
+
+  async adoptPluginNativeSession(input: {
+    workspaceId: string;
+    cwd: string;
+    executor: Executor;
+    nativeSessionId: string;
+    name?: string;
+    approvalMode?: ApprovalMode;
+  }): Promise<{ session: Session; replay: { turns: number; events: number } }> {
+    return this.nativeSessions.adopt(input);
   }
 
   async stopTurn(sessionId: string): Promise<void> {
@@ -229,7 +257,7 @@ export class SessionManager {
       .run(now, sessionId);
     this.broadcastSessionUpdated(sessionId, { status: 'done', updated_at: now });
 
-    this.proxy.forceDispose(sessionId);
+    await this.proxy.forceDispose(sessionId);
   }
 
   async respondApproval(
@@ -239,7 +267,7 @@ export class SessionManager {
     answers?: Record<string, string | string[]>,
     nativeOptionId?: string,
   ): Promise<void> {
-    const gianSession = this.getSession(sessionId);
+    this.getSession(sessionId);
     const proxySessionId = this.proxySessions.get(sessionId);
     if (!proxySessionId) throw new Error(`session not initialized: ${sessionId}`);
     const client = this.proxy.get(sessionId);
@@ -249,11 +277,11 @@ export class SessionManager {
     // for plan-mode-exit ceremony below.
     const pending = this.approvals.getPending(approvalId);
 
-    if (gianSession.executor === 'kimi') {
+    if ((pending?.nativeOptions?.length ?? 0) > 0 || nativeOptionId !== undefined) {
       const option = pending?.nativeOptions?.find(item => item.optionId === nativeOptionId);
       if (!option) {
         throw Object.assign(
-          new Error('Select one of the approval options supplied by Kimi.'),
+          new Error('Select one of the approval options supplied by the Agent.'),
           { code: 'INVALID_APPROVAL_OPTION' },
         );
       }
@@ -266,7 +294,7 @@ export class SessionManager {
       });
       const resolvedDecision: import('@gian/shared').ApprovalDecision = rejected
         ? 'decline'
-        : option.kind === 'allow_always'
+        : option.kind === 'allow_always' || option.kind === 'allow_session'
           ? 'allow_session'
           : 'allow_once';
       this.approvals.resolve(approvalId, resolvedDecision, 'web');
@@ -357,6 +385,21 @@ export class SessionManager {
     const turnId = randomUUID();
     const now = new Date().toISOString();
     const turn = this.turns.start(sessionId, turnId, now);
+    if (client.protocolV1) {
+      try {
+        // gian.proxy/1 uses the Host-minted turn id on the wire. Register the
+        // ownership before the RPC so an overlapping native replay cannot
+        // allocate a second Host turn during the response/event race.
+        this.db.prepare(
+          `INSERT INTO proxy_replay_turns
+            (session_id, provider_turn_id, turn_id, replay_owned)
+           VALUES (?, ?, ?, 0)`,
+        ).run(sessionId, turnId, turnId);
+      } catch (error) {
+        this.turns.rollbackStart(sessionId, turnId);
+        throw error;
+      }
+    }
     const turnNumber = turn.number;
 
     // Live Sync v2: pause the watcher while a proxy turn is in flight so we
@@ -411,6 +454,7 @@ export class SessionManager {
     try {
       const started = await client.startTurn({
         sessionId: proxySessionId,
+        turnId,
         input: dispatchItems,
         ...(codexAttachmentRoot
           ? { additionalWorkspaceRoots: [codexAttachmentRoot] }
@@ -588,24 +632,24 @@ export class SessionManager {
 
   /**
    * SESSION-NAME-001: push the Gian session name onto the native session.
-   *   - claude: append a `custom-title` line to the on-disk JSONL (instant,
-   *     zero ripple — `parseCcLine` ignores non-message lines). Only when the
-   *     JSONL already exists; before the first turn the cc-proxy `--name` flag
-   *     covers it.
+   *   - claude gian.proxy/1: delegate to the plugin's `session.rename`.
+   *   - claude legacy: append a `custom-title` line to the on-disk JSONL.
    *   - codex: `thread/name/set` via the live proxy facade, when one is up.
    *     Otherwise the next bring-up re-applies it (see bringUpProxySession).
    */
   private async applyNativeSessionName(sessionId: string, name: string): Promise<void> {
     const session = this.getSession(sessionId);
     if (session.executor === 'claude') {
-      this.writeClaudeCustomTitle(session, name);
+      const client = this.proxy.get(sessionId);
+      if (client?.protocolV1 && client.setName) await client.setName(name);
+      else this.writeClaudeCustomTitle(session, name);
     } else if (session.executor === 'codex') {
       const client = this.proxy.get(sessionId);
       if (client?.setName) await client.setName(name);
     }
   }
 
-  /** Append a `custom-title` record to a Claude session's JSONL so the name
+  /** Legacy-only: append a `custom-title` record to a Claude session's JSONL so the name
    *  shows in `claude --resume` / Remote Control listings. No-op when the
    *  session id or file isn't there yet (the first-turn `--name` covers that). */
   private writeClaudeCustomTitle(session: Session, name: string): void {
@@ -883,8 +927,9 @@ export class SessionManager {
     sessionId: string,
     updates: unknown[],
     timestamp: string,
+    replayStreamId?: string,
   ): { turns: number; events: number } {
-    return this.events.persistKimiReplay(sessionId, updates, timestamp);
+    return this.events.persistKimiReplay(sessionId, updates, timestamp, replayStreamId);
   }
 
   private completeTurn(

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { scanCommandsDir, listAllSlashCommands, clearSlashCache } from '../../src/core/slash.js';
+import { scanCommandsDir, listAllSlashCommands, clearSlashCache } from '../src/core/slash.js';
 
 const stubProbe = (names: string[]) => async () => names;
 

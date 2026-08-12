@@ -18,6 +18,7 @@ import {
   createProxyProcessShutdownState,
   shutdownProxyProcess,
 } from './process-shutdown.js';
+import { redactSensitiveText } from '../logging/redact.js';
 
 export interface CcProxyClientOptions {
   /** Absolute path to cc-proxy spawn.js entry. */
@@ -64,7 +65,8 @@ export class CcProxyClient implements ProxyClient {
   private exitNotified = false;
 
   constructor(opts: CcProxyClientOptions) {
-    this.log = opts.log ?? (() => {});
+    const log = opts.log ?? (() => {});
+    this.log = message => log(redactSensitiveText(message));
     this.shutdownProcess = opts.shutdownProcess ?? shutdownProxyProcess;
 
     const nodeBin = opts.nodeBin ?? process.execPath;

@@ -165,6 +165,48 @@ test('shouldRetryWithoutNoSessionPersistence detects older Claude CLI rejection'
   );
 });
 
+test('Claude stream result keeps OAuth API errors out of the success channel', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-proxy-auth-error-'));
+  const fakeClaude = join(dir, 'claude');
+  writeFileSync(fakeClaude, [
+    '#!/usr/bin/env node',
+    "console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: true, terminal_reason: 'api_error', result: 'Failed to authenticate: OAuth session expired' }));",
+  ].join('\n'));
+  chmodSync(fakeClaude, 0o755);
+
+  const oldClaudeBin = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = fakeClaude;
+  const runtime = new ClaudeMcpRuntime();
+  const replies: string[] = [];
+  runtime.on('channelReply', (_sessionId, text) => replies.push(text));
+  const exited = new Promise<ClaudeRuntimeEvents['processExited']>((resolve) => {
+    runtime.once('processExited', (...args) => resolve(args));
+  });
+
+  try {
+    await runtime.spawnSession({
+      sessionId: 'session-auth-error',
+      claudeSessionId: '00000000-0000-4000-8000-000000000081',
+      cwd: dir,
+      model: null,
+      isResume: false,
+    });
+    await runtime.sendMessage('session-auth-error', 'hello', {
+      permissionMode: 'bypassPermissions',
+    });
+    const [, code, signal, detail] = await exited;
+    assert.deepEqual(replies, []);
+    assert.equal(code, 0);
+    assert.equal(signal, null);
+    assert.equal(detail, 'Failed to authenticate: OAuth session expired');
+  } finally {
+    await runtime.stop();
+    if (oldClaudeBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = oldClaudeBin;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('Claude compact boundary detection covers native auto-compaction signals', () => {
   assert.equal(isClaudeCompactBoundary(CLAUDE_STREAM_JSON_V1_COMPACTION.boundary), true);
   assert.equal(
@@ -782,11 +824,11 @@ test('service relays approval requests and process failures', async () => {
       },
     ]);
 
-    runtime.emit('processExited', created.session.id, 9, null);
+    runtime.emit('processExited', created.session.id, 9, null, 'Claude authentication expired');
 
     const failedSnapshot = service.sessionSnapshot({ sessionId: created.session.id });
     assert.equal(failedSnapshot.session.status, 'error');
-    assert.match(failedSnapshot.session.lastError ?? '', /code=9/);
+    assert.equal(failedSnapshot.session.lastError, 'Claude authentication expired');
     assert.ok(events.some((event) => event.method === 'approval.resolved'));
     assert.ok(events.some((event) => event.method === 'turn.failed'));
   });

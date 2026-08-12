@@ -1,0 +1,103 @@
+name: Release Gian Proxy Plugin
+
+on:
+  push:
+    tags:
+      - 'proxy-claude-v*'
+      - 'proxy-codex-v*'
+      - 'proxy-kimi-v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: proxy-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos-arm64:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Require release commit on main
+        run: git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+
+      - name: Resolve plugin metadata
+        id: plugin
+        shell: bash
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            proxy-claude-v*)
+              ID=claude
+              PACKAGE=@gian/cc-proxy
+              MANIFEST=packages/proxies/cc-proxy/package.json
+              ;;
+            proxy-codex-v*)
+              ID=codex
+              PACKAGE=@gian/codex-proxy
+              MANIFEST=packages/proxies/codex-proxy/package.json
+              ;;
+            proxy-kimi-v*)
+              ID=kimi
+              PACKAGE=@gian/kimi-proxy
+              MANIFEST=packages/proxies/kimi-proxy/package.json
+              ;;
+            *) exit 1 ;;
+          esac
+          VERSION="${GITHUB_REF_NAME#proxy-${ID}-v}"
+          test "$(node -p "require('./${MANIFEST}').version")" = "${VERSION}"
+          echo "id=${ID}" >> "${GITHUB_OUTPUT}"
+          echo "package=${PACKAGE}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and test protocol
+        run: |
+          pnpm --filter @gian/shared build
+          pnpm --filter @gian/proxy-protocol test
+
+      - name: Build and test plugin
+        run: pnpm --filter "${{ steps.plugin.outputs.package }}" test
+
+      - name: Package plugin
+        run: >-
+          node scripts/build-proxy-artifacts.mjs
+          --plugin "${{ steps.plugin.outputs.id }}"
+          --version "${{ steps.plugin.outputs.version }}"
+
+      - name: Verify packaged checksum
+        working-directory: artifacts/proxies
+        run: >-
+          shasum -a 256 -c
+          "gian-proxy-${{ steps.plugin.outputs.id }}-${{ steps.plugin.outputs.version }}-darwin-arm64.tar.gz.sha256"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "artifacts/proxies/gian-proxy-${{ steps.plugin.outputs.id }}-${{ steps.plugin.outputs.version }}-darwin-arm64.tar.gz" \
+            "artifacts/proxies/gian-proxy-${{ steps.plugin.outputs.id }}-${{ steps.plugin.outputs.version }}-darwin-arm64.tar.gz.sha256" \
+            "artifacts/proxies/gian-proxy-${{ steps.plugin.outputs.id }}-${{ steps.plugin.outputs.version }}-darwin-arm64.tar.gz.manifest.json" \
+            --verify-tag \
+            --generate-notes \
+            --latest=false \
+            --title "Gian ${{ steps.plugin.outputs.id }} Proxy ${{ steps.plugin.outputs.version }}"

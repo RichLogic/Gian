@@ -3,9 +3,16 @@ import test from 'node:test';
 import { EventEmitter } from 'node:events';
 
 import { CodexProxyService } from '../src/core/service.js';
+import { CodexProtocolV1Adapter } from '../src/protocol/v1-adapter.js';
 import type { InputItem } from '../src/core/types.js';
 import type { CodexRuntime, RuntimeNotification, RuntimeServerRequest } from '../src/runtime/types.js';
 import { CODEX_APP_SERVER_V2_COMPACTION } from './fixtures/codex-app-server-v2-compaction.js';
+import {
+  parseProxyRequest,
+  proxyNotificationSchema,
+  resultSchemas,
+  type ProxyNotification,
+} from '@gian/proxy-protocol';
 
 function bindCompactionFixture(
   notification: { method: string; params: Record<string, unknown> },
@@ -30,6 +37,7 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
   }> = [];
   readonly responses: Array<{ id: number | string; payload: unknown }> = [];
   readonly threads = new Map<string, unknown>();
+  readonly interruptCalls: Array<{ threadId: string; turnId: string }> = [];
 
   async ensureStarted() {}
 
@@ -107,7 +115,13 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
     return {};
   }
 
-  async interruptTurn(_threadId: string, _turnId: string) {
+  async interruptTurn(threadId: string, turnId: string) {
+    this.interruptCalls.push({ threadId, turnId });
+    const thread = this.threads.get(threadId) as {
+      turns?: Array<{ id?: string; status?: string }>;
+    } | undefined;
+    const turn = thread?.turns?.find(entry => entry.id === turnId);
+    if (turn) turn.status = 'interrupted';
     return {};
   }
 
@@ -556,6 +570,143 @@ test('Codex native /compact uses app-server thread/compact/start', async () => {
   }
 });
 
+test('retryable Codex stream errors preserve the active turn until completion', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+    const started = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'keep working' }],
+    }, 42);
+
+    harness.runtime.emitNotification({
+      method: 'error',
+      params: {
+        threadId: created.session.threadId,
+        turnId: started.turn.id,
+        error: {
+          message: 'Reconnecting... 2/5',
+          codexErrorInfo: {
+            responseStreamDisconnected: { httpStatusCode: null },
+          },
+        },
+        willRetry: true,
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const duringRetry = harness.service.getSession({ sessionId: created.session.id }).session;
+    assert.equal(duringRetry.status, 'running');
+    assert.equal(harness.events.some((entry) => entry.method === 'runtime.error'), false);
+    await harness.service.steerTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'continue after reconnect' }],
+    });
+    assert.equal(harness.runtime.steerCalls.at(-1)?.turnId, started.turn.id);
+
+    harness.runtime.setCompletedTurn(created.session.threadId, started.turn.id);
+    harness.runtime.emitNotification({
+      method: 'turn/completed',
+      params: {
+        threadId: created.session.threadId,
+        turn: { id: started.turn.id, status: 'completed' },
+      },
+    });
+
+    await waitFor(() => harness.events.some((entry) => entry.method === 'turn.completed'));
+    const afterCompletion = harness.service.getSession({ sessionId: created.session.id }).session;
+    assert.equal(afterCompletion.status, 'idle');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('non-retryable Codex runtime errors remain terminal', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+    const started = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'fail this turn' }],
+    });
+
+    harness.runtime.emitNotification({
+      method: 'error',
+      params: {
+        threadId: created.session.threadId,
+        turnId: started.turn.id,
+        error: { message: 'request failed' },
+        willRetry: false,
+      },
+    });
+
+    await waitFor(() => harness.events.some((entry) => entry.method === 'runtime.error'));
+    const failed = harness.service.getSession({ sessionId: created.session.id }).session;
+    assert.equal(failed.status, 'error');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('force close interrupts the runtime-owned turn after proxy turn state diverges', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+    const other = await harness.service.createSession({ cwd: '/tmp/other' });
+    const started = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'keep working' }],
+    });
+    const thread = harness.runtime.threads.get(created.session.threadId) as {
+      turns: Array<{ id: string; status: string; items: unknown[] }>;
+    };
+    const proxyTurn = thread.turns.find(turn => turn.id === started.turn.id)!;
+    proxyTurn.status = 'failed';
+    thread.turns.push({
+      id: 'native-turn-still-running',
+      status: 'inProgress',
+      items: [],
+    });
+
+    await assert.rejects(
+      harness.service.closeSession({ sessionId: created.session.id }),
+      (error: unknown) => (
+        Boolean(error)
+        && typeof error === 'object'
+        && (error as { code?: unknown }).code === 'SESSION_BUSY'
+      ),
+      'ordinary close must keep rejecting an active proxy session',
+    );
+    await harness.service.closeSession({ sessionId: created.session.id, force: true });
+
+    assert.deepEqual(harness.runtime.interruptCalls, [{
+      threadId: created.session.threadId,
+      turnId: 'native-turn-still-running',
+    }]);
+    assert.throws(
+      () => harness.service.getSession({ sessionId: created.session.id }),
+      /not found/,
+    );
+    assert.equal(
+      harness.service.getSession({ sessionId: other.session.id }).session.threadId,
+      other.session.threadId,
+      'force close must not detach another session on the shared runtime',
+    );
+
+    const recovered = await harness.service.createSession({
+      cwd: '/tmp/work',
+      threadId: created.session.threadId,
+    });
+    const next = await harness.service.startTurn({
+      sessionId: recovered.session.id,
+      input: [{ type: 'text', text: 'continue after recovery' }],
+    });
+    assert.equal(next.turn.id, 'turn-2');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('Codex auto-compaction replaces context only after the compaction item completes', async () => {
   const harness = await createHarness();
   try {
@@ -989,6 +1140,207 @@ test('turn completion emits a normalized summary with commands and file changes'
 
     const snapshot = await harness.service.sessionSnapshot({ sessionId: created.session.id });
     assert.equal(typeof (snapshot.thread as { preview?: unknown }).preview, 'string');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('gian.proxy/1 adapter owns Host ids, validates events, and deduplicates turns', async () => {
+  const harness = await createHarness();
+  const notifications: ProxyNotification[] = [];
+  const adapter = new CodexProtocolV1Adapter(
+    harness.service,
+    '0.1.0',
+    notification => notifications.push(proxyNotificationSchema.parse(notification)),
+  );
+  try {
+    const initialize = await adapter.handle(parseProxyRequest({
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocol: { name: 'gian.proxy', versions: ['1.0'] },
+        host: { name: 'Gian', version: '9.9.9' },
+      },
+    }));
+    resultSchemas.initialize.parse(initialize);
+    resultSchemas['catalog.list'].parse(await adapter.handle(parseProxyRequest({
+      id: 2,
+      method: 'catalog.list',
+      params: {},
+    })));
+
+    const created = resultSchemas['session.create'].parse(await adapter.handle(parseProxyRequest({
+      id: 3,
+      method: 'session.create',
+      params: {
+        sessionId: 'host-session-1',
+        cwd: '/tmp/work',
+        workspaceRoots: ['/tmp/work'],
+        model: 'gpt-5-codex',
+        mode: 'ask',
+        config: {},
+      },
+    })));
+    assert.equal(created.session.id, 'host-session-1');
+    assert.equal(created.session.nativeSession?.id, 'thread-1');
+
+    const startRequest = {
+      id: 4,
+      method: 'turn.start',
+      params: {
+        sessionId: 'host-session-1',
+        streamId: created.session.streamId,
+        turnId: 'host-turn-1',
+        input: [{ type: 'text', text: 'hello' }],
+        policy: {
+          workspaceRoots: ['/tmp/work'],
+          approval: 'relay',
+          network: 'ask',
+        },
+        config: { mode: 'ask', native: {} },
+      },
+    } as const;
+    resultSchemas['turn.start'].parse(await adapter.handle(parseProxyRequest(startRequest)));
+    assert.equal(harness.runtime.startTurnCalls.length, 1);
+    assert.deepEqual(notifications.map(value => [
+      value.method,
+      'sessionId' in value.params ? value.params.sessionId : null,
+      'turnId' in value.params ? value.params.turnId : null,
+    ]), [['turn.started', 'host-session-1', 'host-turn-1']]);
+
+    harness.runtime.emitNotification({
+      method: 'item/agentMessage/delta',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'message-1',
+        delta: 'hello',
+      },
+    });
+    harness.runtime.setCompletedTurn('thread-1', 'turn-1');
+    harness.runtime.emitNotification({
+      method: 'turn/completed',
+      params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } },
+    });
+    await waitFor(() => notifications.some(value => value.method === 'turn.completed'));
+    assert.deepEqual(notifications.map(value => value.method), [
+      'turn.started',
+      'content.delta',
+      'turn.completed',
+    ]);
+    assert.deepEqual(notifications.map(value => (
+      'sequence' in value.params ? value.params.sequence : null
+    )), [1, 2, 3]);
+
+    resultSchemas['turn.start'].parse(await adapter.handle(parseProxyRequest(startRequest)));
+    assert.equal(harness.runtime.startTurnCalls.length, 1, 'same Host turn must not execute twice');
+    await assert.rejects(
+      adapter.handle(parseProxyRequest({
+        ...startRequest,
+        id: 5,
+        params: { ...startRequest.params, input: [{ type: 'text', text: 'changed' }] },
+      })),
+      (error: unknown) => error instanceof Error
+        && 'code' in error
+        && error.code === 'CONFLICT',
+    );
+
+    await adapter.handle(parseProxyRequest({
+      ...startRequest,
+      id: 6,
+      params: {
+        ...startRequest.params,
+        turnId: 'host-turn-clear',
+        input: [{ type: 'text', text: '/clear' }],
+      },
+    }));
+    const rotationIndex = notifications.findIndex(value => (
+      value.method === 'session.updated'
+      && value.params.data.reason === 'native-session-rotated'
+    ));
+    assert.ok(rotationIndex >= 0);
+    const reset = notifications[rotationIndex + 1];
+    assert.equal(reset?.method, 'usage.updated');
+    assert.deepEqual(reset?.params.data, {
+      context: null,
+      conversation: { mode: 'reset' },
+      reason: 'session_reset',
+    });
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('gian.proxy/1 adapter resolves approval before an interrupted turn terminates', async () => {
+  const harness = await createHarness();
+  const notifications: ProxyNotification[] = [];
+  const adapter = new CodexProtocolV1Adapter(
+    harness.service,
+    '0.1.0',
+    notification => notifications.push(notification),
+  );
+  try {
+    await adapter.handle(parseProxyRequest({
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocol: { name: 'gian.proxy', versions: ['1.0'] },
+        host: { name: 'Gian', version: '9.9.9' },
+      },
+    }));
+    const created = resultSchemas['session.create'].parse(await adapter.handle(parseProxyRequest({
+      id: 2,
+      method: 'session.create',
+      params: {
+        sessionId: 'host-session-2',
+        cwd: '/tmp/work',
+        workspaceRoots: ['/tmp/work'],
+        config: {},
+      },
+    })));
+    await adapter.handle(parseProxyRequest({
+      id: 3,
+      method: 'turn.start',
+      params: {
+        sessionId: 'host-session-2',
+        streamId: created.session.streamId,
+        turnId: 'host-turn-2',
+        input: [{ type: 'text', text: 'needs approval' }],
+        policy: {
+          workspaceRoots: ['/tmp/work'],
+          approval: 'relay',
+          network: 'ask',
+        },
+        config: { native: {} },
+      },
+    }));
+    harness.runtime.emitServerRequest({
+      id: 77,
+      method: 'item/commandExecution/requestApproval',
+      params: { threadId: 'thread-1', command: 'echo hello' },
+    });
+    await waitFor(() => notifications.some(value => value.method === 'approval.requested'));
+    await adapter.handle(parseProxyRequest({
+      id: 4,
+      method: 'turn.interrupt',
+      params: {
+        sessionId: 'host-session-2',
+        streamId: created.session.streamId,
+        turnId: 'host-turn-2',
+      },
+    }));
+    harness.runtime.setCompletedTurn('thread-1', 'turn-1');
+    harness.runtime.emitNotification({
+      method: 'turn/completed',
+      params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'interrupted' } },
+    });
+    await waitFor(() => notifications.some(value => value.method === 'turn.completed'));
+
+    const methods = notifications.map(value => value.method);
+    assert.ok(methods.indexOf('approval.resolved') > methods.indexOf('approval.requested'));
+    assert.ok(methods.indexOf('approval.resolved') < methods.indexOf('turn.completed'));
+    const completed = notifications.find(value => value.method === 'turn.completed');
+    assert.equal(completed?.params.data.stopReason, 'interrupted');
   } finally {
     await harness.cleanup();
   }

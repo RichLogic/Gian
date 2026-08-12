@@ -208,6 +208,29 @@ test('ERR-011: adopt happy path returns the new gian session row when the native
   }
 });
 
+test('ERR-011: concurrent adopts of one native session create exactly one Gian session', async () => {
+  const ctx = await setup();
+  try {
+    const sid = ctx.home.addClaudeSession({
+      workspacePath: ctx.workspacePath,
+      sessionId: 'cc-concurrent-adopt',
+    });
+    const [first, second] = await Promise.all([
+      adoptBody(ctx, { executor: 'claude', native_session_id: sid }),
+      adoptBody(ctx, { executor: 'claude', native_session_id: sid }),
+    ]);
+
+    assert.deepEqual([first.status, second.status].sort(), [200, 409],
+      'the second mutation must observe the first adoption instead of inserting a duplicate');
+    const rows = ctx.appCtx.db.prepare(
+      'SELECT id FROM sessions WHERE executor = ? AND native_session_id = ?',
+    ).all('claude', sid);
+    assert.equal(rows.length, 1, 'the database must contain one binding after the race');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test('ERR-011: native adopt broadcast identifies its Host origin', async () => {
   const ctx = await setup();
   try {
@@ -222,6 +245,7 @@ test('ERR-011: native adopt broadcast identifies its Host origin', async () => {
       db: ctx.appCtx.db,
       sessions: {
         getSession: (sessionId: string) => repository.get(sessionId),
+        listPluginNativeSessions: async () => null,
       } as unknown as SessionManager,
       broadcaster: {
         broadcast: (message: ServerToClientMessage) => messages.push(message),
@@ -316,6 +340,64 @@ test('ERR-011: delete of a native session in a different workspace returns 404 (
     const res = await deleteNative(ctx, 'claude', 'cross-leak');
     assert.equal(res.status, 404,
       'cross-workspace delete must NOT succeed — security boundary mirrors adopt');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ERR-011: concurrent deletes of one native session yield one deletion and one clean miss', async () => {
+  const ctx = await setup();
+  try {
+    const sid = ctx.home.addClaudeSession({
+      workspacePath: ctx.workspacePath,
+      sessionId: 'cc-concurrent-delete',
+    });
+    const [first, second] = await Promise.all([
+      deleteNative(ctx, 'claude', sid),
+      deleteNative(ctx, 'claude', sid),
+    ]);
+    assert.deepEqual([first.status, second.status].sort(), [200, 404],
+      'serialized deletion must not turn the loser into unlink ENOENT/500');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ERR-011: concurrent adopt/delete resolves to one complete outcome without split-brain state', async () => {
+  const ctx = await setup();
+  try {
+    const sid = ctx.home.addClaudeSession({
+      workspacePath: ctx.workspacePath,
+      sessionId: 'cc-adopt-delete-race',
+    });
+    const adopt = adoptBody(ctx, { executor: 'claude', native_session_id: sid });
+    const remove = deleteNative(ctx, 'claude', sid);
+    const [adoptResult, deleteResult] = await Promise.all([adopt, remove]);
+
+    const statuses = [adoptResult.status, deleteResult.status];
+    assert.ok(
+      statuses[0] === 200 && statuses[1] === 409
+      || statuses[0] === 404 && statuses[1] === 200,
+      `race must resolve as adopt-wins or delete-wins, got ${statuses.join('/')}`,
+    );
+    const listed = await ctx.appCtx.fetch(
+      `/api/workspaces/${ctx.workspaceId}/native-sessions`,
+    );
+    const body = await listed.json() as {
+      sessions: Array<{ id: string; adoptedBy?: { gianSessionId: string } }>;
+    };
+    const listedSession = body.sessions.find(session => session.id === sid);
+    if (adoptResult.status === 200) {
+      assert.ok(listedSession?.adoptedBy,
+        'adopt-wins must preserve and link the native source');
+    } else {
+      assert.equal(listedSession, undefined,
+        'delete-wins must leave no native source that could become a ghost adoption');
+      const rows = ctx.appCtx.db.prepare(
+        'SELECT id FROM sessions WHERE executor = ? AND native_session_id = ?',
+      ).all('claude', sid);
+      assert.equal(rows.length, 0, 'delete-wins must not leave a Gian binding');
+    }
   } finally {
     await ctx.cleanup();
   }

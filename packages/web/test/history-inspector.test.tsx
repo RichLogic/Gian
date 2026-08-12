@@ -11,6 +11,7 @@ import * as api from '../src/api.js';
 import {
   getHistoryState,
   reconcileHistoryAfterFetch,
+  refreshHistory,
 } from '../src/controllers/use-history.js';
 
 vi.mock('../src/api.js', async () => {
@@ -172,6 +173,7 @@ describe('HistoryInspector', () => {
     loadGitHistory.mockResolvedValue(page({ items: [commit({ sha: 'aaa111', subject: 'seed commit' })] }));
     renderInspector(wt);
     await screen.findByText('seed commit');
+    expect(screen.getByLabelText('Search commit message or SHA…')).toBeTruthy();
     fireEvent.change(document.querySelector('.insp-search input')!, { target: { value: 'oauth' } });
     await waitFor(() => expect(loadGitHistory).toHaveBeenLastCalledWith(wt, expect.objectContaining({ q: 'oauth' })), { timeout: 1500 });
   });
@@ -205,7 +207,7 @@ describe('HistoryInspector', () => {
     renderInspector(wt);
     await screen.findByText('cached commit');
 
-    fireEvent.click(screen.getByLabelText('Refresh — re-read local history (no network)'));
+    act(() => refreshHistory(wt));
     await screen.findByText("Couldn't load history.");
     expect(screen.getByText('cached commit')).toBeTruthy();
 
@@ -237,20 +239,33 @@ describe('HistoryInspector', () => {
     renderInspector(wt);
     await screen.findByText('before fetch');
     const callsBefore = loadGitHistory.mock.calls.length;
-    fireEvent.click(screen.getByTestId('history-fetch'));
+    fireEvent.click(screen.getByTestId('history-sync'));
     await waitFor(() => expect(loadGitHistory.mock.calls.length).toBeGreaterThan(callsBefore));
     expect(document.querySelector('.h-moved')).toBeTruthy();
   });
 
-  it('fetch success without ref changes still discards cursor state and reloads page 1', async () => {
+  it('sync refreshes local history before Fetch settles, then reconciles page 1', async () => {
     const wt = nextTree();
     loadGitHistory.mockResolvedValue(page({ items: [commit({ sha: 'aaa111', subject: 'unchanged fetch' })] }));
-    fetchGitHistory.mockResolvedValue({ ok: true, fetchedAt: new Date().toISOString(), refsChanged: false, coalesced: false });
+    const pendingFetch = deferred<Awaited<ReturnType<typeof api.fetchGitHistory>>>();
+    fetchGitHistory.mockReturnValueOnce(pendingFetch.promise);
     renderInspector(wt);
     await screen.findByText('unchanged fetch');
     const callsBefore = loadGitHistory.mock.calls.length;
-    fireEvent.click(screen.getByTestId('history-fetch'));
-    await waitFor(() => expect(loadGitHistory.mock.calls.length).toBeGreaterThan(callsBefore));
+    expect(screen.queryByTestId('history-fetch')).toBeNull();
+    fireEvent.click(screen.getByTestId('history-sync'));
+    await waitFor(() => expect(loadGitHistory.mock.calls.length).toBe(callsBefore + 1));
+    expect(fetchGitHistory).toHaveBeenCalledWith(wt);
+    expect(screen.getByText('Fetching…')).toBeTruthy();
+    expect(screen.queryByText('read-only — working tree untouched')).toBeNull();
+
+    await act(async () => pendingFetch.resolve({
+      ok: true,
+      fetchedAt: new Date().toISOString(),
+      refsChanged: false,
+      coalesced: false,
+    }));
+    await waitFor(() => expect(loadGitHistory.mock.calls.length).toBe(callsBefore + 2));
     expect(document.querySelector('.h-moved')).toBeNull();
   });
 
@@ -263,7 +278,7 @@ describe('HistoryInspector', () => {
     loadGitHistory.mockResolvedValue(page({ items: [commit({ sha: 'aaa111', subject: 'seed commit' })] }));
     renderInspector(wt);
     await screen.findByText('seed commit');
-    fireEvent.click(screen.getByTestId('history-fetch'));
+    fireEvent.click(screen.getByTestId('history-sync'));
     await screen.findByText('Authentication failed');
     expect(document.querySelector('.h-fetchbar.err .btn')?.textContent).toBe('Retry');
   });
@@ -277,7 +292,7 @@ describe('HistoryInspector', () => {
     loadGitHistory.mockResolvedValue(page({ items: [commit({ sha: 'aaa111', subject: 'seed commit' })] }));
     renderInspector(wt);
     await screen.findByText('seed commit');
-    fireEvent.click(screen.getByTestId('history-fetch'));
+    fireEvent.click(screen.getByTestId('history-sync'));
     await screen.findByText(/outcome unknown/);
     expect(document.querySelector('.h-fetchbar.warn')).toBeTruthy();
   });
@@ -290,7 +305,7 @@ describe('HistoryInspector', () => {
     })).mockRejectedValueOnce(new Error('network offline'));
     renderInspector(wt);
     await screen.findByText('seed commit');
-    fireEvent.click(screen.getByTestId('history-fetch'));
+    fireEvent.click(screen.getByTestId('history-sync'));
     await screen.findByText('Authentication failed');
     fireEvent.click(screen.getByText('Retry'));
     await screen.findByText('Fetch failed.');
@@ -312,7 +327,7 @@ describe('HistoryInspector', () => {
     const rendered = renderInspector(treeA);
     await screen.findByText('tree A commit');
     fireEvent.change(document.querySelector('.insp-search input')!, { target: { value: 'only-tree-a' } });
-    fireEvent.click(screen.getByTestId('history-fetch'));
+    fireEvent.click(screen.getByTestId('history-sync'));
 
     rendered.rerender(
       <HistoryInspector workingTreeId={treeB} selectedSha={null} onOpenCommit={rendered.onOpenCommit} />,

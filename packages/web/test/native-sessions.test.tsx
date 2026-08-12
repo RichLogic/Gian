@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { NativeSession, Session, Workspace } from '@gian/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -67,6 +67,16 @@ const adopted = {
   updated_at: '2026-08-08T00:00:00.000Z',
 } satisfies Session;
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('NATIVE-001: Native Sessions UI', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -126,6 +136,80 @@ describe('NATIVE-001: Native Sessions UI', () => {
     expect(await screen.findByText('native session not found in this workspace')).toBeVisible();
     expect(screen.getByRole('heading', { name: 'Adopt as Gian session' })).toBeVisible();
     expect(onSessionAdopted).not.toHaveBeenCalled();
+    rendered.dispatcher.dispose();
+  });
+
+  it('keeps the newest workspace result when an older request finishes late', async () => {
+    const workspaceB = {
+      ...workspace,
+      id: 'ws-native-b',
+      name: 'Native workspace B',
+      path: '/tmp/native-workspace-b',
+    } satisfies Workspace;
+    const sourceB = {
+      ...source,
+      id: 'codex-native-b',
+      cwd: workspaceB.path,
+      firstUserMessage: 'Workspace B conversation',
+    } satisfies NativeSession;
+    const requestA = deferred<NativeSession[]>();
+    const requestB = deferred<NativeSession[]>();
+    vi.mocked(loadNativeSessions).mockImplementation(id => (
+      id === workspace.id ? requestA.promise : requestB.promise
+    ));
+    const rendered = renderWithOperations(
+      <NativeSessionsPane workspace={workspace} onChange={vi.fn()} onSessionAdopted={vi.fn()} />,
+    );
+    await waitFor(() => expect(loadNativeSessions).toHaveBeenCalledWith(workspace.id));
+
+    rendered.rerender(
+      <NativeSessionsPane workspace={workspaceB} onChange={vi.fn()} onSessionAdopted={vi.fn()} />,
+    );
+    await waitFor(() => expect(loadNativeSessions).toHaveBeenCalledWith(workspaceB.id));
+    await act(async () => { requestB.resolve([sourceB]); });
+    expect(await screen.findByText('Workspace B conversation')).toBeVisible();
+
+    await act(async () => { requestA.resolve([source]); });
+    expect(screen.getByText('Workspace B conversation')).toBeVisible();
+    expect(screen.queryByText('Replay the existing native conversation')).not.toBeInTheDocument();
+    rendered.dispatcher.dispose();
+  });
+
+  it('surfaces the latest refresh failure and always leaves loading state', async () => {
+    vi.mocked(loadNativeSessions).mockRejectedValue(new Error('native discovery unavailable'));
+    const rendered = renderWithOperations(
+      <NativeSessionsPane workspace={workspace} onChange={vi.fn()} onSessionAdopted={vi.fn()} />,
+    );
+
+    expect(await screen.findByText('native discovery unavailable')).toBeVisible();
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
+    expect(screen.getByText('No native sessions in this workspace.')).toBeVisible();
+    rendered.dispatcher.dispose();
+  });
+
+  it('ignores a stale refresh failure after the next workspace has loaded', async () => {
+    const workspaceB = { ...workspace, id: 'ws-native-b', path: '/tmp/native-b' } satisfies Workspace;
+    const sourceB = {
+      ...source,
+      id: 'codex-native-b',
+      cwd: workspaceB.path,
+      firstUserMessage: 'Fresh workspace result',
+    } satisfies NativeSession;
+    const requestA = deferred<NativeSession[]>();
+    vi.mocked(loadNativeSessions).mockImplementation(id => (
+      id === workspace.id ? requestA.promise : Promise.resolve([sourceB])
+    ));
+    const rendered = renderWithOperations(
+      <NativeSessionsPane workspace={workspace} onChange={vi.fn()} onSessionAdopted={vi.fn()} />,
+    );
+    rendered.rerender(
+      <NativeSessionsPane workspace={workspaceB} onChange={vi.fn()} onSessionAdopted={vi.fn()} />,
+    );
+    expect(await screen.findByText('Fresh workspace result')).toBeVisible();
+
+    await act(async () => { requestA.reject(new Error('late stale failure')); });
+    expect(screen.queryByText('late stale failure')).not.toBeInTheDocument();
+    expect(screen.getByText('Fresh workspace result')).toBeVisible();
     rendered.dispatcher.dispose();
   });
 });

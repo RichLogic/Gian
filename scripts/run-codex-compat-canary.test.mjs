@@ -112,4 +112,5 @@ test('compatibility canary contains no model-turn operation', async () => {
   const source = await readFile(scriptUrl, 'utf8');
   assert.doesNotMatch(source, /\.startTurn\s*\(/);
   assert.doesNotMatch(source, /['"]turn\/start['"]/);
+  assert.match(source, /maxRetries:\s*20/);
 });

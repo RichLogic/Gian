@@ -31,7 +31,7 @@ export function assertPortableMacNodeRuntime(otoolOutput) {
     throw new Error([
       'Node runtime is not portable: it depends on non-system macOS libraries.',
       ...external.map(path => `- ${path}`),
-      'Use the official Node.js 22 macOS arm64 binary before packaging Gian.',
+      'Use the official Node.js 24 macOS arm64 binary before packaging Gian.',
     ].join('\n'));
   }
   return libraries;

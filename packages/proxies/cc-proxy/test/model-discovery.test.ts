@@ -9,7 +9,7 @@ import {
   parseAvailableModels,
   resolveClaudeSettingsPath,
   ClaudeMcpRuntime,
-} from '../../src/runtime/claude-mcp-runtime.js';
+} from '../src/runtime/claude-mcp-runtime.js';
 
 function makeTmpDir(): string {
   return mkdtempSync(join(tmpdir(), 'cc-proxy-model-discovery-'));

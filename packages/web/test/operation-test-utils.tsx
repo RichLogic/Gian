@@ -9,6 +9,7 @@
  */
 import { render, type RenderOptions, type RenderResult } from '@testing-library/react';
 import type { ClientToServerMessage, ServerToClientMessage } from '@gian/shared';
+import { useEffect } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { createOperationDispatcher, type OperationTransport } from '../src/operations/dispatcher.js';
 import type { OperationStore } from '../src/operations/store.js';
@@ -79,15 +80,21 @@ export function createOperationHarness(): OperationHarness {
   const store = createOperationStore();
   const transport = new FakeOperationTransport();
   const dispatcher = createOperationDispatcher({ store, transport });
+
+  function OperationHarnessWrapper({ children }: { children: ReactNode }) {
+    useEffect(() => () => dispatcher.dispose(), [dispatcher]);
+    return (
+      <OperationStoreProvider store={store}>
+        <OperationDispatcherProvider dispatcher={dispatcher}>{children}</OperationDispatcherProvider>
+      </OperationStoreProvider>
+    );
+  }
+
   return {
     store,
     dispatcher,
     transport,
-    wrapper: ({ children }: { children: ReactNode }) => (
-      <OperationStoreProvider store={store}>
-        <OperationDispatcherProvider dispatcher={dispatcher}>{children}</OperationDispatcherProvider>
-      </OperationStoreProvider>
-    ),
+    wrapper: OperationHarnessWrapper,
   };
 }
 

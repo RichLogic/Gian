@@ -4,10 +4,11 @@ const GIT_READ_TIMEOUT = 5_000;
 const GIT_MUTATION_TIMEOUT = 60_000;
 
 /**
- * Detect the default branch of `repo`. Tries, in order:
+ * Detect the default compare branch of `repo`. Tries, in order:
  *   1. origin/HEAD symref (the canonical answer if there's a remote)
- *   2. presence of `main` or `master` locally
- *   3. fallback: 'main'
+ *   2. presence of `origin/main` or `origin/master`
+ *   3. presence of `main` or `master` locally
+ *   4. fallback: 'main'
  * Runs without blocking the Host request/event loop.
  */
 export async function detectDefaultBranchAsync(repo: string): Promise<string> {
@@ -17,12 +18,12 @@ export async function detectDefaultBranchAsync(repo: string): Promise<string> {
       { cwd: repo, timeoutMs: GIT_READ_TIMEOUT },
     );
     const ref = stdout.trim();
-    if (ref.startsWith('origin/')) return ref.slice('origin/'.length);
+    if (ref.startsWith('origin/')) return ref;
   } catch {
     // No remote HEAD — probe the conventional local branches below.
   }
 
-  for (const candidate of ['main', 'master']) {
+  for (const candidate of ['origin/main', 'origin/master', 'main', 'master']) {
     try {
       const { stdout } = await runGit(
         ['rev-parse', '--verify', candidate],

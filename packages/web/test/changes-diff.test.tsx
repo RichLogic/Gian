@@ -7,10 +7,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ChangesDiffBody } from '../src/components/ChangesDiffBody.js';
-import type { ChangedEntry, WorkingTree } from '../src/api.js';
+import type { ChangedEntry } from '../src/api.js';
 import * as api from '../src/api.js';
 import {
   __resetChangesDiffForTests,
+  applyChangesScopeRequest,
   getChangesDiffState,
   invalidateAllChangesDiffs,
   requestChangesDiffAnchor,
@@ -22,12 +23,14 @@ vi.mock('../src/api.js', async () => {
   const actual = await vi.importActual<typeof import('../src/api.js')>('../src/api.js');
   return {
     ...actual,
+    loadBranchList: vi.fn(),
     loadChanged: vi.fn(),
     loadDiff: vi.fn(),
   };
 });
 
 const loadChanged = vi.mocked(api.loadChanged);
+const loadBranchList = vi.mocked(api.loadBranchList);
 const loadDiff = vi.mocked(api.loadDiff);
 
 /* Controllable IntersectionObserver — jsdom has none. */
@@ -45,12 +48,6 @@ class FakeIO {
   trigger() { this.cb([{ isIntersecting: true } as IntersectionObserverEntry], this as unknown as IntersectionObserver); }
 }
 
-const tree: WorkingTree = {
-  id: 'ws:demo', kind: 'workspace', label: 'demo', path: '/tmp/demo',
-  branch: 'main', workspace_id: 'demo', workspace_name: 'demo',
-  session_id: null, session_name: null,
-};
-
 const FILES: ChangedEntry[] = [
   { path: 'src/a.ts', kind: 'update', staged: false, added: 3, removed: 1 },
   { path: 'src/b.ts', kind: 'create', staged: false, added: 5, removed: 0 },
@@ -67,7 +64,7 @@ const DIFF_A = [
 ].join('\n');
 
 function renderBody(workingTreeId: string | null = 'ws:demo') {
-  return render(<ChangesDiffBody workingTreeId={workingTreeId} tree={workingTreeId ? tree : null} />);
+  return render(<ChangesDiffBody workingTreeId={workingTreeId} />);
 }
 
 beforeEach(() => {
@@ -78,6 +75,11 @@ beforeEach(() => {
   vi.stubGlobal('IntersectionObserver', FakeIO);
   window.HTMLElement.prototype.scrollIntoView = vi.fn();
   loadChanged.mockResolvedValue(FILES);
+  loadBranchList.mockResolvedValue({
+    head: 'main',
+    base: 'origin/main',
+    branches: ['main', 'origin/main'],
+  });
   loadDiff.mockResolvedValue({ diff: DIFF_A, truncated: false });
 });
 
@@ -86,13 +88,10 @@ afterEach(() => {
 });
 
 describe('ChangesDiffBody', () => {
-  it('renders the scope header (title, tree meta, totals) once the list loads', async () => {
+  it('renders toolbar totals without duplicating scope and tree metadata', async () => {
     renderBody();
-    await waitFor(() => expect(document.querySelector('.cs-subject')?.textContent).toBe('Branch'));
-    // Default scope, tree label + branch, and the auto-base hint.
-    expect(document.querySelector('.cs-meta')?.textContent).toContain('demo · main');
-    expect(document.querySelector('.cs-meta')?.textContent).toContain('main →');
-    expect(screen.getByText(/2 files/)).toBeTruthy();
+    await screen.findByText(/2 files/);
+    expect(document.querySelector('.cs-head')).toBeNull();
     expect(document.querySelector('.cs-stats .add')?.textContent).toBe('+8');
     expect(document.querySelector('.cs-stats .del')?.textContent).toBe('−1');
     expect(loadChanged).toHaveBeenCalledWith('ws:demo', 'branch', null, null, null, undefined);
@@ -124,6 +123,27 @@ describe('ChangesDiffBody', () => {
     await waitFor(() => expect(loadDiff).toHaveBeenCalledWith('ws:demo', 'src/a.ts', 'branch', null, null));
     expect(loadDiff).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(document.querySelectorAll('.sheet-diff-ln.add').length).toBe(1));
+  });
+
+  it('pins last-turn patches to the same session and turn as the file list', async () => {
+    act(() => {
+      applyChangesScopeRequest('ws:demo', 'lastturn', {
+        sessionId: 'session-card',
+        turn: 7,
+      });
+    });
+    renderBody();
+    await waitFor(() => expect(document.querySelectorAll('.cs-file').length).toBe(2));
+    act(() => FakeIO.instances[0]!.trigger());
+    await waitFor(() => expect(loadDiff).toHaveBeenCalledWith(
+      'ws:demo',
+      'src/a.ts',
+      'lastturn',
+      null,
+      null,
+      'session-card',
+      7,
+    ));
   });
 
   it('per-file failure offers retry without touching other files', async () => {
@@ -188,7 +208,7 @@ describe('ChangesDiffBody', () => {
     expect(document.querySelectorAll('.cs-file.collapsed').length).toBe(1);
     expect(getChangesDiffState('ws:demo').patches['src/a.ts']).toBeUndefined();
     expect(localStorage.getItem('gian.changes.scope')).toBe('all');
-    expect(document.querySelector('.cs-subject')?.textContent).toBe('All changes');
+    expect(getChangesDiffState('ws:demo').scope).toBe('all');
   });
 
   it('an anchor request expands the block and scrolls it into view', async () => {

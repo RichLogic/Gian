@@ -13,6 +13,14 @@ import {
 } from '@agentclientprotocol/sdk';
 
 import { KimiProxyService, parseKimiConversationUsage } from '../src/core/service.js';
+import { KimiProtocolV1Adapter } from '../src/protocol/v1-adapter.js';
+import {
+  PROTOCOL_NAME,
+  PROTOCOL_V1,
+  parseProxyRequest,
+  proxyNotificationSchema,
+  type ProxyNotification,
+} from '@gian/proxy-protocol';
 import {
   KimiAcpClient,
   type KimiAcpExit,
@@ -850,7 +858,7 @@ const FULL_CONFIG_OPTIONS = [
   {
     type: 'select',
     category: 'thought_level',
-    id: 'thought_level',
+    id: 'thinking',
     name: 'Thinking',
     currentValue: 'medium',
     options: [
@@ -936,5 +944,205 @@ test('capabilities reports empty modes and models when the probe session fails',
 
   assert.deepEqual(capabilities.modes, []);
   assert.deepEqual(capabilities.models, []);
+  await service.close();
+});
+
+function v1Request(id: number, method: string, params: unknown) {
+  return parseProxyRequest({ id, method, params });
+}
+
+test('Kimi gian.proxy/1 translates ACP text, tools, usage, and Host ids', async () => {
+  let remote!: AgentSideConnection;
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory((client) => {
+      remote = client;
+      return {
+        initialize: async () => initializeResponse(),
+        newSession: async () => ({ sessionId: 'native-v1' }),
+        prompt: async (params: { sessionId: string }) => {
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'hello' },
+            },
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'tool-1',
+              title: 'Read file',
+              kind: 'read',
+              status: 'in_progress',
+              rawInput: { path: '/tmp/a' },
+            },
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'tool-1',
+              status: 'completed',
+              rawOutput: { text: 'ok' },
+            },
+          });
+          return {
+            stopReason: 'end_turn',
+            usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+          };
+        },
+      } as unknown as Agent;
+    }),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const notifications: ProxyNotification[] = [];
+  const adapter = new KimiProtocolV1Adapter(service, '0.1.0', notification => {
+    notifications.push(proxyNotificationSchema.parse(notification));
+  });
+  await adapter.handle(v1Request(1, 'initialize', {
+    protocol: { name: PROTOCOL_NAME, versions: [PROTOCOL_V1] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v1Request(2, 'session.create', {
+    sessionId: 'host-kimi-session',
+    cwd: '/tmp',
+    workspaceRoots: ['/tmp'],
+    config: {},
+  })) as { session: { streamId: string; nativeSession: { id: string } } };
+  await adapter.handle(v1Request(3, 'turn.start', {
+    sessionId: 'host-kimi-session',
+    streamId: created.session.streamId,
+    turnId: 'host-kimi-turn',
+    input: [{ type: 'text', text: 'go' }],
+    policy: { workspaceRoots: ['/tmp'], approval: 'relay', network: 'ask' },
+    config: { native: {} },
+  }));
+  await waitFor(
+    () => notifications.some(item => item.method === 'turn.completed'),
+    'standard Kimi turn did not complete',
+  );
+  assert.equal(created.session.nativeSession.id, 'native-v1');
+  assert.deepEqual(notifications.map(item => item.method), [
+    'turn.started',
+    'content.delta',
+    'tool.started',
+    'tool.completed',
+    'usage.updated',
+    'turn.completed',
+  ]);
+  for (const notification of notifications) {
+    if ('turnId' in notification.params) {
+      assert.equal(notification.params.turnId, 'host-kimi-turn');
+    }
+  }
+  await service.close();
+});
+
+test('Kimi gian.proxy/1 detaches a newly-created service session when config fails', async () => {
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({
+        sessionId: 'native-config-failure',
+        configOptions: MODE_CONFIG_OPTIONS,
+      }),
+      setSessionConfigOption: async () => {
+        throw new Error('config rejected');
+      },
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const originalClose = service.closeSession.bind(service);
+  let closeCalls = 0;
+  service.closeSession = async params => {
+    closeCalls += 1;
+    return originalClose(params);
+  };
+  const adapter = new KimiProtocolV1Adapter(service, '0.1.0', () => undefined);
+  await adapter.handle(v1Request(1, 'initialize', {
+    protocol: { name: PROTOCOL_NAME, versions: [PROTOCOL_V1] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+
+  await assert.rejects(
+    adapter.handle(v1Request(2, 'session.create', {
+      sessionId: 'host-config-failure',
+      cwd: '/tmp',
+      workspaceRoots: ['/tmp'],
+      config: { mode: 'auto' },
+    })),
+    /Internal error/,
+  );
+  assert.equal(closeCalls, 1);
+  await service.close();
+});
+
+test('Kimi gian.proxy/1 returns normalized replay on one synthetic stream', async () => {
+  let remote!: AgentSideConnection;
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory((client) => {
+      remote = client;
+      return {
+        initialize: async () => initializeResponse(),
+        loadSession: async (params: { sessionId: string }) => {
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: 'old question' },
+            },
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'history' },
+            },
+          });
+          return {};
+        },
+      } as unknown as Agent;
+    }),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const adapter = new KimiProtocolV1Adapter(service, '0.1.0', () => undefined);
+  await adapter.handle(v1Request(1, 'initialize', {
+    protocol: { name: PROTOCOL_NAME, versions: [PROTOCOL_V1] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v1Request(2, 'session.create', {
+    sessionId: 'host-replay',
+    cwd: '/tmp',
+    workspaceRoots: ['/tmp'],
+    nativeSession: { id: 'native-replay', mode: 'load' },
+    config: {},
+  })) as { session: { streamId: string } };
+  const replay = await adapter.handle(v1Request(3, 'session.replay', {
+    sessionId: 'host-replay',
+    streamId: created.session.streamId,
+    cursor: null,
+    limit: 100,
+  })) as { replayStreamId: string; events: ProxyNotification[]; nextCursor: string | null };
+  assert.deepEqual(replay.events.map(item => item.method), [
+    'turn.started',
+    'input.recorded',
+    'content.delta',
+    'turn.completed',
+  ]);
+  assert.deepEqual(replay.events.map(item => (
+    'sequence' in item.params ? item.params.sequence : null
+  )), [1, 2, 3, 4]);
+  assert.ok(replay.events.every(item => (
+    'streamId' in item.params && item.params.streamId === replay.replayStreamId
+  )));
+  assert.equal(replay.nextCursor, null);
   await service.close();
 });

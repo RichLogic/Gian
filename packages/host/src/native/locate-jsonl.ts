@@ -97,7 +97,9 @@ export function appendCcCustomTitle(
   name: string,
 ): boolean {
   // eslint-disable-next-line no-control-regex
-  const clean = name.replace(/[\x00-\x1F\x7F]/g, ' ').trim().slice(0, 200);
+  const clean = [...name.replace(/[\x00-\x1F\x7F]/g, ' ').trim()]
+    .slice(0, 200)
+    .join('');
   if (!clean) return false;
   const line = JSON.stringify({
     type: 'custom-title',

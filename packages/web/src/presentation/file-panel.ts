@@ -23,14 +23,32 @@ export function resolveFilePanelRoute(
   workingTrees: WorkingTree[],
   currentFiles: ReadonlySet<string>,
 ): FilePanelRoute {
+  const matchedTree = longestRootMatch(workingTrees, absPath) ?? null;
+  const matchedRel = matchedTree ? relativeTo(matchedTree.path, absPath) : null;
   const insideCurrent = !!currentTree && isWithinRoot(currentTree.path, absPath);
-  const currentRel = insideCurrent && currentTree ? relativeTo(currentTree.path, absPath) : null;
+  // Agent output sometimes anchors a project-relative file to the workspace
+  // primary path even while the user is viewing an agent-created worktree.
+  // Remap only primary-checkout paths, only within the same workspace, and
+  // only when the relative file is known to exist in the viewed tree.
+  const primaryAlias = !!currentTree
+    && !!matchedTree
+    && matchedTree.kind === 'workspace'
+    && matchedTree.id !== currentTree.id
+    && matchedTree.workspace_id === currentTree.workspace_id
+    && !!matchedRel
+    && currentFiles.has(matchedRel);
+  const currentRel = insideCurrent && currentTree
+    ? relativeTo(currentTree.path, absPath)
+    : primaryAlias
+      ? matchedRel
+      : null;
   const inCurrentFiles = !!currentRel && currentFiles.has(currentRel);
 
   // Prefer the current tree whenever it contains the path, including hidden
-  // files omitted from the Files index. Otherwise use another registered tree.
-  const sourceTree = insideCurrent ? currentTree : (longestRootMatch(workingTrees, absPath) ?? null);
-  const sourceRel = sourceTree ? relativeTo(sourceTree.path, absPath) : null;
+  // files omitted from the Files index. A verified primary-path alias also
+  // belongs to the viewed tree; otherwise use the path's registered tree.
+  const sourceTree = insideCurrent || primaryAlias ? currentTree : matchedTree;
+  const sourceRel = sourceTree === currentTree ? currentRel : matchedRel;
 
   return {
     sourceTree,

@@ -23,10 +23,14 @@ interface CacheEntry {
   sessions: NativeSession[];
 }
 const CACHE = new Map<string, CacheEntry>();
+const IN_FLIGHT = new Map<string, Promise<NativeSession[]>>();
 const CACHE_TTL_MS = 30_000;
+let cacheGeneration = 0;
 
 export function clearNativeSessionsCache(): void {
+  cacheGeneration++;
   CACHE.clear();
+  IN_FLIGHT.clear();
 }
 
 export interface ScanNativeSessionsOptions {
@@ -37,6 +41,14 @@ export interface ScanNativeSessionsOptions {
   /** Skip the 30s result cache. Tests that rewrite the fixture between
    *  scans need this; production calls leave it false. */
   noCache?: boolean;
+  /** Transitional legacy providers to scan. gian.proxy/1 providers discover
+   * native sessions inside their plugin and are omitted here. */
+  executors?: ReadonlyArray<'claude' | 'codex'>;
+  /** Deterministic scanner seams for concurrency and failure-path tests. */
+  scanners?: Partial<Record<
+    'claude' | 'codex',
+    (workspacePath: string, homeDir: string) => Promise<NativeSession[]>
+  >>;
 }
 
 export async function scanNativeSessions(
@@ -44,23 +56,48 @@ export async function scanNativeSessions(
   options: ScanNativeSessionsOptions = {},
 ): Promise<NativeSession[]> {
   const home = options.homeDir ?? homedir();
+  const executors = options.executors ?? ['claude', 'codex'];
+  const cacheKey = `${home}\u0000${workspacePath}\u0000${[...executors].sort().join(',')}`;
   if (!options.noCache) {
-    const cached = CACHE.get(workspacePath);
+    const cached = CACHE.get(cacheKey);
     if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.sessions;
+    const pending = IN_FLIGHT.get(cacheKey);
+    if (pending) return pending;
   }
 
-  const [cc, codex] = await Promise.all([
-    scanClaudeCode(workspacePath, home).catch(() => [] as NativeSession[]),
-    scanCodex(workspacePath, home).catch(() => [] as NativeSession[]),
-  ]);
+  const generation = cacheGeneration;
+  const scan = async () => {
+    const [cc, codex] = await Promise.allSettled([
+      executors.includes('claude')
+        ? (options.scanners?.claude ?? scanClaudeCode)(workspacePath, home)
+        : Promise.resolve([] as NativeSession[]),
+      executors.includes('codex')
+        ? (options.scanners?.codex ?? scanCodex)(workspacePath, home)
+        : Promise.resolve([] as NativeSession[]),
+    ]);
+    const merged = [
+      ...(cc.status === 'fulfilled' ? cc.value : []),
+      ...(codex.status === 'fulfilled' ? codex.value : []),
+    ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 
-  const merged = [...cc, ...codex].sort((a, b) =>
-    Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
-  );
-  if (!options.noCache) {
-    CACHE.set(workspacePath, { ts: Date.now(), sessions: merged });
+    // A partial result is useful to the current caller, but caching it would
+    // hide a recovered executor for the full TTL. A clear during this scan
+    // similarly makes this result stale and unable to repopulate the cache.
+    const complete = cc.status === 'fulfilled' && codex.status === 'fulfilled';
+    if (!options.noCache && complete && generation === cacheGeneration) {
+      CACHE.set(cacheKey, { ts: Date.now(), sessions: merged });
+    }
+    return merged;
+  };
+
+  const pending = scan();
+  if (options.noCache) return pending;
+  IN_FLIGHT.set(cacheKey, pending);
+  try {
+    return await pending;
+  } finally {
+    if (IN_FLIGHT.get(cacheKey) === pending) IN_FLIGHT.delete(cacheKey);
   }
-  return merged;
 }
 
 // ---------------------------------------------------------------------------

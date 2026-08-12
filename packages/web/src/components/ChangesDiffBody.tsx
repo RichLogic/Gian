@@ -15,7 +15,7 @@
  *   History commit body.
  */
 import { useEffect, useRef, useState } from 'react';
-import type { ChangedEntry, WorkingTree } from '../api.js';
+import type { ChangedEntry } from '../api.js';
 import { useT } from '../i18n/index.js';
 import {
   consumeChangesDiffAnchor,
@@ -186,12 +186,8 @@ function ChangesFileDiffBlock({
 
 export function ChangesDiffBody({
   workingTreeId,
-  tree,
 }: {
   workingTreeId: string | null;
-  /** The working tree object behind the id (label/branch for the meta row);
-   *  null when the id resolved to nothing or no tree exists. */
-  tree: WorkingTree | null;
 }) {
   const t = useT();
   const state = useChangesDiffState(workingTreeId);
@@ -255,20 +251,6 @@ export function ChangesDiffBody({
     );
   }
 
-  const scopeTitle = (() => {
-    switch (state.scope) {
-      case 'all': return t('changes.scope.uncommitted');
-      case 'staged': return t('changes.scope.staged');
-      case 'unstaged': return t('changes.scope.unstaged');
-      case 'commit':
-        return state.commitSha
-          ? `${t('changes.scope.commit')} ${state.commitSha.slice(0, 7)}`
-          : `${t('changes.scope.commit')} ${t('changes.scope.latestCommit').toLowerCase()}`;
-      case 'lastturn': return t('changes.scope.lastTurn');
-      default: return t('changes.scope.branch');
-    }
-  })();
-
   const totals = state.files.reduce(
     (acc, f) => ({ add: acc.add + f.added, del: acc.del + f.removed }),
     { add: 0, del: 0 },
@@ -279,10 +261,8 @@ export function ChangesDiffBody({
   return (
     <div className={`cs-root${wrap ? '' : ' cs-nowrap'}`} ref={rootRef}>
       {state.status !== 'ready' && state.status !== 'error' && state.files.length === 0 ? (
-        <div className="cs-head-skeleton">
-          <span className="sk-line" style={{ width: '46%', height: 16 }} />
-          <span className="sk-line" style={{ width: '64%' }} />
-          <span className="sk-line" style={{ width: '38%' }} />
+        <div className="sheet-empty">
+          <span className="spinner" aria-hidden="true" /> {t('common.loading')}
         </div>
       ) : state.status === 'error' ? (
         <div className="sheet-empty">
@@ -294,34 +274,6 @@ export function ChangesDiffBody({
         </div>
       ) : (
         <>
-          <div className="cs-head">
-            <div className="cs-subject">{scopeTitle}</div>
-            <div className="cs-meta">
-              {tree && (
-                <span className="cs-author" title={tree.path}>
-                  {tree.label}{tree.branch ? ` · ${tree.branch}` : ''}
-                </span>
-              )}
-              {state.scope === 'branch' && (tree?.branch || state.baseBranch) && (
-                <span className="cs-base">
-                  <Icon d={I.diff} size={11} stroke={1.6} />
-                  {tree?.branch ?? 'HEAD'} → <b>&nbsp;{state.baseBranch ?? 'auto'}</b>
-                </span>
-              )}
-              {state.scope === 'commit' && state.commitSha && (
-                <span className="cs-base" title={state.commitSha}>
-                  <Icon d={I.diff} size={11} stroke={1.6} />
-                  {state.commitSha.slice(0, 7)}
-                </span>
-              )}
-              {state.scope === 'lastturn' && state.lastTurn && (
-                <span className="cs-base">
-                  <Icon d={I.diff} size={11} stroke={1.6} />
-                  {t('changes.diff.turn').replace('{n}', String(state.lastTurn.turn))}
-                </span>
-              )}
-            </div>
-          </div>
           <div className="cs-toolbar">
             <span className="cs-stats">
               <span className="files">{state.files.length} {t('changes.files')}</span>

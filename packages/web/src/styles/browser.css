@@ -14,7 +14,6 @@
   align-items: center;
   gap: 3px;
   padding: 4px 6px;
-  border-bottom: 1px solid var(--hairline);
   background: var(--surface);
 }
 

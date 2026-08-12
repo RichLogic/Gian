@@ -13,19 +13,29 @@ import { join } from 'node:path';
 import { openDatabase, type Db } from '../../src/storage/db.js';
 import { loadConfig } from '../../src/storage/config.js';
 import { createApp, type AppHandle } from '../../src/web/app.js';
+import type { OpenCommand } from '../../src/web/open-with.js';
+
+export interface TestAppOptions {
+  platform?: NodeJS.Platform;
+  runOpenSync?: (command: OpenCommand) => void;
+  runOpen?: (command: OpenCommand, onError: (error: Error) => void) => void;
+}
 
 export interface TestAppCtx {
   app: AppHandle;
   db: Db;
   dataDir: string;
+  openedCommands: Array<{ mode: 'sync' | 'detached'; command: OpenCommand }>;
   fetch: (path: string, init?: RequestInit) => Promise<Response>;
   cleanup: () => Promise<void>;
 }
 
-export async function makeTestApp(): Promise<TestAppCtx> {
+export async function makeTestApp(options: TestAppOptions = {}): Promise<TestAppCtx> {
   // Pin the env-var skip BEFORE createApp reads it. Without this the
   // app would spawn a real cc-proxy / codex-proxy.
   process.env['GIAN_SKIP_PROXY_WARMUP'] = '1';
+  const prevDesktopToken = process.env['GIAN_DESKTOP_TOKEN'];
+  delete process.env['GIAN_DESKTOP_TOKEN'];
   const dataDir = mkdtempSync(join(tmpdir(), 'gian-test-app-'));
   // `writeAttachment` (and anything else still calling `resolveDataDir()`
   // directly) reads `GIAN_DATA_DIR` first. Without this, the attachment
@@ -36,6 +46,7 @@ export async function makeTestApp(): Promise<TestAppCtx> {
   process.env['GIAN_DATA_DIR'] = dataDir;
   const db = openDatabase(dataDir);
   const config = loadConfig(db);
+  const openedCommands: Array<{ mode: 'sync' | 'detached'; command: OpenCommand }> = [];
 
   const app = createApp({
     db,
@@ -47,6 +58,15 @@ export async function makeTestApp(): Promise<TestAppCtx> {
     // we don't run here.
     ccProxyEntry: join(dataDir, 'cc-proxy-not-used.js'),
     codexProxyEntry: join(dataDir, 'codex-proxy-not-used.js'),
+    applicationRouteOptions: {
+      platform: options.platform,
+      runOpenSync: options.runOpenSync ?? (command => {
+        openedCommands.push({ mode: 'sync', command });
+      }),
+      runOpen: options.runOpen ?? ((command) => {
+        openedCommands.push({ mode: 'detached', command });
+      }),
+    },
   });
 
   async function fetch(path: string, init: RequestInit = {}): Promise<Response> {
@@ -58,6 +78,7 @@ export async function makeTestApp(): Promise<TestAppCtx> {
     app,
     db,
     dataDir,
+    openedCommands,
     fetch,
     cleanup: async () => {
       await app.shutdown().catch(() => undefined);
@@ -67,6 +88,11 @@ export async function makeTestApp(): Promise<TestAppCtx> {
         delete process.env['GIAN_DATA_DIR'];
       } else {
         process.env['GIAN_DATA_DIR'] = prevDataDirEnv;
+      }
+      if (prevDesktopToken === undefined) {
+        delete process.env['GIAN_DESKTOP_TOKEN'];
+      } else {
+        process.env['GIAN_DESKTOP_TOKEN'] = prevDesktopToken;
       }
     },
   };

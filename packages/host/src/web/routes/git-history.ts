@@ -63,7 +63,12 @@ interface ChangedPath {
 
 const COMMIT_LIST_FORMAT = '%H%x00%P%x00%an%x00%ae%x00%aI%x00%cI%x00%s';
 const COMMIT_DETAIL_FORMAT = `${COMMIT_LIST_FORMAT}%x00%b`;
-const fetches = new Map<string, Promise<GitCommandResult>>();
+
+export interface GitHistoryRouteOptions {
+  /** Test seam for deterministic timeout, partial-ref, and coalescing cases. */
+  fetchGit?: typeof runGit;
+  fingerprintRefs?: (cwd: string) => Promise<string | null>;
+}
 
 function queryError(c: Context, code: string, message: string, status: 400 | 404 | 409 = 400): Response {
   return c.json({ error: { code, message, retryable: false } }, status);
@@ -338,30 +343,37 @@ async function refFingerprint(cwd: string): Promise<string | null> {
   }
 }
 
-function fetchRepository(cwd: string, repositoryKey: string): { coalesced: boolean; promise: Promise<GitCommandResult> } {
-  const current = fetches.get(repositoryKey);
-  if (current) return { coalesced: true, promise: current };
-  let promise!: Promise<GitCommandResult>;
-  promise = (async () => {
-    try {
-      return await runGit(cwd, ['fetch', '--prune', '--all'], {
-        timeoutMs: 60_000,
-        maxStdoutBytes: 1024 * 1024,
-        maxStderrBytes: 1024 * 1024,
-      });
-    } finally {
-      if (fetches.get(repositoryKey) === promise) fetches.delete(repositoryKey);
-    }
-  })();
-  fetches.set(repositoryKey, promise);
-  return { coalesced: false, promise };
-}
-
 export function registerGitHistoryRoutes(
   app: Hono,
   broadcaster: WsBroadcaster,
   resolveWorkingTree: ResolveHistoryWorkingTree,
+  options: GitHistoryRouteOptions = {},
 ): void {
+  const fetches = new Map<string, Promise<GitCommandResult>>();
+  const fetchGit = options.fetchGit ?? runGit;
+  const fingerprintRefs = options.fingerprintRefs ?? refFingerprint;
+
+  function fetchRepository(
+    cwd: string,
+    repositoryKey: string,
+  ): { coalesced: boolean; promise: Promise<GitCommandResult> } {
+    const current = fetches.get(repositoryKey);
+    if (current) return { coalesced: true, promise: current };
+    let promise!: Promise<GitCommandResult>;
+    promise = (async () => {
+      try {
+        return await fetchGit(cwd, ['fetch', '--prune', '--all'], {
+          timeoutMs: 60_000,
+          maxStdoutBytes: 1024 * 1024,
+          maxStderrBytes: 1024 * 1024,
+        });
+      } finally {
+        if (fetches.get(repositoryKey) === promise) fetches.delete(repositoryKey);
+      }
+    })();
+    fetches.set(repositoryKey, promise);
+    return { coalesced: false, promise };
+  }
   app.get('/api/working_trees/:id/history', async c => {
     const wt = await resolveWorkingTree(c.req.param('id'));
     if (!wt) return queryError(c, 'working_tree_not_found', 'Working tree not found', 404);
@@ -556,18 +568,18 @@ export function registerGitHistoryRoutes(
   app.post('/api/working_trees/:id/fetch', async c => {
     const wt = await resolveWorkingTree(c.req.param('id'));
     if (!wt) return queryError(c, 'working_tree_not_found', 'Working tree not found', 404);
-    const before = await refFingerprint(wt.path);
+    const before = await fingerprintRefs(wt.path);
     // Every Gian working tree for one workspace shares the same repository;
     // coalesce concurrent Fetch clicks across its main and linked worktrees.
     const fetch = fetchRepository(wt.path, wt.workspace_id);
     try {
       await fetch.promise;
-      const after = await refFingerprint(wt.path);
+      const after = await fingerprintRefs(wt.path);
       const refsChanged = before !== null && after !== null && before !== after;
       broadcaster.broadcast({ type: 'workspace:git-updated', workspace_id: wt.workspace_id, reason: 'fetch' });
       return c.json({ ok: true, fetchedAt: new Date().toISOString(), refsChanged, coalesced: fetch.coalesced });
     } catch (error) {
-      const after = await refFingerprint(wt.path);
+      const after = await fingerprintRefs(wt.path);
       const refsChanged = before !== null && after !== null && before !== after;
       if (refsChanged) {
         broadcaster.broadcast({ type: 'workspace:git-updated', workspace_id: wt.workspace_id, reason: 'fetch' });

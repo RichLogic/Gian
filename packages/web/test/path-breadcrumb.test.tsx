@@ -13,7 +13,7 @@ import type { PathSegment } from '../src/components/PathBreadcrumb.js';
 const segments: PathSegment[] = [
   { kind: 'workspace', label: 'Gian-Dev' },
   { kind: 'session', label: 'bug fix', menuAnchor: true },
-  { kind: 'branch', label: 'fix/subtask-running-check' },
+  { kind: 'branch', label: 'gian-dev-subtask-running-check' },
 ];
 
 function renderBreadcrumb(onBranchOpen?: () => void) {
@@ -24,8 +24,8 @@ function renderBreadcrumb(onBranchOpen?: () => void) {
       branchMenu={{
         onOpen: onBranchOpen,
         items: [
-          { id: 'w1', label: 'main', detail: 'Primary' },
-          { id: 'w2', label: 'fix/subtask-running-check', active: true },
+          { id: 'w1', label: 'Gian-Dev', detail: 'main · Primary' },
+          { id: 'w2', label: 'gian-dev-subtask-running-check', detail: 'fix/subtask-running-check', active: true },
         ],
         onPick: () => {},
       }}
@@ -58,9 +58,9 @@ describe('PathBreadcrumb dropdowns', () => {
     renderBreadcrumb();
     await user.click(screen.getByRole('button', { name: /bug fix/ }));
     expect(screen.getByText('Rename')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: /fix\/subtask-running-check/ }));
+    await user.click(screen.getByRole('button', { name: /gian-dev-subtask-running-check/ }));
     expect(screen.queryByText('Rename')).toBeNull();
-    expect(screen.getByText('Primary')).toBeTruthy();
+    expect(screen.getByText('main · Primary')).toBeTruthy();
     expect(openMenus()).toBe(1);
   });
 
@@ -68,7 +68,7 @@ describe('PathBreadcrumb dropdowns', () => {
     const user = userEvent.setup();
     const onOpen = vi.fn();
     renderBreadcrumb(onOpen);
-    const branch = screen.getByRole('button', { name: /fix\/subtask-running-check/ });
+    const branch = screen.getByRole('button', { name: /gian-dev-subtask-running-check/ });
 
     await user.click(branch);
     expect(onOpen).toHaveBeenCalledTimes(1);
@@ -81,23 +81,25 @@ describe('PathBreadcrumb dropdowns', () => {
   it('opening the session menu closes the branch dropdown', async () => {
     const user = userEvent.setup();
     renderBreadcrumb();
-    await user.click(screen.getByRole('button', { name: /fix\/subtask-running-check/ }));
-    expect(screen.getByText('Primary')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /gian-dev-subtask-running-check/ }));
+    expect(screen.getByText('main · Primary')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: /bug fix/ }));
-    expect(screen.queryByText('Primary')).toBeNull();
+    expect(screen.queryByText('main · Primary')).toBeNull();
     expect(screen.getByText('Rename')).toBeTruthy();
     expect(openMenus()).toBe(1);
   });
 
-  it('branch dropdown is content-sized (branch-menu class) and rows expose the full name via title', async () => {
+  it('worktree dropdown is content-sized and keeps branch as secondary detail', async () => {
     const user = userEvent.setup();
     renderBreadcrumb();
-    await user.click(screen.getByRole('button', { name: /fix\/subtask-running-check/ }));
+    await user.click(screen.getByRole('button', { name: /gian-dev-subtask-running-check/ }));
     const menu = document.querySelector('.session-menu.branch-menu');
     expect(menu).toBeTruthy();
     // The breadcrumb segment itself is also a button with the same name; pick
     // the one inside the menu.
-    const menuRow = within(menu as HTMLElement).getByRole('button', { name: /fix\/subtask-running-check/ });
-    expect(menuRow.getAttribute('title')).toBe('fix/subtask-running-check');
+    const menuRow = within(menu as HTMLElement).getByRole('button', { name: /gian-dev-subtask-running-check/ });
+    expect(menuRow.getAttribute('title')).toBe('gian-dev-subtask-running-check');
+    expect(menuRow.querySelector('.item-label')?.textContent).toBe('gian-dev-subtask-running-check');
+    expect(menuRow.querySelector('.sub')?.textContent).toBe('fix/subtask-running-check');
   });
 });

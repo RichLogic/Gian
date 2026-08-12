@@ -2,6 +2,7 @@ import type {
   ApprovalMode,
   Executor,
   TaskStatus,
+  ThinkingEffort,
 } from '@gian/shared';
 import type { Hono } from 'hono';
 import type { SessionManager } from '../../session/manager.js';
@@ -91,6 +92,7 @@ export function registerTaskRoutes(
       name?: string;
       model?: string | null;
       approval_mode?: ApprovalMode;
+      thinking_effort?: ThinkingEffort | null;
     }>();
     if (typeof body.workspace_id !== 'string' || body.workspace_id === '') {
       return c.json({ error: 'workspace_id required' }, 400);
@@ -107,6 +109,7 @@ export function registerTaskRoutes(
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.model !== undefined ? { model: body.model } : {}),
         ...(body.approval_mode !== undefined ? { approval_mode: body.approval_mode } : {}),
+        ...(body.thinking_effort !== undefined ? { thinking_effort: body.thinking_effort } : {}),
       });
       broadcaster.broadcast({ type: 'session:created', session, origin: 'task-create' });
       return c.json({ session });

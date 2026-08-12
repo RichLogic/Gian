@@ -7,7 +7,7 @@
 #   ./scripts/install.sh --check   # render/validate unit only; do not install
 #
 # Supports: macOS (launchd LaunchAgent) and Linux (systemd --user).
-# Requires: Node v22+ on $PATH, pre-built packages/host/dist/.
+# Requires: Node v24 on $PATH, pre-built packages/host/dist/.
 
 set -euo pipefail
 
@@ -57,15 +57,12 @@ resolve_executable() {
 
 NODE_BIN="$(resolve_executable node)" || die "node not found on \$PATH"
 
-# Confirm it's new enough (v22+) and not Node v25+ (better-sqlite3 breaks).
-NODE_VERSION="$("${NODE_BIN}" --version)" # e.g. "v22.4.0"
+# Keep daemon installs on the same Node ABI as the packaged desktop Host.
+NODE_VERSION="$("${NODE_BIN}" --version)" # e.g. "v24.19.0"
 NODE_MAJOR="${NODE_VERSION#v}"           # strip leading "v"
 NODE_MAJOR="${NODE_MAJOR%%.*}"           # keep only major number
-if (( NODE_MAJOR < 22 )); then
-  die "Node v22+ required (found ${NODE_VERSION}). better-sqlite3 bindings fail on older versions."
-fi
-if (( NODE_MAJOR >= 25 )); then
-  die "Node v25+ silently breaks better-sqlite3 bindings (found ${NODE_VERSION}). Use Node 22–24 (\`nvm use 22\`). If which-node disagrees with nvm, brew is shadowing nvm: \`export PATH=~/.nvm/versions/node/v22.18.0/bin:\$PATH\`."
+if (( NODE_MAJOR != 24 )); then
+  die "Node v24.x required (found ${NODE_VERSION}). Gian pins better-sqlite3 and the Host runtime to Node 24 LTS. Use \`nvm install 24 && nvm use 24\`."
 fi
 
 # Resolve runtime tool paths so launchd's bare PATH doesn't ENOENT on the

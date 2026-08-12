@@ -31,19 +31,35 @@ import { resolveWebDistDir, staticFiles } from './static-files.js';
 import { buildHealthPayload } from './health.js';
 import { requireDesktopClient } from './desktop-boundary.js';
 import { RuntimeGuardian } from '../runtime/guardian.js';
+import type { ApplicationRouteOptions } from './routes/applications.js';
 
 export interface AppContext {
   db: Db;
   config: SystemConfig;
   dataDir: string;
+  hostVersion?: string;
   ccProxyEntry: string;
+  claudeProxyProtocolV1?: {
+    pluginVersion: string;
+    processScope: 'shared' | 'session';
+  };
   codexProxyEntry?: string;
+  codexProxyProtocolV1?: {
+    pluginVersion: string;
+    processScope: 'shared' | 'session';
+  };
   kimiProxyEntry?: string;
+  kimiProxyProtocolV1?: {
+    pluginVersion: string;
+    processScope: 'shared' | 'session';
+  };
   codexBin?: string;
   runtimeManager?: CliRuntimeManager;
   agentManager?: AgentManager;
   /** Test seam; production uses the guardian's five-minute cadence. */
   runtimeGuardianIntervalMs?: number;
+  /** Test seam; production uses real operating-system application launchers. */
+  applicationRouteOptions?: ApplicationRouteOptions;
 }
 
 export interface AppHandle {
@@ -59,9 +75,13 @@ export function createApp(ctx: AppContext): AppHandle {
   const broadcaster = new WsBroadcaster();
   const proxy = new ProxyManager({
     dataDir: ctx.dataDir,
+    hostVersion: ctx.hostVersion,
     ccProxyEntry: ctx.ccProxyEntry,
+    claudeProxyProtocolV1: ctx.claudeProxyProtocolV1,
     codexProxyEntry: ctx.codexProxyEntry,
+    codexProxyProtocolV1: ctx.codexProxyProtocolV1,
     kimiProxyEntry: ctx.kimiProxyEntry,
+    kimiProxyProtocolV1: ctx.kimiProxyProtocolV1,
     codexBin: ctx.codexBin,
     runtimeManager: ctx.runtimeManager,
   });
@@ -101,7 +121,12 @@ export function createApp(ctx: AppContext): AppHandle {
   // Live Sync v2: on host boot, attach a watcher to every active session so
   // we resume picking up external CLI appends after a host restart. New
   // sessions get watched lazily inside SessionManager.bringUpProxySession.
-  bootJsonlWatchers(ctx.db, watcher);
+  bootJsonlWatchers(ctx.db, watcher, {
+    executors: [
+      ...(ctx.claudeProxyProtocolV1 ? [] : ['claude' as const]),
+      ...(ctx.codexProxyProtocolV1 ? [] : ['codex' as const]),
+    ],
+  });
 
   // Break the circular dependency: ApprovalManager needs to call back into
   // SessionManager to forward auto-approve decisions to the proxy, but we
@@ -162,7 +187,9 @@ export function createApp(ctx: AppContext): AppHandle {
   registerSessionRoutes(app, ctx.db, sessions);
   registerNativeSessionRoutes(app, { db: ctx.db, sessions, broadcaster });
   registerWorkspaceFileRoutes(app, ctx.db);
-  registerWorkingTreeRoutes(app, ctx.db, broadcaster);
+  registerWorkingTreeRoutes(app, ctx.db, broadcaster, {
+    applicationRoutes: ctx.applicationRouteOptions,
+  });
   registerReconnectRoutes(app, proxy);
   if (ctx.agentManager && ctx.runtimeManager) {
     registerOnboardingRoutes(app, {

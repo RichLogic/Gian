@@ -4,9 +4,9 @@
 //   history scopes with hairline separators, via a custom ✓-marked FLAT
 //   dropdown (no nested submenus), defaults to Branch, persists the choice,
 //   re-queries on switch, and hides the per-file stage toggle outside the
-//   working-tree scopes. Commit/base picking lives on a second row under the
-//   header (Codex's two-row Review UI): Committed shows a searchable commit
-//   picker, Branch shows `<head> → <base ⌄>` with a searchable branch list.
+//   working-tree scopes. The primary scope stays in the title row; context
+//   picking lives beneath it: Committed shows a searchable commit picker,
+//   Branch shows `<head> → <base ⌄>` with a contained searchable branch list.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
@@ -24,7 +24,16 @@ vi.mock('../src/api.js', () => ({
     { path: 'a.ts', kind: 'update', staged: false, added: 1, removed: 0 },
   ]),
   loadCommits: vi.fn().mockResolvedValue([]),
-  loadBranchList: vi.fn().mockResolvedValue({ head: 'feature', base: 'main', branches: ['main', 'feature', 'origin/main'] }),
+  loadBranchList: vi.fn().mockResolvedValue({
+    head: 'feature',
+    base: 'origin/main',
+    branches: [
+      'main',
+      'feature',
+      'origin/main',
+      'feature/this-is-a-very-long-branch-name-that-must-not-expand-the-inspector',
+    ],
+  }),
   loadTree: vi.fn().mockResolvedValue([]),
   loadAllFiles: vi.fn().mockResolvedValue({ files: [], truncated: false }),
   stageFile: vi.fn().mockResolvedValue(true),
@@ -74,6 +83,13 @@ describe('Changes scope picker', () => {
   it('defaults to Branch and queries the branch scope', async () => {
     renderChanges();
     expect(document.querySelector('.changes-scope-btn')?.textContent).toContain('Branch');
+    const head = document.querySelector('.insp-head') as HTMLElement;
+    const controls = document.querySelector('.changes-controls') as HTMLElement;
+    expect(head.children[1]).toHaveClass('changes-scope');
+    expect(head.querySelector('.iconbtn')).toBeNull();
+    expect(controls).toHaveClass('changes-controls');
+    expect(controls.firstElementChild).toHaveClass('changes-base-row');
+    expect(document.querySelector('.changes-summary')).toBeNull();
     await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'branch', null, null, 'session-current', undefined));
   });
 
@@ -118,6 +134,7 @@ describe('Changes scope picker', () => {
     // Second row appears with the default (latest commit).
     const rowBtn = document.querySelector('.changes-base-btn') as HTMLElement;
     expect(rowBtn.textContent).toContain('Latest commit');
+    expect(document.querySelector('.changes-controls')?.firstElementChild).toBe(rowBtn.closest('.changes-base-row'));
     await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'commit', null, null, 'session-current', undefined));
 
     await user.click(rowBtn);
@@ -130,18 +147,24 @@ describe('Changes scope picker', () => {
   it('Branch shows a `<head> → <base>` second row; picking a base re-queries with it', async () => {
     const user = userEvent.setup();
     renderChanges();
-    // Default scope is Branch — the second row shows head → auto base.
+    // Default scope is Branch — the second row names the remote default.
     await waitFor(() => expect(loadBranchList).toHaveBeenCalledWith('wt:s1'));
     const row = document.querySelector('.changes-base-row') as HTMLElement;
     expect(row.textContent).toContain('feature');
     expect(row.textContent).toContain('→');
-    expect(row.textContent).toContain('main');
+    expect(row.textContent).toContain('origin/main');
 
     await user.click(document.querySelector('.changes-base-btn') as HTMLElement);
-    await user.click(await screen.findByRole('menuitemradio', { name: 'origin/main' }));
-    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'branch', null, 'origin/main', 'session-current', undefined));
+    const menu = document.querySelector('.changes-base-menu') as HTMLElement;
+    expect(within(menu).queryByText(/Auto/)).toBeNull();
+    expect(within(menu).getAllByRole('menuitemradio', { name: /origin\/main$/ })).toHaveLength(1);
+    const longBranch = within(menu).getByText('feature/this-is-a-very-long-branch-name-that-must-not-expand-the-inspector');
+    expect(longBranch).toHaveClass('branch-name');
+    expect(longBranch.closest('button')).toHaveAttribute('title', longBranch.textContent);
+    await user.click(within(menu).getByRole('menuitemradio', { name: 'main' }));
+    await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'branch', null, 'main', 'session-current', undefined));
     // The explicit base is remembered per working tree.
-    expect(localStorage.getItem('gian.changes.base.wt:s1')).toBe('origin/main');
+    expect(localStorage.getItem('gian.changes.base.wt:s1')).toBe('main');
   });
 
   it('hides the stage toggle outside the working-tree scopes', async () => {

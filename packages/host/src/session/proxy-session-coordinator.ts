@@ -1,7 +1,9 @@
 import type {
+  AgentProxyDefaults,
   Executor,
   ExecutorConfigState,
   NativeConfigOption,
+  NativeConfigValue,
   ProxyCapabilities,
   ProxyNotification,
   Session,
@@ -10,7 +12,7 @@ import type {
 import { locateNativeJsonl } from '../native/locate-jsonl.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import type { ProxyManager } from '../proxy/manager.js';
-import type { ProxyClient } from '../proxy/types.js';
+import type { ProxyClient, ProxyReplayResult } from '../proxy/types.js';
 import type { Db } from '../storage/db.js';
 import type { SessionHistoryStore } from './history-store.js';
 import { executorConfigFromOptions, type SessionRepository } from './repository.js';
@@ -22,6 +24,7 @@ export interface BringUpProxySessionInput {
   model: string | null;
   nativeSessionId?: string | null;
   executorConfig?: ExecutorConfigState;
+  executorDefaults?: AgentProxyDefaults;
   resumeMode?: 'load' | 'resume';
   displayName?: string | null;
 }
@@ -31,6 +34,7 @@ export interface BringUpProxySessionResult {
   nativeSessionId: string;
   configOptions: NativeConfigOption[];
   replayUpdates: unknown[];
+  replayStreamId?: string;
 }
 
 interface ProxySessionCallbacks {
@@ -42,6 +46,39 @@ interface ProxySessionCallbacks {
 interface ProxySessionBindings {
   offNotification: () => void;
   offExit: () => void;
+}
+
+type KimiConfigRole = keyof AgentProxyDefaults;
+
+const KIMI_CONFIG_ROLE_ORDER: readonly KimiConfigRole[] = [
+  'model',
+  'thinking',
+  'mode',
+];
+
+function kimiConfigRole(
+  option: Pick<NativeConfigOption, 'id' | 'category'>,
+): KimiConfigRole | null {
+  const category = option.category?.trim().toLowerCase() ?? '';
+  const id = option.id.trim().toLowerCase();
+  if (category === 'model' || id === 'model') return 'model';
+  if (
+    category === 'thought_level'
+    || category === 'thought'
+    || category === 'thinking'
+    || category === 'effort'
+    || id === 'thought_level'
+    || id === 'thought'
+    || id === 'thinking'
+    || id === 'effort'
+    || id === 'reasoning_effort'
+  ) return 'thinking';
+  if (category === 'mode' || id === 'mode') return 'mode';
+  return null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export class ProxySessionCoordinator {
@@ -61,6 +98,21 @@ export class ProxySessionCoordinator {
 
   get(sessionId: string): string | undefined {
     return this.sessionIds.get(sessionId);
+  }
+
+  usesProtocolV1(sessionId: string): boolean {
+    return this.proxy.get(sessionId)?.protocolV1 === true;
+  }
+
+  async replay(sessionId: string): Promise<ProxyReplayResult> {
+    const client = this.proxy.get(sessionId);
+    if (!client?.replaySession) return { events: [] };
+    const result = await client.replaySession();
+    return Array.isArray(result) ? { events: result } : result;
+  }
+
+  abort(sessionId: string): void {
+    this.proxy.get(sessionId)?.forceKill();
   }
 
   forget(sessionId: string): void {
@@ -127,11 +179,11 @@ export class ProxySessionCoordinator {
       resumeMode?: 'load' | 'resume';
     } = {};
     if (args.nativeSessionId) {
+      adoptParams.resumeMode = args.resumeMode ?? 'resume';
       if (args.executor === 'claude') adoptParams.claudeSessionId = args.nativeSessionId;
       else if (args.executor === 'codex') adoptParams.threadId = args.nativeSessionId;
       else {
         adoptParams.nativeSessionId = args.nativeSessionId;
-        adoptParams.resumeMode = args.resumeMode ?? 'resume';
       }
     }
     let created: {
@@ -139,6 +191,7 @@ export class ProxySessionCoordinator {
       nativeSessionId: string;
       configOptions?: NativeConfigOption[];
       replayUpdates?: unknown[];
+      replayStreamId?: string;
     };
     try {
       created = await client.createSession({
@@ -168,25 +221,61 @@ export class ProxySessionCoordinator {
 
     this.sessionIds.set(args.sessionId, created.session.id);
     let configOptions = created.configOptions ?? created.session.configOptions ?? [];
-    if (args.executor === 'kimi' && args.executorConfig && client.setNativeConfig) {
-      const current = new Map(configOptions.map(option => [option.id, option.currentValue]));
-      const ids = Object.keys(args.executorConfig.values).sort((left, right) => {
-        const order = ['model', 'thinking', 'thought_level', 'mode'];
-        const leftIndex = order.indexOf(left);
-        const rightIndex = order.indexOf(right);
-        if (leftIndex !== -1 || rightIndex !== -1) {
-          return (leftIndex === -1 ? order.length : leftIndex)
-            - (rightIndex === -1 ? order.length : rightIndex);
+    if (
+      args.executor === 'kimi'
+      && client.setNativeConfig
+      && (args.executorConfig || args.executorDefaults)
+    ) {
+      const setNativeConfig = client.setNativeConfig.bind(client);
+      const optionForRole = (role: KimiConfigRole) =>
+        configOptions.find(option => kimiConfigRole(option) === role);
+      const applyValue = async (
+        option: NativeConfigOption,
+        value: NativeConfigValue,
+        label: string,
+      ) => {
+        if (Object.is(option.currentValue, value)) return;
+        try {
+          const updated = await setNativeConfig(option.id, value);
+          configOptions = updated.options;
+        } catch (error) {
+          throw new Error(
+            `Failed to apply Kimi ${label} using config id "${option.id}": ${errorMessage(error)}`,
+          );
         }
-        return left.localeCompare(right);
-      });
-      for (const id of ids) {
-        const value = args.executorConfig.values[id];
-        if (value === undefined || Object.is(current.get(id), value)) continue;
-        const updated = await client.setNativeConfig(id, value);
-        configOptions = updated.options;
-        current.clear();
-        for (const option of configOptions) current.set(option.id, option.currentValue);
+      };
+
+      // Settings defaults name semantic roles. Resolve them only after
+      // session/new or session/load returns the authoritative ACP options;
+      // option.category may stay stable while option.id changes between Kimi
+      // versions (for example thought_level -> thinking).
+      for (const role of KIMI_CONFIG_ROLE_ORDER) {
+        const value = args.executorDefaults?.[role];
+        if (!value) continue;
+        const option = optionForRole(role);
+        if (option) await applyValue(option, value, `${role} default`);
+      }
+
+      // Persisted state normally contains exact native ids. If an upgrade
+      // renames one, remap known semantic aliases to the id advertised by the
+      // current session. Unknown, no-longer-advertised ids are never sent.
+      const persistedEntries = Object.entries(args.executorConfig?.values ?? {})
+        .sort(([left], [right]) => {
+          const leftRole = kimiConfigRole({ id: left });
+          const rightRole = kimiConfigRole({ id: right });
+          const leftIndex = leftRole ? KIMI_CONFIG_ROLE_ORDER.indexOf(leftRole) : -1;
+          const rightIndex = rightRole ? KIMI_CONFIG_ROLE_ORDER.indexOf(rightRole) : -1;
+          if (leftIndex !== -1 || rightIndex !== -1) {
+            return (leftIndex === -1 ? KIMI_CONFIG_ROLE_ORDER.length : leftIndex)
+              - (rightIndex === -1 ? KIMI_CONFIG_ROLE_ORDER.length : rightIndex);
+          }
+          return left.localeCompare(right);
+        });
+      for (const [storedId, value] of persistedEntries) {
+        const exact = configOptions.find(option => option.id === storedId);
+        const role = kimiConfigRole({ id: storedId });
+        const option = exact ?? (role ? optionForRole(role) : undefined);
+        if (option) await applyValue(option, value, `session setting "${option.name}"`);
       }
     }
     this.sessions.setNativeOptions(args.sessionId, configOptions);
@@ -205,7 +294,7 @@ export class ProxySessionCoordinator {
       });
     }
 
-    if (this.watcher && args.executor !== 'kimi') {
+    if (this.watcher && args.executor !== 'kimi' && !client.protocolV1) {
       const filePath = locateNativeJsonl(args.executor, created.nativeSessionId, args.cwd);
       if (filePath) this.watcher.start(args.sessionId, filePath, args.executor);
     }
@@ -216,11 +305,13 @@ export class ProxySessionCoordinator {
     const persistedName = this.db.prepare('SELECT name FROM sessions WHERE id = ?')
       .get(args.sessionId) as { name: string | null } | undefined;
     const displayName = (persistedName ? persistedName.name : args.displayName)?.trim();
-    if (args.executor === 'codex' && displayName && client.setName) {
+    const shouldSyncName = args.executor === 'codex'
+      || (args.executor === 'claude' && client.protocolV1);
+    if (shouldSyncName && displayName && client.setName) {
       try {
         await client.setName(displayName);
       } catch (error) {
-        console.warn(`[session] codex setName on bring-up failed for ${args.sessionId}: ${String(error)}`);
+        console.warn(`[session] ${args.executor} setName on bring-up failed for ${args.sessionId}: ${String(error)}`);
       }
     }
     return {
@@ -228,6 +319,7 @@ export class ProxySessionCoordinator {
       nativeSessionId: created.nativeSessionId,
       configOptions,
       replayUpdates: created.replayUpdates ?? [],
+      ...(created.replayStreamId ? { replayStreamId: created.replayStreamId } : {}),
     };
   }
 

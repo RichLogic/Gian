@@ -16,6 +16,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import type { NativeSession } from '@gian/shared';
 import {
   scanNativeSessions,
   clearNativeSessionsCache,
@@ -23,6 +24,29 @@ import {
 import { replayNativeJsonl } from '../src/native/replay.js';
 import { openDatabase } from '../src/storage/db.js';
 import { makeNativeHome } from './fixtures/native-home.js';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function nativeSession(id: string, cwd = '/workspace'): NativeSession {
+  return {
+    id,
+    executor: 'claude',
+    filePath: `/tmp/${id}.jsonl`,
+    cwd,
+    updatedAt: '2026-08-12T00:00:00.000Z',
+    fileSize: 1,
+    turnCount: 1,
+    firstUserMessage: id,
+  };
+}
 
 function workspaceCtx() {
   const dir = mkdtempSync(join(tmpdir(), 'gian-native-001-'));
@@ -226,6 +250,111 @@ test('NATIVE-001: clearNativeSessionsCache forces re-scan after fixture changes'
   } finally {
     ctx.cleanup();
   }
+});
+
+test('NATIVE-001: concurrent cached scans for one workspace share the same filesystem work', async () => {
+  clearNativeSessionsCache();
+  const gate = deferred<NativeSession[]>();
+  let calls = 0;
+  const scanClaude = async () => {
+    calls++;
+    return gate.promise;
+  };
+
+  const first = scanNativeSessions('/workspace', {
+    homeDir: '/home/test', executors: ['claude'], scanners: { claude: scanClaude },
+  });
+  const second = scanNativeSessions('/workspace', {
+    homeDir: '/home/test', executors: ['claude'], scanners: { claude: scanClaude },
+  });
+  assert.equal(calls, 1, 'ordinary concurrent refreshes must coalesce per workspace');
+
+  gate.resolve([nativeSession('shared')]);
+  assert.deepEqual(await first, [nativeSession('shared')]);
+  assert.deepEqual(await second, [nativeSession('shared')]);
+  assert.equal(calls, 1);
+  clearNativeSessionsCache();
+});
+
+test('NATIVE-001: scans for different workspaces are not serialized behind each other', async () => {
+  clearNativeSessionsCache();
+  const gates = new Map<string, ReturnType<typeof deferred<NativeSession[]>>>();
+  const started: string[] = [];
+  const scanClaude = async (workspacePath: string) => {
+    started.push(workspacePath);
+    const gate = deferred<NativeSession[]>();
+    gates.set(workspacePath, gate);
+    return gate.promise;
+  };
+
+  const first = scanNativeSessions('/workspace-a', {
+    homeDir: '/home/test', executors: ['claude'], scanners: { claude: scanClaude },
+  });
+  const second = scanNativeSessions('/workspace-b', {
+    homeDir: '/home/test', executors: ['claude'], scanners: { claude: scanClaude },
+  });
+  assert.deepEqual(started.sort(), ['/workspace-a', '/workspace-b'],
+    'workspace B must start while workspace A is still pending');
+
+  gates.get('/workspace-b')!.resolve([nativeSession('b', '/workspace-b')]);
+  gates.get('/workspace-a')!.resolve([nativeSession('a', '/workspace-a')]);
+  assert.equal((await first)[0]!.id, 'a');
+  assert.equal((await second)[0]!.id, 'b');
+  clearNativeSessionsCache();
+});
+
+test('NATIVE-001: clearing during a scan prevents the stale result from overwriting a fresh cache', async () => {
+  clearNativeSessionsCache();
+  const staleGate = deferred<NativeSession[]>();
+  let staleCalls = 0;
+  const stale = scanNativeSessions('/workspace', {
+    homeDir: '/home/test',
+    executors: ['claude'],
+    scanners: { claude: async () => { staleCalls++; return staleGate.promise; } },
+  });
+  assert.equal(staleCalls, 1);
+
+  clearNativeSessionsCache();
+  let freshCalls = 0;
+  const fresh = await scanNativeSessions('/workspace', {
+    homeDir: '/home/test',
+    executors: ['claude'],
+    scanners: { claude: async () => { freshCalls++; return [nativeSession('fresh')]; } },
+  });
+  assert.equal(fresh[0]!.id, 'fresh');
+
+  staleGate.resolve([nativeSession('stale')]);
+  assert.equal((await stale)[0]!.id, 'stale', 'the original caller still receives its result');
+  const cached = await scanNativeSessions('/workspace', {
+    homeDir: '/home/test',
+    executors: ['claude'],
+    scanners: { claude: async () => { freshCalls++; return [nativeSession('unexpected')]; } },
+  });
+  assert.equal(cached[0]!.id, 'fresh', 'the stale completion must not replace the post-clear cache');
+  assert.equal(freshCalls, 1, 'the post-clear result remains cached');
+  clearNativeSessionsCache();
+});
+
+test('NATIVE-001: a transient executor failure returns partial data without poisoning the cache', async () => {
+  clearNativeSessionsCache();
+  let codexCalls = 0;
+  const options = {
+    homeDir: '/home/test',
+    scanners: {
+      claude: async () => [nativeSession('claude-ok')],
+      codex: async () => {
+        codexCalls++;
+        if (codexCalls === 1) throw new Error('temporary read failure');
+        return [{ ...nativeSession('codex-recovered'), executor: 'codex' as const }];
+      },
+    },
+  };
+
+  assert.deepEqual((await scanNativeSessions('/workspace', options)).map(s => s.id), ['claude-ok']);
+  const recovered = await scanNativeSessions('/workspace', options);
+  assert.deepEqual(recovered.map(s => s.id).sort(), ['claude-ok', 'codex-recovered']);
+  assert.equal(codexCalls, 2, 'a failed executor must be retried instead of hidden for 30 seconds');
+  clearNativeSessionsCache();
 });
 
 // ---------------------------------------------------------------------------

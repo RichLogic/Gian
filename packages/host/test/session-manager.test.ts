@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   ExecutorConfigState,
   AgentProxyDefaults,
@@ -16,7 +16,13 @@ import type {
 import { openDatabase } from '../src/storage/db.js';
 import { SessionManager } from '../src/session/manager.js';
 import type { ProxyManager } from '../src/proxy/manager.js';
-import type { ProxyClient, NotificationHandler, StartTurnParams } from '../src/proxy/types.js';
+import type {
+  ProxyClient,
+  NotificationHandler,
+  ProxyReplayResult,
+  RespondApprovalParams,
+  StartTurnParams,
+} from '../src/proxy/types.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import { ApprovalManager } from '../src/approval/index.js';
 import { QueueManager } from '../src/queue/index.js';
@@ -24,6 +30,7 @@ import { writeAttachment } from '../src/storage/attachments.js';
 import { listGitWorktreesAsync } from '../src/workspace/git.js';
 import { createGitRepo } from './fixtures/git-repo.js';
 import { installEventStorageV3 } from '../src/storage/event-storage-v3-schema.js';
+import { proxyNotificationSchema } from '@gian/proxy-protocol';
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -43,6 +50,7 @@ class StubProxyClient implements ProxyClient {
   notificationDuringInterrupt: ProxyNotification | null = null;
   interruptError: Error | null = null;
   startTurnIds: string[] = [];
+  approvalCalls: RespondApprovalParams[] = [];
   createSessionGate: Promise<void> | null = null;
   onCreateSessionStarted: (() => void) | null = null;
 
@@ -121,7 +129,9 @@ class StubProxyClient implements ProxyClient {
       throw error;
     }
   }
-  async respondApproval() { /* no-op */ }
+  async respondApproval(params: RespondApprovalParams) {
+    this.approvalCalls.push(params);
+  }
   async startTurn(params: StartTurnParams) {
     this.startTurnCalls.push(params);
     return {
@@ -165,6 +175,7 @@ class FakeProxyManager {
   private active: StubProxyClient | null = this.client;
   private initialized = false;
   forceDisposeCalls: string[] = [];
+  forceDisposeGate: Promise<void> | null = null;
   async getOrCreate(_sessionId?: string, executor: Executor = 'claude'): Promise<ProxyClient> {
     if (!this.initialized) {
       this.initialized = true;
@@ -181,11 +192,12 @@ class FakeProxyManager {
   get(): ProxyClient | undefined {
     return this.active ?? undefined;
   }
-  forceDispose(sessionId: string): void {
+  async forceDispose(sessionId: string): Promise<void> {
     this.forceDisposeCalls.push(sessionId);
     const client = this.active;
     this.active = null;
-    client?.forceKill();
+    if (client) await client.forceKill();
+    if (this.forceDisposeGate) await this.forceDisposeGate;
   }
   async dispose(): Promise<void> {}
   async closeAll(): Promise<void> { /* no-op */ }
@@ -193,12 +205,17 @@ class FakeProxyManager {
 
 class StubKimiProxyClient implements ProxyClient {
   readonly executor = 'kimi' as const;
+  readonly protocolV1 = true as const;
   notificationHandlers: NotificationHandler[] = [];
   nativeListCalls: Array<{ cwd?: string; cursor?: string }> = [];
   failNativeList = false;
   replayUpdates: unknown[] = [];
+  replaySession?: () => Promise<ProxyNotification[] | ProxyReplayResult>;
+  forceKillCalls = 0;
   createCalls = 0;
   failNextCreate: Error | null = null;
+  failNextNativeConfig: Error | null = null;
+  setNativeConfigCalls: Array<{ configId: string; value: NativeConfigValue }> = [];
   readonly options: NativeConfigOption[] = [
     {
       id: 'mode',
@@ -284,6 +301,12 @@ class StubKimiProxyClient implements ProxyClient {
     return this.snapshot();
   }
   async setNativeConfig(configId: string, value: NativeConfigValue) {
+    this.setNativeConfigCalls.push({ configId, value });
+    if (this.failNextNativeConfig) {
+      const error = this.failNextNativeConfig;
+      this.failNextNativeConfig = null;
+      throw error;
+    }
     const option = this.options.find(item => item.id === configId);
     if (!option) throw new Error(`unknown config: ${configId}`);
     option.currentValue = value;
@@ -291,7 +314,7 @@ class StubKimiProxyClient implements ProxyClient {
   }
   async interruptTurn() {}
   async respondApproval() {}
-  async startTurn() {
+  async startTurn(params: StartTurnParams) {
     return {
       session: {
         id: 'kimi_proxy_1',
@@ -302,12 +325,12 @@ class StubKimiProxyClient implements ProxyClient {
         updatedAt: '2026-07-29T00:00:00.000Z',
         lastError: null,
       },
-      turn: { id: 'kimi_turn_1' },
+      turn: { id: params.turnId ?? 'kimi_turn_1' },
     };
   }
   async closeSession() {}
   async shutdown() {}
-  forceKill() {}
+  forceKill() { this.forceKillCalls += 1; }
   onNotification(handler: NotificationHandler) {
     this.notificationHandlers.push(handler);
     return () => {
@@ -316,6 +339,10 @@ class StubKimiProxyClient implements ProxyClient {
   }
   onExit() {
     return () => {};
+  }
+
+  fire(notification: ProxyNotification): void {
+    for (const handler of this.notificationHandlers) handler(notification);
   }
 
   private snapshot(): {
@@ -400,7 +427,7 @@ function setup(
   approvals.setRespondFn((sid, aid, dec) => sessions.respondApproval(sid, aid, dec));
   approvals.setGetModeFn(sid => sessions.getSession(sid).approval_mode);
 
-  return { dir, db, wsId, proxyMgr, broadcaster, sessions };
+  return { dir, db, wsId, proxyMgr, broadcaster, approvals, sessions };
 }
 
 function setupKimi(
@@ -453,6 +480,103 @@ test('new sessions use defaults owned by their Proxy configuration', async () =>
   }
 });
 
+test('opaque approval options route without an executor-specific Host branch', async () => {
+  const { dir, db, wsId, proxyMgr, approvals, sessions } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+    });
+    const approvalResult = approvals.request({
+      sessionId: session.id,
+      turnId: 'turn-1',
+      category: 'command',
+      risk: 'medium',
+      description: 'Run tests',
+      payload: { approvalId: 'approval-opaque' },
+      nativeOptions: [{
+        optionId: 'opaque-provider-option-42',
+        label: 'Allow once',
+        kind: 'allow_once',
+      }],
+    });
+
+    await sessions.respondApproval(
+      session.id,
+      'approval-opaque',
+      'allow_once',
+      undefined,
+      'opaque-provider-option-42',
+    );
+
+    assert.deepEqual(proxyMgr.client.approvalCalls, [{
+      sessionId: session.native_session_id,
+      approvalId: 'approval-opaque',
+      decision: 'accept',
+      nativeOptionId: 'opaque-provider-option-42',
+    }]);
+    assert.equal(await approvalResult, 'allow_once');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a live terminal event still settles the turn when replay already persisted it', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+    });
+    await sessions.sendMessage(session.id, 'hello');
+    const turnId = proxyMgr.client.startTurnCalls[0]?.turnId;
+    assert.ok(turnId);
+    const providerTurnId = 'proxy_turn';
+    const emittedAt = '2026-08-10T03:00:00.000Z';
+    const data = { stopReason: 'completed' } as const;
+    const eventId = 'overlap-terminal-event';
+    const payloadHash = createHash('sha256').update(JSON.stringify({
+      method: 'turn.completed',
+      turnId: providerTurnId,
+      emittedAt,
+      data,
+    })).digest('hex');
+    db.prepare(
+      `INSERT INTO proxy_replay_turns
+        (session_id, provider_turn_id, turn_id, replay_owned)
+       VALUES (?, ?, ?, 0)`,
+    ).run(session.id, providerTurnId, turnId);
+    db.prepare(
+      `INSERT INTO proxy_replay_events
+        (session_id, event_id, turn_id, payload_sha256)
+       VALUES (?, ?, ?, ?)`,
+    ).run(session.id, eventId, turnId, payloadHash);
+
+    proxyMgr.client.fire(proxyNotificationSchema.parse({
+      method: 'turn.completed',
+      params: {
+        eventId,
+        streamId: 'stream-1',
+        sequence: 1,
+        sessionId: session.id,
+        turnId: providerTurnId,
+        emittedAt,
+        data,
+      },
+    }) as unknown as ProxyNotification);
+
+    assert.equal(sessions.getSession(session.id).status, 'done');
+    assert.deepEqual(
+      db.prepare('SELECT status FROM turns WHERE id = ?').get(turnId),
+      { status: 'completed' },
+    );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('Kimi applies a Proxy-owned default mode through native config', async () => {
   const { dir, db, wsId, sessions } = setupKimi(() => ({
     model: '',
@@ -489,8 +613,9 @@ test('Kimi applies Proxy-owned model and thinking defaults through native config
         ],
       },
       {
-        id: 'thought_level',
+        id: 'thinking',
         name: 'Thinking',
+        category: 'thought_level',
         type: 'select',
         currentValue: 'medium',
         scope: 'session',
@@ -507,8 +632,103 @@ test('Kimi applies Proxy-owned model and thinking defaults through native config
     assert.deepEqual(session.executor_config.values, {
       mode: 'yolo',
       model: 'kimi-k2',
-      thought_level: 'high',
+      thinking: 'high',
     });
+    assert.deepEqual(proxyMgr.client.setNativeConfigCalls, [
+      { configId: 'model', value: 'kimi-k2' },
+      { configId: 'thinking', value: 'high' },
+      { configId: 'mode', value: 'yolo' },
+    ]);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi skips a stale default when ACP no longer advertises that semantic role', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi(() => ({
+    model: '',
+    thinking: 'high',
+    mode: '',
+  }));
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'kimi' });
+    assert.deepEqual(session.executor_config.values, { mode: 'default' });
+    assert.deepEqual(proxyMgr.client.setNativeConfigCalls, []);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi creation failure names the advertised config id and leaves no Gian row', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi(() => ({
+    model: '',
+    thinking: 'high',
+    mode: '',
+  }));
+  try {
+    proxyMgr.client.options.push({
+      id: 'thinking',
+      name: 'Thinking',
+      category: 'thought_level',
+      type: 'select',
+      currentValue: 'medium',
+      scope: 'session',
+      choices: [
+        { value: 'medium', label: 'Medium' },
+        { value: 'high', label: 'High' },
+      ],
+    });
+    proxyMgr.client.failNextNativeConfig = new Error(
+      'Invalid params: Unknown configId: thinking',
+    );
+
+    await assert.rejects(
+      sessions.createSession({ workspace_id: wsId, executor: 'kimi' }),
+      /Failed to apply Kimi thinking default using config id "thinking": Invalid params/,
+    );
+    const count = db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number };
+    assert.equal(count.count, 0);
+    assert.equal(proxyMgr.disposeCalls.length, 1);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi rehydrate remaps a saved thinking alias to the current advertised id', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi();
+  try {
+    proxyMgr.client.options.push({
+      id: 'thinking',
+      name: 'Thinking',
+      category: 'thought_level',
+      type: 'select',
+      currentValue: 'medium',
+      scope: 'session',
+      choices: [
+        { value: 'medium', label: 'Medium' },
+        { value: 'high', label: 'High' },
+      ],
+    });
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'kimi' });
+    db.prepare('UPDATE sessions SET executor_config_json = ? WHERE id = ?').run(
+      JSON.stringify({
+        schemaVersion: 1,
+        values: { mode: 'default', thought_level: 'high' },
+      }),
+      session.id,
+    );
+    proxyMgr.client.setNativeConfigCalls.length = 0;
+    proxyMgr.dropClient();
+
+    const snapshot = await sessions.getNativeConfig(session.id);
+
+    assert.equal(snapshot.state.values.thinking, 'high');
+    assert.deepEqual(proxyMgr.client.setNativeConfigCalls, [
+      { configId: 'thinking', value: 'high' },
+    ]);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -677,6 +897,317 @@ test('Kimi adoption coalesces replay chunks and keeps assistant IDs turn-local',
       events.filter(event => event.display?.type === 'state.turn-completed').map(event => event.turn),
       [1, 2],
     );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('protocol v1 replay deduplicates events already persisted from the live stream', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi();
+  try {
+    const adopted = await sessions.adoptKimiNativeSession({
+      workspaceId: wsId,
+      cwd: '/tmp/test-ws',
+      nativeSessionId: 'native-live-replay-overlap',
+    });
+    await sessions.sendMessage(adopted.session.id, 'live question');
+    const turn = db.prepare(
+      'SELECT id, turn_number FROM turns WHERE session_id = ? ORDER BY turn_number DESC LIMIT 1',
+    ).get(adopted.session.id) as { id: string; turn_number: number };
+    assert.deepEqual(db.prepare(
+      `SELECT turn_id, replay_owned
+       FROM proxy_replay_turns
+       WHERE session_id = ? AND provider_turn_id = ?`,
+    ).get(adopted.session.id, turn.id), { turn_id: turn.id, replay_owned: 0 });
+    const streamId = 'replay-live-overlap';
+    const replay = [
+      proxyNotificationSchema.parse({
+        method: 'turn.started',
+        params: {
+          eventId: 'overlap-start', streamId, sequence: 1,
+          sessionId: adopted.session.id, turnId: turn.id,
+          emittedAt: '2026-08-10T01:00:00.000Z', data: {},
+        },
+      }),
+      proxyNotificationSchema.parse({
+        method: 'input.recorded',
+        params: {
+          eventId: 'overlap-input', streamId, sequence: 2,
+          sessionId: adopted.session.id, turnId: turn.id,
+          emittedAt: '2026-08-10T01:00:00.100Z',
+          data: {
+            inputId: 'overlap-input-item',
+            input: [{ type: 'text', text: 'live question' }],
+          },
+        },
+      }),
+      proxyNotificationSchema.parse({
+        method: 'content.completed',
+        params: {
+          eventId: 'overlap-content', streamId, sequence: 3,
+          sessionId: adopted.session.id, turnId: turn.id,
+          emittedAt: '2026-08-10T01:00:01.000Z',
+          data: { contentId: 'overlap-answer', kind: 'text', content: 'live answer' },
+        },
+      }),
+      proxyNotificationSchema.parse({
+        method: 'turn.completed',
+        params: {
+          eventId: 'overlap-end', streamId, sequence: 4,
+          sessionId: adopted.session.id, turnId: turn.id,
+          emittedAt: '2026-08-10T01:00:02.000Z',
+          data: { stopReason: 'completed' },
+        },
+      }),
+    ];
+
+    proxyMgr.client.replaySession = async () => ({ replayStreamId: streamId, events: replay });
+    proxyMgr.client.fire({
+      method: 'session.updated',
+      params: {
+        eventId: 'overlap-history-changed',
+        streamId: 'attached-stream',
+        sequence: 1,
+        sessionId: adopted.session.id,
+        emittedAt: '2026-08-10T01:00:03.000Z',
+        data: { reason: 'native-history-changed' },
+      },
+    });
+
+    await waitFor(() => (
+      db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_events WHERE session_id = ?')
+        .get(adopted.session.id) as { count: number }
+    ).count === 4);
+    const beforeLiveEvents = (db.prepare(
+      'SELECT COUNT(*) AS count FROM events WHERE session_id = ?',
+    ).get(adopted.session.id) as { count: number }).count;
+    for (const notification of [replay[0]!, replay[2]!, replay[3]!]) {
+      proxyMgr.client.fire(notification);
+    }
+    assert.equal((db.prepare(
+      'SELECT COUNT(*) AS count FROM events WHERE session_id = ?',
+    ).get(adopted.session.id) as { count: number }).count, beforeLiveEvents);
+    assert.equal((db.prepare(
+      'SELECT COUNT(*) AS count FROM turns WHERE session_id = ?',
+    ).get(adopted.session.id) as { count: number }).count, 1);
+    assert.equal(sessions.listEvents(adopted.session.id)
+      .filter(event => event.event === 'user_message').length, 1);
+    assert.equal(sessions.getSession(adopted.session.id).status, 'done');
+    assert.equal(proxyMgr.client.forceKillCalls, 0);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('protocol v1 native-history refresh retries a transient replay failure', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi();
+  try {
+    const adopted = await sessions.adoptKimiNativeSession({
+      workspaceId: wsId,
+      cwd: '/tmp/test-ws',
+      nativeSessionId: 'native-transient-replay',
+    });
+    const streamId = 'replay-transient';
+    const events = [
+      proxyNotificationSchema.parse({
+        method: 'turn.started',
+        params: {
+          eventId: 'transient-start', streamId, sequence: 1,
+          sessionId: adopted.session.id, turnId: 'transient-turn',
+          emittedAt: '2026-08-10T01:00:00.000Z', data: {},
+        },
+      }),
+      proxyNotificationSchema.parse({
+        method: 'turn.completed',
+        params: {
+          eventId: 'transient-end', streamId, sequence: 2,
+          sessionId: adopted.session.id, turnId: 'transient-turn',
+          emittedAt: '2026-08-10T01:00:01.000Z',
+          data: { stopReason: 'completed' },
+        },
+      }),
+    ];
+    let replayCalls = 0;
+    proxyMgr.client.replaySession = async () => {
+      replayCalls += 1;
+      if (replayCalls === 1) throw new Error('temporary replay timeout');
+      return { replayStreamId: streamId, events };
+    };
+
+    proxyMgr.client.fire({
+      method: 'session.updated',
+      params: {
+        eventId: 'transient-history-changed',
+        streamId: 'attached-stream',
+        sequence: 1,
+        sessionId: adopted.session.id,
+        emittedAt: '2026-08-10T01:00:02.000Z',
+        data: { reason: 'native-history-changed' },
+      },
+    });
+
+    await waitFor(() => replayCalls === 2);
+    await waitFor(() => (
+      db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_events WHERE session_id = ?')
+        .get(adopted.session.id) as { count: number }
+    ).count === 2);
+    assert.equal(proxyMgr.client.forceKillCalls, 0);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('protocol v1 native-history refresh persists new replay eventIds exactly once', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi();
+  try {
+    const adopted = await sessions.adoptKimiNativeSession({
+      workspaceId: wsId,
+      cwd: '/tmp/test-ws',
+      nativeSessionId: 'native-protocol-history',
+    });
+    let streamId = 'replay-native-protocol-history';
+    const replayTurn = (turnId: string, startSequence: number) => [
+      proxyNotificationSchema.parse({
+        method: 'turn.started',
+        params: {
+          eventId: `start-${turnId}`,
+          streamId,
+          sequence: startSequence,
+          sessionId: adopted.session.id,
+          turnId,
+          emittedAt: '2026-08-10T01:00:00.000Z',
+          data: {},
+        },
+      }),
+      proxyNotificationSchema.parse({
+        method: 'input.recorded',
+        params: {
+          eventId: `input-${turnId}`,
+          streamId,
+          sequence: startSequence + 1,
+          sessionId: adopted.session.id,
+          turnId,
+          emittedAt: '2026-08-10T01:00:00.000Z',
+          data: {
+            inputId: `input-${turnId}`,
+            input: [{ type: 'text', text: `question ${turnId}` }],
+          },
+        },
+      }),
+      proxyNotificationSchema.parse({
+        method: 'content.completed',
+        params: {
+          eventId: `content-${turnId}`,
+          streamId,
+          sequence: startSequence + 2,
+          sessionId: adopted.session.id,
+          turnId,
+          emittedAt: '2026-08-10T01:00:01.000Z',
+          data: { contentId: `content-${turnId}`, kind: 'text', content: 'answer' },
+        },
+      }),
+      proxyNotificationSchema.parse({
+        method: 'turn.completed',
+        params: {
+          eventId: `end-${turnId}`,
+          streamId,
+          sequence: startSequence + 3,
+          sessionId: adopted.session.id,
+          turnId,
+          emittedAt: '2026-08-10T01:00:02.000Z',
+          data: { stopReason: 'completed' },
+        },
+      }),
+    ];
+    let replay = replayTurn('external-1', 1);
+    let releaseFirstReplay!: () => void;
+    const firstReplayGate = new Promise<void>(resolve => { releaseFirstReplay = resolve; });
+    let replayCalls = 0;
+    proxyMgr.client.replaySession = async () => {
+      replayCalls += 1;
+      if (replayCalls === 1) await firstReplayGate;
+      return { replayStreamId: streamId, events: replay };
+    };
+    const historyChanged = () => proxyMgr.client.fire({
+      method: 'session.updated',
+      params: {
+        eventId: randomUUID(),
+        streamId: 'attached-stream',
+        sequence: 1,
+        sessionId: adopted.session.id,
+        emittedAt: new Date().toISOString(),
+        data: { reason: 'native-history-changed' },
+      },
+    });
+
+    historyChanged();
+    await waitFor(() => replayCalls === 1);
+    historyChanged();
+    releaseFirstReplay();
+    await waitFor(() => replayCalls === 2);
+    await waitFor(() => (
+      db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_events')
+        .get() as { count: number }
+    ).count === 4);
+    historyChanged();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal((
+      db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_events')
+        .get() as { count: number }
+    ).count, 4);
+    assert.equal((
+      db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_turns')
+        .get() as { count: number }
+    ).count, 1);
+
+    replay = [...replay, ...replayTurn('external-2', 5)];
+    historyChanged();
+    await waitFor(() => (
+      db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_events')
+        .get() as { count: number }
+    ).count === 8);
+    assert.equal((
+      db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_turns')
+        .get() as { count: number }
+    ).count, 2);
+
+    streamId = 'replay-native-protocol-history-rewritten';
+    replay = replayTurn('external-rewritten', 1);
+    historyChanged();
+    await waitFor(() => (
+      db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_events')
+        .get() as { count: number }
+    ).count === 4);
+    assert.equal((
+      db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_turns')
+        .get() as { count: number }
+    ).count, 1);
+    assert.equal((
+      db.prepare('SELECT COUNT(*) AS count FROM turns')
+        .get() as { count: number }
+    ).count, 1);
+
+    const conflicting = {
+      ...replay[2]!,
+      params: {
+        ...replay[2]!.params,
+        data: { contentId: 'content-external-1', kind: 'text', content: 'changed' },
+      },
+    } as ProxyNotification;
+    replay = [...replayTurn('external-3', 1), conflicting];
+    historyChanged();
+    await waitFor(() => proxyMgr.client.forceKillCalls === 1);
+    assert.equal((
+      db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_events')
+        .get() as { count: number }
+    ).count, 4, 'a conflicting replay rolls back earlier events in the same refresh');
+    assert.equal((
+      db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_turns')
+        .get() as { count: number }
+    ).count, 1, 'a conflicting replay also rolls back its newly allocated turn');
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -1764,6 +2295,31 @@ test('Codex force recover replaces the facade and never accumulates notification
        WHERE session_id = ? AND type = 'output.text.delta'`,
     ).get(session.id) as { count: number };
     assert.equal(stored.count, 1, 'one Proxy delta produces one persisted event');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('forceRecover waits for proxy cleanup before reporting recovery complete', async () => {
+  const { dir, db, wsId, sessions, proxyMgr } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'codex' });
+    let releaseCleanup!: () => void;
+    proxyMgr.forceDisposeGate = new Promise<void>(resolve => {
+      releaseCleanup = resolve;
+    });
+
+    let recovered = false;
+    const recovery = sessions.forceRecover(session.id).then(() => {
+      recovered = true;
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(recovered, false, 'recovery acknowledgement must wait for native cleanup');
+
+    releaseCleanup();
+    await recovery;
+    assert.equal(recovered, true);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

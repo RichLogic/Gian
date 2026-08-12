@@ -192,6 +192,91 @@ export function registerWorkspaceRoutes(app: Hono, db: Db): void {
     }
   });
 
+  /** Derive a workspace-safe directory name from a git remote URL:
+   *  basename minus `.git`, sanitized to the workspace-name charset. */
+  function deriveRepoName(url: string): string {
+    const tail = url.trim().replace(/[/\\]+$/, '').split(/[/\\:]/).filter(Boolean).pop() ?? '';
+    return tail.replace(/\.git$/i, '').replace(/[^a-zA-Z0-9._-]/g, '-');
+  }
+
+  // Clone-only (issue #57 new-workspace redesign): clone a git remote into
+  // <workspace_root>/<name> WITHOUT registering a workspace row. The form
+  // fills its path field from the response; the actual registration happens
+  // when the user confirms with Create (adopt path).
+  app.post('/api/workspaces/clone', async c => {
+    const body = await c.req.json<{ git_remote?: string; name?: string }>();
+    const url = body.git_remote?.trim() ?? '';
+    if (!url) return c.json({ error: 'git_remote required' }, 400);
+    const name = body.name?.trim() || deriveRepoName(url);
+    if (!/^[a-zA-Z0-9._-]+$/.test(name)) {
+      return c.json({ error: 'name may only contain letters, digits, dot, dash, underscore' }, 400);
+    }
+
+    const requestedRoot = resolve(expandHome(loadConfig(db).workspace_root || '~/Coding'));
+    let path = resolve(requestedRoot, name);
+    let root: string;
+    try {
+      [path, root] = await Promise.all([
+        canonicalWorkspacePath(path, { signal: c.req.raw.signal }),
+        canonicalWorkspacePath(requestedRoot, { signal: c.req.raw.signal }),
+      ]);
+    } catch (error) {
+      const failure = pathResolutionFailure(error);
+      return c.json({ error: failure.message }, failure.status);
+    }
+    if (isFilesystemRoot(path) || sameWorkspaceIdentity(path, root)) {
+      return c.json({ error: `invalid clone target (${path})` }, 400);
+    }
+
+    let releaseReservation: () => void;
+    try {
+      releaseReservation = await reserveWorkspacePath(path, { signal: c.req.raw.signal });
+    } catch (error) {
+      if (error instanceof WorkspacePathReservationError) {
+        return c.json({ error: error.message, code: 'WORKSPACE_INIT_IN_PROGRESS' }, 409);
+      }
+      if (error instanceof WorkspacePathResolutionError) {
+        const failure = pathResolutionFailure(error);
+        return c.json({ error: failure.message }, failure.status);
+      }
+      return c.json({ error: String(error) }, 500);
+    }
+
+    try {
+      const existingRows = db
+        .prepare('SELECT id, name, path FROM workspaces')
+        .all() as Array<{ id: string; name: string; path: string }>;
+      for (const existing of existingRows) {
+        let existingPath: string;
+        try {
+          existingPath = await canonicalWorkspacePath(existing.path, { signal: c.req.raw.signal });
+        } catch (error) {
+          const failure = pathResolutionFailure(error);
+          return c.json({ error: failure.message }, failure.status);
+        }
+        if (sameWorkspaceIdentity(existingPath, path)) {
+          return c.json({ error: `path is already a workspace: "${existing.name}"` }, 409);
+        }
+      }
+
+      const result = await initWorkspace({
+        path,
+        gitRemote: url,
+        name,
+        signal: c.req.raw.signal,
+      });
+      if (!result.ok) {
+        return c.json(
+          { error: result.error ?? 'clone failed', notes: result.notes },
+          result.errorStatus ?? 400,
+        );
+      }
+      return c.json({ path, name, notes: result.notes });
+    } finally {
+      releaseReservation();
+    }
+  });
+
   app.patch('/api/workspaces/:id', async c => {
     const id = c.req.param('id');
     if (!db.prepare('SELECT 1 FROM workspaces WHERE id = ?').get(id)) {

@@ -12,6 +12,7 @@ import { AUTH_REQUIRED } from '../auth/middleware.js';
 import { loadConfig } from '../storage/config.js';
 import { deleteTaskCascade } from '../task/delete-cascade.js';
 import { updateTaskWithSessionArchive } from '../task/update-with-session-archive.js';
+import { redactErrorForLog } from '../logging/redact.js';
 
 interface WsMessageEvent {
   data: WSMessageReceive;
@@ -164,7 +165,7 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
           });
         }
       } catch (err) {
-        console.error('[ws] dispatch error', err);
+        console.error('[ws] dispatch error', redactErrorForLog(err));
         // Surface the failure to the client. Without this, errors inside
         // sendMessage / respondApproval / etc. are invisible — the user sees
         // "no reply" with no clue why.
@@ -259,6 +260,7 @@ async function dispatch(
         executor: msg.executor,
         model: msg.model,
         approval_mode: msg.approval_mode,
+        ...(msg.thinking_effort !== undefined ? { thinking_effort: msg.thinking_effort } : {}),
         ...(msg.name !== undefined ? { name: msg.name } : {}),
       });
       broadcaster.send(ws, {

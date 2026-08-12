@@ -68,14 +68,14 @@ test('ERR-017: systemd rendering quotes spaces and escapes percent specifiers', 
   const directory = await mkdtemp(join(tmpdir(), 'gian-systemd-render-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const installDir = '/srv/Gian & 100% ${ROOT} ready';
-  const nodeBin = '/opt/Node 22%/$runtime/node';
+  const nodeBin = '/opt/Node 24%/$runtime/node';
   const home = '/home/user name%';
   const launchdPath = '/opt/Kimi 100%:/usr/bin';
   const template = await readFile(join(scriptsDir, 'install/linux/gian.service'), 'utf8');
   const rendered = renderDaemonUnit({
     platform: 'linux', template, installDir, nodeBin, home, launchdPath,
   });
-  assert.match(rendered, /ExecStart="\/opt\/Node 22%%\/\$\$runtime\/node" "\/srv\/Gian & 100%% \$\$\{ROOT\} ready\/packages\/host\/dist\/index\.js"/);
+  assert.match(rendered, /ExecStart="\/opt\/Node 24%%\/\$\$runtime\/node" "\/srv\/Gian & 100%% \$\$\{ROOT\} ready\/packages\/host\/dist\/index\.js"/);
   assert.match(rendered, /WorkingDirectory="\/srv\/Gian & 100%% \$\{ROOT\} ready\/packages\/host"/);
   assert.match(rendered, /Environment="PATH=\/opt\/Kimi 100%%:\/usr\/bin"/);
   assert.match(rendered, /StandardOutput="append:\/home\/user name%%\/\.gian\/logs\/host\.out"/);
@@ -166,7 +166,7 @@ test('ERR-017: relative PATH entries become absolute daemon executable paths', a
   if (!requireInstallerHost(t)) return;
   const fixture = await installFixture();
   t.after(() => rm(fixture.base, { recursive: true, force: true }));
-  await setFakeRuntime(fixture.bin, installerUname, 'v22.18.0');
+  await setFakeRuntime(fixture.bin, installerUname, 'v24.19.0');
 
   const result = await runCheck(fixture, {
     cwd: fixture.base,
@@ -184,7 +184,7 @@ test('ERR-017: version validation checks the resolved binary, not a shell functi
   if (!requireInstallerHost(t)) return;
   const fixture = await installFixture();
   t.after(() => rm(fixture.base, { recursive: true, force: true }));
-  await setFakeRuntime(fixture.bin, installerUname, 'v22.18.0');
+  await setFakeRuntime(fixture.bin, installerUname, 'v24.19.0');
   await writeExecutable(join(fixture.bin, 'bash'), `#!/bin/bash
 node() { printf 'v25.0.0\\n'; }
 export -f node
@@ -192,7 +192,7 @@ exec /bin/bash "$@"
 `);
 
   const result = await runCheck(fixture);
-  assert.match(result.stdout, /Node\s+: .* \(v22\.18\.0\)/);
+  assert.match(result.stdout, /Node\s+: .* \(v24\.19\.0\)/);
 });
 
 test('ERR-017: daemon PATH rejects unrepresentable control characters', async t => {
@@ -200,7 +200,7 @@ test('ERR-017: daemon PATH rejects unrepresentable control characters', async t 
   t.after(() => rm(fixture.base, { recursive: true, force: true }));
   const controlBin = join(fixture.base, 'node\ninjected');
   await mkdir(controlBin);
-  await setFakeRuntime(controlBin, 'Darwin', 'v22.18.0');
+  await setFakeRuntime(controlBin, 'Darwin', 'v24.19.0');
 
   await assert.rejects(
     runCheck(fixture, { path: `${controlBin}:${fixture.bin}:/usr/bin:/bin` }),
@@ -229,7 +229,7 @@ test('ERR-017: install --check validates the host platform with special paths', 
   if (!requireInstallerHost(t)) return;
   const fixture = await installFixture();
   t.after(() => rm(fixture.base, { recursive: true, force: true }));
-  await setFakeRuntime(fixture.bin, installerUname, 'v22.18.0');
+  await setFakeRuntime(fixture.bin, installerUname, 'v24.19.0');
   const result = await runCheck(fixture);
   assert.match(result.stdout, new RegExp(`Rendered ${installerPlatform} unit successfully`));
 });
@@ -238,7 +238,7 @@ test('DAEMON-001: install --check renders the Linux systemd user unit', async t 
   if (!requireInstallerHost(t)) return;
   const fixture = await installFixture();
   t.after(() => rm(fixture.base, { recursive: true, force: true }));
-  await setFakeRuntime(fixture.bin, 'Linux', 'v22.18.0');
+  await setFakeRuntime(fixture.bin, 'Linux', 'v24.19.0');
 
   const result = await runCheck(fixture);
   assert.match(result.stdout, /Rendered linux unit successfully/);
@@ -249,40 +249,38 @@ test('ERR-017: install failure matrix rejects unsupported Node and missing build
   const fixture = await installFixture();
   t.after(() => rm(fixture.base, { recursive: true, force: true }));
 
-  await setFakeRuntime(fixture.bin, 'Darwin', 'v21.9.0');
+  await setFakeRuntime(fixture.bin, 'Darwin', 'v23.11.1');
   await assert.rejects(runCheck(fixture), error => {
-    assert.match(error.stderr, /Node v22\+ required/);
+    assert.match(error.stderr, /Node v24\.x required/);
     return true;
   });
 
   await setFakeRuntime(fixture.bin, 'Darwin', 'v25.0.0');
   await assert.rejects(runCheck(fixture), error => {
-    assert.match(error.stderr, /Node v25\+ silently breaks better-sqlite3/);
-    assert.match(error.stderr, /brew is shadowing nvm/);
+    assert.match(error.stderr, /Node v24\.x required/);
     return true;
   });
 
   await unlink(join(fixture.root, 'packages/host/dist/index.js'));
-  await setFakeRuntime(fixture.bin, 'Darwin', 'v22.18.0');
+  await setFakeRuntime(fixture.bin, 'Darwin', 'v24.19.0');
   await assert.rejects(runCheck(fixture), error => {
     assert.match(error.stderr, /Built entry point not found/);
     return true;
   });
 });
 
-test('ERR-017: a Homebrew Node 25 shadowing an nvm Node 22 fails explicitly', async t => {
+test('ERR-017: a Homebrew Node 25 shadowing Node 24 fails explicitly', async t => {
   const fixture = await installFixture();
   t.after(() => rm(fixture.base, { recursive: true, force: true }));
   const brewBin = join(fixture.base, 'homebrew', 'bin');
   await mkdir(brewBin, { recursive: true });
-  await setFakeRuntime(fixture.bin, 'Darwin', 'v22.18.0');
+  await setFakeRuntime(fixture.bin, 'Darwin', 'v24.19.0');
   await writeExecutable(join(brewBin, 'node'), '#!/bin/sh\nprintf "v25.0.0\\n"\n');
 
   await assert.rejects(
     runCheck(fixture, { path: `${brewBin}:${fixture.bin}:/usr/bin:/bin` }),
     error => {
-      assert.match(error.stderr, /Node v25\+ silently breaks better-sqlite3/);
-      assert.match(error.stderr, /brew is shadowing nvm/);
+      assert.match(error.stderr, /Node v24\.x required/);
       return true;
     },
   );
@@ -295,7 +293,7 @@ test('ERR-017: missing provider CLIs stay non-fatal and identify every deferred 
   for (const command of ['claude', 'codex', 'kimi']) {
     await unlink(join(fixture.bin, command));
   }
-  await setFakeRuntime(fixture.bin, installerUname, 'v22.18.0');
+  await setFakeRuntime(fixture.bin, installerUname, 'v24.19.0');
 
   const result = await runCheck(fixture);
   assert.match(result.stdout, new RegExp(`Rendered ${installerPlatform} unit successfully`));

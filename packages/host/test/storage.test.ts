@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { openDatabase } from '../src/storage/db.js';
 import { loadConfig, saveConfig } from '../src/storage/config.js';
 
@@ -31,6 +32,9 @@ test('openDatabase runs migrations and creates expected tables', () => {
       'tasks',
       'task_loops',
       'task_actions',
+      'proxy_replay_turns',
+      'proxy_replay_events',
+      'proxy_replay_streams',
     ]) {
       assert.ok(names.includes(expected), `missing table ${expected}`);
     }
@@ -42,6 +46,57 @@ test('openDatabase runs migrations and creates expected tables', () => {
       assert.ok(!sessionColumns.includes(retired), `retired session column still exists: ${retired}`);
     }
     db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration 047 upgrades databases that already applied the original 046', () => {
+  const dir = makeTempDir();
+  try {
+    const raw = new Database(join(dir, 'gian.db'));
+    raw.exec(`
+      CREATE TABLE migrations (
+        filename TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE sessions (id TEXT PRIMARY KEY);
+      CREATE TABLE turns (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
+      );
+      CREATE TABLE proxy_replay_turns (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        provider_turn_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id) ON DELETE CASCADE,
+        PRIMARY KEY (session_id, provider_turn_id)
+      );
+      CREATE TABLE proxy_replay_events (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        event_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        payload_sha256 TEXT NOT NULL,
+        PRIMARY KEY (session_id, event_id)
+      );
+    `);
+    const migrationDir = new URL('../migrations/', import.meta.url);
+    const insert = raw.prepare('INSERT INTO migrations (filename) VALUES (?)');
+    for (const filename of readdirSync(migrationDir).filter(name => name.endsWith('.sql'))) {
+      if (filename !== '047_proxy_replay_stream_ownership.sql') insert.run(filename);
+    }
+    raw.close();
+
+    const upgraded = openDatabase(dir);
+    const columns = upgraded.prepare('PRAGMA table_info(proxy_replay_turns)')
+      .all() as Array<{ name: string }>;
+    assert.ok(columns.some(column => column.name === 'replay_owned'));
+    assert.ok(upgraded.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'proxy_replay_streams'",
+    ).get());
+    assert.ok(upgraded.prepare(
+      "SELECT 1 FROM migrations WHERE filename = '047_proxy_replay_stream_ownership.sql'",
+    ).get());
+    upgraded.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

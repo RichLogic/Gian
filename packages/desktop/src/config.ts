@@ -74,16 +74,6 @@ export function resolveDesktopTargets({
   };
 }
 
-export function resolveManagedHostReleaseVersion(
-  appVersion: string,
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): string {
-  const smokeVersion = env['GIAN_DESKTOP_SMOKE_RELEASE_VERSION']?.trim();
-  return env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] === '1' && smokeVersion
-    ? smokeVersion
-    : appVersion;
-}
-
 export function isTrustedDesktopUrl(
   candidate: string,
   targets: Pick<DesktopTargets, 'hostUrl' | 'webUrl'>,

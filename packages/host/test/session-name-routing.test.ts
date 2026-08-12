@@ -31,6 +31,7 @@ import { openDatabase, type Db } from '../src/storage/db.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 
 class RecordingProxyClient implements ProxyClient {
+  readonly protocolV1?: true;
   readonly createCalls: CreateSessionParams[] = [];
   readonly startTurnCalls: StartTurnParams[] = [];
   readonly setNameCalls: string[] = [];
@@ -41,7 +42,10 @@ class RecordingProxyClient implements ProxyClient {
     readonly executor: Executor,
     private readonly key: string,
     private readonly createGate?: Promise<void>,
-  ) {}
+    protocolV1 = false,
+  ) {
+    if (protocolV1) this.protocolV1 = true;
+  }
 
   async initialize() {
     return { mode: 'spawn' as const, protocolVersion: 'test', methods: [] };
@@ -120,12 +124,15 @@ class RecordingProxyClient implements ProxyClient {
 class RecordingProxyManager {
   readonly clients = new Map<string, RecordingProxyClient>();
 
-  constructor(private readonly createGate?: Promise<void>) {}
+  constructor(
+    private readonly createGate?: Promise<void>,
+    private readonly protocolV1 = false,
+  ) {}
 
   async getOrCreate(key: string, executor: Executor): Promise<ProxyClient> {
     let client = this.clients.get(key);
     if (!client) {
-      client = new RecordingProxyClient(executor, key, this.createGate);
+      client = new RecordingProxyClient(executor, key, this.createGate, this.protocolV1);
       this.clients.set(key, client);
     }
     return client;
@@ -232,6 +239,32 @@ test('SESSION-NAME-001: Claude first turn carries the latest Gian name and renam
     db.close();
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('SESSION-NAME-001: Claude gian.proxy/1 delegates native naming to the plugin', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-session-name-claude-v1-'));
+  const workspacePath = join(dir, 'workspace');
+  mkdirSync(workspacePath, { recursive: true });
+  const db = openDatabase(dir);
+  const proxies = new RecordingProxyManager(undefined, true);
+  const sessions = makeManager(db, dir, proxies);
+  try {
+    const workspaceId = seedWorkspace(db, workspacePath);
+    const session = await sessions.createSession({
+      workspace_id: workspaceId,
+      executor: 'claude',
+      name: 'Claude Initial',
+    });
+    const client = proxies.client(session.id);
+    assert.deepEqual(client.setNameCalls, ['Claude Initial']);
+
+    sessions.renameSession(session.id, 'Claude Renamed');
+    await waitFor(() => client.setNameCalls.length === 2);
+    assert.deepEqual(client.setNameCalls, ['Claude Initial', 'Claude Renamed']);
+  } finally {
+    db.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

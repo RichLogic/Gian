@@ -106,6 +106,14 @@ for await (const line of rl) {
     }
     case 'session.close': {
       const sessionId = req.params?.sessionId;
+      const session = sessions.get(sessionId);
+      if (session?.cwd === '/force-busy' && req.params?.force !== true) {
+        write({
+          id: req.id,
+          error: { code: 'SESSION_BUSY', message: 'active turn' },
+        });
+        break;
+      }
       sessions.delete(sessionId);
       write({ id: req.id, result: { ok: true } });
       break;

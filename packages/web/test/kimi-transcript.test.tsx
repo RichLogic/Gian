@@ -21,6 +21,44 @@ function envelope(
 }
 
 describe('Kimi transcript events', () => {
+  it('resolves an opaque native option by its advertised kind', () => {
+    const approval: ApprovalItem = {
+      kind: 'approval',
+      id: 'approval-card-opaque',
+      approvalId: 'approval-opaque',
+      title: 'Run deployment',
+      reason: 'Needs permission',
+      cmd: '',
+      risk: 'medium',
+      status: 'pending',
+      category: 'other',
+      nativeOptions: [{
+        optionId: 'opaque-provider-option-42',
+        label: 'Allow once',
+        kind: 'allow_once',
+      }],
+      ts: 1,
+      turn: 1,
+    };
+    const resolved = {
+      ...envelope('approval.resolved', 'approval-opaque', {}),
+      display: {
+        type: 'interaction.resolved' as const,
+        data: {
+          approvalId: 'approval-opaque',
+          decision: 'decline' as const,
+          auto: false,
+          nativeOptionId: 'opaque-provider-option-42',
+        },
+      },
+    };
+
+    expect(applyEnvelope([approval], resolved, 'kimi')[0]).toMatchObject({
+      status: 'approved-once',
+      nativeOptionId: 'opaque-provider-option-42',
+    });
+  });
+
   it('upserts ACP tool updates by stable toolCallId', () => {
     let items = applyEnvelope([], envelope('file_read', 'read-1', {
       path: '/workspace/package.json',

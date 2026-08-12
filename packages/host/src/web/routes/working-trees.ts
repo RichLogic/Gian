@@ -1,6 +1,6 @@
 import type { Hono } from 'hono';
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { basename, isAbsolute, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import type { Db } from '../../storage/db.js';
 import { detectDefaultBranchAsync, listGitWorktreesAsync } from '../../workspace/git.js';
 import {
@@ -19,7 +19,10 @@ import {
 } from '../../workspace/bounded-file.js';
 import { resolveWithinWorkspace } from '../../workspace/safe-path.js';
 import type { WsBroadcaster } from '../ws-broadcast.js';
-import { registerApplicationRoutes } from './applications.js';
+import {
+  registerApplicationRoutes,
+  type ApplicationRouteOptions,
+} from './applications.js';
 import { registerGitHistoryRoutes } from './git-history.js';
 import { registerWorkspaceGitRoutes } from './workspace-git.js';
 import {
@@ -32,6 +35,7 @@ export function registerWorkingTreeRoutes(
   broadcaster: WsBroadcaster,
   options: {
     listGitWorktreesAsync?: typeof listGitWorktreesAsync;
+    applicationRoutes?: ApplicationRouteOptions;
   } = {},
 ): void {
   // Working trees — the right unit for "files I can see and edit right now".
@@ -148,18 +152,21 @@ export function registerWorkingTreeRoutes(
 
   // Base for the `branch` scope: the merge-base of HEAD with the compare
   // base — an explicit `?base=` ref when given (the web UI's second-row
-  // branch picker), else the session's recorded `base_branch` for a `wt:`
-  // tree, else the repo's detected default. Falls back to HEAD (→ empty
+  // branch picker), else the repo's remote default branch. A session's
+  // recorded `base_branch` is only a fallback for repositories without a
+  // remote default. Falls back to HEAD (→ empty
   // branch diff) when there's no distinct base or git can't resolve a
   // merge-base. Result is a commit-ish suitable for `git diff <base>`.
   async function autoBaseRef(wt: { path: string; session_id: string | null }): Promise<string | null> {
+    const detected = await detectDefaultBranchAsync(wt.path);
+    if (detected.startsWith('origin/')) return detected;
     if (wt.session_id) {
       const row = db
         .prepare('SELECT base_branch FROM sessions WHERE id = ?')
         .get(wt.session_id) as { base_branch: string | null } | undefined;
       if (row?.base_branch) return row.base_branch;
     }
-    return detectDefaultBranchAsync(wt.path);
+    return detected;
   }
 
   async function branchBase(wt: { path: string; session_id: string | null }, overrideRef?: string | null): Promise<string> {
@@ -178,44 +185,203 @@ export function registerWorkingTreeRoutes(
     return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(raw) && !raw.includes('..') ? raw : null;
   }
 
-  // Distinct file paths the agent edited in an explicitly requested turn, or
-  // the session's most recent turn when no number is pinned. Pulled from
-  // file-change display projections for the `lastturn` scope.
-  function lastTurnPaths(sessionId: string | null, turnNumber?: number | null): Set<string> {
-    const paths = new Set<string>();
-    if (!sessionId) return paths;
-    const turn = turnNumber != null
-      ? db
-        .prepare('SELECT id FROM turns WHERE session_id = ? AND turn_number = ?')
-        .get(sessionId, turnNumber) as { id: string } | undefined
-      : db
-        .prepare('SELECT id FROM turns WHERE session_id = ? ORDER BY turn_number DESC LIMIT 1')
-        .get(sessionId) as { id: string } | undefined;
-    if (!turn) return paths;
-    const rows = db
-      .prepare(
-        `SELECT data FROM events
-         WHERE turn_id = ?
-           AND (type = 'file_change'
-                OR (json_valid(data) AND json_extract(data, '$.display.type') = 'activity.file-change'))`,
-      )
-      .all(turn.id) as Array<{ data: string }>;
-    for (const r of rows) {
-      try {
-        const parsed = JSON.parse(r.data) as {
-          files?: Array<{ path?: string }>;
-          display?: { data?: { files?: Array<{ path?: string }> } };
-        };
-        const files = parsed.display?.data?.files ?? parsed.files ?? [];
-        for (const f of files) if (f.path) paths.add(f.path);
-      } catch {
-        // malformed event payload — skip
-      }
+  type ChangedFile = { path: string; kind: 'create' | 'update' | 'delete' | 'rename'; staged: boolean; added: number; removed: number };
+  type LastTurnTarget = {
+    sessionId: string;
+    turnId: string;
+    turnNumber: number;
+    createdAt: string;
+    completedAt: string | null;
+  };
+  type LastTurnFile = ChangedFile & { diff?: string; hasStats: boolean };
+
+  function resolveLastTurnTarget(
+    wt: { path: string; workspace_id: string; session_id: string | null },
+    rawSession: string | undefined,
+    rawTurn: string | undefined,
+  ): LastTurnTarget | null {
+    let sessionId = wt.session_id;
+    if (rawSession) {
+      const session = db
+        .prepare('SELECT id FROM sessions WHERE id = ? AND workspace_id = ?')
+        .get(rawSession, wt.workspace_id) as { id: string } | undefined;
+      if (session) sessionId = session.id;
     }
-    return paths;
+    if (!sessionId) return null;
+
+    const requestedTurn = rawTurn && /^\d+$/.test(rawTurn) && Number(rawTurn) > 0
+      ? Number(rawTurn)
+      : null;
+    const turn = requestedTurn != null
+      ? db.prepare(
+          `SELECT id, turn_number, created_at, completed_at
+           FROM turns WHERE session_id = ? AND turn_number = ?`,
+        ).get(sessionId, requestedTurn)
+      : db.prepare(
+          `SELECT id, turn_number, created_at, completed_at
+           FROM turns WHERE session_id = ? ORDER BY turn_number DESC LIMIT 1`,
+        ).get(sessionId);
+    if (!turn) return null;
+    const row = turn as {
+      id: string;
+      turn_number: number;
+      created_at: string;
+      completed_at: string | null;
+    };
+    return {
+      sessionId,
+      turnId: row.id,
+      turnNumber: row.turn_number,
+      createdAt: row.created_at,
+      completedAt: row.completed_at,
+    };
   }
 
-  type ChangedFile = { path: string; kind: 'create' | 'update' | 'delete' | 'rename'; staged: boolean; added: number; removed: number };
+  function splitUnifiedDiff(text: string): string[] {
+    const starts = [...text.matchAll(/^diff --git .*$/gm)]
+      .map(match => match.index)
+      .filter((index): index is number => index != null);
+    if (starts.length === 0) return text.trim() ? [text] : [];
+    return starts.map((start, index) => text.slice(start, starts[index + 1] ?? text.length));
+  }
+
+  function cleanEventPath(path: string): string {
+    const normalized = path.replaceAll('\\', '/');
+    return !isAbsolute(normalized) && /^(a|b)\//.test(normalized)
+      ? normalized.slice(2)
+      : normalized;
+  }
+
+  function eventDiffPath(diff: string): string {
+    const plus = /^\+\+\+\s+(?:b\/)?(.+)$/m.exec(diff)?.[1];
+    if (plus && plus !== '/dev/null') return cleanEventPath(plus);
+    const minus = /^---\s+(?:a\/)?(.+)$/m.exec(diff)?.[1];
+    return minus && minus !== '/dev/null' ? cleanEventPath(minus) : '';
+  }
+
+  function eventPathsMatch(left: string, right: string): boolean {
+    const a = cleanEventPath(left);
+    const b = cleanEventPath(right);
+    return a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
+  }
+
+  function rebaseUnifiedDiff(diff: string, path: string): string {
+    return diff
+      .replace(/^diff --git .*$/m, `diff --git a/${path} b/${path}`)
+      .replace(/^---\s+(?!\/dev\/null).+$/m, `--- a/${path}`)
+      .replace(/^\+\+\+\s+(?!\/dev\/null).+$/m, `+++ b/${path}`);
+  }
+
+  async function lastTurnTrackedPaths(cwd: string): Promise<string[]> {
+    const [current, previous] = await Promise.all([
+      gitText(cwd, ['ls-files', '--cached', '--others', '--exclude-standard']),
+      gitText(cwd, ['ls-tree', '-r', '--name-only', 'HEAD~1']),
+    ]);
+    return [...new Set(`${current}\n${previous}`.split('\n').map(path => path.trim()).filter(Boolean))]
+      .sort((a, b) => b.length - a.length);
+  }
+
+  async function normalizeLastTurnPath(
+    targetRoot: string,
+    rawPath: string,
+    trackedPaths: string[],
+  ): Promise<string | null> {
+    const path = cleanEventPath(rawPath);
+    if (!isAbsolute(path)) {
+      return path && path !== '..' && !path.startsWith('../') ? path : null;
+    }
+
+    const targetRelative = relative(targetRoot, path).replaceAll('\\', '/');
+    if (targetRelative && targetRelative !== '..' && !targetRelative.startsWith('../')) {
+      return targetRelative;
+    }
+
+    const sourceRoot = (await gitText(dirname(path), ['rev-parse', '--show-toplevel'])).trim();
+    if (sourceRoot) {
+      const sourceRelative = relative(sourceRoot, path).replaceAll('\\', '/');
+      if (sourceRelative && sourceRelative !== '..' && !sourceRelative.startsWith('../')) {
+        return sourceRelative;
+      }
+    }
+
+    // The task worktree may already have been removed. Match only paths Git
+    // knows in the viewed repository, choosing the longest suffix so an
+    // absolute provider path cannot become an arbitrary filesystem lookup.
+    return trackedPaths.find(candidate => path === candidate || path.endsWith(`/${candidate}`)) ?? null;
+  }
+
+  async function loadLastTurnFiles(cwd: string, target: LastTurnTarget): Promise<LastTurnFile[]> {
+    const rows = db.prepare(
+      `SELECT data FROM events
+       WHERE turn_id = ?
+         AND (type = 'file_change'
+              OR (json_valid(data) AND json_extract(data, '$.display.type') = 'activity.file-change'))
+       ORDER BY created_at, id`,
+    ).all(target.turnId) as Array<{ data: string }>;
+    const trackedPaths = await lastTurnTrackedPaths(cwd);
+    const byPath = new Map<string, LastTurnFile>();
+
+    for (const row of rows) {
+      try {
+        const parsed = JSON.parse(row.data) as {
+          files?: Array<{ path?: string; kind?: string; added?: number; removed?: number }>;
+          diff?: string;
+          display?: {
+            data?: {
+              files?: Array<{ path?: string; kind?: string; added?: number; removed?: number }>;
+              diff?: string;
+            };
+          };
+        };
+        const data = parsed.display?.data ?? parsed;
+        const files = data.files ?? [];
+        const chunks = typeof data.diff === 'string' ? splitUnifiedDiff(data.diff) : [];
+        for (let index = 0; index < files.length; index++) {
+          const file = files[index]!;
+          if (!file.path) continue;
+          const path = await normalizeLastTurnPath(cwd, file.path, trackedPaths);
+          if (!path || !(await resolveWithinWorkspace(cwd, path))) continue;
+          const previous = byPath.get(path);
+          const hasStats = typeof file.added === 'number' || typeof file.removed === 'number';
+          const matchingChunk = chunks.length === files.length
+            ? chunks[index]
+            : chunks.find(chunk => eventPathsMatch(eventDiffPath(chunk), file.path!));
+          const kind = file.kind === 'create' || file.kind === 'delete' || file.kind === 'rename'
+            ? file.kind
+            : 'update';
+          byPath.set(path, {
+            path,
+            kind,
+            staged: false,
+            added: typeof file.added === 'number' ? file.added : previous?.added ?? 0,
+            removed: typeof file.removed === 'number' ? file.removed : previous?.removed ?? 0,
+            diff: matchingChunk ? rebaseUnifiedDiff(matchingChunk, path) : previous?.diff,
+            hasStats: hasStats || previous?.hasStats === true,
+          });
+        }
+      } catch {
+        // Malformed historical event payload — skip it without hiding other
+        // valid files from the same turn.
+      }
+    }
+    return [...byPath.values()];
+  }
+
+  function shiftedIso(value: string, deltaMs: number): string {
+    const timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) ? new Date(timestamp + deltaMs).toISOString() : value;
+  }
+
+  async function lastTurnGitRange(cwd: string, target: LastTurnTarget): Promise<string[]> {
+    const beforeStart = (await gitText(cwd, [
+      'rev-list', '-1', `--before=${shiftedIso(target.createdAt, -1_000)}`, 'HEAD',
+    ])).trim();
+    const atEnd = (await gitText(cwd, [
+      'rev-list', '-1', `--before=${shiftedIso(target.completedAt ?? new Date().toISOString(), 1_000)}`, 'HEAD',
+    ])).trim();
+    if (!atEnd || atEnd === beforeStart) return ['HEAD'];
+    return [beforeStart || EMPTY_TREE, atEnd];
+  }
 
   // Fill per-file added/removed counts on a changed-file list: `git diff
   // --numstat` for tracked diffs, then an on-disk line count for untracked
@@ -276,14 +442,23 @@ export function registerWorkingTreeRoutes(
   //     still synthesizing untracked files via --no-index.
   //   - 'staged': only index-vs-HEAD changes (`diff --cached -- <path>`).
   //     Untracked files have nothing staged, so no --no-index fallback.
-  async function computeFileDiff(cwd: string, rel: string, scope: ChangeScope = 'all', wt?: { path: string; session_id: string | null }, commitSha?: string | null, baseRef?: string | null): Promise<string> {
+  async function computeFileDiff(
+    cwd: string,
+    rel: string,
+    scope: ChangeScope = 'all',
+    wt?: { path: string; session_id: string | null },
+    commitSha?: string | null,
+    baseRef?: string | null,
+    lastTurnRange?: string[],
+  ): Promise<string> {
     const commitRef = commitSha ?? 'HEAD';
     const baseArgs =
       scope === 'staged' ? ['diff', '--cached'] :
       scope === 'unstaged' ? ['diff'] :
       scope === 'commit' ? ['diff', await commitBaseOf(cwd, commitRef), commitRef] :
       scope === 'branch' ? ['diff', await branchBase(wt ?? { path: cwd, session_id: null }, baseRef)] :
-      ['diff', 'HEAD']; // 'all' and 'lastturn' both diff the working tree vs HEAD
+      scope === 'lastturn' ? ['diff', ...(lastTurnRange ?? ['HEAD'])] :
+      ['diff', 'HEAD'];
     try {
       const out = (await runGit([...baseArgs, '--', rel], { cwd, timeoutMs: 5_000 })).stdout;
       if (out) return out;
@@ -541,7 +716,8 @@ export function registerWorkingTreeRoutes(
     const id = c.req.param('id');
     const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
-    // Commits on this branch since it diverged from its base — powers the
+    // Commits on this branch since it diverged from the same remote-default
+    // base used by Branch scope — powers the
     // Committed submenu in the Changes scope picker (Codex parity). Newest
     // first, capped at 50. Empty when there's no distinct base.
     const base = await branchBase(wt);
@@ -596,6 +772,22 @@ export function registerWorkingTreeRoutes(
     const scope = parseScope(c.req.query('scope'));
     const sha = parseCommitSha(c.req.query('sha'));
     const base = scope === 'branch' ? parseBaseRef(c.req.query('base')) : null;
+    if (scope === 'lastturn') {
+      const target = resolveLastTurnTarget(
+        wt,
+        c.req.query('session'),
+        c.req.query('turn'),
+      );
+      if (!target) return c.json({ diff: '' });
+      const files = await loadLastTurnFiles(wt.path, target);
+      const snapshot = files.find(file => file.path === rel);
+      if (!snapshot) return c.json({ diff: '' });
+      if (snapshot.diff) return c.json({ diff: snapshot.diff });
+      const range = await lastTurnGitRange(wt.path, target);
+      return c.json({
+        diff: await computeFileDiff(wt.path, rel, scope, wt, sha, base, range),
+      });
+    }
     return c.json({ diff: await computeFileDiff(wt.path, rel, scope, wt, sha, base) });
   });
 
@@ -654,26 +846,49 @@ export function registerWorkingTreeRoutes(
   //                for a root commit).
   //   - branch   = the whole branch vs its base (merge-base of HEAD with the
   //                session's base_branch / repo default) + untracked.
-  //   - lastturn = the files the agent edited in its most recent turn
-  //                (file_change events), shown as their live diff vs HEAD.
+  //   - lastturn = the persisted file-change projection for one exact turn;
+  //                raw event patches survive local commits, with Git used
+  //                only to fill provider-omitted counts/content.
   app.get('/api/working_trees/:id/changed', async c => {
     const id = c.req.param('id');
     const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
     const scope = parseScope(c.req.query('scope'));
 
-    // History scopes (commit / branch / lastturn) read the file list from
+    if (scope === 'lastturn') {
+      const target = resolveLastTurnTarget(
+        wt,
+        c.req.query('session'),
+        c.req.query('turn'),
+      );
+      if (!target) return c.json([]);
+      const files = await loadLastTurnFiles(wt.path, target);
+      const range = await lastTurnGitRange(wt.path, target);
+      await fillLineCounts(
+        wt.path,
+        files.filter(file => !file.hasStats),
+        ['diff', '--numstat', ...range],
+      );
+      return c.json(files.map(file => ({
+        path: file.path,
+        kind: file.kind,
+        staged: file.staged,
+        added: file.added,
+        removed: file.removed,
+      })));
+    }
+
+    // History scopes (commit / branch) read the file list from
     // `git diff --name-status` against a base ref, not `git status`.
-    if (scope === 'commit' || scope === 'branch' || scope === 'lastturn') {
+    if (scope === 'commit' || scope === 'branch') {
       // Ref(s) to diff against. `<base> <ref>` = the committed delta (commit,
       // optionally pinned to `?sha=`); a single ref = that ref vs the working
-      // tree (branch / lastturn).
+      // tree (branch).
       const commitRef = parseCommitSha(c.req.query('sha')) ?? 'HEAD';
       const baseRef = scope === 'branch' ? parseBaseRef(c.req.query('base')) : null;
       const baseRange =
         scope === 'commit' ? [await commitBaseOf(wt.path, commitRef), commitRef] :
-        scope === 'branch' ? [await branchBase(wt, baseRef)] :
-        ['HEAD']; // lastturn diffs the working tree vs HEAD, then filters
+        [await branchBase(wt, baseRef)];
       const out: ChangedFile[] = [];
       const recs = (await gitText(wt.path, ['diff', '--name-status', '-z', ...baseRange])).split('\0');
       for (let i = 0; i < recs.length; i++) {
@@ -694,9 +909,9 @@ export function registerWorkingTreeRoutes(
         }
         if (path) out.push({ path, kind, staged: false, added: 0, removed: 0 });
       }
-      // branch / lastturn also surface untracked files (new on the branch, or
-      // freshly created by the agent). commit never does — they're in no commit.
-      if (scope === 'branch' || scope === 'lastturn') {
+      // Branch also surfaces untracked files. Commit never does — they're in
+      // no commit.
+      if (scope === 'branch') {
         for (const rec of (await gitText(wt.path, ['status', '--porcelain=1', '-z'])).split('\0')) {
           if (!rec.startsWith('?? ')) continue;
           const p = rec.slice(3);
@@ -705,37 +920,8 @@ export function registerWorkingTreeRoutes(
           }
         }
       }
-      // lastturn: keep only the paths the agent edited in its most recent turn.
-      let list = out;
-      if (scope === 'lastturn') {
-        // `wt:` trees carry their session; `ws:` trees don't, so the web
-        // passes the active session explicitly. It's accepted only when the
-        // session actually belongs to this tree's workspace — otherwise the
-        // param would let a caller probe another workspace's session events.
-        let sessionId = wt.session_id;
-        const rawSession = c.req.query('session');
-        if (rawSession) {
-          const s = db
-            .prepare('SELECT id FROM sessions WHERE id = ? AND workspace_id = ?')
-            .get(rawSession, wt.workspace_id) as { id: string } | undefined;
-          // A Diff chip carries the conversation that produced it. Prefer
-          // that explicit target even when the viewed `wt:` tree belongs to
-          // another Gian session; workspace validation keeps the override
-          // from exposing events across repositories.
-          if (s) sessionId = s.id;
-        }
-        const rawTurn = c.req.query('turn');
-        const requestedTurn = rawTurn && /^\d+$/.test(rawTurn)
-          ? Number(rawTurn)
-          : null;
-        const turnPaths = lastTurnPaths(
-          sessionId,
-          requestedTurn != null && requestedTurn > 0 ? requestedTurn : null,
-        );
-        list = out.filter(e => turnPaths.has(e.path));
-      }
-      await fillLineCounts(wt.path, list, ['diff', '--numstat', ...baseRange]);
-      return c.json(list);
+      await fillLineCounts(wt.path, out, ['diff', '--numstat', ...baseRange]);
+      return c.json(out);
     }
 
     let raw = '';
@@ -800,5 +986,5 @@ export function registerWorkingTreeRoutes(
     return c.json(out);
   });
 
-  registerApplicationRoutes(app, db, resolveWorkingTree);
+  registerApplicationRoutes(app, db, resolveWorkingTree, options.applicationRoutes);
 }

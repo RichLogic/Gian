@@ -33,12 +33,18 @@ import { makeWsHandlers } from '../src/web/ws-handler.js';
 class FakeProxyClient implements ProxyClient {
   readonly executor: 'claude' | 'codex' = 'claude';
   notificationHandlers: NotificationHandler[] = [];
+  failNextCreate: Error | null = null;
   failNextStartTurn: Error | null = null;
 
   async initialize() { return { mode: 'spawn' as const, protocolVersion: '0.1.0', methods: [] }; }
   async capabilities() { return { protocolVersion: '0.1.0', models: [], slashCommands: [] }; }
   async listSlashCommands() { return { commands: [] }; }
   async createSession(params: { cwd: string; claudeSessionId?: string }) {
+    if (this.failNextCreate) {
+      const err = this.failNextCreate;
+      this.failNextCreate = null;
+      throw err;
+    }
     const nativeSessionId = params.claudeSessionId ?? `cc_${randomUUID()}`;
     return {
       session: {
@@ -84,6 +90,7 @@ class FakeProxyManager {
   client = new FakeProxyClient();
   async getOrCreate(): Promise<ProxyClient> { return this.client; }
   get(): ProxyClient { return this.client; }
+  async dispose(): Promise<void> {}
   async closeAll(): Promise<void> {}
 }
 
@@ -237,6 +244,42 @@ test('ERR-007: ws dispatch maps each known message:* type to a stable error code
       assert.equal(err!.request_type, msg.type,
         'request_type must survive even when the error code is operation-specific');
     }
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('session:create returns the provider failure in correlated envelopes for the create form', async () => {
+  const ctx = await setup();
+  try {
+    ctx.proxyMgr.client.failNextCreate = new Error(
+      'Failed to apply Kimi thinking default using config id "thinking": Invalid params',
+    );
+    const requestId = 'kimi-create-failure';
+
+    await ctx.handlers.onMessage(
+      { data: JSON.stringify({
+        type: 'session:create',
+        request_id: requestId,
+        workspace_id: ctx.wsId,
+        executor: 'kimi',
+      }) } as never,
+      ctx.ws as never,
+    );
+
+    const sent = ctx.broadcaster.sentTo(ctx.ws as never);
+    const error = sent.find(message => message.type === 'error' && message.request_id === requestId);
+    assert.ok(error && error.type === 'error');
+    assert.equal(error.code, 'SESSION_CREATE_FAILED');
+    assert.match(error.message, /Kimi thinking default.*config id "thinking".*Invalid params/);
+
+    const result = sent.find(
+      message => message.type === 'operation:result' && message.request_id === requestId,
+    );
+    assert.ok(result && result.type === 'operation:result');
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.message, error.message);
+    assert.equal(ctx.sessions.listSessions().length, 0);
   } finally {
     teardown(ctx);
   }

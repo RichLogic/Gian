@@ -58,6 +58,7 @@ export function NativeSessionsPane({
   const [status, setStatus] = useState<'all' | 'adopted' | 'available'>('all');
   const [adoptingFor, setAdoptingFor] = useState<NativeSession | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const refreshGeneration = useRef(0);
   const dispatch = useOperationDispatch();
   // Tracked native.delete run (Phase 3b): refresh on confirm, inline error
   // on failure. `key` identifies the row so a follow-up delete supersedes.
@@ -77,14 +78,26 @@ export function NativeSessionsPane({
   }, [deleteRunState?.phase]);
 
   async function refresh() {
+    const generation = ++refreshGeneration.current;
     setLoading(true);
-    const list = await loadNativeSessions(workspace.id);
-    setSessions(list);
-    setLoading(false);
+    try {
+      const list = await loadNativeSessions(workspace.id);
+      if (generation !== refreshGeneration.current) return;
+      setSessions(list);
+      setError(null);
+    } catch (cause) {
+      if (generation !== refreshGeneration.current) return;
+      setError(cause instanceof Error ? cause.message : 'Failed to load native sessions');
+    } finally {
+      if (generation === refreshGeneration.current) setLoading(false);
+    }
   }
 
   useEffect(() => {
+    setSessions([]);
+    setError(null);
     void refresh();
+    return () => { refreshGeneration.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace.id]);
 

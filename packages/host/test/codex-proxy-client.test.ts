@@ -123,6 +123,26 @@ test('CodexProxySessionClient.shutdown closes the session without killing the ho
   }
 });
 
+test('CodexProxySessionClient.forceKill requests force close without killing the shared host', async () => {
+  const { host, dir } = makeHost();
+  try {
+    await host.initialize();
+
+    const wedged = new CodexProxySessionClient(host);
+    const healthy = new CodexProxySessionClient(host);
+    await wedged.createSession({ cwd: '/force-busy' });
+    await healthy.createSession({ cwd: '/tmp' });
+
+    await wedged.forceKill();
+    assert.equal(host.hasSessions(), true, 'the healthy shared-host session remains attached');
+    await healthy.shutdown();
+    assert.equal(host.hasSessions(), false, 'force-closed session was removed from host routing');
+  } finally {
+    await host.shutdown();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('host process exit notifies all session facades', async () => {
   const { host, dir } = makeHost();
   try {

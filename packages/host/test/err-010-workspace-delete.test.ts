@@ -23,6 +23,7 @@ interface DelCtx {
 
 async function setupWs(opts?: {
   withSession?: boolean;
+  withRunningSession?: boolean;
   withLiveWorktree?: boolean;
   withFinalizedWorktree?: boolean;
 }): Promise<DelCtx> {
@@ -33,7 +34,7 @@ async function setupWs(opts?: {
     .run(workspaceId, 'demo', '/tmp/demo-ws');
 
   const now = new Date().toISOString();
-  if (opts?.withSession) {
+  if (opts?.withSession || opts?.withRunningSession) {
     const id = randomUUID();
     sessionIds.push(id);
     appCtx.db.prepare(`
@@ -41,8 +42,14 @@ async function setupWs(opts?: {
         (id, name, type, workspace_id, executor, model, approval_mode,
          active_channel, status, archived, native_session_id, created_at, updated_at)
       VALUES (?, 'live', 'coding', ?, 'claude', NULL, 'ask',
-              'web', 'new', 0, ?, ?, ?)
-    `).run(id, workspaceId, `native-${randomUUID()}`, now, now);
+              'web', ?, 0, ?, ?, ?)
+    `).run(id, workspaceId, opts.withRunningSession ? 'running' : 'new', `native-${randomUUID()}`, now, now);
+    if (opts.withRunningSession) {
+      appCtx.db.prepare(`
+        INSERT INTO queue_entries (id, session_id, text, sort_order, created_at)
+        VALUES (?, ?, 'queued while running', 0, ?)
+      `).run(randomUUID(), id, now);
+    }
   }
   if (opts?.withLiveWorktree) {
     const id = randomUUID();
@@ -130,6 +137,22 @@ test('ERR-010: DELETE with a plain session succeeds and unfiles the session', as
   }
 });
 
+test('ERR-010: DELETE preserves a running session and its queued turn', async () => {
+  const ctx = await setupWs({ withRunningSession: true });
+  try {
+    await deleteWorkspace(ctx);
+    assertDeletedWithUnfiledSessions(ctx);
+    const session = ctx.appCtx.db.prepare('SELECT status FROM sessions WHERE id = ?')
+      .get(ctx.sessionIds[0]) as { status: string };
+    assert.equal(session.status, 'running');
+    const queued = ctx.appCtx.db.prepare('SELECT text FROM queue_entries WHERE session_id = ?')
+      .all(ctx.sessionIds[0]) as Array<{ text: string }>;
+    assert.deepEqual(queued, [{ text: 'queued while running' }]);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test('ERR-010: DELETE with a live-worktree session succeeds and unfiles it', async () => {
   const ctx = await setupWs({ withLiveWorktree: true });
   try {
@@ -168,6 +191,27 @@ test('ERR-010: DELETE on a non-existent workspace returns 404', async () => {
     assert.equal(res.status, 404);
     const body = await res.json() as { error: string };
     assert.match(body.error, /workspace not found/);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ERR-010: concurrent deletes settle once and stale Git routes fail closed', async () => {
+  const ctx = await setupWs({ withSession: true });
+  try {
+    const [first, second] = await Promise.all([
+      ctx.appCtx.fetch(`/api/workspaces/${ctx.workspaceId}`, { method: 'DELETE' }),
+      ctx.appCtx.fetch(`/api/workspaces/${ctx.workspaceId}`, { method: 'DELETE' }),
+    ]);
+    assert.deepEqual([first.status, second.status].sort(), [200, 404]);
+    assertDeletedWithUnfiledSessions(ctx);
+
+    const staleHistory = await ctx.appCtx.fetch(`/api/working_trees/ws:${ctx.workspaceId}/history`);
+    assert.equal(staleHistory.status, 404);
+    assert.equal(
+      ((await staleHistory.json()) as { error: { code: string } }).error.code,
+      'working_tree_not_found',
+    );
   } finally {
     await ctx.cleanup();
   }

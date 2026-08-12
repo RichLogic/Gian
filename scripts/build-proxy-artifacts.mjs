@@ -16,9 +16,27 @@ const execFileAsync = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const platform = 'darwin-arm64';
 const definitions = [
-  ['claude', 'cc-proxy'],
-  ['codex', 'codex-proxy'],
-  ['kimi', 'kimi-proxy'],
+  {
+    id: 'claude',
+    directory: 'cc-proxy',
+    displayName: 'Claude Code',
+    processScope: 'session',
+    runtime: { id: 'claude', displayName: 'Claude Code CLI' },
+  },
+  {
+    id: 'codex',
+    directory: 'codex-proxy',
+    displayName: 'Codex',
+    processScope: 'shared',
+    runtime: { id: 'codex', displayName: 'Codex CLI' },
+  },
+  {
+    id: 'kimi',
+    directory: 'kimi-proxy',
+    displayName: 'Kimi Code',
+    processScope: 'shared',
+    runtime: { id: 'kimi', displayName: 'Kimi Code CLI' },
+  },
 ];
 
 export async function buildProxyBundle(entryPoint, outfile) {
@@ -43,29 +61,37 @@ export async function buildProxyBundle(entryPoint, outfile) {
   await writeFile(outfile, `#!/usr/bin/env node\n${withoutShebangs}`);
 }
 
-export async function assertProxySelfTest(entryPoint, expectedId) {
+export async function assertProxySelfTest(entryPoint, manifest) {
   const result = await execFileAsync(process.execPath, [entryPoint, '--self-test'], {
     timeout: 5_000,
     maxBuffer: 64 * 1024,
     encoding: 'utf8',
+    env: {
+      ...process.env,
+      ...(manifest.schemaVersion === 2
+        ? {
+            GIAN_PLUGIN_ID: manifest.id,
+            GIAN_PROTOCOL_VERSIONS: '1.0',
+          }
+        : {}),
+    },
   });
   let response;
   try {
     response = JSON.parse(String(result.stdout).trim());
   } catch {
-    throw new Error(`${expectedId} proxy self-test returned invalid JSON`);
+    throw new Error(`${manifest.id} proxy self-test returned invalid JSON`);
   }
-  if (
-    response?.schemaVersion !== 1
-    || response?.id !== expectedId
-    || response?.ok !== true
-  ) {
-    throw new Error(`${expectedId} proxy self-test returned an invalid result`);
+  const validVersion = manifest.schemaVersion === 1
+    ? response?.schemaVersion === 1
+    : response?.schemaVersion === 2
+      && response?.pluginVersion === manifest.pluginVersion;
+  if (!validVersion || response?.id !== manifest.id || response?.ok !== true) {
+    throw new Error(`${manifest.id} proxy self-test returned an invalid result`);
   }
 }
 
 async function main() {
-  const rootPackage = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   const args = new Map();
   for (let index = 2; index < process.argv.length; index += 1) {
     const key = process.argv[index];
@@ -76,12 +102,45 @@ async function main() {
     }
   }
 
-  const version = args.get('version') ?? rootPackage.version;
-  if (!/^[0-9A-Za-z._-]+$/.test(version)) throw new Error('invalid proxy version');
+  const requestedPlugin = args.get('plugin');
+  if (requestedPlugin && !definitions.some(definition => definition.id === requestedPlugin)) {
+    throw new Error(`unknown proxy plugin: ${requestedPlugin}`);
+  }
+  const selectedDefinitions = requestedPlugin
+    ? definitions.filter(definition => definition.id === requestedPlugin)
+    : definitions;
   const outputDir = resolve(root, args.get('output') ?? 'artifacts/proxies');
   await mkdir(outputDir, { recursive: true });
 
-  for (const [id, directory] of definitions) {
+  for (const definition of selectedDefinitions) {
+    const { id, directory } = definition;
+    const packageMetadata = JSON.parse(await readFile(join(
+      root,
+      'packages',
+      'proxies',
+      directory,
+      'package.json',
+    ), 'utf8'));
+    const pluginVersion = packageMetadata.version;
+    if (!/^[0-9A-Za-z.+-]+$/.test(pluginVersion)) {
+      throw new Error(`invalid ${id} proxy version`);
+    }
+    const requestedVersion = args.get('version');
+    if (requestedVersion && requestedVersion !== pluginVersion) {
+      throw new Error(
+        `${id} package version ${pluginVersion} does not match requested ${requestedVersion}`,
+      );
+    }
+    const manifest = {
+      schemaVersion: 2,
+      id,
+      displayName: definition.displayName,
+      pluginVersion,
+      entry: 'proxy.mjs',
+      protocol: { name: 'gian.proxy', range: '>=1.0 <2.0' },
+      process: { scope: definition.processScope },
+      runtime: definition.runtime,
+    };
     const staging = join(outputDir, `.staging-${id}`);
     const packageDir = join(staging, 'package');
     const proxyEntry = join(packageDir, 'proxy.mjs');
@@ -95,20 +154,18 @@ async function main() {
       'cli',
       'spawn.js',
     );
-    const assetName = `gian-proxy-${id}-${version}-${platform}.tar.gz`;
+    const assetName = `gian-proxy-${id}-${pluginVersion}-${platform}.tar.gz`;
     const assetPath = join(outputDir, assetName);
+    const manifestAssetPath = `${assetPath}.manifest.json`;
     await rm(staging, { recursive: true, force: true });
     await mkdir(packageDir, { recursive: true });
     try {
       await buildProxyBundle(sourceEntry, proxyEntry);
       await chmod(proxyEntry, 0o755);
-      await assertProxySelfTest(proxyEntry, id);
-      await writeFile(join(packageDir, 'manifest.json'), `${JSON.stringify({
-        schemaVersion: 1,
-        id,
-        version,
-        entry: 'proxy.mjs',
-      }, null, 2)}\n`);
+      await assertProxySelfTest(proxyEntry, manifest);
+      const manifestJson = `${JSON.stringify(manifest, null, 2)}\n`;
+      await writeFile(join(packageDir, 'manifest.json'), manifestJson);
+      await writeFile(manifestAssetPath, manifestJson);
       await execFileAsync('/usr/bin/tar', [
         '-czf',
         assetPath,

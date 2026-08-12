@@ -100,7 +100,15 @@ export async function runCodexCompatibilityCanary(options = {}) {
   } finally {
     if (client && !runtimeStopped) await client.stop().catch(() => {});
     restoreEnvironment('CODEX_HOME', previousCodexHome);
-    await rm(canaryRoot, { recursive: true, force: true });
+    // Codex may still be winding down a background plugin clone after the
+    // app-server socket closes. Let recursive removal retry that short race so
+    // the isolated CODEX_HOME is never left behind.
+    await rm(canaryRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: 20,
+      retryDelay: 100,
+    });
   }
 }
 

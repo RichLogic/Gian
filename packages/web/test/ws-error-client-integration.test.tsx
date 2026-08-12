@@ -7,9 +7,13 @@ import {
 } from 'react';
 import type { ClientToServerMessage, Session } from '@gian/shared';
 import { describe, expect, it, vi } from 'vitest';
+import { loadSessions } from '../src/api.js';
 import { useAppSocket } from '../src/controllers/use-app-socket.js';
+import { reloadFailedSessionMetadata } from '../src/controllers/session-failure-reload.js';
+import { __resetFeedback, getSnapshot as feedbackSnapshot } from '../src/feedback.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { createOperationDispatcher, type OperationDispatcher } from '../src/operations/dispatcher.js';
+import '../src/operations/session.js';
 import {
   createMessageEchoSink,
   dispatchMessageSend,
@@ -156,6 +160,150 @@ function snapshot(): Snapshot {
 }
 
 describe('WS-003: Host dispatch failure through the real Web client chain', () => {
+  it('reloads canonical metadata, rolls back the overlay, and exposes the Host error', async () => {
+    __resetFeedback();
+    vi.mocked(loadSessions).mockResolvedValue([]);
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    let canonical = sessionContractFixture({ id: 'session-wire', name: 'Before' });
+    const reloaded = { ...canonical, name: 'Canonical after rejection' };
+    const ops = createOperationDispatcher({
+      store,
+      transport: ws,
+      readCanonicalField: (_entityKey, field) => canonical[field as keyof Session],
+      onFailed: run => {
+        void reloadFailedSessionMetadata(run, sessions => {
+          canonical = sessions[0] ?? canonical;
+        });
+      },
+    });
+    const view = render(
+      <ClientReducerHarness ws={ws} store={store} ops={ops} initialSessions={[canonical]} />,
+    );
+
+    try {
+      await vi.waitFor(() => expect(loadSessions).toHaveBeenCalled());
+      vi.mocked(loadSessions).mockClear();
+      vi.mocked(loadSessions).mockResolvedValue([reloaded]);
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [canonical] }));
+
+      let runId = '';
+      act(() => {
+        runId = ops.dispatch('session.rename', { sessionId: 'session-wire', name: 'Optimistic' }).id;
+      });
+      expect(store.getEntityOverlays('session:session-wire')[0]?.value).toBe('Optimistic');
+      const request = socket.parsedSent<ClientToServerMessage>()
+        .find(frame => frame.type === 'session:rename') as { request_id: string };
+
+      act(() => socket.fakeMessage({
+        type: 'error',
+        session_id: 'session-wire',
+        request_id: request.request_id,
+        request_type: 'session:rename',
+        code: 'SESSION_RENAME_FAILED',
+        message: 'rename rejected by Host',
+      }));
+      act(() => socket.fakeMessage({
+        type: 'operation:result',
+        request_id: request.request_id,
+        request_type: 'session:rename',
+        ok: false,
+        error: { code: 'SESSION_RENAME_FAILED', message: 'rename rejected by Host' },
+      }));
+
+      await vi.waitFor(() => expect(canonical.name).toBe('Canonical after rejection'));
+      expect(loadSessions).toHaveBeenCalledTimes(1);
+      expect(store.getRun(runId)?.phase).toBe('failed');
+      expect(store.getEntityOverlays('session:session-wire')).toHaveLength(0);
+      expect(feedbackSnapshot().toasts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'error', message: 'rename rejected by Host' }),
+      ]));
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      __resetFeedback();
+    }
+  });
+
+  it('reconciles stale pending state from authoritative state_sync session status', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const running = sessionContractFixture({
+      id: 'session-wire', status: 'running', executor: 'codex',
+    });
+    const done = { ...running, status: 'done' as const };
+    const view = render(
+      <ClientReducerHarness ws={ws} store={store} ops={ops} initialSessions={[done]} />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [running] }));
+      expect(snapshot().pendingBySession['session-wire']).toBe(true);
+
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [done] }));
+      expect(snapshot().pendingBySession['session-wire']).toBe(false);
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+    }
+  });
+
+  it('keeps a genuine optimistic send pending across a terminal state_sync snapshot', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const done = sessionContractFixture({
+      id: 'session-wire', status: 'done', executor: 'codex',
+    });
+    const optimistic: TranscriptItem = {
+      kind: 'user', id: 'optimistic:session-wire:1', text: 'queued offline',
+      exec: 'codex', ts: 1, turn: 0, pending: true,
+    };
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        initialSessions={[done]}
+        initialItemsBySession={{ 'session-wire': [optimistic] }}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [done] }));
+
+      expect(snapshot().pendingBySession['session-wire']).toBe(true);
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+    }
+  });
+
   it('closes the latest in-memory turn once when only a terminal session update arrives', async () => {
     const ws = new GianWs('ws://test.invalid/ws', () => 'token');
     const store = createOperationStore();
@@ -268,7 +416,7 @@ describe('WS-003: Host dispatch failure through the real Web client chain', () =
     }
   });
 
-  it('finalizes an active plan from session lifecycle alone using the latest transcript turn', async () => {
+  it('finalizes an active plan from session lifecycle without reassigning its turn', async () => {
     const ws = new GianWs('ws://test.invalid/ws', () => 'token');
     const store = createOperationStore();
     const ops = createOperationDispatcher({ store, transport: ws });
@@ -311,7 +459,7 @@ describe('WS-003: Host dispatch failure through the real Web client chain', () =
       expect(snapshot().planStateBySession['session-wire']).toMatchObject({
         completed: true,
         status: 'completed',
-        turn: 7,
+        turn: 5,
       });
     } finally {
       view.unmount();

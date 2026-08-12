@@ -479,7 +479,9 @@ function claudeExecutable() {
 export function sanitizeDisplayName(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string') return null;
   // eslint-disable-next-line no-control-regex
-  const cleaned = raw.replace(/[\x00-\x1F\x7F]/g, ' ').trim().slice(0, 200);
+  const cleaned = [...raw.replace(/[\x00-\x1F\x7F]/g, ' ').trim()]
+    .slice(0, 200)
+    .join('');
   return cleaned.length > 0 ? cleaned : null;
 }
 
@@ -724,6 +726,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     const lines = createInterface({ input: proc.stdout! });
     let resultText: string | null = null;
     let resultSubtype: string | null = null;
+    let resultError: string | null = null;
     // Tracks whether any text has been streamed via `assistantText` this
     // turn. The `result` event echoes the final assistant message verbatim,
     // so emitting it again as channelReply would duplicate the last text
@@ -866,9 +869,35 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
           }
         }
 
+        if (eventType === 'user') {
+          const message = event.message as { content?: unknown[] } | undefined;
+          const content = Array.isArray(message?.content) ? message.content : [];
+          for (const block of content) {
+            if (typeof block !== 'object' || block === null) continue;
+            const result = block as Record<string, unknown>;
+            if (result.type !== 'tool_result') continue;
+            const callId = typeof result.tool_use_id === 'string' ? result.tool_use_id : '';
+            if (!callId) continue;
+            this.emit(
+              'toolResult',
+              sessionId,
+              callId,
+              result.content ?? null,
+              result.is_error === true,
+            );
+          }
+        }
+
         if (eventType === 'result') {
           resultSubtype = (event.subtype as string) ?? null;
           resultText = typeof event.result === 'string' ? event.result : '';
+          const terminalReason = typeof event.terminal_reason === 'string'
+            ? event.terminal_reason
+            : null;
+          if (event.is_error === true || terminalReason === 'api_error' || resultSubtype !== 'success') {
+            resultError = resultText
+              || (terminalReason ? `Claude Code turn failed (${terminalReason}).` : 'Claude Code turn failed.');
+          }
           this.emit('debug', `[runtime] Turn result for ${sessionId} (${resultSubtype}): ${resultText.slice(0, 120)}...`);
 
           const usageUpdate = parseClaudeResultUsage(
@@ -907,7 +936,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       // will deny outstanding approvals so claude never gets a stale reply.
       this.cleanupAfterTurn(session);
 
-      if (resultText !== null && resultSubtype === 'success') {
+      if (resultText !== null && resultSubtype === 'success' && resultError === null) {
         // Turn completed successfully. If we've already streamed text via
         // assistantText events, the result text is just a duplicate of the
         // last block — pass an empty string so the service emits the
@@ -918,7 +947,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
         this.emit('channelReply', sessionId, replyText);
       }
 
-      this.emit('processExited', sessionId, code, signal);
+      this.emit('processExited', sessionId, code, signal, resultError ?? undefined);
       this.emit('debug', `[runtime] Turn process exited for ${sessionId} (code=${code}, signal=${signal})`);
     });
   }

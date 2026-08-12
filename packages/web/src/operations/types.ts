@@ -64,6 +64,7 @@ export type OperationName =
   | 'workspace.delete'
   | 'workspace.saveClaudeMd'
   | 'workspace.pickFolder'
+  | 'workspace.cloneRepo'
   // Git / worktree / external open
   | 'git.fetch'
   | 'git.historyFetch'
@@ -149,6 +150,7 @@ export const OPERATION_POLICIES = {
   'workspace.delete': 'pending',
   'workspace.saveClaudeMd': 'pending',
   'workspace.pickFolder': 'pending',
+  'workspace.cloneRepo': 'pending',
   'git.fetch': 'pending',
   'git.historyFetch': 'pending',
   'git.abortPendingOp': 'pending',

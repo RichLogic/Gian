@@ -92,6 +92,7 @@ function projectPlan(
   includeHistory: boolean,
 ): PlanDisplayItem | null {
   const latestTurn = latestTranscriptTurn(items);
+  const latestClosedTurn = latestTerminalTurn(items);
   const nextTurnPending = hasPendingUserTurn(items);
   let latestApproval: ApprovalItem | null = null;
   let latestApprovalIndex = -1;
@@ -134,6 +135,11 @@ function projectPlan(
   // immediate-hide behavior when no lifecycle turn is available.
   if (!includeHistory && status === 'completed'
       && (planTurn == null || nextTurnPending || latestTurn > planTurn)) return null;
+  // A paused plan remains inspectable while idle and while the user resumes
+  // work, but it stops being current once a newer turn has actually closed.
+  // Its own lifecycle turn must stay stable for this boundary to be reliable.
+  if (!includeHistory && status === 'paused' && planTurn != null
+      && latestClosedTurn > planTurn) return null;
   return markdown
     ? planDisplay(`codex-plan-${sessionId}`, markdown, status)
     : null;
@@ -225,6 +231,16 @@ function projectAgents(
 function latestTranscriptTurn(items: TranscriptItem[]): number {
   let latest = 0;
   for (const item of items) if (item.turn > latest) latest = item.turn;
+  return latest;
+}
+
+function latestTerminalTurn(items: TranscriptItem[]): number {
+  let latest = 0;
+  for (const item of items) {
+    if ((item.kind === 'turn-end' || item.kind === 'error') && item.turn > latest) {
+      latest = item.turn;
+    }
+  }
   return latest;
 }
 

@@ -164,10 +164,11 @@ export interface ChangedEntry {
  *   - `commit`   = a single commit's delta (HEAD's by default; `sha` pins
  *                  any commit — the Committed submenu).
  *   - `branch`   = the whole branch vs its base (merge-base) + untracked.
- *   - `lastturn` = files the agent edited in its most recent turn, vs HEAD. */
+ *   - `lastturn` = persisted files and patches from one exact agent turn;
+ *                  Git fills provider-omitted details when available. */
 export type ChangeScope = 'all' | 'unstaged' | 'staged' | 'commit' | 'branch' | 'lastturn';
 
-/** A commit on the current branch since it diverged from its base. */
+/** A commit on the current branch since it diverged from the remote default. */
 export interface BranchCommit {
   sha: string;
   subject: string;
@@ -176,10 +177,11 @@ export interface BranchCommit {
 }
 
 /** Branch picker data for the Changes inspector's second row: the checked-out
- *  head, the auto-detected compare base, and every local + remote branch. */
+ *  head, the detected remote-default compare base, and every local + remote
+ *  branch. */
 export interface BranchList {
   head: string;
-  /** Auto-detected compare base (session base_branch / repo default), or
+  /** Detected remote-default compare base (with local/session fallback), or
    *  null when none could be determined. */
   base: string | null;
   branches: string[];
@@ -615,11 +617,15 @@ export async function loadDiff(
   scope: ChangeScope = 'all',
   sha?: string | null,
   base?: string | null,
+  sessionId?: string | null,
+  turn?: number | null,
 ): Promise<FileDiffResult> {
   const params = new URLSearchParams({ path });
   if (scope !== 'all') params.set('scope', scope);
   if (scope === 'commit' && sha) params.set('sha', sha);
   if (scope === 'branch' && base) params.set('base', base);
+  if (scope === 'lastturn' && sessionId) params.set('session', sessionId);
+  if (scope === 'lastturn' && turn != null) params.set('turn', String(turn));
   const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/diff?${params.toString()}`);
   // Throws on failure (Phase 3b): the diff view's loading→fill-or-fail timing
   // must distinguish a failed load (error state + retry) from an empty diff.
@@ -684,6 +690,33 @@ export async function createWorkspace(
     return { workspace: null, notes: body.notes ?? [], error: body.error ?? `Create failed: ${res.status}` };
   }
   return { workspace: body.workspace ?? null, notes: body.notes ?? [] };
+}
+
+export interface CloneWorkspaceRepoResult {
+  /** Absolute path the repo was cloned into (<workspace_root>/<name>). */
+  path?: string;
+  /** Directory name used for the clone (form name, else URL-derived). */
+  name?: string;
+  error?: string;
+}
+
+/** Clone-only: materialize a git remote under the workspace root WITHOUT
+ *  registering a workspace (issue #57 new-workspace form). The form fills
+ *  its path field from the result; Create then adopts that path. */
+export async function cloneWorkspaceRepo(
+  gitRemote: string,
+  name?: string,
+): Promise<CloneWorkspaceRepoResult> {
+  const res = await fetch('/api/workspaces/clone', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ git_remote: gitRemote, ...(name ? { name } : {}) }),
+  });
+  const body = (await res.json().catch(() => ({}))) as CloneWorkspaceRepoResult;
+  if (!res.ok) {
+    return { error: body.error ?? `Clone failed: ${res.status}` };
+  }
+  return body;
 }
 
 export async function loadClaudeMd(workspaceId: string): Promise<string> {
@@ -763,6 +796,7 @@ export async function createSubtask(
     name?: string;
     model?: string | null;
     approval_mode?: import('@gian/shared').ApprovalMode;
+    thinking_effort?: import('@gian/shared').ThinkingEffort | null;
   },
 ): Promise<Session | null> {
   try {

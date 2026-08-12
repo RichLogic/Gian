@@ -15,7 +15,7 @@
 /* Workspaces v3 — Inspector list + Workbench detail tab; loaded after V2 so
    the .ws-* list + .ws-detail-tab overrides win. */
 @import url('./workspaces-v3.css');
-/* Plan and Agent detail owned by the active chat, separate from dock rails. */
+/* Chat-owned detail (Plan, Agent, transcript), separate from dock rails. */
 @import url('./chat-context-panel.css');
 @import url('./browser.css');
 @import url('./onboarding.css');

@@ -44,12 +44,23 @@ export interface ClaudeRuntimeEvents {
     input: Record<string, unknown>,
     callId: string,
   ];
+  toolResult: [
+    sessionId: string,
+    callId: string,
+    output: unknown,
+    isError: boolean,
+  ];
   /** Claude -p's native task_started / task_notification lifecycle. */
   agentTask: [sessionId: string, update: ClaudeAgentTaskUpdate];
   /** Current context samples from assistant events plus the result event's
    *  per-invocation conversation delta and authoritative context-window size. */
   tokenUsage: [sessionId: string, usage: TokenUsageUpdate];
-  processExited: [sessionId: string, code: number | null, signal: string | null];
+  processExited: [
+    sessionId: string,
+    code: number | null,
+    signal: string | null,
+    errorDetail?: string,
+  ];
   debug: [message: string];
 }
 

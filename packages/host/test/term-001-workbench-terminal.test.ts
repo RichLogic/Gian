@@ -16,6 +16,8 @@ import type { IPty } from 'node-pty';
 import type { ServerToClientMessage } from '@gian/shared';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import {
+  DEFAULT_RING_BUFFER_BYTES,
+  MAX_TERMINAL_OUTPUT_CHUNK_BYTES,
   WorkbenchTerminalManager,
   type PtyFactory,
 } from '../src/term/manager.js';
@@ -304,16 +306,70 @@ test('TERM-001: ring buffer caps memory — oldest chunks drop when ~1 MiB cap i
   await tick();
 
   const { chunks } = ctx.mgr.replay('t1');
-  // Sum of bytes after base64 decode must be ≤ 1 MiB + one chunk (the ring
-  // keeps at least one chunk regardless, and only trims once size>cap AND
-  // length>1).
+  // Sum of bytes after base64 decode must stay within the hard per-terminal cap.
   const totalBytes = chunks.reduce((acc, c) => acc + Buffer.from(c, 'base64').length, 0);
-  assert.ok(totalBytes <= 1024 * 1024 + CHUNK,
-    `ring buffer must cap retained bytes near 1 MiB; got ${totalBytes}`);
+  assert.ok(totalBytes <= DEFAULT_RING_BUFFER_BYTES,
+    `ring buffer must cap retained bytes at 1 MiB; got ${totalBytes}`);
   // And the earliest output ('A...') must have been dropped.
   const decoded = chunks.map(c => Buffer.from(c, 'base64').toString('utf8'));
   assert.ok(!decoded.some(s => s[0] === 'A'),
     'oldest chunk should be evicted from the ring once we exceed the cap');
+});
+
+test('TERM-001: one oversized PTY callback retains only its final 1 MiB', async () => {
+  const ctx = setup();
+  await ctx.mgr.spawn({ termId: 't1', cwd: '/tmp', cols: 80, rows: 24 });
+  const pty = handleFor(ctx, 0);
+  const prefix = 'A'.repeat(DEFAULT_RING_BUFFER_BYTES * 2);
+  const tail = 'Z'.repeat(DEFAULT_RING_BUFFER_BYTES);
+
+  pty.pushOutput(prefix + tail);
+  const replay = ctx.mgr.replay('t1');
+  const retained = Buffer.concat(replay.chunks.map(chunk => Buffer.from(chunk, 'base64')));
+  assert.equal(retained.length, DEFAULT_RING_BUFFER_BYTES,
+    'a single huge callback must not bypass the ring cap');
+  assert.equal(retained.toString('utf8'), tail,
+    'reconnect replay keeps the newest bytes, not the beginning of stale output');
+});
+
+test('TERM-001: oversized output is split into bounded WS frames without data loss', async () => {
+  const ctx = setup();
+  await ctx.mgr.spawn({ termId: 't1', cwd: '/tmp', cols: 80, rows: 24 });
+  const pty = handleFor(ctx, 0);
+  ctx.broadcaster.messages.length = 0;
+  const output = '中🙂0123456789'.repeat(30_000);
+
+  pty.pushOutput(output);
+  const frames = ctx.broadcaster.messages.filter(
+    message => message.type === 'term:output',
+  ) as Array<{ type: 'term:output'; term_id: string; data: string }>;
+  const decoded = frames.map(frame => Buffer.from(frame.data, 'base64'));
+  assert.ok(decoded.length > 1, 'large output must be emitted as multiple frames');
+  assert.ok(decoded.every(chunk => chunk.length <= MAX_TERMINAL_OUTPUT_CHUNK_BYTES),
+    'no terminal WS frame may exceed the configured byte budget');
+  assert.equal(Buffer.concat(decoded).toString('utf8'), output,
+    'chunking must preserve the exact output byte stream');
+});
+
+test('TERM-001: noisy terminals keep independent replay budgets', async () => {
+  const ctx = setup();
+  await ctx.mgr.spawn({ termId: 'a', cwd: '/tmp', cols: 80, rows: 24 });
+  await ctx.mgr.spawn({ termId: 'b', cwd: '/tmp', cols: 80, rows: 24 });
+  handleFor(ctx, 0).pushOutput('A'.repeat(DEFAULT_RING_BUFFER_BYTES * 2));
+  handleFor(ctx, 1).pushOutput('B'.repeat(DEFAULT_RING_BUFFER_BYTES * 2));
+
+  for (const termId of ['a', 'b']) {
+    const bytes = ctx.mgr.replay(termId).chunks.reduce(
+      (total, chunk) => total + Buffer.from(chunk, 'base64').length,
+      0,
+    );
+    assert.equal(bytes, DEFAULT_RING_BUFFER_BYTES,
+      `terminal ${termId} must retain exactly its own capped tail`);
+  }
+  const a = Buffer.concat(ctx.mgr.replay('a').chunks.map(chunk => Buffer.from(chunk, 'base64')));
+  const b = Buffer.concat(ctx.mgr.replay('b').chunks.map(chunk => Buffer.from(chunk, 'base64')));
+  assert.equal(a[0], 'A'.charCodeAt(0));
+  assert.equal(b[0], 'B'.charCodeAt(0));
 });
 
 // ---------------------------------------------------------------------------

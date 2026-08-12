@@ -2,7 +2,12 @@ import { locateNativeJsonl } from '../native/locate-jsonl.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import type { Db } from '../storage/db.js';
 
-export function bootJsonlWatchers(db: Db, watcher: NativeJsonlWatcher): void {
+export function bootJsonlWatchers(
+  db: Db,
+  watcher: NativeJsonlWatcher,
+  options: { executors?: ReadonlyArray<'claude' | 'codex'> } = {},
+): void {
+  const executors = new Set(options.executors ?? ['claude', 'codex']);
   const rows = db.prepare(
     `SELECT s.id, s.executor, s.native_session_id, s.worktree_path, w.path AS workspace_path
        FROM sessions s
@@ -20,6 +25,7 @@ export function bootJsonlWatchers(db: Db, watcher: NativeJsonlWatcher): void {
   }>;
 
   for (const row of rows) {
+    if (!executors.has(row.executor)) continue;
     const filePath = locateNativeJsonl(
       row.executor,
       row.native_session_id,

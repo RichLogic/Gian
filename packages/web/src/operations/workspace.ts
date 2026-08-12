@@ -37,12 +37,14 @@
 import type { Workspace } from '@gian/shared';
 
 import {
+  cloneWorkspaceRepo,
   createWorkspace,
   deleteWorkspace,
   pickWorkspaceFolder,
   reorderWorkspaces,
   saveClaudeMd,
   updateWorkspace,
+  type CloneWorkspaceRepoResult,
   type CreateWorkspaceOptions,
   type PickFolderResult,
 } from '../api.js';
@@ -64,6 +66,8 @@ export const WORKSPACE_ORDER_FIELD = 'order';
 const REST_TIMEOUT_MS = 10_000;
 /** Workspace create may mkdir/git-clone — slower than a metadata write. */
 const CREATE_TIMEOUT_MS = 60_000;
+/** Clone-only can fetch a large remote; just over the host's 120s git cap. */
+const CLONE_TIMEOUT_MS = 130_000;
 /** The native folder dialog can stay open for minutes; a timeout would mark
  *  the run unresolved and swallow the eventual pick. */
 const PICK_TIMEOUT_MS = 300_000;
@@ -232,11 +236,32 @@ const workspacePickFolder: OperationDefinition<Record<string, never>, PickFolder
   timeoutMs: PICK_TIMEOUT_MS, // the dialog can stay open for a while
 };
 
+export interface WorkspaceCloneRepoInput {
+  gitRemote: string;
+  /** Optional directory name; the host derives one from the URL otherwise. */
+  name?: string;
+}
+
+// Clone-only (issue #57 new-workspace form): materializes the remote under
+// the workspace root and returns the path; nothing is registered yet — the
+// form's Create adopts the cloned directory.
+const workspaceCloneRepo: OperationDefinition<WorkspaceCloneRepoInput, CloneWorkspaceRepoResult> = {
+  policy: 'pending',
+  entityKey: () => `pending:workspace.cloneRepo:${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`,
+  execute: async input => {
+    const result = await cloneWorkspaceRepo(input.gitRemote, input.name);
+    if (result.error || !result.path) throw new Error(result.error ?? 'Clone failed');
+    return result;
+  },
+  timeoutMs: CLONE_TIMEOUT_MS,
+};
+
 registry.register('workspace.rename', workspaceRename);
 registry.register('workspace.setHidden', workspaceSetHidden);
 registry.register('workspace.pin', workspacePin);
 registry.register('workspace.reorder', workspaceReorder);
 registry.register('workspace.create', workspaceCreate);
+registry.register('workspace.cloneRepo', workspaceCloneRepo);
 registry.register('workspace.delete', workspaceDelete);
 registry.register('workspace.saveClaudeMd', workspaceSaveClaudeMd);
 registry.register('workspace.pickFolder', workspacePickFolder);

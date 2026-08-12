@@ -79,18 +79,8 @@
 }
 
 .context-strip .plan-chip[aria-expanded="true"] .context-chip-meta,
-.context-chip[aria-expanded="true"] .context-chip-meta,
-.context-chip[aria-expanded="true"] .context-chip-count {
+.context-chip[aria-expanded="true"] .context-chip-meta {
   color: var(--accent-text);
-}
-
-.context-chip-count {
-  min-width: 16px;
-  color: var(--text-3);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 600;
-  text-align: center;
 }
 
 .context-chip-dot {

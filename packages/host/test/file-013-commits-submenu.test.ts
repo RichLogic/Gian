@@ -1,8 +1,8 @@
 // Coverage for the Committed-submenu backend (FILE-011 extension): the
 // Changes picker's Committed row lists the branch's commits and each pick
 // pins the commit/diff scopes to that sha.
-//   - GET /api/working_trees/:id/commits → branch commits since the
-//     merge-base, newest first
+//   - GET /api/working_trees/:id/commits → branch commits since the remote
+//     default's merge-base, newest first
 //   - /changed?scope=commit&sha=<sha>  → that commit's delta (sha^..sha)
 //   - /diff?scope=commit&sha=<sha>     → the per-file diff of that commit
 //   - a bogus sha falls back to HEAD's delta (parseCommitSha)
@@ -14,7 +14,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import { makeTestApp, type TestAppCtx } from './fixtures/test-app.js';
-import { createGitRepo, type GitRepo } from './fixtures/git-repo.js';
+import { bareUpstream, createGitRepo, type GitRepo } from './fixtures/git-repo.js';
 
 interface ChangedEntry {
   path: string;
@@ -38,6 +38,7 @@ interface Ctx {
 }
 
 async function setup(): Promise<Ctx> {
+  const upstream = bareUpstream();
   const appCtx = await makeTestApp();
   const repo = createGitRepo({
     initialBranch: 'main',
@@ -46,6 +47,9 @@ async function setup(): Promise<Ctx> {
       'src/util.ts': 'export const u = 1;\n',
     },
   });
+  repo.git(['remote', 'add', 'origin', upstream.path]);
+  repo.git(['push', '--force', 'origin', 'main']);
+  repo.git(['remote', 'set-head', 'origin', '--auto']);
   const workspaceId = randomUUID();
   appCtx.db.prepare('INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)')
     .run(workspaceId, 'demo', repo.path);
@@ -56,16 +60,20 @@ async function setup(): Promise<Ctx> {
     cleanup: async () => {
       await appCtx.cleanup();
       repo.cleanup();
+      upstream.cleanup();
     },
   };
 }
 
-test('FILE-013: /commits lists branch commits newest-first, excluding the merge-base history', async () => {
+test('FILE-013: /commits lists commits since the remote default, newest-first', async () => {
   const ctx = await setup();
   try {
-    ctx.repo.checkout('feature', { create: true });
     const first = ctx.repo.commit('src/app.ts', "console.log('init')\nconsole.log('one')\n", 'feat: first on branch');
     const second = ctx.repo.commit('src/util.ts', 'export const u = 2;\n', 'feat: second on branch');
+    // Match a conversation branch created from an already-ahead local main.
+    // Comparing to local main would make this range empty; origin/main must
+    // remain the baseline.
+    ctx.repo.checkout('feature', { create: true });
 
     const res = await ctx.appCtx.fetch(`/api/working_trees/${ctx.wsTreeId}/commits`);
     assert.equal(res.status, 200, `/commits fetch failed: ${res.status}`);

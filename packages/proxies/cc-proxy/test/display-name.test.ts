@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { ClaudeMcpRuntime, sanitizeDisplayName } from '../../src/runtime/claude-mcp-runtime.js';
+import { ClaudeMcpRuntime, sanitizeDisplayName } from '../src/runtime/claude-mcp-runtime.js';
 
 // SESSION-NAME-001: the Claude CLI `--name` value is sanitized before it hits
 // the argv so a pasted multi-line name can't smuggle extra args / blow up the

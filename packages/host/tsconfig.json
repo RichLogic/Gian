@@ -9,6 +9,7 @@
   },
   "include": ["src/**/*"],
   "references": [
+    { "path": "../proxy-protocol" },
     { "path": "../shared" }
   ]
 }

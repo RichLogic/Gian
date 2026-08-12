@@ -2,7 +2,13 @@ import { createContext } from 'react';
 
 export type ChatPanelRequest =
   | { kind: 'plan'; id: string }
-  | { kind: 'agent'; id: string };
+  | { kind: 'agent'; id: string }
+  | {
+      kind: 'transcript-detail';
+      title: string;
+      text: string;
+      sourceId?: string;
+    };
 
 export type ChatPanelTarget = ChatPanelRequest & { sessionId: string };
 

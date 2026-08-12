@@ -23,6 +23,15 @@ const other: WorkingTree = {
   workspace_name: 'other',
 };
 
+const viewedWorktree: WorkingTree = {
+  ...current,
+  id: 'ext:current:d3Q',
+  kind: 'worktree',
+  label: 'current-feature',
+  path: '/work/current-feature',
+  branch: 'feat/current',
+};
+
 describe('file panel routing', () => {
   it('locates a file present in the current Files index', () => {
     const route = resolveFilePanelRoute(
@@ -65,6 +74,35 @@ describe('file panel routing', () => {
     expect(route.sourceTree).toBe(other);
     expect(route.sourceRel).toBe('README.md');
     expect(route.revealRel).toBeNull();
+    expect(route.inCurrentFiles).toBe(false);
+  });
+
+  it('maps a primary-checkout path to the same known file in the viewed worktree', () => {
+    const route = resolveFilePanelRoute(
+      '/work/current/docs/design.md',
+      viewedWorktree,
+      [current, viewedWorktree, other],
+      new Set(['docs/design.md']),
+    );
+
+    expect(route).toEqual({
+      sourceTree: viewedWorktree,
+      sourceRel: 'docs/design.md',
+      revealRel: 'docs/design.md',
+      inCurrentFiles: true,
+    });
+  });
+
+  it('does not map a primary-checkout path when the file is absent from the viewed worktree', () => {
+    const route = resolveFilePanelRoute(
+      '/work/current/docs/design.md',
+      viewedWorktree,
+      [current, viewedWorktree, other],
+      new Set(),
+    );
+
+    expect(route.sourceTree).toBe(current);
+    expect(route.sourceRel).toBe('docs/design.md');
     expect(route.inCurrentFiles).toBe(false);
   });
 

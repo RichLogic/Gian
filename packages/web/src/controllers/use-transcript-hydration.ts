@@ -20,6 +20,7 @@ interface TranscriptHydrationInput {
   activeSessionId: string | null;
   connectionReady: boolean;
   sessions: Session[];
+  itemsBySession: Record<string, TranscriptItem[]>;
   setItemsBySession: Dispatch<SetStateAction<Record<string, TranscriptItem[]>>>;
   setPlanStateBySession: Dispatch<SetStateAction<Record<string, PlanLifecycleState>>>;
 }
@@ -33,7 +34,7 @@ export interface TranscriptHistoryState {
   error: TranscriptHistoryError | null;
 }
 
-export type TranscriptHistoryLoadOperation = 'initial' | 'refresh' | 'older';
+export type TranscriptHistoryLoadOperation = 'initial' | 'refresh' | 'rebuild' | 'older';
 
 export interface TranscriptHistoryError {
   kind: EventHistoryLoadErrorKind;
@@ -47,6 +48,7 @@ interface TranscriptHydrationResult {
   loadOlder: (sessionId: string, executor: Executor) => void;
   retry: (sessionId: string, executor: Executor) => void;
   markLive: (sessionId: string) => void;
+  rebuild: (sessionId: string, executor: Executor) => void;
 }
 
 export function historyIsHydrated(state: TranscriptHistoryState | undefined): boolean {
@@ -88,6 +90,7 @@ export function useTranscriptHydration({
   activeSessionId,
   connectionReady,
   sessions,
+  itemsBySession,
   setItemsBySession,
   setPlanStateBySession,
 }: TranscriptHydrationInput): TranscriptHydrationResult {
@@ -95,17 +98,22 @@ export function useTranscriptHydration({
   const historyRef = useRef(historyBySession);
   historyRef.current = historyBySession;
   const loadingRef = useRef(new Set<string>());
+  const pendingRebuildRef = useRef(new Map<string, Executor>());
+  const rebuildBaselineRef = useRef(new Map<string, Map<string, TranscriptItem>>());
   const previousActiveRef = useRef<string | null>(null);
   const previousConnectionReadyRef = useRef(connectionReady);
 
   const loadFirstPage = useCallback((
     sessionId: string,
     executor: Executor,
-    operation: 'initial' | 'refresh',
+    operation: 'initial' | 'refresh' | 'rebuild',
   ) => {
     const existing = historyRef.current[sessionId];
     if (loadingRef.current.has(sessionId)
       || (operation === 'initial' && historyIsHydrated(existing))) return;
+    const rebuildBaseline = operation === 'rebuild'
+      ? rebuildBaselineRef.current.get(sessionId)
+      : undefined;
     loadingRef.current.add(sessionId);
     setHistoryBySession(previous => {
       const current = previous[sessionId] ?? unloadedHistoryState();
@@ -119,16 +127,36 @@ export function useTranscriptHydration({
         (current, event) => applyEnvelope(current, event, executor),
         [],
       );
-      if (operation === 'initial') {
+      const queuedBaseline = pendingRebuildRef.current.has(sessionId)
+        ? rebuildBaselineRef.current.get(sessionId)
+        : undefined;
+      for (const item of items) {
+        queuedBaseline?.set(transcriptItemMergeIdentity(item), item);
+      }
+      if (operation === 'initial' || operation === 'rebuild') {
         const plan = page.events.reduce<PlanLifecycleState>(
           (current, event) => applyPlanLifecycle(current, event),
           { completed: false },
         );
-        setItemsBySession(previous => ({
-          ...previous,
-          [sessionId]: mergeHydratedItems(items, previous[sessionId] ?? []),
-        }));
-        if (plan.text !== undefined) {
+        setItemsBySession(previous => {
+          const current = previous[sessionId] ?? [];
+          const concurrentLive = operation === 'rebuild'
+            ? current.filter(item => (
+                rebuildBaseline?.get(transcriptItemMergeIdentity(item)) !== item
+              ))
+            : current;
+          return {
+            ...previous,
+            [sessionId]: mergeHydratedItems(items, concurrentLive),
+          };
+        });
+        if (
+          operation === 'rebuild'
+          && rebuildBaselineRef.current.get(sessionId) === rebuildBaseline
+        ) {
+          rebuildBaselineRef.current.delete(sessionId);
+        }
+        if (operation === 'rebuild' || plan.text !== undefined) {
           setPlanStateBySession(previous => ({ ...previous, [sessionId]: plan }));
         }
       } else {
@@ -156,7 +184,7 @@ export function useTranscriptHydration({
       }
       setHistoryBySession(previous => ({
         ...previous,
-        [sessionId]: operation === 'initial'
+        [sessionId]: operation === 'initial' || operation === 'rebuild'
           ? {
               phase: page.hasMore ? 'page' : 'complete',
               hasMore: page.hasMore,
@@ -185,6 +213,11 @@ export function useTranscriptHydration({
       });
     }).finally(() => {
       loadingRef.current.delete(sessionId);
+      const pendingRebuild = pendingRebuildRef.current.get(sessionId);
+      if (pendingRebuild) {
+        pendingRebuildRef.current.delete(sessionId);
+        queueMicrotask(() => loadFirstPage(sessionId, pendingRebuild, 'rebuild'));
+      }
     });
   }, [setItemsBySession, setPlanStateBySession]);
 
@@ -201,6 +234,12 @@ export function useTranscriptHydration({
         (current, event) => applyEnvelope(current, event, executor),
         [],
       );
+      const queuedBaseline = pendingRebuildRef.current.has(sessionId)
+        ? rebuildBaselineRef.current.get(sessionId)
+        : undefined;
+      for (const item of olderItems) {
+        queuedBaseline?.set(transcriptItemMergeIdentity(item), item);
+      }
       setItemsBySession(previous => ({
         ...previous,
         [sessionId]: prependOlderItems(olderItems, previous[sessionId] ?? []),
@@ -237,6 +276,11 @@ export function useTranscriptHydration({
           ? previous
           : { ...previous, [sessionId]: { ...current, loadingOlder: false } };
       });
+      const pendingRebuild = pendingRebuildRef.current.get(sessionId);
+      if (pendingRebuild) {
+        pendingRebuildRef.current.delete(sessionId);
+        queueMicrotask(() => loadFirstPage(sessionId, pendingRebuild, 'rebuild'));
+      }
     });
   }, [setItemsBySession]);
 
@@ -266,6 +310,17 @@ export function useTranscriptHydration({
     });
   }, []);
 
+  const rebuild = useCallback((sessionId: string, executor: Executor) => {
+    rebuildBaselineRef.current.set(sessionId, new Map(
+      (itemsBySession[sessionId] ?? []).map(item => [transcriptItemMergeIdentity(item), item]),
+    ));
+    if (loadingRef.current.has(sessionId)) {
+      pendingRebuildRef.current.set(sessionId, executor);
+      return;
+    }
+    loadFirstPage(sessionId, executor, 'rebuild');
+  }, [itemsBySession, loadFirstPage]);
+
   useEffect(() => {
     const previousActive = previousActiveRef.current;
     previousActiveRef.current = activeSessionId;
@@ -289,7 +344,7 @@ export function useTranscriptHydration({
     loadFirstPage(activeSessionId, executor, 'refresh');
   }, [activeSessionId, connectionReady, historyBySession, loadFirstPage, retry, sessions]);
 
-  return { historyBySession, loadOlder, retry, markLive };
+  return { historyBySession, loadOlder, retry, markLive, rebuild };
 }
 
 /** Historical first page arrives after live events in reconnect races. */

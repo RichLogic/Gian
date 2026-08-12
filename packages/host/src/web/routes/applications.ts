@@ -33,6 +33,15 @@ export interface WorkingTreeTarget {
 
 type ResolveWorkingTree = (id: string) => Promise<WorkingTreeTarget | null>;
 
+export interface ApplicationRouteOptions {
+  /** Test seam. Production always uses the current process platform. */
+  platform?: NodeJS.Platform;
+  /** Test seam for awaited Finder/default-opener commands. */
+  runOpenSync?: (command: OpenCommand) => void;
+  /** Test seam for detached editor/application commands. */
+  runOpen?: typeof runOpen;
+}
+
 function gitMutationStatus(error: unknown): 500 | 503 | 504 {
   if (error instanceof RepoMutationLockError || error instanceof GitQueueFullError) return 503;
   return error instanceof CommandExecutionError && error.timedOut ? 504 : 500;
@@ -42,14 +51,20 @@ export function registerApplicationRoutes(
   app: Hono,
   db: Db,
   resolveWorkingTree: ResolveWorkingTree,
+  options: ApplicationRouteOptions = {},
 ): void {
+  const platform = options.platform ?? process.platform;
+  const runOpenSync = options.runOpenSync ?? ((command: OpenCommand) => {
+    execFileSync(command.command, command.argv, { timeout: 5000, stdio: 'ignore' });
+  });
+  const runOpenDetached = options.runOpen ?? runOpen;
   // Installed applications for the Sheet's "Open with…" menu. macOS-only:
   // scans the standard .app bundle locations (LaunchServices isn't reachable
   // from Node without a native binding, and a directory scan is good enough —
   // it lists apps, the user picks one, `open -a` resolves it). Non-mac
   // platforms return an empty list so the menu degrades to default + editors.
   app.get('/api/apps', async c => {
-    if (process.platform !== 'darwin') return c.json({ apps: [] });
+    if (platform !== 'darwin') return c.json({ apps: [] });
     const home = process.env.HOME;
     const dirs = [
       '/Applications',
@@ -82,7 +97,7 @@ export function registerApplicationRoutes(
   // icon, sips error) degrades to 404 so the web side falls back to a glyph —
   // this route must never 500 on a malformed app bundle.
   app.get('/api/apps/icon', c => {
-    if (process.platform !== 'darwin') return c.json({ error: 'macOS only' }, 404);
+    if (platform !== 'darwin') return c.json({ error: 'macOS only' }, 404);
     try {
       const name = c.req.query('name');
       if (!name) return c.json({ error: 'name required' }, 400);
@@ -196,7 +211,7 @@ export function registerApplicationRoutes(
     const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
     try {
-      execFileSync('open', [wt.path], { timeout: 5000, stdio: 'ignore' });
+      runOpenSync({ command: 'open', argv: [wt.path] });
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: String(err) }, 500);
@@ -318,7 +333,7 @@ export function registerApplicationRoutes(
     } else if (body.app) {
       // "Open with…" → a named macOS application (LaunchServices). The app
       // list itself comes from GET /api/apps, so this is macOS-only.
-      if (process.platform !== 'darwin') {
+      if (platform !== 'darwin') {
         return c.json({ error: 'open-with-app is macOS only' }, 400);
       }
       cmd = appOpenerArgs(body.app, absPath);
@@ -329,7 +344,7 @@ export function registerApplicationRoutes(
       if (body.builtin === 'default') {
         let defaultCmd: OpenCommand;
         try {
-          defaultCmd = defaultOpenerArgs(process.platform, absPath);
+          defaultCmd = defaultOpenerArgs(platform, absPath);
         } catch (err) {
           return c.json({ error: String((err as Error).message) }, 500);
         }
@@ -339,19 +354,16 @@ export function registerApplicationRoutes(
         // the type — so run it AWAITED here and report 422 on failure instead of
         // returning a fire-and-forget 200. Other platforms keep the existing
         // detached runOpen path below.
-        if (process.platform === 'darwin') {
+        if (platform === 'darwin') {
           try {
-            execFileSync(defaultCmd.command, defaultCmd.argv, {
-              stdio: 'ignore',
-              timeout: 5000,
-            });
+            runOpenSync(defaultCmd);
           } catch {
             return c.json({ error: 'no-app' }, 422);
           }
           return c.json({ ok: true });
         }
         cmd = defaultCmd;
-      } else if (process.platform !== 'darwin') {
+      } else if (platform !== 'darwin') {
         return c.json({ error: 'this opener is macOS only' }, 400);
       } else if (body.builtin === 'finder') {
         cmd = revealArgs(absPath);
@@ -362,7 +374,7 @@ export function registerApplicationRoutes(
       }
     } else {
       try {
-        cmd = defaultOpenerArgs(process.platform, absPath);
+        cmd = defaultOpenerArgs(platform, absPath);
       } catch (err) {
         return c.json({ error: String((err as Error).message) }, 500);
       }
@@ -373,7 +385,7 @@ export function registerApplicationRoutes(
         () => resolve(c.json({ ok: true }) as unknown as Response),
         50,
       );
-      runOpen(cmd, err => {
+      runOpenDetached(cmd, err => {
         clearTimeout(timer);
         resolve(c.json({ error: String(err.message) }, 500) as unknown as Response);
       });

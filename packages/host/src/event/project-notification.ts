@@ -1,7 +1,9 @@
 import type { ChatDisplay, ChatEvent, DisplayEvent, Executor, ProxyNotification } from '@gian/shared';
+import { proxyNotificationSchema } from '@gian/proxy-protocol';
 import { projectCcNotification } from './normalize-cc.js';
 import { projectCodexNotification } from './normalize-codex.js';
 import { projectKimiNotification } from './normalize-kimi.js';
+import { projectProtocolV1Notification } from './normalize-protocol-v1.js';
 
 /**
  * Keep a provider notification intact and attach zero or more UI projections.
@@ -14,7 +16,26 @@ export function projectNotification(
   turn: number,
 ): ChatEvent[] {
   let projected: DisplayEvent[];
-  if (provider === 'codex') {
+  const standard = proxyNotificationSchema.safeParse(notification);
+  if (standard.success) {
+    if (standard.data.method === 'input.recorded') {
+      const input = standard.data.params.data.input;
+      const text = input
+        .filter((item): item is Extract<typeof item, { type: 'text' }> => item.type === 'text')
+        .map(item => item.text)
+        .join('\n\n');
+      return [{
+        session_id: sessionId,
+        turn,
+        call_id: standard.data.params.data.inputId,
+        ts: Date.parse(standard.data.params.emittedAt),
+        provider,
+        event: 'user_message',
+        data: { text, input },
+      }];
+    }
+    projected = projectProtocolV1Notification(standard.data, sessionId, turn);
+  } else if (provider === 'codex') {
     projected = projectCodexNotification(notification, sessionId, turn);
   } else if (provider === 'kimi') {
     projected = projectKimiNotification(notification, sessionId, turn);

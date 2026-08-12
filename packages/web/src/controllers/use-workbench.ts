@@ -116,12 +116,11 @@ export function useWorkbench({
     return null;
   }
 
-  // View-level working-tree override (breadcrumb branch picker): affects only
-  // what the Diffs/Files rails, the diff sheet, and the breadcrumb label show.
-  // Execution cwd, terminal cwd, and file-mention stay bound to the session's
-  // own worktree. Keyed by session id so a stale override never leaks across
-  // sessions; the in-memory pick wins, then the persisted per-session
-  // override (if the tree still exists), then the session default.
+  // View-level working-tree override (breadcrumb picker): affects Diffs,
+  // Files, file previews/mentions, and the breadcrumb label. Execution and
+  // terminal cwd stay bound to the session's own tree. Keyed by session id so
+  // a stale override never leaks across sessions; the in-memory pick wins,
+  // then the persisted override, then the session default.
   function viewedWorkingTreeId(sess: Session | null): string | null {
     if (!sess) return defaultWorkingTreeIdFor(null);
     return resolveViewedTreeId({
@@ -194,7 +193,7 @@ export function useWorkbench({
   } | null>(null);
   const fileIndexWtRef = useRef<string | null>(null);
   useEffect(() => {
-    const wtId = defaultWorkingTreeIdFor(activeSession);
+    const wtId = viewedWorkingTreeId(activeSession);
     const wt = wtId ? workingTrees.find(w => w.id === wtId) : null;
     if (!wtId || !wt) { fileIndexWtRef.current = null; setFileIndexAbs(null); return; }
     if (fileIndexWtRef.current === wtId) return;
@@ -211,7 +210,7 @@ export function useWorkbench({
       });
     });
     return () => { cancelled = true; };
-  }, [activeSessionId, workingTrees]);
+  }, [activeSessionId, workingTrees, wtView]);
   const fileRehype = fileIndexAbs?.rehype ?? null;
 
   // ─── Sheet (Workbench) actions ──────────────────────────────────────────
@@ -288,7 +287,7 @@ export function useWorkbench({
   const sheetActions = useMemo(() => {
     function syncFilesInspectorToTab(tab: SheetTab | undefined): void {
       if (tab?.group !== 'files' || tab.kind !== 'file') return;
-      const currentWtId = defaultWorkingTreeIdFor(activeSession);
+      const currentWtId = viewedWorkingTreeId(activeSession);
       const locatable = !!tab.fileTreePath && tab.workingTreeId === currentWtId;
       setFilesInspectorSuppressed(!locatable);
       if (locatable && tab.fileTreePath && currentWtId) {
@@ -552,7 +551,7 @@ export function useWorkbench({
     const sess = activeSessionId
       ? sessions.find(s => s.id === activeSessionId) ?? null
       : null;
-    const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
+    const wtId = sess ? viewedWorkingTreeId(sess) : null;
     const currentWt = wtId ? workingTrees.find(t => t.id === wtId) ?? null : null;
     let currentFiles: ReadonlySet<string> = new Set();
     if (currentWt) {
@@ -584,7 +583,9 @@ export function useWorkbench({
     const wt = route.sourceTree;
     const rel = route.sourceRel;
     const name = (rel ?? absPath).split('/').pop() || absPath;
-    const fullPath = absPath;
+    const fullPath = wt && rel
+      ? `${wt.path.replace(/\/+$/, '')}/${rel}`
+      : absPath;
     const icoKind = extOf(name);
     const ext = (name.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase();
     const rawUrl = wt && rel
@@ -683,7 +684,7 @@ export function useWorkbench({
     const line = m?.[2] ? Number(m[2]) : undefined;
     let abs = rel;
     if (!rel.startsWith('/')) {
-      const wtId = defaultWorkingTreeIdFor(activeSession);
+      const wtId = viewedWorkingTreeId(activeSession);
       const base = (wtId ? workingTrees.find(w => w.id === wtId)?.path : null)
         ?? activeWorkspace?.path
         ?? workspaces[0]?.path;
@@ -842,54 +843,6 @@ export function useWorkbench({
         : t));
   }
 
-  /** Route an over-threshold transcript detail (P3: full command output,
-   *  long reasoning, long result list) to panel 2 as a preview text tab.
-   *  Same preview semantics as transcript diffs — the next detail replaces
-   *  the current preview tab; double-click/pin fixes it. Content travels in
-   *  the tab itself, so no working-tree context or async fill is needed. */
-  function openTranscriptTextInSheet(payload: {
-    title: string;
-    text: string;
-    /** Transcript item id, for a stable tab identity across re-opens. */
-    sourceId?: string;
-  }): void {
-    setChatPanel(null);
-    setActiveRail('diffs');
-    // Provider ids are scoped to a transcript stream, not globally. Include
-    // the active session so opening the same native item id in another chat
-    // cannot reveal or update the previous chat's panel-2 preview tab.
-    const id = `tab-text-${activeSessionId ?? 'global'}-${payload.sourceId ?? Date.now()}`;
-    setWbTabs(prev => {
-      const existing = prev.find(tab => tab.id === id);
-      if (existing) {
-        revealSheetTab('diffs', id);
-        // A pinned detail stays pinned when reopened; a still-previewing tab
-        // keeps preview semantics. Refresh the body in place either way.
-        return prev.map(tab => tab.id === id
-          ? {
-              ...tab,
-              name: payload.title,
-              text: payload.text,
-              sessionId: activeSessionId ?? undefined,
-            }
-          : tab);
-      }
-      const tab: SheetTab = {
-        id,
-        group: 'diffs',
-        name: payload.title,
-        kind: 'text',
-        icoKind: 'term',
-        ico: '›',
-        preview: true,
-        text: payload.text,
-        sessionId: activeSessionId ?? undefined,
-      };
-      revealSheetTab('diffs', id);
-      return insertGroupPreviewTab(prev, 'diffs', tab);
-    });
-  }
-
   function openChatPanel(
     sessionId: string,
     request: ChatPanelRequest,
@@ -1022,7 +975,6 @@ export function useWorkbench({
     openTranscriptDiffInSheet,
     openCommitInSheet,
     revalidateHistoryTabs,
-    openTranscriptTextInSheet,
     openChatPanel,
     addTerminalTab,
     addBrowserTab,

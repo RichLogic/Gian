@@ -1,7 +1,7 @@
 {
   "name": "@gian/desktop",
   "productName": "Gian",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "description": "macOS desktop shell for the Gian coding agent workspace",
   "author": "RichLogic",
@@ -26,7 +26,7 @@
     "@gian/shared": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
+    "@types/node": "^24.12.2",
     "electron": "43.2.0",
     "electron-builder": "^26.15.3",
     "playwright": "^1.49.0",

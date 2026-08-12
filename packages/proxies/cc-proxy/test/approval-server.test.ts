@@ -7,7 +7,7 @@ import {
   ApprovalServer,
   APPROVAL_TOOL_NAME,
   type ApprovalServerOptions,
-} from '../../src/mcp/approval-server.js';
+} from '../src/mcp/approval-server.js';
 
 interface CapturedRequest {
   sessionId: string;

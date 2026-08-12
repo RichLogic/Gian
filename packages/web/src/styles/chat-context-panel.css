@@ -72,13 +72,21 @@
   margin: 0 auto;
 }
 
+.chat-context-detail {
+  max-width: 760px;
+  margin: 0 auto;
+  color: var(--text-2);
+  font: var(--fz-12)/1.6 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .chat-context-progress {
   display: flex;
   align-items: baseline;
   gap: 10px;
   margin: 4px 0 18px;
   padding-bottom: 10px;
-  border-bottom: 1px solid var(--hairline);
   color: var(--text-3);
   font: 500 var(--fz-11)/1 var(--font-mono);
 }
@@ -95,7 +103,6 @@
 
 .chat-agent-summary {
   padding: 6px 0 20px;
-  border-bottom: 1px solid var(--hairline);
 }
 
 .chat-agent-kicker {
@@ -127,7 +134,6 @@
 
 .chat-agent-state {
   padding-left: 8px;
-  border-left: 1px solid var(--hairline);
   font-weight: 500;
 }
 
@@ -185,7 +191,6 @@
 
 .chat-agent-section + .chat-agent-section {
   margin-top: 8px;
-  border-top: 1px solid var(--hairline);
 }
 
 .chat-agent-section h4 {

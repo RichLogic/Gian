@@ -1,8 +1,12 @@
 // Coverage for traceability row SES-001 (Web form payload dimension):
-//   The new-session form collects only workspace, agent (executor), and an
-//   optional name. `buildSessionCreatePayload` must emit exactly that
-//   contract — approval mode / worktree fields / first message were removed
-//   from the form on 2026-08-01 and must never leak back into the payload.
+//   The new-session composer collects workspace, agent (executor), an
+//   optional title, capability chips (model / thinking / mode, v2), and a
+//   first message. `buildSessionCreatePayload` emits workspaceId / name /
+//   executor plus ONLY the chip values the user explicitly picked — unset
+//   chips stay out so the host's configured defaults apply, and Kimi never
+//   carries approvalMode (executor-native configuration). The first message
+//   (issue #57) deliberately rides App's pendingFirstMessage channel instead
+//   of the session.create wire payload.
 
 import { describe, it, expect } from 'vitest';
 import { buildSessionCreatePayload, type SessionCreateFormState } from '../src/views/CodingView.js';
@@ -48,5 +52,30 @@ describe('SES-001: minimal session payload from form state', () => {
     for (const key of ['approvalMode', 'mode', 'baseBranch', 'branch', 'firstMessage']) {
       expect(payload[key]).toBeUndefined();
     }
+  });
+
+  it('carries explicitly picked chip values (v2 composer)', () => {
+    const payload = buildSessionCreatePayload(formState({
+      executor: 'codex',
+      model: 'gpt-5',
+      thinkingEffort: 'high',
+      approvalMode: 'auto',
+    }));
+    expect(payload).toEqual({
+      workspaceId: 'ws-1',
+      name: 'demo',
+      executor: 'codex',
+      model: 'gpt-5',
+      thinkingEffort: 'high',
+      approvalMode: 'auto',
+    });
+  });
+
+  it('drops approvalMode for kimi even when set (executor-native configuration)', () => {
+    const payload = buildSessionCreatePayload(formState({
+      executor: 'kimi',
+      approvalMode: 'auto',
+    })) as Record<string, unknown>;
+    expect(payload.approvalMode).toBeUndefined();
   });
 });

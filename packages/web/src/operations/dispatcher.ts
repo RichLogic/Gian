@@ -69,6 +69,10 @@ export interface OperationDispatcherDeps {
    *  reload of the affected entity followed by `store.reconcileUnresolved` —
    *  the unresolved-reload path (Phase 3a). */
   onUnresolved?: (entityKey: string) => void;
+  /** Fired after a definitive failure has rolled back its owned overlays.
+   *  The app uses this only for session metadata, whose contract requires a
+   *  fresh canonical Session list after a Host rejection. */
+  onFailed?: (run: OperationRun, error: OperationError) => void;
   /** Timer injection for tests. */
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
@@ -162,10 +166,12 @@ export function createOperationDispatcher(deps: OperationDispatcherDeps = {}): O
     if (outcome.ok) {
       definition.reconcile?.(outcome.result, active.context);
     } else {
+      const error = outcome.error ?? { code: 'UNKNOWN', message: 'operation failed' };
       definition.rollback?.(
-        outcome.error ?? { code: 'UNKNOWN', message: 'operation failed' },
+        error,
         active.context,
       );
+      deps.onFailed?.(run, error);
     }
   }
 

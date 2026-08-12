@@ -15,7 +15,9 @@
 import { useCallback, useSyncExternalStore } from 'react';
 import {
   loadChanged,
+  loadBranchList,
   loadDiff,
+  type BranchList,
   type ChangedEntry,
   type ChangeScope,
 } from '../api.js';
@@ -36,8 +38,10 @@ export interface ChangesDiffState {
   scope: ChangeScope;
   /** Pinned commit for the `commit` scope (null = HEAD's delta). */
   commitSha: string | null;
-  /** Explicit compare base for the `branch` scope (null = auto-detected). */
+  /** Explicit compare base for the `branch` scope (null = remote default). */
   baseBranch: string | null;
+  /** Host-resolved default plus the refs offered by the Branch picker. */
+  branchList: BranchList | null;
   /** Exact session+turn a transcript entry pinned for the `lastturn` scope. */
   lastTurn: { sessionId: string; turn: number } | null;
   /** Active session forwarded by the inspector — the lastturn fallback for
@@ -73,6 +77,7 @@ function initialState(workingTreeId: string): ChangesDiffState {
     scope,
     commitSha: null,
     baseBranch,
+    branchList: null,
     lastTurn: null,
     sessionId: null,
     status: 'idle',
@@ -126,6 +131,7 @@ const IDLE_STATE: ChangesDiffState = {
   scope: 'branch',
   commitSha: null,
   baseBranch: null,
+  branchList: null,
   lastTurn: null,
   sessionId: null,
   status: 'idle',
@@ -176,18 +182,23 @@ export async function reloadChangesDiffFiles(workingTreeId: string): Promise<voi
   requestSeq.set(workingTreeId, seq);
   patch(workingTreeId, { status: 'loading', error: null });
   try {
-    const files = await loadChanged(
-      workingTreeId,
-      state.scope,
-      state.commitSha,
-      state.baseBranch,
-      state.scope === 'lastturn'
-        ? state.lastTurn?.sessionId ?? state.sessionId
-        : state.sessionId,
-      state.scope === 'lastturn' ? state.lastTurn?.turn : undefined,
-    );
+    const [files, branchList] = await Promise.all([
+      loadChanged(
+        workingTreeId,
+        state.scope,
+        state.commitSha,
+        state.baseBranch,
+        state.scope === 'lastturn'
+          ? state.lastTurn?.sessionId ?? state.sessionId
+          : state.sessionId,
+        state.scope === 'lastturn' ? state.lastTurn?.turn : undefined,
+      ),
+      state.scope === 'branch'
+        ? loadBranchList(workingTreeId)
+        : Promise.resolve(state.branchList),
+    ]);
     if (requestSeq.get(workingTreeId) !== seq) return;
-    patch(workingTreeId, { status: 'ready', files });
+    patch(workingTreeId, { status: 'ready', files, branchList });
   } catch (err) {
     if (requestSeq.get(workingTreeId) !== seq) return;
     patch(workingTreeId, { status: 'error', error: errorMessage(err) });
@@ -243,7 +254,7 @@ export function setChangesDiffCommit(workingTreeId: string, sha: string | null):
   void reloadChangesDiffFiles(workingTreeId);
 }
 
-/** Pin (or unpin, null = auto-detect) the Branch scope's compare base. */
+/** Pin (or unpin, null = remote default) the Branch scope's compare base. */
 export function setChangesDiffBase(workingTreeId: string, base: string | null): void {
   patchScope(workingTreeId, { baseBranch: base });
   try {
@@ -293,7 +304,23 @@ async function loadPatch(workingTreeId: string, path: string): Promise<void> {
   const scopeKey = scopeKeyOf(state);
   setPatch(workingTreeId, path, { status: 'loading', diff: null, truncated: false });
   try {
-    const result = await loadDiff(workingTreeId, path, state.scope, state.commitSha, state.baseBranch);
+    const result = state.scope === 'lastturn'
+      ? await loadDiff(
+          workingTreeId,
+          path,
+          state.scope,
+          state.commitSha,
+          state.baseBranch,
+          state.lastTurn?.sessionId ?? state.sessionId,
+          state.lastTurn?.turn,
+        )
+      : await loadDiff(
+          workingTreeId,
+          path,
+          state.scope,
+          state.commitSha,
+          state.baseBranch,
+        );
     // A scope switch mid-flight dropped this patch — the late result must not
     // resurrect it under the new comparison.
     if (scopeKeyOf(getChangesDiffState(workingTreeId)) !== scopeKey) return;

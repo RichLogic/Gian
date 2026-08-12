@@ -1842,7 +1842,13 @@ test('an already-empty compatibility process never enters signalling shutdown', 
       env: Readonly<Record<string, string>>;
     }>;
     runProxyCompatibilityProbe: (
-      input: { id: 'claude'; version: string; entryPath: string },
+      input: {
+        id: 'claude';
+        version: string;
+        entryPath: string;
+        protocol: 'legacy' | 'gian.proxy';
+        processScope?: 'shared' | 'session';
+      },
       updateOwner: AgentUpdateLease,
     ) => Promise<void>;
   };
@@ -1876,11 +1882,86 @@ test('an already-empty compatibility process never enters signalling shutdown', 
       id: 'claude',
       version: '0.1.0',
       entryPath,
+      protocol: 'legacy',
     }, updateOwner),
     /exited before registration/,
   );
   assert.equal(signalPathCalls, 0);
   assert.equal(releaseUnregisteredCalls, 1);
+});
+
+test('protocol v1 compatibility probe uses generic env and validates the handshake', {
+  skip: process.platform === 'win32',
+}, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-compatibility-v1-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const entryPath = join(root, 'v1-proxy.mjs');
+  await writeFile(entryPath, `
+import { createInterface } from 'node:readline';
+const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+for await (const line of input) {
+  const request = JSON.parse(line);
+  let result;
+  if (request.method === 'initialize') {
+    const valid = process.env.GIAN_PLUGIN_ID === 'claude'
+      && process.env.GIAN_PLUGIN_DATA_DIR
+      && process.env.GIAN_RUNTIME_BIN
+      && process.env.GIAN_PROTOCOL_VERSIONS === '1.0'
+      && request.params.protocol.name === 'gian.proxy'
+      && request.params.protocol.versions.includes('1.0');
+    result = {
+      protocol: { name: 'gian.proxy', version: '1.0' },
+      plugin: { id: valid ? 'claude' : 'invalid.fixture', name: 'Claude', version: '7.4.2' },
+      process: { scope: 'shared' },
+      capabilities: {},
+    };
+  } else if (request.method === 'catalog.list') {
+    result = { models: [], modes: [], sessionOptions: [] };
+  } else if (request.method === 'shutdown') {
+    result = { ok: true };
+  }
+  process.stdout.write(JSON.stringify({ id: request.id, result }) + '\\n');
+  if (request.method === 'shutdown') break;
+}
+`);
+  const cliPath = await writeFakeCli(root, 'claude');
+  const dataDir = join(root, 'data');
+  const manager = await AgentManager.create({
+    dataDir,
+    releaseVersion: '99.8.7',
+    managedProxies: false,
+    environmentCliPaths: { claude: cliPath },
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+  const internals = manager as unknown as {
+    runProxyCompatibilityProbe: (
+      input: {
+        id: 'claude';
+        version: string;
+        entryPath: string;
+        protocol: 'gian.proxy';
+        processScope: 'shared';
+      },
+      updateOwner: AgentUpdateLease,
+    ) => Promise<void>;
+  };
+  const updateOwner = await acquireAgentUpdateLock(
+    join(root, 'locks'),
+    'claude',
+    'protocol v1 compatibility probe',
+  );
+  try {
+    await internals.runProxyCompatibilityProbe({
+      id: 'claude',
+      version: '7.4.2',
+      entryPath,
+      protocol: 'gian.proxy',
+      processScope: 'shared',
+    }, updateOwner);
+  } finally {
+    await updateOwner.release();
+  }
 });
 
 test('production compatibility handshake validates protocol, capabilities, and managed env', {

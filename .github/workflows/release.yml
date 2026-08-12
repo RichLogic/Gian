@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -28,24 +30,11 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - name: Verify release tag
-        run: |
-          VERSION="$(node -p "require('./package.json').version")"
-          test "${GITHUB_REF_NAME}" = "v${VERSION}"
-          for MANIFEST in \
-            packages/desktop/package.json \
-            packages/host/package.json \
-            packages/shared/package.json \
-            packages/web/package.json \
-            packages/proxies/cc-proxy/package.json \
-            packages/proxies/codex-proxy/package.json \
-            packages/proxies/kimi-proxy/package.json
-          do
-            test "$(node -p "require('./${MANIFEST}').version")" = "${VERSION}"
-          done
+        run: node scripts/check-version-consistency.mjs --release-ref "${GITHUB_REF_NAME}"
 
       - name: Verify beta release configuration
         env:
@@ -63,9 +52,6 @@ jobs:
         run: |
           pnpm typecheck
           pnpm test
-
-      - name: Build proxy release assets
-        run: pnpm release:proxies
 
       - name: Build unsigned Gian beta
         run: pnpm --filter @gian/desktop make:mac
@@ -93,7 +79,6 @@ jobs:
             packages/desktop/release/Gian-*.dmg \
             packages/desktop/release/Gian-*.zip \
             packages/desktop/release/SHA256SUMS \
-            artifacts/proxies/* \
             --verify-tag \
             --generate-notes \
             --notes "Unsigned self-use beta. This build is not signed or notarized; see README for macOS Gatekeeper instructions." \

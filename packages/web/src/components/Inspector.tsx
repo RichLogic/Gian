@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
-import { loadTree, loadCommits, loadBranchList, loadAllFiles } from '../api.js';
-import type { TreeEntry, ChangedEntry, BranchCommit, BranchList, WorkingTree, ChangeScope } from '../api.js';
+import { loadTree, loadCommits, loadAllFiles } from '../api.js';
+import type { TreeEntry, ChangedEntry, BranchCommit, WorkingTree, ChangeScope } from '../api.js';
 import {
   ensureChangesDiffLoaded,
   refreshChangesDiff,
@@ -514,7 +514,7 @@ function ChangesInspector({
   // panel 2's multi-diff view and surviving inspector unmounts (rail
   // collapse). This component is a view over that store plus its pickers.
   const diffState = useChangesDiffState(workingTreeId);
-  const { scope, commitSha, baseBranch } = diffState;
+  const { scope, commitSha, baseBranch, branchList: branches } = diffState;
   const changes = diffState.files;
   // Stage/unstage busy state is derived from the in-flight git.stage /
   // git.unstage runs (Phase 3b — the runs replaced the local busyPath flag);
@@ -535,11 +535,10 @@ function ChangesInspector({
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   // Second-row pickers (Codex's two-row Review UI — no nested dropdowns): the
   // Committed row pins a commit (null = HEAD's delta), the Branch row pins a
-  // compare base (null = auto-detected). The lists are local picker data; the
-  // pinned values live in the store.
+  // compare base (null = repository remote default). Commit choices are local
+  // picker data; branch choices and pinned values live in the shared store.
   const [commits, setCommits] = useState<BranchCommit[]>([]);
   const [commitsLoaded, setCommitsLoaded] = useState(false);
-  const [branches, setBranches] = useState<BranchList | null>(null);
   const [rowMenuOpen, setRowMenuOpen] = useState(false);
   const [rowSearch, setRowSearch] = useState('');
 
@@ -557,7 +556,6 @@ function ChangesInspector({
   useEffect(() => {
     setCommits([]);
     setCommitsLoaded(false);
-    setBranches(null);
   }, [workingTreeId]);
 
   useEffect(() => {
@@ -571,15 +569,6 @@ function ChangesInspector({
     return () => { cancelled = true; };
   }, [scope, workingTreeId, commitsLoaded]);
 
-  useEffect(() => {
-    if (scope !== 'branch' || !workingTreeId || branches) return;
-    let cancelled = false;
-    void loadBranchList(workingTreeId).then(list => {
-      if (!cancelled) setBranches(list);
-    });
-    return () => { cancelled = true; };
-  }, [scope, workingTreeId, branches]);
-
   function pickScope(next: ChangeScope) {
     if (!workingTreeId) return;
     setChangesDiffScope(workingTreeId, next);
@@ -591,8 +580,8 @@ function ChangesInspector({
     setRowMenuOpen(false);
   }
 
-  const total = changes.reduce((acc, c) => ({ add: acc.add + c.added, del: acc.del + c.removed }), { add: 0, del: 0 });
   const tree = buildChangeTree(changes);
+  const defaultBaseSelected = baseBranch === null || baseBranch === branches?.base;
 
   // Stage/unstage settle: the confirmed index write reloads the changed-file
   // list (the pre-migration await-then-reload); failures toast from the
@@ -625,11 +614,9 @@ function ChangesInspector({
   }
 
   return (
-    <aside className="inspector">
+    <aside className="inspector changes-inspector">
       <div className="insp-head">
         <span className="label">{t('inspector.changes')}</span>
-        {/* Diff-source picker — flat menu (no nested dropdowns) with a ✓ on
-            the active scope; commit/base picking lives on the second row. */}
         <div className="changes-scope">
           <button
             className="changes-scope-btn"
@@ -663,115 +650,112 @@ function ChangesInspector({
             </>
           )}
         </div>
-        <button className="iconbtn" title={t('common.refresh')}
-                onClick={() => { if (workingTreeId) refreshChangesDiff(workingTreeId); }}>
-          <Icon d={I.refresh} />
-        </button>
       </div>
-      {/* Second row (Codex's two-row Review UI): for Branch, the compare-base
-          picker `<head> → <base>`; for Committed, the pinned-commit picker. */}
+      {/* Contextual second row for Branch / Committed, right-aligned. */}
       {(scope === 'branch' || scope === 'commit') && (
-        <div className="changes-base-row">
-          {scope === 'branch' && <span className="base-head">{branches?.head ?? '…'}</span>}
-          {scope === 'branch' && <span className="base-arrow">→</span>}
-          <div className="changes-base">
-            <button
-              className="changes-base-btn"
-              type="button"
-              onClick={() => { setRowMenuOpen(o => !o); setRowSearch(''); }}
-            >
-              {scope === 'branch'
-                ? (baseBranch ?? branches?.base ?? '…')
-                : (commitSha
-                    ? `${commitSha.slice(0, 7)} ${commits.find(cm => cm.sha === commitSha)?.subject ?? ''}`.trim()
-                    : t('changes.scope.latestCommit'))}
-              <span className="caret">▾</span>
-            </button>
-            {rowMenuOpen && (
-              <>
-                <div className="changes-menu-backdrop" onClick={() => setRowMenuOpen(false)} />
-                <div className="changes-base-menu" role="menu">
-                  <input
-                    autoFocus
-                    className="changes-base-search"
-                    placeholder={t(scope === 'branch' ? 'changes.scope.searchBranches' : 'changes.scope.searchCommits')}
-                    value={rowSearch}
-                    onChange={e => setRowSearch(e.target.value)}
-                  />
-                  {scope === 'branch' ? (
-                    <>
-                      <button
-                        role="menuitemradio"
-                        aria-checked={baseBranch === null}
-                        type="button"
-                        className={baseBranch === null ? 'active' : ''}
-                        onClick={() => pickBase(null)}
-                      >
-                        <span className="ck">{baseBranch === null ? '✓' : ''}</span>
-                        {t('changes.scope.autoBase')}{branches?.base ? ` (${branches.base})` : ''}
-                      </button>
-                      {(branches?.branches ?? [])
-                        .filter(b => !rowSearch || b.toLowerCase().includes(rowSearch.toLowerCase()))
-                        .map(b => (
-                          <button
-                            key={b}
-                            role="menuitemradio"
-                            aria-checked={(baseBranch ?? branches?.base) === b}
-                            type="button"
-                            className={(baseBranch ?? branches?.base) === b ? 'active' : ''}
-                            onClick={() => pickBase(b)}
-                          >
-                            <span className="ck">{(baseBranch ?? branches?.base) === b ? '✓' : ''}</span>
-                            {b}
-                          </button>
-                        ))}
-                    </>
-                  ) : (
-                    <>
-                      <button
-                        role="menuitemradio"
-                        aria-checked={commitSha === null}
-                        type="button"
-                        className={commitSha === null ? 'active' : ''}
-                        onClick={() => { if (workingTreeId) setChangesDiffCommit(workingTreeId, null); setRowMenuOpen(false); }}
-                      >
-                        <span className="ck">{commitSha === null ? '✓' : ''}</span>
-                        {t('changes.scope.latestCommit')}
-                      </button>
-                      {commitsLoaded && commits.length === 0 && (
-                        <div className="changes-commit-empty">{t('changes.scope.noCommits')}</div>
-                      )}
-                      {commits
-                        .filter(cm => !rowSearch || cm.subject.toLowerCase().includes(rowSearch.toLowerCase()) || cm.sha.startsWith(rowSearch.toLowerCase()))
-                        .map(cm => (
-                          <button
-                            key={cm.sha}
-                            role="menuitemradio"
-                            aria-checked={commitSha === cm.sha}
-                            type="button"
-                            className={commitSha === cm.sha ? 'active' : ''}
-                            title={cm.sha}
-                            onClick={() => { if (workingTreeId) setChangesDiffCommit(workingTreeId, cm.sha); setRowMenuOpen(false); }}
-                          >
-                            <span className="ck">{commitSha === cm.sha ? '✓' : ''}</span>
-                            <span className="subj">{cm.subject}</span>
-                            <span className="rel">{cm.rel}</span>
-                          </button>
-                        ))}
-                    </>
-                  )}
-                </div>
-              </>
-            )}
+        <div className="changes-controls">
+          <div className="changes-base-row">
+            {scope === 'branch' && <span className="base-head">{branches?.head ?? '…'}</span>}
+            {scope === 'branch' && <span className="base-arrow">→</span>}
+            <div className="changes-base">
+              <button
+                className="changes-base-btn"
+                type="button"
+                onClick={() => { setRowMenuOpen(o => !o); setRowSearch(''); }}
+              >
+                <span className="changes-base-label">
+                  {scope === 'branch'
+                    ? (baseBranch ?? branches?.base ?? '…')
+                    : (commitSha
+                        ? `${commitSha.slice(0, 7)} ${commits.find(cm => cm.sha === commitSha)?.subject ?? ''}`.trim()
+                        : t('changes.scope.latestCommit'))}
+                </span>
+                <span className="caret">▾</span>
+              </button>
+              {rowMenuOpen && (
+                <>
+                  <div className="changes-menu-backdrop" onClick={() => setRowMenuOpen(false)} />
+                  <div className="changes-base-menu" role="menu">
+                    <input
+                      autoFocus
+                      className="changes-base-search"
+                      placeholder={t(scope === 'branch' ? 'changes.scope.searchBranches' : 'changes.scope.searchCommits')}
+                      value={rowSearch}
+                      onChange={e => setRowSearch(e.target.value)}
+                    />
+                    {scope === 'branch' ? (
+                      <>
+                        <button
+                          role="menuitemradio"
+                          aria-checked={defaultBaseSelected}
+                          type="button"
+                          className={defaultBaseSelected ? 'active' : ''}
+                          title={branches?.base ?? undefined}
+                          onClick={() => pickBase(null)}
+                        >
+                          <span className="ck">{defaultBaseSelected ? '✓' : ''}</span>
+                          <span className="branch-name">{branches?.base ?? '…'}</span>
+                        </button>
+                        {(branches?.branches ?? [])
+                          .filter(b => b !== branches?.base)
+                          .filter(b => !rowSearch || b.toLowerCase().includes(rowSearch.toLowerCase()))
+                          .map(b => (
+                            <button
+                              key={b}
+                              role="menuitemradio"
+                              aria-checked={(baseBranch ?? branches?.base) === b}
+                              type="button"
+                              className={(baseBranch ?? branches?.base) === b ? 'active' : ''}
+                              title={b}
+                              onClick={() => pickBase(b)}
+                            >
+                              <span className="ck">{(baseBranch ?? branches?.base) === b ? '✓' : ''}</span>
+                              <span className="branch-name">{b}</span>
+                            </button>
+                          ))}
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          role="menuitemradio"
+                          aria-checked={commitSha === null}
+                          type="button"
+                          className={commitSha === null ? 'active' : ''}
+                          onClick={() => { if (workingTreeId) setChangesDiffCommit(workingTreeId, null); setRowMenuOpen(false); }}
+                        >
+                          <span className="ck">{commitSha === null ? '✓' : ''}</span>
+                          <span className="subj">{t('changes.scope.latestCommit')}</span>
+                        </button>
+                        {commitsLoaded && commits.length === 0 && (
+                          <div className="changes-commit-empty">{t('changes.scope.noCommits')}</div>
+                        )}
+                        {commits
+                          .filter(cm => !rowSearch || cm.subject.toLowerCase().includes(rowSearch.toLowerCase()) || cm.sha.startsWith(rowSearch.toLowerCase()))
+                          .map(cm => (
+                            <button
+                              key={cm.sha}
+                              role="menuitemradio"
+                              aria-checked={commitSha === cm.sha}
+                              type="button"
+                              className={commitSha === cm.sha ? 'active' : ''}
+                              title={cm.sha}
+                              onClick={() => { if (workingTreeId) setChangesDiffCommit(workingTreeId, cm.sha); setRowMenuOpen(false); }}
+                            >
+                              <span className="ck">{commitSha === cm.sha ? '✓' : ''}</span>
+                              <span className="subj">{cm.subject}</span>
+                              <span className="rel">{cm.rel}</span>
+                            </button>
+                          ))}
+                      </>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}
       <div className="insp-scroll">
-        <div className="changes-summary">
-          <span className="count">{changes.length} {t('changes.files')}</span>
-          <span className="add">+{total.add}</span>
-          <span className="del">−{total.del}</span>
-        </div>
         {diffState.status === 'error' ? (
           <div className="changes-empty">
             {t('changes.diff.loadFailed')}{' '}

@@ -44,6 +44,7 @@ function resolveProxyEntry(
 
 async function main(): Promise<void> {
   const dataDir = resolveDataDir();
+  const releaseVersion = process.env.GIAN_RELEASE_VERSION ?? '0.1.0';
   assertNoEventStorageMaintenance(dataDir);
   const db = openDatabase(dataDir);
   const config = loadConfig(db);
@@ -96,9 +97,10 @@ async function main(): Promise<void> {
   } as const;
   const agentManager = await AgentManager.create({
     dataDir,
-    releaseVersion: process.env.GIAN_RELEASE_VERSION ?? '0.1.0',
+    releaseVersion,
     releaseRepository: process.env.GIAN_RELEASE_REPOSITORY ?? 'RichLogic/Gian',
     managedProxies: process.env.GIAN_MANAGED_PLUGINS === '1',
+    independentProxyReleases: process.env.GIAN_MANAGED_PLUGINS === '1',
     developmentProxyEntries,
     legacyProxyDefaults: {
       claude: {
@@ -123,14 +125,23 @@ async function main(): Promise<void> {
     agentManager.runtimeProviders(),
     agentManager.updateLockDataDir(),
   );
+  const [claudeProxy, codexProxy, kimiProxy] = await Promise.all([
+    agentManager.proxyLaunchDescriptor('claude'),
+    agentManager.proxyLaunchDescriptor('codex'),
+    agentManager.proxyLaunchDescriptor('kimi'),
+  ]);
 
   const handle = createApp({
     db,
     config,
     dataDir,
-    ccProxyEntry: agentManager.proxyEntry('claude'),
-    codexProxyEntry: agentManager.proxyEntry('codex'),
-    kimiProxyEntry: agentManager.proxyEntry('kimi'),
+    hostVersion: releaseVersion,
+    ccProxyEntry: claudeProxy.entryPath,
+    claudeProxyProtocolV1: claudeProxy.protocolV1,
+    codexProxyEntry: codexProxy.entryPath,
+    kimiProxyEntry: kimiProxy.entryPath,
+    codexProxyProtocolV1: codexProxy.protocolV1,
+    kimiProxyProtocolV1: kimiProxy.protocolV1,
     runtimeManager,
     agentManager,
   });

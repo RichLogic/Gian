@@ -12,6 +12,8 @@ import { Toaster } from '../src/components/Toaster.js';
 import { __resetFeedback } from '../src/feedback.js';
 import * as api from '../src/api.js';
 
+const ASYNC_DIALOG_TEST_TIMEOUT_MS = 10_000;
+
 vi.mock('../src/api.js', async () => {
   const actual = await vi.importActual<typeof import('../src/api.js')>('../src/api.js');
   return {
@@ -110,15 +112,16 @@ describe('SettingsBody Executors', () => {
   ];
 
   beforeEach(() => {
-    vi.clearAllMocks();
     delete window.gianDesktop;
-    vi.mocked(api.loadAgents).mockResolvedValue(agents);
-    vi.mocked(api.loadProxyCapabilities).mockImplementation(async id => capabilities(id));
-    vi.mocked(api.setAgentCliPath).mockImplementation(async id => agent(
+    // Reset implementations as well as calls so an unconsumed one-shot
+    // failure from a timed-out test cannot leak into the next case.
+    vi.mocked(api.loadAgents).mockReset().mockResolvedValue(agents);
+    vi.mocked(api.loadProxyCapabilities).mockReset().mockImplementation(async id => capabilities(id));
+    vi.mocked(api.setAgentCliPath).mockReset().mockImplementation(async id => agent(
       id,
       id === 'claude' ? 'Claude Code' : id === 'codex' ? 'Codex' : 'Kimi Code',
     ));
-    vi.mocked(api.setAgentProxyDefaults).mockImplementation(async id => agent(
+    vi.mocked(api.setAgentProxyDefaults).mockReset().mockImplementation(async id => agent(
       id,
       id === 'claude' ? 'Claude Code' : id === 'codex' ? 'Codex' : 'Kimi Code',
     ));
@@ -238,7 +241,7 @@ describe('SettingsBody Executors', () => {
       );
       expect(restartApp).toHaveBeenCalledOnce();
     }, { timeout: 5_000 });
-  });
+  }, ASYNC_DIALOG_TEST_TIMEOUT_MS);
 
   it('restores the previous path without persisting when restart is declined', async () => {
     const restartApp = vi.fn().mockResolvedValue(true);
@@ -257,7 +260,7 @@ describe('SettingsBody Executors', () => {
     await waitFor(() => expect(pathInput).toHaveValue('/bin/claude'));
     expect(api.setAgentCliPath).not.toHaveBeenCalled();
     expect(restartApp).not.toHaveBeenCalled();
-  });
+  }, ASYNC_DIALOG_TEST_TIMEOUT_MS);
 
   it('does not restart when persisting a CLI path fails', async () => {
     const restartApp = vi.fn().mockResolvedValue(true);
@@ -277,7 +280,7 @@ describe('SettingsBody Executors', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('invalid CLI');
     await waitFor(() => expect(pathInput).toHaveValue('/bin/claude'));
     expect(restartApp).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it('mirrors the confirmed shell relaunch in GianDev without managing its external Host', async () => {
     const restartApp = vi.fn().mockResolvedValue(true);

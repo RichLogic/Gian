@@ -9,9 +9,24 @@ import {
   readWtAutoApplied,
   writeWtAutoApplied,
   resolveViewedTreeId,
+  worktreeDisplayName,
 } from '../src/presentation/wt-view.js';
 
 beforeEach(() => localStorage.clear());
+
+describe('worktree display name', () => {
+  it('uses the checkout directory instead of its branch or session label', () => {
+    expect(worktreeDisplayName({
+      path: '/Users/rich/Coding/worktrees/gian-dev-0.4.1-bug-fix/',
+      label: 'CLI Proxy 插件化',
+    })).toBe('gian-dev-0.4.1-bug-fix');
+  });
+
+  it('supports Windows separators and falls back when the path has no name', () => {
+    expect(worktreeDisplayName({ path: 'C:\\worktrees\\gian-fix', label: 'fallback' })).toBe('gian-fix');
+    expect(worktreeDisplayName({ path: '/', label: 'Primary checkout' })).toBe('Primary checkout');
+  });
+});
 
 describe('wt-view override persistence', () => {
   it('round-trips a pick per session', () => {

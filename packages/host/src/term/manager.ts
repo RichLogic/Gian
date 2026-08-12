@@ -25,7 +25,9 @@ async function loadNodePty(): Promise<typeof import('node-pty')> {
 }
 
 /** Default ring-buffer cap per terminal (~1 MiB). */
-const DEFAULT_RING_BUFFER_BYTES = 1024 * 1024;
+export const DEFAULT_RING_BUFFER_BYTES = 1024 * 1024;
+/** Bound each WS frame so one noisy PTY cannot create multi-megabyte messages. */
+export const MAX_TERMINAL_OUTPUT_CHUNK_BYTES = 64 * 1024;
 
 interface WorkbenchTerminalRec {
   termId: string;
@@ -46,11 +48,24 @@ class RingBuffer {
   constructor(private readonly cap: number) {}
 
   push(chunk: Buffer): void {
+    if (chunk.length >= this.cap) {
+      this.chunks = [chunk.subarray(chunk.length - this.cap)];
+      this.size = this.cap;
+      return;
+    }
     this.chunks.push(chunk);
     this.size += chunk.length;
-    while (this.size > this.cap && this.chunks.length > 1) {
-      const head = this.chunks.shift();
-      if (head) this.size -= head.length;
+    while (this.size > this.cap) {
+      const overflow = this.size - this.cap;
+      const head = this.chunks[0];
+      if (!head) break;
+      if (head.length <= overflow) {
+        this.chunks.shift();
+        this.size -= head.length;
+      } else {
+        this.chunks[0] = head.subarray(overflow);
+        this.size -= overflow;
+      }
     }
   }
 
@@ -156,8 +171,11 @@ export class WorkbenchTerminalManager extends EventEmitter<WorkbenchTerminalEven
 
     proc.onData((data: string) => {
       const buf = Buffer.from(data, 'utf8');
-      ring.push(buf);
-      this.emit('output', opts.termId, buf);
+      for (let offset = 0; offset < buf.length; offset += MAX_TERMINAL_OUTPUT_CHUNK_BYTES) {
+        const chunk = buf.subarray(offset, offset + MAX_TERMINAL_OUTPUT_CHUNK_BYTES);
+        ring.push(chunk);
+        this.emit('output', opts.termId, chunk);
+      }
     });
     proc.onExit(({ exitCode, signal }) => {
       record.exited = true;

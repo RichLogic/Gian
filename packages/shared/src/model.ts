@@ -42,8 +42,9 @@ export interface NativeConfigChoice {
 
 /**
  * Executor-owned session configuration. IDs and values are deliberately
- * opaque: Gian renders and round-trips them but never maps their semantics
- * across CLIs.
+ * opaque for persistence and round-trip. A product control may classify an
+ * advertised option by category/id, but must always send the option's actual
+ * id back to that executor.
  */
 export interface NativeConfigOption {
   id: string;

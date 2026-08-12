@@ -1,11 +1,12 @@
 /**
  * Git History — panel 3 (Inspector): commit timeline with a slim DAG graph,
- * search, branch/author filters, refs chips, Refresh/Fetch, and cursor
+ * search, branch/author filters, refs chips, Sync, and cursor
  * pagination. Visual + interaction baseline: design/git-history/index.html.
  *
  * All view state lives in controllers/use-history.ts keyed by workingTreeId
  * (this component unmounts on rail collapse without losing anything), and the
- * Fetch mutation goes through the registered `git.historyFetch` operation —
+ * Sync refreshes local history first; its Fetch mutation goes through the
+ * registered `git.historyFetch` operation —
  * everything else on this surface is read-only (Issue #3).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -46,7 +47,6 @@ function Icon({ d, size = 13, stroke = 1.5 }: { d: string; size?: number; stroke
 
 const I = {
   refresh: 'M20 12a8 8 0 1 1-2.34-5.66 M20 4v4h-4',
-  fetch: 'M12 3v8 M8.5 7.5L12 11l3.5-3.5 M3.5 14.5L12 19l8.5-4.5 M3.5 18.5L12 23l8.5-4.5',
   search: 'M10.5 4.5a6 6 0 1 0 0 12 6 6 0 0 0 0-12z M19.5 19.5l-4.6-4.6',
   branch: 'M6 3v12 M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M18 9a9 9 0 0 1-9 9',
   tag: 'M3.5 3.5h7L20 13l-7 7L3.5 10.5z M8 8h.01',
@@ -226,6 +226,14 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
     refreshHistory(workingTreeId);
   }
 
+  function runSync(): void {
+    if (!workingTreeId || fetchPending) return;
+    // Show local commits without waiting for the network. A successful Fetch
+    // reconciles page 1 again after remote refs have been updated.
+    refreshHistory(workingTreeId);
+    runFetch();
+  }
+
   /* Search input is instant locally, debounced into the store (which refetches). */
   useEffect(() => {
     if (searchDraft === null || !workingTreeId) return;
@@ -313,14 +321,10 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
     <aside className="inspector" aria-label={t('dock.history')}>
       <div className="insp-head">
         <span className="label">{t('dock.history')}</span>
-        <button className="iconbtn" title={t('history.refresh.title')} aria-label={t('history.refresh.title')}
-                onClick={runRefresh} disabled={!workingTreeId}>
+        <button className="iconbtn" title={t('history.sync.title')} aria-label={t('history.sync.title')}
+                data-testid="history-sync"
+                onClick={runSync} disabled={!workingTreeId || fetchPending}>
           <Icon d={I.refresh} />
-        </button>
-        <button className="iconbtn" title={t('history.fetch.title')} aria-label={t('history.fetch.title')}
-                data-testid="history-fetch"
-                onClick={runFetch} disabled={!workingTreeId || fetchPending}>
-          <Icon d={I.fetch} />
           {state.moved && <span className="nudge" />}
         </button>
       </div>
@@ -328,7 +332,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
       {fetchPending && (
         <div className="h-fetchbar pending" role="status">
           <span className="ic"><span className="spinner" /></span>
-          <span className="txt">{t('history.fetch.pending')}<span className="sub">{t('history.fetch.pendingSub')}</span></span>
+          <span className="txt">{t('history.fetch.pending')}</span>
         </div>
       )}
       {!fetchPending && fetchNote?.kind === 'ok' && (
@@ -345,7 +349,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
             <b>{t('history.fetch.authFailed')}</b>
             {fetchNote.message && <span className="sub" title={fetchNote.message}>{fetchNote.message}</span>}
           </span>
-          <span className="act"><button className="btn secondary sm" onClick={runFetch}>{t('common.retry')}</button></span>
+          <span className="act"><button className="btn secondary sm" onClick={runSync}>{t('common.retry')}</button></span>
         </div>
       )}
       {!fetchPending && fetchNote?.kind === 'err' && (
@@ -355,7 +359,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
             {t('history.fetch.failed')}
             {fetchNote.message && <span className="sub" title={fetchNote.message}>{fetchNote.message}</span>}
           </span>
-          <span className="act"><button className="btn secondary sm" onClick={runFetch}>{t('common.retry')}</button></span>
+          <span className="act"><button className="btn secondary sm" onClick={runSync}>{t('common.retry')}</button></span>
         </div>
       )}
       {!fetchPending && fetchNote?.kind === 'unknown' && (
@@ -441,9 +445,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
             </>
           )}
         </span>
-        {/* The author menu is the rightmost chip — right-align its menu so it
-         *  can never fly out past the panel edge and cover the rail. */}
-        <span className="h-menu-anchor end">
+        <span className="h-menu-anchor">
           <button className={`h-chip${state.author ? ' on' : ''}`} aria-haspopup="menu"
                   aria-expanded={openMenu === 'author'} title={t('history.filter.authorTitle')}
                   onClick={() => { setOpenMenu(m => (m === 'author' ? null : 'author')); setMenuSearch(''); }}>
@@ -478,12 +480,6 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
             </>
           )}
         </span>
-        {(state.ref || state.author) && (
-          <button className="h-chip" title={t('history.filter.clear')}
-                  onClick={() => workingTreeId && clearHistoryFilters(workingTreeId)}>
-            <span className="x">✕</span>
-          </button>
-        )}
       </div>
 
       <div className="insp-scroll" ref={scrollRef}

@@ -44,10 +44,8 @@ describe('QUEUE-003: QueueList rendering', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('QUEUE-003: shows the entry count and each entry text in order', () => {
+  it('QUEUE-003: shows each entry text in order', () => {
     renderQueue({ queue: [entry('a', 'first'), entry('b', 'second'), entry('c', 'third')] });
-    // Count badge has class .qd-count
-    expect(document.querySelector('.qd-count')?.textContent).toBe('3');
     expect(screen.getByText('first')).toBeInTheDocument();
     expect(screen.getByText('second')).toBeInTheDocument();
     expect(screen.getByText('third')).toBeInTheDocument();

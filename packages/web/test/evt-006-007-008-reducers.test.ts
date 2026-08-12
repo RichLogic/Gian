@@ -268,6 +268,22 @@ describe('EVT-007: plan_update reducer surface', () => {
       turn: 1,
     });
   });
+
+  it('does not let later terminal turns reassign and perpetually pause an old plan', () => {
+    const active = applyPlanLifecycle(
+      { completed: false },
+      planUpdate('- [x] inspect\n- [ ] test', { delta: false }),
+    );
+    const paused = applyPlanLifecycle(active, turnEnvelope('turn_completed'));
+    const laterTerminal = {
+      ...turnEnvelope('turn_completed'),
+      turn: 8,
+      call_id: 'turn-8-complete',
+    };
+
+    expect(paused).toMatchObject({ status: 'paused', turn: 1 });
+    expect(applyPlanLifecycle(paused, laterTerminal)).toBe(paused);
+  });
 });
 
 // ---------------------------------------------------------------------------

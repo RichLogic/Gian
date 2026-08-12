@@ -103,7 +103,8 @@ export function TasksView({
   activeSubtaskId,
   subtaskMain,
   onSelectSubtask,
-  onWorkspaceCreated,
+  onNewWorkspace,
+  onSetPendingFirstMessage,
   railLayout,
 }: {
   /** Top-level app mode — the sidebar's mode dropdown reads/drives this. */
@@ -124,9 +125,13 @@ export function TasksView({
    *  subtask is selected. */
   subtaskMain: React.ReactNode;
   onSelectSubtask: (taskId: string, subtaskId: string) => void;
-  /** NewSessionView lets the user create a workspace inline; App owns the
-   *  workspace list. */
-  onWorkspaceCreated: (workspace: Workspace) => void;
+  /** Open the Workspaces "New workspace" sheet tab (the task-context
+   *  new-session page's workspace drop "+ New workspace" row). */
+  onNewWorkspace: () => void;
+  /** App-owned pendingFirstMessage channel: the first composer message is
+   *  stashed before create and auto-sent by the session:created socket
+   *  handler. Pass null to clear a stashed message after a failed create. */
+  onSetPendingFirstMessage: (text: string | null) => void;
   /** App-owned four-panel layout. Optional for isolated component renders. */
   railLayout?: RailLayoutController;
 }) {
@@ -157,6 +162,7 @@ export function TasksView({
       if (session) onSelectSubtask(taskId, session.id);
     } else if (subtaskCreateRun.phase === 'failed') {
       setSubtaskRun(null);
+      onSetPendingFirstMessage(null);
       toast({ kind: 'error', message: t('tasks.newSubtask.createFailed') });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -199,11 +205,18 @@ export function TasksView({
   }
 
   function submitNewSubtask(taskId: string, input: CreateSessionInput) {
+    // Stash the first message before dispatching: the session:created socket
+    // frame (origin 'task-create') consumes it and auto-sends once the
+    // subtask session exists — same channel as the plain session create.
+    onSetPendingFirstMessage(input.firstMessage?.trim() ? input.firstMessage : null);
     const run = dispatch('task.createSubtask', {
       taskId,
       workspaceId: input.workspaceId,
       executor: input.executor,
       ...(input.name ? { name: input.name } : {}),
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
+      ...(input.thinkingEffort ? { thinkingEffort: input.thinkingEffort } : {}),
     });
     setSubtaskRun({ runId: run.id, taskId });
   }
@@ -231,7 +244,7 @@ export function TasksView({
           workspaces={workspaces}
           taskName={newForTask.name}
           initialExecutor={newForExecutor}
-          onWorkspaceCreated={onWorkspaceCreated}
+          onNewWorkspace={onNewWorkspace}
           creating={creatingSubtask}
           onCancel={() => setNewForTaskId(null)}
           onCreate={input => { submitNewSubtask(newForTask.id, input); }}

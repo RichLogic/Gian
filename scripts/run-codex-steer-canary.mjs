@@ -82,6 +82,8 @@ export async function runCodexSteerCanary(options = {}) {
   let client;
   let watcher;
   let runtimeStopped = false;
+  let threadId;
+  let turnId;
   const debug = [];
 
   try {
@@ -99,7 +101,7 @@ export async function runCodexSteerCanary(options = {}) {
 
     await client.ensureStarted();
     const startedThread = await client.startThread({ cwd: canaryRoot, ephemeral: true });
-    const threadId = startedThread?.thread?.id;
+    threadId = startedThread?.thread?.id;
     assert.equal(typeof threadId, 'string', 'Codex returned no ephemeral thread id.');
     assert.ok(threadId, 'Codex returned an empty ephemeral thread id.');
 
@@ -108,7 +110,7 @@ export async function runCodexSteerCanary(options = {}) {
       text: 'Codex steer canary: draft a four-paragraph explanation of why same-turn steering is useful. Do not use tools.',
     }];
     const startedTurn = await client.startTurn(threadId, firstInput);
-    const turnId = startedTurn?.turn?.id;
+    turnId = startedTurn?.turn?.id;
     assert.equal(typeof turnId, 'string', 'Codex returned no turn id.');
     assert.ok(turnId, 'Codex returned an empty turn id.');
 
@@ -148,6 +150,15 @@ export async function runCodexSteerCanary(options = {}) {
       runtimeStopped,
       debugLineCount: debug.length,
     };
+  } catch (error) {
+    if (error instanceof Error && client && threadId) {
+      const read = await client.readThread(threadId).catch(() => null);
+      if (read) error.message += `\nCodex thread:\n${JSON.stringify(read)}`;
+    }
+    if (error instanceof Error && debug.length > 0) {
+      error.message += `\nCodex debug:\n${debug.join('\n')}`;
+    }
+    throw error;
   } finally {
     watcher?.close();
     if (client && !runtimeStopped) await client.stop().catch(() => {});

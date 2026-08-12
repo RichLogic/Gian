@@ -120,6 +120,57 @@ test('history pages are turn-bounded and compact legacy snapshot floods on read'
   }
 });
 
+test('large histories keep each response bounded by whole-turn pagination', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-history-large-'));
+  try {
+    const db = openDatabase(dir);
+    db.exec(`
+      INSERT INTO workspaces(id,name,path,sort_order,hidden,created_at,updated_at)
+      VALUES('w1','workspace','/tmp',0,0,datetime('now'),datetime('now'));
+      INSERT INTO sessions(id,name,type,workspace_id,executor,approval_mode,status,archived,unread,native_session_id,created_at,updated_at)
+      VALUES('s1','session','primary','w1','codex','plan','done',0,0,'native',datetime('now'),datetime('now'));
+    `);
+    const insertTurn = db.prepare(
+      `INSERT INTO turns(id,session_id,turn_number,status,created_at,completed_at)
+       VALUES(?, 's1', ?, 'completed', ?, ?)`,
+    );
+    db.transaction(() => {
+      for (let turn = 1; turn <= 1_000; turn++) {
+        const timestamp = new Date(Date.UTC(2026, 0, 1, 0, 0, turn)).toISOString();
+        insertTurn.run(`t${turn}`, turn, timestamp, timestamp);
+      }
+    })();
+    const history = new SessionHistoryStore(db);
+    db.transaction(() => {
+      for (let turn = 1; turn <= 1_000; turn++) {
+        history.appendEvent('s1', `t${turn}`, `user-${turn}`, 'user_message', {
+          text: `turn ${turn}`,
+        });
+      }
+    })();
+
+    const newest = history.listEventPage('s1', null);
+    assert.deepEqual([...new Set(newest.events.map(event => event.turn))], [998, 999, 1000]);
+    assert.equal(newest.hasMore, true);
+    assert.equal(newest.nextCursor, 998);
+    assert.ok(Buffer.byteLength(JSON.stringify(newest)) < 32 * 1024,
+      '1,000 persisted turns must not inflate the default response beyond its three-turn page');
+
+    const older = history.listEventPage('s1', newest.nextCursor);
+    assert.deepEqual([...new Set(older.events.map(event => event.turn))], [995, 996, 997]);
+    const clamped = history.listEventPage('s1', null, 100);
+    assert.equal(new Set(clamped.events.map(event => event.turn)).size, 10,
+      'even an oversized requested page is capped at ten complete turns');
+    assert.equal(
+      (db.prepare('SELECT COUNT(*) AS n FROM events WHERE session_id = ?').get('s1') as { n: number }).n,
+      1_000,
+      'pagination is a bounded read and does not compact away append-only history');
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('history treats offset-less SQLite event timestamps as UTC', () => {
   const dir = mkdtempSync(join(tmpdir(), 'gian-history-timestamp-'));
   const previousTimezone = process.env.TZ;

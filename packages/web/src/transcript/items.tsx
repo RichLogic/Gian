@@ -37,27 +37,8 @@ export const ImageZoomContext = createContext<
  *  itself stays compact (just file path + +/- stats). */
 export const DiffOpenContext = createContext<((item: DiffItem) => void) | null>(null);
 
-/** Provided by App.tsx: opens an over-threshold transcript detail (P3 level
- *  3 — full command output, long reasoning, long search-result list) in
- *  panel 2 as a preview text tab. Null when no provider is mounted — the
- *  row then keeps the P1 fallback (inline expand with a capped, scrolling
- *  detail). */
-export interface TranscriptDetailPayload {
-  /** Tab title, e.g. `Run: pnpm test`. */
-  title: string;
-  /** Full detail text (mono, pre-wrap body). */
-  text: string;
-  /** Logical transcript item id, for a stable tab identity across re-opens. */
-  sourceId?: string;
-}
-export const TranscriptDetailOpenContext = createContext<
-  ((payload: TranscriptDetailPayload) => void) | null
->(null);
-
-/** Compatibility path for callers that explicitly push plan markdown into the
- *  4th-level inspector. The persistent PlanChip now expands inline; keeping
- *  this provider leaves the Sheet capability available to other plan entry
- *  points without coupling the status strip back to the panel. */
+/** Compatibility path for transcript plan entries that open the chat-owned
+ *  panel. The persistent PlanChip itself still expands inline. */
 export interface PlanOpenPayload {
   /** Stable id used as the Sheet tab key. */
   id: string;
@@ -426,7 +407,7 @@ export function ToolEvent({
 }) {
   const t = useT();
   const { open, toggle } = useStableExpand();
-  const openDetail = useContext(TranscriptDetailOpenContext);
+  const openChatPanel = useContext(ChatPanelOpenContext);
   const hasDetail = !!(item.summary || item.output);
   // Historical tool cards all re-render while the current item streams. Keep
   // JSON parsing/stringifying bounded to a card whose own payload changed.
@@ -440,7 +421,7 @@ export function ToolEvent({
   // often a one-line JSON object and the inline key/value view deliberately
   // truncates long values; both forms must still offer the full value in
   // panel 2. Running tools remain inline so live output does not jump panels.
-  if (!running && hasDetail && detailNeedsPanel && openDetail) {
+  if (!running && hasDetail && detailNeedsPanel && openChatPanel) {
     return (
       <TRow
         verb={t('transcript.tool')}
@@ -453,7 +434,8 @@ export function ToolEvent({
             <span>{detail.lines} {t(detail.lines === 1 ? 'transcript.line' : 'transcript.lines')}</span>
           </>
         }
-        onRowClick={() => openDetail({
+        onRowClick={() => openChatPanel({
+          kind: 'transcript-detail',
           title: `${t('transcript.tool')}: ${item.name}`,
           text: detail.text,
           sourceId: transcriptItemIdentity(item),
@@ -726,13 +708,13 @@ export function AssistantMessage({ item, hideAvatar, showFooter }: { item: MsgIt
 export function ReasoningCard({ item }: { item: ReasoningItem }) {
   const t = useT();
   const { open, toggle } = useStableExpand();
-  const openDetail = useContext(TranscriptDetailOpenContext);
+  const openChatPanel = useContext(ChatPanelOpenContext);
   const lineCount = item.text ? item.text.split('\n').length : 0;
   const label = item.variant === 'summary' ? t('transcript.reasoning.summary') : t('transcript.reasoning.full');
   const preview = item.text.split('\n', 1)[0] ?? '';
   const expandable = item.text.length > 0;
   // Level 3 (P3): a long trace opens in panel 2 instead of scrolling inline.
-  if (expandable && lineCount > INLINE_OUTPUT_LINES && openDetail) {
+  if (expandable && lineCount > INLINE_OUTPUT_LINES && openChatPanel) {
     return (
       <TRow
         verb={label}
@@ -745,7 +727,8 @@ export function ReasoningCard({ item }: { item: ReasoningItem }) {
             <span>{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>
           </>
         }
-        onRowClick={() => openDetail({
+        onRowClick={() => openChatPanel({
+          kind: 'transcript-detail',
           title: label,
           text: item.text,
           sourceId: transcriptItemIdentity(item),
@@ -784,7 +767,7 @@ export function CommandCard({
 }) {
   const t = useT();
   const { open, toggle } = useStableExpand();
-  const openDetail = useContext(TranscriptDetailOpenContext);
+  const openChatPanel = useContext(ChatPanelOpenContext);
   const outputText = item.stdout + (item.stderr ? `\n${item.stderr}` : '');
   const hasOutput = outputText.length > 0;
   const lineCount = hasOutput ? visualLineCount(outputText) : 0;
@@ -797,7 +780,7 @@ export function CommandCard({
   );
   // Level 3 (P3): a finished command with >10 output lines opens the full
   // output in panel 2. Running commands keep streaming inline.
-  if (hasOutput && lineCount > INLINE_OUTPUT_LINES && !running && openDetail) {
+  if (hasOutput && lineCount > INLINE_OUTPUT_LINES && !running && openChatPanel) {
     return (
       <TRow
         verb={t('transcript.command.run')}
@@ -810,7 +793,8 @@ export function CommandCard({
             <span>{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>
           </>
         }
-        onRowClick={() => openDetail({
+        onRowClick={() => openChatPanel({
+          kind: 'transcript-detail',
           title: `${t('transcript.command.run')}: ${item.command}`,
           text: outputText,
           sourceId: transcriptItemIdentity(item),
@@ -870,13 +854,13 @@ export function FileReadCard({ item }: { item: FileReadItem }) {
 export function FileSearchCard({ item }: { item: FileSearchItem }) {
   const t = useT();
   const { open, toggle } = useStableExpand();
-  const openDetail = useContext(TranscriptDetailOpenContext);
+  const openChatPanel = useContext(ChatPanelOpenContext);
   const hasMatches = item.matches && item.matches.length > 0;
   const count = item.matchCount ?? item.matches?.length;
   const verb = item.searchKind === 'glob' ? t('transcript.file.glob') : t('transcript.file.grep');
   // Level 3 (P3): a long result list opens in panel 2 instead of scrolling
   // inline; short lists keep the inline detail.
-  if (hasMatches && item.matches!.length > INLINE_OUTPUT_LINES && openDetail) {
+  if (hasMatches && item.matches!.length > INLINE_OUTPUT_LINES && openChatPanel) {
     return (
       <TRow
         verb={verb}
@@ -889,7 +873,8 @@ export function FileSearchCard({ item }: { item: FileSearchItem }) {
             {count !== undefined && <span>{count} {t(count === 1 ? 'transcript.file.match' : 'transcript.file.matches')}</span>}
           </>
         }
-        onRowClick={() => openDetail({
+        onRowClick={() => openChatPanel({
+          kind: 'transcript-detail',
           title: `${verb}: /${item.pattern}/`,
           text: item.matches!.join('\n'),
           sourceId: transcriptItemIdentity(item),
@@ -981,6 +966,24 @@ export function CompactionRow({ item }: { item: CompactionItem }) {
  */
 export function AutoNoticeCard({ item }: { item: AutoNoticeItem }) {
   const t = useT();
+  if (item.variant === 'notice') {
+    if (item.severity === 'error') {
+      return (
+        <MinimalErrorCard label={item.title || item.code || 'Notice'}>
+          {item.message}
+        </MinimalErrorCard>
+      );
+    }
+    return (
+      <TRow
+        verb={item.title || 'Notice'}
+        subject={item.message}
+        subjectTitle={item.message}
+        subjectDim={item.severity === 'info'}
+        meta={item.code ? <span>{item.code}</span> : undefined}
+      />
+    );
+  }
   if (item.variant === 'circuit-breaker') {
     const triggerLabel = item.trigger === 'total'
       ? `${item.total} ${t('transcript.auto.totalDenials')}`

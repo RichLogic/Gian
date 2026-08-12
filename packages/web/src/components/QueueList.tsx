@@ -69,11 +69,7 @@ export function QueueList({
   return (
     <div className="queue-drawer">
       <div className="qd-head">
-        <span className="qd-title">
-          {t('queue.title')}
-          <span className="qd-count">{displayQueue.length}</span>
-        </span>
-        <span className="qd-sub">· {t('queue.subtitle')}</span>
+        <span className="qd-title">{t('queue.title')}</span>
         <div className="qd-actions">
           {onSendNow != null ? (
             <button className="btn xs secondary" onClick={onSendNow} disabled={sendingNow}>

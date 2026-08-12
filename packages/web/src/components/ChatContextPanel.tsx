@@ -54,9 +54,12 @@ export function ChatContextPanel({
     ? context.agents.find(item => item.id === target.id) ?? null
     : null;
   const plan = target.kind === 'plan' ? context.plan : null;
+  const detail = target.kind === 'transcript-detail' ? target : null;
   const title = target.kind === 'plan'
     ? t('chatPanel.plan.title')
-    : t('chatPanel.agent.title');
+    : target.kind === 'agent'
+      ? t('chatPanel.agent.title')
+      : target.title;
 
   return (
     <aside className="chat-context-panel" aria-label={title}>
@@ -91,7 +94,9 @@ export function ChatContextPanel({
 
         {agent && <AgentDetail agent={agent} />}
 
-        {!plan && !agent && (
+        {detail && <pre className="chat-context-detail">{detail.text}</pre>}
+
+        {!plan && !agent && !detail && (
           <div className="chat-context-empty">{t('chatPanel.unavailable')}</div>
         )}
       </div>
