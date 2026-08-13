@@ -192,7 +192,7 @@ test('negotiates ACP v1 without filesystem or terminal reverse capabilities', as
     protocolVersion: 1,
     clientInfo: {
       name: 'gian-grok-proxy',
-      version: '0.1.0',
+      version: '0.1.1',
     },
     clientCapabilities: {
       auth: {

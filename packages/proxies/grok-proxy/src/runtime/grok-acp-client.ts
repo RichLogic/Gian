@@ -112,7 +112,6 @@ function processTransportFactory(
     const child = spawn(options.binaryPath, [
       'agent',
       '--no-leader',
-      '--no-auto-update',
       'stdio',
     ], {
       env: {
@@ -243,7 +242,7 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
       protocolVersion: ACP_PROTOCOL_VERSION,
       clientInfo: {
         name: 'gian-grok-proxy',
-        version: '0.1.0',
+        version: '0.1.1',
       },
       clientCapabilities: {
         fs: {

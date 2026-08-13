@@ -58,7 +58,7 @@ test('Grok CLI negotiates gian.proxy/1 independently from its ACP runtime versio
   assert.equal(initialized.id, 1);
   const result = initializeResultSchema.parse(initialized.result);
   assert.equal(result.protocol.version, '1.0');
-  assert.equal(result.plugin.version, '0.1.0');
+  assert.equal(result.plugin.version, '0.1.1');
 
   proxy.send({ id: 2, method: 'does.not.exist', params: {} });
   assert.equal(proxyErrorResponseSchema.parse(await proxy.next()).error.code, 'METHOD_NOT_FOUND');
@@ -131,7 +131,7 @@ test('Grok runtime uses the locked ACP command and forces the workspace sandbox'
   });
   await proxy.next();
   assert.deepEqual(JSON.parse(await readFile(recordPath, 'utf8')), {
-    argv: ['agent', '--no-leader', '--no-auto-update', 'stdio'],
+    argv: ['agent', '--no-leader', 'stdio'],
     disableAutoUpdater: '1',
     sandbox: 'workspace',
   });

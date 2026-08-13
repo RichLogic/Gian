@@ -5,7 +5,7 @@ Shared structured-runtime adapter for Grok Build's ACP server.
 The process bridges two newline-delimited JSON protocols:
 
 - stdin/stdout facing Gian Host: `gian.proxy/1` only.
-- a managed child `grok agent --no-leader --no-auto-update stdio`: official
+- a managed child `grok agent --no-leader stdio`: official
   ACP v1 via `@agentclientprotocol/sdk`.
 
 The child always receives `GROK_SANDBOX=workspace` and
