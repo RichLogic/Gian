@@ -480,6 +480,42 @@ test('new sessions use defaults owned by their Proxy configuration', async () =>
   }
 });
 
+test('new Codex sessions persist Fast before their first turn starts', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'codex',
+      service_tier: 'fast',
+    });
+    assert.equal(session.service_tier, 'fast');
+
+    await sessions.sendMessage(session.id, 'first fast turn');
+    assert.equal(proxyMgr.client.startTurnCalls.at(-1)?.serviceTier, 'fast');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('blank session titles are normalized to null so auto-title remains enabled', async () => {
+  const { dir, db, wsId, sessions } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'codex',
+      name: '  \n\t  ',
+    });
+    assert.equal(session.name, null);
+    const stored = db.prepare('SELECT name FROM sessions WHERE id = ?')
+      .get(session.id) as { name: string | null };
+    assert.equal(stored.name, null);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('opaque approval options route without an executor-specific Host branch', async () => {
   const { dir, db, wsId, proxyMgr, approvals, sessions } = setup();
   try {
@@ -904,7 +940,7 @@ test('Kimi adoption coalesces replay chunks and keeps assistant IDs turn-local',
 });
 
 test('protocol v1 replay deduplicates events already persisted from the live stream', async () => {
-  const { dir, db, wsId, proxyMgr, sessions } = setupKimi();
+  const { dir, db, wsId, proxyMgr, broadcaster, sessions } = setupKimi();
   try {
     const adopted = await sessions.adoptKimiNativeSession({
       workspaceId: wsId,
@@ -963,6 +999,7 @@ test('protocol v1 replay deduplicates events already persisted from the live str
     ];
 
     proxyMgr.client.replaySession = async () => ({ replayStreamId: streamId, events: replay });
+    broadcaster.messages.length = 0;
     proxyMgr.client.fire({
       method: 'session.updated',
       params: {
@@ -979,6 +1016,11 @@ test('protocol v1 replay deduplicates events already persisted from the live str
       db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_events WHERE session_id = ?')
         .get(adopted.session.id) as { count: number }
     ).count === 4);
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'attention').length,
+      0,
+      'history refresh may rebuild transcript events but must not replay notifications',
+    );
     const beforeLiveEvents = (db.prepare(
       'SELECT COUNT(*) AS count FROM events WHERE session_id = ?',
     ).get(adopted.session.id) as { count: number }).count;
@@ -1061,13 +1103,14 @@ test('protocol v1 native-history refresh retries a transient replay failure', as
 });
 
 test('protocol v1 native-history refresh persists new replay eventIds exactly once', async () => {
-  const { dir, db, wsId, proxyMgr, sessions } = setupKimi();
+  const { dir, db, wsId, proxyMgr, broadcaster, sessions } = setupKimi();
   try {
     const adopted = await sessions.adoptKimiNativeSession({
       workspaceId: wsId,
       cwd: '/tmp/test-ws',
       nativeSessionId: 'native-protocol-history',
     });
+    broadcaster.messages.length = 0;
     let streamId = 'replay-native-protocol-history';
     const replayTurn = (turnId: string, startSequence: number) => [
       proxyNotificationSchema.parse({
@@ -1162,6 +1205,11 @@ test('protocol v1 native-history refresh persists new replay eventIds exactly on
       db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_turns')
         .get() as { count: number }
     ).count, 1);
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'attention').length,
+      1,
+      'the first newly observed external replay turn notifies exactly once',
+    );
 
     replay = [...replay, ...replayTurn('external-2', 5)];
     historyChanged();
@@ -1173,6 +1221,11 @@ test('protocol v1 native-history refresh persists new replay eventIds exactly on
       db.prepare('SELECT COUNT(*) AS count FROM proxy_replay_turns')
         .get() as { count: number }
     ).count, 2);
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'attention').length,
+      2,
+      'a second external replay tail adds one notification without replaying the first',
+    );
 
     streamId = 'replay-native-protocol-history-rewritten';
     replay = replayTurn('external-rewritten', 1);
@@ -1189,6 +1242,11 @@ test('protocol v1 native-history refresh persists new replay eventIds exactly on
       db.prepare('SELECT COUNT(*) AS count FROM turns')
         .get() as { count: number }
     ).count, 1);
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'attention').length,
+      2,
+      'a stream-revision transcript rebuild is historical and stays silent',
+    );
 
     const conflicting = {
       ...replay[2]!,
@@ -1753,6 +1811,12 @@ test('proxy notification persists event and broadcasts; turn.completed updates s
       0,
       'Gian must not broadcast a duplicate when the provider supplied completion',
     );
+    const attentions = broadcaster.messages.filter(
+      (message): message is Extract<ServerToClientMessage, { type: 'attention' }> =>
+        message.type === 'attention',
+    );
+    assert.deepEqual(attentions.map(message => message.kind), ['turn-completed']);
+    assert.equal(attentions[0]?.session_id, session.id);
     const doneUpdate = broadcaster.messages.find(
       (m): m is { type: 'session:updated'; session: { status?: string; unread?: number } } =>
         m.type === 'session:updated' && (m as { session: { status?: string } }).session.status === 'done',
@@ -1790,7 +1854,106 @@ test('turn.failed persists and broadcasts one Gian-owned terminal boundary', asy
       )).length,
       1,
     );
+    assert.deepEqual(
+      broadcaster.messages
+        .filter((message): message is Extract<ServerToClientMessage, { type: 'attention' }> => (
+          message.type === 'attention'
+        ))
+        .map(message => message.kind),
+      ['error'],
+    );
     assert.equal(sessions.getSession(session.id).status, 'error');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('duplicate legacy approval events emit one attention signal', async () => {
+  const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+      approval_mode: 'ask',
+    });
+    await sessions.sendMessage(session.id, 'request permission');
+    broadcaster.messages.length = 0;
+    const notification: ProxyNotification = {
+      method: 'approval.requested',
+      params: {
+        sessionId: 'proxy_x',
+        data: {
+          approvalId: 'same-approval',
+          toolName: 'Bash',
+          risk: 'high',
+          inputPreview: JSON.stringify({
+            command: 'pnpm test',
+            description: 'Run the project checks.',
+          }),
+        },
+      },
+    };
+
+    proxyMgr.client.fire(notification);
+    proxyMgr.client.fire(notification);
+
+    assert.equal(
+      broadcaster.messages.filter(message => (
+        message.type === 'event' && message.display?.type === 'interaction.approval'
+      )).length,
+      2,
+      'legacy providers may repeat the transcript event itself',
+    );
+    const attentions = broadcaster.messages.filter(
+      (message): message is Extract<ServerToClientMessage, { type: 'attention' }> =>
+        message.type === 'attention',
+    );
+    assert.equal(attentions.length, 1, 'bounded identity de-duplication suppresses the repeat');
+    assert.match(attentions[0]?.id ?? '', /^gian:attention:[A-Za-z0-9_-]{43}$/u);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('auto-approved requests do not emit attention', async () => {
+  const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+      approval_mode: 'ask',
+    });
+    await sessions.sendMessage(session.id, 'run a safe command');
+    broadcaster.messages.length = 0;
+
+    proxyMgr.client.fire({
+      method: 'approval.requested',
+      params: {
+        sessionId: 'proxy_x',
+        data: {
+          approvalId: 'auto-approved-request',
+          toolName: 'Bash',
+          risk: 'low',
+          inputPreview: JSON.stringify({
+            command: 'pwd',
+            description: 'Inspect the current directory.',
+          }),
+        },
+      },
+    });
+
+    await waitFor(() => broadcaster.messages.some(message => (
+      message.type === 'approval:created'
+      && message.approval.id === 'auto-approved-request'
+      && message.approval.status === 'auto-approved'
+    )));
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'attention').length,
+      0,
+      'attention is emitted only after ApprovalManager confirms pending state',
+    );
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -1990,6 +2153,7 @@ test('user-initiated stop settles status=done WITHOUT marking unread', async () 
     await sessions.sendMessage(session.id, 'ping'); // opens an active turn
     const client = proxyMgr.client;
     sessions.enqueueMessage(session.id, 'must remain queued');
+    broadcaster.messages.length = 0;
     await sessions.stopTurn(session.id);            // → completeTurn('stopped')
 
     const row = db.prepare('SELECT status, unread FROM sessions WHERE id = ?').get(session.id) as { status: string; unread: number };
@@ -2002,6 +2166,11 @@ test('user-initiated stop settles status=done WITHOUT marking unread', async () 
     assert.ok(broadcaster.messages.some(message => (
       message.type === 'event' && message.event === 'gian.turn.completed'
     )), 'local stop broadcasts the same persisted fold boundary');
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'attention').length,
+      0,
+      'a user-initiated stop does not produce completion attention',
+    );
     assert.equal(proxyMgr.client.startTurnCalls.length, 1, 'local stop must not auto-send queued work');
     assert.equal(sessions.getQueueLength(session.id), 1);
     assert.equal(client.notificationHandlers.length, 1, 'stop keeps exactly one live notification binding');
@@ -2035,8 +2204,8 @@ test('user-initiated stop settles status=done WITHOUT marking unread', async () 
   }
 });
 
-test('provider terminal emitted inside interrupt settles stopped and does not drain queue', async () => {
-  const { dir, db, wsId, sessions, proxyMgr } = setup();
+test('provider completion emitted inside interrupt settles stopped without attention or queue drain', async () => {
+  const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
   try {
     const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
     proxyMgr.client.startTurnIds.push('stop-race-turn');
@@ -2065,6 +2234,46 @@ test('provider terminal emitted inside interrupt settles stopped and does not dr
       sessions.listEvents(session.id)
         .filter(event => event.display?.type === 'state.turn-completed').length,
       1,
+    );
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'attention').length,
+      0,
+      'a synchronous provider completion cannot outrun the Stop attention boundary',
+    );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('provider failure emitted inside interrupt settles stopped without error attention', async () => {
+  const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    proxyMgr.client.startTurnIds.push('stop-failure-race-turn');
+    await sessions.sendMessage(session.id, 'ping');
+    broadcaster.messages.length = 0;
+    proxyMgr.client.notificationDuringInterrupt = {
+      method: 'turn.failed',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'stop-failure-race-turn',
+        data: { message: 'interrupted by user' },
+      },
+    };
+
+    await sessions.stopTurn(session.id);
+
+    const turn = db.prepare(
+      'SELECT status FROM turns WHERE session_id = ?',
+    ).get(session.id) as { status: string };
+    assert.equal(turn.status, 'stopped');
+    assert.equal(sessions.getSession(session.id).status, 'done');
+    assert.equal(sessions.getSession(session.id).unread, 0);
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'attention').length,
+      0,
+      'a synchronous provider failure cannot outrun the Stop attention boundary',
     );
   } finally {
     db.close();

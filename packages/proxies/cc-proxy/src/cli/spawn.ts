@@ -27,7 +27,7 @@ import { createProtocolWriter, protocolError, writeJsonLine } from '../transport
 import { ClaudeProtocolV1Adapter, claudeProtocolError } from '../protocol/v1-adapter.js';
 
 const SELF_TEST_FLAG = '--self-test';
-const PLUGIN_VERSION = '0.1.0';
+const PLUGIN_VERSION = '0.1.1';
 const V1_METHODS = new Set<string>([
   ...CORE_METHODS,
   ...Object.keys(OPTIONAL_METHOD_CAPABILITIES),

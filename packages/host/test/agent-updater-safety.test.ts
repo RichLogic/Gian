@@ -45,6 +45,10 @@ import {
   KimiProxySessionClient,
 } from '../src/proxy/kimi-proxy-client.js';
 import {
+  GrokProtocolV1Host,
+  GrokProtocolV1SessionClient,
+} from '../src/proxy/grok-protocol-v1-client.js';
+import {
   createProxyProcessShutdownState,
   shutdownProxyProcess,
 } from '../src/proxy/process-shutdown.js';
@@ -313,6 +317,7 @@ test('pinned official installer runs with vendor updater isolation', async t => 
       claude: proxyPath,
       codex: proxyPath,
       kimi: proxyPath,
+      grok: proxyPath,
     },
     homeDir,
     pathEnv: '',
@@ -396,6 +401,7 @@ test('install route cannot replace an in-use CLI and re-probes after the last le
       claude: proxyPath,
       codex: proxyPath,
       kimi: proxyPath,
+      grok: proxyPath,
     },
     environmentCliPaths: { claude: cliPath },
     homeDir,
@@ -572,6 +578,7 @@ test('real status --version probe blocks installer fetch and post-install status
       claude: proxyPath,
       codex: proxyPath,
       kimi: proxyPath,
+      grok: proxyPath,
     },
     environmentCliPaths: { claude: cliPath },
     homeDir,
@@ -643,6 +650,7 @@ test('setCliPath restores the previous configured path when its status claim is 
       claude: proxyPath,
       codex: proxyPath,
       kimi: proxyPath,
+      grok: proxyPath,
     },
     homeDir: join(root, 'home'),
     pathEnv: '',
@@ -702,7 +710,7 @@ printf 'claude 2.0.0\\n'
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath },
+    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath },
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
@@ -761,7 +769,7 @@ if [ "$count" -eq 1 ]; then printf 'claude 2.0.0\\n'; else printf 'broken\\n'; f
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath },
+    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath },
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
@@ -792,7 +800,7 @@ test('setCliPath keeps a committed path when only claim retirement fails', {
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath },
+    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath },
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
@@ -839,7 +847,7 @@ test('committed Proxy defaults invalidate cached status before claim retirement'
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath },
+    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath },
     environmentCliPaths: { claude: cliPath },
     homeDir: join(root, 'home'),
     pathEnv: '',
@@ -891,7 +899,7 @@ test('config mutations serialize locally and a stale Host reloads before commit'
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false as const,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath },
+    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath },
     homeDir,
     pathEnv: '',
   };
@@ -2355,7 +2363,7 @@ test('Proxy close barrier waits for an in-flight runtime attempt to release its 
 });
 
 test('startup leases remain strongly retryable when reservation and lease cleanup fail', async t => {
-  for (const executor of ['claude', 'codex', 'kimi'] as const) {
+  for (const executor of ['claude', 'codex', 'kimi', 'grok'] as const) {
     const root = await mkdtemp(join(tmpdir(), `gian-${executor}-startup-binding-`));
     t.after(() => rm(root, { recursive: true, force: true }));
     let acquireCalls = 0;
@@ -2386,6 +2394,7 @@ test('startup leases remain strongly retryable when reservation and lease cleanu
       ccProxyEntry: '/unused/cc-proxy.mjs',
       ...(executor === 'codex' ? { codexProxyEntry: '/unused/codex-proxy.mjs' } : {}),
       ...(executor === 'kimi' ? { kimiProxyEntry: '/unused/kimi-proxy.mjs' } : {}),
+      ...(executor === 'grok' ? { grokProxyEntry: '/unused/grok-proxy.mjs' } : {}),
       runtimeManager: runtimeManager as never,
     });
 
@@ -2426,14 +2435,16 @@ test('startup leases remain strongly retryable when reservation and lease cleanu
 });
 
 test('already-empty Proxy startup skips shutdown and records terminal absence', async t => {
-  const observeCalls = { claude: 0, codex: 0, kimi: 0 };
-  const shutdownCalls = { claude: 0, codex: 0, kimi: 0 };
+  const observeCalls = { claude: 0, codex: 0, kimi: 0, grok: 0 };
+  const shutdownCalls = { claude: 0, codex: 0, kimi: 0, grok: 0 };
   const originalClaudeObserve = CcProxyClient.prototype.observeProcessGroupAbsence;
   const originalCodexObserve = CodexProxyHost.prototype.observeProcessGroupAbsence;
   const originalKimiObserve = KimiProxyHost.prototype.observeProcessGroupAbsence;
+  const originalGrokObserve = GrokProtocolV1Host.prototype.observeProcessGroupAbsence;
   const originalClaudeShutdown = CcProxyClient.prototype.shutdown;
   const originalCodexShutdown = CodexProxyHost.prototype.shutdown;
   const originalKimiShutdown = KimiProxyHost.prototype.shutdown;
+  const originalGrokShutdown = GrokProtocolV1Host.prototype.shutdown;
   CcProxyClient.prototype.observeProcessGroupAbsence = function observeClaudeAbsence() {
     observeCalls.claude += 1;
     originalClaudeObserve.call(this);
@@ -2446,6 +2457,10 @@ test('already-empty Proxy startup skips shutdown and records terminal absence', 
     observeCalls.kimi += 1;
     originalKimiObserve.call(this);
   };
+  GrokProtocolV1Host.prototype.observeProcessGroupAbsence = function observeGrokAbsence() {
+    observeCalls.grok += 1;
+    originalGrokObserve.call(this);
+  };
   CcProxyClient.prototype.shutdown = async function skipClaudeShutdown() {
     shutdownCalls.claude += 1;
   };
@@ -2455,16 +2470,21 @@ test('already-empty Proxy startup skips shutdown and records terminal absence', 
   KimiProxyHost.prototype.shutdown = async function skipKimiShutdown() {
     shutdownCalls.kimi += 1;
   };
+  GrokProtocolV1Host.prototype.shutdown = async function skipGrokShutdown() {
+    shutdownCalls.grok += 1;
+  };
   t.after(() => {
     CcProxyClient.prototype.observeProcessGroupAbsence = originalClaudeObserve;
     CodexProxyHost.prototype.observeProcessGroupAbsence = originalCodexObserve;
     KimiProxyHost.prototype.observeProcessGroupAbsence = originalKimiObserve;
+    GrokProtocolV1Host.prototype.observeProcessGroupAbsence = originalGrokObserve;
     CcProxyClient.prototype.shutdown = originalClaudeShutdown;
     CodexProxyHost.prototype.shutdown = originalCodexShutdown;
     KimiProxyHost.prototype.shutdown = originalKimiShutdown;
+    GrokProtocolV1Host.prototype.shutdown = originalGrokShutdown;
   });
 
-  for (const executor of ['claude', 'codex', 'kimi'] as const) {
+  for (const executor of ['claude', 'codex', 'kimi', 'grok'] as const) {
     const root = await mkdtemp(join(tmpdir(), `gian-${executor}-known-empty-startup-`));
     t.after(() => rm(root, { recursive: true, force: true }));
     const proxyEntry = join(root, 'fast-exit-proxy.mjs');
@@ -2502,6 +2522,7 @@ test('already-empty Proxy startup skips shutdown and records terminal absence', 
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
       ...(executor === 'kimi' ? { kimiProxyEntry: proxyEntry } : {}),
+      ...(executor === 'grok' ? { grokProxyEntry: proxyEntry } : {}),
       runtimeManager: runtimeManager as never,
     });
 
@@ -2587,7 +2608,7 @@ test('a stale unpublished Claude runtime retains its lease until shutdown can be
 });
 
 test('failed close blocks replacement runtimes until exact cleanup is retried', async t => {
-  for (const executor of ['claude', 'codex', 'kimi'] as const) {
+  for (const executor of ['claude', 'codex', 'kimi', 'grok'] as const) {
     const root = await mkdtemp(join(tmpdir(), `gian-${executor}-failed-close-barrier-`));
     t.after(() => rm(root, { recursive: true, force: true }));
     const proxyEntry = join(root, 'close-barrier-proxy.mjs');
@@ -2603,12 +2624,13 @@ test('failed close blocks replacement runtimes until exact cleanup is retried', 
     `);
     let acquireCalls = 0;
     let releaseCalls = 0;
-    const runtimeManager = executor === 'kimi' ? {
+    const usesSharedRuntime = executor === 'kimi' || executor === 'grok';
+    const runtimeManager = usesSharedRuntime ? {
       async acquire() {
         acquireCalls += 1;
         return {
-          cli: 'kimi' as const,
-          binaryPath: '/fake/kimi',
+          cli: executor,
+          binaryPath: `/fake/${executor}`,
           version: `${acquireCalls}.0.0`,
           source: 'managed' as const,
           env: {},
@@ -2621,14 +2643,15 @@ test('failed close blocks replacement runtimes until exact cleanup is retried', 
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
       ...(executor === 'kimi' ? { kimiProxyEntry: proxyEntry } : {}),
+      ...(executor === 'grok' ? { grokProxyEntry: proxyEntry } : {}),
       ...(runtimeManager ? { runtimeManager: runtimeManager as never } : {}),
     });
     const client = await manager.getOrCreate(`${executor}-failed-close`, executor);
     const owner = client instanceof CodexProxySessionClient
+      || client instanceof KimiProxySessionClient
+      || client instanceof GrokProtocolV1SessionClient
       ? client.runtimeHost()
-      : client instanceof KimiProxySessionClient
-        ? client.runtimeHost()
-        : client;
+      : client;
     const originalShutdown = owner.shutdown;
     owner.shutdown = async () => {
       throw new Error(`controlled ${executor} close cleanup failure`);
@@ -2646,19 +2669,19 @@ test('failed close blocks replacement runtimes until exact cleanup is retried', 
       manager.getOrCreate(`${executor}-replacement-blocked`, executor),
       new RegExp(`controlled ${executor} close cleanup failure`),
     );
-    if (executor === 'kimi') assert.equal(acquireCalls, 1);
+    if (usesSharedRuntime) assert.equal(acquireCalls, 1);
 
     owner.shutdown = originalShutdown;
     await manager.closeByExecutor(executor);
     const replacement = await manager.getOrCreate(`${executor}-replacement`, executor);
     const replacementOwner = replacement instanceof CodexProxySessionClient
+      || replacement instanceof KimiProxySessionClient
+      || replacement instanceof GrokProtocolV1SessionClient
       ? replacement.runtimeHost()
-      : replacement instanceof KimiProxySessionClient
-        ? replacement.runtimeHost()
-        : replacement;
+      : replacement;
     assert.notEqual(replacementOwner, owner);
     await manager.closeAll();
-    if (executor === 'kimi') {
+    if (usesSharedRuntime) {
       assert.equal(acquireCalls, 2);
       assert.equal(releaseCalls, 2);
     }
@@ -2744,7 +2767,7 @@ test('racing dispose holds every same-session creation waiter behind its barrier
 test('unexpected Proxy leader exit releases runtime only after orphan PGID cleanup', {
   skip: process.platform !== 'darwin' && process.platform !== 'linux',
 }, async t => {
-  for (const executor of ['claude', 'codex', 'kimi'] as const) {
+  for (const executor of ['claude', 'codex', 'kimi', 'grok'] as const) {
     const root = await mkdtemp(join(tmpdir(), `gian-${executor}-unexpected-pgid-`));
     t.after(() => rm(root, { recursive: true, force: true }));
     const groupFile = join(root, 'group.json');
@@ -2796,6 +2819,7 @@ test('unexpected Proxy leader exit releases runtime only after orphan PGID clean
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
       ...(executor === 'kimi' ? { kimiProxyEntry: proxyEntry } : {}),
+      ...(executor === 'grok' ? { grokProxyEntry: proxyEntry } : {}),
       runtimeManager: runtimeManager as never,
     });
     await manager.getOrCreate(`${executor}-unexpected-session`, executor);
@@ -2903,7 +2927,7 @@ test('same-session concurrent getOrCreate is single-flight and releases each cli
 });
 
 test('an exited Proxy is never published after delayed process-group registration', async t => {
-  for (const executor of ['claude', 'codex', 'kimi'] as const) {
+  for (const executor of ['claude', 'codex', 'kimi', 'grok'] as const) {
     const root = await mkdtemp(join(tmpdir(), `gian-${executor}-dead-publication-`));
     t.after(() => rm(root, { recursive: true, force: true }));
     const proxyEntry = join(root, 'early-exit-proxy.mjs');
@@ -2950,6 +2974,7 @@ test('an exited Proxy is never published after delayed process-group registratio
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
       ...(executor === 'kimi' ? { kimiProxyEntry: proxyEntry } : {}),
+      ...(executor === 'grok' ? { grokProxyEntry: proxyEntry } : {}),
       runtimeManager: runtimeManager as never,
     });
 
@@ -2969,7 +2994,7 @@ test('an exited Proxy is never published after delayed process-group registratio
 });
 
 test('executor close waits for unexpected-exit runtime release after cache deletion', async t => {
-  for (const executor of ['claude', 'codex', 'kimi'] as const) {
+  for (const executor of ['claude', 'codex', 'kimi', 'grok'] as const) {
     const root = await mkdtemp(join(tmpdir(), `gian-${executor}-release-barrier-`));
     t.after(() => rm(root, { recursive: true, force: true }));
     const proxyEntry = join(root, 'self-exit-proxy.mjs');
@@ -3000,6 +3025,7 @@ test('executor close waits for unexpected-exit runtime release after cache delet
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
       ...(executor === 'kimi' ? { kimiProxyEntry: proxyEntry } : {}),
+      ...(executor === 'grok' ? { grokProxyEntry: proxyEntry } : {}),
       runtimeManager: runtimeManager as never,
     });
     const sessionId = `${executor}-release-barrier-session`;

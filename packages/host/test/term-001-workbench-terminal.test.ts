@@ -19,6 +19,7 @@ import {
   DEFAULT_RING_BUFFER_BYTES,
   MAX_TERMINAL_OUTPUT_CHUNK_BYTES,
   WorkbenchTerminalManager,
+  terminalOptions,
   type PtyFactory,
 } from '../src/term/manager.js';
 
@@ -151,6 +152,33 @@ test('TERM-001: spawn() creates a PTY, returns empty replay + alive=true', async
   assert.equal(ctx.spawnCalls.length, 1);
   assert.equal(ctx.spawnCalls[0]!.cols, 80);
   assert.equal(ctx.spawnCalls[0]!.rows, 24);
+});
+
+test('TERM-001: discovered shells include the effective system shell and drive spawn', async () => {
+  const options = terminalOptions();
+  assert.ok(options.system_shell.startsWith('/'));
+  assert.ok(options.shells.some(shell => shell.path === options.system_shell));
+  assert.ok(options.shells.every(shell => shell.path.startsWith('/') && shell.label.length > 0));
+
+  const ctx = setup();
+  await ctx.mgr.spawn({
+    termId: 'configured-shell',
+    cwd: '/tmp',
+    shell: options.system_shell,
+    cols: 80,
+    rows: 24,
+  });
+  assert.equal(ctx.spawnCalls[0]!.shell, options.system_shell);
+});
+
+test('TERM-001: spawn rejects executable paths that are not discovered login shells', async () => {
+  const ctx = setup();
+  await assert.rejects(
+    ctx.mgr.spawn({ termId: 'bad-shell', cwd: '/tmp', shell: '/bin/echo', cols: 80, rows: 24 }),
+    /Terminal shell is not available/,
+  );
+  assert.equal(ctx.spawnCalls.length, 0);
+  assert.equal(ctx.mgr.size(), 0);
 });
 
 test('TERM-001: PTY output broadcasts term:output with base64-encoded chunks', async () => {

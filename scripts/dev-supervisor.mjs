@@ -71,6 +71,7 @@ async function runBuild() {
     '--filter', '@gian/cc-proxy',
     '--filter', '@gian/codex-proxy',
     '--filter', '@gian/kimi-proxy',
+    '--filter', '@gian/grok-proxy',
     'build',
   ]);
   services = child;

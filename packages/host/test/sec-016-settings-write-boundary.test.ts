@@ -4,7 +4,9 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { loadConfig, loadPasswordHash, saveConfig, savePasswordHash } from '../src/storage/config.js';
+import { terminalOptions } from '../src/term/manager.js';
 import { makeTestApp, type TestAppCtx } from './fixtures/test-app.js';
+import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 
 async function patchSettings(ctx: TestAppCtx, body: unknown): Promise<Response> {
   return ctx.fetch('/api/settings', {
@@ -83,6 +85,14 @@ test('SEC-016 · malformed, non-object, wrong-type, and out-of-range bodies retu
       { open_apps: [] },
       { open_apps: { executable: 'Calculator' } },
       { open_apps: { code: 42 } },
+      { terminal: null },
+      { terminal: { ...DEFAULT_TERMINAL_PREFERENCES, font_size: 23 } },
+      { terminal: { ...DEFAULT_TERMINAL_PREFERENCES, line_height: 0.9 } },
+      { terminal: { ...DEFAULT_TERMINAL_PREFERENCES, cursor_blink: 'yes' } },
+      { terminal: { ...DEFAULT_TERMINAL_PREFERENCES, scrollback_lines: 2_000 } },
+      { terminal: { ...DEFAULT_TERMINAL_PREFERENCES, shell: '/bin/echo' } },
+      { terminal: { ...DEFAULT_TERMINAL_PREFERENCES, extra: true } },
+      { terminal: { font_size: 13 } },
     ];
 
     for (const payload of invalidPayloads) {
@@ -122,6 +132,17 @@ test('SEC-016 · retired appearance preferences normalize while current settings
         pdf: '@finder',
         other: 'TextEdit',
       },
+      terminal: {
+        ...DEFAULT_TERMINAL_PREFERENCES,
+        font_family: 'sf-mono' as const,
+        font_size: 15,
+        line_height: 1.3,
+        cursor_style: 'underline' as const,
+        cursor_blink: false,
+        scrollback_lines: 10_000 as const,
+        shell: terminalOptions().system_shell,
+        start_directory: 'home' as const,
+      },
     } as const;
 
     const response = await patchSettings(ctx, payload);
@@ -148,6 +169,21 @@ test('SEC-016 · retired appearance preferences normalize while current settings
     assert.equal(stored.locale, payload.locale);
     assert.deepEqual(stored.external_editors, payload.external_editors);
     assert.deepEqual(stored.open_apps, payload.open_apps);
+    assert.deepEqual(stored.terminal, payload.terminal);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('TERM-001 · terminal options route returns only discovered executable shells', async () => {
+  const ctx = await makeTestApp();
+  try {
+    const response = await ctx.fetch('/api/settings/terminal-options');
+    assert.equal(response.status, 200);
+    const options = await response.json() as ReturnType<typeof terminalOptions>;
+    assert.ok(options.system_shell.startsWith('/'));
+    assert.ok(options.shells.some(shell => shell.path === options.system_shell));
+    assert.ok(options.shells.every(shell => shell.path.startsWith('/') && shell.label.length > 0));
   } finally {
     await ctx.cleanup();
   }

@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import {
   useEffect,
   useRef,
@@ -7,7 +7,7 @@ import {
 } from 'react';
 import type { ClientToServerMessage, Session } from '@gian/shared';
 import { describe, expect, it, vi } from 'vitest';
-import { loadSessions } from '../src/api.js';
+import { loadSessions, uploadAttachment } from '../src/api.js';
 import { useAppSocket } from '../src/controllers/use-app-socket.js';
 import { reloadFailedSessionMetadata } from '../src/controllers/session-failure-reload.js';
 import { __resetFeedback, getSnapshot as feedbackSnapshot } from '../src/feedback.js';
@@ -27,6 +27,7 @@ import type { TranscriptItem } from '../src/types.js';
 import { GianWs } from '../src/ws.js';
 import { sessionContractFixture, stateSyncFixture } from './fixtures/ws-contract.js';
 import { getMockWebSockets } from './setup.js';
+import type { PendingFirstMessageValue } from '../src/pending-first-message.js';
 
 vi.mock('../src/api.js', async () => {
   const actual = await vi.importActual<typeof import('../src/api.js')>('../src/api.js');
@@ -36,6 +37,7 @@ vi.mock('../src/api.js', async () => {
     loadSessions: vi.fn(async () => []),
     loadTasks: vi.fn(async () => []),
     loadWorkingTrees: vi.fn(async () => []),
+    uploadAttachment: vi.fn(),
   };
 });
 
@@ -47,7 +49,7 @@ interface HarnessProps {
   ops: OperationDispatcher;
   initialSessions?: Session[];
   initialActiveSessionId?: string;
-  pendingFirstMessage?: string | null;
+  pendingFirstMessage?: PendingFirstMessageValue;
   initialItemsBySession?: Record<string, TranscriptItem[]>;
   initialPlanStateBySession?: Record<string, PlanLifecycleState>;
 }
@@ -74,7 +76,7 @@ function ClientReducerHarness({
   itemsBySessionRef.current = itemsBySession;
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
-  const pendingFirstMessageRef = useRef<string | null>(pendingFirstMessage);
+  const pendingFirstMessageRef = useRef<PendingFirstMessageValue>(pendingFirstMessage);
   const setSessionsRef = (next: SetStateAction<Session[]>) => {
     sessionsRef.current = typeof next === 'function' ? next(sessionsRef.current) : next;
   };
@@ -140,7 +142,7 @@ function ClientReducerHarness({
 interface Snapshot {
   authed: boolean;
   activeSessionId: string | null;
-  pendingFirstMessage: string | null;
+  pendingFirstMessage: PendingFirstMessageValue;
   itemsBySession: Record<string, Array<{
     kind?: TranscriptItem['kind'];
     id?: string;
@@ -535,6 +537,75 @@ describe('WS-003: Host dispatch failure through the real Web client chain', () =
         session_id: nextCreated.id,
         text: 'first message for the next create',
       }));
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      wireMessageEchoSink(null);
+    }
+  });
+
+  it('uploads a new-session screenshot before sending the attachment-only first turn', async () => {
+    const created = sessionContractFixture({ id: 'session-with-screenshot' });
+    vi.mocked(uploadAttachment).mockResolvedValue({
+      path: '/tmp/gian/attachments/session-with-screenshot/captured.png',
+      name: 'captured.png',
+      mime: 'image/png',
+      size: 4,
+    });
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        pendingFirstMessage={{
+          scope: { kind: 'workspace', id: 'workspace-contract' },
+          text: '',
+          attachments: [{
+            id: 'capture-1',
+            name: 'captured.png',
+            mime: 'image/png',
+            size: 4,
+            blob: new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: 'image/png' }),
+          }],
+        }}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage(stateSyncFixture()));
+      act(() => socket.fakeMessage({
+        type: 'session:created',
+        session: created,
+        origin: 'interactive-create',
+      }));
+
+      await waitFor(() => expect(uploadAttachment).toHaveBeenCalledWith(
+        created.id,
+        expect.objectContaining({ type: 'image/png', size: 4 }),
+        'captured.png',
+      ));
+      await waitFor(() => expect(socket.parsedSent<ClientToServerMessage>())
+        .toContainEqual(expect.objectContaining({
+          type: 'message:send',
+          session_id: created.id,
+          text: '',
+          items: [expect.objectContaining({
+            type: 'localImage',
+            path: '/tmp/gian/attachments/session-with-screenshot/captured.png',
+          })],
+        })));
+      expect(snapshot().pendingFirstMessage).toBeNull();
     } finally {
       view.unmount();
       ops.dispose();

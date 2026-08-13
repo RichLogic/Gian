@@ -12,7 +12,7 @@ import type {
   SandboxPolicy,
   ThinkingLevel,
 } from '../core/types.js';
-import type { CodexRuntime } from './types.js';
+import type { CodexNativeThreadSummary, CodexRuntime } from './types.js';
 
 function toError(value: unknown, fallback: string) {
   return value instanceof Error ? value : new Error(value ? String(value) : fallback);
@@ -286,6 +286,50 @@ function normalizeThreadBootstrap(response: unknown) {
   return {
     thread: { id: threadId },
     configuredPermissions: normalizeConfiguredPermissions(record),
+  };
+}
+
+function normalizedLabel(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const label = value.replace(/\s+/g, ' ').trim();
+  return label || null;
+}
+
+function previewLabel(value: unknown): string | null {
+  const label = normalizedLabel(value);
+  if (!label) return null;
+  return label.length <= 120 ? label : `${label.slice(0, 117)}...`;
+}
+
+function normalizedUpdatedAt(value: unknown): string | null {
+  const timestamp = typeof value === 'number'
+    ? value * 1_000
+    : typeof value === 'string'
+      ? Date.parse(value)
+      : Number.NaN;
+  if (!Number.isFinite(timestamp)) return null;
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function normalizeNativeThread(
+  value: unknown,
+  cwdFilter: string | undefined,
+): CodexNativeThreadSummary | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const thread = value as Record<string, unknown>;
+  if (typeof thread.id !== 'string' || !thread.id.trim()) return null;
+  const cwd = typeof thread.cwd === 'string' && thread.cwd ? thread.cwd : null;
+  // Keep an exact client-side filter as rolling-upgrade protection for older
+  // app-server builds that accepted but did not consistently apply `cwd`.
+  if (cwdFilter && cwd !== cwdFilter) return null;
+  const displayName = normalizedLabel(thread.name) ?? previewLabel(thread.preview);
+  const updatedAt = normalizedUpdatedAt(thread.updatedAt);
+  return {
+    id: thread.id.trim(),
+    ...(displayName ? { displayName } : {}),
+    ...(cwd ? { cwd } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
   };
 }
 
@@ -740,6 +784,50 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
    *  in `codex resume` / Codex app listings. */
   async setThreadName(threadId: string, name: string) {
     return this.request('thread/name/set', { threadId, name });
+  }
+
+  /** Read every persisted thread page. `name` is Codex's user-facing title
+   *  (including its LM-generated title); `preview` is only a compatibility
+   *  fallback when Codex has not assigned a name yet. */
+  async listNativeThreads(cwd?: string): Promise<CodexNativeThreadSummary[]> {
+    const threads: CodexNativeThreadSummary[] = [];
+    const seenThreadIds = new Set<string>();
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+
+    while (true) {
+      const response = await this.request('thread/list', {
+        ...(cwd ? { cwd } : {}),
+        ...(cursor ? { cursor } : {}),
+        limit: 100,
+        sortKey: 'updated_at',
+        sortDirection: 'desc',
+      });
+      if (!response || typeof response !== 'object' || Array.isArray(response)) {
+        throw new Error('Codex thread/list returned an invalid response.');
+      }
+      const page = response as { data?: unknown; nextCursor?: unknown };
+      if (!Array.isArray(page.data)) {
+        throw new Error('Codex thread/list response omitted its data array.');
+      }
+      for (const value of page.data) {
+        const thread = normalizeNativeThread(value, cwd);
+        if (!thread || seenThreadIds.has(thread.id)) continue;
+        seenThreadIds.add(thread.id);
+        threads.push(thread);
+      }
+
+      if (page.nextCursor === null || page.nextCursor === undefined || page.nextCursor === '') {
+        break;
+      }
+      if (typeof page.nextCursor !== 'string' || seenCursors.has(page.nextCursor)) {
+        throw new Error('Codex thread/list returned an invalid pagination cursor.');
+      }
+      seenCursors.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
+
+    return threads;
   }
 
   async startTurn(

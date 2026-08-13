@@ -93,12 +93,13 @@ export function registerTaskRoutes(
       model?: string | null;
       approval_mode?: ApprovalMode;
       thinking_effort?: ThinkingEffort | null;
+      service_tier?: 'fast' | null;
     }>();
     if (typeof body.workspace_id !== 'string' || body.workspace_id === '') {
       return c.json({ error: 'workspace_id required' }, 400);
     }
-    if (body.executor !== 'claude' && body.executor !== 'codex' && body.executor !== 'kimi') {
-      return c.json({ error: 'executor must be claude, codex, or kimi' }, 400);
+    if (body.executor !== 'claude' && body.executor !== 'codex' && body.executor !== 'kimi' && body.executor !== 'grok') {
+      return c.json({ error: 'executor must be claude, codex, kimi, or grok' }, 400);
     }
     try {
       const session = await sessions.createSession({
@@ -110,6 +111,7 @@ export function registerTaskRoutes(
         ...(body.model !== undefined ? { model: body.model } : {}),
         ...(body.approval_mode !== undefined ? { approval_mode: body.approval_mode } : {}),
         ...(body.thinking_effort !== undefined ? { thinking_effort: body.thinking_effort } : {}),
+        ...(body.service_tier !== undefined ? { service_tier: body.service_tier } : {}),
       });
       broadcaster.broadcast({ type: 'session:created', session, origin: 'task-create' });
       return c.json({ session });

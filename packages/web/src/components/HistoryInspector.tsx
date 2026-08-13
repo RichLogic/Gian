@@ -119,70 +119,77 @@ function refChipIcon(kind: GitHistoryRef['kind']): string {
 
 interface Props {
   workingTreeId: string | null;
+  ownerSessionId?: string | null;
   /** Full sha of the commit shown in the active history tab for THIS tree —
    *  the selected row. Null when no commit is open. */
   selectedSha: string | null;
   onOpenCommit: (commit: { sha: string; subject: string }) => void;
 }
 
-export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: Props) {
+export function HistoryInspector({
+  workingTreeId,
+  ownerSessionId = null,
+  selectedSha,
+  onOpenCommit,
+}: Props) {
   const t = useT();
-  const state = useHistoryState(workingTreeId);
+  const ownerKey = JSON.stringify([ownerSessionId, workingTreeId]);
+  const state = useHistoryState(workingTreeId, ownerSessionId);
   const dispatch = useOperationDispatch();
   const scrollRef = useRef<HTMLDivElement>(null);
 
   /* Local, ephemeral UI state (not worth persisting per tree). */
   const [searchDraftState, setSearchDraftState] = useState<{
-    workingTreeId: string;
+    ownerKey: string;
     value: string;
   } | null>(null);
   const [openMenu, setOpenMenu] = useState<null | 'ref' | 'author'>(null);
   const [menuSearch, setMenuSearch] = useState('');
-  const [focusState, setFocusState] = useState<{ workingTreeId: string; sha: string } | null>(null);
+  const [focusState, setFocusState] = useState<{ ownerKey: string; sha: string } | null>(null);
   const [fetchNoteState, setFetchNoteState] = useState<{
-    workingTreeId: string;
+    ownerKey: string;
     note: null | { kind: 'ok' | 'auth' | 'err' | 'unknown'; message?: string };
   } | null>(null);
   const [fetchAttempt, setFetchAttempt] = useState<{
-    workingTreeId: string;
+    ownerKey: string;
     runId: string;
   } | null>(null);
   const fetchRun = useOperationRun(
-    fetchAttempt?.workingTreeId === workingTreeId ? fetchAttempt.runId : undefined,
+    fetchAttempt?.ownerKey === ownerKey ? fetchAttempt.runId : undefined,
   );
-  const searchDraft = searchDraftState?.workingTreeId === workingTreeId
+  const searchDraft = searchDraftState?.ownerKey === ownerKey
     ? searchDraftState.value
     : null;
-  const focusSha = focusState?.workingTreeId === workingTreeId ? focusState.sha : null;
-  const fetchNote = fetchNoteState?.workingTreeId === workingTreeId ? fetchNoteState.note : null;
+  const focusSha = focusState?.ownerKey === ownerKey ? focusState.sha : null;
+  const fetchNote = fetchNoteState?.ownerKey === ownerKey ? fetchNoteState.note : null;
   const fetchEntityKey = workingTreeId ? gitHistoryFetchEntityKey(workingTreeId) : null;
   const pendingRuns = usePendingOperations(fetchEntityKey ?? undefined);
   const fetchPending = pendingRuns.some(run => run.name === 'git.historyFetch');
 
   useEffect(() => {
-    if (workingTreeId) ensureHistoryLoaded(workingTreeId);
-  }, [workingTreeId]);
+    if (workingTreeId) ensureHistoryLoaded(workingTreeId, ownerSessionId);
+  }, [workingTreeId, ownerSessionId]);
 
   useEffect(() => {
     setOpenMenu(null);
     setMenuSearch('');
-  }, [workingTreeId]);
+  }, [ownerKey]);
 
   function setFetchNote(note: null | { kind: 'ok' | 'auth' | 'err' | 'unknown'; message?: string }): void {
     if (!workingTreeId) return;
-    setFetchNoteState({ workingTreeId, note });
+    setFetchNoteState({ ownerKey, note });
   }
 
   /* Restore the tree's scroll position on mount / tree switch. */
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = state.scrollTop;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workingTreeId]);
+  }, [ownerKey]);
 
   /* Fetch outcome → status bar (pending is derived from the store above). */
   const fetchPhase = fetchRun?.phase;
   useEffect(() => {
-    if (!fetchPhase || !workingTreeId || fetchAttempt?.workingTreeId !== workingTreeId) return;
+    if (!fetchPhase || !workingTreeId || fetchAttempt?.ownerKey !== ownerKey) return;
     if (fetchPhase === 'confirmed') {
       const refsChanged = (fetchRun?.result as { refsChanged?: boolean } | undefined)?.refsChanged;
       // refsChanged already triggered reconcileHistoryAfterFetch inside the
@@ -204,7 +211,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
     }
     // `fetchRun` result/error are immutable once this phase settles.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchPhase, workingTreeId, fetchAttempt?.workingTreeId]);
+  }, [fetchPhase, workingTreeId, ownerKey, fetchAttempt?.ownerKey]);
 
   /* Auto-dismiss the success note. */
   useEffect(() => {
@@ -217,29 +224,33 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
     if (!workingTreeId || fetchPending) return;
     setFetchNote(null);
     const run = dispatch('git.historyFetch', { workingTreeId });
-    setFetchAttempt({ workingTreeId, runId: run.id });
+    setFetchAttempt({ ownerKey, runId: run.id });
   }
 
   function runRefresh(): void {
     if (!workingTreeId) return;
     if (fetchNote?.kind === 'unknown') setFetchNote(null);
-    refreshHistory(workingTreeId);
+    refreshHistory(workingTreeId, ownerSessionId);
   }
 
   function runSync(): void {
     if (!workingTreeId || fetchPending) return;
     // Show local commits without waiting for the network. A successful Fetch
     // reconciles page 1 again after remote refs have been updated.
-    refreshHistory(workingTreeId);
+    refreshHistory(workingTreeId, ownerSessionId);
     runFetch();
   }
 
   /* Search input is instant locally, debounced into the store (which refetches). */
   useEffect(() => {
     if (searchDraft === null || !workingTreeId) return;
-    const timer = setTimeout(() => setHistoryQuery(workingTreeId, searchDraft), 300);
+    const timer = setTimeout(() => setHistoryQuery(
+      workingTreeId,
+      searchDraft,
+      ownerSessionId,
+    ), 300);
     return () => clearTimeout(timer);
-  }, [searchDraft, workingTreeId]);
+  }, [searchDraft, workingTreeId, ownerSessionId]);
 
   const graphRows = useMemo(() => assignHistoryLanes(state.items), [state.items]);
 
@@ -252,12 +263,14 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
     if (!el || !workingTreeId || !state.nextCursor || state.loadingMore || state.loadMoreError) return;
     if (typeof IntersectionObserver === 'undefined') return;
     const io = new IntersectionObserver(entries => {
-      if (entries.some(e => e.isIntersecting)) loadMoreHistory(workingTreeId);
+      if (entries.some(e => e.isIntersecting)) {
+        loadMoreHistory(workingTreeId, ownerSessionId);
+      }
     }, { root: scrollRef.current, rootMargin: '120px' });
     io.observe(el);
     return () => io.disconnect();
     // A failed page never auto-retries — the error row keeps a manual Retry.
-  }, [workingTreeId, state.nextCursor, state.loadingMore, state.loadMoreError, state.items.length]);
+  }, [workingTreeId, ownerSessionId, state.nextCursor, state.loadingMore, state.loadMoreError, state.items.length]);
 
   const headSha = state.headSha;
 
@@ -272,7 +285,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
       e.preventDefault();
       const next = items[idx + (e.key === 'ArrowDown' ? 1 : -1)];
       if (next) {
-        setFocusState({ workingTreeId: workingTreeId!, sha: next.sha });
+        setFocusState({ ownerKey, sha: next.sha });
         scrollRef.current
           ?.querySelector<HTMLElement>(`.h-row[data-sha="${next.sha.slice(0, 7)}"]`)
           ?.focus();
@@ -384,7 +397,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
         <Icon d={I.search} size={12} stroke={1.7} />
         <input
           value={query}
-          onChange={e => workingTreeId && setSearchDraftState({ workingTreeId, value: e.target.value })}
+          onChange={e => workingTreeId && setSearchDraftState({ ownerKey, value: e.target.value })}
           placeholder={t('history.search')}
           aria-label={t('history.search')}
           spellCheck={false}
@@ -394,8 +407,8 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
           <button className="insp-search-x" aria-label={t('common.clear')}
                   onClick={() => {
                     if (!workingTreeId) return;
-                    setSearchDraftState({ workingTreeId, value: '' });
-                    setHistoryQuery(workingTreeId, '');
+                    setSearchDraftState({ ownerKey, value: '' });
+                    setHistoryQuery(workingTreeId, '', ownerSessionId);
                   }}>
             ✕
           </button>
@@ -419,7 +432,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
                        aria-label={t('history.filter.searchRefs')}
                        value={menuSearch} onChange={e => setMenuSearch(e.target.value)} />
                 <button role="menuitemradio" aria-checked={!state.ref} className={!state.ref ? 'active' : ''}
-                        onClick={() => { if (workingTreeId) setHistoryRef(workingTreeId, null); setOpenMenu(null); }}>
+                        onClick={() => { if (workingTreeId) setHistoryRef(workingTreeId, null, ownerSessionId); setOpenMenu(null); }}>
                   <span className="ck">{!state.ref ? '✓' : ''}</span>{t('history.filter.allBranches')}
                 </button>
                 {(['local', 'remote', 'tag'] as const).map((kind, gi) => {
@@ -433,7 +446,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
                       {refs.map(r => (
                         <button key={r.name} role="menuitemradio" aria-checked={state.ref === r.name}
                                 className={state.ref === r.name ? 'active' : ''} title={r.name}
-                                onClick={() => { if (workingTreeId) setHistoryRef(workingTreeId, r.name); setOpenMenu(null); }}>
+                                onClick={() => { if (workingTreeId) setHistoryRef(workingTreeId, r.name, ownerSessionId); setOpenMenu(null); }}>
                           <span className="ck">{state.ref === r.name ? '✓' : ''}</span>{r.shortName}
                           <span className="sub">{kind === 'tag' ? 'tag' : kind === 'remote' ? 'remote' : ''}</span>
                         </button>
@@ -461,7 +474,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
                        aria-label={t('history.filter.searchAuthors')}
                        value={menuSearch} onChange={e => setMenuSearch(e.target.value)} />
                 <button role="menuitemradio" aria-checked={!state.author} className={!state.author ? 'active' : ''}
-                        onClick={() => { if (workingTreeId) setHistoryAuthor(workingTreeId, null); setOpenMenu(null); }}>
+                        onClick={() => { if (workingTreeId) setHistoryAuthor(workingTreeId, null, ownerSessionId); setOpenMenu(null); }}>
                   <span className="ck">{!state.author ? '✓' : ''}</span>{t('history.filter.allAuthors')}
                 </button>
                 {state.availableAuthors
@@ -471,7 +484,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
                   .map(a => (
                     <button key={a.email} role="menuitemradio" aria-checked={state.author === a.email}
                             className={state.author === a.email ? 'active' : ''}
-                            onClick={() => { if (workingTreeId) setHistoryAuthor(workingTreeId, a.email); setOpenMenu(null); }}>
+                            onClick={() => { if (workingTreeId) setHistoryAuthor(workingTreeId, a.email, ownerSessionId); setOpenMenu(null); }}>
                       <span className="ck">{state.author === a.email ? '✓' : ''}</span><span className="nm">{a.name}</span>
                       <span className="sub">{a.email}</span>
                     </button>
@@ -483,7 +496,11 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
       </div>
 
       <div className="insp-scroll" ref={scrollRef}
-           onScroll={e => workingTreeId && saveHistoryScroll(workingTreeId, e.currentTarget.scrollTop)}>
+           onScroll={e => workingTreeId && saveHistoryScroll(
+             workingTreeId,
+             e.currentTarget.scrollTop,
+             ownerSessionId,
+           )}>
         {!workingTreeId ? (
           <div className="insp-note">{t('history.noTree')}</div>
         ) : state.moved && (
@@ -492,8 +509,8 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
             <span>
               {t('history.moved')}
               <span className="lnk" role="button" tabIndex={0}
-                    onClick={() => dismissHistoryMoved(workingTreeId)}
-                    onKeyDown={e => e.key === 'Enter' && dismissHistoryMoved(workingTreeId)}>
+                    onClick={() => dismissHistoryMoved(workingTreeId, ownerSessionId)}
+                    onKeyDown={e => e.key === 'Enter' && dismissHistoryMoved(workingTreeId, ownerSessionId)}>
                 {t('common.dismiss')}
               </span>
             </span>
@@ -532,8 +549,8 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
             {filtersActive && (
               <button className="btn secondary sm"
                       onClick={() => {
-                        setSearchDraftState({ workingTreeId, value: '' });
-                        clearHistoryFilters(workingTreeId);
+                        setSearchDraftState({ ownerKey, value: '' });
+                        clearHistoryFilters(workingTreeId, ownerSessionId);
                       }}>
                 {t('history.filter.clear')}
               </button>
@@ -554,7 +571,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
                 title={`${commit.subject} — ${commit.sha.slice(0, 7)} · ${commit.author.name} · ${relTime(commit.authoredAt)}`}
                 onClick={() => openCommit(commit)}
                 onKeyDown={e => onListKeyDown(e, commit)}
-                onFocus={() => setFocusState({ workingTreeId: workingTreeId!, sha: commit.sha })}
+                onFocus={() => setFocusState({ ownerKey, sha: commit.sha })}
               >
                 <span className="g">
                   <GraphCell row={graphRows[i]!} head={headSha === commit.sha}
@@ -576,7 +593,7 @@ export function HistoryInspector({ workingTreeId, selectedSha, onOpenCommit }: P
               <div className="h-foot-err" role="alert">
                 <Icon d={I.warnTri} size={12} stroke={1.7} />
                 <span>{t('history.loadMoreFailed')}</span>
-                <button className="btn secondary sm" onClick={() => loadMoreHistory(workingTreeId)}>{t('common.retry')}</button>
+                <button className="btn secondary sm" onClick={() => loadMoreHistory(workingTreeId, ownerSessionId)}>{t('common.retry')}</button>
               </div>
             ) : state.nextCursor ? (
               <>

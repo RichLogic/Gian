@@ -47,8 +47,8 @@ export function registerNativeSessionRoutes(
     }>();
     const executor = body.executor;
     const nativeId = body.native_session_id;
-    if (executor !== 'claude' && executor !== 'codex' && executor !== 'kimi') {
-      return c.json({ error: 'executor must be claude, codex, or kimi' }, 400);
+    if (executor !== 'claude' && executor !== 'codex' && executor !== 'kimi' && executor !== 'grok') {
+      return c.json({ error: 'executor must be claude, codex, kimi, or grok' }, 400);
     }
     if (!nativeId) return c.json({ error: 'native_session_id required' }, 400);
 
@@ -56,10 +56,13 @@ export function registerNativeSessionRoutes(
     if ((approvalMode === 'custom' || approvalMode === 'full-access') && executor !== 'codex') {
       return c.json({ error: `${approvalMode} approval mode is codex-only` }, 400);
     }
-    if (executor === 'kimi' && body.approval_mode !== undefined) {
+    if ((executor === 'kimi' || executor === 'grok') && body.approval_mode !== undefined) {
       return c.json({
-        error: 'Kimi uses executor-native mode; approval_mode must be omitted',
+        error: `${executor} uses executor-native mode; approval_mode must be omitted`,
       }, 400);
+    }
+    if (executor === 'grok') {
+      return c.json({ error: 'Grok native session adopt is not available yet' }, 400);
     }
 
     return serializeNativeMutation(`${executor}:${nativeId}`, async () => {
@@ -158,12 +161,17 @@ export function registerNativeSessionRoutes(
   app.delete('/api/workspaces/:id/native-sessions/:nativeId', async c => {
     const nativeId = c.req.param('nativeId');
     const executor = c.req.query('executor') as Executor | undefined;
-    if (executor !== 'claude' && executor !== 'codex' && executor !== 'kimi') {
-      return c.json({ error: 'executor query param must be claude, codex, or kimi' }, 400);
+    if (executor !== 'claude' && executor !== 'codex' && executor !== 'kimi' && executor !== 'grok') {
+      return c.json({ error: 'executor query param must be claude, codex, kimi, or grok' }, 400);
     }
     if (executor === 'kimi') {
       return c.json({
         error: 'Kimi ACP does not expose destructive native-session deletion.',
+      }, 400);
+    }
+    if (executor === 'grok') {
+      return c.json({
+        error: 'Grok native session deletion is not available yet',
       }, 400);
     }
     const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?')
@@ -217,11 +225,11 @@ export function registerNativeSessionRoutes(
       try {
         const discovered = await sessions.listPluginNativeSessions(executor, workspace.path);
         if (discovered !== null) pluginSessions.push(...discovered);
-        else if (executor !== 'kimi') legacyExecutors.push(executor);
-        else pluginSessions.push(...await sessions.listKimiNativeSessions(workspace.path));
+        else if (executor === 'claude' || executor === 'codex') legacyExecutors.push(executor);
+        else if (executor === 'kimi') pluginSessions.push(...await sessions.listKimiNativeSessions(workspace.path));
       } catch (error) {
         console.warn(`[native-sessions] ${executor} discovery unavailable: ${String(error)}`);
-        if (executor !== 'kimi') legacyExecutors.push(executor);
+        if (executor === 'claude' || executor === 'codex') legacyExecutors.push(executor);
       }
     }
     const diskSessions = legacyExecutors.length > 0

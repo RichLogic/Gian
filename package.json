@@ -1,8 +1,8 @@
 {
   "name": "gian",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
-  "description": "One local desktop app for Codex, Claude Code, and Kimi Code",
+  "description": "One local desktop app for Codex, Claude Code, Kimi Code, and Grok Build",
   "packageManager": "pnpm@10.33.2",
   "engines": {
     "node": ">=24 <25"
@@ -25,6 +25,7 @@
     "canary:attachment:claude": "pnpm --filter @gian/shared build && pnpm --filter @gian/cc-proxy build && node scripts/run-provider-attachment-canary.mjs --provider claude",
     "canary:attachment:codex": "pnpm --filter @gian/shared build && pnpm --filter @gian/codex-proxy build && node scripts/run-provider-attachment-canary.mjs --provider codex",
     "canary:attachment:kimi": "pnpm --filter @gian/shared build && pnpm --filter @gian/host build && pnpm --filter @gian/kimi-proxy build && node scripts/run-provider-attachment-canary.mjs --provider kimi",
+    "canary:attachment:grok": "pnpm --filter @gian/shared build && pnpm --filter @gian/host build && pnpm --filter @gian/grok-proxy build && node scripts/run-provider-attachment-canary.mjs --provider grok",
     "canary:codex-compat": "pnpm --filter @gian/shared build && pnpm --filter @gian/codex-proxy build && node scripts/run-codex-compat-canary.mjs",
     "canary:codex-steer": "pnpm --filter @gian/shared build && pnpm --filter @gian/codex-proxy build && node scripts/run-codex-steer-canary.mjs",
     "canary:kimi-store-compat": "pnpm --filter @gian/shared build && pnpm --filter @gian/host build && node scripts/run-kimi-store-preflight.mjs",
@@ -32,7 +33,7 @@
     "desktop:dev": "node scripts/dev.mjs open",
     "desktop:pack": "pnpm -F @gian/desktop package:mac",
     "desktop:dmg": "pnpm -F @gian/desktop make:mac",
-    "release:proxies": "pnpm --filter @gian/shared build && pnpm --filter @gian/proxy-protocol build && pnpm --filter @gian/cc-proxy build && pnpm --filter @gian/codex-proxy build && pnpm --filter @gian/kimi-proxy build && node scripts/build-proxy-artifacts.mjs",
+    "release:proxies": "pnpm --filter @gian/shared build && pnpm --filter @gian/proxy-protocol build && pnpm --filter @gian/cc-proxy build && pnpm --filter @gian/codex-proxy build && pnpm --filter @gian/kimi-proxy build && pnpm --filter @gian/grok-proxy build && node scripts/build-proxy-artifacts.mjs",
     "quality:versions": "node scripts/check-version-consistency.mjs",
     "quality:traceability": "node scripts/check-traceability.js",
     "quality:docs": "node scripts/check-doc-links.mjs",

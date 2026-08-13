@@ -115,6 +115,10 @@ function makeService(
   db: Db,
   proxy: ProxyManager,
   rename: (sessionId: string, name: string) => void,
+  options: {
+    nativePollDelaysMs?: readonly number[];
+    sleep?: (delayMs: number) => Promise<void>;
+  } = {},
 ): AutoTitleService {
   return new AutoTitleService({
     db,
@@ -122,6 +126,7 @@ function makeService(
     history: new SessionHistoryStore(db),
     proxy,
     rename,
+    ...options,
   });
 }
 
@@ -132,14 +137,17 @@ class UnusedProxyManager {
   async dispose(): Promise<void> {}
 }
 
-class StubKimiProxyManager {
+class StubNativeProxyManager {
   listCalls = 0;
   disposeCalls = 0;
   pages: Array<{ sessions: unknown[]; nextCursor?: string }> = [];
   gate: Promise<void> | null = null;
 
-  async getOrCreate(key: string, _executor: Executor): Promise<Partial<ProxyClient>> {
-    assert.equal(key, '__native_sessions_kimi__');
+  constructor(readonly executor: Extract<Executor, 'kimi' | 'codex'>) {}
+
+  async getOrCreate(key: string, executor: Executor): Promise<Partial<ProxyClient>> {
+    assert.equal(key, `__native_sessions_${this.executor}__`);
+    assert.equal(executor, this.executor);
     return {
       initialize: async () => ({ mode: 'spawn' as const, protocolVersion: 'test', methods: [] }),
       listNativeSessions: async () => {
@@ -228,7 +236,7 @@ test('claude: ai-title from the session JSONL becomes the name', async () => {
   }
 });
 
-test('claude: missing JSONL retries on later turns until the ai-title appears', async () => {
+test('claude: one completed turn polls until a delayed ai-title appears', async () => {
   const fixture = makeFixture();
   const previousHome = process.env.HOME;
   process.env.HOME = join(fixture.dir, 'home');
@@ -239,24 +247,26 @@ test('claude: missing JSONL retries on later turns until the ai-title appears', 
       nativeSessionId: 'native-claude-2',
     });
     const renamed: string[] = [];
+    const jsonl = locateCcJsonl('native-claude-2', join(fixture.dir, 'workspace'))!;
     const service = makeService(
       fixture.db,
       new UnusedProxyManager() as unknown as ProxyManager,
       (_id, name) => renamed.push(name),
+      {
+        nativePollDelaysMs: [0, 1],
+        sleep: async () => {
+          mkdirSync(dirname(jsonl), { recursive: true });
+          writeFileSync(
+            jsonl,
+            `${JSON.stringify({ type: 'ai-title', aiTitle: 'Late Title', sessionId: 'x' })}\n`,
+            'utf8',
+          );
+        },
+      },
     );
 
-    // Turn 1: Claude Code has not written the file / ai-title yet.
-    await service.maybeAutoTitle(sessionId);
-    assert.deepEqual(renamed, []);
-
-    // Turn 2: the ai-title landed meanwhile → native title wins over fallback.
-    const jsonl = locateCcJsonl('native-claude-2', join(fixture.dir, 'workspace'))!;
-    mkdirSync(dirname(jsonl), { recursive: true });
-    writeFileSync(
-      jsonl,
-      `${JSON.stringify({ type: 'ai-title', aiTitle: 'Late Title', sessionId: 'x' })}\n`,
-      'utf8',
-    );
+    // The first lookup sees no JSONL. It lands during the bounded poll after
+    // the same turn completion; no second completed turn is required.
     await service.maybeAutoTitle(sessionId);
     assert.deepEqual(renamed, ['Late Title']);
   } finally {
@@ -266,7 +276,7 @@ test('claude: missing JSONL retries on later turns until the ai-title appears', 
   }
 });
 
-test('claude: native lookup gives up after the 3rd completed turn and falls back', async () => {
+test('claude: native polling timeout falls back after the same completed turn', async () => {
   const fixture = makeFixture();
   const previousHome = process.env.HOME;
   process.env.HOME = join(fixture.dir, 'home'); // no JSONL ever appears
@@ -278,17 +288,19 @@ test('claude: native lookup gives up after the 3rd completed turn and falls back
     });
     seedUserMessage(fixture.db, sessionId, '  refactor the   session\nmanager tests  ');
     const renamed: string[] = [];
+    const slept: number[] = [];
     const service = makeService(
       fixture.db,
       new UnusedProxyManager() as unknown as ProxyManager,
       (_id, name) => renamed.push(name),
+      {
+        nativePollDelaysMs: [0, 10, 20],
+        sleep: async delayMs => { slept.push(delayMs); },
+      },
     );
 
-    await service.maybeAutoTitle(sessionId); // attempt 1
-    await service.maybeAutoTitle(sessionId); // attempt 2
-    assert.deepEqual(renamed, [], 'still waiting for the native ai-title');
-
-    await service.maybeAutoTitle(sessionId); // attempt 3 → fallback
+    await service.maybeAutoTitle(sessionId);
+    assert.deepEqual(slept, [10, 20]);
     assert.deepEqual(renamed, ['refactor the session manager tests']);
 
     // Once named, further completions are a no-op.
@@ -303,7 +315,7 @@ test('claude: native lookup gives up after the 3rd completed turn and falls back
   }
 });
 
-test('codex: no native title capability → truncation fallback on the first turn', async () => {
+test('codex: prompt-derived placeholders are ignored until the native LM title appears', async () => {
   const fixture = makeFixture();
   try {
     const sessionId = seedSession(fixture.db, {
@@ -311,19 +323,41 @@ test('codex: no native title capability → truncation fallback on the first tur
       executor: 'codex',
       nativeSessionId: 'native-codex-1',
     });
-    seedUserMessage(
-      fixture.db,
-      sessionId,
-      'fix the flaky login test and make the whole suite pass again',
-    );
+    const prompt = `  ${'a'.repeat(60)} \n ${'b'.repeat(80)}  `;
+    seedUserMessage(fixture.db, sessionId, prompt);
+    const proxy = new StubNativeProxyManager('codex');
+    // Codex thread/list exposes preview while the LM-generated name is
+    // pending: whitespace collapsed, then first 117 chars plus "...".
+    proxy.pages.push({
+      sessions: [{
+        sessionId: 'native-codex-1',
+        title: `${'a'.repeat(60)} ${'b'.repeat(56)}...`,
+      }],
+    });
+    // Codex can also expose its short prompt fallback through `name` before
+    // the asynchronous LM title replaces it.
+    proxy.pages.push({
+      sessions: [{
+        sessionId: 'native-codex-1',
+        title: truncateFallbackTitle(prompt),
+      }],
+    });
+    proxy.pages.push({
+      sessions: [{ sessionId: 'native-codex-1', title: 'Codex LM Summary' }],
+    });
     const renamed: string[] = [];
     const service = makeService(
       fixture.db,
-      new UnusedProxyManager() as unknown as ProxyManager,
+      proxy as unknown as ProxyManager,
       (_id, name) => renamed.push(name),
+      {
+        nativePollDelaysMs: [0, 1, 1],
+        sleep: async () => {},
+      },
     );
     await service.maybeAutoTitle(sessionId);
-    assert.deepEqual(renamed, ['fix the flaky login test and make the w…']);
+    assert.deepEqual(renamed, ['Codex LM Summary']);
+    assert.equal(proxy.listCalls, 3);
   } finally {
     fixture.cleanup();
   }
@@ -361,7 +395,7 @@ test('kimi: native listNativeSessions title is used; in-flight guard and rename 
       nativeSessionId: 'native-kimi-1',
     });
     let release!: () => void;
-    const proxy = new StubKimiProxyManager();
+    const proxy = new StubNativeProxyManager('kimi');
     proxy.gate = new Promise<void>(resolve => { release = resolve; });
     proxy.pages.push({
       sessions: [
@@ -403,7 +437,8 @@ test('kimi: native title applies when the session is still unnamed', async () =>
       executor: 'kimi',
       nativeSessionId: 'native-kimi-2',
     });
-    const proxy = new StubKimiProxyManager();
+    seedUserMessage(fixture.db, sessionId, '  Kimi\nTitle  ');
+    const proxy = new StubNativeProxyManager('kimi');
     proxy.pages.push({
       sessions: [{ sessionId: 'native-kimi-2', title: '  Kimi\nTitle  ' }],
       nextCursor: 'unused',
@@ -432,6 +467,7 @@ class RecordingProxyClient implements ProxyClient {
   constructor(
     readonly executor: Executor,
     private readonly key: string,
+    private readonly manager: RecordingProxyManager,
   ) {}
 
   async initialize() {
@@ -451,6 +487,11 @@ class RecordingProxyClient implements ProxyClient {
     const nativeSessionId = this.executor === 'claude'
       ? params.claudeSessionId ?? `claude-native-${this.key}`
       : `codex-native-${this.key}`;
+    this.manager.recordNativeSession(
+      this.executor,
+      nativeSessionId,
+      this.executor === 'codex' ? 'Codex LM Summary' : null,
+    );
     return {
       session: {
         id: `proxy-${this.key}`,
@@ -477,6 +518,12 @@ class RecordingProxyClient implements ProxyClient {
         lastError: null,
       },
       turn: { id: 'turn-provider' },
+    };
+  }
+
+  async listNativeSessions() {
+    return {
+      sessions: this.manager.listNativeSessions(this.executor),
     };
   }
 
@@ -507,11 +554,12 @@ class RecordingProxyClient implements ProxyClient {
 
 class RecordingProxyManager {
   readonly clients = new Map<string, RecordingProxyClient>();
+  private readonly nativeSessions = new Map<Executor, Map<string, string | null>>();
 
   async getOrCreate(key: string, executor: Executor): Promise<ProxyClient> {
     let client = this.clients.get(key);
     if (!client) {
-      client = new RecordingProxyClient(executor, key);
+      client = new RecordingProxyClient(executor, key, this);
       this.clients.set(key, client);
     }
     return client;
@@ -530,18 +578,38 @@ class RecordingProxyManager {
     assert.ok(client, `missing fake proxy client for ${key}`);
     return client;
   }
+
+  recordNativeSession(executor: Executor, sessionId: string, title: string | null): void {
+    let sessions = this.nativeSessions.get(executor);
+    if (!sessions) {
+      sessions = new Map();
+      this.nativeSessions.set(executor, sessions);
+    }
+    sessions.set(sessionId, title);
+  }
+
+  listNativeSessions(executor: Executor): Array<{ sessionId: string; title: string }> {
+    return [...(this.nativeSessions.get(executor) ?? [])].flatMap(([sessionId, title]) =>
+      title ? [{ sessionId, title }] : []);
+  }
 }
 
-class NoopBroadcaster {
+class RecordingBroadcaster {
+  readonly messages: ServerToClientMessage[] = [];
+
   add() {}
   remove() {}
   send() {}
-  broadcast(_message: ServerToClientMessage) {}
+  broadcast(message: ServerToClientMessage) { this.messages.push(message); }
   get size() { return 0; }
 }
 
-function makeManager(db: Db, dir: string, proxies: RecordingProxyManager): SessionManager {
-  const broadcaster = new NoopBroadcaster();
+function makeManager(
+  db: Db,
+  dir: string,
+  proxies: RecordingProxyManager,
+  broadcaster = new RecordingBroadcaster(),
+): SessionManager {
   const approvals = new ApprovalManager(broadcaster as unknown as WsBroadcaster);
   const sessions = new SessionManager(
     db,
@@ -564,7 +632,7 @@ function sessionName(db: Db, sessionId: string): string | null {
   return row?.name ?? null;
 }
 
-test('e2e: codex session is named from its first user message on turn completion', async () => {
+test('e2e: codex session writes its native LM title back on turn completion', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'gian-auto-title-e2e-codex-'));
   const workspacePath = join(dir, 'workspace');
   mkdirSync(workspacePath, { recursive: true });
@@ -572,7 +640,8 @@ test('e2e: codex session is named from its first user message on turn completion
   try {
     const workspaceId = seedWorkspace(db, workspacePath);
     const proxies = new RecordingProxyManager();
-    const sessions = makeManager(db, dir, proxies);
+    const broadcaster = new RecordingBroadcaster();
+    const sessions = makeManager(db, dir, proxies, broadcaster);
     const session = await sessions.createSession({
       workspace_id: workspaceId,
       executor: 'codex',
@@ -586,10 +655,17 @@ test('e2e: codex session is named from its first user message on turn completion
     });
 
     await waitFor(() => sessionName(db, session.id) !== null);
-    assert.equal(sessionName(db, session.id), 'fix the flaky login test please');
+    assert.equal(sessionName(db, session.id), 'Codex LM Summary');
+    assert.ok(
+      broadcaster.messages.some(message =>
+        message.type === 'session:updated'
+          && message.session.id === session.id
+          && message.session.name === 'Codex LM Summary'),
+      'rename broadcasts session:updated with the generated name for UI state',
+    );
     // The write went through renameSession → native name-sync fires too.
     await waitFor(() => proxies.client(session.id).setNameCalls.length === 1);
-    assert.deepEqual(proxies.client(session.id).setNameCalls, ['fix the flaky login test please']);
+    assert.deepEqual(proxies.client(session.id).setNameCalls, ['Codex LM Summary']);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -606,7 +682,8 @@ test('e2e: claude session picks up the ai-title from its JSONL on turn completio
   try {
     const workspaceId = seedWorkspace(db, workspacePath);
     const proxies = new RecordingProxyManager();
-    const sessions = makeManager(db, dir, proxies);
+    const broadcaster = new RecordingBroadcaster();
+    const sessions = makeManager(db, dir, proxies, broadcaster);
     const session = await sessions.createSession({
       workspace_id: workspaceId,
       executor: 'claude',
@@ -630,6 +707,13 @@ test('e2e: claude session picks up the ai-title from its JSONL on turn completio
 
     await waitFor(() => sessionName(db, session.id) !== null);
     assert.equal(sessionName(db, session.id), 'Fix Login Bug');
+    assert.ok(
+      broadcaster.messages.some(message =>
+        message.type === 'session:updated'
+          && message.session.id === session.id
+          && message.session.name === 'Fix Login Bug'),
+      'rename broadcasts session:updated with the generated name for UI state',
+    );
     // renameSession also appended a custom-title line for the native CLI.
     await waitFor(() => readFileSync(jsonl, 'utf8').includes('custom-title'));
     const lastLine = readFileSync(jsonl, 'utf8').trim().split('\n').at(-1)!;

@@ -39,6 +39,157 @@ test('event subscriptions keep full transcript payloads scoped to the active ses
   assert.deepEqual(secondMessages.map(message => JSON.parse(message).type), ['session:updated']);
 });
 
+test('attention is global while the corresponding full transcript stays session-scoped', () => {
+  const broadcaster = new WsBroadcaster();
+  const activeMessages: string[] = [];
+  const backgroundMessages: string[] = [];
+  const attentionOnlyMessages: string[] = [];
+  const active = client(activeMessages);
+  const background = client(backgroundMessages);
+  const attentionOnly = client(attentionOnlyMessages);
+  broadcaster.add(active);
+  broadcaster.add(background);
+  broadcaster.add(attentionOnly);
+  broadcaster.subscribeToEvents(active, 'session-a');
+  broadcaster.subscribeToEvents(background, 'session-b');
+  broadcaster.subscribeToEvents(attentionOnly, null);
+
+  broadcaster.broadcast({
+    type: 'event',
+    session_id: 'session-a',
+    turn: 3,
+    call_id: 'turn-a',
+    event: 'turn.completed',
+    ts: 123,
+    data: { private: 'full provider payload' },
+  });
+  broadcaster.broadcast({
+    type: 'attention',
+    id: 'gian:session-a:3:turn-completed:turn-a',
+    session_id: 'session-a',
+    turn: 3,
+    kind: 'turn-completed',
+    timestamp: 123,
+    title: 'Turn completed',
+    body: 'The agent finished turn 3.',
+    provider: 'codex',
+  });
+
+  assert.deepEqual(activeMessages.map(message => JSON.parse(message).type), [
+    'event',
+    'attention',
+  ]);
+  assert.deepEqual(backgroundMessages.map(message => JSON.parse(message).type), [
+    'attention',
+  ]);
+  assert.doesNotMatch(backgroundMessages[0]!, /full provider payload/);
+  assert.deepEqual(attentionOnlyMessages.map(message => JSON.parse(message).type), [
+    'attention',
+  ]);
+  assert.doesNotMatch(attentionOnlyMessages[0]!, /full provider payload/);
+});
+
+test('attention-only clients reject every non-attention payload class', () => {
+  const broadcaster = new WsBroadcaster();
+  const messages: string[] = [];
+  const attentionClient = client(messages);
+  broadcaster.add(attentionClient, 'attention');
+
+  broadcaster.send(attentionClient, {
+    type: 'state_sync',
+    private: 'workspace and approval snapshot',
+  } as never);
+  broadcaster.broadcast({
+    type: 'event',
+    session_id: 'session-a',
+    turn: 1,
+    call_id: 'private-event',
+    event: 'output.text.delta',
+    ts: 1,
+    data: { delta: 'private transcript' },
+  });
+  broadcaster.broadcast({
+    type: 'queue:updated',
+    session_id: 'session-a',
+    queue: [{ id: 'q1', text: 'private queued prompt' }],
+  });
+  broadcaster.broadcast({
+    type: 'term:output',
+    term_id: 'term-a',
+    data: Buffer.from('private terminal output').toString('base64'),
+  });
+  broadcaster.broadcast({
+    type: 'session:updated',
+    session: { id: 'session-a', summary: 'private summary' },
+  });
+  broadcaster.broadcast({
+    type: 'attention',
+    id: 'gian:session-a:1:turn-completed:done',
+    session_id: 'session-a',
+    turn: 1,
+    kind: 'turn-completed',
+    timestamp: 1,
+    title: 'Turn completed',
+    body: 'The agent finished turn 1.',
+    provider: 'codex',
+  });
+
+  assert.deepEqual(messages.map(message => JSON.parse(message).type), ['attention']);
+  assert.doesNotMatch(messages[0]!, /private/);
+});
+
+test('attention auth atomically registers a restricted read-only client', async () => {
+  const broadcaster = new WsBroadcaster();
+  const handlers = makeWsHandlers({
+    sessions: {} as SessionManager,
+    broadcaster,
+  });
+  const messages: string[] = [];
+  let closed: [number | undefined, string | undefined] | undefined;
+  const ws = {
+    send: (value: string) => { messages.push(value); },
+    close: (code?: number, reason?: string) => { closed = [code, reason]; },
+  } as unknown as WSContext;
+  const token = await createSessionToken('attention-user');
+
+  try {
+    handlers.onOpen(new Event('open'), ws);
+    await handlers.onMessage(
+      { data: JSON.stringify({ type: 'auth', token, client: 'attention' }) },
+      ws,
+    );
+    assert.deepEqual(messages.map(message => JSON.parse(message).type), ['auth_ok']);
+    messages.length = 0;
+
+    broadcaster.broadcast({
+      type: 'session:updated',
+      session: { id: 'session-a', name: 'private name' },
+    });
+    broadcaster.broadcast({
+      type: 'attention',
+      id: 'gian:session-a:1:error:failed',
+      session_id: 'session-a',
+      turn: 1,
+      kind: 'error',
+      timestamp: 1,
+      title: 'Agent stopped with an error',
+      body: 'Open Gian to review the error.',
+      provider: 'claude',
+    });
+    assert.deepEqual(messages.map(message => JSON.parse(message).type), ['attention']);
+
+    await handlers.onMessage(
+      { data: JSON.stringify({ type: 'session:delete', session_id: 'session-a' }) },
+      ws,
+    );
+    assert.deepEqual(closed, [4003, 'attention_read_only']);
+    assert.equal(broadcaster.size, 0);
+  } finally {
+    handlers.onClose({ code: 1000, reason: '', wasClean: true }, ws);
+    deleteToken(token);
+  }
+});
+
 test('global broadcasts exclude connected peers until WebSocket authentication succeeds', async () => {
   const broadcaster = new WsBroadcaster();
   const handlers = makeWsHandlers({

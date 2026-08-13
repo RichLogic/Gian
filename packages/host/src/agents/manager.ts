@@ -72,6 +72,10 @@ const REQUIRED_PROXY_METHODS: Record<Executor, readonly string[]> = {
     'session.snapshot', 'session.config.set', 'session.listNative',
     'turn.start', 'turn.interrupt', 'approval.respond', 'session.close', 'shutdown',
   ],
+  grok: [
+    'initialize', 'catalog.list', 'session.create',
+    'turn.start', 'turn.interrupt', 'approval.respond', 'session.close', 'shutdown',
+  ],
 };
 
 interface AgentDefinition {
@@ -195,6 +199,19 @@ const AGENTS: Record<Executor, AgentDefinition> = {
       '/usr/local/bin/kimi',
     ],
   },
+  grok: {
+    id: 'grok',
+    name: 'Grok Build',
+    command: 'grok',
+    installerUrl: 'https://x.ai/cli/install.sh',
+    installerSha256: '43d0943123edade1383a476a4f778674877acee7c1f98a00f094c4a0f7349321',
+    officialPaths: home => [
+      join(home, '.grok', 'bin', 'grok'),
+      join(home, '.local', 'bin', 'grok'),
+      '/opt/homebrew/bin/grok',
+      '/usr/local/bin/grok',
+    ],
+  },
 };
 
 function emptyConfig(): AgentConfigFile {
@@ -270,6 +287,12 @@ function managedRuntimeEnvironment(id: Executor): Readonly<Record<string, string
     return { DISABLE_AUTOUPDATER: '1', DISABLE_UPDATES: '1' };
   }
   if (id === 'kimi') return { KIMI_CODE_NO_AUTO_UPDATE: '1' };
+  if (id === 'grok') {
+    return {
+      GROK_DISABLE_AUTOUPDATER: '1',
+      GROK_SANDBOX: 'workspace',
+    };
+  }
   return {};
 }
 
@@ -590,7 +613,14 @@ export class AgentManager {
 
   async proxyLaunchDescriptor(id: Executor): Promise<ProxyLaunchDescriptor> {
     if (!this.options.managedProxies) {
-      return { entryPath: this.proxyEntry(id) };
+      return {
+        entryPath: this.proxyEntry(id),
+        // Grok is gian.proxy/1 only. Development still has to negotiate v1
+        // even though there is no downloaded manifest.
+        ...(id === 'grok'
+          ? { protocolV1: { pluginVersion: '0.1.0', processScope: 'shared' as const } }
+          : {}),
+      };
     }
     const agentRoot = join(this.options.dataDir, 'plugins', id);
     let current: string;
@@ -1373,6 +1403,8 @@ export class AgentManager {
         args.push('--data-dir', probeDirectory);
       } else if (input.id === 'codex') {
         args.push('--data-dir', probeDirectory, '--codex-bin', runtime.binaryPath);
+      } else if (input.id === 'grok') {
+        args.push('--grok-bin', runtime.binaryPath);
       } else {
         args.push('--kimi-bin', runtime.binaryPath);
       }
@@ -1410,6 +1442,7 @@ export class AgentManager {
                 ...(input.id === 'claude' ? { CLAUDE_BIN: runtime.binaryPath } : {}),
                 ...(input.id === 'codex' ? { CODEX_BIN: runtime.binaryPath } : {}),
                 ...(input.id === 'kimi' ? { KIMI_BIN: runtime.binaryPath } : {}),
+                ...(input.id === 'grok' ? { GROK_BIN: runtime.binaryPath } : {}),
               }),
         },
       });

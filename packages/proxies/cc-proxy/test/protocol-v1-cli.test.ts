@@ -42,8 +42,11 @@ function startV1Proxy() {
   };
 }
 
-test('Claude CLI negotiates gian.proxy/1 and reports its independent version', async () => {
+test('Claude CLI negotiates gian.proxy/1 and reports its independent version', async (t) => {
   const proxy = startV1Proxy();
+  t.after(() => {
+    if (proxy.child.exitCode === null) proxy.child.kill('SIGTERM');
+  });
   proxy.send({
     id: 1,
     method: 'initialize',
@@ -54,7 +57,7 @@ test('Claude CLI negotiates gian.proxy/1 and reports its independent version', a
   });
   const initialized = await proxy.next() as { id: number; result: unknown };
   assert.equal(initialized.id, 1);
-  assert.equal(initializeResultSchema.parse(initialized.result).plugin.version, '0.1.0');
+  assert.equal(initializeResultSchema.parse(initialized.result).plugin.version, '0.1.1');
 
   proxy.send({ id: 2, method: 'does.not.exist', params: {} });
   assert.equal(proxyErrorResponseSchema.parse(await proxy.next()).error.code, 'METHOD_NOT_FOUND');

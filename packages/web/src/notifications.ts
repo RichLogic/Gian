@@ -1,6 +1,7 @@
 import type { EventEnvelope, Session } from '@gian/shared';
 import { stripGianActionBlocks } from '@gian/shared';
 import { displayDataForEnvelope, displayTypeForEnvelope } from './transcript/apply.js';
+import { desktopBridge } from './desktop-bridge.js';
 
 const PREFS_KEY = 'gian.notificationPrefs.v1';
 
@@ -21,6 +22,27 @@ export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
 };
 
 export type BrowserNotificationPermission = NotificationPermission | 'unsupported';
+
+export function visibleSessionForNativeNotification(input: {
+  mode: 'sessions' | 'tasks' | 'spaces';
+  viewState: 'main' | 'both' | 'workbench';
+  activeSessionId: string | null;
+  activeSubtaskId: string | null;
+}): string | null {
+  // `workbench` hides the Session surface entirely; Settings, Terminal,
+  // Browser, and other full-sheet views must not suppress a useful alert for
+  // the session behind them. In `both`, the Session remains visibly present.
+  if (input.viewState === 'workbench') return null;
+  if (input.mode === 'sessions') return input.activeSessionId;
+  if (
+    input.mode === 'tasks'
+    && input.activeSubtaskId
+    && input.activeSubtaskId === input.activeSessionId
+  ) {
+    return input.activeSessionId;
+  }
+  return null;
+}
 
 function storage(): Storage | null {
   try {
@@ -57,6 +79,16 @@ export function saveNotificationPrefs(prefs: NotificationPrefs): NotificationPre
   return prefs;
 }
 
+export function nativeNotificationPreferencesForMigration(): NotificationPrefs {
+  const preferences = loadNotificationPrefs();
+  return {
+    ...preferences,
+    // Carry forward only consent already granted through the renderer. A
+    // fresh signed install still requires an explicit user gesture.
+    desktop: preferences.desktop && browserNotificationPermission() === 'granted',
+  };
+}
+
 export async function requestDesktopNotificationPermission(): Promise<BrowserNotificationPermission> {
   if (!('Notification' in globalThis)) return 'unsupported';
   if (Notification.permission === 'granted' || Notification.permission === 'denied') {
@@ -71,6 +103,7 @@ function sessionLabel(session: Pick<Session, 'name' | 'executor'> | null | undef
   if (name) return name;
   if (session.executor === 'codex') return 'Codex session';
   if (session.executor === 'kimi') return 'Kimi session';
+  if (session.executor === 'grok') return 'Grok session';
   return 'Claude session';
 }
 
@@ -120,6 +153,11 @@ export function maybeNotifyForEnvelope(
     onClick?: () => void;
   } = {},
 ): boolean {
+  // Signed desktop builds receive global, privacy-bounded `attention`
+  // messages in Electron main. Keeping the renderer path active as well
+  // would double-notify the currently subscribed session. Browser/GianDev
+  // surfaces retain this fallback.
+  if (desktopBridge()?.notifications?.native) return false;
   const prefs = loadNotificationPrefs();
   if (!prefs.desktop || browserNotificationPermission() !== 'granted') return false;
 

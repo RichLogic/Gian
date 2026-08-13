@@ -15,13 +15,40 @@ import type { ModelCapabilities } from '../src/core/types.js';
 import type { ClaudeRuntime, ClaudeRuntimeEvents } from '../src/runtime/types.js';
 
 class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRuntime {
-  readonly messages: Array<{ sessionId: string; content: string; displayName?: string | null }> = [];
+  readonly messages: Array<{
+    sessionId: string;
+    content: string;
+    model: string | null;
+    displayName?: string | null;
+  }> = [];
   readonly permissionResponses: Array<{ requestId: string; behavior: 'allow' | 'deny' }> = [];
+  readonly spawns: Array<Parameters<ClaudeRuntime['spawnSession']>[0]> = [];
+  readonly modelUpdates: Array<{ sessionId: string; model: string | null }> = [];
   private readonly alive = new Set<string>();
+  private readonly modelBySession = new Map<string, string | null>();
+
+  constructor(private readonly models: ModelCapabilities[] = [{
+    id: 'default',
+    model: '',
+    displayName: 'Default',
+    description: '',
+    hidden: false,
+    isDefault: true,
+    defaultEffort: null,
+    supportedEfforts: [],
+  }]) {
+    super();
+  }
 
   async start(): Promise<number> { return 0; }
-  async spawnSession(options: { sessionId: string }): Promise<void> {
+  async spawnSession(options: Parameters<ClaudeRuntime['spawnSession']>[0]): Promise<void> {
+    this.spawns.push(options);
     this.alive.add(options.sessionId);
+    this.modelBySession.set(options.sessionId, options.model ?? null);
+  }
+  setSessionModel(sessionId: string, model: string | null): void {
+    this.modelUpdates.push({ sessionId, model });
+    this.modelBySession.set(sessionId, model);
   }
   async sendMessage(
     sessionId: string,
@@ -31,6 +58,7 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
     this.messages.push({
       sessionId,
       content,
+      model: this.modelBySession.get(sessionId) ?? null,
       ...(options?.displayName !== undefined ? { displayName: options.displayName } : {}),
     });
   }
@@ -47,16 +75,7 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
   getDetectedModelId(): string | null { return null; }
   async stop(): Promise<void> { this.alive.clear(); }
   getModels(): ModelCapabilities[] {
-    return [{
-      id: 'default',
-      model: '',
-      displayName: 'Default',
-      description: '',
-      hidden: false,
-      isDefault: true,
-      defaultEffort: null,
-      supportedEfforts: [],
-    }];
+    return this.models;
   }
   async awaitModelDiscovery(): Promise<void> {}
 }
@@ -127,6 +146,114 @@ test('Claude gian.proxy/1 keeps Host ids and rejects conflicting or concurrent t
     })));
     const started = notifications.find(item => item.method === 'turn.started');
     assert.equal('turnId' in started!.params ? started!.params.turnId : null, 'host-turn');
+  } finally {
+    await service.close();
+  }
+});
+
+test('Claude gian.proxy/1 lazily resolves catalog ids and updates each turn runtime model', async () => {
+  const runtime = new FakeRuntime([
+    {
+      id: 'claude-default',
+      model: '',
+      displayName: 'Default',
+      description: '',
+      hidden: false,
+      isDefault: true,
+      defaultEffort: null,
+      supportedEfforts: [],
+    },
+    {
+      id: 'claude-alias-opus',
+      model: 'opus',
+      displayName: 'Opus',
+      description: '',
+      hidden: false,
+      isDefault: false,
+      defaultEffort: null,
+      supportedEfforts: [],
+    },
+    {
+      id: 'claude-settings-router-kimi',
+      model: 'claude-router-kimi-k3[1m]',
+      displayName: 'claude-router-kimi-k3[1m]',
+      description: '',
+      hidden: false,
+      isDefault: false,
+      defaultEffort: null,
+      supportedEfforts: [],
+    },
+  ]);
+  const service = new CcProxyService({ runtime });
+  await service.initialize();
+  const adapter = new ClaudeProtocolV1Adapter(service, '0.1.0', () => undefined);
+  try {
+    await adapter.handle(request(1, 'initialize', {
+      protocol: { name: PROTOCOL_NAME, versions: [PROTOCOL_V1] },
+      host: { name: 'test', version: '9.9.9' },
+    }));
+    // Deliberately create before catalog.list. Session creation must lazily
+    // load the catalog mapping instead of forwarding the opaque id to Claude.
+    const created = await adapter.handle(request(2, 'session.create', {
+      sessionId: 'model-session',
+      cwd: '/tmp',
+      workspaceRoots: ['/tmp'],
+      model: 'claude-alias-opus',
+      config: {},
+    })) as { session: { streamId: string; model: string | null } };
+    assert.equal(created.session.model, 'claude-alias-opus');
+
+    const catalog = await adapter.handle(request(3, 'catalog.list', {})) as {
+      models: Array<{ id: string }>;
+    };
+    assert.deepEqual(catalog.models.map(model => model.id), [
+      'claude-default',
+      'claude-alias-opus',
+      'claude-settings-router-kimi',
+    ]);
+
+    await adapter.handle(request(4, 'turn.start', {
+      sessionId: 'model-session',
+      streamId: created.session.streamId,
+      turnId: 'alias-turn',
+      input: [{ type: 'text', text: 'hello' }],
+      policy: { workspaceRoots: ['/tmp'], approval: 'relay', network: 'ask' },
+      config: { native: {} },
+    }));
+    assert.equal(runtime.spawns[0]?.model, 'opus');
+    assert.equal(runtime.messages[0]?.model, 'opus');
+    runtime.emit('channelReply', runtime.messages[0]!.sessionId, 'alias done');
+
+    await adapter.handle(request(5, 'turn.start', {
+      sessionId: 'model-session',
+      streamId: created.session.streamId,
+      turnId: 'custom-turn',
+      input: [{ type: 'text', text: 'hello again' }],
+      policy: { workspaceRoots: ['/tmp'], approval: 'relay', network: 'ask' },
+      config: { model: 'claude-settings-router-kimi', native: {} },
+    }));
+    assert.equal(runtime.spawns.length, 1, 'registered native session is reused');
+    assert.equal(runtime.messages[1]?.model, 'claude-router-kimi-k3[1m]');
+    runtime.emit('channelReply', runtime.messages[1]!.sessionId, 'custom done');
+
+    await adapter.handle(request(6, 'turn.start', {
+      sessionId: 'model-session',
+      streamId: created.session.streamId,
+      turnId: 'default-turn',
+      input: [{ type: 'text', text: 'back to default' }],
+      policy: { workspaceRoots: ['/tmp'], approval: 'relay', network: 'ask' },
+      config: { model: 'claude-default', native: {} },
+    }));
+    assert.equal(runtime.messages[2]?.model, null);
+    assert.deepEqual(runtime.modelUpdates.map(update => update.model), [
+      'opus',
+      'claude-router-kimi-k3[1m]',
+      null,
+    ]);
+    const current = await adapter.handle(request(7, 'session.get', {
+      sessionId: 'model-session',
+    })) as { session: { model: string | null } };
+    assert.equal(current.session.model, 'claude-default');
   } finally {
     await service.close();
   }

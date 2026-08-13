@@ -244,7 +244,7 @@
   flex: none;
 }
 /* sidebar top row — Codex-style mode dropdown (large bold label + chevron)
-   with search / new icon buttons pushed right */
+   with the view-specific action buttons pushed right */
 .sb-toprow {
   display: flex; align-items: center; gap: 4px;
   height: var(--panel-header-h);
@@ -400,6 +400,7 @@ button.sb-section:hover { color: var(--text); }
 .ri-exec.claude { color: var(--claude); }
 .ri-exec.codex  { color: var(--codex); }
 .ri-exec.kimi { color: var(--text); }
+.ri-exec.grok { color: var(--text-2); }
 .ri-hidden-badge {
   position: absolute; top: 7px; right: 28px;
   width: 14px; height: 14px;
@@ -1986,6 +1987,7 @@ button.sb-section:hover { color: var(--text); }
 }
 .chip.claude { background: var(--claude-soft); color: var(--claude); }
 .chip.codex  { background: var(--codex-soft); color: var(--codex); }
+.chip.grok { background: var(--surface-3); color: var(--text); }
 .chip.discord { background: var(--discord-soft); color: var(--discord); }
 .chip.slack { background: var(--slack-soft); color: var(--slack); }
 
@@ -2326,6 +2328,7 @@ button.sb-section:hover { color: var(--text); }
 .exec-dot.claude { background: var(--claude); }
 .exec-dot.codex  { background: var(--codex); }
 .exec-dot.kimi { background: var(--kimi); box-shadow: 0 0 0 1px oklch(0.65 0 0 / 0.55); }
+.exec-dot.grok { background: var(--surface-1); box-shadow: inset 0 0 0 1px var(--text); }
 .exec-name { font: 500 13px/1 var(--font-sans); color: var(--text); }
 .exec-status {
   margin-left: auto;
@@ -2688,6 +2691,47 @@ button.sb-section:hover { color: var(--text); }
   display: flex; justify-content: flex-end; gap: 8px;
   margin-top: 16px;
 }
+.assign-session-task-modal {
+  width: min(440px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+.assign-session-task-name {
+  margin: 10px 0 8px;
+  overflow: hidden;
+  color: var(--text-2);
+  font: 500 var(--fz-12)/1.4 var(--font-sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assign-session-task-list {
+  max-height: min(320px, 50vh);
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--surface-2);
+  border-radius: var(--r-2);
+}
+.assign-session-task-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--text-3);
+}
+.assign-session-task-list .mp-row:disabled { opacity: 0.5; cursor: wait; }
+.assign-session-task-list .mp-row:disabled:hover { background: transparent; }
+.assign-session-task-list .mp-row-title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assign-session-task-empty {
+  margin: 0;
+  padding: 14px 10px;
+  color: var(--text-3);
+  font: var(--fz-12)/1.4 var(--font-sans);
+  text-align: center;
+}
 @keyframes confirm-fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes confirm-pop {
   from { opacity: 0; transform: translateY(6px) scale(0.98); }
@@ -2890,10 +2934,21 @@ button.sb-section:hover { color: var(--text); }
 .cs-sha-btn:hover { filter: brightness(0.97); }
 .cs-sha-btn svg { width: 11px; height: 11px; }
 /* Toolbar under the header: file stats left, view actions right
- * (collapse-all / unified⇄split / word-wrap / ⋯). */
+ * (collapse-all / stacked⇄side-by-side / word-wrap / ⋯). */
 .cs-toolbar { flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 16px; }
 .cs-toolbar .cs-stats { flex: 1 1 auto; min-width: 0; margin-top: 0; }
 .cs-actions { flex: none; display: inline-flex; align-items: center; gap: 2px; }
+.sheet-tabs-act .diff-layout-icon { width: 14px; height: 14px; }
+.diff-layout-icon .frame { fill: var(--surface); stroke: currentColor; stroke-width: 1.15; opacity: 0.65; }
+.diff-layout-icon .old { fill: var(--danger); opacity: 0.78; }
+.diff-layout-icon .next { fill: var(--ok); opacity: 0.78; }
+.cs-actions .diff-wrap-toggle.active {
+  color: var(--text);
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--hairline), inset 0 1px 2px oklch(from var(--text) l c h / 0.12);
+  transform: translateY(1px);
+}
+.cs-actions .diff-wrap-toggle.active:hover { background: var(--surface-3); }
 .cs-stats { display: flex; align-items: center; gap: 10px; margin-top: 10px; font: 600 10.5px/1 var(--font-mono); color: var(--text-3); letter-spacing: 0.05em; }
 .cs-stats .files { color: var(--text-2); }
 .cs-stats .add { color: var(--ok); } .cs-stats .del { color: var(--danger); }

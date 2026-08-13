@@ -23,6 +23,8 @@ export interface SessionMenuActions {
   // subtask). When a callback is absent, its item is hidden.
   // Subtask drops fork/delete.
   onCopyName?: () => void;
+  /** Move a standalone Session into one of the user's active Tasks. */
+  onAssignTask?: () => void;
   onForceRecover?: () => void;
   /** True while a session.recover run is in flight — the Force-recover item
    *  renders disabled with a "recovering" label (Phase 2a pending policy). */
@@ -99,6 +101,7 @@ const ICON = {
   copy: 'M9 9h10v10H9z M5 15V5h10',
   refresh: 'M3 12a9 9 0 0 1 15.5-6.3L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15.5 6.3L3 16 M3 21v-5h5',
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+  task: 'M4 6h6l2 2h8v10H4z M8 12h8 M8 15h5',
   trash: 'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13',
   // envelope — "mark as unread", same idiom as an unread email
   mail: 'M3 5h18v14H3z M3 7l9 6 9-6',
@@ -152,6 +155,12 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
 
   // session (default)
   copy();
+  if (m.onAssignTask) items.push({
+    key: 'assign-task',
+    icon: ICON.task,
+    label: t('path.menu.assignTask'),
+    onClick: m.onAssignTask,
+  });
   if (m.onMarkUnread) items.push({ key: 'unread', icon: ICON.mail, label: t('path.menu.markUnread'), onClick: m.onMarkUnread });
   if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t(m.recovering ? 'path.menu.recovering' : 'path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, disabled: m.recovering, ruleBefore: true });
   return items;

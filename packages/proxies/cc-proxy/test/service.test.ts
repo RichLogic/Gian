@@ -71,6 +71,8 @@ class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRun
     this.aliveSessions.add(options.sessionId);
   }
 
+  setSessionModel(_sessionId: string, _model: string | null): void {}
+
   async sendMessage(
     sessionId: string,
     content: string,

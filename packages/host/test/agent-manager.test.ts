@@ -54,11 +54,13 @@ test('agent manager detects configured official CLIs and development proxies', a
     claude: join(root, 'bin', 'claude'),
     codex: join(root, 'bin', 'codex'),
     kimi: join(root, 'bin', 'kimi'),
+    grok: join(root, 'bin', 'grok'),
   };
   await Promise.all([
     executable(bins.claude, 'claude 2.1.220'),
     executable(bins.codex, 'codex-cli 0.146.0'),
     executable(bins.kimi, 'kimi 0.31.1'),
+    executable(bins.grok, 'grok 0.1.42'),
   ]);
   const proxy = join(root, 'proxy.mjs');
   await writeFile(proxy, 'export {};\n');
@@ -67,7 +69,7 @@ test('agent manager detects configured official CLIs and development proxies', a
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy },
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy },
     environmentCliPaths: bins,
     homeDir: join(root, 'home'),
     pathEnv: '',
@@ -78,6 +80,7 @@ test('agent manager detects configured official CLIs and development proxies', a
     ['claude', true, '2.1.220'],
     ['codex', true, '0.146.0'],
     ['kimi', true, '0.31.1'],
+    ['grok', true, '0.1.42'],
   ]);
 
   await executable(bins.codex, 'codex-cli 0.147.0');
@@ -121,7 +124,7 @@ test('agent manager validates and persists a user CLI path', async t => {
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy },
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy },
     homeDir: join(root, 'home'),
     pathEnv: '',
   } as const;
@@ -149,7 +152,7 @@ test('agent manager migrates and persists Proxy-owned session defaults', async t
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy },
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy },
     homeDir: join(root, 'home'),
     pathEnv: '',
     legacyProxyDefaults: {

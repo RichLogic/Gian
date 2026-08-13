@@ -415,6 +415,10 @@ export class CodexProxyService {
     }
   }
 
+  async listNativeThreads(cwd?: string) {
+    return this.runtime.listNativeThreads?.(cwd) ?? null;
+  }
+
   async createSession(input: CreateSessionParams) {
     const cwd = resolve(normalizeNonEmptyString(input.cwd, 'cwd'));
     const thinking = input.thinking === undefined ? null : normalizeThinking(input.thinking);

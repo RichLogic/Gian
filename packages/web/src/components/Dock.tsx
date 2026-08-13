@@ -60,9 +60,9 @@ interface Props {
   activeRail: RailId | null;
   /** Toggle a rail open/closed (re-clicking the active rail collapses it). */
   onToggleRail: (rail: RailId) => void;
-  /** Session-scoped rails (Files / Diffs) need an active session. */
+  /** Session-scoped rails (Files / Diffs / History) need an active session. */
   sessionRailsDisabled?: boolean;
-  /** Global workbench rails (Terminal / Workspaces / Settings) need
+  /** Global workbench rails (Terminal / Browser / Workspaces / Settings) need
    *  Sessions or Tasks mode. */
   workbenchDisabled?: boolean;
   /** Browser is available only in the Electron desktop renderer. */

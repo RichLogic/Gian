@@ -1,4 +1,5 @@
 import type { Session, StateSyncMessage } from '@gian/shared';
+import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 
 export function sessionContractFixture(overrides: Partial<Session> = {}): Session {
   return {
@@ -68,6 +69,7 @@ export function stateSyncFixture(): StateSyncMessage {
       font_scale_chrome: 'md',
       font_scale_chat: 'md',
       font_scale_code: 'md',
+      terminal: { ...DEFAULT_TERMINAL_PREFERENCES },
       locale: 'zh-CN',
       default_claude_model: '',
       default_claude_effort: '',

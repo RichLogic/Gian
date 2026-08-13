@@ -30,6 +30,9 @@ export class NativeSessionService {
   }
 
   async listPlugin(executor: Executor, cwd: string): Promise<NativeSession[] | null> {
+    // Grok V1 does not advertise session.nativeList. Do not start a shared
+    // ACP process just to discover that the method is absent.
+    if (executor === 'grok') return null;
     return this.listFromProxy(executor, cwd, true);
   }
 
@@ -152,7 +155,7 @@ export class NativeSessionService {
             name,
             input.workspaceId,
             input.executor,
-            input.executor === 'kimi' ? null : input.approvalMode ?? 'ask',
+            input.executor === 'kimi' || input.executor === 'grok' ? null : input.approvalMode ?? 'ask',
             JSON.stringify(executorConfigFromOptions(broughtUp.configOptions)),
             input.nativeSessionId,
             now,

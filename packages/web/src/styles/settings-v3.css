@@ -64,6 +64,15 @@
 /* Single-section switcher — the nav lives in the panel-3 SettingsNavInspector. */
 .s2-section { scroll-margin-top: 16px; }
 .s2-section + .s2-section { margin-top: 26px; }
+.s2-section-heading {
+  min-height: 28px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.s2-section-heading .s2-sectiontitle { margin-bottom: 0; }
 .s2-sectiontitle {
   margin: 0 0 12px;
   font: 600 14px/1.2 var(--font-sans);
@@ -166,6 +175,55 @@
   color: var(--text-2);
   font: 500 var(--fz-12)/1 var(--font-mono);
   text-align: right;
+}
+
+.terminal-settings .select { width: 100%; }
+.terminal-stepper {
+  display: grid;
+  grid-template-columns: 28px 56px 28px;
+  align-items: center;
+  width: max-content;
+}
+.terminal-stepper button {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font: 500 15px/1 var(--font-sans);
+}
+.terminal-stepper button:first-child { border-radius: var(--r-1) 0 0 var(--r-1); }
+.terminal-stepper button:last-child { border-radius: 0 var(--r-1) var(--r-1) 0; }
+.terminal-stepper button:hover:not(:disabled) { color: var(--text); border-color: var(--text-3); }
+.terminal-stepper button:disabled { opacity: 0.4; cursor: default; }
+.terminal-stepper output {
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-block: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--text);
+  font: 500 var(--fz-12)/1 var(--font-mono);
+}
+.terminal-range {
+  min-height: 28px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  align-items: center;
+  gap: 10px;
+}
+.terminal-range input { width: 100%; min-width: 0; accent-color: var(--accent); }
+.terminal-range output {
+  color: var(--text-2);
+  font: 500 var(--fz-12)/1 var(--font-mono);
+  text-align: right;
+}
+.terminal-shell-select { text-overflow: ellipsis; }
+.terminal-settings .field-error {
+  display: block;
+  margin-top: 5px;
+  color: var(--danger);
+  font: var(--fz-11)/1.3 var(--font-sans);
 }
 
 /* Light-theme swatches are near-white — give every chip swatch a hairline

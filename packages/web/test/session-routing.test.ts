@@ -47,6 +47,14 @@ function session(overrides: Partial<Session> = {}): Session {
 }
 
 describe('session:updated active-list reconciliation', () => {
+  it('applies an asynchronously generated title to the canonical session row', () => {
+    const unnamed = session({ name: null });
+    expect(applySessionUpdate([unnamed], {
+      id: unnamed.id,
+      name: 'Generated Session Title',
+    })[0]?.name).toBe('Generated Session Title');
+  });
+
   it('removes an archived session', () => {
     expect(applySessionUpdate([session()], { id: 'session-1', archived: 1 })).toEqual([]);
   });

@@ -6,6 +6,7 @@ on:
       - 'proxy-claude-v*'
       - 'proxy-codex-v*'
       - 'proxy-kimi-v*'
+      - 'proxy-grok-v*'
 
 permissions:
   contents: write
@@ -46,6 +47,11 @@ jobs:
               ID=kimi
               PACKAGE=@gian/kimi-proxy
               MANIFEST=packages/proxies/kimi-proxy/package.json
+              ;;
+            proxy-grok-v*)
+              ID=grok
+              PACKAGE=@gian/grok-proxy
+              MANIFEST=packages/proxies/grok-proxy/package.json
               ;;
             *) exit 1 ;;
           esac

@@ -6,12 +6,23 @@ import {
   ensureChangesDiffLoaded,
   refreshChangesDiff,
   requestChangesDiffAnchor,
+  saveChangesInspectorScroll,
   setChangesDiffBase,
   setChangesDiffCommit,
   setChangesDiffScope,
   setChangesDiffSession,
+  toggleChangesFolder,
   useChangesDiffState,
 } from '../controllers/use-changes-diff.js';
+import {
+  filesInspectorOwnerKey,
+  refreshFilesInspector,
+  saveFilesInspectorScroll,
+  setFilesFolderOpen,
+  setFilesInspectorQuery,
+  toggleFilesFolder,
+  useFilesInspectorState,
+} from '../controllers/use-files-inspector.js';
 import { gitIndexEntityKey } from '../operations/git.js';
 import { useOperationDispatch, useOperationRun, usePendingOperations } from '../operations/use-operations.js';
 import { useT } from '../i18n/index.js';
@@ -77,6 +88,7 @@ export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, reveal
     return (
       <FilesInspector
         workingTreeId={workingTreeId}
+        activeSessionId={activeSessionId}
         workingTrees={workingTrees}
         onOpenFile={onOpenFile}
         revealFile={revealFile}
@@ -89,22 +101,27 @@ export function Inspector({ tab, workingTreeId, workingTrees, onOpenFile, reveal
 // ─── Files Inspector ────────────────────────────────────────────────────────
 function FilesInspector({
   workingTreeId,
+  activeSessionId,
   workingTrees,
   onOpenFile,
   revealFile,
 }: {
   workingTreeId: string | null;
+  activeSessionId?: string | null;
   workingTrees: WorkingTree[];
   onOpenFile: (p: string, perm: boolean) => void;
   revealFile?: { workingTreeId: string; path: string; requestId: number } | null;
 }) {
   const t = useT();
-  const [reloadKey, setReloadKey] = useState(0);
-  const [query, setQuery] = useState('');
+  const ownerKey = filesInspectorOwnerKey(activeSessionId, workingTreeId)
+    ?? (workingTreeId ? JSON.stringify([null, workingTreeId]) : null);
+  const viewState = useFilesInspectorState(ownerKey);
+  const { query, reloadRevision } = viewState;
   // Whole-tree file index, fetched lazily the first time the user searches.
   // null = not loaded yet; [] = loaded-and-empty.
   const [allFiles, setAllFiles] = useState<string[] | null>(null);
   const [loadingAll, setLoadingAll] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const wt = workingTreeId ? workingTrees.find(w => w.id === workingTreeId) : null;
   const rootName = wt ? (wt.path.split('/').pop() || wt.path) : 'Root';
   const q = query.trim().toLowerCase();
@@ -112,12 +129,16 @@ function FilesInspector({
 
   // Cross-panel reveals use the hierarchical tree, not a stale search result.
   useEffect(() => {
-    if (revealPath) setQuery('');
-  }, [revealPath, revealFile?.requestId]);
+    if (revealPath && ownerKey) setFilesInspectorQuery(ownerKey, '');
+  }, [revealPath, revealFile?.requestId, ownerKey]);
 
   // Invalidate the cached index when the working tree changes or the user
   // hits refresh — the previous tree's paths no longer apply.
-  useEffect(() => { setAllFiles(null); }, [workingTreeId, reloadKey]);
+  useEffect(() => { setAllFiles(null); }, [workingTreeId, reloadRevision]);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = viewState.scrollTop;
+  }, [ownerKey]);
 
   // Fetch the recursive index on first search for the current tree.
   useEffect(() => {
@@ -140,7 +161,9 @@ function FilesInspector({
     <aside className="inspector">
       <div className="insp-head">
         <span className="label">{t('dock.files')}</span>
-        <button className="iconbtn" title={t('common.refresh')} onClick={() => setReloadKey(k => k + 1)}>
+        <button className="iconbtn" title={t('common.refresh')} onClick={() => {
+          if (ownerKey) refreshFilesInspector(ownerKey);
+        }}>
           <Icon d={I.refresh} />
         </button>
       </div>
@@ -148,18 +171,21 @@ function FilesInspector({
         <Icon d={I.search} size={12} stroke={1.7} />
         <input
           value={query}
-          onChange={e => setQuery(e.target.value)}
+          onChange={e => { if (ownerKey) setFilesInspectorQuery(ownerKey, e.target.value); }}
           placeholder={t('inspector.files.search')}
           aria-label={t('inspector.files.search')}
           spellCheck={false}
         />
         {query && (
-          <button className="insp-search-x" aria-label={t('common.clear')} onClick={() => setQuery('')}>
+          <button className="insp-search-x" aria-label={t('common.clear')} onClick={() => {
+            if (ownerKey) setFilesInspectorQuery(ownerKey, '');
+          }}>
             ✕
           </button>
         )}
       </div>
-      <div className="insp-scroll">
+      <div className="insp-scroll" ref={scrollRef}
+           onScroll={e => { if (ownerKey) saveFilesInspectorScroll(ownerKey, e.currentTarget.scrollTop); }}>
         {!workingTreeId ? (
           <div style={{ padding: '12px', color: 'var(--text-3)', fontSize: 'var(--fz-12)', fontStyle: 'italic' }}>
             No active working tree.
@@ -180,7 +206,8 @@ function FilesInspector({
               // Key on the working tree (not just reloadKey) so switching
               // workspace remounts the whole tree — otherwise the root folder
               // keeps the previous tree's cached `entries` and never reloads.
-              key={`${workingTreeId}:${reloadKey}`}
+              key={`${ownerKey}:${reloadRevision}`}
+              ownerKey={ownerKey!}
               workingTreeId={workingTreeId}
               relPath=""
               name={rootName}
@@ -222,6 +249,7 @@ function SearchHit({ path, onOpenFile }: { path: string; onOpenFile: (p: string,
 }
 
 function TreeFolder({
+  ownerKey,
   workingTreeId,
   relPath,
   name,
@@ -231,6 +259,7 @@ function TreeFolder({
   revealPath,
   revealRequestId,
 }: {
+  ownerKey: string;
   workingTreeId: string;
   relPath: string;
   name: string;
@@ -241,15 +270,16 @@ function TreeFolder({
   revealRequestId?: number;
 }) {
   const t = useT();
-  const [open, setOpen] = useState(openInitial);
+  const viewState = useFilesInspectorState(ownerKey);
+  const open = viewState.folderOpen[relPath] ?? openInitial;
   const [entries, setEntries] = useState<TreeEntry[] | null>(null);
   const containsReveal = !!revealPath && (
     relPath === '' || revealPath.startsWith(`${relPath}/`)
   );
 
   useEffect(() => {
-    if (containsReveal) setOpen(true);
-  }, [containsReveal, revealRequestId]);
+    if (containsReveal) setFilesFolderOpen(ownerKey, relPath, true);
+  }, [containsReveal, revealRequestId, ownerKey, relPath]);
 
   useEffect(() => {
     if (!open || entries !== null) return;
@@ -270,7 +300,7 @@ function TreeFolder({
     <>
       <div className={`tree-item folder ${open ? 'open' : ''}`}
            style={{ paddingLeft: 6 + depth * 10 }}
-           onClick={() => setOpen(o => !o)}>
+           onClick={() => toggleFilesFolder(ownerKey, relPath, openInitial)}>
         <span className="tree-caret"><Icon d={I.chev} size={10} /></span>
         <span className="tree-name">{name}</span>
       </div>
@@ -288,6 +318,7 @@ function TreeFolder({
           {entries.map(e => e.type === 'dir' ? (
             <TreeFolder
               key={e.path}
+              ownerKey={ownerKey}
               workingTreeId={workingTreeId}
               relPath={e.path}
               name={e.name}
@@ -412,6 +443,9 @@ function sortChangeNodes(nodes: ChangeNode[]): void {
 }
 
 interface ChangeTreeProps {
+  workingTreeId: string;
+  ownerSessionId?: string | null;
+  folderOpen: Readonly<Record<string, boolean>>;
   scope: ChangeScope;
   busyPath: string | null;
   /** Jump panel 2's Changes multi-diff view to this file's diff block. */
@@ -426,13 +460,13 @@ function ChangeTreeNode({ node, depth, ctx }: { node: ChangeNode; depth: number;
 }
 
 function ChangeFolder({ node, depth, ctx }: { node: ChangeNode; depth: number; ctx: ChangeTreeProps }) {
-  const [open, setOpen] = useState(true);
+  const open = ctx.folderOpen[node.path] ?? true;
   return (
     <>
       <div
         className={`tree-item folder ${open ? 'open' : ''}`}
         style={{ paddingLeft: 6 + depth * 10 }}
-        onClick={() => setOpen(o => !o)}
+        onClick={() => toggleChangesFolder(ctx.workingTreeId, node.path, ctx.ownerSessionId)}
         title={node.path}
       >
         <span className="tree-caret"><Icon d={I.chev} size={10} /></span>
@@ -510,10 +544,9 @@ function ChangesInspector({
   const t = useT();
   const dispatch = useOperationDispatch();
   // Scope, pinned commit/base, last-turn target and the changed-file list all
-  // live in the use-changes-diff store (keyed by working tree) — shared with
-  // panel 2's multi-diff view and surviving inspector unmounts (rail
-  // collapse). This component is a view over that store plus its pickers.
-  const diffState = useChangesDiffState(workingTreeId);
+  // live in the use-changes-diff store (keyed by Session + working tree) —
+  // shared with panel 2's multi-diff view and surviving inspector unmounts.
+  const diffState = useChangesDiffState(workingTreeId, activeSessionId);
   const { scope, commitSha, baseBranch, branchList: branches } = diffState;
   const changes = diffState.files;
   // Stage/unstage busy state is derived from the in-flight git.stage /
@@ -541,22 +574,33 @@ function ChangesInspector({
   const [commitsLoaded, setCommitsLoaded] = useState(false);
   const [rowMenuOpen, setRowMenuOpen] = useState(false);
   const [rowSearch, setRowSearch] = useState('');
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   // Forward the active session — the Last-turn scope's fallback for trees
   // that carry no session of their own. Declared BEFORE the ensure effect so
   // the first list load already carries it (store updates are synchronous).
   useEffect(() => {
-    if (workingTreeId) setChangesDiffSession(workingTreeId, activeSessionId ?? null);
+    if (workingTreeId) {
+      setChangesDiffSession(
+        workingTreeId,
+        activeSessionId ?? null,
+        activeSessionId,
+      );
+    }
   }, [workingTreeId, activeSessionId]);
 
   useEffect(() => {
-    if (workingTreeId) ensureChangesDiffLoaded(workingTreeId);
-  }, [workingTreeId]);
+    if (workingTreeId) ensureChangesDiffLoaded(workingTreeId, activeSessionId);
+  }, [workingTreeId, activeSessionId]);
 
   useEffect(() => {
     setCommits([]);
     setCommitsLoaded(false);
-  }, [workingTreeId]);
+  }, [workingTreeId, activeSessionId]);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = diffState.inspectorScrollTop;
+  }, [workingTreeId, activeSessionId]);
 
   useEffect(() => {
     if (scope !== 'commit' || !workingTreeId || commitsLoaded) return;
@@ -571,12 +615,12 @@ function ChangesInspector({
 
   function pickScope(next: ChangeScope) {
     if (!workingTreeId) return;
-    setChangesDiffScope(workingTreeId, next);
+    setChangesDiffScope(workingTreeId, next, activeSessionId);
   }
 
   function pickBase(branch: string | null) {
     if (!workingTreeId) return;
-    setChangesDiffBase(workingTreeId, branch);
+    setChangesDiffBase(workingTreeId, branch, activeSessionId);
     setRowMenuOpen(false);
   }
 
@@ -590,7 +634,7 @@ function ChangesInspector({
     if (!stageRun) return;
     if (stageRun.phase === 'confirmed') {
       setStageRunId(undefined);
-      if (workingTreeId) refreshChangesDiff(workingTreeId);
+      if (workingTreeId) refreshChangesDiff(workingTreeId, activeSessionId);
     } else if (stageRun.phase === 'failed' || stageRun.phase === 'timed-out') {
       setStageRunId(undefined);
     }
@@ -721,7 +765,7 @@ function ChangesInspector({
                           aria-checked={commitSha === null}
                           type="button"
                           className={commitSha === null ? 'active' : ''}
-                          onClick={() => { if (workingTreeId) setChangesDiffCommit(workingTreeId, null); setRowMenuOpen(false); }}
+                          onClick={() => { if (workingTreeId) setChangesDiffCommit(workingTreeId, null, activeSessionId); setRowMenuOpen(false); }}
                         >
                           <span className="ck">{commitSha === null ? '✓' : ''}</span>
                           <span className="subj">{t('changes.scope.latestCommit')}</span>
@@ -739,7 +783,7 @@ function ChangesInspector({
                               type="button"
                               className={commitSha === cm.sha ? 'active' : ''}
                               title={cm.sha}
-                              onClick={() => { if (workingTreeId) setChangesDiffCommit(workingTreeId, cm.sha); setRowMenuOpen(false); }}
+                              onClick={() => { if (workingTreeId) setChangesDiffCommit(workingTreeId, cm.sha, activeSessionId); setRowMenuOpen(false); }}
                             >
                               <span className="ck">{commitSha === cm.sha ? '✓' : ''}</span>
                               <span className="subj">{cm.subject}</span>
@@ -755,12 +799,19 @@ function ChangesInspector({
           </div>
         </div>
       )}
-      <div className="insp-scroll">
+      <div className="insp-scroll" ref={scrollRef}
+           onScroll={e => {
+             if (workingTreeId) saveChangesInspectorScroll(
+               workingTreeId,
+               e.currentTarget.scrollTop,
+               activeSessionId,
+             );
+           }}>
         {diffState.status === 'error' ? (
           <div className="changes-empty">
             {t('changes.diff.loadFailed')}{' '}
             <button className="btn sm secondary" type="button"
-                    onClick={() => { if (workingTreeId) refreshChangesDiff(workingTreeId); }}>
+                    onClick={() => { if (workingTreeId) refreshChangesDiff(workingTreeId, activeSessionId); }}>
               {t('common.retry')}
             </button>
           </div>
@@ -774,9 +825,12 @@ function ChangesInspector({
                 node={node}
                 depth={0}
                 ctx={{
+                  workingTreeId: workingTreeId!,
+                  ownerSessionId: activeSessionId,
+                  folderOpen: diffState.folderOpen,
                   scope,
                   busyPath,
-                  onReveal: path => { if (workingTreeId) requestChangesDiffAnchor(workingTreeId, path); },
+                  onReveal: path => { if (workingTreeId) requestChangesDiffAnchor(workingTreeId, path, activeSessionId); },
                   onToggleStage: (e, c) => { void toggleStage(e, c); },
                   t,
                 }}

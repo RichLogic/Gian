@@ -9,6 +9,7 @@ import type {
   Session,
   SlashListResult,
 } from '@gian/shared';
+import { usesNativeExecutorConfig } from '@gian/shared';
 import { locateNativeJsonl } from '../native/locate-jsonl.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import type { ProxyManager } from '../proxy/manager.js';
@@ -138,7 +139,7 @@ export class ProxySessionCoordinator {
     try {
       return await pending;
     } catch (error) {
-      if (session.executor === 'kimi') await this.dispose(session.id);
+      if (usesNativeExecutorConfig(session.executor)) await this.dispose(session.id);
       throw error;
     } finally {
       if (this.bringUps.get(session.id) === pending) this.bringUps.delete(session.id);
@@ -207,7 +208,7 @@ export class ProxySessionCoordinator {
         || message.includes('Could not resume')
       );
       const turnCount = isMissing ? this.history.countTurns(args.sessionId) : -1;
-      if (!isMissing || turnCount > 0 || args.executor === 'kimi') throw error;
+      if (!isMissing || turnCount > 0 || usesNativeExecutorConfig(args.executor)) throw error;
 
       created = await client.createSession({ cwd: args.cwd, model: args.model ?? undefined });
       const now = new Date().toISOString();
@@ -222,7 +223,7 @@ export class ProxySessionCoordinator {
     this.sessionIds.set(args.sessionId, created.session.id);
     let configOptions = created.configOptions ?? created.session.configOptions ?? [];
     if (
-      args.executor === 'kimi'
+      usesNativeExecutorConfig(args.executor)
       && client.setNativeConfig
       && (args.executorConfig || args.executorDefaults)
     ) {
@@ -294,7 +295,11 @@ export class ProxySessionCoordinator {
       });
     }
 
-    if (this.watcher && args.executor !== 'kimi' && !client.protocolV1) {
+    if (
+      this.watcher
+      && !usesNativeExecutorConfig(args.executor)
+      && !client.protocolV1
+    ) {
       const filePath = locateNativeJsonl(args.executor, created.nativeSessionId, args.cwd);
       if (filePath) this.watcher.start(args.sessionId, filePath, args.executor);
     }
@@ -347,7 +352,7 @@ export class ProxySessionCoordinator {
 
   async warmCapabilities(executor: Executor): Promise<ProxyCapabilities> {
     const cached = this.capabilitiesByExecutor.get(executor);
-    if (cached && (executor === 'kimi' || cached.models.length > 0)) return cached;
+    if (cached && (usesNativeExecutorConfig(executor) || cached.models.length > 0)) return cached;
     const tempKey = `__caps__${executor}`;
     if (cached) {
       this.capabilitiesByExecutor.delete(executor);

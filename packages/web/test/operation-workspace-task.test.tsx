@@ -332,10 +332,14 @@ describe('subtask REST operations (proposal §8, product definitions)', () => {
     const session = { id: 'sub-new', task_id: 't1' } as Session;
     vi.mocked(createSubtask).mockResolvedValue(session);
 
-    const run = dispatcher.dispatch('task.createSubtask', { taskId: 't1', workspaceId: 'w1', executor: 'codex', name: 'Sub' });
+    const run = dispatcher.dispatch('task.createSubtask', {
+      taskId: 't1', workspaceId: 'w1', executor: 'codex', name: 'Sub', serviceTier: 'fast',
+    });
     expect(run.phase).toBe('pending');
     expect(run.entityKey.startsWith('pending:task.createSubtask:')).toBe(true);
-    expect(createSubtask).toHaveBeenCalledWith('t1', { workspace_id: 'w1', executor: 'codex', name: 'Sub' });
+    expect(createSubtask).toHaveBeenCalledWith('t1', {
+      workspace_id: 'w1', executor: 'codex', name: 'Sub', service_tier: 'fast',
+    });
 
     await vi.waitFor(() => expect(store.getRun(run.id)?.phase).toBe('confirmed'));
     expect(store.getRun(run.id)?.result).toBe(session);

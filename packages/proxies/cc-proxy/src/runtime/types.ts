@@ -77,6 +77,10 @@ export interface ClaudeRuntime extends EventEmitter<ClaudeRuntimeEvents> {
     isResume: boolean;
   }): Promise<void>;
 
+  /** Update the provider-facing model used by subsequent per-turn CLI
+   *  processes without discarding the registered native session. */
+  setSessionModel(sessionId: string, model: string | null): void;
+
   /** Send a user message to Claude Code. */
   sendMessage(sessionId: string, content: string, options?: {
     /** Per-turn `--permission-mode` value. Pass-through to the spawned

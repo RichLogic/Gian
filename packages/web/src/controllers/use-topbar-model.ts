@@ -26,6 +26,8 @@ interface TopbarModelInput {
   /** True while a session.recover run is in flight for the active session —
    *  the Force-recover menu item renders disabled/"recovering". */
   activeSessionRecovering: boolean;
+  /** Open the active-Task picker for a standalone Session. */
+  onAssignSessionTask: (session: Session) => void;
   ops: OperationDispatcher;
   t(key: string): string;
 }
@@ -53,6 +55,7 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
     setWtView,
     viewedWorkingTreeId,
     activeSessionRecovering,
+    onAssignSessionTask,
     ops,
     t,
   } = input;
@@ -124,6 +127,11 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
       onCopyName: () => {
         try { void navigator.clipboard?.writeText(activeSession.name || ''); } catch { /* ignore */ }
       },
+      ...(mode === 'sessions'
+        && activeSession.type === 'coding'
+        && activeSession.task_id === null
+        ? { onAssignTask: () => onAssignSessionTask(activeSession) }
+        : {}),
       onForceRecover: () => ops.dispatch('session.recover', { sessionId: activeSession.id }),
       recovering: activeSessionRecovering,
       onMarkUnread: () => ops.dispatch('session.setUnread', { sessionId: activeSession.id, unread: true }),
@@ -147,7 +155,7 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
         },
       }),
     };
-  }, [activeSession, activeSessionRecovering, activeSubtaskId, mode, ops, t]);
+  }, [activeSession, activeSessionRecovering, activeSubtaskId, mode, onAssignSessionTask, ops, t]);
 
   const branchMenu = useMemo<BranchMenuActions | null>(() => {
     const visible = (mode === 'sessions' || (mode === 'tasks' && activeSubtaskId))

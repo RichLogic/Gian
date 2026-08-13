@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src data:; style-src 'self' 'unsafe-inline'; script-src 'self';"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gian Screenshot</title>
+    <link rel="stylesheet" href="./screenshot.css" />
+  </head>
+  <body>
+    <main id="capture-root" aria-label="截图编辑器">
+      <canvas id="capture-canvas"></canvas>
+
+      <div id="target-label" class="target-label" aria-live="polite"></div>
+      <div id="selection-size" class="selection-size" hidden></div>
+      <div id="capture-status" class="capture-status" hidden></div>
+
+      <section id="toolbar" class="toolbar" aria-label="截图工具" hidden>
+        <div class="tool-group" role="group" aria-label="标注工具">
+          <button class="tool active" type="button" data-tool="cursor" title="调整选区 (V)" aria-label="调整选区">
+            <span class="cursor-icon">↖</span>
+          </button>
+          <button class="tool" type="button" data-tool="rect" title="矩形框 (R)" aria-label="矩形框">
+            <span class="rect-icon"></span>
+          </button>
+          <button class="tool" type="button" data-tool="ellipse" title="圆形框 (O)" aria-label="圆形框">
+            <span class="ellipse-icon"></span>
+          </button>
+          <button class="tool" type="button" data-tool="line" title="直线 (L)" aria-label="直线">
+            <span class="line-icon"></span>
+          </button>
+          <button class="tool" type="button" data-tool="arrow" title="箭头 (A)" aria-label="箭头">
+            <span class="arrow-icon">↗</span>
+          </button>
+          <button class="tool" type="button" data-tool="pen" title="画笔 (P)" aria-label="画笔">
+            <span class="pen-icon">⌁</span>
+          </button>
+          <button class="tool text-tool" type="button" data-tool="text" title="文字 (T)" aria-label="文字">T</button>
+          <button class="tool mosaic-tool" type="button" data-tool="mosaic" title="马赛克 (M)" aria-label="马赛克">
+            <span class="mosaic-grid"><i></i><i></i><i></i><i></i></span>
+          </button>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="tool-group colors" role="group" aria-label="颜色">
+          <button type="button" class="color-swatch active" data-color="#ff4d4f" style="--swatch: #ff4d4f" aria-label="红色"></button>
+          <button type="button" class="color-swatch" data-color="#ffcc00" style="--swatch: #ffcc00" aria-label="黄色"></button>
+          <button type="button" class="color-swatch" data-color="#35c759" style="--swatch: #35c759" aria-label="绿色"></button>
+          <button type="button" class="color-swatch" data-color="#2f80ed" style="--swatch: #2f80ed" aria-label="蓝色"></button>
+          <button type="button" class="color-swatch" data-color="#ffffff" style="--swatch: #ffffff" aria-label="白色"></button>
+          <label class="custom-color" title="自定义颜色">
+            <input id="custom-color" type="color" value="#ff4d4f" aria-label="自定义颜色" />
+          </label>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="tool-group widths" role="group" aria-label="线条粗细">
+          <button type="button" class="width-option active" data-width="2" title="细" aria-label="细线"><i></i></button>
+          <button type="button" class="width-option" data-width="4" title="中" aria-label="中等线条"><i></i></button>
+          <button type="button" class="width-option" data-width="8" title="粗" aria-label="粗线"><i></i></button>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="tool-group actions" role="group" aria-label="操作">
+          <button id="undo-button" class="tool" type="button" title="撤销 (⌘Z)" aria-label="撤销" disabled>↶</button>
+          <button id="cancel-button" class="action-button cancel" type="button">取消</button>
+          <button id="complete-button" class="action-button complete" type="button">完成</button>
+        </div>
+      </section>
+
+      <textarea id="text-editor" class="text-editor" rows="1" aria-label="输入截图文字" hidden></textarea>
+    </main>
+    <script src="./screenshot.js"></script>
+  </body>
+</html>

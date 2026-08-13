@@ -16,7 +16,7 @@ import {
   rm,
   writeFile,
 } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -79,6 +79,10 @@ export function resolveDevEnvironment(
   const clean = Object.fromEntries(
     Object.entries(env).filter(([key]) => !key.startsWith('GIAN_')),
   );
+  const githubBrokerSocket = join(
+    tmpdir(),
+    `gian-github-${createHash('sha256').update(identity.runtimeId).digest('hex').slice(0, 24)}.sock`,
+  );
   return {
     ...clean,
     GIAN_HOST: '127.0.0.1',
@@ -90,6 +94,7 @@ export function resolveDevEnvironment(
     GIAN_DESKTOP_WEB_URL: DEV_WEB_URL,
     GIAN_DESKTOP_DISABLE_HOST_MANAGEMENT: '1',
     GIAN_GITHUB_CLIENT_ID: githubClientId,
+    GIAN_DESKTOP_GITHUB_BROKER_SOCKET: githubBrokerSocket,
     GIAN_RELEASE_VERSION: releaseVersion,
     GIAN_DEV_RUNTIME_ID: identity.runtimeId,
     GIAN_DEV_WORKTREE: identity.worktree,

@@ -9,6 +9,7 @@ import type {
   Session,
   ChatEvent,
 } from '@gian/shared';
+import { usesNativeExecutorConfig } from '@gian/shared';
 import { existsSync } from 'node:fs';
 import { ensureSessionAttachmentDir } from '../storage/attachments.js';
 import type { Db } from '../storage/db.js';
@@ -28,6 +29,7 @@ import {
 } from './lifecycle-service.js';
 import { ProxySessionCoordinator } from './proxy-session-coordinator.js';
 import { SessionEventCoordinator } from './event-coordinator.js';
+import type { AttentionDispatcher } from './attention.js';
 import { AutoTitleService } from './auto-title.js';
 import { SubtaskLifecycle } from './subtask-lifecycle.js';
 import { NativeSessionService } from './native-session-service.js';
@@ -81,6 +83,7 @@ export class SessionManager {
      *  events + WS for each active session. Optional so tests can omit. */
     private watcher: NativeJsonlWatcher | null = null,
     private proxyDefaults?: (executor: Executor) => AgentProxyDefaults,
+    attention?: AttentionDispatcher,
   ) {
     this.sessions = new SessionRepository(db);
     this.history = new SessionHistoryStore(db);
@@ -118,6 +121,7 @@ export class SessionManager {
       {
         sendMessage: (sessionId, text, items) => this.sendMessage(sessionId, text, items),
       },
+      attention,
     );
     this.subtasks = new SubtaskLifecycle(db, this.sessions, {
       broadcastUpdated: (sessionId, partial) => this.broadcastSessionUpdated(sessionId, partial),
@@ -435,7 +439,7 @@ export class SessionManager {
     // escalates it to 'auto' for writes. It still binds the root workspace
     // (`~/Coding`, spanning all projects), so 'auto' there is broad — the mode
     // picker is the gate.
-    const policyParams = session.executor === 'kimi'
+    const policyParams = usesNativeExecutorConfig(session.executor)
       ? {}
       : oneShotBypass
         ? { permissionMode: 'bypassPermissions' as const }
@@ -502,8 +506,8 @@ export class SessionManager {
 
   setApprovalMode(sessionId: string, mode: ApprovalMode): void {
     const session = this.getSession(sessionId);
-    if (session.executor === 'kimi') {
-      throw new Error('Kimi mode is executor-native; use session:set_native_config.');
+    if (usesNativeExecutorConfig(session.executor)) {
+      throw new Error(`${session.executor} mode is executor-native; use session:set_native_config.`);
     }
     assertApprovalModeAllowed(session.executor, mode);
     const now = new Date().toISOString();
@@ -873,6 +877,10 @@ export class SessionManager {
 
   archiveSession(sessionId: string, archived: boolean): void {
     this.lifecycle.archive(sessionId, archived);
+  }
+
+  assignTask(sessionId: string, taskId: string): void {
+    this.lifecycle.assignTask(sessionId, taskId);
   }
 
   notifyTaskSessionsUpdated(taskId: string): void {

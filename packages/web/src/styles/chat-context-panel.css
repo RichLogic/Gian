@@ -131,6 +131,10 @@
 .chat-agent-provider[data-provider="claude"] > span { background: var(--claude); }
 .chat-agent-provider[data-provider="codex"] > span { background: var(--codex); }
 .chat-agent-provider[data-provider="kimi"] > span { background: var(--accent); }
+.chat-agent-provider[data-provider="grok"] > span {
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--text);
+}
 
 .chat-agent-state {
   padding-left: 8px;

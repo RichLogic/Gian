@@ -4,6 +4,7 @@ import { SettingsBody } from '../src/components/SettingsBody.js';
 import { renderWithOperations } from './operation-test-utils.js';
 import * as api from '../src/api.js';
 import type { SystemConfig } from '@gian/shared';
+import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 
 vi.mock('../src/api.js', async () => {
   const actual = await vi.importActual<typeof import('../src/api.js')>('../src/api.js');
@@ -19,6 +20,7 @@ function baseConfig(overrides: Partial<SystemConfig> = {}): SystemConfig {
     host: '127.0.0.1', port: 8991, workspace_root: '~/Coding',
     theme: 'warm', accent: 'ember', density: 'cozy', locale: 'zh-CN',
     font_scale_chrome: 'md', font_scale_chat: 'md', font_scale_code: 'md',
+    terminal: { ...DEFAULT_TERMINAL_PREFERENCES },
     default_claude_model: '', default_claude_effort: '',
     default_codex_model:  '', default_codex_effort:  '',
     auth_username: '', external_editors: [],

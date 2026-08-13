@@ -6,7 +6,11 @@ import { useAppShortcuts } from '../src/controllers/use-app-shortcuts.js';
 import type { OperationDispatcher } from '../src/operations/dispatcher.js';
 import { sessionContractFixture } from './fixtures/ws-contract.js';
 
-function renderShortcuts(session: Session) {
+function renderShortcuts(
+  session: Session,
+  disabled = false,
+  setPaletteOpen = vi.fn() as Dispatch<SetStateAction<boolean>>,
+) {
   const dispatch = vi.fn();
   const sessionsRef = { current: [session] } as RefObject<Session[]>;
   const ops = {
@@ -14,8 +18,6 @@ function renderShortcuts(session: Session) {
     dispose: vi.fn(),
     store: {},
   } as unknown as OperationDispatcher;
-  const setPaletteOpen = vi.fn() as Dispatch<SetStateAction<boolean>>;
-
   renderHook(() => useAppShortcuts({
     authenticated: true,
     mode: 'sessions',
@@ -25,6 +27,7 @@ function renderShortcuts(session: Session) {
     sessionsRef,
     ops,
     paletteOpen: false,
+    disabled,
     setPaletteOpen,
   }));
 
@@ -45,6 +48,28 @@ function pressQueueShortcut(modifier: 'metaKey' | 'ctrlKey'): KeyboardEvent {
 }
 
 describe('global queue.sendNow shortcut terminal guard', () => {
+  it('ignores global shortcuts while a modal owns keyboard focus', () => {
+    const session = sessionContractFixture({ id: 'modal-open' });
+    const setPaletteOpen = vi.fn() as Dispatch<SetStateAction<boolean>>;
+    const dispatch = renderShortcuts(session, true, setPaletteOpen);
+
+    for (const init of [
+      { key: 'Enter', metaKey: true },
+      { key: 'j', metaKey: true },
+      { key: 'k', metaKey: true },
+      { key: 'k', metaKey: true, shiftKey: true },
+    ]) {
+      act(() => document.dispatchEvent(new KeyboardEvent('keydown', {
+        ...init,
+        bubbles: true,
+        cancelable: true,
+      })));
+    }
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(setPaletteOpen).not.toHaveBeenCalled();
+  });
+
   for (const modifier of ['metaKey', 'ctrlKey'] as const) {
     it(`dispatches ${modifier === 'metaKey' ? 'Cmd' : 'Ctrl'}+Enter for an open Codex session`, () => {
       const session = sessionContractFixture({ id: `open-${modifier}` });

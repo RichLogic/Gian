@@ -113,6 +113,16 @@ function stateSyncFixture() {
       font_scale_chrome: 'md',
       font_scale_chat: 'lg',
       font_scale_code: 'sm',
+      terminal: {
+        font_family: 'jetbrains-mono',
+        font_size: 13,
+        line_height: 1.2,
+        cursor_style: 'block',
+        cursor_blink: true,
+        scrollback_lines: 5000,
+        shell: '',
+        start_directory: 'context',
+      },
       locale: 'zh-CN',
       default_claude_model: '',
       default_claude_effort: '',
@@ -147,6 +157,16 @@ test('CONTRACT-005: malformed nested model/web fields are rejected at runtime', 
   const badSync = stateSyncFixture();
   badSync.config.density = 'dense';
   assert.throws(() => parseStateSyncMessage(badSync), error =>
+    error instanceof RuntimeContractError && error.contract === 'StateSyncMessage');
+
+  const badTerminal = stateSyncFixture();
+  badTerminal.config.terminal.font_size = 'large';
+  assert.throws(() => parseStateSyncMessage(badTerminal), error =>
+    error instanceof RuntimeContractError && error.contract === 'StateSyncMessage');
+
+  const oversizedTerminal = stateSyncFixture();
+  oversizedTerminal.config.terminal.font_size = 23;
+  assert.throws(() => parseStateSyncMessage(oversizedTerminal), error =>
     error instanceof RuntimeContractError && error.contract === 'StateSyncMessage');
 });
 

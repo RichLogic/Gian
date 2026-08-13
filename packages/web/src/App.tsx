@@ -1,5 +1,6 @@
 import { lazy, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { RunnerInfo, Session, Task, Workspace } from '@gian/shared';
+import type { RunnerInfo, Session, Task, TerminalOptions, Workspace } from '@gian/shared';
+import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 import { LocaleProvider } from './i18n/index.js';
 import { EN } from './i18n/en.js';
 import { ZH } from './i18n/zh.js';
@@ -8,6 +9,7 @@ import { GianWs } from './ws.js';
 import {
   fetchWsToken,
   loadSettings,
+  loadTerminalOptions,
   loadAgents,
   loadSessions,
   loadTasks,
@@ -24,6 +26,7 @@ import { FileRefRehypeContext } from './transcript/items.js';
 import type { PlanLifecycleState } from './transcript/apply.js';
 import { DiffOpenContext, FileLinkOpenContext, ImageZoomContext, PlanOpenContext, RelativeLinkOpenContext } from './transcript/items.js';
 import { ImageLightbox, type ZoomImage } from './components/ImageLightbox.js';
+import { AssignSessionTaskDialog } from './components/AssignSessionTaskDialog.js';
 import { Topbar } from './components/Topbar.js';
 import type { Mode } from './components/Topbar.js';
 import { Dock } from './components/Dock.js';
@@ -64,6 +67,15 @@ import { useWorkingTrees } from './controllers/use-working-trees.js';
 import { usePanelLayout } from './controllers/use-panel-layout.js';
 import { useAppZoom } from './display-prefs.js';
 import { createOperationDispatcher, type OperationDispatcher } from './operations/dispatcher.js';
+import {
+  desktopBridge,
+  type GianDesktopNavigationTarget,
+} from './desktop-bridge.js';
+import { subscribeDesktopNavigation } from './desktop-navigation.js';
+import {
+  nativeNotificationPreferencesForMigration,
+  visibleSessionForNativeNotification,
+} from './notifications.js';
 // Importing the operations modules registers the operation definitions on
 // the product registry as a side effect (session.js directly here;
 // message/queue/approval via use-session-commands.js below; task/workspace
@@ -77,7 +89,11 @@ import './operations/files.js';
 import './operations/browser.js';
 import './operations/onboarding.js';
 import { sessionEntityKey } from './operations/session.js';
-import { createMessageEchoSink, wireMessageEchoSink } from './operations/message.js';
+import {
+  createMessageEchoSink,
+  dispatchAttachmentUpload,
+  wireMessageEchoSink,
+} from './operations/message.js';
 import { QUEUE_OVERLAY_FIELD, wireCanonicalQueueReader } from './operations/queue.js';
 import { wireSubtaskCanonicalSink } from './operations/task.js';
 import { SETTINGS_ENTITY_KEY, wireSettingsSink } from './operations/settings.js';
@@ -98,6 +114,8 @@ import {
   useStoreTasksWithOverlays,
   useStoreWorkspacesWithOverlays,
 } from './operations/use-operations.js';
+import type { PendingFirstMessageValue } from './pending-first-message.js';
+import { routeScreenshotCapture } from './screenshot-routing.js';
 
 // Lazy surfaces each get their OWN Suspense boundary at the usage site below.
 // A single root boundary used to wrap the whole shell: the first render of
@@ -218,12 +236,16 @@ export function App() {
   // SettingsNavInspector) so it survives rail collapse/restore.
   const [settingsSection, setSettingsSection] = useState<NavKey>('appearance');
   const [systemConfig, setSystemConfig] = useState<SystemConfig | null>(null);
+  const [terminalOptions, setTerminalOptions] = useState<TerminalOptions | null>(null);
   // Canonical config for the operation layer's overlay `previous` values —
   // read via ref, never the overlaid render value.
   const systemConfigRef = useRef<SystemConfig | null>(null);
   useEffect(() => { systemConfigRef.current = systemConfig; }, [systemConfig]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteInitialQuery, setPaletteInitialQuery] = useState<string | undefined>(undefined);
+  const [assignTaskSessionId, setAssignTaskSessionId] = useState<string | null>(null);
+  const [assignTaskTargetId, setAssignTaskTargetId] = useState<string | null>(null);
+  const [assignTaskRunId, setAssignTaskRunId] = useState<string | undefined>();
   // Image tapped in a transcript bubble → shown in the in-app lightbox
   // (ImageZoomContext below), instead of opening a new browser tab.
   const [zoomImage, setZoomImage] = useState<ZoomImage | null>(null);
@@ -235,7 +257,7 @@ export function App() {
     getFeedbackSnapshot,
   );
   const [runner, setRunner] = useState<RunnerInfo | null>(null);
-  const pendingFirstMessageRef = useRef<string | null>(null);
+  const pendingFirstMessageRef = useRef<PendingFirstMessageValue>(null);
   // New-session → New Workspace sheet round trip (issue #57 v2): the view
   // flags localStorage before opening the sheet; when the sheet's create
   // lands we return to a fresh new-session page with that workspace
@@ -272,6 +294,7 @@ export function App() {
   useEffect(() => {
     if (authStatus !== 'authenticated') return;
     void loadSettings().then(cfg => { if (cfg) setSystemConfig(cfg); });
+    void loadTerminalOptions().then(setTerminalOptions).catch(() => undefined);
     void loadAgents().catch(() => undefined);
   }, [authStatus]);
 
@@ -398,6 +421,7 @@ export function App() {
   // populates canonical state and arrives first, host-side).
   const pendingRuns = useStorePendingOperations(operationStore);
   const sessionCreateRun = useStoreOperationRun(operationStore, sessionCreateRunId);
+  const assignTaskRun = useStoreOperationRun(operationStore, assignTaskRunId);
   const creatingSession = pendingRuns.some(run => run.name === 'session.create');
   const forkingSession = pendingRuns.some(run => run.name === 'session.fork');
   // A failed / unknown-outcome create must not leave a stale first message in
@@ -420,6 +444,34 @@ export function App() {
   // lists all read the merged config so optimistic writes apply in the same
   // task they dispatch.
   const displayConfig = useStoreSettingsWithOverlays(operationStore, systemConfig);
+  const assignTaskSession = assignTaskSessionId
+    ? displaySessions.find(session => session.id === assignTaskSessionId) ?? null
+    : null;
+  const canonicalAssignTaskSession = assignTaskSessionId
+    ? sessions.find(session => session.id === assignTaskSessionId) ?? null
+    : null;
+  useEffect(() => {
+    if (assignTaskSessionId === null) return;
+    // Host broadcasts canonical state before operation:result. Close on that
+    // durable state as well as on confirmation so a dropped result cannot
+    // leave a successfully-filed Session in a misleading retry dialog.
+    const reachedSelectedTask = assignTaskTargetId !== null
+      && canonicalAssignTaskSession?.type === 'subtask'
+      && canonicalAssignTaskSession.task_id === assignTaskTargetId;
+    const noLongerAssignable = canonicalAssignTaskSession === null
+      || canonicalAssignTaskSession.archived !== 0
+      || canonicalAssignTaskSession.type !== 'coding'
+      || canonicalAssignTaskSession.task_id !== null;
+    if (assignTaskRun?.phase !== 'confirmed' && !reachedSelectedTask && !noLongerAssignable) return;
+    setAssignTaskSessionId(null);
+    setAssignTaskTargetId(null);
+    setAssignTaskRunId(undefined);
+  }, [
+    assignTaskRun?.phase,
+    assignTaskSessionId,
+    assignTaskTargetId,
+    canonicalAssignTaskSession,
+  ]);
 
   // Appearance side-effect reads the RENDERED config (canonical +
   // settings.save overlays) so an optimistic theme switch applies in the
@@ -440,6 +492,16 @@ export function App() {
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
   useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);
   useEffect(() => {
+    const notifications = desktopBridge()?.notifications;
+    if (!notifications?.native) return;
+    // Run migration on App startup, not only when the user happens to open
+    // Settings, so existing explicitly-authorized 0.4.2 users do not lose
+    // alerts during the manual 0.4.3 bridge installation.
+    void notifications.updatePreferences(
+      nativeNotificationPreferencesForMigration(),
+    ).catch(() => undefined);
+  }, []);
+  useEffect(() => {
     if (runtimeAuthStatus !== 'authenticated') return;
     ws.send({ type: 'events:subscribe', session_id: activeSessionId });
   }, [activeSessionId, runtimeAuthStatus, ws]);
@@ -453,6 +515,7 @@ export function App() {
     sessionsRef,
     ops,
     paletteOpen,
+    disabled: assignTaskSessionId !== null,
     setPaletteOpen,
   });
   // Active-session transcript hydration effect. (The returned hydrate
@@ -605,6 +668,8 @@ export function App() {
     activeWorkspace,
     workspaces,
     workingTrees,
+    terminalPreferences: displayConfig?.terminal ?? DEFAULT_TERMINAL_PREFERENCES,
+    terminalSystemShell: terminalOptions?.system_shell ?? '',
     mode,
     activeSubtaskId,
     t: appT,
@@ -619,7 +684,7 @@ export function App() {
     target?: { sessionId: string; turn: number },
   ) => {
     const wtId = viewedWorkingTreeId(activeSession);
-    if (wtId) applyChangesScopeRequest(wtId, scope, target);
+    if (wtId) applyChangesScopeRequest(wtId, scope, target, activeSessionId);
     showChangesDiff();
   };
   const showAllChanges = () => showChanges('all');
@@ -629,8 +694,13 @@ export function App() {
   const showLastTurnChanges = (session: Session, turn: number, path: string) => {
     const wtId = viewedWorkingTreeId(session);
     if (wtId) {
-      applyChangesScopeRequest(wtId, 'lastturn', { sessionId: session.id, turn });
-      requestChangesDiffAnchor(wtId, path);
+      applyChangesScopeRequest(
+        wtId,
+        'lastturn',
+        { sessionId: session.id, turn },
+        session.id,
+      );
+      requestChangesDiffAnchor(wtId, path, session.id);
     }
     showChangesDiff();
   };
@@ -640,7 +710,7 @@ export function App() {
   // tab of that tree against the host so a commit that became unreachable
   // gets the ORPHANED tag + snapshot banner instead of silently closing.
   const historyWtId = viewedWorkingTreeId(activeSession);
-  const historyMovementRevision = useHistoryMovementRevision(historyWtId);
+  const historyMovementRevision = useHistoryMovementRevision(historyWtId, activeSessionId);
   useEffect(() => {
     if (historyMovementRevision === 0 || !historyWtId) return;
     const tabs = wbTabs.filter(t =>
@@ -668,7 +738,7 @@ export function App() {
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [historyMovementRevision, historyWtId]);
+  }, [historyMovementRevision, historyWtId, activeSessionId]);
 
   useAppSocket({
     authStatus: runtimeAuthStatus,
@@ -697,6 +767,7 @@ export function App() {
     rebuildSessionHistory,
     operationStore,
     ops,
+    translate: appT,
   });
 
   const selectSession = useSessionSelection({
@@ -708,6 +779,71 @@ export function App() {
     setChatPanel,
     ops,
   });
+
+  useEffect(() => {
+    const screenshot = desktopBridge()?.screenshot;
+    if (!screenshot) return;
+    const offCaptured = screenshot.onCaptured(capture => {
+      void routeScreenshotCapture(capture, {
+        findSession: sessionId =>
+          sessionsRef.current.find(session => session.id === sessionId) ?? null,
+        upload: (sessionId, blob, filename) =>
+          dispatchAttachmentUpload(ops.dispatch, { sessionId, blob, filename }),
+        onSelectSession: session => {
+          selectSession(session.id);
+          setActiveRail(null);
+          setViewState('main');
+          startTransition(() => setMode('sessions'));
+        },
+      }).then(result => {
+        if (result.ok) return;
+        toast({
+          kind: 'error',
+          message: appT(result.reason === 'missing-target'
+            ? 'screenshot.targetMissing'
+            : 'screenshot.uploadFailed'),
+        });
+      }).catch(() => {
+        toast({ kind: 'error', message: appT('screenshot.restoreFailed') });
+      });
+    });
+    const offError = screenshot.onError(error => {
+      const key = error === 'permission-denied'
+        ? 'screenshot.permissionDenied'
+        : error === 'shortcut-unavailable'
+          ? 'screenshot.shortcutUnavailable'
+          : error === 'busy'
+            ? 'screenshot.busy'
+            : error === 'no-target'
+              ? 'screenshot.noTarget'
+              : 'screenshot.captureFailed';
+      toast({ kind: 'error', message: appT(key) });
+    });
+    return () => {
+      offCaptured();
+      offError();
+    };
+  }, [appT, ops.dispatch, selectSession, setActiveRail, setViewState]);
+
+  const handleDesktopNavigation = useCallback((target: GianDesktopNavigationTarget) => {
+    if (target.type === 'settings') {
+      setSettingsSection(target.section);
+      activateRail('settings');
+      return;
+    }
+    selectSession(target.sessionId);
+    setActiveTaskId(null);
+    setActiveSubtaskId(null);
+    setActiveRail(null);
+    setViewState('main');
+    startTransition(() => setMode('sessions'));
+  }, [activateRail, selectSession, setActiveRail, setViewState]);
+
+  useEffect(() => {
+    const navigation = desktopBridge()?.navigation;
+    if (!navigation) return;
+    return subscribeDesktopNavigation(navigation, handleDesktopNavigation);
+  }, [handleDesktopNavigation]);
 
   const openAdoptedSession = useCallback((session: Session) => {
     // Make the HTTP result available synchronously for selection and unread
@@ -797,6 +933,11 @@ export function App() {
     activeSessionRecovering: activeSessionId != null
       && pendingRuns.some(run => run.name === 'session.recover'
         && run.entityKey === sessionEntityKey(activeSessionId)),
+    onAssignSessionTask: session => {
+      setAssignTaskRunId(undefined);
+      setAssignTaskTargetId(null);
+      setAssignTaskSessionId(session.id);
+    },
     ops,
     t: appT,
   });
@@ -829,9 +970,34 @@ export function App() {
     chatPanel,
     filesInspectorSuppressed,
     p3Collapsed,
-    setP3Collapsed,
     groupOfRail: GROUP_OF_RAIL,
   });
+
+  useEffect(() => {
+    const notifications = desktopBridge()?.notifications;
+    if (!notifications?.native) return;
+    const visibleSessionId = visibleSessionForNativeNotification({
+      mode,
+      viewState,
+      activeSessionId,
+      activeSubtaskId,
+    });
+    const syncContext = () => {
+      void notifications.setContext({
+        windowFocused: document.hasFocus() && document.visibilityState === 'visible',
+        visibleSessionId,
+      });
+    };
+    syncContext();
+    window.addEventListener('focus', syncContext);
+    window.addEventListener('blur', syncContext);
+    document.addEventListener('visibilitychange', syncContext);
+    return () => {
+      window.removeEventListener('focus', syncContext);
+      window.removeEventListener('blur', syncContext);
+      document.removeEventListener('visibilitychange', syncContext);
+    };
+  }, [activeSessionId, activeSubtaskId, mode, viewState]);
 
   const panelLayout = usePanelLayout({
     enabled: authStatus === 'authenticated' && onboarding.status === 'complete',
@@ -985,6 +1151,29 @@ export function App() {
         onGoForward={() => navGo(1)}
       />
       <ImageLightbox image={zoomImage} onClose={() => setZoomImage(null)} />
+      {assignTaskSession && (
+        <AssignSessionTaskDialog
+          sessionName={assignTaskSession.name || appT('coding.session.untitled')}
+          tasks={displayTasks}
+          pending={assignTaskRun?.phase === 'optimistic' || assignTaskRun?.phase === 'pending'}
+          error={assignTaskRun?.phase === 'failed' || assignTaskRun?.phase === 'timed-out'
+            ? (assignTaskRun.error || appT('session.assignTask.failed'))
+            : null}
+          onSelect={taskId => {
+            setAssignTaskTargetId(taskId);
+            const run = ops.dispatch('session.assignTask', {
+              sessionId: assignTaskSession.id,
+              taskId,
+            });
+            setAssignTaskRunId(run.id);
+          }}
+          onCancel={() => {
+            setAssignTaskSessionId(null);
+            setAssignTaskTargetId(null);
+            setAssignTaskRunId(undefined);
+          }}
+        />
+      )}
       {paletteOpen && <Suspense fallback={null}><CommandPalette
         open={paletteOpen}
         onClose={() => { setPaletteOpen(false); setPaletteInitialQuery(undefined); }}
@@ -1034,9 +1223,11 @@ export function App() {
                 // First message rides the dormant pendingFirstMessage channel:
                 // the session:created socket handler consumes it and dispatches
                 // the send once the session exists (use-app-socket.ts).
-                pendingFirstMessageRef.current = input.firstMessage?.trim()
-                  ? input.firstMessage
-                  : null;
+                pendingFirstMessageRef.current = {
+                  scope: { kind: 'workspace', id: input.workspaceId },
+                  text: input.firstMessage,
+                  attachments: input.firstAttachments ?? [],
+                };
                 const run = ops.dispatch('session.create', {
                   workspaceId: input.workspaceId,
                   executor: input.executor,
@@ -1044,6 +1235,7 @@ export function App() {
                   ...(input.model ? { model: input.model } : {}),
                   ...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
                   ...(input.thinkingEffort ? { thinkingEffort: input.thinkingEffort } : {}),
+                  ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
                 });
                 setSessionCreateRunId(run.id);
                 return run;
@@ -1112,7 +1304,6 @@ export function App() {
             <TasksView
               mode={mode}
               onSetMode={(m) => { startTransition(() => setMode(m)); }}
-              onOpenSearch={() => setPaletteOpen(true)}
               tasks={displayTasks}
               sessions={displaySessions}
               workspaces={displayWorkspaces}
@@ -1187,6 +1378,7 @@ export function App() {
                         && activeTabByGroup.browser === t.id
                         && !paletteOpen
                         && !zoomImage
+                        && !assignTaskSession
                         && feedbackState.confirms.length === 0}
                     />
                   );
@@ -1196,6 +1388,7 @@ export function App() {
                     <SettingsBody
                       config={displayConfig}
                       apps={apps}
+                      terminalOptions={terminalOptions}
                       activeSection={settingsSection}
                       identity={identity}
                       onSignOut={signOut}
@@ -1203,22 +1396,13 @@ export function App() {
                   );
                 }
                 if (t.kind === 'term') {
-                  // Pick the most-specific cwd we can: worktree path
-                  // when the active session has one, otherwise the
-                  // session's workspace, otherwise the first known
-                  // workspace. This matches what GitBadge / Files /
-                  // /raw all already use as the "current" tree. The
-                  // server falls back to $HOME if everything is null.
-                  // Each tab is a distinct PTY keyed by t.id.
-                  const wtId = defaultWorkingTreeIdFor(activeSession);
-                  const wtPath = wtId ? workingTrees.find(w => w.id === wtId)?.path : null;
-                  const wbCwd = wtPath ?? activeWorkspace?.path ?? workspaces[0]?.path ?? null;
                   return (
                     <div className="sheet-term">
                       <Suspense fallback={null}>
                       <Terminal
                         instanceKey={`term:${t.id}`}
-                        wire={makeWorkbenchWire(ws, t.id, wbCwd ? { cwd: wbCwd } : {}, ops.dispatch)}
+                        preferences={displayConfig?.terminal ?? DEFAULT_TERMINAL_PREFERENCES}
+                        wire={makeWorkbenchWire(ws, t.id, t.terminalProfile ?? {}, ops.dispatch)}
                       />
                       </Suspense>
                     </div>
@@ -1258,6 +1442,7 @@ export function App() {
                     <Suspense fallback={null}>
                     <ChangesDiffBody
                       workingTreeId={activeWtForSession?.id ?? null}
+                      ownerSessionId={activeSessionId}
                     />
                     </Suspense>
                   );
@@ -1302,6 +1487,7 @@ export function App() {
               <Suspense fallback={null}>
               <HistoryInspector
                 workingTreeId={historyWtId}
+                ownerSessionId={activeSessionId}
                 selectedSha={(() => {
                   const tab = wbTabs.find(t => t.id === activeTabByGroup.history);
                   return tab?.kind === 'commit' && tab.workingTreeId === historyWtId

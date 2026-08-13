@@ -4,12 +4,15 @@
 //   - The sidebar is two collapsible sections: 进行中 (In Progress) and
 //     完成 (Done), task pin was removed (2026-08-03) — tasks sort by
 //     created_at DESC.
-//   - Task group rows carry a "⋯" menu (rename / done-toggle / delete
-//     with confirm) and a "+" that opens the task-context new-session form.
+//   - Task group rows carry a "⋯" menu (rename / completed-session
+//     visibility / done-toggle / delete with confirm) and a "+" that opens
+//     the task-context new-session form.
 //   - Done rows keep the same menu (no "+") and are not selectable.
 //   - Subtask rows carry hover pin (`session.pin`, open subtasks only) and a
 //     complete/reopen toggle (task.completeSubtask / task.reopenSubtask),
 //     disabled while a turn is running.
+//   - Tasks exposes only the new-task action in its sidebar header; the
+//     session-search button remains exclusive to Sessions view.
 //   - All task mutations dispatch through the operation layer (Phase 3a):
 //     rename/done/pin are optimistic overlays on `task:<id>`, create/delete
 //     are pending (delete keeps the row visible with a pending affordance).
@@ -132,13 +135,12 @@ function renderTasks(props: Partial<Parameters<typeof TasksView>[0]> = {}) {
   const onSelectSubtask = vi.fn();
   const onSetPendingFirstMessage = vi.fn();
   const harness = operationHarness();
-  render(
+  const view = render(
     <LocaleProvider locale="en">
       <harness.wrapper>
         <TasksView
           mode="tasks"
           onSetMode={vi.fn()}
-          onOpenSearch={vi.fn()}
           tasks={[]}
           sessions={[]}
           workspaces={[workspace('ws-1')]}
@@ -154,7 +156,13 @@ function renderTasks(props: Partial<Parameters<typeof TasksView>[0]> = {}) {
       </harness.wrapper>
     </LocaleProvider>,
   );
-  return { onSelectTask, onSelectSubtask, onSetPendingFirstMessage, opSent: harness.sent };
+  return {
+    onSelectTask,
+    onSelectSubtask,
+    onSetPendingFirstMessage,
+    opSent: harness.sent,
+    unmount: view.unmount,
+  };
 }
 
 beforeEach(() => {
@@ -202,6 +210,50 @@ describe('task group row actions', () => {
     await userEvent.click(screen.getByTestId('task-menu-task-1'));
     expect(screen.queryByRole('menuitem', { name: 'Pin to top' })).toBeNull();
     expect(screen.getByRole('menuitem', { name: 'Rename' })).toBeInTheDocument();
+  });
+
+  it('hides and restores only this Task\'s completed Session rows', async () => {
+    const props: Partial<Parameters<typeof TasksView>[0]> = {
+      tasks: [
+        task({ id: 'task-1', name: 'First task' }),
+        task({ id: 'task-2', name: 'Second task', created_at: '2026-08-02T00:00:00Z' }),
+      ],
+      sessions: [
+        subtask({ id: 'finished-1', name: 'First completed', completed_at: '2026-08-02T01:00:00Z' }),
+        subtask({ id: 'turn-done-1', name: 'Turn done but not completed', status: 'done' }),
+        subtask({ id: 'running-1', name: 'Still running', status: 'running' }),
+        subtask({
+          id: 'finished-2',
+          name: 'Second completed',
+          task_id: 'task-2',
+          completed_at: '2026-08-02T02:00:00Z',
+        }),
+      ],
+      activeTaskId: 'task-1',
+      activeSubtaskId: 'finished-1',
+      subtaskMain: <div>Selected completed detail</div>,
+    };
+    const firstRender = renderTasks(props);
+
+    expect(screen.getByText('First completed')).toBeInTheDocument();
+    expect(screen.getByText('Second completed')).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('task-menu-task-1'));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Hide all completed sessions' }));
+
+    expect(screen.queryByText('First completed')).toBeNull();
+    expect(screen.getByText('Turn done but not completed')).toBeInTheDocument();
+    expect(screen.getByText('Still running')).toBeInTheDocument();
+    expect(screen.getByText('Second completed')).toBeInTheDocument();
+    expect(screen.getByText('Selected completed detail')).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('gian.tasks.completed-hidden') ?? '[]')).toEqual(['task-1']);
+
+    firstRender.unmount();
+    renderTasks(props);
+    expect(screen.queryByText('First completed')).toBeNull();
+    await userEvent.click(screen.getByTestId('task-menu-task-1'));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Show all completed sessions' }));
+    expect(screen.getByText('First completed')).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('gian.tasks.completed-hidden') ?? '[]')).toEqual([]);
   });
 
   it('renames inline via the menu', async () => {
@@ -259,24 +311,73 @@ describe('task group row actions', () => {
   it('opens the task-context new-session form from "+" and creates a subtask', async () => {
     const { onSelectSubtask, onSetPendingFirstMessage } = renderTasks({ tasks: [task()], activeTaskId: 'task-1' });
     await userEvent.click(screen.getByTestId('task-new-session-task-1'));
-    // Task context is shown read-only.
-    expect(screen.getByTestId('ns-task-name')).toHaveTextContent('My task');
+    // The task association is carried by the create route, not repeated in
+    // the empty center of the New Session page.
+    expect(screen.queryByTestId('ns-task-name')).not.toBeInTheDocument();
     vi.mocked(createSubtask).mockResolvedValue(subtask({ id: 'sub-new' }));
     // The composer auto-selects the only ready agent (codex in this mock);
     // Send enables once a first message is typed.
+    await userEvent.type(await screen.findByTestId('ns-title-input'), 'Child title');
+    await userEvent.click(screen.getByTestId('ns-fast-chip'));
     await userEvent.type(await screen.findByTestId('ns-message-input'), 'first subtask message');
     await userEvent.click(screen.getByTestId('ns-send'));
     // The first message is stashed for the session:created socket handler…
-    expect(onSetPendingFirstMessage).toHaveBeenCalledWith('first subtask message');
+    expect(onSetPendingFirstMessage).toHaveBeenCalledWith({
+      scope: { kind: 'task', id: 'task-1' },
+      text: 'first subtask message',
+      attachments: [],
+    });
     await waitFor(() => {
       expect(createSubtask).toHaveBeenCalledWith('task-1', {
         workspace_id: 'ws-1',
         executor: 'codex',
+        name: 'Child title',
+        service_tier: 'fast',
       });
     });
     await waitFor(() => {
       expect(onSelectSubtask).toHaveBeenCalledWith('task-1', 'sub-new');
     });
+    // Confirmed creation is the only boundary that discards the Task draft.
+    await userEvent.click(screen.getByTestId('task-new-session-task-1'));
+    expect(await screen.findByTestId('ns-title-input')).toHaveValue('');
+    expect(screen.getByTestId('ns-message-input')).toHaveValue('');
+  });
+
+  it('lets a sidebar Session replace New Session while preserving separate Task drafts', async () => {
+    const taskOne = task({ id: 'task-1', name: 'Task one' });
+    const taskTwo = task({
+      id: 'task-2',
+      name: 'Task two',
+      created_at: '2026-08-02T00:00:00Z',
+      updated_at: '2026-08-02T00:00:00Z',
+    });
+    const sessionOne = subtask({ id: 'sub-1', task_id: 'task-1', name: 'Task one session' });
+    const sessionTwo = subtask({ id: 'sub-2', task_id: 'task-2', name: 'Task two session' });
+    const { onSelectSubtask } = renderTasks({
+      tasks: [taskOne, taskTwo],
+      sessions: [sessionOne, sessionTwo],
+    });
+
+    await userEvent.click(screen.getByTestId('task-new-session-task-1'));
+    await userEvent.type(await screen.findByTestId('ns-title-input'), 'Draft for task one');
+    await userEvent.type(screen.getByTestId('ns-message-input'), 'continue task one');
+
+    // Selecting any existing Session must win immediately over the draft UI.
+    await userEvent.click(screen.getByText('Task two session'));
+    expect(onSelectSubtask).toHaveBeenCalledWith('task-2', 'sub-2');
+    expect(screen.queryByTestId('ns-message-input')).toBeNull();
+
+    await userEvent.click(screen.getByTestId('task-new-session-task-2'));
+    expect(await screen.findByTestId('ns-title-input')).toHaveValue('');
+    expect(screen.getByTestId('ns-message-input')).toHaveValue('');
+    await userEvent.type(screen.getByTestId('ns-message-input'), 'continue task two');
+
+    await userEvent.click(screen.getByText('Task one session'));
+    expect(screen.queryByTestId('ns-message-input')).toBeNull();
+    await userEvent.click(screen.getByTestId('task-new-session-task-1'));
+    expect(await screen.findByTestId('ns-title-input')).toHaveValue('Draft for task one');
+    expect(screen.getByTestId('ns-message-input')).toHaveValue('continue task one');
   });
 });
 
@@ -307,6 +408,7 @@ describe('done group', () => {
     expect(screen.queryByRole('menuitem', { name: 'Pin to top' })).toBeNull();
     // Done tasks can't be renamed (2026-08-03).
     expect(screen.queryByRole('menuitem', { name: 'Rename' })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'Hide all completed sessions' })).toBeNull();
     await userEvent.click(screen.getByRole('menuitem', { name: 'Reopen' }));
     expect(opSent.at(-1)).toMatchObject({ type: 'task:update', task_id: 'task-1', status: 'open' });
     expect(screen.queryByTestId('task-new-session-task-1')).toBeNull();
@@ -341,7 +443,6 @@ describe('subtask row actions', () => {
           <TasksView
             mode="tasks"
             onSetMode={vi.fn()}
-            onOpenSearch={vi.fn()}
             tasks={[task()]}
             sessions={[subtask()]}
             workspaces={[workspace('ws-1')]}
@@ -364,7 +465,6 @@ describe('subtask row actions', () => {
           <TasksView
             mode="tasks"
             onSetMode={vi.fn()}
-            onOpenSearch={vi.fn()}
             tasks={[task()]}
             sessions={[subtask({ completed_at: '2026-08-01T04:00:00Z' })]}
             workspaces={[workspace('ws-1')]}
@@ -390,6 +490,12 @@ describe('subtask row actions', () => {
 });
 
 describe('new task form', () => {
+  it('does not render the Sessions search button', () => {
+    renderTasks();
+    expect(screen.queryByTestId('sb-open-search')).toBeNull();
+    expect(screen.getByTestId('sb-new-task')).toBeTruthy();
+  });
+
   it('creates a task without any executor pick', async () => {
     const { opSent } = renderTasks();
     await userEvent.click(screen.getByTestId('sb-new-task'));
@@ -409,7 +515,6 @@ describe('task detail placeholder', () => {
           <TasksView
             mode="tasks"
             onSetMode={vi.fn()}
-            onOpenSearch={vi.fn()}
             tasks={[task()]}
             sessions={[]}
             workspaces={[workspace('ws-1')]}

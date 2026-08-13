@@ -24,7 +24,10 @@ const WEB_SRC_ROOT = resolve('../web/src');
 // Every declared server message has a consumer.
 // ---------------------------------------------------------------------------
 
-const NOT_DISPLAYED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> = [];
+const NOT_DISPLAYED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> = [{
+  type: 'attention',
+  reason: 'Consumed by Electron main for native notifications, not rendered by the web client.',
+}];
 
 // ---------------------------------------------------------------------------
 // Parsers

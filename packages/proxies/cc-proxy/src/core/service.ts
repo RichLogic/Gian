@@ -256,10 +256,20 @@ export class CcProxyService {
       return this.handleClearIntercept(session, requestId);
     }
 
-    const requestedModel = typeof params.model === 'string' && params.model.trim() ? params.model.trim() : session.model;
+    // Only omission inherits the session model. An explicit null/empty value
+    // means "use Claude's configured default" and must clear a prior override.
+    const requestedModel = params.model === undefined
+      ? session.model
+      : typeof params.model === 'string' && params.model.trim()
+        ? params.model.trim()
+        : null;
 
     // Ensure Claude Code process is running for this session.
     await this.ensureProcess(session, requestedModel);
+    // ClaudeMcpRuntime keeps one registered session while spawning a fresh CLI
+    // process per turn. Keep its model synchronized even when ensureProcess()
+    // finds the session already registered and therefore does not spawn again.
+    this.runtime.setSessionModel(session.id, requestedModel);
 
     const turnId = randomId('turn');
     const isCompact = prompt.trim().split(/\s+/, 1)[0]?.toLowerCase() === '/compact';

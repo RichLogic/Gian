@@ -6,7 +6,7 @@ import type { RailLayoutController } from '../components/RailLayout.js';
 import { ModeDropdown } from '../components/ModeDropdown.js';
 import type { Mode } from '../components/Topbar.js';
 import { StatusIcon, statusGlyphShown, relTime } from './session-list-status.js';
-import { NewSessionView } from './new-session-view.js';
+import { clearNewSessionDraft, NewSessionView } from './new-session-view.js';
 import type { CreateSessionInput } from './new-session-view.js';
 import { confirm as confirmDialog, toast } from '../feedback.js';
 import { sessionEntityKey } from '../operations/session.js';
@@ -18,12 +18,12 @@ import {
   usePendingOperations,
 } from '../operations/use-operations.js';
 import { sessionNeedsAttention } from '../session-routing.js';
+import type { PendingFirstMessage } from '../pending-first-message.js';
 
 // ── V2 icon paths (verbatim subset from design/gian-design-v2/js/data.jsx) ──
 const I = {
   plus: 'M12 5v14 M5 12h14',
   check: 'M5 12l5 5L20 7',
-  search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-4.3-4.3',
   caretRight: 'M9 6l6 6-6 6',
   caretDown: 'M6 9l6 6 6-6',
   // pushpin — pin / unpin (same glyph as the Sessions rail pin).
@@ -95,7 +95,6 @@ function compareTasks(a: Task, b: Task): number {
 export function TasksView({
   mode,
   onSetMode,
-  onOpenSearch,
   tasks,
   sessions,
   workspaces,
@@ -110,8 +109,6 @@ export function TasksView({
   /** Top-level app mode — the sidebar's mode dropdown reads/drives this. */
   mode: Mode;
   onSetMode: (mode: Mode) => void;
-  /** Open the global CommandPalette (sidebar search button). */
-  onOpenSearch: () => void;
   tasks: Task[];
   sessions: Session[];
   workspaces: Workspace[];
@@ -131,7 +128,7 @@ export function TasksView({
   /** App-owned pendingFirstMessage channel: the first composer message is
    *  stashed before create and auto-sent by the session:created socket
    *  handler. Pass null to clear a stashed message after a failed create. */
-  onSetPendingFirstMessage: (text: string | null) => void;
+  onSetPendingFirstMessage: (pending: PendingFirstMessage | null) => void;
   /** App-owned four-panel layout. Optional for isolated component renders. */
   railLayout?: RailLayoutController;
 }) {
@@ -148,7 +145,11 @@ export function TasksView({
   // run's result and is selected on confirm.
   const [newForTaskId, setNewForTaskId] = useState<string | null>(null);
   const [newForExecutor, setNewForExecutor] = useState<Executor | undefined>(undefined);
-  const [subtaskRun, setSubtaskRun] = useState<{ runId: string; taskId: string } | null>(null);
+  const [subtaskRun, setSubtaskRun] = useState<{
+    runId: string;
+    taskId: string;
+    preserveDraftUntilUpload: boolean;
+  } | null>(null);
   const subtaskCreateRun = useOperationRun(subtaskRun?.runId);
   const creatingSubtask = subtaskCreateRun?.phase === 'pending';
 
@@ -157,6 +158,9 @@ export function TasksView({
     if (subtaskCreateRun.phase === 'confirmed') {
       const session = subtaskCreateRun.result as Session | undefined;
       const taskId = subtaskRun.taskId;
+      if (!subtaskRun.preserveDraftUntilUpload) {
+        clearNewSessionDraft({ kind: 'task', id: taskId });
+      }
       setSubtaskRun(null);
       setNewForTaskId(null);
       if (session) onSelectSubtask(taskId, session.id);
@@ -204,11 +208,24 @@ export function TasksView({
     setNewForTaskId(taskId);
   }
 
+  function selectSubtask(taskId: string, subtaskId: string) {
+    // A draft is background state, never a navigation lock. Hide the form
+    // immediately and let the selected Session surface take over; reopening
+    // the Task's "+" restores this Task's own persisted draft.
+    setNewForTaskId(null);
+    setNewForExecutor(undefined);
+    onSelectSubtask(taskId, subtaskId);
+  }
+
   function submitNewSubtask(taskId: string, input: CreateSessionInput) {
     // Stash the first message before dispatching: the session:created socket
     // frame (origin 'task-create') consumes it and auto-sends once the
     // subtask session exists — same channel as the plain session create.
-    onSetPendingFirstMessage(input.firstMessage?.trim() ? input.firstMessage : null);
+    onSetPendingFirstMessage({
+      scope: { kind: 'task', id: taskId },
+      text: input.firstMessage,
+      attachments: input.firstAttachments ?? [],
+    });
     const run = dispatch('task.createSubtask', {
       taskId,
       workspaceId: input.workspaceId,
@@ -217,8 +234,13 @@ export function TasksView({
       ...(input.model ? { model: input.model } : {}),
       ...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
       ...(input.thinkingEffort ? { thinkingEffort: input.thinkingEffort } : {}),
+      ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
     });
-    setSubtaskRun({ runId: run.id, taskId });
+    setSubtaskRun({
+      runId: run.id,
+      taskId,
+      preserveDraftUntilUpload: (input.firstAttachments?.length ?? 0) > 0,
+    });
   }
 
   return (
@@ -231,22 +253,26 @@ export function TasksView({
       <TasksList
         mode={mode}
         onSetMode={onSetMode}
-        onOpenSearch={onOpenSearch}
         tasks={tasks}
         sessions={sessions}
         activeSubtaskId={activeSubtaskId}
-        onSelectSubtask={onSelectSubtask}
+        onSelectSubtask={selectSubtask}
         onNewSession={openNewForTask}
       />
       <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize tasks list" />
       {newForTask ? (
         <NewSessionView
+          key={`task:${newForTask.id}`}
           workspaces={workspaces}
-          taskName={newForTask.name}
           initialExecutor={newForExecutor}
+          draftScope={{ kind: 'task', id: newForTask.id }}
+          draftLabel={newForTask.name}
           onNewWorkspace={onNewWorkspace}
           creating={creatingSubtask}
-          onCancel={() => setNewForTaskId(null)}
+          onCancel={() => {
+            setNewForTaskId(null);
+            setNewForExecutor(undefined);
+          }}
           onCreate={input => { submitNewSubtask(newForTask.id, input); }}
         />
       ) : (
@@ -303,11 +329,13 @@ function NewTaskForm({
 }
 
 /** The per-task "⋯" dropdown (reuses the Spaces workspace-kebab styles).
- *  Open tasks get Rename/Mark-done; done tasks get Reopen/Delete
+ *  Open tasks get Rename/completed-Session visibility/Mark-done; done tasks get Reopen/Delete
  *  (2026-08-03: open tasks can't be deleted, done tasks can't be renamed). */
 function TaskMenu({
   task,
   anchorClass,
+  completedSessionsHidden = false,
+  onToggleCompletedSessions,
   onRename,
   onToggleDone,
   onDelete,
@@ -315,6 +343,9 @@ function TaskMenu({
   task: Task;
   /** Trigger button class — `sb-act` on both the group header and done rows. */
   anchorClass: string;
+  /** Open Tasks can hide/show their user-completed Session rows. */
+  completedSessionsHidden?: boolean;
+  onToggleCompletedSessions?: () => void;
   onRename: () => void;
   onToggleDone: () => void;
   onDelete: () => void;
@@ -355,13 +386,27 @@ function TaskMenu({
       {open && (
         <span className="ws-kebab-pop" role="menu" onClick={e => e.stopPropagation()}>
           {!done && (
-            <button
-              className="ws-kebab-item"
-              role="menuitem"
-              onClick={() => { setOpen(false); onRename(); }}
-            >
-              {t('path.menu.rename')}
-            </button>
+            <>
+              <button
+                className="ws-kebab-item"
+                role="menuitem"
+                onClick={() => { setOpen(false); onRename(); }}
+              >
+                {t('path.menu.rename')}
+              </button>
+              {onToggleCompletedSessions && (
+                <button
+                  className="ws-kebab-item"
+                  role="menuitem"
+                  data-testid={`task-toggle-completed-${task.id}`}
+                  onClick={() => { setOpen(false); onToggleCompletedSessions(); }}
+                >
+                  {t(completedSessionsHidden
+                    ? 'tasks.menu.showCompletedSessions'
+                    : 'tasks.menu.hideCompletedSessions')}
+                </button>
+              )}
+            </>
           )}
           <button
             className="ws-kebab-item"
@@ -472,7 +517,6 @@ function TaskRenameInput({
 function TasksList({
   mode,
   onSetMode,
-  onOpenSearch,
   tasks,
   sessions,
   activeSubtaskId,
@@ -481,7 +525,6 @@ function TasksList({
 }: {
   mode: Mode;
   onSetMode: (mode: Mode) => void;
-  onOpenSearch: () => void;
   tasks: Task[];
   sessions: Session[];
   activeSubtaskId: string | null;
@@ -505,12 +548,31 @@ function TasksList({
       return new Set(raw ? (JSON.parse(raw) as string[]) : []);
     } catch { return new Set(); }
   });
+  // Per-task visibility preference for user-completed Sessions. Like the
+  // collapse state above, this is view-only and survives reloads without
+  // changing Task or Session records on the Host.
+  const [tasksWithCompletedHidden, setTasksWithCompletedHidden] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('gian.tasks.completed-hidden');
+      return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+    } catch { return new Set(); }
+  });
   const [renamingTaskId, setRenamingTaskId] = useState<string | null>(null);
   const toggleTaskCollapsed = (taskId: string) => {
     setCollapsedTasks(prev => {
       const next = new Set(prev);
       if (next.has(taskId)) next.delete(taskId); else next.add(taskId);
       try { localStorage.setItem('gian.tasks.collapsed', JSON.stringify([...next])); } catch { /* ignore */ }
+      return next;
+    });
+  };
+  const toggleCompletedSessions = (taskId: string) => {
+    setTasksWithCompletedHidden(previous => {
+      const next = new Set(previous);
+      if (next.has(taskId)) next.delete(taskId); else next.add(taskId);
+      try {
+        localStorage.setItem('gian.tasks.completed-hidden', JSON.stringify([...next]));
+      } catch { /* ignore */ }
       return next;
     });
   };
@@ -554,10 +616,13 @@ function TasksList({
   // rail (CodingView): each task is a `.sb-group` header — clicking it ONLY
   // toggles collapse, exactly like a project group (2026-08-03: tasks are no
   // longer selectable; only subtasks are). The hover "⋯" menu carries
-  // rename/done/delete, "+" opens the task-context new-session form.
+  // rename/completed-Session visibility/done, "+" opens the task-context
+  // new-session form.
   const renderOpen = (group: Task[]) =>
     group.map(task => {
-      const childSubs = subtasksFor(sessions, task.id);
+      const completedSessionsHidden = tasksWithCompletedHidden.has(task.id);
+      const childSubs = subtasksFor(sessions, task.id)
+        .filter(session => !completedSessionsHidden || session.completed_at == null);
       const isCollapsed = collapsedTasks.has(task.id);
       const deleting = deletingTaskIds.has(task.id);
       return (
@@ -583,6 +648,8 @@ function TasksList({
               <TaskMenu
                 task={task}
                 anchorClass="sb-act"
+                completedSessionsHidden={completedSessionsHidden}
+                onToggleCompletedSessions={() => toggleCompletedSessions(task.id)}
                 onRename={taskActions.rename(task)}
                 onToggleDone={taskActions.toggleDone(task)}
                 onDelete={taskActions.remove(task)}
@@ -618,16 +685,6 @@ function TasksList({
         <div className="sb-toprow">
           <ModeDropdown mode={mode} onSetMode={onSetMode} />
           <span className="sb-toprow-spacer" />
-          <button
-            type="button"
-            className="sb-iconbtn"
-            data-testid="sb-open-search"
-            aria-label={t('coding.sidebar.search.label')}
-            title={t('coding.sidebar.search.label')}
-            onClick={onOpenSearch}
-          >
-            <Icon d={I.search} />
-          </button>
           <button
             type="button"
             className={`sb-iconbtn${creating ? ' active' : ''}`}

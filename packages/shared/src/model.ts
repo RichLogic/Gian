@@ -1,4 +1,9 @@
-export type Executor = 'codex' | 'claude' | 'kimi';
+export type Executor = 'codex' | 'claude' | 'kimi' | 'grok';
+
+/** Kimi and Grok expose opaque ACP config options instead of Gian ApprovalMode. */
+export function usesNativeExecutorConfig(executor: Executor): executor is 'kimi' | 'grok' {
+  return executor === 'kimi' || executor === 'grok';
+}
 
 export type SessionType = 'coding' | 'subtask' | 'manager';
 
@@ -275,6 +280,49 @@ export type Accent =
 
 export type FontScale = 'sm' | 'md' | 'lg' | 'xl';
 
+export type TerminalFontFamily =
+  | 'jetbrains-mono'
+  | 'system-mono'
+  | 'sf-mono'
+  | 'menlo';
+
+export type TerminalCursorStyle = 'block' | 'bar' | 'underline';
+export type TerminalStartDirectory = 'context' | 'home';
+export type TerminalScrollbackLines = 1_000 | 5_000 | 10_000 | 50_000;
+
+export interface TerminalPreferences {
+  font_family: TerminalFontFamily;
+  font_size: number;
+  line_height: number;
+  cursor_style: TerminalCursorStyle;
+  cursor_blink: boolean;
+  scrollback_lines: TerminalScrollbackLines;
+  /** Empty means the Host's effective $SHELL. */
+  shell: string;
+  start_directory: TerminalStartDirectory;
+}
+
+export const DEFAULT_TERMINAL_PREFERENCES: Readonly<TerminalPreferences> = {
+  font_family: 'jetbrains-mono',
+  font_size: 13,
+  line_height: 1.2,
+  cursor_style: 'block',
+  cursor_blink: true,
+  scrollback_lines: 5_000,
+  shell: '',
+  start_directory: 'context',
+};
+
+export interface TerminalShellOption {
+  path: string;
+  label: string;
+}
+
+export interface TerminalOptions {
+  system_shell: string;
+  shells: TerminalShellOption[];
+}
+
 export const THEME_DEFAULT_ACCENT: Record<'light' | 'warm' | 'dark', Accent> = {
   light: 'azure',
   warm: 'ember',
@@ -294,6 +342,7 @@ export interface SystemConfig {
   font_scale_chat: FontScale;
   /** @deprecated Fixed to `md`; retained for older API clients. */
   font_scale_code: FontScale;
+  terminal: TerminalPreferences;
   locale: 'zh-CN' | 'en';
   /** Default model for new claude (cc) sessions. Empty = use proxy default. */
   default_claude_model: string;

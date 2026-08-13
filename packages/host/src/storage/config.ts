@@ -1,9 +1,16 @@
-import type { ExternalEditor, SystemConfig, Accent, FontScale } from '@gian/shared';
-import { THEME_DEFAULT_ACCENT } from '@gian/shared';
+import type {
+  Accent,
+  ExternalEditor,
+  FontScale,
+  SystemConfig,
+  TerminalPreferences,
+} from '@gian/shared';
+import { DEFAULT_TERMINAL_PREFERENCES, THEME_DEFAULT_ACCENT } from '@gian/shared';
 import type { Db } from './db.js';
 
 const EXTERNAL_EDITORS_KEY = 'external_editors';
 const OPEN_APPS_KEY = 'open_apps';
+const TERMINAL_KEY = 'terminal';
 const OPEN_APP_CATEGORIES = ['code', 'web', 'images', 'pdf', 'other'] as const;
 
 const VALID_ACCENTS: ReadonlySet<Accent> = new Set([
@@ -11,6 +18,18 @@ const VALID_ACCENTS: ReadonlySet<Accent> = new Set([
 ]);
 const VALID_SCALES: ReadonlySet<FontScale> = new Set(['sm', 'md', 'lg', 'xl']);
 const VALID_THEMES: ReadonlySet<SystemConfig['theme']> = new Set(['light', 'warm', 'dark']);
+const VALID_TERMINAL_FONT_FAMILIES = new Set<TerminalPreferences['font_family']>([
+  'jetbrains-mono', 'system-mono', 'sf-mono', 'menlo',
+]);
+const VALID_TERMINAL_CURSOR_STYLES = new Set<TerminalPreferences['cursor_style']>([
+  'block', 'bar', 'underline',
+]);
+const VALID_TERMINAL_SCROLLBACK = new Set<TerminalPreferences['scrollback_lines']>([
+  1_000, 5_000, 10_000, 50_000,
+]);
+const VALID_TERMINAL_START_DIRECTORIES = new Set<TerminalPreferences['start_directory']>([
+  'context', 'home',
+]);
 
 function sanitizeScale(raw: string | undefined): FontScale {
   return raw && VALID_SCALES.has(raw as FontScale) ? (raw as FontScale) : 'md';
@@ -69,6 +88,54 @@ function sanitizeOpenApps(raw: unknown): Record<string, string> {
   return out;
 }
 
+export function sanitizeTerminalPreferences(raw: unknown): TerminalPreferences {
+  const record = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {};
+  const defaults = DEFAULT_TERMINAL_PREFERENCES;
+  const fontSize = record.font_size;
+  const lineHeight = record.line_height;
+  const shell = record.shell;
+  return {
+    font_family: VALID_TERMINAL_FONT_FAMILIES.has(
+      record.font_family as TerminalPreferences['font_family'],
+    )
+      ? record.font_family as TerminalPreferences['font_family']
+      : defaults.font_family,
+    font_size: typeof fontSize === 'number'
+      && Number.isInteger(fontSize)
+      && fontSize >= 10
+      && fontSize <= 22
+      ? fontSize
+      : defaults.font_size,
+    line_height: typeof lineHeight === 'number'
+      && Number.isFinite(lineHeight)
+      && lineHeight >= 1
+      && lineHeight <= 1.6
+      ? lineHeight
+      : defaults.line_height,
+    cursor_style: VALID_TERMINAL_CURSOR_STYLES.has(
+      record.cursor_style as TerminalPreferences['cursor_style'],
+    )
+      ? record.cursor_style as TerminalPreferences['cursor_style']
+      : defaults.cursor_style,
+    cursor_blink: typeof record.cursor_blink === 'boolean'
+      ? record.cursor_blink
+      : defaults.cursor_blink,
+    scrollback_lines: VALID_TERMINAL_SCROLLBACK.has(
+      record.scrollback_lines as TerminalPreferences['scrollback_lines'],
+    )
+      ? record.scrollback_lines as TerminalPreferences['scrollback_lines']
+      : defaults.scrollback_lines,
+    shell: typeof shell === 'string' && shell.length <= 4_096 ? shell : defaults.shell,
+    start_directory: VALID_TERMINAL_START_DIRECTORIES.has(
+      record.start_directory as TerminalPreferences['start_directory'],
+    )
+      ? record.start_directory as TerminalPreferences['start_directory']
+      : defaults.start_directory,
+  };
+}
+
 export function saveConfig(db: Db, partial: Partial<SystemConfig>): void {
   const stmt = db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)`);
   for (const [key, value] of Object.entries(partial) as [keyof SystemConfig, SystemConfig[keyof SystemConfig]][]) {
@@ -88,6 +155,10 @@ export function saveConfig(db: Db, partial: Partial<SystemConfig>): void {
       // String() (which yields "[object Object]" and then fails JSON.parse on
       // load, silently resetting the user's choice to {}).
       stmt.run(key, JSON.stringify(sanitizeOpenApps(value)));
+      continue;
+    }
+    if (key === TERMINAL_KEY) {
+      stmt.run(key, JSON.stringify(sanitizeTerminalPreferences(value)));
       continue;
     }
     stmt.run(key, String(value));
@@ -121,6 +192,16 @@ export function loadConfig(db: Db): SystemConfig {
     }
   }
 
+  let terminal = { ...DEFAULT_TERMINAL_PREFERENCES };
+  const rawTerminal = map.get(TERMINAL_KEY);
+  if (rawTerminal) {
+    try {
+      terminal = sanitizeTerminalPreferences(JSON.parse(rawTerminal));
+    } catch {
+      terminal = { ...DEFAULT_TERMINAL_PREFERENCES };
+    }
+  }
+
   const rawTheme = map.get('theme') ?? '';
   const theme: SystemConfig['theme'] = VALID_THEMES.has(rawTheme as SystemConfig['theme'])
     ? (rawTheme as SystemConfig['theme'])
@@ -140,6 +221,7 @@ export function loadConfig(db: Db): SystemConfig {
     font_scale_chrome: 'md',
     font_scale_chat: sanitizeScale(map.get('font_scale_chat')),
     font_scale_code: 'md',
+    terminal,
     locale: (map.get('locale') ?? 'zh-CN') as SystemConfig['locale'],
     default_claude_model: map.get('default_claude_model') ?? '',
     default_claude_effort: map.get('default_claude_effort') ?? '',

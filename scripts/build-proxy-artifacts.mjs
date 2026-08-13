@@ -37,6 +37,13 @@ const definitions = [
     processScope: 'shared',
     runtime: { id: 'kimi', displayName: 'Kimi Code CLI' },
   },
+  {
+    id: 'grok',
+    directory: 'grok-proxy',
+    displayName: 'Grok Build',
+    processScope: 'shared',
+    runtime: { id: 'grok', displayName: 'Grok Build CLI' },
+  },
 ];
 
 export async function buildProxyBundle(entryPoint, outfile) {

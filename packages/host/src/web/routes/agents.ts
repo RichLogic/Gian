@@ -8,7 +8,7 @@ import type { AgentManager } from '../../agents/manager.js';
 import type { CliRuntimeManager } from '../../runtime/manager.js';
 import { pickPath } from '../pick-path.js';
 
-const EXECUTORS = new Set<Executor>(['claude', 'codex', 'kimi']);
+const EXECUTORS = new Set<Executor>(['claude', 'codex', 'kimi', 'grok']);
 
 function executor(raw: string): Executor | null {
   return EXECUTORS.has(raw as Executor) ? raw as Executor : null;

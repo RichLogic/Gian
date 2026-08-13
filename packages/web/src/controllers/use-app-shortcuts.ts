@@ -15,6 +15,9 @@ interface UseAppShortcutsInput {
    *  Phase 2a; ⌘Enter queue.sendNow in Phase 2b). */
   ops: OperationDispatcher;
   paletteOpen: boolean;
+  /** A modal owns keyboard focus; global navigation/mutation shortcuts must
+   *  not operate the obscured app behind it. */
+  disabled?: boolean;
   setPaletteOpen: Dispatch<SetStateAction<boolean>>;
 }
 
@@ -27,9 +30,11 @@ export function useAppShortcuts({
   sessionsRef,
   ops,
   paletteOpen,
+  disabled = false,
   setPaletteOpen,
 }: UseAppShortcutsInput): void {
   useEffect(() => {
+    if (disabled) return;
     function onKeyDown(event: KeyboardEvent) {
       const mod = event.metaKey || event.ctrlKey;
       if (mod && event.shiftKey && event.key.toLowerCase() === 'k') {
@@ -40,10 +45,10 @@ export function useAppShortcuts({
     }
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [paletteOpen, setPaletteOpen]);
+  }, [disabled, paletteOpen, setPaletteOpen]);
 
   useEffect(() => {
-    if (!authenticated) return;
+    if (!authenticated || disabled) return;
 
     function spawnChild(executor: 'claude' | 'codex') {
       if (mode === 'tasks' && activeTaskId && !activeSubtaskId) {
@@ -113,6 +118,7 @@ export function useAppShortcuts({
     activeSubtaskId,
     activeTaskId,
     authenticated,
+    disabled,
     mode,
     ops,
     sessionsRef,

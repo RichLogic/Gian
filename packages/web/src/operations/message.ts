@@ -247,6 +247,26 @@ export interface UploadAttachmentInput {
   onFailed: (message: string) => void;
 }
 
+/** Promise facade for controller-level flows that must upload before they can
+ * continue (screenshot routing and a new Session's first message). The actual
+ * REST mutation still runs exclusively inside message.uploadAttachment. */
+export function dispatchAttachmentUpload(
+  dispatch: OperationDispatcher['dispatch'],
+  input: Pick<UploadAttachmentInput, 'sessionId' | 'blob' | 'filename'>,
+): Promise<UploadedAttachment> {
+  return new Promise((resolve, reject) => {
+    try {
+      dispatch('message.uploadAttachment', {
+        ...input,
+        onUploaded: resolve,
+        onFailed: (message: string) => reject(new Error(message)),
+      });
+    } catch (thrown) {
+      reject(thrown);
+    }
+  });
+}
+
 const messageUploadAttachment: OperationDefinition<UploadAttachmentInput, UploadedAttachment> = {
   policy: 'pending',
   // Each upload is its own entity: two different files upload concurrently

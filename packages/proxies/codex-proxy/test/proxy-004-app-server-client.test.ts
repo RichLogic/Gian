@@ -775,3 +775,100 @@ test('turn/start sends an exact configured profile without a conflicting sandbox
   );
   assert.equal('sandboxPolicy' in (calls[0]?.params ?? {}), false);
 });
+
+test('thread/list paginates, applies the cwd filter, and prefers the Codex title over preview', async () => {
+  const client = new CodexAppServerClient();
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  (client as unknown as { request(method: string, params: unknown): Promise<unknown> }).request =
+    async (method, params) => {
+      const request = params as Record<string, unknown>;
+      calls.push({ method, params: request });
+      if (request.cursor === 'page-2') {
+        return {
+          data: [
+            {
+              id: 'thread-1',
+              name: 'stale duplicate',
+              preview: 'ignored',
+              cwd: '/repo',
+              updatedAt: 1_699_999_999,
+            },
+            {
+              id: 'thread-2',
+              name: null,
+              preview: '  First\nquestion   without a generated title  ',
+              cwd: '/repo',
+              updatedAt: '2023-11-13T22:13:20Z',
+            },
+          ],
+          nextCursor: null,
+        };
+      }
+      return {
+        data: [
+          {
+            id: 'thread-1',
+            name: '  LM-generated   project\nsummary  ',
+            preview: 'Raw first user question',
+            cwd: '/repo',
+            updatedAt: 1_700_000_000,
+          },
+          {
+            id: 'wrong-cwd',
+            name: 'Must be filtered locally',
+            cwd: '/other',
+            updatedAt: 1_700_000_001,
+          },
+          { id: '   ', name: 'Invalid id', cwd: '/repo', updatedAt: 1_700_000_002 },
+        ],
+        nextCursor: 'page-2',
+      };
+    };
+
+  assert.deepEqual(await client.listNativeThreads('/repo'), [
+    {
+      id: 'thread-1',
+      displayName: 'LM-generated project summary',
+      cwd: '/repo',
+      updatedAt: '2023-11-14T22:13:20.000Z',
+    },
+    {
+      id: 'thread-2',
+      displayName: 'First question without a generated title',
+      cwd: '/repo',
+      updatedAt: '2023-11-13T22:13:20.000Z',
+    },
+  ]);
+  assert.deepEqual(calls, [
+    {
+      method: 'thread/list',
+      params: {
+        cwd: '/repo',
+        limit: 100,
+        sortKey: 'updated_at',
+        sortDirection: 'desc',
+      },
+    },
+    {
+      method: 'thread/list',
+      params: {
+        cwd: '/repo',
+        cursor: 'page-2',
+        limit: 100,
+        sortKey: 'updated_at',
+        sortDirection: 'desc',
+      },
+    },
+  ]);
+});
+
+test('thread/list rejects a repeated pagination cursor instead of looping forever', async () => {
+  const client = new CodexAppServerClient();
+  (client as unknown as { request(method: string, params: unknown): Promise<unknown> }).request =
+    async () => ({ data: [], nextCursor: 'same-page' });
+
+  await assert.rejects(
+    client.listNativeThreads('/repo'),
+    /invalid pagination cursor/,
+  );
+});

@@ -14,7 +14,7 @@ import { EventEmitter } from 'node:events';
 import { closeSync, openSync, readFileSync, readSync } from 'node:fs';
 import { writeFile, unlink } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import type { TokenUsageUpdate } from '@gian/shared';
@@ -24,6 +24,9 @@ import type { ClaudeRuntime, ClaudeRuntimeEvents } from './types.js';
 
 const NO_SESSION_PERSISTENCE_FLAG = '--no-session-persistence';
 const CLAUDE_DEFAULT_MODEL_ID = 'claude-default';
+const GATEWAY_MODELS_CACHE_MAX_BYTES = 1024 * 1024;
+const GATEWAY_MODELS_MAX_ENTRIES = 1000;
+const GATEWAY_MODEL_TEXT_MAX_LENGTH = 512;
 
 function nonNegativeInteger(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
@@ -432,6 +435,86 @@ export function parseAvailableModels(settings: unknown): string[] {
   return raw.filter((m): m is string => typeof m === 'string' && m.length > 0);
 }
 
+interface ClaudeGatewayModel {
+  id: string;
+  displayName: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isSafeGatewayText(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= GATEWAY_MODEL_TEXT_MAX_LENGTH
+    && value.trim().length > 0
+    // Model ids and display names are rendered in the UI and included in
+    // debug output. Reject control characters from the local cache rather
+    // than letting a corrupt cache inject terminal/UI control sequences.
+    // eslint-disable-next-line no-control-regex
+    && !/[\x00-\x1F\x7F]/.test(value);
+}
+
+function isGatewayModelDiscoveryEnabled(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true';
+}
+
+/** Validate Claude Code's gateway-model discovery cache against the settings
+ * profile that owns it. A cache is usable only when its base URL exactly
+ * matches settings.env.ANTHROPIC_BASE_URL and every model entry has the
+ * expected id/display_name shape. Invalid caches fail closed to []. */
+function parseGatewayModelsCache(
+  settings: unknown,
+  cache: unknown,
+): ClaudeGatewayModel[] {
+  if (!isRecord(settings) || !isRecord(settings.env) || !isRecord(cache)) return [];
+  if (!isGatewayModelDiscoveryEnabled(
+    settings.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY,
+  )) return [];
+  const rawExpectedBaseUrl = settings.env.ANTHROPIC_BASE_URL;
+  const rawCacheBaseUrl = cache.baseUrl;
+  if (typeof rawExpectedBaseUrl !== 'string' || typeof rawCacheBaseUrl !== 'string') return [];
+  const expectedBaseUrl = rawExpectedBaseUrl.trim();
+  const cacheBaseUrl = rawCacheBaseUrl.trim();
+  if (!expectedBaseUrl || !cacheBaseUrl || cacheBaseUrl !== expectedBaseUrl) return [];
+  if (!Array.isArray(cache.models)
+    || cache.models.length === 0
+    || cache.models.length > GATEWAY_MODELS_MAX_ENTRIES) return [];
+
+  const seen = new Set<string>();
+  const models: ClaudeGatewayModel[] = [];
+  for (const rawModel of cache.models) {
+    if (!isRecord(rawModel)
+      || !isSafeGatewayText(rawModel.id)
+      || !isSafeGatewayText(rawModel.display_name)) return [];
+    if (seen.has(rawModel.id)) continue;
+    seen.add(rawModel.id);
+    models.push({ id: rawModel.id, displayName: rawModel.display_name });
+  }
+  return models;
+}
+
+/** Read only the bounded gateway cache owned by the resolved settings
+ * profile. Missing, oversized, unreadable, malformed, or mismatched caches
+ * are deliberately indistinguishable and return []. */
+function readGatewayModelsCache(
+  settingsPath: string,
+  settings: unknown,
+): ClaudeGatewayModel[] {
+  const cachePath = join(dirname(settingsPath), 'cache', 'gateway-models.json');
+  const raw = readFileHead(cachePath, GATEWAY_MODELS_CACHE_MAX_BYTES + 1);
+  if (!raw || raw.byteLength > GATEWAY_MODELS_CACHE_MAX_BYTES) return [];
+  try {
+    return parseGatewayModelsCache(settings, JSON.parse(raw.toString('utf8')));
+  } catch {
+    return [];
+  }
+}
+
 /** Stable slug for building capability ids out of arbitrary model strings. */
 function slugifyModelId(model: string): string {
   const slug = model.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
@@ -553,10 +636,11 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     // Model menu sources, in priority order:
     //  1. The `availableModels` list from the Claude settings.json the
     //     configured CLI actually reads (see resolveClaudeSettingsPath).
-    //     Users running a wrapped/router CLI (custom ANTHROPIC_BASE_URL)
-    //     define their real model menu there; honoring it costs zero Agent
-    //     SDK credit because it's a local file read.
-    //  2. The static alias menu (opus / sonnet / haiku + "no --model" = the
+    //  2. Claude Code's gateway discovery cache from that same profile, but
+    //     only when its baseUrl matches settings.env.ANTHROPIC_BASE_URL.
+    //     Both custom sources are local file reads and spend no Agent SDK
+    //     credit.
+    //  3. The static alias menu (opus / sonnet / haiku + "no --model" = the
     //     configured default) as fallback. Aliases are stable (always the
     //     latest of that family), so this list never goes stale. The
     //     interactive `/model` picker shows exactly this set, so scraping its
@@ -565,12 +649,19 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     // entry's label with the resolved concrete name; it never changes which
     // models are offered.
     let settingsModels: string[] = [];
+    let gatewayModels: ClaudeGatewayModel[] = [];
     try {
       const settingsPath = resolveClaudeSettingsPath();
       if (settingsPath) {
-        settingsModels = parseAvailableModels(JSON.parse(readFileSync(settingsPath, 'utf8')));
+        const settings = JSON.parse(readFileSync(settingsPath, 'utf8')) as unknown;
+        settingsModels = parseAvailableModels(settings);
         if (settingsModels.length > 0) {
           this.emit('debug', `[runtime] Model menu from ${settingsPath} availableModels (${settingsModels.length} entries)`);
+        } else {
+          gatewayModels = readGatewayModelsCache(settingsPath, settings);
+          if (gatewayModels.length > 0) {
+            this.emit('debug', `[runtime] Model menu from ${dirname(settingsPath)} gateway cache (${gatewayModels.length} entries)`);
+          }
         }
       }
     } catch (err) {
@@ -596,16 +687,29 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       "Uses Claude Code's configured default model.",
       true,
     );
-    if (settingsModels.length > 0) {
+    if (settingsModels.length > 0 || gatewayModels.length > 0) {
       const usedIds = new Set<string>();
+      const configuredModels = settingsModels.length > 0
+        ? settingsModels.map((model) => ({
+            idPrefix: 'claude-settings',
+            model,
+            displayName: model,
+            description: 'From Claude settings availableModels.',
+          }))
+        : gatewayModels.map((model) => ({
+            idPrefix: 'claude-gateway',
+            model: model.id,
+            displayName: model.displayName,
+            description: 'From Claude gateway model discovery cache.',
+          }));
       this.discoveredModels = [
         defaultEntry,
-        ...settingsModels.map((model) => {
-          const slug = slugifyModelId(model);
-          let id = `claude-settings-${slug}`;
-          for (let n = 2; usedIds.has(id); n++) id = `claude-settings-${slug}-${n}`;
+        ...configuredModels.map((entry) => {
+          const slug = slugifyModelId(entry.model);
+          let id = `${entry.idPrefix}-${slug}`;
+          for (let n = 2; usedIds.has(id); n++) id = `${entry.idPrefix}-${slug}-${n}`;
           usedIds.add(id);
-          return alias(id, model, model, 'From Claude settings availableModels.');
+          return alias(id, entry.model, entry.displayName, entry.description);
         }),
       ];
     } else {
@@ -643,6 +747,15 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     });
 
     this.emit('debug', `[runtime] Session registered: ${options.sessionId} (claude: ${options.claudeSessionId})`);
+  }
+
+  setSessionModel(sessionId: string, model: string | null): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`No session found for ${sessionId}`);
+    session.model = model;
+    // The last init event belongs to the previous model selection. Do not let
+    // it influence usage/context inference for the next per-turn process.
+    session.detectedModelId = null;
   }
 
   /**

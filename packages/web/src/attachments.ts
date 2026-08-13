@@ -18,6 +18,12 @@ export interface ComposerAttachmentPayload {
   size?: number;
 }
 
+/** Stable Host URL for an attachment that already lives in a Session store. */
+export function servedAttachmentUrl(sessionId: string, path: string): string {
+  const filename = path.split('/').pop() ?? path;
+  return `/api/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(filename)}`;
+}
+
 export function attachmentInputItem(attachment: ComposerAttachmentPayload): InputItem {
   const metadata = {
     path: attachment.path,

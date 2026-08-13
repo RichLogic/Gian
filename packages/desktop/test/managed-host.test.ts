@@ -36,6 +36,7 @@ test('managed host environment configures the bundled Node runtime boundary', ()
     port: 8990,
     desktopToken: 'secret',
     instanceId: 'instance-1',
+    githubBrokerSocket: '/tmp/gian-github.sock',
     env: { PATH: '/usr/bin' },
   });
 
@@ -47,6 +48,7 @@ test('managed host environment configures the bundled Node runtime boundary', ()
     GIAN_WEB_DIST: '/app/web',
     GIAN_DESKTOP_TOKEN: 'secret',
     GIAN_DESKTOP_INSTANCE_ID: 'instance-1',
+    GIAN_DESKTOP_GITHUB_BROKER_SOCKET: '/tmp/gian-github.sock',
     GIAN_PARENT_MANAGED: '1',
     GIAN_MANAGED_PLUGINS: '1',
   });

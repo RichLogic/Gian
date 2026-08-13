@@ -1,37 +1,37 @@
 import { useEffect, useRef } from 'react';
 import { Terminal as Xterm } from '@xterm/xterm';
 import type { ITheme } from '@xterm/xterm';
+import type { TerminalPreferences } from '@gian/shared';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { TerminalWire } from './terminal-wire.js';
+import {
+  applyTerminalPreferences,
+  terminalOptionsFromPreferences,
+} from '../terminal-preferences.js';
 
 export interface TerminalProps {
   wire: TerminalWire;
   /** Stable key so React unmounts xterm when the terminal id changes. */
   instanceKey: string;
+  preferences: TerminalPreferences;
 }
 
 /**
  * xterm.js panel — channel-agnostic. The owner picks the wire.
  */
-export function Terminal({ wire, instanceKey }: TerminalProps) {
+export function Terminal({ wire, instanceKey, preferences }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Xterm | null>(null);
+  const refitRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
     const container = containerRef.current;
 
-    // Stay in step with the rest of the app's mono surfaces — same
-    // JetBrains Mono stack as `--font-mono`, slightly smaller than
-    // xterm's stock 15px so it sits beside transcript / file viewers
-    // without feeling bolted on. Line height a touch over 1.0 keeps
-    // descenders from kissing the cell above.
     const term = new Xterm({
-      cursorBlink: true,
-      fontFamily: '"JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace',
-      fontSize: readCodeFontSizeFromCss(container) ?? 12.5,
-      lineHeight: 1.25,
+      ...terminalOptionsFromPreferences(preferences),
       letterSpacing: 0,
       theme: readThemeFromCss(container),
       allowProposedApi: true,
@@ -41,6 +41,7 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
     term.loadAddon(fit);
     term.loadAddon(links);
     term.open(container);
+    terminalRef.current = term;
     try { fit.fit(); } catch { /* before layout settles */ }
 
     // Re-paint when the user flips the app theme (light / warm / dark)
@@ -52,27 +53,10 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
       term.options.theme = readThemeFromCss(containerRef.current);
     };
 
-    // Code-zone font scale is a CSS-only mechanism for the rest of the
-    // app (--fz-* tokens multiply by --zone-scale), but xterm uses a
-    // JS-driven fontSize. Read the resolved --fz-13 px value and apply
-    // it, then refit so the cell grid matches the new metric.
-    const applyCodeScale = () => {
-      const px = readCodeFontSizeFromCss(container);
-      if (px !== null) {
-        term.options.fontSize = px;
-        pushResize();
-      }
-    };
-
-    const themeObserver = new MutationObserver(records => {
-      for (const r of records) {
-        if (r.attributeName === 'data-scale-code') applyCodeScale();
-        else repaintTheme();
-      }
-    });
+    const themeObserver = new MutationObserver(() => repaintTheme());
     themeObserver.observe(document.body, {
       attributes: true,
-      attributeFilter: ['data-theme', 'data-accent', 'data-scale-code'],
+      attributeFilter: ['data-theme', 'data-accent'],
     });
 
     const encoder = new TextEncoder();
@@ -99,6 +83,7 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
         wire.sendResize(cols, rows);
       }
     };
+    refitRef.current = pushResize;
 
     const resizeObserver = new ResizeObserver(() => { pushResize(); });
     resizeObserver.observe(container);
@@ -147,12 +132,29 @@ export function Terminal({ wire, instanceKey }: TerminalProps) {
       themeObserver.disconnect();
       off();
       term.dispose();
+      terminalRef.current = null;
+      refitRef.current = null;
       wire.dispose?.();
     };
     // `wire` is recreated on every parent render, so we deliberately
     // ignore it in deps. `instanceKey` signals genuine resource changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instanceKey]);
+
+  useEffect(() => {
+    const term = terminalRef.current;
+    if (!term) return;
+    applyTerminalPreferences(term.options, preferences);
+    const frame = requestAnimationFrame(() => refitRef.current?.());
+    return () => cancelAnimationFrame(frame);
+  }, [
+    preferences.font_family,
+    preferences.font_size,
+    preferences.line_height,
+    preferences.cursor_style,
+    preferences.cursor_blink,
+    preferences.scrollback_lines,
+  ]);
 
   return <div className="gian-terminal" ref={containerRef} />;
 }
@@ -165,24 +167,6 @@ function writeExitStatus(term: Xterm, exitCode: number | null, signal: string | 
 // ---------------------------------------------------------------------------
 // Theme bridge
 // ---------------------------------------------------------------------------
-
-/** Resolve the code-zone font token to a concrete pixel value for xterm. */
-function readCodeFontSizeFromCss(host: HTMLElement): number | null {
-  // CSS custom properties retain their calc() expression when read directly.
-  // A probe using the token as an actual font-size asks the browser to resolve
-  // the host's code-zone --zone-scale into the px value xterm requires.
-  const probe = document.createElement('span');
-  probe.style.cssText = [
-    'position:absolute',
-    'visibility:hidden',
-    'pointer-events:none',
-    'font-size:var(--fz-13)',
-  ].join(';');
-  host.appendChild(probe);
-  const px = parseFloat(getComputedStyle(probe).fontSize);
-  host.removeChild(probe);
-  return px > 0 && Number.isFinite(px) ? px : null;
-}
 
 /**
  * Resolve an xterm theme from the active CSS theme tokens.

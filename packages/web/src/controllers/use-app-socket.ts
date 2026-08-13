@@ -18,7 +18,7 @@ import { invalidateAllChangesDiffs } from './use-changes-diff.js';
 import { toast } from '../feedback.js';
 import { maybeNotifyForEnvelope } from '../notifications.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
-import { dispatchMessageSend } from '../operations/message.js';
+import { dispatchAttachmentUpload, dispatchMessageSend } from '../operations/message.js';
 import { sessionEntityKey } from '../operations/session.js';
 import { taskEntityKey } from '../operations/task.js';
 import { workspaceEntityKey } from '../operations/workspace.js';
@@ -39,6 +39,14 @@ import {
 import type { QueueEntry, TranscriptItem } from '../types.js';
 import type { GianWs, WsState } from '../ws.js';
 import type { AppAuthStatus } from './use-app-auth.js';
+import {
+  pendingFirstMessageForCreatedSession,
+  type PendingFirstMessage,
+  type PendingFirstMessageValue,
+} from '../pending-first-message.js';
+import { clearNewSessionDraftStorage } from '../screenshot-drafts.js';
+import { injectComposerAttachment, injectComposerDraft } from '../components/Composer.js';
+import { servedAttachmentUrl } from '../attachments.js';
 
 type Setter<T> = Dispatch<SetStateAction<T>>;
 
@@ -48,7 +56,7 @@ interface UseAppSocketInput {
   sessionsRef: MutableRefObject<Session[]>;
   itemsBySessionRef: MutableRefObject<Record<string, TranscriptItem[]>>;
   activeSessionIdRef: MutableRefObject<string | null>;
-  pendingFirstMessageRef: MutableRefObject<string | null>;
+  pendingFirstMessageRef: MutableRefObject<PendingFirstMessageValue>;
   setWsState: Setter<WsState>;
   setWsAttempt: Setter<number>;
   setAuthed: Setter<boolean>;
@@ -75,6 +83,60 @@ interface UseAppSocketInput {
   /** Operation dispatcher — the auto first-queued send and the unread
    *  auto-clear dispatch through the operation layer (Phase 2b). */
   ops: OperationDispatcher;
+  translate?: (key: string) => string;
+}
+
+async function deliverCreatedSessionFirstMessage(
+  pending: PendingFirstMessage,
+  session: Session,
+  current: Pick<UseAppSocketInput, 'ops' | 'translate'>,
+): Promise<void> {
+  if (pending.attachments.length === 0) {
+    const firstMessage = planCreatedSessionFirstMessage(pending.text);
+    if (firstMessage.structuredText) {
+      dispatchMessageSend(current.ops.dispatch, {
+        sessionId: session.id,
+        text: firstMessage.structuredText,
+        exec: session.executor,
+      });
+    }
+    clearNewSessionDraftStorage(pending.scope);
+    return;
+  }
+
+  const settled = await Promise.allSettled(pending.attachments.map(attachment =>
+    dispatchAttachmentUpload(current.ops.dispatch, {
+      sessionId: session.id,
+      blob: attachment.blob,
+      filename: attachment.name,
+    })));
+  const uploaded = settled.flatMap(result => result.status === 'fulfilled' ? [result.value] : []);
+  const failed = settled.length - uploaded.length;
+
+  if (failed > 0) {
+    // Keep the original Workspace/Task draft (including its raw Blobs) for a
+    // safe retry. Anything that did upload is also recoverable in the created
+    // Session's Composer, and is deliberately not auto-sent on partial error.
+    if (pending.text.trim()) injectComposerDraft(session.id, pending.text.trim());
+    for (const attachment of uploaded) injectComposerAttachment(session.id, attachment);
+    toast({
+      kind: 'error',
+      message: current.translate?.('screenshot.firstMessageUploadFailed')
+        ?? 'Some screenshots could not be uploaded. The original new-session draft was kept.',
+    });
+    return;
+  }
+
+  dispatchMessageSend(current.ops.dispatch, {
+    sessionId: session.id,
+    text: pending.text.trim(),
+    exec: session.executor,
+    attachments: uploaded.map(attachment => ({
+      ...attachment,
+      previewUrl: servedAttachmentUrl(session.id, attachment.path),
+    })),
+  });
+  clearNewSessionDraftStorage(pending.scope);
 }
 
 export function useAppSocket(input: UseAppSocketInput): void {
@@ -224,17 +286,16 @@ export function useAppSocket(input: UseAppSocketInput): void {
           // The creating/forking busy state is driven by the pending
           // operation run in App and ends on operation:result — nothing to
           // clear here.
-          const pending = current.pendingFirstMessageRef.current;
-          current.pendingFirstMessageRef.current = null;
-          const firstMessage = planCreatedSessionFirstMessage(pending);
-          if (firstMessage.structuredText) {
-            // The auto first-queued send shares the Composer's send path:
-            // dispatch + synchronous optimistic echo via the echo sink.
-            dispatchMessageSend(current.ops.dispatch, {
-              sessionId: message.session.id,
-              text: firstMessage.structuredText,
-              exec: message.session.executor,
-            });
+          const pending = pendingFirstMessageForCreatedSession(
+            current.pendingFirstMessageRef.current,
+            message.session,
+            message.origin,
+          );
+          if (pending) {
+            current.pendingFirstMessageRef.current = null;
+            // Screenshot Blobs can only be uploaded after the Session exists.
+            // The operation path is async; selection already happened above.
+            void deliverCreatedSessionFirstMessage(pending, message.session, current);
           } else {
             // Native adoption broadcasts session:created around the same time
             // its HTTP response selects the session and hydrates replayed

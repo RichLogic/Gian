@@ -271,6 +271,11 @@
   background: var(--text);
 }
 
+.context-agent-row[data-provider="grok"] .context-provider-mark {
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--text);
+}
+
 /* Transcript rows remain lightweight anchors, but their source color follows
  * the CLI rather than making every subagent look like Claude. */
 .evt.agent[data-provider="codex"] {

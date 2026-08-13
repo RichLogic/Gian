@@ -5,8 +5,10 @@ import {
   browserNotificationPermission,
   loadNotificationPrefs,
   maybeNotifyForEnvelope,
+  nativeNotificationPreferencesForMigration,
   requestDesktopNotificationPermission,
   saveNotificationPrefs,
+  visibleSessionForNativeNotification,
 } from '../src/notifications.js';
 
 class FakeNotification {
@@ -55,6 +57,7 @@ function envelope(
 describe('browser notifications', () => {
   beforeEach(() => {
     localStorage.clear();
+    delete window.gianDesktop;
     installNotification('granted');
   });
 
@@ -80,6 +83,17 @@ describe('browser notifications', () => {
     expect(FakeNotification.requestPermission).toHaveBeenCalledTimes(1);
   });
 
+  it('migrates native delivery only from previously granted consent', () => {
+    saveNotificationPrefs({ ...DEFAULT_NOTIFICATION_PREFS, sound: true });
+    expect(nativeNotificationPreferencesForMigration()).toEqual({
+      ...DEFAULT_NOTIFICATION_PREFS,
+      sound: true,
+      desktop: true,
+    });
+    installNotification('default');
+    expect(nativeNotificationPreferencesForMigration().desktop).toBe(false);
+  });
+
   it('sends a desktop notification for session completion when permission is granted', () => {
     const sent = maybeNotifyForEnvelope(
       envelope('turn_completed', { summary: 'Implemented the parser.' }),
@@ -90,6 +104,17 @@ describe('browser notifications', () => {
     expect(FakeNotification.instances).toHaveLength(1);
     expect(FakeNotification.instances[0]!.title).toBe('Gian · Parser fix completed');
     expect(FakeNotification.instances[0]!.options?.body).toBe('Implemented the parser.');
+  });
+
+  it('leaves signed desktop delivery to Electron main to avoid duplicates', () => {
+    window.gianDesktop = {
+      notifications: {
+        native: true,
+      } as NonNullable<typeof window.gianDesktop>['notifications'],
+    };
+
+    expect(maybeNotifyForEnvelope(envelope('turn_completed', {}))).toBe(false);
+    expect(FakeNotification.instances).toHaveLength(0);
   });
 
   it('uses a Kimi fallback label for unnamed Kimi sessions', () => {
@@ -124,5 +149,49 @@ describe('browser notifications', () => {
 
     expect(browserNotificationPermission()).toBe('unsupported');
     expect(maybeNotifyForEnvelope(envelope('session_error', { message: 'boom' }))).toBe(false);
+  });
+});
+
+describe('native notification visibility context', () => {
+  it('reports a Session only while its conversation surface is actually visible', () => {
+    expect(visibleSessionForNativeNotification({
+      mode: 'sessions',
+      viewState: 'main',
+      activeSessionId: 'sess-1',
+      activeSubtaskId: null,
+    })).toBe('sess-1');
+    expect(visibleSessionForNativeNotification({
+      mode: 'sessions',
+      viewState: 'both',
+      activeSessionId: 'sess-1',
+      activeSubtaskId: null,
+    })).toBe('sess-1');
+    expect(visibleSessionForNativeNotification({
+      mode: 'sessions',
+      viewState: 'workbench',
+      activeSessionId: 'sess-1',
+      activeSubtaskId: null,
+    })).toBeNull();
+  });
+
+  it('reports only the active Tasks subtask, never Spaces', () => {
+    expect(visibleSessionForNativeNotification({
+      mode: 'tasks',
+      viewState: 'main',
+      activeSessionId: 'sub-1',
+      activeSubtaskId: 'sub-1',
+    })).toBe('sub-1');
+    expect(visibleSessionForNativeNotification({
+      mode: 'tasks',
+      viewState: 'main',
+      activeSessionId: 'sub-1',
+      activeSubtaskId: 'sub-2',
+    })).toBeNull();
+    expect(visibleSessionForNativeNotification({
+      mode: 'spaces',
+      viewState: 'main',
+      activeSessionId: 'sess-1',
+      activeSubtaskId: null,
+    })).toBeNull();
   });
 });

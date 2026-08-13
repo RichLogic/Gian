@@ -762,6 +762,10 @@
   background: var(--kimi);
   box-shadow: 0 0 0 1px oklch(0.65 0 0 / 0.55);
 }
+.cmp-executor-mark.grok {
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--text);
+}
 
 /* Model & thinking popover (rendered via portal at document.body) */
 .popover.model-pop {
@@ -889,6 +893,11 @@
 .composer-ex .dot { width: 7px; height: 7px; border-radius: var(--r-1); flex-shrink: 0; }
 .composer-ex .dot.codex { background: var(--codex); }
 .composer-ex .dot.claude { background: var(--claude); }
+.composer-ex .dot.kimi { background: var(--kimi); }
+.composer-ex .dot.grok {
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--text);
+}
 
 /* Approval mode — segmented control */
 .composer-mode {
@@ -1959,6 +1968,10 @@
 .ns-exec-dot.kimi {
   background: var(--kimi);
   box-shadow: 0 0 0 1px oklch(0.65 0 0 / 0.55), 0 0 0 3px var(--kimi-soft);
+}
+.ns-exec-dot.grok {
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--text), 0 0 0 2px var(--hairline-2);
 }
 
 /* ============================================================

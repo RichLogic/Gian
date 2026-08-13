@@ -4,7 +4,7 @@
 
 <h1 align="center">Gian</h1>
 
-<p align="center"><strong>在一个本地桌面工作区中使用 Codex、Claude Code 和 Kimi Code。</strong></p>
+<p align="center"><strong>在一个本地桌面工作区中使用 Codex、Claude Code、Kimi Code 和 Grok Build。</strong></p>
 
 <p align="center">
   把 Agent 会话、审批、Tasks、worktree、文件、Diff 和终端集中到一个专注的 macOS 应用中。
@@ -15,11 +15,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/RichLogic/Gian/releases/download/v0.4.2/Gian-0.4.2-arm64.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-Gian_0.4.2-E4572E?style=for-the-badge&logo=apple&logoColor=white" alt="Download Gian for macOS Apple Silicon"></a>
+  <a href="https://github.com/RichLogic/Gian/releases/download/v0.4.3/Gian-0.4.3-arm64.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-Gian_0.4.3-E4572E?style=for-the-badge&logo=apple&logoColor=white" alt="Download Gian for macOS Apple Silicon"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/RichLogic/Gian/releases/tag/v0.4.2"><img src="https://img.shields.io/badge/release-v0.4.2_beta-C65D3A" alt="Current Gian beta release v0.4.2"></a>
+  <a href="https://github.com/RichLogic/Gian/releases/tag/v0.4.3"><img src="https://img.shields.io/badge/release-v0.4.3_beta-C65D3A" alt="Current Gian beta release v0.4.3"></a>
   <img src="https://img.shields.io/badge/platform-macOS_Apple_Silicon-1F2328?logo=apple" alt="Platform macOS Apple Silicon">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2F7D6D" alt="MIT License"></a>
 </p>
@@ -30,7 +30,7 @@
 
 ## 为什么选择 Gian
 
-- 在同一个桌面界面中使用 Codex、Claude Code 和 Kimi Code。
+- 在同一个桌面界面中使用 Codex、Claude Code、Kimi Code 和 Grok Build。
 - 同时保留多个会话，在它们之间快速切换，不再来回翻找终端。
 - 以结构化事件查看回复、计划、工具调用、命令、审批和错误。
 - 用 Tasks 归纳相关会话，不在你和 Agent 之间加入自动化 Manager。
@@ -66,7 +66,7 @@
 
 Gian 当前是面向 **Apple Silicon 的 unsigned macOS Beta**。它尚未经过 Apple 公证，因此第一次打开时 macOS Gatekeeper 会给出提示。
 
-1. 从[当前 Beta Release](https://github.com/RichLogic/Gian/releases/tag/v0.4.2)下载 [`Gian-0.4.2-arm64.dmg`](https://github.com/RichLogic/Gian/releases/download/v0.4.2/Gian-0.4.2-arm64.dmg)。
+1. 从[当前 Beta Release](https://github.com/RichLogic/Gian/releases/tag/v0.4.3)下载 [`Gian-0.4.3-arm64.dmg`](https://github.com/RichLogic/Gian/releases/download/v0.4.3/Gian-0.4.3-arm64.dmg)。
 2. 打开 DMG，把 Gian 拖入 **Applications（应用程序）**。
 3. 在 Finder 中按住 Control 点击 Gian，选择 **Open（打开）**，再在 Gatekeeper 对话框中选择一次 **Open（打开）**。
 4. 如果没有这个选项，打开 **System Settings > Privacy & Security（系统设置 > 隐私与安全性）**，在 Gian 对应提示旁选择 **Open Anyway（仍要打开）**。
@@ -82,12 +82,13 @@ Gian 当前是面向 **Apple Silicon 的 unsigned macOS Beta**。它尚未经过
 | Codex | OpenAI Codex CLI | 共享 app-server Proxy |
 | Claude Code | Anthropic Claude Code CLI | 结构化 print-mode Proxy |
 | Kimi Code | Moonshot AI Kimi CLI | 共享 ACP Proxy |
+| Grok Build | xAI Grok Build CLI | 共享 ACP Proxy |
 
 Gian 可以检测现有 CLI，也可以使用自定义可执行文件路径。如果 CLI 尚未安装，初始化流程可以启动服务商的官方安装器。Gian 会从同一个 GitHub Release 下载对应版本的集成 Proxy，并在启用前完成校验。
 
 ## 从源码构建
 
-源码构建面向贡献者和开发者，需要 **Node.js 22**（`>=22 <25`）和 **pnpm 10**。
+源码构建面向贡献者和开发者，需要 **Node.js 24 LTS**（`>=24 <25`）和 **pnpm 10**。
 
 ```bash
 git clone https://github.com/RichLogic/Gian.git

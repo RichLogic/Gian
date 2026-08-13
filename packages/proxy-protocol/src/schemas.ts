@@ -43,7 +43,7 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
 export const wireIdSchema = z.union([nonEmptyStringSchema, safeIntegerSchema]);
 
 const pluginIdSchema = nonEmptyStringSchema.regex(
-  /^(?:claude|codex|kimi|[a-z0-9]+(?:[.-][a-z0-9]+)+)$/,
+  /^(?:claude|codex|kimi|grok|[a-z0-9]+(?:[.-][a-z0-9]+)+)$/,
   'Expected a reserved built-in ID or reverse-domain external plugin ID.',
 );
 const semverSchema = nonEmptyStringSchema.regex(

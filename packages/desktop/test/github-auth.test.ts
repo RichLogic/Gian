@@ -144,6 +144,81 @@ test('credential file contains encrypted bytes rather than the GitHub token', as
   }
 });
 
+test('release metadata requests use the signed-in credential only for exact GitHub API URLs', async () => {
+  const token = 'github-token-sentinel';
+  const store = memoryStore();
+  store.saved = { token, user };
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return Response.json({ ok: true });
+  }) as typeof fetch;
+  const service = new GitHubAuthService({
+    clientId: 'Ov23liExampleClient',
+    store,
+    fetch: fetchImpl,
+  });
+
+  await service.fetchReleaseMetadata({ repository: 'RichLogic/Gian' });
+  await service.fetchReleaseMetadata({
+    repository: 'RichLogic/Gian',
+    tag: 'proxy/codex v0.4.2',
+  });
+
+  assert.deepEqual(calls.map(call => call.url), [
+    'https://api.github.com/repos/RichLogic/Gian/releases?per_page=100',
+    'https://api.github.com/repos/RichLogic/Gian/releases/tags/proxy%2Fcodex%20v0.4.2',
+  ]);
+  for (const call of calls) {
+    const headers = new Headers(call.init?.headers);
+    assert.equal(headers.get('authorization'), `Bearer ${token}`);
+    assert.equal(headers.get('accept'), 'application/vnd.github+json');
+    assert.equal(headers.get('user-agent'), 'Gian');
+    assert.equal(headers.get('x-github-api-version'), '2022-11-28');
+    assert.equal(call.init?.redirect, 'error');
+  }
+
+  await service.signOut();
+  assert.deepEqual(await service.getState(), { status: 'signed_out' });
+  await service.fetchReleaseMetadata({ repository: 'RichLogic/Gian' });
+  assert.equal(new Headers(calls[2]?.init?.headers).get('authorization'), null);
+  assert.equal(calls[2]?.init?.redirect, 'error');
+});
+
+test('release metadata rejects arbitrary repositories and unsafe tags before fetching', async () => {
+  const calls: string[] = [];
+  const service = new GitHubAuthService({
+    clientId: 'Ov23liExampleClient',
+    store: memoryStore(),
+    fetch: (async input => {
+      calls.push(String(input));
+      return Response.json({ ok: true });
+    }) as typeof fetch,
+  });
+
+  for (const repository of [
+    '',
+    'RichLogic',
+    'RichLogic/Gian/releases',
+    'RichLogic/..',
+    'https://api.github.com/repos/RichLogic/Gian',
+    'RichLogic/Gian?per_page=1',
+  ]) {
+    await assert.rejects(
+      service.fetchReleaseMetadata({ repository }),
+      /invalid GitHub release repository/,
+    );
+  }
+  for (const tag of ['', 'bad\ntag', 'x'.repeat(256)]) {
+    await assert.rejects(
+      service.fetchReleaseMetadata({ repository: 'RichLogic/Gian', tag }),
+      /invalid GitHub release tag/,
+    );
+  }
+
+  assert.deepEqual(calls, []);
+});
+
 test('OAuth client id resolves from development env or packaged runtime config', async () => {
   assert.equal(resolveGitHubOAuthClientId({
     env: { GIAN_GITHUB_CLIENT_ID: ' Ov23liFromEnv ' },

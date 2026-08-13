@@ -1,5 +1,3 @@
-import { useEffect } from 'react';
-import type { Dispatch, SetStateAction } from 'react';
 import type { Mode } from '../components/Topbar.js';
 import type { RailId, SheetGroup, SheetTab } from '../components/sheet-model.js';
 import type { ChatPanelTarget } from '../presentation/chat-panel.js';
@@ -14,7 +12,6 @@ interface UseWorkbenchLayoutInput {
   chatPanel: ChatPanelTarget | null;
   filesInspectorSuppressed: boolean;
   p3Collapsed: boolean;
-  setP3Collapsed: Dispatch<SetStateAction<boolean>>;
   groupOfRail: Record<RailId, SheetGroup | null>;
 }
 
@@ -28,7 +25,6 @@ export function useWorkbenchLayout({
   chatPanel,
   filesInspectorSuppressed,
   p3Collapsed,
-  setP3Collapsed,
   groupOfRail,
 }: UseWorkbenchLayoutInput) {
   const sessionViewActive = mode === 'sessions' || subtaskActive;
@@ -62,10 +58,6 @@ export function useWorkbenchLayout({
     && !(inspectorKind === 'files' && filesInspectorSuppressed)
     && ((inspectorKind === 'files' || inspectorKind === 'changes' || inspectorKind === 'history') ? sessionViewActive : true);
   const inspectorVisible = inspectorAvailable && !p3Collapsed;
-
-  useEffect(() => {
-    setP3Collapsed(false);
-  }, [activeRail, setP3Collapsed]);
 
   const openWorkspaceIds = new Set(
     tabs.filter(tab => tab.kind === 'workspace' && tab.wsId).map(tab => tab.wsId as string),

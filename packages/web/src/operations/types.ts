@@ -32,6 +32,7 @@ export type OperationName =
   | 'session.setModel'
   | 'session.setEffort'
   | 'session.setServiceTier'
+  | 'session.assignTask'
   | 'session.setNativeConfig'
   | 'session.merge'
   | 'session.drop'
@@ -115,6 +116,7 @@ export const OPERATION_POLICIES = {
   'session.setModel': 'optimistic',
   'session.setEffort': 'optimistic',
   'session.setServiceTier': 'optimistic',
+  'session.assignTask': 'optimistic',
   // Pending, not optimistic (Phase 2a decision, inventory §4 note 6): the
   // rendered value lives in `native_config_options[].currentValue` — a nested
   // array element, not a flat Session field — so it does not fit the
@@ -217,6 +219,7 @@ export const WS_TYPE_POLICIES = {
   'session:set_model': 'optimistic',
   'session:set_effort': 'optimistic',
   'session:set_service_tier': 'optimistic',
+  'session:assign_task': 'optimistic',
   'session:set_native_config': 'pending', // see OPERATION_POLICIES note
   'task:create': 'pending',
   'task:update': 'optimistic',

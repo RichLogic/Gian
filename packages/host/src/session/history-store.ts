@@ -273,6 +273,23 @@ export class SessionHistoryStore {
     ));
   }
 
+  /** True when this turn already carries the requested UI projection. */
+  hasTurnDisplayType(turnId: string, displayType: DisplayEventType): boolean {
+    const order = this.events.usesSequence ? 'sequence' : 'rowid';
+    const rows = this.db.prepare(
+      `SELECT e.id, e.session_id, e.call_id, e.type, e.data, e.created_at,
+              t.turn_number
+       FROM events e
+       JOIN turns t ON t.id = e.turn_id
+       WHERE e.turn_id = ?
+       ORDER BY e.${order} ASC`,
+    ).all(turnId) as StoredEventRow[];
+    return rows.some(row => (
+      eventEnvelope(this.events, row.session_id, row, true).display?.type
+        === displayType
+    ));
+  }
+
   /** Merge safe streaming fragments once a turn is terminal. */
   compactTurnStreams(turnId: string): number {
     return this.compactTurnStreamsDetailed(turnId).removed;
@@ -385,8 +402,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function isExecutor(value: unknown): value is 'claude' | 'codex' | 'kimi' {
-  return value === 'claude' || value === 'codex' || value === 'kimi';
+function isExecutor(value: unknown): value is 'claude' | 'codex' | 'kimi' | 'grok' {
+  return value === 'claude' || value === 'codex' || value === 'kimi' || value === 'grok';
 }
 
 const SQLITE_UTC_TIMESTAMP_RE =

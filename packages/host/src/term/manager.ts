@@ -13,9 +13,11 @@
 
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
-import { existsSync } from 'node:fs';
+import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:fs';
+import { basename, isAbsolute } from 'node:path';
 
 import type { IPty } from 'node-pty';
+import type { TerminalOptions } from '@gian/shared';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
 
 let nodePtyPromise: Promise<typeof import('node-pty')> | null = null;
@@ -250,15 +252,70 @@ export class WorkbenchTerminalManager extends EventEmitter<WorkbenchTerminalEven
   }
 }
 
-function resolveShell(override?: string): string {
-  if (override && override.trim().length > 0) return override.trim();
+export function terminalOptions(): TerminalOptions {
+  const candidates = new Set<string>();
   const fromEnv = process.env.SHELL?.trim();
-  if (fromEnv && existsSync(fromEnv)) return fromEnv;
+  if (fromEnv) candidates.add(fromEnv);
+  try {
+    for (const line of readFileSync('/etc/shells', 'utf8').split(/\r?\n/)) {
+      const shell = line.trim();
+      if (shell && !shell.startsWith('#')) candidates.add(shell);
+    }
+  } catch {
+    // Minimal containers may not have /etc/shells; known fallbacks follow.
+  }
+  for (const candidate of [
+    '/bin/zsh', '/bin/bash', '/bin/sh',
+    '/opt/homebrew/bin/fish', '/opt/homebrew/bin/nu',
+    '/usr/local/bin/fish', '/usr/local/bin/nu',
+  ]) {
+    candidates.add(candidate);
+  }
+
+  const shells = [...candidates]
+    .filter(isExecutableShell)
+    .sort((a, b) => basename(a).localeCompare(basename(b)) || a.localeCompare(b))
+    .map(path => ({ path, label: basename(path) }));
+  return {
+    system_shell: resolveSystemShell(),
+    shells,
+  };
+}
+
+export function isAvailableTerminalShell(candidate: string): boolean {
+  const normalized = candidate.trim();
+  return terminalOptions().shells.some(shell => shell.path === normalized);
+}
+
+function resolveShell(override?: string): string {
+  if (override && override.trim().length > 0) {
+    const normalized = override.trim();
+    if (!isAvailableTerminalShell(normalized)) {
+      throw new Error(`Terminal shell is not available: ${normalized}`);
+    }
+    return normalized;
+  }
+  return resolveSystemShell();
+}
+
+function resolveSystemShell(): string {
+  const fromEnv = process.env.SHELL?.trim();
+  if (fromEnv && isExecutableShell(fromEnv)) return fromEnv;
   for (const candidate of ['/bin/zsh', '/bin/bash', '/bin/sh']) {
-    if (existsSync(candidate)) return candidate;
+    if (isExecutableShell(candidate)) return candidate;
   }
   // Last resort — let the OS error out if even /bin/sh is missing.
   return '/bin/sh';
+}
+
+function isExecutableShell(candidate: string): boolean {
+  if (!isAbsolute(candidate)) return false;
+  try {
+    accessSync(candidate, constants.X_OK);
+    return statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function resolveCwd(cwd?: string): string {

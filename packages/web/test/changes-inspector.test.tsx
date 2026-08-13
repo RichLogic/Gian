@@ -33,12 +33,14 @@ const stagedRow: ChangedEntry = { path: 'src/b.ts', kind: 'update', staged: true
 function renderChanges(opts: {
   canCommit?: boolean;
   onComposePrompt?: ReturnType<typeof vi.fn>;
+  activeSessionId?: string | null;
 } = {}) {
   const onComposePrompt = opts.onComposePrompt ?? vi.fn();
   renderWithOperations(
     <Inspector
       tab="changes"
       workingTreeId="ws:demo"
+      activeSessionId={opts.activeSessionId}
       workingTrees={workingTrees}
       onOpenFile={() => {}}
       canCommit={opts.canCommit ?? true}
@@ -157,6 +159,31 @@ describe('Inspector CHANGES', () => {
     expect(screen.queryByText('a.ts')).toBeNull();
     expect(screen.queryByText('b.ts')).toBeNull();
     expect(screen.getByText('c.ts')).toBeTruthy();
+  });
+
+  it('restores changed-folder expansion independently for Sessions on one tree', async () => {
+    (api.loadChanged as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { path: 'src/a.ts', kind: 'update', staged: false, added: 1, removed: 0 },
+    ]);
+    const { rerender } = renderWithOperations(
+      <Inspector tab="changes" workingTreeId="ws:demo" activeSessionId="session-1"
+        workingTrees={workingTrees} onOpenFile={() => {}} canCommit onComposePrompt={() => {}} />,
+    );
+    await screen.findByText('a.ts');
+    fireEvent.click(screen.getByText('src'));
+    expect(screen.queryByText('a.ts')).toBeNull();
+
+    rerender(
+      <Inspector tab="changes" workingTreeId="ws:demo" activeSessionId="session-2"
+        workingTrees={workingTrees} onOpenFile={() => {}} canCommit onComposePrompt={() => {}} />,
+    );
+    expect(await screen.findByText('a.ts')).toBeTruthy();
+
+    rerender(
+      <Inspector tab="changes" workingTreeId="ws:demo" activeSessionId="session-1"
+        workingTrees={workingTrees} onOpenFile={() => {}} canCommit onComposePrompt={() => {}} />,
+    );
+    expect(screen.queryByText('a.ts')).toBeNull();
   });
 
   it('git-action buttons are disabled with no active session', async () => {

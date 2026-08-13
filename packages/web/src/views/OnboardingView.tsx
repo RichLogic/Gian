@@ -13,7 +13,7 @@ import {
 import type { AppIdentity } from '../controllers/use-app-auth.js';
 import { useT } from '../i18n/index.js';
 
-const AGENT_ORDER: Executor[] = ['codex', 'claude', 'kimi'];
+const AGENT_ORDER: Executor[] = ['codex', 'claude', 'kimi', 'grok'];
 
 export function OnboardingSteps({ active }: { active: 1 | 2 | 3 }) {
   const t = useT();

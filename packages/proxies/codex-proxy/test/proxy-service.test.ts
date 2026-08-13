@@ -5,7 +5,12 @@ import { EventEmitter } from 'node:events';
 import { CodexProxyService } from '../src/core/service.js';
 import { CodexProtocolV1Adapter } from '../src/protocol/v1-adapter.js';
 import type { InputItem } from '../src/core/types.js';
-import type { CodexRuntime, RuntimeNotification, RuntimeServerRequest } from '../src/runtime/types.js';
+import type {
+  CodexNativeThreadSummary,
+  CodexRuntime,
+  RuntimeNotification,
+  RuntimeServerRequest,
+} from '../src/runtime/types.js';
 import { CODEX_APP_SERVER_V2_COMPACTION } from './fixtures/codex-app-server-v2-compaction.js';
 import {
   parseProxyRequest,
@@ -38,6 +43,8 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
   readonly responses: Array<{ id: number | string; payload: unknown }> = [];
   readonly threads = new Map<string, unknown>();
   readonly interruptCalls: Array<{ threadId: string; turnId: string }> = [];
+  nativeThreads: CodexNativeThreadSummary[] = [];
+  readonly listNativeThreadsCalls: Array<string | undefined> = [];
 
   async ensureStarted() {}
 
@@ -155,6 +162,11 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
 
   async listSkills(_cwd?: string) {
     return { data: [] };
+  }
+
+  async listNativeThreads(cwd?: string) {
+    this.listNativeThreadsCalls.push(cwd);
+    return this.nativeThreads;
   }
 
   async unsubscribeThread(_threadId: string) {
@@ -1266,6 +1278,51 @@ test('gian.proxy/1 adapter owns Host ids, validates events, and deduplicates tur
       conversation: { mode: 'reset' },
       reason: 'session_reset',
     });
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('gian.proxy/1 native list exposes app-server thread names as display titles', async () => {
+  const harness = await createHarness();
+  const adapter = new CodexProtocolV1Adapter(
+    harness.service,
+    '0.1.0',
+    () => undefined,
+  );
+  harness.runtime.nativeThreads = [{
+    id: 'codex-thread-with-title',
+    displayName: 'LM-generated project title',
+    cwd: '/tmp/gian-codex-title-fixture',
+    updatedAt: '2026-08-12T00:00:00.000Z',
+  }];
+  try {
+    await adapter.handle(parseProxyRequest({
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocol: { name: 'gian.proxy', versions: ['1.0'] },
+        host: { name: 'Gian', version: '9.9.9' },
+      },
+    }));
+
+    const result = resultSchemas['session.native.list'].parse(await adapter.handle(parseProxyRequest({
+      id: 2,
+      method: 'session.native.list',
+      params: { cwd: '/tmp/gian-codex-title-fixture' },
+    })));
+    assert.deepEqual(result, {
+      sessions: [{
+        id: 'codex-thread-with-title',
+        displayName: 'LM-generated project title',
+        cwd: '/tmp/gian-codex-title-fixture',
+        updatedAt: '2026-08-12T00:00:00.000Z',
+      }],
+      nextCursor: null,
+    });
+    assert.deepEqual(harness.runtime.listNativeThreadsCalls, [
+      '/tmp/gian-codex-title-fixture',
+    ]);
   } finally {
     await harness.cleanup();
   }

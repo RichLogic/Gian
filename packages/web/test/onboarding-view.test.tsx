@@ -48,6 +48,7 @@ const readyAgents = [
   agent('codex', 'Codex'),
   agent('claude', 'Claude Code'),
   agent('kimi', 'Kimi Code'),
+  agent('grok', 'Grok Build'),
 ];
 
 function state(agents = readyAgents): OnboardingState {
@@ -96,6 +97,7 @@ describe('OnboardingView', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
     expect(screen.getByRole('heading', { name: 'Initialize your agents' })).toBeInTheDocument();
+    expect(screen.getByText('Grok Build')).toBeInTheDocument();
   });
 
   it('finishes agent setup and shows the Agent worktree directory', async () => {
@@ -158,6 +160,7 @@ describe('OnboardingView', () => {
       agent('codex', 'Codex', false),
       agent('claude', 'Claude Code', false),
       agent('kimi', 'Kimi Code', false),
+      agent('grok', 'Grok Build', false),
     ];
     const codexReady = [agent('codex', 'Codex'), missingAgents[1]!, missingAgents[2]!];
     vi.mocked(loadAgents).mockResolvedValue(codexReady);

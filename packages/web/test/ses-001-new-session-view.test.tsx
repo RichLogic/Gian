@@ -1,21 +1,28 @@
 // Coverage for SES-001 (issue #57, chat-panel layout) — NewSessionView
-// mirrors the session chat panel: the transcript area stays empty (task
-// context / create errors only); agent + workspace selectors sit in a row
-// above the message box; the composer bar carries model / thinking / mode
-// chips that follow the picked agent. Send stays disabled until an agent is
-// picked (multi-agent) and a message typed; a single ready agent
-// auto-selects into a static chip. Chip choices are explicit-only in the
-// payload; the last used workspace/agent/chips are remembered for the next
-// open. The workspace drop is Codex-style (search + "+ New workspace" jump
-// to the Workspaces sheet) — the page never creates workspaces inline.
+// mirrors the session chat panel: the transcript area stays empty except for
+// create errors; agent + workspace selectors sit above a two-row composer
+// whose optional title precedes the required first message. The composer bar
+// carries model / thinking / mode chips that follow the picked agent, plus a
+// Codex-only Fast toggle. Send stays disabled until an agent is picked
+// (multi-agent) and a message typed;
+// a single ready agent auto-selects into a static chip. Chip choices are
+// explicit-only in the payload; the last used workspace/agent/chips are
+// remembered for the next open. The workspace drop is Codex-style (search +
+// "+ New workspace" jump to the Workspaces sheet) — the page never creates
+// workspaces inline.
 
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentInstallStatus, CodexModelCapabilities, Executor, Workspace } from '@gian/shared';
 import { loadAgents, loadProxyCapabilities, loadProxyModels } from '../src/api.js';
 import { LocaleProvider } from '../src/i18n/index.js';
-import { NewSessionView } from '../src/views/new-session-view.js';
+import {
+  clearNewSessionDraft,
+  NewSessionView,
+  newSessionDraftStorageKey,
+} from '../src/views/new-session-view.js';
+import { storeNewSessionScreenshot } from '../src/screenshot-drafts.js';
 
 vi.mock('../src/api.js', () => ({
   loadAgents: vi.fn(),
@@ -118,6 +125,10 @@ describe('NewSessionView', () => {
     vi.mocked(loadProxyCapabilities).mockResolvedValue({
       protocolVersion: 'test', models: [], modes: [], slashCommands: [],
     });
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => 'blob:new-session-screenshot') },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
   });
 
   it('lists agents from /api/agents in the picker; unready agents are disabled', async () => {
@@ -155,15 +166,20 @@ describe('NewSessionView', () => {
     });
   });
 
-  it('submits the picked agent and trimmed first message (no title field)', async () => {
+  it('shows an optional title above the message and submits both trimmed values', async () => {
     const { onCreate } = renderView();
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-claude'));
+    expect(screen.queryByTestId('ns-fast-chip')).toBeNull();
+    const title = screen.getByTestId('ns-title-input');
+    const message = screen.getByTestId('ns-message-input');
+    expect(title.nextElementSibling).toBe(message);
+    await userEvent.type(title, '  Auth cleanup  ');
     await userEvent.type(screen.getByTestId('ns-message-input'), '  refactor auth  ');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
-      name: '',
+      name: 'Auth cleanup',
       executor: 'claude',
       firstMessage: 'refactor auth',
     });
@@ -218,28 +234,144 @@ describe('NewSessionView', () => {
     const { onNewWorkspace } = renderView();
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    await userEvent.click(screen.getByTestId('ns-fast-chip'));
+    await userEvent.type(screen.getByTestId('ns-title-input'), 'Draft title');
     await userEvent.type(screen.getByTestId('ns-message-input'), 'draft keeps me');
     await userEvent.click(screen.getByTestId('ns-workspace-chip'));
     await userEvent.click(screen.getByTestId('ns-workspace-new'));
     expect(onNewWorkspace).toHaveBeenCalledTimes(1);
-    const draft = JSON.parse(localStorage.getItem('gian.new-session.draft.v1') ?? 'null');
-    expect(draft).toMatchObject({ message: 'draft keeps me', executor: 'codex' });
+    const draft = JSON.parse(localStorage.getItem(newSessionDraftStorageKey({
+      kind: 'workspace',
+      id: 'ws-1',
+    })) ?? 'null');
+    expect(draft).toMatchObject({
+      sessionName: 'Draft title',
+      message: 'draft keeps me',
+      executor: 'codex',
+      serviceTier: 'fast',
+    });
     expect(localStorage.getItem('gian.new-session.return.v1')).toBe('1');
   });
 
   it('restores the stashed draft on the return trip', async () => {
-    localStorage.setItem('gian.new-session.draft.v1', JSON.stringify({
+    const key = newSessionDraftStorageKey({ kind: 'workspace', id: 'ws-2' });
+    localStorage.setItem(key, JSON.stringify({
+      workspaceId: 'ws-2',
+      sessionName: 'Backlog cleanup',
       message: 'back from the sheet',
       executor: 'codex',
       model: 'gpt-5',
+      serviceTier: 'fast',
     }));
     renderView({ initialWorkspaceId: 'ws-2' });
+    expect(screen.getByTestId('ns-title-input')).toHaveValue('Backlog cleanup');
     expect(screen.getByTestId('ns-message-input')).toHaveValue('back from the sheet');
     expect(await screen.findByTestId('ns-agent-picker')).toHaveTextContent('Codex');
     expect(screen.getByTestId('ns-workspace-chip')).toHaveTextContent('Beta');
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5'));
-    // The draft is consumed — a fresh open does not resurrect it.
-    expect(localStorage.getItem('gian.new-session.draft.v1')).toBeNull();
+    await waitFor(() => {
+      expect(screen.getByTestId('ns-fast-chip')).toHaveAttribute('aria-pressed', 'true');
+    });
+    // Navigation drafts remain until creation succeeds; merely reopening the
+    // page is not a destructive read.
+    expect(JSON.parse(localStorage.getItem(key) ?? 'null')).toMatchObject({
+      sessionName: 'Backlog cleanup',
+      message: 'back from the sheet',
+    });
+  });
+
+  it('keeps independent drafts per Workspace and reopens the last active one', async () => {
+    vi.mocked(loadAgents).mockResolvedValue([agent('kimi', 'Kimi Code')]);
+
+    const alpha = renderView({ initialWorkspaceId: 'ws-1' });
+    await screen.findByTestId('ns-agent-picker');
+    await userEvent.type(screen.getByTestId('ns-title-input'), 'Alpha draft');
+    await userEvent.type(screen.getByTestId('ns-message-input'), 'work in alpha');
+    alpha.unmount();
+
+    const beta = renderView({ initialWorkspaceId: 'ws-2' });
+    await screen.findByTestId('ns-agent-picker');
+    expect(screen.getByTestId('ns-title-input')).toHaveValue('');
+    expect(screen.getByTestId('ns-message-input')).toHaveValue('');
+    await userEvent.type(screen.getByTestId('ns-title-input'), 'Beta draft');
+    await userEvent.type(screen.getByTestId('ns-message-input'), 'work in beta');
+    beta.unmount();
+
+    // Header "+" has no explicit Workspace. It returns to the Workspace draft
+    // that was actually in the foreground when the user navigated away.
+    const active = renderView();
+    await screen.findByText('Kimi Code');
+    expect(screen.getByTestId('ns-workspace-chip')).toHaveTextContent('Beta');
+    expect(screen.getByTestId('ns-title-input')).toHaveValue('Beta draft');
+    expect(screen.getByTestId('ns-message-input')).toHaveValue('work in beta');
+    active.unmount();
+
+    renderView({ initialWorkspaceId: 'ws-1' });
+    await screen.findByText('Kimi Code');
+    expect(screen.getByTestId('ns-title-input')).toHaveValue('Alpha draft');
+    expect(screen.getByTestId('ns-message-input')).toHaveValue('work in alpha');
+  });
+
+  it('keeps independent drafts per Task even when they share a Workspace', async () => {
+    vi.mocked(loadAgents).mockResolvedValue([agent('kimi', 'Kimi Code')]);
+
+    const first = renderView({ draftScope: { kind: 'task', id: 'task-1' } });
+    await screen.findByTestId('ns-agent-picker');
+    await userEvent.type(screen.getByTestId('ns-title-input'), 'Task one draft');
+    await userEvent.type(screen.getByTestId('ns-message-input'), 'first task work');
+    first.unmount();
+
+    const second = renderView({ draftScope: { kind: 'task', id: 'task-2' } });
+    await screen.findByTestId('ns-agent-picker');
+    expect(screen.getByTestId('ns-title-input')).toHaveValue('');
+    await userEvent.type(screen.getByTestId('ns-message-input'), 'second task work');
+    second.unmount();
+
+    renderView({ draftScope: { kind: 'task', id: 'task-1' } });
+    await screen.findByText('Kimi Code');
+    expect(screen.getByTestId('ns-title-input')).toHaveValue('Task one draft');
+    expect(screen.getByTestId('ns-message-input')).toHaveValue('first task work');
+  });
+
+  it('accepts an attachment-only screenshot draft and submits its original Blob', async () => {
+    const { onCreate } = renderView();
+    await openAgentPicker();
+    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    await act(async () => {
+      await storeNewSessionScreenshot(
+        { kind: 'workspace', id: 'ws-1' },
+        {
+          id: 'capture-new-session',
+          target: {
+            kind: 'new-session',
+            scope: { kind: 'workspace', id: 'ws-1' },
+            label: 'Alpha',
+          },
+          filename: 'screenshot.png',
+          mime: 'image/png',
+          bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+        },
+      );
+    });
+
+    expect(await screen.findByText('screenshot.png')).toBeInTheDocument();
+    expect(screen.getByTestId('ns-send')).toBeEnabled();
+    await userEvent.click(screen.getByTestId('ns-send'));
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
+    const input = onCreate.mock.calls[0]![0];
+    expect(input).toMatchObject({
+      workspaceId: 'ws-1',
+      executor: 'codex',
+      firstMessage: '',
+      firstAttachments: [{
+        id: 'capture-new-session',
+        name: 'screenshot.png',
+        mime: 'image/png',
+        size: 4,
+      }],
+    });
+    expect(input.firstAttachments[0].blob).toBeInstanceOf(Blob);
+    expect(input.firstAttachments[0].blob.size).toBe(4);
   });
 
   it('renders capability chips for the picked agent and sends explicit choices', async () => {
@@ -250,6 +382,10 @@ describe('NewSessionView', () => {
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5 Codex'));
     expect(screen.getByTestId('ns-effort-chip')).toHaveTextContent('Medium');
     expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('Ask for approval');
+    const fast = screen.getByTestId('ns-fast-chip');
+    expect(fast).toHaveAttribute('aria-pressed', 'false');
+    await userEvent.click(fast);
+    expect(fast).toHaveAttribute('aria-pressed', 'true');
 
     await userEvent.click(screen.getByTestId('ns-model-chip'));
     await userEvent.click(
@@ -275,6 +411,7 @@ describe('NewSessionView', () => {
       model: 'gpt-5',
       thinkingEffort: 'medium',
       approvalMode: 'auto',
+      serviceTier: 'fast',
     });
   });
 
@@ -304,10 +441,15 @@ describe('NewSessionView', () => {
     await userEvent.click(
       within(document.querySelector('.model-pop') as HTMLElement).getByText('GPT-5'),
     );
+    await userEvent.click(screen.getByTestId('ns-fast-chip'));
     await userEvent.click(screen.getByTestId('ns-workspace-chip'));
     await userEvent.click(screen.getByTestId('ns-workspace-option-ws-2'));
+    await userEvent.type(screen.getByTestId('ns-title-input'), 'One-off title');
     await userEvent.type(screen.getByTestId('ns-message-input'), 'first run');
     await userEvent.click(screen.getByTestId('ns-send'));
+    // NewSessionView only submits; CodingView owns the operation result and
+    // clears this Workspace draft after the create run is confirmed.
+    clearNewSessionDraft({ kind: 'workspace', id: 'ws-2' });
     first.unmount();
 
     const second = renderView();
@@ -315,7 +457,13 @@ describe('NewSessionView', () => {
       expect(screen.getByTestId('ns-agent-picker')).toHaveTextContent('Codex');
       expect(screen.getByTestId('ns-workspace-chip')).toHaveTextContent('Beta');
     });
+    // A title belongs only to the session being created; unlike workspace,
+    // agent, and capability choices, it must never become a next-open default.
+    expect(screen.getByTestId('ns-title-input')).toHaveValue('');
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5'));
+    await waitFor(() => {
+      expect(screen.getByTestId('ns-fast-chip')).toHaveAttribute('aria-pressed', 'true');
+    });
     await userEvent.type(screen.getByTestId('ns-message-input'), 'second run');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(second.onCreate).toHaveBeenCalledWith({
@@ -324,15 +472,8 @@ describe('NewSessionView', () => {
       executor: 'codex',
       firstMessage: 'second run',
       model: 'gpt-5',
+      serviceTier: 'fast',
     });
-  });
-
-  it('shows the task context read-only when opened from a task-row "+"', async () => {
-    renderView({ taskName: 'My task' });
-    await screen.findByTestId('ns-agent-picker');
-    expect(screen.getByTestId('ns-task-name')).toHaveTextContent('My task');
-    // The workspace picker is still editable — only the task is fixed.
-    expect(screen.getByTestId('ns-workspace-chip')).toBeEnabled();
   });
 
   it('keeps a session creation failure visible while preserving editable form state', async () => {

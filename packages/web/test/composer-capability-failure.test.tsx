@@ -63,7 +63,7 @@ function renderComposer(executor: Executor) {
 }
 
 describe('Composer capability failures', () => {
-  it.each(['claude', 'codex', 'kimi'] as const)(
+  it.each(['claude', 'codex', 'kimi', 'grok'] as const)(
     'keeps a %s session usable when capability/config discovery fails',
     async executor => {
       renderComposer(executor);

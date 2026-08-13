@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { Inspector } from '../src/components/Inspector.js';
+import { __resetFilesInspectorForTests } from '../src/controllers/use-files-inspector.js';
 import type { WorkingTree } from '../src/api.js';
 import * as api from '../src/api.js';
 
@@ -36,7 +37,10 @@ function renderFiles(onOpenFile = vi.fn()) {
 }
 
 describe('Inspector FILES search', () => {
-  beforeEach(() => { vi.clearAllMocks(); });
+  beforeEach(() => {
+    vi.clearAllMocks();
+    __resetFilesInspectorForTests();
+  });
 
   it('typing a query fetches the recursive index and shows only matching files', async () => {
     renderFiles();
@@ -85,6 +89,52 @@ describe('Inspector FILES search', () => {
         onOpenFile={vi.fn()} onOpenDiff={() => {}} />,
     );
     await waitFor(() => expect(api.loadTree).toHaveBeenCalledWith('ws:other', ''));
+  });
+
+  it('restores independent search state for Sessions sharing one working tree', async () => {
+    const { rerender } = render(
+      <Inspector
+        tab="files"
+        workingTreeId="ws:demo"
+        activeSessionId="session-1"
+        workingTrees={workingTrees}
+        onOpenFile={vi.fn()}
+        onOpenDiff={() => {}}
+      />,
+    );
+    fireEvent.change(screen.getByPlaceholderText('Filter files…'), {
+      target: { value: 'baz' },
+    });
+    expect((screen.getByPlaceholderText('Filter files…') as HTMLInputElement).value).toBe('baz');
+    await screen.findByText('baz.ts');
+
+    await act(async () => rerender(
+      <Inspector
+        tab="files"
+        workingTreeId="ws:demo"
+        activeSessionId="session-2"
+        workingTrees={workingTrees}
+        onOpenFile={vi.fn()}
+        onOpenDiff={() => {}}
+      />,
+    ));
+    expect((screen.getByPlaceholderText('Filter files…') as HTMLInputElement).value).toBe('');
+    fireEvent.change(screen.getByPlaceholderText('Filter files…'), {
+      target: { value: 'index' },
+    });
+    await screen.findByText('index.ts');
+
+    await act(async () => rerender(
+      <Inspector
+        tab="files"
+        workingTreeId="ws:demo"
+        activeSessionId="session-1"
+        workingTrees={workingTrees}
+        onOpenFile={vi.fn()}
+        onOpenDiff={() => {}}
+      />,
+    ));
+    expect((screen.getByPlaceholderText('Filter files…') as HTMLInputElement).value).toBe('baz');
   });
 
   it('expands, selects, and scrolls to a file opened outside the inspector', async () => {

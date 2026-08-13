@@ -11,6 +11,7 @@ const SESSION_METADATA_OPERATIONS: ReadonlySet<OperationName> = new Set([
   'session.setModel',
   'session.setEffort',
   'session.setServiceTier',
+  'session.assignTask',
 ]);
 
 /** Restore Host truth after a definitive metadata rejection. The operation

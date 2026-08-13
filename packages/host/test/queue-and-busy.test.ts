@@ -615,7 +615,7 @@ test('ERR-005: SESSION_BUSY from proxy rolls back the phantom turn without flipp
 test('ERR-005: non-busy startTurn failure rolls back AND marks the turn as error', async () => {
   const ctx = setup();
   try {
-    const { sessions, proxyMgr, db } = ctx;
+    const { sessions, proxyMgr, broadcaster, db } = ctx;
     const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
 
     proxyMgr.client.failNextStartTurn = new Error('proxy crashed mid-startTurn');
@@ -636,6 +636,64 @@ test('ERR-005: non-busy startTurn failure rolls back AND marks the turn as error
     const sessionRow = db.prepare('SELECT status FROM sessions WHERE id = ?').get(session.id) as { status: string };
     assert.equal(sessionRow.status, 'error',
       'session.status flipped to error on real startTurn failure (not SESSION_BUSY)');
+
+    const errorEvents = sessions.listEvents(session.id)
+      .filter(event => event.display?.type === 'state.error');
+    assert.equal(errorEvents.length, 1,
+      'non-busy startTurn rejection gets one generic persisted error projection');
+    assert.deepEqual(
+      broadcaster.messages
+        .filter((message): message is Extract<ServerToClientMessage, { type: 'attention' }> => (
+          message.type === 'attention'
+        ))
+        .map(message => ({ kind: message.kind, body: message.body })),
+      [{ kind: 'error', body: 'Open Gian to review the error and retry.' }],
+      'non-busy startTurn rejection emits one generic error attention',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('ERR-005: queued auto-send start failure emits its own generic error attention', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, broadcaster, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'turn-B');
+    proxyMgr.client.failNextStartTurn = new Error('secret provider diagnostic');
+    broadcaster.messages.length = 0;
+
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: { sessionId: 'proxy_x', data: { status: 'completed' } },
+    });
+    await tick();
+    await tick();
+
+    const turns = db.prepare(
+      'SELECT status FROM turns WHERE session_id = ? ORDER BY turn_number ASC',
+    ).all(session.id) as Array<{ status: string }>;
+    assert.deepEqual(turns.map(turn => turn.status), ['completed', 'error']);
+    assert.deepEqual(
+      broadcaster.messages
+        .filter((message): message is Extract<ServerToClientMessage, { type: 'attention' }> => (
+          message.type === 'attention'
+        ))
+        .map(message => message.kind),
+      ['turn-completed', 'error'],
+      'the completed turn and failed queued turn each emit their single actionable boundary',
+    );
+    assert.ok(
+      broadcaster.messages
+        .filter((message): message is Extract<ServerToClientMessage, { type: 'attention' }> => (
+          message.type === 'attention'
+        ))
+        .every(message => !message.body.includes('secret provider diagnostic')),
+      'provider diagnostics never leak into native notification bodies',
+    );
   } finally {
     teardown(ctx);
   }

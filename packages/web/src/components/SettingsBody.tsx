@@ -3,11 +3,14 @@ import type {
   AgentInstallStatus,
   AgentProxyDefaults,
   ExternalEditor,
+  GianScreenshotState,
   OpenFileCategory,
   ProxyCapabilities,
   SystemConfig,
+  TerminalOptions,
+  TerminalPreferences,
 } from '@gian/shared';
-import { THEME_DEFAULT_ACCENT } from '@gian/shared';
+import { DEFAULT_TERMINAL_PREFERENCES, THEME_DEFAULT_ACCENT } from '@gian/shared';
 import {
   loadAgents,
   loadProxyCapabilities,
@@ -22,7 +25,7 @@ import {
   useZoomPercent,
 } from '../display-prefs.js';
 import { desktopBridge } from '../desktop-bridge.js';
-import { confirm } from '../feedback.js';
+import { confirm, toast } from '../feedback.js';
 import { agentEntityKey } from '../operations/agents.js';
 import { AUTH_ENTITY_KEY } from '../operations/auth.js';
 import { SETTINGS_ONBOARDING_ENTITY_KEY } from '../operations/settings.js';
@@ -50,13 +53,14 @@ const OPEN_CATEGORIES: Array<{ key: OpenFileCategory; labelKey: string }> = [
 import {
   browserNotificationPermission,
   loadNotificationPrefs,
+  nativeNotificationPreferencesForMigration,
   requestDesktopNotificationPermission,
   saveNotificationPrefs,
   type BrowserNotificationPermission,
   type NotificationPrefs,
 } from '../notifications.js';
 
-export type NavKey = 'appearance' | 'notifications' | 'shortcuts' | 'executors' | 'openwith' | 'account';
+export type NavKey = 'appearance' | 'terminal' | 'notifications' | 'updates' | 'shortcuts' | 'executors' | 'openwith' | 'account';
 
 /** Left-nav groups (locator). `labelKey` is an i18n key; `items` map a
  *  section anchor id (`sec-<key>`) to its nav label key. */
@@ -68,7 +72,9 @@ const NAV_GROUPS: Array<{
     labelKey: 'settings.nav.group.preferences',
     items: [
       ['appearance', 'settings.section.appearance'],
+      ['terminal', 'settings.section.terminal'],
       ['notifications', 'settings.section.notifications'],
+      ['updates', 'settings.section.updates'],
       ['shortcuts', 'settings.section.shortcuts'],
     ],
   },
@@ -107,6 +113,7 @@ interface Props {
   config: SystemConfig | null;
   /** Installed apps (macOS) for the "Add application" picker. */
   apps?: string[];
+  terminalOptions?: TerminalOptions | null;
   /** Which section to render — controlled by App (driven by the panel-3
    *  SettingsNavInspector; the state survives rail collapse/restore).
   *  Defaults to 'appearance'. */
@@ -128,6 +135,7 @@ interface Props {
 export function SettingsBody({
   config,
   apps,
+  terminalOptions = null,
   activeSection = 'appearance',
   identity = null,
   onSignOut,
@@ -138,6 +146,7 @@ export function SettingsBody({
     <SettingsBodyInner
       config={config}
       apps={apps ?? []}
+      terminalOptions={terminalOptions}
       activeSection={activeSection}
       identity={identity}
       onSignOut={onSignOut}
@@ -146,10 +155,11 @@ export function SettingsBody({
 }
 
 function SettingsBodyInner({
-  config, apps, activeSection, identity, onSignOut,
+  config, apps, terminalOptions, activeSection, identity, onSignOut,
 }: {
   config: SystemConfig;
   apps: string[];
+  terminalOptions: TerminalOptions | null;
   activeSection: NavKey;
   identity: AppIdentity | null;
   onSignOut?: () => void;
@@ -157,6 +167,8 @@ function SettingsBodyInner({
   const t = useT();
   const dispatch = useOperationDispatch();
   const browserAvailable = !!desktopBridge()?.browser;
+  const screenshotAvailable = !!desktopBridge()?.screenshot;
+  const [screenshotState, setScreenshotState] = useState<GianScreenshotState | null>(null);
   const clearingBrowserData = useOperationPending(BROWSER_PROFILE_ENTITY_KEY, 'browser.clearData');
   const minimapOn = useMinimapEnabled();
   const zoomPercent = useZoomPercent();
@@ -167,6 +179,16 @@ function SettingsBodyInner({
   useEffect(() => {
     setEditors(config.external_editors);
   }, [config.external_editors]);
+
+  useEffect(() => {
+    const screenshot = desktopBridge()?.screenshot;
+    if (!screenshot || activeSection !== 'shortcuts') return;
+    let alive = true;
+    void screenshot.getState().then(state => {
+      if (alive) setScreenshotState(state);
+    });
+    return () => { alive = false; };
+  }, [activeSection]);
 
   // Debounced auto-save: dispatch the final write 500ms after the user stops
   // typing. Skip when local matches prop (initial mount, post-sync — the
@@ -313,6 +335,30 @@ function SettingsBodyInner({
         </section>
         )}
 
+        {/* ── Terminal ── */}
+        {activeSection === 'terminal' && (
+        <section className="s2-section">
+          <div className="s2-section-heading">
+            <h3 className="s2-sectiontitle">{t('settings.section.terminal')}</h3>
+            <button
+              type="button"
+              className="btn sm secondary"
+              disabled={terminalPreferencesEqual(config.terminal, DEFAULT_TERMINAL_PREFERENCES)}
+              onClick={() => patch({ terminal: { ...DEFAULT_TERMINAL_PREFERENCES } })}
+            >
+              {t('settings.terminal.reset')}
+            </button>
+          </div>
+          <div className="s2-card">
+            <TerminalSettingsBlock
+              preferences={config.terminal}
+              options={terminalOptions}
+              onChange={terminal => patch({ terminal })}
+            />
+          </div>
+        </section>
+        )}
+
         {/* ── Notifications ── */}
         {activeSection === 'notifications' && (
         <section className="s2-section">
@@ -323,12 +369,33 @@ function SettingsBodyInner({
         </section>
         )}
 
+        {/* ── Updates ── */}
+        {activeSection === 'updates' && (
+        <section className="s2-section">
+          <h3 className="s2-sectiontitle">{t('settings.section.updates')}</h3>
+          <div className="s2-card">
+            <UpdatesBlock />
+          </div>
+        </section>
+        )}
+
         {/* ── Shortcuts ── */}
         {activeSection === 'shortcuts' && (
         <section className="s2-section">
           <h3 className="s2-sectiontitle">{t('settings.section.shortcuts')}</h3>
           <div className="s2-card">
             <dl className="kv-grid shortcuts">
+              {screenshotAvailable && (
+                <>
+                  <dt>
+                    {t('settings.shortcuts.screenshot')}
+                    {screenshotState && !screenshotState.shortcutRegistered && (
+                      <span className="muted"> · {t('screenshot.shortcutUnavailable')}</span>
+                    )}
+                  </dt>
+                  <dd><kbd>⌃</kbd><kbd>⌘</kbd><kbd>A</kbd></dd>
+                </>
+              )}
               <dt>{t('settings.shortcuts.commandPalette')}</dt><dd><kbd>⌘</kbd><kbd>⇧</kbd><kbd>K</kbd></dd>
               <dt>{t('settings.shortcuts.steerOrSendNow')}</dt><dd><kbd>⌘</kbd><kbd>⏎</kbd></dd>
               <dt>{t('settings.shortcuts.createClaudeChild')}</dt><dd><kbd>⌘</kbd><kbd>J</kbd></dd>
@@ -472,6 +539,182 @@ function SettingsBodyInner({
         )}
       </div>
     </div>
+  );
+}
+
+function terminalPreferencesEqual(
+  a: TerminalPreferences,
+  b: Readonly<TerminalPreferences>,
+): boolean {
+  return a.font_family === b.font_family
+    && a.font_size === b.font_size
+    && a.line_height === b.line_height
+    && a.cursor_style === b.cursor_style
+    && a.cursor_blink === b.cursor_blink
+    && a.scrollback_lines === b.scrollback_lines
+    && a.shell === b.shell
+    && a.start_directory === b.start_directory;
+}
+
+function TerminalSettingsBlock({
+  preferences,
+  options,
+  onChange,
+}: {
+  preferences: TerminalPreferences;
+  options: TerminalOptions | null;
+  onChange: (next: TerminalPreferences) => void;
+}) {
+  const t = useT();
+  const update = (patch: Partial<TerminalPreferences>) => {
+    onChange({ ...preferences, ...patch });
+  };
+  const shellAvailable = preferences.shell === ''
+    || options?.shells.some(shell => shell.path === preferences.shell);
+
+  return (
+    <dl className="kv-grid terminal-settings">
+      <dt>{t('settings.terminal.fontFamily')}</dt>
+      <dd>
+        <select
+          className="select mono"
+          value={preferences.font_family}
+          onChange={event => update({
+            font_family: event.target.value as TerminalPreferences['font_family'],
+          })}
+        >
+          <option value="jetbrains-mono">JetBrains Mono</option>
+          <option value="system-mono">{t('settings.terminal.font.system')}</option>
+          <option value="sf-mono">SF Mono</option>
+          <option value="menlo">Menlo</option>
+        </select>
+      </dd>
+
+      <dt>{t('settings.terminal.fontSize')}</dt>
+      <dd>
+        <div className="terminal-stepper">
+          <button
+            type="button"
+            aria-label={t('settings.terminal.fontSize.decrease')}
+            disabled={preferences.font_size <= 10}
+            onClick={() => update({ font_size: preferences.font_size - 1 })}
+          >-</button>
+          <output>{preferences.font_size}px</output>
+          <button
+            type="button"
+            aria-label={t('settings.terminal.fontSize.increase')}
+            disabled={preferences.font_size >= 22}
+            onClick={() => update({ font_size: preferences.font_size + 1 })}
+          >+</button>
+        </div>
+      </dd>
+
+      <dt>{t('settings.terminal.lineHeight')}</dt>
+      <dd>
+        <div className="terminal-range">
+          <input
+            type="range"
+            aria-label={t('settings.terminal.lineHeight')}
+            min="1"
+            max="1.6"
+            step="0.05"
+            value={preferences.line_height}
+            onChange={event => update({ line_height: Number(event.currentTarget.value) })}
+          />
+          <output>{preferences.line_height.toFixed(2).replace(/0$/, '')}</output>
+        </div>
+      </dd>
+
+      <dt>{t('settings.terminal.cursorStyle')}</dt>
+      <dd>
+        <div className="segm">
+          {([
+            ['block', 'settings.terminal.cursor.block'],
+            ['bar', 'settings.terminal.cursor.bar'],
+            ['underline', 'settings.terminal.cursor.underline'],
+          ] as const).map(([style, labelKey]) => (
+            <button
+              key={style}
+              type="button"
+              className={`segm-item ${preferences.cursor_style === style ? 'active' : ''}`}
+              onClick={() => update({ cursor_style: style })}
+            >
+              {t(labelKey)}
+            </button>
+          ))}
+        </div>
+      </dd>
+
+      <dt>{t('settings.terminal.cursorBlink')}</dt>
+      <dd>
+        <label className="switch">
+          <input
+            type="checkbox"
+            checked={preferences.cursor_blink}
+            onChange={event => update({ cursor_blink: event.target.checked })}
+          />
+          <span>{t('settings.terminal.cursorBlink.label')}</span>
+        </label>
+      </dd>
+
+      <dt>{t('settings.terminal.scrollback')}</dt>
+      <dd>
+        <select
+          className="select mono"
+          value={preferences.scrollback_lines}
+          onChange={event => update({
+            scrollback_lines: Number(event.target.value) as TerminalPreferences['scrollback_lines'],
+          })}
+        >
+          <option value={1_000}>1,000</option>
+          <option value={5_000}>5,000</option>
+          <option value={10_000}>10,000</option>
+          <option value={50_000}>50,000</option>
+        </select>
+      </dd>
+
+      <dt>{t('settings.terminal.shell')}</dt>
+      <dd>
+        <select
+          className="select mono terminal-shell-select"
+          aria-label={t('settings.terminal.shell')}
+          value={preferences.shell}
+          disabled={!options}
+          onChange={event => update({ shell: event.target.value })}
+        >
+          <option value="">
+            {options
+              ? `${t('settings.terminal.shell.system')} · ${options.system_shell}`
+              : t('common.loading')}
+          </option>
+          {!shellAvailable && preferences.shell && (
+            <option value={preferences.shell}>{preferences.shell}</option>
+          )}
+          {options?.shells.map(shell => (
+            <option key={shell.path} value={shell.path}>{shell.label} · {shell.path}</option>
+          ))}
+        </select>
+      </dd>
+
+      <dt>{t('settings.terminal.startDirectory')}</dt>
+      <dd>
+        <div className="segm">
+          {([
+            ['context', 'settings.terminal.startDirectory.context'],
+            ['home', 'settings.terminal.startDirectory.home'],
+          ] as const).map(([directory, labelKey]) => (
+            <button
+              key={directory}
+              type="button"
+              className={`segm-item ${preferences.start_directory === directory ? 'active' : ''}`}
+              onClick={() => update({ start_directory: directory })}
+            >
+              {t(labelKey)}
+            </button>
+          ))}
+        </div>
+      </dd>
+    </dl>
   );
 }
 
@@ -772,8 +1015,8 @@ function AgentInstallRow({
               if (event.key === 'Enter') event.currentTarget.blur();
               if (event.key === 'Escape') setPath(agent.cli.path ?? '');
             }}
-            onBlur={() => {
-              const next = path.trim();
+            onBlur={event => {
+              const next = event.currentTarget.value.trim();
               if (next !== (agent.cli.path ?? '')) void commitPath(next || null);
               showPathTail();
             }}
@@ -903,11 +1146,32 @@ function NotificationsBlock() {
   const t = useT();
   const [prefs, setPrefs] = useState<NotificationPrefs>(() => loadNotificationPrefs());
   const [permission, setPermission] = useState<BrowserNotificationPermission>(() => browserNotificationPermission());
+  const [nativeFailure, setNativeFailure] = useState(false);
+  const nativeNotifications = desktopBridge()?.notifications;
   const desktopEnabled = prefs.desktop && permission === 'granted';
   const unavailable = permission === 'unsupported' || permission === 'denied';
 
+  useEffect(() => {
+    if (!nativeNotifications?.native) return;
+    const unsubscribe = nativeNotifications.onStateChanged(state => {
+      setNativeFailure(state.lastError === 'delivery_failed');
+    });
+    // One-time migration of the renderer preference shape used before 0.4.3.
+    // Subsequent writes keep both stores aligned for browser fallback.
+    void nativeNotifications.updatePreferences(
+      nativeNotificationPreferencesForMigration(),
+    ).then(state => {
+      setNativeFailure(state.lastError === 'delivery_failed');
+    });
+    return unsubscribe;
+  }, [nativeNotifications]);
+
   function patch(partial: Partial<NotificationPrefs>) {
-    setPrefs(prev => saveNotificationPrefs({ ...prev, ...partial }));
+    setPrefs(prev => {
+      const next = saveNotificationPrefs({ ...prev, ...partial });
+      void nativeNotifications?.updatePreferences(next);
+      return next;
+    });
   }
 
   async function setDesktop(enabled: boolean) {
@@ -921,7 +1185,9 @@ function NotificationsBlock() {
   }
 
   const statusText =
-    permission === 'granted'
+    nativeFailure
+      ? t('settings.notifications.status.deliveryFailed')
+      : permission === 'granted'
       ? t('settings.notifications.status.enabled')
       : permission === 'denied'
         ? t('settings.notifications.status.blocked')
@@ -942,6 +1208,15 @@ function NotificationsBlock() {
           />
           <span>{statusText}</span>
         </label>
+        {(nativeFailure || permission === 'denied') && nativeNotifications && (
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => { void nativeNotifications.openSystemSettings(); }}
+          >
+            {t('settings.notifications.openSettings')}
+          </button>
+        )}
       </dd>
       <dt>{t('settings.notifications.events')}</dt>
       <dd>
@@ -984,6 +1259,92 @@ function NotificationsBlock() {
           />
           <span>{t('settings.notifications.chime')}</span>
         </label>
+      </dd>
+    </dl>
+  );
+}
+
+function UpdatesBlock() {
+  const t = useT();
+  const desktop = desktopBridge();
+  const updater = desktop?.updater;
+  const [state, setState] = useState<import('../desktop-bridge.js').GianDesktopUpdateState>({
+    status: 'disabled',
+    trigger: null,
+    update: null,
+    progress: null,
+    error: null,
+  });
+
+  useEffect(() => {
+    if (!updater) return;
+    const unsubscribe = updater.onStateChanged(setState);
+    void updater.getState().then(setState);
+    return unsubscribe;
+  }, [updater]);
+
+  async function checkNow() {
+    if (!updater) return;
+    const result = await updater.check();
+    setState(result.state);
+  }
+
+  async function restartAndInstall() {
+    if (!updater) return;
+    const accepted = await confirm({
+      title: t('settings.updates.installTitle'),
+      message: t('settings.updates.installMessage'),
+      confirmLabel: t('settings.updates.installConfirm'),
+      cancelLabel: t('common.cancel'),
+    });
+    if (!accepted) return;
+    if (!(await updater.install())) {
+      toast({ kind: 'error', message: t('settings.updates.installFailed') });
+    }
+  }
+
+  const statusKey = `settings.updates.status.${state.status}`;
+  const busy = state.status === 'checking' || state.status === 'downloading';
+  const version = state.update?.version;
+
+  return (
+    <dl className="kv-grid">
+      {desktop?.appVersion && (
+        <>
+          <dt>{t('settings.updates.currentVersion')}</dt>
+          <dd>v{desktop.appVersion}</dd>
+        </>
+      )}
+      <dt>{t('settings.updates.automatic')}</dt>
+      <dd>
+        <span>{t(statusKey)}</span>
+        {version && state.status !== 'up-to-date' && (
+          <span className="s2-help"> · v{version}</span>
+        )}
+        {state.status === 'downloading' && state.progress && (
+          <div className="s2-help">{Math.round(state.progress.percent)}%</div>
+        )}
+        {state.status === 'error' && state.error && (
+          <div className="s2-help">{state.error}</div>
+        )}
+      </dd>
+      <dt>{t('settings.updates.actions')}</dt>
+      <dd>
+        {state.status === 'downloaded' ? (
+          <button type="button" className="btn-primary" onClick={() => { void restartAndInstall(); }}>
+            {t('settings.updates.restartInstall')}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={!updater || state.status === 'disabled' || busy}
+            onClick={() => { void checkNow(); }}
+          >
+            {busy ? t('settings.updates.checking') : t('settings.updates.checkNow')}
+          </button>
+        )}
+        <p className="s2-help">{t('settings.updates.help')}</p>
       </dd>
     </dl>
   );

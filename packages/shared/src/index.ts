@@ -10,3 +10,4 @@ export * from './agents.js';
 export * from './github-auth.js';
 export * from './onboarding.js';
 export * from './browser.js';
+export * from './screenshot.js';

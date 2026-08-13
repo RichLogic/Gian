@@ -1,7 +1,7 @@
 import type { ApprovalMode, Executor } from '@gian/shared';
 
 export function proxyTurnParamsFor(
-  executor: Exclude<Executor, 'kimi'>,
+  executor: Exclude<Executor, 'kimi' | 'grok'>,
   mode: ApprovalMode,
 ): {
   permissionMode?: 'plan' | 'default' | 'auto' | 'bypassPermissions';

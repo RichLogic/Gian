@@ -25,6 +25,14 @@ export interface RuntimeEventSource {
   on(event: 'runtimeStopped', handler: () => void): void;
 }
 
+/** A Codex thread normalized for Gian's native-session picker. */
+export interface CodexNativeThreadSummary {
+  id: string;
+  displayName?: string;
+  cwd?: string;
+  updatedAt?: string;
+}
+
 export interface CodexRuntime extends RuntimeEventSource {
   ensureStarted(): Promise<void>;
   /** Start a fresh thread using Codex's effective config. */
@@ -73,6 +81,10 @@ export interface CodexRuntime extends RuntimeEventSource {
    *  app-server `thread/name/set` RPC so the name shows in `codex resume` /
    *  Codex app listings. Optional for runtimes without app discovery. */
   setThreadName?(threadId: string, name: string): Promise<unknown>;
+  /** List persisted Codex threads through app-server `thread/list`. Older
+   *  runtimes may not expose this RPC, so protocol adapters retain rollout
+   *  discovery as a compatibility fallback. */
+  listNativeThreads?(cwd?: string): Promise<CodexNativeThreadSummary[]>;
   respond(id: number | string, result: unknown): Promise<unknown>;
   listAllModels(): Promise<unknown[]>;
   listSkills(cwd?: string): Promise<SkillsListResponse>;

@@ -118,10 +118,12 @@ export interface TaskCreateSubtaskInput {
   executor: Executor;
   name?: string;
   /** New-session composer chips (issue #57 v2) — same semantics as
-   *  SessionCreateInput; approvalMode is claude/codex-only. */
+   *  SessionCreateInput; approvalMode is claude/codex-only and serviceTier
+   *  is Codex-only. */
   model?: string;
   approvalMode?: ApprovalMode | null;
   thinkingEffort?: ThinkingEffort | null;
+  serviceTier?: 'fast' | null;
 }
 
 const taskCreateSubtask: OperationDefinition<TaskCreateSubtaskInput, Session> = {
@@ -138,6 +140,7 @@ const taskCreateSubtask: OperationDefinition<TaskCreateSubtaskInput, Session> = 
       ...(input.model ? { model: input.model } : {}),
       ...(input.executor !== 'kimi' && input.approvalMode ? { approval_mode: input.approvalMode } : {}),
       ...(input.thinkingEffort ? { thinking_effort: input.thinkingEffort } : {}),
+      ...(input.executor === 'codex' && input.serviceTier === 'fast' ? { service_tier: 'fast' as const } : {}),
     });
     if (!session) throw new Error('create subtask failed');
     return session;

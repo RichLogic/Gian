@@ -8,6 +8,7 @@ import type {
   ThinkingEffort,
   WorktreeOutcome,
 } from '@gian/shared';
+import { usesNativeExecutorConfig } from '@gian/shared';
 import { randomUUID } from 'node:crypto';
 import type { ApprovalManager } from '../approval/index.js';
 import type { Db } from '../storage/db.js';
@@ -29,6 +30,7 @@ export interface CreateSessionInput {
   type?: SessionType;
   task_id?: string | null;
   thinking_effort?: ThinkingEffort | null;
+  service_tier?: 'fast' | null;
 }
 
 interface BringUpInput {
@@ -96,13 +98,27 @@ export class SessionLifecycleService {
 
     const id = randomUUID();
     const now = new Date().toISOString();
-    if (input.executor === 'kimi' && input.approval_mode !== undefined) {
-      throw new Error('Kimi uses executor-native mode; approval_mode must be omitted');
+    // Treat a blank title exactly like an omitted title at the Host boundary.
+    // The Web client already omits blank values, but protocol/API callers can
+    // send an empty string. Persisting that value would permanently exclude
+    // the session from auto-title, whose unnamed contract is `name IS NULL`.
+    const name = typeof input.name === 'string' ? input.name.trim() || null : null;
+    if (input.service_tier !== undefined
+      && input.service_tier !== null
+      && input.service_tier !== 'fast') {
+      throw new Error(`unsupported service tier: ${String(input.service_tier)}`);
+    }
+    if (input.executor !== 'codex' && input.service_tier != null) {
+      throw new Error('service_tier is codex-only');
+    }
+    const serviceTier = input.executor === 'codex' ? input.service_tier ?? null : null;
+    if (usesNativeExecutorConfig(input.executor) && input.approval_mode !== undefined) {
+      throw new Error(`${input.executor} uses executor-native mode; approval_mode must be omitted`);
     }
     const managedDefaults = this.proxyDefaults?.(input.executor);
     const configuredMode = managedDefaults?.mode.trim() ?? '';
     const fallbackMode: ApprovalMode = managedDefaults ? 'ask' : 'auto';
-    const approvalMode: ApprovalMode | null = input.executor === 'kimi'
+    const approvalMode: ApprovalMode | null = usesNativeExecutorConfig(input.executor)
       ? null
       : (input.approval_mode ?? (configuredMode || fallbackMode) as ApprovalMode);
     if (approvalMode) assertApprovalModeAllowed(input.executor, approvalMode);
@@ -140,12 +156,12 @@ export class SessionLifecycleService {
         executor: input.executor,
         cwd: workspace.path,
         model: effectiveModel,
-        displayName: input.name ?? null,
+        displayName: name,
         // These are semantic roles owned by Gian's Settings UI, not ACP
         // config ids. The coordinator resolves each role against the
         // configOptions returned by this exact Kimi session before applying
         // the value.
-        ...(input.executor === 'kimi' && managedDefaults
+        ...(usesNativeExecutorConfig(input.executor) && managedDefaults
           ? {
               executorDefaults: {
                 model: defaultModel,
@@ -164,19 +180,19 @@ export class SessionLifecycleService {
       .prepare(
         `INSERT INTO sessions
           (id, name, type, task_id, workspace_id, executor, model, approval_mode,
-           executor_config_json, thinking_effort, active_channel, status,
+           executor_config_json, thinking_effort, service_tier, active_channel, status,
            archived, worktree_path, branch, base_branch, worktree_outcome,
            native_session_id, fork_from_session_id, conversation_usage_complete,
            created_at, updated_at)
          VALUES
           (@id, @name, @type, @task_id, @workspace_id, @executor, @model,
-           @approval_mode, @executor_config_json, @thinking_effort, 'web', 'new',
+           @approval_mode, @executor_config_json, @thinking_effort, @service_tier, 'web', 'new',
            0, NULL, NULL, NULL, NULL, @native_session_id,
            @fork_from_session_id, 1, @now, @now)`,
       )
       .run({
         id,
-        name: input.name ?? null,
+        name,
         type: input.type ?? 'coding',
         task_id: input.task_id ?? null,
         workspace_id: input.workspace_id,
@@ -185,6 +201,7 @@ export class SessionLifecycleService {
         approval_mode: approvalMode,
         executor_config_json: JSON.stringify(executorConfigFromOptions(proxyResult.configOptions)),
         thinking_effort: effectiveEffort,
+        service_tier: serviceTier,
         native_session_id: proxyResult.nativeSessionId,
         fork_from_session_id: null,
         now,
@@ -249,6 +266,60 @@ export class SessionLifecycleService {
       // full row so clients can reinsert it rather than merge into nothing.
       this.broadcastSessionUpdated(sessionId, this.sessions.get(sessionId));
     }
+  }
+
+  /**
+   * File an existing standalone Session under an open Task. The checks and
+   * write are one synchronous SQLite transaction so no caller can observe a
+   * Task/session eligibility check that no longer matches the committed row.
+   */
+  assignTask(sessionId: string, taskId: string): void {
+    const now = new Date().toISOString();
+    const assign = this.db.transaction((): string => {
+      const task = this.db
+        .prepare('SELECT status FROM tasks WHERE id = ?')
+        .get(taskId) as { status: string } | undefined;
+      if (!task) throw new Error(`task not found: ${taskId}`);
+      if (task.status !== 'open') throw new Error(`task is not open: ${taskId}`);
+
+      const session = this.db
+        .prepare('SELECT type, task_id, archived, updated_at FROM sessions WHERE id = ?')
+        .get(sessionId) as {
+          type: SessionType;
+          task_id: string | null;
+          archived: 0 | 1;
+          updated_at: string;
+        } | undefined;
+      if (!session) throw new Error(`session not found: ${sessionId}`);
+      if (session.archived !== 0) throw new Error(`session is archived: ${sessionId}`);
+      // A retry after a lost result is a successful no-op. Re-broadcast the
+      // stored state below so a reconnecting client can still converge.
+      if (session.type === 'subtask' && session.task_id === taskId) {
+        return session.updated_at;
+      }
+      if (session.type !== 'coding' || session.task_id !== null) {
+        throw new Error(`session is not an independent coding session: ${sessionId}`);
+      }
+
+      const result = this.db
+        .prepare(
+          `UPDATE sessions
+           SET type = 'subtask', task_id = ?, updated_at = ?
+           WHERE id = ? AND archived = 0 AND type = 'coding' AND task_id IS NULL`,
+        )
+        .run(taskId, now, sessionId);
+      if (result.changes !== 1) {
+        throw new Error(`session is not assignable: ${sessionId}`);
+      }
+      return now;
+    });
+
+    const updatedAt = assign();
+    this.broadcastSessionUpdated(sessionId, {
+      type: 'subtask',
+      task_id: taskId,
+      updated_at: updatedAt,
+    });
   }
 
   notifyTaskSessionsUpdated(taskId: string): void {

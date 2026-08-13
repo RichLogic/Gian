@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 import type { Db } from '../storage/db.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
 import { EventStore } from '../session/event-store.js';
+import { AttentionDispatcher } from '../session/attention.js';
+import type { ChatEvent } from '@gian/shared';
 import { parseCcLine, parseCodexLine, type ParsedLine } from './replay.js';
 
 /**
@@ -61,7 +63,11 @@ export class NativeJsonlWatcher {
   private sessions = new Map<string, WatchedSession>();
   private events: EventStore;
 
-  constructor(private db: Db, private broadcaster: WsBroadcaster) {
+  constructor(
+    private db: Db,
+    private broadcaster: WsBroadcaster,
+    private attention = new AttentionDispatcher(broadcaster),
+  ) {
     this.events = new EventStore(db);
   }
 
@@ -230,7 +236,7 @@ export class NativeJsonlWatcher {
       const parsed = parser(line);
       if (parsed) this.applyParsed(state, parsed, metadata.timestamp);
       if (metadata.completed) {
-        this.completeCurrentTurn(state, metadata.timestamp ?? new Date().toISOString());
+        this.completeCurrentTurn(state, metadata.timestamp ?? new Date().toISOString(), true);
       }
     }
   }
@@ -248,7 +254,7 @@ export class NativeJsonlWatcher {
       // is also a definitive boundary for the prior running turn. Close it
       // before opening the next turn so live and replay lifecycle agree.
       const boundaryAt = timestamp ?? new Date().toISOString();
-      this.completeCurrentTurn(state, boundaryAt);
+      this.completeCurrentTurn(state, boundaryAt, true);
 
       // Open a new turn row. Use the next available turn_number — re-query
       // every time so concurrent proxy turns can't clash with us.
@@ -261,7 +267,7 @@ export class NativeJsonlWatcher {
         )
         .run(state.currentTurnId, state.sessionId, state.currentTurnNumber, boundaryAt);
 
-      this.persistLifecycle(state, 'started', boundaryAt);
+      this.persistLifecycle(state, 'started', boundaryAt, true);
       this.persistSessionStatus(state.sessionId, 'running');
     }
 
@@ -273,7 +279,7 @@ export class NativeJsonlWatcher {
     }
 
     for (const ev of parsed.events) {
-      this.persistAndBroadcast(state, ev.callId, ev.type, ev.data);
+      this.persistAndBroadcast(state, ev.callId, ev.type, ev.data, { attentionEligible: true });
     }
   }
 
@@ -282,7 +288,11 @@ export class NativeJsonlWatcher {
     callId: string,
     type: string,
     data: Record<string, unknown>,
-    options: { replaceSnapshot?: boolean; createdAt?: string } = {},
+    options: {
+      replaceSnapshot?: boolean;
+      createdAt?: string;
+      attentionEligible?: boolean;
+    } = {},
   ): void {
     let inserted = true;
     try {
@@ -311,18 +321,23 @@ export class NativeJsonlWatcher {
     const display = stored?.display && typeof stored.display === 'object' && !Array.isArray(stored.display)
       ? stored.display as import('@gian/shared').ChatDisplay
       : undefined;
-    const provider = stored?.provider;
-    this.broadcaster.broadcast({
-      type: 'event',
+    const provider = stored?.provider === 'claude'
+      || stored?.provider === 'codex'
+      || stored?.provider === 'kimi'
+      ? stored.provider
+      : state.executor;
+    const event: ChatEvent = {
       session_id: state.sessionId,
       turn: state.currentTurnNumber,
       call_id: callId,
       event: type,
       ts: options.createdAt ? Date.parse(options.createdAt) : Date.now(),
       data: raw,
-      ...(provider === 'claude' || provider === 'codex' || provider === 'kimi' ? { provider } : {}),
+      provider,
       ...(display ? { display } : {}),
-    });
+    };
+    this.broadcaster.broadcast({ type: 'event', ...event });
+    if (inserted && options.attentionEligible) this.attention.broadcast(event);
     if (display?.type === 'interaction.approval' || display?.type === 'interaction.question') {
       this.persistSessionStatus(state.sessionId, 'pending');
     } else if (display?.type === 'interaction.resolved') {
@@ -335,6 +350,7 @@ export class NativeJsonlWatcher {
     state: WatchedSession,
     lifecycle: 'started' | 'completed',
     createdAt: string,
+    attentionEligible: boolean,
   ): void {
     const turnId = state.currentTurnId;
     if (!turnId) return;
@@ -367,7 +383,7 @@ export class NativeJsonlWatcher {
           data: { turnId },
         },
       },
-      { replaceSnapshot: true, createdAt },
+      { replaceSnapshot: true, createdAt, attentionEligible },
     );
   }
 
@@ -376,7 +392,11 @@ export class NativeJsonlWatcher {
    * existing lifecycle (replay/provider/restart) is authoritative: preserve
    * its completed_at, but heal a partially-written running/null row.
    */
-  private completeCurrentTurn(state: WatchedSession, completedAt: string): void {
+  private completeCurrentTurn(
+    state: WatchedSession,
+    completedAt: string,
+    attentionEligible: boolean,
+  ): void {
     const turnId = state.currentTurnId;
     if (!turnId) return;
     const row = this.db
@@ -420,7 +440,7 @@ export class NativeJsonlWatcher {
         )
         .run(effectiveCompletedAt, turnId, state.sessionId);
     }
-    this.persistLifecycle(state, 'completed', effectiveCompletedAt);
+    this.persistLifecycle(state, 'completed', effectiveCompletedAt, attentionEligible);
     this.persistSessionStatus(
       state.sessionId,
       row.status === 'error' ? 'error' : 'done',
@@ -466,7 +486,12 @@ export class NativeJsonlWatcher {
       }
       const metadata = inspectNativeLine(line, state.executor);
       if (metadata.completed) {
-        this.completeCurrentTurn(state, metadata.timestamp ?? new Date().toISOString());
+        // Restart repair is historical recovery, not a new live boundary.
+        this.completeCurrentTurn(
+          state,
+          metadata.timestamp ?? new Date().toISOString(),
+          false,
+        );
       }
       return;
     }

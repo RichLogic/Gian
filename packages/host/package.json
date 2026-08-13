@@ -1,6 +1,6 @@
 {
   "name": "@gian/host",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -26,6 +26,7 @@
     "@gian/cc-proxy": "workspace:*",
     "@gian/codex-proxy": "workspace:*",
     "@gian/kimi-proxy": "workspace:*",
+    "@gian/grok-proxy": "workspace:*",
     "@types/better-sqlite3": "^7.6.12",
     "tsx": "^4.19.2"
   }

@@ -1,7 +1,13 @@
 import type { Hono } from 'hono';
-import type { ExternalEditor, OpenAppPrefs, SystemConfig } from '@gian/shared';
+import type {
+  ExternalEditor,
+  OpenAppPrefs,
+  SystemConfig,
+  TerminalPreferences,
+} from '@gian/shared';
 import { loadConfig, saveConfig } from '../../storage/config.js';
 import type { Db } from '../../storage/db.js';
+import { isAvailableTerminalShell, terminalOptions } from '../../term/manager.js';
 
 type EditableSettingsKey =
   | 'port'
@@ -11,6 +17,7 @@ type EditableSettingsKey =
   | 'font_scale_chrome'
   | 'font_scale_chat'
   | 'font_scale_code'
+  | 'terminal'
   | 'locale'
   | 'external_editors'
   | 'open_apps';
@@ -25,9 +32,20 @@ const MAX_EDITOR_COMMAND_LENGTH = 4_096;
 const MAX_EDITOR_ARGS = 128;
 const MAX_EDITOR_ARG_LENGTH = 4_096;
 const MAX_OPEN_APP_LENGTH = 256;
+const MAX_TERMINAL_SHELL_LENGTH = 4_096;
 
 const EDITOR_FIELDS = new Set(['id', 'name', 'command', 'args']);
 const OPEN_APP_CATEGORIES = new Set(['code', 'web', 'images', 'pdf', 'other']);
+const TERMINAL_FIELDS = new Set([
+  'font_family',
+  'font_size',
+  'line_height',
+  'cursor_style',
+  'cursor_blink',
+  'scrollback_lines',
+  'shell',
+  'start_directory',
+]);
 
 function parseString(
   value: unknown,
@@ -104,6 +122,61 @@ function parseOpenApps(value: unknown): OpenAppPrefs {
   return parsed as OpenAppPrefs;
 }
 
+function parseTerminalPreferences(value: unknown): TerminalPreferences {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('terminal must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  const unknownField = Object.keys(record).find(key => !TERMINAL_FIELDS.has(key));
+  if (unknownField) throw new Error(`terminal.${unknownField} is not allowed`);
+  const missingField = [...TERMINAL_FIELDS].find(key => !Object.hasOwn(record, key));
+  if (missingField) throw new Error(`terminal.${missingField} is required`);
+
+  if (typeof record.font_size !== 'number'
+    || !Number.isInteger(record.font_size)
+    || record.font_size < 10
+    || record.font_size > 22) {
+    throw new Error('terminal.font_size must be an integer between 10 and 22');
+  }
+  if (typeof record.line_height !== 'number'
+    || !Number.isFinite(record.line_height)
+    || record.line_height < 1
+    || record.line_height > 1.6) {
+    throw new Error('terminal.line_height must be between 1 and 1.6');
+  }
+  if (typeof record.cursor_blink !== 'boolean') {
+    throw new Error('terminal.cursor_blink must be a boolean');
+  }
+  if (typeof record.scrollback_lines !== 'number'
+    || ![1_000, 5_000, 10_000, 50_000].includes(record.scrollback_lines)) {
+    throw new Error('terminal.scrollback_lines must be one of: 1000, 5000, 10000, 50000');
+  }
+  const shell = parseString(record.shell, 'terminal.shell', {
+    maxLength: MAX_TERMINAL_SHELL_LENGTH,
+    allowEmpty: true,
+  }).trim();
+  if (shell && !isAvailableTerminalShell(shell)) {
+    throw new Error('terminal.shell must be an available login shell');
+  }
+
+  return {
+    font_family: parseEnum(record.font_family, 'terminal.font_family', [
+      'jetbrains-mono', 'system-mono', 'sf-mono', 'menlo',
+    ]) as TerminalPreferences['font_family'],
+    font_size: record.font_size,
+    line_height: record.line_height,
+    cursor_style: parseEnum(record.cursor_style, 'terminal.cursor_style', [
+      'block', 'bar', 'underline',
+    ]) as TerminalPreferences['cursor_style'],
+    cursor_blink: record.cursor_blink,
+    scrollback_lines: record.scrollback_lines as TerminalPreferences['scrollback_lines'],
+    shell,
+    start_directory: parseEnum(record.start_directory, 'terminal.start_directory', [
+      'context', 'home',
+    ]) as TerminalPreferences['start_directory'],
+  };
+}
+
 const SETTINGS_PATCH_SCHEMA = {
   port(value: unknown) {
     if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65_535) {
@@ -137,6 +210,7 @@ const SETTINGS_PATCH_SCHEMA = {
     field,
     ['sm', 'md', 'lg', 'xl'],
   ),
+  terminal: parseTerminalPreferences,
   locale: (value: unknown, field: string) => parseEnum(value, field, ['zh-CN', 'en']),
   external_editors: parseEditors,
   open_apps: parseOpenApps,
@@ -161,6 +235,7 @@ function parseSettingsPatch(value: unknown): EditableSettingsPatch {
 }
 
 export function registerSettingsRoutes(app: Hono, db: Db): void {
+  app.get('/api/settings/terminal-options', c => c.json(terminalOptions()));
   app.get('/api/settings', c => c.json(loadConfig(db)));
   app.patch('/api/settings', async c => {
     let body: unknown;

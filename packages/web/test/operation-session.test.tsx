@@ -24,7 +24,7 @@ function fixture(overrides: Partial<Session> = {}): Session {
   return {
     id: 's1',
     name: 'Before',
-    type: 'primary',
+    type: 'coding',
     task_id: null,
     workspace_id: 'workspace-1',
     executor: 'codex',
@@ -136,6 +136,31 @@ describe('session operations (proposal §8, product definitions)', () => {
     expect(transport.sent).toHaveLength(1);
   });
 
+  it('moves a session into a task with the matching semantic overlays and wire message', () => {
+    const { store, transport, dispatcher } = setup();
+
+    const run = dispatcher.dispatch('session.assignTask', {
+      sessionId: 's1',
+      taskId: 'task-1',
+    });
+
+    expect(run.phase).toBe('optimistic');
+    expect(store.getOverlay(entityFieldKey('session:s1', 'type'))?.value).toBe('subtask');
+    expect(store.getOverlay(entityFieldKey('session:s1', 'task_id'))?.value).toBe('task-1');
+    expect(transport.sent[0]).toMatchObject({
+      type: 'session:assign_task',
+      session_id: 's1',
+      task_id: 'task-1',
+    });
+
+    transport.emitResult(requestIdOf(transport.sent[0]), false, {
+      code: 'SESSION_ASSIGN_TASK_FAILED',
+      message: 'task is no longer open',
+    });
+    expect(store.getRun(run.id)?.phase).toBe('failed');
+    expect(store.getEntityOverlays('session:s1')).toHaveLength(0);
+  });
+
   it('blocks duplicate pending submissions (stop/delete) while one is in flight', () => {
     const { store, transport, dispatcher } = setup();
 
@@ -155,7 +180,9 @@ describe('session operations (proposal §8, product definitions)', () => {
   it('session.create/fork run pending on a fresh pending entity key and send session:create', () => {
     const { store, transport, dispatcher } = setup();
 
-    const create = dispatcher.dispatch('session.create', { workspaceId: 'w1', executor: 'claude', name: 'New' });
+    const create = dispatcher.dispatch('session.create', {
+      workspaceId: 'w1', executor: 'codex', name: 'New', serviceTier: 'fast',
+    });
     const fork = dispatcher.dispatch('session.fork', {
       workspaceId: 'w1', executor: 'claude', approvalMode: 'ask', name: 'New copy',
     });
@@ -165,7 +192,9 @@ describe('session operations (proposal §8, product definitions)', () => {
     expect(fork.entityKey.startsWith('pending:session.fork:')).toBe(true);
     // Distinct keys: concurrent creates are not duplicate submissions.
     expect(store.getPendingRuns()).toHaveLength(2);
-    expect(transport.sent[0]).toMatchObject({ type: 'session:create', workspace_id: 'w1', executor: 'claude', name: 'New' });
+    expect(transport.sent[0]).toMatchObject({
+      type: 'session:create', workspace_id: 'w1', executor: 'codex', name: 'New', service_tier: 'fast',
+    });
     expect(transport.sent[1]).toMatchObject({
       type: 'session:create', workspace_id: 'w1', executor: 'claude', name: 'New copy', approval_mode: 'ask',
     });

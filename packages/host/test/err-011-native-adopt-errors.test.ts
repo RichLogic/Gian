@@ -21,6 +21,7 @@ import { makeTestApp, type TestAppCtx } from './fixtures/test-app.js';
 import { makeNativeHome, type NativeHome } from './fixtures/native-home.js';
 import { clearNativeSessionsCache } from '../src/native/scanner.js';
 import type { SessionManager } from '../src/session/manager.js';
+import { NativeSessionService } from '../src/session/native-session-service.js';
 import { SessionRepository } from '../src/session/repository.js';
 import { registerNativeSessionRoutes } from '../src/web/routes/native-sessions.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
@@ -84,7 +85,19 @@ test('ERR-011: adopt rejects unsupported executor with 400', async () => {
     const res = await adoptBody(ctx, { executor: 'gemini', native_session_id: 'x' });
     assert.equal(res.status, 400);
     const body = await res.json() as { error: string };
-    assert.match(body.error, /executor must be claude, codex, or kimi/);
+    assert.match(body.error, /executor must be claude, codex, kimi, or grok/);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('ERR-011: grok adopt is rejected as not available yet', async () => {
+  const ctx = await setup();
+  try {
+    const res = await adoptBody(ctx, { executor: 'grok', native_session_id: 'native-grok' });
+    assert.equal(res.status, 400);
+    const body = await res.json() as { error: string };
+    assert.match(body.error, /Grok native session adopt is not available yet/);
   } finally {
     await ctx.cleanup();
   }
@@ -283,13 +296,45 @@ async function deleteNative(
   );
 }
 
+test('ERR-011: grok native-session delete is rejected without discovery', async () => {
+  const ctx = await setup();
+  try {
+    const res = await deleteNative(ctx, 'grok', 'native-grok');
+    assert.equal(res.status, 400);
+    const body = await res.json() as { error: string };
+    assert.match(body.error, /Grok native session deletion is not available yet/);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('Grok native-session listing does not start a Grok runtime', async () => {
+  let created = false;
+  const service = new NativeSessionService(
+    {} as never,
+    {
+      usesProtocolV1: () => true,
+      getOrCreate: async () => {
+        created = true;
+        throw new Error('must not start Grok for native list');
+      },
+    } as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
+  assert.equal(await service.listPlugin('grok', '/tmp'), null);
+  assert.equal(created, false);
+});
+
 test('ERR-011: delete rejects unsupported executor query param with 400', async () => {
   const ctx = await setup();
   try {
     const res = await deleteNative(ctx, 'gemini', 'whatever');
     assert.equal(res.status, 400);
     const body = await res.json() as { error: string };
-    assert.match(body.error, /executor query param must be claude, codex, or kimi/);
+    assert.match(body.error, /executor query param must be claude, codex, kimi, or grok/);
   } finally {
     await ctx.cleanup();
   }
@@ -398,6 +443,18 @@ test('ERR-011: concurrent adopt/delete resolves to one complete outcome without 
       ).all('claude', sid);
       assert.equal(rows.length, 0, 'delete-wins must not leave a Gian binding');
     }
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('Grok capabilities route is a known executor', async () => {
+  const ctx = await makeTestApp();
+  try {
+    const res = await ctx.fetch('/api/proxy/grok/capabilities');
+    const body = await res.json() as { error?: string };
+    assert.notEqual(body.error, 'unknown executor');
+    assert.notEqual(res.status, 400);
   } finally {
     await ctx.cleanup();
   }

@@ -10,6 +10,7 @@ import { assertNoEventStorageMaintenance } from './storage/maintenance-lock.js';
 import { sweepColdEvents } from './events/lifecycle.js';
 import { CliRuntimeManager } from './runtime/manager.js';
 import { AgentManager } from './agents/manager.js';
+import { createGitHubReleaseFetch } from './agents/github-release-fetch.js';
 import { syncAgentInstructionBlocks } from './onboarding/agent-instructions.js';
 import { expandHome } from './workspace/index.js';
 
@@ -45,6 +46,11 @@ function resolveProxyEntry(
 async function main(): Promise<void> {
   const dataDir = resolveDataDir();
   const releaseVersion = process.env.GIAN_RELEASE_VERSION ?? '0.1.0';
+  const releaseRepository = (process.env.GIAN_RELEASE_REPOSITORY ?? 'RichLogic/Gian').trim();
+  const githubBrokerSocketPath = process.env.GIAN_DESKTOP_GITHUB_BROKER_SOCKET;
+  // The socket is a Desktop-only credential boundary. Do not let the
+  // capability path flow into Proxy or vendor CLI child environments.
+  delete process.env.GIAN_DESKTOP_GITHUB_BROKER_SOCKET;
   assertNoEventStorageMaintenance(dataDir);
   const db = openDatabase(dataDir);
   const config = loadConfig(db);
@@ -94,11 +100,20 @@ async function main(): Promise<void> {
       '@gian/kimi-proxy',
       'kimi-proxy',
     ),
+    grok: resolveProxyEntry(
+      process.env.GIAN_GROK_PROXY_ENTRY,
+      '@gian/grok-proxy',
+      'grok-proxy',
+    ),
   } as const;
   const agentManager = await AgentManager.create({
     dataDir,
     releaseVersion,
-    releaseRepository: process.env.GIAN_RELEASE_REPOSITORY ?? 'RichLogic/Gian',
+    releaseRepository,
+    fetchImpl: createGitHubReleaseFetch({
+      releaseRepository,
+      brokerSocketPath: githubBrokerSocketPath,
+    }),
     managedProxies: process.env.GIAN_MANAGED_PLUGINS === '1',
     independentProxyReleases: process.env.GIAN_MANAGED_PLUGINS === '1',
     developmentProxyEntries,
@@ -114,21 +129,24 @@ async function main(): Promise<void> {
         mode: 'ask',
       },
       kimi: { model: '', thinking: '', mode: '' },
+      grok: { model: '', thinking: '', mode: '' },
     },
     environmentCliPaths: {
       ...(process.env.CLAUDE_BIN ? { claude: process.env.CLAUDE_BIN } : {}),
       ...(process.env.CODEX_BIN ? { codex: process.env.CODEX_BIN } : {}),
       ...(process.env.KIMI_BIN ? { kimi: process.env.KIMI_BIN } : {}),
+      ...(process.env.GROK_BIN ? { grok: process.env.GROK_BIN } : {}),
     },
   });
   const runtimeManager = new CliRuntimeManager(
     agentManager.runtimeProviders(),
     agentManager.updateLockDataDir(),
   );
-  const [claudeProxy, codexProxy, kimiProxy] = await Promise.all([
+  const [claudeProxy, codexProxy, kimiProxy, grokProxy] = await Promise.all([
     agentManager.proxyLaunchDescriptor('claude'),
     agentManager.proxyLaunchDescriptor('codex'),
     agentManager.proxyLaunchDescriptor('kimi'),
+    agentManager.proxyLaunchDescriptor('grok'),
   ]);
 
   const handle = createApp({
@@ -140,8 +158,10 @@ async function main(): Promise<void> {
     claudeProxyProtocolV1: claudeProxy.protocolV1,
     codexProxyEntry: codexProxy.entryPath,
     kimiProxyEntry: kimiProxy.entryPath,
+    grokProxyEntry: grokProxy.entryPath,
     codexProxyProtocolV1: codexProxy.protocolV1,
     kimiProxyProtocolV1: kimiProxy.protocolV1,
+    grokProxyProtocolV1: grokProxy.protocolV1,
     runtimeManager,
     agentManager,
   });

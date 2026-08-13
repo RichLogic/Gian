@@ -278,7 +278,15 @@ export class CodexProtocolV1Adapter {
       case 'approval.respond':
         return this.respondApproval(request.params);
       case 'session.native.list': {
-        const sessions = listCodexNativeSessions(request.params.cwd);
+        let sessions;
+        try {
+          sessions = await this.service.listNativeThreads(request.params.cwd)
+            ?? listCodexNativeSessions(request.params.cwd);
+        } catch {
+          // Old app-server builds do not expose thread/list. Keep rollout
+          // discovery as the backwards-compatible source in that case.
+          sessions = listCodexNativeSessions(request.params.cwd);
+        }
         const offset = request.params.cursor === null || request.params.cursor === undefined
           ? 0
           : Number.parseInt(request.params.cursor, 10);

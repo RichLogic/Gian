@@ -16,6 +16,7 @@
  */
 import { waitFor } from '@testing-library/react';
 import type { Session, SystemConfig } from '@gian/shared';
+import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../src/api.js';
 import { __resetFeedback, getSnapshot } from '../src/feedback.js';
@@ -47,6 +48,7 @@ function config(overrides: Partial<SystemConfig> = {}): SystemConfig {
     host: '127.0.0.1', port: 8991, workspace_root: '~/Coding',
     theme: 'warm', accent: 'ember', density: 'cozy', locale: 'en',
     font_scale_chrome: 'md', font_scale_chat: 'md', font_scale_code: 'md',
+    terminal: { ...DEFAULT_TERMINAL_PREFERENCES },
     default_claude_model: '', default_claude_effort: '',
     default_codex_model: '', default_codex_effort: '',
     auth_username: '', external_editors: [],

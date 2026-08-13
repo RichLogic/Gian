@@ -36,6 +36,7 @@ class FakeProxyClient implements ProxyClient {
   readonly executor: 'claude' | 'codex' = 'claude';
   notificationHandlers: NotificationHandler[] = [];
   exitHandlers: Array<(code: number | null) => void> = [];
+  exitDuringInterrupt: number | null | undefined;
 
   async initialize() { return { mode: 'spawn' as const, protocolVersion: '0.1.0', methods: [] }; }
   async capabilities() { return { protocolVersion: '0.1.0', models: [], slashCommands: [] }; }
@@ -56,7 +57,11 @@ class FakeProxyClient implements ProxyClient {
       nativeSessionId,
     };
   }
-  async interruptTurn() {}
+  async interruptTurn() {
+    if (this.exitDuringInterrupt !== undefined) {
+      this.fireExit(this.exitDuringInterrupt);
+    }
+  }
   async respondApproval() {}
   async startTurn() {
     return {
@@ -243,6 +248,92 @@ test('ERR-009: proxy exit mid-turn flips active turn to error and session to err
     ) as Array<{ session: { id: string; status?: string } }>;
     assert.ok(updates.some(u => u.session.id === session.id && u.session.status === 'error'),
       'session:updated must broadcast the error status so the runner chip refreshes');
+
+    const errors = ctx.sessions.listEvents(session.id)
+      .filter(event => event.display?.type === 'state.error');
+    assert.equal(errors.length, 1,
+      'an unexpected active Proxy exit persists one generic error projection');
+    assert.equal(errors[0]?.event, 'gian.turn.error');
+    assert.equal(errors[0]?.display?.type === 'state.error'
+      ? errors[0].display.data.message
+      : null, 'The agent stopped unexpectedly.');
+    assert.deepEqual(
+      ctx.broadcaster.messages
+        .filter((message): message is Extract<ServerToClientMessage, { type: 'attention' }> => (
+          message.type === 'attention'
+        ))
+        .map(message => message.kind),
+      ['error'],
+      'an unexpected active Proxy exit emits exactly one error attention',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('ERR-009: a prior projected runtime error prevents duplicate exit attention', async () => {
+  const ctx = setup();
+  try {
+    const session = await ctx.sessions.createSession({
+      workspace_id: ctx.wsId, executor: 'claude', approval_mode: 'ask',
+    });
+    await ctx.sessions.sendMessage(session.id, 'work');
+    ctx.broadcaster.messages.length = 0;
+
+    ctx.proxyMgr.client.fire({
+      method: 'runtime.error',
+      params: {
+        sessionId: 'proxy_x',
+        data: { code: 'RUNTIME_CRASH', message: 'proxy runtime failed' },
+      },
+    });
+    await tick();
+    ctx.proxyMgr.client.fireExit(1);
+    await tick();
+
+    assert.equal(
+      ctx.sessions.listEvents(session.id)
+        .filter(event => event.display?.type === 'state.error').length,
+      1,
+      'the generic exit fallback is omitted when the turn already has an error',
+    );
+    assert.equal(
+      ctx.broadcaster.messages.filter(message => message.type === 'attention').length,
+      1,
+      'the projected provider error remains the only attention signal',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('ERR-009: a Proxy exit racing user Stop remains silent', async () => {
+  const ctx = setup();
+  try {
+    const session = await ctx.sessions.createSession({
+      workspace_id: ctx.wsId, executor: 'claude', approval_mode: 'ask',
+    });
+    await ctx.sessions.sendMessage(session.id, 'work');
+    ctx.broadcaster.messages.length = 0;
+    ctx.proxyMgr.client.exitDuringInterrupt = 137;
+
+    await ctx.sessions.stopTurn(session.id);
+
+    const turn = ctx.db.prepare(
+      'SELECT status FROM turns WHERE session_id = ?',
+    ).get(session.id) as { status: string };
+    assert.equal(turn.status, 'stopped');
+    assert.equal(ctx.sessions.getSession(session.id).status, 'done');
+    assert.equal(
+      ctx.sessions.listEvents(session.id)
+        .filter(event => event.display?.type === 'state.error').length,
+      0,
+    );
+    assert.equal(
+      ctx.broadcaster.messages.filter(message => message.type === 'attention').length,
+      0,
+      'the stop intent wins over a synchronous Proxy exit',
+    );
   } finally {
     teardown(ctx);
   }
@@ -285,6 +376,11 @@ test('ERR-009: proxy exit while idle (no active turn) clears caches but does NOT
     assert.equal(turnRows.length, 1);
     assert.equal(turnRows[0]!.status, 'completed',
       'completed turn stays completed; idle exit must not retroactively error it');
+    assert.equal(
+      ctx.broadcaster.messages.filter(message => message.type === 'attention').length,
+      0,
+      'an idle Proxy exit is not actionable',
+    );
   } finally {
     teardown(ctx);
   }

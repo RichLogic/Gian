@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { readFile, stat } from 'node:fs/promises';
 import test from 'node:test';
 
@@ -40,7 +41,7 @@ test('Kimi attachment canary fails closed when its session-store activation does
   );
 });
 
-for (const provider of ['claude', 'codex', 'kimi']) {
+for (const provider of ['claude', 'codex', 'kimi', 'grok']) {
   test(`${provider} attachment canary sends localFile through one real JSONL proxy process`, async () => {
     const summary = await runProviderAttachmentCanary({
       provider,
@@ -122,6 +123,59 @@ test('attachment canary rejects a response that did not read the fixture', async
   await assert.rejects(stat(canaryRoot), { code: 'ENOENT' });
 });
 
+test('Grok attachment canary preserves the original failure and cleans up with V1 ids', async () => {
+  let canaryRoot;
+  let interruptParams;
+  let closeParams;
+  let stopped = false;
+  class FailingGrokClient extends EventEmitter {
+    async ensureStarted() {}
+    async request(method, params) {
+      if (method === 'initialize') {
+        return { protocol: { version: '1.0' }, capabilities: { 'input.localFile': 1 } };
+      }
+      if (method === 'session.create') {
+        canaryRoot = params.cwd;
+        return { session: { id: params.sessionId, streamId: 'stream-grok' } };
+      }
+      if (method === 'turn.start') throw new Error('controlled Grok turn failure');
+      if (method === 'turn.interrupt') interruptParams = params;
+      if (method === 'session.close') closeParams = params;
+      return { ok: true };
+    }
+    async stop() {
+      stopped = true;
+      this.emit('runtimeStopped');
+    }
+  }
+
+  await assert.rejects(
+    runProviderAttachmentCanary({
+      provider: 'grok',
+      allowRealAgentTurn: true,
+      binaryPath: process.execPath,
+      ClientClass: FailingGrokClient,
+      timeoutMs: 1_000,
+    }),
+    /controlled Grok turn failure/,
+  );
+  assert.ok(interruptParams);
+  const { sessionId, turnId } = interruptParams;
+  assert.deepEqual(interruptParams, {
+    sessionId,
+    streamId: 'stream-grok',
+    turnId,
+  });
+  assert.equal(typeof sessionId, 'string');
+  assert.equal(typeof turnId, 'string');
+  assert.deepEqual(closeParams, {
+    sessionId,
+    streamId: 'stream-grok',
+  });
+  assert.equal(stopped, true);
+  await assert.rejects(stat(canaryRoot), { code: 'ENOENT' });
+});
+
 test('attachment canary source keeps its quota gate and localFile contract visible', async () => {
   const source = await readFile(scriptUrl, 'utf8');
   assert.match(source, /GIAN_ALLOW_REAL_AGENT_TURN/);
@@ -130,4 +184,7 @@ test('attachment canary source keeps its quota gate and localFile contract visib
   assert.match(source, /client\.request\('turn\.steer'/);
   assert.match(source, /runDefaultKimiPreflight/);
   assert.match(source, /attachmentContentObserved: true/);
+  assert.match(source, /GIAN_PROTOCOL_VERSIONS: '1.0'/);
+  assert.match(source, /provider === 'grok'/);
+  assert.match(source, /approval: 'relay', network: 'ask'/);
 });

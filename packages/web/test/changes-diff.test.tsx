@@ -122,7 +122,7 @@ describe('ChangesDiffBody', () => {
     });
     await waitFor(() => expect(loadDiff).toHaveBeenCalledWith('ws:demo', 'src/a.ts', 'branch', null, null));
     expect(loadDiff).toHaveBeenCalledTimes(1);
-    await waitFor(() => expect(document.querySelectorAll('.sheet-diff-ln.add').length).toBe(1));
+    await waitFor(() => expect(document.querySelectorAll('.sheet-diff-side.new.add').length).toBe(1));
   });
 
   it('pins last-turn patches to the same session and turn as the file list', async () => {
@@ -153,7 +153,7 @@ describe('ChangesDiffBody', () => {
     act(() => FakeIO.instances[0]!.trigger());
     await screen.findByText("Couldn't load this file's diff.");
     fireEvent.click(screen.getByText('Retry'));
-    await waitFor(() => expect(document.querySelectorAll('.sheet-diff-ln.add').length).toBe(1));
+    await waitFor(() => expect(document.querySelectorAll('.sheet-diff-side.new.add').length).toBe(1));
     expect(loadDiff).toHaveBeenCalledTimes(2);
   });
 
@@ -182,15 +182,48 @@ describe('ChangesDiffBody', () => {
     expect(document.querySelectorAll('.cs-file.collapsed').length).toBe(0);
   });
 
-  it('the split toggle persists to the shared localStorage key', async () => {
+  it('switches the real diff layout and gives word wrap a default pressed state', async () => {
     renderBody();
     await waitFor(() => expect(document.querySelectorAll('.cs-file').length).toBe(2));
     act(() => FakeIO.instances[0]!.trigger());
-    await waitFor(() => expect(document.querySelectorAll('.sheet-diff-ln.add').length).toBe(1));
+    await waitFor(() => expect(document.querySelectorAll('.sheet-diff-side.new').length).toBeGreaterThan(0));
+
+    const wrapToggle = screen.getByLabelText('Disable word wrap');
+    expect(wrapToggle).toHaveAttribute('aria-pressed', 'true');
+    expect(wrapToggle).toHaveClass('active');
+    expect(document.querySelector('.cs-root')).not.toHaveClass('cs-nowrap');
+
+    const layoutToggle = screen.getByLabelText('Stacked view');
+    expect(layoutToggle).toHaveAttribute('data-layout', 'side-by-side');
+    expect(layoutToggle.querySelector('[data-icon="side-by-side"]')).toBeTruthy();
+    expect(document.querySelector('.sheet-diff')).toHaveClass('split');
+    expect(document.querySelectorAll('.sheet-diff-side.old').length).toBeGreaterThan(0);
+    expect(document.querySelectorAll('.sheet-diff-side.new').length).toBeGreaterThan(0);
+
+    fireEvent.click(layoutToggle);
     expect(document.querySelector('.sheet-diff')).not.toHaveClass('split');
+    expect(document.querySelectorAll('.sheet-diff-side')).toHaveLength(0);
+    expect(document.querySelectorAll('.sheet-diff-ln.add')).toHaveLength(1);
+    expect(screen.getByLabelText('Side-by-side view').querySelector('[data-icon="stacked"]')).toBeTruthy();
+    expect(localStorage.getItem('gian.sheet.diffsplit')).toBe('off');
+
     fireEvent.click(screen.getByLabelText('Side-by-side view'));
     expect(document.querySelector('.sheet-diff')).toHaveClass('split');
+    expect(screen.getByLabelText('Stacked view').querySelector('[data-icon="side-by-side"]')).toBeTruthy();
     expect(localStorage.getItem('gian.sheet.diffsplit')).toBe('on');
+
+    fireEvent.click(wrapToggle);
+    const enableWrap = screen.getByLabelText('Enable word wrap');
+    expect(enableWrap).toHaveAttribute('aria-pressed', 'false');
+    expect(enableWrap).not.toHaveClass('active');
+    expect(document.querySelector('.cs-root')).toHaveClass('cs-nowrap');
+    expect(document.querySelector('.sheet-diff')).toHaveClass('nowrap');
+    expect(localStorage.getItem('gian.sheet.wordwrap')).toBe('off');
+
+    fireEvent.click(enableWrap);
+    expect(screen.getByLabelText('Disable word wrap')).toHaveClass('active');
+    expect(document.querySelector('.cs-root')).not.toHaveClass('cs-nowrap');
+    expect(localStorage.getItem('gian.sheet.wordwrap')).toBe('on');
   });
 
   it('collapse state survives a scope switch while patches are dropped', async () => {
@@ -209,6 +242,28 @@ describe('ChangesDiffBody', () => {
     expect(getChangesDiffState('ws:demo').patches['src/a.ts']).toBeUndefined();
     expect(localStorage.getItem('gian.changes.scope')).toBe('all');
     expect(getChangesDiffState('ws:demo').scope).toBe('all');
+  });
+
+  it('isolates scope, collapse, and selection state for Sessions sharing one tree', () => {
+    act(() => {
+      setChangesDiffScope('ws:demo', 'all', 'session-1');
+      toggleChangesDiffCollapsed('ws:demo', 'src/a.ts', 'session-1');
+      requestChangesDiffAnchor('ws:demo', 'src/b.ts', 'session-1');
+    });
+
+    expect(getChangesDiffState('ws:demo', 'session-1')).toMatchObject({
+      scope: 'all',
+      collapsed: { 'src/a.ts': true, 'src/b.ts': false },
+      anchor: { path: 'src/b.ts', requestId: 1 },
+    });
+    expect(getChangesDiffState('ws:demo', 'session-2')).toMatchObject({
+      scope: 'branch',
+      collapsed: {},
+      folderOpen: {},
+      anchor: null,
+    });
+    expect(localStorage.getItem('gian.changes.scope.session-1')).toBe('all');
+    expect(localStorage.getItem('gian.changes.scope.session-2')).toBeNull();
   });
 
   it('an anchor request expands the block and scrolls it into view', async () => {

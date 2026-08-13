@@ -96,7 +96,7 @@ export function isSession(value: unknown): value is Session {
     && isOneOf(value.type, ['coding', 'subtask', 'manager'])
     && isNullableString(value.task_id)
     && isNullableString(value.workspace_id)
-    && isOneOf(value.executor, ['codex', 'claude', 'kimi'])
+    && isOneOf(value.executor, ['codex', 'claude', 'kimi', 'grok'])
     && isNullableString(value.model)
     && (value.approval_mode === null
       || isOneOf(value.approval_mode, ['plan', 'ask', 'auto', 'custom', 'full-access']))
@@ -180,6 +180,24 @@ function isExternalEditor(value: unknown): value is ExternalEditor {
     && isArrayOf(value.args, isString);
 }
 
+function isTerminalPreferences(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return isOneOf(value.font_family, ['jetbrains-mono', 'system-mono', 'sf-mono', 'menlo'])
+    && isFiniteNumber(value.font_size)
+    && Number.isInteger(value.font_size)
+    && value.font_size >= 10
+    && value.font_size <= 22
+    && isFiniteNumber(value.line_height)
+    && value.line_height >= 1
+    && value.line_height <= 1.6
+    && isOneOf(value.cursor_style, ['block', 'bar', 'underline'])
+    && typeof value.cursor_blink === 'boolean'
+    && isOneOf(value.scrollback_lines, [1_000, 5_000, 10_000, 50_000])
+    && isString(value.shell)
+    && value.shell.length <= 4_096
+    && isOneOf(value.start_directory, ['context', 'home']);
+}
+
 function isSystemConfig(value: unknown): value is SystemConfig {
   if (!isRecord(value)) return false;
   return isString(value.host)
@@ -191,6 +209,7 @@ function isSystemConfig(value: unknown): value is SystemConfig {
     && isOneOf(value.font_scale_chrome, ['sm', 'md', 'lg', 'xl'])
     && isOneOf(value.font_scale_chat, ['sm', 'md', 'lg', 'xl'])
     && isOneOf(value.font_scale_code, ['sm', 'md', 'lg', 'xl'])
+    && isTerminalPreferences(value.terminal)
     && isOneOf(value.locale, ['zh-CN', 'en'])
     && isString(value.default_claude_model)
     && isString(value.default_claude_effort)
@@ -233,7 +252,7 @@ export function isStateSyncMessage(value: unknown): value is StateSyncMessage {
 export function isNativeSession(value: unknown): value is NativeSession {
   if (!isRecord(value)) return false;
   return isString(value.id)
-    && isOneOf(value.executor, ['codex', 'claude', 'kimi'])
+    && isOneOf(value.executor, ['codex', 'claude', 'kimi', 'grok'])
     && isString(value.filePath)
     && isString(value.cwd)
     && isString(value.updatedAt)

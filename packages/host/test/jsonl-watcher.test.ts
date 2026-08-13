@@ -305,6 +305,15 @@ test('claude turn_duration explicitly completes the current turn', async () => {
       && message.session.status === 'done'
       && message.session.unread === 1
     )));
+    assert.deepEqual(
+      h.broadcaster.messages
+        .filter((message): message is Extract<ServerToClientMessage, { type: 'attention' }> => (
+          message.type === 'attention'
+        ))
+        .map(message => message.kind),
+      ['turn-completed'],
+      'a live external CLI completion emits one attention message',
+    );
   } finally {
     h.cleanup();
   }
@@ -342,6 +351,11 @@ test('restart repairs a running DB turn from the bounded native EOF terminal', (
       h.broadcaster.messages.filter(message => message.type === 'event').length,
       1,
       'bounded recovery adds only the missing boundary and never replays the tail',
+    );
+    assert.equal(
+      h.broadcaster.messages.filter(message => message.type === 'attention').length,
+      0,
+      'restart repair is historical recovery and must stay silent',
     );
   } finally {
     h.cleanup();
@@ -809,6 +823,15 @@ test('claude AskUserQuestion tool_use is mirrored as a question approval card an
       .prepare('SELECT status FROM sessions WHERE id = ?')
       .get(h.sessionId) as { status: string };
     assert.equal(session.status, 'running');
+    assert.deepEqual(
+      h.broadcaster.messages
+        .filter((message): message is Extract<ServerToClientMessage, { type: 'attention' }> => (
+          message.type === 'attention'
+        ))
+        .map(message => message.kind),
+      ['question'],
+      'a live external AskUserQuestion emits exactly one question attention',
+    );
   } finally {
     h.cleanup();
   }
@@ -861,6 +884,15 @@ test('claude AskUserQuestion appended after watcher restart is attached to lates
     const question = displayData(row.data) as { category: string; questions?: Array<{ question: string }> };
     assert.equal(question.category, 'question');
     assert.equal(question.questions?.[0]?.question, '晚饭想吃什么？');
+    assert.deepEqual(
+      h.broadcaster.messages
+        .filter((message): message is Extract<ServerToClientMessage, { type: 'attention' }> => (
+          message.type === 'attention'
+        ))
+        .map(message => message.kind),
+      ['question'],
+      'new tail content after watcher restart remains live and actionable',
+    );
   } finally {
     h.cleanup();
   }
@@ -919,6 +951,15 @@ test('codex executor — session_meta header skipped, event_msg lines synced', a
       created_at: startedAt,
       completed_at: completedAt,
     });
+    assert.deepEqual(
+      h.broadcaster.messages
+        .filter((message): message is Extract<ServerToClientMessage, { type: 'attention' }> => (
+          message.type === 'attention'
+        ))
+        .map(message => message.kind),
+      ['turn-completed'],
+      'Codex Live Sync completion emits one attention message',
+    );
   } finally {
     h.cleanup();
   }

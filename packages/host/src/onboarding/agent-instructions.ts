@@ -11,7 +11,7 @@ export const MANAGED_BLOCK_BEGIN = '<!-- gian:begin -->';
 export const MANAGED_BLOCK_END = '<!-- gian:end -->';
 
 export interface AgentInstructionTarget {
-  agent: 'codex' | 'claude' | 'kimi';
+  agent: 'codex' | 'claude' | 'kimi' | 'grok';
   path: string;
 }
 
@@ -20,6 +20,7 @@ export function agentInstructionTargets(home: string = homedir()): AgentInstruct
     { agent: 'codex', path: join(home, '.codex', 'AGENTS.md') },
     { agent: 'claude', path: join(home, '.claude', 'CLAUDE.md') },
     { agent: 'kimi', path: join(home, '.kimi-code', 'AGENTS.md') },
+    { agent: 'grok', path: join(home, '.grok', 'AGENTS.md') },
   ];
 }
 

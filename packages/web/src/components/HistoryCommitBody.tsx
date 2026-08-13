@@ -13,20 +13,28 @@
  * - merge commits review against the first parent, root commits against the
  *   empty tree — both fixed by the host contract (`detail.base`), the base
  *   strip is display-only.
- * - unified⇄split and word-wrap mirror the existing diff-tab controls and
- *   persist to the same localStorage keys.
+ * - stacked⇄side-by-side and word-wrap share their persisted preference with
+ *   the Diffs panel-2 body.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   loadGitHistoryCommit,
   loadGitHistoryFileDiff,
   type GitHistoryChangedFile,
-  type GitHistoryCommitDetail,
-  type GitHistoryFileDiff,
 } from '../api.js';
+import {
+  getHistoryCommitState,
+  historyCommitOwnerKey,
+  patchHistoryCommitState,
+  saveHistoryCommitScroll,
+  setHistoryCommitCollapsed,
+  setHistoryCommitFileState,
+  useHistoryCommitState,
+} from '../controllers/use-history-commit.js';
 import { useT } from '../i18n/index.js';
 import { toast } from '../feedback.js';
 import { relTime } from '../views/session-list-status.js';
+import { DiffViewControls, useDiffViewPreferences } from './DiffViewControls.js';
 import { DiffBody } from './Sheet.js';
 import type { SheetTab } from './sheet-model.js';
 
@@ -42,8 +50,6 @@ function Icon({ d, size = 13, stroke = 1.5 }: { d: string; size?: number; stroke
 const I = {
   copy: 'M8 8h11v13H8z M5 16V3h11',
   kebab: 'M12 5.01v-.02 M12 12.01v-.02 M12 19.01v-.02',
-  split: 'M8 3.5v17 M16 3.5v17 M3.5 3.5h17v17h-17z',
-  wrap: 'M3.5 6h17 M3.5 10h17M3.5 14h10a3 3 0 1 1 0 6H11 M13.5 17.5L11 20l2.5 2.5 M3.5 18h4',
   fold: 'M8.5 3.5L12 7l3.5-3.5 M8.5 20.5L12 17l3.5 3.5',
   unfold: 'M8.5 7L12 3.5 15.5 7 M8.5 17l3.5 3.5 3.5-3.5',
   warnTri: 'M12 4l9.5 16.5h-19z M12 10v4.5 M12 17.8h.01',
@@ -51,19 +57,6 @@ const I = {
   caret: 'M7 10l5 5 5-5',
   diff: 'M8.5 4v13 M8.5 4l-3 3 M8.5 4l3 3 M15.5 20V7 M15.5 20l3-3 M15.5 20l-3-3',
 };
-
-const WRAP_KEY = 'gian.sheet.wordwrap';
-const SPLIT_KEY = 'gian.sheet.diffsplit';
-
-function readBool(key: string, fallback: boolean): boolean {
-  try {
-    const v = localStorage.getItem(key);
-    if (v === null) return fallback;
-    return v === 'on' || v === 'true';
-  } catch {
-    return fallback;
-  }
-}
 
 /** Status badge for one changed file — letter + color double-code the kind
  *  (never color alone). */
@@ -80,12 +73,8 @@ function statusBadge(file: GitHistoryChangedFile): { cls: string; txt: string } 
   }
 }
 
-interface FileState {
-  status: 'idle' | 'loading' | 'loaded' | 'error';
-  diff: GitHistoryFileDiff | null;
-}
-
 function FileDiffBlock({
+  ownerKey,
   workingTreeId,
   sha,
   file,
@@ -94,6 +83,7 @@ function FileDiffBlock({
   collapsed,
   onToggle,
 }: {
+  ownerKey: string;
   workingTreeId: string;
   sha: string;
   file: GitHistoryChangedFile;
@@ -103,32 +93,31 @@ function FileDiffBlock({
   onToggle: () => void;
 }) {
   const t = useT();
-  const [state, setState] = useState<FileState>({ status: 'idle', diff: null });
+  const viewState = useHistoryCommitState(ownerKey);
+  const state = viewState.files[file.path] ?? { status: 'idle', diff: null };
   const anchorRef = useRef<HTMLDivElement>(null);
-  const statusRef = useRef<FileState['status']>('idle');
+  const statusRef = useRef(state.status);
   const requestSeq = useRef(0);
+
+  useEffect(() => { statusRef.current = state.status; }, [state.status]);
 
   const startLoad = useCallback(() => {
     if (statusRef.current === 'loading' || statusRef.current === 'loaded') return;
     statusRef.current = 'loading';
     const seq = ++requestSeq.current;
-    setState({ status: 'loading', diff: null });
+    setHistoryCommitFileState(ownerKey, file.path, { status: 'loading', diff: null });
     loadGitHistoryFileDiff(workingTreeId, sha, file.path)
       .then(diff => {
         if (requestSeq.current !== seq) return;
         statusRef.current = 'loaded';
-        setState({ status: 'loaded', diff });
+        setHistoryCommitFileState(ownerKey, file.path, { status: 'loaded', diff });
       })
       .catch(() => {
         if (requestSeq.current !== seq) return;
         statusRef.current = 'error';
-        setState({ status: 'error', diff: null });
+        setHistoryCommitFileState(ownerKey, file.path, { status: 'error', diff: null });
       });
-  }, [workingTreeId, sha, file.path]);
-
-  useEffect(() => () => {
-    requestSeq.current += 1;
-  }, []);
+  }, [ownerKey, workingTreeId, sha, file.path]);
 
   /* Viewport trigger: load when the placeholder scrolls near the visible
    *  area. Binary files never fetch — there is no textual diff to show. */
@@ -219,57 +208,53 @@ export function HistoryCommitBody({ tab }: { tab: SheetTab }) {
   const t = useT();
   const workingTreeId = tab.workingTreeId ?? null;
   const sha = tab.commitSha ?? '';
-  const [detail, setDetail] = useState<GitHistoryCommitDetail | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [collapsed, setCollapsed] = useState<Record<number, boolean>>({});
+  const ownerKey = historyCommitOwnerKey(tab.sessionId, workingTreeId, sha)
+    ?? JSON.stringify([null, tab.id, workingTreeId, sha]);
+  const viewState = useHistoryCommitState(ownerKey);
+  const { detail, loadError, loading, collapsed } = viewState;
   const [menuOpen, setMenuOpen] = useState(false);
-  const [wrap, setWrap] = useState(() => readBool(WRAP_KEY, true));
-  const [split, setSplit] = useState(() => readBool(SPLIT_KEY, false));
-  const detailRequestSeq = useRef(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const { wrap, split, toggleWrap, toggleSplit } = useDiffViewPreferences();
 
   const load = useCallback(() => {
-    const seq = ++detailRequestSeq.current;
     if (!workingTreeId || !sha) {
-      setLoading(false);
-      setLoadError(t('history.loadFailed'));
+      patchHistoryCommitState(ownerKey, {
+        requested: true,
+        loading: false,
+        loadError: t('history.loadFailed'),
+      });
       return;
     }
-    setLoading(true);
-    setLoadError(null);
-    setDetail(null);
-    setCollapsed({});
+    patchHistoryCommitState(ownerKey, {
+      requested: true,
+      loading: true,
+      loadError: null,
+      detail: null,
+    });
     loadGitHistoryCommit(workingTreeId, sha)
       .then(d => {
-        if (detailRequestSeq.current !== seq) return;
-        setDetail(d);
-        setLoading(false);
+        patchHistoryCommitState(ownerKey, { detail: d, loading: false });
       })
       .catch(err => {
-        if (detailRequestSeq.current !== seq) return;
-        setLoadError(err instanceof Error ? err.message : String(err));
-        setLoading(false);
+        patchHistoryCommitState(ownerKey, {
+          loadError: err instanceof Error ? err.message : String(err),
+          loading: false,
+        });
       });
-  }, [workingTreeId, sha, t]);
+  }, [ownerKey, workingTreeId, sha, t]);
 
   useEffect(() => {
-    load();
-    return () => { detailRequestSeq.current += 1; };
-  }, [load]);
+    if (!getHistoryCommitState(ownerKey).requested) load();
+  }, [ownerKey, load]);
 
-  function togglePref(kind: 'wrap' | 'split'): void {
-    if (kind === 'wrap') {
-      setWrap(w => {
-        try { localStorage.setItem(WRAP_KEY, w ? 'off' : 'on'); } catch { /* storage disabled */ }
-        return !w;
-      });
-    } else {
-      setSplit(s => {
-        try { localStorage.setItem(SPLIT_KEY, s ? 'off' : 'on'); } catch { /* storage disabled */ }
-        return !s;
-      });
-    }
-  }
+  useEffect(() => {
+    const scroller = rootRef.current?.closest<HTMLElement>('.sheet-content');
+    if (scroller) scroller.scrollTop = viewState.scrollTop;
+    if (!scroller) return;
+    const onScroll = () => saveHistoryCommitScroll(ownerKey, scroller.scrollTop);
+    scroller.addEventListener('scroll', onScroll);
+    return () => scroller.removeEventListener('scroll', onScroll);
+  }, [ownerKey]);
 
   function copy(text: string, key: string): void {
     try { void navigator.clipboard?.writeText(text).catch(() => undefined); } catch { /* clipboard blocked */ }
@@ -282,21 +267,21 @@ export function HistoryCommitBody({ tab }: { tab: SheetTab }) {
     ? detail.files.reduce((acc, f) => ({ add: acc.add + f.added, del: acc.del + f.removed }), { add: 0, del: 0 })
     : { add: 0, del: 0 };
   const allCollapsed = !!detail && detail.files.length > 0
-    && detail.files.every((_, i) => collapsed[i] === true);
+    && detail.files.every(file => collapsed[file.path] === true);
 
   function toggleAllFiles(): void {
     if (!detail) return;
     if (allCollapsed) {
-      setCollapsed({});
+      patchHistoryCommitState(ownerKey, { collapsed: {} });
     } else {
-      const next: Record<number, boolean> = {};
-      detail.files.forEach((_, i) => { next[i] = true; });
-      setCollapsed(next);
+      const next: Record<string, boolean> = {};
+      detail.files.forEach(file => { next[file.path] = true; });
+      patchHistoryCommitState(ownerKey, { collapsed: next });
     }
   }
 
   return (
-    <div className={`cs-root${wrap ? '' : ' cs-nowrap'}`}>
+    <div className={`cs-root${wrap ? '' : ' cs-nowrap'}`} ref={rootRef}>
       {tab.orphaned && (
         <div className="cs-banner" role="alert">
           <Icon d={I.warnTri} stroke={1.7} />
@@ -357,18 +342,8 @@ export function HistoryCommitBody({ tab }: { tab: SheetTab }) {
                       onClick={toggleAllFiles}>
                 <Icon d={allCollapsed ? I.unfold : I.fold} size={12} stroke={1.6} />
               </button>
-              <button className={`sheet-tabs-act${split ? ' active' : ''}`} aria-pressed={split}
-                      title={split ? t('sheet.diffview.toUnified') : t('sheet.diffview.toSplit')}
-                      aria-label={split ? t('sheet.diffview.toUnified') : t('sheet.diffview.toSplit')}
-                      onClick={() => togglePref('split')}>
-                <Icon d={I.split} size={12} stroke={1.6} />
-              </button>
-              <button className={`sheet-tabs-act${wrap ? ' active' : ''}`} aria-pressed={wrap}
-                      title={wrap ? t('sheet.wordwrap.disable') : t('sheet.wordwrap.enable')}
-                      aria-label={wrap ? t('sheet.wordwrap.disable') : t('sheet.wordwrap.enable')}
-                      onClick={() => togglePref('wrap')}>
-                <Icon d={I.wrap} size={12} stroke={1.6} />
-              </button>
+              <DiffViewControls split={split} wrap={wrap}
+                                onToggleSplit={toggleSplit} onToggleWrap={toggleWrap} />
               <span className="h-menu-anchor">
                 <button className={`sheet-tabs-act${menuOpen ? ' active' : ''}`} title={t('sheet.more')}
                         aria-label={t('sheet.more')} aria-haspopup="menu" aria-expanded={menuOpen}
@@ -392,16 +367,21 @@ export function HistoryCommitBody({ tab }: { tab: SheetTab }) {
             </span>
           </div>
           <div className="cs-files">
-            {detail.files.map((f, i) => (
+            {detail.files.map(f => (
               <FileDiffBlock
-                key={`${sha}:${f.oldPath ?? ''}->${f.path}`}
+                key={`${ownerKey}:${f.oldPath ?? ''}->${f.path}`}
+                ownerKey={ownerKey}
                 workingTreeId={workingTreeId!}
                 sha={sha}
                 file={f}
                 split={split}
                 wrap={wrap}
-                collapsed={collapsed[i] ?? false}
-                onToggle={() => setCollapsed(c => ({ ...c, [i]: !(c[i] ?? false) }))}
+                collapsed={collapsed[f.path] ?? false}
+                onToggle={() => setHistoryCommitCollapsed(
+                  ownerKey,
+                  f.path,
+                  !(collapsed[f.path] ?? false),
+                )}
               />
             ))}
           </div>

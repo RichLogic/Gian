@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { makeTestApp } from './fixtures/test-app.js';
 import { loadConfig, saveConfig } from '../src/storage/config.js';
+import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 
 test('UI-ACCENT-001 · invalid accent falls back to theme default', async () => {
   const ctx = await makeTestApp();
@@ -95,6 +96,46 @@ test('UI-ACCENT-001 · defaults when nothing is set', async () => {
   assert.equal(cfg.font_scale_chrome, 'md');
   assert.equal(cfg.font_scale_chat, 'md');
   assert.equal(cfg.font_scale_code, 'md');
+  assert.deepEqual(cfg.terminal, DEFAULT_TERMINAL_PREFERENCES);
+  await ctx.cleanup?.();
+});
+
+test('TERM-001 · terminal preferences round-trip as JSON', async () => {
+  const ctx = await makeTestApp();
+  const terminal = {
+    ...DEFAULT_TERMINAL_PREFERENCES,
+    font_family: 'menlo' as const,
+    font_size: 16,
+    line_height: 1.35,
+    cursor_style: 'bar' as const,
+    cursor_blink: false,
+    scrollback_lines: 10_000 as const,
+    shell: '/bin/bash',
+    start_directory: 'home' as const,
+  };
+  saveConfig(ctx.db, { terminal });
+  assert.deepEqual(loadConfig(ctx.db).terminal, terminal);
+  const row = ctx.db.prepare(`SELECT value FROM config WHERE key = 'terminal'`).get() as { value: string };
+  assert.deepEqual(JSON.parse(row.value), terminal);
+  await ctx.cleanup?.();
+});
+
+test('TERM-001 · malformed terminal preferences fall back field by field', async () => {
+  const ctx = await makeTestApp();
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('terminal', ?)`)
+    .run(JSON.stringify({
+      ...DEFAULT_TERMINAL_PREFERENCES,
+      font_size: 99,
+      line_height: 'wide',
+      cursor_style: 'beam',
+      scrollback_lines: 123,
+      start_directory: 'root',
+      cursor_blink: false,
+    }));
+  assert.deepEqual(loadConfig(ctx.db).terminal, {
+    ...DEFAULT_TERMINAL_PREFERENCES,
+    cursor_blink: false,
+  });
   await ctx.cleanup?.();
 });
 

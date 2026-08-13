@@ -36,6 +36,7 @@ export interface WsHandlerDeps {
 interface ClientState {
   authed: boolean;
   clientId: string;
+  mode: 'full' | 'attention';
 }
 
 export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db }: WsHandlerDeps) {
@@ -80,7 +81,7 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
 
   return {
     onOpen(_evt: Event, ws: WSContext) {
-      states.set(ws, { authed: false, clientId: randomUUID() });
+      states.set(ws, { authed: false, clientId: randomUUID(), mode: 'full' });
     },
 
     onClose(_evt: WsCloseEvent, ws: WSContext) {
@@ -110,6 +111,10 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
           ws.close(4001, 'auth_failed');
           return;
         }
+        if (parsed.client !== undefined && parsed.client !== 'attention') {
+          ws.close(4002, 'invalid_client_mode');
+          return;
+        }
         if (AUTH_REQUIRED) {
           const username = getUsernameForToken(parsed.token);
           if (!username) {
@@ -117,16 +122,24 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
             return;
           }
           state.authed = true;
-          broadcaster.add(ws);
+          state.mode = parsed.client === 'attention' ? 'attention' : 'full';
+          broadcaster.add(ws, state.mode);
           broadcaster.send(ws, { type: 'auth_ok', user: username });
         } else {
           state.authed = true;
-          broadcaster.add(ws);
+          state.mode = parsed.client === 'attention' ? 'attention' : 'full';
+          broadcaster.add(ws, state.mode);
           broadcaster.send(ws, { type: 'auth_ok', user: 'dev' });
         }
         // Send authoritative state immediately after auth so the client can
         // skip REST fetches and re-sync after reconnect.
-        await sendStateSync(ws);
+        if (state.mode === 'full') await sendStateSync(ws);
+        return;
+      }
+
+      if (state.mode === 'attention') {
+        ws.close(4003, 'attention_read_only');
+        broadcaster.remove(ws);
         return;
       }
 
@@ -232,6 +245,8 @@ function dispatchErrorCode(messageType: string): string {
       return 'SESSION_CREATE_FAILED';
     case 'session:stop':
       return 'SESSION_STOP_FAILED';
+    case 'session:assign_task':
+      return 'SESSION_ASSIGN_TASK_FAILED';
     case 'queue:send_now':
       return 'QUEUE_SEND_NOW_FAILED';
     case 'task:delete':
@@ -261,6 +276,7 @@ async function dispatch(
         model: msg.model,
         approval_mode: msg.approval_mode,
         ...(msg.thinking_effort !== undefined ? { thinking_effort: msg.thinking_effort } : {}),
+        ...(msg.service_tier !== undefined ? { service_tier: msg.service_tier } : {}),
         ...(msg.name !== undefined ? { name: msg.name } : {}),
       });
       broadcaster.send(ws, {
@@ -276,6 +292,10 @@ async function dispatch(
     }
     case 'session:archive': {
       sessions.archiveSession(msg.session_id, msg.archived);
+      return;
+    }
+    case 'session:assign_task': {
+      sessions.assignTask(msg.session_id, msg.task_id);
       return;
     }
     case 'session:pin': {

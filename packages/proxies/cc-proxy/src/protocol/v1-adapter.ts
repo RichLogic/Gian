@@ -156,6 +156,12 @@ function permissionMode(
 export class ClaudeProtocolV1Adapter {
   private readonly sessions = new Map<string, AttachedSession>();
   private readonly sessionByServiceId = new Map<string, AttachedSession>();
+  /** gian.proxy/1 exposes one opaque catalog id, while the legacy Claude
+   *  service keeps a separate provider-facing model value. Remember the
+   *  relationship so a catalog selection round-trips back to the exact value
+   *  Claude CLI expects (for example claude-alias-opus -> opus). */
+  private readonly runtimeModelByCatalogId = new Map<string, string>();
+  private catalogModelsLoaded = false;
   private readonly turnsByRequest = new Map<string, HostTurnRef>();
   private readonly requestByTurn = new Map<string, string>();
   private readonly activeTurnBySession = new Map<string, string>();
@@ -263,6 +269,7 @@ export class ClaudeProtocolV1Adapter {
 
   private async catalog() {
     const capabilities = await this.service.listCapabilities();
+    this.rememberCatalogModels(capabilities.models);
     return {
       models: capabilities.models.map(model => ({
         id: model.id,
@@ -298,9 +305,10 @@ export class ClaudeProtocolV1Adapter {
         false,
       );
     }
+    const runtimeModel = await this.resolveRuntimeModel(params.model);
     const result = await this.service.createSession({
       cwd: params.cwd,
-      ...(params.model !== undefined ? { model: params.model } : {}),
+      ...(runtimeModel !== undefined ? { model: runtimeModel } : {}),
       ...(params.nativeSession ? { claudeSessionId: params.nativeSession.id } : {}),
     });
     const serviceSession = result.session;
@@ -311,7 +319,9 @@ export class ClaudeProtocolV1Adapter {
       streamId: randomUUID(),
       cwd: params.cwd,
       status: serviceSession.status,
-      model: serviceSession.model,
+      // Keep the protocol-facing catalog id on the attached session. The
+      // service session intentionally stores the resolved provider value.
+      model: params.model === undefined ? serviceSession.model : params.model,
       mode: params.mode ?? null,
       displayName: null,
       lastError: serviceSession.lastError,
@@ -399,14 +409,16 @@ export class ClaudeProtocolV1Adapter {
     this.openToolsByTurn.set(turnKey, new Set());
     this.historyWatchers.get(session.id)?.pause();
     try {
+      const runtimeModel = await this.resolveRuntimeModel(params.config.model);
       await this.service.startTurn({
         sessionId: session.serviceSessionId,
         input: claudeInput(params.input),
         permissionMode: permissionMode(params.config.mode ?? session.mode, params.policy),
         ...(session.displayName ? { displayName: session.displayName } : {}),
-        ...(params.config.model !== undefined ? { model: params.config.model } : {}),
+        ...(runtimeModel !== undefined ? { model: runtimeModel } : {}),
         ...(params.config.effort !== undefined ? { thinking: params.config.effort } : {}),
       }, requestId);
+      if (params.config.model !== undefined) session.model = params.config.model;
       return { accepted: true, turnId: params.turnId };
     } catch (error) {
       this.ledger.forget(params);
@@ -760,6 +772,32 @@ export class ClaudeProtocolV1Adapter {
 
   private turnKey(sessionId: string, turnId: string): string {
     return `${sessionId}\u0000${turnId}`;
+  }
+
+  private rememberCatalogModels(
+    models: Awaited<ReturnType<CcProxyService['listCapabilities']>>['models'],
+  ): void {
+    this.runtimeModelByCatalogId.clear();
+    for (const model of models) {
+      this.runtimeModelByCatalogId.set(model.id, model.model);
+    }
+    this.catalogModelsLoaded = true;
+  }
+
+  /** Resolve an opaque gian.proxy/1 catalog id to the provider-facing model
+   *  value. Direct/raw model strings from older persisted Host configuration
+   *  remain valid for backward compatibility. */
+  private async resolveRuntimeModel(
+    modelId: string | null | undefined,
+  ): Promise<string | null | undefined> {
+    if (modelId === undefined || modelId === null) return modelId;
+    if (!this.catalogModelsLoaded) {
+      const capabilities = await this.service.listCapabilities();
+      this.rememberCatalogModels(capabilities.models);
+    }
+    return this.runtimeModelByCatalogId.has(modelId)
+      ? this.runtimeModelByCatalogId.get(modelId)!
+      : modelId;
   }
 
   private updateSession(session: AttachedSession, patch: Partial<AttachedSession>): void {

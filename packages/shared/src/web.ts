@@ -17,6 +17,9 @@ import type { InputItem } from './proxy.js';
 export interface AuthMessage {
   type: 'auth';
   token: string;
+  /** Attention clients are read-only and receive no state/transcript/terminal
+   *  payloads. Omitted preserves the full legacy client contract. */
+  client?: 'attention';
 }
 
 export interface AuthOkMessage {
@@ -60,6 +63,32 @@ export interface EventEnvelope {
 
 export interface EventMessage extends EventEnvelope {
   type: 'event';
+}
+
+/**
+ * Lightweight, global signal for events that may need the user's attention.
+ * Unlike `EventMessage`, this intentionally carries no provider-native/raw
+ * payload and is not scoped to the transcript subscription. Desktop clients
+ * can therefore observe background sessions without receiving their full
+ * transcripts.
+ */
+export type AttentionKind = 'turn-completed' | 'approval' | 'question' | 'error';
+
+export interface AttentionMessage {
+  type: 'attention';
+  /** Stable across duplicate delivery attempts for the same display event. */
+  id: string;
+  session_id: string;
+  /** 1-based Host turn number, suitable for navigation. */
+  turn: number;
+  kind: AttentionKind;
+  /** Unix milliseconds copied from the canonical display event. */
+  timestamp: number;
+  /** Short, notification-safe presentation text. */
+  title: string;
+  /** Notification-safe summary, capped by the Host to a small UTF-8 budget. */
+  body: string;
+  provider: Executor;
 }
 
 export interface SessionUpdatedMessage {
@@ -255,6 +284,7 @@ export type ServerToClientMessage =
   | AuthOkMessage
   | StateSyncMessage
   | EventMessage
+  | AttentionMessage
   | SessionUpdatedMessage
   | SessionHistoryRebuiltMessage
   | SessionCreatedMessage
@@ -286,6 +316,8 @@ export interface SessionCreateMessage {
   /** Optional thinking effort for the new session (new-session composer
    *  chip); omitted/null falls back to the configured default. */
   thinking_effort?: import('./model.js').ThinkingEffort | null;
+  /** Codex-only Fast service tier. Omitted/null keeps the standard tier. */
+  service_tier?: 'fast' | null;
   /** Correlation id — see `OperationResultMessage`. */
   request_id?: string;
 }
@@ -395,6 +427,15 @@ export interface SessionArchiveMessage {
   type: 'session:archive';
   session_id: string;
   archived: boolean;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
+}
+
+/** Move an active standalone coding session under an open Task. */
+export interface SessionAssignTaskMessage {
+  type: 'session:assign_task';
+  session_id: string;
+  task_id: string;
   /** Correlation id — see `OperationResultMessage`. */
   request_id?: string;
 }
@@ -593,6 +634,7 @@ export type ClientToServerMessage =
   | SessionRecoverMessage
   | SessionRenameMessage
   | SessionArchiveMessage
+  | SessionAssignTaskMessage
   | SessionPinMessage
   | SessionDeleteMessage
   | TaskCreateMessage

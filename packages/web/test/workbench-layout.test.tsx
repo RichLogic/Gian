@@ -42,7 +42,6 @@ function useHarness(chatPanel: ChatPanelTarget | null = null) {
     chatPanel,
     filesInspectorSuppressed: false,
     p3Collapsed,
-    setP3Collapsed,
     groupOfRail: GROUP_OF_RAIL,
   });
   return { p3Collapsed, setP3Collapsed, layout };
@@ -105,7 +104,6 @@ describe('useWorkbenchLayout panel-3 gating', () => {
         chatPanel: null,
         filesInspectorSuppressed: false,
         p3Collapsed,
-        setP3Collapsed,
         groupOfRail: GROUP_OF_RAIL,
       });
       return layout;

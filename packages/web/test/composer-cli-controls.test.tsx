@@ -202,6 +202,30 @@ describe('CLI-aligned composer controls', () => {
     expect(await screen.findByText('/review')).toBeTruthy();
   });
 
+  it('renders the Grok executor mark for Grok-native model options', async () => {
+    const options: NativeConfigOption[] = [{
+      id: 'model',
+      name: 'Model',
+      category: 'model',
+      type: 'select',
+      currentValue: 'grok-build',
+      choices: [{ value: 'grok-build', label: 'Grok Build' }],
+      scope: 'session',
+    }];
+    renderComposer(makeSession('grok', {
+      native_config_options: options,
+      executor_config: {
+        schemaVersion: 1,
+        values: { model: 'grok-build' },
+      },
+    }));
+
+    await waitFor(() => {
+      expect(document.querySelector('.cmp-executor-mark.grok')).toBeTruthy();
+    });
+    expect(document.querySelector('.cmp-executor-mark.kimi')).toBeNull();
+  });
+
   it('removes slash and Remote buttons while keeping typed slash discovery', async () => {
     const user = userEvent.setup();
     renderComposer(makeSession('claude'));

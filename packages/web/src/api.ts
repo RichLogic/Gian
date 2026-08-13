@@ -6,6 +6,7 @@ import type {
   Executor,
   Session,
   SystemConfig,
+  TerminalOptions,
   Task,
   Workspace,
   OnboardingState,
@@ -465,7 +466,7 @@ function cacheAgent(agent: AgentInstallStatus): AgentInstallStatus {
   const current = agentCache?.agents ?? [];
   agentCache = {
     agents: [agent, ...current.filter(candidate => candidate.id !== agent.id)]
-      .sort((a, b) => ['claude', 'codex', 'kimi'].indexOf(a.id) - ['claude', 'codex', 'kimi'].indexOf(b.id)),
+      .sort((a, b) => ['claude', 'codex', 'kimi', 'grok'].indexOf(a.id) - ['claude', 'codex', 'kimi', 'grok'].indexOf(b.id)),
     expiresAt: Date.now() + AGENT_CACHE_TTL_MS,
   };
   return agent;
@@ -797,6 +798,7 @@ export async function createSubtask(
     model?: string | null;
     approval_mode?: import('@gian/shared').ApprovalMode;
     thinking_effort?: import('@gian/shared').ThinkingEffort | null;
+    service_tier?: 'fast' | null;
   },
 ): Promise<Session | null> {
   try {
@@ -858,6 +860,12 @@ export async function loadSettings(): Promise<SystemConfig | null> {
   const res = await fetch('/api/settings');
   if (!res.ok) return null;
   return (await res.json()) as SystemConfig;
+}
+
+export async function loadTerminalOptions(): Promise<TerminalOptions> {
+  const res = await fetch('/api/settings/terminal-options');
+  if (!res.ok) throw new Error(`Failed to load terminal options (${res.status})`);
+  return (await res.json()) as TerminalOptions;
 }
 
 export async function saveSettings(partial: Partial<SystemConfig>): Promise<SystemConfig | null> {

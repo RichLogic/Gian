@@ -1,6 +1,7 @@
 // Coverage for traceability row SES-001 (Web form payload dimension):
 //   The new-session composer collects workspace, agent (executor), an
-//   optional title, capability chips (model / thinking / mode, v2), and a
+//   optional title, capability chips (model / thinking / mode / Codex Fast,
+//   v2), and a
 //   first message. `buildSessionCreatePayload` emits workspaceId / name /
 //   executor plus ONLY the chip values the user explicitly picked — unset
 //   chips stay out so the host's configured defaults apply, and Kimi never
@@ -41,7 +42,7 @@ describe('SES-001: minimal session payload from form state', () => {
   });
 
   it('every executor round-trips', () => {
-    for (const exec of ['claude', 'codex', 'kimi'] as const) {
+    for (const exec of ['claude', 'codex', 'kimi', 'grok'] as const) {
       const payload = buildSessionCreatePayload(formState({ executor: exec }));
       expect(payload.executor).toBe(exec);
     }
@@ -60,6 +61,7 @@ describe('SES-001: minimal session payload from form state', () => {
       model: 'gpt-5',
       thinkingEffort: 'high',
       approvalMode: 'auto',
+      serviceTier: 'fast',
     }));
     expect(payload).toEqual({
       workspaceId: 'ws-1',
@@ -68,12 +70,29 @@ describe('SES-001: minimal session payload from form state', () => {
       model: 'gpt-5',
       thinkingEffort: 'high',
       approvalMode: 'auto',
+      serviceTier: 'fast',
     });
+  });
+
+  it('drops Fast for non-Codex executors', () => {
+    const payload = buildSessionCreatePayload(formState({
+      executor: 'claude',
+      serviceTier: 'fast',
+    })) as Record<string, unknown>;
+    expect(payload.serviceTier).toBeUndefined();
   });
 
   it('drops approvalMode for kimi even when set (executor-native configuration)', () => {
     const payload = buildSessionCreatePayload(formState({
       executor: 'kimi',
+      approvalMode: 'auto',
+    })) as Record<string, unknown>;
+    expect(payload.approvalMode).toBeUndefined();
+  });
+
+  it('drops approvalMode for grok even when set (executor-native configuration)', () => {
+    const payload = buildSessionCreatePayload(formState({
+      executor: 'grok',
       approvalMode: 'auto',
     })) as Record<string, unknown>;
     expect(payload.approvalMode).toBeUndefined();

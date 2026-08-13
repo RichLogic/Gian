@@ -119,7 +119,9 @@ export interface SlashListResult {
   commands: SlashCommand[];
 }
 
-export type ProxyCapabilities = CcCapabilities | CodexCapabilities | KimiCapabilities;
+export type GrokCapabilities = KimiCapabilities;
+
+export type ProxyCapabilities = CcCapabilities | CodexCapabilities | KimiCapabilities | GrokCapabilities;
 
 export interface InitializeResult {
   mode: 'spawn';

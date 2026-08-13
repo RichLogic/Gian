@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   AgentInstallStatus,
@@ -6,6 +6,7 @@ import type {
   ProxyCapabilities,
   SystemConfig,
 } from '@gian/shared';
+import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 import { SettingsBody } from '../src/components/SettingsBody.js';
 import { renderWithOperations } from './operation-test-utils.js';
 import { Toaster } from '../src/components/Toaster.js';
@@ -37,6 +38,7 @@ function config(): SystemConfig {
     font_scale_chrome: 'md',
     font_scale_chat: 'md',
     font_scale_code: 'md',
+    terminal: { ...DEFAULT_TERMINAL_PREFERENCES },
     default_claude_model: '',
     default_claude_effort: '',
     default_codex_model: '',
@@ -57,7 +59,7 @@ function agent(id: Executor, name: string): AgentInstallStatus {
       path: `/proxy/${id}`,
       version: '0.1.0',
       source: 'development',
-      defaults: id === 'kimi'
+      defaults: id === 'kimi' || id === 'grok'
         ? { model: '', thinking: '', mode: '' }
         : { model: `${id}-model`, thinking: 'high', mode: 'ask' },
     },
@@ -66,7 +68,7 @@ function agent(id: Executor, name: string): AgentInstallStatus {
 }
 
 function capabilities(id: Executor): ProxyCapabilities {
-  if (id === 'kimi') {
+  if (id === 'kimi' || id === 'grok') {
     return {
       protocolVersion: 'acp/1',
       models: [],
@@ -109,6 +111,7 @@ describe('SettingsBody Executors', () => {
     agent('claude', 'Claude Code'),
     agent('codex', 'Codex'),
     agent('kimi', 'Kimi Code'),
+    agent('grok', 'Grok Build'),
   ];
 
   beforeEach(() => {
@@ -119,11 +122,15 @@ describe('SettingsBody Executors', () => {
     vi.mocked(api.loadProxyCapabilities).mockReset().mockImplementation(async id => capabilities(id));
     vi.mocked(api.setAgentCliPath).mockReset().mockImplementation(async id => agent(
       id,
-      id === 'claude' ? 'Claude Code' : id === 'codex' ? 'Codex' : 'Kimi Code',
+      id === 'claude' ? 'Claude Code'
+        : id === 'codex' ? 'Codex'
+          : id === 'grok' ? 'Grok Build' : 'Kimi Code',
     ));
     vi.mocked(api.setAgentProxyDefaults).mockReset().mockImplementation(async id => agent(
       id,
-      id === 'claude' ? 'Claude Code' : id === 'codex' ? 'Codex' : 'Kimi Code',
+      id === 'claude' ? 'Claude Code'
+        : id === 'codex' ? 'Codex'
+          : id === 'grok' ? 'Grok Build' : 'Kimi Code',
     ));
   });
 
@@ -140,12 +147,13 @@ describe('SettingsBody Executors', () => {
     );
   }
 
-  it('renders exactly three cards with Proxy-owned defaults inside each card', async () => {
+  it('renders exactly four cards with Proxy-owned defaults inside each card', async () => {
     renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
 
     await waitFor(() => expect(screen.getAllByText('Claude Code')).toHaveLength(1));
     expect(screen.getAllByText('Codex')).toHaveLength(1);
     expect(screen.getAllByText('Kimi Code')).toHaveLength(1);
+    expect(screen.getAllByText('Grok Build')).toHaveLength(1);
     // Claude + Codex: model, thinking/effort, mode. Kimi advertises no
     // models/modes, so it renders no defaults rows at all (2026-08-04).
     await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(6));
@@ -223,8 +231,10 @@ describe('SettingsBody Executors', () => {
     renderSettingsWithToaster();
 
     const pathInput = await screen.findByDisplayValue('/bin/claude');
-    fireEvent.change(pathInput, { target: { value: '/Users/test/bin/claude-mix' } });
-    fireEvent.blur(pathInput);
+    act(() => {
+      fireEvent.change(pathInput, { target: { value: '/Users/test/bin/claude-mix' } });
+      fireEvent.blur(pathInput);
+    });
 
     expect(await screen.findByRole(
       'alertdialog',

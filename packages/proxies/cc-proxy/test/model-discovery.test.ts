@@ -22,6 +22,14 @@ function writeSettings(dir: string, contents: string): string {
   return path;
 }
 
+function writeGatewayModelsCache(dir: string, contents: string): string {
+  const cacheDir = join(dir, 'cache');
+  mkdirSync(cacheDir, { recursive: true });
+  const path = join(cacheDir, 'gateway-models.json');
+  writeFileSync(path, contents, 'utf8');
+  return path;
+}
+
 // ---------------------------------------------------------------------------
 // extractClaudeConfigDirFromScript
 // ---------------------------------------------------------------------------
@@ -276,6 +284,138 @@ test('discoverModels builds the menu from settings availableModels, Default firs
     assert.equal(new Set(rest.map((m) => m.id)).size, rest.length);
   } finally {
     rmSync(confRoot, { recursive: true, force: true });
+  }
+});
+
+test('discoverModels builds the menu from the matching gateway model cache', async () => {
+  const confRoot = makeTmpDir();
+  try {
+    const baseUrl = 'http://127.0.0.1:8316';
+    const gatewayModels = [
+      'claude-router-kimi-k3[1m]',
+      'claude-router-kimi-k3-256k',
+      'claude-router-deepseek-v4-flash[1m]',
+    ];
+    writeSettings(confRoot, JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: `  ${baseUrl}  `,
+        CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
+      },
+    }));
+    writeGatewayModelsCache(confRoot, JSON.stringify({
+      baseUrl,
+      fetchedAt: 1_786_525_841_181,
+      models: gatewayModels.map((id) => ({ id, display_name: id })),
+    }));
+
+    const models = await discoverModelsWith(confRoot);
+
+    assert.deepEqual(models.map((m) => m.model), ['', ...gatewayModels]);
+    assert.deepEqual(models.map((m) => m.displayName), ['Default', ...gatewayModels]);
+    assert.equal(models[0]?.isDefault, true);
+    for (const model of models.slice(1)) {
+      assert.match(model.id, /^claude-gateway-/);
+      assert.equal(model.isDefault, false);
+      assert.equal(model.description, 'From Claude gateway model discovery cache.');
+    }
+  } finally {
+    rmSync(confRoot, { recursive: true, force: true });
+  }
+});
+
+test('discoverModels ignores a gateway model cache for a different base URL', async () => {
+  const confRoot = makeTmpDir();
+  try {
+    writeSettings(confRoot, JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:8316',
+        CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: 'true',
+      },
+    }));
+    writeGatewayModelsCache(confRoot, JSON.stringify({
+      baseUrl: 'http://127.0.0.1:9417',
+      models: [{ id: 'wrong-gateway-model', display_name: 'Wrong gateway model' }],
+    }));
+
+    const models = await discoverModelsWith(confRoot);
+
+    assert.deepEqual(models.map((m) => m.id), [
+      'claude-default',
+      'claude-alias-opus',
+      'claude-alias-sonnet',
+      'claude-alias-haiku',
+    ]);
+  } finally {
+    rmSync(confRoot, { recursive: true, force: true });
+  }
+});
+
+test('discoverModels ignores a matching but disabled gateway model cache', async () => {
+  const confRoot = makeTmpDir();
+  try {
+    const baseUrl = 'http://127.0.0.1:8316';
+    writeSettings(confRoot, JSON.stringify({
+      env: {
+        ANTHROPIC_BASE_URL: baseUrl,
+        CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '0',
+      },
+    }));
+    writeGatewayModelsCache(confRoot, JSON.stringify({
+      baseUrl,
+      models: [{ id: 'stale-gateway-model', display_name: 'Stale gateway model' }],
+    }));
+
+    const models = await discoverModelsWith(confRoot);
+
+    assert.deepEqual(models.map((m) => m.id), [
+      'claude-default',
+      'claude-alias-opus',
+      'claude-alias-sonnet',
+      'claude-alias-haiku',
+    ]);
+  } finally {
+    rmSync(confRoot, { recursive: true, force: true });
+  }
+});
+
+test('discoverModels ignores malformed or invalid gateway model caches', async (t) => {
+  const invalidCaches = [
+    ['malformed JSON', 'not json {'],
+    ['missing models array', JSON.stringify({ baseUrl: 'http://127.0.0.1:8316' })],
+    ['non-object model entry', JSON.stringify({
+      baseUrl: 'http://127.0.0.1:8316',
+      models: ['not-an-object'],
+    })],
+    ['missing display name', JSON.stringify({
+      baseUrl: 'http://127.0.0.1:8316',
+      models: [{ id: 'incomplete-model' }],
+    })],
+  ] as const;
+
+  for (const [name, cacheContents] of invalidCaches) {
+    await t.test(name, async () => {
+      const confRoot = makeTmpDir();
+      try {
+        writeSettings(confRoot, JSON.stringify({
+          env: {
+            ANTHROPIC_BASE_URL: 'http://127.0.0.1:8316',
+            CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: true,
+          },
+        }));
+        writeGatewayModelsCache(confRoot, cacheContents);
+
+        const models = await discoverModelsWith(confRoot);
+
+        assert.deepEqual(models.map((m) => m.id), [
+          'claude-default',
+          'claude-alias-opus',
+          'claude-alias-sonnet',
+          'claude-alias-haiku',
+        ]);
+      } finally {
+        rmSync(confRoot, { recursive: true, force: true });
+      }
+    });
   }
 });
 

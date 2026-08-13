@@ -8,7 +8,10 @@ import type {
   ThinkingEffort,
   Workspace,
 } from '@gian/shared';
+import { usesNativeExecutorConfig } from '@gian/shared';
 import { loadAgents, peekAgents } from '../api.js';
+import { desktopBridge } from '../desktop-bridge.js';
+import { toast } from '../feedback.js';
 import { useT } from '../i18n/index.js';
 import {
   claudeModelFamily,
@@ -26,6 +29,22 @@ import {
 } from '../components/composer/capabilities.js';
 import type { ProxyModel } from '../components/composer/capabilities.js';
 import { BulbIcon, ExecutorMark, useUpDrop } from '../components/composer/option-drops.js';
+import {
+  clearNewSessionDraftStorage,
+  loadNewSessionScreenshotBlob,
+  NEW_SESSION_SCREENSHOT_EVENT,
+  newSessionDraftStorageKey,
+  removeNewSessionScreenshot,
+  screenshotEventMatchesScope,
+  type NewSessionScreenshotDraftAttachment,
+} from '../screenshot-drafts.js';
+import { publishScreenshotTarget, startScreenshotCapture } from '../screenshot-target.js';
+
+export { newSessionDraftStorageKey } from '../screenshot-drafts.js';
+
+export interface NewSessionFirstAttachment extends NewSessionScreenshotDraftAttachment {
+  blob: Blob;
+}
 
 export interface CreateSessionInput {
   workspaceId: string;
@@ -35,12 +54,17 @@ export interface CreateSessionInput {
    *  create payload itself stays free of it (ses-001 contract); App hands it
    *  to the `session:created` socket handler via pendingFirstMessageRef. */
   firstMessage: string;
+  /** Screenshots captured before the Session exists. They are uploaded into
+   *  the newly-created Session before its first structured message is sent. */
+  firstAttachments?: NewSessionFirstAttachment[];
   /** Capability chips the user picked on the new-session composer; omitted
    *  fields fall back to the host's configured defaults. Kimi never carries
-   *  approvalMode (executor-native configuration). */
+   *  approvalMode (executor-native configuration); serviceTier is Codex-only. */
   model?: string;
   thinkingEffort?: ThinkingEffort | null;
   approvalMode?: ApprovalMode | null;
+  /** Codex-only Fast service tier. Omitted/null keeps the standard tier. */
+  serviceTier?: 'fast' | null;
 }
 
 export interface SessionCreateFormState {
@@ -50,6 +74,7 @@ export interface SessionCreateFormState {
   model?: string;
   thinkingEffort?: ThinkingEffort | null;
   approvalMode?: ApprovalMode | null;
+  serviceTier?: 'fast' | null;
 }
 
 export function buildSessionCreatePayload(
@@ -60,8 +85,9 @@ export function buildSessionCreatePayload(
     name: form.sessionName.trim(),
     executor: form.executor,
     ...(form.model ? { model: form.model } : {}),
-    ...(form.executor !== 'kimi' && form.approvalMode ? { approvalMode: form.approvalMode } : {}),
+    ...(!usesNativeExecutorConfig(form.executor) && form.approvalMode ? { approvalMode: form.approvalMode } : {}),
     ...(form.thinkingEffort ? { thinkingEffort: form.thinkingEffort } : {}),
+    ...(form.executor === 'codex' && form.serviceTier === 'fast' ? { serviceTier: 'fast' as const } : {}),
   };
 }
 
@@ -71,13 +97,23 @@ const AGENT_DESC: Record<string, string> = {
   codex: 'OpenAI · gpt-5-codex',
   claude: 'CLI plan',
   kimi: 'Moonshot AI · ACP',
+  grok: 'xAI · ACP',
 };
 
 /** Last-used new-session choices, remembered across opens (localStorage). */
 const LAST_KEY = 'gian.new-session.last.v1';
-/** Unsent draft, stashed when the user jumps to the New Workspace sheet so
- *  the return trip restores the composer exactly as it was. */
-const DRAFT_KEY = 'gian.new-session.draft.v1';
+/** Legacy one-shot draft key used before drafts were isolated per Task /
+ *  Workspace. It is read once as a migration path for an already-open New
+ *  Workspace round trip, but all new writes use DRAFT_KEY_PREFIX. */
+const LEGACY_DRAFT_KEY = 'gian.new-session.draft.v1';
+/** Persistent unsent drafts. A Workspace and a Task never share composer
+ *  state; switching away only hides the form, while confirmed creation is
+ *  the boundary that clears its owner draft. */
+/** Most recently foregrounded Workspace draft. The header "+" has no
+ *  explicit Workspace, so this pointer lets it reopen the draft the user
+ *  actually left instead of falling back to the last successfully-created
+ *  Session's Workspace. */
+const ACTIVE_WORKSPACE_DRAFT_KEY = 'gian.new-session.draft.active-workspace.v1';
 /** Set while the New Workspace sheet is open via the new-session page — App
  *  returns to a fresh new-session page (with the created workspace
  *  preselected) when the sheet reports a successful create. */
@@ -89,10 +125,18 @@ interface StoredNewSession {
   model?: string;
   thinkingEffort?: ThinkingEffort | null;
   approvalMode?: ApprovalMode | null;
+  serviceTier?: 'fast' | null;
 }
 
 interface NewSessionDraft extends StoredNewSession {
+  sessionName?: string;
   message?: string;
+  screenshotAttachments?: NewSessionScreenshotDraftAttachment[];
+}
+
+export interface NewSessionDraftScope {
+  kind: 'workspace' | 'task';
+  id: string;
 }
 
 function readJson<T>(key: string): T | null {
@@ -114,11 +158,19 @@ function writeJson(key: string, value: unknown): void {
   }
 }
 
-/** Read-and-consume the stashed draft (one-shot). */
-function takeNewSessionDraft(): NewSessionDraft | null {
-  const draft = readJson<NewSessionDraft>(DRAFT_KEY);
+function readNewSessionDraft(scope: NewSessionDraftScope | null): NewSessionDraft | null {
+  return scope ? readJson<NewSessionDraft>(newSessionDraftStorageKey(scope)) : null;
+}
+
+export function clearNewSessionDraft(scope: NewSessionDraftScope): void {
+  clearNewSessionDraftStorage(scope);
+}
+
+/** Consume a v1 draft left by an older New Workspace round trip. */
+function takeLegacyNewSessionDraft(): NewSessionDraft | null {
+  const draft = readJson<NewSessionDraft>(LEGACY_DRAFT_KEY);
   if (draft) {
-    try { localStorage.removeItem(DRAFT_KEY); } catch { /* best-effort */ }
+    try { localStorage.removeItem(LEGACY_DRAFT_KEY); } catch { /* best-effort */ }
   }
   return draft;
 }
@@ -135,8 +187,9 @@ function FolderIcon() {
 export function NewSessionView({
   workspaces,
   initialWorkspaceId,
-  taskName,
   initialExecutor,
+  draftScope,
+  draftLabel,
   onCreate,
   onCancel,
   onNewWorkspace,
@@ -150,11 +203,13 @@ export function NewSessionView({
   /** Preselected workspace (sidebar workspace-row "+" entry point, or the
    *  auto-return from the New Workspace sheet). */
   initialWorkspaceId?: string;
-  /** Task context (Tasks sidebar task-row "+" entry point): shown read-only —
-   *  the new session is created as a subtask of this task. */
-  taskName?: string;
   /** Preselected agent (⌘J/⌘K "new subtask" shortcut carries the choice). */
   initialExecutor?: Executor;
+  /** Task-owned forms keep one persistent draft per Task. Session-mode forms
+   *  omit this prop and are automatically keyed by the selected Workspace. */
+  draftScope?: NewSessionDraftScope;
+  /** Human-readable locked target shown by the Desktop capture overlay. */
+  draftLabel?: string;
   onCreate: (input: CreateSessionInput) => void;
   onCancel: () => void;
   /** Open the Workspaces "New workspace" sheet tab (the drop's "+ New
@@ -168,16 +223,42 @@ export function NewSessionView({
   onVerifyCreate?: () => void;
 }) {
   const t = useT();
-  const [draft] = useState(takeNewSessionDraft);
   const [last] = useState(() => readJson<StoredNewSession>(LAST_KEY));
-  const [selectedWs, setSelectedWs] = useState(() => {
+  const [initial] = useState(() => {
     const usable = (id: string | undefined) =>
       id !== undefined && workspaces.some(w => w.id === id && w.hidden !== 1);
-    if (usable(initialWorkspaceId)) return initialWorkspaceId!;
-    if (usable(last?.workspaceId)) return last!.workspaceId!;
-    return workspaces.find(w => w.hidden !== 1 && w.name !== '__gian_root__')?.id ?? '';
+    let activeDraftWorkspaceId: string | undefined;
+    if (draftScope?.kind !== 'task') {
+      try { activeDraftWorkspaceId = localStorage.getItem(ACTIVE_WORKSPACE_DRAFT_KEY) ?? undefined; }
+      catch { /* best-effort */ }
+    }
+    let workspaceId = '';
+    if (usable(initialWorkspaceId)) workspaceId = initialWorkspaceId!;
+    else if (usable(activeDraftWorkspaceId)) workspaceId = activeDraftWorkspaceId!;
+    else if (usable(last?.workspaceId)) workspaceId = last!.workspaceId!;
+    else workspaceId = workspaces.find(w => w.hidden !== 1 && w.name !== '__gian_root__')?.id ?? '';
+    const owner = draftScope?.kind === 'task'
+      ? draftScope
+      : workspaceId ? { kind: 'workspace' as const, id: workspaceId } : null;
+    const saved = readNewSessionDraft(owner) ?? takeLegacyNewSessionDraft();
+    // A Task draft owns its Workspace choice too. A Workspace draft cannot
+    // redirect the form to another Workspace because the storage key itself
+    // is the ownership boundary.
+    if (draftScope?.kind === 'task' && usable(saved?.workspaceId)) {
+      workspaceId = saved!.workspaceId!;
+    }
+    return { draft: saved, workspaceId };
   });
+  const [draft, setDraft] = useState<NewSessionDraft | null>(initial.draft);
+  const [selectedWs, setSelectedWs] = useState(initial.workspaceId);
+  const [sessionName, setSessionName] = useState(draft?.sessionName ?? '');
   const [message, setMessage] = useState(draft?.message ?? '');
+  const [screenshotAttachments, setScreenshotAttachments] = useState<
+    NewSessionScreenshotDraftAttachment[]
+  >(() => draft?.screenshotAttachments ?? []);
+  const [screenshotPreviews, setScreenshotPreviews] = useState<Record<string, string>>({});
+  const [preparingAttachments, setPreparingAttachments] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   /** Which agents exist and whether they're usable — driven by the host's
    *  /api/agents install status so the picker follows Settings, not a
    *  hardcoded list. Null while loading. */
@@ -187,9 +268,10 @@ export function NewSessionView({
   );
   // Capability chip state (claude/codex only — kimi shows its configured
   // defaults as static text, its native options only exist on a live session).
-  const [model, setModel] = useState('');
-  const [effort, setEffort] = useState<ThinkingEffort | null>(null);
-  const [mode, setMode] = useState<ApprovalMode | null>(null);
+  const [model, setModel] = useState(draft?.model ?? '');
+  const [effort, setEffort] = useState<ThinkingEffort | null>(draft?.thinkingEffort ?? null);
+  const [mode, setMode] = useState<ApprovalMode | null>(draft?.approvalMode ?? null);
+  const [serviceTier, setServiceTier] = useState<'fast' | null>(draft?.serviceTier ?? null);
   const [models, setModels] = useState<ProxyModel[]>([]);
   const [proxyModes, setProxyModes] = useState<ProxyModeCapabilities[]>([]);
   const [wsQuery, setWsQuery] = useState('');
@@ -199,6 +281,7 @@ export function NewSessionView({
   const effortDrop = useUpDrop(210);
   const modeDrop = useUpDrop(340);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const screenshotAvailable = !!desktopBridge()?.screenshot;
 
   useEffect(() => {
     let cancelled = false;
@@ -230,9 +313,10 @@ export function NewSessionView({
   // configured defaults stay authoritative otherwise. Models/modes load
   // lazily per executor (cached).
   useEffect(() => {
-    if (!executor || executor === 'kimi') {
+    if (!executor || usesNativeExecutorConfig(executor)) {
       setModels([]);
       setProxyModes([]);
+      setServiceTier(null);
       return;
     }
     const cli = executor;
@@ -244,6 +328,7 @@ export function NewSessionView({
     setModel(remembered?.model ?? '');
     setEffort(remembered?.thinkingEffort ?? null);
     setMode(remembered?.approvalMode ?? null);
+    setServiceTier(cli === 'codex' ? (remembered?.serviceTier ?? null) : null);
 
     let alive = true;
     void fetchModelsCached(cli)
@@ -253,8 +338,104 @@ export function NewSessionView({
       .then(list => { if (alive) setProxyModes(list); })
       .catch(() => { /* built-in mode lists */ });
     return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [executor]);
+  }, [executor, draft, last]);
+
+  function currentDraft(workspaceId = selectedWs): NewSessionDraft {
+    return {
+      workspaceId,
+      sessionName,
+      message,
+      ...(screenshotAttachments.length > 0 ? { screenshotAttachments } : {}),
+      ...(executor ? { executor } : {}),
+      ...(model ? { model } : {}),
+      ...(effort ? { thinkingEffort: effort } : {}),
+      ...(mode ? { approvalMode: mode } : {}),
+      ...(executor === 'codex' && serviceTier ? { serviceTier } : {}),
+    };
+  }
+
+  function activeDraftScope(workspaceId = selectedWs): NewSessionDraftScope | null {
+    if (draftScope?.kind === 'task') return draftScope;
+    return workspaceId ? { kind: 'workspace', id: workspaceId } : null;
+  }
+
+  // Persist continuously, not only during the New Workspace detour. A normal
+  // sidebar navigation unmounts this form, so every committed edit must
+  // already be recoverable when the user comes back.
+  useEffect(() => {
+    const owner = activeDraftScope();
+    if (owner) {
+      writeJson(newSessionDraftStorageKey(owner), currentDraft());
+      if (owner.kind === 'workspace') {
+        try { localStorage.setItem(ACTIVE_WORKSPACE_DRAFT_KEY, owner.id); } catch { /* best-effort */ }
+      }
+    }
+  }, [
+    selectedWs,
+    sessionName,
+    message,
+    executor,
+    model,
+    effort,
+    mode,
+    serviceTier,
+    screenshotAttachments,
+    draftScope?.kind,
+    draftScope?.id,
+  ]);
+
+  const currentScope = activeDraftScope();
+  const currentScopeKey = currentScope ? `${currentScope.kind}:${currentScope.id}` : '';
+  const selectedWorkspace = workspaces.find(w => w.id === selectedWs) ?? null;
+
+  // The Desktop result is routed by its capture-time scope. A view that has
+  // since switched Workspace ignores the event; that attachment remains in
+  // the old Workspace's durable draft and appears when the user returns.
+  useEffect(() => {
+    if (!currentScope) return;
+    const onScreenshot = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (!screenshotEventMatchesScope(detail, currentScope)) return;
+      setScreenshotAttachments(detail.attachments);
+      setAttachmentError(null);
+      requestAnimationFrame(() => taRef.current?.focus());
+    };
+    window.addEventListener(NEW_SESSION_SCREENSHOT_EVENT, onScreenshot);
+    return () => window.removeEventListener(NEW_SESSION_SCREENSHOT_EVENT, onScreenshot);
+  }, [currentScopeKey]);
+
+  useEffect(() => {
+    if (!currentScope) {
+      setScreenshotPreviews({});
+      return;
+    }
+    let alive = true;
+    const urls: string[] = [];
+    void Promise.all(screenshotAttachments.map(async attachment => {
+      const blob = await loadNewSessionScreenshotBlob(currentScope, attachment.id);
+      if (!blob) return null;
+      const url = URL.createObjectURL(blob);
+      urls.push(url);
+      return [attachment.id, url] as const;
+    })).then(entries => {
+      if (!alive) return;
+      setScreenshotPreviews(Object.fromEntries(entries.filter(
+        (entry): entry is readonly [string, string] => entry !== null,
+      )));
+    });
+    return () => {
+      alive = false;
+      for (const url of urls) URL.revokeObjectURL(url);
+    };
+  }, [currentScopeKey, screenshotAttachments]);
+
+  useEffect(() => {
+    if (!currentScope || !screenshotAvailable) return;
+    const label = draftScope?.kind === 'task'
+      ? (draftLabel?.trim() || t('tasks.detail.empty'))
+      : (selectedWorkspace?.name || t('coding.new.title'));
+    return publishScreenshotTarget({ kind: 'new-session', scope: currentScope, label });
+  }, [currentScopeKey, draftLabel, draftScope?.kind, screenshotAvailable, selectedWorkspace?.name, t]);
 
   // Auto-grow the message box, same 160px cap as the session Composer.
   useEffect(() => {
@@ -270,7 +451,7 @@ export function NewSessionView({
   // statically (issue #57). Zero or 2+ ready agents get the picker drop
   // (not-ready rows render disabled).
   const showAgentPicker = readyAgents.length !== 1;
-  const cliExecutor = executor === 'kimi' ? null : executor;
+  const cliExecutor = executor && usesNativeExecutorConfig(executor) ? null : executor;
   const cliDefaults = cliExecutor
     ? agents?.find(a => a.id === cliExecutor)?.proxy?.defaults
     : undefined;
@@ -289,8 +470,8 @@ export function NewSessionView({
     ?? ((cliDefaults?.mode.trim() || null) as ApprovalMode | null)
     ?? 'ask';
   const modeOptions = cliExecutor ? composerModeOptions(cliExecutor, proxyModes) : [];
-  const kimiDefaults = executor === 'kimi'
-    ? agents?.find(a => a.id === 'kimi')?.proxy?.defaults
+  const nativeDefaults = executor && usesNativeExecutorConfig(executor)
+    ? agents?.find(a => a.id === executor)?.proxy?.defaults
     : undefined;
 
   const wsRows = workspaces.filter(w => w.name !== '__gian_root__');
@@ -298,7 +479,6 @@ export function NewSessionView({
   const filteredWs = query
     ? wsRows.filter(w => w.name.toLowerCase().includes(query))
     : wsRows;
-  const selectedWorkspace = workspaces.find(w => w.id === selectedWs) ?? null;
 
   function pickModel(next: string) {
     setModel(next);
@@ -311,22 +491,81 @@ export function NewSessionView({
     modelDrop.setOpen(false);
   }
 
+  function pickWorkspace(nextWorkspaceId: string) {
+    if (nextWorkspaceId === selectedWs) {
+      wsDrop.setOpen(false);
+      return;
+    }
+
+    if (draftScope?.kind === 'task') {
+      // The Task is the owner; Workspace is simply one field inside that
+      // Task's draft.
+      setSelectedWs(nextWorkspaceId);
+    } else {
+      // Workspace-mode drafts switch owners. Snapshot the source before
+      // loading the target so neither side can overwrite the other.
+      const currentOwner = activeDraftScope();
+      if (currentOwner) {
+        writeJson(newSessionDraftStorageKey(currentOwner), currentDraft());
+      }
+      const nextOwner = { kind: 'workspace' as const, id: nextWorkspaceId };
+      const savedNextDraft = readNewSessionDraft(nextOwner);
+      // A never-opened Workspace starts with a blank goal/title but keeps the
+      // current Agent/capability choices as convenient defaults. Once that
+      // Workspace has its own draft, its complete choices win instead.
+      const nextDraft = savedNextDraft ?? {
+        ...currentDraft(nextWorkspaceId),
+        sessionName: '',
+        message: '',
+      };
+      setDraft(nextDraft);
+      setSelectedWs(nextWorkspaceId);
+      setSessionName(nextDraft.sessionName ?? '');
+      setMessage(nextDraft.message ?? '');
+      setScreenshotAttachments(nextDraft.screenshotAttachments ?? []);
+      setExecutor(nextDraft.executor ?? null);
+      setModel(nextDraft.model ?? '');
+      setEffort(nextDraft.thinkingEffort ?? null);
+      setMode(nextDraft.approvalMode ?? null);
+      setServiceTier(nextDraft.serviceTier ?? null);
+    }
+    wsDrop.setOpen(false);
+  }
+
   const canSend = !!selectedWorkspace
     && selectedWorkspace.hidden !== 1
     && selectedAgent?.ready === true
-    && !!message.trim()
+    && (!!message.trim() || screenshotAttachments.length > 0)
     && !creating
+    && !preparingAttachments
     && !createUnknown;
 
-  function submit() {
+  async function submit() {
     if (!canSend || !executor) return;
+    const owner = activeDraftScope();
+    if (!owner) return;
+    setPreparingAttachments(true);
+    setAttachmentError(null);
+    const firstAttachments: NewSessionFirstAttachment[] = [];
+    try {
+      for (const attachment of screenshotAttachments) {
+        const blob = await loadNewSessionScreenshotBlob(owner, attachment.id);
+        if (!blob) throw new Error(`missing screenshot blob: ${attachment.id}`);
+        firstAttachments.push({ ...attachment, blob });
+      }
+    } catch {
+      setAttachmentError(t('screenshot.restoreFailed'));
+      setPreparingAttachments(false);
+      return;
+    }
     const payload = buildSessionCreatePayload({
       workspaceId: selectedWs,
-      sessionName: '',
+      sessionName,
       executor,
       model: cliExecutor ? model : undefined,
       thinkingEffort: cliExecutor ? effort : undefined,
       approvalMode: cliExecutor ? mode : undefined,
+      serviceTier: executor === 'codex' ? serviceTier : undefined,
     });
     writeJson(LAST_KEY, {
       workspaceId: selectedWs,
@@ -334,23 +573,24 @@ export function NewSessionView({
       ...(payload.model ? { model: payload.model } : {}),
       ...(payload.thinkingEffort ? { thinkingEffort: payload.thinkingEffort } : {}),
       ...(payload.approvalMode ? { approvalMode: payload.approvalMode } : {}),
+      ...(payload.serviceTier ? { serviceTier: payload.serviceTier } : {}),
     });
-    onCreate({ ...payload, firstMessage: message.trim() });
+    onCreate({
+      ...payload,
+      firstMessage: message.trim(),
+      ...(firstAttachments.length > 0 ? { firstAttachments } : {}),
+    });
+    setPreparingAttachments(false);
     // The text stays put on failure (the form stays open with the error);
     // CodingView unmounts this view once the create run confirms.
   }
 
   function startNewWorkspace() {
     wsDrop.setOpen(false);
-    // Stash everything the return trip should restore, then flag the jump so
-    // App re-opens this page once the sheet's create lands.
-    writeJson(DRAFT_KEY, {
-      message,
-      ...(executor ? { executor } : {}),
-      ...(model ? { model } : {}),
-      ...(effort ? { thinkingEffort: effort } : {}),
-      ...(mode ? { approvalMode: mode } : {}),
-    } satisfies NewSessionDraft);
+    // The continuous draft already owns the full form. Keep the return flag
+    // so App can reopen the page with the newly created Workspace selected.
+    const owner = activeDraftScope();
+    if (owner) writeJson(newSessionDraftStorageKey(owner), currentDraft());
     try { localStorage.setItem(RETURN_KEY, '1'); } catch { /* best-effort */ }
     onNewWorkspace();
   }
@@ -358,7 +598,29 @@ export function NewSessionView({
   function handleMessageKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
-      submit();
+      void submit();
+    }
+  }
+
+  async function captureScreenshot(): Promise<void> {
+    try {
+      await startScreenshotCapture();
+    } catch {
+      toast({ kind: 'error', message: t('screenshot.startFailed') });
+    }
+  }
+
+  function removeScreenshot(id: string): void {
+    const owner = activeDraftScope();
+    if (!owner) return;
+    setScreenshotAttachments(previous => previous.filter(item => item.id !== id));
+    void removeNewSessionScreenshot(owner, id);
+  }
+
+  function handleTitleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      taRef.current?.focus();
     }
   }
 
@@ -374,12 +636,14 @@ export function NewSessionView({
       </div>
       <div className="main-scroll">
         <div className="ns-center">
-          {taskName !== undefined && (
-            <div className="ns-task-static" data-testid="ns-task-name">{taskName}</div>
-          )}
           {createError && (
             <p className="spaces-error" role="alert" data-testid="session-create-error">
               {createError}
+            </p>
+          )}
+          {attachmentError && (
+            <p className="spaces-error" role="alert" data-testid="new-session-attachment-error">
+              {attachmentError}
             </p>
           )}
           {createUnknown && onVerifyCreate && (
@@ -510,7 +774,7 @@ export function NewSessionView({
                   className={`mp-row${selectedWs === workspace.id ? ' active' : ''}`}
                   data-testid={`ns-workspace-option-${workspace.id}`}
                   disabled={workspace.hidden === 1}
-                  onClick={() => { setSelectedWs(workspace.id); wsDrop.setOpen(false); }}
+                  onClick={() => pickWorkspace(workspace.id)}
                 >
                   <span className="mp-check">{selectedWs === workspace.id ? '✓' : ''}</span>
                   <span className="mp-row-body">
@@ -542,6 +806,17 @@ export function NewSessionView({
 
         <div className="composer">
           <div className="composer-input-wrap">
+            <input
+              className="ns-title-input"
+              data-testid="ns-title-input"
+              aria-label={t('coding.new.sessionTitle')}
+              autoComplete="off"
+              spellCheck={false}
+              value={sessionName}
+              onChange={event => setSessionName(event.target.value)}
+              onKeyDown={handleTitleKeyDown}
+              placeholder={t('coding.new.sessionTitle.placeholder')}
+            />
             <textarea
               ref={taRef}
               className="composer-ta"
@@ -554,10 +829,37 @@ export function NewSessionView({
               placeholder={t('coding.new.message.placeholder')}
             />
           </div>
+          {screenshotAttachments.length > 0 && (
+            <div className="composer-attachments" data-testid="new-session-screenshots">
+              {screenshotAttachments.map(attachment => (
+                <div key={attachment.id} className="att-chip">
+                  {screenshotPreviews[attachment.id] ? (
+                    <span className="att-thumb-btn">
+                      <img
+                        className="att-thumb"
+                        src={screenshotPreviews[attachment.id]}
+                        alt={attachment.name}
+                      />
+                    </span>
+                  ) : (
+                    <span className="spinner" aria-label={t('common.loading')} />
+                  )}
+                  <span className="att-name" title={attachment.name}>{attachment.name}</span>
+                  <button
+                    className="att-remove"
+                    type="button"
+                    onClick={() => removeScreenshot(attachment.id)}
+                    aria-label={t('composer.attachment.remove')}
+                  >✕</button>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="composer-bar">
             {/* Capability chips follow the selected agent. claude/codex get
-                live model + thinking drops; kimi's native options only exist
-                on a live ACP session, so it shows its configured defaults. */}
+                live model + thinking drops; Codex also gets Fast. kimi's
+                native options only exist on a live ACP session, so it shows
+                its configured defaults. */}
             {cliExecutor && (
               <>
                 <button
@@ -658,16 +960,29 @@ export function NewSessionView({
                 )}
               </>
             )}
-            {executor === 'kimi' && (
+            {executor && usesNativeExecutorConfig(executor) && (
               <>
                 <span className="composer-opt ns-chip-static" data-testid="ns-model-chip">
-                  <span className="name">{kimiDefaults?.model.trim() || t('coding.new.chip.default')}</span>
+                  <span className="name">{nativeDefaults?.model.trim() || t('coding.new.chip.default')}</span>
                 </span>
                 <span className="composer-opt ns-chip-static" data-testid="ns-effort-chip">
                   <BulbIcon />
-                  <span className="name">{kimiDefaults?.thinking.trim() || t('coding.new.chip.default')}</span>
+                  <span className="name">{nativeDefaults?.thinking.trim() || t('coding.new.chip.default')}</span>
                 </span>
               </>
+            )}
+
+            {executor === 'codex' && (
+              <button
+                type="button"
+                className={`composer-opt cmp-fast${serviceTier === 'fast' ? ' on' : ''}`}
+                data-testid="ns-fast-chip"
+                title={t('composer.fast.title')}
+                aria-pressed={serviceTier === 'fast'}
+                onClick={() => setServiceTier(serviceTier === 'fast' ? null : 'fast')}
+              >
+                {t('composer.fast.button')}
+              </button>
             )}
 
             <span className="spacer" />
@@ -729,10 +1044,26 @@ export function NewSessionView({
                 )}
               </>
             )}
-            {executor === 'kimi' && (
+            {executor && usesNativeExecutorConfig(executor) && (
               <span className="composer-opt ns-chip-static" data-testid="ns-mode-chip">
-                <span className="name">{kimiDefaults?.mode.trim() || t('coding.new.chip.default')}</span>
+                <span className="name">{nativeDefaults?.mode.trim() || t('coding.new.chip.default')}</span>
               </span>
+            )}
+
+            {screenshotAvailable && (
+              <button
+                type="button"
+                className="composer-act"
+                disabled={creating || preparingAttachments || createUnknown}
+                title={t('screenshot.capture')}
+                aria-label={t('screenshot.capture')}
+                onClick={() => { void captureScreenshot(); }}
+              >
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
+                  <path d="M5 3.5 6 2h4l1 1.5h2A1.5 1.5 0 0 1 14.5 5v7A1.5 1.5 0 0 1 13 13.5H3A1.5 1.5 0 0 1 1.5 12V5A1.5 1.5 0 0 1 3 3.5h2Z" strokeWidth="1.2" />
+                  <circle cx="8" cy="8.5" r="2.5" strokeWidth="1.2" />
+                </svg>
+              </button>
             )}
 
             <button
@@ -744,7 +1075,7 @@ export function NewSessionView({
               title={t('composer.send.button')}
               aria-label={t('composer.send.button')}
             >
-              {creating ? (
+              {creating || preparingAttachments ? (
                 <span className="spinner" aria-hidden="true" />
               ) : (
                 <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

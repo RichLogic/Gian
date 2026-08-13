@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Session } from '@gian/shared';
 
-import { Composer } from '../src/components/Composer.js';
+import { Composer, injectComposerAttachment } from '../src/components/Composer.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { uploadAttachment } from '../src/api.js';
 import { createOperationDispatcher } from '../src/operations/dispatcher.js';
@@ -146,5 +146,27 @@ describe('Composer file attachments', () => {
       expect(img?.getAttribute('src')).toBe('/api/sessions/session-attachment/attachments/uuid.png');
     });
     expect(screen.getByText('paste-1.png')).toBeInTheDocument();
+  });
+
+  it('injects a completed screenshot into the exact mounted Composer and focuses it', async () => {
+    renderComposer();
+    const textbox = screen.getByRole('textbox');
+    expect(textbox).not.toHaveFocus();
+
+    act(() => injectComposerAttachment(SESSION.id, {
+      path: '/tmp/gian/attachments/session-attachment/captured.png',
+      name: 'screenshot.png',
+      mime: 'image/png',
+      size: 128,
+    }));
+
+    expect(await screen.findByText('screenshot.png')).toBeInTheDocument();
+    await waitFor(() => expect(textbox).toHaveFocus());
+    const persisted = JSON.parse(
+      localStorage.getItem(`gian.composer.draft.v2.${SESSION.id}`) ?? 'null',
+    );
+    expect(persisted.attachments).toEqual([expect.objectContaining({
+      path: '/tmp/gian/attachments/session-attachment/captured.png',
+    })]);
   });
 });

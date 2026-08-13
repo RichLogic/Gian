@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ApprovalDecision, ApprovalMode, Executor, NativeConfigValue, Session, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { ModeDropdown } from '../components/ModeDropdown.js';
@@ -13,7 +13,7 @@ import type { ApprovalActionContext, QueueEntry, TranscriptItem } from '../types
 import { sessionNeedsAttention, buildRailSections } from '../session-routing.js';
 import { SessionMain } from './SessionMain.js';
 import { relTime, statusGlyphShown, StatusIcon } from './session-list-status.js';
-import { NewSessionView } from './new-session-view.js';
+import { clearNewSessionDraft, NewSessionView } from './new-session-view.js';
 import type { CreateSessionInput } from './new-session-view.js';
 export { buildSessionCreatePayload } from './new-session-view.js';
 export type { CreateSessionInput, SessionCreateFormState } from './new-session-view.js';
@@ -145,6 +145,10 @@ export interface CodingViewProps {
 
 export function CodingView(p: CodingViewProps) {
   const [showNew, setShowNew] = useState(false);
+  const submittedDraftScopeRef = useRef<{
+    scope: { kind: 'workspace'; id: string };
+    preserveDraftUntilUpload: boolean;
+  } | null>(null);
   const [verifyingCreate, setVerifyingCreate] = useState(false);
   const [verifyCreateError, setVerifyCreateError] = useState<string | null>(null);
   const createRun = p.sessionCreateRun;
@@ -170,6 +174,12 @@ export function CodingView(p: CodingViewProps) {
   // only on a confirmed run; failures remain visible and retryable in-place.
   useEffect(() => {
     if (createRun?.phase === 'confirmed') {
+      if (submittedDraftScopeRef.current) {
+        if (!submittedDraftScopeRef.current.preserveDraftUntilUpload) {
+          clearNewSessionDraft(submittedDraftScopeRef.current.scope);
+        }
+        submittedDraftScopeRef.current = null;
+      }
       setShowNew(false);
       p.onClearSessionCreateRun();
     }
@@ -254,6 +264,7 @@ export function CodingView(p: CodingViewProps) {
       <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize sidebar" />
       {showNew ? (
         <NewSessionView
+          key={`workspace:${newForWs ?? 'active'}`}
           workspaces={p.workspaces}
           initialWorkspaceId={newForWs}
           onCancel={resetNewSession}
@@ -265,6 +276,10 @@ export function CodingView(p: CodingViewProps) {
           onVerifyCreate={() => void verifyUnknownCreate()}
           onCreate={input => {
             setVerifyCreateError(null);
+            submittedDraftScopeRef.current = {
+              scope: { kind: 'workspace', id: input.workspaceId },
+              preserveDraftUntilUpload: (input.firstAttachments?.length ?? 0) > 0,
+            };
             p.onCreateSession(input);
           }}
         />

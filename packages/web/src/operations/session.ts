@@ -7,7 +7,7 @@
  *
  * Entity keys are `session:<id>`. Optimistic writes target flat Session
  * fields (`name`, `pinned_at`, `archived`, `unread`, `approval_mode`,
- * `model`, `thinking_effort`, `service_tier`); rendering merges
+ * `model`, `thinking_effort`, `service_tier`, `type`, `task_id`); rendering merges
  * `canonical + overlays` via `applySessionOverlays` (see use-operations.ts
  * for the hooks).
  *
@@ -116,6 +116,24 @@ const sessionSetServiceTier: OperationDefinition<SessionIdInput & { tier: 'fast'
   timeoutMs: WS_TIMEOUT_MS,
 };
 
+const sessionAssignTask: OperationDefinition<SessionIdInput & { taskId: string }> = {
+  policy: 'optimistic',
+  entityKey: input => sessionEntityKey(input.sessionId),
+  // A Task-owned Session is defined by BOTH fields. Keeping them in one
+  // operation mirrors the Host transaction and prevents an intermediate
+  // task_id-only row that neither Sessions nor Tasks can classify correctly.
+  optimisticWrites: input => [
+    { field: 'type', value: 'subtask' as const },
+    { field: 'task_id', value: input.taskId },
+  ],
+  buildMessage: input => ({
+    type: 'session:assign_task',
+    session_id: input.sessionId,
+    task_id: input.taskId,
+  }),
+  timeoutMs: WS_TIMEOUT_MS,
+};
+
 const sessionSetNativeConfig: OperationDefinition<SessionIdInput & { configId: string; value: NativeConfigValue }> = {
   policy: 'pending',
   // Per-option key: changing two different options of one session is not a
@@ -136,10 +154,12 @@ export interface SessionCreateInput {
   executor: Executor;
   name?: string;
   /** New-session composer chips (issue #57 v2): omitted fields fall back to
-   *  the host's configured defaults. approvalMode is claude/codex-only. */
+   *  the host's configured defaults. approvalMode is claude/codex-only;
+   *  serviceTier is Codex-only. */
   model?: string;
   approvalMode?: ApprovalMode | null;
   thinkingEffort?: ThinkingEffort | null;
+  serviceTier?: 'fast' | null;
 }
 
 const sessionCreate: OperationDefinition<SessionCreateInput> = {
@@ -155,6 +175,7 @@ const sessionCreate: OperationDefinition<SessionCreateInput> = {
     ...(input.model ? { model: input.model } : {}),
     ...(input.executor !== 'kimi' && input.approvalMode ? { approval_mode: input.approvalMode } : {}),
     ...(input.thinkingEffort ? { thinking_effort: input.thinkingEffort } : {}),
+    ...(input.executor === 'codex' && input.serviceTier === 'fast' ? { service_tier: 'fast' as const } : {}),
   }),
   timeoutMs: CREATE_TIMEOUT_MS,
 };
@@ -234,6 +255,7 @@ registry.register('session.setMode', sessionSetMode);
 registry.register('session.setModel', sessionSetModel);
 registry.register('session.setEffort', sessionSetEffort);
 registry.register('session.setServiceTier', sessionSetServiceTier);
+registry.register('session.assignTask', sessionAssignTask);
 registry.register('session.setNativeConfig', sessionSetNativeConfig);
 registry.register('session.create', sessionCreate);
 registry.register('session.fork', sessionFork);
@@ -253,6 +275,8 @@ const SESSION_OVERLAY_FIELDS = new Set([
   'model',
   'thinking_effort',
   'service_tier',
+  'type',
+  'task_id',
 ]);
 
 /**

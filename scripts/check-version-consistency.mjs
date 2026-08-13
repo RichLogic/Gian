@@ -16,6 +16,7 @@ export const INDEPENDENT_MANIFESTS = [
   'packages/proxies/cc-proxy/package.json',
   'packages/proxies/codex-proxy/package.json',
   'packages/proxies/kimi-proxy/package.json',
+  'packages/proxies/grok-proxy/package.json',
 ];
 const VERSION_RE = /^\d+\.\d+\.\d+(?:-hotfix)?$/;
 const INDEPENDENT_VERSION_RE = /^\d+\.\d+\.\d+$/;

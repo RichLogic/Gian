@@ -107,6 +107,32 @@ function renderWorkbench(strict = false, workingTrees: WorkingTree[] = [tree]) {
   }), strict ? { wrapper: StrictMode } : undefined);
 }
 
+const session2: Session = { ...session, id: 's2', name: 'demo two' };
+const session3: Session = { ...session, id: 's3', name: 'demo three' };
+const session4: Session = { ...session, id: 's4', name: 'demo four' };
+const sessionSet = [session, session2, session3, session4];
+
+function renderSwitchableWorkbench(initialSessionId = 's1') {
+  return renderHook(({ sessionId }: { sessionId: string }) => {
+    const active = sessionSet.find(candidate => candidate.id === sessionId) ?? null;
+    return useWorkbench({
+      authStatus: 'authenticated',
+      dispatch: vi.fn(),
+      sessions: sessionSet,
+      activeSessionId: active?.id ?? null,
+      activeSession: active,
+      activeWorkspace: workspace,
+      workspaces: [workspace],
+      workingTrees: [tree],
+      mode: 'sessions',
+      activeSubtaskId: null,
+      t: key => key,
+    });
+  }, {
+    initialProps: { sessionId: initialSessionId },
+  });
+}
+
 describe('Sheet tab query timing (§4.5)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -441,6 +467,252 @@ describe('Sheet tab query timing (§4.5)', () => {
 
     act(() => result.current.revalidateHistoryTabs(tree.id, () => false));
     expect(result.current.wbTabs.find(t => t.commitSha === sha)?.orphaned).toBe(false);
+  });
+});
+
+describe('Issue #46 Session-owned workbench state', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    delete window.gianDesktop;
+    vi.mocked(api.loadAllFiles).mockResolvedValue([]);
+    vi.mocked(api.loadApps).mockResolvedValue([]);
+  });
+
+  it('restores independent Files, Diffs, History, and explicitly closed states per Session', async () => {
+    const { result, rerender } = renderSwitchableWorkbench();
+
+    act(() => result.current.activateRail('files'));
+    expect(result.current.activeRail).toBe('files');
+
+    rerender({ sessionId: 's2' });
+    expect(result.current.activeRail).toBeNull();
+    act(() => result.current.activateRail('diffs'));
+    await waitFor(() => expect(result.current.activeRail).toBe('diffs'));
+
+    rerender({ sessionId: 's3' });
+    expect(result.current.activeRail).toBeNull();
+    act(() => result.current.activateRail('history'));
+    expect(result.current.activeRail).toBe('history');
+
+    rerender({ sessionId: 's4' });
+    expect(result.current.activeRail).toBeNull();
+    rerender({ sessionId: 's1' });
+    expect(result.current.activeRail).toBe('files');
+    rerender({ sessionId: 's2' });
+    expect(result.current.activeRail).toBe('diffs');
+    rerender({ sessionId: 's3' });
+    expect(result.current.activeRail).toBe('history');
+
+    rerender({ sessionId: 's2' });
+    act(() => result.current.toggleRail('diffs'));
+    expect(result.current.activeRail).toBeNull();
+    rerender({ sessionId: 's1' });
+    expect(result.current.activeRail).toBe('files');
+    rerender({ sessionId: 's2' });
+    expect(result.current.activeRail).toBeNull();
+  });
+
+  it('isolates Session-owned tabs and active content even when Sessions share one working tree', async () => {
+    vi.mocked(api.loadAllFiles).mockResolvedValue(['src/a.ts', 'src/b.ts']);
+    vi.mocked(api.loadFile).mockImplementation(async (_workingTreeId, path) => ({
+      content: `content:${path}`,
+      size: path.length,
+    }));
+    const { result, rerender } = renderSwitchableWorkbench();
+
+    await act(async () => result.current.openFileInSheet('/tmp/w1/src/a.ts', true));
+    await waitFor(() => expect(result.current.wbTabs.find(tab => tab.kind === 'file')?.fullPath)
+      .toBe('/tmp/w1/src/a.ts'));
+    const firstTabId = result.current.activeTabByGroup.files;
+
+    rerender({ sessionId: 's2' });
+    expect(result.current.wbTabs.some(tab => tab.kind === 'file')).toBe(false);
+    await act(async () => result.current.openFileInSheet('/tmp/w1/src/b.ts', true));
+    await waitFor(() => expect(result.current.wbTabs.find(tab => tab.kind === 'file')?.fullPath)
+      .toBe('/tmp/w1/src/b.ts'));
+    const secondTabId = result.current.activeTabByGroup.files;
+    expect(secondTabId).not.toBe(firstTabId);
+
+    rerender({ sessionId: 's1' });
+    expect(result.current.wbTabs.filter(tab => tab.kind === 'file')).toHaveLength(1);
+    expect(result.current.wbTabs.find(tab => tab.kind === 'file')?.fullPath)
+      .toBe('/tmp/w1/src/a.ts');
+    expect(result.current.activeTabByGroup.files).toBe(firstTabId);
+
+    rerender({ sessionId: 's2' });
+    expect(result.current.wbTabs.filter(tab => tab.kind === 'file')).toHaveLength(1);
+    expect(result.current.wbTabs.find(tab => tab.kind === 'file')?.fullPath)
+      .toBe('/tmp/w1/src/b.ts');
+    expect(result.current.activeTabByGroup.files).toBe(secondTabId);
+  });
+
+  it('does not let a late Files index response displace a newer global rail', async () => {
+    const pendingIndex = deferred<string[]>();
+    vi.mocked(api.loadAllFiles).mockImplementation(() => pendingIndex.promise);
+    vi.mocked(api.loadFile).mockResolvedValue({ content: 'late file', size: 9 });
+    const { result } = renderSwitchableWorkbench();
+
+    act(() => { void result.current.openFileInSheet('/tmp/w1/src/late.ts'); });
+    expect(result.current.activeRail).toBe('files');
+    act(() => result.current.activateRail('terminal'));
+    expect(result.current.activeRail).toBe('terminal');
+
+    await act(async () => pendingIndex.resolve(['src/late.ts']));
+    await waitFor(() => expect(result.current.wbTabs.some(tab =>
+      tab.kind === 'file' && tab.fullPath === '/tmp/w1/src/late.ts')).toBe(true));
+    expect(result.current.activeRail).toBe('terminal');
+  });
+
+  it('opens the Files inspector without clearing another rail panel-3 memory', async () => {
+    vi.mocked(api.loadAllFiles).mockResolvedValue(['src/a.ts']);
+    vi.mocked(api.loadFile).mockResolvedValue({ content: 'a', size: 1 });
+    const { result } = renderSwitchableWorkbench();
+
+    act(() => result.current.activateRail('diffs'));
+    await waitFor(() => expect(result.current.activeRail).toBe('diffs'));
+    act(() => result.current.setP3Collapsed(true));
+    expect(result.current.p3Collapsed).toBe(true);
+
+    await act(async () => result.current.openFileInSheet('/tmp/w1/src/a.ts'));
+    expect(result.current.activeRail).toBe('files');
+    expect(result.current.p3Collapsed).toBe(false);
+    act(() => result.current.toggleRail('diffs'));
+    expect(result.current.activeRail).toBe('diffs');
+    expect(result.current.p3Collapsed).toBe(true);
+  });
+
+  it('keeps History commit singletons and close fallback inside their owning Session', async () => {
+    const { result, rerender } = renderSwitchableWorkbench();
+    const firstSha = 'a'.repeat(40);
+    const secondSha = 'b'.repeat(40);
+
+    act(() => result.current.openCommitInSheet({
+      workingTreeId: tree.id,
+      sha: firstSha,
+      subject: 'first Session commit',
+    }));
+    const firstTabId = result.current.activeTabByGroup.history;
+    expect(result.current.wbTabs.find(tab => tab.id === firstTabId)?.commitSha).toBe(firstSha);
+
+    await act(async () => rerender({ sessionId: 's2' }));
+    act(() => result.current.openCommitInSheet({
+      workingTreeId: tree.id,
+      sha: secondSha,
+      subject: 'second Session commit',
+    }));
+    const secondTabId = result.current.activeTabByGroup.history;
+    expect(secondTabId).not.toBe(firstTabId);
+    expect(result.current.wbTabs.find(tab => tab.id === secondTabId)?.commitSha).toBe(secondSha);
+
+    act(() => result.current.sheetActions.closeTab(secondTabId!));
+    expect(result.current.activeTabByGroup.history).toBeNull();
+    expect(result.current.wbTabs.some(tab => tab.kind === 'commit')).toBe(false);
+
+    await act(async () => rerender({ sessionId: 's1' }));
+    expect(result.current.activeTabByGroup.history).toBe(firstTabId);
+    expect(result.current.wbTabs.find(tab => tab.id === firstTabId)?.commitSha).toBe(firstSha);
+  });
+
+  it.each(['terminal', 'browser', 'workspaces', 'settings'] as const)(
+    'keeps the global %s foreground and tabs unchanged while Sessions switch',
+    async (globalRail) => {
+      const { result, rerender } = renderSwitchableWorkbench();
+      act(() => result.current.activateRail('files'));
+      rerender({ sessionId: 's2' });
+      act(() => result.current.activateRail('history'));
+      rerender({ sessionId: 's1' });
+      expect(result.current.activeRail).toBe('files');
+
+      act(() => {
+        if (globalRail === 'workspaces') result.current.openWorkspaceInSheet(workspace.id);
+        else result.current.activateRail(globalRail);
+      });
+      await waitFor(() => expect(result.current.activeRail).toBe(globalRail));
+      const globalTabIds = result.current.wbTabs
+        .filter(tab => ['term', 'browser', 'workspaces', 'settings'].includes(tab.group))
+        .map(tab => tab.id);
+
+      rerender({ sessionId: 's2' });
+      expect(result.current.activeRail).toBe(globalRail);
+      expect(result.current.wbTabs
+        .filter(tab => ['term', 'browser', 'workspaces', 'settings'].includes(tab.group))
+        .map(tab => tab.id)).toEqual(globalTabIds);
+
+      act(() => result.current.toggleRail(globalRail));
+      expect(result.current.activeRail).toBeNull();
+      act(() => result.current.toggleRail('history'));
+      expect(result.current.activeRail).toBe('history');
+      rerender({ sessionId: 's1' });
+      expect(result.current.activeRail).toBe('files');
+    },
+  );
+
+  it.each([
+    ['terminal', 'term'],
+    ['browser', 'browser'],
+  ] as const)(
+    'closing the final %s tab clears its global foreground and restores the Session scene',
+    async (globalRail, group) => {
+      const { result } = renderSwitchableWorkbench();
+      act(() => result.current.activateRail('files'));
+      expect(result.current.activeRail).toBe('files');
+
+      act(() => result.current.activateRail(globalRail));
+      const globalTab = result.current.wbTabs.find(tab => tab.group === group);
+      expect(globalTab).toBeDefined();
+      expect(result.current.activeRail).toBe(globalRail);
+
+      act(() => result.current.sheetActions.closeTab(globalTab!.id));
+      await waitFor(() => {
+        expect(result.current.wbTabs.some(tab => tab.group === group)).toBe(false);
+        expect(result.current.activeRail).toBeNull();
+      });
+
+      act(() => result.current.toggleRail('files'));
+      expect(result.current.activeRail).toBe('files');
+
+      // A single Dock click must also be enough to create the global tab
+      // again; there is no invisible active rail left to dismiss first.
+      act(() => result.current.toggleRail(globalRail));
+      await waitFor(() => {
+        expect(result.current.activeRail).toBe(globalRail);
+        expect(result.current.wbTabs.filter(tab => tab.group === group)).toHaveLength(1);
+      });
+    },
+  );
+
+  it('keeps the global Workspaces rail open when its new-workspace detail closes', async () => {
+    const { result, rerender } = renderSwitchableWorkbench();
+    act(() => result.current.openNewWorkspaceInSheet());
+    const formTab = result.current.wbTabs.find(tab => tab.kind === 'new-workspace');
+    expect(formTab).toBeDefined();
+    expect(result.current.activeRail).toBe('workspaces');
+
+    act(() => result.current.sheetActions.closeTab(formTab!.id));
+    await waitFor(() => {
+      expect(result.current.wbTabs.some(tab => tab.group === 'workspaces')).toBe(false);
+      expect(result.current.activeRail).toBe('workspaces');
+    });
+
+    await act(async () => rerender({ sessionId: 's2' }));
+    expect(result.current.activeRail).toBe('workspaces');
+  });
+
+  it('keeps the panel-3 collapsed state with its Session rail scene', async () => {
+    const { result, rerender } = renderSwitchableWorkbench();
+    act(() => result.current.activateRail('files'));
+    act(() => result.current.setP3Collapsed(true));
+    expect(result.current.p3Collapsed).toBe(true);
+
+    await act(async () => rerender({ sessionId: 's2' }));
+    expect(result.current.p3Collapsed).toBe(false);
+    act(() => result.current.activateRail('files'));
+    expect(result.current.p3Collapsed).toBe(false);
+
+    await act(async () => rerender({ sessionId: 's1' }));
+    expect(result.current.activeRail).toBe('files');
+    expect(result.current.p3Collapsed).toBe(true);
   });
 });
 

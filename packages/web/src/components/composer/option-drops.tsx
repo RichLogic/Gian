@@ -65,11 +65,13 @@ export function useUpDrop(popoverWidth: number) {
 }
 
 export function NativeOptionDrop({
+  executor,
   option,
   role,
   disabled,
   onChange,
 }: {
+  executor: Executor;
   option: NativeConfigOption;
   role: NativeOptionRole;
   disabled: boolean;
@@ -87,7 +89,7 @@ export function NativeOptionDrop({
         disabled={disabled}
         onClick={() => drop.setOpen(open => !open)}
       >
-        {role === 'model' && <ExecutorMark executor="kimi" />}
+        {role === 'model' && <ExecutorMark executor={executor} />}
         {role === 'effort' && <BulbIcon />}
         <span className="name">{currentLabel}</span>
         <span className="caret cmp-caret" aria-hidden="true">▾</span>

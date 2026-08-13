@@ -1,5 +1,6 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import type { GianBrowserApi, SystemConfig } from '@gian/shared';
+import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SettingsBody } from '../src/components/SettingsBody.js';
 import {
@@ -13,6 +14,7 @@ const config: SystemConfig = {
   host: '127.0.0.1', port: 8990, workspace_root: '~/Coding',
   theme: 'warm', accent: 'plum', density: 'cozy', locale: 'en',
   font_scale_chrome: 'md', font_scale_chat: 'md', font_scale_code: 'md',
+  terminal: { ...DEFAULT_TERMINAL_PREFERENCES },
   default_claude_model: '', default_claude_effort: '',
   default_codex_model: '', default_codex_effort: '',
   auth_username: '', external_editors: [], open_apps: {},

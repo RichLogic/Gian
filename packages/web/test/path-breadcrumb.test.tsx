@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { PathBreadcrumb } from '../src/components/PathBreadcrumb.js';
-import type { PathSegment } from '../src/components/PathBreadcrumb.js';
+import type { PathSegment, SessionMenuActions } from '../src/components/PathBreadcrumb.js';
 
 const segments: PathSegment[] = [
   { kind: 'workspace', label: 'Gian-Dev' },
@@ -16,11 +16,14 @@ const segments: PathSegment[] = [
   { kind: 'branch', label: 'gian-dev-subtask-running-check' },
 ];
 
-function renderBreadcrumb(onBranchOpen?: () => void) {
+function renderBreadcrumb(
+  onBranchOpen?: () => void,
+  sessionMenu: SessionMenuActions = { onRename: () => {} },
+) {
   return render(
     <PathBreadcrumb
       segments={segments}
-      sessionMenu={{ onRename: () => {} }}
+      sessionMenu={sessionMenu}
       branchMenu={{
         onOpen: onBranchOpen,
         items: [
@@ -51,6 +54,18 @@ describe('PathBreadcrumb dropdowns', () => {
     await user.click(screen.getByRole('button', { name: /bug fix/ }));
     expect(screen.getByText('Rename')).toBeTruthy();
     expect(openMenus()).toBe(1);
+  });
+
+  it('runs the move-to-task action and closes the session menu', async () => {
+    const user = userEvent.setup();
+    const onAssignTask = vi.fn();
+    renderBreadcrumb(undefined, { onRename: () => {}, onAssignTask });
+
+    await user.click(screen.getByRole('button', { name: /bug fix/ }));
+    await user.click(screen.getByRole('button', { name: /Move to task/ }));
+
+    expect(onAssignTask).toHaveBeenCalledOnce();
+    expect(openMenus()).toBe(0);
   });
 
   it('opening the branch dropdown closes the session menu', async () => {

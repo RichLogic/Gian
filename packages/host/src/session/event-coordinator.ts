@@ -1,13 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type {
+  AttentionMessage,
+  ChatEvent,
   EventEnvelope,
   ExecutorConfigState,
   InputItem,
   NativeConfigOption,
   ProxyNotification,
   Session,
-  ChatEvent,
+  SessionErrorData,
 } from '@gian/shared';
+import { usesNativeExecutorConfig } from '@gian/shared';
 import {
   ProxyProtocolError,
   protocolViolation,
@@ -39,6 +42,13 @@ import {
   type ParsedTokenUsageUpdate,
 } from './token-usage.js';
 import { kimiContentText } from './input-items.js';
+import { AttentionDispatcher } from './attention.js';
+
+export {
+  ATTENTION_BODY_MAX_BYTES,
+  ATTENTION_TITLE_MAX_BYTES,
+  attentionMessageForEvent,
+} from './attention.js';
 
 function isReplaceableSnapshot(event: ChatEvent): boolean {
   if (event.event === 'diff.updated') return true;
@@ -91,6 +101,7 @@ export class SessionEventCoordinator {
   private replayRetryAttempts = new Map<string, number>();
   private replayRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private replayRefreshCancelled = new Set<string>();
+  private attention: AttentionDispatcher;
 
   constructor(
     private db: Db,
@@ -104,7 +115,10 @@ export class SessionEventCoordinator {
     private proxySessions: ProxySessionCoordinator,
     private autoTitle: AutoTitleService,
     private callbacks: EventCoordinatorCallbacks,
-  ) {}
+    attention?: AttentionDispatcher,
+  ) {
+    this.attention = attention ?? new AttentionDispatcher(broadcaster);
+  }
 
   onEvent(subscriber: (event: ChatEvent) => void): () => void {
     this.eventSubscribers.push(subscriber);
@@ -307,7 +321,11 @@ export class SessionEventCoordinator {
     broadcast = false,
     replayStreamId?: string,
   ): { turns: number; events: number } {
-    const broadcasts: Array<{ event: ChatEvent; turnId: string }> = [];
+    const broadcasts: Array<{
+      event: ChatEvent;
+      turnId: string;
+      attentionEligible: boolean;
+    }> = [];
     const persist = this.db.transaction(() => this.persistProtocolV1ReplayTransaction(
       sessionId,
       notifications,
@@ -316,7 +334,13 @@ export class SessionEventCoordinator {
       replayStreamId,
     ));
     const result = persist();
-    for (const item of broadcasts) this.broadcastChatEvent(item.event, item.turnId);
+    for (const item of broadcasts) {
+      this.broadcastChatEvent(
+        item.event,
+        item.turnId,
+        item.attentionEligible && !result.rebuilt,
+      );
+    }
     if (broadcast && result.rebuilt) {
       this.broadcaster.broadcast({ type: 'session:history-rebuilt', session_id: sessionId });
     }
@@ -327,7 +351,11 @@ export class SessionEventCoordinator {
     sessionId: string,
     notifications: ProtocolV1Notification[],
     fallbackTimestamp: string,
-    broadcasts: Array<{ event: ChatEvent; turnId: string }> | null,
+    broadcasts: Array<{
+      event: ChatEvent;
+      turnId: string;
+      attentionEligible: boolean;
+    }> | null,
     replayStreamId?: string,
   ): { turns: number; events: number; rebuilt: boolean } {
     const provider = this.sessions.get(sessionId).executor;
@@ -459,7 +487,14 @@ export class SessionEventCoordinator {
         );
         if (result.inserted) {
           eventCount += 1;
-          broadcasts?.push({ event, turnId: turn.id });
+          broadcasts?.push({
+            event,
+            turnId: turn.id,
+            // Replay-owned turns originate outside this Host process. A
+            // newly appended tail is live work and may need attention;
+            // Gian-owned turns were already notified by their stdio path.
+            attentionEligible: turn.replayOwned,
+          });
         }
       }
       this.db.prepare(
@@ -739,6 +774,7 @@ export class SessionEventCoordinator {
       notification as unknown as ProxyNotification,
       active.number,
     );
+    const persistedEvents: Array<{ event: ChatEvent; inserted: boolean }> = [];
     const persist = this.db.transaction(() => {
       const mapped = this.db.prepare(
         `SELECT turn_id
@@ -758,7 +794,7 @@ export class SessionEventCoordinator {
         ).run(sessionId, providerTurnId, active.id);
       }
       for (const event of events) {
-        this.history.appendEvent(
+        const result = this.history.appendEvent(
           sessionId,
           active.id,
           event.call_id,
@@ -771,6 +807,7 @@ export class SessionEventCoordinator {
           },
           { replaceSnapshot: isReplaceableSnapshot(event) },
         );
+        persistedEvents.push({ event, inserted: result.inserted });
       }
       this.db.prepare(
         `INSERT INTO proxy_replay_events
@@ -779,7 +816,9 @@ export class SessionEventCoordinator {
       ).run(sessionId, eventId, active.id, payloadHash);
     });
     persist();
-    for (const event of events) this.broadcastChatEvent(event, active.id);
+    for (const item of persistedEvents) {
+      this.broadcastChatEvent(item.event, active.id, item.inserted);
+    }
     return true;
   }
 
@@ -908,7 +947,7 @@ export class SessionEventCoordinator {
     if (this.watcher && manageWatcher) {
       this.watcher.stop(gianSessionId);
       const session = this.sessions.get(gianSessionId);
-      if (session.executor === 'kimi') return;
+      if (usesNativeExecutorConfig(session.executor)) return;
       const workspace = this.db
         .prepare('SELECT path FROM workspaces WHERE id = ?')
         .get(session.workspace_id) as { path: string } | undefined;
@@ -992,7 +1031,7 @@ export class SessionEventCoordinator {
       raw: e.data,
       ...(e.display ? { display: e.display } : {}),
     };
-    this.history.appendEvent(
+    const result = this.history.appendEvent(
       e.session_id,
       turnId,
       e.call_id,
@@ -1000,10 +1039,10 @@ export class SessionEventCoordinator {
       storedData,
       { replaceSnapshot: isReplaceableSnapshot(e) },
     );
-    this.broadcastChatEvent(e, turnId);
+    this.broadcastChatEvent(e, turnId, result.inserted);
   }
 
-  private broadcastChatEvent(e: ChatEvent, turnId: string): void {
+  private broadcastChatEvent(e: ChatEvent, turnId: string, attentionEligible: boolean): void {
     this.broadcaster.broadcast({
       type: 'event',
       session_id: e.session_id,
@@ -1015,7 +1054,22 @@ export class SessionEventCoordinator {
       provider: e.provider,
       ...(e.display ? { display: e.display } : {}),
     });
-    this.afterChatEvent(e, turnId);
+    // A provider can emit its terminal synchronously while interruptTurn is
+    // still awaiting the Stop RPC. The turn remains active until lifecycle
+    // handling below, but its stop intent is already authoritative for user
+    // attention: never flash a completion/error alert for work they stopped.
+    const attention = attentionEligible
+      && !this.turns.isStopRequested(e.session_id, turnId)
+      ? this.attention.claim(e)
+      : null;
+    if (
+      attention
+      && e.display?.type !== 'interaction.approval'
+      && e.display?.type !== 'interaction.question'
+    ) {
+      this.broadcaster.broadcast(attention);
+    }
+    this.afterChatEvent(e, turnId, attention);
     for (const fn of this.eventSubscribers) {
       try { fn(e); } catch {}
     }
@@ -1026,7 +1080,11 @@ export class SessionEventCoordinator {
    * specific event types — used by Approval (Track C) to register pending
    * approvals into the global list.
    */
-  private afterChatEvent(e: ChatEvent, turnId: string): void {
+  private afterChatEvent(
+    e: ChatEvent,
+    turnId: string,
+    attention: AttentionMessage | null,
+  ): void {
     if (e.display?.type === 'interaction.approval' || e.display?.type === 'interaction.question') {
       const d = e.display.data as import('@gian/shared').ApprovalRequestedData;
       void this.approvals.request({
@@ -1038,6 +1096,7 @@ export class SessionEventCoordinator {
         subject: d.subject,
         payload: { approvalId: d.approvalId },
         nativeOptions: d.nativeOptions,
+        ...(attention ? { attention } : {}),
       }).catch(err => {
         console.error('[approval] request failed', err);
       });
@@ -1206,6 +1265,31 @@ export class SessionEventCoordinator {
     const terminalStatus = current && this.turns.isStopRequested(sessionId, current.id)
       ? 'stopped'
       : status;
+    if (
+      current
+      && terminalStatus === 'error'
+      && !this.history.hasTurnDisplayType(current.id, 'state.error')
+    ) {
+      const session = this.sessions.get(sessionId);
+      const errorData: SessionErrorData = {
+        message: 'The agent stopped unexpectedly.',
+        retryable: true,
+        code: 'TURN_FAILED',
+      };
+      const error: ChatEvent<'state.error'> = {
+        session_id: sessionId,
+        turn: current.number,
+        call_id: `gian:turn-error:${current.id}`,
+        ts: Date.now(),
+        provider: session.executor,
+        event: 'gian.turn.error',
+        // Provider diagnostics remain in their native event/log. Keep this
+        // fallback presentation and OS notification intentionally generic.
+        data: { status: 'error' },
+        display: { type: 'state.error', data: errorData },
+      };
+      this.persistAndBroadcast(error, current.id);
+    }
     const active = this.turns.finish(sessionId, terminalStatus, now);
     if (!active) return null;
     this.ensureTerminalBoundary(sessionId, active, terminalStatus, now);

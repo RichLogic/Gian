@@ -67,9 +67,8 @@
 }
 
 /* New session (issue #57) — the page mirrors the chat panel: the transcript
-   area (.main-scroll) stays empty except for task context / create errors;
-   agent + workspace selectors sit in a row above the message box; the
-   composer at the bottom is the real composer layout with capability chips. */
+   area (.main-scroll) stays empty except for create errors; agent + workspace
+   selectors sit above a two-row title/message composer with capability chips. */
 .ns-center {
   min-height: 100%;
   display: flex; flex-direction: column; justify-content: center; gap: 12px;
@@ -92,6 +91,21 @@
   align-items: center;
   gap: 4px;
 }
+/* Optional title is the first row inside the new-session composer. A blank
+   value stays omitted from session:create so SES-TITLE-001 can auto-title the
+   session after its first completed turn. */
+.ns-title-input {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--hairline);
+  outline: none;
+  padding: 10px 12px 8px;
+  font: 500 var(--fz-13)/1.4 var(--font-sans);
+  color: var(--text);
+}
+.ns-title-input::placeholder { color: var(--text-3); font-weight: 400; }
 /* Codex-style workspace drop: search box on top, filtered rows, and a
    "+ New workspace" footer row that jumps to the Workspaces sheet form. */
 .ns-ws-pop { width: 300px; }
@@ -122,16 +136,6 @@
   text-align: left;
 }
 .ns-ws-new:hover { background: var(--surface-2); color: var(--text); }
-/* Read-only task context row (Tasks sidebar task-row "+" entry): the new
-   session is created as a subtask of this task. */
-.ns-task-static {
-  padding: 7px 9px;
-  background: var(--surface-2);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-2);
-  font: var(--fz-13)/1.5 var(--font-sans);
-  color: var(--text-2);
-}
 
 /* Busy state — used by the Browse→create-workspace button while the host
    call is in flight. Keeps the button width stable. */

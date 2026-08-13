@@ -26,6 +26,11 @@ interface Credential {
   user: GitHubUserProfile;
 }
 
+export interface GitHubReleaseMetadataRequest {
+  repository: string;
+  tag?: string;
+}
+
 export interface GitHubCredentialStore {
   isAvailable(): boolean;
   load(): Promise<Credential | null>;
@@ -196,6 +201,33 @@ export class GitHubAuthService {
     await this.options.store.clear();
   }
 
+  /**
+   * Perform the narrow GitHub API operation used by the managed Host without
+   * disclosing the OAuth token outside Electron main. The caller supplies a
+   * structured repository/tag request rather than an arbitrary URL, and
+   * redirects are rejected so the Authorization header cannot cross origins.
+   */
+  async fetchReleaseMetadata(
+    request: GitHubReleaseMetadataRequest,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    const url = releaseMetadataUrl(request);
+    const headers = new Headers({
+      accept: 'application/vnd.github+json',
+      'user-agent': 'Gian',
+      'x-github-api-version': API_VERSION,
+    });
+    if (this.options.store.isAvailable()) {
+      const credential = await this.options.store.load();
+      if (credential) headers.set('authorization', `Bearer ${credential.token}`);
+    }
+    return this.fetchImpl(url, {
+      headers,
+      redirect: 'error',
+      ...(signal ? { signal } : {}),
+    });
+  }
+
   private async poll(pending: PendingAuthorization): Promise<GitHubAuthFinishResult> {
     const clientId = this.options.clientId;
     if (!clientId) return { ok: false, error: 'not_configured' };
@@ -310,6 +342,40 @@ function validClientId(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   return /^[A-Za-z0-9_-]{8,200}$/.test(trimmed) ? trimmed : null;
+}
+
+function releaseMetadataUrl(request: GitHubReleaseMetadataRequest): string {
+  if (!isGitHubRepository(request.repository)) {
+    throw new Error('invalid GitHub release repository');
+  }
+  const repository = request.repository
+    .split('/')
+    .map(segment => encodeURIComponent(segment))
+    .join('/');
+  if (request.tag === undefined) {
+    return `https://api.github.com/repos/${repository}/releases?per_page=100`;
+  }
+  if (
+    request.tag.length === 0
+    || request.tag.length > 255
+    || /[\u0000-\u001f\u007f]/.test(request.tag)
+  ) {
+    throw new Error('invalid GitHub release tag');
+  }
+  return `https://api.github.com/repos/${repository}/releases/tags/${encodeURIComponent(request.tag)}`;
+}
+
+function isGitHubRepository(value: string): boolean {
+  if (value.length === 0 || value.length > 200) return false;
+  const segments = value.split('/');
+  return segments.length === 2
+    && segments.every(segment => (
+      segment.length > 0
+      && segment.length <= 100
+      && /^[A-Za-z0-9_.-]+$/.test(segment)
+      && segment !== '.'
+      && segment !== '..'
+    ));
 }
 
 function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {

@@ -46,6 +46,11 @@ export type SheetOpenWith =
   | { kind: 'app'; app: string }
   | { kind: 'editor'; id: string };
 
+export interface TerminalLaunchProfile {
+  cwd?: string;
+  shell?: string;
+}
+
 export interface SheetTab {
   id: string;
   group: SheetGroup;
@@ -97,6 +102,9 @@ export interface SheetTab {
   /** Error-state retry: re-runs the tab's content load (set by the loader
    *  alongside `loadError`). */
   retryLoad?: () => void;
+  /** Captured when a Workbench terminal tab is created. Visual preferences
+   *  stay live, but shell/cwd changes apply only to future PTYs. */
+  terminalProfile?: TerminalLaunchProfile;
 }
 
 export interface SheetActions {

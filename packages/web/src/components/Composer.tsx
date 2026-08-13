@@ -1,17 +1,22 @@
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ApprovalMode, Executor, NativeConfigOption, NativeConfigValue, ProxyModeCapabilities, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
-import { isNativeImageMime } from '../attachments.js';
+import { usesNativeExecutorConfig } from '@gian/shared';
+import { isNativeImageMime, servedAttachmentUrl } from '../attachments.js';
+import type { UploadedAttachment } from '../api.js';
 import {
   loadNativeConfig,
   loadSessionSlashCommands,
 } from '../api.js';
+import { desktopBridge } from '../desktop-bridge.js';
+import { toast } from '../feedback.js';
 import { useT } from '../i18n/index.js';
 // Runtime import (not `import type`): registering message.uploadAttachment
 // on the product registry is a module side effect.
 import { type UploadAttachmentInput } from '../operations/message.js';
 import { useOperationDispatchOptional, useSessionOperationPending } from '../operations/use-operations.js';
 import { ImageZoomContext } from '../transcript/items.js';
+import { publishScreenshotTarget, startScreenshotCapture } from '../screenshot-target.js';
 import { ContextUsageIndicator } from './composer/context-usage-indicator.js';
 import {
   claudeModelFamily,
@@ -65,12 +70,6 @@ interface ComposerDraft {
 
 const EMPTY_DRAFT: ComposerDraft = { text: '', attachments: [] };
 
-/** Served preview URL for an attachment that already lives in the host's
- *  per-session store — the same endpoint the transcript bubbles use. */
-function servedAttachmentUrl(sessionId: string, path: string): string {
-  return `/api/sessions/${sessionId}/attachments/${path.split('/').pop() ?? path}`;
-}
-
 function readDraft(sessionId: string): ComposerDraft {
   try {
     const raw = localStorage.getItem(draftKey(sessionId));
@@ -108,6 +107,7 @@ function writeDraft(sessionId: string, draft: ComposerDraft): void {
  *  draft (e.g. the Changes inspector dropping a "commit and push" prompt into
  *  the active session's input for the user to review before sending). */
 const COMPOSER_INJECT_EVENT = 'gian:composer-inject';
+let pendingComposerFocusSessionId: string | null = null;
 
 /** Append `text` to the given session's draft and notify a mounted Composer
  *  to re-read it. The text is NOT auto-sent — it lands in the textarea so the
@@ -118,9 +118,38 @@ export function injectComposerDraft(sessionId: string, text: string): void {
   const next = existing.text ? `${existing.text}\n\n${text}` : text;
   writeDraft(sessionId, { ...existing, text: next });
   try {
-    window.dispatchEvent(new CustomEvent(COMPOSER_INJECT_EVENT, { detail: { sessionId } }));
+    window.dispatchEvent(new CustomEvent(COMPOSER_INJECT_EVENT, {
+      detail: { sessionId, kind: 'text' },
+    }));
   } catch {
     // no window (SSR/tests) — the draft is still persisted for next mount.
+  }
+}
+
+/** Add an already-uploaded screenshot to one exact Session draft. */
+export function injectComposerAttachment(
+  sessionId: string,
+  attachment: Pick<UploadedAttachment, 'path' | 'name' | 'mime' | 'size'>,
+): void {
+  const existing = readDraft(sessionId);
+  const nextAttachment: DraftAttachment = {
+    path: attachment.path,
+    name: attachment.name,
+    mime: attachment.mime,
+    size: attachment.size,
+  };
+  const attachments = [
+    ...existing.attachments.filter(item => item.path !== attachment.path),
+    nextAttachment,
+  ];
+  writeDraft(sessionId, { ...existing, attachments });
+  pendingComposerFocusSessionId = sessionId;
+  try {
+    window.dispatchEvent(new CustomEvent(COMPOSER_INJECT_EVENT, {
+      detail: { sessionId, kind: 'attachment', attachment: nextAttachment },
+    }));
+  } catch {
+    // The draft and focus request are consumed when the Composer next mounts.
   }
 }
 
@@ -251,7 +280,7 @@ export function Composer({
   const t = useT();
   const minimal = variant === 'minimal';
   const hardDisabled = disabled && disabledSubmitBehavior === 'block';
-  const cliExecutor = executor === 'kimi' ? null : executor;
+  const cliExecutor = usesNativeExecutorConfig(executor) ? null : executor;
   const zoomImage = useContext(ImageZoomContext);
   // Restore text AND already-uploaded attachments from the per-session draft —
   // before v2 only the text survived a session switch and the chips vanished
@@ -315,6 +344,7 @@ export function Composer({
   // message.uploadAttachment). Null only when no operation provider is
   // mounted (standalone test renders) — uploads then fail the chip visibly.
   const dispatch = useOperationDispatchOptional();
+  const screenshotAvailable = !!desktopBridge()?.screenshot;
 
   // Fetch model list lazily per executor; cached.
   useEffect(() => {
@@ -363,7 +393,7 @@ export function Composer({
 
   // Fetch slash commands lazily; keyed by (executor, workspaceId); cached.
   useEffect(() => {
-    if (executor === 'kimi') {
+    if (usesNativeExecutorConfig(executor)) {
       let alive = true;
       setSlashCommands([]);
       setSlashLoading(true);
@@ -407,7 +437,7 @@ export function Composer({
   }, [executor, session.id, workspaceId, slashRefreshVersion]);
 
   useEffect(() => {
-    if (executor === 'kimi' || !workspaceId) return;
+    if (usesNativeExecutorConfig(executor) || !workspaceId) return;
     const refresh = (event: Event) => {
       const detail = (event as CustomEvent).detail as { workspaceId?: unknown } | undefined;
       if (detail?.workspaceId === workspaceId) {
@@ -419,7 +449,7 @@ export function Composer({
   }, [executor, workspaceId]);
 
   useEffect(() => {
-    if (executor !== 'kimi') return;
+    if (!usesNativeExecutorConfig(executor)) return;
     const update = (event: Event) => {
       const detail = (event as CustomEvent).detail as
         | { sessionId?: unknown; commands?: unknown }
@@ -436,7 +466,7 @@ export function Composer({
   }, [session.id, session.native_config_options]);
 
   useEffect(() => {
-    if (executor !== 'kimi' || sessionNativeOptions.length > 0) return;
+    if (!usesNativeExecutorConfig(executor) || sessionNativeOptions.length > 0) return;
     let alive = true;
     void loadNativeConfig(session.id)
       .then(snapshot => {
@@ -489,22 +519,65 @@ export function Composer({
     writeDraft(session.id, { text, attachments: persistableDraftAttachments(pendingFiles) });
   }, [session.id, text, pendingFiles]);
 
-  // External draft injection (Changes inspector → "commit / push / create PR"
-  // prompts). The dispatcher has already written the appended draft to
-  // localStorage; we just re-read it into the textarea and focus, caret at end.
+  // External draft injection covers text prompts and screenshots captured while
+  // this Session was either foregrounded or temporarily unmounted.
   useEffect(() => {
     function onInject(e: Event) {
-      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
+      const detail = (e as CustomEvent).detail as {
+        sessionId?: string;
+        kind?: 'text' | 'attachment';
+        attachment?: DraftAttachment;
+      } | undefined;
       if (detail?.sessionId !== session.id) return;
-      setText(readDraft(session.id).text);
+      if (detail.kind === 'attachment' && detail.attachment) {
+        setPendingFiles(previous => {
+          if (previous.some(file => file.path === detail.attachment!.path)) return previous;
+          return [
+            ...previous,
+            ...draftAttachmentsToPending(session.id, [detail.attachment!]),
+          ];
+        });
+      } else {
+        setText(readDraft(session.id).text);
+      }
       requestAnimationFrame(() => {
         const el = ref.current;
-        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+        if (el) {
+          el.focus();
+          el.setSelectionRange(el.value.length, el.value.length);
+          if (pendingComposerFocusSessionId === session.id) pendingComposerFocusSessionId = null;
+        }
       });
     }
     window.addEventListener(COMPOSER_INJECT_EVENT, onInject);
+    if (pendingComposerFocusSessionId === session.id) {
+      requestAnimationFrame(() => {
+        const el = ref.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(el.value.length, el.value.length);
+        if (pendingComposerFocusSessionId === session.id) pendingComposerFocusSessionId = null;
+      });
+    }
     return () => window.removeEventListener(COMPOSER_INJECT_EVENT, onInject);
   }, [session.id]);
+
+  useEffect(() => {
+    if (hardDisabled || !screenshotAvailable) return;
+    return publishScreenshotTarget({
+      kind: 'session',
+      sessionId: session.id,
+      label: session.name?.trim() || `session ${session.id.slice(0, 6)}`,
+    });
+  }, [hardDisabled, screenshotAvailable, session.id, session.name]);
+
+  async function captureScreenshot(): Promise<void> {
+    try {
+      await startScreenshotCapture();
+    } catch {
+      toast({ kind: 'error', message: t('screenshot.startFailed') });
+    }
+  }
 
   const activeModel = currentModel;
   const approvalMode = session.approval_mode;
@@ -976,10 +1049,11 @@ export function Composer({
         )}
 
         <div className="composer-bar">
-          {!minimal && executor === 'kimi' && (
+          {!minimal && usesNativeExecutorConfig(executor) && (
             <div className="composer-native-config">
               {nativeModelOption && (
                 <NativeOptionDrop
+                  executor={executor}
                   option={nativeModelOption}
                   role="model"
                   disabled={disabled || !onSetNativeConfig}
@@ -988,6 +1062,7 @@ export function Composer({
               )}
               {nativeEffortOption && (
                 <NativeOptionDrop
+                  executor={executor}
                   option={nativeEffortOption}
                   role="effort"
                   disabled={disabled || !onSetNativeConfig}
@@ -1064,7 +1139,7 @@ export function Composer({
               ))}
             </div>
           )}
-          {!minimal && executor !== 'kimi' && (<>
+          {!minimal && !usesNativeExecutorConfig(executor) && (<>
           {/* Model picker — opens custom model+thinking popover */}
           <div className="composer-model">
           <button
@@ -1190,8 +1265,9 @@ export function Composer({
 
           {!minimal && <ContextUsageIndicator session={session} />}
 
-          {!minimal && executor === 'kimi' && nativeModeOption && (
+          {!minimal && usesNativeExecutorConfig(executor) && nativeModeOption && (
             <NativeOptionDrop
+              executor={executor}
               option={nativeModeOption}
               role="mode"
               disabled={disabled || !onSetNativeConfig}
@@ -1294,6 +1370,22 @@ export function Composer({
             >
               <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+            </button>
+          )}
+
+          {!minimal && screenshotAvailable && (
+            <button
+              type="button"
+              className="composer-act"
+              disabled={hardDisabled}
+              title={t('screenshot.capture')}
+              aria-label={t('screenshot.capture')}
+              onClick={() => { void captureScreenshot(); }}
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
+                <path d="M5 3.5 6 2h4l1 1.5h2A1.5 1.5 0 0 1 14.5 5v7A1.5 1.5 0 0 1 13 13.5H3A1.5 1.5 0 0 1 1.5 12V5A1.5 1.5 0 0 1 3 3.5h2Z" strokeWidth="1.2" />
+                <circle cx="8" cy="8.5" r="2.5" strokeWidth="1.2" />
               </svg>
             </button>
           )}

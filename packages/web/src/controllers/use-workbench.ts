@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Session, Workspace } from '@gian/shared';
+import type { Dispatch, SetStateAction } from 'react';
+import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
+import type { Session, TerminalPreferences, Workspace } from '@gian/shared';
 import {
   loadAllFiles,
   loadApps,
@@ -9,13 +11,13 @@ import {
 } from '../api.js';
 import {
   IMAGE_EXTS,
-  insertGroupPreviewTab,
   openCategoryFor,
   type FileViewMode,
   type RailId,
   type SheetGroup,
   type SheetOpenWith,
   type SheetTab,
+  type TerminalLaunchProfile,
 } from '../components/sheet-model.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
 import { buildFileRefIndex, makeFileLinkifyRehype } from '../transcript/linkify-files.js';
@@ -27,9 +29,83 @@ import { desktopBridge } from '../desktop-bridge.js';
 import { readWtViewOverride, resolveViewedTreeId, writeWtViewOverride } from '../presentation/wt-view.js';
 import type { ChatPanelRequest, ChatPanelTarget } from '../presentation/chat-panel.js';
 import type { AppAuthStatus } from './use-app-auth.js';
+import {
+  resolveTerminalLaunchProfile,
+  terminalLaunchLabel,
+} from '../terminal-launch-profile.js';
 
 let browserTabSequence = 0;
 let terminalTabSequence = 0;
+
+type SessionRailId = Extract<RailId, 'files' | 'diffs' | 'history'>;
+type GlobalRailId = Exclude<RailId, SessionRailId>;
+type SessionSheetGroup = Extract<SheetGroup, 'files' | 'diffs' | 'history'>;
+
+const GLOBAL_TAB_OWNER = '__global__';
+const SESSION_RAILS = new Set<SessionRailId>(['files', 'diffs', 'history']);
+const SESSION_GROUPS = new Set<SessionSheetGroup>(['files', 'diffs', 'history']);
+const ALL_GROUPS: readonly SheetGroup[] = [
+  'files', 'diffs', 'history', 'term', 'browser', 'workspaces', 'settings',
+];
+
+function isSessionRail(rail: RailId): rail is SessionRailId {
+  return SESSION_RAILS.has(rail as SessionRailId);
+}
+
+function isSessionGroup(group: SheetGroup): group is SessionSheetGroup {
+  return SESSION_GROUPS.has(group as SessionSheetGroup);
+}
+
+function selfContainedGlobalRailForGroup(group: SheetGroup): GlobalRailId | null {
+  switch (group) {
+    case 'term': return 'terminal';
+    case 'browser': return 'browser';
+    default: return null;
+  }
+}
+
+function tabBelongsToSession(tab: SheetTab, sessionId: string | null): boolean {
+  return !isSessionGroup(tab.group) || (!!sessionId && tab.sessionId === sessionId);
+}
+
+type ActiveTabs = Partial<Record<SheetGroup, string | null>>;
+
+function visibleActiveTabs(
+  owners: Record<string, ActiveTabs>,
+  sessionId: string | null,
+): ActiveTabs {
+  return {
+    ...(owners[GLOBAL_TAB_OWNER] ?? {}),
+    ...(sessionId ? owners[sessionId] ?? {} : {}),
+  };
+}
+
+interface SessionWorkbenchScene {
+  activeRail: SessionRailId | null;
+  filesInspectorSuppressed: boolean;
+  fileReveal: {
+    workingTreeId: string;
+    path: string;
+    requestId: number;
+  } | null;
+}
+
+const DEFAULT_SESSION_SCENE: SessionWorkbenchScene = {
+  activeRail: null,
+  filesInspectorSuppressed: false,
+  fileReveal: null,
+};
+
+type WorkbenchForeground =
+  | { kind: 'none' }
+  | { kind: 'session' }
+  | { kind: 'global'; rail: GlobalRailId };
+
+function railStateKey(rail: RailId, sessionId: string | null): string | null {
+  return isSessionRail(rail)
+    ? (sessionId ? `session:${sessionId}:${rail}` : null)
+    : `global:${rail}`;
+}
 
 function createBrowserTab(existingCount: number): SheetTab {
   browserTabSequence += 1;
@@ -54,6 +130,8 @@ interface UseWorkbenchInput {
   activeWorkspace: Workspace | null;
   workspaces: Workspace[];
   workingTrees: WorkingTree[];
+  terminalPreferences?: Readonly<TerminalPreferences>;
+  terminalSystemShell?: string;
   mode: string;
   activeSubtaskId: string | null;
   t(key: string): string;
@@ -68,6 +146,8 @@ export function useWorkbench({
   activeWorkspace,
   workspaces,
   workingTrees,
+  terminalPreferences = DEFAULT_TERMINAL_PREFERENCES,
+  terminalSystemShell = '',
   mode,
   activeSubtaskId,
   t: appT,
@@ -81,31 +161,119 @@ export function useWorkbench({
     if (v) writeWtViewOverride(v.sessionId, v.wtId);
   }, []);
   const [apps, setApps] = useState<string[]>([]);
-  const [wbTabs, setWbTabs] = useState<SheetTab[]>([]);
-  const [activeTabByGroup, setActiveTabByGroup] =
-    useState<Partial<Record<SheetGroup, string | null>>>({});
+  // Files / Diffs / History tabs belong to the Session that opened them.
+  // Global tabs stay in the same array without a sessionId so Terminal,
+  // Browser, Workspaces, and Settings remain mounted while Sessions change.
+  const [allWbTabs, setWbTabs] = useState<SheetTab[]>([]);
+  const wbTabs = useMemo(
+    () => allWbTabs.filter(tab => tabBelongsToSession(tab, activeSessionId)),
+    [allWbTabs, activeSessionId],
+  );
+  const [activeTabsByOwner, setActiveTabsByOwner] =
+    useState<Record<string, ActiveTabs>>({ [GLOBAL_TAB_OWNER]: {} });
+  const activeTabByGroup = useMemo(
+    () => visibleActiveTabs(activeTabsByOwner, activeSessionId),
+    [activeTabsByOwner, activeSessionId],
+  );
+  const setActiveTabByGroup: Dispatch<SetStateAction<ActiveTabs>> = useCallback((action) => {
+    const ownerSessionId = activeSessionId;
+    setActiveTabsByOwner(previous => {
+      const current = visibleActiveTabs(previous, ownerSessionId);
+      const next = typeof action === 'function' ? action(current) : action;
+      const globalTabs = { ...(previous[GLOBAL_TAB_OWNER] ?? {}) };
+      for (const group of ALL_GROUPS) {
+        if (!isSessionGroup(group)) globalTabs[group] = next[group] ?? null;
+      }
+      const owners: Record<string, ActiveTabs> = {
+        ...previous,
+        [GLOBAL_TAB_OWNER]: globalTabs,
+      };
+      if (ownerSessionId) {
+        const sessionTabs = { ...(previous[ownerSessionId] ?? {}) };
+        for (const group of ALL_GROUPS) {
+          if (isSessionGroup(group)) sessionTabs[group] = next[group] ?? null;
+        }
+        owners[ownerSessionId] = sessionTabs;
+      }
+      return owners;
+    });
+  }, [activeSessionId]);
   const [viewState, setViewState] = useState<'main' | 'workbench' | 'both'>('main');
-  const [activeRail, setActiveRail] = useState<RailId | null>(null);
+  const [sessionScenes, setSessionScenes] = useState<Record<string, SessionWorkbenchScene>>({});
+  const sessionScene = activeSessionId
+    ? sessionScenes[activeSessionId] ?? DEFAULT_SESSION_SCENE
+    : DEFAULT_SESSION_SCENE;
+  const patchSessionScene = useCallback((
+    patch: Partial<SessionWorkbenchScene>
+      | ((current: SessionWorkbenchScene) => Partial<SessionWorkbenchScene>),
+  ) => {
+    const ownerSessionId = activeSessionId;
+    if (!ownerSessionId) return;
+    setSessionScenes(previous => {
+      const current = previous[ownerSessionId] ?? DEFAULT_SESSION_SCENE;
+      const changes = typeof patch === 'function' ? patch(current) : patch;
+      return { ...previous, [ownerSessionId]: { ...current, ...changes } };
+    });
+  }, [activeSessionId]);
+  const [foreground, setForeground] = useState<WorkbenchForeground>({ kind: 'none' });
+  const activeRail: RailId | null = foreground.kind === 'global'
+    ? foreground.rail
+    : foreground.kind === 'session'
+      ? sessionScene.activeRail
+      : null;
+  const setActiveRail = useCallback((rail: RailId | null) => {
+    if (rail === null) {
+      // A global foreground is only an overlay. Dismissing it must not erase
+      // the current Session's remembered Files / Diffs / History scene.
+      setForeground({ kind: 'none' });
+      return;
+    }
+    if (isSessionRail(rail)) {
+      if (!activeSessionId) return;
+      patchSessionScene({ activeRail: rail });
+      setForeground({ kind: 'session' });
+      return;
+    }
+    setForeground({ kind: 'global', rail });
+  }, [activeSessionId, patchSessionScene]);
   const [railMemory, setRailMemory] =
-    useState<Partial<Record<RailId, { tabId: string | null }>>>({});
-  const [p3Collapsed, setP3Collapsed] = useState(false);
-  const [filesInspectorSuppressed, setFilesInspectorSuppressed] = useState(false);
-  const [fileReveal, setFileReveal] = useState<{
-    workingTreeId: string;
-    path: string;
-    requestId: number;
-  } | null>(null);
+    useState<Record<string, { tabId: string | null }>>({});
+  const [p3CollapsedByRail, setP3CollapsedByRail] = useState<Record<string, boolean>>({});
+  const activeRailStateKey = activeRail ? railStateKey(activeRail, activeSessionId) : null;
+  const p3Collapsed = activeRailStateKey
+    ? p3CollapsedByRail[activeRailStateKey] ?? false
+    : false;
+  const setRailP3Collapsed = useCallback((
+    rail: RailId,
+    ownerSessionId: string | null,
+    action: SetStateAction<boolean>,
+  ) => {
+    const key = railStateKey(rail, ownerSessionId);
+    if (!key) return;
+    setP3CollapsedByRail(previous => {
+      const current = previous[key] ?? false;
+      const next = typeof action === 'function' ? action(current) : action;
+      return current === next ? previous : { ...previous, [key]: next };
+    });
+  }, []);
+  const setP3Collapsed: Dispatch<SetStateAction<boolean>> = useCallback((action) => {
+    if (!activeRail) return;
+    setRailP3Collapsed(activeRail, activeSessionId, action);
+  }, [activeRail, activeSessionId, setRailP3Collapsed]);
+  const filesInspectorSuppressed = sessionScene.filesInspectorSuppressed;
+  const setFilesInspectorSuppressed = useCallback((suppressed: boolean) => {
+    patchSessionScene({ filesInspectorSuppressed: suppressed });
+  }, [patchSessionScene]);
+  const fileReveal = sessionScene.fileReveal;
+  const setFileReveal = useCallback((reveal: SessionWorkbenchScene['fileReveal']) => {
+    patchSessionScene({ fileReveal: reveal });
+  }, [patchSessionScene]);
   const fileRevealSeqRef = useRef(0);
   const [chatPanel, setChatPanel] = useState<ChatPanelTarget | null>(null);
 
   useEffect(() => {
     setChatPanel(null);
   }, [mode, activeSessionId, activeSubtaskId]);
-
-  useEffect(() => {
-    setFilesInspectorSuppressed(false);
-    setFileReveal(null);
-  }, [activeSessionId]);
 
   function defaultWorkingTreeIdFor(sess: Session | null): string | null {
     if (sess) {
@@ -218,32 +386,39 @@ export function useWorkbench({
   // a file = preview tab (one at a time, italic name); double-click or pin =
   // permanent. Settings is singleton; Terminal and Browser are additive.
 
-  // Force viewState back to 'main' when wbTabs goes empty.
+  // Force viewState back to 'main' only when every Session-owned and global
+  // tab is gone. Looking at the active Session's filtered tabs here would
+  // close another Session's remembered workbench merely by switching away.
   useEffect(() => {
-    if (viewState !== 'main' && wbTabs.length === 0) {
+    if (viewState !== 'main' && allWbTabs.length === 0) {
       setViewState('main');
     }
-  }, [viewState, wbTabs.length]);
+  }, [viewState, allWbTabs.length]);
 
   /** Create the singleton Changes multi-diff tab if the diffs group doesn't
    *  have one. Non-stealing: an already-active text detail tab keeps the
    *  foreground; the new tab is only selected when the group has no
    *  selection. */
   function ensureChangesTab(): void {
+    if (!activeSessionId) return;
     if (wbTabs.some(t => t.group === 'diffs' && t.kind === 'changes')) {
       setViewState(v => v === 'main' ? 'both' : v);
       return;
     }
     const tab: SheetTab = {
-      id: 'tab-changes',
+      id: `tab-changes-${activeSessionId}`,
       group: 'diffs',
       name: appT('inspector.changes'),
       kind: 'changes',
       icoKind: 'diff',
       ico: '±',
       preview: false,
+      sessionId: activeSessionId,
     };
-    setWbTabs(prev => prev.some(t => t.group === 'diffs' && t.kind === 'changes') ? prev : [...prev, tab]);
+    setWbTabs(prev => prev.some(t =>
+      t.group === 'diffs' && t.kind === 'changes' && t.sessionId === activeSessionId)
+      ? prev
+      : [...prev, tab]);
     setActiveTabByGroup(a => ({ ...a, diffs: a.diffs ?? tab.id }));
     setViewState(v => v === 'main' ? 'both' : v);
   }
@@ -253,6 +428,7 @@ export function useWorkbench({
    *  creating it on first use. The tab is a shell — its body reads the
    *  use-changes-diff store for the viewed working tree. */
   function showChangesDiff(): void {
+    if (!activeSessionId) return;
     setChatPanel(null);
     setActiveRail('diffs');
     const existing = wbTabs.find(t => t.group === 'diffs' && t.kind === 'changes');
@@ -261,15 +437,19 @@ export function useWorkbench({
       return;
     }
     const tab: SheetTab = {
-      id: 'tab-changes',
+      id: `tab-changes-${activeSessionId}`,
       group: 'diffs',
       name: appT('inspector.changes'),
       kind: 'changes',
       icoKind: 'diff',
       ico: '±',
       preview: false,
+      sessionId: activeSessionId,
     };
-    setWbTabs(prev => prev.some(t => t.group === 'diffs' && t.kind === 'changes') ? prev : [...prev, tab]);
+    setWbTabs(prev => prev.some(t =>
+      t.group === 'diffs' && t.kind === 'changes' && t.sessionId === activeSessionId)
+      ? prev
+      : [...prev, tab]);
     revealSheetTab('diffs', tab.id);
   }
 
@@ -327,13 +507,26 @@ export function useWorkbench({
             setFileReveal(null);
           }
         }
+        const closingSelfContainedRail = tab ? selfContainedGlobalRailForGroup(tab.group) : null;
+        if (tab && closingSelfContainedRail
+          && !wbTabs.some(candidate => candidate.id !== id && candidate.group === tab.group)) {
+          // Closing a global rail's final tab closes that foreground too.
+          // Otherwise the Dock remains visually active with no Sheet body,
+          // and the next click merely dismisses that ghost state instead of
+          // opening a fresh Terminal/Browser (Issue #46).
+          setForeground(current => current.kind === 'global' && current.rail === closingSelfContainedRail
+            ? { kind: 'none' }
+            : current);
+        }
         setWbTabs(prev => {
           const closing = prev.find(t => t.id === id);
           const next = prev.filter(t => t.id !== id);
           if (closing) {
             setActiveTabByGroup(a => {
               if (a[closing.group] !== id) return a;
-              const sib = next.find(t => t.group === closing.group);
+              const sib = next.find(t =>
+                t.group === closing.group
+                && (!isSessionGroup(closing.group) || t.sessionId === closing.sessionId));
               return { ...a, [closing.group]: sib ? sib.id : null };
             });
           }
@@ -347,7 +540,16 @@ export function useWorkbench({
       setTabName: (id: string, name: string) =>
         setWbTabs(prev => prev.map(t => (t.id === id && t.name !== name) ? { ...t, name } : t)),
     };
-  }, [activeSession, activeTabByGroup.files, wbTabs, workspaces, dispatch]);
+  }, [
+    activeSession,
+    activeSessionId,
+    activeTabByGroup.files,
+    wbTabs,
+    workspaces,
+    workingTrees,
+    wtView,
+    dispatch,
+  ]);
 
   /** Rail → Sheet group mapping. */
   const GROUP_OF_RAIL: Record<RailId, SheetGroup | null> = {
@@ -370,14 +572,14 @@ export function useWorkbench({
    *  content some rails need: the first terminal, the settings tab, the
    *  diffs rail's Changes multi-diff tab. */
   function activateRail(rail: RailId): void {
+    if (isSessionRail(rail) && !activeSessionId) return;
     setChatPanel(null);
     if (rail === 'files') setFilesInspectorSuppressed(false);
     setActiveRail(rail);
     if (rail === 'terminal' && !wbTabs.some(t => t.group === 'term')) {
-      const id = 'tab-term-' + Date.now();
-      const tab: SheetTab = { id, group: 'term', name: terminalTabName(), kind: 'term', icoKind: 'term', ico: '$' };
+      const tab = createTerminalTab(0);
       setWbTabs(prev => [...prev, tab]);
-      revealSheetTab('term', id);
+      revealSheetTab('term', tab.id);
       return;
     }
     if (rail === 'settings' && !wbTabs.some(t => t.group === 'settings')) {
@@ -415,6 +617,7 @@ export function useWorkbench({
   /** Dock click: re-clicking the active rail collapses its panels and
    *  snapshots the scene into railMemory; clicking a rail opens/restores it. */
   function toggleRail(rail: RailId): void {
+    if (isSessionRail(rail) && !activeSessionId) return;
     if (chatPanel) {
       setChatPanel(null);
       if (activeRail !== rail) activateRail(rail);
@@ -428,12 +631,27 @@ export function useWorkbench({
         return;
       }
       const group = GROUP_OF_RAIL[rail];
-      setRailMemory(m => ({ ...m, [rail]: { tabId: group ? (activeTabByGroup[group] ?? null) : null } }));
-      setActiveRail(null);
+      const memoryKey = railStateKey(rail, activeSessionId);
+      if (memoryKey) {
+        setRailMemory(memory => ({
+          ...memory,
+          [memoryKey]: { tabId: group ? (activeTabByGroup[group] ?? null) : null },
+        }));
+      }
+      if (isSessionRail(rail)) {
+        patchSessionScene({ activeRail: null });
+        // Stay in Session-owned foreground mode even though this Session's
+        // rail is closed. Switching Sessions must still restore the target
+        // Session's independently remembered open/closed state.
+        setForeground({ kind: 'session' });
+      } else {
+        setForeground({ kind: 'none' });
+      }
       return;
     }
     const group = GROUP_OF_RAIL[rail];
-    const snap = railMemory[rail];
+    const memoryKey = railStateKey(rail, activeSessionId);
+    const snap = memoryKey ? railMemory[memoryKey] : undefined;
     if (group && snap?.tabId && wbTabs.some(t => t.id === snap.tabId)) {
       setActiveTabByGroup(a => ({ ...a, [group]: snap.tabId! }));
     }
@@ -455,9 +673,14 @@ export function useWorkbench({
    *  preview tab replaced in place; double-click/permanent promotes or
    *  stacks). */
   function insertFileTab(tabContent: Omit<SheetTab, 'id' | 'group' | 'preview'>, permanent: boolean, line?: number): void {
-    setActiveRail('files');
+    if (!activeSessionId) return;
+    const ownerSessionId = activeSessionId;
     setWbTabs(prev => {
-      const existingPrev = prev.find(t => t.group === 'files' && t.kind === 'file' && t.preview);
+      const existingPrev = prev.find(t =>
+        t.group === 'files'
+        && t.kind === 'file'
+        && t.preview
+        && t.sessionId === ownerSessionId);
       let tabs = [...prev];
       // Replace preview tab in place.
       if (existingPrev) {
@@ -470,15 +693,27 @@ export function useWorkbench({
           // Replace the preview tab's content WITHOUT spreading the old tab —
           // otherwise stale fields (e.g. an image tab's `rawSrc` or a text
           // tab's `lines`) leak into the new content and the body mis-renders.
-          tabs = tabs.map(t => t.id === existingPrev.id ? { ...tabContent, id: t.id, group: t.group, preview: true } : t);
+          tabs = tabs.map(t => t.id === existingPrev.id ? {
+            ...tabContent,
+            id: t.id,
+            group: t.group,
+            preview: true,
+            sessionId: ownerSessionId,
+          } : t);
           revealSheetTab('files', existingPrev.id);
           return tabs;
         }
         // Permanent open of a different file: drop preview tab.
         tabs = tabs.filter(t => t.id !== existingPrev.id);
       }
-      const id = 'tab-' + Date.now();
-      const tab: SheetTab = { id, group: 'files', ...tabContent, preview: !permanent };
+      const id = `tab-${ownerSessionId}-${Date.now()}`;
+      const tab: SheetTab = {
+        id,
+        group: 'files',
+        ...tabContent,
+        preview: !permanent,
+        sessionId: ownerSessionId,
+      };
       tabs.push(tab);
       revealSheetTab('files', id);
       return tabs;
@@ -492,10 +727,12 @@ export function useWorkbench({
     kind: 'file' | 'text';
     fullPath?: string;
     id?: string;
+    sessionId?: string;
   }
 
   function tabMatches(t: SheetTab, match: TabMatch): boolean {
     if (t.kind !== match.kind || t.fullPath !== match.fullPath) return false;
+    if (match.sessionId && t.sessionId !== match.sessionId) return false;
     return !match.id || t.id === match.id;
   }
 
@@ -514,13 +751,18 @@ export function useWorkbench({
     line?: number;
     icoKind: SheetTab['icoKind'];
     fullPath: string;
+    sessionId: string;
   }
 
   /** Async fill of a file tab created in the loading state: lines on
    *  success, an error state with retry on failure. Fills ONLY the tab this
    *  load belongs to (same kind + path, still loading — see TabMatch). */
   async function fillFileTab(fill: FileTabFill): Promise<void> {
-    const match: TabMatch = { kind: 'file', fullPath: fill.fullPath };
+    const match: TabMatch = {
+      kind: 'file',
+      fullPath: fill.fullPath,
+      sessionId: fill.sessionId,
+    };
     const file = await loadFile(fill.wtId, fill.rel);
     setWbTabs(prev => prev.map(t => {
       if (!tabMatches(t, match) || !t.loading) return t;
@@ -548,9 +790,13 @@ export function useWorkbench({
    *  no silent wait for loadFile before the destination surface exists. */
   async function openFileInSheet(absPath: string, permanent: boolean = false, line?: number): Promise<void> {
     setChatPanel(null);
-    const sess = activeSessionId
-      ? sessions.find(s => s.id === activeSessionId) ?? null
-      : null;
+    const ownerSessionId = activeSessionId;
+    if (!ownerSessionId) return;
+    // Surface Files at click time, before any index request. A late index
+    // response must never replace a Terminal/Browser the user opened while
+    // this request was in flight.
+    setActiveRail('files');
+    const sess = sessions.find(s => s.id === ownerSessionId) ?? null;
     const wtId = sess ? viewedWorkingTreeId(sess) : null;
     const currentWt = wtId ? workingTrees.find(t => t.id === wtId) ?? null : null;
     let currentFiles: ReadonlySet<string> = new Set();
@@ -573,11 +819,16 @@ export function useWorkbench({
       currentFiles = new Set(files);
       const base = currentWt.path.replace(/\/+$/, '');
       const index = buildFileRefIndex(files, base);
-      setFileIndexAbs({
-        wtId: currentWt.id,
-        paths: currentFiles,
-        rehype: makeFileLinkifyRehype(index, fileRel => `${base}/${fileRel}`),
-      });
+      // This cache feeds the ACTIVE transcript renderer. If the user moved to
+      // another tree while the refresh was in flight, keep the result scoped
+      // to the tab routing below but do not overwrite the new tree's index.
+      if (fileIndexWtRef.current === currentWt.id) {
+        setFileIndexAbs({
+          wtId: currentWt.id,
+          paths: currentFiles,
+          rehype: makeFileLinkifyRehype(index, fileRel => `${base}/${fileRel}`),
+        });
+      }
       route = resolveFilePanelRoute(absPath, currentWt, workingTrees, currentFiles);
     }
     const wt = route.sourceTree;
@@ -595,7 +846,7 @@ export function useWorkbench({
 
     setFilesInspectorSuppressed(!route.inCurrentFiles);
     if (route.inCurrentFiles && currentWt && route.revealRel) {
-      setP3Collapsed(false);
+      setRailP3Collapsed('files', ownerSessionId, false);
       setFileReveal({
         workingTreeId: currentWt.id,
         path: route.revealRel,
@@ -614,7 +865,6 @@ export function useWorkbench({
         scrollLine: line,
         fileTreePath: route.revealRel ?? undefined,
       } : t));
-      setActiveRail('files');
       revealSheetTab('files', existingPerm.id);
       return;
     }
@@ -659,7 +909,14 @@ export function useWorkbench({
       workingTreeId: wt.id,
       loading: true,
     }, permanent, line);
-    void fillFileTab({ wtId: wt.id, rel, line, icoKind, fullPath });
+    void fillFileTab({
+      wtId: wt.id,
+      rel,
+      line,
+      icoKind,
+      fullPath,
+      sessionId: ownerSessionId,
+    });
   }
 
   /** Click-time fallback for relative-path markdown links that the render-time
@@ -744,7 +1001,9 @@ export function useWorkbench({
    *  IMMEDIATELY with a loading body, then filled (or failed, with retry). */
   async function openTranscriptDiffInSheet(item: DiffItem): Promise<void> {
     setChatPanel(null);
-    const sess = activeSessionId ? sessions.find(s => s.id === activeSessionId) ?? null : null;
+    const ownerSessionId = activeSessionId;
+    if (!ownerSessionId) return;
+    const sess = sessions.find(s => s.id === ownerSessionId) ?? null;
     const wtId = sess ? defaultWorkingTreeIdFor(sess) : null;
     const wt = wtId ? workingTrees.find(t => t.id === wtId) : null;
     if (!wt || item.files.length === 0) return;
@@ -756,7 +1015,7 @@ export function useWorkbench({
       : `${item.files.length} files`;
 
     setActiveRail('diffs');
-    const id = `tab-diff-event-${activeSessionId ?? 'global'}-${transcriptItemIdentity(item)}`;
+    const id = `tab-diff-event-${ownerSessionId}-${transcriptItemIdentity(item)}`;
     setWbTabs(prev => {
       const existing = prev.find(tab => tab.id === id);
       if (existing) {
@@ -773,7 +1032,7 @@ export function useWorkbench({
         ico: '±',
         fullPath,
         workingTreeId: wt.id,
-        sessionId: activeSessionId ?? undefined,
+        sessionId: ownerSessionId,
         preview: true,
         loading: true,
       };
@@ -781,9 +1040,19 @@ export function useWorkbench({
       // Preview replacement spans every 'diffs'-group preview tab (transcript
       // diff or level-3 text detail): one preview tab at a time. The
       // singleton Changes tab is never preview, so it always survives.
-      return insertGroupPreviewTab(prev, 'diffs', tab);
+      const preview = prev.find(candidate =>
+        candidate.group === 'diffs'
+        && candidate.preview
+        && candidate.sessionId === ownerSessionId);
+      const base = preview ? prev.filter(candidate => candidate.id !== preview.id) : [...prev];
+      return [...base, tab];
     });
-    void fillTranscriptDiffTab(id, item, wt.id, { kind: 'text', fullPath, id });
+    void fillTranscriptDiffTab(id, item, wt.id, {
+      kind: 'text',
+      fullPath,
+      id,
+      sessionId: ownerSessionId,
+    });
   }
 
   /** Open a commit's change-set review in the Sheet workbench (History rail).
@@ -793,11 +1062,16 @@ export function useWorkbench({
    *  Tab identity is {workingTreeId, full sha} — the short sha is only ever a
    *  label (git-history proposal §5). */
   function openCommitInSheet(input: { workingTreeId: string; sha: string; subject?: string }): void {
+    if (!activeSessionId) return;
+    const ownerSessionId = activeSessionId;
     setChatPanel(null);
     setActiveRail('history');
     const name = input.subject ? `${input.sha.slice(0, 7)} · ${input.subject}` : input.sha.slice(0, 7);
     setWbTabs(prev => {
-      const existing = prev.find(t => t.group === 'history' && t.kind === 'commit');
+      const existing = prev.find(t =>
+        t.group === 'history'
+        && t.kind === 'commit'
+        && t.sessionId === ownerSessionId);
       if (existing) {
         if (existing.commitSha === input.sha && existing.workingTreeId === input.workingTreeId) {
           revealSheetTab('history', existing.id);
@@ -809,7 +1083,7 @@ export function useWorkbench({
         revealSheetTab('history', existing.id);
         return tabs;
       }
-      const id = 'tab-commit-' + Date.now();
+      const id = `tab-commit-${ownerSessionId}-${Date.now()}`;
       const tab: SheetTab = {
         id,
         group: 'history',
@@ -820,6 +1094,7 @@ export function useWorkbench({
         preview: false,
         commitSha: input.sha,
         workingTreeId: input.workingTreeId,
+        sessionId: ownerSessionId,
       };
       revealSheetTab('history', id);
       return [...prev, tab];
@@ -855,15 +1130,11 @@ export function useWorkbench({
    *  at the right end of the terminal tabs strip. Always additive, and
    *  surfaces the terminal rail (un-collapsing it if needed). */
   function addTerminalTab(): void {
-    terminalTabSequence += 1;
     const existingTerms = wbTabs.filter(t => t.kind === 'term').length;
-    const id = `tab-term-${Date.now()}-${terminalTabSequence}`;
-    const base = terminalTabName();
-    const name = existingTerms === 0 ? base : `${base} #${existingTerms + 1}`;
-    const tab: SheetTab = { id, group: 'term', name, kind: 'term', icoKind: 'term', ico: '$' };
+    const tab = createTerminalTab(existingTerms);
     setActiveRail('terminal');
     setWbTabs(prev => [...prev, tab]);
-    revealSheetTab('term', id);
+    revealSheetTab('term', tab.id);
   }
 
   /** Add an independent native Browser tab with its own WebContentsView and
@@ -875,28 +1146,26 @@ export function useWorkbench({
     revealSheetTab('browser', tab.id);
   }
 
-  /**
-   * Compute a tab label for a new terminal. Picks the most-specific
-   * known cwd (worktree path → workspace path → first workspace) and
-   * shows its basename, falling back to the shell name when nothing is
-   * known. Stays parallel to the actual cwd we send to the server in
-   * the `term:spawn` payload below.
-   */
-  function terminalTabName(): string {
+  function terminalLaunchProfile(): TerminalLaunchProfile {
     const wtId = defaultWorkingTreeIdFor(activeSession);
     const wtPath = wtId ? workingTrees.find(w => w.id === wtId)?.path : null;
-    const cwd = wtPath ?? activeWorkspace?.path ?? workspaces[0]?.path ?? null;
-    if (!cwd) return 'zsh';
-    // Tilde-collapse $HOME for prettier display (heuristic — server is
-    // the authority on the actual env, but for the tab label this is
-    // a reasonable best-effort).
-    const home = '/Users/';
-    const idx = cwd.indexOf(home);
-    const display = idx === 0
-      ? cwd.replace(/^\/Users\/[^/]+/, '~')
-      : cwd;
-    const seg = display.split('/').filter(Boolean).pop() ?? display;
-    return `zsh · ${seg}`;
+    const contextCwd = wtPath ?? activeWorkspace?.path ?? workspaces[0]?.path ?? null;
+    return resolveTerminalLaunchProfile(terminalPreferences, contextCwd);
+  }
+
+  function createTerminalTab(existingCount: number): SheetTab {
+    terminalTabSequence += 1;
+    const profile = terminalLaunchProfile();
+    const base = terminalLaunchLabel(profile, terminalSystemShell);
+    return {
+      id: `tab-term-${Date.now()}-${terminalTabSequence}`,
+      group: 'term',
+      name: existingCount === 0 ? base : `${base} #${existingCount + 1}`,
+      kind: 'term',
+      icoKind: 'term',
+      ico: '$',
+      terminalProfile: profile,
+    };
   }
 
   /** Open a workspace's detail as a Workbench tab (zone 3). The list lives in

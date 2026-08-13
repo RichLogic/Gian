@@ -1,0 +1,347 @@
+:root {
+  color-scheme: dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  user-select: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#capture-root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #000;
+}
+
+body {
+  cursor: crosshair;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  -webkit-app-region: no-drag;
+}
+
+#capture-canvas {
+  position: fixed;
+  inset: 0;
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  touch-action: none;
+}
+
+.target-label,
+.capture-status,
+.selection-size,
+.toolbar,
+.text-editor {
+  position: fixed;
+  z-index: 2;
+}
+
+.target-label {
+  top: 18px;
+  left: 50%;
+  max-width: min(520px, calc(100vw - 40px));
+  padding: 8px 13px;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 12px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: rgba(25, 27, 32, 0.84);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
+  transform: translateX(-50%);
+  backdrop-filter: blur(16px);
+  pointer-events: none;
+}
+
+.target-label::before {
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  display: inline-block;
+  content: "";
+  background: #35c759;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(53, 199, 89, 0.18);
+}
+
+.capture-status {
+  top: 50%;
+  left: 50%;
+  max-width: min(440px, calc(100vw - 48px));
+  padding: 14px 18px;
+  color: #fff;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: center;
+  background: rgba(24, 26, 31, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  box-shadow: 0 16px 46px rgba(0, 0, 0, 0.4);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.selection-size {
+  min-width: 64px;
+  padding: 4px 7px;
+  color: rgba(255, 255, 255, 0.95);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  line-height: 15px;
+  text-align: center;
+  background: rgba(15, 17, 21, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 48px;
+  padding: 5px 7px;
+  color: #f5f7fa;
+  background: rgba(29, 31, 37, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  box-shadow: 0 14px 42px rgba(0, 0, 0, 0.44);
+  backdrop-filter: blur(18px);
+}
+
+.toolbar[hidden] {
+  display: none;
+}
+
+.tool-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.divider {
+  width: 1px;
+  height: 25px;
+  margin: 0 3px;
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.tool,
+.width-option {
+  position: relative;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.82);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  place-items: center;
+  cursor: pointer;
+}
+
+.tool:hover:not(:disabled),
+.width-option:hover,
+.tool.active,
+.width-option.active {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.tool.active {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.tool:disabled {
+  color: rgba(255, 255, 255, 0.28);
+  cursor: default;
+}
+
+.cursor-icon,
+.arrow-icon,
+.pen-icon,
+.text-tool {
+  font-weight: 650;
+  font-size: 17px;
+}
+
+.rect-icon,
+.ellipse-icon {
+  width: 17px;
+  height: 13px;
+  border: 2px solid currentColor;
+}
+
+.ellipse-icon {
+  border-radius: 50%;
+}
+
+.line-icon {
+  width: 19px;
+  height: 2px;
+  background: currentColor;
+  border-radius: 2px;
+  transform: rotate(-37deg);
+}
+
+.mosaic-grid {
+  display: grid;
+  width: 17px;
+  height: 17px;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 2px;
+}
+
+.mosaic-grid i {
+  background: currentColor;
+  border-radius: 1px;
+  opacity: 0.9;
+}
+
+.colors {
+  gap: 5px;
+  padding: 0 3px;
+}
+
+.color-swatch,
+.custom-color {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  background: var(--swatch, conic-gradient(red, #ff0, #0f0, #0ff, #00f, #f0f, red));
+  border: 2px solid rgba(255, 255, 255, 0.38);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.color-swatch.active::after,
+.custom-color.active::after {
+  position: absolute;
+  inset: -5px;
+  content: "";
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: 50%;
+}
+
+.custom-color {
+  overflow: hidden;
+  background: conic-gradient(red, #ff0, #0f0, #0ff, #00f, #f0f, red);
+}
+
+.custom-color input {
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.widths {
+  gap: 0;
+}
+
+.width-option {
+  width: 28px;
+}
+
+.width-option i {
+  width: 16px;
+  height: var(--line-width, 2px);
+  background: currentColor;
+  border-radius: 999px;
+}
+
+.width-option[data-width="4"] i {
+  --line-width: 4px;
+}
+
+.width-option[data-width="8"] i {
+  --line-width: 7px;
+}
+
+.actions {
+  gap: 5px;
+}
+
+.action-button {
+  height: 32px;
+  padding: 0 13px;
+  color: rgba(255, 255, 255, 0.9);
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.action-button.cancel {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.action-button.cancel:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.action-button.complete {
+  color: white;
+  background: #2f80ed;
+  border: 1px solid #4490f5;
+}
+
+.action-button.complete:hover {
+  background: #3c8bf4;
+}
+
+.action-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.text-editor {
+  min-width: 80px;
+  max-width: min(440px, calc(100vw - 20px));
+  min-height: 34px;
+  padding: 5px 7px;
+  overflow: hidden;
+  color: var(--text-color, #ff4d4f);
+  font-weight: 600;
+  font-size: 18px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  resize: none;
+  outline: none;
+  background: rgba(18, 20, 24, 0.72);
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  user-select: text;
+}
+
+.text-editor[hidden] {
+  display: none;
+}
+
+@media (max-width: 850px) {
+  .toolbar {
+    max-width: calc(100vw - 16px);
+    height: auto;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+}

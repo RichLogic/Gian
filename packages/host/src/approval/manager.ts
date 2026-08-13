@@ -4,6 +4,7 @@ import type {
   ApprovalDecision,
   ApprovalResolvedBy,
   ApprovalStatus,
+  AttentionMessage,
 } from '@gian/shared';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
 
@@ -16,6 +17,9 @@ export interface ApprovalRequest {
   subject?: string;
   payload?: Record<string, unknown>;
   nativeOptions?: import('@gian/shared').NativeApprovalOption[];
+  /** Prebuilt generic notification. Broadcast only after the request is known
+   *  to be pending; auto-approved requests intentionally ignore it. */
+  attention?: AttentionMessage;
 }
 
 export interface ApprovalRecord extends ApprovalRequest {
@@ -147,6 +151,7 @@ export class ApprovalManager {
         ...(record.nativeOptions ? { native_options: record.nativeOptions } : {}),
       },
     });
+    if (req.attention) this.broadcaster.broadcast(req.attention);
 
     return new Promise<ApprovalDecision>(resolve => {
       this.resolvers.set(id, resolve);

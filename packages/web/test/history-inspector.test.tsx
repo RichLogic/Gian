@@ -12,6 +12,8 @@ import {
   getHistoryState,
   reconcileHistoryAfterFetch,
   refreshHistory,
+  saveHistoryScroll,
+  setHistoryQuery,
 } from '../src/controllers/use-history.js';
 
 vi.mock('../src/api.js', async () => {
@@ -341,6 +343,25 @@ describe('HistoryInspector', () => {
     expect(screen.queryByText('Authentication failed')).toBeNull();
     expect(loadGitHistory.mock.calls.some(([id, options]) =>
       id === treeB && options?.q === 'only-tree-a')).toBe(false);
+  });
+
+  it('isolates filters and scroll for Sessions sharing one working tree', () => {
+    const wt = nextTree();
+    loadGitHistory.mockResolvedValue(page());
+
+    act(() => {
+      setHistoryQuery(wt, 'only-session-one', 'session-1');
+      saveHistoryScroll(wt, 240, 'session-1');
+    });
+
+    expect(getHistoryState(wt, 'session-1')).toMatchObject({
+      query: 'only-session-one',
+      scrollTop: 240,
+    });
+    expect(getHistoryState(wt, 'session-2')).toMatchObject({
+      query: '',
+      scrollTop: 0,
+    });
   });
 
   it('each ref rewrite advances the orphan-revalidation revision even before dismiss', async () => {

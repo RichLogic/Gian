@@ -44,6 +44,9 @@ import * as api from '../src/api.js';
 const loadChanged = vi.mocked(api.loadChanged);
 const loadCommits = vi.mocked(api.loadCommits);
 const loadBranchList = vi.mocked(api.loadBranchList);
+const OWNER_SESSION_ID = 'session-current';
+const OWNER_SCOPE_KEY = `gian.changes.scope.${OWNER_SESSION_ID}`;
+const OWNER_BASE_KEY = `gian.changes.base.${OWNER_SESSION_ID}.wt:s1`;
 
 function renderChanges() {
   renderWithOperations(
@@ -53,7 +56,7 @@ function renderChanges() {
         workingTreeId="wt:s1"
         workingTrees={[]}
         onOpenFile={vi.fn()}
-        activeSessionId="session-current"
+        activeSessionId={OWNER_SESSION_ID}
         canCommit={false}
         onComposePrompt={vi.fn()}
       />
@@ -117,7 +120,7 @@ describe('Changes scope picker', () => {
     await pickScope(user, /Unadded/);
 
     await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'unstaged', null, null, 'session-current', undefined));
-    expect(localStorage.getItem('gian.changes.scope')).toBe('unstaged');
+    expect(localStorage.getItem(OWNER_SCOPE_KEY)).toBe('unstaged');
     // Trigger now reflects the new scope.
     expect(document.querySelector('.changes-scope-btn')?.textContent).toContain('Unadded');
   });
@@ -164,7 +167,7 @@ describe('Changes scope picker', () => {
     await user.click(within(menu).getByRole('menuitemradio', { name: 'main' }));
     await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'branch', null, 'main', 'session-current', undefined));
     // The explicit base is remembered per working tree.
-    expect(localStorage.getItem('gian.changes.base.wt:s1')).toBe('main');
+    expect(localStorage.getItem(OWNER_BASE_KEY)).toBe('main');
   });
 
   it('hides the stage toggle outside the working-tree scopes', async () => {
@@ -180,26 +183,31 @@ describe('Changes scope picker', () => {
   });
 
   it('accepts a stored "all" scope as All changes', async () => {
-    localStorage.setItem('gian.changes.scope', 'all');
+    localStorage.setItem(OWNER_SCOPE_KEY, 'all');
     renderChanges();
     expect(document.querySelector('.changes-scope-btn')?.textContent).toContain('All changes');
     await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'all', null, null, 'session-current', undefined));
   });
 
   it('an external scope request (GitBadge click) forces All changes and persists it', async () => {
-    localStorage.setItem('gian.changes.scope', 'branch');
+    localStorage.setItem(OWNER_SCOPE_KEY, 'branch');
     renderChanges();
     // App writes the use-changes-diff store directly (the inspector's old
     // scopeRequest prop is gone).
-    act(() => applyChangesScopeRequest('wt:s1', 'all'));
+    act(() => applyChangesScopeRequest('wt:s1', 'all', undefined, OWNER_SESSION_ID));
     await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'all', null, null, 'session-current', undefined));
     expect(document.querySelector('.changes-scope-btn')?.textContent).toContain('All changes');
-    expect(localStorage.getItem('gian.changes.scope')).toBe('all');
+    expect(localStorage.getItem(OWNER_SCOPE_KEY)).toBe('all');
   });
 
   it('pins a Diff-chip request to its exact session and turn', async () => {
     renderChanges();
-    act(() => applyChangesScopeRequest('wt:s1', 'lastturn', { sessionId: 'session-card', turn: 7 }));
+    act(() => applyChangesScopeRequest(
+      'wt:s1',
+      'lastturn',
+      { sessionId: 'session-card', turn: 7 },
+      OWNER_SESSION_ID,
+    ));
     await waitFor(() => expect(loadChanged).toHaveBeenCalledWith(
       'wt:s1',
       'lastturn',

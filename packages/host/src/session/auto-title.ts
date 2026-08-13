@@ -11,26 +11,24 @@ import type { SessionRepository } from './repository.js';
  * produced completed turns.
  *
  *   - claude: Claude Code writes `{"type":"ai-title","aiTitle":...}` lines into
- *     the session JSONL, asynchronously after the first turn. We re-read the
- *     file on each completed turn and take the last non-empty ai-title.
- *   - kimi: the shared kimi proxy's `listNativeSessions` carries a native
- *     `title` per session; match by `native_session_id`.
- *   - codex: no native title capability — straight to the fallback.
+ *     the session JSONL, asynchronously after the first turn.
+ *   - codex: its shared discovery proxy exposes the native LM-generated name.
+ *   - kimi: the same discovery API exposes Kimi's native first-message
+ *     preview (not a separate LM summary).
  *
- * Claude/Kimi get MAX_NATIVE_ATTEMPTS completed turns to produce a native
- * title; afterwards the fallback (first user message, truncated) is written
- * instead. A user rename always wins: the name is re-checked right before
- * writing, and the write itself goes through SessionManager.renameSession so
- * broadcast + native name-sync behave exactly like a manual rename.
+ * Native titles land asynchronously, so a single completed turn starts a
+ * bounded, time-based poll. Only after that window expires do we use the
+ * truncated first user message as a fallback. A user rename always wins: the
+ * name is checked during polling and immediately before writing, and the write
+ * itself goes through SessionManager.renameSession so broadcast + native
+ * name-sync behave exactly like a manual rename.
  */
 
-/** Native titles are asynchronous; give the executor this many completed
- *  turns before settling for the truncation fallback. */
-const MAX_NATIVE_ATTEMPTS = 3;
+/** Immediate lookup, then a bounded ~16 second window for an asynchronous
+ *  executor-native title candidate to land after turn completion. */
+const DEFAULT_NATIVE_POLL_DELAYS_MS = [0, 250, 500, 1_000, 2_000, 4_000, 8_000] as const;
 const FALLBACK_MAX_LENGTH = 40;
 const TITLE_MAX_LENGTH = 200;
-/** Same shared-client cache key as NativeSessionService.listKimi. */
-const KIMI_CACHE_KEY = '__native_sessions_kimi__';
 
 /** Same cleaning as `appendCcCustomTitle`: control chars out, trim, cap. */
 export function sanitizeTitle(raw: string): string {
@@ -75,12 +73,13 @@ interface AutoTitleDeps {
   proxy: ProxyManager;
   /** SessionManager.renameSession — DB write + broadcast + native name sync. */
   rename: (sessionId: string, name: string) => void;
+  /** Test seam for the bounded native-title polling schedule. */
+  nativePollDelaysMs?: readonly number[];
+  /** Test seam for advancing polling without wall-clock delays. */
+  sleep?: (delayMs: number) => Promise<void>;
 }
 
 export class AutoTitleService {
-  /** Completed turns observed per unnamed session; dropped once a title
-   *  (native or fallback) is written or the session gains a name. */
-  private attempts = new Map<string, number>();
   /** One async derivation per session at a time. */
   private inFlight = new Set<string>();
 
@@ -114,37 +113,33 @@ export class AutoTitleService {
 
   private async run(sessionId: string): Promise<void> {
     const session = this.deps.sessions.get(sessionId);
-    const attempt = (this.attempts.get(sessionId) ?? 0) + 1;
-    this.attempts.set(sessionId, attempt);
-
-    const nativeCapable = session.executor === 'claude' || session.executor === 'kimi';
     let title: string | null = null;
-    if (nativeCapable && attempt <= MAX_NATIVE_ATTEMPTS) {
+
+    const delays = this.deps.nativePollDelaysMs ?? DEFAULT_NATIVE_POLL_DELAYS_MS;
+    const sleep = this.deps.sleep ?? (delayMs => new Promise<void>(resolve => {
+      setTimeout(resolve, delayMs);
+    }));
+    for (const delayMs of delays) {
+      if (delayMs > 0) await sleep(delayMs);
+      if (!this.isUnnamed(sessionId)) return;
       title = await this.nativeTitle(session);
+      if (title) break;
     }
-    if (!title && (!nativeCapable || attempt >= MAX_NATIVE_ATTEMPTS)) {
-      title = this.fallbackTitle(sessionId);
-    }
-    // No title yet (native title still pending, or no user message): leave
-    // the attempt counted and retry on the next completed turn.
+
+    // The bounded native-title window expired. Settle on the first user
+    // message so a one-turn session does not remain unnamed forever.
+    if (!title) title = this.fallbackTitle(sessionId);
     if (!title) return;
 
     // The lookup above may have yielded; a user rename during that window
     // always wins, so re-check before writing.
-    const current = this.deps.db
-      .prepare('SELECT name FROM sessions WHERE id = ?')
-      .get(sessionId) as { name: string | null } | undefined;
-    if (!current || current.name !== null) {
-      this.attempts.delete(sessionId);
-      return;
-    }
-    this.attempts.delete(sessionId);
+    if (!this.isUnnamed(sessionId)) return;
     this.deps.rename(sessionId, title);
   }
 
   private async nativeTitle(session: Session): Promise<string | null> {
     if (session.executor === 'claude') return this.claudeTitle(session);
-    return this.kimiTitle(session);
+    return this.proxyTitle(session);
   }
 
   private claudeTitle(session: Session): string | null {
@@ -158,21 +153,22 @@ export class AutoTitleService {
       content = readFileSync(filePath, 'utf8');
     } catch {
       // The CLI creates the file lazily and the ai-title lands after the
-      // first turn — absence just means "try again next turn".
+      // first turn — absence just means "keep polling".
       return null;
     }
     return parseCcAiTitle(content);
   }
 
-  private async kimiTitle(session: Session): Promise<string | null> {
+  private async proxyTitle(session: Session): Promise<string | null> {
     if (!session.native_session_id) return null;
     const cwd = this.cwdFor(session);
     if (!cwd) return null;
+    const cacheKey = `__native_sessions_${session.executor}__`;
     try {
-      const client = await this.deps.proxy.getOrCreate(KIMI_CACHE_KEY, 'kimi');
+      const client = await this.deps.proxy.getOrCreate(cacheKey, session.executor);
       await client.initialize();
       if (!client.listNativeSessions) return null;
-      // Same pagination pattern as NativeSessionService.listKimi.
+      // Same pagination pattern as NativeSessionService.listFromProxy.
       const seenCursors = new Set<string>();
       let cursor: string | undefined;
       for (let pageIndex = 0; pageIndex < 100; pageIndex += 1) {
@@ -188,7 +184,16 @@ export class AutoTitleService {
           const item = entry as { sessionId?: unknown; title?: unknown };
           if (item.sessionId !== session.native_session_id) continue;
           const title = typeof item.title === 'string' ? sanitizeTitle(item.title) : '';
-          if (title) return title;
+          if (!title) continue;
+          // Codex thread/list exposes prompt-derived placeholders while its
+          // LM-generated `name` is still pending: either the 120-char preview
+          // or Codex's short ellipsized fallback. Treat both as "not ready"
+          // so neither can win the race against the real title. Kimi
+          // intentionally keeps its native first-message preview.
+          if (session.executor === 'codex' && this.isCodexPromptDerivedTitle(session.id, title)) {
+            continue;
+          }
+          return title;
         }
         const nextCursor = typeof page.nextCursor === 'string' && page.nextCursor
           ? page.nextCursor
@@ -200,13 +205,37 @@ export class AutoTitleService {
       return null;
     } catch (error) {
       // The shared lookup client may be wedged; drop it so the next attempt
-      // respawns, and leave the title unset for this turn.
-      await this.deps.proxy.dispose(KIMI_CACHE_KEY).catch(() => undefined);
+      // respawns, and leave the title unset for this poll.
+      await this.deps.proxy.dispose(cacheKey).catch(() => undefined);
       console.warn(
-        `[auto-title] kimi native session lookup failed session=${session.id}: ${String(error)}`,
+        `[auto-title] ${session.executor} native session lookup failed session=${session.id}: ${String(error)}`,
       );
       return null;
     }
+  }
+
+  private isUnnamed(sessionId: string): boolean {
+    try {
+      const row = this.deps.db
+        .prepare('SELECT name FROM sessions WHERE id = ?')
+        .get(sessionId) as { name: string | null } | undefined;
+      return Boolean(row && row.name === null);
+    } catch {
+      // Host shutdown can close the DB while a bounded poll is sleeping.
+      // Treat that exactly like a removed/named session and stop quietly.
+      return false;
+    }
+  }
+
+  private isCodexPromptDerivedTitle(sessionId: string, candidate: string): boolean {
+    const firstUserMessage = this.deps.history.firstUserMessageText(sessionId);
+    if (!firstUserMessage) return false;
+    const collapsed = firstUserMessage.replace(/\s+/g, ' ').trim();
+    const preview = collapsed.length <= 120
+      ? collapsed
+      : `${collapsed.slice(0, 117)}...`;
+    return candidate === sanitizeTitle(preview)
+      || candidate === sanitizeTitle(truncateFallbackTitle(firstUserMessage));
   }
 
   private fallbackTitle(sessionId: string): string | null {
