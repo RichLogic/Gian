@@ -14,6 +14,40 @@ interface JsonRpcMessage {
   params?: unknown;
 }
 
+/**
+ * The CLI smoke tests boot the real proxy, which probes a real `claude`
+ * binary for slash-command and model discovery. They only run where a usable
+ * Claude Code CLI is available (e.g. developer machines). CI runners and
+ * environments without a working `claude` skip these tests instead of
+ * failing the suite.
+ */
+async function claudeIsAvailable(): Promise<boolean> {
+  const bin = process.env.CLAUDE_BIN?.trim() || 'claude';
+  try {
+    const probe = spawn(bin, ['--version'], { stdio: 'ignore' });
+    const exitCode = await new Promise<number | null>((resolveExit) => {
+      const timer = setTimeout(() => {
+        probe.kill('SIGKILL');
+        resolveExit(null);
+      }, 5_000);
+      probe.once('error', () => {
+        clearTimeout(timer);
+        resolveExit(null);
+      });
+      probe.once('exit', (code) => {
+        clearTimeout(timer);
+        resolveExit(code);
+      });
+    });
+    return exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+const claudeAvailable = await claudeIsAvailable();
+const smokeSkip: boolean | string = claudeAvailable ? false : 'requires a usable claude CLI';
+
 function createQueue<T>() {
   const items: T[] = [];
   const waiters: Array<(item: T) => void> = [];
@@ -132,7 +166,7 @@ function startProxy(dataDir: string) {
   };
 }
 
-test('cli smoke covers initialize, session lifecycle, and capabilities', async () => {
+test('cli smoke covers initialize, session lifecycle, and capabilities', { skip: smokeSkip }, async () => {
   const dataDir = await mkdtemp(resolve(tmpdir(), 'cc-proxy-smoke-'));
   const proxy = startProxy(dataDir);
 
@@ -174,7 +208,7 @@ test('cli smoke covers initialize, session lifecycle, and capabilities', async (
   }
 });
 
-test('cli smoke reports protocol errors for malformed json', async () => {
+test('cli smoke reports protocol errors for malformed json', { skip: smokeSkip }, async () => {
   const dataDir = await mkdtemp(resolve(tmpdir(), 'cc-proxy-smoke-'));
   const proxy = startProxy(dataDir);
 
