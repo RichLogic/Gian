@@ -21,30 +21,69 @@ const definitions = [
     directory: 'cc-proxy',
     displayName: 'Claude Code',
     processScope: 'session',
-    runtime: { id: 'claude', displayName: 'Claude Code CLI' },
+    runtime: {
+      id: 'claude',
+      displayName: 'Claude Code CLI',
+      recommendedCliVersion: '2.1.159',
+    },
   },
   {
     id: 'codex',
     directory: 'codex-proxy',
     displayName: 'Codex',
     processScope: 'shared',
-    runtime: { id: 'codex', displayName: 'Codex CLI' },
+    runtime: {
+      id: 'codex',
+      displayName: 'Codex CLI',
+      recommendedCliVersion: '0.146.0',
+    },
   },
   {
     id: 'kimi',
     directory: 'kimi-proxy',
     displayName: 'Kimi Code',
     processScope: 'shared',
-    runtime: { id: 'kimi', displayName: 'Kimi Code CLI' },
+    runtime: {
+      id: 'kimi',
+      displayName: 'Kimi Code CLI',
+      recommendedCliVersion: '0.31.1',
+    },
   },
   {
     id: 'grok',
     directory: 'grok-proxy',
     displayName: 'Grok Build',
-    processScope: 'shared',
-    runtime: { id: 'grok', displayName: 'Grok Build CLI' },
+    processScope: 'session',
+    runtime: {
+      id: 'grok',
+      displayName: 'Grok Build CLI',
+      recommendedCliVersion: '1.0.3',
+    },
   },
 ];
+
+const BUILTIN_PROXY_IDS = new Set(definitions.map(definition => definition.id));
+const SEMVER_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+export function assertRuntimeManifest(manifest) {
+  const runtime = manifest.runtime;
+  if (!runtime || typeof runtime !== 'object') {
+    if (BUILTIN_PROXY_IDS.has(manifest.id)) {
+      throw new Error(`${manifest.id} built-in proxy must declare runtime.recommendedCliVersion`);
+    }
+    return;
+  }
+  const recommended = runtime.recommendedCliVersion;
+  if (recommended == null || recommended === '') {
+    if (BUILTIN_PROXY_IDS.has(manifest.id)) {
+      throw new Error(`${manifest.id} built-in proxy must declare runtime.recommendedCliVersion`);
+    }
+    return;
+  }
+  if (typeof recommended !== 'string' || !SEMVER_RE.test(recommended)) {
+    throw new Error(`${manifest.id} runtime.recommendedCliVersion must be SemVer`);
+  }
+}
 
 export async function buildProxyBundle(entryPoint, outfile) {
   await build({
@@ -148,6 +187,7 @@ async function main() {
       process: { scope: definition.processScope },
       runtime: definition.runtime,
     };
+    assertRuntimeManifest(manifest);
     const staging = join(outputDir, `.staging-${id}`);
     const packageDir = join(staging, 'package');
     const proxyEntry = join(packageDir, 'proxy.mjs');

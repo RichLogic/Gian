@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 
-import { buildProxyBundle } from './build-proxy-artifacts.mjs';
+import { assertRuntimeManifest, buildProxyBundle } from './build-proxy-artifacts.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -38,4 +38,26 @@ test('proxy bundle has one shebang and supports CommonJS dynamic require', async
     encoding: 'utf8',
   });
   assert.equal(result.stdout.trim(), join('proxy', 'ready'));
+});
+
+test('built-in proxy manifests require SemVer recommended CLI versions', () => {
+  assert.doesNotThrow(() => assertRuntimeManifest({
+    id: 'grok',
+    runtime: { id: 'grok', displayName: 'Grok', recommendedCliVersion: '1.0.3' },
+  }));
+  assert.throws(
+    () => assertRuntimeManifest({ id: 'grok', runtime: { id: 'grok', displayName: 'Grok' } }),
+    /recommendedCliVersion/,
+  );
+  assert.throws(
+    () => assertRuntimeManifest({
+      id: 'claude',
+      runtime: { id: 'claude', displayName: 'Claude', recommendedCliVersion: 'latest' },
+    }),
+    /SemVer/,
+  );
+  assert.doesNotThrow(() => assertRuntimeManifest({
+    id: 'x.ai.external',
+    runtime: { id: 'x.ai.external', displayName: 'External' },
+  }));
 });
