@@ -106,7 +106,7 @@ describe('file panel routing', () => {
     expect(route.inCurrentFiles).toBe(false);
   });
 
-  it('keeps an unregistered absolute path in a panel-only unavailable state', () => {
+  it('does not claim a Files tree location for an unregistered absolute path', () => {
     const route = resolveFilePanelRoute(
       '/private/tmp/output.log',
       current,

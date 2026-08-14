@@ -5,8 +5,9 @@ Shared structured-runtime adapter for Grok Build's ACP server.
 The process bridges two newline-delimited JSON protocols:
 
 - stdin/stdout facing Gian Host: `gian.proxy/1` only.
-- a managed child `grok agent --no-leader stdio`: official
-  ACP v1 via `@agentclientprotocol/sdk`.
+- a session-scoped child `grok --deny MCPTool(*) --disallowed-tools search_tool,use_tool agent --no-leader stdio`: official
+  ACP v1 via `@agentclientprotocol/sdk`. The Proxy process starts only after
+  the Gian session cwd is known so `GROK_SANDBOX=workspace` matches that cwd.
 
 The child always receives `GROK_SANDBOX=workspace` and
 `GROK_DISABLE_AUTOUPDATER=1`. Accordingly, the V1 adapter accepts exactly the

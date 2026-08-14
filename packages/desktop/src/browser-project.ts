@@ -12,11 +12,13 @@ export function createBrowserProjectSite(
 ): BrowserProjectSite | null {
   const path = normalizeRelativePath(inputPath);
   if (!path) return null;
-  const root = posix.dirname(path);
+  // Keep the working tree as the site root and put the file at its real
+  // relative URL. HTML-directory-as-root flattened `../tokens.css` into
+  // `/tokens.css` inside that folder, so shared parent assets 404'd.
   return {
     workingTreeId,
-    root: root === '.' ? '' : root,
-    entry: posix.basename(path),
+    root: '',
+    entry: path,
   };
 }
 
@@ -25,10 +27,10 @@ export function browserProjectUrl(siteId: string, entry: string): string {
   return `gian-browser://${siteId}/${encoded}`;
 }
 
-/** Resolve a custom-origin request inside the HTML file's directory. Absolute
- * site URLs (/assets/app.js) remain inside that root, and traversal can never
- * escape it. The Host performs its own working-tree boundary check as a
- * second line of defence. */
+/** Resolve a custom-origin request inside the working tree. The page URL is
+ * the file's workspace-relative path, so `./style.css` and `../tokens.css`
+ * resolve the same way a repo-root static server would. Traversal still
+ * cannot leave the working tree; the Host repeats that check. */
 export function resolveBrowserProjectPath(root: string, pathname: string): string | null {
   let decoded: string;
   try {

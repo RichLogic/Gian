@@ -19,6 +19,7 @@ import {
 } from '@agentclientprotocol/sdk';
 
 import {
+  GROK_SPAWN_PREFIX,
   GrokAcpClient,
   type GrokAcpExit,
   type GrokAcpTransportFactory,
@@ -150,11 +151,25 @@ class RecordingAgent {
     this.configRequest = params;
     return { configOptions: [] };
   }
+
+  async unstable_setSessionModel(params: { sessionId: string; modelId: string }) {
+    this.configRequest = params as unknown as SetSessionConfigOptionRequest;
+    return {};
+  }
 }
+
+test('locks the Grok ACP argv prefix that disables MCP tools', () => {
+  assert.deepEqual([...GROK_SPAWN_PREFIX], [
+    '--deny',
+    'MCPTool(*)',
+    '--disallowed-tools',
+    'search_tool,use_tool',
+  ]);
+});
 
 test('requires an absolute managed binary path', () => {
   assert.throws(
-    () => new GrokAcpClient({ binaryPath: 'grok' }),
+    () => new GrokAcpClient({ binaryPath: 'grok', cwd: '/tmp' }),
     /binaryPath must be an absolute path/,
   );
 });
@@ -162,6 +177,7 @@ test('requires an absolute managed binary path', () => {
 test('fails startup promptly when the managed binary does not exist', async () => {
   const client = new GrokAcpClient({
     binaryPath: '/definitely-not-installed/gian-grok-test',
+    cwd: '/tmp',
     startupTimeoutMs: 5_000,
   });
 
@@ -179,6 +195,7 @@ test('negotiates ACP v1 without filesystem or terminal reverse capabilities', as
   let agent!: RecordingAgent;
   const client = new GrokAcpClient({
     binaryPath: '/managed/grok',
+    cwd: '/workspace',
     transportFactory: inMemoryTransport((remoteClient) => {
       agent = new RecordingAgent(remoteClient);
       return agent as unknown as Agent;
@@ -192,7 +209,7 @@ test('negotiates ACP v1 without filesystem or terminal reverse capabilities', as
     protocolVersion: 1,
     clientInfo: {
       name: 'gian-grok-proxy',
-      version: '0.1.1',
+      version: '0.2.0',
     },
     clientCapabilities: {
       auth: {
@@ -213,6 +230,7 @@ test('preserves cwd and mcpServers across new, load, and resume', async () => {
   let agent!: RecordingAgent;
   const client = new GrokAcpClient({
     binaryPath: '/managed/grok',
+    cwd: '/workspace',
     transportFactory: inMemoryTransport((remoteClient) => {
       agent = new RecordingAgent(remoteClient);
       return agent as unknown as Agent;
@@ -254,6 +272,7 @@ test('routes session updates and returns the exact native permission option', as
   const updates: string[] = [];
   const client = new GrokAcpClient({
     binaryPath: '/managed/grok',
+    cwd: '/workspace',
     permissionHandler: async (request) => {
       assert.deepEqual(
         request.options.map((option) => option.optionId),
@@ -296,6 +315,7 @@ test('defaults an unhandled permission request to cancelled', async () => {
   let agent!: RecordingAgent;
   const client = new GrokAcpClient({
     binaryPath: '/managed/grok',
+    cwd: '/workspace',
     transportFactory: inMemoryTransport((remoteClient) => {
       agent = new RecordingAgent(remoteClient);
       return agent as unknown as Agent;
@@ -317,6 +337,7 @@ test('defaults an unhandled permission request to cancelled', async () => {
 test('capability-gates session close instead of sending an unsupported RPC', async () => {
   const client = new GrokAcpClient({
     binaryPath: '/managed/grok',
+    cwd: '/workspace',
     transportFactory: inMemoryTransport(
       (remoteClient) => new RecordingAgent(remoteClient) as unknown as Agent,
     ),
@@ -335,6 +356,7 @@ test('forwards list, config, cancel, and marks an explicit stop as expected', as
   const stopped = deferred<boolean>();
   const client = new GrokAcpClient({
     binaryPath: '/managed/grok',
+    cwd: '/workspace',
     transportFactory: inMemoryTransport((remoteClient) => {
       agent = new RecordingAgent(remoteClient);
       return agent as unknown as Agent;
@@ -345,10 +367,9 @@ test('forwards list, config, cancel, and marks an explicit stop as expected', as
   });
 
   const listed = await client.listSessions({ cwd: '/workspace/one' });
-  await client.setSessionConfigOption({
+  await client.setSessionModel({
     sessionId: 'native-new',
-    configId: 'mode',
-    value: 'yolo',
+    modelId: 'grok-4.6',
   });
   await client.cancel('native-new');
   await client.stop();
@@ -357,8 +378,7 @@ test('forwards list, config, cancel, and marks an explicit stop as expected', as
   assert.deepEqual(agent.listRequest, { cwd: '/workspace/one' });
   assert.deepEqual(agent.configRequest, {
     sessionId: 'native-new',
-    configId: 'mode',
-    value: 'yolo',
+    modelId: 'grok-4.6',
   });
   assert.equal(agent.cancelSessionId, 'native-new');
   assert.equal(await stopped.promise, true);

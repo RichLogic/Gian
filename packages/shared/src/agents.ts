@@ -15,6 +15,7 @@ export interface AgentCliStatus {
   state: AgentComponentState;
   path: string | null;
   version: string | null;
+  recommendedVersion?: string | null;
   source: 'override' | 'official-user' | 'path' | null;
   error?: string;
 }
@@ -40,4 +41,23 @@ export interface AgentInstallStatus {
 export interface AgentInstallResult {
   agent: AgentInstallStatus;
   output?: string;
+}
+
+export function migrateLegacyGrokProxyDefaults(
+  defaults: AgentProxyDefaults,
+): AgentProxyDefaults {
+  if (
+    defaults.mode === 'default'
+    || defaults.mode === 'auto'
+    || defaults.mode === 'always_approve'
+    || defaults.mode === ''
+  ) {
+    return defaults;
+  }
+  const effortLike = /^(none|minimal|low|medium|high|xhigh|max)$/i.test(defaults.mode);
+  return {
+    model: defaults.model,
+    thinking: defaults.thinking || (effortLike ? defaults.mode : ''),
+    mode: 'default',
+  };
 }

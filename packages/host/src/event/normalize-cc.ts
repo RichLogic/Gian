@@ -493,7 +493,7 @@ export function projectCcNotification(
  * Lossy on bad input — returns `[]` so the UI just shows an empty card
  * rather than crashing.
  */
-function parseAskUserQuestionInput(raw: unknown): AskQuestion[] {
+export function parseAskUserQuestionInput(raw: unknown): AskQuestion[] {
   if (typeof raw !== 'string' || !raw.trim()) return [];
   try {
     const parsed = JSON.parse(raw) as { questions?: unknown };
@@ -541,7 +541,7 @@ function mapCcToolNameToCategory(
  * Returns `null` on bad input — callers fall back to the raw string so we
  * never lose info even if the shape changes.
  */
-function parseCcApprovalInput(raw: unknown): Record<string, unknown> | null {
+export function parseCcApprovalInput(raw: unknown): Record<string, unknown> | null {
   if (typeof raw !== 'string' || !raw.trim()) return null;
   try {
     const parsed = JSON.parse(raw) as unknown;
@@ -558,7 +558,7 @@ function parseCcApprovalInput(raw: unknown): Record<string, unknown> | null {
  * the raw JSON dump with the meaningful field per tool. Returns `undefined`
  * for unknown tools so the caller can fall back to the raw string.
  */
-function ccApprovalSubject(toolName: string, parsed: Record<string, unknown> | null): string | undefined {
+export function ccApprovalSubject(toolName: string, parsed: Record<string, unknown> | null): string | undefined {
   if (!parsed) return undefined;
   const s = (k: string) => typeof parsed[k] === 'string' ? parsed[k] as string : '';
   switch (toolName) {
@@ -604,7 +604,7 @@ function ccApprovalSubject(toolName: string, parsed: Record<string, unknown> | n
  * that's much more useful than the boilerplate "Tool X requires permission."
  * cc-proxy emits. Returns `undefined` to defer to the proxy's default.
  */
-function ccApprovalDescription(toolName: string, parsed: Record<string, unknown> | null): string | undefined {
+export function ccApprovalDescription(toolName: string, parsed: Record<string, unknown> | null): string | undefined {
   if (!parsed) return undefined;
   if (toolName === 'Bash') {
     const desc = typeof parsed.description === 'string' ? parsed.description.trim() : '';

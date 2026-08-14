@@ -13,12 +13,11 @@ import {
 } from '@gian/proxy-protocol';
 
 import { GrokProxyService } from '../core/service.js';
-import { GrokAcpClient } from '../runtime/grok-acp-client.js';
 import { writeJsonLine } from '../transport/protocol.js';
 import { GrokProtocolV1Adapter, grokProtocolError } from '../protocol/v1-adapter.js';
 
 const SELF_TEST_FLAG = '--self-test';
-const PLUGIN_VERSION = '0.1.1';
+const PLUGIN_VERSION = '0.2.0';
 const V1_METHODS = new Set<string>([
   ...CORE_METHODS,
   ...Object.keys(OPTIONAL_METHOD_CAPABILITIES),
@@ -159,14 +158,7 @@ async function main(): Promise<void> {
   process.on('uncaughtException', (error) => reportCrash('uncaught', error));
   process.on('unhandledRejection', (error) => reportCrash('unhandledRejection', error));
 
-  const runtime = new GrokAcpClient({ binaryPath: options.grokBin });
-  const service = new GrokProxyService({
-    runtime,
-    emitEvent(method, params) {
-      if (method === 'debug') console.error(`[grok-proxy] ${JSON.stringify(params)}`);
-    },
-  });
-  await service.initialize();
+  const service = new GrokProxyService({ binaryPath: options.grokBin });
   await runV1Loop(service);
 }
 

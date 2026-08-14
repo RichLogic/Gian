@@ -147,6 +147,13 @@ export async function loadFile(workingTreeId: string, path: string): Promise<{ c
   return (await res.json()) as { content: string; size: number };
 }
 
+/** Preview a clicked absolute path that is not inside a registered working tree. */
+export async function loadAbsoluteFile(path: string): Promise<{ content: string; size: number } | null> {
+  const res = await fetch(`/api/files/content?path=${encodeURIComponent(path)}`);
+  if (!res.ok) return null;
+  return (await res.json()) as { content: string; size: number };
+}
+
 export interface ChangedEntry {
   path: string;
   kind: 'create' | 'update' | 'delete' | 'rename';

@@ -110,3 +110,39 @@ describe('provider-native event → page display contract', () => {
     expect(applyEnvelope([], env, 'codex')).toEqual([]);
   });
 });
+
+describe('tool card naming', () => {
+  it('keeps the real tool name when tool.completed carries the placeholder title', () => {
+    const started = nativeEnvelope('claude', 'tool.use', {
+      type: 'activity.tool',
+      data: {
+        itemId: 'call-mcp',
+        title: 'mcp__github__create_issue',
+        kind: 'mcp__github__create_issue',
+        status: 'running',
+      },
+    });
+    const completed = nativeEnvelope('claude', 'tool.result', {
+      type: 'activity.tool',
+      // The protocol-v1 completed projection hardcodes the placeholder title
+      // 'Tool' and omits kind — it must not clobber the started name.
+      data: { itemId: 'call-mcp', title: 'Tool', status: 'success', output: 'done' },
+    });
+    const items = applyEnvelope(applyEnvelope([], started, 'claude'), completed, 'claude');
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: 'tool',
+      name: 'mcp__github__create_issue',
+      status: 'success',
+      output: 'done',
+    });
+  });
+
+  it('falls back to Tool when no real name was ever established', () => {
+    const orphan = nativeEnvelope('claude', 'tool.result', {
+      type: 'activity.tool',
+      data: { itemId: 'call-orphan', title: 'Tool', status: 'error', output: 'boom' },
+    });
+    expect(applyEnvelope([], orphan, 'claude')[0]).toMatchObject({ kind: 'tool', name: 'Tool' });
+  });
+});

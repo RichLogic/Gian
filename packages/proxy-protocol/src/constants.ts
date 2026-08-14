@@ -21,6 +21,7 @@ export const OPTIONAL_METHOD_CAPABILITIES = {
   'slash.list': 'slash.list',
   'session.rename': 'session.rename',
   'session.native.list': 'session.nativeList',
+  'session.native.delete': 'session.nativeDelete',
   'session.replay': 'session.replay',
   'session.config.set': 'session.config',
   'turn.steer': 'turn.steer',

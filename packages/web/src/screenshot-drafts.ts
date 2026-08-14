@@ -11,7 +11,9 @@ export type NewSessionScreenshotScope = Extract<
 export interface NewSessionScreenshotDraftAttachment {
   id: string;
   name: string;
-  mime: 'image/png';
+  /** Screenshots are always image/png; pasted/picked files carry their own
+   *  type (falls back to application/octet-stream for typeless Blobs). */
+  mime: string;
   size: number;
 }
 
@@ -52,7 +54,8 @@ function draftAttachments(record: Record<string, unknown>): NewSessionScreenshot
     const candidate = item as Partial<NewSessionScreenshotDraftAttachment>;
     return typeof candidate.id === 'string'
       && typeof candidate.name === 'string'
-      && candidate.mime === 'image/png'
+      && typeof candidate.mime === 'string'
+      && candidate.mime.length > 0
       && typeof candidate.size === 'number';
   });
 }
@@ -151,12 +154,34 @@ export async function storeNewSessionScreenshot(
 ): Promise<NewSessionScreenshotDraftAttachment> {
   const bytes = new Uint8Array(capture.bytes);
   const blob = new Blob([bytes.slice().buffer], { type: capture.mime });
-  const attachment: NewSessionScreenshotDraftAttachment = {
+  return persistNewSessionAttachment(scope, {
     id: capture.id,
     name: capture.filename,
     mime: capture.mime,
     size: blob.size,
-  };
+  }, blob);
+}
+
+/** Generic pre-session attachment (pasted image or picked file). Shares the
+ *  screenshot Blob store and draft record so the create-time upload pipeline
+ *  (`deliverCreatedSessionFirstMessage`) handles both identically. */
+export async function storeNewSessionAttachment(
+  scope: NewSessionScreenshotScope,
+  input: { name: string; blob: Blob },
+): Promise<NewSessionScreenshotDraftAttachment> {
+  return persistNewSessionAttachment(scope, {
+    id: crypto.randomUUID(),
+    name: input.name,
+    mime: input.blob.type || 'application/octet-stream',
+    size: input.blob.size,
+  }, input.blob);
+}
+
+async function persistNewSessionAttachment(
+  scope: NewSessionScreenshotScope,
+  attachment: NewSessionScreenshotDraftAttachment,
+  blob: Blob,
+): Promise<NewSessionScreenshotDraftAttachment> {
   await putBlob(blobKey(scope, attachment.id), blob);
   const existing = readNewSessionScreenshotAttachments(scope);
   const next = [

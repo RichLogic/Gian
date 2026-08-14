@@ -4,9 +4,32 @@ This file records user-facing changes in published Gian builds. It is updated
 whenever a version is packaged and tagged for release; local test packages are
 not listed.
 
-Releases through 0.4.3 are unsigned macOS Apple Silicon beta builds. The
+Releases through 0.4.4 are unsigned macOS Apple Silicon beta builds. The
 signed-only native notification and automatic update paths remain disabled in
-the 0.4.3 beta until Developer ID signing and notarization are available.
+the current beta until Developer ID signing and notarization are available.
+
+## [0.4.4] - 2026-08-14
+
+### Added
+
+- Aligned the Grok Build integration with Grok Build CLI 1.0.3’s ACP protocol:
+  each Gian Grok session now runs its own Proxy and agent process scoped to
+  that session’s working directory, with native session list/adopt/delete,
+  slash-command filtering, resource-link attachments, and recommended CLI
+  version hints.
+- Added support for current Grok Build CLI agent flags.
+
+### Fixed
+
+- Fixed the per-task … menu being clipped by the sidebar; it now opens as a
+  viewport-clamped popover aligned to its trigger.
+- Fixed in-app Browser links always opening a new tab and loading project pages
+  at their workspace-relative URLs so parent-relative assets resolve.
+- Fixed Files preview for paths outside the current working tree, such as
+  session attachments.
+- Sped up clipboard screenshot capture.
+- Fixed native configuration error messages to use the executor’s proper name
+  (for example, “Kimi”) instead of the raw executor id.
 
 ## [0.4.3] - 2026-08-13
 

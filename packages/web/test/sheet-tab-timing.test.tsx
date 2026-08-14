@@ -22,6 +22,7 @@ vi.mock('../src/api.js', async () => {
     loadAllFiles: vi.fn().mockResolvedValue([]),
     loadApps: vi.fn().mockResolvedValue([]),
     loadFile: vi.fn(),
+    loadAbsoluteFile: vi.fn(),
     loadDiff: vi.fn(),
     loadTree: vi.fn(),
   };
@@ -217,6 +218,52 @@ describe('Sheet tab query timing (§4.5)', () => {
     expect(tab?.loadError).toBeUndefined();
   });
 
+  it('previews an unregistered absolute markdown path without opening Files inspector', async () => {
+    const pending = deferred<{ content: string; size: number } | null>();
+    vi.mocked(api.loadAbsoluteFile).mockImplementation(() => pending.promise);
+    const { result } = renderWorkbench();
+    const abs = '/Users/me/.gian/attachments/sess-1/plan.md';
+
+    act(() => { void result.current.openFileInSheet(abs); });
+
+    await waitFor(() => {
+      const tab = result.current.wbTabs.find(t => t.kind === 'file');
+      expect(tab).toBeDefined();
+      expect(tab!.loading).toBe(true);
+      expect(tab!.fullPath).toBe(abs);
+      expect(tab!.workingTreeId).toBeUndefined();
+    });
+    expect(api.loadFile).not.toHaveBeenCalled();
+    expect(api.loadAbsoluteFile).toHaveBeenCalledWith(abs);
+    expect(result.current.filesInspectorSuppressed).toBe(true);
+    expect(result.current.fileReveal).toBeNull();
+
+    await act(async () => pending.resolve({ content: '# Plan\n\nDone.', size: 14 }));
+    await waitFor(() => {
+      const tab = result.current.wbTabs.find(t => t.kind === 'file');
+      expect(tab!.loading).toBeUndefined();
+      expect(tab!.viewMode).toBe('preview');
+      expect(tab!.lines).toEqual([['1', '# Plan'], ['2', ''], ['3', 'Done.']]);
+      expect(tab!.loadError).toBeUndefined();
+    });
+  });
+
+  it('previews an unregistered image through the absolute raw endpoint', async () => {
+    const { result } = renderWorkbench();
+    const abs = '/Users/me/.gian/attachments/sess-1/shot.png';
+
+    act(() => { void result.current.openFileInSheet(abs); });
+
+    await waitFor(() => {
+      const tab = result.current.wbTabs.find(t => t.kind === 'file');
+      expect(tab?.rawSrc).toBe(`/api/files/raw?path=${encodeURIComponent(abs)}`);
+      expect(tab?.icoKind).toBe('img');
+      expect(tab?.loadError).toBeUndefined();
+    });
+    expect(api.loadFile).not.toHaveBeenCalled();
+    expect(api.loadAbsoluteFile).not.toHaveBeenCalled();
+  });
+
   it('the diffs rail auto-ensures exactly one singleton Changes tab', async () => {
     const { result } = renderWorkbench();
 
@@ -356,7 +403,7 @@ describe('Sheet tab query timing (§4.5)', () => {
     });
   });
 
-  it('opens project HTML in the active Browser tab and creates independent tabs', async () => {
+  it('opens each project HTML in a new Browser tab and keeps existing tabs', async () => {
     const openProject = vi.fn().mockResolvedValue({
       url: 'gian-browser://site/index.html',
       title: '',
@@ -382,20 +429,32 @@ describe('Sheet tab query timing (§4.5)', () => {
       });
     });
 
-    act(() => result.current.addBrowserTab());
+    act(() => result.current.openProjectInBrowser('ws:workspace-1', 'design/01.html'));
     await waitFor(() => {
       const browserTabs = result.current.wbTabs.filter(tab => tab.kind === 'browser');
       expect(browserTabs).toHaveLength(2);
-      expect(new Set(browserTabs.map(tab => tab.id)).size).toBe(2);
-      expect(browserTabs[1]?.name).toBe('Browser #2');
+      expect(openProject).toHaveBeenCalledTimes(2);
+      expect(openProject).toHaveBeenLastCalledWith(browserTabs[1]?.id, {
+        workingTreeId: 'ws:workspace-1',
+        path: 'design/01.html',
+      });
       expect(result.current.activeTabByGroup.browser).toBe(browserTabs[1]?.id);
     });
 
-    const secondTab = result.current.wbTabs.filter(tab => tab.kind === 'browser')[1]!;
-    act(() => result.current.sheetActions.closeTab(secondTab.id));
+    act(() => result.current.addBrowserTab());
     await waitFor(() => {
-      expect(closeTab).toHaveBeenCalledWith(secondTab.id);
-      expect(result.current.wbTabs.filter(tab => tab.kind === 'browser')).toHaveLength(1);
+      const browserTabs = result.current.wbTabs.filter(tab => tab.kind === 'browser');
+      expect(browserTabs).toHaveLength(3);
+      expect(new Set(browserTabs.map(tab => tab.id)).size).toBe(3);
+      expect(browserTabs[2]?.name).toBe('Browser #3');
+      expect(result.current.activeTabByGroup.browser).toBe(browserTabs[2]?.id);
+    });
+
+    const lastTab = result.current.wbTabs.filter(tab => tab.kind === 'browser')[2]!;
+    act(() => result.current.sheetActions.closeTab(lastTab.id));
+    await waitFor(() => {
+      expect(closeTab).toHaveBeenCalledWith(lastTab.id);
+      expect(result.current.wbTabs.filter(tab => tab.kind === 'browser')).toHaveLength(2);
     });
   });
 

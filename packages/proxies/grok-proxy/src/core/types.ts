@@ -21,7 +21,9 @@ export interface TextInputItem {
 export interface LocalImageInputItem {
   type: 'localImage';
   path: string;
+  name?: string;
   mimeType?: string;
+  size?: number;
 }
 
 export interface LocalFileInputItem {

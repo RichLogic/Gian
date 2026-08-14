@@ -35,6 +35,7 @@ import type {
   AgentProxyStatus,
   Executor,
 } from '@gian/shared';
+import { migrateLegacyGrokProxyDefaults } from '@gian/shared';
 import { CommandRuntimeProvider } from '../runtime/command-provider.js';
 import { KimiSessionStoreRuntimeProvider } from '../runtime/kimi-session-store.js';
 import { runProtectedCommand } from '../runtime/protected-command.js';
@@ -57,6 +58,13 @@ const MAX_PROXY_MANIFEST_BYTES = 64 * 1024;
 const PROXY_SELF_TEST_TIMEOUT_MS = 5_000;
 const PROXY_COMPATIBILITY_TIMEOUT_MS = 30_000;
 const STATUS_CACHE_TTL_MS = 30_000;
+const RECOMMENDED_CLI_VERSIONS: Record<Executor, string> = {
+  claude: '2.1.159',
+  codex: '0.146.0',
+  kimi: '0.31.1',
+  grok: '1.0.3',
+};
+
 const REQUIRED_PROXY_METHODS: Record<Executor, readonly string[]> = {
   claude: [
     'initialize', 'capabilities.list', 'slash.list', 'session.create',
@@ -618,7 +626,7 @@ export class AgentManager {
         // Grok is gian.proxy/1 only. Development still has to negotiate v1
         // even though there is no downloaded manifest.
         ...(id === 'grok'
-          ? { protocolV1: { pluginVersion: '0.1.0', processScope: 'shared' as const } }
+          ? { protocolV1: { pluginVersion: '0.2.0', processScope: 'session' as const } }
           : {}),
       };
     }
@@ -717,7 +725,8 @@ export class AgentManager {
 
   proxyDefaults(id: Executor): AgentProxyDefaults {
     if (!AGENTS[id]) throw new Error(`unsupported agent: ${id}`);
-    return { ...(this.config.proxyDefaults[id] ?? emptyProxyDefaults()) };
+    const defaults = { ...(this.config.proxyDefaults[id] ?? emptyProxyDefaults()) };
+    return id === 'grok' ? migrateLegacyGrokProxyDefaults(defaults) : defaults;
   }
 
   async setProxyDefaults(
@@ -1076,12 +1085,19 @@ export class AgentManager {
         state: 'invalid',
         path: this.configuredPath(id),
         version: null,
+        recommendedVersion: RECOMMENDED_CLI_VERSIONS[id],
         source: this.configuredPath(id) ? 'override' : null,
         error: error instanceof Error ? error.message : String(error),
       };
     }
     if (installed.length === 0) {
-      return { state: 'missing', path: null, version: null, source: null };
+      return {
+        state: 'missing',
+        path: null,
+        version: null,
+        recommendedVersion: RECOMMENDED_CLI_VERSIONS[id],
+        source: null,
+      };
     }
     const failures: string[] = [];
     for (const candidate of installed) {
@@ -1091,6 +1107,7 @@ export class AgentManager {
           state: 'ready',
           path: probe.binaryPath,
           version: probe.version,
+          recommendedVersion: RECOMMENDED_CLI_VERSIONS[id],
           source: probe.source === 'managed' ? 'official-user' : probe.source,
         };
       } catch (error) {
@@ -1102,6 +1119,7 @@ export class AgentManager {
       state: 'invalid',
       path: installed[0]?.binaryPath ?? null,
       version: null,
+      recommendedVersion: RECOMMENDED_CLI_VERSIONS[id],
       source: installed[0]?.source === 'managed'
         ? 'official-user'
         : installed[0]?.source ?? null,

@@ -8,7 +8,7 @@ import type {
   ThinkingEffort,
   WorktreeOutcome,
 } from '@gian/shared';
-import { usesNativeExecutorConfig } from '@gian/shared';
+import { migrateLegacyGrokProxyDefaults, usesNativeExecutorConfig } from '@gian/shared';
 import { randomUUID } from 'node:crypto';
 import type { ApprovalManager } from '../approval/index.js';
 import type { Db } from '../storage/db.js';
@@ -115,7 +115,13 @@ export class SessionLifecycleService {
     if (usesNativeExecutorConfig(input.executor) && input.approval_mode !== undefined) {
       throw new Error(`${input.executor} uses executor-native mode; approval_mode must be omitted`);
     }
-    const managedDefaults = this.proxyDefaults?.(input.executor);
+    const managedDefaults = input.executor === 'grok'
+      ? migrateLegacyGrokProxyDefaults(this.proxyDefaults?.(input.executor) ?? {
+        model: '',
+        thinking: '',
+        mode: '',
+      })
+      : this.proxyDefaults?.(input.executor);
     const configuredMode = managedDefaults?.mode.trim() ?? '';
     const fallbackMode: ApprovalMode = managedDefaults ? 'ask' : 'auto';
     const approvalMode: ApprovalMode | null = usesNativeExecutorConfig(input.executor)

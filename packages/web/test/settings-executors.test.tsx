@@ -225,6 +225,23 @@ describe('SettingsBody Executors', () => {
     expect(screen.getByText('0.1.0 · GitHub')).toBeInTheDocument();
   });
 
+  it('shows a Version-row hint only when the CLI version differs from the recommended value', async () => {
+    vi.mocked(api.loadAgents).mockResolvedValue([
+      {
+        ...agent('grok', 'Grok Build'),
+        cli: {
+          state: 'ready',
+          path: '/bin/grok',
+          version: '1.0.4',
+          recommendedVersion: '1.0.3',
+          source: 'path',
+        },
+      },
+    ]);
+    renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
+    expect(await screen.findByTestId('grok-cli-version-mismatch')).toHaveTextContent('1.0.3');
+  });
+
   it('confirms before persisting a changed CLI path and restarting the packaged app', async () => {
     const restartApp = vi.fn().mockResolvedValue(true);
     window.gianDesktop = { appVariant: 'production', restartApp };
@@ -259,8 +276,10 @@ describe('SettingsBody Executors', () => {
     renderSettingsWithToaster();
 
     const pathInput = await screen.findByDisplayValue('/bin/claude');
-    fireEvent.change(pathInput, { target: { value: '/Users/test/bin/claude-mix' } });
-    fireEvent.blur(pathInput);
+    act(() => {
+      fireEvent.change(pathInput, { target: { value: '/Users/test/bin/claude-mix' } });
+      fireEvent.blur(pathInput);
+    });
     fireEvent.click(await screen.findByRole(
       'button',
       { name: 'Keep current path' },
@@ -279,8 +298,10 @@ describe('SettingsBody Executors', () => {
     renderSettingsWithToaster();
 
     const pathInput = await screen.findByDisplayValue('/bin/claude');
-    fireEvent.change(pathInput, { target: { value: '/missing/claude' } });
-    fireEvent.blur(pathInput);
+    act(() => {
+      fireEvent.change(pathInput, { target: { value: '/missing/claude' } });
+      fireEvent.blur(pathInput);
+    });
     fireEvent.click(await screen.findByRole(
       'button',
       { name: 'Restart' },
@@ -298,8 +319,10 @@ describe('SettingsBody Executors', () => {
     renderSettingsWithToaster();
 
     const pathInput = await screen.findByDisplayValue('/bin/codex');
-    fireEvent.change(pathInput, { target: { value: '/Users/test/bin/codex-next' } });
-    fireEvent.blur(pathInput);
+    act(() => {
+      fireEvent.change(pathInput, { target: { value: '/Users/test/bin/codex-next' } });
+      fireEvent.blur(pathInput);
+    });
     expect(api.setAgentCliPath).not.toHaveBeenCalled();
     fireEvent.click(await screen.findByRole(
       'button',

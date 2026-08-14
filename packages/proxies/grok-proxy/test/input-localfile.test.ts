@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { normalizeInputItems, toPromptBlocks } from '../src/core/input.js';
 
-test('grok-proxy maps a localFile to an ACP resource_link', async () => {
+test('grok-proxy maps local files and images to ACP resource_link, not image blocks', async () => {
   const input = normalizeInputItems(
     [{
       type: 'localFile',
@@ -28,6 +28,17 @@ test('grok-proxy maps a localFile to an ACP resource_link', async () => {
     name: 'report final.pdf',
     mimeType: 'application/pdf',
     size: 42,
+  }]);
+
+  const image = normalizeInputItems(
+    [{ type: 'localImage', path: 'shot.png', mime: 'image/png' }],
+    '/workdir',
+  );
+  assert.deepEqual(toPromptBlocks(image), [{
+    type: 'resource_link',
+    uri: 'file:///workdir/shot.png',
+    name: 'shot.png',
+    mimeType: 'image/png',
   }]);
 });
 

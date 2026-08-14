@@ -54,18 +54,22 @@ test('Grok CLI negotiates gian.proxy/1 independently from its ACP runtime versio
       host: { name: 'Gian', version: '9.9.9' },
     },
   });
-  const initialized = await proxy.next() as { id: number; result: unknown };
-  assert.equal(initialized.id, 1);
-  const result = initializeResultSchema.parse(initialized.result);
-  assert.equal(result.protocol.version, '1.0');
-  assert.equal(result.plugin.version, '0.1.1');
+  try {
+    const initialized = await proxy.next() as { id: number; result?: unknown; error?: unknown };
+    assert.equal(initialized.id, 1);
+    assert.equal(initialized.error, undefined, JSON.stringify(initialized));
+    const result = initializeResultSchema.parse(initialized.result);
+    assert.equal(result.protocol.version, '1.0');
+    assert.equal(result.plugin.id, 'grok');
+    assert.equal(result.process.scope, 'session');
+    assert.equal(result.capabilities['session.nativeDelete'], 1);
 
-  proxy.send({ id: 2, method: 'does.not.exist', params: {} });
-  assert.equal(proxyErrorResponseSchema.parse(await proxy.next()).error.code, 'METHOD_NOT_FOUND');
-
-  proxy.send({ id: 3, method: 'shutdown', params: {} });
-  assert.deepEqual(await proxy.next(), { id: 3, result: { ok: true } });
-  assert.equal(await waitForExit(proxy.child), 0);
+    proxy.send({ id: 2, method: 'does.not.exist', params: {} });
+    assert.equal(proxyErrorResponseSchema.parse(await proxy.next()).error.code, 'METHOD_NOT_FOUND');
+  } finally {
+    proxy.child.kill();
+    await waitForExit(proxy.child);
+  }
 });
 
 test('Grok gian.proxy/1 CLI treats malformed NDJSON as a fatal protocol failure', async () => {
@@ -130,12 +134,25 @@ test('Grok runtime uses the locked ACP command and forces the workspace sandbox'
     },
   });
   await proxy.next();
-  assert.deepEqual(JSON.parse(await readFile(recordPath, 'utf8')), {
-    argv: ['agent', '--no-leader', 'stdio'],
-    disableAutoUpdater: '1',
-    sandbox: 'workspace',
-  });
-  proxy.send({ id: 2, method: 'shutdown', params: {} });
-  assert.deepEqual(await proxy.next(), { id: 2, result: { ok: true } });
+  proxy.send({ id: 2, method: 'catalog.list', params: {} });
+  const catalog = await proxy.next() as { result?: { modes?: Array<{ id: string; workspace: string }> } };
+  assert.deepEqual(catalog.result?.modes?.map(mode => mode.id), ['default', 'auto', 'always_approve']);
+  assert.equal(catalog.result?.modes?.every(mode => mode.workspace === 'workspace-write'), true);
+  const recorded = JSON.parse(await readFile(recordPath, 'utf8')) as {
+    argv: string[];
+    sandbox: string;
+  };
+  assert.deepEqual(recorded.argv, [
+    '--deny',
+    'MCPTool(*)',
+    '--disallowed-tools',
+    'search_tool,use_tool',
+    'agent',
+    '--no-leader',
+    'stdio',
+  ]);
+  assert.equal(recorded.sandbox, 'workspace');
+  proxy.send({ id: 3, method: 'shutdown', params: {} });
+  assert.deepEqual(await proxy.next(), { id: 3, result: { ok: true } });
   assert.equal(await waitForExit(proxy.child), 0);
 });

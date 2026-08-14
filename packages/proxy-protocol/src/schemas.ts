@@ -69,6 +69,7 @@ export const manifestV2Schema = z.strictObject({
   runtime: z.strictObject({
     id: nonEmptyStringSchema,
     displayName: nonEmptyStringSchema,
+    recommendedCliVersion: semverSchema.optional(),
   }).optional(),
 });
 
@@ -115,6 +116,7 @@ export const configOptionSchema = z.strictObject({
   id: nonEmptyStringSchema,
   displayName: nonEmptyStringSchema,
   description: z.string().optional(),
+  category: nonEmptyStringSchema.optional(),
   type: z.enum(['select', 'boolean', 'number', 'text']),
   scope: z.enum(['session', 'turn']),
   currentValue: configValueSchema,
@@ -343,6 +345,9 @@ export const proxyRequestSchema = z.discriminatedUnion('method', [
     ),
   })),
   requestSchema('session.native.list', nativeSessionListParamsSchema),
+  requestSchema('session.native.delete', z.strictObject({
+    nativeSessionId: nonEmptyStringSchema,
+  })),
   requestSchema('session.replay', sessionAndStreamSchema.extend({
     cursor: z.string().nullable(),
     limit: positiveSafeIntegerSchema.max(500),
@@ -497,6 +502,12 @@ const approvalRequestedDataSchema = z.strictObject({
 });
 const approvalResolvedDataSchema = z.strictObject({
   approvalId: nonEmptyStringSchema,
+  /** Structured AskUserQuestion answers picked in the UI, echoed back so the
+   *  resolved card can show "answered with …" without waiting for replay. */
+  answers: z.record(z.string(), z.union([
+    z.string(),
+    z.array(z.string()),
+  ])).optional(),
   resolution: z.enum([
     'selected',
     'turn_interrupted',
@@ -678,6 +689,7 @@ export const resultSchemas = {
     sessions: z.array(nativeSessionSummarySchema),
     nextCursor: z.string().nullable(),
   }),
+  'session.native.delete': okResultSchema,
   'session.replay': replayResultSchema,
   'session.config.set': z.strictObject({
     session: sessionSchema,

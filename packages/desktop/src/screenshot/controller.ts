@@ -12,7 +12,7 @@ import type {
 
 export const MAX_SCREENSHOT_BYTES = 20 * 1024 * 1024;
 export const MAX_CAPTURE_TOTAL_PIXELS = 160_000_000;
-export const MAX_CAPTURE_DATA_URL_CHARS = 256 * 1024 * 1024;
+export const MAX_CAPTURE_PNG_BYTES = 192 * 1024 * 1024;
 export const MAC_SCREENSHOT_SHORTCUT = 'Control+Command+A';
 export const OTHER_SCREENSHOT_SHORTCUT = 'Control+Shift+A';
 
@@ -34,7 +34,7 @@ export interface ScreenshotDisplay {
 export interface ScreenshotImage {
   isEmpty(): boolean;
   getSize(): { width: number; height: number };
-  toDataURL(): string;
+  toPNG(): Buffer;
 }
 
 export interface ScreenshotSource {
@@ -53,6 +53,7 @@ export interface ScreenshotOverlayWindow {
   isDestroyed(): boolean;
   once(event: 'closed', listener: () => void): this;
   loadFile(path: string): Promise<void>;
+  hide(): void;
   show(): void;
   showInactive(): void;
   focus(): void;
@@ -71,8 +72,9 @@ export interface ScreenshotOverlayWindow {
 
 export interface ScreenshotOverlayCapture {
   captureId: string;
-  imageDataUrl: string;
+  imagePngBytes: Uint8Array;
   targetLabel: string;
+  clipboardOnly: boolean;
 }
 
 export interface ScreenshotControllerDependencies {
@@ -87,8 +89,8 @@ export interface ScreenshotControllerDependencies {
   showScreenPermissionHelp(): Promise<void>;
   /** Hide Gian and return an opaque token used to restore its exact prior state. */
   prepareMainWindow(): Promise<unknown>;
-  restoreMainWindow(token: unknown, outcome: 'cancel' | 'success'): Promise<void>;
-  waitForDesktopToSettle(): Promise<void>;
+  restoreMainWindow(token: unknown, outcome: 'cancel' | 'success' | 'clipboard'): Promise<void>;
+  waitForDesktopToSettle(token: unknown): Promise<void>;
   watchDisplayChanges(listener: () => void): () => void;
   registerGlobalShortcut(accelerator: string, listener: () => void): boolean;
   unregisterGlobalShortcut(accelerator: string): void;
@@ -103,13 +105,18 @@ export interface ScreenshotControllerDependencies {
 interface OverlayBinding {
   captureId: string;
   displayId: number;
-  imageDataUrl: string;
+  imagePngBytes: Uint8Array;
+  window: ScreenshotOverlayWindow;
+}
+
+interface ReusableOverlay {
+  display: ScreenshotDisplay;
   window: ScreenshotOverlayWindow;
 }
 
 interface ActiveCapture {
   id: string;
-  target: GianScreenshotTarget;
+  target: GianScreenshotTarget | null;
   restoreToken?: unknown;
   stopWatchingDisplays?: () => void;
   bindings: Map<number, OverlayBinding>;
@@ -276,6 +283,8 @@ export class ScreenshotController {
   private readonly shortcut: string;
   private target: GianScreenshotTarget | null = null;
   private active: ActiveCapture | null = null;
+  private readonly overlays = new Map<number, ReusableOverlay>();
+  private warmUpPromise: Promise<void> | null = null;
   private shortcutRegistered = false;
   private disposed = false;
 
@@ -306,8 +315,23 @@ export class ScreenshotController {
     this.target = null;
     const capture = this.active;
     if (capture && !capture.cleaned && !capture.finishing) {
-      void this.abortCapture(capture, 'capture-failed');
+      capture.target = null;
     }
+  }
+
+  /** Keep the hidden overlay renderer processes ready so a shortcut does not
+   * pay BrowserWindow startup cost on every capture. */
+  warmUp(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    if (this.warmUpPromise) return this.warmUpPromise;
+    const displays = this.dependencies.listDisplays();
+    this.warmUpPromise = Promise.all(
+      this.overlayWindowsFor(displays).map(window =>
+        window.loadFile(this.dependencies.overlayHtmlPath)),
+    ).then(() => undefined).finally(() => {
+      this.warmUpPromise = null;
+    });
+    return this.warmUpPromise;
   }
 
   getState(): GianScreenshotState {
@@ -324,11 +348,6 @@ export class ScreenshotController {
       this.reportError('busy');
       return { ok: false, error: 'busy' };
     }
-    if (!this.target) {
-      this.reportError('no-target');
-      return { ok: false, error: 'no-target' };
-    }
-
     const permission = this.dependencies.getScreenPermissionStatus();
     if (permission === 'denied' || permission === 'restricted') {
       await this.dependencies.showScreenPermissionHelp();
@@ -338,7 +357,7 @@ export class ScreenshotController {
 
     const capture: ActiveCapture = {
       id: this.dependencies.randomId(),
-      target: cloneTarget(this.target),
+      target: this.target ? cloneTarget(this.target) : null,
       bindings: new Map(),
       windows: [],
       cleaned: false,
@@ -347,9 +366,10 @@ export class ScreenshotController {
     this.active = capture;
 
     try {
+      if (this.warmUpPromise) await this.warmUpPromise.catch(() => undefined);
       capture.restoreToken = await this.dependencies.prepareMainWindow();
       if (capture.cleaned) return { ok: false, error: capture.abortCode ?? 'capture-failed' };
-      await this.dependencies.waitForDesktopToSettle();
+      await this.dependencies.waitForDesktopToSettle(capture.restoreToken);
       if (capture.cleaned) return { ok: false, error: capture.abortCode ?? 'capture-failed' };
 
       const displays = this.dependencies.listDisplays();
@@ -369,66 +389,22 @@ export class ScreenshotController {
         throw new Error('captured desktop exceeds pixel budget');
       }
 
-      let totalDataUrlChars = 0;
+      let totalPngBytes = 0;
+      const windows = this.overlayWindowsFor(displays);
 
-      for (const display of displays) {
+      for (const [index, display] of displays.entries()) {
         const source = sourceByDisplay.get(display.id)!;
-        const imageDataUrl = source.thumbnail.toDataURL();
-        totalDataUrlChars += imageDataUrl.length;
-        if (
-          !imageDataUrl.startsWith('data:image/png;base64,')
-          || totalDataUrlChars > MAX_CAPTURE_DATA_URL_CHARS
-        ) {
+        const imagePngBytes = new Uint8Array(source.thumbnail.toPNG());
+        totalPngBytes += imagePngBytes.byteLength;
+        if (totalPngBytes > MAX_CAPTURE_PNG_BYTES || !hasPngSignature(imagePngBytes)) {
           throw new Error('captured desktop exceeds encoded image budget');
         }
-        const window = this.dependencies.createOverlayWindow({
-          x: display.bounds.x,
-          y: display.bounds.y,
-          width: display.bounds.width,
-          height: display.bounds.height,
-          show: false,
-          frame: false,
-          transparent: false,
-          backgroundColor: '#000000',
-          type: 'panel',
-          title: 'Gian Screenshot',
-          focusable: true,
-          acceptFirstMouse: true,
-          enableLargerThanScreen: true,
-          resizable: false,
-          movable: false,
-          minimizable: false,
-          maximizable: false,
-          fullscreenable: false,
-          closable: false,
-          skipTaskbar: true,
-          hasShadow: false,
-          roundedCorners: false,
-          hiddenInMissionControl: true,
-          webPreferences: {
-            preload: this.dependencies.overlayPreloadPath,
-            contextIsolation: true,
-            nodeIntegration: false,
-            sandbox: true,
-            webSecurity: true,
-            spellcheck: false,
-            devTools: false,
-            backgroundThrottling: false,
-            partition: 'gian-screenshot',
-          },
-        });
+        const window = windows[index]!;
         capture.windows.push(window);
-        const cancelOnOverlayGone = () => {
-          void this.abortCapture(capture, 'capture-failed');
-        };
-        window.once('closed', cancelOnOverlayGone);
-        window.webContents.once('render-process-gone', cancelOnOverlayGone);
-        window.setAlwaysOnTop(true, 'screen-saver', 1);
-        window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
         capture.bindings.set(window.webContents.id, {
           captureId: capture.id,
           displayId: display.id,
-          imageDataUrl,
+          imagePngBytes,
           window,
         });
       }
@@ -465,8 +441,9 @@ export class ScreenshotController {
     if (!binding || binding.captureId !== capture.id) return null;
     return {
       captureId: capture.id,
-      imageDataUrl: binding.imageDataUrl,
-      targetLabel: capture.target.label,
+      imagePngBytes: binding.imagePngBytes,
+      targetLabel: capture.target?.label ?? '',
+      clipboardOnly: capture.target === null,
     };
   }
 
@@ -525,14 +502,17 @@ export class ScreenshotController {
     }
 
     capture.finishing = true;
-    await this.cleanupCapture(capture, 'success');
-    await this.dependencies.onCaptured({
-      id: capture.id,
-      target: cloneTarget(capture.target),
-      filename: screenshotFilename(this.dependencies.now()),
-      mime: 'image/png',
-      bytes,
-    });
+    const target = capture.target ? cloneTarget(capture.target) : null;
+    await this.cleanupCapture(capture, target ? 'success' : 'clipboard');
+    if (target) {
+      await this.dependencies.onCaptured({
+        id: capture.id,
+        target,
+        filename: screenshotFilename(this.dependencies.now()),
+        mime: 'image/png',
+        bytes,
+      });
+    }
     return true;
   }
 
@@ -545,14 +525,17 @@ export class ScreenshotController {
     }
     const capture = this.active;
     this.active = null;
-    if (!capture) return;
-    capture.cleaned = true;
-    capture.stopWatchingDisplays?.();
-    capture.bindings.clear();
-    for (const window of capture.windows) {
+    if (capture) {
+      capture.cleaned = true;
+      capture.stopWatchingDisplays?.();
+      capture.bindings.clear();
+      capture.windows.length = 0;
+    }
+    const windows = [...this.overlays.values()].map(overlay => overlay.window);
+    this.overlays.clear();
+    for (const window of windows) {
       if (!window.isDestroyed()) window.destroy();
     }
-    capture.windows.length = 0;
   }
 
   private async abortCapture(
@@ -568,7 +551,7 @@ export class ScreenshotController {
 
   private async cleanupCapture(
     capture: ActiveCapture,
-    outcome: 'cancel' | 'success',
+    outcome: 'cancel' | 'success' | 'clipboard',
   ): Promise<void> {
     if (capture.cleaned) return;
     capture.cleaned = true;
@@ -576,7 +559,7 @@ export class ScreenshotController {
     capture.stopWatchingDisplays = undefined;
     capture.bindings.clear();
     for (const window of capture.windows) {
-      if (!window.isDestroyed()) window.destroy();
+      if (!window.isDestroyed()) window.hide();
     }
     capture.windows.length = 0;
     try {
@@ -593,4 +576,104 @@ export class ScreenshotController {
       // Screenshot error reporting must never destabilize the Desktop shell.
     }
   }
+
+  private overlayWindowsFor(displays: readonly ScreenshotDisplay[]): ScreenshotOverlayWindow[] {
+    const activeIds = new Set(displays.map(display => display.id));
+    for (const [displayId, overlay] of this.overlays) {
+      const display = displays.find(item => item.id === displayId);
+      if (
+        !activeIds.has(displayId)
+        || !display
+        || !sameDisplay(display, overlay.display)
+        || overlay.window.isDestroyed()
+        || overlay.window.webContents.isDestroyed()
+      ) {
+        this.overlays.delete(displayId);
+        if (!overlay.window.isDestroyed()) overlay.window.destroy();
+      }
+    }
+
+    return displays.map(display => {
+      const existing = this.overlays.get(display.id);
+      if (existing) return existing.window;
+      const window = this.createOverlayWindow(display);
+      this.overlays.set(display.id, { display: cloneDisplay(display), window });
+      return window;
+    });
+  }
+
+  private createOverlayWindow(display: ScreenshotDisplay): ScreenshotOverlayWindow {
+    const window = this.dependencies.createOverlayWindow({
+      x: display.bounds.x,
+      y: display.bounds.y,
+      width: display.bounds.width,
+      height: display.bounds.height,
+      show: false,
+      frame: false,
+      transparent: false,
+      backgroundColor: '#000000',
+      type: 'panel',
+      title: 'Gian Screenshot',
+      focusable: true,
+      acceptFirstMouse: true,
+      enableLargerThanScreen: true,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      closable: false,
+      skipTaskbar: true,
+      hasShadow: false,
+      roundedCorners: false,
+      hiddenInMissionControl: true,
+      webPreferences: {
+        preload: this.dependencies.overlayPreloadPath,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webSecurity: true,
+        spellcheck: false,
+        devTools: false,
+        backgroundThrottling: false,
+        partition: 'gian-screenshot',
+      },
+    });
+    const removeOverlay = () => {
+      const overlay = this.overlays.get(display.id);
+      if (overlay?.window === window) this.overlays.delete(display.id);
+      const capture = this.active;
+      if (capture && capture.windows.includes(window)) {
+        void this.abortCapture(capture, 'capture-failed');
+      }
+      if (!window.isDestroyed() && window.webContents.isDestroyed()) window.destroy();
+    };
+    window.once('closed', removeOverlay);
+    window.webContents.once('render-process-gone', removeOverlay);
+    window.setAlwaysOnTop(true, 'screen-saver', 1);
+    window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    return window;
+  }
+}
+
+function hasPngSignature(bytes: Uint8Array): boolean {
+  if (bytes.byteLength < PNG_SIGNATURE.length) return false;
+  return PNG_SIGNATURE.every((byte, index) => bytes[index] === byte);
+}
+
+function sameDisplay(left: ScreenshotDisplay, right: ScreenshotDisplay): boolean {
+  return left.id === right.id
+    && left.scaleFactor === right.scaleFactor
+    && left.bounds.x === right.bounds.x
+    && left.bounds.y === right.bounds.y
+    && left.bounds.width === right.bounds.width
+    && left.bounds.height === right.bounds.height;
+}
+
+function cloneDisplay(display: ScreenshotDisplay): ScreenshotDisplay {
+  return {
+    id: display.id,
+    bounds: { ...display.bounds },
+    scaleFactor: display.scaleFactor,
+  };
 }

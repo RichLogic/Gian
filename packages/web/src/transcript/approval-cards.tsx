@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ApprovalDecision } from '@gian/shared';
 import { useT } from '../i18n/index.js';
+import { normalizeGfmTables } from '../markdown-tables.js';
 import { useOperationPending } from '../operations/use-operations.js';
 import type { ApprovalActionContext, ApprovalItem } from '../types.js';
 
@@ -89,6 +90,12 @@ export function ApprovalCard({
   const isPlanExit = item.category === 'exit_plan_mode' && item.planActions && item.planActions.length > 0;
   const isNative = (item.nativeOptions?.length ?? 0) > 0;
   const kimiQuestion = isKimiQuestion(item);
+  // Plan bodies are model-written markdown — repair spec-invalid tables the
+  // same way the transcript renderer does.
+  const planMarkdown = useMemo(
+    () => (item.category === 'exit_plan_mode' && item.cmd ? normalizeGfmTables(item.cmd) : ''),
+    [item.category, item.cmd],
+  );
   const sessionScopeAllowed = (item.scopeOptions ?? ['once']).includes('session');
   // Pending approval.resolve run (Phase 2b, proposal §5): clicking any
   // decision immediately disables the submitted card and labels it
@@ -150,7 +157,7 @@ export function ApprovalCard({
           ? (
             <div className="approval-plan">
               <div className="approval-plan-md">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.cmd}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{planMarkdown}</ReactMarkdown>
               </div>
             </div>
           )

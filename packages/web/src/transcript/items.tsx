@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { isNativeImageMime } from '../attachments.js';
 import { useT } from '../i18n/index.js';
+import { normalizeGfmTables } from '../markdown-tables.js';
 import { dispatchMessageSend } from '../operations/message.js';
 import { useOperationDispatchOptional, useOperationRun } from '../operations/use-operations.js';
 import {
@@ -172,13 +173,17 @@ export function MarkdownText({ children }: { children: string }) {
     () => (makeRehype ? [makeRehype] : []),
     [makeRehype],
   );
+  // Repair spec-invalid table patterns models emit constantly (header glued
+  // to a list item, delimiter/header cell-count mismatch) before remark sees
+  // them — otherwise the table silently renders as raw pipe text.
+  const source = useMemo(() => normalizeGfmTables(children), [children]);
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       rehypePlugins={rehypePlugins as never}
       components={{ a: MarkdownAnchor as never, pre: MarkdownPre as never }}
     >
-      {children}
+      {source}
     </ReactMarkdown>
   );
 }

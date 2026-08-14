@@ -10,6 +10,7 @@ import type {
 } from '@gian/shared';
 import { usesNativeExecutorConfig } from '@gian/shared';
 import { loadAgents, peekAgents } from '../api.js';
+import { MAX_FILE_BYTES, fmtBytes, isNativeImageMime } from '../attachments.js';
 import { desktopBridge } from '../desktop-bridge.js';
 import { toast } from '../feedback.js';
 import { useT } from '../i18n/index.js';
@@ -36,6 +37,7 @@ import {
   newSessionDraftStorageKey,
   removeNewSessionScreenshot,
   screenshotEventMatchesScope,
+  storeNewSessionAttachment,
   type NewSessionScreenshotDraftAttachment,
 } from '../screenshot-drafts.js';
 import { publishScreenshotTarget, startScreenshotCapture } from '../screenshot-target.js';
@@ -281,6 +283,7 @@ export function NewSessionView({
   const effortDrop = useUpDrop(210);
   const modeDrop = useUpDrop(340);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const screenshotAvailable = !!desktopBridge()?.screenshot;
 
   useEffect(() => {
@@ -412,6 +415,7 @@ export function NewSessionView({
     let alive = true;
     const urls: string[] = [];
     void Promise.all(screenshotAttachments.map(async attachment => {
+      if (!isNativeImageMime(attachment.mime)) return null;
       const blob = await loadNewSessionScreenshotBlob(currentScope, attachment.id);
       if (!blob) return null;
       const url = URL.createObjectURL(blob);
@@ -617,6 +621,46 @@ export function NewSessionView({
     void removeNewSessionScreenshot(owner, id);
   }
 
+  /** Paste/picker entry point, mirroring the session Composer's pipeline but
+   *  staged in the pre-session Blob store — the session does not exist yet, so
+   *  there is nothing to upload to. `storeNewSessionAttachment` dispatches the
+   *  screenshot event, which the listener above uses to refresh chip state. */
+  async function addFiles(files: File[]): Promise<void> {
+    const owner = activeDraftScope();
+    if (!owner || files.length === 0) return;
+    setAttachmentError(null);
+    for (const file of files) {
+      if (file.size > MAX_FILE_BYTES) {
+        setAttachmentError(t('composer.attachment.tooLarge'));
+        continue;
+      }
+      try {
+        await storeNewSessionAttachment(owner, { name: file.name, blob: file });
+      } catch {
+        setAttachmentError(t('screenshot.restoreFailed'));
+      }
+    }
+  }
+
+  function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>): void {
+    const items = Array.from(event.clipboardData?.items ?? []);
+    const images = items.filter(item => item.kind === 'file' && item.type.startsWith('image/'));
+    if (images.length === 0) return; // let normal text paste through
+    event.preventDefault();
+    const files = images
+      .map(item => item.getAsFile())
+      .filter((file): file is File => file !== null)
+      // Screenshots have empty names — fabricate one, same as the Composer.
+      .map(file => file.name ? file : new File([file], `paste-${Date.now()}.png`, { type: file.type }));
+    void addFiles(files);
+  }
+
+  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>): void {
+    void addFiles(Array.from(event.target.files ?? []));
+    // Reset input so the same file can be re-selected.
+    event.target.value = '';
+  }
+
   function handleTitleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
     if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
       event.preventDefault();
@@ -805,6 +849,17 @@ export function NewSessionView({
         )}
 
         <div className="composer">
+          {/* Hidden file input — triggered by the plus button */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            data-testid="ns-file-input"
+            style={{ display: 'none' }}
+            onChange={handleFileChange}
+            aria-hidden="true"
+            tabIndex={-1}
+          />
           <div className="composer-input-wrap">
             <input
               className="ns-title-input"
@@ -826,6 +881,7 @@ export function NewSessionView({
               value={message}
               onChange={event => setMessage(event.target.value)}
               onKeyDown={handleMessageKeyDown}
+              onPaste={handlePaste}
               placeholder={t('coding.new.message.placeholder')}
             />
           </div>
@@ -833,18 +889,28 @@ export function NewSessionView({
             <div className="composer-attachments" data-testid="new-session-screenshots">
               {screenshotAttachments.map(attachment => (
                 <div key={attachment.id} className="att-chip">
-                  {screenshotPreviews[attachment.id] ? (
-                    <span className="att-thumb-btn">
-                      <img
-                        className="att-thumb"
-                        src={screenshotPreviews[attachment.id]}
-                        alt={attachment.name}
-                      />
-                    </span>
+                  {isNativeImageMime(attachment.mime) ? (
+                    screenshotPreviews[attachment.id] ? (
+                      <span className="att-thumb-btn">
+                        <img
+                          className="att-thumb"
+                          src={screenshotPreviews[attachment.id]}
+                          alt={attachment.name}
+                        />
+                      </span>
+                    ) : (
+                      <span className="spinner" aria-label={t('common.loading')} />
+                    )
                   ) : (
-                    <span className="spinner" aria-label={t('common.loading')} />
+                    <span className="att-file-icon" aria-hidden="true">
+                      <svg viewBox="0 0 16 16" fill="none">
+                        <path d="M4 1.75h5l3 3V14.25H4z" stroke="currentColor" strokeWidth="1.2" />
+                        <path d="M9 1.75v3h3" stroke="currentColor" strokeWidth="1.2" />
+                      </svg>
+                    </span>
                   )}
                   <span className="att-name" title={attachment.name}>{attachment.name}</span>
+                  <span className="att-size">{fmtBytes(attachment.size)}</span>
                   <button
                     className="att-remove"
                     type="button"
@@ -1049,6 +1115,21 @@ export function NewSessionView({
                 <span className="name">{nativeDefaults?.mode.trim() || t('coding.new.chip.default')}</span>
               </span>
             )}
+
+            {/* Attach files — plus glyph, same as the session Composer. */}
+            <button
+              type="button"
+              className={`composer-act${screenshotAttachments.length > 0 ? ' active' : ''}`}
+              data-testid="ns-attach-button"
+              disabled={creating || preparingAttachments || createUnknown}
+              title={t('composer.attachment.addFiles')}
+              onClick={() => fileInputRef.current?.click()}
+              aria-label={t('composer.attachment.addFiles')}
+            >
+              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+            </button>
 
             {screenshotAvailable && (
               <button

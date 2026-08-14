@@ -2624,8 +2624,8 @@ test('failed close blocks replacement runtimes until exact cleanup is retried', 
     `);
     let acquireCalls = 0;
     let releaseCalls = 0;
-    const usesSharedRuntime = executor === 'kimi' || executor === 'grok';
-    const runtimeManager = usesSharedRuntime ? {
+    const usesSharedRuntime = executor === 'kimi';
+    const runtimeManager = (usesSharedRuntime || executor === 'grok') ? {
       async acquire() {
         acquireCalls += 1;
         return {

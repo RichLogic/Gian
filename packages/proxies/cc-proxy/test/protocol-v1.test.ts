@@ -379,3 +379,75 @@ test('Claude gian.proxy/1 resets usage immediately after native session rotation
     await service.close();
   }
 });
+
+test('Claude gian.proxy/1 suppresses generic tool events for approval-bridged tools', async () => {
+  const { runtime, service, adapter, notifications, streamId } = await setup();
+  try {
+    await adapter.handle(request(3, 'turn.start', {
+      sessionId: 'host-session',
+      streamId,
+      turnId: 'host-turn',
+      input: [{ type: 'text', text: 'run' }],
+      policy: { workspaceRoots: ['/tmp'], approval: 'relay', network: 'ask' },
+      config: { native: {} },
+    }));
+    const serviceSessionId = runtime.messages[0]!.sessionId;
+    // AskUserQuestion / ExitPlanMode always route through the approval bridge;
+    // their generic tool cards would duplicate the approval card and render
+    // the deny+message answer tunnel as a bogus error.
+    runtime.emit('toolUse', serviceSessionId, 'AskUserQuestion', { questions: [] }, 'tool-q');
+    runtime.emit('toolResult', serviceSessionId, 'tool-q', 'denied with answers', true);
+    runtime.emit('toolUse', serviceSessionId, 'ExitPlanMode', {}, 'tool-p');
+    runtime.emit('toolResult', serviceSessionId, 'tool-p', 'Plan approved', false);
+    // A regular tool is unaffected.
+    runtime.emit('toolUse', serviceSessionId, 'Read', { file_path: '/tmp/x' }, 'tool-r');
+    runtime.emit('toolResult', serviceSessionId, 'tool-r', 'data', false);
+    runtime.emit('channelReply', serviceSessionId, 'done');
+    assert.deepEqual(
+      notifications.map(item => item.method),
+      ['turn.started', 'tool.started', 'tool.completed', 'content.completed', 'turn.completed'],
+    );
+    const started = notifications.find(item => item.method === 'tool.started')!;
+    assert.equal((started.params.data as { name: string }).name, 'Read');
+  } finally {
+    await service.close();
+  }
+});
+
+test('Claude gian.proxy/1 echoes AskUserQuestion answers on approval.resolved', async () => {
+  const { runtime, service, adapter, notifications, streamId } = await setup();
+  try {
+    await adapter.handle(request(3, 'turn.start', {
+      sessionId: 'host-session',
+      streamId,
+      turnId: 'host-turn',
+      input: [{ type: 'text', text: 'run' }],
+      policy: { workspaceRoots: ['/tmp'], approval: 'relay', network: 'ask' },
+      config: { native: {} },
+    }));
+    const serviceSessionId = runtime.messages[0]!.sessionId;
+    runtime.emit('permissionRequest', serviceSessionId, 'native-q', 'AskUserQuestion', 'Pick one', '{"questions":[]}');
+    const requested = notifications.find(item => item.method === 'approval.requested')!;
+    assert.ok(requested);
+
+    await adapter.handle(request(4, 'approval.respond', {
+      sessionId: 'host-session',
+      streamId,
+      turnId: 'host-turn',
+      approvalId: (requested.params.data as { approvalId: string }).approvalId,
+      optionId: 'allow_once',
+      answers: { 'Pick one': 'Option A' },
+    }));
+
+    // The answers tunnel to claude as a deny+message…
+    assert.equal(runtime.permissionResponses[0]?.behavior, 'deny');
+    // …but the resolved event still reports the user's pick and carries the
+    // answers so the resolved card can show "answered with …" live.
+    const resolved = notifications.find(item => item.method === 'approval.resolved')!;
+    assert.ok(resolved);
+    assert.equal((resolved.params.data as { optionId: string }).optionId, 'allow_once');
+    assert.deepEqual((resolved.params.data as { answers?: unknown }).answers, { 'Pick one': 'Option A' });
+  } finally {
+    await service.close();
+  }
+});

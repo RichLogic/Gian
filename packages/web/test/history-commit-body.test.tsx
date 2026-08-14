@@ -4,6 +4,7 @@ import { HistoryCommitBody } from '../src/components/HistoryCommitBody.js';
 import type { GitHistoryCommitDetail, GitHistoryFileDiff } from '../src/api.js';
 import type { SheetTab } from '../src/components/sheet-model.js';
 import * as api from '../src/api.js';
+import { __resetHistoryCommitForTests } from '../src/controllers/use-history-commit.js';
 
 vi.mock('../src/api.js', async () => {
   const actual = await vi.importActual<typeof import('../src/api.js')>('../src/api.js');
@@ -91,6 +92,8 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  __resetHistoryCommitForTests();
+  localStorage.clear();
   FakeIO.instances = [];
   vi.stubGlobal('IntersectionObserver', FakeIO);
   loadGitHistoryCommit.mockResolvedValue(detail());
@@ -126,7 +129,7 @@ describe('HistoryCommitBody', () => {
     });
     await waitFor(() => expect(loadGitHistoryFileDiff).toHaveBeenCalledWith('ws:demo', 'c0ffee1full', 'src/a.ts'));
     expect(loadGitHistoryFileDiff).toHaveBeenCalledTimes(1);
-    await waitFor(() => expect(document.querySelectorAll('.sheet-diff-ln.add').length).toBe(1));
+    await waitFor(() => expect(document.querySelectorAll('.sheet-diff-side.new.add').length).toBe(1));
   });
 
   it('binary files never fetch — they render the binary note', async () => {
@@ -142,7 +145,7 @@ describe('HistoryCommitBody', () => {
     act(() => FakeIO.instances[0]!.trigger());
     await screen.findByText("Couldn't load this file's diff.");
     fireEvent.click(screen.getByText('Retry'));
-    await waitFor(() => expect(document.querySelectorAll('.sheet-diff-ln.add').length).toBe(1));
+    await waitFor(() => expect(document.querySelectorAll('.sheet-diff-side.new.add').length).toBe(1));
     expect(loadGitHistoryFileDiff).toHaveBeenCalledTimes(2);
   });
 
@@ -176,6 +179,37 @@ describe('HistoryCommitBody', () => {
     expect(document.querySelectorAll('.cs-file.collapsed').length).toBe(0);
   });
 
+  it('switches between stacked and side-by-side diffs and toggles the pressed wrap control', async () => {
+    render(<HistoryCommitBody tab={tab()} />);
+    await waitFor(() => expect(document.querySelector('.cs-subject')?.textContent).toBe('feat: wire history rail'));
+    act(() => FakeIO.instances[0]!.trigger());
+    await waitFor(() => expect(document.querySelectorAll('.sheet-diff-side.new').length).toBeGreaterThan(0));
+
+    const wrapToggle = screen.getByLabelText('Disable word wrap');
+    expect(wrapToggle).toHaveAttribute('aria-pressed', 'true');
+    expect(wrapToggle).toHaveClass('active');
+
+    const layoutToggle = screen.getByLabelText('Stacked view');
+    expect(layoutToggle.querySelector('[data-icon="side-by-side"]')).toBeTruthy();
+    expect(document.querySelectorAll('.sheet-diff-side.old').length).toBeGreaterThan(0);
+    expect(document.querySelectorAll('.sheet-diff-side.new').length).toBeGreaterThan(0);
+    fireEvent.click(layoutToggle);
+    expect(document.querySelectorAll('.sheet-diff-side')).toHaveLength(0);
+    expect(document.querySelectorAll('.sheet-diff-ln.add')).toHaveLength(1);
+    expect(screen.getByLabelText('Side-by-side view').querySelector('[data-icon="stacked"]')).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText('Side-by-side view'));
+    expect(document.querySelectorAll('.sheet-diff-side.new').length).toBeGreaterThan(0);
+    expect(screen.getByLabelText('Stacked view').querySelector('[data-icon="side-by-side"]')).toBeTruthy();
+
+    fireEvent.click(wrapToggle);
+    const enableWrap = screen.getByLabelText('Enable word wrap');
+    expect(enableWrap).toHaveAttribute('aria-pressed', 'false');
+    expect(enableWrap).not.toHaveClass('active');
+    expect(document.querySelector('.cs-root')).toHaveClass('cs-nowrap');
+    expect(document.querySelector('.sheet-diff')).toHaveClass('nowrap');
+  });
+
   it('orphaned tabs show the snapshot banner', async () => {
     render(<HistoryCommitBody tab={tab({ orphaned: true })} />);
     await screen.findByText(/no longer reachable/);
@@ -189,6 +223,30 @@ describe('HistoryCommitBody', () => {
     expect(document.querySelector('.cs-file.collapsed')).toBeTruthy();
     fireEvent.click(head);
     expect(document.querySelector('.cs-file.collapsed')).toBeNull();
+  });
+
+  it('restores commit detail, patches, and expansion for one Session without leaking to another', async () => {
+    const sessionOneTab = tab({ sessionId: 'session-1' });
+    const first = render(<HistoryCommitBody tab={sessionOneTab} />);
+    await screen.findByText('feat: wire history rail');
+    act(() => FakeIO.instances.at(-1)!.trigger());
+    await screen.findByText('const b = 2;');
+    fireEvent.click(document.querySelector('.cs-file-head')!);
+    expect(document.querySelector('.cs-file.collapsed')).toBeTruthy();
+    first.unmount();
+
+    const second = render(<HistoryCommitBody tab={tab({ sessionId: 'session-2' })} />);
+    await screen.findByText('feat: wire history rail');
+    expect(document.querySelector('.cs-file.collapsed')).toBeNull();
+    second.unmount();
+
+    render(<HistoryCommitBody tab={sessionOneTab} />);
+    expect(await screen.findByText('feat: wire history rail')).toBeTruthy();
+    expect(document.querySelector('.cs-file.collapsed')).toBeTruthy();
+    fireEvent.click(document.querySelector('.cs-file-head')!);
+    expect(screen.getByText('const b = 2;')).toBeTruthy();
+    expect(loadGitHistoryCommit).toHaveBeenCalledTimes(2);
+    expect(loadGitHistoryFileDiff).toHaveBeenCalledTimes(1);
   });
 
   it('replacing a preview commit reloads a same-path patch instead of reusing the old one', async () => {
@@ -212,6 +270,7 @@ describe('HistoryCommitBody', () => {
     const { rerender } = render(
       <HistoryCommitBody
         tab={tab({ commitSha: 'first-full', name: 'first' })}
+       
       />,
     );
     await waitFor(() => expect(document.querySelector('.cs-subject')?.textContent).toBe('first preview'));
@@ -221,6 +280,7 @@ describe('HistoryCommitBody', () => {
     rerender(
       <HistoryCommitBody
         tab={tab({ commitSha: 'second-full', name: 'second' })}
+       
       />,
     );
     await waitFor(() => expect(document.querySelector('.cs-subject')?.textContent).toBe('second preview'));
@@ -239,11 +299,13 @@ describe('HistoryCommitBody', () => {
     const { rerender } = render(
       <HistoryCommitBody
         tab={tab({ commitSha: 'first-full', name: 'first' })}
+       
       />,
     );
     rerender(
       <HistoryCommitBody
         tab={tab({ commitSha: 'second-full', name: 'second' })}
+       
       />,
     );
     await act(async () => second.resolve(detail({ sha: 'second-full', subject: 'second wins' })));
@@ -251,5 +313,93 @@ describe('HistoryCommitBody', () => {
     await act(async () => first.resolve(detail({ sha: 'first-full', subject: 'late first' })));
     expect(screen.queryByText('late first')).toBeNull();
     expect(document.querySelector('.cs-subject')?.textContent).toBe('second wins');
+  });
+
+  it('keeps an in-flight commit available when the singleton switches away and back', async () => {
+    const first = deferred<GitHistoryCommitDetail>();
+    loadGitHistoryCommit.mockImplementation((_workingTreeId, sha) =>
+      sha === 'first-full'
+        ? first.promise
+        : Promise.resolve(detail({ sha: 'second-full', subject: 'second ready' })));
+    const { rerender } = render(
+      <HistoryCommitBody tab={tab({ sessionId: 'session-1', commitSha: 'first-full' })} />,
+    );
+    rerender(
+      <HistoryCommitBody tab={tab({ sessionId: 'session-1', commitSha: 'second-full' })} />,
+    );
+    await screen.findByText('second ready');
+    await act(async () => first.resolve(detail({ sha: 'first-full', subject: 'first ready' })));
+    rerender(
+      <HistoryCommitBody tab={tab({ sessionId: 'session-1', commitSha: 'first-full' })} />,
+    );
+    expect(await screen.findByText('first ready')).toBeTruthy();
+    expect(loadGitHistoryCommit).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps same-path in-flight patches isolated when the owner Session switches away and back', async () => {
+    const firstPatch = deferred<GitHistoryFileDiff>();
+    const secondPatch = deferred<GitHistoryFileDiff>();
+    let patchRequest = 0;
+    loadGitHistoryFileDiff.mockImplementation(() => {
+      patchRequest += 1;
+      return patchRequest === 1 ? firstPatch.promise : secondPatch.promise;
+    });
+
+    // Prime Session 2's commit detail so the A -> B switch below can reuse
+    // the same FileDiffBlock position without an intervening detail skeleton.
+    const primed = render(<HistoryCommitBody tab={tab({ sessionId: 'session-2' })} />);
+    await screen.findByText('feat: wire history rail');
+    primed.unmount();
+
+    const { rerender } = render(
+      <HistoryCommitBody tab={tab({ sessionId: 'session-1' })} />,
+    );
+    await screen.findByText('feat: wire history rail');
+    act(() => FakeIO.instances.at(-1)!.trigger());
+    await waitFor(() => expect(loadGitHistoryFileDiff).toHaveBeenCalledTimes(1));
+
+    rerender(<HistoryCommitBody tab={tab({ sessionId: 'session-2' })} />);
+    act(() => FakeIO.instances.at(-1)!.trigger());
+    await waitFor(() => expect(loadGitHistoryFileDiff).toHaveBeenCalledTimes(2));
+
+    await act(async () => secondPatch.resolve({
+      ...DIFF,
+      diff: `${DIFF.diff}\n+B_SESSION_PATCH`,
+    }));
+    await screen.findByText('B_SESSION_PATCH');
+
+    await act(async () => firstPatch.resolve({
+      ...DIFF,
+      diff: `${DIFF.diff}\n+A_SESSION_PATCH`,
+    }));
+    expect(screen.queryByText('A_SESSION_PATCH')).toBeNull();
+
+    rerender(<HistoryCommitBody tab={tab({ sessionId: 'session-1' })} />);
+    expect(await screen.findByText('A_SESSION_PATCH')).toBeTruthy();
+    expect(loadGitHistoryFileDiff).toHaveBeenCalledTimes(2);
+  });
+
+  it('restores the commit Sheet scroll position independently for each Session', async () => {
+    const body = (sessionId: string) => (
+      <div className="sheet-content" data-testid="commit-scroller">
+        <HistoryCommitBody tab={tab({ sessionId })} />
+      </div>
+    );
+    const { rerender } = render(body('session-1'));
+    await screen.findByText('feat: wire history rail');
+    const scroller = screen.getByTestId('commit-scroller');
+    scroller.scrollTop = 140;
+    fireEvent.scroll(scroller);
+
+    rerender(body('session-2'));
+    await screen.findByText('feat: wire history rail');
+    expect(scroller.scrollTop).toBe(0);
+    scroller.scrollTop = 55;
+    fireEvent.scroll(scroller);
+
+    rerender(body('session-1'));
+    expect(scroller.scrollTop).toBe(140);
+    rerender(body('session-2'));
+    expect(scroller.scrollTop).toBe(55);
   });
 });

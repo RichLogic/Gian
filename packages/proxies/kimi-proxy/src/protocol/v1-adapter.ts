@@ -261,6 +261,7 @@ export class KimiProtocolV1Adapter {
       case 'session.replay': return this.replay(request.params);
       case 'session.config.set': return this.setConfig(request.params);
       case 'session.rename':
+      case 'session.native.delete':
       case 'turn.steer':
         throw new ProxyProtocolError(
           'CAPABILITY_NOT_SUPPORTED',

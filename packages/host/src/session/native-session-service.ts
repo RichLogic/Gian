@@ -30,9 +30,6 @@ export class NativeSessionService {
   }
 
   async listPlugin(executor: Executor, cwd: string): Promise<NativeSession[] | null> {
-    // Grok V1 does not advertise session.nativeList. Do not start a shared
-    // ACP process just to discover that the method is absent.
-    if (executor === 'grok') return null;
     return this.listFromProxy(executor, cwd, true);
   }
 
@@ -87,6 +84,24 @@ export class NativeSessionService {
     } catch (error) {
       await this.proxy.dispose(cacheKey).catch(() => undefined);
       throw error;
+    }
+  }
+
+  async deletePluginNativeSession(
+    executor: Executor,
+    nativeSessionId: string,
+    _cwd: string,
+  ): Promise<void> {
+    const cacheKey = `__native_sessions_${executor}__`;
+    const client = await this.proxy.getOrCreate(cacheKey, executor);
+    try {
+      await client.initialize();
+      if (!client.deleteNativeSession) {
+        throw new Error(`${executor} does not expose native-session deletion.`);
+      }
+      await client.deleteNativeSession(nativeSessionId);
+    } finally {
+      await this.proxy.dispose(cacheKey).catch(() => undefined);
     }
   }
 

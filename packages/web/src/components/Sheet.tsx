@@ -1,8 +1,9 @@
-import { useContext, useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { OpenAppPrefs } from '@gian/shared';
 import { useT } from '../i18n/index.js';
+import { normalizeGfmTables } from '../markdown-tables.js';
 import { parseUnifiedDiff } from '../transcript/apply.js';
 import { BrowserLinkOpenContext } from '../presentation/chat-panel.js';
 import { AppIcon } from './AppIcon.js';
@@ -193,6 +194,7 @@ function FileBody({ lines, scrollLine }: { lines: Array<[string, string, string?
  *  inject markup. Styling hangs off the shared `.md-preview` class. */
 function MarkdownPreview({ source }: { source: string }) {
   const openBrowser = useContext(BrowserLinkOpenContext);
+  const normalized = useMemo(() => normalizeGfmTables(source), [source]);
   return (
     <div className="md-preview">
       <ReactMarkdown
@@ -217,7 +219,7 @@ function MarkdownPreview({ source }: { source: string }) {
           },
         }}
       >
-        {source}
+        {normalized}
       </ReactMarkdown>
     </div>
   );

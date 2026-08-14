@@ -691,6 +691,42 @@ test('conversation delta usage is accepted at most once per turn', () => {
   );
 });
 
+test('config options may carry an optional category and native delete is optional', () => {
+  assert.doesNotThrow(() => parseProxyRequest({
+    id: 1,
+    method: 'session.native.delete',
+    params: { nativeSessionId: 'native-1' },
+  }));
+  assert.equal(manifestV2Schema.parse({
+    schemaVersion: 2,
+    id: 'codex',
+    displayName: 'Codex',
+    pluginVersion: '0.3.2',
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=1.0 <2.0' },
+    process: { scope: 'shared' },
+    runtime: {
+      id: 'codex',
+      displayName: 'Codex CLI',
+      recommendedCliVersion: '0.146.0',
+    },
+  }).runtime?.recommendedCliVersion, '0.146.0');
+  assert.equal(manifestV2Schema.safeParse({
+    schemaVersion: 2,
+    id: 'codex',
+    displayName: 'Codex',
+    pluginVersion: '0.3.2',
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=1.0 <2.0' },
+    process: { scope: 'shared' },
+    runtime: {
+      id: 'codex',
+      displayName: 'Codex CLI',
+      recommendedCliVersion: 'not-a-semver',
+    },
+  }).success, false);
+});
+
 test('session.rename limits Unicode code points rather than UTF-16 units', () => {
   const base = {
     id: 1,

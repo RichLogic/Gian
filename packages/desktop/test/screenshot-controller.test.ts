@@ -48,8 +48,10 @@ class FakeOverlayWindow implements ScreenshotOverlayWindow {
   readonly closedListeners: Array<() => void> = [];
   destroyed = false;
   shown = false;
+  hidden = false;
   focused = false;
   loadedPath: string | null = null;
+  loadCount = 0;
   alwaysOnTop: unknown[] | null = null;
   allWorkspaces: unknown[] | null = null;
 
@@ -72,14 +74,22 @@ class FakeOverlayWindow implements ScreenshotOverlayWindow {
 
   async loadFile(path: string): Promise<void> {
     this.loadedPath = path;
+    this.loadCount += 1;
+  }
+
+  hide(): void {
+    this.shown = false;
+    this.hidden = true;
   }
 
   show(): void {
     this.shown = true;
+    this.hidden = false;
   }
 
   showInactive(): void {
     this.shown = true;
+    this.hidden = false;
   }
 
   focus(): void {
@@ -106,12 +116,12 @@ class FakeOverlayWindow implements ScreenshotOverlayWindow {
 function fakeImage(
   width: number,
   height: number,
-  dataUrl = 'data:image/png;base64,iVBORw0KGgo=',
+  pngBytes = PNG_BYTES,
 ): ScreenshotSource['thumbnail'] {
   return {
     isEmpty: () => false,
     getSize: () => ({ width, height }),
-    toDataURL: () => dataUrl,
+    toPNG: () => Buffer.from(pngBytes),
   };
 }
 
@@ -133,7 +143,7 @@ interface Harness {
   windows: FakeOverlayWindow[];
   captures: GianScreenshotCapture[];
   errors: string[];
-  restores: Array<'cancel' | 'success'>;
+  restores: Array<'cancel' | 'success' | 'clipboard'>;
   shortcuts: string[];
   unregistered: string[];
   permissionHelp: { count: number };
@@ -147,7 +157,7 @@ function createHarness(
   const windows: FakeOverlayWindow[] = [];
   const captures: GianScreenshotCapture[] = [];
   const errors: string[] = [];
-  const restores: Array<'cancel' | 'success'> = [];
+  const restores: Array<'cancel' | 'success' | 'clipboard'> = [];
   const shortcuts: string[] = [];
   const unregistered: string[] = [];
   const permissionHelp = { count: 0 };
@@ -367,8 +377,72 @@ describe('screenshot controller lifecycle', () => {
     assert.equal(harness.captures[0]?.filename, 'screenshot-20260812T123456Z.png');
     assert.deepEqual(harness.restores, ['success']);
     assert.deepEqual(harness.clipboardWrites, [PNG_BYTES]);
-    assert.ok(harness.windows.every(window => window.destroyed));
+    assert.ok(harness.windows.every(window => window.hidden && !window.destroyed));
     assert.deepEqual(harness.errors, []);
+  });
+
+  it('captures without a conversation target and only writes the final PNG to clipboard', async () => {
+    const harness = createHarness();
+
+    assert.deepEqual(await harness.controller.start(), { ok: true });
+    const capture = harness.controller.getOverlayCapture(100)!;
+    assert.equal(capture.clipboardOnly, true);
+    assert.equal(capture.targetLabel, '');
+    assert.equal(harness.controller.claimFromOverlay(100, capture.captureId), true);
+
+    assert.equal(
+      await harness.controller.completeFromOverlay(100, capture.captureId, PNG_BYTES),
+      true,
+    );
+    assert.deepEqual(harness.clipboardWrites, [PNG_BYTES]);
+    assert.deepEqual(harness.captures, []);
+    assert.deepEqual(harness.restores, ['clipboard']);
+    assert.deepEqual(harness.errors, []);
+  });
+
+  it('falls back to clipboard-only if the captured target is invalidated', async () => {
+    const harness = createHarness();
+    setSessionTarget(harness.controller);
+    assert.deepEqual(await harness.controller.start(), { ok: true });
+    const capture = harness.controller.getOverlayCapture(100)!;
+    assert.equal(harness.controller.claimFromOverlay(100, capture.captureId), true);
+
+    harness.controller.invalidateTarget();
+    assert.equal(
+      await harness.controller.completeFromOverlay(100, capture.captureId, PNG_BYTES),
+      true,
+    );
+
+    assert.deepEqual(harness.clipboardWrites, [PNG_BYTES]);
+    assert.deepEqual(harness.captures, []);
+    assert.deepEqual(harness.restores, ['clipboard']);
+    assert.deepEqual(harness.errors, []);
+  });
+
+  it('prewarms and reuses one hidden overlay window per display', async () => {
+    const harness = createHarness();
+
+    await harness.controller.warmUp();
+    assert.equal(harness.windows.length, DISPLAYS.length);
+    assert.ok(harness.windows.every(window => window.loadCount === 1));
+
+    setSessionTarget(harness.controller);
+    assert.deepEqual(await harness.controller.start(), { ok: true });
+    const firstCapture = harness.controller.getOverlayCapture(100)!;
+    assert.deepEqual(firstCapture.imagePngBytes, PNG_BYTES);
+    assert.equal(harness.controller.claimFromOverlay(100, firstCapture.captureId), true);
+    assert.equal(
+      await harness.controller.completeFromOverlay(100, firstCapture.captureId, PNG_BYTES),
+      true,
+    );
+
+    setSessionTarget(harness.controller, 'session-2');
+    assert.deepEqual(await harness.controller.start(), { ok: true });
+    assert.equal(harness.windows.length, DISPLAYS.length);
+    assert.ok(harness.windows.every(window => window.loadCount === 3));
+    assert.equal(await harness.controller.cancelFromOverlay(100), true);
+    harness.controller.dispose();
+    assert.ok(harness.windows.every(window => window.destroyed));
   });
 
   it('keeps the overlay open when the final PNG cannot reach the system clipboard', async () => {
@@ -410,6 +484,7 @@ describe('screenshot controller lifecycle', () => {
 
     assert.deepEqual(harness.restores, ['cancel']);
     assert.deepEqual(harness.errors, ['capture-failed']);
-    assert.ok(harness.windows.every(window => window.destroyed));
+    assert.equal(harness.windows[0]?.destroyed, true);
+    assert.equal(harness.windows[1]?.hidden, true);
   });
 });

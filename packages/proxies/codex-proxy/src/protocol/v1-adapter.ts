@@ -303,6 +303,7 @@ export class CodexProtocolV1Adapter {
       case 'session.replay':
         return this.replay(request.params);
       case 'session.config.set':
+      case 'session.native.delete':
         throw new ProxyProtocolError(
           'CAPABILITY_NOT_SUPPORTED',
           `${request.method} is not advertised by Codex Proxy.`,

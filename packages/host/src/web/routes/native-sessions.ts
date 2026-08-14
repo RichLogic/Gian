@@ -61,10 +61,6 @@ export function registerNativeSessionRoutes(
         error: `${executor} uses executor-native mode; approval_mode must be omitted`,
       }, 400);
     }
-    if (executor === 'grok') {
-      return c.json({ error: 'Grok native session adopt is not available yet' }, 400);
-    }
-
     return serializeNativeMutation(`${executor}:${nativeId}`, async () => {
       const existing = db.prepare(
         `SELECT id, name FROM sessions
@@ -130,6 +126,9 @@ export function registerNativeSessionRoutes(
         session => session.executor === executor && session.id === nativeId,
       );
       if (!native) return c.json({ error: 'native session not found in this workspace' }, 404);
+      if (executor !== 'claude' && executor !== 'codex') {
+        return c.json({ error: 'native session not found in this workspace' }, 404);
+      }
 
       const sessionId = randomUUID();
       const now = new Date().toISOString();
@@ -169,24 +168,11 @@ export function registerNativeSessionRoutes(
         error: 'Kimi ACP does not expose destructive native-session deletion.',
       }, 400);
     }
-    if (executor === 'grok') {
-      return c.json({
-        error: 'Grok native session deletion is not available yet',
-      }, 400);
-    }
     const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?')
       .get(c.req.param('id')) as { path: string } | undefined;
     if (!workspace) return c.json({ error: 'workspace not found' }, 404);
 
     return serializeNativeMutation(`${executor}:${nativeId}`, async () => {
-      try {
-        if (await sessions.listPluginNativeSessions(executor, workspace.path) !== null) {
-          return c.json({ error: 'This plugin does not expose native-session deletion.' }, 400);
-        }
-      } catch (error) {
-        return c.json({ error: String(error) }, 400);
-      }
-
       const adopted = db.prepare(
         `SELECT id, name FROM sessions
          WHERE executor = ? AND native_session_id = ?`,
@@ -196,6 +182,25 @@ export function registerNativeSessionRoutes(
           error: `Native session is currently adopted as ${adopted.name ?? adopted.id}. Delete the Gian session first.`,
           gian_session_id: adopted.id,
         }, 409);
+      }
+
+      if (executor === 'grok') {
+        try {
+          await sessions.deletePluginNativeSession(executor, nativeId, workspace.path);
+          clearNativeSessionsCache();
+          return c.json({ ok: true });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return c.json({ error: message }, 400);
+        }
+      }
+
+      try {
+        if (await sessions.listPluginNativeSessions(executor, workspace.path) !== null) {
+          return c.json({ error: 'This plugin does not expose native-session deletion.' }, 400);
+        }
+      } catch (error) {
+        return c.json({ error: String(error) }, 400);
       }
 
       const candidates = await scanNativeSessions(workspace.path);
@@ -221,7 +226,7 @@ export function registerNativeSessionRoutes(
 
     const pluginSessions: NativeSession[] = [];
     const legacyExecutors: Array<'claude' | 'codex'> = [];
-    for (const executor of ['claude', 'codex', 'kimi'] as const) {
+    for (const executor of ['claude', 'codex', 'kimi', 'grok'] as const) {
       try {
         const discovered = await sessions.listPluginNativeSessions(executor, workspace.path);
         if (discovered !== null) pluginSessions.push(...discovered);

@@ -13,10 +13,7 @@ import {
   KimiProtocolV1Host,
   KimiProtocolV1SessionClient,
 } from './kimi-protocol-v1-client.js';
-import {
-  GrokProtocolV1Host,
-  GrokProtocolV1SessionClient,
-} from './grok-protocol-v1-client.js';
+import { GrokProtocolV1Host } from './grok-protocol-v1-client.js';
 import type { ProxyClient } from './types.js';
 import type { CliRuntimeManager } from '../runtime/manager.js';
 import type {
@@ -28,16 +25,9 @@ type ProxyExecutor = 'codex' | 'claude' | 'kimi' | 'grok';
 type CodexRuntimeHost = CodexProxyHost | CodexProtocolV1Host;
 type KimiRuntimeHost = KimiProxyHost | KimiProtocolV1Host;
 type KimiRuntimeClient = KimiProxySessionClient | KimiProtocolV1SessionClient;
-type GrokRuntimeHost = GrokProtocolV1Host;
-type GrokRuntimeClient = GrokProtocolV1SessionClient;
-
 function isKimiRuntimeClient(client: ProxyClient): client is KimiRuntimeClient {
   return client instanceof KimiProxySessionClient
     || client instanceof KimiProtocolV1SessionClient;
-}
-
-function isGrokRuntimeClient(client: ProxyClient): client is GrokRuntimeClient {
-  return client instanceof GrokProtocolV1SessionClient;
 }
 
 interface RuntimeBinding {
@@ -59,12 +49,6 @@ interface SessionDisposal {
 
 interface KimiHostRetirement {
   host: KimiRuntimeHost;
-  promise: Promise<void> | null;
-  failure?: { error: unknown; reported: boolean };
-}
-
-interface GrokHostRetirement {
-  host: GrokRuntimeHost;
   promise: Promise<void> | null;
   failure?: { error: unknown; reported: boolean };
 }
@@ -137,10 +121,6 @@ export class ProxyManager {
    * completed process-tree and updater-lease retirement. */
   private kimiHostRetirement: KimiHostRetirement | null = null;
   private retiringKimiHostBySession = new Map<string, KimiRuntimeHost>();
-  private grokHost: GrokRuntimeHost | null = null;
-  private grokHostInit: Promise<GrokRuntimeHost> | null = null;
-  private grokHostRetirement: GrokHostRetirement | null = null;
-  private retiringGrokHostBySession = new Map<string, GrokRuntimeHost>();
   private closeEpochByExecutor = new Map<ProxyExecutor, number>();
   private closingByExecutor = new Map<ProxyExecutor, Promise<void>>();
   private creatingByExecutor = new Map<
@@ -278,7 +258,7 @@ export class ProxyManager {
       // publish a facade that escaped its drain barrier. This whole cleanup is
       // part of the tracked creation attempt, so closeByExecutor cannot return
       // before the stale runtime claim is actually released.
-      if (executor === 'claude') {
+      if (executor === 'claude' || executor === 'grok') {
         if (this.runtimeByOwner.has(client)) await this.releaseRuntimeBinding(client);
         else await client.shutdown();
       }
@@ -340,10 +320,6 @@ export class ProxyManager {
     if (isKimiRuntimeClient(client)) {
       const host = client.runtimeHost();
       return this.kimiHost === host && this.kimiHostRetirement?.host !== host;
-    }
-    if (isGrokRuntimeClient(client)) {
-      const host = client.runtimeHost();
-      return this.grokHost === host && this.grokHostRetirement?.host !== host;
     }
     return true;
   }
@@ -410,8 +386,7 @@ export class ProxyManager {
       record = {
         executor: this.executorBySession.get(sessionId)
           ?? this.creatingBySession.get(sessionId)?.executor
-          ?? (this.retiringKimiHostBySession.has(sessionId) ? 'kimi'
-            : this.retiringGrokHostBySession.has(sessionId) ? 'grok' : undefined),
+          ?? (this.retiringKimiHostBySession.has(sessionId) ? 'kimi' : undefined),
         promise: null,
       };
       // Publish the barrier before inspecting or detaching any client. A
@@ -426,7 +401,6 @@ export class ProxyManager {
     // host-retirement barrier in the same tick.
     const immediateClient = this.clients.get(sessionId);
     let failedKimiHost: KimiRuntimeHost | undefined;
-    let failedGrokHost: GrokRuntimeHost | undefined;
     if (
       immediateClient && isKimiRuntimeClient(immediateClient)
       && !immediateClient.hasAttachedSession()
@@ -437,18 +411,8 @@ export class ProxyManager {
         this.beginKimiHostRetirement(failedKimiHost);
       }
     }
-    if (
-      immediateClient && isGrokRuntimeClient(immediateClient)
-      && !immediateClient.hasAttachedSession()
-    ) {
-      failedGrokHost = immediateClient.runtimeHost();
-      if (!failedGrokHost.hasSessions()) {
-        this.detachGrokHostForRetirement(failedGrokHost);
-        this.beginGrokHostRetirement(failedGrokHost);
-      }
-    }
 
-    const attempt = this.performDispose(sessionId, record, failedKimiHost, failedGrokHost);
+    const attempt = this.performDispose(sessionId, record, failedKimiHost);
     record.promise = attempt;
     try {
       await attempt;
@@ -468,7 +432,6 @@ export class ProxyManager {
     sessionId: string,
     record: SessionDisposal,
     failedKimiHost?: KimiRuntimeHost,
-    failedGrokHost?: GrokRuntimeHost,
   ): Promise<void> {
     const creating = this.creatingBySession.get(sessionId);
     if (creating) {
@@ -483,12 +446,6 @@ export class ProxyManager {
         await this.retryKimiHostRetirement(retiringKimi);
       } else if (record.executor === 'kimi') {
         await this.retryKimiHostRetirement();
-      }
-      const retiringGrok = failedGrokHost ?? this.retiringGrokHostBySession.get(sessionId);
-      if (retiringGrok) {
-        await this.retryGrokHostRetirement(retiringGrok);
-      } else if (record.executor === 'grok') {
-        await this.retryGrokHostRetirement();
       }
       return;
     }
@@ -506,20 +463,8 @@ export class ProxyManager {
         this.beginKimiHostRetirement(retiringKimiHost);
       }
     }
-    let retiringGrokHost = failedGrokHost;
-    if (
-      !retiringGrokHost
-      && isGrokRuntimeClient(client)
-      && !client.hasAttachedSession()
-    ) {
-      retiringGrokHost = client.runtimeHost();
-      if (!retiringGrokHost.hasSessions()) {
-        this.detachGrokHostForRetirement(retiringGrokHost);
-        this.beginGrokHostRetirement(retiringGrokHost);
-      }
-    }
 
-    if (executor === 'claude') {
+    if (executor === 'claude' || executor === 'grok') {
       if (this.runtimeByOwner.has(client)) await this.releaseRuntimeBinding(client);
       else await client.shutdown();
     } else {
@@ -533,9 +478,6 @@ export class ProxyManager {
 
     if (retiringKimiHost && !retiringKimiHost.hasSessions()) {
       await this.retryKimiHostRetirement(retiringKimiHost);
-    }
-    if (retiringGrokHost && !retiringGrokHost.hasSessions()) {
-      await this.retryGrokHostRetirement(retiringGrokHost);
     }
   }
 
@@ -607,7 +549,7 @@ export class ProxyManager {
     // disposal. A shared facade may be stuck forever in session.close; killing
     // its exact host rejects that RPC and lets the disposal barrier drain.
     const cleanupAttempts: Array<{ owner?: object; promise: Promise<void> }> = [];
-    if (executor === 'claude') {
+    if (executor === 'claude' || executor === 'grok') {
       for (const current of toClose) {
         if (this.clients.get(current.sessionId) === current.client) {
           this.clients.delete(current.sessionId);
@@ -635,21 +577,6 @@ export class ProxyManager {
           promise: this.runtimeByOwner.has(host)
             ? this.releaseRuntimeBinding(host)
             : host.shutdown(),
-        });
-      }
-    } else if (executor === 'grok') {
-      const pending = this.grokHostInit;
-      if (pending) await pending.catch(() => undefined);
-      if (this.grokHostInit === pending) this.grokHostInit = null;
-      const host = this.grokHost;
-      if (host) {
-        this.detachGrokHostForRetirement(host);
-        cleanupAttempts.push({ owner: host, promise: this.beginGrokHostRetirement(host) });
-      } else if (this.grokHostRetirement) {
-        const retiringHost = this.grokHostRetirement.host;
-        cleanupAttempts.push({
-          owner: retiringHost,
-          promise: this.retryGrokHostRetirement(retiringHost),
         });
       }
     } else {
@@ -1049,88 +976,35 @@ export class ProxyManager {
   }
 
   private async createGrokClient(sessionId: string): Promise<ProxyClient | null> {
-    const host = await this.getOrCreateGrokHost(sessionId);
-    if (!host) return null;
-    return host.createSessionClient(sessionId);
-  }
-
-  private currentGrokHost(): GrokRuntimeHost | null {
-    return this.grokHost;
-  }
-
-  private currentGrokHostRetirement(): GrokHostRetirement | null {
-    return this.grokHostRetirement;
-  }
-
-  private async getOrCreateGrokHost(sessionId: string): Promise<GrokRuntimeHost | null> {
     if (!this.cfg.grokProxyEntry) {
       throw new Error('grok executor requested but grokProxyEntry is not configured');
     }
     if (!this.cfg.runtimeManager) {
       throw new Error('grok executor requested but CliRuntimeManager is not configured');
     }
-    while (true) {
-      if (this.disposingBySession.has(sessionId)) {
-        if (this.grokHostRetirement) await this.retryGrokHostRetirement();
-        return null;
-      }
-      if (this.grokHostRetirement) {
-        await this.retryGrokHostRetirement();
-        continue;
-      }
-      if (this.grokHost) return this.grokHost;
-
-      let pending = this.grokHostInit;
-      if (!pending) {
-        pending = this.startGrokHost();
-        this.grokHostInit = pending;
-      }
-      try {
-        const host: GrokRuntimeHost = await pending;
-        if (this.disposingBySession.has(sessionId)) {
-          if (this.currentGrokHost() === host && !host.hasSessions()) {
-            this.detachGrokHostForRetirement(host);
-            this.beginGrokHostRetirement(host);
-          }
-          if (this.currentGrokHostRetirement()?.host === host) {
-            await this.retryGrokHostRetirement(host);
-          }
-          return null;
-        }
-        if (this.currentGrokHostRetirement() || this.currentGrokHost() !== host) continue;
-        return host;
-      } finally {
-        if (this.grokHostInit === pending) this.grokHostInit = null;
-      }
-    }
-  }
-
-  private async startGrokHost(): Promise<GrokRuntimeHost> {
-    const lease = await this.cfg.runtimeManager!.acquire('grok');
+    if (this.disposingBySession.has(sessionId)) return null;
+    const dataDir = join(this.cfg.dataDir, 'proxy', sessionId);
+    mkdirSync(dataDir, { recursive: true });
+    const lease = await this.cfg.runtimeManager.acquire('grok');
     let runtimeOwner: object = this.trackStartupRuntime('grok', lease);
     let reservation: RuntimeProcessGroupReservation | undefined;
-    let host: GrokRuntimeHost | undefined;
+    let host: GrokProtocolV1Host | undefined;
     try {
       reservation = await lease.reserveProcessGroup?.();
       if (reservation) {
-        this.setRuntimeProtection(
-          runtimeOwner,
-          () => reservation!.cancelBeforeSpawn(),
-        );
+        this.setRuntimeProtection(runtimeOwner, () => reservation!.cancelBeforeSpawn());
       }
       const protocol = this.cfg.grokProxyProtocolV1 ?? {
-        pluginVersion: '0.1.0',
-        processScope: 'shared' as const,
+        pluginVersion: '0.2.0',
+        processScope: 'session' as const,
       };
-      if (protocol.processScope !== 'shared') {
-        throw new Error('Grok gian.proxy/1 manifest must use shared process scope.');
+      if (protocol.processScope !== 'session') {
+        throw new Error('Grok gian.proxy/1 manifest must use session process scope.');
       }
-      const dataDir = join(this.cfg.dataDir, 'proxy', 'grok');
-      mkdirSync(dataDir, { recursive: true });
       host = new GrokProtocolV1Host({
-        entry: this.cfg.grokProxyEntry!,
+        entry: this.cfg.grokProxyEntry,
         pluginVersion: protocol.pluginVersion,
-        processScope: 'shared',
+        processScope: 'session',
         dataDir,
         hostVersion: this.cfg.hostVersion ?? '0.0.0',
         runtimeBin: lease.binaryPath,
@@ -1158,18 +1032,9 @@ export class ProxyManager {
         }
         this.setRuntimeProtection(runtimeOwner, () => reservation!.release());
       }
-      const startedHost = host;
-      this.grokHost = startedHost;
-      startedHost.onHostExit(() => {
-        if (this.grokHost === startedHost) {
-          this.detachGrokHostForRetirement(startedHost);
-        }
-        this.markRuntimeBindingReleaseEligible(startedHost);
-        void this.beginGrokHostRetirement(startedHost).catch(error => {
-          console.error('[proxy] failed to release Grok runtime:', error);
-        });
-      });
-      return startedHost;
+      const client = host.createSessionClient(sessionId);
+      this.promoteStartupRuntime(host, client, () => host!.shutdown());
+      return client;
     } catch (error) {
       await this.cleanupFailedRuntimeStartup(
         runtimeOwner,
@@ -1311,67 +1176,6 @@ export class ProxyManager {
     await this.beginKimiHostRetirement(record.host);
   }
 
-  private dropGrokClientsForHost(host: GrokRuntimeHost): void {
-    for (const [sessionId, executor] of this.executorBySession) {
-      if (executor !== 'grok') continue;
-      const client = this.clients.get(sessionId);
-      if (
-        client && isGrokRuntimeClient(client)
-        && client.runtimeHost() === host
-      ) {
-        this.retiringGrokHostBySession.set(sessionId, host);
-        this.clients.delete(sessionId);
-        this.executorBySession.delete(sessionId);
-      }
-    }
-  }
-
-  private detachGrokHostForRetirement(host: GrokRuntimeHost): void {
-    if (this.grokHost === host) this.grokHost = null;
-    this.dropGrokClientsForHost(host);
-    const current = this.grokHostRetirement;
-    if (!current) {
-      this.grokHostRetirement = { host, promise: null };
-    } else if (current.host !== host) {
-      throw new Error('Cannot retire two Grok Proxy hosts concurrently.');
-    }
-  }
-
-  private beginGrokHostRetirement(host: GrokRuntimeHost): Promise<void> {
-    this.detachGrokHostForRetirement(host);
-    const record = this.grokHostRetirement!;
-    if (record.promise) return record.promise;
-    record.failure = undefined;
-    const attempt = this.runtimeByOwner.has(host)
-      ? this.releaseRuntimeBinding(host)
-      : host.shutdown();
-    record.promise = attempt;
-    void attempt.then(
-      () => {
-        if (this.grokHostRetirement === record) this.grokHostRetirement = null;
-        for (const [sessionId, retiringHost] of this.retiringGrokHostBySession) {
-          if (retiringHost === host) this.retiringGrokHostBySession.delete(sessionId);
-        }
-      },
-      error => {
-        if (this.grokHostRetirement === record) {
-          record.promise = null;
-          record.failure = { error, reported: false };
-        }
-      },
-    );
-    return attempt;
-  }
-
-  private async retryGrokHostRetirement(expectedHost?: GrokRuntimeHost): Promise<void> {
-    const record = this.grokHostRetirement;
-    if (!record) return;
-    if (expectedHost && record.host !== expectedHost) {
-      throw new Error('A different Grok Proxy host is already retiring.');
-    }
-    await this.beginGrokHostRetirement(record.host);
-  }
-
   private async drainSessionDisposals(
     executor: ProxyExecutor,
     retryableAtStart: ReadonlySet<string>,
@@ -1434,12 +1238,6 @@ export class ProxyManager {
       const host = client.runtimeHost();
       this.detachKimiHostForRetirement(host);
       await this.beginKimiHostRetirement(host);
-      return;
-    }
-    if (isGrokRuntimeClient(client)) {
-      const host = client.runtimeHost();
-      this.detachGrokHostForRetirement(host);
-      await this.beginGrokHostRetirement(host);
       return;
     }
     if (this.runtimeByOwner.has(client)) await this.releaseRuntimeBinding(client);

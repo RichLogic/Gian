@@ -306,13 +306,14 @@ export function nativeOptionRole(option: NativeConfigOption): NativeOptionRole |
     || category === 'thought'
     || category === 'thinking'
     || category === 'effort'
+    || category === 'reasoning_effort'
     || id === 'thought_level'
     || id === 'thought'
     || id === 'thinking'
     || id === 'effort'
     || id === 'reasoning_effort'
   ) return 'effort';
-  if (category === 'mode' || id === 'mode') return 'mode';
+  if (category === 'mode' || id === 'mode' || id === 'permission_mode') return 'mode';
   return null;
 }
 

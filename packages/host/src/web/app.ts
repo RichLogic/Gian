@@ -25,6 +25,7 @@ import { registerReconnectRoutes } from './routes/reconnect.js';
 import { registerNativeSessionRoutes } from './routes/native-sessions.js';
 import { registerWorkspaceFileRoutes } from './routes/workspace-files.js';
 import { registerWorkingTreeRoutes } from './routes/working-trees.js';
+import { registerAbsoluteFileRoutes } from './routes/absolute-files.js';
 import { registerAgentRoutes } from './routes/agents.js';
 import { registerOnboardingRoutes } from './routes/onboarding.js';
 import { bootJsonlWatchers } from './watcher-bootstrap.js';
@@ -200,6 +201,7 @@ export function createApp(ctx: AppContext): AppHandle {
   registerWorkingTreeRoutes(app, ctx.db, broadcaster, {
     applicationRoutes: ctx.applicationRouteOptions,
   });
+  registerAbsoluteFileRoutes(app);
   registerReconnectRoutes(app, proxy);
   if (ctx.agentManager && ctx.runtimeManager) {
     registerOnboardingRoutes(app, {

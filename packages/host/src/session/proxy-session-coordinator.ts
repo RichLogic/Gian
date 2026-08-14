@@ -49,17 +49,17 @@ interface ProxySessionBindings {
   offExit: () => void;
 }
 
-type KimiConfigRole = keyof AgentProxyDefaults;
+type NativeConfigRole = keyof AgentProxyDefaults;
 
-const KIMI_CONFIG_ROLE_ORDER: readonly KimiConfigRole[] = [
+const NATIVE_CONFIG_ROLE_ORDER: readonly NativeConfigRole[] = [
   'model',
   'thinking',
   'mode',
 ];
 
-function kimiConfigRole(
+function nativeConfigRole(
   option: Pick<NativeConfigOption, 'id' | 'category'>,
-): KimiConfigRole | null {
+): NativeConfigRole | null {
   const category = option.category?.trim().toLowerCase() ?? '';
   const id = option.id.trim().toLowerCase();
   if (category === 'model' || id === 'model') return 'model';
@@ -68,13 +68,14 @@ function kimiConfigRole(
     || category === 'thought'
     || category === 'thinking'
     || category === 'effort'
+    || category === 'reasoning_effort'
     || id === 'thought_level'
     || id === 'thought'
     || id === 'thinking'
     || id === 'effort'
     || id === 'reasoning_effort'
   ) return 'thinking';
-  if (category === 'mode' || id === 'mode') return 'mode';
+  if (category === 'mode' || id === 'mode' || id === 'permission_mode') return 'mode';
   return null;
 }
 
@@ -195,9 +196,15 @@ export class ProxySessionCoordinator {
       replayStreamId?: string;
     };
     try {
+      const persistedMode = args.executorConfig?.values.permission_mode
+        ?? args.executorConfig?.values.mode;
+      const createMode = typeof persistedMode === 'string' && persistedMode
+        ? persistedMode
+        : args.executorDefaults?.mode;
       created = await client.createSession({
         cwd: args.cwd,
         model: args.model ?? undefined,
+        ...(args.executor === 'grok' && createMode ? { mode: createMode } : {}),
         ...adoptParams,
       });
     } catch (error) {
@@ -228,8 +235,8 @@ export class ProxySessionCoordinator {
       && (args.executorConfig || args.executorDefaults)
     ) {
       const setNativeConfig = client.setNativeConfig.bind(client);
-      const optionForRole = (role: KimiConfigRole) =>
-        configOptions.find(option => kimiConfigRole(option) === role);
+      const optionForRole = (role: NativeConfigRole) =>
+        configOptions.find(option => nativeConfigRole(option) === role);
       const applyValue = async (
         option: NativeConfigOption,
         value: NativeConfigValue,
@@ -240,8 +247,9 @@ export class ProxySessionCoordinator {
           const updated = await setNativeConfig(option.id, value);
           configOptions = updated.options;
         } catch (error) {
+          const executorName = `${args.executor[0]!.toUpperCase()}${args.executor.slice(1)}`;
           throw new Error(
-            `Failed to apply Kimi ${label} using config id "${option.id}": ${errorMessage(error)}`,
+            `Failed to apply ${executorName} ${label} using config id "${option.id}": ${errorMessage(error)}`,
           );
         }
       };
@@ -250,7 +258,7 @@ export class ProxySessionCoordinator {
       // session/new or session/load returns the authoritative ACP options;
       // option.category may stay stable while option.id changes between Kimi
       // versions (for example thought_level -> thinking).
-      for (const role of KIMI_CONFIG_ROLE_ORDER) {
+      for (const role of NATIVE_CONFIG_ROLE_ORDER) {
         const value = args.executorDefaults?.[role];
         if (!value) continue;
         const option = optionForRole(role);
@@ -262,19 +270,19 @@ export class ProxySessionCoordinator {
       // current session. Unknown, no-longer-advertised ids are never sent.
       const persistedEntries = Object.entries(args.executorConfig?.values ?? {})
         .sort(([left], [right]) => {
-          const leftRole = kimiConfigRole({ id: left });
-          const rightRole = kimiConfigRole({ id: right });
-          const leftIndex = leftRole ? KIMI_CONFIG_ROLE_ORDER.indexOf(leftRole) : -1;
-          const rightIndex = rightRole ? KIMI_CONFIG_ROLE_ORDER.indexOf(rightRole) : -1;
+          const leftRole = nativeConfigRole({ id: left });
+          const rightRole = nativeConfigRole({ id: right });
+          const leftIndex = leftRole ? NATIVE_CONFIG_ROLE_ORDER.indexOf(leftRole) : -1;
+          const rightIndex = rightRole ? NATIVE_CONFIG_ROLE_ORDER.indexOf(rightRole) : -1;
           if (leftIndex !== -1 || rightIndex !== -1) {
-            return (leftIndex === -1 ? KIMI_CONFIG_ROLE_ORDER.length : leftIndex)
-              - (rightIndex === -1 ? KIMI_CONFIG_ROLE_ORDER.length : rightIndex);
+            return (leftIndex === -1 ? NATIVE_CONFIG_ROLE_ORDER.length : leftIndex)
+              - (rightIndex === -1 ? NATIVE_CONFIG_ROLE_ORDER.length : rightIndex);
           }
           return left.localeCompare(right);
         });
       for (const [storedId, value] of persistedEntries) {
         const exact = configOptions.find(option => option.id === storedId);
-        const role = kimiConfigRole({ id: storedId });
+        const role = nativeConfigRole({ id: storedId });
         const option = exact ?? (role ? optionForRole(role) : undefined);
         if (option) await applyValue(option, value, `session setting "${option.name}"`);
       }
@@ -311,6 +319,7 @@ export class ProxySessionCoordinator {
       .get(args.sessionId) as { name: string | null } | undefined;
     const displayName = (persistedName ? persistedName.name : args.displayName)?.trim();
     const shouldSyncName = args.executor === 'codex'
+      || args.executor === 'grok'
       || (args.executor === 'claude' && client.protocolV1);
     if (shouldSyncName && displayName && client.setName) {
       try {

@@ -6,7 +6,9 @@
 //     created_at DESC.
 //   - Task group rows carry a "⋯" menu (rename / completed-session
 //     visibility / done-toggle / delete with confirm) and a "+" that opens
-//     the task-context new-session form.
+//     the task-context new-session form. The menu is portaled to <body> and
+//     viewport-clamped (fixed) because the sidebar clips absolute overflow,
+//     and closes on scroll/resize since it cannot track its anchor.
 //   - Done rows keep the same menu (no "+") and are not selectable.
 //   - Subtask rows carry hover pin (`session.pin`, open subtasks only) and a
 //     complete/reopen toggle (task.completeSubtask / task.reopenSubtask),
@@ -19,7 +21,7 @@
 //   - The sidebar "+" creates a task with NO executor pick.
 //   - A selected task (no session) shows the placeholder panel.
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -205,6 +207,34 @@ describe('subtasksFor ordering', () => {
 });
 
 describe('task group row actions', () => {
+  it('portals the menu to <body> with fixed viewport-clamped positioning', async () => {
+    // 2026-08-14: the sidebar clips absolutely-positioned overflow, which cut
+    // long labels off at the rail's left edge — the popover must live outside
+    // the sidebar tree and opt into the fixed-position variant.
+    renderTasks({ tasks: [task()] });
+    await userEvent.click(screen.getByTestId('task-menu-task-1'));
+    const menu = screen.getByRole('menu');
+    expect(menu).toHaveClass('ws-kebab-pop', 'ws-kebab-pop--fixed');
+    expect(menu.parentElement).toBe(document.body);
+    expect(menu.closest('.sidebar')).toBeNull();
+    expect(screen.getByTestId('task-menu-task-1').closest('.ws-kebab-anchor')).not.toContainElement(menu);
+  });
+
+  it('closes the portaled menu on scroll and window resize', async () => {
+    // The popover is position: fixed, so it cannot track the anchor when the
+    // sidebar scrolls — close instead of leaving it detached mid-air.
+    renderTasks({ tasks: [task()] });
+    await userEvent.click(screen.getByTestId('task-menu-task-1'));
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+    fireEvent.scroll(screen.getByTestId('task-menu-task-1'));
+    expect(screen.queryByRole('menu')).toBeNull();
+
+    await userEvent.click(screen.getByTestId('task-menu-task-1'));
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+    fireEvent.resize(window);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
   it('has no pin item — task pin was removed (2026-08-03)', async () => {
     renderTasks({ tasks: [task()] });
     await userEvent.click(screen.getByTestId('task-menu-task-1'));
@@ -238,7 +268,7 @@ describe('task group row actions', () => {
     expect(screen.getByText('First completed')).toBeInTheDocument();
     expect(screen.getByText('Second completed')).toBeInTheDocument();
     await userEvent.click(screen.getByTestId('task-menu-task-1'));
-    await userEvent.click(screen.getByRole('menuitem', { name: 'Hide all completed sessions' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Hide completed' }));
 
     expect(screen.queryByText('First completed')).toBeNull();
     expect(screen.getByText('Turn done but not completed')).toBeInTheDocument();
@@ -251,7 +281,7 @@ describe('task group row actions', () => {
     renderTasks(props);
     expect(screen.queryByText('First completed')).toBeNull();
     await userEvent.click(screen.getByTestId('task-menu-task-1'));
-    await userEvent.click(screen.getByRole('menuitem', { name: 'Show all completed sessions' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Show completed' }));
     expect(screen.getByText('First completed')).toBeInTheDocument();
     expect(JSON.parse(localStorage.getItem('gian.tasks.completed-hidden') ?? '[]')).toEqual([]);
   });

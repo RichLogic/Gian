@@ -29,6 +29,7 @@ interface ProtocolConfigOption {
   id: string;
   displayName: string;
   description?: string;
+  category?: string;
   type: 'select' | 'boolean' | 'number' | 'text';
   scope: 'session' | 'turn';
   currentValue: NativeConfigValue;
@@ -84,6 +85,7 @@ export function normalizeProtocolConfigOptions(
     id: option.id,
     name: option.displayName,
     ...(option.description !== undefined ? { description: option.description } : {}),
+    ...(option.category !== undefined ? { category: option.category } : {}),
     type: option.type,
     currentValue: option.currentValue,
     scope: option.scope,
@@ -108,7 +110,7 @@ function configState(options: readonly NativeConfigOption[]): ExecutorConfigStat
 export interface GrokProtocolV1HostOptions {
   entry: string;
   pluginVersion: string;
-  processScope: 'shared';
+  processScope: 'shared' | 'session';
   dataDir: string;
   hostVersion: string;
   runtimeBin: string;
@@ -280,6 +282,26 @@ export class GrokProtocolV1SessionClient implements ProxyClient {
   initialize(): Promise<LegacyInitializeResult> { return this.host.initialize(); }
   capabilities(): Promise<GrokCapabilities> { return this.host.capabilities(); }
 
+  async listNativeSessions(params?: { cwd?: string; cursor?: string }): Promise<unknown> {
+    const result = await this.host.request<{
+      sessions: Array<{ id: string; displayName?: string; cwd?: string; updatedAt?: string }>;
+      nextCursor: string | null;
+    }>('session.native.list', {
+      ...(params?.cwd !== undefined ? { cwd: params.cwd } : {}),
+      ...(params?.cursor !== undefined ? { cursor: params.cursor } : {}),
+      limit: 100,
+    });
+    return {
+      sessions: result.sessions.map(session => ({
+        sessionId: session.id,
+        ...(session.displayName !== undefined ? { title: session.displayName } : {}),
+        ...(session.cwd !== undefined ? { cwd: session.cwd } : {}),
+        ...(session.updatedAt !== undefined ? { updatedAt: session.updatedAt } : {}),
+      })),
+      nextCursor: result.nextCursor,
+    };
+  }
+
   async listSlashCommands(): Promise<SlashListResult> {
     if (!this.stream) return { commands: [] };
     return this.host.request('slash.list', {
@@ -295,6 +317,7 @@ export class GrokProtocolV1SessionClient implements ProxyClient {
       cwd: params.cwd,
       workspaceRoots: [params.cwd],
       ...(params.model !== undefined ? { model: params.model } : {}),
+      ...(params.mode !== undefined ? { mode: params.mode } : {}),
       ...(params.nativeSessionId ? {
         nativeSession: {
           id: params.nativeSessionId,
@@ -339,8 +362,8 @@ export class GrokProtocolV1SessionClient implements ProxyClient {
         input: params.input,
         policy: {
           workspaceRoots: [cwd],
-          approval: 'relay',
-          network: 'ask',
+          approval: this.mode === 'always_approve' ? 'never' : this.mode === 'auto' ? 'auto' : 'relay',
+          network: 'allow',
         },
         config: {
           ...(params.model !== undefined ? { model: params.model } : {}),
@@ -421,6 +444,29 @@ export class GrokProtocolV1SessionClient implements ProxyClient {
     return this.loadReplay();
   }
 
+  async setName(name: string): Promise<void> {
+    await this.host.request('session.rename', {
+      sessionId: this.hostSessionId,
+      streamId: this.requireStream(),
+      name,
+    });
+  }
+
+  async steerTurn(params: { sessionId: string; input: import('@gian/shared').InputItem[] }) {
+    const turnId = this.requireTurn();
+    await this.host.request('turn.steer', {
+      sessionId: this.hostSessionId,
+      streamId: this.requireStream(),
+      turnId,
+      input: params.input,
+    });
+    return { ok: true as const, turnId };
+  }
+
+  async deleteNativeSession(nativeSessionId: string): Promise<void> {
+    await this.host.request('session.native.delete', { nativeSessionId });
+  }
+
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -428,6 +474,7 @@ export class GrokProtocolV1SessionClient implements ProxyClient {
       await this.closeSession();
     } finally {
       this.host.unregister(this.hostSessionId, this);
+      await this.host.shutdown();
     }
   }
 
@@ -436,6 +483,7 @@ export class GrokProtocolV1SessionClient implements ProxyClient {
     this.closed = true;
     void this.closeSession().catch(() => undefined);
     this.host.unregister(this.hostSessionId, this);
+    void this.host.shutdown();
   }
 
   onNotification(handler: NotificationHandler): () => void {

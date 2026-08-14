@@ -76,6 +76,8 @@ export interface ProxyClient {
   }>;
   /** Executor-native session discovery (Kimi ACP session/list today). */
   listNativeSessions?(params?: { cwd?: string; cursor?: string }): Promise<unknown>;
+  /** Optional native session deletion gated by session.nativeDelete. */
+  deleteNativeSession?(nativeSessionId: string): Promise<void>;
   /** Reload normalized native history after a protocol-v1 plugin reports that
    * its attached native history changed outside Gian. */
   replaySession?(): Promise<unknown[] | ProxyReplayResult>;
@@ -100,6 +102,7 @@ export interface ProxyReplayResult {
 export interface CreateSessionParams {
   cwd: string;
   model?: string | null;
+  mode?: string | null;
   /** codex-only: start a thread that should not be materialized on disk. */
   ephemeral?: boolean;
   /** Adopt an existing native session: claudeSessionId for cc, threadId for

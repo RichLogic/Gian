@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { Executor, Session, Task, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
@@ -329,8 +330,14 @@ function NewTaskForm({
 }
 
 /** The per-task "⋯" dropdown (reuses the Spaces workspace-kebab styles).
- *  Open tasks get Rename/completed-Session visibility/Mark-done; done tasks get Reopen/Delete
- *  (2026-08-03: open tasks can't be deleted, done tasks can't be renamed). */
+ *  Open tasks get Mark-done / Rename / completed-Session visibility (in that
+ *  order, with a divider after the primary action); done tasks get
+ *  Reopen/Delete (2026-08-03: open tasks can't be deleted, done tasks can't
+ *  be renamed).
+ *
+ *  The popover is portaled to <body> and viewport-clamped: the sidebar clips
+ *  absolutely-positioned overflow, which cut long labels off at the panel's
+ *  left edge (2026-08-14). */
 function TaskMenu({
   task,
   anchorClass,
@@ -352,26 +359,60 @@ function TaskMenu({
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const ref = useRef<HTMLSpanElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLSpanElement>(null);
+
+  // Right-align the popover to the trigger and clamp it into the viewport.
+  // The portal mounts hidden on the first pass so we can measure its real
+  // (max-content) width before placing it — no clipped frame is ever painted
+  // because this runs in useLayoutEffect.
+  useLayoutEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+    const btn = btnRef.current;
+    const pop = popRef.current;
+    if (!btn || !pop) return;
+    const rect = btn.getBoundingClientRect();
+    const width = pop.offsetWidth;
+    const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
+    setPos({ left, top: rect.bottom + 4 });
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (e: PointerEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      if (ref.current?.contains(target)) return;
+      if (popRef.current?.contains(target)) return;
+      setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false);
     };
+    // The popover is position: fixed, so it cannot track the anchor — close
+    // on any scroll (capture, so sidebar scrolling counts) or window resize
+    // instead of leaving it detached mid-air.
+    const onScrollOrResize = () => setOpen(false);
     document.addEventListener('pointerdown', onPointerDown);
     document.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', onScrollOrResize, true);
+    window.addEventListener('resize', onScrollOrResize);
     return () => {
       document.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', onScrollOrResize, true);
+      window.removeEventListener('resize', onScrollOrResize);
     };
   }, [open]);
   const done = task.status === 'done';
   return (
     <span className="ws-kebab-anchor" ref={ref}>
       <button
+        ref={btnRef}
         type="button"
         className={anchorClass}
         data-testid={`task-menu-${task.id}`}
@@ -383,10 +424,26 @@ function TaskMenu({
       >
         <Icon d={I.kebab} size={13} stroke={2.6} />
       </button>
-      {open && (
-        <span className="ws-kebab-pop" role="menu" onClick={e => e.stopPropagation()}>
+      {open && createPortal(
+        <span
+          ref={popRef}
+          className="ws-kebab-pop ws-kebab-pop--fixed"
+          role="menu"
+          onClick={e => e.stopPropagation()}
+          style={pos
+            ? { left: pos.left, top: pos.top }
+            : { visibility: 'hidden', left: 0, top: 0 }}
+        >
+          <button
+            className="ws-kebab-item"
+            role="menuitem"
+            onClick={() => { setOpen(false); onToggleDone(); }}
+          >
+            {t(done ? 'tasks.reopen' : 'tasks.markDone')}
+          </button>
           {!done && (
             <>
+              <span className="ws-kebab-divider" />
               <button
                 className="ws-kebab-item"
                 role="menuitem"
@@ -408,13 +465,6 @@ function TaskMenu({
               )}
             </>
           )}
-          <button
-            className="ws-kebab-item"
-            role="menuitem"
-            onClick={() => { setOpen(false); onToggleDone(); }}
-          >
-            {t(done ? 'tasks.reopen' : 'tasks.markDone')}
-          </button>
           {done && (
             <>
               <span className="ws-kebab-divider" />
@@ -427,7 +477,8 @@ function TaskMenu({
               </button>
             </>
           )}
-        </span>
+        </span>,
+        document.body,
       )}
     </span>
   );

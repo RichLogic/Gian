@@ -296,7 +296,12 @@ export function applyEnvelope(
     const nextItem = {
       kind: 'tool' as const,
       id: itemId,
-      name: String(data.title ?? data.kind ?? existing?.name ?? 'Tool'),
+      // tool.completed carries the bare placeholder title 'Tool' (the protocol
+      // event has no name field) — never let it clobber the real tool name
+      // established by tool.started.
+      name: data.title !== undefined && data.title !== 'Tool'
+        ? String(data.title)
+        : String(data.kind ?? existing?.name ?? 'Tool'),
       summary,
       status,
       ...(output !== undefined ? { output } : {}),

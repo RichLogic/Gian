@@ -1,5 +1,11 @@
 import type { DisplayEvent, FileChangeSummary } from '@gian/shared';
 import type { ProxyNotification } from '@gian/proxy-protocol';
+import {
+  ccApprovalDescription,
+  ccApprovalSubject,
+  parseAskUserQuestionInput,
+  parseCcApprovalInput,
+} from './normalize-cc.js';
 
 function timestamp(value: string): number {
   const parsed = Date.parse(value);
@@ -212,30 +218,104 @@ export function projectProtocolV1Notification(
         label: option.label,
         kind: option.kind,
       }));
+      const category = protocolCategory(data.category);
+      const scopeOptions = [
+        ...(data.options.some((option: { kind: string }) => option.kind === 'allow_once') ? ['once' as const] : []),
+        ...(data.options.some((option: { kind: string }) => option.kind === 'allow_session') ? ['session' as const] : []),
+      ];
+
+      // cc-proxy rides its tool identity on payload.{toolName,inputPreview}
+      // (kimi/grok payloads carry different shapes — they keep the generic
+      // path below). Reuse the legacy cc parser so the live protocol-v1 card
+      // matches what the JSONL replay path produces: structured questions for
+      // AskUserQuestion, plan subject + three-way actions for ExitPlanMode.
+      const payload = data.payload && typeof data.payload === 'object' && !Array.isArray(data.payload)
+        ? data.payload as Record<string, unknown>
+        : {};
+      const toolName = typeof payload['toolName'] === 'string' ? payload['toolName'] : '';
+      const inputPreview = typeof payload['inputPreview'] === 'string' ? payload['inputPreview'] : undefined;
+
+      if (toolName || inputPreview) {
+        const parsedQuestions = parseAskUserQuestionInput(inputPreview);
+        if (toolName === 'AskUserQuestion' || parsedQuestions.length > 0) {
+          const firstQuestion = parsedQuestions[0]?.question?.trim();
+          return [{
+            session_id: sessionId,
+            turn,
+            call_id: data.approvalId,
+            ts,
+            type: 'interaction.question',
+            data: {
+              approvalId: data.approvalId,
+              category: 'question',
+              risk: 'low',
+              title: firstQuestion || 'Claude is asking you a question',
+              description: '',
+              scopeOptions: ['once'],
+              ...(toolName ? { toolName } : {}),
+              questions: parsedQuestions,
+            },
+          }];
+        }
+
+        const parsedInput = parseCcApprovalInput(inputPreview);
+        const subject = ccApprovalSubject(toolName, parsedInput);
+        const description = ccApprovalDescription(toolName, parsedInput) ?? data.description;
+        return [{
+          session_id: sessionId,
+          turn,
+          call_id: data.approvalId,
+          ts,
+          type: category === 'question' ? 'interaction.question' : 'interaction.approval',
+          data: {
+            approvalId: data.approvalId,
+            category,
+            risk: 'medium',
+            title: category === 'exit_plan_mode' ? 'Plan ready for review' : data.title,
+            description,
+            ...(subject ? { subject } : {}),
+            // cc has no native session scope; offer it only for the
+            // categories the ApprovalManager can allowlist, same as the
+            // legacy normalize-cc path.
+            scopeOptions: category === 'command' || category === 'file_write_outside_ws' || category === 'network'
+              ? scopeOptions
+              : ['once' as const],
+            nativeOptions,
+            ...(category === 'exit_plan_mode'
+              ? { planActions: ['accept_with_auto', 'accept_with_ask', 'keep_planning'] as const }
+              : {}),
+            ...(toolName ? { toolName } : {}),
+          },
+        }];
+      }
+
       return [{
         session_id: sessionId,
         turn,
         call_id: data.approvalId,
         ts,
-        type: protocolCategory(data.category) === 'question'
+        type: category === 'question'
           ? 'interaction.question'
           : 'interaction.approval',
         data: {
           approvalId: data.approvalId,
-          category: protocolCategory(data.category),
+          category,
           risk: 'medium',
           title: data.title,
           description: data.description,
-          scopeOptions: [
-            ...(data.options.some((option: { kind: string }) => option.kind === 'allow_once') ? ['once' as const] : []),
-            ...(data.options.some((option: { kind: string }) => option.kind === 'allow_session') ? ['session' as const] : []),
-          ],
+          scopeOptions,
           nativeOptions,
         },
       }];
     }
     case 'approval.resolved': {
       const option = data.optionId ?? '';
+      // AskUserQuestion answers ride along (optional additive field) so the
+      // resolved question card can show what was picked, matching the replay
+      // path.
+      const answers = data.answers && typeof data.answers === 'object' && !Array.isArray(data.answers)
+        ? data.answers as Record<string, string | string[]>
+        : undefined;
       return [{
         session_id: sessionId,
         turn,
@@ -249,6 +329,7 @@ export function projectProtocolV1Notification(
             : option === 'allow_once' ? 'allow_once' : 'decline',
           auto: data.resolvedBy !== 'user',
           nativeOptionId: data.optionId ?? null,
+          ...(answers ? { answers } : {}),
         },
       }];
     }

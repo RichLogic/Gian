@@ -181,6 +181,14 @@ export class SessionManager {
     return this.nativeSessions.adoptKimi(input);
   }
 
+  async deletePluginNativeSession(
+    executor: Executor,
+    nativeSessionId: string,
+    cwd: string,
+  ): Promise<void> {
+    return this.nativeSessions.deletePluginNativeSession(executor, nativeSessionId, cwd);
+  }
+
   async adoptPluginNativeSession(input: {
     workspaceId: string;
     cwd: string;

@@ -15,7 +15,8 @@ function relativeTo(root: string, absPath: string): string {
 /**
  * Resolve an absolute transcript file reference without conflating two
  * separate questions: which tree can serve it, and whether the current Files
- * inspector can locate it.
+ * inspector can locate it. A null source tree still previews via the
+ * absolute-path file API; it only means the inspector cannot reveal a row.
  */
 export function resolveFilePanelRoute(
   absPath: string,

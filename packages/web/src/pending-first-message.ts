@@ -3,7 +3,8 @@ import type { Session } from '@gian/shared';
 export interface PendingFirstAttachment {
   id: string;
   name: string;
-  mime: 'image/png';
+  /** image/png for screenshots; pasted/picked files carry their own mime. */
+  mime: string;
   size: number;
   blob: Blob;
 }

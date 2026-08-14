@@ -2,7 +2,7 @@ import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import type { ApprovalMode, Executor, NativeConfigOption, NativeConfigValue, ProxyModeCapabilities, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
 import { usesNativeExecutorConfig } from '@gian/shared';
-import { isNativeImageMime, servedAttachmentUrl } from '../attachments.js';
+import { MAX_FILE_BYTES, fmtBytes, isNativeImageMime, servedAttachmentUrl } from '../attachments.js';
 import type { UploadedAttachment } from '../api.js';
 import {
   loadNativeConfig,
@@ -41,8 +41,6 @@ import {
 import type { ProxyModel } from './composer/capabilities.js';
 import { BulbIcon, ExecutorMark, NativeOptionDrop, useUpDrop } from './composer/option-drops.js';
 export { ContextUsageIndicator } from './composer/context-usage-indicator.js';
-
-const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
 
 /** Per-session unsent draft. localStorage key prefix; v2 stores JSON
  *  `{text, attachments}` so unsent ATTACHMENTS survive a session switch too
@@ -173,12 +171,6 @@ interface PendingFile {
   uploading: boolean;
   /** Set when the upload fails so the chip can show the error state. */
   error?: string;
-}
-
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** Rebuild composer chips from a persisted draft. The upload already happened

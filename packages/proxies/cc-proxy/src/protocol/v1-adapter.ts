@@ -237,6 +237,7 @@ export class ClaudeProtocolV1Adapter {
         return { ok: true };
       }
       case 'session.config.set':
+      case 'session.native.delete':
       case 'turn.steer':
         throw new ProxyProtocolError(
           'CAPABILITY_NOT_SUPPORTED',
@@ -630,12 +631,16 @@ export class ClaudeProtocolV1Adapter {
         if (!approvalId || !approvalRef) return;
         this.approvals.delete(approvalId);
         this.updateSession(session, { status: 'running' });
+        const answers = data.answers && typeof data.answers === 'object' && !Array.isArray(data.answers)
+          ? data.answers as Record<string, string | string[]>
+          : undefined;
         this.emitSessionEvent('approval.resolved', session, approvalRef.turnId, {
           approvalId,
           resolution: 'selected',
           resolvedBy: 'user',
           optionId: approvalRef.selectedOptionId
             ?? (data.behavior === 'deny' ? 'reject_once' : 'allow_once'),
+          ...(answers ? { answers } : {}),
         });
         return;
       }

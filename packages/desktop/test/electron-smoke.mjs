@@ -217,7 +217,7 @@ try {
     await browser.setLayout('browser-smoke-primary', { x: 100, y: 100, width: 640, height: 420 }, true);
     return browser.openProject('browser-smoke-primary', { workingTreeId: 'ws:smoke', path: 'site/index.html' });
   });
-  assert.match(browserProjectState.url, /^gian-browser:\/\/[a-f0-9]+\/index\.html$/);
+  assert.match(browserProjectState.url, /^gian-browser:\/\/[a-f0-9]+\/site\/index\.html$/);
   const loadedProjectState = await waitForBrowserState(
     window,
     'browser-smoke-primary',

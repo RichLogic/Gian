@@ -1035,6 +1035,14 @@ function AgentInstallRow({
           {agent.cli.state === 'ready'
             ? agent.cli.version ?? t('settings.agents.ready')
             : t(agent.cli.state === 'invalid' ? 'settings.agents.invalid' : 'settings.agents.notInstalled')}
+          {agent.cli.state === 'ready'
+            && agent.cli.version
+            && agent.cli.recommendedVersion
+            && agent.cli.version !== agent.cli.recommendedVersion && (
+            <div className="hint" data-testid={`${agent.id}-cli-version-mismatch`}>
+              {t('settings.agents.cliVersionMismatch').replace('{version}', agent.cli.recommendedVersion)}
+            </div>
+          )}
           {agent.cli.state !== 'ready' && (
             <button className="btn xs secondary" type="button" disabled={busy} onClick={onInstallCli}>
               {t('settings.agents.installOfficial')}

@@ -3,6 +3,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 import type { Session, TerminalPreferences, Workspace } from '@gian/shared';
 import {
+  loadAbsoluteFile,
   loadAllFiles,
   loadApps,
   loadDiff,
@@ -746,8 +747,8 @@ export function useWorkbench({
   }
 
   interface FileTabFill {
-    wtId: string;
-    rel: string;
+    wtId?: string;
+    rel?: string;
     line?: number;
     icoKind: SheetTab['icoKind'];
     fullPath: string;
@@ -763,7 +764,9 @@ export function useWorkbench({
       fullPath: fill.fullPath,
       sessionId: fill.sessionId,
     };
-    const file = await loadFile(fill.wtId, fill.rel);
+    const file = fill.wtId && fill.rel
+      ? await loadFile(fill.wtId, fill.rel)
+      : await loadAbsoluteFile(fill.fullPath);
     setWbTabs(prev => prev.map(t => {
       if (!tabMatches(t, match) || !t.loading) return t;
       if (file) {
@@ -783,7 +786,8 @@ export function useWorkbench({
 
   /** Open a file in the Sheet workbench (Phase 3+ replacement for the old
    *  preview drawer). Files in the current Files index also reveal their tree
-   *  row; hidden/other-tree/unknown files keep the inspector closed.
+   *  row; hidden/other-tree/unregistered files keep the inspector closed but
+   *  still load a preview.
    *
    *  Query timing (Phase 3b, proposal §4.5): the tab is created and selected
    *  IMMEDIATELY with a loading body, then filled (or failed, with retry) —
@@ -841,7 +845,7 @@ export function useWorkbench({
     const ext = (name.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase();
     const rawUrl = wt && rel
       ? `/api/working_trees/${encodeURIComponent(wt.id)}/raw?path=${encodeURIComponent(rel)}`
-      : null;
+      : `/api/files/raw?path=${encodeURIComponent(fullPath)}`;
     const isImage = IMAGE_EXTS.has(ext);
 
     setFilesInspectorSuppressed(!route.inCurrentFiles);
@@ -869,9 +873,10 @@ export function useWorkbench({
       return;
     }
 
-    // Images render straight from `/raw` via an <img> (no text load); binary
-    // targets get the notice. Both are synchronous — no loading phase.
-    if (!wt || !rel || openCategoryFor(name) === 'pdf') {
+    // Images render straight from `/raw` via an <img> (no text load). PDF
+    // stays a notice until the Sheet has a viewer. Everything else loads as
+    // text — including absolute paths outside every registered tree.
+    if (openCategoryFor(name) === 'pdf') {
       insertFileTab({
         name,
         kind: 'file' as const,
@@ -884,7 +889,7 @@ export function useWorkbench({
       }, permanent, line);
       return;
     }
-    if (isImage && rawUrl) {
+    if (isImage) {
       insertFileTab({
         name,
         kind: 'file' as const,
@@ -893,7 +898,7 @@ export function useWorkbench({
         rawSrc: rawUrl,
         fullPath,
         fileTreePath: route.revealRel ?? undefined,
-        workingTreeId: wt.id,
+        workingTreeId: wt?.id,
       }, permanent, line);
       return;
     }
@@ -906,12 +911,12 @@ export function useWorkbench({
       ico: '',
       fullPath,
       fileTreePath: route.revealRel ?? undefined,
-      workingTreeId: wt.id,
+      workingTreeId: wt?.id,
       loading: true,
     }, permanent, line);
     void fillFileTab({
-      wtId: wt.id,
-      rel,
+      wtId: wt?.id,
+      rel: rel ?? undefined,
       line,
       icoKind,
       fullPath,
@@ -1189,25 +1194,18 @@ export function useWorkbench({
     revealSheetTab('workspaces', tab.id);
   }
 
-  /** Open one full static site in the desktop Browser. The HTML file's
-   * directory becomes that site's isolated gian-browser origin root. */
+  /** Open one project HTML file in a new desktop Browser tab. Reusing the
+   *  active tab would replace whatever the user was already previewing. */
   function openProjectInBrowser(workingTreeId: string, path: string): void {
     const browser = desktopBridge()?.browser;
     if (!browser) {
       window.open(`/api/working_trees/${encodeURIComponent(workingTreeId)}/raw?path=${encodeURIComponent(path)}`, '_blank', 'noopener');
       return;
     }
-    const selected = activeTabByGroup.browser
-      ? wbTabs.find(tab => tab.id === activeTabByGroup.browser && tab.kind === 'browser')
-      : undefined;
-    const tab = selected ?? createBrowserTab(wbTabs.filter(item => item.kind === 'browser').length);
-    if (!selected) {
-      setWbTabs(prev => [...prev, tab]);
-      revealSheetTab('browser', tab.id);
-      setActiveRail('browser');
-    } else {
-      activateRail('browser');
-    }
+    const tab = createBrowserTab(wbTabs.filter(item => item.kind === 'browser').length);
+    setWbTabs(prev => [...prev, tab]);
+    revealSheetTab('browser', tab.id);
+    setActiveRail('browser');
     void browser.openProject(tab.id, { workingTreeId, path });
   }
 

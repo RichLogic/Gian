@@ -51,6 +51,14 @@ export function buildPrompt(input: InputItem[]): string {
   return parts.join('\n\n');
 }
 
+/** Tools that always route through the approval MCP bridge: the permission
+ *  card carries their entire UX (structured question picker / plan review),
+ *  so their generic tool.use/tool.result events are suppressed. This matches
+ *  the host's JSONL replay path, which never renders generic tool cards for
+ *  them — and hides the deny+message answer tunnel, whose tool_result is
+ *  always flagged is_error and would render as a bogus failure card. */
+const APPROVAL_BRIDGED_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
+
 /** Serialize the user's AskUserQuestion answers into the deny-message body
  *  the model sees when claude CLI relays the permission-prompt-tool denial.
  *  Single-select values come through as `string`, multi-select as `string[]`,
@@ -93,6 +101,10 @@ export class CcProxyService {
     requestId: number | string | undefined;
     isCompact: boolean;
   }>();
+  /** `${sessionId}:${callId}` → toolName, recorded on toolUse so toolResult
+   *  can apply the same per-tool handling (approval-bridged tools suppress
+   *  both events). Entries are deleted on result / turn end / session end. */
+  private readonly toolCallNames = new Map<string, string>();
 
   constructor(options: ServiceOptions) {
     this.runtime = options.runtime;
@@ -343,6 +355,7 @@ export class CcProxyService {
     // Killing the process is the most reliable way to interrupt.
     this.runtime.killSession(session.id);
     this.activeTurns.delete(session.id);
+    this.clearToolCallNames(session.id);
 
     const updated = this.updateSession(session, {
       activeTurnId: null,
@@ -391,6 +404,9 @@ export class CcProxyService {
       data: {
         approvalId: approval.approvalId,
         behavior: params.behavior,
+        // Echo the picked answers so the web's resolved question card can
+        // show "answered with …" without waiting for the JSONL replay.
+        ...(params.answers ? { answers: params.answers } : {}),
       },
     });
 
@@ -525,6 +541,7 @@ export class CcProxyService {
     // Each reply call from Claude Code represents a complete response.
     // Mark the turn as completed.
     this.activeTurns.delete(sessionId);
+    this.clearToolCallNames(sessionId);
     const updated = this.updateSession(session, {
       activeTurnId: null,
       status: 'idle',
@@ -548,6 +565,9 @@ export class CcProxyService {
     const session = this.sessionsById.get(sessionId);
     if (!session) return;
 
+    this.toolCallNames.set(`${sessionId}:${callId}`, toolName);
+    if (APPROVAL_BRIDGED_TOOLS.has(toolName)) return;
+
     const context = this.activeTurns.get(sessionId);
     const turnId = context?.turnId ?? session.activeTurnId;
 
@@ -567,6 +587,11 @@ export class CcProxyService {
   ) {
     const session = this.sessionsById.get(sessionId);
     if (!session) return;
+    const nameKey = `${sessionId}:${callId}`;
+    const toolName = this.toolCallNames.get(nameKey);
+    this.toolCallNames.delete(nameKey);
+    // A result without a seen toolUse (e.g. replay boundary) still surfaces.
+    if (toolName !== undefined && APPROVAL_BRIDGED_TOOLS.has(toolName)) return;
     const context = this.activeTurns.get(sessionId);
     this.emitEvent('tool.result', {
       requestId: context?.requestId,
@@ -724,6 +749,7 @@ export class CcProxyService {
 
     const context = this.activeTurns.get(sessionId);
     this.activeTurns.delete(sessionId);
+    this.clearToolCallNames(sessionId);
 
     // Clear all pending approvals (an MCP CallTool waiting on the dead
     // process can never be answered). ExitPlanMode also routes through the
@@ -830,12 +856,20 @@ export class CcProxyService {
 
   private removeSession(session: SessionRecord) {
     this.sessionsById.delete(session.id);
+    this.clearToolCallNames(session.id);
     const approvals = this.approvalsBySessionId.get(session.id);
     if (approvals) {
       for (const id of approvals.keys()) {
         this.approvalsById.delete(id);
       }
       this.approvalsBySessionId.delete(session.id);
+    }
+  }
+
+  private clearToolCallNames(sessionId: string) {
+    const prefix = `${sessionId}:`;
+    for (const key of this.toolCallNames.keys()) {
+      if (key.startsWith(prefix)) this.toolCallNames.delete(key);
     }
   }
 

@@ -3,15 +3,18 @@
 // create errors; agent + workspace selectors sit above a two-row composer
 // whose optional title precedes the required first message. The composer bar
 // carries model / thinking / mode chips that follow the picked agent, plus a
-// Codex-only Fast toggle. Send stays disabled until an agent is picked
-// (multi-agent) and a message typed;
+// Codex-only Fast toggle. Attachments align with the session Composer: image
+// paste, a file picker for arbitrary files, and Desktop screenshot capture all
+// stage Blobs in the pre-session IndexedDB store (20 MB cap) and are uploaded
+// into the Session after it is created. Send stays disabled until an agent is
+// picked (multi-agent) and a message typed;
 // a single ready agent auto-selects into a static chip. Chip choices are
 // explicit-only in the payload; the last used workspace/agent/chips are
 // remembered for the next open. The workspace drop is Codex-style (search +
 // "+ New workspace" jump to the Workspaces sheet) — the page never creates
 // workspaces inline.
 
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentInstallStatus, CodexModelCapabilities, Executor, Workspace } from '@gian/shared';
@@ -22,7 +25,7 @@ import {
   NewSessionView,
   newSessionDraftStorageKey,
 } from '../src/views/new-session-view.js';
-import { storeNewSessionScreenshot } from '../src/screenshot-drafts.js';
+import { storeNewSessionAttachment, storeNewSessionScreenshot } from '../src/screenshot-drafts.js';
 
 vi.mock('../src/api.js', () => ({
   loadAgents: vi.fn(),
@@ -372,6 +375,121 @@ describe('NewSessionView', () => {
     });
     expect(input.firstAttachments[0].blob).toBeInstanceOf(Blob);
     expect(input.firstAttachments[0].blob.size).toBe(4);
+  });
+
+  it('stages a pasted image as an attachment chip and submits its Blob', async () => {
+    const { onCreate } = renderView();
+    await openAgentPicker();
+    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+
+    const pasted = new File([new Uint8Array([0x89, 0x50])], '', { type: 'image/png' });
+    fireEvent.paste(screen.getByTestId('ns-message-input'), {
+      clipboardData: {
+        items: [
+          { kind: 'string', type: 'text/plain', getAsFile: () => null },
+          { kind: 'file', type: 'image/png', getAsFile: () => pasted },
+        ],
+      },
+    });
+
+    // Unnamed screenshots get a fabricated paste-<ts>.png name (Composer parity).
+    expect(await screen.findByText(/^paste-.*\.png$/)).toBeInTheDocument();
+    expect(screen.getByTestId('ns-send')).toBeEnabled();
+    await userEvent.click(screen.getByTestId('ns-send'));
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
+    const input = onCreate.mock.calls[0]![0];
+    expect(input.firstMessage).toBe('');
+    expect(input.firstAttachments).toHaveLength(1);
+    expect(input.firstAttachments[0]).toMatchObject({ mime: 'image/png', size: 2 });
+    expect(input.firstAttachments[0].name).toMatch(/^paste-.*\.png$/);
+    expect(input.firstAttachments[0].blob).toBeInstanceOf(Blob);
+  });
+
+  it('ignores a text-only paste (no chip, normal paste passes through)', async () => {
+    renderView();
+    await screen.findByTestId('ns-agent-picker');
+    fireEvent.paste(screen.getByTestId('ns-message-input'), {
+      clipboardData: {
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+      },
+    });
+    expect(screen.queryByTestId('new-session-screenshots')).toBeNull();
+  });
+
+  it('stages picked files (including non-images) and submits their Blobs', async () => {
+    const { onCreate } = renderView();
+    await openAgentPicker();
+    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+
+    const pdf = new File([new Uint8Array([0x25, 0x50, 0x44, 0x46])], 'spec.pdf', { type: 'application/pdf' });
+    const image = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'shot.png', { type: 'image/png' });
+    fireEvent.change(screen.getByTestId('ns-file-input'), { target: { files: [pdf, image] } });
+
+    expect(await screen.findByText('spec.pdf')).toBeInTheDocument();
+    expect(await screen.findByText('shot.png')).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('ns-send'));
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
+    const input = onCreate.mock.calls[0]![0];
+    expect(input.firstAttachments).toHaveLength(2);
+    expect(input.firstAttachments.map((a: { name: string }) => a.name)).toEqual(['spec.pdf', 'shot.png']);
+    expect(input.firstAttachments[0]).toMatchObject({ mime: 'application/pdf', size: 4 });
+    expect(input.firstAttachments[0].blob).toBeInstanceOf(Blob);
+  });
+
+  it('renders a file icon (no thumbnail) for non-image attachments', async () => {
+    renderView();
+    await screen.findByTestId('ns-agent-picker');
+    const pdf = new File([new Uint8Array([0x25])], 'notes.pdf', { type: 'application/pdf' });
+    fireEvent.change(screen.getByTestId('ns-file-input'), { target: { files: [pdf] } });
+
+    const chip = (await screen.findByText('notes.pdf')).closest('.att-chip') as HTMLElement;
+    expect(chip.querySelector('.att-file-icon')).not.toBeNull();
+    expect(chip.querySelector('.att-thumb')).toBeNull();
+    expect(chip.querySelector('.att-size')).toHaveTextContent('1 B');
+  });
+
+  it('rejects files over 20 MB with a visible error and keeps Send disabled', async () => {
+    renderView();
+    await screen.findByTestId('ns-agent-picker');
+    const big = new File([new Uint8Array(20 * 1024 * 1024 + 1)], 'huge.bin', { type: 'application/octet-stream' });
+    fireEvent.change(screen.getByTestId('ns-file-input'), { target: { files: [big] } });
+
+    expect(await screen.findByTestId('new-session-attachment-error')).toHaveTextContent('20 MB');
+    expect(screen.queryByTestId('new-session-screenshots')).toBeNull();
+    expect(screen.getByTestId('ns-send')).toBeDisabled();
+  });
+
+  it('removing an attachment chip clears it from the persisted draft', async () => {
+    renderView();
+    await screen.findByTestId('ns-agent-picker');
+    await act(async () => {
+      await storeNewSessionAttachment(
+        { kind: 'workspace', id: 'ws-1' },
+        { name: 'draft.png', blob: new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }) },
+      );
+    });
+    expect(await screen.findByText('draft.png')).toBeInTheDocument();
+
+    const chip = screen.getByText('draft.png').closest('.att-chip') as HTMLElement;
+    await userEvent.click(within(chip).getByRole('button', { name: 'Remove attachment' }));
+    expect(screen.queryByText('draft.png')).toBeNull();
+    const draft = JSON.parse(localStorage.getItem(newSessionDraftStorageKey({
+      kind: 'workspace',
+      id: 'ws-1',
+    })) ?? 'null');
+    expect(draft?.screenshotAttachments ?? []).toEqual([]);
+  });
+
+  it('restores staged attachments when reopening the Workspace draft', async () => {
+    const first = renderView();
+    await screen.findByTestId('ns-agent-picker');
+    const pdf = new File([new Uint8Array([0x25, 0x50])], 'keep.pdf', { type: 'application/pdf' });
+    fireEvent.change(screen.getByTestId('ns-file-input'), { target: { files: [pdf] } });
+    expect(await screen.findByText('keep.pdf')).toBeInTheDocument();
+    first.unmount();
+
+    renderView({ initialWorkspaceId: 'ws-1' });
+    expect(await screen.findByText('keep.pdf')).toBeInTheDocument();
   });
 
   it('renders capability chips for the picked agent and sends explicit choices', async () => {

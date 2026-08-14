@@ -88,6 +88,18 @@
     status.hidden = !message;
   }
 
+  function releaseCaptureMemory() {
+    capture = null;
+    selection = null;
+    drag = null;
+    activeAction = null;
+    actions = [];
+    mosaicSource = null;
+    image.src = '';
+    canvas.width = 1;
+    canvas.height = 1;
+  }
+
   function setTool(nextTool) {
     commitText();
     tool = nextTool;
@@ -536,6 +548,7 @@
       const bytes = new Uint8Array(await blob.arrayBuffer());
       const accepted = await api.complete(capture.captureId, bytes);
       if (!accepted) throw new Error('Screenshot was not accepted');
+      releaseCaptureMemory();
     } catch {
       completing = false;
       completeButton.disabled = false;
@@ -548,6 +561,7 @@
     if (completing) return;
     try {
       await api.cancel();
+      releaseCaptureMemory();
     } catch {
       displayStatus('无法退出截图，请按 Esc 重试');
     }
@@ -690,9 +704,19 @@
     try {
       capture = await api.getCapture();
       if (!capture) throw new Error('No active capture');
-      targetLabel.textContent = `完成后加入：${capture.targetLabel}`;
-      image.src = capture.imageDataUrl;
-      await image.decode();
+      targetLabel.textContent = capture.clipboardOnly
+        ? '完成后复制到剪贴板'
+        : `完成后加入：${capture.targetLabel}`;
+      const imageUrl = URL.createObjectURL(new Blob(
+        [new Uint8Array(capture.imagePngBytes)],
+        { type: 'image/png' },
+      ));
+      try {
+        image.src = imageUrl;
+        await image.decode();
+      } finally {
+        URL.revokeObjectURL(imageUrl);
+      }
       canvas.width = image.naturalWidth;
       canvas.height = image.naturalHeight;
       mosaicSource = buildMosaicSource();

@@ -615,7 +615,12 @@ function createScreenshotController(): ScreenshotController {
       if (state.wasFocused) revealMainWindow(state.window);
       else state.window.showInactive();
     },
-    waitForDesktopToSettle: () => new Promise(resolve => setTimeout(resolve, 100)),
+    waitForDesktopToSettle: token => {
+      const state = token as MainWindowCaptureState | null;
+      return state?.wasVisible
+        ? new Promise(resolve => setTimeout(resolve, 100))
+        : Promise.resolve();
+    },
     watchDisplayChanges: listener => {
       screen.on('display-added', listener);
       screen.on('display-removed', listener);
@@ -1236,11 +1241,14 @@ if (!hasSingleInstanceLock) {
     buildApplicationMenu();
     await ensureMainWindow();
     screenshotController.registerShortcut();
+    void screenshotController.warmUp().catch(error => {
+      console.warn('[desktop] screenshot overlay warm-up failed', error);
+    });
     attentionClient?.start();
 
     app.on('activate', () => {
       if (screenshotController?.getState().capturing) return;
-      if (BrowserWindow.getAllWindows().length === 0) void ensureMainWindow();
+      if (!mainWindow || mainWindow.isDestroyed()) void ensureMainWindow();
     });
   }).catch(error => {
     console.error('[desktop] failed to start', error);

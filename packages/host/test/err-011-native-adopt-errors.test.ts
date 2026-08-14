@@ -91,13 +91,14 @@ test('ERR-011: adopt rejects unsupported executor with 400', async () => {
   }
 });
 
-test('ERR-011: grok adopt is rejected as not available yet', async () => {
+test('ERR-011: grok adopt requires a discoverable native session', async () => {
   const ctx = await setup();
   try {
     const res = await adoptBody(ctx, { executor: 'grok', native_session_id: 'native-grok' });
-    assert.equal(res.status, 400);
+    assert.ok(res.status === 400 || res.status === 404);
     const body = await res.json() as { error: string };
-    assert.match(body.error, /Grok native session adopt is not available yet/);
+    assert.ok(typeof body.error === 'string' && body.error.length > 0);
+    assert.doesNotMatch(body.error, /not available yet/);
   } finally {
     await ctx.cleanup();
   }
@@ -296,19 +297,20 @@ async function deleteNative(
   );
 }
 
-test('ERR-011: grok native-session delete is rejected without discovery', async () => {
+test('ERR-011: grok native-session delete uses capability-gated plugin deletion', async () => {
   const ctx = await setup();
   try {
     const res = await deleteNative(ctx, 'grok', 'native-grok');
-    assert.equal(res.status, 400);
+    assert.ok(res.status === 400 || res.status === 404);
     const body = await res.json() as { error: string };
-    assert.match(body.error, /Grok native session deletion is not available yet/);
+    assert.ok(typeof body.error === 'string' && body.error.length > 0);
+    assert.doesNotMatch(body.error, /not available yet/);
   } finally {
     await ctx.cleanup();
   }
 });
 
-test('Grok native-session listing does not start a Grok runtime', async () => {
+test('Grok native-session listing uses the plugin list capability', async () => {
   let created = false;
   const service = new NativeSessionService(
     {} as never,
@@ -316,16 +318,22 @@ test('Grok native-session listing does not start a Grok runtime', async () => {
       usesProtocolV1: () => true,
       getOrCreate: async () => {
         created = true;
-        throw new Error('must not start Grok for native list');
+        return {
+          protocolV1: true,
+          initialize: async () => ({}),
+          listNativeSessions: async () => ({ sessions: [] }),
+        };
       },
+      dispose: async () => undefined,
     } as never,
     {} as never,
     {} as never,
     {} as never,
     {} as never,
   );
-  assert.equal(await service.listPlugin('grok', '/tmp'), null);
-  assert.equal(created, false);
+  const listed = await service.listPlugin('grok', '/tmp');
+  assert.equal(created, true);
+  assert.deepEqual(listed, []);
 });
 
 test('ERR-011: delete rejects unsupported executor query param with 400', async () => {

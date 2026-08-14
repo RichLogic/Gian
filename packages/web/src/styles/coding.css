@@ -1935,6 +1935,15 @@
   padding: 4px;
   display: flex; flex-direction: column;
 }
+/* TaskMenu portals its popover to <body> and positions it with fixed,
+ *  viewport-clamped coordinates — the sidebar would clip absolute overflow
+ *  (long labels used to be cut off at the panel's left edge, 2026-08-14).
+ *  The `.task-group .ws-kebab-pop` descendant sizing no longer reaches a
+ *  portaled popover, so the task sizing is repeated here. */
+.ws-kebab-pop--fixed {
+  position: fixed; right: auto;
+  min-width: 140px; width: max-content; max-width: calc(100vw - 16px);
+}
 .ws-kebab-item {
   text-align: left;
   padding: 7px 10px;

@@ -122,7 +122,7 @@ async function deliverCreatedSessionFirstMessage(
     toast({
       kind: 'error',
       message: current.translate?.('screenshot.firstMessageUploadFailed')
-        ?? 'Some screenshots could not be uploaded. The original new-session draft was kept.',
+        ?? 'Some attachments could not be uploaded. The original new-session draft was kept.',
     });
     return;
   }

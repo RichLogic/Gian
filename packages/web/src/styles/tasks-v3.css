@@ -28,11 +28,9 @@
   color: var(--text-3);
 }
 
-/* The task ⋯ menu must stay inside the (possibly narrow) rail: the shared
-   Spaces kebab pop enforces `min-width: 200px` (coding.css), which overflows
-   the rail's left edge and gets clipped by `.sidebar { overflow: hidden }`.
-   Content-size it here instead. */
-.task-group .ws-kebab-pop { min-width: 140px; width: max-content; }
+/* The task ⋯ menu popover is portaled to <body> since 2026-08-14 (the rail
+   clipped absolute overflow), so no descendant selector here can reach it —
+   its sizing lives on `.ws-kebab-pop--fixed` in coding.css. */
 
 /* ---- Subtask done toggle ------------------------------------------------
  * A subtask IS a session; completing it (POST /api/sessions/:id/complete) is

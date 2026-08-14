@@ -22,13 +22,18 @@ import {
   type ResumeSessionRequest,
   type ResumeSessionResponse,
   type SessionNotification,
-  type SetSessionConfigOptionRequest,
-  type SetSessionConfigOptionResponse,
 } from '@agentclientprotocol/sdk';
 
 const ACP_PROTOCOL_VERSION = 1;
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const DEFAULT_GRACEFUL_STOP_MS = 3_000;
+
+export const GROK_SPAWN_PREFIX = [
+  '--deny',
+  'MCPTool(*)',
+  '--disallowed-tools',
+  'search_tool,use_tool',
+] as const;
 
 export type GrokAcpPermissionHandler = (
   request: RequestPermissionRequest,
@@ -50,6 +55,7 @@ export type GrokAcpTransportFactory = (client: Client) => Promise<GrokAcpTranspo
 
 export interface GrokAcpClientOptions {
   binaryPath: string;
+  cwd: string;
   env?: NodeJS.ProcessEnv;
   permissionHandler?: GrokAcpPermissionHandler;
   startupTimeoutMs?: number;
@@ -64,7 +70,13 @@ export interface GrokAcpRuntimeStoppedEvent extends GrokAcpExit {
 interface GrokAcpClientEvents {
   debug: [message: string];
   sessionUpdate: [notification: SessionNotification];
+  extensionNotification: [method: string, params: unknown];
   runtimeStopped: [event: GrokAcpRuntimeStoppedEvent];
+}
+
+interface ExtCapable {
+  sendRequest(method: string, params?: unknown): Promise<unknown>;
+  sendNotification(method: string, params?: unknown): Promise<void>;
 }
 
 function delay(ms: number): Promise<void> {
@@ -82,9 +94,7 @@ async function settlesWithin<T>(promise: Promise<T>, timeoutMs: number): Promise
 }
 
 function validateAbsolutePath(value: string, field: string): void {
-  if (!isAbsolute(value)) {
-    throw new Error(`${field} must be an absolute path.`);
-  }
+  if (!isAbsolute(value)) throw new Error(`${field} must be an absolute path.`);
 }
 
 function processExit(child: ChildProcessWithoutNullStreams): Promise<GrokAcpExit> {
@@ -95,25 +105,31 @@ function processExit(child: ChildProcessWithoutNullStreams): Promise<GrokAcpExit
       settled = true;
       resolve(exit);
     };
-    child.once('error', (error) => {
-      settle({ code: null, signal: null, error });
-    });
-    child.once('exit', (code, signal) => {
-      settle({ code, signal });
-    });
+    child.once('error', (error) => settle({ code: null, signal: null, error }));
+    child.once('exit', (code, signal) => settle({ code, signal }));
   });
 }
 
+function innerConnection(connection: ClientSideConnection): ExtCapable {
+  const candidate = connection as unknown as { connection?: ExtCapable };
+  if (!candidate.connection?.sendRequest || !candidate.connection.sendNotification) {
+    throw new Error('Grok ACP connection does not expose extension RPC.');
+  }
+  return candidate.connection;
+}
+
 function processTransportFactory(
-  options: Pick<GrokAcpClientOptions, 'binaryPath' | 'env' | 'gracefulStopMs'>,
+  options: Pick<GrokAcpClientOptions, 'binaryPath' | 'cwd' | 'env' | 'gracefulStopMs'>,
   emitDebug: (message: string) => void,
 ): GrokAcpTransportFactory {
   return async (client) => {
     const child = spawn(options.binaryPath, [
+      ...GROK_SPAWN_PREFIX,
       'agent',
       '--no-leader',
       'stdio',
     ], {
+      cwd: options.cwd,
       env: {
         ...process.env,
         ...options.env,
@@ -123,30 +139,23 @@ function processTransportFactory(
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const exit = processExit(child);
-
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => {
       const message = chunk.trim();
       if (message) emitDebug(message);
     });
-
     const stream = ndJsonStream(
       Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
       Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
     );
     const connection = new ClientSideConnection(() => client, stream);
-
     return {
       connection,
       exit,
       async stop() {
         if (child.exitCode !== null || child.signalCode !== null) return;
-
         child.stdin.end();
-        if (await settlesWithin(exit, options.gracefulStopMs ?? DEFAULT_GRACEFUL_STOP_MS)) {
-          return;
-        }
-
+        if (await settlesWithin(exit, options.gracefulStopMs ?? DEFAULT_GRACEFUL_STOP_MS)) return;
         child.kill('SIGTERM');
         if (await settlesWithin(exit, 2_000)) return;
         child.kill('SIGKILL');
@@ -159,19 +168,20 @@ function processTransportFactory(
 export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
   private readonly options: GrokAcpClientOptions;
   private readonly transportFactory: GrokAcpTransportFactory;
-  private readonly callbacks: Client;
+  private readonly callbacks: Client & {
+    extNotification?(method: string, params: unknown): Promise<void>;
+    extMethod?(method: string, params: unknown): Promise<unknown>;
+  };
   private permissionHandler: GrokAcpPermissionHandler | null;
   private transport: GrokAcpTransport | null = null;
   private initializeResponse: InitializeResponse | null = null;
   private startPromise: Promise<InitializeResponse> | null = null;
   private readonly expectedStops = new WeakSet<GrokAcpTransport>();
-  /** Notifications from an internal command such as `/status` are captured so
-   *  they can update session metadata without leaking into the transcript. */
-  private readonly capturedUpdates = new Map<string, SessionNotification[]>();
 
   constructor(options: GrokAcpClientOptions) {
     super();
     validateAbsolutePath(options.binaryPath, 'binaryPath');
+    validateAbsolutePath(options.cwd, 'cwd');
     this.options = options;
     this.permissionHandler = options.permissionHandler ?? null;
     this.transportFactory = options.transportFactory
@@ -184,26 +194,25 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
         return this.permissionHandler(request);
       },
       sessionUpdate: async (notification) => {
-        const capture = this.capturedUpdates.get(notification.sessionId);
-        if (capture) {
-          capture.push(notification);
-          return;
-        }
         this.emit('sessionUpdate', notification);
       },
+      extNotification: async (method, params) => {
+        this.emit('extensionNotification', method, params);
+      },
+      extMethod: async () => ({}),
     };
-  }
-
-  get negotiated(): InitializeResponse | null {
-    return this.initializeResponse;
   }
 
   get binaryPath(): string {
     return this.options.binaryPath;
   }
 
-  get started(): boolean {
-    return this.transport !== null && this.initializeResponse !== null;
+  get cwd(): string {
+    return this.options.cwd;
+  }
+
+  get negotiated(): InitializeResponse | null {
+    return this.initializeResponse;
   }
 
   setPermissionHandler(handler: GrokAcpPermissionHandler | null): void {
@@ -212,19 +221,13 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
 
   async ensureStarted(): Promise<InitializeResponse> {
     if (this.initializeResponse) return this.initializeResponse;
-    if (!this.startPromise) {
-      this.startPromise = this.start().catch((error) => {
-        this.startPromise = null;
-        throw error;
-      });
-    }
+    this.startPromise ??= this.start();
     return this.startPromise;
   }
 
   private async start(): Promise<InitializeResponse> {
     const transport = await this.transportFactory(this.callbacks);
     this.transport = transport;
-
     void transport.exit.then((exit) => {
       const isCurrent = this.transport === transport;
       if (isCurrent) {
@@ -235,20 +238,14 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
       this.emit('runtimeStopped', {
         ...exit,
         expected: this.expectedStops.has(transport),
-      } satisfies GrokAcpRuntimeStoppedEvent);
+      });
     });
 
     const initialize = transport.connection.initialize({
       protocolVersion: ACP_PROTOCOL_VERSION,
-      clientInfo: {
-        name: 'gian-grok-proxy',
-        version: '0.1.1',
-      },
+      clientInfo: { name: 'gian-grok-proxy', version: '0.2.0' },
       clientCapabilities: {
-        fs: {
-          readTextFile: false,
-          writeTextFile: false,
-        },
+        fs: { readTextFile: false, writeTextFile: false },
         terminal: false,
       },
     });
@@ -268,29 +265,17 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
         }),
       ]);
     } catch (error) {
-      if (this.transport === transport) {
-        this.transport = null;
-      }
+      if (this.transport === transport) this.transport = null;
       this.expectedStops.add(transport);
       await transport.stop();
       throw error;
     }
 
     if (response.protocolVersion !== ACP_PROTOCOL_VERSION) {
-      if (this.transport === transport) {
-        this.transport = null;
-      }
+      if (this.transport === transport) this.transport = null;
       this.expectedStops.add(transport);
       await transport.stop();
-      throw new Error(
-        `Unsupported Grok ACP protocol version ${String(response.protocolVersion)}.`,
-      );
-    }
-
-    if (this.transport !== transport) {
-      this.expectedStops.add(transport);
-      await transport.stop();
-      throw new Error('Grok ACP startup was cancelled.');
+      throw new Error(`Unsupported Grok ACP protocol version ${String(response.protocolVersion)}.`);
     }
 
     this.initializeResponse = response;
@@ -299,10 +284,12 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
 
   private async connection(): Promise<ClientSideConnection> {
     await this.ensureStarted();
-    if (!this.transport) {
-      throw new Error('Grok ACP transport stopped during startup.');
-    }
+    if (!this.transport) throw new Error('Grok ACP transport stopped during startup.');
     return this.transport.connection;
+  }
+
+  private async ext(): Promise<ExtCapable> {
+    return innerConnection(await this.connection());
   }
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
@@ -312,8 +299,7 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     validateAbsolutePath(params.cwd, 'cwd');
-    const capabilities = (await this.ensureStarted()).agentCapabilities;
-    if (capabilities?.loadSession !== true) {
+    if ((await this.ensureStarted()).agentCapabilities?.loadSession !== true) {
       throw new Error('Grok ACP does not advertise session/load.');
     }
     return (await this.connection()).loadSession(params);
@@ -321,16 +307,14 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
 
   async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
     validateAbsolutePath(params.cwd, 'cwd');
-    const capabilities = (await this.ensureStarted()).agentCapabilities;
-    if (capabilities?.sessionCapabilities?.resume == null) {
+    if ((await this.ensureStarted()).agentCapabilities?.sessionCapabilities?.resume == null) {
       throw new Error('Grok ACP does not advertise session/resume.');
     }
     return (await this.connection()).resumeSession(params);
   }
 
   async listSessions(params: ListSessionsRequest = {}): Promise<ListSessionsResponse> {
-    const capabilities = (await this.ensureStarted()).agentCapabilities;
-    if (capabilities?.sessionCapabilities?.list == null) {
+    if ((await this.ensureStarted()).agentCapabilities?.sessionCapabilities?.list == null) {
       throw new Error('Grok ACP does not advertise session/list.');
     }
     return (await this.connection()).listSessions(params);
@@ -340,36 +324,57 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
     return (await this.connection()).prompt(params);
   }
 
-  async promptCaptured(params: PromptRequest): Promise<{
-    response: PromptResponse;
-    updates: SessionNotification[];
-  }> {
-    if (this.capturedUpdates.has(params.sessionId)) {
-      throw new Error(`A captured prompt is already running for ${params.sessionId}.`);
-    }
-    const updates: SessionNotification[] = [];
-    this.capturedUpdates.set(params.sessionId, updates);
-    try {
-      const response = await this.prompt(params);
-      return { response, updates };
-    } finally {
-      this.capturedUpdates.delete(params.sessionId);
-    }
-  }
-
   async cancel(sessionId: string): Promise<void> {
-    await (await this.connection()).cancel({ sessionId });
+    await innerConnection(await this.connection()).sendNotification('session/cancel', {
+      sessionId,
+      _meta: {
+        rewindIfNoOutput: false,
+        rewindIfPristine: false,
+        cancelSubagents: true,
+      },
+    });
   }
 
-  async setSessionConfigOption(
-    params: SetSessionConfigOptionRequest,
-  ): Promise<SetSessionConfigOptionResponse> {
-    return (await this.connection()).setSessionConfigOption(params);
+  async setSessionModel(params: {
+    sessionId: string;
+    modelId: string;
+    _meta?: Record<string, unknown>;
+  }): Promise<unknown> {
+    return (await this.connection()).unstable_setSessionModel(params);
+  }
+
+  async renameSession(sessionId: string, title: string): Promise<unknown> {
+    return (await this.ext()).sendRequest('x.ai/session/rename', { sessionId, title });
+  }
+
+  async deleteSession(sessionId: string): Promise<unknown> {
+    return (await this.ext()).sendRequest('x.ai/session/delete', { sessionId });
+  }
+
+  async sessionUsage(sessionId: string): Promise<unknown> {
+    return (await this.ext()).sendRequest('x.ai/session/usage', { sessionId });
+  }
+
+  async interject(params: {
+    sessionId: string;
+    text: string;
+    interjectionId: string;
+  }): Promise<unknown> {
+    return (await this.ext()).sendRequest('x.ai/interject', params);
+  }
+
+  async notifyPermissionMode(params: {
+    sessionId: string;
+    clientIdentifier: string;
+    permission_mode: string;
+    yolo_mode: boolean;
+    auto_mode: boolean;
+  }): Promise<void> {
+    await (await this.ext()).sendNotification('x.ai/yolo_mode_changed', params);
   }
 
   async closeSession(params: CloseSessionRequest): Promise<void> {
-    const capabilities = (await this.ensureStarted()).agentCapabilities;
-    if (capabilities?.sessionCapabilities?.close == null) {
+    if ((await this.ensureStarted()).agentCapabilities?.sessionCapabilities?.close == null) {
       throw new Error('Grok ACP does not advertise session/close.');
     }
     await (await this.connection()).closeSession(params);
@@ -379,12 +384,10 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
     if (this.startPromise && !this.transport) {
       await this.startPromise.catch(() => undefined);
     }
-
     const transport = this.transport;
     this.transport = null;
     this.initializeResponse = null;
     this.startPromise = null;
-    this.capturedUpdates.clear();
     if (transport) {
       this.expectedStops.add(transport);
       await transport.stop();
