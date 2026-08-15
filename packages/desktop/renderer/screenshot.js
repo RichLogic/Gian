@@ -696,14 +696,16 @@
   window.addEventListener('resize', render);
   window.addEventListener('dragstart', event => event.preventDefault());
 
-  async function initialize() {
+  async function loadCapture() {
     if (!api || !context) {
       displayStatus('截图组件初始化失败');
       return;
     }
     try {
-      capture = await api.getCapture();
-      if (!capture) throw new Error('No active capture');
+      releaseCaptureMemory();
+      const nextCapture = await api.getCapture();
+      if (!nextCapture) throw new Error('No active capture');
+      capture = nextCapture;
       targetLabel.textContent = capture.clipboardOnly
         ? '完成后复制到剪贴板'
         : `完成后加入：${capture.targetLabel}`;
@@ -721,10 +723,15 @@
       canvas.height = image.naturalHeight;
       mosaicSource = buildMosaicSource();
       render();
+      api.painted();
     } catch {
       displayStatus('无法载入屏幕画面，按 Esc 退出');
+      api.painted();
     }
   }
 
-  void initialize();
+  // The page stays loaded across captures (warm-up reuses the renderer);
+  // a refresh signal re-fetches the frozen desktop without a reload.
+  api?.onRefresh?.(() => { void loadCapture(); });
+  void loadCapture();
 })();

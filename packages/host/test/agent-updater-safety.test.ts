@@ -3463,3 +3463,49 @@ test('whole-executor close reaches bounded shared-host shutdown when session.clo
     assert.equal(releaseCalls, 1);
   }
 });
+
+test('check-proxy-update route is read-only and rejects unknown agents', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-proxy-check-route-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const proxyPath = join(root, 'proxy.mjs');
+  await writeFile(proxyPath, 'export {};\n');
+  const agents = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.4.4',
+    managedProxies: false,
+    developmentProxyEntries: {
+      claude: proxyPath,
+      codex: proxyPath,
+      kimi: proxyPath,
+      grok: proxyPath,
+    },
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+    fetchImpl: async () => {
+      throw new Error('check-proxy-update must not fetch for development proxies');
+    },
+  });
+  const runtimes = new CliRuntimeManager(
+    agents.runtimeProviders(),
+    agents.updateLockDataDir(),
+  );
+  const app = new Hono();
+  registerAgentRoutes(app, {
+    agents,
+    runtimes,
+    closeProxy: async () => undefined,
+    capabilities: async () => ({ models: [], modes: [] }),
+  });
+
+  const unknown = await app.request('/api/agents/nope/check-proxy-update', { method: 'POST' });
+  assert.equal(unknown.status, 404);
+
+  const response = await app.request('/api/agents/claude/check-proxy-update', { method: 'POST' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    managed: false,
+    currentVersion: null,
+    latestVersion: null,
+    updateAvailable: false,
+  });
+});

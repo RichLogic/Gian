@@ -1959,7 +1959,8 @@
 .ws-kebab-item:disabled { opacity: 0.5; cursor: not-allowed; }
 .ws-kebab-divider {
   height: 1px;
-  margin: 4px 6px;
+  margin: 4px 8px;
+  background: var(--hairline);
 }
 
 /* ============================================================

@@ -23,6 +23,8 @@ vi.mock('../src/api.js', async () => {
     loadProxyCapabilities: vi.fn(),
     setAgentCliPath: vi.fn(),
     setAgentProxyDefaults: vi.fn(),
+    checkAgentProxyUpdate: vi.fn(),
+    installAgentProxy: vi.fn(),
   };
 });
 
@@ -36,7 +38,7 @@ function config(): SystemConfig {
     density: 'cozy',
     locale: 'en',
     font_scale_chrome: 'md',
-    font_scale_chat: 'md',
+    font_scale_chat: 'md', chat_font_size: 14, chat_font_family: 'system',
     font_scale_code: 'md',
     terminal: { ...DEFAULT_TERMINAL_PREFERENCES },
     default_claude_model: '',
@@ -132,6 +134,8 @@ describe('SettingsBody Executors', () => {
         : id === 'codex' ? 'Codex'
           : id === 'grok' ? 'Grok Build' : 'Kimi Code',
     ));
+    vi.mocked(api.checkAgentProxyUpdate).mockReset();
+    vi.mocked(api.installAgentProxy).mockReset();
   });
 
   afterEach(() => {
@@ -223,6 +227,66 @@ describe('SettingsBody Executors', () => {
 
     expect(await screen.findByRole('button', { name: 'Update proxy' })).toBeInTheDocument();
     expect(screen.getByText('0.1.0 · GitHub')).toBeInTheDocument();
+  });
+
+  it('hides the manual update check for development-source proxies', async () => {
+    // The default fixture's proxy.source is 'development'.
+    renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
+    await screen.findByText('Claude Code');
+    expect(screen.queryByRole('button', { name: 'Check for updates' })).toBeNull();
+  });
+
+  function githubReleaseAgent(id: Executor, name: string, version: string): AgentInstallStatus {
+    return {
+      ...agent(id, name),
+      proxy: { ...agent(id, name).proxy, version, source: 'github-release' },
+    };
+  }
+
+  it('checks for a Proxy update and offers the update when one is available', async () => {
+    vi.mocked(api.loadAgents).mockResolvedValue([githubReleaseAgent('claude', 'Claude Code', '0.1.0')]);
+    vi.mocked(api.checkAgentProxyUpdate).mockResolvedValue({
+      managed: true,
+      currentVersion: '0.1.0',
+      latestVersion: '0.2.0',
+      updateAvailable: true,
+    });
+    vi.mocked(api.installAgentProxy).mockResolvedValue({
+      agent: githubReleaseAgent('claude', 'Claude Code', '0.2.0'),
+    });
+
+    renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
+
+    const check = await screen.findByTestId('claude-proxy-check-update');
+    fireEvent.click(check);
+    const hint = await screen.findByTestId('claude-proxy-update-available');
+    expect(hint).toHaveTextContent('0.2.0');
+    expect(api.checkAgentProxyUpdate).toHaveBeenCalledWith('claude');
+
+    fireEvent.click(within(hint).getByRole('button', { name: 'Update proxy' }));
+    await waitFor(() => {
+      expect(api.installAgentProxy).toHaveBeenCalledWith('claude');
+    });
+    // A completed update clears the stale check hint.
+    await waitFor(() => {
+      expect(screen.queryByTestId('claude-proxy-update-available')).toBeNull();
+    });
+  });
+
+  it('reports up to date when no newer Proxy release exists', async () => {
+    vi.mocked(api.loadAgents).mockResolvedValue([githubReleaseAgent('claude', 'Claude Code', '0.2.0')]);
+    vi.mocked(api.checkAgentProxyUpdate).mockResolvedValue({
+      managed: true,
+      currentVersion: '0.2.0',
+      latestVersion: '0.2.0',
+      updateAvailable: false,
+    });
+
+    renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
+
+    fireEvent.click(await screen.findByTestId('claude-proxy-check-update'));
+    expect(await screen.findByTestId('claude-proxy-up-to-date')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Update proxy' })).toBeNull();
   });
 
   it('shows a Version-row hint only when the CLI version differs from the recommended value', async () => {

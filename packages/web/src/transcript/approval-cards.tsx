@@ -5,6 +5,7 @@ import type { ApprovalDecision } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { normalizeGfmTables } from '../markdown-tables.js';
 import { useOperationPending } from '../operations/use-operations.js';
+import { comboMatches, useShortcuts } from '../shortcut-prefs.js';
 import type { ApprovalActionContext, ApprovalItem } from '../types.js';
 
 export function SeverityIcon({ risk }: { risk: 'low' | 'medium' | 'high' }) {
@@ -103,30 +104,32 @@ export function ApprovalCard({
   // host's error envelope surfaces the error.
   const resolving = useOperationPending(`approval:${item.approvalId}`, 'approval.resolve');
 
-  // Keyboard shortcut wiring (A / Shift+A / D) while pending — only for
-  // ordinary approvals; AskUserQuestion uses option pickers, and the plan
-  // exit card uses semantic three-way buttons rather than allow/deny. The
-  // visible kbd hint chips were removed in v3; the shortcuts stay.
+  // Keyboard shortcut wiring (remappable; defaults A / Shift+A / D) while
+  // pending — only for ordinary approvals; AskUserQuestion uses option
+  // pickers, and the plan exit card uses semantic three-way buttons rather
+  // than allow/deny. The visible kbd hint chips were removed in v3; the
+  // shortcuts stay.
+  const shortcuts = useShortcuts();
   useEffect(() => {
     if (item.status !== 'pending' || resolving || isQuestion || isPlanExit || isNative) return;
     function handleKey(e: KeyboardEvent) {
       // Ignore if focus is in an input/textarea/contenteditable
       const tag = (e.target as HTMLElement | null)?.tagName ?? '';
       if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement | null)?.isContentEditable) return;
-      if (e.key === 'A' && e.shiftKey && sessionScopeAllowed) {
+      if (comboMatches(e, shortcuts.approveSession) && sessionScopeAllowed) {
         e.preventDefault();
         onApprove(item.approvalId, 'allow_session');
-      } else if (e.key === 'a' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      } else if (comboMatches(e, shortcuts.approveOnce)) {
         e.preventDefault();
         onApprove(item.approvalId, 'allow_once');
-      } else if (e.key === 'd' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      } else if (comboMatches(e, shortcuts.decline)) {
         e.preventDefault();
         onApprove(item.approvalId, 'decline');
       }
     }
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [item.status, item.approvalId, onApprove, resolving, isQuestion, isPlanExit, isNative, sessionScopeAllowed]);
+  }, [item.status, item.approvalId, onApprove, resolving, isQuestion, isPlanExit, isNative, sessionScopeAllowed, shortcuts]);
 
   // Resolved approvals and questions compress to a single line that reads
   // inline with the surrounding process rows.

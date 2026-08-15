@@ -67,7 +67,7 @@ export function stateSyncFixture(): StateSyncMessage {
       accent: 'ember',
       density: 'cozy',
       font_scale_chrome: 'md',
-      font_scale_chat: 'md',
+      font_scale_chat: 'md', chat_font_size: 14, chat_font_family: 'system',
       font_scale_code: 'md',
       terminal: { ...DEFAULT_TERMINAL_PREFERENCES },
       locale: 'zh-CN',

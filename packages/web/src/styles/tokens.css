@@ -137,19 +137,13 @@ body[data-scale-chrome="xl"] .sidebar,
 body[data-scale-chrome="xl"] .topbar,
 body[data-scale-chrome="xl"] .inspector                          { --zone-scale: 1.25;  }
 
-.transcript, .composer, .composer-wrap, .approval            { --zone-scale: 1; }
-body[data-scale-chat="sm"] .transcript,
-body[data-scale-chat="sm"] .composer,
-body[data-scale-chat="sm"] .composer-wrap,
-body[data-scale-chat="sm"] .approval                         { --zone-scale: 0.875; }
-body[data-scale-chat="lg"] .transcript,
-body[data-scale-chat="lg"] .composer,
-body[data-scale-chat="lg"] .composer-wrap,
-body[data-scale-chat="lg"] .approval                         { --zone-scale: 1.125; }
-body[data-scale-chat="xl"] .transcript,
-body[data-scale-chat="xl"] .composer,
-body[data-scale-chat="xl"] .composer-wrap,
-body[data-scale-chat="xl"] .approval                         { --zone-scale: 1.25;  }
+/* Chat zone is driven by concrete settings: --chat-zone-scale (px size /
+   14px base, set inline on body) replaces the old data-scale-chat steps,
+   and --chat-font-family swaps the transcript/composer typeface. */
+.transcript, .composer, .composer-wrap, .approval            { --zone-scale: var(--chat-zone-scale, 1); }
+.transcript, .composer, .composer-wrap {
+  font-family: var(--chat-font-family, var(--font-sans));
+}
 
 .sheet, .gian-terminal, .sheet-file, .md-preview                   { --zone-scale: 1; }
 body[data-scale-code="sm"] .sheet,

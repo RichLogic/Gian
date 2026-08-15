@@ -6,7 +6,8 @@
 // Codex-only Fast toggle. Attachments align with the session Composer: image
 // paste, a file picker for arbitrary files, and Desktop screenshot capture all
 // stage Blobs in the pre-session IndexedDB store (20 MB cap) and are uploaded
-// into the Session after it is created. Send stays disabled until an agent is
+// into the Session after it is created; image thumbnails zoom through the
+// app-level ImageLightbox (ImageZoomContext), same as the Composer's chips. Send stays disabled until an agent is
 // picked (multi-agent) and a message typed;
 // a single ready agent auto-selects into a static chip. Chip choices are
 // explicit-only in the payload; the last used workspace/agent/chips are
@@ -26,6 +27,7 @@ import {
   newSessionDraftStorageKey,
 } from '../src/views/new-session-view.js';
 import { storeNewSessionAttachment, storeNewSessionScreenshot } from '../src/screenshot-drafts.js';
+import { ImageZoomContext } from '../src/transcript/items.js';
 
 vi.mock('../src/api.js', () => ({
   loadAgents: vi.fn(),
@@ -446,6 +448,33 @@ describe('NewSessionView', () => {
     expect(chip.querySelector('.att-file-icon')).not.toBeNull();
     expect(chip.querySelector('.att-thumb')).toBeNull();
     expect(chip.querySelector('.att-size')).toHaveTextContent('1 B');
+  });
+
+  it('opens the app lightbox when an image attachment thumbnail is clicked', async () => {
+    const zoomImage = vi.fn();
+    render(
+      <LocaleProvider locale="en">
+        <ImageZoomContext.Provider value={zoomImage}>
+          <NewSessionView
+            workspaces={[workspace('ws-1', 'Alpha'), workspace('ws-2', 'Beta')]}
+            onNewWorkspace={vi.fn()}
+            onCreate={vi.fn()}
+            onCancel={vi.fn()}
+            creating={false}
+          />
+        </ImageZoomContext.Provider>
+      </LocaleProvider>,
+    );
+    await screen.findByTestId('ns-agent-picker');
+
+    const image = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'shot.png', { type: 'image/png' });
+    fireEvent.change(screen.getByTestId('ns-file-input'), { target: { files: [image] } });
+
+    const chip = (await screen.findByText('shot.png')).closest('.att-chip') as HTMLElement;
+    // The thumb button appears once the async Blob preview resolves.
+    const thumbBtn = await within(chip).findByRole('button', { name: 'shot.png' });
+    await userEvent.click(thumbBtn);
+    expect(zoomImage).toHaveBeenCalledWith('blob:new-session-screenshot', 'shot.png');
   });
 
   it('rejects files over 20 MB with a visible error and keeps Send disabled', async () => {

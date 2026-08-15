@@ -1,22 +1,35 @@
 import type {
   Accent,
   ExternalEditor,
-  FontScale,
+  ShortcutMap,
   SystemConfig,
   TerminalPreferences,
 } from '@gian/shared';
-import { DEFAULT_TERMINAL_PREFERENCES, THEME_DEFAULT_ACCENT } from '@gian/shared';
+import {
+  DEFAULT_CHAT_FONT_SIZE,
+  DEFAULT_TERMINAL_PREFERENCES,
+  MAX_CHAT_FONT_SIZE,
+  MIN_CHAT_FONT_SIZE,
+  SHORTCUT_ACTIONS,
+  THEME_DEFAULT_ACCENT,
+  isValidShortcutCombo,
+} from '@gian/shared';
 import type { Db } from './db.js';
 
 const EXTERNAL_EDITORS_KEY = 'external_editors';
 const OPEN_APPS_KEY = 'open_apps';
 const TERMINAL_KEY = 'terminal';
+const SHORTCUTS_KEY = 'shortcuts';
 const OPEN_APP_CATEGORIES = ['code', 'web', 'images', 'pdf', 'other'] as const;
+
+const VALID_CHAT_FONT_FAMILIES: ReadonlySet<SystemConfig['chat_font_family']> = new Set([
+  'system', 'manrope', 'serif', 'mono',
+]);
+const SHORTCUT_ACTION_SET: ReadonlySet<string> = new Set(SHORTCUT_ACTIONS);
 
 const VALID_ACCENTS: ReadonlySet<Accent> = new Set([
   'rose', 'ember', 'citron', 'moss', 'teal', 'azure', 'ink', 'plum',
 ]);
-const VALID_SCALES: ReadonlySet<FontScale> = new Set(['sm', 'md', 'lg', 'xl']);
 const VALID_THEMES: ReadonlySet<SystemConfig['theme']> = new Set(['light', 'warm', 'dark']);
 const VALID_TERMINAL_FONT_FAMILIES = new Set<TerminalPreferences['font_family']>([
   'jetbrains-mono', 'system-mono', 'sf-mono', 'menlo',
@@ -31,8 +44,31 @@ const VALID_TERMINAL_START_DIRECTORIES = new Set<TerminalPreferences['start_dire
   'context', 'home',
 ]);
 
-function sanitizeScale(raw: string | undefined): FontScale {
-  return raw && VALID_SCALES.has(raw as FontScale) ? (raw as FontScale) : 'md';
+function sanitizeChatFontSize(raw: string | undefined): number {
+  const value = raw === undefined ? Number.NaN : Number(raw);
+  return Number.isInteger(value) && value >= MIN_CHAT_FONT_SIZE && value <= MAX_CHAT_FONT_SIZE
+    ? value
+    : DEFAULT_CHAT_FONT_SIZE;
+}
+
+function sanitizeChatFontFamily(raw: string | undefined): SystemConfig['chat_font_family'] {
+  return raw && VALID_CHAT_FONT_FAMILIES.has(raw as SystemConfig['chat_font_family'])
+    ? (raw as SystemConfig['chat_font_family'])
+    : 'system';
+}
+
+/** Keep only known actions with valid combo strings. Mirrors the load-side
+ *  validation so save and load agree on the shape. */
+export function sanitizeShortcuts(raw: unknown): ShortcutMap {
+  const out: ShortcutMap = {};
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [action, combo] of Object.entries(raw as Record<string, unknown>)) {
+      if (!SHORTCUT_ACTION_SET.has(action)) continue;
+      if (!isValidShortcutCombo(combo)) continue;
+      out[action as keyof ShortcutMap] = combo;
+    }
+  }
+  return out;
 }
 
 export function loadPasswordHash(db: Db): string {
@@ -141,8 +177,10 @@ export function saveConfig(db: Db, partial: Partial<SystemConfig>): void {
   for (const [key, value] of Object.entries(partial) as [keyof SystemConfig, SystemConfig[keyof SystemConfig]][]) {
     // Kept in the wire model for backward compatibility, but these appearance
     // choices were retired in 0.3.0. Ignore stale clients and always render
-    // Cozy with MD interface/code text.
-    if (key === 'density' || key === 'font_scale_chrome' || key === 'font_scale_code') {
+    // Cozy with MD interface/code text. `font_scale_chat` joined them when the
+    // chat font became a concrete px size (`chat_font_size`).
+    if (key === 'density' || key === 'font_scale_chrome' || key === 'font_scale_code'
+      || key === 'font_scale_chat') {
       continue;
     }
     if (key === EXTERNAL_EDITORS_KEY) {
@@ -159,6 +197,10 @@ export function saveConfig(db: Db, partial: Partial<SystemConfig>): void {
     }
     if (key === TERMINAL_KEY) {
       stmt.run(key, JSON.stringify(sanitizeTerminalPreferences(value)));
+      continue;
+    }
+    if (key === SHORTCUTS_KEY) {
+      stmt.run(key, JSON.stringify(sanitizeShortcuts(value)));
       continue;
     }
     stmt.run(key, String(value));
@@ -202,6 +244,16 @@ export function loadConfig(db: Db): SystemConfig {
     }
   }
 
+  let shortcuts: ShortcutMap = {};
+  const rawShortcuts = map.get(SHORTCUTS_KEY);
+  if (rawShortcuts) {
+    try {
+      shortcuts = sanitizeShortcuts(JSON.parse(rawShortcuts));
+    } catch {
+      shortcuts = {};
+    }
+  }
+
   const rawTheme = map.get('theme') ?? '';
   const theme: SystemConfig['theme'] = VALID_THEMES.has(rawTheme as SystemConfig['theme'])
     ? (rawTheme as SystemConfig['theme'])
@@ -219,8 +271,11 @@ export function loadConfig(db: Db): SystemConfig {
     accent,
     density: 'cozy',
     font_scale_chrome: 'md',
-    font_scale_chat: sanitizeScale(map.get('font_scale_chat')),
+    font_scale_chat: 'md',
     font_scale_code: 'md',
+    chat_font_size: sanitizeChatFontSize(map.get('chat_font_size')),
+    chat_font_family: sanitizeChatFontFamily(map.get('chat_font_family')),
+    shortcuts,
     terminal,
     locale: (map.get('locale') ?? 'zh-CN') as SystemConfig['locale'],
     default_claude_model: map.get('default_claude_model') ?? '',

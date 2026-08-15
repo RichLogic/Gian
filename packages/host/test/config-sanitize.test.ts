@@ -27,6 +27,51 @@ test('UI-ACCENT-001 · invalid font scale falls back to md', async () => {
   await ctx.cleanup?.();
 });
 
+test('chat font · invalid px / family fall back to the defaults', async () => {
+  const ctx = await makeTestApp();
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('chat_font_size', 'huge')`).run();
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('chat_font_family', 'papyrus')`).run();
+  const cfg = loadConfig(ctx.db);
+  assert.equal(cfg.chat_font_size, 14);
+  assert.equal(cfg.chat_font_family, 'system');
+  await ctx.cleanup?.();
+});
+
+test('chat font · valid px / family round-trip', async () => {
+  const ctx = await makeTestApp();
+  saveConfig(ctx.db, { chat_font_size: 17, chat_font_family: 'serif' });
+  const cfg = loadConfig(ctx.db);
+  assert.equal(cfg.chat_font_size, 17);
+  assert.equal(cfg.chat_font_family, 'serif');
+  await ctx.cleanup?.();
+});
+
+test('shortcuts · saveConfig→loadConfig round-trips valid overrides only', async () => {
+  const ctx = await makeTestApp();
+  saveConfig(ctx.db, {
+    shortcuts: {
+      commandPalette: 'mod+shift+p',
+      decline: 'x',
+      bogusAction: 'mod+k',
+      approveOnce: 'not a combo!',
+    } as never,
+  });
+  const cfg = loadConfig(ctx.db);
+  assert.deepEqual(cfg.shortcuts, {
+    commandPalette: 'mod+shift+p',
+    decline: 'x',
+  });
+  await ctx.cleanup?.();
+});
+
+test('shortcuts · a malformed stored JSON loads as {} without crashing', async () => {
+  const ctx = await makeTestApp();
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('shortcuts', '[object Object]')`).run();
+  const cfg = loadConfig(ctx.db);
+  assert.deepEqual(cfg.shortcuts, {});
+  await ctx.cleanup?.();
+});
+
 test('UI-ACCENT-001 · legacy plum accent is preserved', async () => {
   const ctx = await makeTestApp();
   ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('accent', 'plum')`).run();

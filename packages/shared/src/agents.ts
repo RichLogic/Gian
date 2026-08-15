@@ -29,6 +29,18 @@ export interface AgentProxyStatus {
   error?: string;
 }
 
+/** Result of a read-only "is a newer compatible Proxy release available?"
+ *  check against the release repository (issue #86). */
+export interface AgentProxyUpdateCheck {
+  /** false for development proxies — there is no managed update channel. */
+  managed: boolean;
+  /** Installed Proxy version; null when none is installed. */
+  currentVersion: string | null;
+  /** Newest release compatible with this App's protocol; null in dev mode. */
+  latestVersion: string | null;
+  updateAvailable: boolean;
+}
+
 export interface AgentInstallStatus {
   id: Executor;
   name: string;

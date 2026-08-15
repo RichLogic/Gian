@@ -13,6 +13,10 @@ import type {
 export const MAX_SCREENSHOT_BYTES = 20 * 1024 * 1024;
 export const MAX_CAPTURE_TOTAL_PIXELS = 160_000_000;
 export const MAX_CAPTURE_PNG_BYTES = 192 * 1024 * 1024;
+/** Longest we wait for an overlay to draw its frozen desktop before showing
+ * the window anyway. Decoding a large PNG over IPC is normally well under
+ * this; the timeout only guards against a wedged renderer. */
+export const OVERLAY_PAINT_TIMEOUT_MS = 2_000;
 export const MAC_SCREENSHOT_SHORTCUT = 'Control+Command+A';
 export const OTHER_SCREENSHOT_SHORTCUT = 'Control+Shift+A';
 
@@ -46,6 +50,7 @@ export interface ScreenshotOverlayWebContents {
   id: number;
   isDestroyed(): boolean;
   once(event: 'render-process-gone', listener: () => void): this;
+  send(channel: string, ...args: unknown[]): void;
 }
 
 export interface ScreenshotOverlayWindow {
@@ -79,6 +84,9 @@ export interface ScreenshotOverlayCapture {
 
 export interface ScreenshotControllerDependencies {
   platform: NodeJS.Platform;
+  /** User-remapped accelerator from the persisted preferences; falls back
+   *  to the platform default when absent. */
+  initialShortcut?: string | null;
   overlayHtmlPath: string;
   overlayPreloadPath: string;
   listDisplays(): ScreenshotDisplay[];
@@ -112,6 +120,8 @@ interface OverlayBinding {
 interface ReusableOverlay {
   display: ScreenshotDisplay;
   window: ScreenshotOverlayWindow;
+  /** The overlay page has been loaded once and can be refreshed in place. */
+  loaded: boolean;
 }
 
 interface ActiveCapture {
@@ -121,6 +131,9 @@ interface ActiveCapture {
   stopWatchingDisplays?: () => void;
   bindings: Map<number, OverlayBinding>;
   windows: ScreenshotOverlayWindow[];
+  /** Overlay webContents ids that have drawn the frozen desktop. */
+  painted: Set<number>;
+  paintedResolve?: () => void;
   ownerSenderId?: number;
   cleaned: boolean;
   finishing: boolean;
@@ -280,7 +293,7 @@ function screenshotFilename(now: Date): string {
 }
 
 export class ScreenshotController {
-  private readonly shortcut: string;
+  private shortcut: string;
   private target: GianScreenshotTarget | null = null;
   private active: ActiveCapture | null = null;
   private readonly overlays = new Map<number, ReusableOverlay>();
@@ -289,7 +302,8 @@ export class ScreenshotController {
   private disposed = false;
 
   constructor(private readonly dependencies: ScreenshotControllerDependencies) {
-    this.shortcut = screenshotShortcutForPlatform(dependencies.platform);
+    this.shortcut = dependencies.initialShortcut
+      ?? screenshotShortcutForPlatform(dependencies.platform);
   }
 
   registerShortcut(): boolean {
@@ -305,6 +319,21 @@ export class ScreenshotController {
     }
     if (!this.shortcutRegistered) this.reportError('shortcut-unavailable');
     return this.shortcutRegistered;
+  }
+
+  /** Rebind the global capture shortcut at runtime (Settings remap). The
+   *  caller validates the accelerator; a failed re-register keeps the new
+   *  value surfaced via getState() with shortcutRegistered=false so the UI
+   *  can show the unavailable hint. */
+  setShortcut(accelerator: string): boolean {
+    if (this.disposed) return false;
+    if (accelerator === this.shortcut) return this.shortcutRegistered;
+    if (this.shortcutRegistered) {
+      this.dependencies.unregisterGlobalShortcut(this.shortcut);
+      this.shortcutRegistered = false;
+    }
+    this.shortcut = accelerator;
+    return this.registerShortcut();
   }
 
   setTarget(target: GianScreenshotTarget | null): void {
@@ -325,10 +354,12 @@ export class ScreenshotController {
     if (this.disposed) return Promise.resolve();
     if (this.warmUpPromise) return this.warmUpPromise;
     const displays = this.dependencies.listDisplays();
+    const windows = this.overlayWindowsFor(displays);
     this.warmUpPromise = Promise.all(
-      this.overlayWindowsFor(displays).map(window =>
-        window.loadFile(this.dependencies.overlayHtmlPath)),
-    ).then(() => undefined).finally(() => {
+      windows.map(window => window.loadFile(this.dependencies.overlayHtmlPath)),
+    ).then(() => {
+      for (const overlay of this.overlays.values()) overlay.loaded = true;
+    }).finally(() => {
       this.warmUpPromise = null;
     });
     return this.warmUpPromise;
@@ -360,6 +391,7 @@ export class ScreenshotController {
       target: this.target ? cloneTarget(this.target) : null,
       bindings: new Map(),
       windows: [],
+      painted: new Set(),
       cleaned: false,
       finishing: false,
     };
@@ -377,7 +409,22 @@ export class ScreenshotController {
       capture.stopWatchingDisplays = this.dependencies.watchDisplayChanges(() => {
         void this.abortCapture(capture, 'capture-failed');
       });
-      const sources = await this.dependencies.captureScreens(thumbnailSize);
+      const windows = this.overlayWindowsFor(displays);
+
+      // Capture the desktop and prepare the overlay pages concurrently: the
+      // system screen grab does not depend on the overlay, and loading the
+      // page (first capture only) does not depend on the grab.
+      const [sources] = await Promise.all([
+        this.dependencies.captureScreens(thumbnailSize),
+        (async () => {
+          const fresh = windows.filter(window => !this.isOverlayLoaded(window));
+          await Promise.all(fresh.map(window =>
+            window.loadFile(this.dependencies.overlayHtmlPath)));
+          for (const overlay of this.overlays.values()) {
+            if (windows.includes(overlay.window)) overlay.loaded = true;
+          }
+        })(),
+      ]);
       if (capture.cleaned) return { ok: false, error: capture.abortCode ?? 'capture-failed' };
       const sourceByDisplay = matchDisplaySources(displays, sources);
 
@@ -390,7 +437,6 @@ export class ScreenshotController {
       }
 
       let totalPngBytes = 0;
-      const windows = this.overlayWindowsFor(displays);
 
       for (const [index, display] of displays.entries()) {
         const source = sourceByDisplay.get(display.id)!;
@@ -409,8 +455,13 @@ export class ScreenshotController {
         });
       }
 
-      await Promise.all(capture.windows.map(window =>
-        window.loadFile(this.dependencies.overlayHtmlPath)));
+      // Reuse the warm-up page when possible: refresh it in place instead of
+      // paying a full loadFile (HTML/CSS/JS re-parse) on every capture.
+      for (const window of capture.windows) {
+        window.webContents.send('desktop:screenshot-overlay:refresh');
+      }
+
+      await this.waitForOverlaysPainted(capture);
       if (capture.cleaned) return { ok: false, error: capture.abortCode ?? 'capture-failed' };
 
       for (const window of capture.windows) window.showInactive();
@@ -445,6 +496,21 @@ export class ScreenshotController {
       targetLabel: capture.target?.label ?? '',
       clipboardOnly: capture.target === null,
     };
+  }
+
+  /** Called when an overlay renderer has decoded and drawn its frozen frame.
+   * `start()` waits for every bound overlay before showing them, so the
+   * capture appears without a black flash. */
+  markOverlayPainted(senderId: number): void {
+    const capture = this.active;
+    if (!capture || capture.cleaned || capture.finishing) return;
+    if (!capture.bindings.has(senderId)) return;
+    if (capture.painted.has(senderId)) return;
+    capture.painted.add(senderId);
+    if (capture.painted.size === capture.bindings.size) {
+      capture.paintedResolve?.();
+      capture.paintedResolve = undefined;
+    }
   }
 
   claimFromOverlay(senderId: number, captureId: unknown): boolean {
@@ -549,6 +615,17 @@ export class ScreenshotController {
     this.reportError(error);
   }
 
+  private async waitForOverlaysPainted(capture: ActiveCapture): Promise<void> {
+    if (capture.painted.size >= capture.bindings.size) return;
+    const pending = new Promise<void>(resolve => {
+      capture.paintedResolve = resolve;
+    });
+    const timedOut = new Promise<void>(resolve => {
+      setTimeout(resolve, OVERLAY_PAINT_TIMEOUT_MS);
+    });
+    await Promise.race([pending, timedOut]);
+  }
+
   private async cleanupCapture(
     capture: ActiveCapture,
     outcome: 'cancel' | 'success' | 'clipboard',
@@ -577,8 +654,14 @@ export class ScreenshotController {
     }
   }
 
-  private overlayWindowsFor(displays: readonly ScreenshotDisplay[]): ScreenshotOverlayWindow[] {
-    const activeIds = new Set(displays.map(display => display.id));
+  private isOverlayLoaded(window: ScreenshotOverlayWindow): boolean {
+    for (const overlay of this.overlays.values()) {
+      if (overlay.window === window) return overlay.loaded;
+    }
+    return false;
+  }
+
+  private overlayWindowsFor(displays: readonly ScreenshotDisplay[]): ScreenshotOverlayWindow[] {    const activeIds = new Set(displays.map(display => display.id));
     for (const [displayId, overlay] of this.overlays) {
       const display = displays.find(item => item.id === displayId);
       if (
@@ -597,7 +680,11 @@ export class ScreenshotController {
       const existing = this.overlays.get(display.id);
       if (existing) return existing.window;
       const window = this.createOverlayWindow(display);
-      this.overlays.set(display.id, { display: cloneDisplay(display), window });
+      this.overlays.set(display.id, {
+        display: cloneDisplay(display),
+        window,
+        loaded: false,
+      });
       return window;
     });
   }

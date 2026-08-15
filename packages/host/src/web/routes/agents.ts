@@ -151,6 +151,18 @@ export function registerAgentRoutes(
     }
   });
 
+  app.post('/api/agents/:id/check-proxy-update', async c => {
+    const id = executor(c.req.param('id'));
+    if (!id) return c.json({ error: 'unsupported agent' }, 404);
+    try {
+      // Read-only availability probe: no update lock, no filesystem or
+      // process side effects — the update itself stays on install-proxy.
+      return c.json(await options.agents.checkProxyUpdate(id));
+    } catch (error) {
+      return c.json(errorResponse(error), 502);
+    }
+  });
+
   app.post('/api/agents/:id/install-proxy', async c => {
     const id = executor(c.req.param('id'));
     if (!id) return c.json({ error: 'unsupported agent' }, 404);

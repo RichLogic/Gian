@@ -3,6 +3,7 @@ import type { Dispatch, RefObject, SetStateAction } from 'react';
 import type { Session } from '@gian/shared';
 import type { Mode } from '../components/Topbar.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
+import { comboFromEvent, comboMatches, useShortcuts } from '../shortcut-prefs.js';
 
 interface UseAppShortcutsInput {
   authenticated: boolean;
@@ -33,11 +34,14 @@ export function useAppShortcuts({
   disabled = false,
   setPaletteOpen,
 }: UseAppShortcutsInput): void {
+  // User-remappable bindings (defaults + settings.save overrides), kept in
+  // the module store so both effects re-subscribe on a remap.
+  const shortcuts = useShortcuts();
+
   useEffect(() => {
     if (disabled) return;
     function onKeyDown(event: KeyboardEvent) {
-      const mod = event.metaKey || event.ctrlKey;
-      if (mod && event.shiftKey && event.key.toLowerCase() === 'k') {
+      if (comboMatches(event, shortcuts.commandPalette)) {
         event.preventDefault();
         setPaletteOpen(open => !open);
       }
@@ -45,7 +49,7 @@ export function useAppShortcuts({
     }
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [disabled, paletteOpen, setPaletteOpen]);
+  }, [disabled, paletteOpen, setPaletteOpen, shortcuts]);
 
   useEffect(() => {
     if (!authenticated || disabled) return;
@@ -77,9 +81,16 @@ export function useAppShortcuts({
 
     function onKey(event: KeyboardEvent) {
       if (event.defaultPrevented) return;
-      const mod = event.metaKey || event.ctrlKey;
-      if (!mod || event.shiftKey || event.altKey) return;
-      if (event.key === 'Enter') {
+      // A remapped bare key (no mod) must not fire while the user is typing
+      // in an input/textarea/contenteditable — same guard the approval cards
+      // use for their letter shortcuts.
+      const combo = comboFromEvent(event);
+      if (combo && !combo.includes('mod')) {
+        const target = event.target as HTMLElement | null;
+        const tag = target?.tagName ?? '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+      }
+      if (comboMatches(event, shortcuts.steerOrSendNow)) {
         const session = activeSessionId
           ? sessionsRef.current?.find(candidate => candidate.id === activeSessionId)
           : undefined;
@@ -91,21 +102,20 @@ export function useAppShortcuts({
         ) {
           event.preventDefault();
           // Pending policy: the dispatcher's duplicate guard blocks repeat
-          // ⌘Enter while one drain is in flight.
+          // triggers while one drain is in flight.
           ops.dispatch('queue.sendNow', { sessionId: activeSessionId });
         }
         return;
       }
-      const key = event.key.toLowerCase();
-      if (key === 'u') {
+      if (comboMatches(event, shortcuts.markUnread)) {
         if (activeSessionId) {
           event.preventDefault();
           ops.dispatch('session.setUnread', { sessionId: activeSessionId, unread: true });
         }
-      } else if (key === 'j') {
+      } else if (comboMatches(event, shortcuts.createClaudeChild)) {
         event.preventDefault();
         spawnChild('claude');
-      } else if (key === 'k') {
+      } else if (comboMatches(event, shortcuts.createCodexChild)) {
         event.preventDefault();
         spawnChild('codex');
       }
@@ -122,5 +132,6 @@ export function useAppShortcuts({
     mode,
     ops,
     sessionsRef,
+    shortcuts,
   ]);
 }

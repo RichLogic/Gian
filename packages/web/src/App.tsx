@@ -1,6 +1,6 @@
 import { lazy, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { RunnerInfo, Session, Task, TerminalOptions, Workspace } from '@gian/shared';
-import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
+import { CHAT_FONT_FAMILY_STACKS, DEFAULT_CHAT_FONT_SIZE, DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 import { LocaleProvider } from './i18n/index.js';
 import { EN } from './i18n/en.js';
 import { ZH } from './i18n/zh.js';
@@ -66,6 +66,7 @@ import { useViewNav } from './controllers/use-view-nav.js';
 import { useWorkingTrees } from './controllers/use-working-trees.js';
 import { usePanelLayout } from './controllers/use-panel-layout.js';
 import { useAppZoom } from './display-prefs.js';
+import { setShortcutOverrides } from './shortcut-prefs.js';
 import { createOperationDispatcher, type OperationDispatcher } from './operations/dispatcher.js';
 import {
   desktopBridge,
@@ -482,12 +483,23 @@ export function App() {
     document.body.setAttribute('data-accent', displayConfig.accent);
     document.body.setAttribute('data-density', 'cozy');
     document.body.setAttribute('data-scale-chrome', 'md');
-    document.body.setAttribute('data-scale-chat', displayConfig.font_scale_chat);
     document.body.setAttribute('data-scale-code', 'md');
+    // Chat typography is concrete: a px size drives --zone-scale directly
+    // (base chat font is 14px) and the family fills --chat-font-family.
+    const chatScale = displayConfig.chat_font_size / DEFAULT_CHAT_FONT_SIZE;
+    document.body.style.setProperty('--chat-zone-scale', String(chatScale));
+    document.body.style.setProperty(
+      '--chat-font-family',
+      CHAT_FONT_FAMILY_STACKS[displayConfig.chat_font_family],
+    );
     document.documentElement.setAttribute('lang', displayConfig.locale);
     applyGianIconAppearance(displayConfig.theme, displayConfig.accent);
+    // Keep the remappable-shortcut store aligned with the rendered config
+    // (optimistic overlay applies in the same task; rollback reverts it).
+    setShortcutOverrides(displayConfig.shortcuts);
   }, [displayConfig?.theme, displayConfig?.accent,
-      displayConfig?.font_scale_chat, displayConfig?.locale]);
+      displayConfig?.chat_font_size, displayConfig?.chat_font_family,
+      displayConfig?.shortcuts, displayConfig?.locale]);
   // Latest active session id for stable event and unread handlers.
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
   useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);

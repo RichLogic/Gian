@@ -99,9 +99,17 @@
   width: 100%;
   background: transparent;
   border: 0;
-  border-bottom: 1px solid var(--hairline);
   outline: none;
   padding: 10px 12px 8px;
+  /* Divider between title and body: inset 12px on both sides (aligned with
+     the text padding) so it reads as a divider with breathing room, not an
+     edge-to-edge rule. Drawn as a background stripe so the line stops short
+     of the composer edges; --border (one step above --hairline) keeps it
+     perceptible on the tinted composer surface. */
+  background-image: linear-gradient(var(--border), var(--border));
+  background-size: calc(100% - 24px) 1px;
+  background-position: 12px 100%;
+  background-repeat: no-repeat;
   font: 500 var(--fz-13)/1.4 var(--font-sans);
   color: var(--text);
 }

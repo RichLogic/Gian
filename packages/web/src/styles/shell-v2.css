@@ -328,7 +328,9 @@
   width: max-content;
   max-width: min(480px, calc(100vw - 48px));
 }
-.session-menu .rule { height: 1px; margin: 4px 4px; }
+/* Group separator inside session/branch menus — inset on both sides so it
+   reads as a divider with breathing room, not an edge-to-edge rule. */
+.session-menu .rule { height: 1px; margin: 4px 10px; background: var(--hairline); }
 
 /* ---------- Dock (right icon strip) — frame surface ---------- */
 .dock {
@@ -479,7 +481,8 @@
 }
 .runner-pop-divider {
   height: 1px;
-  margin: 8px 0;
+  margin: 8px 10px;
+  background: var(--hairline);
   opacity: 0.6;
 }
 .runner-pop-list {

@@ -91,6 +91,12 @@ import {
   screenshotShortcutForPlatform,
   type ScreenPermissionStatus,
 } from './screenshot/controller.js';
+import {
+  DEFAULT_SCREENSHOT_PREFERENCES,
+  FileScreenshotPreferenceStore,
+  sanitizeScreenshotPreferences,
+  type ScreenshotPreferences,
+} from './screenshot-preferences.js';
 
 const { autoUpdater } = electronUpdater;
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -143,6 +149,8 @@ const desktopInstanceId = app.isPackaged ? randomUUID() : null;
 let mainWindow: BrowserWindow | null = null;
 let browserController: BrowserController | null = null;
 let screenshotController: ScreenshotController | null = null;
+let screenshotPreferencesStore: FileScreenshotPreferenceStore | null = null;
+let screenshotPreferences: ScreenshotPreferences = { ...DEFAULT_SCREENSHOT_PREFERENCES };
 let managedHost: ChildProcess | null = null;
 let githubAuthService: GitHubAuthService | null = null;
 let githubReleaseBroker: GitHubReleaseMetadataBroker | null = null;
@@ -559,6 +567,7 @@ async function showScreenPermissionHelp(): Promise<void> {
 function createScreenshotController(): ScreenshotController {
   return new ScreenshotController({
     platform: process.platform,
+    initialShortcut: screenshotPreferences.shortcut,
     overlayHtmlPath: screenshotHtmlPath,
     overlayPreloadPath: screenshotPreloadPath,
     listDisplays: () => screen.getAllDisplays().map(display => ({
@@ -591,6 +600,11 @@ function createScreenshotController(): ScreenshotController {
     prepareMainWindow: async () => {
       const window = mainWindow;
       if (!window || window.isDestroyed()) return null;
+      if (!screenshotPreferences.hideMainWindowDuringCapture) {
+        // Keep the Gian window visible: the frozen desktop then includes it,
+        // so the user can capture Gian's own surface too.
+        return { window, wasVisible: false, wasMinimized: false, wasFocused: false };
+      }
       const state: MainWindowCaptureState = {
         window,
         wasVisible: window.isVisible(),
@@ -771,7 +785,8 @@ function buildApplicationMenu(): void {
         },
         {
           label: 'Screenshot',
-          accelerator: screenshotShortcutForPlatform(process.platform),
+          accelerator: screenshotPreferences.shortcut
+            ?? screenshotShortcutForPlatform(process.platform),
           registerAccelerator: false,
           click: () => { void screenshotController?.start(); },
         },
@@ -1009,8 +1024,34 @@ ipcMain.handle('desktop:screenshot:get-state', event => {
   };
 });
 
+ipcMain.handle('desktop:screenshot:get-preferences', event => {
+  if (!isMainWindowSender(event.sender)) return null;
+  return { ...screenshotPreferences };
+});
+
+ipcMain.handle('desktop:screenshot:set-preferences', (event, value: unknown) => {
+  if (!isMainWindowSender(event.sender) || !screenshotPreferencesStore) {
+    return { ...screenshotPreferences };
+  }
+  const previousShortcut = screenshotPreferences.shortcut;
+  screenshotPreferences = sanitizeScreenshotPreferences(value, screenshotPreferences);
+  screenshotPreferencesStore.save(screenshotPreferences);
+  // A remap (or reset to the platform default, null) rebinds the live
+  // controller; the renderer learns the outcome through getState().
+  if (screenshotController && screenshotPreferences.shortcut !== previousShortcut) {
+    screenshotController.setShortcut(
+      screenshotPreferences.shortcut ?? screenshotShortcutForPlatform(process.platform),
+    );
+  }
+  return { ...screenshotPreferences };
+});
+
 ipcMain.handle('desktop:screenshot-overlay:get-capture', event =>
   screenshotController?.getOverlayCapture(event.sender.id) ?? null);
+
+ipcMain.on('desktop:screenshot-overlay:painted', event => {
+  screenshotController?.markOverlayPainted(event.sender.id);
+});
 
 ipcMain.handle('desktop:screenshot-overlay:claim', (event, captureId: unknown) =>
   screenshotController?.claimFromOverlay(event.sender.id, captureId) ?? false);
@@ -1237,6 +1278,10 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(async () => {
     installDesktopRequestBoundary();
     initializeDesktopServices();
+    screenshotPreferencesStore = new FileScreenshotPreferenceStore(
+      join(app.getPath('userData'), 'screenshot-preferences.json'),
+    );
+    screenshotPreferences = screenshotPreferencesStore.load();
     screenshotController = createScreenshotController();
     buildApplicationMenu();
     await ensureMainWindow();

@@ -83,6 +83,7 @@ export type OperationName =
   | 'settings.resetOnboarding'
   | 'agent.installCli'
   | 'agent.installProxy'
+  | 'agent.checkProxyUpdate'
   | 'agent.setCliPath'
   | 'agent.setProxyDefaults'
   | 'agent.pickCliPath'
@@ -167,6 +168,7 @@ export const OPERATION_POLICIES = {
   'settings.resetOnboarding': 'pending',
   'agent.installCli': 'pending',
   'agent.installProxy': 'pending',
+  'agent.checkProxyUpdate': 'pending',
   'agent.setCliPath': 'pending',
   'agent.setProxyDefaults': 'pending',
   'agent.pickCliPath': 'pending',

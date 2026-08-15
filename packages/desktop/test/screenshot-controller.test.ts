@@ -37,6 +37,12 @@ class FakeWebContents {
     return this;
   }
 
+  send(channel: string): void {
+    this.sentChannels.push(channel);
+  }
+
+  readonly sentChannels: string[] = [];
+
   crash(): void {
     this.destroyed = true;
     for (const listener of this.listeners.splice(0)) listener();
@@ -153,7 +159,9 @@ interface Harness {
 
 function createHarness(
   overrides: Partial<ScreenshotControllerDependencies> = {},
+  options: { autoPaint?: boolean } = {},
 ): Harness {
+  const autoPaint = options.autoPaint ?? true;
   const windows: FakeOverlayWindow[] = [];
   const captures: GianScreenshotCapture[] = [];
   const errors: string[] = [];
@@ -163,6 +171,7 @@ function createHarness(
   const permissionHelp = { count: 0 };
   const clipboardWrites: Uint8Array[] = [];
   let displayChangeListener: (() => void) | null = null;
+  let controller: ScreenshotController;
 
   const dependencies: ScreenshotControllerDependencies = {
     platform: 'darwin',
@@ -176,6 +185,22 @@ function createHarness(
     ],
     createOverlayWindow: options => {
       const window = new FakeOverlayWindow(100 + windows.length, options);
+      if (autoPaint) {
+        // Simulate the real renderer: after the page loads, and again after a
+        // refresh signal, it draws its frame and notifies the controller.
+        const originalLoad = window.loadFile.bind(window);
+        window.loadFile = async path => {
+          await originalLoad(path);
+          controller.markOverlayPainted(window.webContents.id);
+        };
+        const originalSend = window.webContents.send.bind(window.webContents);
+        window.webContents.send = channel => {
+          originalSend(channel);
+          if (channel === 'desktop:screenshot-overlay:refresh') {
+            controller.markOverlayPainted(window.webContents.id);
+          }
+        };
+      }
       windows.push(window);
       return window;
     },
@@ -204,8 +229,9 @@ function createHarness(
     ...overrides,
   };
 
+  controller = new ScreenshotController(dependencies);
   return {
-    controller: new ScreenshotController(dependencies),
+    controller,
     windows,
     captures,
     errors,
@@ -302,6 +328,45 @@ describe('screenshot controller lifecycle', () => {
     assert.deepEqual(registered.unregistered, [MAC_SCREENSHOT_SHORTCUT]);
   });
 
+  it('rebinds the global shortcut at runtime and reflects it in getState()', () => {
+    const harness = createHarness();
+    assert.equal(harness.controller.registerShortcut(), true);
+
+    assert.equal(harness.controller.setShortcut('Command+Shift+S'), true);
+    assert.deepEqual(harness.unregistered, [MAC_SCREENSHOT_SHORTCUT]);
+    assert.deepEqual(harness.shortcuts, [MAC_SCREENSHOT_SHORTCUT, 'Command+Shift+S']);
+    assert.deepEqual(harness.controller.getState(), {
+      shortcut: 'Command+Shift+S',
+      shortcutRegistered: true,
+      capturing: false,
+    });
+
+    // Rebinding to the same accelerator is a no-op (no unregister churn).
+    assert.equal(harness.controller.setShortcut('Command+Shift+S'), true);
+    assert.deepEqual(harness.unregistered, [MAC_SCREENSHOT_SHORTCUT]);
+
+    harness.controller.dispose();
+    assert.deepEqual(harness.unregistered, [MAC_SCREENSHOT_SHORTCUT, 'Command+Shift+S']);
+  });
+
+  it('surfaces a failed rebind as shortcutRegistered=false', () => {
+    const harness = createHarness({
+      registerGlobalShortcut: accelerator => accelerator === MAC_SCREENSHOT_SHORTCUT,
+    });
+    assert.equal(harness.controller.registerShortcut(), true);
+    assert.equal(harness.controller.setShortcut('Command+Shift+S'), false);
+    assert.equal(harness.controller.getState().shortcut, 'Command+Shift+S');
+    assert.equal(harness.controller.getState().shortcutRegistered, false);
+    assert.deepEqual(harness.errors, ['shortcut-unavailable']);
+  });
+
+  it('honors a persisted initial shortcut over the platform default', () => {
+    const harness = createHarness({ initialShortcut: 'Control+Command+Shift+4' });
+    assert.equal(harness.controller.registerShortcut(), true);
+    assert.deepEqual(harness.shortcuts, ['Control+Command+Shift+4']);
+    assert.equal(harness.controller.getState().shortcut, 'Control+Command+Shift+4');
+  });
+
   it('blocks capture when screen permission is denied', async () => {
     let captureCalls = 0;
     const harness = createHarness({
@@ -320,6 +385,30 @@ describe('screenshot controller lifecycle', () => {
     assert.equal(captureCalls, 0);
     assert.equal(harness.permissionHelp.count, 1);
     assert.deepEqual(harness.errors, ['permission-denied']);
+  });
+
+  it('waits for every overlay to draw before showing them, without a black flash', async () => {
+    const harness = createHarness({}, { autoPaint: false });
+    setSessionTarget(harness.controller);
+
+    const started = harness.controller.start();
+    // Neither overlay has painted yet; the capture must not resolve.
+    let settled = false;
+    void started.then(() => { settled = true; });
+    await nextTurn();
+    assert.equal(settled, false);
+    assert.ok(harness.windows.every(window => !window.shown));
+
+    // The first overlay paints alone; still waiting for the second.
+    harness.controller.markOverlayPainted(100);
+    await nextTurn();
+    assert.equal(settled, false);
+    assert.ok(harness.windows.every(window => !window.shown));
+
+    // The final overlay paints: capture resolves and windows show.
+    harness.controller.markOverlayPainted(101);
+    assert.deepEqual(await started, { ok: true });
+    assert.ok(harness.windows.every(window => window.shown));
   });
 
   it('binds each frozen source to its sender and lets only the first claimant complete', async () => {
@@ -428,6 +517,11 @@ describe('screenshot controller lifecycle', () => {
 
     setSessionTarget(harness.controller);
     assert.deepEqual(await harness.controller.start(), { ok: true });
+    // The page was loaded once during warm-up; the capture refreshed it in
+    // place instead of paying another loadFile.
+    assert.ok(harness.windows.every(window => window.loadCount === 1));
+    assert.ok(harness.windows.every(window =>
+      window.webContents.sentChannels.includes('desktop:screenshot-overlay:refresh')));
     const firstCapture = harness.controller.getOverlayCapture(100)!;
     assert.deepEqual(firstCapture.imagePngBytes, PNG_BYTES);
     assert.equal(harness.controller.claimFromOverlay(100, firstCapture.captureId), true);
@@ -439,7 +533,8 @@ describe('screenshot controller lifecycle', () => {
     setSessionTarget(harness.controller, 'session-2');
     assert.deepEqual(await harness.controller.start(), { ok: true });
     assert.equal(harness.windows.length, DISPLAYS.length);
-    assert.ok(harness.windows.every(window => window.loadCount === 3));
+    // Still no reload: reuse keeps the renderer alive across captures.
+    assert.ok(harness.windows.every(window => window.loadCount === 1));
     assert.equal(await harness.controller.cancelFromOverlay(100), true);
     harness.controller.dispose();
     assert.ok(harness.windows.every(window => window.destroyed));

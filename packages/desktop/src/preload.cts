@@ -5,6 +5,7 @@ import type {
   GianBrowserState,
   GianScreenshotCapture,
   GianScreenshotErrorCode,
+  GianScreenshotPreferences,
   GianScreenshotTarget,
 } from '@gian/shared';
 
@@ -30,6 +31,9 @@ contextBridge.exposeInMainWorld(
         ipcRenderer.invoke('desktop:screenshot:set-target', target),
       start: () => ipcRenderer.invoke('desktop:screenshot:start'),
       getState: () => ipcRenderer.invoke('desktop:screenshot:get-state'),
+      getPreferences: () => ipcRenderer.invoke('desktop:screenshot:get-preferences'),
+      setPreferences: (preferences: GianScreenshotPreferences) =>
+        ipcRenderer.invoke('desktop:screenshot:set-preferences', preferences),
       onCaptured: (listener: (capture: GianScreenshotCapture) => void) => {
         const handler = (_event: Electron.IpcRendererEvent, capture: GianScreenshotCapture) =>
           listener(capture);

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type {
   AgentInstallStatus,
@@ -41,6 +41,7 @@ import {
   type NewSessionScreenshotDraftAttachment,
 } from '../screenshot-drafts.js';
 import { publishScreenshotTarget, startScreenshotCapture } from '../screenshot-target.js';
+import { ImageZoomContext } from '../transcript/items.js';
 
 export { newSessionDraftStorageKey } from '../screenshot-drafts.js';
 
@@ -225,6 +226,9 @@ export function NewSessionView({
   onVerifyCreate?: () => void;
 }) {
   const t = useT();
+  // Thumbnail click opens the app-level ImageLightbox (App.tsx provides this
+  // context), same as the session Composer's pending-attachment chips.
+  const zoomImage = useContext(ImageZoomContext);
   const [last] = useState(() => readJson<StoredNewSession>(LAST_KEY));
   const [initial] = useState(() => {
     const usable = (id: string | undefined) =>
@@ -887,17 +891,24 @@ export function NewSessionView({
           </div>
           {screenshotAttachments.length > 0 && (
             <div className="composer-attachments" data-testid="new-session-screenshots">
-              {screenshotAttachments.map(attachment => (
+              {screenshotAttachments.map(attachment => {
+                const thumbUrl = screenshotPreviews[attachment.id];
+                return (
                 <div key={attachment.id} className="att-chip">
                   {isNativeImageMime(attachment.mime) ? (
-                    screenshotPreviews[attachment.id] ? (
-                      <span className="att-thumb-btn">
+                    thumbUrl ? (
+                      <button
+                        type="button"
+                        className="att-thumb-btn"
+                        title={attachment.name}
+                        onClick={() => zoomImage?.(thumbUrl, attachment.name)}
+                      >
                         <img
                           className="att-thumb"
-                          src={screenshotPreviews[attachment.id]}
+                          src={thumbUrl}
                           alt={attachment.name}
                         />
-                      </span>
+                      </button>
                     ) : (
                       <span className="spinner" aria-label={t('common.loading')} />
                     )
@@ -918,7 +929,8 @@ export function NewSessionView({
                     aria-label={t('composer.attachment.remove')}
                   >✕</button>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
           <div className="composer-bar">

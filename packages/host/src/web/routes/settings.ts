@@ -2,8 +2,15 @@ import type { Hono } from 'hono';
 import type {
   ExternalEditor,
   OpenAppPrefs,
+  ShortcutMap,
   SystemConfig,
   TerminalPreferences,
+} from '@gian/shared';
+import {
+  MAX_CHAT_FONT_SIZE,
+  MIN_CHAT_FONT_SIZE,
+  SHORTCUT_ACTIONS,
+  isValidShortcutCombo,
 } from '@gian/shared';
 import { loadConfig, saveConfig } from '../../storage/config.js';
 import type { Db } from '../../storage/db.js';
@@ -17,6 +24,9 @@ type EditableSettingsKey =
   | 'font_scale_chrome'
   | 'font_scale_chat'
   | 'font_scale_code'
+  | 'chat_font_size'
+  | 'chat_font_family'
+  | 'shortcuts'
   | 'terminal'
   | 'locale'
   | 'external_editors'
@@ -36,6 +46,7 @@ const MAX_TERMINAL_SHELL_LENGTH = 4_096;
 
 const EDITOR_FIELDS = new Set(['id', 'name', 'command', 'args']);
 const OPEN_APP_CATEGORIES = new Set(['code', 'web', 'images', 'pdf', 'other']);
+const SHORTCUT_ACTION_SET = new Set<string>(SHORTCUT_ACTIONS);
 const TERMINAL_FIELDS = new Set([
   'font_family',
   'font_size',
@@ -105,8 +116,24 @@ function parseEditors(value: unknown): ExternalEditor[] {
   });
 }
 
-function parseOpenApps(value: unknown): OpenAppPrefs {
+function parseShortcuts(value: unknown): ShortcutMap {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('shortcuts must be an object');
+  }
+  const parsed: ShortcutMap = {};
+  for (const [action, combo] of Object.entries(value)) {
+    if (!SHORTCUT_ACTION_SET.has(action)) {
+      throw new Error(`shortcuts.${action} is not a remappable action`);
+    }
+    if (!isValidShortcutCombo(combo)) {
+      throw new Error(`shortcuts.${action} is not a valid key combo`);
+    }
+    parsed[action as keyof ShortcutMap] = combo;
+  }
+  return parsed;
+}
+
+function parseOpenApps(value: unknown): OpenAppPrefs {  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('open_apps must be an object');
   }
   const parsed: Record<string, string> = {};
@@ -205,6 +232,21 @@ const SETTINGS_PATCH_SCHEMA = {
     field,
     ['sm', 'md', 'lg', 'xl'],
   ),
+  chat_font_size(value: unknown) {
+    if (typeof value !== 'number' || !Number.isInteger(value)
+      || value < MIN_CHAT_FONT_SIZE || value > MAX_CHAT_FONT_SIZE) {
+      throw new Error(
+        `chat_font_size must be an integer between ${MIN_CHAT_FONT_SIZE} and ${MAX_CHAT_FONT_SIZE}`,
+      );
+    }
+    return value;
+  },
+  chat_font_family: (value: unknown, field: string) => parseEnum(
+    value,
+    field,
+    ['system', 'manrope', 'serif', 'mono'],
+  ),
+  shortcuts: parseShortcuts,
   font_scale_code: (value: unknown, field: string) => parseEnum(
     value,
     field,

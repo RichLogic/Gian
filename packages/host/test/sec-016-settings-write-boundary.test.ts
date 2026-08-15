@@ -75,6 +75,15 @@ test('SEC-016 · malformed, non-object, wrong-type, and out-of-range bodies retu
       { density: 'dense' },
       { locale: 'fr' },
       { font_scale_chat: 'xxl' },
+      { chat_font_size: 11 },
+      { chat_font_size: 21 },
+      { chat_font_size: 13.5 },
+      { chat_font_family: 'papyrus' },
+      { shortcuts: [] },
+      { shortcuts: { bogusAction: 'mod+k' } },
+      { shortcuts: { commandPalette: 'mod+shift' } },
+      { shortcuts: { commandPalette: 'mod+shift+shift+k' } },
+      { shortcuts: { commandPalette: 'MOD+K' } },
       { external_editors: {} },
       { external_editors: [{ id: 'editor', name: '', command: 'code', args: [] }] },
       { external_editors: [{ id: 'editor', name: 'Code', command: 'code', args: [42] }] },
@@ -116,6 +125,12 @@ test('SEC-016 · retired appearance preferences normalize while current settings
       font_scale_chrome: 'sm',
       font_scale_chat: 'lg',
       font_scale_code: 'xl',
+      chat_font_size: 16,
+      chat_font_family: 'mono',
+      shortcuts: {
+        commandPalette: 'mod+shift+p',
+        approveOnce: 'o',
+      },
       locale: 'en',
       external_editors: [
         {
@@ -152,6 +167,9 @@ test('SEC-016 · retired appearance preferences normalize while current settings
       ...payload,
       density: 'cozy',
       font_scale_chrome: 'md',
+      // font_scale_chat joined the retired set when chat font became a
+      // concrete px size; the wire value is always md for older clients.
+      font_scale_chat: 'md',
       font_scale_code: 'md',
     } as const;
     for (const [key, value] of Object.entries(expected)) {
@@ -166,6 +184,9 @@ test('SEC-016 · retired appearance preferences normalize while current settings
     assert.equal(stored.font_scale_chrome, expected.font_scale_chrome);
     assert.equal(stored.font_scale_chat, expected.font_scale_chat);
     assert.equal(stored.font_scale_code, expected.font_scale_code);
+    assert.equal(stored.chat_font_size, payload.chat_font_size);
+    assert.equal(stored.chat_font_family, payload.chat_font_family);
+    assert.deepEqual(stored.shortcuts, payload.shortcuts);
     assert.equal(stored.locale, payload.locale);
     assert.deepEqual(stored.external_editors, payload.external_editors);
     assert.deepEqual(stored.open_apps, payload.open_apps);

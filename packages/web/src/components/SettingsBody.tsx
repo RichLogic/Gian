@@ -2,15 +2,24 @@ import { useEffect, useRef, useState } from 'react';
 import type {
   AgentInstallStatus,
   AgentProxyDefaults,
+  AgentProxyUpdateCheck,
+  ChatFontFamily,
   ExternalEditor,
+  GianScreenshotPreferences,
   GianScreenshotState,
   OpenFileCategory,
   ProxyCapabilities,
+  ShortcutAction,
   SystemConfig,
   TerminalOptions,
   TerminalPreferences,
 } from '@gian/shared';
-import { DEFAULT_TERMINAL_PREFERENCES, THEME_DEFAULT_ACCENT } from '@gian/shared';
+import {
+  DEFAULT_TERMINAL_PREFERENCES,
+  MAX_CHAT_FONT_SIZE,
+  MIN_CHAT_FONT_SIZE,
+  THEME_DEFAULT_ACCENT,
+} from '@gian/shared';
 import {
   loadAgents,
   loadProxyCapabilities,
@@ -24,6 +33,15 @@ import {
   useMinimapEnabled,
   useZoomPercent,
 } from '../display-prefs.js';
+import {
+  acceleratorDisplayParts,
+  acceleratorFromEvent,
+  comboDisplayParts,
+  comboFromEvent,
+  isShortcutCustomized,
+  shortcutConflict,
+  useShortcuts,
+} from '../shortcut-prefs.js';
 import { desktopBridge } from '../desktop-bridge.js';
 import { confirm, toast } from '../feedback.js';
 import { agentEntityKey } from '../operations/agents.js';
@@ -50,17 +68,29 @@ const OPEN_CATEGORIES: Array<{ key: OpenFileCategory; labelKey: string }> = [
   { key: 'pdf', labelKey: 'settings.openapps.pdf' },
   { key: 'other', labelKey: 'settings.openapps.other' },
 ];
-import {
-  browserNotificationPermission,
-  loadNotificationPrefs,
-  nativeNotificationPreferencesForMigration,
-  requestDesktopNotificationPermission,
-  saveNotificationPrefs,
-  type BrowserNotificationPermission,
-  type NotificationPrefs,
-} from '../notifications.js';
 
-export type NavKey = 'appearance' | 'terminal' | 'notifications' | 'updates' | 'shortcuts' | 'executors' | 'openwith' | 'account';
+export type NavKey = 'updates' | 'appearance' | 'chat' | 'terminal' | 'shortcuts' | 'executors' | 'openwith' | 'account';
+
+/** Dropdown option lists. Zoom uses the same step lattice the slider
+ *  exposed (and Cmd+/- still snaps to); chat font sizes are concrete px. */
+const ZOOM_OPTIONS: readonly number[] = (() => {
+  const options: number[] = [];
+  for (let p = MIN_ZOOM_PERCENT; p <= MAX_ZOOM_PERCENT; p += ZOOM_STEP_PERCENT) options.push(p);
+  return options;
+})();
+
+const CHAT_FONT_SIZE_OPTIONS: readonly number[] = (() => {
+  const options: number[] = [];
+  for (let px = MIN_CHAT_FONT_SIZE; px <= MAX_CHAT_FONT_SIZE; px += 1) options.push(px);
+  return options;
+})();
+
+const CHAT_FONT_FAMILY_LABEL_KEYS: Record<ChatFontFamily, string> = {
+  system: 'settings.chat.font.system',
+  manrope: 'settings.chat.font.manrope',
+  serif: 'settings.chat.font.serif',
+  mono: 'settings.chat.font.mono',
+};
 
 /** Left-nav groups (locator). `labelKey` is an i18n key; `items` map a
  *  section anchor id (`sec-<key>`) to its nav label key. */
@@ -71,10 +101,10 @@ const NAV_GROUPS: Array<{
   {
     labelKey: 'settings.nav.group.preferences',
     items: [
-      ['appearance', 'settings.section.appearance'],
-      ['terminal', 'settings.section.terminal'],
-      ['notifications', 'settings.section.notifications'],
       ['updates', 'settings.section.updates'],
+      ['appearance', 'settings.section.appearance'],
+      ['chat', 'settings.section.chat'],
+      ['terminal', 'settings.section.terminal'],
       ['shortcuts', 'settings.section.shortcuts'],
     ],
   },
@@ -169,6 +199,8 @@ function SettingsBodyInner({
   const browserAvailable = !!desktopBridge()?.browser;
   const screenshotAvailable = !!desktopBridge()?.screenshot;
   const [screenshotState, setScreenshotState] = useState<GianScreenshotState | null>(null);
+  const [screenshotPreferences, setScreenshotPreferences] =
+    useState<GianScreenshotPreferences | null>(null);
   const clearingBrowserData = useOperationPending(BROWSER_PROFILE_ENTITY_KEY, 'browser.clearData');
   const minimapOn = useMinimapEnabled();
   const zoomPercent = useZoomPercent();
@@ -186,6 +218,9 @@ function SettingsBodyInner({
     let alive = true;
     void screenshot.getState().then(state => {
       if (alive) setScreenshotState(state);
+    });
+    void screenshot.getPreferences().then(preferences => {
+      if (alive) setScreenshotPreferences(preferences);
     });
     return () => { alive = false; };
   }, [activeSection]);
@@ -226,19 +261,19 @@ function SettingsBodyInner({
             <dl className="kv-grid">
               <dt>{t('settings.appearance.theme')}</dt>
               <dd>
-                <div className="theme-row">
-                  {([
-                    ['light', 'settings.theme.light', ['oklch(0.955 0.004 280)', 'oklch(0.935 0.005 280)', 'oklch(0.22 0.02 280)']],
-                    ['warm', 'settings.theme.warm', ['oklch(0.955 0.020 80)', 'oklch(0.925 0.022 78)', 'oklch(0.30 0.04 55)']],
-                    ['dark', 'settings.theme.dark', ['oklch(0.140 0.004 265)', 'oklch(0.269 0.006 271)', 'oklch(0.910 0.004 271)']],
-                  ] as const).map(([key, labelKey, swatches]) => (
-                    <button key={key} className={`theme-chip ${config.theme === key ? 'active' : ''}`}
-                            onClick={() => patch({ theme: key, accent: THEME_DEFAULT_ACCENT[key] })}>
-                      <div className="swatches">{swatches.map((c, i) => <i key={i} style={{ background: c }} />)}</div>
-                      <div className="name">{t(labelKey)}</div>
-                    </button>
-                  ))}
-                </div>
+                <select
+                  className="select"
+                  aria-label={t('settings.appearance.theme')}
+                  value={config.theme}
+                  onChange={e => {
+                    const theme = e.target.value as SystemConfig['theme'];
+                    patch({ theme, accent: THEME_DEFAULT_ACCENT[theme] });
+                  }}
+                >
+                  <option value="light">{t('settings.theme.light')}</option>
+                  <option value="warm">{t('settings.theme.warm')}</option>
+                  <option value="dark">{t('settings.theme.dark')}</option>
+                </select>
               </dd>
               <dt>{t('settings.appearance.accent')}</dt>
               <dd>
@@ -264,61 +299,68 @@ function SettingsBodyInner({
               </dd>
               <dt>{t('settings.appearance.language')}</dt>
               <dd>
-                <div className="segm">
-                  {([
-                    ['zh-CN', 'settings.language.zh'],
-                    ['en', 'settings.language.en'],
-                  ] as const).map(([locale, labelKey]) => (
-                    <button
-                      key={locale}
-                      className={`segm-item ${config.locale === locale ? 'active' : ''}`}
-                      onClick={() => patch({ locale })}
-                    >
-                      {t(labelKey)}
-                    </button>
-                  ))}
-                </div>
+                <select
+                  className="select"
+                  aria-label={t('settings.appearance.language')}
+                  value={config.locale}
+                  onChange={e => patch({ locale: e.target.value as SystemConfig['locale'] })}
+                >
+                  <option value="zh-CN">{t('settings.language.zh')}</option>
+                  <option value="en">{t('settings.language.en')}</option>
+                </select>
               </dd>
               <dt>{t('settings.appearance.zoom')}</dt>
               <dd>
-                <div className="appearance-zoom">
-                  <button
-                    type="button"
-                    aria-label={t('settings.appearance.zoomOut')}
-                    disabled={zoomPercent <= MIN_ZOOM_PERCENT}
-                    onClick={() => setZoomPercent(zoomPercent - ZOOM_STEP_PERCENT)}
-                  >−</button>
-                  <input
-                    type="range"
-                    aria-label={t('settings.appearance.zoom')}
-                    min={MIN_ZOOM_PERCENT}
-                    max={MAX_ZOOM_PERCENT}
-                    step={ZOOM_STEP_PERCENT}
-                    value={zoomPercent}
-                    onChange={e => setZoomPercent(Number(e.currentTarget.value))}
-                  />
-                  <output>{zoomPercent}%</output>
-                  <button
-                    type="button"
-                    aria-label={t('settings.appearance.zoomIn')}
-                    disabled={zoomPercent >= MAX_ZOOM_PERCENT}
-                    onClick={() => setZoomPercent(zoomPercent + ZOOM_STEP_PERCENT)}
-                  >+</button>
-                </div>
-              </dd>
-              <dt>{t('settings.appearance.fontTranscript')}</dt>
-              <dd>
-                <div className="segm">
-                  {(['sm', 'md', 'lg', 'xl'] as const).map(s => (
-                    <button key={s} className={`segm-item ${config.font_scale_chat === s ? 'active' : ''}`}
-                            onClick={() => patch({ font_scale_chat: s })}>
-                      {s.toUpperCase()}
-                    </button>
+                <select
+                  className="select"
+                  aria-label={t('settings.appearance.zoom')}
+                  value={zoomPercent}
+                  onChange={e => setZoomPercent(Number(e.target.value))}
+                >
+                  {ZOOM_OPTIONS.map(percent => (
+                    <option key={percent} value={percent}>{percent}%</option>
                   ))}
-                </div>
+                </select>
               </dd>
-              <dt>{t('settings.appearance.fontFamily')}</dt>
-              <dd className="mono" style={{ color: 'var(--text-3)' }}>Instrument Sans · JetBrains Mono</dd>
+            </dl>
+          </div>
+        </section>
+        )}
+
+        {/* ── Chat ── */}
+        {activeSection === 'chat' && (
+        <section className="s2-section">
+          <h3 className="s2-sectiontitle">{t('settings.section.chat')}</h3>
+          <div className="s2-card">
+            <dl className="kv-grid">
+              <dt>{t('settings.chat.fontSize')}</dt>
+              <dd>
+                <select
+                  className="select"
+                  aria-label={t('settings.chat.fontSize')}
+                  value={config.chat_font_size}
+                  onChange={e => patch({ chat_font_size: Number(e.target.value) })}
+                >
+                  {CHAT_FONT_SIZE_OPTIONS.map(size => (
+                    <option key={size} value={size}>{size}px</option>
+                  ))}
+                </select>
+              </dd>
+              <dt>{t('settings.chat.fontFamily')}</dt>
+              <dd>
+                <select
+                  className="select"
+                  aria-label={t('settings.chat.fontFamily')}
+                  value={config.chat_font_family}
+                  onChange={e => patch({ chat_font_family: e.target.value as ChatFontFamily })}
+                >
+                  {(Object.keys(CHAT_FONT_FAMILY_LABEL_KEYS) as ChatFontFamily[]).map(family => (
+                    <option key={family} value={family}>
+                      {t(CHAT_FONT_FAMILY_LABEL_KEYS[family])}
+                    </option>
+                  ))}
+                </select>
+              </dd>
               <dt>{t('settings.display.minimap')}</dt>
               <dd>
                 <label className="switch">
@@ -359,16 +401,6 @@ function SettingsBodyInner({
         </section>
         )}
 
-        {/* ── Notifications ── */}
-        {activeSection === 'notifications' && (
-        <section className="s2-section">
-          <h3 className="s2-sectiontitle">{t('settings.section.notifications')}</h3>
-          <div className="s2-card">
-            <NotificationsBlock />
-          </div>
-        </section>
-        )}
-
         {/* ── Updates ── */}
         {activeSection === 'updates' && (
         <section className="s2-section">
@@ -393,17 +425,46 @@ function SettingsBodyInner({
                       <span className="muted"> · {t('screenshot.shortcutUnavailable')}</span>
                     )}
                   </dt>
-                  <dd><kbd>⌃</kbd><kbd>⌘</kbd><kbd>A</kbd></dd>
+                  <dd>
+                    <ScreenshotShortcutEditor
+                      state={screenshotState}
+                      preferences={screenshotPreferences}
+                      onState={setScreenshotState}
+                      onPreferences={setScreenshotPreferences}
+                    />
+                  </dd>
+                  <dt>{t('settings.screenshot.hideWindow')}</dt>
+                  <dd>
+                    <label className="switch">
+                      <input
+                        type="checkbox"
+                        aria-label={t('settings.screenshot.hideWindow')}
+                        checked={screenshotPreferences?.hideMainWindowDuringCapture ?? false}
+                        onChange={event => {
+                          const next: GianScreenshotPreferences = {
+                            shortcut: screenshotPreferences?.shortcut ?? null,
+                            hideMainWindowDuringCapture: event.target.checked,
+                          };
+                          setScreenshotPreferences(next);
+                          void desktopBridge()?.screenshot?.setPreferences(next);
+                        }}
+                      />
+                    </label>
+                  </dd>
+                  {/* The hint is a long sentence; in the auto-sized keycap
+                      column it would inflate the track and squeeze every
+                      label. Span both columns so it wraps freely. */}
+                  <dd className="shortcut-hint">{t('settings.screenshot.hideWindowHint')}</dd>
                 </>
               )}
-              <dt>{t('settings.shortcuts.commandPalette')}</dt><dd><kbd>⌘</kbd><kbd>⇧</kbd><kbd>K</kbd></dd>
-              <dt>{t('settings.shortcuts.steerOrSendNow')}</dt><dd><kbd>⌘</kbd><kbd>⏎</kbd></dd>
-              <dt>{t('settings.shortcuts.createClaudeChild')}</dt><dd><kbd>⌘</kbd><kbd>J</kbd></dd>
-              <dt>{t('settings.shortcuts.createCodexChild')}</dt><dd><kbd>⌘</kbd><kbd>K</kbd></dd>
-              <dt>{t('settings.shortcuts.markUnread')}</dt><dd><kbd>⌘</kbd><kbd>U</kbd></dd>
-              <dt>{t('settings.shortcuts.approveOnce')}</dt><dd><kbd>A</kbd></dd>
-              <dt>{t('settings.shortcuts.approveSession')}</dt><dd><kbd>⇧</kbd><kbd>A</kbd></dd>
-              <dt>{t('settings.shortcuts.decline')}</dt><dd><kbd>D</kbd></dd>
+              {SHORTCUT_ROWS.map(action => (
+                <ShortcutRow
+                  key={action}
+                  action={action}
+                  shortcuts={config.shortcuts}
+                  onPatch={patch}
+                />
+              ))}
             </dl>
           </div>
         </section>
@@ -794,6 +855,11 @@ function AgentInstallBlock() {
   const [agents, setAgents] = useState<AgentInstallStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  /** Per-executor result of the last manual Proxy update check (issue #86).
+   *  Not persisted; a successful install clears the stale entry. */
+  const [proxyChecks, setProxyChecks] = useState<
+    Partial<Record<string, AgentProxyUpdateCheck>>
+  >({});
 
   async function refresh() {
     setLoading(true);
@@ -836,6 +902,33 @@ function AgentInstallBlock() {
       && !(await run('agent.installProxy', { executor: agent.id }))) return;
     if (agent.cli.state !== 'ready') {
       await run('agent.installCli', { executor: agent.id });
+    }
+  }
+
+  /** Install (or update) the Proxy, then drop the now-stale check result. */
+  async function installProxy(agent: AgentInstallStatus) {
+    if (await run('agent.installProxy', { executor: agent.id })) {
+      setProxyChecks(previous => {
+        const next = { ...previous };
+        delete next[agent.id];
+        return next;
+      });
+    }
+  }
+
+  /** Read-only check against the release repository; the confirmed run's
+   *  result is the check payload, shown inline on the row. */
+  async function checkProxyUpdate(agent: AgentInstallStatus) {
+    setError('');
+    const dispatched = dispatch('agent.checkProxyUpdate', { executor: agent.id });
+    const settled: OperationRun = await waitForRunSettle(store, dispatched.id);
+    if (settled.phase === 'confirmed') {
+      setProxyChecks(previous => ({
+        ...previous,
+        [agent.id]: settled.result as AgentProxyUpdateCheck,
+      }));
+    } else {
+      setError(settled.error ?? 'Agent operation failed');
     }
   }
 
@@ -885,7 +978,9 @@ function AgentInstallBlock() {
           agent={agent}
           onSetup={() => { void setup(agent); }}
           onInstallCli={() => { void run('agent.installCli', { executor: agent.id }); }}
-          onInstallProxy={() => { void run('agent.installProxy', { executor: agent.id }); }}
+          onInstallProxy={() => { void installProxy(agent); }}
+          onCheckProxyUpdate={() => { void checkProxyUpdate(agent); }}
+          proxyCheck={proxyChecks[agent.id]}
           onSetPath={path => changeCliPath(agent, path)}
           onSetDefaults={defaults => { void run('agent.setProxyDefaults', { executor: agent.id, defaults }); }}
           onPickPath={async () => {
@@ -907,6 +1002,8 @@ function AgentInstallRow({
   onSetup,
   onInstallCli,
   onInstallProxy,
+  onCheckProxyUpdate,
+  proxyCheck,
   onSetPath,
   onSetDefaults,
   onPickPath,
@@ -915,6 +1012,9 @@ function AgentInstallRow({
   onSetup: () => void;
   onInstallCli: () => void;
   onInstallProxy: () => void;
+  onCheckProxyUpdate: () => void;
+  /** Last manual update-check result for this row, if any (issue #86). */
+  proxyCheck: AgentProxyUpdateCheck | undefined;
   onSetPath: (path: string | null) => Promise<boolean>;
   onSetDefaults: (defaults: Partial<AgentProxyDefaults>) => void;
   onPickPath: () => Promise<string | null>;
@@ -1061,6 +1161,40 @@ function AgentInstallRow({
                 : 'settings.agents.installProxy')}
             </button>
           )}
+          {/* Manual update check (issue #86): only managed github-release
+              proxies have an update channel; development trees never do. */}
+          {agent.proxy.state === 'ready' && agent.proxy.source === 'github-release' && (
+            <>
+              <button
+                className="btn xs secondary"
+                type="button"
+                disabled={busy}
+                data-testid={`${agent.id}-proxy-check-update`}
+                onClick={onCheckProxyUpdate}
+              >
+                {t('settings.agents.checkProxyUpdate')}
+              </button>
+              {proxyCheck?.managed && (proxyCheck.updateAvailable ? (
+                <span className="hint" data-testid={`${agent.id}-proxy-update-available`}>
+                  {t('settings.agents.proxyUpdateAvailable')
+                    .replace('{version}', proxyCheck.latestVersion ?? '')}
+                  {' '}
+                  <button
+                    className="btn xs secondary"
+                    type="button"
+                    disabled={busy}
+                    onClick={onInstallProxy}
+                  >
+                    {t('settings.agents.updateProxy')}
+                  </button>
+                </span>
+              ) : (
+                <span className="hint" data-testid={`${agent.id}-proxy-up-to-date`}>
+                  {t('settings.agents.proxyUpToDate')}
+                </span>
+              ))}
+            </>
+          )}
         </dd>
         {(models.length > 0 || thinkingLevels.length > 0 || modes.length > 0 || capabilityError) && (
           <>
@@ -1150,128 +1284,6 @@ function AgentInstallRow({
   );
 }
 
-function NotificationsBlock() {
-  const t = useT();
-  const [prefs, setPrefs] = useState<NotificationPrefs>(() => loadNotificationPrefs());
-  const [permission, setPermission] = useState<BrowserNotificationPermission>(() => browserNotificationPermission());
-  const [nativeFailure, setNativeFailure] = useState(false);
-  const nativeNotifications = desktopBridge()?.notifications;
-  const desktopEnabled = prefs.desktop && permission === 'granted';
-  const unavailable = permission === 'unsupported' || permission === 'denied';
-
-  useEffect(() => {
-    if (!nativeNotifications?.native) return;
-    const unsubscribe = nativeNotifications.onStateChanged(state => {
-      setNativeFailure(state.lastError === 'delivery_failed');
-    });
-    // One-time migration of the renderer preference shape used before 0.4.3.
-    // Subsequent writes keep both stores aligned for browser fallback.
-    void nativeNotifications.updatePreferences(
-      nativeNotificationPreferencesForMigration(),
-    ).then(state => {
-      setNativeFailure(state.lastError === 'delivery_failed');
-    });
-    return unsubscribe;
-  }, [nativeNotifications]);
-
-  function patch(partial: Partial<NotificationPrefs>) {
-    setPrefs(prev => {
-      const next = saveNotificationPrefs({ ...prev, ...partial });
-      void nativeNotifications?.updatePreferences(next);
-      return next;
-    });
-  }
-
-  async function setDesktop(enabled: boolean) {
-    if (!enabled) {
-      patch({ desktop: false });
-      return;
-    }
-    const nextPermission = await requestDesktopNotificationPermission();
-    setPermission(nextPermission);
-    patch({ desktop: nextPermission === 'granted' });
-  }
-
-  const statusText =
-    nativeFailure
-      ? t('settings.notifications.status.deliveryFailed')
-      : permission === 'granted'
-      ? t('settings.notifications.status.enabled')
-      : permission === 'denied'
-        ? t('settings.notifications.status.blocked')
-        : permission === 'unsupported'
-          ? t('settings.notifications.status.unsupported')
-          : t('settings.notifications.status.allow');
-
-  return (
-    <dl className="kv-grid">
-      <dt>{t('settings.notifications.desktop')}</dt>
-      <dd>
-        <label className="switch">
-          <input
-            type="checkbox"
-            checked={desktopEnabled}
-            disabled={unavailable}
-            onChange={e => { void setDesktop(e.target.checked); }}
-          />
-          <span>{statusText}</span>
-        </label>
-        {(nativeFailure || permission === 'denied') && nativeNotifications && (
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={() => { void nativeNotifications.openSystemSettings(); }}
-          >
-            {t('settings.notifications.openSettings')}
-          </button>
-        )}
-      </dd>
-      <dt>{t('settings.notifications.events')}</dt>
-      <dd>
-        <label className="switch">
-          <input
-            type="checkbox"
-            checked={prefs.sessionDone}
-            disabled={!desktopEnabled}
-            onChange={e => patch({ sessionDone: e.target.checked })}
-          />
-          <span>{t('settings.notifications.sessionDone')}</span>
-        </label>
-        <label className="switch">
-          <input
-            type="checkbox"
-            checked={prefs.approvalNeeded}
-            disabled={!desktopEnabled}
-            onChange={e => patch({ approvalNeeded: e.target.checked })}
-          />
-          <span>{t('settings.notifications.approvalNeeded')}</span>
-        </label>
-        <label className="switch">
-          <input
-            type="checkbox"
-            checked={prefs.errors}
-            disabled={!desktopEnabled}
-            onChange={e => patch({ errors: e.target.checked })}
-          />
-          <span>{t('settings.notifications.error')}</span>
-        </label>
-      </dd>
-      <dt>{t('settings.notifications.sound')}</dt>
-      <dd>
-        <label className="switch">
-          <input
-            type="checkbox"
-            checked={prefs.sound}
-            disabled={!desktopEnabled}
-            onChange={e => patch({ sound: e.target.checked })}
-          />
-          <span>{t('settings.notifications.chime')}</span>
-        </label>
-      </dd>
-    </dl>
-  );
-}
-
 function UpdatesBlock() {
   const t = useT();
   const desktop = desktopBridge();
@@ -1355,6 +1367,208 @@ function UpdatesBlock() {
         <p className="s2-help">{t('settings.updates.help')}</p>
       </dd>
     </dl>
+  );
+}
+
+/** In-app remappable rows, in display order. */
+const SHORTCUT_ROWS: readonly ShortcutAction[] = [
+  'commandPalette',
+  'steerOrSendNow',
+  'createClaudeChild',
+  'createCodexChild',
+  'markUnread',
+  'approveOnce',
+  'approveSession',
+  'decline',
+];
+
+const SHORTCUT_LABEL_KEYS: Record<ShortcutAction, string> = {
+  commandPalette: 'settings.shortcuts.commandPalette',
+  steerOrSendNow: 'settings.shortcuts.steerOrSendNow',
+  createClaudeChild: 'settings.shortcuts.createClaudeChild',
+  createCodexChild: 'settings.shortcuts.createCodexChild',
+  markUnread: 'settings.shortcuts.markUnread',
+  approveOnce: 'settings.shortcuts.approveOnce',
+  approveSession: 'settings.shortcuts.approveSession',
+  decline: 'settings.shortcuts.decline',
+};
+
+function KeycapCombo({ combo }: { combo: string }) {
+  return (
+    <span className="keycap-combo">
+      {comboDisplayParts(combo).map((part, index) => <kbd key={index}>{part}</kbd>)}
+    </span>
+  );
+}
+
+function KeycapAccelerator({ accelerator }: { accelerator: string }) {
+  return (
+    <span className="keycap-combo">
+      {acceleratorDisplayParts(accelerator).map((part, index) => <kbd key={index}>{part}</kbd>)}
+    </span>
+  );
+}
+
+/** One remappable in-app shortcut row. Click the combo to arm capture; the
+ *  next keydown becomes the binding (Esc cancels). A conflict with another
+ *  action is rejected inline — two actions never share a combo. */
+function ShortcutRow({
+  action,
+  shortcuts,
+  onPatch,
+}: {
+  action: ShortcutAction;
+  shortcuts: SystemConfig['shortcuts'];
+  onPatch: (partial: Partial<SystemConfig>) => void;
+}) {
+  const t = useT();
+  const resolved = useShortcuts();
+  const combo = resolved[action];
+  const [capturing, setCapturing] = useState(false);
+  const [conflict, setConflict] = useState<ShortcutAction | null>(null);
+
+  useEffect(() => {
+    if (!capturing) return;
+    function onKeyDown(event: KeyboardEvent) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === 'Escape') {
+        setCapturing(false);
+        return;
+      }
+      const next = comboFromEvent(event);
+      if (!next) return; // pure modifier press — keep listening
+      const clash = shortcutConflict(next, action);
+      if (clash) {
+        setConflict(clash);
+        setCapturing(false);
+        return;
+      }
+      setConflict(null);
+      setCapturing(false);
+      onPatch({ shortcuts: { ...(shortcuts ?? {}), [action]: next } });
+    }
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [capturing, action, shortcuts, onPatch]);
+
+  return (
+    <>
+      <dt>{t(SHORTCUT_LABEL_KEYS[action])}</dt>
+      <dd>
+        <button
+          type="button"
+          className={`shortcut-capture ${capturing ? 'capturing' : ''}`}
+          aria-label={t(SHORTCUT_LABEL_KEYS[action])}
+          onClick={() => { setCapturing(true); setConflict(null); }}
+        >
+          {capturing
+            ? <span className="shortcut-listening">{t('settings.shortcuts.listening')}</span>
+            : <KeycapCombo combo={combo} />}
+        </button>
+        {isShortcutCustomized(action) && (
+          <button
+            type="button"
+            className="shortcut-reset"
+            aria-label={t('settings.shortcuts.reset')}
+            title={t('settings.shortcuts.reset')}
+            onClick={() => {
+              setConflict(null);
+              const next = { ...(shortcuts ?? {}) };
+              delete next[action];
+              onPatch({ shortcuts: next });
+            }}
+          >
+            ↺
+          </button>
+        )}
+      </dd>
+      {/* Conflict text is a sentence, not a keycap: in the auto-sized value
+          column it would inflate the track and squeeze the label. Give it a
+          full-width row instead. */}
+      {conflict && (
+        <dd className="shortcut-conflict" role="alert">
+          {t('settings.shortcuts.conflict').replace('{action}', t(SHORTCUT_LABEL_KEYS[conflict]))}
+        </dd>
+      )}
+    </>
+  );
+}
+
+/** The global screenshot shortcut lives in the desktop process (Electron
+ *  globalShortcut), not the Host config — it round-trips through the
+ *  screenshot preferences bridge instead of settings.save. */
+function ScreenshotShortcutEditor({
+  state,
+  preferences,
+  onState,
+  onPreferences,
+}: {
+  state: GianScreenshotState | null;
+  preferences: GianScreenshotPreferences | null;
+  onState: (state: GianScreenshotState) => void;
+  onPreferences: (preferences: GianScreenshotPreferences) => void;
+}) {
+  const t = useT();
+  const [capturing, setCapturing] = useState(false);
+  const activeAccelerator = preferences?.shortcut ?? state?.shortcut ?? '';
+  const customized = preferences?.shortcut != null;
+
+  async function applyShortcut(accelerator: string | null) {
+    const screenshot = desktopBridge()?.screenshot;
+    if (!screenshot || !preferences) return;
+    const next: GianScreenshotPreferences = { ...preferences, shortcut: accelerator };
+    onPreferences(next);
+    const saved = await screenshot.setPreferences(next);
+    onPreferences(saved);
+    onState(await screenshot.getState());
+  }
+
+  useEffect(() => {
+    if (!capturing) return;
+    function onKeyDown(event: KeyboardEvent) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === 'Escape') {
+        setCapturing(false);
+        return;
+      }
+      const accelerator = acceleratorFromEvent(event);
+      if (!accelerator) return;
+      // A global shortcut must carry a modifier — a bare letter would steal
+      // that key from every application.
+      if (!accelerator.includes('+')) return;
+      setCapturing(false);
+      void applyShortcut(accelerator);
+    }
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  });
+
+  return (
+    <>
+      <button
+        type="button"
+        className={`shortcut-capture ${capturing ? 'capturing' : ''}`}
+        aria-label={t('settings.shortcuts.screenshot')}
+        onClick={() => setCapturing(true)}
+      >
+        {capturing
+          ? <span className="shortcut-listening">{t('settings.shortcuts.listening')}</span>
+          : <KeycapAccelerator accelerator={activeAccelerator} />}
+      </button>
+      {customized && (
+        <button
+          type="button"
+          className="shortcut-reset"
+          aria-label={t('settings.shortcuts.reset')}
+          title={t('settings.shortcuts.reset')}
+          onClick={() => { void applyShortcut(null); }}
+        >
+          ↺
+        </button>
+      )}
+    </>
   );
 }
 

@@ -280,6 +280,85 @@ export type Accent =
 
 export type FontScale = 'sm' | 'md' | 'lg' | 'xl';
 
+/** Chat (transcript/composer) font family. 'system' is the built-in sans
+ *  stack; the other ids map to the bundled Google fonts. */
+export type ChatFontFamily = 'system' | 'manrope' | 'serif' | 'mono';
+
+export const DEFAULT_CHAT_FONT_SIZE = 14;
+export const MIN_CHAT_FONT_SIZE = 12;
+export const MAX_CHAT_FONT_SIZE = 20;
+
+/** CSS stacks behind each chat font choice. Mirrors the tokens.css font
+ *  variables; 'system' is the default sans stack. */
+export const CHAT_FONT_FAMILY_STACKS: Readonly<Record<ChatFontFamily, string>> = {
+  system: '"Instrument Sans", ui-sans-serif, system-ui, sans-serif',
+  manrope: '"Manrope", ui-sans-serif, system-ui, sans-serif',
+  serif: '"Instrument Serif", ui-serif, Georgia, serif',
+  mono: '"JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace',
+};
+
+/** App-level keyboard shortcuts the user can remap in Settings. Values are
+ *  canonical combo strings: modifiers (`mod` = Cmd-or-Ctrl, `shift`, `alt`)
+ *  joined with `+` before the key, e.g. "mod+shift+k", "mod+enter", "a". */
+export type ShortcutAction =
+  | 'commandPalette'
+  | 'steerOrSendNow'
+  | 'createClaudeChild'
+  | 'createCodexChild'
+  | 'markUnread'
+  | 'approveOnce'
+  | 'approveSession'
+  | 'decline';
+
+export type ShortcutMap = Partial<Record<ShortcutAction, string>>;
+
+export const SHORTCUT_ACTIONS: readonly ShortcutAction[] = [
+  'commandPalette',
+  'steerOrSendNow',
+  'createClaudeChild',
+  'createCodexChild',
+  'markUnread',
+  'approveOnce',
+  'approveSession',
+  'decline',
+];
+
+export const DEFAULT_SHORTCUTS: Readonly<Record<ShortcutAction, string>> = {
+  commandPalette: 'mod+shift+k',
+  steerOrSendNow: 'mod+enter',
+  createClaudeChild: 'mod+j',
+  createCodexChild: 'mod+k',
+  markUnread: 'mod+u',
+  approveOnce: 'a',
+  approveSession: 'shift+a',
+  decline: 'd',
+};
+
+/** Canonical combo shape: 0-3 distinct modifiers then a single key. The key
+ *  itself must not be a modifier name ("mod+shift" is not a combo). */
+const SHORTCUT_COMBO_RE = /^(?:(mod|shift|alt)\+){0,3}(?!(?:mod|shift|alt)$)[a-z0-9]{1,16}$/;
+
+export function isValidShortcutCombo(value: unknown): value is string {
+  if (typeof value !== 'string' || !SHORTCUT_COMBO_RE.test(value)) return false;
+  const parts = value.split('+');
+  const modifiers = parts.slice(0, -1);
+  return new Set(modifiers).size === modifiers.length;
+}
+
+/** Effective shortcut for an action: the user's override when valid, else
+ *  the built-in default. */
+export function resolveShortcuts(
+  overrides: ShortcutMap | undefined,
+): Record<ShortcutAction, string> {
+  const resolved = { ...DEFAULT_SHORTCUTS } as Record<ShortcutAction, string>;
+  if (!overrides) return resolved;
+  for (const action of SHORTCUT_ACTIONS) {
+    const combo = overrides[action];
+    if (isValidShortcutCombo(combo)) resolved[action] = combo;
+  }
+  return resolved;
+}
+
 export type TerminalFontFamily =
   | 'jetbrains-mono'
   | 'system-mono'
@@ -339,9 +418,15 @@ export interface SystemConfig {
   density: 'compact' | 'cozy' | 'roomy';
   /** @deprecated Fixed to `md`; retained for older API clients. */
   font_scale_chrome: FontScale;
+  /** @deprecated Superseded by `chat_font_size`; retained for older API clients. */
   font_scale_chat: FontScale;
   /** @deprecated Fixed to `md`; retained for older API clients. */
   font_scale_code: FontScale;
+  /** Chat font size in px (transcript + composer). */
+  chat_font_size: number;
+  chat_font_family: ChatFontFamily;
+  /** User keyboard-shortcut overrides; absent actions use DEFAULT_SHORTCUTS. */
+  shortcuts?: ShortcutMap;
   terminal: TerminalPreferences;
   locale: 'zh-CN' | 'en';
   /** Default model for new claude (cc) sessions. Empty = use proxy default. */

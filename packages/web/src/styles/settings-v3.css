@@ -148,33 +148,53 @@
 }
 .s2-card .segm { display: flex; width: 100%; }
 
-.appearance-zoom {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 36px 28px;
+/* Remappable shortcut rows: the capture button shows the current keycaps;
+   while armed it pulses for the next keydown. Esc cancels, a conflict with
+   another action is reported inline. */
+.shortcut-capture {
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
-}
-.appearance-zoom button {
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 1px solid var(--hairline);
+  min-height: 22px;
+  padding: 2px 6px;
+  border: 1px solid transparent;
   border-radius: var(--r-1);
-  background: var(--surface-2);
-  color: var(--text-2);
-  font: 500 16px/1 var(--font-sans);
   cursor: pointer;
 }
-.appearance-zoom button:hover:not(:disabled) {
-  border-color: var(--text-3);
-  color: var(--text);
+.shortcut-capture:hover { background: var(--surface-2); border-color: var(--hairline); }
+.shortcut-capture.capturing {
+  border-color: var(--accent);
+  animation: shortcut-capture-pulse 1.2s var(--ease) infinite;
 }
-.appearance-zoom button:disabled { opacity: 0.4; cursor: default; }
-.appearance-zoom input { width: 100%; min-width: 0; accent-color: var(--accent); }
-.appearance-zoom output {
-  color: var(--text-2);
-  font: 500 var(--fz-12)/1 var(--font-mono);
-  text-align: right;
+@keyframes shortcut-capture-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-ring); }
+  50% { box-shadow: 0 0 0 3px transparent; }
+}
+.shortcut-listening {
+  font: 500 var(--fz-12)/1 var(--font-sans);
+  color: var(--accent-text);
+}
+.keycap-combo { display: inline-flex; gap: 3px; }
+.shortcut-reset {
+  margin-left: 6px;
+  padding: 2px 4px;
+  border-radius: var(--r-1);
+  color: var(--text-3);
+  font-size: 12px;
+  cursor: pointer;
+}
+.shortcut-reset:hover { background: var(--surface-2); color: var(--text); }
+/* Full-width prose rows inside the shortcuts grid: the auto-sized value
+   column must only ever hold keycaps; long text spans both columns so it
+   wraps instead of inflating the track and squeezing the label column. */
+.kv-grid.shortcuts dd.shortcut-hint,
+.kv-grid.shortcuts dd.shortcut-conflict {
+  grid-column: 1 / -1;
+  margin: -4px 0 6px;
+  font: var(--fz-12)/1.5 var(--font-sans);
+  color: var(--text-3);
+}
+.kv-grid.shortcuts dd.shortcut-conflict {
+  color: var(--danger);
 }
 
 .terminal-settings .select { width: 100%; }

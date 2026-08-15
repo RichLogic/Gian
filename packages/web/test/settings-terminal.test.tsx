@@ -30,6 +30,7 @@ function baseConfig(overrides: Partial<SystemConfig> = {}): SystemConfig {
     host: '127.0.0.1', port: 8991, workspace_root: '~/Coding',
     theme: 'warm', accent: 'ember', density: 'cozy', locale: 'en',
     font_scale_chrome: 'md', font_scale_chat: 'md', font_scale_code: 'md',
+    chat_font_size: 14, chat_font_family: 'system',
     terminal: { ...DEFAULT_TERMINAL_PREFERENCES },
     default_claude_model: '', default_claude_effort: '',
     default_codex_model: '', default_codex_effort: '',

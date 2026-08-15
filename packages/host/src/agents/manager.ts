@@ -33,6 +33,7 @@ import type {
   AgentInstallStatus,
   AgentProxyDefaults,
   AgentProxyStatus,
+  AgentProxyUpdateCheck,
   Executor,
 } from '@gian/shared';
 import { migrateLegacyGrokProxyDefaults } from '@gian/shared';
@@ -947,6 +948,40 @@ export class AgentManager {
       }
       },
     ));
+  }
+
+  /** Read-only "is a newer compatible Proxy release available?" check (issue
+   *  #86). No update lock, no filesystem or process side effects: the current
+   *  version comes from the status probe and the latest compatible release
+   *  from the same resolution the installer uses. */
+  async checkProxyUpdate(id: Executor): Promise<AgentProxyUpdateCheck> {
+    if (!AGENTS[id]) throw new Error(`unsupported agent: ${id}`);
+    if (!this.options.managedProxies) {
+      return {
+        managed: false,
+        currentVersion: null,
+        latestVersion: null,
+        updateAvailable: false,
+      };
+    }
+    const current = (await this.proxyStatus(id)).version;
+    const latest = (await this.resolveProxyRelease(id)).version;
+    const currentSemver = current ? parseSemver(current) : null;
+    const latestSemver = parseSemver(latest);
+    let updateAvailable: boolean;
+    if (current === null || latestSemver === null || currentSemver === null) {
+      // Nothing installed, or a non-SemVer version string: fall back to plain
+      // inequality rather than guessing an ordering.
+      updateAvailable = current !== latest;
+    } else {
+      updateAvailable = compareSemver(latestSemver, currentSemver) > 0;
+    }
+    return {
+      managed: true,
+      currentVersion: current,
+      latestVersion: latest,
+      updateAvailable,
+    };
   }
 
   installProxy(id: Executor): Promise<AgentInstallResult> {

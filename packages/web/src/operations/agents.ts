@@ -25,9 +25,10 @@
  * `agent.setCliPath` flow above, which must sequence path-set → restart →
  * rollback as one operation.
  */
-import type { AgentInstallStatus, AgentProxyDefaults, Executor } from '@gian/shared';
+import type { AgentInstallStatus, AgentProxyDefaults, AgentProxyUpdateCheck, Executor } from '@gian/shared';
 
 import {
+  checkAgentProxyUpdate,
   installAgentCli,
   installAgentProxy,
   pickAgentCliPath,
@@ -67,6 +68,18 @@ const agentInstallProxy: OperationDefinition<ExecutorInput, AgentInstallStatus> 
   entityKey: input => agentEntityKey(input.executor),
   execute: async input => (await installAgentProxy(input.executor)).agent,
   timeoutMs: INSTALL_TIMEOUT_MS,
+};
+
+/** Read-only release-availability probe (issue #86). The result entity is
+ *  the check itself (stored on `run.result`), NOT an AgentInstallStatus —
+ *  nothing about the installed Proxy changes, so no agent cache refresh. */
+const agentCheckProxyUpdate: OperationDefinition<ExecutorInput, AgentProxyUpdateCheck> = {
+  policy: 'pending',
+  entityKey: input => agentEntityKey(input.executor),
+  execute: input => checkAgentProxyUpdate(input.executor),
+  // GitHub release metadata via the Desktop broker / anonymous fetch can be
+  // slower than a local REST round-trip but is far under the install budget.
+  timeoutMs: REST_TIMEOUT_MS,
 };
 
 export interface SetCliPathInput extends ExecutorInput {
@@ -128,6 +141,7 @@ const agentRestartApp: OperationDefinition<Record<string, never>, boolean> = {
 
 registry.register('agent.installCli', agentInstallCli);
 registry.register('agent.installProxy', agentInstallProxy);
+registry.register('agent.checkProxyUpdate', agentCheckProxyUpdate);
 registry.register('agent.setCliPath', agentSetCliPath);
 registry.register('agent.setProxyDefaults', agentSetProxyDefaults);
 registry.register('agent.pickCliPath', agentPickCliPath);

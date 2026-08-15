@@ -2,6 +2,7 @@ import type {
   AgentInstallResult,
   AgentInstallStatus,
   AgentProxyDefaults,
+  AgentProxyUpdateCheck,
   EventEnvelope,
   Executor,
   Session,
@@ -546,6 +547,17 @@ export async function installAgentProxy(executor: Executor): Promise<AgentInstal
   const result = await agentResponse<AgentInstallResult>(response);
   cacheAgent(result.agent);
   return result;
+}
+
+/** Read-only "newer compatible Proxy release available?" probe (issue #86).
+ *  No agent cache update — nothing about the installed state changes. */
+export async function checkAgentProxyUpdate(
+  executor: Executor,
+): Promise<AgentProxyUpdateCheck> {
+  const response = await fetch(`/api/agents/${executor}/check-proxy-update`, {
+    method: 'POST',
+  });
+  return agentResponse<AgentProxyUpdateCheck>(response);
 }
 
 export async function loadOnboarding(): Promise<OnboardingState> {

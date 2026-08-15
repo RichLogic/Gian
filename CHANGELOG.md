@@ -10,8 +10,30 @@ until Developer ID signing and notarization are available.
 
 ## [0.4.5] - 2026-08-15
 
+### Added
+
+- Reworked the Settings Appearance and Chat sections: theme, locale, and
+  zoom are dropdowns; accent swatches are rounded squares; chat font size
+  (12–20 px, default 14) and font family are selectable.
+- Made every in-app keyboard shortcut remappable from Settings — command
+  palette, steer / send-now, child sessions, unread, approval keys, and the
+  global screenshot shortcut — with conflict detection, per-row reset, and
+  live rebinding of the screenshot shortcut.
+- Added “Check for updates” to the Settings Proxy rows: the newest
+  compatible Proxy release can be discovered and installed from Settings.
+- Added an optional preference to hide the Gian main window during
+  screenshots (kept visible by default so the frozen desktop includes Gian).
+- Speeded up screenshots by reusing the warm-up page and parallelizing
+  capture preparation.
+- New-session page image thumbnails can be zoomed in from the attachment
+  chips.
+
 ### Fixed
 
+- Restored the action-menu separators and the new-session title divider with
+  an inset style after the all-dividers-hidden pass blanked them.
+- Long hint and conflict text no longer squeeze the shortcuts keycap column
+  in Settings; both now span the row as subdued full-width lines.
 - Approval cards for Grok and Kimi no longer render empty. The command being
   approved (or the fallback approval title) is now surfaced as the card body,
   so pending approvals show what they are asking to run.

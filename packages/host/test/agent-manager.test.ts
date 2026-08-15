@@ -532,3 +532,180 @@ test('manifest v2 self-test must repeat the manifest plugin version', async t =>
   assert.equal(status.proxy.state, 'invalid');
   assert.match(status.proxy.error ?? '', /self-test returned an invalid result/i);
 });
+
+/** Fabricate an activated manifest-v2 plugin install without the network
+ *  (checkProxyUpdate tests only need proxyStatus + resolveProxyRelease). */
+async function fabricateInstalledProxyV2(
+  root: string,
+  id: string,
+  version: string,
+  range = '>=1.0 <2.0',
+): Promise<void> {
+  const proxyDir = join(root, 'data', 'plugins', id, version);
+  await mkdir(proxyDir, { recursive: true });
+  await writeFile(join(proxyDir, 'proxy.mjs'), selfTestingProxyV2(id, version));
+  await writeFile(join(proxyDir, 'manifest.json'), JSON.stringify({
+    schemaVersion: 2,
+    id,
+    displayName: id,
+    pluginVersion: version,
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range },
+    process: { scope: 'shared' },
+  }));
+  await symlink(version, join(root, 'data', 'plugins', id, 'current'), 'dir');
+}
+
+test('checkProxyUpdate is unmanaged for development proxies', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-proxy-check-dev-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const proxy = join(root, 'proxy.mjs');
+  await writeFile(proxy, 'export {};\n');
+
+  const manager = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.4.4',
+    managedProxies: false,
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy },
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+
+  assert.deepEqual(await manager.checkProxyUpdate('claude'), {
+    managed: false,
+    currentVersion: null,
+    latestVersion: null,
+    updateAvailable: false,
+  });
+});
+
+test('checkProxyUpdate reports the newest compatible independent release', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-proxy-check-newer-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await fabricateInstalledProxyV2(root, 'codex', '7.4.2');
+
+  const compatibleManifest = Buffer.from(`${JSON.stringify({
+    schemaVersion: 2,
+    id: 'codex',
+    displayName: 'Codex',
+    pluginVersion: '7.5.0',
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=1.0 <2.0' },
+    process: { scope: 'shared' },
+  })}\n`);
+  const compatibleName = 'gian-proxy-codex-7.5.0-darwin-arm64.tar.gz.manifest.json';
+  const compatibleDigest = createHash('sha256').update(compatibleManifest).digest('hex');
+  const incompatibleManifest = Buffer.from(`${JSON.stringify({
+    schemaVersion: 2,
+    id: 'codex',
+    displayName: 'Codex',
+    pluginVersion: '9.0.0',
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
+    process: { scope: 'shared' },
+  })}\n`);
+  const incompatibleName = 'gian-proxy-codex-9.0.0-darwin-arm64.tar.gz.manifest.json';
+  const incompatibleDigest = createHash('sha256').update(incompatibleManifest).digest('hex');
+
+  const manager = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.4.4',
+    managedProxies: true,
+    independentProxyReleases: true,
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+    fetchImpl: async input => {
+      const url = String(input);
+      if (url.endsWith('/releases?per_page=100')) {
+        return new Response(JSON.stringify([
+          // Newer but protocol-incompatible: must be skipped, not reported.
+          {
+            tag_name: 'proxy-codex-v9.0.0', draft: false, prerelease: false,
+            assets: [{ name: incompatibleName, digest: `sha256:${incompatibleDigest}` }],
+          },
+          {
+            tag_name: 'proxy-codex-v7.5.0', draft: false, prerelease: false,
+            assets: [{ name: compatibleName, digest: `sha256:${compatibleDigest}` }],
+          },
+        ]));
+      }
+      if (url.endsWith(incompatibleName)) return new Response(incompatibleManifest);
+      if (url.endsWith(compatibleName)) return new Response(compatibleManifest);
+      throw new Error(`unexpected fetch: ${url}`);
+    },
+  });
+
+  assert.deepEqual(await manager.checkProxyUpdate('codex'), {
+    managed: true,
+    currentVersion: '7.4.2',
+    latestVersion: '7.5.0',
+    updateAvailable: true,
+  });
+});
+
+test('checkProxyUpdate reports up to date when the installed version matches', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-proxy-check-current-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await fabricateInstalledProxyV2(root, 'codex', '7.5.0');
+
+  const manifest = Buffer.from(`${JSON.stringify({
+    schemaVersion: 2,
+    id: 'codex',
+    displayName: 'Codex',
+    pluginVersion: '7.5.0',
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=1.0 <2.0' },
+    process: { scope: 'shared' },
+  })}\n`);
+  const manifestName = 'gian-proxy-codex-7.5.0-darwin-arm64.tar.gz.manifest.json';
+  const manifestDigest = createHash('sha256').update(manifest).digest('hex');
+
+  const manager = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.4.4',
+    managedProxies: true,
+    independentProxyReleases: true,
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+    fetchImpl: async input => {
+      const url = String(input);
+      if (url.endsWith('/releases?per_page=100')) {
+        return new Response(JSON.stringify([
+          {
+            tag_name: 'proxy-codex-v7.5.0', draft: false, prerelease: false,
+            assets: [{ name: manifestName, digest: `sha256:${manifestDigest}` }],
+          },
+        ]));
+      }
+      if (url.endsWith(manifestName)) return new Response(manifest);
+      throw new Error(`unexpected fetch: ${url}`);
+    },
+  });
+
+  assert.deepEqual(await manager.checkProxyUpdate('codex'), {
+    managed: true,
+    currentVersion: '7.5.0',
+    latestVersion: '7.5.0',
+    updateAvailable: false,
+  });
+});
+
+test('checkProxyUpdate treats a missing install as updatable without network in legacy mode', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-proxy-check-legacy-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const manager = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.4.4',
+    managedProxies: true,
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+
+  assert.deepEqual(await manager.checkProxyUpdate('kimi'), {
+    managed: true,
+    currentVersion: null,
+    latestVersion: '0.4.4',
+    updateAvailable: true,
+  });
+});

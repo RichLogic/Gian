@@ -1302,7 +1302,7 @@ button.sb-section:hover { color: var(--text); }
 .app-icon { border-radius: var(--r-1); object-fit: contain; flex: none; vertical-align: middle; }
 .app-icon-fallback { display: inline-block; background: var(--surface-3); border-radius: var(--r-1); }
 .sheet-act-item.dim { color: var(--text-3); }
-.sheet-act-sep { height: 1px; margin: 4px 2px; }
+.sheet-act-sep { height: 1px; margin: 4px 8px; background: var(--hairline); }
 
 .sheet-content {
   flex: 1; min-height: 0;
@@ -1663,11 +1663,12 @@ button.sb-section:hover { color: var(--text); }
 }
 .changes-scope-menu button:hover { background: var(--surface-2); }
 .changes-scope-menu button.active { color: var(--text); font-weight: 600; }
-/* Spacer between scope groups: working-tree slices | history | Last Turn.
- * The separator hairline is hidden by design — spacing only. */
+/* Hairline between scope groups: working-tree slices | history | Last Turn.
+ * Inset on both sides — breathing room, not an edge-to-edge rule. */
 .changes-scope-sep {
   height: 1px;
-  margin: 4px 6px;
+  margin: 4px 8px;
+  background: var(--hairline);
 }
 .changes-scope-menu .ck {
   width: 12px; flex: none;
@@ -2276,7 +2277,8 @@ button.sb-section:hover { color: var(--text); }
 .accent-row { display: flex; gap: 8px; }
 .accent-swatch {
   width: 26px; height: 26px;
-  border-radius: var(--r-pill);
+  /* Square with the standard UI corner radius, not a circle. */
+  border-radius: var(--r-2);
   border: 2px solid transparent;
   background: transparent;
   box-shadow: inset 0 0 0 1px oklch(0 0 0 / 0.06);
@@ -2390,7 +2392,7 @@ button.sb-section:hover { color: var(--text); }
   font: 10px/1 var(--font-mono);
   color: var(--text-3);
 }
-.session-menu .rule { height: 1px; margin: 4px 4px; }
+.session-menu .rule { height: 1px; margin: 4px 10px; background: var(--hairline); }
 
 /* ============================================================
    v3 REVIEW PASS — dock groups, hints, etc.
@@ -2839,7 +2841,7 @@ button.sb-section:hover { color: var(--text); }
 .h-menu .ck { width: 12px; flex: none; align-self: center; color: var(--accent); font-size: 11px; text-align: center; }
 .h-menu .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; max-width: 120px; align-self: center; }
 .h-menu .sub { margin-left: auto; padding-left: 10px; flex: none; font: 9.5px/1.3 var(--font-mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
-.h-menu-sep { height: 1px; margin: 4px 6px; }
+.h-menu-sep { height: 1px; margin: 4px 8px; background: var(--hairline); }
 .h-menu-backdrop { position: fixed; inset: 0; z-index: 55; }
 
 .h-list { position: relative; }

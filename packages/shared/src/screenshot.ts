@@ -40,11 +40,22 @@ export interface GianScreenshotCapture {
   bytes: Uint8Array;
 }
 
+export interface GianScreenshotPreferences {
+  /** Hide the Gian main window while the capture overlay is active. When
+   * false, the window stays visible and the frozen desktop includes it. */
+  hideMainWindowDuringCapture: boolean;
+  /** User-remapped global capture shortcut as an Electron accelerator
+   * ("Control+Command+A"). Null/absent = the platform default. */
+  shortcut?: string | null;
+}
+
 /** Node-free screenshot surface exposed only to Gian's trusted web renderer. */
 export interface GianScreenshotApi {
   setTarget(target: GianScreenshotTarget | null): Promise<boolean>;
   start(): Promise<GianScreenshotStartResult>;
   getState(): Promise<GianScreenshotState>;
+  getPreferences(): Promise<GianScreenshotPreferences>;
+  setPreferences(preferences: GianScreenshotPreferences): Promise<GianScreenshotPreferences>;
   onCaptured(listener: (capture: GianScreenshotCapture) => void): () => void;
   onError(listener: (error: GianScreenshotErrorCode) => void): () => void;
 }
