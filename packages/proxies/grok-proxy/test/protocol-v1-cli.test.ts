@@ -156,3 +156,96 @@ test('Grok runtime uses the locked ACP command and forces the workspace sandbox'
   assert.deepEqual(await proxy.next(), { id: 3, result: { ok: true } });
   assert.equal(await waitForExit(proxy.child), 0);
 });
+
+test('Grok turn notifications all carry the Host turn id', async () => {
+  const proxy = startV1Proxy();
+  try {
+    proxy.send({
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocol: { name: 'gian.proxy', versions: ['1.0'] },
+        host: { name: 'Gian', version: '9.9.9' },
+      },
+    });
+    const initialized = await proxy.next() as { id: number; error?: unknown };
+    assert.equal(initialized.error, undefined, JSON.stringify(initialized));
+
+    proxy.send({
+      id: 2,
+      method: 'session.create',
+      params: {
+        sessionId: 'sess-turn-id',
+        cwd: process.cwd(),
+        workspaceRoots: [process.cwd()],
+        mode: 'auto',
+        config: {},
+      },
+    });
+    const created = await proxy.next() as {
+      id: number;
+      result?: { session?: { streamId?: string } };
+      error?: unknown;
+    };
+    assert.equal(created.error, undefined, JSON.stringify(created));
+    const streamId = created.result?.session?.streamId;
+    assert.ok(streamId, 'session.create must return a stream id');
+
+    const hostTurnId = 'turn-host-generated';
+    proxy.send({
+      id: 3,
+      method: 'turn.start',
+      params: {
+        sessionId: 'sess-turn-id',
+        streamId,
+        turnId: hostTurnId,
+        input: [{ type: 'text', text: 'ping' }],
+        policy: { workspaceRoots: [process.cwd()], approval: 'auto', network: 'allow' },
+        config: { mode: 'auto', native: {} },
+      },
+    });
+
+    // The Grok service mints its own internal turn id; the adapter must map it
+    // back to the Host turn id on every turn-scoped notification, or the Host
+    // rejects the stream with "references inactive turn".
+    const notifications: Array<{ method: string; params?: { turnId?: string } }> = [];
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const next = await Promise.race([
+        proxy.next(),
+        new Promise(resolve => setTimeout(() => resolve('__timeout__'), 2_000)),
+      ]);
+      if (next === '__timeout__') break;
+      const message = next as {
+        id?: number;
+        method?: string;
+        params?: { turnId?: string };
+        error?: unknown;
+      };
+      if (message.method !== undefined) {
+        notifications.push(message as { method: string; params?: { turnId?: string } });
+        if (message.params?.turnId !== undefined) {
+          assert.equal(
+            message.params.turnId,
+            hostTurnId,
+            'notification ' + message.method + ' used a non-Host turn id',
+          );
+        }
+        if (message.method === 'turn.completed' || message.method === 'turn.failed') break;
+      } else if (message.id === 3) {
+        assert.equal(message.error, undefined, JSON.stringify(message));
+      }
+    }
+    assert.ok(
+      notifications.some(notification => notification.method === 'turn.started'),
+      'expected turn.started',
+    );
+    assert.ok(
+      notifications.some(notification => notification.method === 'turn.completed'),
+      'expected turn.completed, saw: ' + notifications.map(notification => notification.method).join(','),
+    );
+  } finally {
+    proxy.child.kill();
+    await waitForExit(proxy.child);
+  }
+});

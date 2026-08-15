@@ -91,20 +91,12 @@ export function translateSessionUpdate(update: unknown): TranslatedEvent[] {
 
   if (kind === 'agent_message_chunk' || kind === 'agent_thought_chunk' || kind === 'user_message_chunk') {
     const text = textFromContent(value.content ?? value);
-    const contentKind = kind === 'agent_thought_chunk'
-      ? 'reasoning'
-      : kind === 'user_message_chunk'
-        ? 'input'
-        : 'text';
-    if (contentKind === 'input') {
-      if (!text.trim()) return [];
-      return [{
-        method: 'input.recorded',
-        data: {
-          inputId: 'grok-user-chunk',
-          input: [{ type: 'text', text }],
-        },
-      }];
+    const contentKind = kind === 'agent_thought_chunk' ? 'reasoning' : 'text';
+    if (kind === 'user_message_chunk') {
+      // The CLI echoes the Host's own input back to us. input.recorded is a
+      // session.replay-only notification in gian.proxy/1 and the Host rejects
+      // it on the live stream, so the echo contributes nothing live.
+      return [];
     }
     return [{
       method: 'content.delta',

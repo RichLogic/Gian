@@ -18,7 +18,7 @@ const stream = ndJsonStream(
   Readable.toWeb(process.stdin),
 );
 
-new AgentSideConnection(() => ({
+new AgentSideConnection((agentConn) => ({
   async initialize() {
     return {
       protocolVersion: 1,
@@ -60,5 +60,15 @@ new AgentSideConnection(() => ({
   },
   async closeSession() {
     return {};
+  },
+  async prompt() {
+    await agentConn.sessionUpdate({
+      sessionId: 'native-new',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'pong' },
+      },
+    });
+    return { stopReason: 'end_turn' };
   },
 }), stream);

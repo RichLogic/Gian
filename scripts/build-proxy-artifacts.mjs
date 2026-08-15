@@ -57,7 +57,7 @@ const definitions = [
     runtime: {
       id: 'grok',
       displayName: 'Grok Build CLI',
-      recommendedCliVersion: '1.0.3',
+      recommendedCliVersion: '1.0.4',
     },
   },
 ];

@@ -122,6 +122,12 @@ export class GrokProtocolV1Adapter {
   private session: AttachedSession | null = null;
   private readonly turnsByRequest = new Map<string, HostTurnRef>();
   private readonly activeTurnBySession = new Map<string, string>();
+  /** Maps turn ids minted by the Grok service (GrokProxyService) to the turn id
+   * the Host supplied in turn.start. The protocol requires every notification
+   * of one turn to carry the Host turn id; the service mints its own id and
+   * stamps it on turn.started/completed/failed, usage.updated, session.update
+   * and approval events. */
+  private readonly hostTurnByServiceTurn = new Map<string, string>();
   private readonly replayEvents: ProxyNotification[] = [];
   private readonly replayPager = new ReplaySnapshotPager<ProxyNotification>();
   private readonly ledger = new AttachmentTurnLedger();
@@ -405,7 +411,7 @@ export class GrokProtocolV1Adapter {
   private translateServiceEvent(method: string, params: Record<string, unknown>) {
     const session = this.session;
     if (!session) return;
-    const turnId = typeof params.turnId === 'string' ? params.turnId : this.activeTurnBySession.get(session.id);
+    const turnId = this.resolveTurnId(session, params.turnId);
     const data = record(params.data);
     if (method === 'turn.started') {
       this.emit('turn.started', session, turnId, {});
@@ -414,6 +420,7 @@ export class GrokProtocolV1Adapter {
     if (method === 'turn.completed') {
       if (!this.activeTurnBySession.has(session.id)) return;
       this.activeTurnBySession.delete(session.id);
+      if (turnId !== undefined) this.forgetServiceTurns(turnId);
       this.flushOpenContent(session, turnId);
       this.emit('turn.completed', session, turnId, {
         stopReason: data.stopReason === 'cancelled' || data.stopReason === 'interrupted'
@@ -425,6 +432,7 @@ export class GrokProtocolV1Adapter {
     if (method === 'turn.failed') {
       if (!this.activeTurnBySession.has(session.id)) return;
       this.activeTurnBySession.delete(session.id);
+      if (turnId !== undefined) this.forgetServiceTurns(turnId);
       this.emit('turn.failed', session, turnId, {
         error: {
           code: data.code ?? 'RUNTIME_ERROR',
@@ -486,6 +494,24 @@ export class GrokProtocolV1Adapter {
     }
   }
 
+  private resolveTurnId(session: AttachedSession, serviceTurnId: unknown): string | undefined {
+    const hostTurnId = this.activeTurnBySession.get(session.id);
+    if (typeof serviceTurnId !== 'string') return hostTurnId;
+    const mapped = this.hostTurnByServiceTurn.get(serviceTurnId);
+    if (mapped !== undefined) return mapped;
+    if (hostTurnId !== undefined) {
+      this.hostTurnByServiceTurn.set(serviceTurnId, hostTurnId);
+      return hostTurnId;
+    }
+    return undefined;
+  }
+
+  private forgetServiceTurns(hostTurnId: string): void {
+    for (const [serviceTurnId, mapped] of this.hostTurnByServiceTurn) {
+      if (mapped === hostTurnId) this.hostTurnByServiceTurn.delete(serviceTurnId);
+    }
+  }
+
   private emitTranslated(
     session: AttachedSession,
     turnId: string | undefined,
@@ -514,11 +540,13 @@ export class GrokProtocolV1Adapter {
     if (event.terminal === 'completed') {
       if (!this.activeTurnBySession.has(session.id)) return;
       this.activeTurnBySession.delete(session.id);
+      if (turnId !== undefined) this.forgetServiceTurns(turnId);
       this.flushOpenContent(session, turnId);
     }
     if (event.terminal === 'failed') {
       if (!this.activeTurnBySession.has(session.id)) return;
       this.activeTurnBySession.delete(session.id);
+      if (turnId !== undefined) this.forgetServiceTurns(turnId);
     }
     this.emit(event.method as ProxyNotification['method'], session, turnId, event.data);
   }
