@@ -154,6 +154,42 @@ test('protocol v1 Bash approval extracts the command as subject', () => {
   assert.deepEqual(data.scopeOptions, ['once', 'session']);
 });
 
+test('protocol v1 grok approval extracts the command as subject', () => {
+  const notification = approvalRequestedNotification({
+    category: 'other',
+    title: 'Execute `git status --short`',
+    description: '',
+    options: [
+      { id: 'allow-once', label: 'Yes, proceed', kind: 'allow_once' },
+      { id: 'reject-once', label: 'No, and tell Grok what to do differently', kind: 'reject_once' },
+    ],
+    payload: {
+      rawInput: {
+        variant: 'Bash',
+        command: 'git status --short',
+        description: 'Check working tree',
+        is_background: false,
+      },
+      _meta: {
+        'x.ai/tool': {
+          name: 'run_terminal_command',
+          kind: 'execute',
+          input: { command: 'git status --short', description: 'Check working tree' },
+        },
+      },
+      title: 'Execute `git status --short`',
+      toolCallId: 'call-1',
+    },
+  });
+
+  const [event] = projectNotification('grok', notification, 'session-1', 1);
+  assert.equal(event?.display?.type, 'interaction.approval');
+  const data = event?.display?.data as Record<string, unknown>;
+  assert.equal(data.subject, 'git status --short');
+  assert.equal(data.description, 'Check working tree');
+  assert.deepEqual(data.scopeOptions, ['once']);
+});
+
 test('protocol v1 approval without a cc payload keeps the generic projection', () => {
   const notification = approvalRequestedNotification({
     category: 'question',

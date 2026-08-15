@@ -948,8 +948,21 @@ export function parseApprovalRequested(env: EventEnvelope): ApprovalItem | null 
   const approvalId = String(data.approvalId ?? '');
   if (!approvalId) return null;
   const payload = (data.payload ?? {}) as Record<string, unknown>;
-  // unified: data.subject; legacy: payload.command / .path / etc.
-  const cmd = String(data.subject ?? payload.command ?? payload.cmd ?? payload.path ?? '');
+  const rawInput = payload.rawInput && typeof payload.rawInput === 'object'
+    ? payload.rawInput as Record<string, unknown>
+    : {};
+  // unified: data.subject; legacy: payload.command / .path / etc.; title as a
+  // last resort so an approval without a derived subject still renders its
+  // body (grok titles carry the full command).
+  const cmd = String(
+    data.subject
+    ?? payload.command
+    ?? payload.cmd
+    ?? payload.path
+    ?? rawInput.command
+    ?? data.title
+    ?? '',
+  );
   // unified: data.description; legacy: payload.reason
   const reason = String(data.description ?? payload.reason ?? data.risk ?? '');
   // Unified normalizer attaches `category` + `questions` for AskUserQuestion;

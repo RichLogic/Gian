@@ -4,9 +4,19 @@ This file records user-facing changes in published Gian builds. It is updated
 whenever a version is packaged and tagged for release; local test packages are
 not listed.
 
-Releases through 0.4.4 are unsigned macOS Apple Silicon beta builds. The
-signed-only native notification and automatic update paths remain disabled in
-the current beta until Developer ID signing and notarization are available.
+Releases through 0.4.5 are unsigned macOS Apple Silicon beta builds. Signed
+and notarized native notifications and automatic updates remain disabled
+until Developer ID signing and notarization are available.
+
+## [0.4.5] - 2026-08-15
+
+### Fixed
+
+- Approval cards for Grok and Kimi no longer render empty. The command being
+  approved (or the fallback approval title) is now surfaced as the card body,
+  so pending approvals show what they are asking to run.
+- Requires Grok Proxy 0.2.1 (released with this build) which fixes Grok
+  sessions terminating on protocol turn-id mismatches.
 
 ## [0.4.4] - 2026-08-14
 
@@ -35,12 +45,6 @@ the current beta until Developer ID signing and notarization are available.
 
 ### Added
 
-- Added Grok Build as a first-class Agent integration with its own independently
-  versioned Proxy and capability-aware Composer and Settings controls.
-- Added global macOS screenshot capture with selection, annotation, clipboard,
-  and direct attachment routing into the active or new Session.
-- Added configurable Workbench Terminal font, cursor, scrollback, shell, and
-  startup-directory preferences.
 - Added signed macOS native notifications for completed turns, pending
   approvals and questions, and terminal errors, including background sessions
   and the red-close/no-window state.
@@ -52,24 +56,17 @@ the current beta until Developer ID signing and notarization are available.
 
 ### Changed
 
-- Preserved per-workspace and per-Task new-session drafts, and added direct
-  assignment of existing Sessions to Tasks.
-- Routed GitHub release metadata and Proxy download requests through Gian's
-  authenticated Desktop credential path, with anonymous fallback diagnostics.
 - Moved desktop notification delivery from the active renderer transcript to
   an Electron-main subscription over a small privacy-bounded Host attention
   protocol, preventing background sessions from leaking full transcripts.
-- Kept the 0.4.3 DMG as a manual upgrade from unsigned 0.4.2 builds. The first
-  signed release will also require a manual install; automatic updates begin
-  between subsequent signed releases.
+- Made the 0.4.3 DMG the one-time manual bridge from unsigned 0.4.2 builds;
+  automatic updates begin with upgrades from 0.4.3 to later signed releases.
 - Made update installation follow Gian's safe shutdown boundary: downloads
   never interrupt work, while an explicit confirmed restart first stops the
   managed Host and CLI processes before arming replacement.
 
 ### Known limitations
 
-- This CI beta is unsigned and not notarized, so native macOS notifications
-  and automatic App updates remain disabled in the distributed build.
 - Complete Inbox/read-state synchronization, APNs remote push, and notification
   generation after Gian has fully quit remain outside the 0.4.3 scope.
 

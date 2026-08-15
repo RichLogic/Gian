@@ -289,6 +289,35 @@ export function projectProtocolV1Notification(
         }];
       }
 
+      // grok-proxy rides the command identity inside payload.{rawInput,_meta,title}
+      // (cc-proxy rides payload.{toolName,inputPreview} handled above). Surface
+      // it as `subject` so the pending card shows what is being approved;
+      // fall back to the payload description for the card's supporting text.
+      const rawInput = payload.rawInput && typeof payload.rawInput === 'object'
+        ? payload.rawInput as Record<string, unknown>
+        : {};
+      const toolMeta = payload._meta && typeof payload._meta === 'object'
+        ? payload._meta as Record<string, unknown>
+        : {};
+      const toolInput = toolMeta['x.ai/tool'] && typeof toolMeta['x.ai/tool'] === 'object'
+        ? (toolMeta['x.ai/tool'] as Record<string, unknown>).input
+        : undefined;
+      const toolInputRecord = toolInput && typeof toolInput === 'object'
+        ? toolInput as Record<string, unknown>
+        : {};
+      const subject = String(
+        rawInput.command
+        ?? toolInputRecord.command
+        ?? payload.title
+        ?? '',
+      );
+      const description = String(
+        rawInput.description
+        ?? toolInputRecord.description
+        ?? payload.description
+        ?? data.description,
+      );
+
       return [{
         session_id: sessionId,
         turn,
@@ -302,7 +331,8 @@ export function projectProtocolV1Notification(
           category,
           risk: 'medium',
           title: data.title,
-          description: data.description,
+          description,
+          ...(subject ? { subject } : {}),
           scopeOptions,
           nativeOptions,
         },

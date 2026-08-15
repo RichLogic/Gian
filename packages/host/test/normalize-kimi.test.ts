@@ -312,6 +312,34 @@ test('Kimi ExitPlanMode permission keeps native options and plan content', () =>
   );
 });
 
+test('Kimi Bash permission surfaces the command as subject', () => {
+  const requested = project(
+    notification('approval.requested', {
+      approvalId: 'approval-bash',
+      title: 'Kimi permission',
+      reason: 'Run shell command',
+      nativeOptions: [
+        { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+      ],
+      payload: {
+        toolCall: {
+          title: 'Bash',
+          rawInput: { variant: 'Bash', command: 'npm install', is_background: false },
+        },
+      },
+    }),
+    'gian-1',
+    2,
+  );
+
+  assert.equal(requested[0]?.type, 'interaction.approval');
+  assert.equal((requested[0]?.data as { category?: unknown }).category, 'other');
+  assert.equal(
+    (requested[0]?.data as { subject?: unknown }).subject,
+    'npm install',
+  );
+});
+
 test('Kimi process-wide runtime stop is an explicit transcript no-op', () => {
   assert.deepEqual(
     project(

@@ -1,6 +1,6 @@
 {
   "name": "gian",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "private": true,
   "description": "One local desktop app for Codex, Claude Code, Kimi Code, and Grok Build",
   "packageManager": "pnpm@10.33.2",

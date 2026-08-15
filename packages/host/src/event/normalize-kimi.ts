@@ -281,6 +281,7 @@ export function projectKimiNotification(
     const toolTitle = String(toolCall.title ?? data.title ?? '');
     const isPlanApproval = toolTitle === 'ExitPlanMode';
     const plan = String(input.plan ?? input.content ?? '').trim();
+    const command = String(input.command ?? '').trim();
     return [event(sessionId, turn, approvalId, 'interaction.approval', {
       approvalId,
       category: isPlanApproval ? 'exit_plan_mode' : 'other',
@@ -288,6 +289,7 @@ export function projectKimiNotification(
       title: String(data.title ?? 'Kimi permission'),
       description: String(data.reason ?? data.title ?? 'Kimi requested a decision.'),
       ...(isPlanApproval && plan ? { subject: plan } : {}),
+      ...(!isPlanApproval && command ? { subject: command } : {}),
       scopeOptions: [],
       nativeOptions: options,
     })];
