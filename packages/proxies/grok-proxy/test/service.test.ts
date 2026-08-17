@@ -171,6 +171,25 @@ test('turn prompt is agent-only and blocked slash commands are rejected', async 
   await service.closeSession({ sessionId: created.session.id });
 });
 
+test('rename succeeds when Grok agent does not implement session/rename', async () => {
+  const runtime = fakeRuntime({
+    async renameSession() {
+      runtime.calls.push('x.ai/session/rename');
+      throw new Error('Method not found');
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const created = await service.createSession({ cwd: '/workspace' });
+  assert.deepEqual(await service.renameSession({
+    sessionId: created.session.id,
+    name: 'New conversation',
+  }), { ok: true });
+  await service.closeSession({ sessionId: created.session.id });
+});
+
 test('permission runtime updates use yolo_mode_changed and never set_mode', async () => {
   const runtime = fakeRuntime();
   const service = new GrokProxyService({

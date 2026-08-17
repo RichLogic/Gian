@@ -340,7 +340,12 @@ export class GrokProxyService {
 
   async renameSession(params: { sessionId: string; name: string }) {
     const session = this.requireSession(params.sessionId);
-    await this.requireRuntime().renameSession(session.nativeSessionId, params.name);
+    try {
+      await this.requireRuntime().renameSession(session.nativeSessionId, params.name);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/method not found/i.test(message)) throw mapRuntimeError(error, this.binaryPath);
+    }
     return { ok: true as const };
   }
 
