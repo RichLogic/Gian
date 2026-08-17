@@ -17,7 +17,7 @@ import { writeJsonLine } from '../transport/protocol.js';
 import { GrokProtocolV1Adapter, grokProtocolError } from '../protocol/v1-adapter.js';
 
 const SELF_TEST_FLAG = '--self-test';
-const PLUGIN_VERSION = '0.2.1';
+const PLUGIN_VERSION = '0.2.2';
 const V1_METHODS = new Set<string>([
   ...CORE_METHODS,
   ...Object.keys(OPTIONAL_METHOD_CAPABILITIES),

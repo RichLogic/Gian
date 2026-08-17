@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 
+import { proxyNotificationSchema, type ProxyNotification } from '@gian/proxy-protocol';
+
 import { GrokProxyService } from '../src/core/service.js';
+import { GrokProtocolV1Adapter } from '../src/protocol/v1-adapter.js';
 import type { GrokAcpClient } from '../src/runtime/grok-acp-client.js';
 
 function initializeMeta() {
@@ -183,6 +186,111 @@ test('permission runtime updates use yolo_mode_changed and never set_mode', asyn
   assert.ok(runtime.calls.includes('x.ai/yolo_mode_changed'));
   assert.ok(!runtime.calls.includes('session/set_mode'));
   await service.closeSession({ sessionId: created.session.id });
+});
+
+test('edit tool_call_update diffs emit schema-valid consecutive notifications', async () => {
+  const runtime = fakeRuntime({
+    async prompt() {
+      runtime.calls.push('session/prompt');
+      runtime.emit('sessionUpdate', {
+        sessionId: 'native-1',
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'call-edit-1',
+          title: 'search_replace',
+          rawInput: { file_path: '/workspace/docs/a.md' },
+        },
+      });
+      runtime.emit('sessionUpdate', {
+        sessionId: 'native-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-edit-1',
+          kind: 'edit',
+          status: 'in_progress',
+          title: 'Edit `/workspace/docs/a.md`',
+          content: [{
+            type: 'diff',
+            path: '/workspace/docs/a.md',
+            diff: '@@ -1 +1 @@\n-old\n+new\n',
+          }],
+        },
+      });
+      runtime.emit('sessionUpdate', {
+        sessionId: 'native-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'edited' },
+        },
+      });
+      return { stopReason: 'end_turn' };
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const notifications: ProxyNotification[] = [];
+  const adapter = new GrokProtocolV1Adapter(service, '0.2.2', (notification) => {
+    notifications.push(notification);
+  });
+  await adapter.handle({
+    id: 1,
+    method: 'initialize',
+    params: {
+      protocol: { name: 'gian.proxy', versions: ['1.0'] },
+      host: { name: 'Gian', version: '0.0.0' },
+    },
+  });
+  const created = await adapter.handle({
+    id: 2,
+    method: 'session.create',
+    params: {
+      sessionId: 'host-sess',
+      cwd: '/workspace',
+      workspaceRoots: ['/workspace'],
+      config: {},
+    },
+  }) as { session: { streamId: string } };
+  await adapter.handle({
+    id: 3,
+    method: 'turn.start',
+    params: {
+      sessionId: 'host-sess',
+      streamId: created.session.streamId,
+      turnId: 'host-turn',
+      input: [{ type: 'text', text: 'edit the file' }],
+      policy: {
+        workspaceRoots: ['/workspace'],
+        approval: 'relay',
+        network: 'allow',
+      },
+      config: { native: {} },
+    },
+  });
+
+  for (const notification of notifications) {
+    const parsed = proxyNotificationSchema.safeParse(notification);
+    assert.equal(parsed.success, true, parsed.success ? '' : JSON.stringify(parsed.error.format()));
+  }
+  const sequences = notifications.map((notification) => {
+    const params = notification.params as { sequence?: number };
+    assert.equal(typeof params.sequence, 'number');
+    return params.sequence;
+  });
+  assert.deepEqual(sequences, sequences.map((_, index) => index + 1));
+  const diff = notifications.find(notification => notification.method === 'diff.updated');
+  assert.ok(diff, 'edit tool_call_update must emit diff.updated');
+  assert.equal('path' in diff.params.data, false);
+  assert.equal(
+    (diff.params.data as { files?: Array<{ path?: string }> }).files?.[0]?.path,
+    '/workspace/docs/a.md',
+  );
+  await adapter.handle({
+    id: 4,
+    method: 'session.close',
+    params: { sessionId: 'host-sess', streamId: created.session.streamId },
+  });
 });
 
 test('auth failures map to AUTH_REQUIRED', async () => {

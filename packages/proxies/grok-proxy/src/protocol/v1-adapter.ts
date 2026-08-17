@@ -528,7 +528,8 @@ export class GrokProtocolV1Adapter {
     }
     if (event.method === 'diff.updated') {
       this.emit('diff.updated', session, turnId, {
-        ...event.data,
+        diff: String(event.data.diff ?? ''),
+        ...(Array.isArray(event.data.files) ? { files: event.data.files } : {}),
         diffId: stableId('diff', [turnId, event.data.path ?? event.data.diff]),
       });
       return;
@@ -566,19 +567,31 @@ export class GrokProtocolV1Adapter {
     turnId: string | undefined,
     data: Record<string, unknown>,
   ) {
-    session.sequence += 1;
-    const notification = proxyNotificationSchema.parse({
-      method,
-      params: {
-        eventId: stableId('evt', [session.id, session.sequence, method, turnId, data]),
-        streamId: session.streamId,
-        sequence: session.sequence,
-        sessionId: session.id,
-        ...(turnId ? { turnId } : {}),
-        emittedAt: new Date().toISOString(),
-        data,
-      },
-    });
+    const sequence = session.sequence + 1;
+    let notification: ProxyNotification;
+    try {
+      notification = proxyNotificationSchema.parse({
+        method,
+        params: {
+          eventId: stableId('evt', [session.id, sequence, method, turnId, data]),
+          streamId: session.streamId,
+          sequence,
+          sessionId: session.id,
+          ...(turnId ? { turnId } : {}),
+          emittedAt: new Date().toISOString(),
+          data,
+        },
+      });
+    } catch (error) {
+      // A thrown parse used to increment sequence first, so the next live
+      // event arrived as N+1 and Host force-killed the Proxy mid-turn.
+      console.error(
+        `[grok-proxy] dropped invalid ${method} notification:`,
+        error instanceof Error ? error.message : error,
+      );
+      return;
+    }
+    session.sequence = sequence;
     this.replayEvents.push(notification);
     this.emitEvent(notification);
   }

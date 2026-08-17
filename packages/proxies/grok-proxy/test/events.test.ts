@@ -1,12 +1,35 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { proxyNotificationSchema } from '@gian/proxy-protocol';
+
 import {
+  grokDiffUpdatedData,
   isExcludedExtension,
   parsePromptUsage,
   translateExtension,
   translateSessionUpdate,
 } from '../src/core/events.js';
+
+function assertValidDiffUpdated(data: Record<string, unknown>) {
+  assert.equal('path' in data, false);
+  const parsed = proxyNotificationSchema.safeParse({
+    method: 'diff.updated',
+    params: {
+      eventId: 'evt-1',
+      streamId: 'stream-1',
+      sequence: 1,
+      sessionId: 'sess-1',
+      turnId: 'turn-1',
+      emittedAt: new Date().toISOString(),
+      data: {
+        ...data,
+        diffId: 'diff-1',
+      },
+    },
+  });
+  assert.equal(parsed.success, true, parsed.success ? '' : JSON.stringify(parsed.error.format()));
+}
 
 test('standard ACP updates keep tool content, diffs, and reasoning separate', () => {
   assert.equal(translateSessionUpdate({
@@ -25,7 +48,18 @@ test('standard ACP updates keep tool content, diffs, and reasoning separate', ()
     ],
   });
   assert.deepEqual(tool.map(event => event.method), ['diff.updated', 'tool.updated']);
+  assert.deepEqual(tool[0]?.data, grokDiffUpdatedData('src/a.ts', '@@ -1 +1 @@'));
+  assertValidDiffUpdated(tool[0]!.data);
   assert.deepEqual((tool[1]?.data.data as { locations?: unknown[] }).locations?.[0], { path: 'src/a.ts' });
+});
+
+test('extension diffs also omit the illegal top-level path field', () => {
+  const events = translateExtension('x.ai/file_diff', {
+    path: 'README.md',
+    diff: '@@ -1 +1 @@',
+  });
+  assert.equal(events[0]?.method, 'diff.updated');
+  assertValidDiffUpdated(events[0]!.data);
 });
 
 test('excluded Grok extensions never leak through extension.event', () => {

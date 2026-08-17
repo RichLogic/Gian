@@ -21,6 +21,14 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/** gian.proxy/1 `diff.updated` data. File path lives only in `files`. */
+export function grokDiffUpdatedData(path: string, diff: string) {
+  return {
+    diff,
+    files: [{ path, status: 'modified' as const }],
+  };
+}
+
 export function jsonClone(value: unknown): unknown {
   try {
     return JSON.parse(JSON.stringify(value));
@@ -124,14 +132,12 @@ export function translateSessionUpdate(update: unknown): TranslatedEvent[] {
     for (const item of content) {
       const payload = record(item);
       if (payload.type !== 'diff') continue;
-      const path = String(payload.path ?? 'unknown');
       events.push({
         method: 'diff.updated',
-        data: {
-          path,
-          diff: String(payload.diff ?? payload.unifiedDiff ?? ''),
-          files: [{ path, status: 'modified' }],
-        },
+        data: grokDiffUpdatedData(
+          String(payload.path ?? 'unknown'),
+          String(payload.diff ?? payload.unifiedDiff ?? ''),
+        ),
       });
     }
     if (value.status === 'completed' || value.status === 'failed') {
@@ -293,14 +299,12 @@ export function translateExtension(method: string, params: unknown): TranslatedE
     }];
   }
   if (/diff/.test(normalized)) {
-    const path = String(payload.path ?? payload.file ?? 'unknown');
     return [{
       method: 'diff.updated',
-      data: {
-        path,
-        diff: String(payload.diff ?? payload.unifiedDiff ?? ''),
-        files: [{ path, status: 'modified' }],
-      },
+      data: grokDiffUpdatedData(
+        String(payload.path ?? payload.file ?? 'unknown'),
+        String(payload.diff ?? payload.unifiedDiff ?? ''),
+      ),
     }];
   }
   if (/model/.test(normalized)) {
