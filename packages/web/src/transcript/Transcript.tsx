@@ -6,6 +6,8 @@ import type { ApprovalActionContext, ApprovalItem, StatusItem, TranscriptItem } 
 import { formatTime } from '../utils/format.js';
 import { AgentSpawnRow, ApprovalCard, AssistantMessage, AutoNoticeCard, Caret, CommandCard, CompactionRow, DiffCard, FileReadCard, FileSearchCard, formatElapsed, MinimalErrorCard, ReasoningCard, ToolEvent, UserMessage, useStableExpand, WebSearchRow } from './items.js';
 import { GianMascot } from '../components/GianMascot.js';
+import { ForkFromTurnControl } from '../components/ForkControls.js';
+import type { ActionControlState } from '../components/action-gating.js';
 import { transcriptItemIdentity } from './identity.js';
 
 /**
@@ -119,7 +121,7 @@ export function renderItem(
   onApprove: (
     approvalId: string,
     decision: ApprovalDecision,
-    answers?: Record<string, string | string[]>,
+    answers?: Record<string, string | boolean | string[]>,
     context?: ApprovalActionContext,
   ) => void,
   currentUserRef?: React.RefObject<HTMLDivElement | null>,
@@ -197,7 +199,7 @@ function TurnSumBlock({
   onApprove: (
     approvalId: string,
     decision: ApprovalDecision,
-    answers?: Record<string, string | string[]>,
+    answers?: Record<string, string | boolean | string[]>,
     context?: ApprovalActionContext,
   ) => void;
 }) {
@@ -280,13 +282,14 @@ export interface TranscriptExtra {
 export function Transcript({
   items, pending, onApprove, hiddenApprovalId, extras, hydrated = true,
   hasOlder = false, loadingOlder = false, onLoadOlder, historyError, onRetryHistory,
+  forkAtTurn,
 }: {
   items: TranscriptItem[];
   pending: boolean;
   onApprove: (
     approvalId: string,
     decision: ApprovalDecision,
-    answers?: Record<string, string | string[]>,
+    answers?: Record<string, string | boolean | string[]>,
     context?: ApprovalActionContext,
   ) => void;
   /** Approval id pinned elsewhere (e.g. the Beta question dock). Suppress its
@@ -303,6 +306,14 @@ export function Transcript({
   onLoadOlder?: () => void;
   historyError?: TranscriptHistoryError | null;
   onRetryHistory?: () => void;
+  /** Per-turn Fork affordance (gian.proxy/2.0 §10.6): when present, every
+   *  Terminal Turn boundary (turn-end item) renders the standard control,
+   *  greyed per `state` and per the item's Host-flowed turn identity. Absent
+   *  on surfaces that can never be a fork source (Side Chat panels). */
+  forkAtTurn?: {
+    sourceSessionId: string;
+    state: ActionControlState;
+  } | null;
 }) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
@@ -494,6 +505,21 @@ export function Transcript({
             if (item.kind === 'turnsum') {
               prevSender = null;
               out.push(<TurnSumBlock key={`turnsum:${item.turn}:${item.id}`} block={item} onApprove={onApprove} />);
+            } else if (item.kind === 'turn-end' && forkAtTurn) {
+              // Terminal Turn boundary: the standard per-turn Fork control
+              // (§10.6). Only Terminal Turns have a turn-end item, so the
+              // affordance appears exactly where a fork anchor exists.
+              prevSender = null;
+              out.push(
+                <ForkFromTurnControl
+                  key={transcriptItemIdentity(item)}
+                  sourceSessionId={forkAtTurn.sourceSessionId}
+                  turn={item.turn}
+                  turnId={item.turn_id}
+                  sourceTurnId={item.source_turn_id}
+                  state={forkAtTurn.state}
+                />,
+              );
             } else {
               let hideAvatar = false;
               // Assistant footer (time + copy) renders on the TAIL of a

@@ -6,6 +6,7 @@ import type {
   NativeConfigOption,
   NativeConfigValue,
   Session,
+  SideChatInfo,
   SystemConfig,
   Task,
   Workspace,
@@ -96,7 +97,7 @@ export function isSession(value: unknown): value is Session {
     && isOneOf(value.type, ['coding', 'subtask', 'manager'])
     && isNullableString(value.task_id)
     && isNullableString(value.workspace_id)
-    && isOneOf(value.executor, ['codex', 'claude', 'kimi', 'grok'])
+    && isOneOf(value.executor, ['codex', 'claude', 'kimi', 'grok', 'dsh'])
     && isNullableString(value.model)
     && (value.approval_mode === null
       || isOneOf(value.approval_mode, ['plan', 'ask', 'auto', 'custom', 'full-access']))
@@ -125,8 +126,68 @@ export function isSession(value: unknown): value is Session {
     && isOptional(value, 'conversation_usage_complete', isZeroOrOne)
     && isNullableString(value.summary)
     && isNullableString(value.completed_at)
+    && isOptional(value, 'turn_config', (entry) => (
+      isRecord(entry) && Object.values(entry).every(isNativeConfigValue)
+    ))
+    && isOptional(value, 'turn_config_options', (entry) => isArrayOf(entry, isRecord))
+    && isOptional(value, 'turn_config_revision', isNullableString)
+    && isOptional(value, 'available_actions', isAvailableActions)
+    && isOptional(value, 'origin', isSessionOrigin)
     && isString(value.created_at)
     && isString(value.updated_at);
+}
+
+function isAvailableActions(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return Object.values(value).every((entry) => (
+    isRecord(entry)
+    && typeof entry.enabled === 'boolean'
+    && isOptional(entry, 'reason', isString)
+  ));
+}
+
+function isSessionOrigin(value: unknown): boolean {
+  return isRecord(value)
+    && value.kind === 'fork'
+    && isString(value.session_id)
+    && isString(value.turn_id)
+    && isString(value.source_turn_id);
+}
+
+function isSideChatAnchor(value: unknown): boolean {
+  if (!isRecord(value) || !isString(value.type)) return false;
+  if (value.type === 'empty') return true;
+  return (value.type === 'turn' || value.type === 'activeInput')
+    && isString(value.turn_id)
+    && isString(value.source_turn_id);
+}
+
+function isSideChatUserInput(value: unknown): boolean {
+  return isRecord(value)
+    && isString(value.turn_id)
+    && 'input' in value
+    && isString(value.created_at);
+}
+
+export function isSideChatPublicSnapshot(value: unknown): value is SideChatInfo {
+  if (!isRecord(value)) return false;
+  return isString(value.id)
+    && isString(value.parent_session_id)
+    && isNullableString(value.stream_id)
+    && isOneOf(value.state, ['idle', 'running', 'waiting_interaction', 'stale', 'closed', 'error'])
+    && isOneOf(value.status, ['open', 'closing', 'unavailable'])
+    && isSideChatAnchor(value.anchor)
+    && isRecord(value.session_config)
+    && isNullableString(value.last_error)
+    && isNullableString(value.uncertain_turn_id)
+    && Array.isArray(value.events)
+    && isArrayOf(value.user_inputs, isSideChatUserInput)
+    && isString(value.created_at)
+    && isString(value.updated_at);
+}
+
+export function isSideChatInfo(value: unknown): value is SideChatInfo {
+  return isSideChatPublicSnapshot(value);
 }
 
 function isWorkspace(value: unknown): value is Workspace {
@@ -242,6 +303,7 @@ export function isStateSyncMessage(value: unknown): value is StateSyncMessage {
   return value.type === 'state_sync'
     && isRunnerInfo(value.runner)
     && isArrayOf(value.sessions, isSession)
+    && isOptional(value, 'sidechats', (entry) => isArrayOf(entry, isSideChatPublicSnapshot))
     && isArrayOf(value.workspaces, isWorkspace)
     && isArrayOf(value.tasks, isTask)
     && isArrayOf(value.approvals, isApproval)
@@ -252,7 +314,7 @@ export function isStateSyncMessage(value: unknown): value is StateSyncMessage {
 export function isNativeSession(value: unknown): value is NativeSession {
   if (!isRecord(value)) return false;
   return isString(value.id)
-    && isOneOf(value.executor, ['codex', 'claude', 'kimi', 'grok'])
+    && isOneOf(value.executor, ['codex', 'claude', 'kimi', 'grok', 'dsh'])
     && isString(value.filePath)
     && isString(value.cwd)
     && isString(value.updatedAt)
@@ -298,6 +360,10 @@ export function parseSessionList(value: unknown): Session[] {
 
 export function parseStateSyncMessage(value: unknown): StateSyncMessage {
   return parseContract(value, 'StateSyncMessage', isStateSyncMessage);
+}
+
+export function parseSideChatInfo(value: unknown): SideChatInfo {
+  return parseContract(value, 'SideChatInfo', isSideChatPublicSnapshot);
 }
 
 export function parseListNativeSessionsResponse(value: unknown): ListNativeSessionsResponse {

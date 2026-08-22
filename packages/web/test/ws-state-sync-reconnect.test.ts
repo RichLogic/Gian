@@ -77,8 +77,52 @@ describe('WS-002: reconnect and state_sync queue contract', () => {
     expect(sentTypes(recovered)).toEqual([
       'auth', 'events:subscribe', 'term:replay-request', 'term:close',
     ]);
+    ws.disconnect();
+  });
+
+  it('classifies the sidechat/fork mutations as never-replayable (dropped-and-failed, §10.5/§10.6)', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    ws.connect();
+    const socket = getMockWebSockets()[0]!;
+
+    // Offline/unsynced: every new mutation is DROPPED, not queued. Replaying
+    // them after reconnect could duplicate side effects; a dropped send fails
+    // its operation run and Host-side idempotency (sidechatId / new
+    // sessionId) covers the genuinely-unknown case.
+    expect(ws.send({ type: 'sidechat:create', parent_session_id: 's1' })).toBe('dropped');
+    expect(ws.send({ type: 'sidechat:resume', sidechat_id: 'sc-1' })).toBe('dropped');
+    expect(ws.send({ type: 'sidechat:close', sidechat_id: 'sc-1' })).toBe('dropped');
+    expect(ws.send({
+      type: 'session:fork',
+      source_session_id: 's1',
+      anchor: { type: 'turn', turn_id: 't1', source_turn_id: 'p1' },
+    })).toBe('dropped');
+
+    await openSocket(socket);
+    socket.fakeMessage({ type: 'auth_ok', user: 'dev' });
+    // The authoritative snapshot may carry the Side Chat read-model set
+    // (proposal §10.5.2) — it must survive the deep state_sync validator.
+    const sync = stateSyncFixture();
+    sync.sidechats = [{
+      id: 'sc-1',
+      parent_session_id: 's1',
+      stream_id: 'stream-sc-1',
+      state: 'idle',
+      status: 'open',
+      anchor: { type: 'empty' },
+      session_config: {},
+      last_error: null,
+      uncertain_turn_id: null,
+      events: [],
+      user_inputs: [],
+      created_at: '2026-08-20T08:00:00.000Z',
+      updated_at: '2026-08-20T08:00:00.000Z',
+    }];
+    socket.fakeMessage(sync);
+
+    // Nothing from the dropped mutations was retained for replay.
+    expect(sentTypes(socket)).toEqual(['auth']);
     expect(ws.getState()).toBe('open');
-    expect(ws.getAttempt()).toBe(0);
     ws.disconnect();
   });
 

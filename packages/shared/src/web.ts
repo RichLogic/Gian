@@ -13,6 +13,8 @@ import type {
   Workspace,
 } from './model.js';
 import type { InputItem } from './proxy.js';
+import type { SideChatPublicSnapshot, SessionOrigin } from './sidechat.js';
+import type { SidechatCloseResult } from './operations.js';
 
 export interface AuthMessage {
   type: 'auth';
@@ -42,6 +44,8 @@ export interface StateSyncMessage {
   type: 'state_sync';
   runner: RunnerInfo;
   sessions: Session[];
+  /** Open/closing Side Chats grouped by parent_session_id. Never mixed into sessions. */
+  sidechats?: SideChatPublicSnapshot[];
   workspaces: Workspace[];
   tasks: Task[];
   approvals: Approval[];
@@ -106,7 +110,7 @@ export interface SessionCreatedMessage {
   session: Session;
   /** Creation path that owns the broadcast. Optional for compatibility with
    *  older Hosts; absent messages keep the ordinary interactive behavior. */
-  origin?: 'interactive-create' | 'native-adopt' | 'task-create';
+  origin?: 'interactive-create' | 'native-adopt' | 'task-create' | 'session-fork';
 }
 
 export interface SessionDeletedMessage {
@@ -230,6 +234,8 @@ export interface OperationResultMessage {
   request_type: ClientToServerMessage['type'];
   ok: boolean;
   error?: { code: string; message: string };
+  /** Domain result. Must never include resumeRef or Proxy routing secrets. */
+  result?: SidechatCloseResult | { sidechat_id: string } | { session_id: string; origin: SessionOrigin };
 }
 
 /**
@@ -303,6 +309,9 @@ export type ServerToClientMessage =
   | SessionSlashCommandsMessage
   | WorkspaceGitUpdatedMessage
   | OperationResultMessage
+  | SidechatCreatedMessage
+  | SidechatUpdatedMessage
+  | SidechatClosedMessage
   | ErrorMessage;
 
 export interface SessionCreateMessage {
@@ -318,6 +327,10 @@ export interface SessionCreateMessage {
   thinking_effort?: import('./model.js').ThinkingEffort | null;
   /** Codex-only Fast service tier. Omitted/null keeps the standard tier. */
   service_tier?: 'fast' | null;
+  /** Opaque Session-bound snapshot sent as `session.create.params.config`. */
+  session_config?: Record<string, import('./model.js').ConfigValue>;
+  /** Initial next-turn Turn-bound draft. */
+  turn_config?: Record<string, import('./model.js').ConfigValue>;
   /** Correlation id — see `OperationResultMessage`. */
   request_id?: string;
 }
@@ -389,7 +402,7 @@ export interface ApprovalResolveMessage {
    * Forwarded by host into cc-proxy's `approval.respond.answers` which
    * piggybacks on the Claude SDK `updatedInput.answers` channel.
    */
-  answers?: Record<string, string | string[]>;
+  answers?: Record<string, string | boolean | string[]>;
   /** Exact executor option for ACP-native approvals. */
   native_option_id?: string;
   /** Correlation id — see `OperationResultMessage`. */
@@ -451,8 +464,56 @@ export interface SessionPinMessage {
 export interface SessionDeleteMessage {
   type: 'session:delete';
   session_id: string;
+  /** Recorded, user-confirmed Side Chat close actions. Required when any
+   *  open/closing Side Chat still belongs to this Session. */
+  confirmed_sidechat_ids?: string[];
   /** Correlation id — see `OperationResultMessage`. */
   request_id?: string;
+}
+
+export interface SidechatCreateMessage {
+  type: 'sidechat:create';
+  parent_session_id: string;
+  sidechat_id?: string;
+  request_id?: string;
+}
+
+export interface SidechatResumeMessage {
+  type: 'sidechat:resume';
+  sidechat_id: string;
+  parent_session_id: string;
+  request_id?: string;
+}
+
+export interface SidechatCloseMessage {
+  type: 'sidechat:close';
+  sidechat_id: string;
+  request_id?: string;
+}
+
+export interface SessionForkMessage {
+  type: 'session:fork';
+  source_session_id: string;
+  session_id?: string;
+  anchor: { type: 'head' } | { type: 'turn'; turn_id: string; source_turn_id: string };
+  request_id?: string;
+}
+
+export interface SidechatCreatedMessage {
+  type: 'sidechat:created';
+  sidechat: SideChatPublicSnapshot;
+}
+
+export interface SidechatUpdatedMessage {
+  type: 'sidechat:updated';
+  sidechat: SideChatPublicSnapshot;
+}
+
+export interface SidechatClosedMessage {
+  type: 'sidechat:closed';
+  sidechat_id: string;
+  parent_session_id: string;
+  provider_data_deleted: boolean;
 }
 
 /**
@@ -508,6 +569,15 @@ export interface SessionSetNativeConfigMessage {
   session_id: string;
   config_id: string;
   value: import('./model.js').NativeConfigValue;
+  /** Correlation id — see `OperationResultMessage`. */
+  request_id?: string;
+}
+
+export interface SessionSetTurnConfigMessage {
+  type: 'session:set_turn_config';
+  session_id: string;
+  option_id: string;
+  value: import('./model.js').ConfigValue;
   /** Correlation id — see `OperationResultMessage`. */
   request_id?: string;
 }
@@ -646,6 +716,11 @@ export type ClientToServerMessage =
   | SessionSetEffortMessage
   | SessionSetServiceTierMessage
   | SessionSetNativeConfigMessage
+  | SessionSetTurnConfigMessage
+  | SidechatCreateMessage
+  | SidechatResumeMessage
+  | SidechatCloseMessage
+  | SessionForkMessage
   | QueueAddMessage
   | QueueRemoveMessage
   | QueueUpdateMessage

@@ -1,8 +1,17 @@
 export type SessionStatus = 'idle' | 'running' | 'needs-approval' | 'stale' | 'closed' | 'error';
 
-/** Claude CLI's `--permission-mode` accepted values. Passed through verbatim
- *  to the spawned `claude -p` per turn. */
-export type PermissionMode = 'plan' | 'default' | 'auto' | 'bypassPermissions';
+/** Claude CLI's `--permission-mode` values accepted by the current
+ *  cc-proxy catalog. Plan mode is intentionally not advertised: accepting
+ *  ExitPlanMode would require the Proxy to change a future turn mode, which
+ *  gian.proxy/2.0 has no request semantic for. */
+export type PermissionMode =
+  | 'default'
+  | 'manual'
+  | 'acceptEdits'
+  | 'auto'
+  | 'dontAsk'
+  | 'bypassPermissions'
+  | 'plan';
 
 export interface TextInputItem {
   type: 'text';

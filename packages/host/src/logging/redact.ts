@@ -1,10 +1,12 @@
+import { redactSensitiveProtocolText } from '@gian/proxy-protocol';
+
 const REDACTED = '[REDACTED]';
-const SENSITIVE_KEY = '(?:access[_-]?token|refresh[_-]?token|api[_-]?key|password|passwd|secret|client[_-]?secret|authorization|credential)';
+const SENSITIVE_KEY = '(?:access[_-]?token|refresh[_-]?token|api[_-]?key|password|passwd|secret|client[_-]?secret|authorization|credential|resume[_-]?ref(?:[_-]?id)?)';
 
 /** Redact credential-shaped values at log boundaries while preserving enough
  * context (key, URL host, error text) to diagnose the failure. */
 export function redactSensitiveText(input: string): string {
-  return input
+  return redactSensitiveProtocolText(input)
     .replace(new RegExp(`(["']${SENSITIVE_KEY}["']\\s*:\\s*["'])(.*?)(["'])`, 'gi'), `$1${REDACTED}$3`)
     .replace(new RegExp(`([?&]${SENSITIVE_KEY}=)[^&#\\s]+`, 'gi'), `$1${REDACTED}`)
     .replace(/\b([A-Z][A-Z0-9_]*(?:TOKEN|API_KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*\s*=\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/g, `$1${REDACTED}`)

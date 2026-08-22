@@ -11,3 +11,6 @@ export * from './github-auth.js';
 export * from './onboarding.js';
 export * from './browser.js';
 export * from './screenshot.js';
+export * from './trace.js';
+export * from './sidechat.js';
+export * from './operations.js';

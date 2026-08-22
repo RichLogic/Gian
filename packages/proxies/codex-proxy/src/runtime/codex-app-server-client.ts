@@ -1,6 +1,5 @@
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
 
 import type {
   ApprovalPolicy,
@@ -22,109 +21,22 @@ function abortReason(signal: AbortSignal, fallback: string) {
   return toError(signal.reason, fallback);
 }
 
-function delay(ms: number, signal: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    if (signal.aborted) {
-      reject(abortReason(signal, 'Codex app-server startup was cancelled.'));
-      return;
-    }
+// The umbrella `codex app-server --listen stdio://` form first shipped in 0.100.0.
+export const MIN_CODEX_STDIO_VERSION = '0.100.0';
+export const MAX_APP_SERVER_JSONL_LINE_BYTES = 16 * 1024 * 1024;
+const MAX_STARTUP_DIAGNOSTIC_BYTES = 64 * 1024;
 
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(abortReason(signal, 'Codex app-server startup was cancelled.'));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-async function findFreePort(signal: AbortSignal) {
-  return new Promise<number>((resolve, reject) => {
-    const server = createServer();
-    let settled = false;
-
-    const finish = (error: unknown, port?: number) => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener('abort', onAbort);
-      server.removeListener('error', onError);
-      if (error) {
-        reject(error);
-      } else {
-        resolve(port!);
-      }
-    };
-    const onAbort = () => {
-      if (server.listening) server.close();
-      finish(abortReason(signal, 'Codex app-server startup was cancelled.'));
-    };
-    const onError = (error: Error) => finish(error);
-
-    if (signal.aborted) {
-      finish(abortReason(signal, 'Codex app-server startup was cancelled.'));
-      return;
-    }
-    signal.addEventListener('abort', onAbort, { once: true });
-    server.once('error', onError);
-    server.listen(0, '127.0.0.1', () => {
-      if (settled) {
-        server.close();
-        return;
-      }
-      const address = server.address();
-      if (!address || typeof address === 'string') {
-        server.close();
-        finish(new Error('Failed to allocate a free port.'));
-        return;
-      }
-
-      const port = address.port;
-      server.close((error) => finish(error, port));
-    });
-  });
-}
-
-async function waitForReady(url: string, timeoutMs: number, startupSignal: AbortSignal) {
-  const deadline = Date.now() + timeoutMs;
-  const timeoutError = () => new Error(
-    `Timed out waiting for Codex app-server readiness at ${url} after ${timeoutMs}ms.`,
+function isUnsupportedStdioDiagnostic(value: string) {
+  return (
+    /(?:unexpected|unrecognized|unknown) (?:argument|option)[^\n]*--listen/i.test(value)
+    || /(?:invalid|unsupported)[^\n]*stdio:\/\//i.test(value)
   );
+}
 
-  while (true) {
-    if (startupSignal.aborted) {
-      throw abortReason(startupSignal, 'Codex app-server startup was cancelled.');
-    }
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) throw timeoutError();
-
-    const attemptController = new AbortController();
-    const onStartupAbort = () => attemptController.abort(startupSignal.reason);
-    startupSignal.addEventListener('abort', onStartupAbort, { once: true });
-    const attemptTimer = setTimeout(
-      () => attemptController.abort(timeoutError()),
-      remaining,
-    );
-    try {
-      const response = await fetch(url, { signal: attemptController.signal });
-      if (response.ok) return;
-    } catch {
-      if (startupSignal.aborted) {
-        throw abortReason(startupSignal, 'Codex app-server startup was cancelled.');
-      }
-      if (Date.now() >= deadline || attemptController.signal.aborted) {
-        throw timeoutError();
-      }
-      // The listener may not be accepting connections yet.
-    } finally {
-      clearTimeout(attemptTimer);
-      startupSignal.removeEventListener('abort', onStartupAbort);
-    }
-
-    await delay(Math.min(100, Math.max(1, deadline - Date.now())), startupSignal);
-  }
+function wirePayload(payload: unknown) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+  const { jsonrpc: _jsonrpc, ...wire } = payload as Record<string, unknown>;
+  return wire;
 }
 
 /** Translate our simple SandboxMode enum to codex's `SandboxPolicy` tagged
@@ -341,12 +253,8 @@ interface PendingRequest {
 }
 
 export interface CodexAppServerDeadlines {
-  /** Entire allocation → initialized handshake. */
+  /** Entire spawn → initialized handshake. */
   startupMs: number;
-  /** HTTP `/readyz` polling. */
-  readyMs: number;
-  /** WebSocket open handshake. */
-  socketConnectMs: number;
   /** Every JSON-RPC request, including `initialize`. */
   rpcMs: number;
   /** Grace after SIGTERM before a still-live child receives SIGKILL. */
@@ -355,8 +263,6 @@ export interface CodexAppServerDeadlines {
 
 const DEFAULT_DEADLINES: CodexAppServerDeadlines = {
   startupMs: 30_000,
-  readyMs: 10_000,
-  socketConnectMs: 10_000,
   rpcMs: 60_000,
   terminateGraceMs: 2_000,
 };
@@ -373,7 +279,7 @@ function normalizeDeadlines(overrides: Partial<CodexAppServerDeadlines> | undefi
 
 export function buildInitializeParams() {
   return {
-    clientInfo: { name: 'codex-proxy', version: '0.1.0' },
+    clientInfo: { name: 'codex-proxy', version: '0.2.0' },
     capabilities: {
       experimentalApi: true,
       requestAttestation: false,
@@ -381,10 +287,10 @@ export function buildInitializeParams() {
   };
 }
 
-export function buildAppServerArgs(listenUrl: string): string[] {
+export function buildAppServerArgs(): string[] {
   return [
     '-c', 'check_for_update_on_startup=false',
-    'app-server', '--listen', listenUrl,
+    'app-server', '--listen', 'stdio://',
   ];
 }
 
@@ -392,9 +298,9 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
   private readonly codexBin: string;
   private readonly deadlines: CodexAppServerDeadlines;
   private process: ReturnType<typeof spawn> | null = null;
-  private socket: WebSocket | null = null;
   private startPromise: Promise<void> | null = null;
-  private listenUrl: string | null = null;
+  private writeChain: Promise<void> = Promise.resolve();
+  private startupDiagnostics: { generation: number; text: string } | null = null;
   private nextId = 1;
   private readonly pending = new Map<number, PendingRequest>();
   private nextGeneration = 1;
@@ -433,33 +339,23 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
     }, this.deadlines.startupMs);
 
     try {
-      const port = await findFreePort(startupController.signal);
-      this.assertCurrentGeneration(generation, startupController.signal);
-      const listenUrl = `ws://127.0.0.1:${port}`;
-      this.listenUrl = listenUrl;
       // Gian owns runtime activation. Prevent Codex's own startup updater from
       // racing the HOME-scoped updater or mutating a leased binary in place.
-      const child = spawn(this.codexBin, buildAppServerArgs(listenUrl), {
-        stdio: ['ignore', 'pipe', 'pipe'],
+      const child = spawn(this.codexBin, buildAppServerArgs(), {
+        stdio: ['pipe', 'pipe', 'pipe'],
         env: process.env,
       });
       this.process = child;
+      this.startupDiagnostics = { generation, text: '' };
       this.attachProcess(child, generation);
 
-      await waitForReady(
-        `http://127.0.0.1:${port}/readyz`,
-        this.deadlines.readyMs,
-        startupController.signal,
-      );
-      this.assertCurrentGeneration(generation, startupController.signal);
-      await this.connectSocket(listenUrl, generation, startupController.signal);
-      this.assertCurrentGeneration(generation, startupController.signal);
       await this.requestInternal('initialize', buildInitializeParams(), {
         generation,
         signal: startupController.signal,
       });
       this.assertCurrentGeneration(generation, startupController.signal);
-      this.send({ jsonrpc: '2.0', method: 'initialized' });
+      await this.send({ jsonrpc: '2.0', method: 'initialized' }, generation);
+      if (this.startupDiagnostics?.generation === generation) this.startupDiagnostics = null;
     } catch (cause) {
       const error = startupController.signal.aborted
         ? abortReason(startupController.signal, 'Codex app-server startup was cancelled.')
@@ -481,13 +377,16 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
   }
 
   private attachProcess(child: ReturnType<typeof spawn>, generation: number) {
-    child.stdout?.on('data', (chunk) => {
-      const text = chunk.toString().trim();
-      if (text) this.emit('debug', text);
-    });
+    this.attachProtocolStream(child, generation);
     child.stderr?.on('data', (chunk) => {
       const text = chunk.toString().trim();
       if (text) this.emit('debug', text);
+      const diagnostics = this.startupDiagnostics;
+      if (diagnostics?.generation === generation && diagnostics.text.length < MAX_STARTUP_DIAGNOSTIC_BYTES) {
+        diagnostics.text = `${diagnostics.text}${chunk.toString()}`.slice(
+          -MAX_STARTUP_DIAGNOSTIC_BYTES,
+        );
+      }
     });
     child.on('error', (cause) => {
       this.handleRuntimeFailure(
@@ -495,99 +394,113 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
         toError(cause, 'Codex app-server process failed.'),
       );
     });
-    child.once('exit', () => {
-      this.handleRuntimeFailure(generation, new Error('Codex app-server stopped.'));
+    child.once('exit', (code, signal) => {
+      this.handleRuntimeFailure(generation, this.processExitError(generation, code, signal));
     });
   }
 
-  private async connectSocket(
-    listenUrl: string,
-    generation: number,
-    startupSignal: AbortSignal,
-  ) {
-    this.assertCurrentGeneration(generation, startupSignal);
-    const socket = new WebSocket(listenUrl);
-    await this.attachSocket(socket, generation, startupSignal);
-  }
+  private attachProtocolStream(child: ReturnType<typeof spawn>, generation: number) {
+    const stdout = child.stdout;
+    const stdin = child.stdin;
+    if (!stdout || !stdin) {
+      this.handleRuntimeFailure(
+        generation,
+        new Error('Codex app-server stdio pipes were not available.'),
+      );
+      return;
+    }
 
-  private attachSocket(
-    socket: WebSocket,
-    generation: number,
-    startupSignal: AbortSignal,
-  ) {
-    this.assertCurrentGeneration(generation, startupSignal);
-    // Keep the CONNECTING socket reachable so process/startup failure can
-    // close it. send() still refuses anything other than OPEN.
-    this.socket = socket;
+    let buffered = Buffer.alloc(0);
+    const fail = (cause: unknown, fallback: string) => {
+      this.handleRuntimeFailure(generation, toError(cause, fallback));
+    };
+    stdout.on('data', (chunk: Buffer | string) => {
+      if (this.activeGeneration !== generation || this.process !== child) return;
+      const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      buffered = buffered.length === 0 ? Buffer.from(incoming) : Buffer.concat([buffered, incoming]);
 
-    return new Promise<void>((resolve, reject) => {
-      let handshakeSettled = false;
-      let opened = false;
-      const finishHandshake = (error?: Error) => {
-        if (handshakeSettled) return;
-        handshakeSettled = true;
-        clearTimeout(handshakeTimer);
-        startupSignal.removeEventListener('abort', onStartupAbort);
-        socket.removeEventListener('open', onOpen);
-        if (error) reject(error);
-        else resolve();
-      };
-      const onOpen = () => {
-        if (this.activeGeneration !== generation || startupSignal.aborted) {
-          finishHandshake(startupSignal.aborted
-            ? abortReason(startupSignal, 'Codex websocket startup was cancelled.')
-            : new Error('Codex websocket startup was superseded.'));
-          try { socket.close(); } catch {}
+      while (true) {
+        const newlineIndex = buffered.indexOf(0x0a);
+        if (newlineIndex < 0) break;
+        let line = buffered.subarray(0, newlineIndex);
+        buffered = buffered.subarray(newlineIndex + 1);
+        if (line.length > MAX_APP_SERVER_JSONL_LINE_BYTES) {
+          fail(
+            new Error(
+              `Codex app-server JSONL line exceeds ${MAX_APP_SERVER_JSONL_LINE_BYTES} bytes.`,
+            ),
+            'Codex app-server stdout exceeded its JSONL line limit.',
+          );
           return;
         }
-        opened = true;
-        finishHandshake();
-      };
-      const onMessage = (event: MessageEvent) => {
-        if (this.activeGeneration === generation && this.socket === socket) {
-          this.handleMessage(String(event.data));
+        if (line.at(-1) === 0x0d) line = line.subarray(0, -1);
+        const raw = line.toString('utf8');
+        if (!raw.trim()) continue;
+        try {
+          this.handleMessage(raw);
+        } catch (cause) {
+          fail(
+            new Error(
+              `Codex app-server stdout contained malformed JSONL: ${toError(cause, 'invalid JSON').message}`,
+            ),
+            'Codex app-server stdout contained malformed JSONL.',
+          );
+          return;
         }
-      };
-      const onError = () => {
-        const error = opened
-          ? new Error('Codex app-server websocket failed.')
-          : new Error('Failed to connect to Codex app-server websocket.');
-        finishHandshake(error);
-        if (this.socket === socket) this.handleRuntimeFailure(generation, error);
-      };
-      const onClose = () => {
-        const error = opened
-          ? new Error('Codex app-server websocket closed.')
-          : new Error('Codex app-server websocket closed before connecting.');
-        finishHandshake(error);
-        if (this.socket === socket) this.handleRuntimeFailure(generation, error);
-      };
-      const onStartupAbort = () => {
-        const error = abortReason(startupSignal, 'Codex websocket startup was cancelled.');
-        finishHandshake(error);
-        if (this.socket === socket) this.handleRuntimeFailure(generation, error);
-      };
-      const handshakeTimer = setTimeout(() => {
-        const error = new Error(
-          `Timed out connecting Codex app-server websocket after ${this.deadlines.socketConnectMs}ms.`,
-        );
-        finishHandshake(error);
-        if (this.socket === socket) this.handleRuntimeFailure(generation, error);
-      }, this.deadlines.socketConnectMs);
+      }
 
-      socket.addEventListener('open', onOpen, { once: true });
-      socket.addEventListener('message', onMessage);
-      socket.addEventListener('error', onError);
-      socket.addEventListener('close', onClose, { once: true });
-      startupSignal.addEventListener('abort', onStartupAbort, { once: true });
-      if (startupSignal.aborted) onStartupAbort();
+      if (buffered.length > MAX_APP_SERVER_JSONL_LINE_BYTES) {
+        fail(
+          new Error(
+            `Codex app-server JSONL line exceeds ${MAX_APP_SERVER_JSONL_LINE_BYTES} bytes before newline.`,
+          ),
+          'Codex app-server stdout exceeded its JSONL line limit.',
+        );
+      }
     });
+    stdout.once('error', (cause) => {
+      fail(cause, 'Codex app-server stdout stream failed.');
+    });
+    stdout.once('end', () => {
+      setImmediate(() => {
+        if (this.activeGeneration === generation && this.process === child) {
+          const startupError = this.startupDiagnostics?.generation === generation
+            ? this.processExitError(generation, child.exitCode, child.signalCode)
+            : new Error('Codex app-server stdout closed.');
+          fail(startupError, 'Codex app-server stdout closed.');
+        }
+      });
+    });
+    stdin.once('error', (cause) => {
+      fail(cause, 'Codex app-server stdin stream failed.');
+    });
+  }
+
+  private processExitError(
+    generation: number,
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ) {
+    const diagnostics = this.startupDiagnostics?.generation === generation
+      ? this.startupDiagnostics.text.trim()
+      : '';
+    if (diagnostics && isUnsupportedStdioDiagnostic(diagnostics)) {
+      return new Error(
+        `Installed Codex CLI does not support app-server stdio transport. Upgrade to Codex CLI ${MIN_CODEX_STDIO_VERSION} or newer. ${diagnostics}`,
+      );
+    }
+    const exit = signal ? `signal ${signal}` : `exit code ${code ?? 'unknown'}`;
+    if (this.startupAbort?.generation === generation) {
+      return new Error(
+        `Codex app-server failed to start over stdio (${exit}).${diagnostics ? ` ${diagnostics}` : ''}`,
+      );
+    }
+    return new Error(`Codex app-server stopped (${exit}).`);
   }
 
   private handleRuntimeFailure(generation: number, cause: unknown) {
     if (this.activeGeneration !== generation) return false;
     const error = toError(cause, 'Codex app-server stopped.');
-    const socket = this.socket;
     const child = this.process;
     const startupAbort = this.startupAbort?.generation === generation
       ? this.startupAbort.controller
@@ -596,17 +509,14 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
     // Invalidate the generation before closing/killing. Both operations can
     // synchronously re-enter through close/exit in fakes and some runtimes.
     this.activeGeneration = null;
-    this.socket = null;
     this.process = null;
-    this.listenUrl = null;
     this.startPromise = null;
+    this.writeChain = Promise.resolve();
+    if (this.startupDiagnostics?.generation === generation) this.startupDiagnostics = null;
     if (this.startupAbort?.generation === generation) this.startupAbort = null;
     this.rejectAllPending(error);
     if (startupAbort && !startupAbort.signal.aborted) startupAbort.abort(error);
 
-    if (socket) {
-      try { socket.close(); } catch {}
-    }
     if (child) this.terminateProcess(child);
     this.emit('runtimeStopped');
     return true;
@@ -642,7 +552,11 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
   }
 
   private handleMessage(raw: string) {
-    const message = JSON.parse(raw) as { id?: number; method?: string; result?: unknown; error?: { message?: string } };
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Codex app-server message must be a JSON object.');
+    }
+    const message = parsed as { id?: number; method?: string; result?: unknown; error?: { message?: string } };
     if (typeof message.id === 'number' && !message.method) {
       const pending = this.takePending(message.id);
       if (!pending) {
@@ -666,11 +580,30 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
     }
   }
 
-  private send(payload: unknown) {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-      throw new Error('Codex app-server websocket is not connected.');
+  private send(payload: unknown, generation = this.activeGeneration): Promise<void> {
+    const child = this.process;
+    if (generation === null || this.activeGeneration !== generation || !child?.stdin) {
+      return Promise.reject(new Error('Codex app-server stdio is not connected.'));
     }
-    this.socket.send(JSON.stringify(payload));
+    const line = `${JSON.stringify(wirePayload(payload))}\n`;
+    const write = this.writeChain.then(() => new Promise<void>((resolve, reject) => {
+      if (
+        this.activeGeneration !== generation
+        || this.process !== child
+        || !child.stdin
+        || child.stdin.destroyed
+        || !child.stdin.writable
+      ) {
+        reject(new Error('Codex app-server stdio is not connected.'));
+        return;
+      }
+      child.stdin.write(line, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    }));
+    this.writeChain = write.catch(() => {});
+    return write;
   }
 
   private takePending(id: number) {
@@ -734,7 +667,10 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
         return;
       }
       try {
-        this.send({ jsonrpc: '2.0', id, method, params });
+        void this.send({ jsonrpc: '2.0', id, method, params }, generation).catch((cause) => {
+          const error = toError(cause, `Failed to send Codex app-server RPC ${method}.`);
+          if (!this.handleRuntimeFailure(generation, error)) this.rejectPending(id, error);
+        });
       } catch (cause) {
         const error = toError(cause, `Failed to send Codex app-server RPC ${method}.`);
         if (!this.handleRuntimeFailure(generation, error)) this.rejectPending(id, error);
@@ -865,6 +801,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
       ...sandboxParams,
       ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
       ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {}),
+      ...(options.collaborationMode ? { collaborationMode: options.collaborationMode } : {}),
       ...(options.reasoningSummary ? { summary: options.reasoningSummary } : {}),
       ...(options.serviceTier ? { serviceTier: options.serviceTier } : {}),
     }) as Promise<{ turn: { id: string; status: string } }>;
@@ -888,7 +825,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
       throw new Error('Codex app-server stopped before the response could be sent.');
     }
     try {
-      this.send({ jsonrpc: '2.0', id, result });
+      await this.send({ jsonrpc: '2.0', id, result }, generation);
     } catch (cause) {
       const error = toError(cause, 'Failed to send Codex app-server response.');
       this.handleRuntimeFailure(generation, error);
@@ -930,16 +867,12 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
 
     // Defensive cleanup for a partially constructed instance. Normal runtime
     // paths always have an active generation and use the branch above.
-    const socket = this.socket;
     const child = this.process;
-    this.socket = null;
     this.process = null;
-    this.listenUrl = null;
     this.startPromise = null;
+    this.writeChain = Promise.resolve();
+    this.startupDiagnostics = null;
     this.rejectAllPending(new Error('Codex app-server stopped.'));
-    if (socket) {
-      try { socket.close(); } catch {}
-    }
     if (child) this.terminateProcess(child);
   }
 }

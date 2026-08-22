@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  buildClaudeCliArgs,
   extractClaudeConfigDirFromScript,
   parseAvailableModels,
+  parseClaudePermissionModesFromHelp,
   resolveClaudeSettingsPath,
   ClaudeMcpRuntime,
 } from '../src/runtime/claude-mcp-runtime.js';
@@ -445,4 +447,70 @@ test('discoverModels falls back to static aliases on invalid settings JSON', asy
   } finally {
     rmSync(confRoot, { recursive: true, force: true });
   }
+
+// ---------------------------------------------------------------------------
+// Native permission-mode parsing and CLI argv isolation
+// ---------------------------------------------------------------------------
+
+test('parseClaudePermissionModesFromHelp reads the CLI choices verbatim', () => {
+  const help = '  --permission-mode <mode>  Permission mode to use for the session (choices: "acceptEdits", "bypassPermissions", "default", "plan")';
+  assert.deepEqual(parseClaudePermissionModesFromHelp(help), [
+    'acceptEdits',
+    'bypassPermissions',
+    'default',
+    'plan',
+  ]);
+  assert.deepEqual(parseClaudePermissionModesFromHelp('--permission-mode <mode>  no choices'), []);
+  const currentMultilineHelp = `
+  --permission-mode <mode>  Permission mode to use for the session
+                            (choices: "acceptEdits", "auto",
+                            "bypassPermissions", "manual", "dontAsk", "plan")`;
+  assert.deepEqual(parseClaudePermissionModesFromHelp(currentMultilineHelp), [
+    'acceptEdits',
+    'auto',
+    'bypassPermissions',
+    'manual',
+    'dontAsk',
+    'plan',
+  ]);
+});
+
+test('buildClaudeCliArgs isolates MCP config with --strict-mcp-config on the approval bridge', () => {
+  const args = buildClaudeCliArgs(
+    { mcpConfigPath: '/tmp/cc-proxy-mcp-session-1.json', hasHadFirstTurn: false, claudeSessionId: 'claude-1', model: null },
+    'hello',
+    { permissionMode: 'default' },
+  );
+  const mcpIndex = args.indexOf('--mcp-config');
+  assert.ok(mcpIndex >= 0, 'approval-bridge mcp-config must be passed');
+  assert.equal(args[mcpIndex + 2], '--strict-mcp-config');
+  assert.ok(args.includes('--permission-prompt-tool'));
+});
+
+test('buildClaudeCliArgs maps bypassPermissions to skip-permissions and still isolates MCP', () => {
+  const args = buildClaudeCliArgs(
+    { mcpConfigPath: '/tmp/cc-proxy-mcp-session-1.json', hasHadFirstTurn: true, claudeSessionId: 'claude-1', model: null },
+    'hello',
+    { permissionMode: 'bypassPermissions' },
+  );
+  assert.ok(args.includes('--dangerously-skip-permissions'));
+  assert.ok(args.includes('--strict-mcp-config'));
+  assert.ok(!args.includes('--mcp-config'));
+  assert.ok(!args.includes('--permission-mode'));
+  assert.ok(!args.includes('--permission-prompt-tool'));
+});
+
+test('buildClaudeCliArgs passes discovered manual/acceptEdits modes through unchanged', () => {
+  for (const mode of ['manual', 'acceptEdits'] as const) {
+    const args = buildClaudeCliArgs(
+      { mcpConfigPath: null, hasHadFirstTurn: false, claudeSessionId: 'claude-1', model: null },
+      'hello',
+      { permissionMode: mode },
+    );
+    const modeIndex = args.indexOf('--permission-mode');
+    assert.ok(modeIndex >= 0);
+    assert.equal(args[modeIndex + 1], mode);
+  }
+});
+
 });

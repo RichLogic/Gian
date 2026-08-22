@@ -98,11 +98,13 @@
   background: var(--bg);
 }
 
-/* Spacer between the window-chrome button cluster and the path breadcrumb — dividers are hidden by design; this is spacing only. */
+/* Hairline between the window-chrome button cluster and the path breadcrumb —
+   restored per Owner call (2026-08-21), reverting the 2363ae8 blanking. */
 .tb-divider {
   width: 1px;
   height: 16px;
   flex: none;
+  background: var(--hairline);
   margin: 0 4px;
 }
 
@@ -352,6 +354,9 @@
   width: 18px;
   height: 1px;
   margin: 4px auto;
+  /* Owner call (2026-08-21): dock group dividers stay VISIBLE — reverts the
+     2363ae8 blanking for the right rail only. */
+  background: var(--hairline);
   flex: none;
 }
 .dock-spacer { flex: 1; }

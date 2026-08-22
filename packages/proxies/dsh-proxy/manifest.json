@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 2,
+  "id": "ai.deepseek.harness",
+  "displayName": "DeepSeek Harness",
+  "pluginVersion": "0.1.0",
+  "entry": "proxy.mjs",
+  "protocol": {
+    "name": "gian.proxy",
+    "range": ">=2.0 <3.0"
+  },
+  "process": {
+    "scope": "shared"
+  },
+  "runtime": {
+    "id": "deepseek-harness",
+    "displayName": "DeepSeek Harness"
+  }
+}

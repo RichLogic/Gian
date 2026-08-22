@@ -45,16 +45,24 @@ function sleep(ms) {
 }
 
 function notificationUpdate(notification) {
+  if (notification?.method === 'activity.updated') {
+    return notification?.params?.data?.presentation?.data ?? notification?.params?.data ?? null;
+  }
   return notification?.method === 'acp.sessionUpdate'
     ? notification?.params?.data?.update
     : null;
 }
 
 function optionValues(option) {
-  if (!Array.isArray(option?.options)) return [];
-  return option.options
+  const choices = option?.choices ?? option?.options ?? [];
+  if (!Array.isArray(choices)) return [];
+  return choices
     .map(item => item?.value)
     .filter(value => typeof value === 'string' && value.length > 0);
+}
+
+function optionCurrentValue(option) {
+  return option?.currentValue ?? option?.defaultValue;
 }
 
 function chooseMutableConfig(configOptions) {
@@ -63,11 +71,12 @@ function chooseMutableConfig(configOptions) {
   ));
   for (const option of ordered) {
     const values = optionValues(option);
-    const alternate = values.find(value => value !== option?.currentValue);
+    const current = optionCurrentValue(option);
+    const alternate = values.find(value => value !== current);
     if (typeof option?.id === 'string' && alternate) {
       return {
         id: option.id,
-        originalValue: option.currentValue,
+        originalValue: current,
         alternateValue: alternate,
       };
     }
@@ -75,13 +84,16 @@ function chooseMutableConfig(configOptions) {
   throw new Error('Kimi did not expose a mutable select configuration option.');
 }
 
-function configCurrentValue(response, configId) {
-  return (response?.configOptions ?? response?.session?.configOptions ?? [])
-    .find(option => option?.id === configId)?.currentValue;
+function configCurrentValue(session, configId) {
+  return session?.sessionConfig?.[configId];
+}
+
+function nativeSessionId(session) {
+  return session?.nativeSession?.id ?? session?.nativeSessionId;
 }
 
 function turnStatus(notification) {
-  return notification?.params?.data?.status;
+  return notification?.params?.data?.stopReason ?? notification?.params?.data?.status;
 }
 
 class NotificationJournal {
@@ -107,7 +119,9 @@ class NotificationJournal {
       const relevant = this.notifications.slice(from);
       const runtimeFailure = relevant.find(notification => notification?.method === 'runtime.error');
       if (runtimeFailure) throw new Error(`Kimi runtime failed: ${JSON.stringify(runtimeFailure)}`);
-      const approval = relevant.find(notification => notification?.method === 'approval.requested');
+      const approval = relevant.find(notification => (
+        notification?.method === 'interaction.requested' || notification?.method === 'approval.requested'
+      ));
       if (approval) {
         throw new Error(`Kimi lifecycle canary unexpectedly requested approval: ${JSON.stringify(approval)}`);
       }
@@ -195,14 +209,30 @@ function proxyClientOptions(options, binaryPath, timeoutMs) {
   };
 }
 
-async function startTextTurn(client, sessionId, text) {
-  const started = await client.request('turn.start', {
+async function createWorkspaceSession(client, cwd, extras = {}) {
+  const sessionId = extras.sessionId ?? randomUUID();
+  const created = await client.request('session.create', {
     sessionId,
-    input: [{ type: 'text', text }],
+    workspace: { cwd, roots: [cwd] },
+    config: extras.config ?? {},
+    ...(extras.nativeSession ? { nativeSession: extras.nativeSession } : {}),
   });
-  const turnId = started?.turn?.id;
-  assert.equal(typeof turnId, 'string', 'Kimi proxy returned no turn id.');
-  assert.ok(turnId, 'Kimi proxy returned an empty turn id.');
+  assert.equal(created?.session?.id, sessionId, 'Kimi session.create must echo the Host session id.');
+  assert.equal(typeof created?.session?.streamId, 'string', 'Kimi session.create returned no streamId.');
+  return created.session;
+}
+
+async function startTextTurn(client, session, text, config) {
+  const turnId = randomUUID();
+  const started = await client.request('turn.start', {
+    sessionId: session.id,
+    streamId: session.streamId,
+    turnId,
+    input: [{ type: 'text', text }],
+    config: config ?? {},
+  });
+  assert.equal(started?.accepted, true, 'Kimi turn.start was not accepted.');
+  assert.equal(started?.turnId, turnId, 'Kimi turn.start must echo the Host turn id.');
   return turnId;
 }
 
@@ -268,65 +298,71 @@ export async function runKimiLifecycleCanary(options = {}) {
     clients.push(client);
     journal = new NotificationJournal(client, timeoutMs);
     await client.ensureStarted();
-    const initialized = await client.request('initialize');
-    for (const method of ['session.create', 'session.config.set', 'turn.start', 'turn.interrupt', 'session.close']) {
-      assert.ok(initialized?.methods?.includes(method), `Kimi proxy does not support ${method}.`);
-    }
+    const initialized = await client.request('initialize', {
+      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      host: { name: 'Gian', version: 'canary' },
+    });
+    assert.equal(initialized?.protocol?.version, '2.0', 'Kimi canary must negotiate gian.proxy/2.0.');
+    assert.ok(initialized?.capabilities, 'Kimi initialize returned no capabilities.');
     await sample('initialized');
 
-    const createdA = await client.request('session.create', { cwd: canaryRoot });
-    const createdB = await client.request('session.create', { cwd: canaryRoot });
-    sessionA = createdA?.session;
-    sessionB = createdB?.session;
-    assert.ok(sessionA?.id && sessionA?.nativeSessionId, 'Kimi session A has no proxy/native id.');
-    assert.ok(sessionB?.id && sessionB?.nativeSessionId, 'Kimi session B has no proxy/native id.');
-    assert.notEqual(sessionA.id, sessionB.id, 'Kimi returned duplicate proxy session ids.');
-    assert.notEqual(sessionA.nativeSessionId, sessionB.nativeSessionId, 'Kimi returned duplicate native session ids.');
-
-    const mutableConfig = chooseMutableConfig(sessionA.configOptions);
-    const changed = await client.request('session.config.set', {
-      sessionId: sessionA.id,
-      configId: mutableConfig.id,
-      value: mutableConfig.alternateValue,
+    const catalog = await client.request('catalog.list', {});
+    const mutableConfig = chooseMutableConfig(catalog.configOptions);
+    sessionA = await createWorkspaceSession(client, canaryRoot, {
+      config: { [mutableConfig.id]: mutableConfig.originalValue ?? mutableConfig.alternateValue },
     });
-    assert.equal(
-      configCurrentValue(changed, mutableConfig.id),
-      mutableConfig.alternateValue,
-      'Kimi dynamic configuration did not round-trip the alternate value.',
-    );
-    if (mutableConfig.originalValue !== undefined) {
-      const restored = await client.request('session.config.set', {
-        sessionId: sessionA.id,
-        configId: mutableConfig.id,
-        value: mutableConfig.originalValue,
-      });
-      assert.equal(
-        configCurrentValue(restored, mutableConfig.id),
-        mutableConfig.originalValue,
-        'Kimi dynamic configuration did not restore its original value.',
-      );
-    }
+    sessionB = await createWorkspaceSession(client, canaryRoot);
+    assert.ok(sessionA?.id && nativeSessionId(sessionA), 'Kimi session A has no proxy/native id.');
+    assert.ok(sessionB?.id && nativeSessionId(sessionB), 'Kimi session B has no proxy/native id.');
+    assert.notEqual(sessionA.id, sessionB.id, 'Kimi returned duplicate proxy session ids.');
+    assert.notEqual(nativeSessionId(sessionA), nativeSessionId(sessionB), 'Kimi returned duplicate native session ids.');
 
     const stopStart = journal.mark();
     const stopTurnId = await startTextTurn(
       client,
-      sessionA.id,
+      sessionA,
       `Reply with ${stopMarker}, but do not finish until explicitly interrupted.`,
+      { [mutableConfig.id]: mutableConfig.alternateValue },
+    );
+    const changed = await client.request('session.get', { sessionId: sessionA.id });
+    sessionA = changed.session;
+    assert.equal(
+      configCurrentValue(sessionA, mutableConfig.id),
+      mutableConfig.alternateValue,
+      'Kimi dynamic configuration did not round-trip the alternate value.',
     );
     modelTurnsSent += 1;
     await assert.rejects(
-      startTextTurn(client, sessionA.id, 'This second prompt must be rejected as busy.'),
+      startTextTurn(client, sessionA, 'This second prompt must be rejected as busy.'),
       error => error?.code === 'SESSION_BUSY',
     );
-    await client.request('turn.interrupt', { sessionId: sessionA.id });
+    await client.request('turn.interrupt', {
+      sessionId: sessionA.id,
+      streamId: sessionA.streamId,
+      turnId: stopTurnId,
+    });
     const stopped = await journal.waitForTurn(sessionA.id, stopTurnId, stopStart);
     assert.equal(turnStatus(stopped), 'cancelled', 'Interrupted Kimi turn did not report cancelled.');
 
     const concurrentStart = journal.mark();
     const [turnA, turnB] = await Promise.all([
-      startTextTurn(client, sessionA.id, `Reply with exactly ${concurrentMarkerA}`),
-      startTextTurn(client, sessionB.id, `Reply with exactly ${concurrentMarkerB}`),
+      startTextTurn(
+        client,
+        sessionA,
+        `Reply with exactly ${concurrentMarkerA}`,
+        mutableConfig.originalValue === undefined ? undefined : { [mutableConfig.id]: mutableConfig.originalValue },
+      ),
+      startTextTurn(client, sessionB, `Reply with exactly ${concurrentMarkerB}`),
     ]);
+    if (mutableConfig.originalValue !== undefined) {
+      const restored = await client.request('session.get', { sessionId: sessionA.id });
+      sessionA = restored.session;
+      assert.equal(
+        configCurrentValue(sessionA, mutableConfig.id),
+        mutableConfig.originalValue,
+        'Kimi dynamic configuration did not restore its original value.',
+      );
+    }
     modelTurnsSent += 2;
     await Promise.all([
       waitForMarker(journal, sessionA.id, turnA, concurrentMarkerA, concurrentStart),
@@ -337,7 +373,7 @@ export async function runKimiLifecycleCanary(options = {}) {
     const backgroundStart = journal.mark();
     const backgroundTurnId = await startTextTurn(
       client,
-      sessionA.id,
+      sessionA,
       [
         'Use the Agent tool exactly once with subagent_type="coder" and run_in_background=true.',
         `Tell that child to read ${backgroundFixturePath} and return the complete file contents.`,
@@ -366,7 +402,7 @@ export async function runKimiLifecycleCanary(options = {}) {
     assert.ok(drained, 'Kimi background Agent did not drain.');
     await sample('background-agent-drained');
 
-    const nativeSessionIdA = sessionA.nativeSessionId;
+    const nativeSessionIdA = nativeSessionId(sessionA);
     journal.close();
     await client.crash();
     crashed = true;
@@ -375,16 +411,22 @@ export async function runKimiLifecycleCanary(options = {}) {
     clients.push(client);
     journal = new NotificationJournal(client, timeoutMs);
     await client.ensureStarted();
-    await client.request('initialize');
-    const adopted = await client.request('session.create', {
-      cwd: canaryRoot,
-      nativeSessionId: nativeSessionIdA,
-      resumeMode: 'load',
+    await client.request('initialize', {
+      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      host: { name: 'Gian', version: 'canary' },
     });
-    sessionA = adopted?.session;
-    assert.equal(sessionA?.nativeSessionId, nativeSessionIdA, 'Kimi crash recovery adopted a different native session.');
+    sessionA = await createWorkspaceSession(client, canaryRoot, {
+      nativeSession: { id: nativeSessionIdA, history: 'replay' },
+    });
+    assert.equal(nativeSessionId(sessionA), nativeSessionIdA, 'Kimi crash recovery adopted a different native session.');
+    const replay = await client.request('session.replay', {
+      sessionId: sessionA.id,
+      streamId: sessionA.streamId,
+      cursor: null,
+      limit: 100,
+    });
     assert.ok(
-      JSON.stringify(adopted?.replayUpdates ?? []).includes(concurrentMarkerA),
+      JSON.stringify(replay?.events ?? []).includes(concurrentMarkerA),
       'Kimi native load replay did not contain pre-crash history.',
     );
     await sample('crash-recovered');
@@ -392,21 +434,17 @@ export async function runKimiLifecycleCanary(options = {}) {
     const postCrashStart = journal.mark();
     const postCrashTurnId = await startTextTurn(
       client,
-      sessionA.id,
+      sessionA,
       `Reply with exactly ${postCrashMarker}`,
     );
     modelTurnsSent += 1;
     await waitForMarker(journal, sessionA.id, postCrashTurnId, postCrashMarker, postCrashStart);
 
-    const survivor = await client.request('session.create', { cwd: canaryRoot });
-    survivorSession = survivor?.session;
+    survivorSession = await createWorkspaceSession(client, canaryRoot);
     assert.ok(survivorSession?.id, 'Kimi returned no survivor session id.');
-    const closeResult = await client.request('session.close', { sessionId: sessionA.id });
-    if (closeResult?.detached) {
-      assert.equal(closeResult?.nativeClosed, false, 'Kimi reported detach and native close simultaneously.');
-    }
+    await client.request('session.close', { sessionId: sessionA.id, streamId: sessionA.streamId });
     sessionA = null;
-    const survivorSnapshot = await client.request('session.snapshot', {
+    const survivorSnapshot = await client.request('session.get', {
       sessionId: survivorSession.id,
     });
     assert.equal(
@@ -429,7 +467,7 @@ export async function runKimiLifecycleCanary(options = {}) {
       `Kimi process-group RSS range ${rssDeltaKiB} KiB exceeded budget ${rssGrowthBudgetKiB} KiB.`,
     );
 
-    await client.request('session.close', { sessionId: survivorSession.id });
+    await client.request('session.close', { sessionId: survivorSession.id, streamId: survivorSession.streamId });
     survivorSession = null;
     await client.stop();
 
@@ -459,8 +497,8 @@ export async function runKimiLifecycleCanary(options = {}) {
         postCrashTurnCompleted: true,
       },
       closeSemantics: {
-        nativeClosed: closeResult?.nativeClosed === true,
-        detached: closeResult?.detached === true,
+        nativeClosed: false,
+        detached: true,
         survivorSessionRemainedUsable: true,
       },
       rss: {
@@ -475,15 +513,15 @@ export async function runKimiLifecycleCanary(options = {}) {
   } finally {
     journal?.close();
     if (client && sessionA?.id) {
-      await client.request('turn.interrupt', { sessionId: sessionA.id }).catch(() => {});
-      await client.request('session.close', { sessionId: sessionA.id }).catch(() => {});
+      await client.request('turn.interrupt', { sessionId: sessionA.id, streamId: sessionA.streamId }).catch(() => {});
+      await client.request('session.close', { sessionId: sessionA.id, streamId: sessionA.streamId }).catch(() => {});
     }
     if (client && sessionB?.id && client === clients[0] && !crashed) {
-      await client.request('turn.interrupt', { sessionId: sessionB.id }).catch(() => {});
-      await client.request('session.close', { sessionId: sessionB.id }).catch(() => {});
+      await client.request('turn.interrupt', { sessionId: sessionB.id, streamId: sessionB.streamId }).catch(() => {});
+      await client.request('session.close', { sessionId: sessionB.id, streamId: sessionB.streamId }).catch(() => {});
     }
     if (client && survivorSession?.id) {
-      await client.request('session.close', { sessionId: survivorSession.id }).catch(() => {});
+      await client.request('session.close', { sessionId: survivorSession.id, streamId: survivorSession.streamId }).catch(() => {});
     }
     for (const ownedClient of clients.reverse()) await ownedClient.stop().catch(() => {});
     await rm(canaryRoot, { recursive: true, force: true });

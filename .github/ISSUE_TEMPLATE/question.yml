@@ -1,0 +1,33 @@
+name: Question
+description: Ask a development or product question that should be retained
+title: "[Question] "
+labels:
+  - question
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: 问题
+      description: 清楚说明希望得到回答的具体问题。
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 背景
+      description: 提供理解问题所需的代码路径、现象或产品上下文。
+    validations:
+      required: true
+
+  - type: textarea
+    id: attempts
+    attributes:
+      label: 已确认的信息
+      description: 列出已经查过的资料、尝试过的方法或暂时排除的可能。
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 回答后的动作
+      description: 说明答案是否可能产生 Feature、Bug、Proposal、ADR 或文档更新。

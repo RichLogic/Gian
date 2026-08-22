@@ -9,12 +9,14 @@ import type {
   SystemConfig,
   TerminalOptions,
   Task,
+  TraceSnapshot,
   Workspace,
   OnboardingState,
   OnboardingProjectRootResult,
   ProxyCapabilities,
 } from '@gian/shared';
 import { parseListNativeSessionsResponse, parseSessionList } from '@gian/shared';
+import { releaseAgents } from './release-executors.js';
 
 export interface TreeEntry {
   name: string;
@@ -36,6 +38,16 @@ export async function loadSessions(): Promise<Session[]> {
   const res = await fetch('/api/sessions');
   if (!res.ok) throw new Error(`Session list load failed (${res.status})`);
   return parseSessionList(await res.json());
+}
+
+/** Read Core's persisted Trace projection for one Session. */
+export async function loadSessionTrace(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<TraceSnapshot> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/trace`, { signal });
+  if (!response.ok) throw new Error(`Trace snapshot load failed (${response.status})`);
+  return await response.json() as TraceSnapshot;
 }
 
 export async function loadArchivedSessions(): Promise<Session[]> {
@@ -456,6 +468,29 @@ export async function loadProxyCapabilities(executor: Executor): Promise<ProxyCa
   return agentResponse<ProxyCapabilities>(response);
 }
 
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return agentResponse<T>(response);
+}
+
+/** Query helper for `catalog.resolve`. POST only because the config maps
+ *  do not fit a GET query string; the call does not persist Host state. */
+export async function loadResolvedProxyCatalog(
+  executor: Executor,
+  params: {
+    catalogRevision: string;
+    sessionConfig: Record<string, import('@gian/shared').ConfigValue>;
+    turnConfig: Record<string, import('@gian/shared').ConfigValue>;
+    sessionId?: string;
+  },
+): Promise<import('@gian/shared').ResolvedProxyCatalog> {
+  return postJson(`/api/proxy/${executor}/catalog/resolve`, params);
+}
+
 async function agentResponse<T>(response: Response): Promise<T> {
   const body = await response.json() as T & { error?: string };
   if (!response.ok) throw new Error(body.error ?? `Agent request failed (${response.status})`);
@@ -463,6 +498,7 @@ async function agentResponse<T>(response: Response): Promise<T> {
 }
 
 const AGENT_CACHE_TTL_MS = 30_000;
+const AGENT_ORDER = ['claude', 'codex', 'kimi', 'dsh'];
 let agentCache: { agents: AgentInstallStatus[]; expiresAt: number } | null = null;
 let agentRequest: Promise<AgentInstallStatus[]> | null = null;
 
@@ -473,8 +509,8 @@ export function peekAgents(): AgentInstallStatus[] | null {
 function cacheAgent(agent: AgentInstallStatus): AgentInstallStatus {
   const current = agentCache?.agents ?? [];
   agentCache = {
-    agents: [agent, ...current.filter(candidate => candidate.id !== agent.id)]
-      .sort((a, b) => ['claude', 'codex', 'kimi', 'grok'].indexOf(a.id) - ['claude', 'codex', 'kimi', 'grok'].indexOf(b.id)),
+    agents: releaseAgents([agent, ...current.filter(candidate => candidate.id !== agent.id)])
+      .sort((a, b) => AGENT_ORDER.indexOf(a.id) - AGENT_ORDER.indexOf(b.id)),
     expiresAt: Date.now() + AGENT_CACHE_TTL_MS,
   };
   return agent;
@@ -487,8 +523,9 @@ export async function loadAgents(options: { refresh?: boolean } = {}): Promise<A
   agentRequest = fetch(`/api/agents${query}`)
     .then(response => agentResponse<{ agents: AgentInstallStatus[] }>(response))
     .then(body => {
-      agentCache = { agents: body.agents, expiresAt: Date.now() + AGENT_CACHE_TTL_MS };
-      return body.agents;
+      const agents = releaseAgents(body.agents);
+      agentCache = { agents, expiresAt: Date.now() + AGENT_CACHE_TTL_MS };
+      return agents;
     })
     .finally(() => { agentRequest = null; });
   return agentRequest;

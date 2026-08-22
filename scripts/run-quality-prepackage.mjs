@@ -1,18 +1,21 @@
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { acquireQualityLock } from './quality-lock.mjs';
+import { formatResourceMetrics } from './process-resource-monitor.mjs';
 import { runLoggedCommand } from './run-logged-command.mjs';
 import { sanitizedTestEnv } from './run-tests.mjs';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 export const PREPACKAGE_STEPS = [
+  { id: 'versions', label: 'Version and release consistency', args: ['quality:versions'] },
   { id: 'typecheck', label: 'Type check', args: ['typecheck'] },
-  { id: 'tests', label: 'Unit, integration, and contract tests', args: ['test'] },
+  { id: 'tests', label: 'Unit, integration, system, and contract tests', args: ['test:all'] },
   { id: 'build', label: 'Production build', args: ['build'] },
   { id: 'traceability', label: 'Traceability registry', args: ['quality:traceability'] },
+  { id: 'functional-evidence', label: 'Functional evidence crosswalk', args: ['quality:functional-evidence'] },
   { id: 'docs', label: 'Documentation links', args: ['quality:docs'] },
   { id: 'e2e', label: 'Isolated browser journeys', args: ['test:e2e:run'] },
   {
@@ -21,17 +24,6 @@ export const PREPACKAGE_STEPS = [
     args: ['--filter', '@gian/desktop', 'test:smoke:run'],
   },
 ];
-
-export function resolvePrepackageSteps({
-  hasTraceability = existsSync(join(rootDir, 'docs', 'quality', 'traceability.md')),
-  hasE2e = existsSync(join(rootDir, 'e2e')),
-} = {}) {
-  return PREPACKAGE_STEPS.filter((step) => {
-    if (step.id === 'traceability') return hasTraceability;
-    if (step.id === 'e2e') return hasE2e;
-    return true;
-  });
-}
 
 function pnpmInvocation(args) {
   const pnpmEntry = process.env.npm_execpath;
@@ -58,7 +50,8 @@ function duration(startedAt) {
 export function formatPrepackageSummary(results, logPath) {
   const lines = ['', 'Prepackage quality summary'];
   for (const result of results) {
-    const suffix = result.duration ? ` (${result.duration})` : '';
+    const resource = result.resources ? `; ${formatResourceMetrics(result.resources)}` : '';
+    const suffix = result.duration ? ` (${result.duration}${resource})` : '';
     lines.push(`[${result.status}] ${result.label}${suffix}`);
   }
   const passed = results.every(result => result.status === 'PASS');
@@ -84,6 +77,7 @@ export async function main() {
     const logDir = join(rootDir, 'output', 'quality');
     const timestamp = new Date().toISOString().replaceAll(':', '-');
     const logPath = join(logDir, `prepackage-${timestamp}.log`);
+    const reportPath = join(logDir, `prepackage-${timestamp}.json`);
 
     mkdirSync(logDir, { recursive: true });
     writeFileSync(logPath, `Gian prepackage quality gate\nRevision: ${revision}\n`);
@@ -91,7 +85,7 @@ export async function main() {
     console.log('Gian prepackage quality gate');
     console.log(`Revision: ${revision}${dirty ? ' (working tree has changes)' : ''}`);
 
-    for (const step of resolvePrepackageSteps()) {
+    for (const step of PREPACKAGE_STEPS) {
       if (failed) {
         results.push({ ...step, status: 'SKIP' });
         continue;
@@ -102,19 +96,22 @@ export async function main() {
       const command = pnpmInvocation(step.args);
       appendFileSync(logPath, `\n==> ${step.label}\n`);
       const result = await runLoggedCommand(command.command, command.args, {
+        collectResources: true,
         cwd: rootDir,
         env,
         logPath,
       });
       const status = !result.error && result.status === 0 ? 'PASS' : 'FAIL';
       const elapsed = duration(startedAt);
-      results.push({ ...step, status, duration: elapsed });
-      console.log(`[${status}] ${step.label} (${elapsed})`);
+      results.push({ ...step, status, duration: elapsed, resources: result.resources });
+      console.log(`[${status}] ${step.label} (${elapsed}; ${formatResourceMetrics(result.resources)})`);
       if (result.error) console.error(result.error);
       failed = status === 'FAIL';
     }
 
+    writeFileSync(reportPath, `${JSON.stringify({ revision, results }, null, 2)}\n`);
     console.log(formatPrepackageSummary(results, logPath));
+    console.log(`Resource report: ${reportPath}`);
     return failed ? 1 : 0;
   } finally {
     lock.release();

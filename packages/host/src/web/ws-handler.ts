@@ -58,6 +58,7 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
         ws_root: config.workspace_root,
       },
       sessions: sessions.listSessions(),
+      sidechats: sessions.listSidechats(),
       tasks: tasks?.listTasks() ?? [],
       workspaces: db.prepare('SELECT * FROM workspaces ORDER BY sort_order, name').all() as StateSyncMessage['workspaces'],
       approvals: (approvals?.listPending() ?? []).map(r => ({
@@ -151,7 +152,7 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
         ? rawRequestId
         : null;
       try {
-        await dispatch(parsed, sessions, tasks, broadcaster, ws, term);
+        const dispatched = await dispatch(parsed, sessions, tasks, broadcaster, ws, term);
         // §4.4 success result. ORDERING CONTRACT: the result must never
         // arrive before the canonical broadcast caused by the command.
         // `dispatch` is awaited, and the domain managers broadcast
@@ -175,6 +176,7 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
             request_id: requestId,
             request_type: parsed.type,
             ok: true,
+            ...(dispatched?.result ? { result: dispatched.result } : {}),
           });
         }
       } catch (err) {
@@ -263,7 +265,7 @@ async function dispatch(
   broadcaster: WsBroadcaster,
   ws: WSContext,
   term?: WorkbenchTerminalManager,
-): Promise<void> {
+): Promise<{ result?: import('@gian/shared').OperationResultMessage['result'] } | void> {
   switch (msg.type) {
     case 'events:subscribe': {
       broadcaster.subscribeToEvents(ws, msg.session_id);
@@ -278,6 +280,8 @@ async function dispatch(
         ...(msg.thinking_effort !== undefined ? { thinking_effort: msg.thinking_effort } : {}),
         ...(msg.service_tier !== undefined ? { service_tier: msg.service_tier } : {}),
         ...(msg.name !== undefined ? { name: msg.name } : {}),
+        ...(msg.session_config ? { session_config: msg.session_config } : {}),
+        ...(msg.turn_config ? { turn_config: msg.turn_config } : {}),
       });
       broadcaster.send(ws, {
         type: 'session:created',
@@ -303,8 +307,30 @@ async function dispatch(
       return;
     }
     case 'session:delete': {
-      await sessions.deleteSession(msg.session_id);
+      await sessions.deleteSession(msg.session_id, msg.confirmed_sidechat_ids);
       return;
+    }
+    case 'sidechat:create': {
+      const sidechat = await sessions.createSidechat(msg.parent_session_id, msg.sidechat_id);
+      return { result: { sidechat_id: sidechat.id } };
+    }
+    case 'sidechat:resume': {
+      const sidechat = await sessions.resumeSidechat(msg.sidechat_id, msg.parent_session_id);
+      return { result: { sidechat_id: sidechat.id } };
+    }
+    case 'sidechat:close': {
+      const result = await sessions.closeSidechat(msg.sidechat_id);
+      return { result };
+    }
+    case 'session:fork': {
+      const result = await sessions.forkSession({
+        sourceSessionId: msg.source_session_id,
+        ...(msg.session_id ? { sessionId: msg.session_id } : {}),
+        anchor: msg.anchor.type === 'head'
+          ? { type: 'head' }
+          : { type: 'turn', turnId: msg.anchor.turn_id, sourceTurnId: msg.anchor.source_turn_id },
+      });
+      return { result: { session_id: result.sessionId, origin: result.origin } };
     }
     case 'session:set_unread': {
       sessions.setUnread(msg.session_id, msg.unread);
@@ -384,6 +410,10 @@ async function dispatch(
     }
     case 'session:set_native_config': {
       await sessions.setNativeConfig(msg.session_id, msg.config_id, msg.value);
+      return;
+    }
+    case 'session:set_turn_config': {
+      sessions.setTurnConfigValue(msg.session_id, msg.option_id, msg.value);
       return;
     }
     case 'queue:add': {

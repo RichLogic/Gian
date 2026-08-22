@@ -4,9 +4,42 @@ This file records user-facing changes in published Gian builds. It is updated
 whenever a version is packaged and tagged for release; local test packages are
 not listed.
 
-Releases through 0.4.5 are unsigned macOS Apple Silicon beta builds. Signed
+Releases through 0.5.0 are unsigned macOS Apple Silicon beta builds. Signed
 and notarized native notifications and automatic updates remain disabled
 until Developer ID signing and notarization are available.
+
+## [0.5.0] - 2026-08-22
+
+### Added
+
+- Added DeepSeek Harness (DSH) as a managed Agent integration, including its
+  Gian profile, Bridge bundle, Proxy, runtime discovery, and installer flow.
+- Added Proxy-owned model, effort, permission-mode, and capability catalogs
+  through the `gian.proxy/2.0` protocol for Claude Code, Codex, Kimi Code, and
+  DeepSeek Harness.
+- Added durable Side Chats and session forks where the selected Agent reports
+  support for them.
+- Added an Execution Trace with step trees, requests, structured interactions,
+  and replayed session evidence.
+
+### Changed
+
+- Made Proxy catalogs authoritative for new-session and Settings controls, and
+  hardened turn lifecycle, queued-message, replay, and event identity handling.
+- Hid Grok from onboarding, Settings, and new-session choices for this release.
+
+### Fixed
+
+- Restored Claude replay, Kimi plan projection, and Codex structured question
+  handling across the Proxy 2.0 bridge.
+- Fixed DSH activity completion, replay identifiers, error codes, and packaged
+  Bridge discovery.
+- Fixed the Settings panel layout race that could appear after changing zoom.
+
+### Known limitations
+
+- The macOS build remains unsigned and supports Apple Silicon only.
+- Grok is not included in the 0.5.0 product surface.
 
 ## [0.4.5] - 2026-08-15
 
@@ -333,6 +366,7 @@ until Developer ID signing and notarization are available.
 - The published build contained a placeholder GitHub OAuth client ID and could
   not complete first-run login. It was superseded by 0.1.1.
 
+[0.5.0]: https://github.com/RichLogic/Gian/releases/tag/v0.5.0
 [0.2.1-hotfix]: https://github.com/RichLogic/Gian/releases/tag/v0.2.1-hotfix
 [0.2.1]: https://github.com/RichLogic/Gian/releases/tag/v0.2.1
 [0.2.0]: https://github.com/RichLogic/Gian/releases/tag/v0.2.0

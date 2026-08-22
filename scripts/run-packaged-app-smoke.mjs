@@ -74,6 +74,9 @@ export async function validatePackagedApp(appPath) {
     [join(resources, 'runtime', 'node'), true],
     [join(resources, 'runtime', 'NODE-LICENSE'), false],
     [join(resources, 'runtime', 'github-auth.json'), false],
+    [join(resources, 'dsh-bridge', 'package.json'), false],
+    [join(resources, 'dsh-bridge', 'cordis.patch.yml'), false],
+    [join(resources, 'dsh-bridge', 'dist', 'src', 'index.js'), false],
     [join(resources, 'web', 'index.html'), false],
     [join(unpacked, 'node_modules', '@gian', 'host', 'dist', 'index.js'), false],
     [join(unpacked, 'node_modules', '@gian', 'host', 'dist', 'cli', 'event-storage-v3.js'), false],
@@ -610,6 +613,7 @@ async function completePackagedOnboarding({
   assert.equal(finalState.agents.find(agent => agent.id === 'claude')?.ready, true);
   assert.equal(finalState.agents.find(agent => agent.id === 'codex')?.ready, false);
   assert.equal(finalState.agents.find(agent => agent.id === 'kimi')?.ready, false);
+  assert.equal(finalState.agents.find(agent => agent.id === 'dsh')?.ready, false);
 }
 
 function seedPriorVersionFixture(databasePath) {

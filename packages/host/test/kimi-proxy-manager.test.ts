@@ -30,6 +30,8 @@ test('failed Kimi attach recycles an unused ACP host for login retry', async () 
     dataDir: '/tmp/gian-kimi-proxy-manager-test',
     ccProxyEntry: '/unused/cc-proxy.js',
     kimiProxyEntry: fixture,
+    claudeProxy: { pluginVersion: '0.2.0', processScope: 'session' },
+    kimiProxy: { pluginVersion: '0.2.0', processScope: 'shared' },
     runtimeManager: runtimeManager as never,
   });
 
@@ -83,6 +85,8 @@ test('concurrent Kimi sessions initialize through one shared ACP host', async ()
     dataDir: '/tmp/gian-kimi-proxy-manager-concurrency-test',
     ccProxyEntry: '/unused/cc-proxy.js',
     kimiProxyEntry: fixture,
+    claudeProxy: { pluginVersion: '0.2.0', processScope: 'session' },
+    kimiProxy: { pluginVersion: '0.2.0', processScope: 'shared' },
     runtimeManager: runtimeManager as never,
   });
 

@@ -81,6 +81,9 @@ export interface OperationDispatcherDeps {
 export interface OperationDispatcher {
   dispatch<Input>(name: OperationName, input: Input): OperationRun;
   readonly store: OperationStore;
+  /** Reattach transport listeners after a lifecycle cleanup. Idempotent so
+   *  React StrictMode can setup -> cleanup -> setup the same dispatcher. */
+  connect(): void;
   /** Remove transport subscriptions (tests, teardown). */
   dispose(): void;
 }
@@ -110,7 +113,8 @@ export function createOperationDispatcher(deps: OperationDispatcherDeps = {}): O
     | { type: 'result'; ok: boolean; error?: OperationError; result?: unknown }
     | { type: 'unknown' };
 
-  if (deps.transport) {
+  function connect(): void {
+    if (!deps.transport || disposers.length > 0) return;
     // One subscription for the dispatcher's lifetime; results are correlated
     // to runs by request_id (proposal §4.4).
     disposers.push(
@@ -132,6 +136,7 @@ export function createOperationDispatcher(deps: OperationDispatcherDeps = {}): O
       }),
     );
   }
+  connect();
 
   /**
    * The sole terminal path for result, timeout and socket close. Taking the
@@ -177,6 +182,7 @@ export function createOperationDispatcher(deps: OperationDispatcherDeps = {}): O
 
   return {
     store,
+    connect,
 
     dispatch(name, input) {
       const definition = registry.get(name);

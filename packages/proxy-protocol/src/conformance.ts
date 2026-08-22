@@ -1,15 +1,24 @@
 import { Buffer } from 'node:buffer';
 
 import {
+  ACTION_REQUIRED_CAPABILITIES,
+  CAPABILITY_DEPENDENCIES,
+  CATALOG_ACTION_IDS,
+  JSONRPC_VERSION,
   MAX_NDJSON_LINE_BYTES,
   OPTIONAL_METHOD_CAPABILITIES,
+  isCatalogActionId,
+  isSidechatRejectedSessionMethod,
   type CapabilityName,
+  type CatalogActionId,
   type ProxyMethod,
 } from './constants.js';
 import {
+  jsonRpcRequestViolation,
   protocolViolation,
   ProxyProtocolError,
   requestViolation,
+  sessionViolation,
 } from './errors.js';
 import {
   initializeResultSchema,
@@ -18,37 +27,109 @@ import {
   proxyRequestSchema,
   proxySuccessResponseEnvelopeSchema,
   resultSchemas,
+  type AvailableActions,
+  type CatalogActionDescriptor,
+  type ConfigOption,
+  type ConfigValue,
+  type ForkAnchor,
   type InitializeResult,
   type ProxyNotification,
   type ProxyRequest,
+  type ReplayEvent,
+  type SideChatSnapshot,
   type TurnStartParams,
 } from './schemas.js';
 
-type WireId = string | number;
+type WireId = string;
 
 interface PendingRequest {
   method: ProxyMethod;
   params: unknown;
 }
 
+interface AdvertisedConfigOption {
+  binding: 'session' | 'turn';
+  control: 'select' | 'boolean' | 'number' | 'text';
+  required: boolean;
+  choices?: Array<{ value: ConfigValue }>;
+  visibleWhen?: ReadonlyArray<{ optionId: string; oneOf: ConfigValue[] }>;
+  enabledWhen?: ReadonlyArray<{ optionId: string; oneOf: ConfigValue[] }>;
+}
+
+interface InteractionState {
+  actions: Set<string>;
+  inputs: ReadonlyArray<{
+    id: string;
+    type: string;
+    required: boolean;
+    choices?: ReadonlyArray<{ value: string }>;
+  }>;
+  resolved: boolean;
+  respondAccepted: boolean;
+}
+
+interface ContentStreamState {
+  kind: string;
+  format?: string;
+  stepId?: string;
+  open: boolean;
+}
+
+interface ActivityState {
+  enteredRunning: boolean;
+  status: string;
+}
+
+interface StepState {
+  enteredRunning: boolean;
+  status: string;
+}
+
 interface TurnState {
-  tools: Set<string>;
-  approvals: Map<string, Set<string>>;
-  conversationDeltaSeen: boolean;
+  interactions: Map<string, InteractionState>;
+  activities: Map<string, ActivityState>;
+  steps: Map<string, StepState>;
+  content: Map<string, ContentStreamState>;
+  conversationDeltaSeen: Set<string>;
 }
 
 interface SessionState {
+  kind: 'session' | 'sidechat';
   streamId: string;
   sequence: number;
+  sessionConfig: Record<string, ConfigValue>;
+  acceptedTurns: Set<string>;
   activeTurns: Map<string, TurnState>;
   configOptions: Map<string, AdvertisedConfigOption>;
   liveEvents: Map<string, string>;
+  respondFingerprints: Map<string, string>;
+  parentSessionId?: string;
+  resumeRefId?: string;
+  createFingerprint?: string;
+  resumeFingerprint?: string;
+  closeResult?: { ok: true; sidechatId: string; providerDataDeleted: boolean };
+  closing?: boolean;
 }
 
-interface AdvertisedConfigOption {
-  scope: 'session' | 'turn';
-  type: 'select' | 'boolean' | 'number' | 'text';
-  choices?: Array<{ value: string | boolean | number | null }>;
+export interface NormalizedCatalogAction {
+  supported: boolean;
+  reason?: string;
+}
+
+export function normalizeCatalogActions(
+  actions: ReadonlyArray<CatalogActionDescriptor> | undefined,
+): Map<CatalogActionId, NormalizedCatalogAction> {
+  const out = new Map<CatalogActionId, NormalizedCatalogAction>(
+    CATALOG_ACTION_IDS.map((id) => [id, { supported: false }]),
+  );
+  for (const action of actions ?? []) {
+    if (!isCatalogActionId(action.id)) continue;
+    out.set(action.id, {
+      supported: action.supported,
+      ...(action.reason !== undefined ? { reason: action.reason } : {}),
+    });
+  }
+  return out;
 }
 
 const inputCapabilities = {
@@ -57,9 +138,8 @@ const inputCapabilities = {
   skill: 'input.skill',
 } as const satisfies Partial<Record<TurnStartParams['input'][number]['type'], CapabilityName>>;
 
-function wireIdKey(id: WireId): string {
-  return `${typeof id}:${String(id)}`;
-}
+const TERMINAL_ACTIVITY = new Set(['succeeded', 'failed', 'cancelled']);
+const TERMINAL_STEP = new Set(['completed', 'failed']);
 
 function formatIssues(error: { issues: ReadonlyArray<{ path: PropertyKey[]; message: string }> }): string {
   return error.issues
@@ -84,18 +164,47 @@ export function parseNdjsonObject(line: string): Record<string, unknown> | null 
       `Invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  if (Array.isArray(value)) {
+    throw protocolViolation('JSON-RPC batch arrays are not allowed.');
+  }
+  if (!value || typeof value !== 'object') {
     throw protocolViolation('NDJSON top-level value must be an object.');
   }
   return value as Record<string, unknown>;
 }
 
 export function parseProxyRequest(value: unknown): ProxyRequest {
-  const parsed = proxyRequestSchema.safeParse(value);
-  if (!parsed.success) {
-    throw requestViolation('INVALID_REQUEST', formatIssues(parsed.error));
+  if (Array.isArray(value)) {
+    throw protocolViolation('JSON-RPC batch arrays are not allowed.');
   }
-  return parsed.data;
+  if (!value || typeof value !== 'object') {
+    throw jsonRpcRequestViolation('INVALID_REQUEST', 'Request must be an object.');
+  }
+  const record = value as Record<string, unknown>;
+  if (record.jsonrpc !== JSONRPC_VERSION) {
+    throw jsonRpcRequestViolation(
+      'INVALID_REQUEST',
+      'Request must include jsonrpc "2.0".',
+    );
+  }
+  if (typeof record.id !== 'string' || record.id.length === 0) {
+    throw jsonRpcRequestViolation(
+      'INVALID_REQUEST',
+      'Request id must be a non-empty string.',
+    );
+  }
+  if (typeof record.method !== 'string' || record.method.length === 0) {
+    throw jsonRpcRequestViolation(
+      'INVALID_REQUEST',
+      'Request method must be a non-empty string.',
+    );
+  }
+  const parsed = proxyRequestSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  if (!(record.method in resultSchemas)) {
+    throw jsonRpcRequestViolation('METHOD_NOT_FOUND', `Unknown method ${record.method}.`);
+  }
+  throw jsonRpcRequestViolation('INVALID_PARAMS', formatIssues(parsed.error));
 }
 
 export function parseProxyNotification(value: unknown): ProxyNotification {
@@ -119,6 +228,26 @@ function canonicalize(value: unknown): unknown {
 
 export function canonicalJson(value: unknown): string {
   return JSON.stringify(canonicalize(value));
+}
+
+export function canonicalFingerprint(event: {
+  method: string;
+  sourceTurnId?: string;
+  data?: unknown;
+  extensions?: unknown;
+  params?: {
+    sourceTurnId?: string;
+    data?: unknown;
+  };
+}): string {
+  const sourceTurnId = event.sourceTurnId ?? event.params?.sourceTurnId;
+  const data = event.data ?? event.params?.data;
+  return canonicalJson({
+    method: event.method,
+    ...(sourceTurnId !== undefined ? { sourceTurnId } : {}),
+    data,
+    ...(event.extensions !== undefined ? { extensions: event.extensions } : {}),
+  });
 }
 
 export class AttachmentTurnLedger {
@@ -195,54 +324,45 @@ export class ReplayPageValidator {
     }
 
     for (const event of parsed.data.events) {
-      if (!('sessionId' in event.params)) {
-        throw protocolViolation('Process-level runtime.error cannot appear in session replay.');
-      }
-      if (!('turnId' in event.params)) {
-        throw protocolViolation('Session replay can contain only turn-scoped notifications.');
-      }
-      if (event.params.sessionId !== this.sessionId) {
+      if (event.sessionId !== this.sessionId) {
         throw protocolViolation(
-          `Replay event session ${event.params.sessionId} does not match ${this.sessionId}.`,
+          `Replay event session ${event.sessionId} does not match ${this.sessionId}.`,
         );
       }
-      if (event.params.streamId !== this.replayStreamId) {
-        throw protocolViolation('Replay event streamId does not match replayStreamId.');
+      if (event.replayStreamId !== this.replayStreamId) {
+        throw protocolViolation('Replay event replayStreamId does not match page replayStreamId.');
       }
-      if (event.params.sequence !== this.nextSequence) {
+      if (event.sequence !== this.nextSequence) {
         throw protocolViolation(
-          `Replay sequence ${event.params.sequence} does not match expected ${this.nextSequence}.`,
+          `Replay sequence ${event.sequence} does not match expected ${this.nextSequence}.`,
         );
       }
 
-      const fingerprint = canonicalJson(event);
-      const existing = this.events.get(event.params.eventId);
+      const fingerprint = canonicalFingerprint(event);
+      const existing = this.events.get(event.eventId);
       if (existing !== undefined && existing !== fingerprint) {
         throw protocolViolation(
-          `Replay event ${event.params.eventId} changed canonical content.`,
+          `Replay event ${event.eventId} changed canonical content.`,
         );
       }
       if (existing !== undefined) {
-        throw protocolViolation(`Replay event ${event.params.eventId} was duplicated.`);
+        throw protocolViolation(`Replay event ${event.eventId} was duplicated.`);
       }
-      this.events.set(event.params.eventId, fingerprint);
+      this.events.set(event.eventId, fingerprint);
       this.nextSequence += 1;
     }
   }
 }
 
 const notificationCapabilities: Partial<Record<ProxyNotification['method'], CapabilityName>> = {
-  'tool.started': 'event.tool',
-  'tool.updated': 'event.tool',
-  'tool.completed': 'event.tool',
-  'approval.requested': 'approval.relay',
-  'approval.resolved': 'approval.relay',
+  'interaction.requested': 'interaction',
+  'interaction.resolved': 'interaction',
   'plan.updated': 'event.plan',
   'diff.updated': 'event.diff',
   'usage.updated': 'event.usage',
-  'agent.updated': 'event.agent',
-  'notice.created': 'event.notice',
-  'extension.event': 'extension.events',
+  'step.updated': 'event.step',
+  'request.updated': 'event.request',
+  'history.changed': 'session.replay',
 };
 
 function capabilityForNotification(
@@ -254,22 +374,45 @@ function capabilityForNotification(
   ) {
     switch (notification.params.data.kind) {
       case 'text':
+      case 'status':
         return undefined;
       case 'reasoning':
         return 'event.reasoning';
-      case 'plan':
-        return 'event.plan';
-      case 'command':
-        return 'event.command';
-      case 'status':
-        return 'event.status';
     }
   }
   return notificationCapabilities[notification.method];
 }
 
+function extractSessionIdentity(
+  value: Record<string, unknown>,
+): { sessionId: string; streamId: string } | null {
+  const params = value.params;
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return null;
+  const record = params as Record<string, unknown>;
+  if (
+    typeof record.sessionId === 'string'
+    && record.sessionId.length > 0
+    && typeof record.streamId === 'string'
+    && record.streamId.length > 0
+  ) {
+    return { sessionId: record.sessionId, streamId: record.streamId };
+  }
+  return null;
+}
+
+function conditionsMet(
+  conditions: ReadonlyArray<{ optionId: string; oneOf: ConfigValue[] }> | undefined,
+  values: Record<string, ConfigValue>,
+): boolean {
+  if (!conditions || conditions.length === 0) return true;
+  return conditions.every((condition) => (
+    condition.oneOf.some((candidate) => Object.is(candidate, values[condition.optionId]))
+  ));
+}
+
 export interface HostProtocolValidatorOptions {
   pluginId: string;
+  pluginVersion?: string;
   processScope?: 'shared' | 'session';
 }
 
@@ -280,6 +423,8 @@ export class HostProtocolValidator {
   private initialized = false;
   private negotiated: InitializeResult | null = null;
   private readonly catalogConfigOptions = new Map<string, AdvertisedConfigOption>();
+  private readonly catalogActions = new Map<CatalogActionId, NormalizedCatalogAction>();
+  private readonly resumeRefOwners = new Map<string, string>();
   private readonly processLiveEvents = new Map<string, string>();
 
   constructor(private readonly options: HostProtocolValidatorOptions) {}
@@ -290,7 +435,11 @@ export class HostProtocolValidator {
 
   registerRequest(value: unknown): ProxyRequest {
     const request = parseProxyRequest(value);
-    if (!this.initialized && request.method !== 'initialize') {
+    if (
+      !this.initialized
+      && request.method !== 'initialize'
+      && request.method !== 'shutdown'
+    ) {
       throw requestViolation('NOT_INITIALIZED', 'initialize must be the first request.');
     }
     if (request.method === 'initialize') {
@@ -324,30 +473,69 @@ export class HostProtocolValidator {
       }
     }
     if (request.method === 'session.create') {
-      this.assertConfigOptions(
-        this.catalogConfigOptions,
-        Object.entries(request.params.config),
-        'session',
-      );
+      if (
+        request.params.nativeSession?.history === 'replay'
+        && this.negotiated?.capabilities['session.replay'] === undefined
+      ) {
+        throw requestViolation(
+          'CAPABILITY_NOT_SUPPORTED',
+          'nativeSession.history "replay" requires session.replay.',
+        );
+      }
+      if (
+        request.params.hostServices !== undefined
+        && request.params.hostServices.length > 0
+        && this.negotiated?.capabilities['integration.mcp.streamableHttp'] === undefined
+      ) {
+        throw requestViolation(
+          'CAPABILITY_NOT_SUPPORTED',
+          'hostServices require integration.mcp.streamableHttp.',
+        );
+      }
+      this.assertConfigSnapshot(this.catalogConfigOptions, request.params.config, 'session');
+    } else if (request.method === 'session.fork') {
+      this.assertSessionForkRequest(request.params);
+    } else if (
+      request.method === 'sidechat.create'
+      || request.method === 'sidechat.resume'
+      || request.method === 'sidechat.close'
+    ) {
+      this.assertSidechatRequest(request);
+    } else if (isSidechatRejectedSessionMethod(request.method)) {
+      const sessionId = 'sessionId' in request.params
+        ? request.params.sessionId
+        : undefined;
+      const streamId = 'streamId' in request.params
+        ? request.params.streamId
+        : undefined;
+      if (typeof sessionId === 'string' && this.sessions.get(sessionId)?.kind === 'sidechat') {
+        throw requestViolation(
+          'SESSION_NOT_FOUND',
+          `Session ${sessionId} is not an ordinary Session.`,
+        );
+      }
+      if (
+        request.method === 'catalog.resolve'
+        && typeof sessionId === 'string'
+        && typeof streamId === 'string'
+      ) {
+        this.sessionState(sessionId, streamId);
+      }
     } else if (request.method === 'turn.start') {
-      this.assertConfigOptions(
+      this.assertConfigSnapshot(
         this.sessionConfigOptions(request.params.sessionId, request.params.streamId),
-        Object.entries(request.params.config.native),
+        request.params.config,
         'turn',
+        this.sessions.get(request.params.sessionId)?.sessionConfig ?? {},
       );
-    } else if (request.method === 'session.config.set') {
-      this.assertConfigOptions(
-        this.sessionConfigOptions(request.params.sessionId, request.params.streamId),
-        [[request.params.optionId, request.params.value]],
-        'session',
-      );
+    } else if (request.method === 'interaction.respond') {
+      this.assertInteractionRespond(request.params);
     }
 
-    const key = wireIdKey(request.id);
-    if (this.pending.has(key)) {
-      throw requestViolation('CONFLICT', `Request id ${String(request.id)} is already pending.`);
+    if (this.pending.has(request.id)) {
+      throw requestViolation('CONFLICT', `Request id ${request.id} is already pending.`);
     }
-    this.pending.set(key, {
+    this.pending.set(request.id, {
       method: request.method,
       params: request.params,
     });
@@ -363,12 +551,11 @@ export class HostProtocolValidator {
 
   private acceptResponse(value: unknown): { id: WireId; result?: unknown; error?: unknown } {
     const envelope = zodResponseEnvelope(value);
-    const key = wireIdKey(envelope.id);
-    const pending = this.pending.get(key);
+    const pending = this.pending.get(envelope.id);
     if (!pending) {
-      throw protocolViolation(`Response id ${String(envelope.id)} has no pending request.`);
+      throw protocolViolation(`Response id ${envelope.id} has no pending request.`);
     }
-    this.pending.delete(key);
+    this.pending.delete(envelope.id);
 
     if ('error' in envelope) {
       if (pending.method === 'initialize') this.initializePending = false;
@@ -391,6 +578,14 @@ export class HostProtocolValidator {
         );
       }
       if (
+        this.options.pluginVersion !== undefined
+        && initialized.plugin.version !== this.options.pluginVersion
+      ) {
+        throw protocolViolation(
+          `Handshake plugin version ${initialized.plugin.version} does not match manifest.`,
+        );
+      }
+      if (
         this.options.processScope !== undefined
         && initialized.process.scope !== this.options.processScope
       ) {
@@ -401,11 +596,15 @@ export class HostProtocolValidator {
       this.negotiated = initialized;
       this.initialized = true;
       this.initializePending = false;
+      this.assertCapabilityDependencies(initialized.capabilities);
+      this.replaceCatalogActions(undefined);
     } else if (pending.method === 'session.create') {
-      const session = (result.data as unknown as { session: {
+      const session = (result.data as { session: {
         id: string;
         streamId: string;
-        configOptions?: Array<AdvertisedConfigOption & { id: string }>;
+        sessionConfig: Record<string, ConfigValue>;
+        turnConfigOptions?: Array<ConfigOption>;
+        availableActions?: AvailableActions;
       } }).session;
       const params = pending.params as { sessionId: string };
       if (session.id !== params.sessionId) {
@@ -413,38 +612,46 @@ export class HostProtocolValidator {
           `session.create returned ${session.id}; expected Host session ${params.sessionId}.`,
         );
       }
+      this.assertAvailableActions(session.availableActions);
       this.sessions.set(session.id, {
+        kind: 'session',
         streamId: session.streamId,
         sequence: 0,
+        sessionConfig: session.sessionConfig,
+        acceptedTurns: new Set(),
         activeTurns: new Map(),
         liveEvents: new Map(),
-        configOptions: session.configOptions === undefined
-          ? new Map(this.catalogConfigOptions)
-          : this.configOptionMap(session.configOptions),
+        respondFingerprints: new Map(),
+        configOptions: this.mergeCatalogWithTurnOptions(session.turnConfigOptions),
       });
     } else if (pending.method === 'catalog.list') {
       this.catalogConfigOptions.clear();
       const catalog = result.data as {
-        sessionOptions: Array<{
-          id: string;
-          scope: 'session' | 'turn';
-          type: AdvertisedConfigOption['type'];
-          choices?: AdvertisedConfigOption['choices'];
-        }>;
+        configOptions: ConfigOption[];
+        actions?: CatalogActionDescriptor[];
       };
-      for (const option of catalog.sessionOptions) {
-        this.catalogConfigOptions.set(option.id, {
-          scope: option.scope,
-          type: option.type,
-          ...(option.choices ? { choices: option.choices } : {}),
-        });
+      for (const option of catalog.configOptions) {
+        this.catalogConfigOptions.set(option.id, advertisedOption(option));
       }
+      this.replaceCatalogActions(catalog.actions);
+    } else if (pending.method === 'catalog.resolve') {
+      const catalog = result.data as { actions?: CatalogActionDescriptor[] };
+      this.assertCatalogActions(normalizeCatalogActions(catalog.actions));
+    } else if (pending.method === 'sidechat.create') {
+      this.acceptSidechatCreate(pending.params, result.data);
+    } else if (pending.method === 'sidechat.resume') {
+      this.acceptSidechatResume(pending.params, result.data);
+    } else if (pending.method === 'sidechat.close') {
+      this.acceptSidechatClose(pending.params, result.data);
+    } else if (pending.method === 'session.fork') {
+      this.acceptSessionFork(pending.params, result.data);
     } else if (pending.method === 'session.get') {
       const params = pending.params as { sessionId: string };
       const session = (result.data as { session: {
         id: string;
         streamId: string;
-        configOptions?: Iterable<AdvertisedConfigOption & { id: string }>;
+        sessionConfig: Record<string, ConfigValue>;
+        turnConfigOptions?: ConfigOption[];
       } }).session;
       const state = this.sessions.get(params.sessionId);
       if (state === undefined) {
@@ -453,62 +660,459 @@ export class HostProtocolValidator {
       if (session.id !== params.sessionId || session.streamId !== state.streamId) {
         throw protocolViolation('session.get returned a different session attachment.');
       }
-      if (session.configOptions !== undefined) {
-        state.configOptions = this.configOptionMap(session.configOptions);
+      state.sessionConfig = session.sessionConfig;
+      if (session.turnConfigOptions !== undefined) {
+        state.configOptions = this.mergeCatalogWithTurnOptions(session.turnConfigOptions);
       }
-    } else if (pending.method === 'session.config.set') {
-      const params = pending.params as { sessionId: string; streamId: string };
-      const configResult = result.data as unknown as {
-        session: { id: string; streamId: string };
-        configOptions: Iterable<AdvertisedConfigOption & { id: string }>;
-      };
-      const state = this.sessionState(params.sessionId, params.streamId);
-      if (
-        configResult.session.id !== params.sessionId
-        || configResult.session.streamId !== params.streamId
-      ) {
-        throw protocolViolation('session.config.set returned a different session attachment.');
-      }
-      state.configOptions = this.configOptionMap(configResult.configOptions);
+      this.assertAvailableActions((result.data as { session: { availableActions?: AvailableActions } }).session.availableActions);
     } else if (pending.method === 'session.close') {
       const params = pending.params as { sessionId: string };
       this.sessions.delete(params.sessionId);
+    } else if (pending.method === 'turn.start') {
+      const params = pending.params as { sessionId: string; streamId: string; turnId: string };
+      this.sessionState(params.sessionId, params.streamId).acceptedTurns.add(params.turnId);
+    } else if (pending.method === 'interaction.respond') {
+      const params = pending.params as {
+        sessionId: string;
+        streamId: string;
+        turnId: string;
+        interactionId: string;
+        responseId: string;
+      };
+      const interaction = this.sessionState(params.sessionId, params.streamId)
+        .activeTurns.get(params.turnId)
+        ?.interactions.get(params.interactionId);
+      if (interaction) interaction.respondAccepted = true;
     }
 
     return { id: envelope.id, result: result.data };
   }
 
-  private assertConfigOptions(
+  private mergeCatalogWithTurnOptions(
+    turnConfigOptions: ConfigOption[] | undefined,
+  ): Map<string, AdvertisedConfigOption> {
+    const merged = new Map<string, AdvertisedConfigOption>();
+    for (const [id, option] of this.catalogConfigOptions) {
+      if (turnConfigOptions === undefined || option.binding === 'session') {
+        merged.set(id, option);
+      }
+    }
+    if (turnConfigOptions !== undefined) {
+      for (const option of turnConfigOptions) {
+        merged.set(option.id, advertisedOption(option));
+      }
+    }
+    return merged;
+  }
+
+  private assertConfigSnapshot(
     advertised: ReadonlyMap<string, AdvertisedConfigOption>,
-    entries: ReadonlyArray<readonly [string, string | boolean | number | null]>,
-    expectedScope?: 'session' | 'turn',
+    values: Record<string, ConfigValue>,
+    expectedBinding: 'session' | 'turn',
+    sessionValues: Record<string, ConfigValue> = {},
   ): void {
-    for (const [optionId, value] of entries) {
+    const visibleValues = { ...sessionValues, ...values };
+    for (const [optionId, value] of Object.entries(values)) {
       const option = advertised.get(optionId);
-      if (
-        option === undefined
-        || (expectedScope !== undefined && option.scope !== expectedScope)
-      ) {
+      if (option === undefined) {
+        throw requestViolation('CONFIG_VALUE_INVALID', `Config option ${optionId} is unknown.`);
+      }
+      if (option.binding !== expectedBinding) {
         throw requestViolation(
-          'INVALID_REQUEST',
-          `Config option ${optionId} was not advertised for ${expectedScope ?? 'this session'}.`,
+          'CONFIG_BINDING_INVALID',
+          `Config option ${optionId} is ${option.binding}-bound.`,
         );
       }
-      const validType = value === null
-        || (option.type === 'boolean' && typeof value === 'boolean')
-        || (option.type === 'number' && typeof value === 'number')
-        || (option.type === 'text' && typeof value === 'string')
-        || option.type === 'select';
-      const validChoice = option.type !== 'select'
-        || value === null
-        || option.choices?.some(choice => Object.is(choice.value, value)) === true;
-      if (!validType || !validChoice) {
+      if (!valueMatchesOption(option, value)) {
         throw requestViolation(
-          'INVALID_REQUEST',
+          'CONFIG_VALUE_INVALID',
           `Config option ${optionId} value was not advertised by the Proxy.`,
         );
       }
     }
+    for (const [optionId, option] of advertised) {
+      if (option.binding !== expectedBinding || !option.required) continue;
+      if (!conditionsMet(option.visibleWhen, visibleValues)) continue;
+      if (!conditionsMet(option.enabledWhen, visibleValues)) continue;
+      if (values[optionId] === undefined) {
+        throw requestViolation('CONFIG_REQUIRED', `Config option ${optionId} is required.`);
+      }
+    }
+  }
+
+  private assertCapabilityDependencies(capabilities: Record<string, number>): void {
+    for (const [capability, dependencies] of Object.entries(CAPABILITY_DEPENDENCIES)) {
+      if (capabilities[capability] === undefined) continue;
+      for (const dependency of dependencies) {
+        if (capabilities[dependency] === undefined) {
+          throw protocolViolation(
+            `Capability ${capability} requires ${dependency}.`,
+          );
+        }
+      }
+    }
+  }
+
+  private replaceCatalogActions(actions: CatalogActionDescriptor[] | undefined): void {
+    const normalized = normalizeCatalogActions(actions);
+    this.assertCatalogActions(normalized);
+    this.catalogActions.clear();
+    for (const [id, action] of normalized) this.catalogActions.set(id, action);
+  }
+
+  private assertCatalogActions(
+    actions: ReadonlyMap<CatalogActionId, NormalizedCatalogAction>,
+  ): void {
+    const forkSupported = actions.get('session.fork')?.supported === true;
+    const atTurnSupported = actions.get('session.fork.atTurn')?.supported === true;
+    if (atTurnSupported && !forkSupported) {
+      throw protocolViolation('session.fork.atTurn.supported requires session.fork.supported.');
+    }
+    for (const [id, action] of actions) {
+      if (!action.supported) continue;
+      const required = ACTION_REQUIRED_CAPABILITIES[id];
+      if (this.negotiated?.capabilities[required] === undefined) {
+        throw protocolViolation(
+          `Catalog action ${id} is supported without capability ${required}.`,
+        );
+      }
+    }
+  }
+
+  private assertAvailableActions(actions: AvailableActions | undefined): void {
+    if (actions === undefined) return;
+    let forkEnabled = false;
+    let atTurnEnabled = false;
+    for (const [id, action] of Object.entries(actions)) {
+      if (!isCatalogActionId(id)) continue;
+      const catalog = this.catalogActions.get(id);
+      const required = ACTION_REQUIRED_CAPABILITIES[id];
+      if (catalog?.supported !== true || this.negotiated?.capabilities[required] === undefined) {
+        throw protocolViolation(
+          `availableActions includes ${id} that is not catalog-supported and capability-gated.`,
+        );
+      }
+      if (id === 'session.fork' && action.enabled) forkEnabled = true;
+      if (id === 'session.fork.atTurn' && action.enabled) atTurnEnabled = true;
+    }
+    if (atTurnEnabled && !forkEnabled) {
+      throw protocolViolation('session.fork.atTurn.enabled requires session.fork.enabled.');
+    }
+  }
+
+  private assertSessionForkRequest(params: {
+    sourceSessionId: string;
+    sourceStreamId: string;
+    sessionId: string;
+    anchor: ForkAnchor;
+  }): void {
+    if (this.sessions.get(params.sourceSessionId)?.kind === 'sidechat') {
+      throw requestViolation(
+        'SESSION_NOT_FOUND',
+        `Session ${params.sourceSessionId} is not an ordinary Session.`,
+      );
+    }
+    if (
+      params.anchor.type === 'turn'
+      && this.negotiated?.capabilities['session.fork.atTurn'] === undefined
+    ) {
+      throw requestViolation(
+        'CAPABILITY_NOT_SUPPORTED',
+        'session.fork turn anchors require session.fork.atTurn.',
+      );
+    }
+    const source = this.sessionState(params.sourceSessionId, params.sourceStreamId);
+    this.assertConfigSnapshot(this.catalogConfigOptions, source.sessionConfig, 'session');
+  }
+
+  private assertSidechatRequest(request: ProxyRequest): void {
+    if (request.method === 'sidechat.create') {
+      const parent = this.sessions.get(request.params.parentSessionId);
+      if (parent?.kind === 'sidechat') {
+        throw requestViolation(
+          'SESSION_NOT_FOUND',
+          `Session ${request.params.parentSessionId} is not an ordinary Session.`,
+        );
+      }
+      this.sessionState(request.params.parentSessionId, request.params.parentStreamId);
+      return;
+    }
+    if (request.method === 'sidechat.resume') {
+      const parent = this.sessions.get(request.params.parentSessionId);
+      if (parent?.kind === 'sidechat') {
+        throw requestViolation(
+          'SESSION_NOT_FOUND',
+          `Session ${request.params.parentSessionId} is not an ordinary Session.`,
+        );
+      }
+      const existing = this.sessions.get(request.params.sidechatId);
+      if (existing?.kind === 'sidechat' && existing.parentSessionId !== request.params.parentSessionId) {
+        throw requestViolation('CONFLICT', 'sidechat.resume parent does not match the live Side Chat.');
+      }
+      return;
+    }
+    if (request.method === 'sidechat.close') {
+      const owner = this.resumeRefOwners.get(request.params.resumeRef.id);
+      if (owner !== undefined && owner !== request.params.sidechatId) {
+        throw requestViolation(
+          'CONFLICT',
+          'resumeRef belongs to another live Side Chat.',
+        );
+      }
+      const existing = this.sessions.get(request.params.sidechatId);
+      if (existing?.kind === 'sidechat') {
+        existing.closing = true;
+        if (request.params.streamId !== undefined) {
+          this.sessionState(request.params.sidechatId, request.params.streamId);
+        }
+      }
+    }
+  }
+
+  private emptySessionState(streamId: string, sessionConfig: Record<string, ConfigValue>): SessionState {
+    return {
+      kind: 'session',
+      streamId,
+      sequence: 0,
+      sessionConfig,
+      acceptedTurns: new Set(),
+      activeTurns: new Map(),
+      liveEvents: new Map(),
+      respondFingerprints: new Map(),
+      configOptions: this.mergeCatalogWithTurnOptions(undefined),
+    };
+  }
+
+  private acceptSidechatCreate(params: unknown, data: unknown): void {
+    const request = params as {
+      parentSessionId: string;
+      parentStreamId: string;
+      sidechatId: string;
+    };
+    const snapshot = (data as { sidechat: SideChatSnapshot }).sidechat;
+    const parent = this.sessionState(request.parentSessionId, request.parentStreamId);
+    if (snapshot.id !== request.sidechatId) {
+      throw protocolViolation('sidechat.create returned a different sidechatId.');
+    }
+    if (snapshot.parentSessionId !== request.parentSessionId) {
+      throw protocolViolation('sidechat.create returned a different parentSessionId.');
+    }
+    if (canonicalJson(snapshot.sessionConfig) !== canonicalJson(parent.sessionConfig)) {
+      throw protocolViolation('sidechat.create must inherit parent sessionConfig unchanged.');
+    }
+    const fingerprint = canonicalJson({
+      parentSessionId: request.parentSessionId,
+      parentStreamId: request.parentStreamId,
+    });
+    const existing = this.sessions.get(request.sidechatId);
+    if (existing?.kind === 'sidechat') {
+      if (existing.createFingerprint !== fingerprint) {
+        throw requestViolation('CONFLICT', 'sidechatId was reused with different parent identity.');
+      }
+      return;
+    }
+    this.rememberResumeRef(request.sidechatId, snapshot.resumeRef.id);
+    this.sessions.set(request.sidechatId, {
+      ...this.emptySessionState(snapshot.streamId, snapshot.sessionConfig),
+      kind: 'sidechat',
+      parentSessionId: snapshot.parentSessionId,
+      resumeRefId: snapshot.resumeRef.id,
+      createFingerprint: fingerprint,
+      configOptions: this.mergeCatalogWithTurnOptions(snapshot.turnConfigOptions),
+    });
+  }
+
+  private acceptSidechatResume(params: unknown, data: unknown): void {
+    const request = params as {
+      sidechatId: string;
+      parentSessionId: string;
+      resumeRef: { id: string };
+    };
+    const snapshot = (data as { sidechat: SideChatSnapshot }).sidechat;
+    if (snapshot.id !== request.sidechatId || snapshot.parentSessionId !== request.parentSessionId) {
+      throw protocolViolation('sidechat.resume returned a different Side Chat identity.');
+    }
+    const fingerprint = canonicalJson({
+      parentSessionId: request.parentSessionId,
+      resumeRef: request.resumeRef.id,
+    });
+    const existing = this.sessions.get(request.sidechatId);
+    if (existing?.kind === 'sidechat' && existing.resumeFingerprint === fingerprint) {
+      if (existing.streamId !== snapshot.streamId) {
+        throw protocolViolation('Idempotent sidechat.resume changed streamId.');
+      }
+      return;
+    }
+    if (existing?.kind === 'sidechat' && existing.resumeFingerprint && existing.resumeFingerprint !== fingerprint) {
+      throw requestViolation('CONFLICT', 'sidechat.resume reused an id with different parent or resumeRef.');
+    }
+    this.rememberResumeRef(request.sidechatId, snapshot.resumeRef.id);
+    this.sessions.set(request.sidechatId, {
+      ...this.emptySessionState(snapshot.streamId, snapshot.sessionConfig),
+      kind: 'sidechat',
+      parentSessionId: snapshot.parentSessionId,
+      resumeRefId: snapshot.resumeRef.id,
+      createFingerprint: existing?.createFingerprint,
+      resumeFingerprint: fingerprint,
+      configOptions: this.mergeCatalogWithTurnOptions(snapshot.turnConfigOptions),
+    });
+  }
+
+  private acceptSidechatClose(params: unknown, data: unknown): void {
+    const request = params as { sidechatId: string; resumeRef: { id: string } };
+    const result = data as { ok: true; sidechatId: string; providerDataDeleted: boolean };
+    if (result.sidechatId !== request.sidechatId) {
+      throw protocolViolation('sidechat.close returned a different sidechatId.');
+    }
+    const owner = this.resumeRefOwners.get(request.resumeRef.id);
+    if (owner !== undefined && owner !== request.sidechatId) {
+      throw protocolViolation('sidechat.close succeeded for a resumeRef owned by another live Side Chat.');
+    }
+    const existing = this.sessions.get(request.sidechatId);
+    if (existing?.kind === 'sidechat' && existing.closeResult) {
+      if (canonicalJson(existing.closeResult) !== canonicalJson(result)) {
+        throw protocolViolation('Idempotent sidechat.close changed result.');
+      }
+      return;
+    }
+    if (existing?.kind === 'sidechat') existing.closeResult = result;
+    this.forgetResumeRef(request.sidechatId, existing?.resumeRefId ?? request.resumeRef.id);
+    this.sessions.delete(request.sidechatId);
+  }
+
+  private acceptSessionFork(params: unknown, data: unknown): void {
+    const request = params as {
+      sourceSessionId: string;
+      sourceStreamId: string;
+      sessionId: string;
+      anchor: ForkAnchor;
+    };
+    const result = data as {
+      session: {
+        id: string;
+        streamId: string;
+        nativeSession?: { id: string };
+        sessionConfig: Record<string, ConfigValue>;
+        turnConfigOptions?: ConfigOption[];
+        availableActions?: AvailableActions;
+      };
+      origin: { kind: 'fork'; sessionId: string; turnId: string; sourceTurnId: string };
+    };
+    if (result.session.id !== request.sessionId) {
+      throw protocolViolation('session.fork returned a different sessionId.');
+    }
+    if (!result.session.nativeSession?.id) {
+      throw protocolViolation('session.fork Result requires durable nativeSession.id');
+    }
+    if (result.origin.sessionId !== request.sourceSessionId) {
+      throw protocolViolation('session.fork origin must name the source Session.');
+    }
+    if (request.anchor.type === 'turn') {
+      if (
+        result.origin.turnId !== request.anchor.turnId
+        || result.origin.sourceTurnId !== request.anchor.sourceTurnId
+      ) {
+        throw protocolViolation('session.fork origin must match the requested turn anchor.');
+      }
+    }
+    this.assertAvailableActions(result.session.availableActions);
+    this.sessions.set(result.session.id, {
+      ...this.emptySessionState(result.session.streamId, result.session.sessionConfig),
+      configOptions: this.mergeCatalogWithTurnOptions(result.session.turnConfigOptions),
+    });
+  }
+
+  private rememberResumeRef(sidechatId: string, resumeRefId: string): void {
+    const owner = this.resumeRefOwners.get(resumeRefId);
+    if (owner !== undefined && owner !== sidechatId) {
+      throw protocolViolation('resumeRef is already owned by another live Side Chat.');
+    }
+    const previous = this.sessions.get(sidechatId)?.resumeRefId;
+    if (previous && previous !== resumeRefId) this.resumeRefOwners.delete(previous);
+    this.resumeRefOwners.set(resumeRefId, sidechatId);
+  }
+
+  private forgetResumeRef(sidechatId: string, resumeRefId: string): void {
+    if (this.resumeRefOwners.get(resumeRefId) === sidechatId) {
+      this.resumeRefOwners.delete(resumeRefId);
+    }
+  }
+
+  private assertInteractionRespond(params: {
+    sessionId: string;
+    streamId: string;
+    turnId: string;
+    interactionId: string;
+    responseId: string;
+    actionId: string;
+    values: Record<string, string | boolean | string[]>;
+  }): void {
+    const session = this.sessionState(params.sessionId, params.streamId);
+    const fingerprint = canonicalJson({
+      interactionId: params.interactionId,
+      actionId: params.actionId,
+      values: params.values,
+    });
+    const existing = session.respondFingerprints.get(params.responseId);
+    if (existing !== undefined) {
+      if (existing !== fingerprint) {
+        throw requestViolation(
+          'CONFLICT',
+          `responseId ${params.responseId} was reused with different content.`,
+        );
+      }
+      return;
+    }
+
+    const turn = session.activeTurns.get(params.turnId);
+    const interaction = turn?.interactions.get(params.interactionId);
+    if (!interaction || interaction.resolved) {
+      throw requestViolation(
+        'INTERACTION_NOT_FOUND',
+        `Interaction ${params.interactionId} is not pending.`,
+      );
+    }
+    if (!interaction.actions.has(params.actionId)) {
+      throw requestViolation(
+        'INTERACTION_ACTION_NOT_FOUND',
+        `Action ${params.actionId} was not advertised.`,
+      );
+    }
+    const declared = new Map(interaction.inputs.map((input) => [input.id, input]));
+    for (const [inputId, value] of Object.entries(params.values)) {
+      const input = declared.get(inputId);
+      if (input === undefined) {
+        throw jsonRpcRequestViolation(
+          'INVALID_PARAMS',
+          `Interaction value ${inputId} was not advertised.`,
+        );
+      }
+      const valid = input.type === 'boolean'
+        ? typeof value === 'boolean'
+        : input.type === 'multi_select'
+          ? Array.isArray(value)
+            && value.every((entry) => input.choices?.some((choice) => choice.value === entry))
+          : typeof value === 'string'
+            && (
+              input.type !== 'single_select'
+              || input.choices?.some((choice) => choice.value === value) === true
+            );
+      if (!valid) {
+        throw jsonRpcRequestViolation(
+          'INVALID_PARAMS',
+          `Interaction value ${inputId} does not match the advertised input.`,
+        );
+      }
+    }
+    for (const input of interaction.inputs) {
+      if (input.required && params.values[input.id] === undefined) {
+        throw jsonRpcRequestViolation(
+          'INVALID_PARAMS',
+          `Interaction input ${input.id} is required.`,
+        );
+      }
+    }
+    session.respondFingerprints.set(params.responseId, fingerprint);
   }
 
   private sessionConfigOptions(
@@ -529,72 +1133,115 @@ export class HostProtocolValidator {
     return session;
   }
 
-  private configOptionMap(
-    options: Iterable<AdvertisedConfigOption & { id: string }>,
-  ): Map<string, AdvertisedConfigOption> {
-    return new Map(Array.from(options, option => [option.id, {
-      scope: option.scope,
-      type: option.type,
-      ...(option.choices ? { choices: option.choices } : {}),
-    }]));
-  }
-
-  private acceptNotification(value: unknown): ProxyNotification {
+  private acceptNotification(value: Record<string, unknown>): ProxyNotification {
     if (!this.initialized || this.negotiated === null) {
       throw protocolViolation('Proxy emitted a notification before initialize completed.');
     }
-    const notification = parseProxyNotification(value);
+    if (value.jsonrpc !== JSONRPC_VERSION) {
+      throw protocolViolation('Notification must include jsonrpc "2.0".');
+    }
+    if ('id' in value && value.id !== undefined) {
+      throw protocolViolation('Notification must omit id.');
+    }
+
+    const identity = extractSessionIdentity(value);
+    const parsed = proxyNotificationSchema.safeParse(value);
+    if (!parsed.success) {
+      const message = `Invalid Proxy notification: ${formatIssues(parsed.error)}`;
+      if (identity) throw sessionViolation(message, identity.sessionId, identity.streamId);
+      throw protocolViolation(message);
+    }
+    const notification = parsed.data;
+    const fault = (message: string): never => {
+      if (identity) throw sessionViolation(message, identity.sessionId, identity.streamId);
+      throw protocolViolation(message);
+    };
+
     if (notification.method === 'input.recorded') {
-      throw protocolViolation('input.recorded is valid only inside session.replay.');
+      fault('input.recorded is valid only inside session.replay.');
     }
     const capability = capabilityForNotification(notification);
     if (capability !== undefined && this.negotiated.capabilities[capability] === undefined) {
-      throw protocolViolation(
-        `Proxy emitted ${notification.method} without capability ${capability}.`,
-      );
+      fault(`Proxy emitted ${notification.method} without capability ${capability}.`);
+    }
+    if (
+      (
+        notification.method === 'content.delta'
+        || notification.method === 'content.completed'
+        || notification.method === 'activity.updated'
+        || notification.method === 'usage.updated'
+      )
+      && notification.params.data.stepId !== undefined
+      && this.negotiated.capabilities['event.step'] === undefined
+    ) {
+      fault(`Proxy emitted ${notification.method} with stepId without capability event.step.`);
     }
 
-    if (
-      notification.method === 'extension.event'
-      && notification.params.data.namespace !== this.options.pluginId
-    ) {
-      throw protocolViolation(
-        `Extension namespace ${notification.params.data.namespace} does not match plugin ${this.options.pluginId}.`,
-      );
+    if (notification.extensions) {
+      for (const namespace of Object.keys(notification.extensions)) {
+        if (namespace !== this.options.pluginId) {
+          fault(
+            `Extension namespace ${namespace} does not match plugin ${this.options.pluginId}.`,
+          );
+        }
+      }
     }
 
     if (!('sessionId' in notification.params)) {
-      this.rememberLiveEvent(notification, this.processLiveEvents);
+      this.rememberLiveEvent(notification, this.processLiveEvents, null);
       return notification;
     }
+
     const params = notification.params;
     const session = this.sessions.get(params.sessionId);
-    if (!session) {
-      throw protocolViolation(
+    if (session === undefined) {
+      throw sessionViolation(
         `Notification references unattached session ${params.sessionId}.`,
+        params.sessionId,
+        params.streamId,
       );
+    }
+    if (session.kind === 'sidechat' && session.closing && session.streamId !== params.streamId) {
+      return notification;
     }
     if (params.streamId !== session.streamId) {
-      throw protocolViolation(
+      throw sessionViolation(
         `Notification stream ${params.streamId} does not match active stream ${session.streamId}.`,
+        params.sessionId,
+        params.streamId,
       );
     }
+
+    const fingerprint = canonicalFingerprint(notification);
+    const existing = session.liveEvents.get(params.eventId);
+    if (existing === fingerprint) return notification;
+    if (existing !== undefined) {
+      throw sessionViolation(
+        `Live event ${params.eventId} changed canonical content.`,
+        params.sessionId,
+        params.streamId,
+      );
+    }
+
     const expected = session.sequence + 1;
     if (params.sequence !== expected) {
-      throw protocolViolation(
+      throw sessionViolation(
         `Notification sequence ${params.sequence} does not match expected ${expected}.`,
+        params.sessionId,
+        params.streamId,
       );
     }
-    session.sequence = params.sequence;
-
     this.validateLifecycle(notification, session);
-    if (
-      notification.method === 'session.updated'
-      && notification.params.data.configOptions !== undefined
-    ) {
-      session.configOptions = this.configOptionMap(notification.params.data.configOptions);
+    session.sequence = params.sequence;
+    session.liveEvents.set(params.eventId, fingerprint);
+    if (notification.method === 'session.updated') {
+      if (notification.params.data.turnConfigOptions !== undefined) {
+        session.configOptions = this.mergeCatalogWithTurnOptions(
+          notification.params.data.turnConfigOptions,
+        );
+      }
+      this.assertAvailableActions(notification.params.data.availableActions);
     }
-    this.rememberLiveEvent(notification, session.liveEvents);
     return notification;
   }
 
@@ -603,81 +1250,142 @@ export class HostProtocolValidator {
     session: SessionState,
   ): void {
     if (!('turnId' in notification.params)) return;
-    const { turnId } = notification.params;
+    const params = notification.params;
+    const { turnId } = params;
+    const fault = (message: string): never => {
+      throw sessionViolation(message, params.sessionId, params.streamId);
+    };
+
     if (notification.method === 'turn.started') {
+      if (!session.acceptedTurns.has(turnId)) {
+        fault(`Turn ${turnId} started before turn.start was accepted.`);
+      }
       if (session.activeTurns.has(turnId)) {
-        throw protocolViolation(`Turn ${turnId} started more than once.`);
+        fault(`Turn ${turnId} started more than once.`);
       }
       session.activeTurns.set(turnId, {
-        tools: new Set(),
-        approvals: new Map(),
-        conversationDeltaSeen: false,
+        interactions: new Map(),
+        activities: new Map(),
+        steps: new Map(),
+        content: new Map(),
+        conversationDeltaSeen: new Set(),
       });
       return;
     }
 
     const turn = session.activeTurns.get(turnId);
-    if (!turn) {
-      throw protocolViolation(
+    if (turn === undefined) {
+      throw sessionViolation(
         `${notification.method} references inactive turn ${turnId}.`,
+        params.sessionId,
+        params.streamId,
       );
     }
 
-    if (notification.method === 'tool.started') {
-      const id = notification.params.data.toolCallId;
-      if (turn.tools.has(id)) throw protocolViolation(`Tool ${id} started more than once.`);
-      turn.tools.add(id);
-    } else if (notification.method === 'tool.updated') {
-      if (!turn.tools.has(notification.params.data.toolCallId)) {
-        throw protocolViolation('tool.updated arrived before tool.started.');
+    if (notification.method === 'step.updated') {
+      const { stepId, status } = notification.params.data;
+      const previous = turn.steps.get(stepId);
+      turn.steps.set(stepId, {
+        enteredRunning: previous?.enteredRunning === true || status === 'running',
+        status,
+      });
+    } else if (notification.method === 'activity.updated') {
+      const { activityId, status } = notification.params.data;
+      const previous = turn.activities.get(activityId);
+      turn.activities.set(activityId, {
+        enteredRunning: previous?.enteredRunning === true || status === 'running',
+        status,
+      });
+    } else if (notification.method === 'interaction.requested') {
+      const id = notification.params.data.interactionId;
+      if (turn.interactions.has(id)) {
+        fault(`Interaction ${id} was requested more than once.`);
       }
-    } else if (notification.method === 'tool.completed') {
-      const id = notification.params.data.toolCallId;
-      if (!turn.tools.delete(id)) {
-        throw protocolViolation('tool.completed arrived without an open tool.');
-      }
-    } else if (notification.method === 'approval.requested') {
-      const id = notification.params.data.approvalId;
-      if (turn.approvals.has(id)) {
-        throw protocolViolation(`Approval ${id} was requested more than once.`);
-      }
-      turn.approvals.set(
-        id,
-        new Set(notification.params.data.options.map(option => option.id)),
-      );
-    } else if (notification.method === 'approval.resolved') {
-      const id = notification.params.data.approvalId;
-      const options = turn.approvals.get(id);
-      if (options === undefined) {
-        throw protocolViolation('approval.resolved arrived without a pending approval.');
-      }
-      if (
-        notification.params.data.resolution === 'selected'
-        && (
-          notification.params.data.optionId === undefined
-          || !options.has(notification.params.data.optionId)
-        )
-      ) {
-        throw protocolViolation(
-          `Approval ${id} selected an option that was not advertised.`,
+      turn.interactions.set(id, {
+        actions: new Set(notification.params.data.actions.map((action) => action.id)),
+        inputs: notification.params.data.inputs.map((input) => ({
+          id: input.id,
+          type: input.type,
+          required: input.required,
+          ...(input.choices ? { choices: input.choices } : {}),
+        })),
+        resolved: false,
+        respondAccepted: false,
+      });
+    } else if (notification.method === 'interaction.resolved') {
+      const id = notification.params.data.interactionId;
+      const interaction = turn.interactions.get(id);
+      if (interaction === undefined || interaction.resolved) {
+        throw sessionViolation(
+          'interaction.resolved arrived without a pending interaction.',
+          params.sessionId,
+          params.streamId,
         );
       }
-      turn.approvals.delete(id);
+      if (
+        notification.params.data.outcome === 'submitted'
+        && (
+          notification.params.data.actionId === undefined
+          || !interaction.actions.has(notification.params.data.actionId)
+        )
+      ) {
+        fault(`Interaction ${id} selected an action that was not advertised.`);
+      }
+      if (notification.params.data.outcome === 'submitted' && !interaction.respondAccepted) {
+        fault('interaction.resolved arrived before interaction.respond succeeded.');
+      }
+      interaction.resolved = true;
+    } else if (
+      notification.method === 'content.delta'
+      || notification.method === 'content.completed'
+    ) {
+      const { contentId, kind, format, stepId } = notification.params.data;
+      const previous = turn.content.get(contentId);
+      if (
+        previous
+        && (
+          previous.kind !== kind
+          || previous.format !== format
+          || previous.stepId !== stepId
+        )
+      ) {
+        fault(`Content ${contentId} changed kind, format, or stepId.`);
+      }
+      if (previous && !previous.open && notification.method === 'content.delta') {
+        fault(`Content ${contentId} received a delta after content.completed.`);
+      }
+      turn.content.set(contentId, {
+        kind,
+        ...(format !== undefined ? { format } : {}),
+        ...(stepId !== undefined ? { stepId } : {}),
+        open: notification.method === 'content.delta',
+      });
     } else if (
       notification.method === 'usage.updated'
       && notification.params.data.conversation?.mode === 'delta'
     ) {
-      if (turn.conversationDeltaSeen) {
-        throw protocolViolation(`Turn ${turnId} emitted conversation delta usage more than once.`);
+      const stepKey = notification.params.data.stepId ?? '';
+      if (turn.conversationDeltaSeen.has(stepKey)) {
+        fault(
+          `Turn ${turnId} emitted conversation delta usage more than once for step ${stepKey || '<none>'}.`,
+        );
       }
-      turn.conversationDeltaSeen = true;
+      turn.conversationDeltaSeen.add(stepKey);
     } else if (
       notification.method === 'turn.completed'
       || notification.method === 'turn.failed'
     ) {
-      if (turn.tools.size > 0 || turn.approvals.size > 0) {
-        throw protocolViolation(
-          `Turn ${turnId} terminated with open tools or approvals.`,
+      const openInteractions = [...turn.interactions.values()].some((item) => !item.resolved);
+      const openActivities = [...turn.activities.values()].some((item) => (
+        item.enteredRunning && !TERMINAL_ACTIVITY.has(item.status)
+      ));
+      const openSteps = [...turn.steps.values()].some((item) => (
+        item.enteredRunning && !TERMINAL_STEP.has(item.status)
+      ));
+      const openContent = [...turn.content.values()].some((item) => item.open);
+      if (openInteractions || openActivities || openSteps || openContent) {
+        fault(
+          `Turn ${turnId} terminated with open interactions, activities, steps, or content streams.`,
         );
       }
       session.activeTurns.delete(turnId);
@@ -687,17 +1395,42 @@ export class HostProtocolValidator {
   private rememberLiveEvent(
     notification: ProxyNotification,
     liveEvents: Map<string, string>,
-  ): void {
+    identity: { sessionId: string; streamId: string } | null,
+  ): boolean {
     const eventId = notification.params.eventId;
-    const fingerprint = canonicalJson(notification);
+    const fingerprint = canonicalFingerprint(notification);
     const existing = liveEvents.get(eventId);
+    if (existing === fingerprint) return true;
     if (existing !== undefined) {
-      throw protocolViolation(existing === fingerprint
-        ? `Live event ${eventId} was duplicated.`
-        : `Live event ${eventId} changed canonical content.`);
+      const message = `Live event ${eventId} changed canonical content.`;
+      if (identity) throw sessionViolation(message, identity.sessionId, identity.streamId);
+      throw protocolViolation(message);
     }
     liveEvents.set(eventId, fingerprint);
+    return false;
   }
+}
+
+function advertisedOption(option: ConfigOption): AdvertisedConfigOption {
+  return {
+    binding: option.binding,
+    control: option.control,
+    required: option.required,
+    ...(option.choices ? { choices: option.choices } : {}),
+    ...(option.visibleWhen ? { visibleWhen: option.visibleWhen } : {}),
+    ...(option.enabledWhen ? { enabledWhen: option.enabledWhen } : {}),
+  };
+}
+
+function valueMatchesOption(option: AdvertisedConfigOption, value: ConfigValue): boolean {
+  if (value === null) return !option.required;
+  const validType = (option.control === 'boolean' && typeof value === 'boolean')
+    || (option.control === 'number' && typeof value === 'number')
+    || (option.control === 'text' && typeof value === 'string')
+    || option.control === 'select';
+  const validChoice = option.control !== 'select'
+    || option.choices?.some((choice) => Object.is(choice.value, value)) === true;
+  return validType && validChoice;
 }
 
 function zodResponseEnvelope(
@@ -705,13 +1438,62 @@ function zodResponseEnvelope(
 ):
   | { id: WireId; result: unknown }
   | { id: WireId; error: unknown } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw protocolViolation('Invalid Proxy response: top-level value must be an object.');
+  }
+  const record = value as Record<string, unknown>;
+  if (record.jsonrpc !== JSONRPC_VERSION) {
+    throw protocolViolation('Response must include jsonrpc "2.0".');
+  }
   const success = proxySuccessResponseEnvelopeSchema.safeParse(value);
   if (success.success) return success.data;
   const failure = proxyErrorResponseSchema.safeParse(value);
-  if (failure.success) return failure.data;
+  if (failure.success) {
+    if (failure.data.id === null) {
+      throw protocolViolation('Successful or domain responses cannot use id null.');
+    }
+    return { id: failure.data.id, error: failure.data.error };
+  }
   throw protocolViolation(
     `Invalid Proxy response: ${formatIssues(success.error)}; ${formatIssues(failure.error)}`,
   );
 }
 
+export function validateBindingConfig(
+  options: readonly ConfigOption[],
+  values: Record<string, ConfigValue>,
+  binding: 'session' | 'turn',
+  sessionValues: Record<string, ConfigValue> = {},
+): void {
+  const advertised = new Map(options.map((option) => [option.id, advertisedOption(option)]));
+  const visibleValues = { ...sessionValues, ...values };
+  for (const [optionId, value] of Object.entries(values)) {
+    const option = advertised.get(optionId);
+    if (option === undefined) {
+      throw requestViolation('CONFIG_VALUE_INVALID', `Config option ${optionId} is unknown.`);
+    }
+    if (option.binding !== binding) {
+      throw requestViolation(
+        'CONFIG_BINDING_INVALID',
+        `Config option ${optionId} is ${option.binding}-bound.`,
+      );
+    }
+    if (!valueMatchesOption(option, value)) {
+      throw requestViolation(
+        'CONFIG_VALUE_INVALID',
+        `Config option ${optionId} value was not advertised by the Proxy.`,
+      );
+    }
+  }
+  for (const [optionId, option] of advertised) {
+    if (option.binding !== binding || !option.required) continue;
+    if (!conditionsMet(option.visibleWhen, visibleValues)) continue;
+    if (!conditionsMet(option.enabledWhen, visibleValues)) continue;
+    if (values[optionId] === undefined) {
+      throw requestViolation('CONFIG_REQUIRED', `Config option ${optionId} is required.`);
+    }
+  }
+}
+
 export { ProxyProtocolError };
+export type { ReplayEvent };

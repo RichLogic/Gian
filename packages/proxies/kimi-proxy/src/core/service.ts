@@ -812,6 +812,15 @@ export class KimiProxyService {
     if (!session || this.provisionalUpdates.has(session.id)) {
       return { outcome: { outcome: 'cancelled' } };
     }
+    // A permission request without options can never be relayed as a Gian
+    // interaction (the contract requires at least one action). Cancel it
+    // immediately instead of leaving the runtime blocked forever.
+    if (request.options.length === 0) {
+      this.emitEvent('debug', {
+        message: '[kimi] Permission request without options; auto-cancelling.',
+      });
+      return { outcome: { outcome: 'cancelled' } };
+    }
 
     const approvalId = randomId('approval');
     return new Promise<RequestPermissionResponse>((resolve) => {

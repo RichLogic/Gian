@@ -1,6 +1,7 @@
 import type { Session, Workspace } from '@gian/shared';
 import type { SessionCommands } from '../controllers/use-session-commands.js';
 import type { TranscriptHistoryState } from '../controllers/use-transcript-hydration.js';
+import type { ActionControlState } from '../components/action-gating.js';
 import {
   ChatPanelOpenContext,
 } from '../presentation/chat-panel.js';
@@ -49,6 +50,11 @@ interface SessionSurfaceProps {
   onShowLastTurnChanges: (turn: number, path: string) => void;
   onReopen?: () => void;
   containerClassName?: string;
+  /** Session Fork standard controls (proposal §10.6) — same contract as
+   *  SessionMain (head fork lives in the session dropdown menu; Side Chat
+   *  lives on the Dock rail + panel 2). */
+  forkAtTurnControl?: ActionControlState | null;
+  originParentName?: string;
 }
 
 export function SessionSurface({
@@ -78,6 +84,8 @@ export function SessionSurface({
   onShowLastTurnChanges,
   onReopen,
   containerClassName,
+  forkAtTurnControl,
+  originParentName,
 }: SessionSurfaceProps) {
   const content = (
     <FileLinkOpenContext.Provider value={onOpenFile}>
@@ -118,12 +126,19 @@ export function SessionSurface({
                 onSetServiceTier={tier => commands.onSetServiceTier(session.id, tier)}
                 onSetNativeConfig={(configId, value) =>
                   commands.onSetNativeConfig(session.id, configId, value)}
+                onSetTurnConfig={(optionId, value) =>
+                  commands.onSetTurnConfig(session.id, optionId, value, {
+                    ...(session.turn_config ?? {}),
+                    [optionId]: value,
+                  })}
                 onDelete={() => commands.onDelete(session.id)}
                 onReopen={onReopen}
                 onShowChanges={onShowChanges}
                 onShowLastTurnChanges={onShowLastTurnChanges}
                 workingTreeId={workingTreeId}
                 branch={branch}
+                forkAtTurnControl={forkAtTurnControl}
+                originParentName={originParentName}
               />
             </ChatPanelOpenContext.Provider>
           </PlanOpenContext.Provider>

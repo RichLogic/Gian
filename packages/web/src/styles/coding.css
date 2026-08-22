@@ -271,9 +271,59 @@
 }
 .question-option--other input[type='text']:focus { outline: 1px solid var(--accent-text); }
 
+/* gian.proxy/2.0 §12 unified interaction card: tone tint (warning/danger
+ * get a colored head label + a 2px left accent bar; neutral/info stay
+ * plain) and generic inputs rendered in the `.question-body` language. */
+.approval.tone-warning { box-shadow: inset 2px 0 0 var(--warn), 0 0 0 1px var(--hairline); }
+.approval.tone-danger { box-shadow: inset 2px 0 0 var(--danger), 0 0 0 1px var(--hairline); }
+.approval.tone-warning .approval-head { color: var(--warn); }
+.approval.tone-danger .approval-head { color: var(--danger); }
+/* Prose subject (question / confirmation text) — the card's primary line,
+ * NOT a mono code block. Technical subjects (tool/command/path) keep the
+ * slim `.approval-cmd` block below. */
+.approval-prose {
+  margin: 8px 12px 0;
+  font-size: var(--fz-13);
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+.approval-desc {
+  margin: 6px 12px 0;
+  font-size: var(--fz-12);
+  line-height: 1.45;
+  color: var(--text-2);
+  white-space: pre-wrap;
+}
+/* Inputs sit directly on the card — no filled sub-panel, so text fields
+ * don't read as a box inside a box. */
+.approval-inputs {
+  margin: 8px 12px 0;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.approval-input { display: flex; flex-direction: column; gap: 4px; }
+.approval-input > span { font-size: var(--fz-12); color: var(--text-2); }
+.approval-input .approval-input-desc { font-size: 11.5px; color: var(--text-3); }
+.approval-input-bool { flex-direction: row; align-items: center; gap: 8px; }
+.approval-input-bool > span { font-size: var(--fz-13); color: var(--text); }
+.approval-text-field {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-sans);
+  font-size: var(--fz-13);
+  padding: 5px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  color: var(--text);
+}
+.approval-text-field:focus { outline: 1px solid var(--accent-text); }
+textarea.approval-text-field { min-height: 48px; resize: vertical; }
+
 .approval-cmd {
-  margin: 10px 12px 0;
-  padding: 8px 10px;
+  margin: 8px 12px 0;
+  padding: 6px 10px;
   border-radius: var(--r-2);
   background: var(--surface);
   font-family: var(--font-mono);
@@ -613,7 +663,7 @@
   height: 16px;
   border-radius: 50%;
   background: conic-gradient(
-    var(--accent-text) 0 var(--context-progress),
+    var(--accent) 0 var(--context-progress),
     var(--surface-3) var(--context-progress) 360deg
   );
 }
@@ -748,6 +798,17 @@
 .composer-opt:disabled { opacity: 0.45; cursor: default; }
 .composer-opt svg { width: 10px; height: 10px; color: var(--text-3); }
 .composer-opt .cmp-model { color: var(--text); font-weight: 500; }
+/* Approval chip label matches the model name's full-strength text colour;
+   the risky override below (higher specificity) still wins for auto modes. */
+.cmp-approval-btn .name { color: var(--text); }
+/* Combined options button: roomier than the base 3px chip gap so the
+   executor dot, label segments and separators don't read cramped. */
+.cmp-options-btn { gap: 6px; }
+.cmp-options-btn .cmp-opt-sep {
+  margin: 0 2px;
+  color: var(--text-3);
+}
+.cmp-options-btn .cmp-fast-seg { color: var(--accent-text); font-weight: 600; }
 .cmp-bulb { flex: none; }
 .cmp-executor-mark {
   width: 7px;
@@ -763,8 +824,8 @@
   box-shadow: 0 0 0 1px oklch(0.65 0 0 / 0.55);
 }
 .cmp-executor-mark.grok {
-  background: var(--surface-1);
-  box-shadow: inset 0 0 0 1px var(--text);
+  background: var(--text);
+  box-shadow: none;
 }
 
 /* Model & thinking popover (rendered via portal at document.body) */
@@ -815,6 +876,54 @@
 .mp-row-hint { font-size: 10.5px; color: var(--text-3); font-family: var(--font-mono); }
 .mp-row.disabled { opacity: 0.45; cursor: not-allowed; }
 .mp-row.disabled:hover { background: transparent; }
+
+/* Combined options menu (Fast / Effort / Model) + Model submenu — reuses the
+   model-pop shell; both are portaled and fixed-positioned. */
+.popover.options-pop, .popover.options-sub {
+  position: fixed;
+  padding: 4px;
+  background: var(--surface);
+  border-radius: var(--r-3);
+  box-shadow: 0 0 0 1px var(--hairline), 0 12px 32px oklch(0 0 0 / 0.15);
+  z-index: 100;
+  animation: pop-in 100ms var(--ease);
+}
+.popover.options-pop { width: min(320px, calc(100vw - 16px)); }
+.popover.options-sub { width: min(320px, calc(100vw - 16px)); }
+.popover.catalog-options-pop {
+  max-height: min(680px, calc(100vh - 24px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.catalog-options-title {
+  padding: 8px 12px 7px;
+  color: var(--text-2);
+  font-size: var(--fz-12);
+  font-weight: 500;
+}
+.catalog-options-pop .mp-section + .mp-section {
+  border-top: 1px solid var(--hairline);
+}
+.catalog-options-pop .mp-section-head { padding-top: 3px; }
+.catalog-option-field { padding: 0 8px 8px; }
+.catalog-option-field input {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  outline: 0;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 5px 8px;
+  font: var(--fz-12)/1.3 var(--font-mono);
+}
+.catalog-option-field input:focus { border-color: var(--accent-text); }
+/* Fast switch row — the row itself is inert; only the switch toggles. */
+.mp-row.cmp-switch-row { cursor: default; }
+.mp-row.cmp-switch-row:hover { background: transparent; }
+.cmp-switch-row .switch { margin-left: auto; flex: none; }
+/* Model row that opens the submenu. */
+.mp-sub-trigger .mp-sub-caret { color: var(--text-3); font-size: 12px; }
 
 /* codex composer redesign — Thinking / Approval up-drops + Fast toggle. Reuse
    the model-pop shell (fixed-position, portaled) with their own widths. */
@@ -1873,6 +1982,8 @@
 }
 .session-banner.merged { color: var(--text-2); }
 .session-banner.discarded { color: var(--text-3); }
+/* Fork lineage line (proposal §10.6): quieter than an outcome banner. */
+.session-banner.origin { color: var(--text-3); gap: 6px; padding: 6px 14px; }
 .session-banner-spacer { flex: 1; }
 
 /* Sidebar session row + context menu */

@@ -95,6 +95,7 @@ export const REST_MUTATION_TO_OPERATION = {
   resetOnboarding: ['settings.resetOnboarding'],
   installAgentCli: ['agent.installCli'],
   installAgentProxy: ['agent.installProxy'],
+  checkAgentProxyUpdate: ['agent.checkProxyUpdate'],
   setAgentCliPath: ['agent.setCliPath'],
   setAgentProxyDefaults: ['agent.setProxyDefaults'],
   pickAgentCliPath: ['agent.pickCliPath'],

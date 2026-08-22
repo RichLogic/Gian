@@ -153,7 +153,7 @@ export class JsonLineProxyClient extends EventEmitter {
         GIAN_ATTACHMENT_CANARY_PROVIDER: this.provider,
         ...(this.provider === 'kimi' ? { KIMI_CODE_NO_AUTO_UPDATE: '1' } : {}),
         ...(this.provider === 'grok'
-          ? { GROK_DISABLE_AUTOUPDATER: '1', GIAN_PROTOCOL_VERSIONS: '1.0' }
+          ? { GROK_DISABLE_AUTOUPDATER: '1', GIAN_PROTOCOL_VERSIONS: '2.0' }
           : {}),
       },
     });
@@ -176,7 +176,7 @@ export class JsonLineProxyClient extends EventEmitter {
         clearTimeout(pending.timer);
         if (message.error) {
           const error = new Error(message.error.message || 'Provider proxy request failed.');
-          error.code = message.error.code;
+          error.code = message.error.data?.domainCode ?? message.error.code;
           pending.reject(error);
         } else {
           pending.resolve(message.result);
@@ -212,14 +212,14 @@ export class JsonLineProxyClient extends EventEmitter {
     if (!child || child.exitCode !== null || child.signalCode !== null) {
       throw new Error('Provider proxy is not running.');
     }
-    const id = this.nextId++;
+    const id = `req-${this.nextId++}`;
     return new Promise((resolveRequest, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Timed out waiting for provider proxy ${method} after ${timeoutMs}ms.`));
       }, timeoutMs);
       this.pending.set(id, { resolve: resolveRequest, reject, timer });
-      child.stdin.write(`${JSON.stringify({ id, method, params })}\n`, error => {
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params: params ?? {} })}\n`, error => {
         if (!error) return;
         const pending = this.pending.get(id);
         if (!pending) return;
@@ -269,7 +269,7 @@ function createTurnWatcher(client, timeoutMs) {
         ));
         if (failure) throw new Error(`Provider turn failed: ${JSON.stringify(failure)}`);
         const approval = notifications.find(notification => (
-          notification?.method === 'approval.requested'
+          (notification?.method === 'interaction.requested' || notification?.method === 'approval.requested')
           && notification?.params?.sessionId === sessionId
         ));
         if (approval) {
@@ -363,65 +363,43 @@ export async function runProviderAttachmentCanary(options = {}) {
         size: fixtureStat.byteLength,
       },
     ];
-    if (provider === 'grok') {
-      const initialized = await client.request('initialize', {
-        protocol: { name: 'gian.proxy', versions: ['1.0'] },
-        host: { name: 'Gian', version: 'canary' },
-      });
-      assert.equal(initialized?.protocol?.version, '1.0', 'Grok canary must negotiate gian.proxy/1.');
-      assert.equal(
-        initialized?.capabilities?.['input.localFile'],
-        1,
-        'Grok canary must advertise input.localFile.',
-      );
-      sessionId = randomUUID();
-      const created = await client.request('session.create', {
-        sessionId,
-        cwd: canaryRoot,
-        workspaceRoots: [canaryRoot],
-        config: {},
-      });
-      streamId = created?.session?.streamId;
-      assert.equal(created?.session?.id, sessionId, 'Grok V1 session.create must echo the Host session id.');
-      assert.equal(typeof streamId, 'string', 'Grok V1 session.create returned no streamId.');
-      turnId = randomUUID();
-      const started = await client.request('turn.start', {
-        sessionId,
-        streamId,
-        turnId,
-        input,
-        policy: { workspaceRoots: [canaryRoot], approval: 'relay', network: 'ask' },
-        config: { native: {} },
-      });
-      assert.equal(started?.accepted, true, 'Grok V1 turn.start was not accepted.');
-      assert.equal(started?.turnId, turnId, 'Grok V1 turn.start must echo the Host turn id.');
-    } else {
-      const initialized = await client.request('initialize');
-      assert.ok(Array.isArray(initialized?.methods), 'Provider proxy returned no method list.');
-      assert.ok(initialized.methods.includes('turn.start'), 'Provider proxy does not support turn.start.');
-
-      const created = await client.request('session.create', {
-        cwd: canaryRoot,
-        ...(provider === 'codex' ? { ephemeral: true } : {}),
-      });
-      sessionId = created?.session?.id;
-      assert.equal(typeof sessionId, 'string', 'Provider proxy returned no session id.');
-      assert.ok(sessionId, 'Provider proxy returned an empty session id.');
-      const started = await client.request('turn.start', {
-        sessionId,
-        input,
-        ...(provider === 'claude' ? { permissionMode: 'default' } : {}),
-        ...(provider === 'codex' ? { useConfiguredPermissions: true } : {}),
-      });
-      turnId = started?.turn?.id;
-      assert.equal(typeof turnId, 'string', 'Provider proxy returned no turn id.');
-      assert.ok(turnId, 'Provider proxy returned an empty turn id.');
-    }
+    const initialized = await client.request('initialize', {
+      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      host: { name: 'Gian', version: 'canary' },
+    });
+    assert.equal(initialized?.protocol?.version, '2.0', 'Attachment canary must negotiate gian.proxy/2.0.');
+    assert.equal(
+      initialized?.capabilities?.['input.localFile'],
+      1,
+      `${provider} canary must advertise input.localFile.`,
+    );
+    sessionId = randomUUID();
+    const created = await client.request('session.create', {
+      sessionId,
+      workspace: { cwd: canaryRoot, roots: [canaryRoot] },
+      ...(provider === 'codex' ? { nativeSession: { history: 'none' } } : {}),
+      config: {},
+    });
+    streamId = created?.session?.streamId;
+    assert.equal(created?.session?.id, sessionId, 'session.create must echo the Host session id.');
+    assert.equal(typeof streamId, 'string', 'session.create returned no streamId.');
+    turnId = randomUUID();
+    const started = await client.request('turn.start', {
+      sessionId,
+      streamId,
+      turnId,
+      input,
+      config: {},
+    });
+    assert.equal(started?.accepted, true, 'turn.start was not accepted.');
+    assert.equal(started?.turnId, turnId, 'turn.start must echo the Host turn id.');
 
     if (provider === 'codex') {
       const steerFixtureStat = await readFile(steerFixturePath);
       const steered = await client.request('turn.steer', {
         sessionId,
+        streamId,
+        turnId,
         input: [
           {
             type: 'text',
@@ -443,19 +421,11 @@ export async function runProviderAttachmentCanary(options = {}) {
 
     const result = await watcher.wait(sessionId, turnId);
     completed = true;
-    if (provider === 'grok') {
-      assert.equal(
-        result.completion?.params?.data?.stopReason,
-        'completed',
-        'Grok V1 did not report a completed attachment turn.',
-      );
-    } else {
-      assert.equal(
-        result.completion?.params?.data?.status,
-        'completed',
-        'Provider did not report a completed attachment turn.',
-      );
-    }
+    assert.equal(
+      result.completion?.params?.data?.stopReason,
+      'completed',
+      'Provider did not report a completed attachment turn.',
+    );
     assert.ok(
       JSON.stringify(result.notifications).includes(fixtureContent),
       'Provider response did not contain the unique content available only inside the attachment.',
@@ -467,9 +437,7 @@ export async function runProviderAttachmentCanary(options = {}) {
       );
     }
 
-    await client.request('session.close', provider === 'grok'
-      ? { sessionId, streamId }
-      : { sessionId });
+    await client.request('session.close', { sessionId, streamId });
     sessionClosed = true;
     await client.stop();
     assert.equal(runtimeStopped, true, 'Provider proxy shutdown did not emit runtimeStopped.');
@@ -492,18 +460,10 @@ export async function runProviderAttachmentCanary(options = {}) {
     watcher?.close();
     if (client && sessionId && !sessionClosed) {
       if (turnId && !completed) {
-        await client.request(
-          'turn.interrupt',
-          provider === 'grok'
-            ? { sessionId, streamId, turnId }
-            : { sessionId },
-        ).catch(() => {});
+        await client.request('turn.interrupt', { sessionId, streamId, turnId }).catch(() => {});
       }
-      if (provider !== 'grok' || streamId) {
-        await client.request(
-          'session.close',
-          provider === 'grok' ? { sessionId, streamId } : { sessionId },
-        ).catch(() => {});
+      if (streamId) {
+        await client.request('session.close', { sessionId, streamId }).catch(() => {});
       }
     }
     if (client && !runtimeStopped) await client.stop().catch(() => {});

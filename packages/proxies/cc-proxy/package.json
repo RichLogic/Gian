@@ -1,6 +1,6 @@
 {
   "name": "@gian/cc-proxy",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "./dist/src/cli/spawn.js",
@@ -14,11 +14,11 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "devDependencies": {
+    "@gian/proxy-protocol": "workspace:*",
     "@types/node": "^24.12.2",
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@gian/proxy-protocol": "workspace:*",
     "@gian/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.3.6"

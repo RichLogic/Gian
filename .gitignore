@@ -32,11 +32,13 @@ CLAUDE.md
 AGENTS.md
 
 # Playwright
+.playwright-cli/
 test-results/
 playwright-report/
 playwright/.cache/
 output/playwright/
 output/quality/
+output/proxy-real-acceptance/
 .DS_Store
 
 # Desktop packaging
@@ -55,3 +57,8 @@ CLAUDE.local.md
 .ai/.history/
 .ai/STATE.view.md
 .ai/gian-task/
+
+# DSH probe scratch (WP0 runtime installs; never committed)
+/.dsh-probe-tgz/
+/.dsh-probe-tgz2/
+/packages/proxies/dsh-bridge/.dsh-runtime/

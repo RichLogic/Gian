@@ -1,5 +1,5 @@
 import { lazy, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { RunnerInfo, Session, Task, TerminalOptions, Workspace } from '@gian/shared';
+import type { RunnerInfo, Session, SideChatInfo, Task, TerminalOptions, Workspace } from '@gian/shared';
 import { CHAT_FONT_FAMILY_STACKS, DEFAULT_CHAT_FONT_SIZE, DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 import { LocaleProvider } from './i18n/index.js';
 import { EN } from './i18n/en.js';
@@ -56,6 +56,7 @@ import { reloadFailedSessionMetadata } from './controllers/session-failure-reloa
 import { useAppAuth } from './controllers/use-app-auth.js';
 import { useOnboarding } from './controllers/use-onboarding.js';
 import { useAppSocket } from './controllers/use-app-socket.js';
+import { useCatalogActions } from './controllers/use-catalog-actions.js';
 import { useTranscriptHydration } from './controllers/use-transcript-hydration.js';
 import { useTopbarModel } from './controllers/use-topbar-model.js';
 import { useWorkbench } from './controllers/use-workbench.js';
@@ -64,6 +65,8 @@ import { useSessionSelection } from './controllers/use-session-selection.js';
 import { useWorkbenchLayout } from './controllers/use-workbench-layout.js';
 import { useViewNav } from './controllers/use-view-nav.js';
 import { useWorkingTrees } from './controllers/use-working-trees.js';
+import { actionControlState } from './components/action-gating.js';
+import { dispatchHeadFork, useForkRunSettledToast } from './components/ForkControls.js';
 import { usePanelLayout } from './controllers/use-panel-layout.js';
 import { useAppZoom } from './display-prefs.js';
 import { setShortcutOverrides } from './shortcut-prefs.js';
@@ -89,6 +92,7 @@ import './operations/terminal.js';
 import './operations/files.js';
 import './operations/browser.js';
 import './operations/onboarding.js';
+import './operations/sidechat.js';
 import { sessionEntityKey } from './operations/session.js';
 import {
   createMessageEchoSink,
@@ -213,6 +217,17 @@ export function App() {
   // so SessionRow falls through to this when session.branch itself is null.
   // Refreshed on `workspace:git-updated` so external branch switches show up.
   const [sessions, setSessions] = useState<Session[]>([]);
+  // Side Chat read model (gian.proxy/2.0 §10.5): wholesale-replaced by
+  // state_sync, upserted by sidechat:updated. Consumed by the SideChatDock
+  // surface mounted on the parent session's view; side chats NEVER join the
+  // session lists above (§10.5.2).
+  const [sideChats, setSideChats] = useState<SideChatInfo[]>([]);
+  const sideChatsRef = useRef<SideChatInfo[]>([]);
+  sideChatsRef.current = sideChats;
+  // Live id set for the echo-sink router (side chat sends echo into the
+  // sidechat stores, not itemsBySession) — see the wiring effect below.
+  const sideChatIdsRef = useRef<Set<string>>(new Set());
+  sideChatIdsRef.current = new Set(sideChats.map(entry => entry.id));
   // The exact create attempt is App-owned so an unknown outcome cannot be
   // forgotten by closing the form or switching away from Sessions mode.
   const [sessionCreateRunId, setSessionCreateRunId] = useState<string | undefined>();
@@ -227,6 +242,15 @@ export function App() {
   const itemsBySessionRef = useRef<Record<string, TranscriptItem[]>>({});
   itemsBySessionRef.current = itemsBySession;
   const [pendingBySession, setPendingBySession] = useState<Record<string, boolean>>({});
+  // Side Chat transcript/turn state, keyed by sidechat id and fully isolated
+  // from the parent session's stores (§10.5.1 route isolation). itemsBySidechat
+  // is fed by the snapshot projection in use-app-socket plus the echo-sink
+  // router below. pendingBySidechat is the echo sink's bookkeeping target
+  // only — turn-running state derives from each snapshot's `state` and the
+  // echo items themselves, so nothing renders from this map.
+  const [itemsBySidechat, setItemsBySidechat] = useState<Record<string, TranscriptItem[]>>({});
+  const [pendingBySidechat, setPendingBySidechat] = useState<Record<string, boolean>>({});
+  void pendingBySidechat;
   const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
   const [mode, setMode] = useState<Mode>('tasks');
   const { workingTrees, reloadWorkingTrees } = useWorkingTrees();
@@ -364,7 +388,13 @@ export function App() {
     }),
     [operationStore, ws],
   );
-  useEffect(() => () => ops.dispose(), [ops]);
+  useEffect(() => {
+    // React StrictMode intentionally runs effect setup -> cleanup -> setup in
+    // development. Reconnect here so the simulated cleanup cannot leave the
+    // retained dispatcher deaf to operation:result frames.
+    ops.connect();
+    return () => ops.dispose();
+  }, [ops]);
   // Late-bound dispatch for useAppAuth (see the declaration above).
   useEffect(() => { opsDispatchRef.current = ops.dispatch; }, [ops]);
 
@@ -374,7 +404,20 @@ export function App() {
   // queue overlay — it reads the RENDERED queue (canonical + any in-flight
   // queue overlay) so two rapid queue edits compose (see operations/queue.ts).
   useEffect(() => {
-    wireMessageEchoSink(createMessageEchoSink(setItemsBySession, setPendingBySession));
+    // The send echo sink routes by target id: Side Chat sends (session_id =
+    // sidechat id, §10.5.1) echo into the sidechat stores so their optimistic
+    // bubbles / pending flags / failure marks never touch the parent's
+    // transcript. The id set ref is repopulated every render, so the router
+    // always sees the current read model.
+    const sessionSink = createMessageEchoSink(setItemsBySession, setPendingBySession);
+    const sidechatSink = createMessageEchoSink(setItemsBySidechat, setPendingBySidechat);
+    const route = (sessionId: string) =>
+      sideChatIdsRef.current.has(sessionId) ? sidechatSink : sessionSink;
+    wireMessageEchoSink({
+      append: (sessionId, item) => route(sessionId).append(sessionId, item),
+      markConfirmed: (runId, sessionId) => route(sessionId).markConfirmed(runId, sessionId),
+      markFailed: (runId, sessionId) => route(sessionId).markFailed(runId, sessionId),
+    });
     wireCanonicalQueueReader(sessionId => {
       const overlay = operationStore.getOverlay(
         entityFieldKey(sessionEntityKey(sessionId), QUEUE_OVERLAY_FIELD),
@@ -554,6 +597,57 @@ export function App() {
     ? displayWorkspaces.find(w => w.id === activeSession.workspace_id) ?? null
     : null;
 
+  // Side Chat surface (proposal §10.5): the read-model records bound to the
+  // active session, the standard control's two-layer gating (catalog §9.4 +
+  // the session's dynamic available_actions §10.3), and the authoritative
+  // local removal for a confirmed close.
+  const activeSideChats = useMemo(
+    () => activeSessionId
+      ? sideChats.filter(entry => entry.parent_session_id === activeSessionId)
+      : [],
+    [sideChats, activeSessionId],
+  );
+  const catalogActions = useCatalogActions(activeSession?.executor ?? null);
+  const sideChatControl = useMemo(
+    () => activeSession
+      ? actionControlState(catalogActions, activeSession.available_actions, 'sidechat.create')
+      : null,
+    [catalogActions, activeSession],
+  );
+  // Session Fork standard controls (proposal §10.6): head fork and the
+  // per-turn affordance are gated independently — atTurn additionally
+  // requires plain fork at both layers (handled inside actionControlState).
+  const forkControl = useMemo(
+    () => activeSession
+      ? actionControlState(catalogActions, activeSession.available_actions, 'session.fork')
+      : null,
+    [catalogActions, activeSession],
+  );
+  const forkAtTurnControl = useMemo(
+    () => activeSession
+      ? actionControlState(catalogActions, activeSession.available_actions, 'session.fork.atTurn')
+      : null,
+    [catalogActions, activeSession],
+  );
+  const handleSideChatClosed = useCallback((sidechatId: string) => {
+    // A confirmed sidechat.close means the Host permanently deleted the
+    // temporary record (§10.5.4) — drop it and its transient transcript state
+    // locally. The next state_sync no longer carries the record either.
+    setSideChats(previous => previous.filter(entry => entry.id !== sidechatId));
+    setItemsBySidechat(previous => {
+      if (!(sidechatId in previous)) return previous;
+      const next = { ...previous };
+      delete next[sidechatId];
+      return next;
+    });
+    setPendingBySidechat(previous => {
+      if (!(sidechatId in previous)) return previous;
+      const next = { ...previous };
+      delete next[sidechatId];
+      return next;
+    });
+  }, []);
+
   // Refresh working trees whenever the workspace or session set changes —
   // a new session with a worktree, or a merged/dropped one, changes the list.
   const workingTreeShape = useMemo(() => JSON.stringify({
@@ -586,6 +680,21 @@ export function App() {
     const messages = locale === 'zh-CN' ? ZH : EN;
     return messages[key] ?? EN[key] ?? key;
   }, [locale]);
+
+  // Protocol head Fork (proposal §10.6): the session dropdown menu's entry.
+  // Wired with the store-explicit hooks because this component mounts ABOVE
+  // the operation providers; failure surfacing shares the per-turn control's
+  // settled-toast helper. One fork at a time; success arrives via
+  // session:created and never auto-switches (§10.6).
+  const [forkHeadRunId, setForkHeadRunId] = useState<string>();
+  const forkHeadRun = useStoreOperationRun(operationStore, forkHeadRunId);
+  useForkRunSettledToast(forkHeadRun, appT);
+  const forkHeadForking = pendingRuns.some(run => run.name === 'session.forkSession');
+  const handleForkHead = useCallback(() => {
+    if (!activeSessionId || forkControl?.enabled !== true || forkHeadForking) return;
+    const run = dispatchHeadFork(ops.dispatch, activeSessionId);
+    setForkHeadRunId(run.id);
+  }, [activeSessionId, forkControl, forkHeadForking, ops]);
 
   // Unresolved-reload wiring (Phase 3a, proposal §4.3): a timed-out run
   // (timeout expiry or socket close — fired by the dispatcher's onUnresolved)
@@ -765,6 +874,10 @@ export function App() {
     setWorkspaces,
     refreshWorkingTrees,
     setSessions,
+    setSideChats,
+    sideChatsRef,
+    setItemsBySidechat,
+    setPendingBySidechat,
     setTasks,
     setSystemConfig,
     setRunner,
@@ -945,6 +1058,14 @@ export function App() {
     activeSessionRecovering: activeSessionId != null
       && pendingRuns.some(run => run.name === 'session.recover'
         && run.entityKey === sessionEntityKey(activeSessionId)),
+    // Side Chats bound to the active session (proposal §10.5.4): the delete
+    // confirm must list them — closing the parent permanently closes them.
+    activeSessionSideChats: activeSideChats,
+    forkHead: {
+      control: forkControl,
+      forking: forkHeadForking,
+      onFork: handleForkHead,
+    },
     onAssignSessionTask: session => {
       setAssignTaskRunId(undefined);
       setAssignTaskTargetId(null);
@@ -984,6 +1105,19 @@ export function App() {
     p3Collapsed,
     groupOfRail: GROUP_OF_RAIL,
   });
+
+  // Side Chat rail entry (proposal §10.5): the session-scoped Dock button
+  // toggles the panel-2 surface through the ordinary chat-panel mechanism.
+  // Greyed exactly like the other session rails when no session is active,
+  // and by the two-layer sidechat.create gating otherwise (§9.4/§10.3/§15).
+  const handleToggleSideChat = useCallback(() => {
+    if (chatPanel?.kind === 'sidechat') {
+      setChatPanel(null);
+      return;
+    }
+    if (!sessionViewActive || sideChatControl?.enabled !== true) return;
+    if (activeSessionId) openChatPanel(activeSessionId, { kind: 'sidechat' });
+  }, [chatPanel, sessionViewActive, sideChatControl, activeSessionId, openChatPanel, setChatPanel]);
 
   useEffect(() => {
     const notifications = desktopBridge()?.notifications;
@@ -1079,6 +1213,10 @@ export function App() {
       onReopen={() => { ops.dispatch('task.reopenSubtask', { sessionId: subtask.id }); }}
       onShowChanges={showAllChanges}
       onShowLastTurnChanges={(turn, path) => showLastTurnChanges(subtask, turn, path)}
+      forkAtTurnControl={forkAtTurnControl}
+      originParentName={subtask.origin?.kind === 'fork'
+        ? sessions.find(s => s.id === subtask.origin!.session_id)?.name ?? undefined
+        : undefined}
     />
   ) : null;
 
@@ -1248,6 +1386,8 @@ export function App() {
                   ...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
                   ...(input.thinkingEffort ? { thinkingEffort: input.thinkingEffort } : {}),
                   ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+                  ...(input.sessionConfig ? { sessionConfig: input.sessionConfig } : {}),
+                  ...(input.turnConfig ? { turnConfig: input.turnConfig } : {}),
                 });
                 setSessionCreateRunId(run.id);
                 return run;
@@ -1284,6 +1424,11 @@ export function App() {
               onSetEffort={sessionMainHandlers.onSetEffort}
               onSetServiceTier={sessionMainHandlers.onSetServiceTier}
               onSetNativeConfig={sessionMainHandlers.onSetNativeConfig}
+              onSetTurnConfig={(sessionId, optionId, value) =>
+                sessionMainHandlers.onSetTurnConfig(sessionId, optionId, value, {
+                  ...(activeSession?.id === sessionId ? activeSession.turn_config ?? {} : {}),
+                  [optionId]: value,
+                })}
               onShowChanges={showAllChanges}
               onShowLastTurnChanges={showLastTurnChanges}
               activeWorkingTreeId={viewedWorkingTreeId(activeSession)}
@@ -1291,6 +1436,7 @@ export function App() {
                 workingTrees.find(wt => wt.id === viewedWorkingTreeId(activeSession))?.branch
                 ?? null
               }
+              forkAtTurnControl={forkAtTurnControl}
               railLayout={panelLayout.railLayout}
             />
           </ChatPanelOpenContext.Provider>
@@ -1348,6 +1494,21 @@ export function App() {
                 planCompleted={planStateBySession[chatPanel.sessionId]?.completed}
                 planStatus={planStateBySession[chatPanel.sessionId]?.status}
                 planTurn={planStateBySession[chatPanel.sessionId]?.turn}
+                // Side Chat surface (proposal §10.5): the panel-2 bundle is
+                // only valid while the panel's parent session is the ACTIVE
+                // one (the chat panel resets on session switch — Side Chat
+                // visibility stays tied to its parent being active).
+                sideChat={chatPanel.kind === 'sidechat'
+                    && activeSession
+                    && chatPanel.sessionId === activeSession.id
+                  ? {
+                      parent: activeSession,
+                      sideChats: activeSideChats,
+                      items: itemsBySidechat,
+                      control: sideChatControl,
+                      onClosed: handleSideChatClosed,
+                    }
+                  : null}
                 onClose={() => setChatPanel(null)}
               />
             </FileRefRehypeContext.Provider>
@@ -1536,6 +1697,17 @@ export function App() {
           activeRail={chatPanel ? null : activeRail}
           onToggleRail={toggleRail}
           sessionRailsDisabled={!sessionViewActive}
+          sideChat={{
+            active: chatPanel?.kind === 'sidechat',
+            disabled: !sessionViewActive || sideChatControl?.enabled !== true,
+            title: !sessionViewActive
+              ? appT('sidechat.title')
+              : sideChatControl?.enabled
+                ? appT('sidechat.createTitle')
+                : (sideChatControl?.reason ?? appT('sidechat.unavailable')),
+            count: activeSideChats.length,
+            onToggle: handleToggleSideChat,
+          }}
           workbenchDisabled={!workbenchActive}
           browserAvailable={!!window.gianDesktop?.browser}
           wsState={wsState}

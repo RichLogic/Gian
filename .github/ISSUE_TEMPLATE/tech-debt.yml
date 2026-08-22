@@ -1,0 +1,60 @@
+name: Tech Debt
+description: Track maintainability, reliability, tooling, or engineering-quality work
+title: "[Tech Debt] "
+labels:
+  - tech-debt
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 当前问题
+      description: 描述正在增加成本、风险或维护难度的具体事实。
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: 影响
+      description: 说明对开发效率、可靠性、安全性、兼容性或发布的影响。
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: 处理范围
+      description: 列出计划修改的边界和明确不包含的内容。
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收条件
+      description: 使用可验证的结果描述完成标准。
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: risk
+    attributes:
+      label: 风险与回滚
+      description: 说明兼容性、数据、发布风险和必要的回滚方式。
+
+  - type: textarea
+    id: references
+    attributes:
+      label: 关联资料
+      description: 相关 requirement、ADR、代码、测试、Issue 或 PR。
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，确认没有重复工作。
+          required: true

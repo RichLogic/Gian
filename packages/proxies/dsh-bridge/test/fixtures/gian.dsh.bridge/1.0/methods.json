@@ -1,0 +1,30 @@
+{
+  "method": [
+    "initialize",
+    "catalog.list",
+    "catalog.resolve",
+    "session.create",
+    "session.resume",
+    "session.get",
+    "session.close",
+    "session.native.list",
+    "session.rename",
+    "session.events.read",
+    "turn.start",
+    "turn.steer",
+    "turn.interrupt",
+    "interaction.respond",
+    "shutdown"
+  ],
+  "notification": [
+    "session.event",
+    "agent.status",
+    "agent.error",
+    "subagent.started",
+    "subagent.finished",
+    "interaction.requested",
+    "interaction.resolved",
+    "catalog.changed",
+    "runtime.error"
+  ]
+}

@@ -17,7 +17,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { ProxyNotification, ServerToClientMessage } from '@gian/shared';
+import type { ProxyCatalog, ProxyNotification, ServerToClientMessage } from '@gian/shared';
 import { openDatabase } from '../src/storage/db.js';
 import { SessionManager } from '../src/session/manager.js';
 import type { ProxyManager } from '../src/proxy/manager.js';
@@ -31,9 +31,26 @@ import { QueueManager } from '../src/queue/index.js';
 // ---------------------------------------------------------------------------
 
 interface ScriptedProxyClient extends ProxyClient {
-  /** Per-instance scripted return values. Pops one per `capabilities()` call. */
-  capsScript: Array<{ models: unknown[]; slashCommands: unknown[] }>;
+  capsScript: ProxyCatalog[];
   callCount: number;
+}
+
+function modelCatalog(models: Array<{ id: string; displayName: string }>): ProxyCatalog {
+  return {
+    catalogRevision: models.length > 0 ? 'populated' : 'empty',
+    input: [{ type: 'text' }],
+    configOptions: models.length > 0 ? [{
+      id: 'model',
+      displayName: 'Model',
+      binding: 'turn',
+      role: 'model',
+      control: 'select',
+      required: false,
+      defaultValue: models[0]!.id,
+      choices: models.map((model) => ({ value: model.id, displayName: model.displayName })),
+    }] : [],
+    slashCommands: [],
+  };
 }
 
 function makeClient(executor: 'claude' | 'codex'): ScriptedProxyClient {
@@ -41,19 +58,25 @@ function makeClient(executor: 'claude' | 'codex'): ScriptedProxyClient {
     executor,
     capsScript: [],
     callCount: 0,
-    async initialize() { return { mode: 'spawn', protocolVersion: '0.1.0', methods: [] }; },
-    async capabilities() {
-      client.callCount += 1;
-      const next = client.capsScript.shift();
-      return next ?? { protocolVersion: '0.1.0', models: [], slashCommands: [] };
+    isExited() { return false; },
+    async initialize() {
+      return {
+        protocol: { name: 'gian.proxy', version: '2.0' },
+        plugin: { id: executor, name: executor, version: '0.2.0' },
+        process: { scope: executor === 'codex' ? 'shared' : 'session' },
+        capabilities: {},
+      };
     },
-    async listSlashCommands() { return { commands: [] }; },
-    async createSession(params: { cwd: string; claudeSessionId?: string }) {
-      const id = params.claudeSessionId ?? `proxy_${randomUUID()}`;
+    async catalog() {
+      client.callCount += 1;
+      return client.capsScript.shift() ?? modelCatalog([]);
+    },
+    async createSession(params) {
+      const id = params.nativeSessionId ?? `proxy_${randomUUID()}`;
       return {
         session: {
-          id, cwd: params.cwd, claudeSessionId: id, model: null,
-          status: 'idle' as const,
+          id, cwd: params.cwd,
+          state: 'idle' as const,
           createdAt: '2026-05-17T00:00:00.000Z', updatedAt: '2026-05-17T00:00:00.000Z',
           lastError: null,
         },
@@ -61,11 +84,11 @@ function makeClient(executor: 'claude' | 'codex'): ScriptedProxyClient {
       };
     },
     async interruptTurn() {},
-    async respondApproval() {},
+    async respondInteraction() {},
     async startTurn() {
       return {
         session: {
-          id: 'p', cwd: '/tmp', model: null, status: 'running' as const,
+          id: 'p', cwd: '/tmp', state: 'running' as const,
           createdAt: '2026-05-17T00:00:00.000Z', updatedAt: '2026-05-17T00:00:00.000Z',
           lastError: null,
         },
@@ -91,9 +114,9 @@ class FakeProxyManager {
    *  by a fresh `getOrCreate` keeps consuming from the same array so a
    *  test can express "empty, then populated" across two probes that
    *  span a dispose. */
-  scriptByExecutor = new Map<'claude' | 'codex', Array<{ models: unknown[]; slashCommands: unknown[] }>>();
+  scriptByExecutor = new Map<'claude' | 'codex', ProxyCatalog[]>();
 
-  setScript(executor: 'claude' | 'codex', script: Array<{ models: unknown[]; slashCommands: unknown[] }>): void {
+  setScript(executor: 'claude' | 'codex', script: ProxyCatalog[]): void {
     this.scriptByExecutor.set(executor, [...script]);
   }
 
@@ -156,19 +179,16 @@ function teardown(ctx: { dir: string; db: ReturnType<typeof openDatabase> }) {
 test('MODEL-002: warmCapabilities returns the populated list on first call (sanity)', async () => {
   const ctx = setup();
   try {
-    const models = [{ id: 'claude-sonnet-4-5', model: 'sonnet', displayName: 'Sonnet', description: '', hidden: false, isDefault: true, defaultEffort: 'medium', supportedEfforts: ['low', 'medium', 'high'] }];
-    ctx.proxyMgr.setScript('claude', [{ models, slashCommands: [] }]);
+    ctx.proxyMgr.setScript('claude', [modelCatalog([{ id: 'claude-sonnet-4-5', displayName: 'Sonnet' }])]);
 
     const caps = await ctx.sessions.warmCapabilities('claude');
-    assert.equal(caps.models.length, 1, 'first call returns populated models');
-    assert.equal((caps.models[0] as { id: string }).id, 'claude-sonnet-4-5');
+    assert.equal(caps.configOptions[0]?.choices?.length, 1, 'first call returns populated models');
+    assert.equal(caps.configOptions[0]?.choices?.[0]?.value, 'claude-sonnet-4-5');
 
-    // Populated cache is reused — second call must NOT trigger another
-    // capabilities() round-trip on the same client.
     const client = ctx.proxyMgr.get('__caps__claude') as ScriptedProxyClient;
     assert.equal(client.callCount, 1);
     const cached = await ctx.sessions.warmCapabilities('claude');
-    assert.equal(cached.models.length, 1);
+    assert.equal(cached.configOptions[0]?.choices?.length, 1);
     assert.equal(client.callCount, 1,
       'populated cache must short-circuit subsequent warmCapabilities calls');
   } finally {
@@ -179,35 +199,30 @@ test('MODEL-002: warmCapabilities returns the populated list on first call (sani
 test('MODEL-002: empty model result on first call is NOT cached — second call re-probes', async () => {
   const ctx = setup();
   try {
-    // First probe returns []; second probe returns populated.
     ctx.proxyMgr.setScript('claude', [
-      { models: [], slashCommands: [] },
-      { models: [{ id: 'claude-haiku-4-5', model: 'haiku', displayName: 'Haiku', description: '', hidden: false, isDefault: false, defaultEffort: 'low', supportedEfforts: ['low'] }], slashCommands: [] },
+      modelCatalog([]),
+      modelCatalog([{ id: 'claude-haiku-4-5', displayName: 'Haiku' }]),
     ]);
 
     const first = await ctx.sessions.warmCapabilities('claude');
-    assert.equal(first.models.length, 0,
+    assert.equal(first.configOptions.some((option) => option.role === 'model'), false,
       'first call surfaces the empty result so the UI can show "no models"');
 
     const second = await ctx.sessions.warmCapabilities('claude');
-    assert.equal(second.models.length, 1,
+    assert.equal(second.configOptions[0]?.choices?.length, 1,
       'second call must NOT return the cached empty result; it must re-probe the proxy');
-    assert.equal((second.models[0] as { id: string }).id, 'claude-haiku-4-5');
+    assert.equal(second.configOptions[0]?.choices?.[0]?.value, 'claude-haiku-4-5');
   } finally {
     teardown(ctx);
   }
 });
 
 test('MODEL-002: empty cache disposes the prior proxy client so the next call spawns a fresh runtime', async () => {
-  // Codex's review called this out specifically: a stuck appserver might
-  // keep returning the same empty result if we reuse the same client.
-  // The fix is `proxy.dispose(tempKey)` so getOrCreate spawns a fresh
-  // client. This test pins that contract.
   const ctx = setup();
   try {
     ctx.proxyMgr.setScript('codex', [
-      { models: [], slashCommands: [] },
-      { models: [{ id: 'codex-default', model: 'gpt', displayName: 'GPT', description: '', hidden: false, isDefault: true, defaultThinking: 'medium', supportedThinking: ['medium'] }], slashCommands: [] },
+      modelCatalog([]),
+      modelCatalog([{ id: 'codex-default', displayName: 'GPT' }]),
     ]);
 
     await ctx.sessions.warmCapabilities('codex');
@@ -223,26 +238,22 @@ test('MODEL-002: empty cache disposes the prior proxy client so the next call sp
 });
 
 test('MODEL-002: empty -> empty -> populated still recovers (chained retries)', async () => {
-  // If the probe is flaky (intermittent codex appserver crash), every
-  // retry must continue to drop the empty cache. Three calls total: two
-  // empty + one populated.
   const ctx = setup();
   try {
     ctx.proxyMgr.setScript('claude', [
-      { models: [], slashCommands: [] },
-      { models: [], slashCommands: [] },
-      { models: [{ id: 'late', model: 'late', displayName: 'Late', description: '', hidden: false, isDefault: false, defaultEffort: 'medium', supportedEfforts: ['medium'] }], slashCommands: [] },
+      modelCatalog([]),
+      modelCatalog([]),
+      modelCatalog([{ id: 'late', displayName: 'Late' }]),
     ]);
 
     const a = await ctx.sessions.warmCapabilities('claude');
-    assert.equal(a.models.length, 0);
+    assert.equal(a.configOptions.some((option) => option.role === 'model'), false);
     const b = await ctx.sessions.warmCapabilities('claude');
-    assert.equal(b.models.length, 0);
+    assert.equal(b.configOptions.some((option) => option.role === 'model'), false);
     const c = await ctx.sessions.warmCapabilities('claude');
-    assert.equal(c.models.length, 1,
+    assert.equal(c.configOptions[0]?.choices?.length, 1,
       'the third probe must return the recovered model list — empty cache never sticks');
 
-    // Each empty-cache transition disposed the temp client once.
     assert.equal(ctx.proxyMgr.disposedKeys.filter(k => k === '__caps__claude').length, 2,
       'two empty-cache hits → two dispose calls; populated success does not dispose');
   } finally {
@@ -253,20 +264,19 @@ test('MODEL-002: empty -> empty -> populated still recovers (chained retries)', 
 test('MODEL-002: warmup is keyed per-executor — empty claude cache does not affect codex', async () => {
   const ctx = setup();
   try {
-    ctx.proxyMgr.setScript('claude', [{ models: [], slashCommands: [] }]);
+    ctx.proxyMgr.setScript('claude', [modelCatalog([])]);
     ctx.proxyMgr.setScript('codex', [
-      { models: [{ id: 'codex-ok', model: 'codex-ok', displayName: 'Codex', description: '', hidden: false, isDefault: true, defaultThinking: 'medium', supportedThinking: ['medium'] }], slashCommands: [] },
+      modelCatalog([{ id: 'codex-ok', displayName: 'Codex' }]),
     ]);
 
     const claude = await ctx.sessions.warmCapabilities('claude');
-    assert.equal(claude.models.length, 0,
+    assert.equal(claude.configOptions.some((option) => option.role === 'model'), false,
       'claude probe was empty');
 
     const codex = await ctx.sessions.warmCapabilities('codex');
-    assert.equal(codex.models.length, 1,
+    assert.equal(codex.configOptions[0]?.choices?.length, 1,
       'codex probe is a separate key and gets a fresh client + non-empty result');
 
-    // No cross-contamination on the dispose log.
     assert.equal(ctx.proxyMgr.disposedKeys.filter(k => k === '__caps__codex').length, 0,
       'codex never had an empty cache → never disposed');
   } finally {

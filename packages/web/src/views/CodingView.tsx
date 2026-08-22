@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ApprovalDecision, ApprovalMode, Executor, NativeConfigValue, Session, Workspace } from '@gian/shared';
+import type { ApprovalDecision, ApprovalMode, ConfigValue, Executor, NativeConfigValue, Session, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { ModeDropdown } from '../components/ModeDropdown.js';
 import type { Mode } from '../components/Topbar.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import type { RailLayoutController } from '../components/RailLayout.js';
+import type { ActionControlState } from '../components/action-gating.js';
 import { useSessionOperationPending } from '../operations/use-operations.js';
 import type { OperationRun } from '../operations/types.js';
 import type { PlanLifecycleState } from '../transcript/apply.js';
@@ -103,7 +104,7 @@ export interface CodingViewProps {
     sessionId: string,
     approvalId: string,
     decision: ApprovalDecision,
-    answers?: Record<string, string | string[]>,
+    answers?: Record<string, string | boolean | string[]>,
     context?: ApprovalActionContext,
   ) => void;
   onQueueAdd: (sessionId: string, text: string, attachments?: Array<{ path: string; name: string; mime: string; size?: number }>) => void;
@@ -123,6 +124,11 @@ export interface CodingViewProps {
     configId: string,
     value: NativeConfigValue,
   ) => void;
+  onSetTurnConfig?: (
+    sessionId: string,
+    optionId: string,
+    value: ConfigValue,
+  ) => void;
   onDelete: (sessionId: string) => void;
   onReopenSession: (sessionId: string) => void;
   /** Toggle a session's pinned marker (sidebar ordering). */
@@ -139,6 +145,11 @@ export interface CodingViewProps {
   activeWorkingTreeId: string | null;
   /** Branch name for the active session's working tree. */
   activeBranch: string | null;
+  /** Session Fork standard control (proposal §10.6): two-layer gating for
+   *  the per-turn transcript affordance (`session.fork.atTurn`) of the
+   *  ACTIVE session. The head-fork entry lives in the session dropdown menu;
+   *  the Side Chat surface lives on the Dock rail + panel 2. */
+  forkAtTurnControl: ActionControlState | null;
   /** App-owned four-panel layout. Optional for isolated component renders. */
   railLayout?: RailLayoutController;
 }
@@ -316,6 +327,9 @@ export function CodingView(p: CodingViewProps) {
           onSetServiceTier={tier => p.onSetServiceTier(p.activeSession!.id, tier)}
           onSetNativeConfig={(configId, value) =>
             p.onSetNativeConfig(p.activeSession!.id, configId, value)}
+          onSetTurnConfig={p.onSetTurnConfig
+            ? (optionId, value) => p.onSetTurnConfig!(p.activeSession!.id, optionId, value)
+            : undefined}
           onDelete={() => p.onDelete(p.activeSession!.id)}
           onReopen={() => p.onReopenSession(p.activeSession!.id)}
           onShowChanges={() => p.onShowChanges(p.activeSession!)}
@@ -323,6 +337,10 @@ export function CodingView(p: CodingViewProps) {
             p.onShowLastTurnChanges(p.activeSession!, turn, path)}
           workingTreeId={p.activeWorkingTreeId}
           branch={p.activeBranch}
+          forkAtTurnControl={p.forkAtTurnControl}
+          originParentName={p.activeSession.origin?.kind === 'fork'
+            ? p.sessions.find(s => s.id === p.activeSession!.origin!.session_id)?.name ?? undefined
+            : undefined}
         />
       ) : (
         <CodingViewEmpty />

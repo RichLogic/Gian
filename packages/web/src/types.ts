@@ -176,6 +176,14 @@ export interface StatusItem {
   text: string;
   ts: number;
   turn: number;
+  /** Protocol turn identity (gian.proxy/2.0 §10.6), only ever present on a
+   *  'turn-end' item when the Host flows the exact Gian `turn_id` and the
+   *  Proxy-stable `source_turn_id` of that Terminal Turn. The per-turn Fork
+   *  control reads them VERBATIM — the web never derives them from rendered
+   *  text and never falls back to an adjacent turn or to `head`. Hosts that
+   *  predate the fork amendment omit both, and the control stays greyed. */
+  turn_id?: string;
+  source_turn_id?: string;
 }
 
 /**
@@ -223,6 +231,18 @@ export interface ApprovalItem {
   /** Exact executor-owned buttons for ACP-native permission requests. */
   nativeOptions?: import('@gian/shared').NativeApprovalOption[];
   nativeOptionId?: string;
+  /** gian.proxy/2.0 actions — when present, render these labels/styles as-is. */
+  actions?: import('@gian/shared').InteractionAction[];
+  /** gian.proxy/2.0 inputs — when present, collect values with the submit action. */
+  inputs?: import('@gian/shared').InteractionInput[];
+  /** True when `cmd` came from the interaction's `context.subject` (a tool
+   *  name / command / path) rather than the prose title — drives mono-block
+   *  vs prose-text rendering on the unified interaction card. */
+  hasSubject?: boolean;
+  /** gian.proxy/2.0 §12 presentation hint — drives the card's kind label. */
+  interactionKind?: 'question' | 'choice' | 'confirmation' | 'permission';
+  /** gian.proxy/2.0 §12 presentation tone — drives the card's tint. */
+  tone?: 'neutral' | 'info' | 'warning' | 'danger';
   /** Timestamp of the lifecycle event that resolved this approval. */
   resolvedAt?: number;
   ts: number;

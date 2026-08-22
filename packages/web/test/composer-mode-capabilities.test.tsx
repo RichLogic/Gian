@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import type { Executor, ProxyModeCapabilities, Session } from '@gian/shared';
 
 import { Composer } from '../src/components/Composer.js';
+import { clearComposerCapabilityCaches } from '../src/components/composer/capabilities.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 
 const CODEX_MODES: ProxyModeCapabilities[] = [
@@ -92,6 +93,7 @@ function renderComposer(
     onSetModel: vi.fn(),
     onSetEffort: vi.fn(),
     onSetNativeConfig: vi.fn(),
+    onSetTurnConfig: vi.fn(),
     onSetServiceTier: vi.fn(),
   };
   render(
@@ -112,6 +114,7 @@ function renderComposer(
 describe('Composer mode dropdown from proxy capabilities', () => {
   beforeEach(() => {
     localStorage.clear();
+    clearComposerCapabilityCaches();
     loadProxyCapabilitiesMock.mockReset();
   });
 
@@ -130,6 +133,35 @@ describe('Composer mode dropdown from proxy capabilities', () => {
     // The hardcoded fallback has no plan mode — it only appears once the
     // proxy capabilities resolve.
     expect(screen.queryByText('Plan', { selector: '.mp-row-title' })).toBeNull();
+  });
+
+  it('renders approval_mode configOptions as composer mode rows', async () => {
+    const user = userEvent.setup();
+    loadProxyCapabilitiesMock.mockResolvedValue({
+      catalogRevision: 'rev-1',
+      input: [{ type: 'text' }],
+      slashCommands: [],
+      configOptions: [{
+        id: 'permissionMode',
+        displayName: 'Permission mode',
+        binding: 'turn',
+        role: 'approval_mode',
+        control: 'select',
+        required: true,
+        defaultValue: 'default',
+        choices: [
+          { value: 'plan', displayName: 'Plan', description: 'Plan first' },
+          { value: 'default', displayName: 'Ask', description: 'Ask first' },
+          { value: 'bypassPermissions', displayName: 'Skip permission prompts', description: 'Skip prompts' },
+        ],
+      }],
+    });
+    renderComposer(makeSession('claude'));
+
+    await user.click(document.querySelector('.cmp-approval-btn')!);
+    expect(await screen.findByText('Plan', { selector: '.mp-row-title' })).toBeTruthy();
+    expect(screen.getByText('Ask', { selector: '.mp-row-title' })).toBeTruthy();
+    expect(screen.getByText('Skip permission prompts', { selector: '.mp-row-title' })).toBeTruthy();
   });
 
   it('renders codex capability modes including plan once capabilities resolve', async () => {
@@ -180,6 +212,12 @@ describe('Composer mode dropdown from proxy capabilities', () => {
 
   it('keeps Chinese hints for known codex ids in zh locale', async () => {
     const user = userEvent.setup();
+    loadProxyCapabilitiesMock.mockImplementation(async (executor: string) => ({
+      protocolVersion: '1',
+      models: [],
+      slashCommands: [],
+      modes: executor === 'codex' ? CODEX_MODES : CLAUDE_MODES,
+    }));
     renderComposer(makeSession('codex'), 'zh-CN');
 
     await user.click(document.querySelector('.cmp-approval-btn')!);
@@ -187,5 +225,70 @@ describe('Composer mode dropdown from proxy capabilities', () => {
     expect(await screen.findByText('编辑外部文件、使用网络前总是询问', { selector: '.mp-row-hint' })).toBeTruthy();
     expect(screen.getByText('无限制访问网络和本机任意文件', { selector: '.mp-row-hint' })).toBeTruthy();
     expect(screen.getByText('YOLO everything', { selector: '.mp-row-title' })).toBeTruthy();
+  });
+
+  it('keeps unknown-role turn options inside the unified options panel', async () => {
+    const user = userEvent.setup();
+    loadProxyCapabilitiesMock.mockResolvedValue({
+      catalogRevision: 'rev-runtime',
+      input: [{ type: 'text' }, { type: 'localFile' }],
+      slashCommands: [],
+      configOptions: [{
+        id: 'verbosity',
+        displayName: 'Verbosity',
+        binding: 'turn',
+        role: 'custom_verbosity',
+        control: 'select',
+        required: false,
+        defaultValue: 'normal',
+        choices: [
+          { value: 'quiet', displayName: 'Quiet' },
+          { value: 'normal', displayName: 'Normal' },
+        ],
+      }],
+    });
+    const callbacks = renderComposer(makeSession('claude'));
+    const trigger = await screen.findByTestId('composer-options-chip');
+    expect(trigger).not.toHaveTextContent('Verbosity');
+    await user.click(trigger);
+    await user.click(await screen.findByRole('button', { name: 'Quiet' }));
+    expect(callbacks.onSetTurnConfig).toHaveBeenCalledWith('verbosity', 'quiet');
+  });
+
+  it('shows Fast when the catalog advertises role=fast on a non-codex executor', async () => {
+    loadProxyCapabilitiesMock.mockResolvedValue({
+      catalogRevision: 'rev-fast',
+      input: [{ type: 'text' }],
+      slashCommands: [],
+      configOptions: [{
+        id: 'fast',
+        displayName: 'Turbo',
+        binding: 'turn',
+        role: 'fast',
+        control: 'boolean',
+        required: false,
+        defaultValue: false,
+      }],
+    });
+    const callbacks = renderComposer(makeSession('grok'));
+    // Fast lives inside the combined options menu as a switch row now.
+    const trigger = await screen.findByRole('button', { name: 'Options' });
+    await userEvent.click(trigger);
+    const toggle = await screen.findByRole('switch', { name: 'Turbo' });
+    await userEvent.click(toggle);
+    expect(callbacks.onSetServiceTier).toHaveBeenCalledWith('fast');
+  });
+
+  it('hides the attachment button when the catalog only advertises text input', async () => {
+    loadProxyCapabilitiesMock.mockResolvedValue({
+      catalogRevision: 'rev-text',
+      input: [{ type: 'text' }],
+      slashCommands: [],
+      configOptions: [],
+    });
+    renderComposer(makeSession('claude'));
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Attach files' })).toBeNull();
+    });
   });
 });

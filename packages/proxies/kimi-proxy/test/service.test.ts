@@ -13,14 +13,8 @@ import {
 } from '@agentclientprotocol/sdk';
 
 import { KimiProxyService, parseKimiConversationUsage } from '../src/core/service.js';
-import { KimiProtocolV1Adapter } from '../src/protocol/v1-adapter.js';
-import {
-  PROTOCOL_NAME,
-  PROTOCOL_V1,
-  parseProxyRequest,
-  proxyNotificationSchema,
-  type ProxyNotification,
-} from '@gian/proxy-protocol';
+import { KimiProtocolV2Adapter, type WireRequest } from '../src/protocol/v2-adapter.js';
+import { proxyNotificationSchema, replayEventSchemaUnion } from '@gian/proxy-protocol';
 import {
   KimiAcpClient,
   type KimiAcpExit,
@@ -947,11 +941,11 @@ test('capabilities reports empty modes and models when the probe session fails',
   await service.close();
 });
 
-function v1Request(id: number, method: string, params: unknown) {
-  return parseProxyRequest({ id, method, params });
+function v2Request(id: string, method: string, params: Record<string, unknown>): WireRequest {
+  return { id, method, params };
 }
 
-test('Kimi gian.proxy/1 translates ACP text, tools, usage, and Host ids', async () => {
+test('Kimi gian.proxy/2 translates ACP text, tools, usage, and Host ids', async () => {
   let remote!: AgentSideConnection;
   const runtime = new KimiAcpClient({
     binaryPath: '/managed/kimi',
@@ -998,92 +992,295 @@ test('Kimi gian.proxy/1 translates ACP text, tools, usage, and Host ids', async 
   });
   const service = new KimiProxyService({ runtime });
   await service.initialize();
-  const notifications: ProxyNotification[] = [];
-  const adapter = new KimiProtocolV1Adapter(service, '0.1.0', notification => {
-    notifications.push(proxyNotificationSchema.parse(notification));
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', (method, params) => {
+    notifications.push({ method, params });
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
   });
-  await adapter.handle(v1Request(1, 'initialize', {
-    protocol: { name: PROTOCOL_NAME, versions: [PROTOCOL_V1] },
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
-  const created = await adapter.handle(v1Request(2, 'session.create', {
+  const created = await adapter.handle(v2Request('2', 'session.create', {
     sessionId: 'host-kimi-session',
-    cwd: '/tmp',
-    workspaceRoots: ['/tmp'],
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
     config: {},
-  })) as { session: { streamId: string; nativeSession: { id: string } } };
-  await adapter.handle(v1Request(3, 'turn.start', {
+  })) as { session: { streamId: string; nativeSession: { id: string }; state: string } };
+  await adapter.handle(v2Request('3', 'turn.start', {
     sessionId: 'host-kimi-session',
     streamId: created.session.streamId,
     turnId: 'host-kimi-turn',
     input: [{ type: 'text', text: 'go' }],
-    policy: { workspaceRoots: ['/tmp'], approval: 'relay', network: 'ask' },
-    config: { native: {} },
+    config: {},
   }));
   await waitFor(
     () => notifications.some(item => item.method === 'turn.completed'),
     'standard Kimi turn did not complete',
   );
   assert.equal(created.session.nativeSession.id, 'native-v1');
+  assert.equal(created.session.state, 'idle');
   assert.deepEqual(notifications.map(item => item.method), [
     'turn.started',
     'content.delta',
-    'tool.started',
-    'tool.completed',
+    'activity.updated',
+    'activity.updated',
     'usage.updated',
+    'content.completed',
     'turn.completed',
   ]);
+  const completedContent = notifications.find(item => item.method === 'content.completed');
+  assert.equal((completedContent?.params.data as { format?: unknown } | undefined)?.format, 'plain');
   for (const notification of notifications) {
     if ('turnId' in notification.params) {
       assert.equal(notification.params.turnId, 'host-kimi-turn');
+      const sourceTurnId = notification.params.sourceTurnId;
+      assert.equal(typeof sourceTurnId, 'string');
+      assert.ok(
+        (sourceTurnId as string).startsWith('kimi-turn-'),
+        'sourceTurnId must be a Proxy-owned stable ID, not the Host turnId',
+      );
+      assert.notEqual(sourceTurnId, 'host-kimi-turn');
     }
   }
+
+  const compactStart = notifications.length;
+  await adapter.handle(v2Request('4', 'turn.start', {
+    sessionId: 'host-kimi-session',
+    streamId: created.session.streamId,
+    turnId: 'host-kimi-compact',
+    input: [{ type: 'text', text: '/compact' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notifications.slice(compactStart).some(item => item.method === 'turn.completed'),
+    'compact Kimi turn did not complete',
+  );
+  assert.deepEqual(
+    notifications.slice(compactStart, compactStart + 2).map(item => item.method),
+    ['turn.started', 'usage.updated'],
+  );
   await service.close();
 });
 
-test('Kimi gian.proxy/1 detaches a newly-created service session when config fails', async () => {
+test('Kimi gian.proxy/2 projects TodoList tools as one deduplicated plan snapshot', async () => {
+  let remote!: AgentSideConnection;
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory((client) => {
+      remote = client;
+      return {
+        initialize: async () => initializeResponse(),
+        newSession: async () => ({ sessionId: 'native-todo-plan' }),
+        prompt: async (params: { sessionId: string }) => {
+          const todos = [
+            { title: 'Inspect', status: 'done' },
+            { title: 'Implement', status: 'in_progress' },
+          ];
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'todo-call-1',
+              title: 'TodoList',
+              kind: 'other',
+              status: 'pending',
+            } as never,
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'todo-call-1',
+              title: 'Updating todo list',
+              kind: 'other',
+              status: 'in_progress',
+              rawInput: { todos },
+            } as never,
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'todo-call-1',
+              status: 'completed',
+            } as never,
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'plan',
+              entries: [
+                { content: 'Inspect', priority: 'medium', status: 'completed' },
+                { content: 'Implement', priority: 'medium', status: 'in_progress' },
+              ],
+            } as never,
+          });
+          return { stopReason: 'end_turn' };
+        },
+      } as unknown as Agent;
+    }),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', (method, params) => {
+    notifications.push({ method, params });
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 'host-todo-plan',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  await adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 'host-todo-plan',
+    streamId: created.session.streamId,
+    turnId: 'host-todo-plan-turn',
+    input: [{ type: 'text', text: 'make a plan' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notifications.some(item => item.method === 'turn.completed'),
+    'TodoList plan turn did not complete',
+  );
+
+  const plans = notifications.filter(item => item.method === 'plan.updated');
+  assert.equal(plans.length, 1, 'TodoList and native plan facts must deduplicate');
+  const plan = plans[0]?.params.data as {
+    planId: string;
+    title: string;
+    steps: Array<{ id: string; text: string; status: string }>;
+  };
+  assert.match(plan.planId, /^plan:kimi-turn-/);
+  assert.deepEqual({ title: plan.title, steps: plan.steps }, {
+    title: 'Plan',
+    steps: [
+      { id: 'step-1', text: 'Inspect', status: 'completed' },
+      { id: 'step-2', text: 'Implement', status: 'in_progress' },
+    ],
+  });
+  assert.equal(
+    notifications.some(item => (
+      item.method === 'activity.updated'
+      && (item.params.data as { activityId?: unknown }).activityId === 'todo-call-1'
+    )),
+    false,
+    'a structured TodoList plan must not also render as a generic tool activity',
+  );
+  await service.close();
+});
+
+test('Kimi config updates cannot emit Turn activity before turn.started', async () => {
+  let remote!: AgentSideConnection;
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory((client) => {
+      remote = client;
+      return {
+        initialize: async () => initializeResponse(),
+        newSession: async () => ({ sessionId: 'native-pre-turn', configOptions: MODE_CONFIG_OPTIONS }),
+        setSessionConfigOption: async () => {
+          await remote.sessionUpdate({
+            sessionId: 'native-pre-turn',
+            update: {
+              sessionUpdate: 'current_mode_update',
+              currentModeId: 'auto',
+            } as never,
+          });
+          return { configOptions: MODE_CONFIG_OPTIONS };
+        },
+        prompt: async () => ({ stopReason: 'end_turn' }),
+        cancel: async () => undefined,
+      } as unknown as Agent;
+    }),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new KimiProtocolV2Adapter(
+    service,
+    '0.2.0',
+    (method, params) => notifications.push({ method, params }),
+  );
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 'host-pre-turn',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  await adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 'host-pre-turn',
+    streamId: created.session.streamId,
+    turnId: 'turn-pre-turn',
+    input: [{ type: 'text', text: 'hello' }],
+    config: { mode: 'auto' },
+  }));
+  await waitFor(
+    () => notifications.some(item => item.method === 'turn.completed'),
+    'Kimi pre-turn config scenario did not complete',
+  );
+  const turnScoped = notifications.filter(item => 'turnId' in item.params);
+  assert.equal(turnScoped[0]?.method, 'turn.started');
+  assert.equal(
+    turnScoped.some(item => (
+      item.method === 'activity.updated'
+      && (item.params.data as { kind?: unknown }).kind === 'current_mode_update'
+    )),
+    false,
+  );
+  await service.close();
+});
+
+test('Kimi gian.proxy/2 rejects session-bound config before any native session exists', async () => {
+  let newSessionCalls = 0;
   const runtime = new KimiAcpClient({
     binaryPath: '/managed/kimi',
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
-      newSession: async () => ({
-        sessionId: 'native-config-failure',
-        configOptions: MODE_CONFIG_OPTIONS,
-      }),
-      setSessionConfigOption: async () => {
-        throw new Error('config rejected');
+      newSession: async () => {
+        newSessionCalls += 1;
+        return {
+          sessionId: 'native-config-failure',
+          configOptions: MODE_CONFIG_OPTIONS,
+        };
       },
       cancel: async () => undefined,
     } as unknown as Agent)),
   });
   const service = new KimiProxyService({ runtime });
   await service.initialize();
-  const originalClose = service.closeSession.bind(service);
-  let closeCalls = 0;
-  service.closeSession = async params => {
-    closeCalls += 1;
-    return originalClose(params);
-  };
-  const adapter = new KimiProtocolV1Adapter(service, '0.1.0', () => undefined);
-  await adapter.handle(v1Request(1, 'initialize', {
-    protocol: { name: PROTOCOL_NAME, versions: [PROTOCOL_V1] },
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', () => undefined);
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
 
+  // Kimi options are turn-bound, so a session.create config snapshot is a
+  // binding violation and must fail before any Provider side effect.
   await assert.rejects(
-    adapter.handle(v1Request(2, 'session.create', {
+    adapter.handle(v2Request('2', 'session.create', {
       sessionId: 'host-config-failure',
-      cwd: '/tmp',
-      workspaceRoots: ['/tmp'],
+      workspace: { cwd: '/tmp', roots: ['/tmp'] },
       config: { mode: 'auto' },
     })),
-    /Internal error/,
+    (error: unknown) => (
+      error instanceof Error
+      && 'domainCode' in error
+      && (error as { domainCode?: string }).domainCode === 'CONFIG_BINDING_INVALID'
+    ),
   );
-  assert.equal(closeCalls, 1);
+  assert.equal(newSessionCalls, 0, 'invalid config must not create a native session');
   await service.close();
 });
 
-test('Kimi gian.proxy/1 returns normalized replay on one synthetic stream', async () => {
+test('Kimi gian.proxy/2 returns Replay Events on one synthetic stream', async () => {
   let remote!: AgentSideConnection;
   const runtime = new KimiAcpClient({
     binaryPath: '/managed/kimi',
@@ -1113,36 +1310,1020 @@ test('Kimi gian.proxy/1 returns normalized replay on one synthetic stream', asyn
   });
   const service = new KimiProxyService({ runtime });
   await service.initialize();
-  const adapter = new KimiProtocolV1Adapter(service, '0.1.0', () => undefined);
-  await adapter.handle(v1Request(1, 'initialize', {
-    protocol: { name: PROTOCOL_NAME, versions: [PROTOCOL_V1] },
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', () => undefined);
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
-  const created = await adapter.handle(v1Request(2, 'session.create', {
+  const created = await adapter.handle(v2Request('2', 'session.create', {
     sessionId: 'host-replay',
-    cwd: '/tmp',
-    workspaceRoots: ['/tmp'],
-    nativeSession: { id: 'native-replay', mode: 'load' },
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    nativeSession: { id: 'native-replay', history: 'replay' },
     config: {},
   })) as { session: { streamId: string } };
-  const replay = await adapter.handle(v1Request(3, 'session.replay', {
+  const replay = await adapter.handle(v2Request('3', 'session.replay', {
     sessionId: 'host-replay',
     streamId: created.session.streamId,
     cursor: null,
     limit: 100,
-  })) as { replayStreamId: string; events: ProxyNotification[]; nextCursor: string | null };
+  })) as { replayStreamId: string; events: Array<{ method: string; sequence: number; replayStreamId: string }>; nextCursor: string | null };
+  for (const event of replay.events) replayEventSchemaUnion.parse(event);
   assert.deepEqual(replay.events.map(item => item.method), [
     'turn.started',
     'input.recorded',
     'content.delta',
+    'content.completed',
     'turn.completed',
   ]);
-  assert.deepEqual(replay.events.map(item => (
-    'sequence' in item.params ? item.params.sequence : null
-  )), [1, 2, 3, 4]);
-  assert.ok(replay.events.every(item => (
-    'streamId' in item.params && item.params.streamId === replay.replayStreamId
-  )));
+  assert.deepEqual(replay.events.map(item => item.sequence), [1, 2, 3, 4, 5]);
+  assert.ok(replay.events.every(item => item.replayStreamId === replay.replayStreamId));
   assert.equal(replay.nextCursor, null);
+  await service.close();
+});
+
+test('Kimi gian.proxy/2 validates turn config before touching the runtime', async () => {
+  const configCalls: Array<{ configId: string; value: unknown }> = [];
+  let promptCalls = 0;
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({ sessionId: 'native-cfg', configOptions: MODE_CONFIG_OPTIONS }),
+      setSessionConfigOption: async (params: { configId: string; value: unknown }) => {
+        configCalls.push(params);
+        return { configOptions: MODE_CONFIG_OPTIONS };
+      },
+      prompt: async () => {
+        promptCalls += 1;
+        return { stopReason: 'end_turn' };
+      },
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', () => undefined);
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+
+  const catalog = await adapter.handle(v2Request('cat', 'catalog.list', {})) as {
+    configOptions: Array<{ id: string; binding: string }>;
+  };
+  assert.equal(
+    catalog.configOptions.find((option) => option.id === 'mode')?.binding,
+    'turn',
+    'Kimi applies ACP config between prompts, so the binding must be honest',
+  );
+
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 's-cfg',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })) as {
+    session: {
+      streamId: string;
+      sessionConfig: Record<string, unknown>;
+      turnConfigOptions?: Array<{ id: string; binding: string }>;
+      turnConfigRevision?: string;
+    };
+  };
+  assert.deepEqual(created.session.sessionConfig, {});
+  assert.equal(created.session.turnConfigOptions?.[0]?.binding, 'turn');
+  assert.ok(created.session.turnConfigRevision);
+
+  const baseTurn = {
+    sessionId: 's-cfg',
+    streamId: created.session.streamId,
+    turnId: 't-cfg',
+    input: [{ type: 'text', text: 'go' }],
+  };
+  const domainCode = (error: unknown) => (error as { domainCode?: string }).domainCode;
+  await assert.rejects(
+    adapter.handle(v2Request('3', 'turn.start', { ...baseTurn, config: { unknown_option: 'x' } })),
+    (error: unknown) => domainCode(error) === 'CONFIG_VALUE_INVALID',
+  );
+  await assert.rejects(
+    adapter.handle(v2Request('4', 'turn.start', { ...baseTurn, config: { mode: 'bogus' } })),
+    (error: unknown) => domainCode(error) === 'CONFIG_VALUE_INVALID',
+  );
+  assert.equal(configCalls.length, 0, 'invalid config reached the runtime');
+  assert.equal(promptCalls, 0, 'invalid config started a turn');
+
+  const accepted = await adapter.handle(
+    v2Request('5', 'turn.start', { ...baseTurn, config: { mode: 'auto' } }),
+  );
+  assert.deepEqual(accepted, { accepted: true, turnId: 't-cfg' });
+  await waitFor(() => promptCalls === 1, 'prompt did not start');
+  assert.deepEqual(configCalls, [{ sessionId: 'native-cfg', configId: 'mode', value: 'auto' }]);
+
+  const duplicate = await adapter.handle(
+    v2Request('6', 'turn.start', { ...baseTurn, config: { mode: 'auto' } }),
+  );
+  assert.deepEqual(duplicate, { accepted: true, turnId: 't-cfg' });
+  assert.equal(promptCalls, 1, 'an idempotent duplicate must not start another prompt');
+  await service.close();
+});
+
+test('Kimi gian.proxy/2 session.create is idempotent and conflicts on different payloads', async () => {
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({ sessionId: 'native-idem' }),
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', () => undefined);
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+
+  const params = {
+    sessionId: 's-idem',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  };
+  const first = await adapter.handle(v2Request('2', 'session.create', params)) as {
+    session: { streamId: string };
+  };
+  const second = await adapter.handle(v2Request('3', 'session.create', params)) as {
+    session: { streamId: string };
+  };
+  assert.equal(second.session.streamId, first.session.streamId);
+
+  const domainCode = (error: unknown) => (error as { domainCode?: string }).domainCode;
+  await assert.rejects(
+    adapter.handle(v2Request('4', 'session.create', {
+      ...params,
+      workspace: { cwd: '/tmp', roots: ['/tmp', '/other'] },
+    })),
+    (error: unknown) => domainCode(error) === 'CONFLICT',
+  );
+  await assert.rejects(
+    adapter.handle(v2Request('5', 'session.create', {
+      ...params,
+      nativeSession: { id: 'native-other' },
+    })),
+    (error: unknown) => domainCode(error) === 'CONFLICT',
+  );
+  await service.close();
+});
+
+test('Kimi gian.proxy/2 interaction.respond keeps native IDs and is responseId-idempotent', async () => {
+  let remote!: AgentSideConnection;
+  const permissionIssued = deferred<void>();
+  const endGate = deferred<void>();
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory((client) => {
+      remote = client;
+      return {
+        initialize: async () => initializeResponse(),
+        newSession: async () => ({ sessionId: 'native-inter' }),
+        prompt: async (params: { sessionId: string }) => {
+          const response = remote.requestPermission({
+            sessionId: params.sessionId,
+            toolCall: {
+              toolCallId: 'ask-1',
+              title: 'AskUserQuestion',
+              content: [
+                { type: 'content', content: { type: 'text', text: 'Pick one' } },
+              ],
+            },
+            options: [
+              { optionId: 'q_opt_a', name: 'Option A', kind: 'allow_once' },
+              { optionId: 'q_opt_b', name: 'Option B', kind: 'allow_once' },
+            ],
+          });
+          permissionIssued.resolve();
+          await response;
+          // Hold the turn open so idempotent replays can arrive after the
+          // interaction resolved but before the terminal event.
+          await endGate.promise;
+          return { stopReason: 'end_turn' };
+        },
+        cancel: async () => undefined,
+      } as unknown as Agent;
+    }),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', (method, params) => {
+    notifications.push({ method, params });
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 's-inter',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  await adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 's-inter',
+    streamId: created.session.streamId,
+    turnId: 't-inter',
+    input: [{ type: 'text', text: 'ask' }],
+    config: {},
+  }));
+  await permissionIssued.promise;
+  await waitFor(
+    () => notifications.some((item) => item.method === 'interaction.requested'),
+    'interaction.requested was not emitted',
+  );
+
+  const requested = notifications.find((item) => item.method === 'interaction.requested');
+  const requestedData = requested?.params.data as {
+    interactionId: string;
+    description?: string;
+    presentation: { kind: string };
+    actions: Array<{ id: string }>;
+  };
+  assert.equal(requestedData.presentation.kind, 'question');
+  assert.equal(requestedData.description, 'Pick one');
+  assert.deepEqual(
+    requestedData.actions.map((action) => action.id),
+    ['q_opt_a', 'q_opt_b'],
+    'native ACP option IDs must round-trip untouched',
+  );
+
+  const respond = (id: string, params: Record<string, unknown>) => adapter.handle(v2Request(
+    id,
+    'interaction.respond',
+    {
+      sessionId: 's-inter',
+      streamId: created.session.streamId,
+      turnId: 't-inter',
+      interactionId: requestedData.interactionId,
+      values: {},
+      ...params,
+    },
+  ));
+  const domainCode = (error: unknown) => (error as { domainCode?: string }).domainCode;
+  await assert.rejects(
+    respond('r-x', { responseId: 'r-x', actionId: 'q_opt_a', values: { bogus: 'x' } }),
+    (error: unknown) => domainCode(error) === 'INVALID_PARAMS',
+  );
+  await assert.rejects(
+    respond('r-y', { responseId: 'r-y', actionId: 'not-advertised' }),
+    (error: unknown) => domainCode(error) === 'INTERACTION_ACTION_NOT_FOUND',
+  );
+
+  const first = await respond('r-1', { responseId: 'r-1', actionId: 'q_opt_a' });
+  assert.deepEqual(first, {
+    accepted: true,
+    interactionId: requestedData.interactionId,
+    responseId: 'r-1',
+  });
+  await waitFor(
+    () => notifications.some((item) => item.method === 'interaction.resolved'),
+    'interaction.resolved was not emitted',
+  );
+  const repeat = await respond('r-2', { responseId: 'r-1', actionId: 'q_opt_a' });
+  assert.deepEqual(repeat, first, 'identical responseId replay must return the first result');
+  await assert.rejects(
+    respond('r-3', { responseId: 'r-1', actionId: 'q_opt_b' }),
+    (error: unknown) => domainCode(error) === 'CONFLICT',
+  );
+
+  endGate.resolve();
+  await waitFor(
+    () => notifications.some((item) => item.method === 'turn.completed'),
+    'turn did not complete after the interaction resolved',
+  );
+  const resolved = notifications.find((item) => item.method === 'interaction.resolved');
+  assert.deepEqual(resolved?.params.data, {
+    interactionId: requestedData.interactionId,
+    outcome: 'submitted',
+    actionId: 'q_opt_a',
+  });
+  await service.close();
+});
+
+test('Kimi gian.proxy/2 maps native stop reasons to contract stopReasons', async () => {
+  const reasons = ['max_tokens', 'max_turn_requests', 'refusal', 'cancelled'];
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({ sessionId: 'native-stops' }),
+      prompt: async () => ({ stopReason: reasons.shift() ?? 'end_turn' }),
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', (method, params) => {
+    notifications.push({ method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 's-stops',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })) as { session: { streamId: string } };
+
+  const expected = ['limit_reached', 'limit_reached', 'refused', 'cancelled'];
+  for (const [index, stopReason] of expected.entries()) {
+    const turnId = `t-stop-${index}`;
+    await adapter.handle(v2Request(`turn-${index}`, 'turn.start', {
+      sessionId: 's-stops',
+      streamId: created.session.streamId,
+      turnId,
+      input: [{ type: 'text', text: `turn ${index}` }],
+      config: {},
+    }));
+    await waitFor(
+      () => notifications.some((item) => (
+        item.method === 'turn.completed' && item.params.turnId === turnId
+      )),
+      `turn ${turnId} did not complete`,
+    );
+    const terminal = notifications.find((item) => (
+      item.method === 'turn.completed' && item.params.turnId === turnId
+    ));
+    assert.equal((terminal?.params.data as { stopReason?: string }).stopReason, stopReason);
+  }
+  await service.close();
+});
+
+test('Kimi gian.proxy/2 reports interrupted only after a host-accepted interrupt', async () => {
+  const promptGate = deferred<void>();
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({ sessionId: 'native-interrupt' }),
+      prompt: async () => {
+        await promptGate.promise;
+        return { stopReason: 'cancelled' };
+      },
+      cancel: async () => {
+        // Resolve on the next tick so the cancel RPC response reaches the
+        // proxy before the prompt settles.
+        setTimeout(() => promptGate.resolve(), 0);
+      },
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', (method, params) => {
+    notifications.push({ method, params });
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 's-interrupt',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  await adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 's-interrupt',
+    streamId: created.session.streamId,
+    turnId: 't-interrupt',
+    input: [{ type: 'text', text: 'work' }],
+    config: {},
+  }));
+
+  const interrupt = await adapter.handle(v2Request('4', 'turn.interrupt', {
+    sessionId: 's-interrupt',
+    streamId: created.session.streamId,
+    turnId: 't-interrupt',
+  }));
+  assert.deepEqual(interrupt, { accepted: true, turnId: 't-interrupt' });
+  await waitFor(
+    () => notifications.some((item) => item.method === 'turn.completed'),
+    'interrupted turn did not terminate',
+  );
+  const terminal = notifications.find((item) => item.method === 'turn.completed');
+  assert.equal((terminal?.params.data as { stopReason?: string }).stopReason, 'interrupted');
+
+  await assert.rejects(
+    adapter.handle(v2Request('5', 'turn.interrupt', {
+      sessionId: 's-interrupt',
+      streamId: created.session.streamId,
+      turnId: 't-interrupt',
+    })),
+    (error: unknown) => (error as { domainCode?: string }).domainCode === 'TURN_NOT_FOUND',
+  );
+  await service.close();
+});
+
+test('Kimi gian.proxy/2 degrades unknown ACP updates to generic activities', async () => {
+  let remote!: AgentSideConnection;
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory((client) => {
+      remote = client;
+      return {
+        initialize: async () => initializeResponse(),
+        newSession: async () => ({ sessionId: 'native-unknown' }),
+        prompt: async (params: { sessionId: string }) => {
+          // SDK-valid but unmapped by this adapter: must degrade to a generic
+          // activity instead of disappearing. Sent twice with identical
+          // content — each occurrence must keep its own card.
+          for (let i = 0; i < 2; i += 1) {
+            await remote.sessionUpdate({
+              sessionId: params.sessionId,
+              update: { sessionUpdate: 'session_info_update', title: 'Renamed session' },
+            });
+          }
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'available_commands_update',
+              availableCommands: [{ name: 'help', description: 'Show help' }],
+            },
+          });
+          return { stopReason: 'end_turn' };
+        },
+        cancel: async () => undefined,
+      } as unknown as Agent;
+    }),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', (method, params) => {
+    notifications.push({ method, params });
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 's-unknown',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  await adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 's-unknown',
+    streamId: created.session.streamId,
+    turnId: 't-unknown',
+    input: [{ type: 'text', text: 'go' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notifications.some((item) => item.method === 'turn.completed'),
+    'turn did not complete',
+  );
+
+  const degraded = notifications.filter((item) => (
+    item.method === 'activity.updated'
+    && (item.params.data as { kind?: string }).kind === 'session_info_update'
+  ));
+  assert.equal(degraded.length, 2, 'each unmapped visible update must degrade to its own card');
+  assert.notEqual(
+    (degraded[0]?.params.data as { activityId: string }).activityId,
+    (degraded[1]?.params.data as { activityId: string }).activityId,
+    'identical repeated updates must not upsert over each other',
+  );
+  const data = degraded[0]?.params.data as {
+    title: string;
+    status: string;
+    presentation: { type: string };
+    details?: unknown;
+  };
+  assert.equal(data.presentation.type, 'generic');
+  assert.equal(data.status, 'succeeded');
+  assert.ok(data.title.includes('session_info_update'));
+  assert.deepEqual(data.details, {
+    sessionUpdate: 'session_info_update',
+    title: 'Renamed session',
+  });
+
+  await waitFor(
+    () => notifications.some((item) => item.method === 'catalog.changed'),
+    'available_commands_update did not surface as a catalog invalidation hint',
+  );
+  const catalog = await adapter.handle(v2Request('4', 'catalog.list', {})) as {
+    catalogRevision: string;
+  };
+  const catalogChanged = notifications.filter((item) => item.method === 'catalog.changed');
+  assert.ok(
+    catalogChanged.every((item) => {
+      const revision = (item.params.data as { revision?: string }).revision;
+      return typeof revision === 'string' && revision !== 'kimi-empty';
+    }),
+    'catalog.changed must carry a fresh revision, never a stale one',
+  );
+  assert.equal(
+    (catalogChanged.at(-1)?.params.data as { revision?: string }).revision,
+    catalog.catalogRevision,
+    'catalog.changed revision must match the catalog the Host would refetch',
+  );
+  assert.ok(
+    !notifications.some((item) => (
+      item.method === 'activity.updated'
+      && (item.params.data as { kind?: string }).kind === 'available_commands_update'
+    )),
+    'available_commands_update must not degrade into a user-facing activity',
+  );
+  await service.close();
+});
+
+test('Kimi gian.proxy/2 mirrors a shared-runtime crash and resumes on the next turn', async () => {
+  const exits: Array<(exit: KimiAcpExit) => void> = [];
+  let generation = 0;
+  let resumeCount = 0;
+  const crashFactory: KimiAcpTransportFactory = async (client) => {
+    generation += 1;
+    const clientToAgent = new TransformStream<Uint8Array, Uint8Array>();
+    const agentToClient = new TransformStream<Uint8Array, Uint8Array>();
+    const agentStream = ndJsonStream(agentToClient.writable, clientToAgent.readable);
+    const clientStream = ndJsonStream(clientToAgent.writable, agentToClient.readable);
+    const exit = deferred<KimiAcpExit>();
+    exits.push(exit.resolve);
+    new AgentSideConnection(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({ sessionId: 'native-crash' }),
+      resumeSession: async () => {
+        resumeCount += 1;
+        return {};
+      },
+      prompt: async () => ({ stopReason: 'end_turn' }),
+      cancel: async () => undefined,
+    } as unknown as Agent), agentStream);
+    return {
+      connection: new ClientSideConnection(() => client, clientStream),
+      exit: exit.promise,
+      async stop() {
+        exit.resolve({ code: 0, signal: null });
+      },
+    };
+  };
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: crashFactory,
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', (method, params) => {
+    notifications.push({ method, params });
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 's-crash',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  assert.equal(generation, 1);
+
+  exits[0]?.({ code: 1, signal: null });
+  await waitFor(
+    () => notifications.some((item) => item.method === 'runtime.error'),
+    'runtime.error was not emitted after the crash',
+  );
+  assert.ok(
+    notifications.some((item) => (
+      item.method === 'session.updated'
+      && (item.params.data as { state?: string }).state === 'stale'
+    )),
+    'the crash must mirror every attached session as stale',
+  );
+  const stale = await adapter.handle(v2Request('3', 'session.get', { sessionId: 's-crash' })) as {
+    session: { state: string };
+  };
+  assert.equal(stale.session.state, 'stale');
+
+  await adapter.handle(v2Request('4', 'turn.start', {
+    sessionId: 's-crash',
+    streamId: created.session.streamId,
+    turnId: 't-crash',
+    input: [{ type: 'text', text: 'continue' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notifications.some((item) => item.method === 'turn.completed'),
+    'resumed turn did not complete',
+  );
+  assert.equal(generation, 2, 'the runtime did not restart');
+  assert.equal(resumeCount, 1, 'the session did not resume its native session');
+  const idle = await adapter.handle(v2Request('5', 'session.get', { sessionId: 's-crash' })) as {
+    session: { state: string };
+  };
+  assert.equal(idle.session.state, 'idle');
+  await service.close();
+});
+
+test('Kimi gian.proxy/2 keeps fact-derived IDs stable across noisy live events and replay', async () => {
+  let remote!: AgentSideConnection;
+  const permissionIssued = deferred<void>();
+  const replayUpdates = async (sessionId: string) => {
+    await remote.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'hello stable id' },
+      },
+    });
+    await remote.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'old ' },
+      },
+    });
+    await remote.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'plan',
+        entries: [
+          { content: 'Inspect code', priority: 'high', status: 'completed' },
+          { content: 'Fix code', priority: 'medium', status: 'in_progress' },
+        ],
+      },
+    });
+    await remote.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'answer' },
+      },
+    });
+    await remote.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'plan',
+        entries: [
+          { content: 'Inspect code', priority: 'high', status: 'completed' },
+          { content: 'Fix code', priority: 'medium', status: 'completed' },
+        ],
+      },
+    });
+    await remote.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-stable',
+        title: 'Read source',
+        kind: 'read',
+        status: 'in_progress',
+        locations: [{ path: '/tmp/source.ts' }],
+        rawInput: { path: '/tmp/source.ts' },
+      },
+    });
+    await remote.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tool-stable',
+        status: 'completed',
+        rawOutput: { text: 'source' },
+      },
+    });
+  };
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory((client) => {
+      remote = client;
+      return {
+        initialize: async () => initializeResponse(),
+        newSession: async () => ({ sessionId: 'native-stable-turn' }),
+        loadSession: async (params: { sessionId: string }) => {
+          await replayUpdates(params.sessionId);
+          return {};
+        },
+        prompt: async (params: { sessionId: string }) => {
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'old ' },
+            },
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'usage_update',
+              used: 42,
+              size: 1_000,
+            },
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'session_info_update',
+              title: 'A future ACP update',
+            },
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'plan',
+              entries: [
+                { content: 'Inspect code', priority: 'high', status: 'completed' },
+                { content: 'Fix code', priority: 'medium', status: 'in_progress' },
+              ],
+            },
+          });
+          const permission = remote.requestPermission({
+            sessionId: params.sessionId,
+            toolCall: { toolCallId: 'approval-stable', title: 'Run command', kind: 'execute' },
+            options: [{ optionId: 'allow-stable', name: 'Allow', kind: 'allow_once' }],
+          });
+          permissionIssued.resolve();
+          await permission;
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'answer' },
+            },
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'plan',
+              entries: [
+                { content: 'Inspect code', priority: 'high', status: 'completed' },
+                { content: 'Fix code', priority: 'medium', status: 'completed' },
+              ],
+            },
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'tool-stable',
+              title: 'Read source',
+              kind: 'read',
+              status: 'in_progress',
+              locations: [{ path: '/tmp/source.ts' }],
+              rawInput: { path: '/tmp/source.ts' },
+            },
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'tool-stable',
+              status: 'completed',
+              rawOutput: { text: 'source' },
+            },
+          });
+          return { stopReason: 'end_turn', usage: ACP_V0_23_PROMPT_USAGE.usage };
+        },
+        cancel: async () => undefined,
+      } as unknown as Agent;
+    }),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', (method, params) => {
+    notifications.push({ method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const live = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 's-live',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  await adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 's-live',
+    streamId: live.session.streamId,
+    turnId: 't-live',
+    input: [{ type: 'text', text: 'hello stable id' }],
+    config: {},
+  }));
+  await permissionIssued.promise;
+  await waitFor(
+    () => notifications.some((item) => item.method === 'interaction.requested'),
+    'interaction.requested was not emitted',
+  );
+  const requested = notifications.find((item) => item.method === 'interaction.requested');
+  const interactionId = String((requested?.params.data as { interactionId?: string }).interactionId);
+  await adapter.handle(v2Request('respond', 'interaction.respond', {
+    sessionId: 's-live',
+    streamId: live.session.streamId,
+    turnId: 't-live',
+    interactionId,
+    responseId: 'response-stable',
+    actionId: 'allow-stable',
+    values: {},
+  }));
+  await waitFor(
+    () => notifications.some((item) => item.method === 'turn.completed'),
+    'live turn did not complete',
+  );
+  const liveStarted = notifications.find((item) => item.method === 'turn.started');
+  const liveSourceTurnId = liveStarted?.params.sourceTurnId as string;
+  assert.ok(liveSourceTurnId.startsWith('kimi-turn-'));
+  const liveEvents = notifications.filter((item) => item.params.turnId === 't-live');
+  assert.ok(liveEvents.some((item) => item.method === 'usage.updated'));
+  assert.ok(liveEvents.some((item) => item.method === 'interaction.resolved'));
+  assert.ok(
+    liveEvents.some((item) => (
+      item.method === 'activity.updated'
+      && (item.params.data as { kind?: string }).kind === 'session_info_update'
+    )),
+    'the degraded live-only event was not emitted',
+  );
+
+  await adapter.handle(v2Request('4', 'session.close', {
+    sessionId: 's-live',
+    streamId: live.session.streamId,
+  }));
+  const attached = await adapter.handle(v2Request('5', 'session.create', {
+    sessionId: 's-replay',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    nativeSession: { id: 'native-stable-turn', history: 'replay' },
+    config: {},
+  })) as { session: { streamId: string } };
+  const replay = await adapter.handle(v2Request('6', 'session.replay', {
+    sessionId: 's-replay',
+    streamId: attached.session.streamId,
+    cursor: null,
+    limit: 100,
+  })) as {
+    events: Array<{
+      method: string;
+      eventId: string;
+      sourceTurnId: string;
+      data: Record<string, unknown>;
+    }>;
+  };
+  const replayed = replay.events.find((event) => event.method === 'turn.started');
+  assert.equal(
+    replayed?.sourceTurnId,
+    liveSourceTurnId,
+    'the same native turn must keep its sourceTurnId across live and replay',
+  );
+  const liveIds = (method: string, predicate = (_data: Record<string, unknown>) => true) => (
+    liveEvents
+      .filter((event) => event.method === method && predicate(event.params.data as Record<string, unknown>))
+      .map((event) => event.params.eventId as string)
+  );
+  const replayIds = (method: string, predicate = (_data: Record<string, unknown>) => true) => (
+    replay.events
+      .filter((event) => event.method === method && predicate(event.data))
+      .map((event) => event.eventId)
+  );
+  const liveData = (method: string, predicate = (_data: Record<string, unknown>) => true) => (
+    liveEvents
+      .filter((event) => event.method === method && predicate(event.params.data as Record<string, unknown>))
+      .map((event) => event.params.data)
+  );
+  const replayData = (method: string, predicate = (_data: Record<string, unknown>) => true) => (
+    replay.events
+      .filter((event) => event.method === method && predicate(event.data))
+      .map((event) => event.data)
+  );
+  assert.deepEqual(replayIds('turn.started'), liveIds('turn.started'));
+  assert.deepEqual(replayIds('content.delta'), liveIds('content.delta'));
+  assert.deepEqual(replayIds('content.completed'), liveIds('content.completed'));
+  assert.deepEqual(replayIds('plan.updated'), liveIds('plan.updated'));
+  assert.equal(new Set(replayIds('plan.updated')).size, 2, 'each plan update needs its own eventId');
+  const isStableTool = (data: Record<string, unknown>) => data.activityId === 'tool-stable';
+  assert.deepEqual(replayIds('activity.updated', isStableTool), liveIds('activity.updated', isStableTool));
+  assert.equal(
+    new Set(replayIds('activity.updated', isStableTool)).size,
+    2,
+    'each activity update needs its own eventId',
+  );
+  assert.deepEqual(replayIds('turn.completed'), liveIds('turn.completed'));
+  assert.deepEqual(replayData('content.delta'), liveData('content.delta'));
+  assert.deepEqual(replayData('content.completed'), liveData('content.completed'));
+  assert.deepEqual(replayData('activity.updated', isStableTool), liveData('activity.updated', isStableTool));
+  assert.deepEqual(replayData('turn.completed'), liveData('turn.completed'));
+
+  const livePlans = liveData('plan.updated');
+  const replayPlans = replayData('plan.updated');
+  assert.deepEqual(replayPlans, livePlans, 'plan data must match live and replay');
+  assert.equal(
+    (livePlans[0] as { planId?: string }).planId,
+    `plan:${liveSourceTurnId}`,
+  );
+  await service.close();
+});
+
+test('auto-cancels a permission request that carries no options', async () => {
+  let permissionResponse: unknown;
+  const events: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory((remote) => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({ sessionId: 'native-empty-perm' }),
+      prompt: async (params: { sessionId: string }) => {
+        permissionResponse = await remote.requestPermission({
+          sessionId: params.sessionId,
+          toolCall: { toolCallId: 'tool-empty', title: 'Odd request', kind: 'other' },
+          options: [],
+        });
+        return { stopReason: 'end_turn' };
+      },
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({
+    runtime,
+    emitEvent(method, params) {
+      events.push({ method, params });
+    },
+  });
+  const created = await service.createSession({ cwd: '/workspace/empty-perm' });
+  await service.startTurn({
+    sessionId: created.session.id,
+    input: [{ type: 'text', text: 'go' }],
+  });
+  await waitFor(
+    () => events.some((event) => event.method === 'turn.completed'),
+    'turn did not complete',
+  );
+  assert.deepEqual(permissionResponse, { outcome: { outcome: 'cancelled' } });
+  assert.ok(
+    !events.some((event) => event.method === 'approval.requested'),
+    'an unanswerable permission request must not block on the host',
+  );
+  await service.close();
+});
+
+test('Kimi gian.proxy/2 auto-cancels a permission request whose options have no usable IDs', async () => {
+  let permissionResponse: unknown;
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory((remote) => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({ sessionId: 'native-no-ids' }),
+      prompt: async (params: { sessionId: string }) => {
+        permissionResponse = await remote.requestPermission({
+          sessionId: params.sessionId,
+          toolCall: { toolCallId: 'tool-no-ids', title: 'Odd request', kind: 'other' },
+          options: [{ optionId: '', name: 'Nameless option', kind: 'allow_once' }],
+        });
+        return { stopReason: 'end_turn' };
+      },
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', (method, params) => {
+    notifications.push({ method, params });
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 's-no-ids',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  await adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 's-no-ids',
+    streamId: created.session.streamId,
+    turnId: 't-no-ids',
+    input: [{ type: 'text', text: 'go' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notifications.some((item) => item.method === 'turn.completed'),
+    'turn must not hang on an unusable permission request',
+  );
+
+  assert.deepEqual(permissionResponse, { outcome: { outcome: 'cancelled' } });
+  assert.ok(
+    !notifications.some((item) => item.method === 'interaction.requested'),
+    'an interaction without actions must not be emitted',
+  );
+  const notice = notifications.find((item) => (
+    item.method === 'activity.updated'
+    && (item.params.data as { kind?: string }).kind === 'permission_unusable'
+  ));
+  assert.ok(notice, 'the unusable permission request must surface as a diagnosable notice');
+  assert.equal(
+    (notice?.params.data as { presentation: { type: string } }).presentation.type,
+    'notice',
+  );
   await service.close();
 });

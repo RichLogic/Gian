@@ -3,33 +3,46 @@ import { createPortal } from 'react-dom';
 import type {
   AgentInstallStatus,
   ApprovalMode,
+  ConfigOption,
+  ConfigValue,
   Executor,
   ProxyModeCapabilities,
   ThinkingEffort,
   Workspace,
 } from '@gian/shared';
 import { usesNativeExecutorConfig } from '@gian/shared';
-import { loadAgents, peekAgents } from '../api.js';
+import { loadAgents, loadResolvedProxyCatalog, peekAgents } from '../api.js';
 import { MAX_FILE_BYTES, fmtBytes, isNativeImageMime } from '../attachments.js';
 import { desktopBridge } from '../desktop-bridge.js';
 import { toast } from '../feedback.js';
 import { useT } from '../i18n/index.js';
 import {
+  applyResolvedDefaults,
   claudeModelFamily,
   composerModeLabel,
   composerModeOptions,
+  createConfigsFromCatalog,
   defaultEffort,
   defaultModel,
   effortLabel,
+  fetchCatalogCached,
   fetchModelsCached,
   fetchModesCached,
+  getCatalogCached,
   getModelsCached,
   getModesCached,
+  inputTypeAdvertised,
   modelLabel,
+  modelsFromCatalog,
+  optionByRole,
+  optionEnabled,
+  optionVisible,
   supportedEfforts,
 } from '../components/composer/capabilities.js';
+import type { ComposerCatalog } from '../components/composer/capabilities.js';
 import type { ProxyModel } from '../components/composer/capabilities.js';
-import { BulbIcon, ExecutorMark, useUpDrop } from '../components/composer/option-drops.js';
+import { CatalogOptionsMenu } from '../components/composer/catalog-options-menu.js';
+import { ExecutorMark, useUpDrop } from '../components/composer/option-drops.js';
 import {
   clearNewSessionDraftStorage,
   loadNewSessionScreenshotBlob,
@@ -42,6 +55,7 @@ import {
 } from '../screenshot-drafts.js';
 import { publishScreenshotTarget, startScreenshotCapture } from '../screenshot-target.js';
 import { ImageZoomContext } from '../transcript/items.js';
+import { isReleaseExecutor, releaseAgents } from '../release-executors.js';
 
 export { newSessionDraftStorageKey } from '../screenshot-drafts.js';
 
@@ -68,6 +82,8 @@ export interface CreateSessionInput {
   approvalMode?: ApprovalMode | null;
   /** Codex-only Fast service tier. Omitted/null keeps the standard tier. */
   serviceTier?: 'fast' | null;
+  sessionConfig?: Record<string, ConfigValue>;
+  turnConfig?: Record<string, ConfigValue>;
 }
 
 export interface SessionCreateFormState {
@@ -78,19 +94,36 @@ export interface SessionCreateFormState {
   thinkingEffort?: ThinkingEffort | null;
   approvalMode?: ApprovalMode | null;
   serviceTier?: 'fast' | null;
+  catalogOptions?: ConfigOption[];
+  catalogValues?: Record<string, ConfigValue>;
 }
 
 export function buildSessionCreatePayload(
   form: SessionCreateFormState,
 ): Omit<CreateSessionInput, 'firstMessage'> {
+  const catalog = form.catalogOptions && form.catalogOptions.length > 0
+    ? createConfigsFromCatalog(form.executor, form.catalogOptions, form.catalogValues ?? {})
+    : null;
   return {
     workspaceId: form.workspaceId,
     name: form.sessionName.trim(),
     executor: form.executor,
-    ...(form.model ? { model: form.model } : {}),
-    ...(!usesNativeExecutorConfig(form.executor) && form.approvalMode ? { approvalMode: form.approvalMode } : {}),
-    ...(form.thinkingEffort ? { thinkingEffort: form.thinkingEffort } : {}),
-    ...(form.executor === 'codex' && form.serviceTier === 'fast' ? { serviceTier: 'fast' as const } : {}),
+    ...((catalog?.model ?? form.model) ? { model: catalog?.model ?? form.model } : {}),
+    ...(!usesNativeExecutorConfig(form.executor) && (catalog?.approvalMode ?? form.approvalMode)
+      ? { approvalMode: catalog?.approvalMode ?? form.approvalMode }
+      : {}),
+    ...((catalog?.thinkingEffort ?? form.thinkingEffort)
+      ? { thinkingEffort: catalog?.thinkingEffort ?? form.thinkingEffort }
+      : {}),
+    ...(form.executor === 'codex' && (catalog?.serviceTier ?? form.serviceTier) === 'fast'
+      ? { serviceTier: 'fast' as const }
+      : {}),
+    ...(catalog && Object.keys(catalog.session_config).length > 0
+      ? { sessionConfig: catalog.session_config }
+      : {}),
+    ...(catalog && Object.keys(catalog.turn_config).length > 0
+      ? { turnConfig: catalog.turn_config }
+      : {}),
   };
 }
 
@@ -268,9 +301,13 @@ export function NewSessionView({
   /** Which agents exist and whether they're usable — driven by the host's
    *  /api/agents install status so the picker follows Settings, not a
    *  hardcoded list. Null while loading. */
-  const [agents, setAgents] = useState<AgentInstallStatus[] | null>(() => peekAgents());
+  const [agents, setAgents] = useState<AgentInstallStatus[] | null>(() => {
+    const cached = peekAgents();
+    return cached ? releaseAgents(cached) : null;
+  });
+  const requestedExecutor = initialExecutor ?? draft?.executor ?? null;
   const [executor, setExecutor] = useState<Executor | null>(
-    initialExecutor ?? draft?.executor ?? null,
+    requestedExecutor && isReleaseExecutor(requestedExecutor) ? requestedExecutor : null,
   );
   // Capability chip state (claude/codex only — kimi shows its configured
   // defaults as static text, its native options only exist on a live session).
@@ -278,22 +315,32 @@ export function NewSessionView({
   const [effort, setEffort] = useState<ThinkingEffort | null>(draft?.thinkingEffort ?? null);
   const [mode, setMode] = useState<ApprovalMode | null>(draft?.approvalMode ?? null);
   const [serviceTier, setServiceTier] = useState<'fast' | null>(draft?.serviceTier ?? null);
+  const [initialCatalog] = useState(() => (
+    executor ? getCatalogCached(executor) : undefined
+  ));
+  const [catalog, setCatalog] = useState<ComposerCatalog>(() => (
+    initialCatalog ?? { configOptions: [], input: [], slashCommands: [] }
+  ));
+  const [catalogExecutor, setCatalogExecutor] = useState<Executor | null>(
+    initialCatalog && executor ? executor : null,
+  );
+  const [catalogValues, setCatalogValues] = useState<Record<string, ConfigValue>>({});
+  const [catalogResolveError, setCatalogResolveError] = useState<string | null>(null);
   const [models, setModels] = useState<ProxyModel[]>([]);
   const [proxyModes, setProxyModes] = useState<ProxyModeCapabilities[]>([]);
   const [wsQuery, setWsQuery] = useState('');
   const agentDrop = useUpDrop(280);
   const wsDrop = useUpDrop(320);
-  const modelDrop = useUpDrop(280);
-  const effortDrop = useUpDrop(210);
   const modeDrop = useUpDrop(340);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const catalogResolveSignature = useRef('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const screenshotAvailable = !!desktopBridge()?.screenshot;
 
   useEffect(() => {
     let cancelled = false;
     loadAgents()
-      .then(list => { if (!cancelled) setAgents(list); })
+      .then(list => { if (!cancelled) setAgents(releaseAgents(list)); })
       .catch(() => { if (!cancelled) setAgents([]); });
     return () => { cancelled = true; };
   }, []);
@@ -346,6 +393,95 @@ export function NewSessionView({
       .catch(() => { /* built-in mode lists */ });
     return () => { alive = false; };
   }, [executor, draft, last]);
+
+  useEffect(() => {
+    if (!executor) {
+      setCatalog({ configOptions: [], input: [], slashCommands: [] });
+      setCatalogExecutor(null);
+      setCatalogValues({});
+      return;
+    }
+    const cached = getCatalogCached(executor);
+    if (cached) {
+      setCatalog(cached);
+      setCatalogExecutor(executor);
+      return;
+    }
+    setCatalogExecutor(null);
+    let alive = true;
+    void fetchCatalogCached(executor)
+      .then(next => {
+        if (!alive) return;
+        setCatalog(next);
+        setCatalogExecutor(executor);
+        const fromCatalog = modelsFromCatalog(optionByRole(next.configOptions, 'model'));
+        if (fromCatalog.length > 0) setModels(fromCatalog);
+      })
+      .catch(() => {
+        if (alive) {
+          setCatalog({ configOptions: [], input: [], slashCommands: [] });
+          setCatalogExecutor(executor);
+        }
+      });
+    return () => { alive = false; };
+  }, [executor]);
+
+  useEffect(() => {
+    if (
+      !executor
+      || catalogExecutor !== executor
+      || !catalog.resolveAdvertised
+      || !catalog.catalogRevision
+    ) {
+      catalogResolveSignature.current = '';
+      setCatalogResolveError(null);
+      return;
+    }
+    const values: Record<string, ConfigValue> = { ...catalogValues };
+    for (const option of catalog.configOptions) {
+      if (option.role === 'model' && model) values[option.id] = model;
+      else if (option.role === 'effort' && effort) values[option.id] = effort;
+      else if (option.role === 'approval_mode' && mode) values[option.id] = mode;
+      else if (option.role === 'fast') values[option.id] = serviceTier === 'fast';
+    }
+    const configs = createConfigsFromCatalog(executor, catalog.configOptions, values);
+    const signature = JSON.stringify({
+      executor,
+      revision: catalog.catalogRevision,
+      sessionConfig: configs.session_config,
+      turnConfig: configs.turn_config,
+    });
+    if (!catalogResolveSignature.current) {
+      catalogResolveSignature.current = signature;
+      return;
+    }
+    if (catalogResolveSignature.current === signature) return;
+    catalogResolveSignature.current = signature;
+    let alive = true;
+    void loadResolvedProxyCatalog(executor, {
+      catalogRevision: catalog.catalogRevision,
+      sessionConfig: configs.session_config,
+      turnConfig: configs.turn_config,
+    }).then((resolved) => {
+      if (!alive) return;
+      setCatalog({
+        catalogRevision: resolved.catalogRevision,
+        configOptions: resolved.configOptions,
+        input: resolved.input,
+        slashCommands: resolved.slashCommands,
+        resolveAdvertised: true,
+      });
+      setCatalogValues(current => applyResolvedDefaults(current, {
+        ...resolved.resolvedDefaults.sessionConfig,
+        ...resolved.resolvedDefaults.turnConfig,
+      }));
+      setCatalogResolveError(null);
+    }).catch((error: unknown) => {
+      if (!alive) return;
+      setCatalogResolveError(error instanceof Error ? error.message : String(error));
+    });
+    return () => { alive = false; };
+  }, [executor, catalogExecutor, catalog, catalogValues, model, effort, mode, serviceTier]);
 
   function currentDraft(workspaceId = selectedWs): NewSessionDraft {
     return {
@@ -463,6 +599,11 @@ export function NewSessionView({
   const cliDefaults = cliExecutor
     ? agents?.find(a => a.id === cliExecutor)?.proxy?.defaults
     : undefined;
+  const catalogReady = catalog.configOptions.length > 0;
+  const catalogModel = optionByRole(catalog.configOptions, 'model');
+  const catalogEffort = optionByRole(catalog.configOptions, 'effort');
+  const catalogApproval = optionByRole(catalog.configOptions, 'approval_mode');
+  const catalogFast = optionByRole(catalog.configOptions, 'fast');
   // Display fallbacks: explicit chip state > Settings proxy defaults >
   // capability-list defaults.
   const displayModel = model
@@ -472,15 +613,55 @@ export function NewSessionView({
     ?? models.find(m => m.isDefault)
     ?? models[0];
   const displayEffort = effort
+    ?? (catalogEffort?.defaultValue != null
+      ? String(catalogEffort.defaultValue) as ThinkingEffort
+      : null)
     ?? ((cliDefaults?.thinking.trim() || null) as ThinkingEffort | null)
     ?? defaultEffort(currentModelMeta);
   const displayMode = mode
     ?? ((cliDefaults?.mode.trim() || null) as ApprovalMode | null)
     ?? 'ask';
-  const modeOptions = cliExecutor ? composerModeOptions(cliExecutor, proxyModes) : [];
   const nativeDefaults = executor && usesNativeExecutorConfig(executor)
     ? agents?.find(a => a.id === executor)?.proxy?.defaults
     : undefined;
+  const modeOptions = catalogApproval?.choices?.length
+    ? composerModeOptions(executor ?? 'claude', catalogApproval.choices.map((choice) => ({
+      id: String(choice.value),
+      label: choice.displayName,
+      description: choice.description ?? '',
+      isDefault: Object.is(choice.value, catalogApproval.defaultValue),
+    })))
+    : (cliExecutor ? composerModeOptions(cliExecutor, proxyModes) : []);
+  const turnModel = catalogModel?.binding === 'turn' ? catalogModel : undefined;
+  const turnEffort = catalogEffort?.binding === 'turn' ? catalogEffort : undefined;
+  const turnFast = catalogFast?.binding === 'turn' ? catalogFast : undefined;
+  const showModelChip = Boolean(cliExecutor || (catalogReady && turnModel));
+  const showEffortChip = Boolean(cliExecutor || (catalogReady && turnEffort));
+  const showApprovalChip = Boolean(cliExecutor || (catalogReady && catalogApproval));
+  const showNativeStatic = Boolean(executor && usesNativeExecutorConfig(executor) && !catalogReady);
+  const showFastChip = executor === 'codex' || Boolean(turnFast);
+  const catalogViewValues: Record<string, ConfigValue> = { ...catalogValues };
+  if (catalogModel && model) catalogViewValues[catalogModel.id] = model;
+  if (catalogEffort && effort) catalogViewValues[catalogEffort.id] = effort;
+  if (catalogApproval && mode) catalogViewValues[catalogApproval.id] = mode;
+  if (catalogFast) catalogViewValues[catalogFast.id] = serviceTier === 'fast';
+  const sessionExtras = catalog.configOptions.filter((option) => (
+    option.binding === 'session'
+    && option.id !== catalogApproval?.id
+    && optionVisible(option, catalogViewValues)
+  ));
+  const turnMenuExtras = catalog.configOptions.filter((option) => (
+    option.binding === 'turn'
+    && option.id !== turnModel?.id
+    && option.id !== turnEffort?.id
+    && option.id !== turnFast?.id
+    && option.id !== catalogApproval?.id
+    && optionVisible(option, catalogViewValues)
+  ));
+  const showOptionsMenu = showModelChip || showEffortChip || showFastChip || turnMenuExtras.length > 0;
+  const showAttach = catalog.input.length === 0
+    || inputTypeAdvertised(catalog, 'localFile', catalogValues)
+    || inputTypeAdvertised(catalog, 'localImage', catalogValues);
 
   const wsRows = workspaces.filter(w => w.name !== '__gian_root__');
   const query = wsQuery.trim().toLowerCase();
@@ -496,7 +677,6 @@ export function NewSessionView({
     if (effort && efforts.length > 0 && !efforts.includes(effort)) {
       setEffort(defaultEffort(meta));
     }
-    modelDrop.setOpen(false);
   }
 
   function pickWorkspace(nextWorkspaceId: string) {
@@ -566,14 +746,29 @@ export function NewSessionView({
       setPreparingAttachments(false);
       return;
     }
+    const catalogReady = catalog.configOptions.length > 0;
+    const values: Record<string, ConfigValue> = { ...catalogValues };
+    if (catalogReady) {
+      for (const option of catalog.configOptions) {
+        if (option.role === 'model' && model) values[option.id] = model;
+        else if (option.role === 'effort' && effort) values[option.id] = effort;
+        else if (option.role === 'approval_mode' && mode) values[option.id] = mode;
+        else if (option.role === 'fast') values[option.id] = serviceTier === 'fast';
+      }
+    }
     const payload = buildSessionCreatePayload({
       workspaceId: selectedWs,
       sessionName,
       executor,
-      model: cliExecutor ? model : undefined,
-      thinkingEffort: cliExecutor ? effort : undefined,
+      model: cliExecutor || catalogReady ? model : undefined,
+      thinkingEffort: cliExecutor || catalogReady ? effort : undefined,
       approvalMode: cliExecutor ? mode : undefined,
-      serviceTier: executor === 'codex' ? serviceTier : undefined,
+      serviceTier: executor === 'codex' || optionByRole(catalog.configOptions, 'fast')
+        ? serviceTier
+        : undefined,
+      ...(catalogReady
+        ? { catalogOptions: catalog.configOptions, catalogValues: values }
+        : {}),
     });
     writeJson(LAST_KEY, {
       workspaceId: selectedWs,
@@ -694,6 +889,11 @@ export function NewSessionView({
               {attachmentError}
             </p>
           )}
+          {catalogResolveError && (
+            <p className="spaces-error" role="alert" data-testid="new-session-catalog-error">
+              {catalogResolveError}
+            </p>
+          )}
           {createUnknown && onVerifyCreate && (
             <button
               type="button"
@@ -711,7 +911,7 @@ export function NewSessionView({
       <div className="composer-wrap">
         {/* Agent + workspace selection live ABOVE the message box (issue #57
             v2 review); the picked agent drives the chips inside the bar. */}
-        <div className="ns-agent-row">
+          <div className="ns-agent-row" data-testid="ns-agent-row">
           {agents === null ? (
             <span className="composer-opt" data-testid="ns-agent-loading">
               <span className="name">{t('common.loading')}</span>
@@ -749,14 +949,31 @@ export function NewSessionView({
             data-testid="ns-workspace-chip"
             title={t('coding.new.workspace.title')}
             onClick={() => wsDrop.setOpen(open => !open)}
-          >
-            <FolderIcon />
-            <span className="name">
-              {selectedWorkspace ? selectedWorkspace.name : t('coding.new.workspace.choose')}
-            </span>
-            <span className="caret cmp-caret" aria-hidden="true">▾</span>
-          </button>
-        </div>
+            >
+              <FolderIcon />
+              <span className="name">
+                {selectedWorkspace ? selectedWorkspace.name : t('coding.new.workspace.choose')}
+              </span>
+              <span className="caret cmp-caret" aria-hidden="true">▾</span>
+            </button>
+
+            {sessionExtras.length > 0 && (
+              <div className="composer-native-config ns-session-config" data-testid="ns-session-config">
+                {sessionExtras.map(option => (
+                  <SessionCatalogOptionControl
+                    key={option.id}
+                    option={option}
+                    value={catalogValues[option.id] ?? option.defaultValue}
+                    disabled={creating}
+                    onChange={value => setCatalogValues(current => ({
+                      ...current,
+                      [option.id]: value,
+                    }))}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
         {agentDrop.open && agentDrop.pos && agents && createPortal(
           <div
             ref={agentDrop.popRef}
@@ -934,138 +1151,69 @@ export function NewSessionView({
             </div>
           )}
           <div className="composer-bar">
-            {/* Capability chips follow the selected agent. claude/codex get
-                live model + thinking drops; Codex also gets Fast. kimi's
-                native options only exist on a live ACP session, so it shows
-                its configured defaults. */}
-            {cliExecutor && (
-              <>
-                <button
-                  ref={modelDrop.btnRef}
-                  type="button"
-                  className={`composer-opt cmp-model-wrap${modelDrop.open ? ' open' : ''}`}
-                  data-testid="ns-model-chip"
-                  title={t('composer.model.title')}
-                  onClick={() => modelDrop.setOpen(open => !open)}
-                >
-                  <span className="name cmp-model">{modelLabel(models, displayModel) || displayModel}</span>
-                  <span className="caret cmp-caret" aria-hidden="true">▾</span>
-                </button>
-                {modelDrop.open && modelDrop.pos && createPortal(
-                  <div
-                    ref={modelDrop.popRef}
-                    className="popover model-pop"
-                    role="dialog"
-                    style={{ left: modelDrop.pos.left, bottom: modelDrop.pos.bottom }}
-                  >
-                    <div className="mp-section">
-                      <div className="mp-section-head">
-                        <span className="mp-section-title">{t('composer.model.section')}</span>
-                        <span className="mp-section-hint">{cliExecutor}</span>
-                      </div>
-                      <div className="mp-list">
-                        {models.length === 0 && (
-                          <div className="mp-row" style={{ color: 'var(--text-3)', cursor: 'default' }}>{t('common.loading')}</div>
-                        )}
-                        {models.filter(m => !m.hidden).map(m => {
-                          const active = m.model === displayModel
-                            || (!!m.model && m.model === claudeModelFamily(displayModel));
-                          return (
-                            <button
-                              key={m.id}
-                              type="button"
-                              className={`mp-row${active ? ' active' : ''}`}
-                              onClick={() => pickModel(m.model)}
-                            >
-                              <span className="mp-check">{active ? '✓' : ''}</span>
-                              <span className="mp-row-body">
-                                <span className="mp-row-title">{m.displayName}</span>
-                                {m.description && cliExecutor !== 'codex' && (
-                                  <span className="mp-row-hint">{m.description}</span>
-                                )}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </div>,
-                  document.body,
-                )}
-
-                <button
-                  ref={effortDrop.btnRef}
-                  type="button"
-                  className={`composer-opt cmp-think-btn${effortDrop.open ? ' open' : ''}`}
-                  data-testid="ns-effort-chip"
-                  title={t('composer.reasoning.effort')}
-                  onClick={() => effortDrop.setOpen(open => !open)}
-                >
-                  <BulbIcon />
-                  <span className="name">{effortLabel(cliExecutor, displayEffort)}</span>
-                  <span className="caret cmp-caret" aria-hidden="true">▾</span>
-                </button>
-                {effortDrop.open && effortDrop.pos && createPortal(
-                  <div
-                    ref={effortDrop.popRef}
-                    className="popover think-pop"
-                    role="dialog"
-                    style={{ left: effortDrop.pos.left, bottom: effortDrop.pos.bottom }}
-                  >
-                    <div className="mp-section-head">
-                      <span className="mp-section-title">{t('composer.reasoning.effort')}</span>
-                    </div>
-                    <div className="mp-list">
-                      {supportedEfforts(currentModelMeta).map(level => {
-                        const active = displayEffort === level;
-                        return (
-                          <button
-                            key={level}
-                            type="button"
-                            className={`mp-row${active ? ' active' : ''}`}
-                            onClick={() => { setEffort(level); effortDrop.setOpen(false); }}
-                          >
-                            <span className="mp-check">{active ? '✓' : ''}</span>
-                            <span className="mp-row-body">
-                              <span className="mp-row-title">{effortLabel(cliExecutor, level)}</span>
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>,
-                  document.body,
-                )}
-              </>
+            {showOptionsMenu && executor && (
+              <CatalogOptionsMenu
+                executor={executor}
+                summary={[
+                  ...(showModelChip ? [modelLabel(models, displayModel) || displayModel] : []),
+                  ...(showEffortChip ? [effortLabel(executor, displayEffort)] : []),
+                  ...(serviceTier === 'fast' ? [t('composer.fast.button')] : []),
+                ]}
+                model={showModelChip ? {
+                  label: t('composer.model.section'),
+                  value: models.some(candidate => candidate.model === displayModel)
+                    ? displayModel
+                    : claudeModelFamily(displayModel),
+                  choices: models.filter(candidate => !candidate.hidden).map(candidate => ({
+                    value: candidate.model,
+                    label: candidate.displayName,
+                    ...(candidate.description && executor !== 'codex'
+                      ? { description: candidate.description }
+                      : {}),
+                  })),
+                  disabled: creating,
+                  onChange: pickModel,
+                } : undefined}
+                effort={showEffortChip ? {
+                  label: t('composer.reasoning.effort'),
+                  value: displayEffort ?? '',
+                  choices: (turnEffort?.choices?.map(choice => String(choice.value))
+                    ?? supportedEfforts(currentModelMeta)).map(level => ({
+                    value: level,
+                    label: effortLabel(executor, level),
+                  })),
+                  disabled: creating,
+                  onChange: value => setEffort(value),
+                } : undefined}
+                fast={showFastChip ? {
+                  label: turnFast?.displayName ?? t('composer.fast.button'),
+                  description: turnFast?.description ?? t('composer.fast.title'),
+                  checked: serviceTier === 'fast',
+                  disabled: creating,
+                  onChange: checked => setServiceTier(checked ? 'fast' : null),
+                } : undefined}
+                options={turnMenuExtras}
+                values={catalogViewValues}
+                optionDisabled={option => creating || !optionEnabled(option, catalogViewValues)}
+                onOptionChange={(option, value) => setCatalogValues(current => ({
+                  ...current,
+                  [option.id]: value,
+                }))}
+                testId="ns-model-chip"
+              />
             )}
-            {executor && usesNativeExecutorConfig(executor) && (
-              <>
-                <span className="composer-opt ns-chip-static" data-testid="ns-model-chip">
-                  <span className="name">{nativeDefaults?.model.trim() || t('coding.new.chip.default')}</span>
-                </span>
-                <span className="composer-opt ns-chip-static" data-testid="ns-effort-chip">
-                  <BulbIcon />
-                  <span className="name">{nativeDefaults?.thinking.trim() || t('coding.new.chip.default')}</span>
-                </span>
-              </>
-            )}
-
-            {executor === 'codex' && (
-              <button
-                type="button"
-                className={`composer-opt cmp-fast${serviceTier === 'fast' ? ' on' : ''}`}
-                data-testid="ns-fast-chip"
-                title={t('composer.fast.title')}
-                aria-pressed={serviceTier === 'fast'}
-                onClick={() => setServiceTier(serviceTier === 'fast' ? null : 'fast')}
-              >
-                {t('composer.fast.button')}
-              </button>
+            {showNativeStatic && (
+              <span className="composer-opt ns-chip-static cmp-options-btn" data-testid="ns-model-chip">
+                {executor && <ExecutorMark executor={executor} />}
+                <span className="name">{nativeDefaults?.model.trim() || t('coding.new.chip.default')}</span>
+                <span className="cmp-opt-sep" aria-hidden="true">|</span>
+                <span className="name">{nativeDefaults?.thinking.trim() || t('coding.new.chip.default')}</span>
+              </span>
             )}
 
             <span className="spacer" />
 
-            {cliExecutor && (
+            {showApprovalChip && (
               <>
                 <button
                   ref={modeDrop.btnRef}
@@ -1076,7 +1224,7 @@ export function NewSessionView({
                   onClick={() => modeDrop.setOpen(open => !open)}
                 >
                   <span className="name">
-                    {composerModeLabel(cliExecutor, displayMode, proxyModes, t)}
+                    {composerModeLabel(executor ?? 'claude', displayMode, proxyModes, t)}
                   </span>
                   <span className="caret cmp-caret" aria-hidden="true">▾</span>
                 </button>
@@ -1122,14 +1270,14 @@ export function NewSessionView({
                 )}
               </>
             )}
-            {executor && usesNativeExecutorConfig(executor) && (
+            {showNativeStatic && (
               <span className="composer-opt ns-chip-static" data-testid="ns-mode-chip">
                 <span className="name">{nativeDefaults?.mode.trim() || t('coding.new.chip.default')}</span>
               </span>
             )}
 
             {/* Attach files — plus glyph, same as the session Composer. */}
-            <button
+            {showAttach && <button
               type="button"
               className={`composer-act${screenshotAttachments.length > 0 ? ' active' : ''}`}
               data-testid="ns-attach-button"
@@ -1141,7 +1289,7 @@ export function NewSessionView({
               <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
               </svg>
-            </button>
+            </button>}
 
             {screenshotAvailable && (
               <button
@@ -1180,5 +1328,77 @@ export function NewSessionView({
         </div>
       </div>
     </main>
+  );
+}
+
+function SessionCatalogOptionControl({
+  option,
+  value,
+  disabled,
+  onChange,
+}: {
+  option: ConfigOption;
+  value: ConfigValue | undefined;
+  disabled: boolean;
+  onChange: (value: ConfigValue) => void;
+}) {
+  if (option.control === 'boolean') {
+    return (
+      <label className="composer-native-toggle" title={option.description}>
+        <span>{option.displayName}</span>
+        <input
+          type="checkbox"
+          checked={value === true}
+          disabled={disabled}
+          aria-label={option.displayName}
+          onChange={event => onChange(event.target.checked)}
+        />
+      </label>
+    );
+  }
+  if (option.control === 'select') {
+    return (
+      <label className="composer-native-select" title={option.description}>
+        <span>{option.displayName}</span>
+        <select
+          aria-label={option.displayName}
+          value={String(value ?? '')}
+          disabled={disabled}
+          onChange={event => {
+            const selected = option.choices?.find(choice => (
+              String(choice.value ?? '') === event.target.value
+            ));
+            onChange(selected ? selected.value : event.target.value);
+          }}
+        >
+          {(option.choices ?? []).map(choice => (
+            <option key={String(choice.value)} value={String(choice.value ?? '')}>
+              {choice.displayName}
+            </option>
+          ))}
+        </select>
+      </label>
+    );
+  }
+  return (
+    <label className="composer-native-input" title={option.description}>
+      <span>{option.displayName}</span>
+      <input
+        key={`${option.id}:${String(value)}`}
+        type={option.presentation?.sensitive
+          ? 'password'
+          : option.control === 'number' ? 'number' : 'text'}
+        defaultValue={String(value ?? '')}
+        disabled={disabled}
+        aria-label={option.displayName}
+        placeholder={option.presentation?.placeholder}
+        min={option.constraints?.minimum}
+        max={option.constraints?.maximum}
+        step={option.constraints?.step}
+        onBlur={event => onChange(
+          option.control === 'number' ? Number(event.target.value) : event.target.value,
+        )}
+      />
+    </label>
   );
 }

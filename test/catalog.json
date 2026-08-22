@@ -1,0 +1,865 @@
+{
+  "version": 1,
+  "discoveryRoots": [
+    "scripts",
+    "packages/host/test",
+    "packages/web/test",
+    "packages/desktop/test",
+    "packages/shared/test",
+    "packages/proxy-protocol/test",
+    "packages/proxies/cc-proxy/test",
+    "packages/proxies/codex-proxy/test",
+    "packages/proxies/kimi-proxy/test",
+    "packages/proxies/grok-proxy/test",
+    "e2e/specs",
+    "packages/proxies/dsh-bridge/test",
+    "packages/proxies/dsh-proxy/test"
+  ],
+  "optionalDiscoveryRoots": [
+    "e2e/specs"
+  ],
+  "defaultScopes": [
+    "unit",
+    "integration"
+  ],
+  "fullScopes": [
+    "unit",
+    "integration",
+    "system"
+  ],
+  "groups": [
+    {
+      "id": "host-unit",
+      "patterns": [
+        "packages/host/test/agent-instruction-targets.test.ts",
+        "packages/host/test/agent-managed-block.test.ts",
+        "packages/host/test/attachments-path.test.ts",
+        "packages/host/test/attention-broadcast.test.ts",
+        "packages/host/test/auth.test.ts",
+        "packages/host/test/bounded-file.test.ts",
+        "packages/host/test/command-error-message.test.ts",
+        "packages/host/test/compact-history-envelopes.test.ts",
+        "packages/host/test/compare-kimi-versions.test.ts",
+        "packages/host/test/config-sanitize-pure.test.ts",
+        "packages/host/test/desktop-boundary.test.ts",
+        "packages/host/test/event-smoke.test.ts",
+        "packages/host/test/event-storage-v3-helpers.test.ts",
+        "packages/host/test/executor-config.test.ts",
+        "packages/host/test/expand-home.test.ts",
+        "packages/host/test/ext-tree-id.test.ts",
+        "packages/host/test/file-003-raw-preview.test.ts",
+        "packages/host/test/fork-inherit-config.test.ts",
+        "packages/host/test/git-classify-failure.test.ts",
+        "packages/host/test/health.test.ts",
+        "packages/host/test/history-canonicalize.test.ts",
+        "packages/host/test/input-items.test.ts",
+        "packages/host/test/kimi-proxy-manager.test.ts",
+        "packages/host/test/locate-jsonl-pure.test.ts",
+        "packages/host/test/maintenance-lock-path.test.ts",
+        "packages/host/test/map-concurrency.test.ts",
+        "packages/host/test/normalize-cc-parsers.test.ts",
+        "packages/host/test/normalize-kimi.test.ts",
+        "packages/host/test/normalize-protocol-v1.test.ts",
+        "packages/host/test/onboarding-pure.test.ts",
+        "packages/host/test/open-with.test.ts",
+        "packages/host/test/p3b-manager-strip.test.ts",
+        "packages/host/test/parse-cc-line-pure.test.ts",
+        "packages/host/test/parse-codex-jsonl.test.ts",
+        "packages/host/test/project-notification-input.test.ts",
+        "packages/host/test/protocol-v1-projector.test.ts",
+        "packages/host/test/protocol-v2-projector.test.ts",
+        "packages/host/test/proxy-shutdown-state.test.ts",
+        "packages/host/test/redact.test.ts",
+        "packages/host/test/runtime-guardian.test.ts",
+        "packages/host/test/session-token-usage.test.ts",
+        "packages/host/test/sidechat-fork-unit.test.ts",
+        "packages/host/test/sidechat-state-machine.test.ts",
+        "packages/host/test/skill-templates.test.ts",
+        "packages/host/test/storage-paths.test.ts",
+        "packages/host/test/term-001-workbench-terminal.test.ts",
+        "packages/host/test/title-sanitize.test.ts",
+        "packages/host/test/trace-projector.test.ts",
+        "packages/host/test/trace-step-request.test.ts",
+        "packages/host/test/turn-runtime.test.ts",
+        "packages/host/test/ws-broadcast.test.ts",
+        "packages/host/test/ws-operation-result.test.ts"
+      ],
+      "module": "host",
+      "scope": "unit",
+      "purposes": [
+        "regression"
+      ],
+      "sideEffects": [
+        "none"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "host-node-tsx"
+    },
+    {
+      "id": "host-integration",
+      "patterns": [
+        "packages/host/test/agent-instructions.test.ts",
+        "packages/host/test/ai-scaffold.test.ts",
+        "packages/host/test/ai-views.test.ts",
+        "packages/host/test/auto-title.test.ts",
+        "packages/host/test/cc-events-regression.test.ts",
+        "packages/host/test/chat-display-contract.test.ts",
+        "packages/host/test/config-sanitize.test.ts",
+        "packages/host/test/contract-001-client-message-parity.test.ts",
+        "packages/host/test/contract-002-server-message-parity.test.ts",
+        "packages/host/test/contract-003-proxy-methods.test.ts",
+        "packages/host/test/contract-004-notification-parity.test.ts",
+        "packages/host/test/err-007-ws-error-envelope.test.ts",
+        "packages/host/test/err-009-proxy-exit.test.ts",
+        "packages/host/test/err-010-workspace-delete.test.ts",
+        "packages/host/test/err-011-native-adopt-errors.test.ts",
+        "packages/host/test/err-012-file-api-errors.test.ts",
+        "packages/host/test/err-018-graceful-shutdown.test.ts",
+        "packages/host/test/event-storage-v3-migrator.test.ts",
+        "packages/host/test/event-store.test.ts",
+        "packages/host/test/events-lifecycle.test.ts",
+        "packages/host/test/file-002-tree-listing.test.ts",
+        "packages/host/test/file-003-raw-route.test.ts",
+        "packages/host/test/file-005-attachment-upload.test.ts",
+        "packages/host/test/file-006-files-recursive.test.ts",
+        "packages/host/test/file-012-absolute-preview.test.ts",
+        "packages/host/test/history-store.test.ts",
+        "packages/host/test/github-release-fetch.test.ts",
+        "packages/host/test/jsonl-watcher.test.ts",
+        "packages/host/test/model-002-warmup-retry.test.ts",
+        "packages/host/test/native-001-scanner.test.ts",
+        "packages/host/test/onboarding-state.test.ts",
+        "packages/host/test/open-route.test.ts",
+        "packages/host/test/p2a-ai-scaffold.test.ts",
+        "packages/host/test/protocol-v1-replay-ledger.test.ts",
+        "packages/host/test/queue-and-busy.test.ts",
+        "packages/host/test/safe-path.test.ts",
+        "packages/host/test/sec-012-one-shot-bypass.test.ts",
+        "packages/host/test/sec-014-reveal-boundary.test.ts",
+        "packages/host/test/sec-016-settings-write-boundary.test.ts",
+        "packages/host/test/sidechat-fork-integration.test.ts",
+        "packages/host/test/session-name-001.test.ts",
+        "packages/host/test/session-name-routing.test.ts",
+        "packages/host/test/storage.test.ts",
+        "packages/host/test/subtask-lifecycle.test.ts",
+        "packages/host/test/task-session-archive.test.ts",
+        "packages/host/test/trace-evidence-store.test.ts",
+        "packages/host/test/trace-route.test.ts",
+        "packages/host/test/working-tree-refresh.test.ts",
+        "packages/host/test/workspace-hide.test.ts",
+        "packages/host/test/workspace-management.test.ts",
+        "packages/host/test/workspace-pin.test.ts",
+        "packages/host/test/ws-state-sync-contract.test.ts"
+      ],
+      "module": "host",
+      "scope": "integration",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "temporary-sqlite",
+        "fake-os-launcher"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "host-node-tsx"
+    },
+    {
+      "id": "host-system",
+      "patterns": [
+        "packages/host/test/agent-manager.test.ts",
+        "packages/host/test/agent-updater-safety.test.ts",
+        "packages/host/test/apps-route.test.ts",
+        "packages/host/test/codex-proxy-client.test.ts",
+        "packages/host/test/command-runtime-provider.test.ts",
+        "packages/host/test/err-013-git-failures.test.ts",
+        "packages/host/test/file-004-changed.test.ts",
+        "packages/host/test/file-010-changes-scope.test.ts",
+        "packages/host/test/file-011-changes-scope-codex.test.ts",
+        "packages/host/test/file-013-commits-submenu.test.ts",
+        "packages/host/test/file-014-branch-base.test.ts",
+        "packages/host/test/git-002-branch-parsing.test.ts",
+        "packages/host/test/git-003-branch-ops.test.ts",
+        "packages/host/test/git-async-responsiveness.test.ts",
+        "packages/host/test/git-history.test.ts",
+        "packages/host/test/git-routes-contract.test.ts",
+        "packages/host/test/git-runner.test.ts",
+        "packages/host/test/host-startup-agent-instructions.test.ts",
+        "packages/host/test/kimi-proxy-client.test.ts",
+        "packages/host/test/kimi-runtime-manager.test.ts",
+        "packages/host/test/kimi-session-store-compat.test.ts",
+        "packages/host/test/protocol-v2-client.test.ts",
+        "packages/host/test/protocol-v2-mock-integration.test.ts",
+        "packages/host/test/protocol-v1-routing.test.ts",
+        "packages/host/test/proxy-client.test.ts",
+        "packages/host/test/sec-014-ext-tree.test.ts",
+        "packages/host/test/session-manager.test.ts",
+        "packages/host/test/sidechat-fork-system.test.ts",
+        "packages/host/test/workspace-create-path.test.ts",
+        "packages/host/test/workspace-clone.test.ts",
+        "packages/host/test/worktree-detect.test.ts",
+        "packages/host/test/wt-001-worktree-lifecycle.test.ts"
+      ],
+      "module": "host",
+      "scope": "system",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "temporary-sqlite",
+        "child-process",
+        "git",
+        "loopback-port",
+        "platform-tool"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "host-node-tsx"
+    },
+    {
+      "id": "web-unit",
+      "patterns": [
+        "packages/web/test/*.test.ts"
+      ],
+      "exclude": [
+        "packages/web/test/ws-state-sync-reconnect.test.ts"
+      ],
+      "module": "web",
+      "scope": "unit",
+      "purposes": [
+        "regression"
+      ],
+      "sideEffects": [
+        "none"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "web-vitest"
+    },
+    {
+      "id": "web-integration",
+      "patterns": [
+        "packages/web/test/*.test.tsx",
+        "packages/web/test/ws-state-sync-reconnect.test.ts"
+      ],
+      "module": "web",
+      "scope": "integration",
+      "purposes": [
+        "regression",
+        "component"
+      ],
+      "sideEffects": [
+        "jsdom",
+        "fake-http",
+        "fake-websocket"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "web-vitest"
+    },
+    {
+      "id": "desktop-unit",
+      "patterns": [
+        "packages/desktop/test/app-updater.test.ts",
+        "packages/desktop/test/attention-client.test.ts",
+        "packages/desktop/test/browser-project.test.ts",
+        "packages/desktop/test/config.test.ts",
+        "packages/desktop/test/managed-host-shutdown.test.ts",
+        "packages/desktop/test/managed-host.test.ts",
+        "packages/desktop/test/native-notifications.test.ts",
+        "packages/desktop/test/screenshot-controller.test.ts",
+        "packages/desktop/test/screenshot-preferences.test.ts",
+        "packages/desktop/test/zoom.test.ts"
+      ],
+      "module": "desktop",
+      "scope": "unit",
+      "purposes": [
+        "regression"
+      ],
+      "sideEffects": [
+        "none"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "desktop-node-tsx"
+    },
+    {
+      "id": "desktop-integration",
+      "patterns": [
+        "packages/desktop/test/github-auth.test.ts",
+        "packages/desktop/test/github-request-broker.test.ts",
+        "packages/desktop/test/host-service.test.ts"
+      ],
+      "module": "desktop",
+      "scope": "integration",
+      "purposes": [
+        "regression"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "local-unix-socket",
+        "fake-safe-storage",
+        "fake-process"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "desktop-node-tsx"
+    },
+    {
+      "id": "shared-unit",
+      "patterns": [
+        "packages/shared/test/*.test.mjs"
+      ],
+      "module": "shared",
+      "scope": "unit",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "none"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "shared-node"
+    },
+    {
+      "id": "proxy-protocol-unit",
+      "patterns": [
+        "packages/proxy-protocol/test/*.test.ts"
+      ],
+      "module": "proxy-protocol",
+      "scope": "unit",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "none"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "proxy-protocol-node"
+    },
+    {
+      "id": "cc-proxy-unit",
+      "patterns": [
+        "packages/proxies/cc-proxy/test/build-prompt.test.ts",
+        "packages/proxies/cc-proxy/test/input-localimage.test.ts",
+        "packages/proxies/cc-proxy/test/protocol-v2.test.ts"
+      ],
+      "module": "cc-proxy",
+      "scope": "unit",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "none"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "cc-proxy-node"
+    },
+    {
+      "id": "cc-proxy-integration",
+      "patterns": [
+        "packages/proxies/cc-proxy/test/native-history.test.ts",
+        "packages/proxies/cc-proxy/test/slash.test.ts"
+      ],
+      "module": "cc-proxy",
+      "scope": "integration",
+      "purposes": [
+        "regression"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "fake-provider"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "cc-proxy-node"
+    },
+    {
+      "id": "cc-proxy-system",
+      "patterns": [
+        "packages/proxies/cc-proxy/test/approval-server.test.ts",
+        "packages/proxies/cc-proxy/test/display-name.test.ts",
+        "packages/proxies/cc-proxy/test/model-discovery.test.ts",
+        "packages/proxies/cc-proxy/test/protocol-v2-cli.test.ts",
+        "packages/proxies/cc-proxy/test/service.test.ts",
+        "packages/proxies/cc-proxy/test/smoke.test.ts"
+      ],
+      "module": "cc-proxy",
+      "scope": "system",
+      "purposes": [
+        "regression",
+        "contract",
+        "smoke"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "child-process",
+        "loopback-port",
+        "fake-provider"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "cc-proxy-node"
+    },
+    {
+      "id": "codex-proxy-unit",
+      "patterns": [
+        "packages/proxies/codex-proxy/test/err-005-input.test.ts",
+        "packages/proxies/codex-proxy/test/slash.test.ts"
+      ],
+      "module": "codex-proxy",
+      "scope": "unit",
+      "purposes": [
+        "regression"
+      ],
+      "sideEffects": [
+        "none"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "codex-proxy-node"
+    },
+    {
+      "id": "codex-proxy-integration",
+      "patterns": [
+        "packages/proxies/codex-proxy/test/native-history.test.ts",
+        "packages/proxies/codex-proxy/test/proxy-service.test.ts"
+      ],
+      "module": "codex-proxy",
+      "scope": "integration",
+      "purposes": [
+        "regression"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "fake-provider"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "codex-proxy-node"
+    },
+    {
+      "id": "codex-proxy-system",
+      "patterns": [
+        "packages/proxies/codex-proxy/test/err-004-cli-smoke.test.ts",
+        "packages/proxies/codex-proxy/test/protocol-v2-cli.test.ts",
+        "packages/proxies/codex-proxy/test/proxy-004-app-server-client.test.ts"
+      ],
+      "module": "codex-proxy",
+      "scope": "system",
+      "purposes": ["regression", "contract", "smoke"],
+      "sideEffects": ["temporary-filesystem", "child-process", "fake-provider"],
+      "platforms": ["any"],
+      "runner": "codex-proxy-node"
+    },
+    {
+      "id": "kimi-proxy-unit",
+      "patterns": [
+        "packages/proxies/kimi-proxy/test/input-localfile.test.ts"
+      ],
+      "module": "kimi-proxy",
+      "scope": "unit",
+      "purposes": [
+        "regression"
+      ],
+      "sideEffects": [
+        "none"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "kimi-proxy-node"
+    },
+    {
+      "id": "kimi-proxy-integration",
+      "patterns": [
+        "packages/proxies/kimi-proxy/test/service.test.ts"
+      ],
+      "module": "kimi-proxy",
+      "scope": "integration",
+      "purposes": [
+        "regression"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "fake-provider"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "kimi-proxy-node"
+    },
+    {
+      "id": "kimi-proxy-system",
+      "patterns": [
+        "packages/proxies/kimi-proxy/test/kimi-acp-client.test.ts",
+        "packages/proxies/kimi-proxy/test/protocol-v2-cli.test.ts"
+      ],
+      "module": "kimi-proxy",
+      "scope": "system",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "child-process",
+        "fake-provider"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "kimi-proxy-node"
+    },
+    {
+      "id": "grok-proxy-unit",
+      "patterns": [
+        "packages/proxies/grok-proxy/test/input-localfile.test.ts",
+        "packages/proxies/grok-proxy/test/slash-policy.test.ts",
+        "packages/proxies/grok-proxy/test/catalog.test.ts",
+        "packages/proxies/grok-proxy/test/events.test.ts",
+        "packages/proxies/grok-proxy/test/permissions.test.ts"
+      ],
+      "module": "grok-proxy",
+      "scope": "unit",
+      "purposes": [
+        "regression"
+      ],
+      "sideEffects": [
+        "none"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "grok-proxy-node"
+    },
+    {
+      "id": "grok-proxy-integration",
+      "patterns": [
+        "packages/proxies/grok-proxy/test/service.test.ts"
+      ],
+      "module": "grok-proxy",
+      "scope": "integration",
+      "purposes": [
+        "regression"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "fake-provider"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "grok-proxy-node"
+    },
+    {
+      "id": "grok-proxy-system",
+      "patterns": [
+        "packages/proxies/grok-proxy/test/grok-acp-client.test.ts",
+        "packages/proxies/grok-proxy/test/protocol-v2-cli.test.ts"
+      ],
+      "module": "grok-proxy",
+      "scope": "system",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "child-process",
+        "fake-provider"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "grok-proxy-node"
+    },
+    {
+      "id": "scripts-unit",
+      "patterns": [
+        "scripts/desktop-runtime-portability.test.mjs",
+        "scripts/check-version-consistency.test.mjs",
+        "scripts/run-e2e.test.mjs",
+        "scripts/check-functional-evidence.test.mjs",
+        "scripts/process-resource-monitor.test.mjs",
+        "scripts/run-preview-verification.test.mjs",
+        "scripts/run-quality-prepackage.test.mjs",
+        "scripts/run-affected-tests.test.mjs",
+        "scripts/run-tests.test.mjs",
+        "scripts/proxy-real-acceptance-catalog.test.mjs",
+        "scripts/test-selection.test.mjs",
+        "scripts/test-catalog.test.mjs",
+        "scripts/verify-update-artifacts.test.mjs"
+      ],
+      "module": "scripts",
+      "scope": "unit",
+      "purposes": [
+        "regression"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "fake-process"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "scripts-node"
+    },
+    {
+      "id": "scripts-integration",
+      "patterns": [
+        "scripts/ci-workflow.test.mjs",
+        "scripts/dev.test.mjs",
+        "scripts/quality-lock.test.mjs"
+      ],
+      "module": "scripts",
+      "scope": "integration",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "fake-process"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "scripts-node"
+    },
+    {
+      "id": "scripts-canary-orchestration",
+      "patterns": [
+        "scripts/run-codex-compat-canary.test.mjs",
+        "scripts/run-codex-steer-canary.test.mjs",
+        "scripts/run-kimi-lifecycle-canary.test.mjs",
+        "scripts/run-kimi-store-preflight.test.mjs",
+        "scripts/run-provider-attachment-canary.test.mjs"
+      ],
+      "module": "scripts",
+      "scope": "integration",
+      "purposes": [
+        "regression",
+        "canary-orchestration"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "fake-process",
+        "fake-provider"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "scripts-node"
+    },
+    {
+      "id": "scripts-system",
+      "patterns": [
+        "scripts/build-proxy-artifacts.test.mjs",
+        "scripts/check-traceability.test.mjs",
+        "scripts/check-ui-operations.test.mjs",
+        "scripts/e2e-janitor.test.mjs",
+        "scripts/render-daemon-unit.test.mjs",
+        "scripts/run-logged-command.test.mjs"
+      ],
+      "module": "scripts",
+      "scope": "system",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "child-process",
+        "git",
+        "platform-tool"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "scripts-node"
+    },
+    {
+      "id": "playwright-e2e",
+      "patterns": [
+        "e2e/specs/*.spec.ts"
+      ],
+      "module": "e2e",
+      "scope": "e2e",
+      "purposes": [
+        "regression",
+        "smoke"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "temporary-sqlite",
+        "child-process",
+        "browser",
+        "loopback-port",
+        "fake-provider"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "playwright"
+    },
+    {
+      "id": "dsh-bridge-unit",
+      "patterns": [
+        "packages/proxies/dsh-bridge/test/*.test.ts"
+      ],
+      "module": "dsh-bridge",
+      "scope": "unit",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "none"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "dsh-bridge-node"
+    },
+    {
+      "id": "dsh-proxy-unit",
+      "patterns": [
+        "packages/proxies/dsh-proxy/test/contract.test.ts",
+        "packages/proxies/dsh-proxy/test/host-validator.test.ts",
+        "packages/proxies/dsh-proxy/test/idempotency-replay.test.ts"
+      ],
+      "module": "dsh-proxy",
+      "scope": "unit",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "none"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "dsh-proxy-node"
+    },
+    {
+      "id": "dsh-proxy-system",
+      "patterns": [
+        "packages/proxies/dsh-proxy/test/protocol-v2-cli.test.ts"
+      ],
+      "module": "dsh-proxy",
+      "scope": "system",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "child-process",
+        "fake-provider"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "dsh-proxy-node"
+    }
+  ],
+  "specialEntrypoints": [
+    {
+      "id": "dsh-bridge-runtime-canary",
+      "path": "scripts/run-dsh-bridge-canary.mjs",
+      "scope": "canary",
+      "purposes": [
+        "compatibility",
+        "smoke"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "child-process",
+        "real-provider"
+      ]
+    },
+    {
+      "id": "dsh-proxy-runtime-canary",
+      "path": "scripts/run-dsh-proxy-canary.mjs",
+      "scope": "canary",
+      "purposes": [
+        "compatibility",
+        "smoke"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "child-process",
+        "loopback-port",
+        "fake-provider"
+      ]
+    },
+    {
+      "id": "desktop-electron-smoke",
+      "path": "packages/desktop/test/electron-smoke.mjs",
+      "scope": "system",
+      "purposes": [
+        "smoke"
+      ],
+      "sideEffects": [
+        "electron",
+        "browser",
+        "loopback-port",
+        "temporary-filesystem"
+      ]
+    },
+    {
+      "id": "packaged-app-smoke",
+      "path": "scripts/run-packaged-app-smoke.mjs",
+      "scope": "system",
+      "purposes": [
+        "smoke"
+      ],
+      "sideEffects": [
+        "packaged-app",
+        "child-process",
+        "loopback-port",
+        "temporary-filesystem"
+      ]
+    },
+    {
+      "id": "real-provider-canaries",
+      "path": "package.json#canary:*",
+      "scope": "canary",
+      "purposes": [
+        "compatibility"
+      ],
+      "sideEffects": [
+        "real-provider",
+        "network",
+        "credentials",
+        "quota"
+      ]
+    }
+  ]
+}

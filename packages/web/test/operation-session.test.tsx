@@ -343,6 +343,25 @@ describe('session operations (proposal §8, product definitions)', () => {
     expect(store.getRun(stop.id)?.phase).toBe('timed-out');
   });
 
+  it('session.setTurnConfig writes an optimistic turn_config overlay', () => {
+    const { store, transport, dispatcher } = setup();
+    dispatcher.dispatch('session.setTurnConfig', {
+      sessionId: 's1',
+      optionId: 'verbosity',
+      value: 'quiet',
+      turnConfig: { verbosity: 'quiet' },
+    });
+    expect(transport.sent[0]).toMatchObject({
+      type: 'session:set_turn_config',
+      session_id: 's1',
+      option_id: 'verbosity',
+      value: 'quiet',
+    });
+    expect(store.getOverlay(entityFieldKey('session:s1', 'turn_config'))?.value).toEqual({
+      verbosity: 'quiet',
+    });
+  });
+
   it('session.setNativeConfig is pending and keyed per config option', () => {
     const { store, transport, dispatcher } = setup();
     dispatcher.dispatch('session.setNativeConfig', { sessionId: 's1', configId: 'mode', value: 'code' });

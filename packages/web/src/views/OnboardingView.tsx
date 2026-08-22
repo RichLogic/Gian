@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { AgentInstallStatus, Executor, OnboardingProjectRootResult, OnboardingState } from '@gian/shared';
+import type { AgentInstallStatus, OnboardingProjectRootResult, OnboardingState } from '@gian/shared';
 import { loadAgents } from '../api.js';
 import type { PickFolderResult } from '../api.js';
 import { agentEntityKey } from '../operations/agents.js';
@@ -12,8 +12,9 @@ import {
 } from '../operations/use-operations.js';
 import type { AppIdentity } from '../controllers/use-app-auth.js';
 import { useT } from '../i18n/index.js';
+import { releaseAgents } from '../release-executors.js';
 
-const AGENT_ORDER: Executor[] = ['codex', 'claude', 'kimi', 'grok'];
+const AGENT_ORDER = ['codex', 'claude', 'kimi', 'dsh'];
 
 export function OnboardingSteps({ active }: { active: 1 | 2 | 3 }) {
   const t = useT();
@@ -76,9 +77,8 @@ export function OnboardingView({
   const savingDirectory = finishRun?.phase === 'pending';
   const anyAgentBusy = usePendingOperations().some(run => run.name.startsWith('agent.'));
 
-  const orderedAgents = useMemo(() => AGENT_ORDER
-    .map(id => agents.find(agent => agent.id === id))
-    .filter((agent): agent is AgentInstallStatus => !!agent), [agents]);
+  const orderedAgents = useMemo(() => releaseAgents(agents)
+    .sort((a, b) => AGENT_ORDER.indexOf(a.id) - AGENT_ORDER.indexOf(b.id)), [agents]);
   const anyReady = orderedAgents.some(agent => agent.ready);
 
   async function refreshAgents() {

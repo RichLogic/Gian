@@ -1,19 +1,11 @@
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import type { Executor } from '@gian/shared';
-import { CcProxyClient } from './cc-proxy-client.js';
-import { ClaudeProtocolV1Client } from './claude-protocol-v1-client.js';
-import { CodexProxyHost, CodexProxySessionClient } from './codex-proxy-client.js';
 import {
-  CodexProtocolV1Host,
-  CodexProtocolV1SessionClient,
-} from './codex-protocol-v1-client.js';
-import { KimiProxyHost, KimiProxySessionClient } from './kimi-proxy-client.js';
-import {
-  KimiProtocolV1Host,
-  KimiProtocolV1SessionClient,
-} from './kimi-protocol-v1-client.js';
-import { GrokProtocolV1Host } from './grok-protocol-v1-client.js';
+  ProtocolV2Host,
+  ProtocolV2SessionClient,
+} from './protocol-v2-session-client.js';
+import type { ProtocolV2ClientOptions } from './protocol-v2-client.js';
 import type { ProxyClient } from './types.js';
 import type { CliRuntimeManager } from '../runtime/manager.js';
 import type {
@@ -21,13 +13,20 @@ import type {
   RuntimeProcessGroupReservation,
 } from '../runtime/types.js';
 
-type ProxyExecutor = 'codex' | 'claude' | 'kimi' | 'grok';
-type CodexRuntimeHost = CodexProxyHost | CodexProtocolV1Host;
-type KimiRuntimeHost = KimiProxyHost | KimiProtocolV1Host;
-type KimiRuntimeClient = KimiProxySessionClient | KimiProtocolV1SessionClient;
-function isKimiRuntimeClient(client: ProxyClient): client is KimiRuntimeClient {
-  return client instanceof KimiProxySessionClient
-    || client instanceof KimiProtocolV1SessionClient;
+type ProxyExecutor = 'codex' | 'claude' | 'kimi' | 'grok' | 'dsh';
+type SharedRuntimeHost = ProtocolV2Host;
+function isKimiRuntimeClient(client: ProxyClient): client is ProtocolV2SessionClient {
+  return client instanceof ProtocolV2SessionClient && client.executor === 'kimi';
+}
+
+/** Product executor alias → gian.proxy plugin id (plan §2 Manifest v2). */
+function pluginIdFor(executor: ProxyExecutor): string {
+  return executor === 'dsh' ? 'ai.deepseek.harness' : executor;
+}
+
+export interface ProxyProtocolDescriptor {
+  pluginVersion: string;
+  processScope: 'shared' | 'session';
 }
 
 interface RuntimeBinding {
@@ -48,7 +47,7 @@ interface SessionDisposal {
 }
 
 interface KimiHostRetirement {
-  host: KimiRuntimeHost;
+  host: SharedRuntimeHost;
   promise: Promise<void> | null;
   failure?: { error: unknown; reported: boolean };
 }
@@ -60,27 +59,18 @@ export interface ProxyManagerConfig {
   hostVersion?: string;
   /** Path to cc-proxy spawn.js entry. */
   ccProxyEntry: string;
-  claudeProxyProtocolV1?: {
-    pluginVersion: string;
-    processScope: 'shared' | 'session';
-  };
+  claudeProxy?: ProxyProtocolDescriptor;
   /** Path to codex-proxy spawn.js entry. */
   codexProxyEntry?: string;
-  codexProxyProtocolV1?: {
-    pluginVersion: string;
-    processScope: 'shared' | 'session';
-  };
+  codexProxy?: ProxyProtocolDescriptor;
   /** Path to kimi-proxy spawn.js entry. */
   kimiProxyEntry?: string;
-  kimiProxyProtocolV1?: {
-    pluginVersion: string;
-    processScope: 'shared' | 'session';
-  };
+  kimiProxy?: ProxyProtocolDescriptor;
   grokProxyEntry?: string;
-  grokProxyProtocolV1?: {
-    pluginVersion: string;
-    processScope: 'shared' | 'session';
-  };
+  grokProxy?: ProxyProtocolDescriptor;
+  /** Path to dsh-proxy spawn.js entry (plugin id ai.deepseek.harness). */
+  dshProxyEntry?: string;
+  dshProxy?: ProxyProtocolDescriptor;
   /** Optional codex CLI binary path (forwarded as --codex-bin). */
   codexBin?: string;
   /** Kimi always resolves through this manager; no PATH fallback in proxy. */
@@ -113,14 +103,16 @@ export class ProxyManager {
    * being disposed. Failed barriers remain closed until an explicit dispose
    * or executor close retries the exact cleanup. */
   private disposingBySession = new Map<string, SessionDisposal>();
-  private codexHost: CodexRuntimeHost | null = null;
-  private codexHostInit: Promise<CodexRuntimeHost> | null = null;
-  private kimiHost: KimiRuntimeHost | null = null;
-  private kimiHostInit: Promise<KimiRuntimeHost> | null = null;
+  private codexHost: SharedRuntimeHost | null = null;
+  private codexHostInit: Promise<SharedRuntimeHost> | null = null;
+  private kimiHost: SharedRuntimeHost | null = null;
+  private kimiHostInit: Promise<SharedRuntimeHost> | null = null;
+  private dshHost: SharedRuntimeHost | null = null;
+  private dshHostInit: Promise<SharedRuntimeHost> | null = null;
   /** A failed-attach Kimi host is never replaced until this exact host has
    * completed process-tree and updater-lease retirement. */
   private kimiHostRetirement: KimiHostRetirement | null = null;
-  private retiringKimiHostBySession = new Map<string, KimiRuntimeHost>();
+  private retiringKimiHostBySession = new Map<string, SharedRuntimeHost>();
   private closeEpochByExecutor = new Map<ProxyExecutor, number>();
   private closingByExecutor = new Map<ProxyExecutor, Promise<void>>();
   private creatingByExecutor = new Map<
@@ -130,13 +122,6 @@ export class ProxyManager {
   private runtimeLeaseReleases = new WeakMap<RuntimeLease, Promise<void>>();
 
   constructor(private cfg: ProxyManagerConfig) {}
-
-  usesProtocolV1(executor: Executor): boolean {
-    if (executor === 'claude') return this.cfg.claudeProxyProtocolV1 !== undefined;
-    if (executor === 'codex') return this.cfg.codexProxyProtocolV1 !== undefined;
-    if (executor === 'grok') return true;
-    return this.cfg.kimiProxyProtocolV1 !== undefined;
-  }
 
   async getOrCreate(sessionId: string, executor: Executor): Promise<ProxyClient> {
     const proxyExecutor: ProxyExecutor = executor;
@@ -246,7 +231,9 @@ export class ProxyManager {
         ? await this.createKimiClient(sessionId)
         : executor === 'grok'
           ? await this.createGrokClient(sessionId)
-          : await this.createClaudeClient(sessionId);
+          : executor === 'dsh'
+            ? await this.createDshClient(sessionId)
+            : await this.createClaudeClient(sessionId);
 
     if (!client) return null;
 
@@ -301,6 +288,32 @@ export class ProxyManager {
     return client;
   }
 
+  /** Register a session facade that already exists on a live Host, such as a
+   *  session.fork child. Does not spawn a process or claim a runtime lease. */
+  adoptExisting(sessionId: string, client: ProxyClient): void {
+    const existing = this.clients.get(sessionId);
+    if (existing === client) return;
+    if (existing) {
+      throw new Error(`Proxy session ${sessionId} is already registered.`);
+    }
+    this.clients.set(sessionId, client);
+    this.executorBySession.set(sessionId, client.executor as ProxyExecutor);
+    client.onExit((code) => {
+      if (this.clients.get(sessionId) !== client) return;
+      console.log(`[proxy] session=${sessionId} exited code=${code}`);
+      if (this.clients.get(sessionId) === client) {
+        this.clients.delete(sessionId);
+        this.executorBySession.delete(sessionId);
+      }
+    });
+  }
+
+  /** Drop an adopted facade without disposing the parent Proxy process. */
+  forgetAdopted(sessionId: string): void {
+    this.clients.delete(sessionId);
+    this.executorBySession.delete(sessionId);
+  }
+
   get(sessionId: string): ProxyClient | undefined {
     if (this.disposingBySession.has(sessionId)) return undefined;
     const client = this.clients.get(sessionId);
@@ -311,16 +324,13 @@ export class ProxyManager {
   }
 
   private isCurrentSharedClient(client: ProxyClient): boolean {
-    if (client instanceof CodexProxySessionClient) {
-      return this.codexHost === client.runtimeHost();
-    }
-    if (client instanceof CodexProtocolV1SessionClient) {
-      return this.codexHost === client.runtimeHost();
-    }
-    if (isKimiRuntimeClient(client)) {
-      const host = client.runtimeHost();
+    if (!(client instanceof ProtocolV2SessionClient)) return true;
+    const host = client.runtimeHost();
+    if (client.executor === 'codex') return this.codexHost === host;
+    if (client.executor === 'kimi') {
       return this.kimiHost === host && this.kimiHostRetirement?.host !== host;
     }
+    if (client.executor === 'dsh') return this.dshHost === host;
     return true;
   }
 
@@ -400,7 +410,7 @@ export class ProxyManager {
     // method reaches its first await; another session key must observe the
     // host-retirement barrier in the same tick.
     const immediateClient = this.clients.get(sessionId);
-    let failedKimiHost: KimiRuntimeHost | undefined;
+    let failedKimiHost: SharedRuntimeHost | undefined;
     if (
       immediateClient && isKimiRuntimeClient(immediateClient)
       && !immediateClient.hasAttachedSession()
@@ -431,7 +441,7 @@ export class ProxyManager {
   private async performDispose(
     sessionId: string,
     record: SessionDisposal,
-    failedKimiHost?: KimiRuntimeHost,
+    failedKimiHost?: SharedRuntimeHost,
   ): Promise<void> {
     const creating = this.creatingBySession.get(sessionId);
     if (creating) {
@@ -484,7 +494,7 @@ export class ProxyManager {
   async closeAll(): Promise<void> {
     await Promise.allSettled(this.closingByExecutor.values());
     const results = await Promise.allSettled(
-      (['claude', 'codex', 'kimi', 'grok'] as const).map(executor => this.closeByExecutor(executor)),
+      (['claude', 'codex', 'kimi', 'grok', 'dsh'] as const).map(executor => this.closeByExecutor(executor)),
     );
     const failures = results
       .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
@@ -579,6 +589,23 @@ export class ProxyManager {
             : host.shutdown(),
         });
       }
+    } else if (executor === 'dsh') {
+      const pending = this.dshHostInit;
+      if (pending) await pending.catch(() => undefined);
+      if (this.dshHostInit === pending) this.dshHostInit = null;
+      const host = this.dshHost;
+      if (this.dshHost === host) {
+        this.dshHost = null;
+        this.dropExecutorClients('dsh');
+      }
+      if (host) {
+        cleanupAttempts.push({
+          owner: host,
+          promise: this.runtimeByOwner.has(host)
+            ? this.releaseRuntimeBinding(host)
+            : host.shutdown(),
+        });
+      }
     } else {
       const pending = this.kimiHostInit;
       if (pending) await pending.catch(() => undefined);
@@ -624,6 +651,42 @@ export class ProxyManager {
     }
   }
 
+  private requireProtocol(
+    executor: ProxyExecutor,
+    protocol: ProxyProtocolDescriptor | undefined,
+    expectedScope: 'shared' | 'session',
+  ): ProxyProtocolDescriptor {
+    if (!protocol) {
+      throw new Error(`${executor} Proxy launch descriptor is required.`);
+    }
+    if (protocol.processScope !== expectedScope) {
+      throw new Error(
+        `${executor} gian.proxy/2 manifest must use ${expectedScope} process scope.`,
+      );
+    }
+    return protocol;
+  }
+
+  private createProtocolHost(
+    executor: ProxyExecutor,
+    options: Omit<ProtocolV2ClientOptions, 'pluginId' | 'pluginVersion' | 'processScope' | 'hostVersion'>
+      & { protocol: ProxyProtocolDescriptor },
+  ): ProtocolV2Host {
+    return new ProtocolV2Host({
+      executor,
+      pluginId: pluginIdFor(executor),
+      pluginVersion: options.protocol.pluginVersion,
+      processScope: options.protocol.processScope,
+      entry: options.entry,
+      dataDir: options.dataDir,
+      hostVersion: this.cfg.hostVersion ?? '0.1.0',
+      ...(options.runtimeBin ? { runtimeBin: options.runtimeBin } : {}),
+      ...(options.nodeBin ? { nodeBin: options.nodeBin } : {}),
+      ...(options.env ? { env: options.env } : {}),
+      ...(options.log ? { log: options.log } : { log: (message) => console.log(message) }),
+    });
+  }
+
   private async createClaudeClient(sessionId: string): Promise<ProxyClient> {
     const dataDir = join(this.cfg.dataDir, 'proxy', sessionId);
     mkdirSync(dataDir, { recursive: true });
@@ -634,7 +697,7 @@ export class ProxyManager {
       ? this.trackStartupRuntime('claude', lease)
       : undefined;
     let reservation: RuntimeProcessGroupReservation | undefined;
-    let client: CcProxyClient | ClaudeProtocolV1Client | undefined;
+    let host: ProtocolV2Host | undefined;
     try {
       reservation = await lease?.reserveProcessGroup?.();
       if (runtimeOwner && reservation) {
@@ -643,39 +706,19 @@ export class ProxyManager {
           () => reservation!.cancelBeforeSpawn(),
         );
       }
-      const protocolV1 = this.cfg.claudeProxyProtocolV1;
-      if (protocolV1 && protocolV1.processScope !== 'session') {
-        throw new Error('Claude gian.proxy/1 manifest must use session process scope.');
-      }
-      client = protocolV1
-        ? new ClaudeProtocolV1Client({
-            entry: this.cfg.ccProxyEntry,
-            pluginVersion: protocolV1.pluginVersion,
-            processScope: 'session',
-            dataDir,
-            hostVersion: this.cfg.hostVersion ?? '0.1.0',
-            hostSessionId: sessionId,
-            ...(lease ? { runtimeBin: lease.binaryPath, env: lease.env } : {}),
-            log: msg => console.log(msg),
-          })
-        : new CcProxyClient({
-            entry: this.cfg.ccProxyEntry,
-            dataDir,
-            ...(lease
-              ? {
-                  env: {
-                    ...lease.env,
-                    CLAUDE_BIN: lease.binaryPath,
-                  },
-                }
-              : {}),
-            log: msg => console.log(msg),
-          });
+      const protocol = this.requireProtocol('claude', this.cfg.claudeProxy, 'session');
+      host = this.createProtocolHost('claude', {
+        protocol,
+        entry: this.cfg.ccProxyEntry,
+        dataDir,
+        ...(lease ? { runtimeBin: lease.binaryPath, env: lease.env } : {}),
+      });
+      const client = host.createSessionClient(sessionId);
       if (runtimeOwner) {
-        this.promoteStartupRuntime(runtimeOwner, client, () => client!.shutdown());
+        this.promoteStartupRuntime(runtimeOwner, client, () => host!.shutdown());
         runtimeOwner = client;
       } else {
-        this.trackSpawnedRuntime('claude', client, () => client!.shutdown());
+        this.trackSpawnedRuntime('claude', client, () => host!.shutdown());
         runtimeOwner = client;
       }
       if (reservation) {
@@ -713,12 +756,10 @@ export class ProxyManager {
 
   private async createCodexClient(sessionId: string): Promise<ProxyClient> {
     const host = await this.getOrCreateCodexHost();
-    return host instanceof CodexProtocolV1Host
-      ? host.createSessionClient(sessionId)
-      : new CodexProxySessionClient(host);
+    return host.createSessionClient(sessionId);
   }
 
-  private async getOrCreateCodexHost(): Promise<CodexRuntimeHost> {
+  private async getOrCreateCodexHost(): Promise<SharedRuntimeHost> {
     if (!this.cfg.codexProxyEntry) {
       throw new Error(
         'codex executor requested but codexProxyEntry is not configured',
@@ -737,7 +778,7 @@ export class ProxyManager {
     }
   }
 
-  private async startCodexHost(): Promise<CodexRuntimeHost> {
+  private async startCodexHost(): Promise<SharedRuntimeHost> {
     const lease = this.cfg.runtimeManager
       ? await this.cfg.runtimeManager.acquire('codex')
       : null;
@@ -745,7 +786,7 @@ export class ProxyManager {
       ? this.trackStartupRuntime('codex', lease)
       : undefined;
     let reservation: RuntimeProcessGroupReservation | undefined;
-    let host: CodexRuntimeHost | undefined;
+    let host: SharedRuntimeHost | undefined;
     try {
       reservation = await lease?.reserveProcessGroup?.();
       if (runtimeOwner && reservation) {
@@ -756,30 +797,16 @@ export class ProxyManager {
       }
       const dataDir = join(this.cfg.dataDir, 'proxy', 'codex');
       mkdirSync(dataDir, { recursive: true });
-      const protocolV1 = this.cfg.codexProxyProtocolV1;
-      if (protocolV1 && protocolV1.processScope !== 'shared') {
-        throw new Error('Codex gian.proxy/1 manifest must use shared process scope.');
-      }
-      host = protocolV1
-        ? new CodexProtocolV1Host({
-            entry: this.cfg.codexProxyEntry!,
-            pluginVersion: protocolV1.pluginVersion,
-            processScope: 'shared',
-            dataDir,
-            hostVersion: this.cfg.hostVersion ?? '0.1.0',
-            ...(lease?.binaryPath ?? this.cfg.codexBin
-              ? { runtimeBin: lease?.binaryPath ?? this.cfg.codexBin! }
-              : {}),
-            ...(lease ? { env: lease.env } : {}),
-            log: msg => console.log(msg),
-          })
-        : new CodexProxyHost({
-            entry: this.cfg.codexProxyEntry!,
-            dataDir,
-            codexBin: lease?.binaryPath ?? this.cfg.codexBin,
-            ...(lease ? { env: lease.env } : {}),
-            log: msg => console.log(msg),
-          });
+      const protocol = this.requireProtocol('codex', this.cfg.codexProxy, 'shared');
+      host = this.createProtocolHost('codex', {
+        protocol,
+        entry: this.cfg.codexProxyEntry!,
+        dataDir,
+        ...(lease?.binaryPath ?? this.cfg.codexBin
+          ? { runtimeBin: lease?.binaryPath ?? this.cfg.codexBin! }
+          : {}),
+        ...(lease ? { env: lease.env } : {}),
+      });
       if (runtimeOwner) {
         this.promoteStartupRuntime(runtimeOwner, host, () => host!.shutdown());
         runtimeOwner = host;
@@ -832,15 +859,108 @@ export class ProxyManager {
     }
   }
 
+  private async createDshClient(sessionId: string): Promise<ProxyClient | null> {
+    const host = await this.getOrCreateDshHost();
+    if (!host) return null;
+    return host.createSessionClient(sessionId);
+  }
+
+  private async getOrCreateDshHost(): Promise<SharedRuntimeHost | null> {
+    if (!this.cfg.dshProxyEntry) {
+      throw new Error(
+        'dsh executor requested but dshProxyEntry is not configured',
+      );
+    }
+    if (!this.cfg.runtimeManager) {
+      throw new Error(
+        'dsh executor requested but CliRuntimeManager is not configured',
+      );
+    }
+    if (this.dshHost) return this.dshHost;
+    let pending = this.dshHostInit;
+    if (!pending) {
+      pending = this.startDshHost();
+      this.dshHostInit = pending;
+    }
+    try {
+      return await pending;
+    } finally {
+      if (this.dshHostInit === pending) this.dshHostInit = null;
+    }
+  }
+
+  private async startDshHost(): Promise<SharedRuntimeHost> {
+    const lease = await this.cfg.runtimeManager!.acquire('dsh');
+    let runtimeOwner: object | undefined = this.trackStartupRuntime('dsh', lease);
+    let reservation: RuntimeProcessGroupReservation | undefined;
+    let host: SharedRuntimeHost | undefined;
+    try {
+      reservation = await lease.reserveProcessGroup?.();
+      if (reservation) {
+        this.setRuntimeProtection(
+          runtimeOwner,
+          () => reservation!.cancelBeforeSpawn(),
+        );
+      }
+      const protocol = this.requireProtocol('dsh', this.cfg.dshProxy, 'shared');
+      host = this.createProtocolHost('dsh', {
+        protocol,
+        entry: this.cfg.dshProxyEntry!,
+        dataDir: join(this.cfg.dataDir, 'proxy', 'dsh'),
+        runtimeBin: lease.binaryPath,
+        env: lease.env,
+      });
+      this.promoteStartupRuntime(runtimeOwner, host, () => host!.shutdown());
+      runtimeOwner = host;
+      if (reservation) {
+        this.setRuntimeProtection(runtimeOwner, async () => {
+          throw new Error(
+            'DSH Proxy spawned without a verifiable process group; retaining its pending reservation.',
+          );
+        });
+        const groupId = host.processGroupId();
+        this.setRuntimeProtection(
+          runtimeOwner,
+          () => reservation!.releaseUnregistered(groupId),
+        );
+        const registration = await reservation.register(groupId);
+        if (registration === 'already-empty') {
+          host.observeProcessGroupAbsence();
+          this.markRuntimeBindingReleaseEligible(runtimeOwner);
+          throw new Error('DSH Proxy exited before its process group could be registered.');
+        }
+        this.setRuntimeProtection(runtimeOwner, () => reservation!.release());
+      }
+      const startedHost = host;
+      this.dshHost = startedHost;
+      startedHost.onHostExit(() => {
+        if (this.dshHost === startedHost) {
+          this.dshHost = null;
+          this.dropExecutorClients('dsh');
+        }
+        this.markRuntimeBindingReleaseEligible(startedHost);
+        void this.releaseRuntimeBinding(startedHost).catch(error => {
+          console.error('[proxy] failed to release DSH runtime:', error);
+        });
+      });
+      return startedHost;
+    } catch (error) {
+      await this.cleanupFailedRuntimeStartup(
+        runtimeOwner,
+        error,
+        'DSH runtime startup cleanup failed.',
+      );
+      throw error;
+    }
+  }
+
   private async createKimiClient(sessionId: string): Promise<ProxyClient | null> {
     const host = await this.getOrCreateKimiHost(sessionId);
     if (!host) return null;
-    return host instanceof KimiProtocolV1Host
-      ? host.createSessionClient(sessionId)
-      : new KimiProxySessionClient(host);
+    return host.createSessionClient(sessionId);
   }
 
-  private currentKimiHost(): KimiRuntimeHost | null {
+  private currentKimiHost(): SharedRuntimeHost | null {
     return this.kimiHost;
   }
 
@@ -848,7 +968,7 @@ export class ProxyManager {
     return this.kimiHostRetirement;
   }
 
-  private async getOrCreateKimiHost(sessionId: string): Promise<KimiRuntimeHost | null> {
+  private async getOrCreateKimiHost(sessionId: string): Promise<SharedRuntimeHost | null> {
     if (!this.cfg.kimiProxyEntry) {
       throw new Error('kimi executor requested but kimiProxyEntry is not configured');
     }
@@ -897,11 +1017,11 @@ export class ProxyManager {
     }
   }
 
-  private async startKimiHost(): Promise<KimiRuntimeHost> {
+  private async startKimiHost(): Promise<SharedRuntimeHost> {
     const lease = await this.cfg.runtimeManager!.acquire('kimi');
     let runtimeOwner: object = this.trackStartupRuntime('kimi', lease);
     let reservation: RuntimeProcessGroupReservation | undefined;
-    let host: KimiRuntimeHost | undefined;
+    let host: SharedRuntimeHost | undefined;
     try {
       reservation = await lease.reserveProcessGroup?.();
       if (reservation) {
@@ -910,24 +1030,14 @@ export class ProxyManager {
           () => reservation!.cancelBeforeSpawn(),
         );
       }
-      const protocol = this.cfg.kimiProxyProtocolV1;
-      host = protocol
-        ? new KimiProtocolV1Host({
-            entry: this.cfg.kimiProxyEntry!,
-            pluginVersion: protocol.pluginVersion,
-            processScope: 'shared',
-            dataDir: join(this.cfg.dataDir, 'proxy', 'kimi'),
-            hostVersion: this.cfg.hostVersion ?? '0.0.0',
-            runtimeBin: lease.binaryPath,
-            env: lease.env,
-            log: message => console.log(message),
-          })
-        : new KimiProxyHost({
-            entry: this.cfg.kimiProxyEntry!,
-            kimiBin: lease.binaryPath,
-            env: lease.env,
-            log: message => console.log(message),
-          });
+      const protocol = this.requireProtocol('kimi', this.cfg.kimiProxy, 'shared');
+      host = this.createProtocolHost('kimi', {
+        protocol,
+        entry: this.cfg.kimiProxyEntry!,
+        dataDir: join(this.cfg.dataDir, 'proxy', 'kimi'),
+        runtimeBin: lease.binaryPath,
+        env: lease.env,
+      });
       this.promoteStartupRuntime(runtimeOwner, host, () => host!.shutdown());
       runtimeOwner = host;
       if (reservation) {
@@ -988,28 +1098,19 @@ export class ProxyManager {
     const lease = await this.cfg.runtimeManager.acquire('grok');
     let runtimeOwner: object = this.trackStartupRuntime('grok', lease);
     let reservation: RuntimeProcessGroupReservation | undefined;
-    let host: GrokProtocolV1Host | undefined;
+    let host: ProtocolV2Host | undefined;
     try {
       reservation = await lease.reserveProcessGroup?.();
       if (reservation) {
         this.setRuntimeProtection(runtimeOwner, () => reservation!.cancelBeforeSpawn());
       }
-      const protocol = this.cfg.grokProxyProtocolV1 ?? {
-        pluginVersion: '0.2.0',
-        processScope: 'session' as const,
-      };
-      if (protocol.processScope !== 'session') {
-        throw new Error('Grok gian.proxy/1 manifest must use session process scope.');
-      }
-      host = new GrokProtocolV1Host({
+      const protocol = this.requireProtocol('grok', this.cfg.grokProxy, 'session');
+      host = this.createProtocolHost('grok', {
+        protocol,
         entry: this.cfg.grokProxyEntry,
-        pluginVersion: protocol.pluginVersion,
-        processScope: 'session',
         dataDir,
-        hostVersion: this.cfg.hostVersion ?? '0.0.0',
         runtimeBin: lease.binaryPath,
         env: lease.env,
-        log: message => console.log(message),
       });
       this.promoteStartupRuntime(runtimeOwner, host, () => host!.shutdown());
       runtimeOwner = host;
@@ -1045,7 +1146,7 @@ export class ProxyManager {
     }
   }
 
-  private dropKimiClientsForHost(host: KimiRuntimeHost): void {
+  private dropKimiClientsForHost(host: SharedRuntimeHost): void {
     for (const [sessionId, executor] of this.executorBySession) {
       if (executor !== 'kimi') continue;
       const client = this.clients.get(sessionId);
@@ -1130,7 +1231,7 @@ export class ProxyManager {
     }
   }
 
-  private detachKimiHostForRetirement(host: KimiRuntimeHost): void {
+  private detachKimiHostForRetirement(host: SharedRuntimeHost): void {
     if (this.kimiHost === host) this.kimiHost = null;
     this.dropKimiClientsForHost(host);
     const current = this.kimiHostRetirement;
@@ -1141,7 +1242,7 @@ export class ProxyManager {
     }
   }
 
-  private beginKimiHostRetirement(host: KimiRuntimeHost): Promise<void> {
+  private beginKimiHostRetirement(host: SharedRuntimeHost): Promise<void> {
     this.detachKimiHostForRetirement(host);
     const record = this.kimiHostRetirement!;
     if (record.promise) return record.promise;
@@ -1167,7 +1268,7 @@ export class ProxyManager {
     return attempt;
   }
 
-  private async retryKimiHostRetirement(expectedHost?: KimiRuntimeHost): Promise<void> {
+  private async retryKimiHostRetirement(expectedHost?: SharedRuntimeHost): Promise<void> {
     const record = this.kimiHostRetirement;
     if (!record) return;
     if (expectedHost && record.host !== expectedHost) {
@@ -1224,7 +1325,7 @@ export class ProxyManager {
   }
 
   private async cleanupExitedClientBeforePublish(client: ProxyClient): Promise<void> {
-    if (client instanceof CodexProxySessionClient) {
+    if (client instanceof ProtocolV2SessionClient && client.executor === 'codex') {
       const host = client.runtimeHost();
       if (this.codexHost === host) {
         this.codexHost = null;

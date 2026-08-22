@@ -1,37 +1,49 @@
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ApprovalMode, Executor, NativeConfigOption, NativeConfigValue, ProxyModeCapabilities, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
-import { usesNativeExecutorConfig } from '@gian/shared';
+import type { ApprovalMode, ConfigOption, ConfigValue, Executor, NativeConfigOption, NativeConfigValue, ProxyModeCapabilities, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
+import { isApprovalMode, usesNativeExecutorConfig } from '@gian/shared';
 import { MAX_FILE_BYTES, fmtBytes, isNativeImageMime, servedAttachmentUrl } from '../attachments.js';
 import type { UploadedAttachment } from '../api.js';
 import {
   loadNativeConfig,
+  loadResolvedProxyCatalog,
   loadSessionSlashCommands,
 } from '../api.js';
 import { desktopBridge } from '../desktop-bridge.js';
-import { toast } from '../feedback.js';
 import { useT } from '../i18n/index.js';
 // Runtime import (not `import type`): registering message.uploadAttachment
 // on the product registry is a module side effect.
 import { type UploadAttachmentInput } from '../operations/message.js';
 import { useOperationDispatchOptional, useSessionOperationPending } from '../operations/use-operations.js';
 import { ImageZoomContext } from '../transcript/items.js';
-import { publishScreenshotTarget, startScreenshotCapture } from '../screenshot-target.js';
+import { publishScreenshotTarget } from '../screenshot-target.js';
 import { ContextUsageIndicator } from './composer/context-usage-indicator.js';
+import { CatalogOptionsMenu } from './composer/catalog-options-menu.js';
 import {
+  applyResolvedDefaults,
   claudeModelFamily,
+  composerConfigValues,
   composerModeLabel,
   composerModeOptions,
   defaultEffort,
   defaultModel,
   effortLabel,
+  fetchCatalogCached,
   fetchModelsCached,
   fetchModesCached,
+  fetchSteerCached,
   fetchSlashCached,
   flatFiltered,
+  getCatalogCached,
   getModelsCached,
   getModesCached,
   getSlashCached,
+  inputTypeAdvertised,
+  mergeTurnCatalog,
+  modelsFromCatalog,
+  optionByRole,
+  optionEnabled,
+  optionVisible,
   SLASH_CACHE_INVALIDATED_EVENT,
   modelLabel,
   nativeOptionRole,
@@ -39,7 +51,7 @@ import {
   supportedEfforts,
 } from './composer/capabilities.js';
 import type { ProxyModel } from './composer/capabilities.js';
-import { BulbIcon, ExecutorMark, NativeOptionDrop, useUpDrop } from './composer/option-drops.js';
+import { NativeOptionDrop, useUpDrop } from './composer/option-drops.js';
 export { ContextUsageIndicator } from './composer/context-usage-indicator.js';
 
 /** Per-session unsent draft. localStorage key prefix; v2 stores JSON
@@ -203,13 +215,14 @@ function persistableDraftAttachments(files: PendingFile[]): DraftAttachment[] {
 export function Composer({
   session,
   onSend, onSendSkill, onStop, onQueueAdd, onSteer, onSetMode, onSetModel, onSetEffort,
-  onSetNativeConfig, onSetServiceTier,
+  onSetNativeConfig, onSetTurnConfig, onSetServiceTier, canSteer,
   disabled, running, executor,
   workspaceId,
   footer,
   disabledSubmitBehavior = 'queue',
   variant = 'full',
   placeholder,
+  busyPlaceholder,
 }: {
   session: Session;
   onSend: (
@@ -237,9 +250,9 @@ export function Composer({
     text: string,
     attachments?: Array<{ path: string; name: string; mime: string; size?: number }>,
   ) => void;
-  /** Codex-only mid-turn injection (`turn/steer`): Ctrl+Enter while a turn is
-   *  running appends the draft to the ACTIVE turn instead of queueing it.
-   *  Omitted for claude / kimi composers — they have no steer primitive. */
+  /** Mid-turn injection (`turn.steer`): Ctrl+Enter while a turn is running
+   *  appends the draft to the ACTIVE turn instead of queueing it. Driven by
+   *  the Proxy `turn.steer` capability via `canSteer`, not by executor id. */
   onSteer?: (
     text: string,
     opts?: { attachments?: Array<{ path: string; name: string; mime: string; size?: number }> },
@@ -248,9 +261,14 @@ export function Composer({
   onSetModel: (model: string) => void;
   onSetEffort: (effort: ThinkingEffort | null) => void;
   onSetNativeConfig?: (configId: string, value: NativeConfigValue) => void;
-  /** codex only: toggle the Fast service tier. Passing this (and executor===
-   *  'codex') renders the Fast button. Omitted for claude / minimal composers. */
+  onSetTurnConfig?: (optionId: string, value: ConfigValue) => void;
+  /** Shown when the catalog advertises `role=fast`, or as the Codex fallback
+   *  until that option arrives. */
   onSetServiceTier?: (tier: 'fast' | null) => void;
+  /** True when the attached Proxy advertised `turn.steer`. When omitted,
+   *  Composer reads initialize capabilities from the executor catalog
+   *  endpoint and falls back to the historical Codex-only behavior. */
+  canSteer?: boolean;
   disabled: boolean;
   /** A turn is actually in flight — drives the Send→Stop toggle. Distinct
    *  from `disabled`, which also covers lock-out / pending-question. */
@@ -263,11 +281,17 @@ export function Composer({
    *  controls down to a bare textarea + Send/Stop, for embedders that want a
    *  fixed-config composer. The draft-persistence, Send→Stop toggle, width
    *  and keyboard handling are all kept identical to a normal session
-   *  composer. (Currently unused — introduced for the retired per-Task
-   *  Manager composer.) */
+   *  composer. Used by the Side Chat dock (proposal §10.5): the Side Chat
+   *  route only allows turn.start/interrupt/steer + interaction.respond, so
+   *  session-config controls, session slash discovery and screenshot-target
+   *  registration are all skipped in this variant. */
   variant?: 'full' | 'minimal';
   /** Override the idle placeholder text (defaults to `composer.placeholder.idle`). */
   placeholder?: string;
+  /** Override the DISABLED placeholder (defaults to `composer.placeholder.busy`,
+   *  which mentions queueing — wrong for surfaces without a queue, e.g. the
+   *  Side Chat dock whose disabled-submit behavior is 'block'). */
+  busyPlaceholder?: string;
 }) {
   const t = useT();
   const minimal = variant === 'minimal';
@@ -313,12 +337,8 @@ export function Composer({
   );
   const [slashRefreshVersion, setSlashRefreshVersion] = useState(0);
   const [slashPopPos, setSlashPopPos] = useState<{ left: number; bottom: number; width: number } | null>(null);
-  const [modelPopOpen, setModelPopOpen] = useState(false);
-  const [modelPopPos, setModelPopPos] = useState<{ left: number; bottom: number } | null>(null);
-  // codex-only up-drops (Thinking / Approval get their own modules per the
-  // codex composer redesign; on claude these stay folded into the model popover
-  // + segmented control below).
-  const thinkDrop = useUpDrop(210);
+  // Approval stays independent; every other catalog option lives in the
+  // single Cursor-style options menu rendered in the composer bar.
   const approvalDrop = useUpDrop(340);
   const [models, setModels] = useState<ProxyModel[]>(
     cliExecutor ? (getModelsCached(cliExecutor) ?? []) : [],
@@ -326,6 +346,18 @@ export function Composer({
   const [proxyModes, setProxyModes] = useState<ProxyModeCapabilities[]>(
     cliExecutor ? (getModesCached(cliExecutor) ?? []) : [],
   );
+  const [fetchedSteer, setFetchedSteer] = useState<boolean | undefined>(undefined);
+  const [catalog, setCatalog] = useState(() => getCatalogCached(executor) ?? {
+    configOptions: [],
+    input: [],
+    slashCommands: [],
+  });
+  const [resolvedOverlay, setResolvedOverlay] = useState<{
+    options?: ConfigOption[];
+    defaults?: Record<string, ConfigValue>;
+    error?: string | null;
+  } | null>(null);
+  const steerEnabled = canSteer ?? fetchedSteer ?? executor === 'codex';
   const sessionNativeOptions = session.native_config_options ?? [];
   const [nativeOptions, setNativeOptions] = useState(sessionNativeOptions);
   // Pending session.stop run (Phase 2a): the Stop button flips to a stable
@@ -383,8 +415,68 @@ export function Composer({
     return () => { alive = false; };
   }, [cliExecutor]);
 
+  useEffect(() => {
+    const cached = getCatalogCached(executor);
+    if (cached) {
+      setCatalog(cached);
+      return;
+    }
+    let alive = true;
+    void fetchCatalogCached(executor)
+      .then(next => {
+        if (!alive) return;
+        setCatalog(next);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setCatalog({ configOptions: [], input: [], slashCommands: [] });
+      });
+    return () => { alive = false; };
+  }, [executor]);
+
+  useEffect(() => {
+    if (canSteer !== undefined) {
+      setFetchedSteer(undefined);
+      return;
+    }
+    let alive = true;
+    void fetchSteerCached(executor)
+      .then(advertised => { if (alive) setFetchedSteer(advertised); })
+      .catch(() => { if (alive) setFetchedSteer(undefined); });
+    return () => { alive = false; };
+  }, [executor, canSteer]);
+
+  useEffect(() => {
+    setResolvedOverlay(null);
+  }, [session.id, executor]);
+
+  const catalogReady = catalog.configOptions.length > 0
+    || session.turn_config_options !== undefined;
+  const showNativeFallback = !catalogReady && usesNativeExecutorConfig(executor);
+
   // Fetch slash commands lazily; keyed by (executor, workspaceId); cached.
   useEffect(() => {
+    // The minimal variant has no slash UI — skip session slash discovery
+    // entirely (for a Side Chat composer the per-session REST endpoint does
+    // not even exist on the route).
+    if (minimal) return;
+    if (catalogReady) {
+      let alive = true;
+      setSlashCommands(catalog.slashCommands);
+      setSlashLoading(true);
+      void loadSessionSlashCommands(session.id)
+        .then(list => {
+          if (!alive) return;
+          setSlashCommands(list);
+          setSlashLoading(false);
+        })
+        .catch(() => {
+          if (!alive) return;
+          setSlashCommands(catalog.slashCommands);
+          setSlashLoading(false);
+        });
+      return () => { alive = false; };
+    }
     if (usesNativeExecutorConfig(executor)) {
       let alive = true;
       setSlashCommands([]);
@@ -426,10 +518,10 @@ export function Composer({
         setSlashLoading(false);
       });
     return () => { alive = false; };
-  }, [executor, session.id, workspaceId, slashRefreshVersion]);
+  }, [catalogReady, catalog.slashCommands, executor, minimal, session.id, workspaceId, slashRefreshVersion]);
 
   useEffect(() => {
-    if (usesNativeExecutorConfig(executor) || !workspaceId) return;
+    if (catalogReady || usesNativeExecutorConfig(executor) || !workspaceId) return;
     const refresh = (event: Event) => {
       const detail = (event as CustomEvent).detail as { workspaceId?: unknown } | undefined;
       if (detail?.workspaceId === workspaceId) {
@@ -438,10 +530,10 @@ export function Composer({
     };
     window.addEventListener(SLASH_CACHE_INVALIDATED_EVENT, refresh);
     return () => window.removeEventListener(SLASH_CACHE_INVALIDATED_EVENT, refresh);
-  }, [executor, workspaceId]);
+  }, [catalogReady, executor, workspaceId]);
 
   useEffect(() => {
-    if (!usesNativeExecutorConfig(executor)) return;
+    if (catalogReady || !usesNativeExecutorConfig(executor)) return;
     const update = (event: Event) => {
       const detail = (event as CustomEvent).detail as
         | { sessionId?: unknown; commands?: unknown }
@@ -451,14 +543,14 @@ export function Composer({
     };
     window.addEventListener('gian:session-slash-commands', update);
     return () => window.removeEventListener('gian:session-slash-commands', update);
-  }, [executor, session.id]);
+  }, [catalogReady, executor, session.id]);
 
   useEffect(() => {
     setNativeOptions(sessionNativeOptions);
   }, [session.id, session.native_config_options]);
 
   useEffect(() => {
-    if (!usesNativeExecutorConfig(executor) || sessionNativeOptions.length > 0) return;
+    if (minimal || !showNativeFallback || sessionNativeOptions.length > 0) return;
     let alive = true;
     void loadNativeConfig(session.id)
       .then(snapshot => {
@@ -468,19 +560,36 @@ export function Composer({
         // Session content remains usable while native config is unavailable.
       });
     return () => { alive = false; };
-  }, [executor, session.id, sessionNativeOptions.length]);
+  }, [minimal, showNativeFallback, executor, session.id, sessionNativeOptions.length]);
 
+  const mergedOptions = mergeTurnCatalog(catalog.configOptions, session.turn_config_options);
+  const viewOptions = resolvedOverlay?.options ?? mergedOptions;
+  const configValues = applyResolvedDefaults(
+    composerConfigValues(session, viewOptions),
+    resolvedOverlay?.defaults,
+  );
+  const catalogModelOption = optionByRole(viewOptions, 'model');
+  const catalogEffortOption = optionByRole(viewOptions, 'effort');
+  const catalogApprovalOption = optionByRole(viewOptions, 'approval_mode');
+  const catalogModels = modelsFromCatalog(catalogModelOption);
+  const displayModels = catalogModels.length > 0 ? catalogModels : models;
+  const catalogEfforts = (catalogEffortOption?.choices ?? []).map(choice => String(choice.value));
   const currentModel = session.model
-    ?? (models.length > 0 && cliExecutor ? defaultModel(models, cliExecutor) : '');
+    ?? (catalogModelOption && catalogModelOption.defaultValue != null
+      ? String(catalogModelOption.defaultValue)
+      : (models.length > 0 && cliExecutor ? defaultModel(models, cliExecutor) : ''));
   // Fall back to the default (or first) entry when the active model isn't in
   // the menu — e.g. a concrete id like `claude-opus-4-8` synced from native state
   // that the static alias list doesn't enumerate. Without this the effort grid
   // (keyed off the matched row's supportedEfforts) would render empty.
-  const currentModelMeta = models.find(m => m.model === currentModel)
-    ?? models.find(m => m.isDefault)
-    ?? models[0];
+  const currentModelMeta = displayModels.find(m => m.model === currentModel)
+    ?? displayModels.find(m => m.isDefault)
+    ?? displayModels[0];
   const explicitThinkLevel = session.thinking_effort;
-  const thinkLevel = explicitThinkLevel ?? defaultEffort(currentModelMeta);
+  const thinkLevel = explicitThinkLevel
+    ?? (catalogEffortOption && catalogEffortOption.defaultValue != null
+      ? String(catalogEffortOption.defaultValue)
+      : defaultEffort(currentModelMeta));
   const nativeModelOption = nativeOptions.find(option =>
     nativeOptionRole(option) === 'model' && option.type === 'select');
   const nativeEffortOption = nativeOptions.find(option =>
@@ -493,14 +602,22 @@ export function Composer({
       .map(option => option.id),
   );
   const nativeExtraOptions = nativeOptions.filter(option => !semanticNativeIds.has(option.id));
+  const fastOption = viewOptions.find(option => option.role === 'fast' && option.binding === 'turn');
+  const showFast = Boolean(onSetServiceTier) && (
+    fastOption
+      ? optionVisible(fastOption, configValues)
+      : executor === 'codex'
+  );
+  const fastEnabled = !fastOption || optionEnabled(fastOption, configValues);
+  const showAttach = catalog.input.length === 0
+    || inputTypeAdvertised(catalog, 'localFile', configValues)
+    || inputTypeAdvertised(catalog, 'localImage', configValues);
   // Files are uploaded into the host-owned per-session attachment store before
   // send, so queued turns and restored sessions never depend on the original.
   // (pendingFiles itself is declared up top — the session-swap block needs it.)
   const fileInputRef = useRef<HTMLInputElement>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
-  const modelBtnRef = useRef<HTMLButtonElement>(null);
-  const modelPopRef = useRef<HTMLDivElement>(null);
 
   // Persist the draft on every text / attachment change so refreshes,
   // accidental closes and session switches don't lose unsent input. The
@@ -555,27 +672,56 @@ export function Composer({
   }, [session.id]);
 
   useEffect(() => {
-    if (hardDisabled || !screenshotAvailable) return;
+    // Minimal composers (Side Chat dock) are not screenshot targets — the
+    // attachment store is keyed to real Sessions.
+    if (minimal || hardDisabled || !screenshotAvailable) return;
     return publishScreenshotTarget({
       kind: 'session',
       sessionId: session.id,
       label: session.name?.trim() || `session ${session.id.slice(0, 6)}`,
     });
-  }, [hardDisabled, screenshotAvailable, session.id, session.name]);
+  }, [minimal, hardDisabled, screenshotAvailable, session.id, session.name]);
 
-  async function captureScreenshot(): Promise<void> {
-    try {
-      await startScreenshotCapture();
-    } catch {
-      toast({ kind: 'error', message: t('screenshot.startFailed') });
-    }
-  }
-
-  const activeModel = currentModel;
-  const approvalMode = session.approval_mode;
-  // Proxy-advertised mode vocabulary once capabilities resolve; built-in
-  // fallback lists before that (and on fetch failure).
-  const modeOptions = cliExecutor ? composerModeOptions(cliExecutor, proxyModes) : [];
+  const activeModel = catalogModelOption
+    ? String(configValues[catalogModelOption.id] ?? currentModel)
+    : currentModel;
+  const approvalValue = catalogApprovalOption
+    ? String(configValues[catalogApprovalOption.id] ?? session.approval_mode ?? catalogApprovalOption.defaultValue ?? '')
+    : (session.approval_mode ?? 'ask');
+  const approvalMode = isApprovalMode(approvalValue) ? approvalValue : session.approval_mode;
+  const catalogModeList = catalogApprovalOption?.choices?.map(choice => ({
+    id: String(choice.value),
+    label: choice.displayName,
+    description: choice.description ?? '',
+    isDefault: Object.is(choice.value, catalogApprovalOption.defaultValue),
+  }));
+  const modeOptions = catalogModeList && catalogModeList.length > 0
+    ? composerModeOptions(executor, catalogModeList)
+    : (cliExecutor ? composerModeOptions(cliExecutor, proxyModes) : []);
+  const showModelChip = catalogReady
+    ? Boolean(catalogModelOption && optionVisible(catalogModelOption, configValues))
+    : Boolean(cliExecutor);
+  const showEffortChip = catalogReady
+    ? Boolean(catalogEffortOption && optionVisible(catalogEffortOption, configValues))
+    : Boolean(cliExecutor);
+  const showApprovalChip = catalogReady
+    ? Boolean(catalogApprovalOption && optionVisible(catalogApprovalOption, configValues))
+    : Boolean(cliExecutor);
+  const optionsMenuCatalogOptions = viewOptions
+    .filter(option => option.binding === 'turn')
+    .filter(option => option.id !== catalogModelOption?.id)
+    .filter(option => option.id !== catalogEffortOption?.id)
+    .filter(option => option.id !== catalogApprovalOption?.id)
+    .filter(option => option.id !== fastOption?.id)
+    .filter(option => optionVisible(option, configValues))
+    .sort((left, right) => (left.presentation?.order ?? 0) - (right.presentation?.order ?? 0));
+  const showOptionsMenu = showModelChip
+    || showEffortChip
+    || Boolean(showFast && onSetServiceTier)
+    || optionsMenuCatalogOptions.length > 0;
+  const effortChoices = catalogEfforts.length > 0
+    ? catalogEfforts
+    : supportedEfforts(currentModelMeta);
   // Warn colour only for modes that stop asking the user (2026-08-04 — the
   // chip used to be warn unconditionally). Kimi isn't here: its mode chip is
   // the native-option drop with its own styling.
@@ -640,14 +786,6 @@ export function Composer({
     return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [slashOpen, session.id, text]);
 
-  useLayoutEffect(() => {
-    if (!modelPopOpen) { setModelPopPos(null); return; }
-    const btn = modelBtnRef.current;
-    if (!btn) return;
-    const rect = btn.getBoundingClientRect();
-    setModelPopPos({ left: rect.left, bottom: window.innerHeight - rect.top + 6 });
-  }, [modelPopOpen]);
-
   // Position the slash popover relative to the composer's bounding rect.
   // Portaled to body so it escapes `.composer { overflow: hidden }`.
   useLayoutEffect(() => {
@@ -662,27 +800,6 @@ export function Composer({
     });
   }, [slashOpen]);
 
-  useEffect(() => {
-    if (!modelPopOpen) return;
-    function onPointerDown(e: PointerEvent) {
-      if (
-        modelPopRef.current && !modelPopRef.current.contains(e.target as Node) &&
-        modelBtnRef.current && !modelBtnRef.current.contains(e.target as Node)
-      ) {
-        setModelPopOpen(false);
-      }
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setModelPopOpen(false);
-    }
-    document.addEventListener('pointerdown', onPointerDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [modelPopOpen]);
-
   function pickCommand(cmd: SlashCommand) {
     // Codex typed skills bypass submit(), so a popup that was open when the
     // session became completed needs an explicit fail-closed guard.
@@ -694,7 +811,12 @@ export function Composer({
     // codex resolves the skill markdown and runs it. Native commands and cc
     // commands fall back to the text-into-input path so the user can edit
     // args before sending.
-    const isCodexSkill = executor === 'codex' && (cmd.source === 'user' || cmd.source === 'project') && !!cmd.filePath;
+    const skillAdvertised = catalog.input.length === 0
+      ? executor === 'codex'
+      : inputTypeAdvertised(catalog, 'skill', configValues);
+    const isCodexSkill = skillAdvertised
+      && (cmd.source === 'user' || cmd.source === 'project')
+      && !!cmd.filePath;
     if (isCodexSkill) {
       setSlashOpen(false);
       setText('');
@@ -777,14 +899,59 @@ export function Composer({
     setText('');
   }
 
-  function setMode(mode: ApprovalMode) {
-    onSetMode(mode);
+  function maybeResolve(nextTurn: Record<string, ConfigValue>): void {
+    if (!catalog.resolveAdvertised || !catalog.catalogRevision) return;
+    const sessionConfig: Record<string, ConfigValue> = {};
+    for (const option of mergedOptions) {
+      if (option.binding !== 'session') continue;
+      const value = configValues[option.id];
+      if (value !== undefined) sessionConfig[option.id] = value;
+    }
+    void loadResolvedProxyCatalog(executor, {
+      catalogRevision: catalog.catalogRevision,
+      sessionConfig,
+      turnConfig: nextTurn,
+      sessionId: session.id,
+    }).then((resolved) => {
+      setResolvedOverlay({
+        options: mergeTurnCatalog(resolved.configOptions, undefined),
+        defaults: {
+          ...resolved.resolvedDefaults.sessionConfig,
+          ...resolved.resolvedDefaults.turnConfig,
+        },
+        error: null,
+      });
+    }).catch((error: unknown) => {
+      setResolvedOverlay((previous) => ({
+        ...(previous ?? {}),
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
+  }
+
+  function setMode(mode: ApprovalMode | string) {
+    if (catalogApprovalOption) {
+      setCatalogOption(catalogApprovalOption, mode);
+      return;
+    }
+    if (isApprovalMode(mode)) onSetMode(mode);
   }
 
   function setNativeConfigValue(configId: string, value: NativeConfigValue) {
     setNativeOptions(current => current.map(option =>
       option.id === configId ? { ...option, currentValue: value } : option));
     onSetNativeConfig?.(configId, value);
+  }
+
+  function setCatalogOption(option: ConfigOption, value: ConfigValue) {
+    if (option.role === 'model') onSetModel(String(value ?? ''));
+    else if (option.role === 'effort') onSetEffort(value == null ? null : String(value));
+    else if (option.role === 'approval_mode') {
+      if (isApprovalMode(value) && !usesNativeExecutorConfig(executor)) onSetMode(value);
+      else onSetTurnConfig?.(option.id, value);
+    } else if (option.role === 'fast') onSetServiceTier?.(value === true ? 'fast' : null);
+    else onSetTurnConfig?.(option.id, value);
+    maybeResolve({ ...(session.turn_config ?? {}), [option.id]: value });
   }
 
   // Check if there are ready attachments (uploaded, no errors).
@@ -858,6 +1025,9 @@ export function Composer({
     const items = Array.from(e.clipboardData?.items ?? []);
     const images = items.filter(it => it.kind === 'file' && it.type.startsWith('image/'));
     if (images.length === 0) return; // let normal text paste through
+    if (catalog.input.length > 0 && !inputTypeAdvertised(catalog, 'localImage', configValues)) {
+      return;
+    }
     e.preventDefault();
     for (const it of images) {
       const file = it.getAsFile();
@@ -906,7 +1076,7 @@ export function Composer({
       const hasDraft = text.trim().length > 0 || pendingFiles.some(f => !f.uploading && !f.error && f.path);
       if (!hasDraft) return;
       e.preventDefault();
-      if (onSteer && executor === 'codex' && disabled) steerSubmit();
+      if (onSteer && steerEnabled && disabled) steerSubmit();
       else submit();
       return;
     }
@@ -960,7 +1130,7 @@ export function Composer({
             onPaste={handlePaste}
             placeholder={
               disabled
-                ? t('composer.placeholder.busy')
+                ? (busyPlaceholder ?? t('composer.placeholder.busy'))
                 : (placeholder ?? t('composer.placeholder.idle'))
             }
           />
@@ -1040,8 +1210,13 @@ export function Composer({
           document.body,
         )}
 
-        <div className="composer-bar">
-          {!minimal && usesNativeExecutorConfig(executor) && (
+          <div className="composer-bar">
+            {!minimal && resolvedOverlay?.error && (
+            <span className="composer-resolve-error" data-testid="composer-resolve-error">
+              {resolvedOverlay.error}
+            </span>
+          )}
+          {!minimal && showNativeFallback && (
             <div className="composer-native-config">
               {nativeModelOption && (
                 <NativeOptionDrop
@@ -1131,144 +1306,65 @@ export function Composer({
               ))}
             </div>
           )}
-          {!minimal && !usesNativeExecutorConfig(executor) && (<>
-          {/* Model picker — opens custom model+thinking popover */}
-          <div className="composer-model">
-          <button
-            ref={modelBtnRef}
-            type="button"
-            className="composer-opt cmp-model-wrap"
-            title={t('composer.model.title')}
-            onClick={() => setModelPopOpen(v => !v)}
-          >
-            <ExecutorMark executor={executor} />
-            <span className="name cmp-model">{modelLabel(models, activeModel) || activeModel}</span>
-            <span className="caret cmp-caret" aria-hidden="true">▾</span>
-          </button>
-          </div>
-          {modelPopOpen && modelPopPos && createPortal(
-            <div
-              ref={modelPopRef}
-              className="popover model-pop"
-              role="dialog"
-              style={{ left: modelPopPos.left, bottom: modelPopPos.bottom }}
-            >
-              <div className="mp-section">
-                <div className="mp-section-head">
-                  <span className="mp-section-title">{t('composer.model.section')}</span>
-                  <span className="mp-section-hint">{executor}</span>
-                </div>
-                <div className="mp-list">
-                  {models.length === 0 && (
-                    <div className="mp-row" style={{ color: 'var(--text-3)', cursor: 'default' }}>{t('common.loading')}</div>
-                  )}
-                  {models.filter(m => !m.hidden).map(m => {
-                    // Highlight on exact id, or when a concrete synced id
-                    // (`claude-opus-4-8`) matches this alias row's family.
-                    const active = m.model === activeModel
-                      || (!!m.model && m.model === claudeModelFamily(activeModel));
-                    return (
-                      <button
-                        key={m.id}
-                        type="button"
-                        className={`mp-row${active ? ' active' : ''}`}
-                        onClick={() => { onSetModel(m.model); setModelPopOpen(false); }}
-                      >
-                        <span className="mp-check">{active ? '✓' : ''}</span>
-                        <span className="mp-row-body">
-                          <span className="mp-row-title">{m.displayName}</span>
-                          {/* codex model list stays plain — name only, like the
-                              real Codex app. claude keeps its descriptions. */}
-                          {m.description && executor !== 'codex' && <span className="mp-row-hint">{m.description}</span>}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>,
-            document.body
-          )}
-
-          {/* Effort is always its own CLI-backed control. */}
-          {cliExecutor && (
-            <>
-              <button
-                ref={thinkDrop.btnRef}
-                type="button"
-                className={`composer-opt cmp-think-btn${thinkDrop.open ? ' open' : ''}`}
-                title={t('composer.reasoning.effort')}
-                onClick={() => thinkDrop.setOpen(o => !o)}
-              >
-                <BulbIcon />
-                <span className="name">{effortLabel(cliExecutor, thinkLevel)}</span>
-                <span className="caret cmp-caret" aria-hidden="true">▾</span>
-              </button>
-              {thinkDrop.open && thinkDrop.pos && createPortal(
-                <div
-                  ref={thinkDrop.popRef}
-                  className="popover think-pop"
-                  role="dialog"
-                  style={{ left: thinkDrop.pos.left, bottom: thinkDrop.pos.bottom }}
-                >
-                  <div className="mp-section-head">
-                    <span className="mp-section-title">{t('composer.reasoning.effort')}</span>
-                  </div>
-                  <div className="mp-list">
-                    {supportedEfforts(currentModelMeta).map(lvl => {
-                      const active = thinkLevel === lvl;
-                      return (
-                        <button
-                          key={lvl}
-                          type="button"
-                          className={`mp-row${active ? ' active' : ''}`}
-                          onClick={() => { onSetEffort(lvl); thinkDrop.setOpen(false); }}
-                        >
-                          <span className="mp-check">{active ? '✓' : ''}</span>
-                          <span className="mp-row-body">
-                            <span className="mp-row-title">{effortLabel(cliExecutor, lvl)}</span>
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>,
-                document.body
-              )}
-            </>
-          )}
-
-          {/* Fast is a Codex-only service tier, not a shared executor mode. */}
-          {executor === 'codex' && onSetServiceTier && (
-            <button
-              type="button"
-              className={`composer-opt cmp-fast${session.service_tier === 'fast' ? ' on' : ''}`}
-              title={t('composer.fast.title')}
-              aria-pressed={session.service_tier === 'fast'}
-              onClick={() => onSetServiceTier(session.service_tier === 'fast' ? null : 'fast')}
-            >
-              {t('composer.fast.button')}
-            </button>
-          )}
-
-          </>)}
+            {!minimal && showOptionsMenu && (
+              <CatalogOptionsMenu
+                executor={executor}
+                summary={[
+                  ...(showModelChip ? [modelLabel(displayModels, activeModel) || activeModel] : []),
+                  ...(showEffortChip ? [effortLabel(executor, thinkLevel)] : []),
+                  ...(session.service_tier === 'fast' ? [t('composer.fast.button')] : []),
+                ]}
+                model={showModelChip ? {
+                  label: t('composer.model.section'),
+                  value: displayModels.some(model => model.model === activeModel)
+                    ? activeModel
+                    : claudeModelFamily(activeModel),
+                  choices: displayModels.filter(model => !model.hidden).map(model => ({
+                    value: model.model,
+                    label: model.displayName,
+                    ...(model.description && executor !== 'codex' ? { description: model.description } : {}),
+                  })),
+                  disabled,
+                  onChange: value => {
+                    if (catalogModelOption) setCatalogOption(catalogModelOption, value);
+                    else onSetModel(value);
+                  },
+                } : undefined}
+                effort={showEffortChip ? {
+                  label: t('composer.reasoning.effort'),
+                  value: thinkLevel ?? '',
+                  choices: effortChoices.map(level => ({
+                    value: level,
+                    label: effortLabel(executor, level),
+                  })),
+                  disabled,
+                  onChange: value => {
+                    if (catalogEffortOption) setCatalogOption(catalogEffortOption, value);
+                    else onSetEffort(value);
+                  },
+                } : undefined}
+                fast={showFast && onSetServiceTier ? {
+                  label: fastOption?.displayName ?? t('composer.fast.button'),
+                  description: fastOption?.description ?? t('composer.fast.title'),
+                  checked: session.service_tier === 'fast',
+                  disabled: disabled || !fastEnabled,
+                  onChange: checked => {
+                    if (fastOption) setCatalogOption(fastOption, checked);
+                    else onSetServiceTier(checked ? 'fast' : null);
+                  },
+                } : undefined}
+                options={optionsMenuCatalogOptions}
+                values={configValues}
+                optionDisabled={option => disabled || !optionEnabled(option, configValues) || !onSetTurnConfig}
+                onOptionChange={setCatalogOption}
+                testId="composer-options-chip"
+              />
+            )}
 
           <span className="spacer" />
 
-          {!minimal && <ContextUsageIndicator session={session} />}
-
-          {!minimal && usesNativeExecutorConfig(executor) && nativeModeOption && (
-            <NativeOptionDrop
-              executor={executor}
-              option={nativeModeOption}
-              role="mode"
-              disabled={disabled || !onSetNativeConfig}
-              onChange={value => setNativeConfigValue(nativeModeOption.id, value)}
-            />
-          )}
-
-          {/* Permission mode stays beside Send for Claude and Codex. */}
-          {!minimal && cliExecutor && (
+          {/* Permission mode leads the right-side cluster for Claude and Codex. */}
+          {!minimal && showApprovalChip && (
             <>
               <button
                 ref={approvalDrop.btnRef}
@@ -1278,9 +1374,14 @@ export function Composer({
                 onClick={() => approvalDrop.setOpen(o => !o)}
               >
                 <span className="name">
-                  {cliExecutor === 'claude' && oneShotBypass
+                  {executor === 'claude' && oneShotBypass
                     ? t('composer.bypass.button')
-                    : composerModeLabel(cliExecutor, approvalMode ?? 'ask', proxyModes, t)}
+                    : composerModeLabel(
+                      executor,
+                      approvalValue || 'ask',
+                      catalogModeList ?? proxyModes,
+                      t,
+                    )}
                 </span>
                 <span className="caret cmp-caret" aria-hidden="true">▾</span>
               </button>
@@ -1293,14 +1394,16 @@ export function Composer({
                 >
                   <div className="mp-section-head">
                     <span className="mp-section-title">
-                      {cliExecutor === 'codex'
+                      {executor === 'codex'
                         ? t('composer.approval.section')
                         : t('composer.mode.title')}
                     </span>
                   </div>
                   <div className="mp-list">
                     {modeOptions.map(opt => {
-                      const active = !oneShotBypass && approvalMode === opt.mode;
+                      const active = !oneShotBypass && (
+                        approvalValue === opt.mode || approvalValue === opt.key
+                      );
                       const title = opt.titleKey ? t(opt.titleKey) : (opt.label ?? opt.key);
                       const hint = opt.descKey
                         ? t(opt.descKey)
@@ -1326,7 +1429,7 @@ export function Composer({
                         </button>
                       );
                     })}
-                    {cliExecutor === 'claude' && (
+                    {executor === 'claude' && (
                       <button
                         type="button"
                         className={`mp-row danger-option${oneShotBypass ? ' active' : ''}`}
@@ -1349,12 +1452,24 @@ export function Composer({
             </>
           )}
 
+          {!minimal && <ContextUsageIndicator session={session} />}
+
+          {!minimal && showNativeFallback && nativeModeOption && (
+            <NativeOptionDrop
+              executor={executor}
+              option={nativeModeOption}
+              role="mode"
+              disabled={disabled || !onSetNativeConfig}
+              onChange={value => setNativeConfigValue(nativeModeOption.id, value)}
+            />
+          )}
+
           {/* Attach files — plus glyph (VS Code style). Hidden in minimal
               (bare textarea variant, no attachment pipeline). */}
-          {!minimal && (
+          {!minimal && showAttach && (
             <button
               type="button"
-              className={`composer-act${pendingFiles.length > 0 ? ' active' : ''}`}
+              className="composer-act"
               disabled={hardDisabled}
               title={t('composer.attachment.addFiles')}
               onClick={() => fileInputRef.current?.click()}
@@ -1362,22 +1477,6 @@ export function Composer({
             >
               <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
                 <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-              </svg>
-            </button>
-          )}
-
-          {!minimal && screenshotAvailable && (
-            <button
-              type="button"
-              className="composer-act"
-              disabled={hardDisabled}
-              title={t('screenshot.capture')}
-              aria-label={t('screenshot.capture')}
-              onClick={() => { void captureScreenshot(); }}
-            >
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
-                <path d="M5 3.5 6 2h4l1 1.5h2A1.5 1.5 0 0 1 14.5 5v7A1.5 1.5 0 0 1 13 13.5H3A1.5 1.5 0 0 1 1.5 12V5A1.5 1.5 0 0 1 3 3.5h2Z" strokeWidth="1.2" />
-                <circle cx="8" cy="8.5" r="2.5" strokeWidth="1.2" />
               </svg>
             </button>
           )}

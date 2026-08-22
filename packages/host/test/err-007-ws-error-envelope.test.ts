@@ -36,20 +36,29 @@ class FakeProxyClient implements ProxyClient {
   failNextCreate: Error | null = null;
   failNextStartTurn: Error | null = null;
 
-  async initialize() { return { mode: 'spawn' as const, protocolVersion: '0.1.0', methods: [] }; }
-  async capabilities() { return { protocolVersion: '0.1.0', models: [], slashCommands: [] }; }
-  async listSlashCommands() { return { commands: [] }; }
-  async createSession(params: { cwd: string; claudeSessionId?: string }) {
+  isExited() { return false; }
+  async initialize() {
+    return {
+      protocol: { name: 'gian.proxy' as const, version: '2.0' as const },
+      plugin: { id: this.executor, name: this.executor, version: '0.2.0' },
+      process: { scope: this.executor === 'codex' ? 'shared' as const : 'session' as const },
+      capabilities: {},
+    };
+  }
+  async catalog() {
+    return { catalogRevision: 'test', input: [{ type: 'text' as const }], configOptions: [], slashCommands: [] };
+  }
+  async createSession(params: { cwd: string; nativeSessionId?: string }) {
     if (this.failNextCreate) {
       const err = this.failNextCreate;
       this.failNextCreate = null;
       throw err;
     }
-    const nativeSessionId = params.claudeSessionId ?? `cc_${randomUUID()}`;
+    const nativeSessionId = params.nativeSessionId ?? `cc_${randomUUID()}`;
     return {
       session: {
-        id: nativeSessionId, cwd: params.cwd, claudeSessionId: nativeSessionId,
-        model: null, status: 'idle' as const,
+        id: nativeSessionId, cwd: params.cwd,
+        state: 'idle' as const,
         createdAt: '2026-05-17T00:00:00.000Z', updatedAt: '2026-05-17T00:00:00.000Z',
         lastError: null,
       },
@@ -57,7 +66,7 @@ class FakeProxyClient implements ProxyClient {
     };
   }
   async interruptTurn() {}
-  async respondApproval() {}
+  async respondInteraction() {}
   async startTurn() {
     if (this.failNextStartTurn) {
       const err = this.failNextStartTurn;
@@ -66,7 +75,7 @@ class FakeProxyClient implements ProxyClient {
     }
     return {
       session: {
-        id: 'proxy_x', cwd: '/tmp', model: null, status: 'running' as const,
+        id: 'proxy_x', cwd: '/tmp', state: 'running' as const,
         createdAt: '2026-05-17T00:00:00.000Z', updatedAt: '2026-05-17T00:00:00.000Z',
         lastError: null,
       },

@@ -12,11 +12,15 @@ interface DockBtnProps {
   label: string;
   active?: boolean;
   disabled?: boolean;
+  /** Tooltip override (defaults to the label). */
+  title?: string;
+  /** Count badge (e.g. open Side Chats); hidden when 0/undefined. */
+  badge?: number;
   onClick?: () => void;
   children: React.ReactNode;
 }
 
-function DockBtn({ group, testId, label, active, disabled, onClick, children }: DockBtnProps) {
+function DockBtn({ group, testId, label, active, disabled, title, badge, onClick, children }: DockBtnProps) {
   return (
     <button
       type="button"
@@ -26,10 +30,13 @@ function DockBtn({ group, testId, label, active, disabled, onClick, children }: 
       aria-label={label}
       onClick={onClick}
       disabled={disabled}
-      title={label}
+      title={title ?? label}
     >
       {children}
       <span className="lbl">{label}</span>
+      {badge !== undefined && badge > 0 && (
+        <span className="dock-badge" aria-hidden="true">{badge}</span>
+      )}
     </button>
   );
 }
@@ -43,6 +50,8 @@ const ICONS = {
   // Counter-clockwise clock — "history" (same 24-grid family).
   history: 'M3 3v5h5 M3.05 13A9 9 0 1 0 6 5.3L3 8 M12 7v5l4 2',
   terminal: 'M5.5 7.5l4.5 4.5-4.5 4.5 M12.5 18.5h6',
+  // lucide.dev `message-square-plus` — Side Chat starts a new side conversation.
+  sidechat: 'M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z M12 8v6 M9 11h6',
   browser: 'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17z M3.5 12h17 M12 3.5c2.2 2.3 3.3 5.1 3.3 8.5S14.2 18.2 12 20.5 M12 3.5C9.8 5.8 8.7 8.6 8.7 12s1.1 6.2 3.3 8.5',
   gear: 'M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z M18.7 12a6 6 0 0 0-.1-1.2l1.8-1.4-1.8-3.1-2.1.8a6.2 6.2 0 0 0-2.1-1.2L14 3.5h-4l-.4 2.4a6.2 6.2 0 0 0-2.1 1.2l-2.1-.8-1.8 3.1 1.8 1.4a6 6 0 0 0 0 2.4l-1.8 1.4 1.8 3.1 2.1-.8a6.2 6.2 0 0 0 2.1 1.2l.4 2.4h4l.4-2.4a6.2 6.2 0 0 0 2.1-1.2l2.1.8 1.8-3.1-1.8-1.4c.07-.4.1-.8.1-1.2z',
 };
@@ -62,6 +71,19 @@ interface Props {
   onToggleRail: (rail: RailId) => void;
   /** Session-scoped rails (Files / Diffs / History) need an active session. */
   sessionRailsDisabled?: boolean;
+  /** Session-scoped Side Chat entry (gian.proxy/2.0 proposal §10.5/§15):
+   *  always rendered like the other rail buttons, greyed with the gating
+   *  reason (or while no session is active). `active` mirrors the panel-2
+   *  side chat surface being open; `count` badges the parent's open Side
+   *  Chats. Omit to hide the button (embedded renders/tests). */
+  sideChat?: {
+    active: boolean;
+    disabled?: boolean;
+    /** Tooltip: the gating reason when greyed, otherwise the entry hint. */
+    title: string;
+    count: number;
+    onToggle: () => void;
+  };
   /** Global workbench rails (Terminal / Browser / Workspaces / Settings) need
    *  Sessions or Tasks mode. */
   workbenchDisabled?: boolean;
@@ -79,6 +101,7 @@ export function Dock({
   activeRail,
   onToggleRail,
   sessionRailsDisabled,
+  sideChat,
   workbenchDisabled,
   browserAvailable,
   wsState,
@@ -149,6 +172,20 @@ export function Dock({
         >
           <Icon d={ICONS.history} />
         </DockBtn>
+        {sideChat && (
+          <DockBtn
+            group="panel"
+            testId="sidechat"
+            label={t('sidechat.title')}
+            active={sideChat.active}
+            disabled={sideChat.disabled}
+            title={sideChat.title}
+            badge={sideChat.count}
+            onClick={sideChat.onToggle}
+          >
+            <Icon d={ICONS.sidechat} />
+          </DockBtn>
+        )}
       </div>
 
       <div className="dock-divider" aria-hidden />

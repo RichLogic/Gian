@@ -115,6 +115,41 @@ describe('NATIVE-001: Native Sessions UI', () => {
     rendered.dispatcher.dispose();
   });
 
+  it('omits Gian approval_mode when adopting an executor-native Grok session', async () => {
+    const grokSource = {
+      ...source,
+      id: 'grok-native-id',
+      executor: 'grok' as const,
+    };
+    const grokAdopted = {
+      ...adopted,
+      id: 'gian-grok-adopted',
+      executor: 'grok' as const,
+      native_session_id: grokSource.id,
+      approval_mode: null,
+    };
+    vi.mocked(loadNativeSessions).mockResolvedValue([grokSource]);
+    vi.mocked(adoptNativeSession).mockResolvedValue({ session: grokAdopted });
+    const rendered = renderWithOperations(
+      <NativeSessionsPane
+        workspace={workspace}
+        onChange={vi.fn()}
+        onSessionAdopted={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Adopt', exact: true }));
+    expect(screen.queryByText('Approval mode')).not.toBeInTheDocument();
+    await userEvent.click(within(screen.getByRole('heading', { name: 'Adopt as Gian session' }).closest('.adopt-dialog')!)
+      .getByRole('button', { name: 'Adopt', exact: true }));
+
+    await waitFor(() => expect(adoptNativeSession).toHaveBeenCalledWith(workspace.id, {
+      executor: 'grok',
+      native_session_id: grokSource.id,
+    }));
+    rendered.dispatcher.dispose();
+  });
+
   it('keeps an adopt race error inside the dialog and does not navigate', async () => {
     vi.mocked(adoptNativeSession).mockResolvedValue({
       session: null,

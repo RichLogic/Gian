@@ -1,0 +1,79 @@
+name: Bug
+description: Report a reproducible defect in Gian-Dev
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include passwords, tokens, private user data, or other secrets.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题描述
+      description: 简要说明发生了什么，以及它造成的影响。
+      placeholder: 在什么场景下出现了什么问题？
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本或提交
+      description: Gian 版本、分支或 commit SHA。
+      placeholder: 0.2.1-hotfix / main@abcdef0
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: 操作系统、Agent、CLI 版本及其他相关配置。
+      placeholder: macOS 15.x, Codex CLI x.y.z
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 写出最短、稳定的复现路径。
+      placeholder: |
+        1. 打开...
+        2. 点击...
+        3. 观察到...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 日志、截图或其他证据
+      description: 请先移除 token、个人信息和其他敏感内容。
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，确认没有重复报告。
+          required: true
+        - label: 我已移除日志和截图中的敏感信息。
+          required: true

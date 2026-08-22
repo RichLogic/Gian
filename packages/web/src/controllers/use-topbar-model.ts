@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
-import type { Executor, Session, Workspace } from '@gian/shared';
+import type { Executor, Session, SideChatInfo, Workspace } from '@gian/shared';
 import type { WorkingTree } from '../api.js';
+import type { ActionControlState } from '../components/action-gating.js';
 import type {
   BranchMenuActions,
   PathSegment,
@@ -9,6 +10,7 @@ import type {
 import type { Mode } from '../components/Topbar.js';
 import { confirm as confirmDialog } from '../feedback.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
+import { sideChatParentCascadeSuffix } from '../presentation/sidechat.js';
 import { worktreeDisplayName } from '../presentation/wt-view.js';
 
 interface TopbarModelInput {
@@ -26,6 +28,19 @@ interface TopbarModelInput {
   /** True while a session.recover run is in flight for the active session —
    *  the Force-recover menu item renders disabled/"recovering". */
   activeSessionRecovering: boolean;
+  /** Side Chats bound to the active session (gian.proxy/2.0 §10.5.4): the
+   *  delete confirm must list the still-open ones — deleting the parent
+   *  permanently closes them too. */
+  activeSessionSideChats?: SideChatInfo[];
+  /** Protocol head-Fork entry for the session dropdown menu (§10.6/§15):
+   *  the gating state (`session.fork`, §9.4/§10.3), whether a fork run is in
+   *  flight, and the dispatch callback. The App root wires all three with
+   *  the store-explicit hooks (this hook runs above the providers). */
+  forkHead?: {
+    control: ActionControlState | null;
+    forking: boolean;
+    onFork: () => void;
+  };
   /** Open the active-Task picker for a standalone Session. */
   onAssignSessionTask: (session: Session) => void;
   ops: OperationDispatcher;
@@ -55,6 +70,8 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
     setWtView,
     viewedWorkingTreeId,
     activeSessionRecovering,
+    activeSessionSideChats,
+    forkHead,
     onAssignSessionTask,
     ops,
     t,
@@ -135,13 +152,41 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
       onForceRecover: () => ops.dispatch('session.recover', { sessionId: activeSession.id }),
       recovering: activeSessionRecovering,
       onMarkUnread: () => ops.dispatch('session.setUnread', { sessionId: activeSession.id, unread: true }),
+      // Protocol head Fork (§10.6/§15): always on the menu, greyed with the
+      // gating reason when either layer disallows it or a fork is in flight.
+      // Dispatch/run tracking lives in the App root (store-explicit hooks).
+      ...(forkHead ? {
+        forkHead: {
+          disabled: forkHead.control?.enabled !== true || forkHead.forking,
+          title: forkHead.control?.enabled
+            ? (forkHead.forking ? t('fork.forking') : t('fork.headTitle'))
+            : (forkHead.control?.reason ?? t('fork.unavailable')),
+          onFork: forkHead.onFork,
+        },
+      } : {}),
       onDelete: async () => {
+        // §10.5.4: explicitly deleting the parent session permanently closes
+        // its still-open Side Chats — the confirm must list them by the same
+        // labels the dock's chips show.
+        const openSideChats = activeSessionSideChats ?? [];
+        const cascade = sideChatParentCascadeSuffix(t, openSideChats);
         const confirmed = await confirmDialog({
-          message: `${t('coding.session.deleteConfirmPrefix')} "${activeSession.name || t('coding.session.untitled')}"? ${t('coding.session.deleteConfirmSuffix')}`,
+          message: `${t('coding.session.deleteConfirmPrefix')} "${activeSession.name || t('coding.session.untitled')}"? ${t('coding.session.deleteConfirmSuffix')}${cascade}`,
           danger: true,
           confirmLabel: t('common.delete'),
         });
-        if (confirmed) ops.dispatch('session.delete', { sessionId: activeSession.id });
+        if (confirmed) {
+          // Host contract (sidechat-coordinator.assertParentCloseConfirmed):
+          // deleting a parent with still-open Side Chats REQUIRES the ids of
+          // the Side Chats whose close the user just confirmed — the confirm
+          // above covers exactly this set, so pass every id through.
+          ops.dispatch('session.delete', {
+            sessionId: activeSession.id,
+            ...(openSideChats.length > 0
+              ? { confirmedSidechatIds: openSideChats.map(entry => entry.id) }
+              : {}),
+          });
+        }
       },
       ...(isSubtask || forkWorkspaceId == null ? {} : {
         onFork: (executor: Executor) => {
@@ -155,7 +200,7 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
         },
       }),
     };
-  }, [activeSession, activeSessionRecovering, activeSubtaskId, mode, onAssignSessionTask, ops, t]);
+  }, [activeSession, activeSessionRecovering, activeSessionSideChats, activeSubtaskId, forkHead, mode, onAssignSessionTask, ops, t]);
 
   const branchMenu = useMemo<BranchMenuActions | null>(() => {
     const visible = (mode === 'sessions' || (mode === 'tasks' && activeSubtaskId))

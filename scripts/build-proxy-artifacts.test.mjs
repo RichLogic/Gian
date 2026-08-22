@@ -6,9 +6,17 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 
-import { assertRuntimeManifest, buildProxyBundle } from './build-proxy-artifacts.mjs';
+import {
+  assertRuntimeManifest,
+  buildProxyBundle,
+  shippingProxyIds,
+} from './build-proxy-artifacts.mjs';
 
 const execFileAsync = promisify(execFile);
+
+test('the default release set includes DSH and excludes the hidden Grok Proxy', () => {
+  assert.deepEqual(shippingProxyIds, ['claude', 'codex', 'kimi', 'dsh']);
+});
 
 test('proxy bundle has one shebang and supports CommonJS dynamic require', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-proxy-bundle-'));
@@ -60,4 +68,11 @@ test('built-in proxy manifests require SemVer recommended CLI versions', () => {
     id: 'x.ai.external',
     runtime: { id: 'x.ai.external', displayName: 'External' },
   }));
+  assert.throws(
+    () => assertRuntimeManifest({
+      id: 'ai.deepseek.harness',
+      runtime: { id: 'dsh', displayName: 'DeepSeek Harness' },
+    }),
+    /recommendedCliVersion/,
+  );
 });

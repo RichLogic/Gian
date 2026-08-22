@@ -4,10 +4,31 @@ import { projectCcNotification } from './normalize-cc.js';
 import { projectCodexNotification } from './normalize-codex.js';
 import { projectKimiNotification } from './normalize-kimi.js';
 import { projectProtocolV1Notification } from './normalize-protocol-v1.js';
+import { projectProtocolV2Notification } from './project-protocol-v2.js';
+
+function isHistoricalProtocolV1(notification: ProxyNotification): boolean {
+  const params = notification.params as Record<string, unknown> | undefined;
+  return Boolean(
+    params
+    && typeof params.emittedAt === 'string'
+    && typeof params.eventId === 'string'
+    && typeof params.sessionId === 'string',
+  );
+}
+
+function projectLegacyNotification(
+  provider: Executor,
+  notification: ProxyNotification,
+  sessionId: string,
+  turn: number,
+): DisplayEvent[] {
+  if (provider === 'claude') return projectCcNotification(notification, sessionId, turn);
+  if (provider === 'codex') return projectCodexNotification(notification, sessionId, turn);
+  return projectKimiNotification(notification, sessionId, turn);
+}
 
 /**
  * Keep a provider notification intact and attach zero or more UI projections.
- * This is the only shared boundary a newly supported CLI needs to implement.
  */
 export function projectNotification(
   provider: Executor,
@@ -15,39 +36,57 @@ export function projectNotification(
   sessionId: string,
   turn: number,
 ): ChatEvent[] {
-  let projected: DisplayEvent[];
   const standard = proxyNotificationSchema.safeParse(notification);
-  if (standard.success) {
-    if (standard.data.method === 'input.recorded') {
-      const input = standard.data.params.data.input;
-      const text = input
-        .filter((item): item is Extract<typeof item, { type: 'text' }> => item.type === 'text')
-        .map(item => item.text)
-        .join('\n\n');
-      return [{
-        session_id: sessionId,
-        turn,
-        call_id: standard.data.params.data.inputId,
-        ts: Date.parse(standard.data.params.emittedAt),
-        provider,
-        event: 'user_message',
-        data: { text, input },
-      }];
-    }
-    projected = projectProtocolV1Notification(standard.data, sessionId, turn);
-  } else if (provider === 'codex') {
-    projected = projectCodexNotification(notification, sessionId, turn);
-  } else if (provider === 'kimi') {
-    projected = projectKimiNotification(notification, sessionId, turn);
-  } else {
-    projected = projectCcNotification(notification, sessionId, turn);
+  if (standard.success && standard.data.method === 'input.recorded') {
+    const input = standard.data.params.data.input;
+    const text = input
+      .filter((item): item is Extract<typeof item, { type: 'text' }> => item.type === 'text')
+      .map((item) => item.text)
+      .join('\n\n');
+    return [{
+      session_id: sessionId,
+      turn,
+      call_id: standard.data.params.eventId,
+      ts: Date.parse(standard.data.params.emittedAt),
+      provider,
+      event: 'user_message',
+      data: { text, input },
+    }];
   }
+  if (
+    standard.success
+    && (standard.data.method === 'step.updated' || standard.data.method === 'request.updated')
+  ) {
+    return [];
+  }
+
+  const projected: DisplayEvent[] = standard.success
+    ? projectProtocolV2Notification(standard.data, sessionId, turn)
+    : (() => {
+      const historical = isHistoricalProtocolV1(notification)
+        ? (() => {
+          try {
+            return projectProtocolV1Notification(
+              notification as Parameters<typeof projectProtocolV1Notification>[0],
+              sessionId,
+              turn,
+            );
+          } catch {
+            return [];
+          }
+        })()
+        : [];
+      return historical.length > 0
+        ? historical
+        : projectLegacyNotification(provider, notification, sessionId, turn);
+    })();
 
   const raw = notification.params?.data && typeof notification.params.data === 'object'
     ? notification.params.data as Record<string, unknown>
     : {};
   if (projected.length === 0) {
-    const nativeCallId = raw.callId ?? raw.itemId ?? notification.params?.turnId;
+    if (notification.method === 'debug') return [];
+    const nativeCallId = raw.activityId ?? raw.interactionId ?? raw.contentId ?? notification.params?.turnId;
     return [{
       session_id: sessionId,
       turn,
@@ -59,7 +98,7 @@ export function projectNotification(
     }];
   }
 
-  return projected.map(item => ({
+  return projected.map((item) => ({
     session_id: item.session_id,
     turn: item.turn,
     call_id: item.call_id,

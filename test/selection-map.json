@@ -1,0 +1,427 @@
+{
+  "version": 1,
+  "stages": {
+    "quick": {
+      "runScopes": [
+        "unit",
+        "integration"
+      ]
+    },
+    "merge": {
+      "runScopes": [
+        "unit",
+        "integration",
+        "system"
+      ]
+    }
+  },
+  "rules": [
+    {
+      "id": "root-test-infrastructure",
+      "patterns": [
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "tsconfig.json",
+        "test/*.json",
+        "scripts/run-tests.mjs",
+        "scripts/test-catalog.mjs",
+        "scripts/run-affected-tests.mjs",
+        "scripts/test-selection.mjs",
+        ".github/workflows/*.yml"
+      ],
+      "modules": [
+        "cc-proxy",
+        "codex-proxy",
+        "desktop",
+        "grok-proxy",
+        "host",
+        "kimi-proxy",
+        "proxy-protocol",
+        "scripts",
+        "shared",
+        "web"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:test-catalog",
+        "quality:test-selection",
+        "quality:functional-evidence",
+        "quality:traceability",
+        "quality:docs",
+        "quality:operations:strict",
+        "quality:versions"
+      ],
+      "reason": "Root build, catalog, runner, or CI changes can alter every deterministic test path."
+    },
+    {
+      "id": "quality-docs",
+      "patterns": [
+        "docs/**/*.md",
+        ".agents/skills/**",
+        "AGENTS.md",
+        "CLAUDE.md"
+      ],
+      "optionalPatterns": [
+        "docs/**/*.md",
+        "AGENTS.md",
+        "CLAUDE.md"
+      ],
+      "modules": [],
+      "scopes": [],
+      "checks": [
+        "quality:traceability",
+        "quality:docs"
+      ],
+      "reason": "Quality and project documentation must retain valid links and traceability."
+    },
+    {
+      "id": "scripts",
+      "patterns": [
+        "scripts/**"
+      ],
+      "modules": [
+        "scripts"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Repository automation changes select the script regression surface."
+    },
+    {
+      "id": "shared-contract",
+      "patterns": [
+        "packages/shared/**"
+      ],
+      "modules": [
+        "cc-proxy",
+        "codex-proxy",
+        "desktop",
+        "grok-proxy",
+        "host",
+        "kimi-proxy",
+        "proxy-protocol",
+        "shared",
+        "web"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Shared contracts are consumed by the Host, UI, Desktop, and all proxies."
+    },
+    {
+      "id": "proxy-protocol-contract",
+      "patterns": [
+        "packages/proxy-protocol/**"
+      ],
+      "modules": [
+        "cc-proxy",
+        "codex-proxy",
+        "grok-proxy",
+        "host",
+        "kimi-proxy",
+        "proxy-protocol"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Proxy protocol changes expand to every proxy consumer and Host routing."
+    },
+    {
+      "id": "proxy-step-request-trace",
+      "patterns": [
+        "packages/proxy-protocol/src/constants.ts",
+        "packages/proxy-protocol/src/schemas.ts",
+        "packages/proxy-protocol/src/conformance.ts",
+        "packages/shared/src/trace.ts",
+        "packages/host/src/trace/**",
+        "packages/host/src/event/project-protocol-v2.ts",
+        "packages/web/src/trace/**",
+        "scripts/fixtures/fake-catalog-ui-proxy.mjs"
+      ],
+      "modules": [
+        "proxy-protocol",
+        "shared",
+        "host",
+        "web"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:operations:strict"
+      ],
+      "reason": "Step/request protocol identities cross the canonical evidence, Trace projection, and Web hierarchy boundaries."
+    },
+    {
+      "id": "host",
+      "patterns": [
+        "packages/host/**"
+      ],
+      "modules": [
+        "host",
+        "web"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Host behavior selects Host tests plus Web contract and component integration."
+    },
+    {
+      "id": "host-process-git-runtime",
+      "patterns": [
+        "packages/host/src/proxy/**",
+        "packages/host/src/runtime/**",
+        "packages/host/src/term/**",
+        "packages/host/src/agents/**",
+        "packages/host/src/workspace/git*.ts",
+        "packages/host/src/session/worktree-detect.ts",
+        "packages/host/src/index.ts"
+      ],
+      "modules": [
+        "host"
+      ],
+      "scopes": [
+        "system"
+      ],
+      "checks": [],
+      "reason": "Process, Provider adapter, port, Git, worktree, and terminal boundaries require System coverage."
+    },
+    {
+      "id": "sidechat-fork-core",
+      "patterns": [
+        "packages/proxy-protocol/src/constants.ts",
+        "packages/proxy-protocol/src/schemas.ts",
+        "packages/proxy-protocol/src/conformance.ts",
+        "packages/proxy-protocol/src/redact.ts",
+        "packages/shared/src/sidechat.ts",
+        "packages/shared/src/operations.ts",
+        "packages/host/src/session/sidechat-*.ts",
+        "packages/host/src/session/fork.ts",
+        "packages/host/migrations/052_sidechat_transients_and_fork_origin.sql",
+        "packages/host/migrations/053_fork_request_identity.sql",
+        "packages/host/migrations/054_sidechat_public_state.sql",
+        "packages/host/test/fixtures/fake-sidechat-fork-proxy.mjs",
+        "packages/host/test/sidechat-fork-*.test.ts"
+      ],
+      "modules": [
+        "proxy-protocol",
+        "shared",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:traceability"
+      ],
+      "reason": "Side Chat and Session Fork contracts cross protocol schemas, Host transient persistence, and Fake Proxy subprocess evidence."
+    },
+    {
+      "id": "host-migrations",
+      "patterns": [
+        "packages/host/migrations/*.sql",
+        "packages/host/src/storage/db.ts",
+        "packages/host/src/storage/event-storage-v3-migrator.ts"
+      ],
+      "modules": [
+        "host"
+      ],
+      "scopes": [
+        "integration",
+        "system"
+      ],
+      "checks": [],
+      "specialEntrypoints": [
+        "packaged-app-smoke"
+      ],
+      "reason": "Schema and migration changes require temporary-database integration and packaged migration smoke."
+    },
+    {
+      "id": "web",
+      "patterns": [
+        "packages/web/**"
+      ],
+      "modules": [
+        "web"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:operations:strict"
+      ],
+      "reason": "Web changes select pure UI logic and component integration."
+    },
+    {
+      "id": "desktop",
+      "patterns": [
+        "packages/desktop/**"
+      ],
+      "modules": [
+        "desktop"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "desktop-electron-smoke"
+      ],
+      "reason": "Desktop lifecycle changes require deterministic Desktop tests and an explicit Electron smoke."
+    },
+    {
+      "id": "cc-proxy",
+      "patterns": [
+        "packages/proxies/cc-proxy/**"
+      ],
+      "modules": [
+        "cc-proxy",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "real-provider-canaries"
+      ],
+      "reason": "Claude proxy changes expand to proxy contracts, Host clients, and deferred real-provider compatibility."
+    },
+    {
+      "id": "codex-proxy",
+      "patterns": ["packages/proxies/codex-proxy/**"],
+      "modules": ["codex-proxy", "host"],
+      "scopes": ["unit", "integration", "system"],
+      "checks": ["typecheck"],
+      "specialEntrypoints": ["real-provider-canaries"],
+      "reason": "Codex proxy changes expand to stdio app-server lifecycle tests, proxy contracts, Host clients, and deferred real-provider compatibility."
+    },
+    {
+      "id": "kimi-proxy",
+      "patterns": [
+        "packages/proxies/kimi-proxy/**"
+      ],
+      "modules": [
+        "kimi-proxy",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "real-provider-canaries"
+      ],
+      "reason": "Kimi proxy changes expand to proxy contracts, Host clients, and deferred real-provider compatibility."
+    },
+    {
+      "id": "grok-proxy",
+      "patterns": [
+        "packages/proxies/grok-proxy/**"
+      ],
+      "modules": [
+        "grok-proxy",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "real-provider-canaries"
+      ],
+      "reason": "Grok proxy changes expand to proxy contracts, Host clients, and deferred real-provider compatibility."
+    },
+    {
+      "id": "dsh-bridge-package",
+      "patterns": [
+        "packages/proxies/dsh-bridge/**"
+      ],
+      "modules": [
+        "dsh-bridge"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "dsh-bridge-runtime-canary",
+        "dsh-proxy-runtime-canary"
+      ],
+      "reason": "DSH bridge bundle is the private bridge/1.0 runtime under test."
+    },
+    {
+      "id": "dsh-proxy-package",
+      "patterns": [
+        "packages/proxies/dsh-proxy/**"
+      ],
+      "modules": [
+        "dsh-proxy",
+        "proxy-protocol"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "dsh-proxy-runtime-canary"
+      ],
+      "reason": "DSH proxy implements gian.proxy/2.0 against the frozen bridge contract."
+    }
+  ]
+}

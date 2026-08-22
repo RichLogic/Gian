@@ -181,9 +181,20 @@ export class AutoTitleService {
         if (!Array.isArray(page.sessions)) break;
         for (const entry of page.sessions) {
           if (!entry || typeof entry !== 'object') continue;
-          const item = entry as { sessionId?: unknown; title?: unknown };
-          if (item.sessionId !== session.native_session_id) continue;
-          const title = typeof item.title === 'string' ? sanitizeTitle(item.title) : '';
+          const item = entry as {
+            id?: unknown;
+            sessionId?: unknown;
+            displayName?: unknown;
+            title?: unknown;
+          };
+          const nativeId = typeof item.id === 'string' && item.id
+            ? item.id
+            : typeof item.sessionId === 'string' ? item.sessionId : '';
+          if (nativeId !== session.native_session_id) continue;
+          const rawTitle = typeof item.displayName === 'string'
+            ? item.displayName
+            : typeof item.title === 'string' ? item.title : '';
+          const title = rawTitle ? sanitizeTitle(rawTitle) : '';
           if (!title) continue;
           // Codex thread/list exposes prompt-derived placeholders while its
           // LM-generated `name` is still pending: either the 120-char preview

@@ -1,0 +1,58 @@
+{
+  "session.event": {
+    "sessionId": "s1",
+    "nativeSeq": 0,
+    "type": "turn/start",
+    "data": {
+      "turn": 0
+    }
+  },
+  "agent.status": {
+    "sessionId": "s1",
+    "status": "running",
+    "turn": 0
+  },
+  "agent.error": {
+    "sessionId": "s1",
+    "turn": 0,
+    "step": 0,
+    "error": "boom"
+  },
+  "subagent.started": {
+    "sessionId": "s1",
+    "parent": "s1",
+    "agentId": "child-1"
+  },
+  "subagent.finished": {
+    "sessionId": "s1",
+    "parent": "s1",
+    "agentId": "child-1",
+    "state": "completed"
+  },
+  "interaction.requested": {
+    "sessionId": "s1",
+    "interactionId": "i1",
+    "kind": "approval",
+    "title": "Approve",
+    "actions": [],
+    "inputs": [],
+    "turn": 0,
+    "step": 0
+  },
+  "interaction.resolved": {
+    "sessionId": "s1",
+    "interactionId": "i1",
+    "outcome": "submitted",
+    "actionId": "allow-once"
+  },
+  "catalog.changed": {
+    "reason": "profile-changed"
+  },
+  "runtime.error": {
+    "sessionId": "s1",
+    "domainCode": "RUNTIME_ERROR",
+    "message": "x",
+    "retryable": true,
+    "details": {}
+  }
+}

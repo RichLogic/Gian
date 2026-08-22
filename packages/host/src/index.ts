@@ -105,6 +105,11 @@ async function main(): Promise<void> {
       '@gian/grok-proxy',
       'grok-proxy',
     ),
+    dsh: resolveProxyEntry(
+      process.env.GIAN_DSH_PROXY_ENTRY,
+      '@gian/dsh-proxy',
+      'dsh-proxy',
+    ),
   } as const;
   const agentManager = await AgentManager.create({
     dataDir,
@@ -116,6 +121,9 @@ async function main(): Promise<void> {
     }),
     managedProxies: process.env.GIAN_MANAGED_PLUGINS === '1',
     independentProxyReleases: process.env.GIAN_MANAGED_PLUGINS === '1',
+    dshBridgePackageDir: process.env.GIAN_DSH_BRIDGE_PACKAGE_DIR
+      ? resolve(process.env.GIAN_DSH_BRIDGE_PACKAGE_DIR)
+      : join(PACKAGES_DIR, 'proxies', 'dsh-bridge'),
     developmentProxyEntries,
     legacyProxyDefaults: {
       claude: {
@@ -130,23 +138,26 @@ async function main(): Promise<void> {
       },
       kimi: { model: '', thinking: '', mode: '' },
       grok: { model: '', thinking: '', mode: '' },
+      dsh: { model: '', thinking: '', mode: '' },
     },
     environmentCliPaths: {
       ...(process.env.CLAUDE_BIN ? { claude: process.env.CLAUDE_BIN } : {}),
       ...(process.env.CODEX_BIN ? { codex: process.env.CODEX_BIN } : {}),
       ...(process.env.KIMI_BIN ? { kimi: process.env.KIMI_BIN } : {}),
       ...(process.env.GROK_BIN ? { grok: process.env.GROK_BIN } : {}),
+      ...(process.env.DSH_BIN ? { dsh: process.env.DSH_BIN } : {}),
     },
   });
   const runtimeManager = new CliRuntimeManager(
     agentManager.runtimeProviders(),
     agentManager.updateLockDataDir(),
   );
-  const [claudeProxy, codexProxy, kimiProxy, grokProxy] = await Promise.all([
+  const [claudeProxy, codexProxy, kimiProxy, grokProxy, dshProxy] = await Promise.all([
     agentManager.proxyLaunchDescriptor('claude'),
     agentManager.proxyLaunchDescriptor('codex'),
     agentManager.proxyLaunchDescriptor('kimi'),
     agentManager.proxyLaunchDescriptor('grok'),
+    agentManager.proxyLaunchDescriptor('dsh'),
   ]);
 
   const handle = createApp({
@@ -155,13 +166,15 @@ async function main(): Promise<void> {
     dataDir,
     hostVersion: releaseVersion,
     ccProxyEntry: claudeProxy.entryPath,
-    claudeProxyProtocolV1: claudeProxy.protocolV1,
+    claudeProxy: claudeProxy.protocol,
     codexProxyEntry: codexProxy.entryPath,
     kimiProxyEntry: kimiProxy.entryPath,
     grokProxyEntry: grokProxy.entryPath,
-    codexProxyProtocolV1: codexProxy.protocolV1,
-    kimiProxyProtocolV1: kimiProxy.protocolV1,
-    grokProxyProtocolV1: grokProxy.protocolV1,
+    dshProxyEntry: dshProxy.entryPath,
+    codexProxy: codexProxy.protocol,
+    kimiProxy: kimiProxy.protocol,
+    grokProxy: grokProxy.protocol,
+    dshProxy: dshProxy.protocol,
     runtimeManager,
     agentManager,
   });

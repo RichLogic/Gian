@@ -17,6 +17,11 @@ export default defineConfig({
   // webServer teardown, so a stranded Host cannot leave a local quality gate
   // silent forever or consume the entire hosted job timeout.
   globalTimeout: CI ? 40 * 60_000 : 15 * 60_000,
+  // All workers share one real Host/Web pair. Keep local and hosted release
+  // runs below the point where browser layout/PTY handshakes starve each other
+  // on high-core machines; this is still enough parallelism for the 56-case
+  // suite without turning timing pressure into product failures.
+  workers: 4,
   // Visual baselines are intentionally shared across developer macOS and
   // Linux CI. Individual assertions carry a small cross-platform pixel
   // tolerance for font rasterization while still catching layout drift.

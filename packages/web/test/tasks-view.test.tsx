@@ -348,7 +348,8 @@ describe('task group row actions', () => {
     // The composer auto-selects the only ready agent (codex in this mock);
     // Send enables once a first message is typed.
     await userEvent.type(await screen.findByTestId('ns-title-input'), 'Child title');
-    await userEvent.click(screen.getByTestId('ns-fast-chip'));
+    await userEvent.click(screen.getByTestId('ns-model-chip'));
+    await userEvent.click(await screen.findByRole('switch', { name: 'Fast' }));
     await userEvent.type(await screen.findByTestId('ns-message-input'), 'first subtask message');
     await userEvent.click(screen.getByTestId('ns-send'));
     // The first message is stashed for the session:created socket handler…

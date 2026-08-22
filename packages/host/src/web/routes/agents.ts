@@ -2,13 +2,13 @@ import type { Hono } from 'hono';
 import type {
   AgentProxyDefaults,
   Executor,
-  ProxyCapabilities,
+  ProxyCatalog,
 } from '@gian/shared';
 import type { AgentManager } from '../../agents/manager.js';
 import type { CliRuntimeManager } from '../../runtime/manager.js';
 import { pickPath } from '../pick-path.js';
 
-const EXECUTORS = new Set<Executor>(['claude', 'codex', 'kimi', 'grok']);
+const EXECUTORS = new Set<Executor>(['claude', 'codex', 'kimi', 'grok', 'dsh']);
 
 function executor(raw: string): Executor | null {
   return EXECUTORS.has(raw as Executor) ? raw as Executor : null;
@@ -27,29 +27,27 @@ function installErrorStatus(error: unknown): 409 | 502 {
   ) ? 409 : 502;
 }
 
+function optionChoices(catalog: ProxyCatalog, role: string): string[] {
+  const option = catalog.configOptions.find((item) => item.role === role);
+  return (option?.choices ?? []).map((choice) => String(choice.value));
+}
+
 function validateProxyDefaults(
   defaults: AgentProxyDefaults,
-  capabilities: ProxyCapabilities,
+  catalog: ProxyCatalog,
 ): void {
-  const visibleModels = capabilities.models.filter(model => !model.hidden);
-  const selectedModel = defaults.model
-    ? visibleModels.find(model => model.model === defaults.model)
-    : visibleModels.find(model => model.isDefault) ?? visibleModels[0];
-  if (defaults.model && !selectedModel) {
+  const models = optionChoices(catalog, 'model');
+  if (defaults.model && models.length > 0 && !models.includes(defaults.model)) {
     throw new Error('model is not advertised by the Proxy');
   }
-  if (defaults.thinking) {
-    const supported = selectedModel
-      ? ('supportedEfforts' in selectedModel
-          ? selectedModel.supportedEfforts
-          : selectedModel.supportedThinking)
-      : [];
-    if (!supported.includes(defaults.thinking)) {
-      throw new Error('thinking/effort is not supported by the selected Proxy model');
-    }
+  const efforts = optionChoices(catalog, 'effort');
+  if (defaults.thinking && efforts.length > 0 && !efforts.includes(defaults.thinking)) {
+    throw new Error('thinking/effort is not supported by the selected Proxy model');
   }
-  const modes = capabilities.modes ?? [];
-  if (defaults.mode && !modes.some(mode => mode.id === defaults.mode)) {
+  const modes = optionChoices(catalog, 'execution_mode');
+  const approvalModes = optionChoices(catalog, 'approval_mode');
+  const modeValues = modes.length > 0 ? modes : approvalModes;
+  if (defaults.mode && modeValues.length > 0 && !modeValues.includes(defaults.mode)) {
     throw new Error('mode is not advertised by the Proxy');
   }
 }
@@ -60,7 +58,7 @@ export function registerAgentRoutes(
     agents: AgentManager;
     runtimes: CliRuntimeManager;
     closeProxy: (id: Executor) => Promise<void>;
-    capabilities: (id: Executor) => Promise<ProxyCapabilities>;
+    capabilities: (id: Executor) => Promise<ProxyCatalog>;
   },
 ): void {
   app.get('/api/agents', async c => c.json({

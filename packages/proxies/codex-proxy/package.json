@@ -1,6 +1,6 @@
 {
   "name": "@gian/codex-proxy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "./dist/src/cli/spawn.js",
@@ -13,10 +13,10 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
-    "@gian/proxy-protocol": "workspace:*",
     "@gian/shared": "workspace:*"
   },
   "devDependencies": {
+    "@gian/proxy-protocol": "workspace:*",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   }

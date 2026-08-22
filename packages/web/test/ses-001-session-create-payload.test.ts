@@ -97,4 +97,22 @@ describe('SES-001: minimal session payload from form state', () => {
     })) as Record<string, unknown>;
     expect(payload.approvalMode).toBeUndefined();
   });
+
+  it('sends session-bound catalog values as sessionConfig', () => {
+    const payload = buildSessionCreatePayload(formState({
+      executor: 'kimi',
+      catalogOptions: [{
+        id: 'mode',
+        displayName: 'Mode',
+        binding: 'session',
+        role: 'approval_mode',
+        control: 'select',
+        required: false,
+        defaultValue: 'default',
+      }],
+      catalogValues: { mode: 'yolo' },
+    }));
+    expect(payload.approvalMode).toBeUndefined();
+    expect(payload.sessionConfig).toEqual({ mode: 'yolo' });
+  });
 });

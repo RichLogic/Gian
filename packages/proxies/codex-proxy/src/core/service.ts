@@ -28,12 +28,23 @@ import type { CodexRuntime, RuntimeNotification, RuntimeServerRequest } from '..
 
 type ProxyEventSink = (method: string, params: Record<string, unknown>) => void;
 
+const REQUEST_USER_INPUT_METHOD = 'item/tool/requestUserInput';
+
 interface ActiveTurnContext {
   sessionId: string;
   requestId?: number | string;
   turnId: string;
+  generation: number;
   outputText: string;
   isCompact: boolean;
+}
+
+interface PendingTurnContext {
+  sessionId: string;
+  requestId?: number | string;
+  generation: number;
+  notifications: RuntimeNotification[];
+  serverRequests: RuntimeServerRequest[];
 }
 
 interface ContextCompactionUsageGuard {
@@ -125,6 +136,8 @@ function approvalTitle(method: string) {
       return 'Approve file change';
     case 'item/permissions/requestApproval':
       return 'Grant extra permissions';
+    case REQUEST_USER_INPUT_METHOD:
+      return 'Codex needs your input';
     default:
       return 'Review Codex request';
   }
@@ -140,6 +153,10 @@ function approvalReason(method: string, params: Record<string, unknown>) {
   if (method === 'item/permissions/requestApproval') {
     return String(params.reason ?? 'Codex requested additional permissions.');
   }
+  if (method === REQUEST_USER_INPUT_METHOD) {
+    const questions = requestUserInputQuestions(params);
+    return questions[0]?.question ?? 'Codex asked a question.';
+  }
   return 'Codex requested a user decision.';
 }
 
@@ -153,7 +170,49 @@ function approvalSeverity(method: string, params: Record<string, unknown>): 'low
       ? 'low'
       : 'medium';
   }
+  if (method === REQUEST_USER_INPUT_METHOD) return 'low';
   return 'medium';
+}
+
+interface RequestUserInputQuestion {
+  id: string;
+  question: string;
+}
+
+function requestUserInputQuestions(payload: unknown): RequestUserInputQuestion[] {
+  if (!payload || typeof payload !== 'object') return [];
+  const questions = (payload as { questions?: unknown }).questions;
+  if (!Array.isArray(questions)) return [];
+  return questions.flatMap(value => {
+    if (!value || typeof value !== 'object') return [];
+    const question = value as { id?: unknown; question?: unknown };
+    if (typeof question.id !== 'string' || !question.id) return [];
+    if (typeof question.question !== 'string' || !question.question) return [];
+    return [{ id: question.id, question: question.question }];
+  });
+}
+
+function requestUserInputResponse(
+  payload: unknown,
+  answers: Record<string, string | string[]> | undefined,
+) {
+  const byQuestionId = answers ?? {};
+  const mapped: Record<string, { answers: string[] }> = {};
+  for (const question of requestUserInputQuestions(payload)) {
+    const answer = byQuestionId[question.id];
+    if (typeof answer === 'string') {
+      mapped[question.id] = { answers: [answer] };
+    } else if (Array.isArray(answer)) {
+      mapped[question.id] = { answers: answer };
+    }
+  }
+  return { answers: mapped };
+}
+
+function cancelledServerRequestResponse(method: string) {
+  return method === REQUEST_USER_INPUT_METHOD
+    ? { answers: {} }
+    : { decision: 'cancel' };
 }
 
 function classifyPermissionsKind(
@@ -272,7 +331,7 @@ function codexAgentUpdates(params: unknown): CodexAgentUpdate[] {
     const path = typeof record.agentPath === 'string' ? record.agentPath : '';
     return [{
       agentId,
-      description: '',
+      description: path || 'Agent',
       status: record.kind === 'interrupted' ? 'error' : 'running',
       ...(path ? { agentType: path } : {}),
     }];
@@ -296,7 +355,7 @@ function codexAgentUpdates(params: unknown): CodexAgentUpdate[] {
       : {};
     return {
       agentId,
-      description: record.tool === 'spawnAgent' ? prompt : '',
+      description: record.tool === 'spawnAgent' && prompt ? prompt : 'Agent',
       status: codexAgentStatus(state.status, record.status),
       ...(model ? { model } : {}),
       ...(typeof state.message === 'string' && state.message ? { output: state.message } : {}),
@@ -334,6 +393,8 @@ export class CodexProxyService {
   private readonly approvalsById = new Map<string, PendingApproval>();
   private readonly approvalsBySessionId = new Map<string, Map<string, PendingApproval>>();
   private readonly activeTurnsByThreadId = new Map<string, ActiveTurnContext>();
+  private readonly pendingTurnsByThreadId = new Map<string, PendingTurnContext>();
+  private nextTurnGeneration = 1;
   /** Compaction usage is untrustworthy until its replacement history is live. */
   private readonly contextCompactionUsageGuards = new Map<string, ContextCompactionUsageGuard>();
 
@@ -354,7 +415,10 @@ export class CodexProxyService {
 
     this.runtime.on('serverRequest', (message) => {
       this.handleRuntimeServerRequest(message).catch((error) => {
-        void this.runtime.respond(message.id, { decision: 'cancel' }).catch(() => undefined);
+        void this.runtime.respond(
+          message.id,
+          cancelledServerRequestResponse(message.method),
+        ).catch(() => undefined);
         this.emitEvent('runtime.error', {
           code: 'SERVER_REQUEST_HANDLER_FAILED',
           message: error instanceof Error ? error.message : String(error),
@@ -525,24 +589,61 @@ export class CodexProxyService {
     const configuredPermissions = params.useConfiguredPermissions
       ? session.configuredPermissions
       : null;
+    const effectiveModel = typeof params.model === 'string' && params.model.trim()
+      ? params.model.trim()
+      : session.model;
+    const effectiveThinking = thinking ?? session.thinking;
+    if (params.collaborationMode && !effectiveModel) {
+      throw createAppError(
+        400,
+        'INVALID_REQUEST',
+        'Codex collaboration mode requires an effective model.',
+      );
+    }
     const runtimeWorkspaceRoots = [...new Set([
       session.cwd,
       ...(params.additionalWorkspaceRoots ?? []).map(root => resolve(session.cwd, root)),
       ...localFileDirs,
     ])];
-    const turnResponse = await this.runtime.startTurn(session.threadId, input, {
-      model: typeof params.model === 'string' && params.model.trim() ? params.model.trim() : session.model,
-      thinking,
-      sandbox: configuredPermissions ? null : params.sandbox ?? null,
-      sandboxPolicy: configuredPermissions?.sandboxPolicy ?? null,
-      runtimeWorkspaceRoots,
-      permissions: configuredPermissions?.permissions ?? null,
-      approvalPolicy: configuredPermissions?.approvalPolicy ?? params.approvalPolicy ?? null,
-      approvalsReviewer: configuredPermissions?.approvalsReviewer ?? params.approvalsReviewer ?? null,
-      collaborationMode: params.collaborationMode ?? null,
-      reasoningSummary: params.reasoningSummary ?? null,
-      serviceTier: params.serviceTier ?? null,
-    });
+    const generation = this.nextTurnGeneration++;
+    const pending: PendingTurnContext = {
+      sessionId: session.id,
+      generation,
+      notifications: [],
+      serverRequests: [],
+      ...(requestId === undefined ? {} : { requestId }),
+    };
+    this.pendingTurnsByThreadId.set(session.threadId, pending);
+    let turnResponse: Awaited<ReturnType<CodexRuntime['startTurn']>>;
+    try {
+      turnResponse = await this.runtime.startTurn(session.threadId, input, {
+        model: effectiveModel,
+        thinking: effectiveThinking,
+        sandbox: configuredPermissions ? null : params.sandbox ?? null,
+        sandboxPolicy: configuredPermissions?.sandboxPolicy ?? null,
+        runtimeWorkspaceRoots,
+        permissions: configuredPermissions?.permissions ?? null,
+        approvalPolicy: configuredPermissions?.approvalPolicy ?? params.approvalPolicy ?? null,
+        approvalsReviewer: configuredPermissions?.approvalsReviewer ?? params.approvalsReviewer ?? null,
+        collaborationMode: params.collaborationMode && effectiveModel
+          ? {
+              mode: params.collaborationMode,
+              settings: {
+                model: effectiveModel,
+                reasoning_effort: effectiveThinking ?? null,
+                developer_instructions: null,
+              },
+            }
+          : null,
+        reasoningSummary: params.reasoningSummary ?? null,
+        serviceTier: params.serviceTier ?? null,
+      });
+    } catch (error) {
+      if (this.pendingTurnsByThreadId.get(session.threadId)?.generation === generation) {
+        this.pendingTurnsByThreadId.delete(session.threadId);
+      }
+      throw error;
+    }
     // A non-compact turn's usage stream is the next authoritative context
     // sample. Keep suppressing compact traffic until startTurn succeeds.
     this.contextCompactionUsageGuards.delete(session.threadId);
@@ -551,14 +652,15 @@ export class CodexProxyService {
     const updatedSession = this.updateSession(session, {
       activeTurnId: turnId,
       status: 'running',
-      model: typeof params.model === 'string' && params.model.trim() ? params.model.trim() : session.model,
-      thinking,
+      model: effectiveModel,
+      thinking: effectiveThinking,
       lastError: null,
     });
 
     const context: ActiveTurnContext = {
       sessionId: updatedSession.id,
       turnId,
+      generation,
       outputText: '',
       isCompact: false,
       ...(requestId === undefined ? {} : { requestId }),
@@ -575,6 +677,16 @@ export class CodexProxyService {
       },
     });
 
+    if (this.pendingTurnsByThreadId.get(updatedSession.threadId)?.generation === generation) {
+      this.pendingTurnsByThreadId.delete(updatedSession.threadId);
+    }
+    for (const notification of pending.notifications) {
+      await this.handleRuntimeNotification(notification);
+    }
+    for (const serverRequest of pending.serverRequests) {
+      await this.handleRuntimeServerRequest(serverRequest);
+    }
+
     return {
       session: this.serializeSession(updatedSession),
       turn: turnResponse.turn,
@@ -583,11 +695,14 @@ export class CodexProxyService {
 
   async interruptTurn(params: { sessionId: string }) {
     const session = await this.ensureSessionUsable(this.requireSessionById(params.sessionId));
-    if (!session.activeTurnId) {
+    const activeTurnId = session.activeTurnId
+      ?? this.activeTurnsByThreadId.get(session.threadId)?.turnId
+      ?? null;
+    if (!activeTurnId) {
       throw createAppError(409, 'INVALID_REQUEST', 'This session does not have an active turn.');
     }
 
-    await this.runtime.interruptTurn(session.threadId, session.activeTurnId);
+    await this.runtime.interruptTurn(session.threadId, activeTurnId);
     return { ok: true };
   }
 
@@ -614,7 +729,15 @@ export class CodexProxyService {
 
     const scope = params.scope === 'session' ? 'session' : 'once';
     const accepted = params.decision !== 'decline';
-    if (approval.method === 'item/commandExecution/requestApproval') {
+    if (approval.method === REQUEST_USER_INPUT_METHOD) {
+      await this.runtime.respond(
+        approval.rpcRequestId,
+        requestUserInputResponse(
+          approval.payload,
+          params.decision === 'decline' ? undefined : params.answers,
+        ),
+      );
+    } else if (approval.method === 'item/commandExecution/requestApproval') {
       await this.runtime.respond(approval.rpcRequestId, {
         decision: accepted ? (scope === 'session' ? 'acceptForSession' : 'accept') : 'decline',
       });
@@ -647,6 +770,7 @@ export class CodexProxyService {
         decision: params.decision,
         scope,
         auto: false,
+        ...(params.answers ? { answers: params.answers } : {}),
       },
     });
     return { ok: true, session: this.serializeSession(updatedSession) };
@@ -697,6 +821,7 @@ export class CodexProxyService {
     }
 
     this.activeTurnsByThreadId.delete(session.threadId);
+    this.pendingTurnsByThreadId.delete(session.threadId);
     this.removeSession(session);
     return { ok: true };
   }
@@ -723,6 +848,7 @@ export class CodexProxyService {
       sessionId: updatedSession.id,
       ...(requestId === undefined ? {} : { requestId }),
       turnId,
+      generation: this.nextTurnGeneration++,
       outputText: '',
       isCompact: true,
     });
@@ -854,6 +980,7 @@ export class CodexProxyService {
     this.sessionsById.delete(session.id);
     this.sessionsByThreadId.delete(session.threadId);
     this.contextCompactionUsageGuards.delete(session.threadId);
+    this.pendingTurnsByThreadId.delete(session.threadId);
     const approvals = this.approvalsBySessionId.get(session.id);
     if (approvals) {
       for (const approvalId of approvals.keys()) {
@@ -964,6 +1091,7 @@ export class CodexProxyService {
       });
     }
     this.activeTurnsByThreadId.clear();
+    this.pendingTurnsByThreadId.clear();
     this.contextCompactionUsageGuards.clear();
   }
 
@@ -986,8 +1114,17 @@ export class CodexProxyService {
     }
 
     const context = this.activeTurnsByThreadId.get(threadId);
+    const pending = this.pendingTurnsByThreadId.get(threadId);
+    if (!context && pending) {
+      pending.notifications.push(message);
+      return;
+    }
+    const runtimeTurnId = extractTurnId(message.params);
+    if (runtimeTurnId && (!context || (!context.isCompact && runtimeTurnId !== context.turnId))) {
+      return;
+    }
     const requestId = context?.requestId;
-    const turnId = extractTurnId(message.params) ?? context?.turnId;
+    const turnId = runtimeTurnId ?? context?.turnId;
 
     if (message.method === 'item/agentMessage/delta' && context) {
       const delta = typeof (message.params as { delta?: unknown } | undefined)?.delta === 'string'
@@ -1197,12 +1334,10 @@ export class CodexProxyService {
     }
 
     if (message.method === 'thread/compacted') {
-      if (!context && !session.activeTurnId) {
-        return;
-      }
+      if (!context) return;
       const completedTurnId = turnId ?? context?.turnId ?? session.activeTurnId;
-      const summary = await this.buildCompletedTurnSummary(session, completedTurnId);
       this.activeTurnsByThreadId.delete(threadId);
+      const summary = await this.buildCompletedTurnSummary(session, completedTurnId);
       const updatedSession = this.updateSession(session, {
         activeTurnId: null,
         status: 'idle',
@@ -1223,16 +1358,24 @@ export class CodexProxyService {
     }
 
     if (message.method !== 'turn/completed') {
+      this.emitEvent('codex.unknown', {
+        ...(requestId !== undefined ? { requestId } : {}),
+        sessionId: session.id,
+        ...(turnId !== undefined ? { turnId } : {}),
+        data: {
+          method: message.method,
+          payload: message.params ?? {},
+        },
+        rawRuntimeEvent: message,
+      });
       return;
     }
 
-    if (!context && !session.activeTurnId) {
-      return;
-    }
+    if (!context) return;
 
     const status = currentTurnStatus(message.params);
-    const summary = await this.buildCompletedTurnSummary(session, turnId ?? session.activeTurnId);
     this.activeTurnsByThreadId.delete(threadId);
+    const summary = await this.buildCompletedTurnSummary(session, turnId ?? session.activeTurnId);
     const nextStatus = status === 'failed' ? 'error' : 'idle';
     const updatedSession = this.updateSession(session, {
       activeTurnId: null,
@@ -1269,26 +1412,33 @@ export class CodexProxyService {
   private async handleRuntimeServerRequest(message: RuntimeServerRequest) {
     const threadId = extractThreadId(message.params);
     if (!threadId) {
-      await this.runtime.respond(message.id, { decision: 'cancel' });
+      await this.runtime.respond(message.id, cancelledServerRequestResponse(message.method));
       return;
     }
 
     const session = this.sessionsByThreadId.get(threadId);
     if (!session) {
-      await this.runtime.respond(message.id, { decision: 'cancel' });
+      await this.runtime.respond(message.id, cancelledServerRequestResponse(message.method));
       return;
     }
 
     const context = this.activeTurnsByThreadId.get(threadId);
+    const pending = this.pendingTurnsByThreadId.get(threadId);
+    if (!context && pending) {
+      pending.serverRequests.push(message);
+      return;
+    }
+    const runtimeTurnId = extractTurnId(message.params);
+    if (runtimeTurnId && (!context || (!context.isCompact && runtimeTurnId !== context.turnId))) {
+      await this.runtime.respond(message.id, cancelledServerRequestResponse(message.method));
+      return;
+    }
     const requestId = context?.requestId;
 
-    // Always relay approvals upstream. Per-turn `approvalsReviewer` controls
-    // routing inside codex: `auto_review` is handled by codex's subagent and
-    // never surfaces here; `user` is what actually triggers this code path.
-    // The legacy mode-driven auto-approval (workspace-scoped file changes,
-    // network-only permission grants) was removed — that lived in the
-    // `safe-agent` mode which is gone. Host's ApprovalManager now owns all
-    // policy decisions for relayed approvals.
+    // Always relay app-server requests. The current turn's provider-native
+    // approvalPolicy/approvalsReviewer decides which requests reach this
+    // bridge; Gian only renders the exact interaction and returns the user's
+    // explicit response.
     const params = (message.params ?? {}) as Record<string, unknown>;
     const reason = approvalReason(message.method, params);
     const permissionsKind = message.method === 'item/permissions/requestApproval'
@@ -1306,7 +1456,7 @@ export class CodexProxyService {
       // Mirror reason into the legacy `risk` field so older consumers don't
       // regress while the host migrates to `reason` + `severity`.
       risk: reason,
-      scopeOptions: ['once', 'session'],
+      scopeOptions: message.method === REQUEST_USER_INPUT_METHOD ? ['once'] : ['once', 'session'],
       payload: params,
       createdAt: nowIso(),
     };

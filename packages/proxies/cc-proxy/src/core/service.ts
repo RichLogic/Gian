@@ -122,6 +122,10 @@ export class CcProxyService {
       this.handleAssistantText(sessionId, text, itemId);
     });
 
+    this.runtime.on('assistantReasoning', (sessionId, text, itemId) => {
+      this.handleAssistantReasoning(sessionId, text, itemId);
+    });
+
     this.runtime.on('permissionRequest', (sessionId, requestId, toolName, description, inputPreview) => {
       this.handlePermissionRequest(sessionId, requestId, toolName, description, inputPreview);
     });
@@ -148,6 +152,10 @@ export class CcProxyService {
 
     this.runtime.on('tokenUsage', (sessionId, usage) => {
       this.handleTokenUsage(sessionId, usage);
+    });
+
+    this.runtime.on('unknownClaudeEvent', (sessionId, event) => {
+      this.handleUnknownClaudeEvent(sessionId, event);
     });
 
     this.runtime.on('processExited', (sessionId, code, signal, errorDetail) => {
@@ -205,6 +213,12 @@ export class CcProxyService {
       ],
       slashCommands: await listAllSlashCommands(),
     };
+  }
+
+  /** Native permission modes reported by the configured Claude CLI help.
+   *  Empty when the optional runtime probe is unavailable. */
+  getPermissionModes(): string[] {
+    return this.runtime.getPermissionModes?.() ?? [];
   }
 
   async listSlashCommands(cwd?: string): Promise<{ commands: import('@gian/shared').SlashCommand[] }> {
@@ -519,6 +533,19 @@ export class CcProxyService {
     });
   }
 
+  private handleAssistantReasoning(sessionId: string, text: string, itemId: string) {
+    const session = this.sessionsById.get(sessionId);
+    if (!session) return;
+    const context = this.activeTurns.get(sessionId);
+    this.emitEvent('output.reasoning', {
+      requestId: context?.requestId,
+      sessionId: session.id,
+      turnId: context?.turnId ?? session.activeTurnId,
+      data: { text, itemId },
+    });
+  }
+
+
   private handleChannelReply(sessionId: string, text: string) {
     const session = this.sessionsById.get(sessionId);
     if (!session) return;
@@ -700,6 +727,22 @@ export class CcProxyService {
       sessionId: session.id,
       turnId: context?.turnId ?? session.activeTurnId,
       data: { trigger, consecutive, total },
+    });
+  }
+
+  /** Unknown but visible Claude stream-json event. The v2 adapter converts
+   *  this to a generic `activity.updated` so Provider additions never
+   *  disappear silently. */
+  private handleUnknownClaudeEvent(sessionId: string, event: Record<string, unknown>) {
+    const session = this.sessionsById.get(sessionId);
+    if (!session) return;
+
+    const context = this.activeTurns.get(sessionId);
+    this.emitEvent('claude.unknown_event', {
+      requestId: context?.requestId,
+      sessionId: session.id,
+      turnId: context?.turnId ?? session.activeTurnId,
+      data: { event },
     });
   }
 

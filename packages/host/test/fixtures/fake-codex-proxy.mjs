@@ -1,24 +1,21 @@
-// Minimal stdio JSON-RPC fixture for the codex-proxy host.
-// Mirrors the real codex-proxy contract closely enough to exercise multi-session
-// routing: notifications carry `params.sessionId` (the proxy-side session id —
-// equal to the codex `threadId`), and `session.create` returns a unique
-// `session.id` + `session.threadId` pair. There is no sessionKey on the wire.
-
 import { createInterface } from 'node:readline';
 
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const emittedAt = '2026-04-26T00:00:00.000Z';
+let seq = 0;
+const sessions = new Map();
 
 function write(obj) {
-  process.stdout.write(JSON.stringify(obj) + '\n');
+  process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
 
-let seq = 0;
-const sessions = new Map(); // sessionId -> { threadId, cwd, model }
+function result(id, value) {
+  write({ jsonrpc: '2.0', id, result: value });
+}
 
 for await (const line of rl) {
   const trimmed = line.trim();
   if (!trimmed) continue;
-
   let req;
   try {
     req = JSON.parse(trimmed);
@@ -28,103 +25,121 @@ for await (const line of rl) {
 
   switch (req.method) {
     case 'initialize':
-      write({
-        id: req.id,
-        result: { mode: 'spawn', protocolVersion: '0.1.0', methods: ['initialize', 'shutdown'] },
+      result(req.id, {
+        protocol: { name: 'gian.proxy', version: '2.0' },
+        plugin: {
+          id: process.env.GIAN_PLUGIN_ID ?? 'codex',
+          name: 'Codex',
+          version: '0.2.0',
+        },
+        process: { scope: 'shared' },
+        capabilities: { 'session.replay': 1, interaction: 1 },
       });
       break;
-    case 'capabilities.list':
-      write({
-        id: req.id,
-        result: { protocolVersion: '0.1.0', models: [], slashCommands: [] },
+    case 'catalog.list':
+      result(req.id, {
+        catalogRevision: 'codex-fixture-1',
+        input: [{ type: 'text' }],
+        configOptions: [],
+        slashCommands: [],
       });
       break;
     case 'session.create': {
-      const sessionId = `codex_sess_${++seq}`;
-      const threadId = req.params?.threadId ?? `thread_${seq}`;
-      const cwd = req.params?.cwd ?? '/tmp';
-      const model = req.params?.model ?? null;
-      sessions.set(sessionId, { threadId, cwd, model });
-      write({
-        id: req.id,
-        result: {
-          session: {
-            id: sessionId,
-            cwd,
-            threadId,
-            model,
-            thinking: req.params?.thinking ?? null,
-            status: 'idle',
-            createdAt: '2026-04-26T00:00:00.000Z',
-            updatedAt: '2026-04-26T00:00:00.000Z',
-            lastError: null,
-          },
+      const sessionId = req.params.sessionId;
+      const nativeId = req.params.nativeSession?.id ?? `thread_${++seq}`;
+      const cwd = req.params.workspace?.cwd ?? '/tmp';
+      sessions.set(sessionId, { nativeId, cwd, streamId: `stream-${sessionId}` });
+      result(req.id, {
+        session: {
+          id: sessionId,
+          nativeSession: { id: nativeId },
+          streamId: `stream-${sessionId}`,
+          state: 'idle',
+          sessionConfig: req.params.config ?? {},
+          lastError: null,
+          createdAt: emittedAt,
+          updatedAt: emittedAt,
         },
       });
       break;
     }
     case 'turn.start': {
-      const sessionId = req.params?.sessionId;
-      const session = sessions.get(sessionId);
-      const turnId = `turn_${++seq}`;
-      // Fire notifications BEFORE the response so tests can verify routing
-      // while a request is still in flight. Routing is by `params.sessionId`.
+      const sessionId = req.params.sessionId;
+      const turnId = req.params.turnId;
+      const streamId = req.params.streamId;
+      const base = { streamId, sessionId, turnId, sourceTurnId: turnId, emittedAt };
+      result(req.id, { accepted: true, turnId });
       write({
-        method: 'output.text',
+        jsonrpc: '2.0',
+        method: 'turn.started',
+        params: { ...base, eventId: `${turnId}-started`, sequence: 1, data: {} },
+      });
+      write({
+        jsonrpc: '2.0',
+        method: 'content.delta',
         params: {
-          sessionId,
-          turnId,
-          data: { text: `pong from ${sessionId}` },
+          ...base,
+          eventId: `${turnId}-delta`,
+          sequence: 2,
+          data: { contentId: 'c1', kind: 'text', delta: `pong from ${sessionId}` },
         },
       });
       write({
+        jsonrpc: '2.0',
+        method: 'content.completed',
+        params: {
+          ...base,
+          eventId: `${turnId}-done`,
+          sequence: 3,
+          data: { contentId: 'c1', kind: 'text', content: `pong from ${sessionId}` },
+        },
+      });
+      write({
+        jsonrpc: '2.0',
         method: 'turn.completed',
         params: {
-          sessionId,
-          turnId,
-          data: { status: 'completed', result: 'ok' },
-        },
-      });
-      write({
-        id: req.id,
-        result: {
-          session: {
-            id: sessionId,
-            cwd: session?.cwd ?? '/tmp',
-            threadId: session?.threadId ?? null,
-            model: session?.model ?? null,
-            thinking: null,
-            status: 'idle',
-            createdAt: '2026-04-26T00:00:00.000Z',
-            updatedAt: '2026-04-26T00:00:00.000Z',
-            lastError: null,
-          },
-          turn: { id: turnId },
+          ...base,
+          eventId: `${turnId}-end`,
+          sequence: 4,
+          data: { stopReason: 'completed' },
         },
       });
       break;
     }
     case 'session.close': {
-      const sessionId = req.params?.sessionId;
-      const session = sessions.get(sessionId);
-      if (session?.cwd === '/force-busy' && req.params?.force !== true) {
+      const session = sessions.get(req.params.sessionId);
+      if (session?.cwd === '/force-busy') {
         write({
+          jsonrpc: '2.0',
           id: req.id,
-          error: { code: 'SESSION_BUSY', message: 'active turn' },
+          error: {
+            code: -32000,
+            message: 'active turn',
+            data: { domainCode: 'SESSION_BUSY', retryable: false, details: {} },
+          },
         });
         break;
       }
-      sessions.delete(sessionId);
-      write({ id: req.id, result: { ok: true } });
+      sessions.delete(req.params.sessionId);
+      result(req.id, { ok: true });
       break;
     }
+    case 'session.replay':
+      result(req.id, { replayStreamId: 'replay-codex', events: [], nextCursor: null });
+      break;
     case 'shutdown':
-      write({ id: req.id, result: { ok: true } });
+      result(req.id, { ok: true });
       process.exit(0);
+      break;
     default:
       write({
+        jsonrpc: '2.0',
         id: req.id,
-        error: { code: 'METHOD_NOT_FOUND', message: req.method },
+        error: {
+          code: -32601,
+          message: req.method,
+          data: { domainCode: 'METHOD_NOT_FOUND', retryable: false, details: {} },
+        },
       });
   }
 }

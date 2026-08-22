@@ -6,6 +6,7 @@ import {
   parseListNativeSessionsResponse,
   parseSession,
   parseSessionList,
+  parseSideChatInfo,
   parseStateSyncMessage,
 } from '../dist/index.js';
 
@@ -189,4 +190,102 @@ test('CONTRACT-005: native-session REST response has positive and negative runti
   const malformed = structuredClone(fixture);
   malformed.sessions[0].fileSize = '1024';
   assert.throws(() => parseListNativeSessionsResponse(malformed), RuntimeContractError);
+});
+
+// ── Side Chat / Fork amendment (gian.proxy/2.0 proposal §10.2–§10.6) ──────
+
+function sideChatFixture() {
+  return {
+    id: 'sc_01J',
+    parent_session_id: 'session-1',
+    stream_id: 'stream-side-1',
+    state: 'idle',
+    status: 'open',
+    anchor: { type: 'turn', turn_id: 't_parent', source_turn_id: 'provider-turn-parent' },
+    session_config: { execution_mode: 'agent' },
+    last_error: null,
+    uncertain_turn_id: null,
+    events: [],
+    user_inputs: [],
+    created_at: '2026-08-20T08:00:00.000Z',
+    updated_at: '2026-08-20T08:00:00.000Z',
+  };
+}
+
+test('SideChatInfo runtime contract accepts every anchor and lifecycle status (§10.5)', () => {
+  for (const anchor of [
+    { type: 'empty' },
+    { type: 'turn', turn_id: 't', source_turn_id: 'p' },
+    { type: 'activeInput', turn_id: 't', source_turn_id: 'p' },
+  ]) {
+    const fixture = { ...sideChatFixture(), anchor };
+    assert.equal(parseSideChatInfo(fixture), fixture);
+  }
+  for (const status of ['open', 'closing', 'unavailable']) {
+    const fixture = { ...sideChatFixture(), status };
+    assert.equal(parseSideChatInfo(fixture), fixture);
+  }
+});
+
+test('SideChatInfo runtime contract rejects malformed records and resumeRef-free payloads stay valid', () => {
+  const badState = { ...sideChatFixture(), status: 'closed' };
+  assert.throws(() => parseSideChatInfo(badState), error =>
+    error instanceof RuntimeContractError && error.contract === 'SideChatInfo');
+
+  const badAnchor = sideChatFixture();
+  badAnchor.anchor = { type: 'turn', turn_id: 't' }; // source_turn_id required
+  assert.throws(() => parseSideChatInfo(badAnchor), RuntimeContractError);
+
+  const unknownAnchor = sideChatFixture();
+  unknownAnchor.anchor = { type: 'history', turn_id: 't', source_turn_id: 'p' };
+  assert.throws(() => parseSideChatInfo(unknownAnchor), RuntimeContractError);
+});
+
+test('state_sync accepts and preserves the complete sidechats read-model set (§10.5.2)', () => {
+  const fixture = stateSyncFixture();
+  fixture.sidechats = [sideChatFixture()];
+  assert.equal(parseStateSyncMessage(fixture), fixture);
+
+  // Hosts predating the amendment omit the field and stay valid.
+  assert.equal(parseStateSyncMessage(stateSyncFixture()).sidechats, undefined);
+});
+
+test('state_sync rejects an invalid sidechat record inside the snapshot', () => {
+  const fixture = stateSyncFixture();
+  fixture.sidechats = [{ ...sideChatFixture(), parent_session_id: 7 }];
+  assert.throws(() => parseStateSyncMessage(fixture), error =>
+    error instanceof RuntimeContractError && error.contract === 'StateSyncMessage');
+});
+
+test('Session accepts available_actions (§10.3) and fork origin (§10.6)', () => {
+  const fixture = sessionFixture();
+  fixture.available_actions = {
+    'sidechat.create': { enabled: true },
+    'session.fork': { enabled: false, reason: '当前没有可分叉的 Terminal Turn。' },
+  };
+  fixture.origin = {
+    kind: 'fork',
+    session_id: 's_parent',
+    turn_id: 't_anchor',
+    source_turn_id: 'provider-turn-anchor',
+  };
+  assert.equal(parseSession(fixture), fixture);
+
+  // Fork origin always records the exact resolved Terminal boundary, including head.
+  const headOrigin = sessionFixture();
+  headOrigin.origin = {
+    kind: 'fork',
+    session_id: 's_parent',
+    turn_id: 't_head',
+    source_turn_id: 'provider-turn-head',
+  };
+  assert.equal(parseSession(headOrigin), headOrigin);
+
+  const badAvailability = sessionFixture();
+  badAvailability.available_actions = { 'session.fork': { enabled: 'yes' } };
+  assert.throws(() => parseSession(badAvailability), RuntimeContractError);
+
+  const badOrigin = sessionFixture();
+  badOrigin.origin = { kind: 'fork', turn_id: 't' }; // session_id required
+  assert.throws(() => parseSession(badOrigin), RuntimeContractError);
 });

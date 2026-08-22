@@ -1,7 +1,7 @@
 export type ProxySessionStatus =
   | 'idle'
   | 'running'
-  | 'needs-approval'
+  | 'waiting_interaction'
   | 'stale'
   | 'closed'
   | 'error';
@@ -123,10 +123,38 @@ export type GrokCapabilities = KimiCapabilities;
 
 export type ProxyCapabilities = CcCapabilities | CodexCapabilities | KimiCapabilities | GrokCapabilities;
 
+export interface ProxyCatalog {
+  catalogRevision: string;
+  input: Array<{
+    type: 'text' | 'localFile' | 'localImage' | 'skill';
+    enabledWhen?: import('./model.js').ConfigCondition[];
+  }>;
+  configOptions: import('./model.js').ConfigOption[];
+  actions?: import('./sidechat.js').CatalogActionDescriptor[];
+  slashCommands: SlashCommand[];
+}
+
+export interface ResolvedProxyCatalog extends ProxyCatalog {
+  resolvedDefaults: {
+    sessionConfig: Record<string, import('./model.js').ConfigValue>;
+    turnConfig: Record<string, import('./model.js').ConfigValue>;
+  };
+}
+
 export interface InitializeResult {
-  mode: 'spawn';
-  protocolVersion: string;
-  methods: string[];
+  protocol: {
+    name: 'gian.proxy';
+    version: '2.0';
+  };
+  plugin: {
+    id: string;
+    name: string;
+    version: string;
+  };
+  process: {
+    scope: 'shared' | 'session';
+  };
+  capabilities: Record<string, unknown>;
 }
 
 export type InputItem = TextInputItem | LocalImageInputItem | LocalFileInputItem | SkillInputItem;
@@ -185,14 +213,11 @@ export interface SkillInputItem {
 export interface ProxySession {
   id: string;
   cwd: string;
-  model: string | null;
-  status: ProxySessionStatus;
+  state: ProxySessionStatus;
   createdAt: string;
   updatedAt: string;
   lastError: string | null;
   nativeSessionId?: string;
-  configOptions?: import('./model.js').NativeConfigOption[];
-  slashCommands?: SlashCommand[];
 }
 
 export interface JsonRpcSuccessResponse<R = unknown> {
@@ -246,49 +271,43 @@ export interface TokenUsageUpdate {
 
 export const PROXY_METHODS = [
   'initialize',
-  'capabilities.list',
-  'slash.list',
+  'catalog.list',
+  'catalog.resolve',
   'session.create',
   'session.get',
-  'session.setName',
+  'session.rename',
+  'session.native.list',
+  'session.native.delete',
+  'session.replay',
+  'sidechat.create',
+  'sidechat.resume',
+  'sidechat.close',
+  'session.fork',
   'turn.start',
   'turn.interrupt',
   'turn.steer',
-  'approval.respond',
-  'session.snapshot',
+  'interaction.respond',
   'session.close',
   'shutdown',
 ] as const;
 
 export const PROXY_NOTIFICATION_METHODS = [
-  // Turn lifecycle (both proxies)
   'turn.started',
+  'input.recorded',
+  'content.delta',
+  'content.completed',
+  'session.updated',
   'turn.completed',
   'turn.failed',
-  // Approval routing (both proxies)
-  'approval.requested',
-  'approval.resolved',
-  // Diagnostic stream (both proxies, dropped at host edge)
-  'debug',
-  // cc-proxy event stream
-  'output.text',
-  'tool.use',
-  'claude.task',
-  'auto.classifier_denied',
-  'auto.circuit_breaker',
-  'session.rotated',
-  // codex-proxy event stream
-  'output.text.delta',
-  'output.command.delta',
-  'output.reasoning.delta',
-  'output.plan.delta',
-  'output.plan.final',
-  'diff.updated',
-  'codex.agent',
-  // Stats and runtime (both proxies)
-  'token_usage.updated',
   'runtime.error',
-  // Kimi ACP event stream
-  'acp.sessionUpdate',
-  'runtime.stopped',
+  'activity.updated',
+  'step.updated',
+  'request.updated',
+  'interaction.requested',
+  'interaction.resolved',
+  'plan.updated',
+  'diff.updated',
+  'usage.updated',
+  'catalog.changed',
+  'history.changed',
 ] as const;

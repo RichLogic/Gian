@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -77,23 +78,33 @@ export function normalizeInputItems(input: unknown, cwd: string): InputItem[] {
   });
 }
 
-export function toPromptBlocks(input: InputItem[]): ContentBlock[] {
-  return input.map((item): ContentBlock => {
+export async function toPromptBlocks(input: InputItem[]): Promise<ContentBlock[]> {
+  return Promise.all(input.map(async (item): Promise<ContentBlock> => {
     if (item.type === 'text') return { type: 'text', text: item.text };
     const name = ('name' in item && item.name)
       ? item.name
       : item.path.split(/[\\/]/).pop() ?? 'attachment';
-    const mimeType = item.type === 'localImage'
-      ? inferImageMime(item.path, item.mimeType)
-      : item.mimeType;
+    if (item.type === 'localImage') {
+      const mimeType = inferImageMime(item.path, item.mimeType);
+      if (!mimeType) {
+        throw createAppError(400, 'INVALID_IMAGE_TYPE', `Cannot infer an image MIME type for ${item.path}.`);
+      }
+      let bytes: Buffer;
+      try {
+        bytes = await readFile(item.path);
+      } catch (error) {
+        throw createAppError(400, 'IMAGE_READ_FAILED', `Could not read local image ${item.path}: ${String(error)}`);
+      }
+      return { type: 'image', data: bytes.toString('base64'), mimeType };
+    }
     return {
       type: 'resource_link',
       uri: pathToFileURL(item.path).href,
       name,
-      ...(mimeType ? { mimeType } : {}),
+      ...(item.mimeType ? { mimeType: item.mimeType } : {}),
       ...('size' in item && item.size !== undefined ? { size: item.size } : {}),
     };
-  });
+  }));
 }
 
 export function firstText(input: InputItem[]): string {

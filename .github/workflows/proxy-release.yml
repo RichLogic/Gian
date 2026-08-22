@@ -6,7 +6,7 @@ on:
       - 'proxy-claude-v*'
       - 'proxy-codex-v*'
       - 'proxy-kimi-v*'
-      - 'proxy-grok-v*'
+      - 'proxy-dsh-v*'
 
 permissions:
   contents: write
@@ -48,10 +48,10 @@ jobs:
               PACKAGE=@gian/kimi-proxy
               MANIFEST=packages/proxies/kimi-proxy/package.json
               ;;
-            proxy-grok-v*)
-              ID=grok
-              PACKAGE=@gian/grok-proxy
-              MANIFEST=packages/proxies/grok-proxy/package.json
+            proxy-dsh-v*)
+              ID=dsh
+              PACKAGE=@gian/dsh-proxy
+              MANIFEST=packages/proxies/dsh-proxy/package.json
               ;;
             *) exit 1 ;;
           esac
@@ -81,7 +81,11 @@ jobs:
           pnpm --filter @gian/proxy-protocol test
 
       - name: Build and test plugin
-        run: pnpm --filter "${{ steps.plugin.outputs.package }}" test
+        run: |
+          if [ "${{ steps.plugin.outputs.id }}" = "dsh" ]; then
+            pnpm --filter @gian/dsh-bridge test
+          fi
+          pnpm --filter "${{ steps.plugin.outputs.package }}" test
 
       - name: Package plugin
         run: >-

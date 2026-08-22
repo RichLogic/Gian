@@ -177,7 +177,10 @@ export function applyEnvelope(
     if (idx >= 0) {
       const existing = items[idx] as MsgItem;
       const next = items.slice();
-      next[idx] = { ...existing, text: stripSettledActionBlocks(existing.text + chunk) };
+      next[idx] = {
+        ...existing,
+        text: stripSettledActionBlocks(data.delta === false ? chunk : existing.text + chunk),
+      };
       return next;
     }
     const created: MsgItem = {
@@ -564,7 +567,14 @@ export function applyEnvelope(
 
   // ── turn_completed (unified) / turn.started / turn.completed (legacy) ──
   if (ev === 'state.turn-completed') {
-    return ensureTurnEnd(items, env.turn, env.call_id, env.ts);
+    return ensureTurnEnd(
+      items,
+      env.turn,
+      env.call_id,
+      env.ts,
+      typeof data.turnId === 'string' ? data.turnId : undefined,
+      typeof data.sourceTurnId === 'string' ? data.sourceTurnId : undefined,
+    );
   }
 
   // ── user_message — host-side event (not a proxy event, so no normalizer);
@@ -712,17 +722,34 @@ export function ensureTurnEnd(
   turn: number,
   id: string,
   ts: number,
+  turnId?: string,
+  sourceTurnId?: string,
 ): TranscriptItem[] {
+  const boundary = {
+    ...(turnId !== undefined ? { turn_id: turnId } : {}),
+    ...(sourceTurnId !== undefined ? { source_turn_id: sourceTurnId } : {}),
+  };
   const existingIndex = items.findIndex(item => item.kind === 'turn-end' && item.turn === turn);
   if (existingIndex >= 0) {
     const existing = items[existingIndex]!;
+    if (existing.kind !== 'turn-end') return items;
     // Replace the client-only fallback when the canonical provider/history
     // boundary arrives. This preserves one logical boundary while recovering
     // the authoritative id and completion timestamp.
-    if (existing.id.startsWith('session-terminal:') && !id.startsWith('session-terminal:')) {
+    const replaceFallback = existing.id.startsWith('session-terminal:')
+      && !id.startsWith('session-terminal:');
+    const recoverBoundary = (existing.turn_id === undefined && turnId !== undefined)
+      || (existing.source_turn_id === undefined && sourceTurnId !== undefined);
+    if (replaceFallback || recoverBoundary) {
       const next = items.slice();
       next[existingIndex] = {
-        kind: 'turn-end', id, text: `Turn ${turn} · complete`, ts, turn,
+        ...existing,
+        kind: 'turn-end',
+        id: replaceFallback ? id : existing.id,
+        text: `Turn ${turn} · complete`,
+        ts: replaceFallback ? ts : existing.ts,
+        turn,
+        ...boundary,
       };
       return next;
     }
@@ -730,7 +757,7 @@ export function ensureTurnEnd(
   }
   return [
     ...items,
-    { kind: 'turn-end', id, text: `Turn ${turn} · complete`, ts, turn },
+    { kind: 'turn-end', id, text: `Turn ${turn} · complete`, ts, turn, ...boundary },
   ];
 }
 
@@ -1000,6 +1027,62 @@ export function parseApprovalRequested(env: EventEnvelope): ApprovalItem | null 
         }];
       })
     : undefined;
+  const actions = Array.isArray(data.actions)
+    ? (data.actions as unknown[]).flatMap(action => {
+        if (!action || typeof action !== 'object') return [];
+        const value = action as Record<string, unknown>;
+        if (typeof value.id !== 'string' || typeof value.label !== 'string') return [];
+        const style: 'primary' | 'secondary' | 'danger' = value.style === 'primary' || value.style === 'danger'
+          ? value.style
+          : 'secondary';
+        return [{ id: value.id, label: value.label, style }];
+      })
+    : undefined;
+  const inputs = Array.isArray(data.inputs)
+    ? (data.inputs as unknown[]).flatMap(input => {
+        if (!input || typeof input !== 'object') return [];
+        const value = input as Record<string, unknown>;
+        if (typeof value.id !== 'string' || typeof value.label !== 'string') return [];
+        const type: NonNullable<ApprovalItem['inputs']>[number]['type'] = value.type === 'multiline_text'
+          || value.type === 'single_select'
+          || value.type === 'multi_select'
+          || value.type === 'boolean'
+          ? value.type
+          : 'text';
+        return [{
+          id: value.id,
+          type,
+          label: value.label,
+          required: value.required === true,
+          ...(typeof value.description === 'string' ? { description: value.description } : {}),
+          ...(typeof value.sensitive === 'boolean' ? { sensitive: value.sensitive } : {}),
+          ...(typeof value.placeholder === 'string' ? { placeholder: value.placeholder } : {}),
+          ...(typeof value.multiline === 'boolean' ? { multiline: value.multiline } : {}),
+          ...(Array.isArray(value.choices)
+            ? {
+              choices: value.choices.flatMap(choice => {
+                if (!choice || typeof choice !== 'object') return [];
+                const row = choice as Record<string, unknown>;
+                if (typeof row.value !== 'string' || typeof row.displayName !== 'string') return [];
+                return [{ value: row.value, displayName: row.displayName }];
+              }),
+            }
+            : {}),
+        }];
+      })
+    : undefined;
+  const interactionKind = data.interactionKind === 'question'
+    || data.interactionKind === 'choice'
+    || data.interactionKind === 'confirmation'
+    || data.interactionKind === 'permission'
+    ? data.interactionKind
+    : undefined;
+  const tone = data.tone === 'neutral'
+    || data.tone === 'info'
+    || data.tone === 'warning'
+    || data.tone === 'danger'
+    ? data.tone
+    : undefined;
   return {
     kind: 'approval',
     id: env.call_id,
@@ -1014,6 +1097,11 @@ export function parseApprovalRequested(env: EventEnvelope): ApprovalItem | null 
     ...(scopeOptions ? { scopeOptions } : {}),
     ...(planActions && planActions.length > 0 ? { planActions } : {}),
     ...(nativeOptions && nativeOptions.length > 0 ? { nativeOptions } : {}),
+    ...(actions && actions.length > 0 ? { actions } : {}),
+    ...(inputs && inputs.length > 0 ? { inputs } : {}),
+    ...(typeof data.subject === 'string' && data.subject ? { hasSubject: true } : {}),
+    ...(interactionKind ? { interactionKind } : {}),
+    ...(tone ? { tone } : {}),
     ts: env.ts,
     turn: env.turn,
   };

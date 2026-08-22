@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -205,6 +205,139 @@ test('Claude stream result keeps OAuth API errors out of the success channel', a
     await runtime.stop();
     if (oldClaudeBin === undefined) delete process.env.CLAUDE_BIN;
     else process.env.CLAUDE_BIN = oldClaudeBin;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Claude non-zero exits surface bounded stderr as the runtime error detail', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-proxy-stderr-error-'));
+  const fakeClaude = join(dir, 'claude');
+  writeFileSync(fakeClaude, [
+    '#!/usr/bin/env node',
+    "console.error('invalid runtime option from current Claude CLI');",
+    'process.exit(2);',
+  ].join('\n'));
+  chmodSync(fakeClaude, 0o755);
+
+  const oldClaudeBin = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = fakeClaude;
+  const runtime = new ClaudeMcpRuntime();
+  const exited = new Promise<ClaudeRuntimeEvents['processExited']>((resolve) => {
+    runtime.once('processExited', (...args) => resolve(args));
+  });
+  try {
+    await runtime.spawnSession({
+      sessionId: 'session-stderr-error',
+      claudeSessionId: '00000000-0000-4000-8000-000000000082',
+      cwd: dir,
+      model: null,
+      isResume: false,
+    });
+    await runtime.sendMessage('session-stderr-error', 'hello', {
+      permissionMode: 'bypassPermissions',
+    });
+    const [, code, signal, detail] = await exited;
+    assert.equal(code, 2);
+    assert.equal(signal, null);
+    assert.equal(detail, 'invalid runtime option from current Claude CLI');
+  } finally {
+    await runtime.stop();
+    if (oldClaudeBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = oldClaudeBin;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('manual stop isolates late child exits from a replacement session turn', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-proxy-stale-exit-'));
+  const fakeClaude = join(dir, 'claude');
+  const counterPath = join(dir, 'spawn-count');
+  writeFileSync(fakeClaude, [
+    '#!/usr/bin/env node',
+    "const fs = require('node:fs');",
+    "const path = process.env.CLAUDE_STALE_EXIT_COUNTER;",
+    "const count = Number(fs.existsSync(path) ? fs.readFileSync(path, 'utf8') : '0') + 1;",
+    "fs.writeFileSync(path, String(count));",
+    "if (count < 3) {",
+    "  process.on('SIGTERM', () => setTimeout(() => process.exit(0), 100));",
+    "  setInterval(() => undefined, 1_000);",
+    "} else {",
+    "  setTimeout(() => console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'replacement completed' })), 50);",
+    "}",
+  ].join('\n'));
+  chmodSync(fakeClaude, 0o755);
+
+  const oldClaudeBin = process.env.CLAUDE_BIN;
+  const oldCounter = process.env.CLAUDE_STALE_EXIT_COUNTER;
+  process.env.CLAUDE_BIN = fakeClaude;
+  process.env.CLAUDE_STALE_EXIT_COUNTER = counterPath;
+  const runtime = new ClaudeMcpRuntime();
+  const exits: Array<ClaudeRuntimeEvents['processExited']> = [];
+  runtime.on('processExited', (...args) => exits.push(args));
+  const sessionId = 'session-stale-exit';
+  const waitForSpawnCount = async (expected: number) => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const count = existsSync(counterPath) ? Number(readFileSync(counterPath, 'utf8')) : 0;
+      if (count >= expected) return;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error(`fake Claude process ${expected} did not start`);
+  };
+
+  try {
+    const spawn = () => runtime.spawnSession({
+      sessionId,
+      claudeSessionId: '00000000-0000-4000-8000-000000000089',
+      cwd: dir,
+      model: null,
+      isResume: true,
+    });
+
+    await spawn();
+    await runtime.sendMessage(sessionId, 'first turn', { permissionMode: 'bypassPermissions' });
+    await waitForSpawnCount(1);
+    runtime.killSession(sessionId);
+
+    await spawn();
+    await runtime.sendMessage(sessionId, 'replacement turn', { permissionMode: 'bypassPermissions' });
+    await waitForSpawnCount(2);
+    await new Promise(resolve => setTimeout(resolve, 250));
+
+    assert.deepEqual(
+      exits,
+      [],
+      'the stopped child must not report processExited into the replacement registration',
+    );
+    assert.equal(runtime.isSessionAlive(sessionId), true);
+
+    runtime.killSession(sessionId);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.deepEqual(exits, [], 'a removed replacement registration also owns no later exit event');
+
+    await spawn();
+    const activeExit = new Promise<ClaudeRuntimeEvents['processExited']>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('active Claude child did not emit processExited')),
+        1_000,
+      );
+      runtime.once('processExited', (...args) => {
+        clearTimeout(timer);
+        resolve(args);
+      });
+    });
+    await runtime.sendMessage(sessionId, 'ordinary completed turn', {
+      permissionMode: 'bypassPermissions',
+    });
+    await waitForSpawnCount(3);
+    const exit = await activeExit;
+    assert.equal(exit[0], sessionId);
+    assert.equal(exits.length, 1, 'the active registered child still emits one terminal signal');
+  } finally {
+    await runtime.stop();
+    if (oldClaudeBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = oldClaudeBin;
+    if (oldCounter === undefined) delete process.env.CLAUDE_STALE_EXIT_COUNTER;
+    else process.env.CLAUDE_STALE_EXIT_COUNTER = oldCounter;
     rmSync(dir, { recursive: true, force: true });
   }
 });

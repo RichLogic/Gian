@@ -1,6 +1,8 @@
 import type {
   AgentProxyDefaults,
   ApprovalMode,
+  ConfigOption,
+  ConfigValue,
   Executor,
   NativeConfigOption,
   Session,
@@ -31,6 +33,8 @@ export interface CreateSessionInput {
   task_id?: string | null;
   thinking_effort?: ThinkingEffort | null;
   service_tier?: 'fast' | null;
+  session_config?: Record<string, ConfigValue>;
+  turn_config?: Record<string, ConfigValue>;
 }
 
 interface BringUpInput {
@@ -40,11 +44,15 @@ interface BringUpInput {
   model: string | null;
   displayName: string | null;
   executorDefaults?: AgentProxyDefaults;
+  sessionConfig?: Record<string, ConfigValue>;
 }
 
 interface BringUpResult {
   nativeSessionId: string;
   configOptions: NativeConfigOption[];
+  turnConfigOptions?: ConfigOption[];
+  turnConfigRevision?: string;
+  availableActions?: import('@gian/shared').SessionAvailableActions;
 }
 
 interface LifecycleRuntime {
@@ -52,6 +60,28 @@ interface LifecycleRuntime {
   discardProxy(sessionId: string): Promise<void>;
   teardownProxy(sessionId: string): Promise<void>;
   forgetConversationUsage(sessionId: string): void;
+}
+
+function initialTurnConfigFromCreate(
+  explicit: Record<string, ConfigValue> | undefined,
+  options: NativeConfigOption[],
+  roles: {
+    model: string | null;
+    effort: ThinkingEffort | null;
+    approvalMode: ApprovalMode | null;
+    serviceTier: 'fast' | null;
+  },
+): Record<string, ConfigValue> {
+  const config: Record<string, ConfigValue> = { ...(explicit ?? {}) };
+  for (const option of options) {
+    if (option.scope !== 'turn' || config[option.id] !== undefined) continue;
+    if (option.category === 'model' && roles.model) config[option.id] = roles.model;
+    else if (option.category === 'effort' && roles.effort) config[option.id] = roles.effort;
+    else if (option.category === 'approval_mode' && roles.approvalMode) {
+      config[option.id] = roles.approvalMode;
+    } else if (option.category === 'fast') config[option.id] = roles.serviceTier === 'fast';
+  }
+  return config;
 }
 
 function assertApprovalModeAllowed(executor: Executor, mode: ApprovalMode): void {
@@ -163,11 +193,9 @@ export class SessionLifecycleService {
         cwd: workspace.path,
         model: effectiveModel,
         displayName: name,
-        // These are semantic roles owned by Gian's Settings UI, not ACP
-        // config ids. The coordinator resolves each role against the
-        // configOptions returned by this exact Kimi session before applying
-        // the value.
-        ...(usesNativeExecutorConfig(input.executor) && managedDefaults
+        // Semantic roles owned by Gian Settings. The coordinator resolves
+        // each role against this session's catalog before sending config.
+        ...(managedDefaults
           ? {
               executorDefaults: {
                 model: defaultModel,
@@ -176,12 +204,23 @@ export class SessionLifecycleService {
               },
             }
           : {}),
+        ...(input.session_config ? { sessionConfig: input.session_config } : {}),
       });
     } catch (error) {
       await this.runtime.discardProxy(id);
       throw error;
     }
 
+    const initialTurnConfig = initialTurnConfigFromCreate(
+      input.turn_config,
+      proxyResult.configOptions,
+      {
+        model: effectiveModel,
+        effort: effectiveEffort,
+        approvalMode,
+        serviceTier,
+      },
+    );
     this.db
       .prepare(
         `INSERT INTO sessions
@@ -189,12 +228,15 @@ export class SessionLifecycleService {
            executor_config_json, thinking_effort, service_tier, active_channel, status,
            archived, worktree_path, branch, base_branch, worktree_outcome,
            native_session_id, fork_from_session_id, conversation_usage_complete,
-           created_at, updated_at)
+           turn_config_json, turn_config_options_json, turn_config_revision,
+           available_actions_json, created_at, updated_at)
          VALUES
           (@id, @name, @type, @task_id, @workspace_id, @executor, @model,
            @approval_mode, @executor_config_json, @thinking_effort, @service_tier, 'web', 'new',
            0, NULL, NULL, NULL, NULL, @native_session_id,
-           @fork_from_session_id, 1, @now, @now)`,
+           @fork_from_session_id, 1,
+           @turn_config_json, @turn_config_options_json, @turn_config_revision,
+           @available_actions_json, @now, @now)`,
       )
       .run({
         id,
@@ -210,6 +252,14 @@ export class SessionLifecycleService {
         service_tier: serviceTier,
         native_session_id: proxyResult.nativeSessionId,
         fork_from_session_id: null,
+        turn_config_json: JSON.stringify(initialTurnConfig),
+        turn_config_options_json: proxyResult.turnConfigOptions !== undefined
+          ? JSON.stringify(proxyResult.turnConfigOptions)
+          : null,
+        turn_config_revision: proxyResult.turnConfigRevision ?? null,
+        available_actions_json: proxyResult.availableActions
+          ? JSON.stringify(proxyResult.availableActions)
+          : null,
         now,
       });
     this.sessions.setNativeOptions(id, proxyResult.configOptions);

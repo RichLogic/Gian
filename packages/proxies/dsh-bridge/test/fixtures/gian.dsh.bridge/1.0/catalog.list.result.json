@@ -1,0 +1,37 @@
+{
+  "catalogRevision": "fake-catalog-0.1.0-rc.7",
+  "providers": [
+    {
+      "id": "deepseek",
+      "label": "DeepSeek"
+    }
+  ],
+  "models": [
+    {
+      "id": "deepseek-chat",
+      "provider": "deepseek",
+      "label": "DeepSeek Chat"
+    }
+  ],
+  "effortLevels": [
+    "low",
+    "medium",
+    "high"
+  ],
+  "approvalPolicies": [
+    "ask",
+    "never"
+  ],
+  "agentPresets": [
+    "standard",
+    "code",
+    "minimal"
+  ],
+  "slashCommands": [
+    {
+      "name": "/compact",
+      "description": "Compact the session",
+      "source": "builtin"
+    }
+  ]
+}

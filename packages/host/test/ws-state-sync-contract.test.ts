@@ -84,7 +84,10 @@ test('WS-001: auth_ok is followed immediately by one complete, runtime-valid sta
       updated_at: '2026-08-08T00:00:00.000Z',
       pinned_at: null,
     };
-    const sessions = { listSessions: () => [session] } as unknown as SessionManager;
+    const sessions = {
+      listSessions: () => [session],
+      listSidechats: () => [],
+    } as unknown as SessionManager;
     const tasks = { listTasks: () => [task] } as unknown as TaskManager;
     const broadcaster = new WsBroadcaster();
     const approvals = new ApprovalManager(broadcaster);
@@ -112,8 +115,9 @@ test('WS-001: auth_ok is followed immediately by one complete, runtime-valid sta
 
     const sync = parseStateSyncMessage(frames[1]);
     assert.deepEqual(Object.keys(sync).sort(), [
-      'approvals', 'config', 'runner', 'sessions', 'tasks', 'type', 'workspaces',
+      'approvals', 'config', 'runner', 'sessions', 'sidechats', 'tasks', 'type', 'workspaces',
     ]);
+    assert.deepEqual(sync.sidechats, []);
     assert.deepEqual(sync.sessions, [session]);
     assert.deepEqual(sync.tasks, [task]);
     assert.deepEqual(sync.workspaces, db.prepare(

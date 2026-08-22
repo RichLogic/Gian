@@ -97,7 +97,8 @@ describe('OnboardingView', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
     expect(screen.getByRole('heading', { name: 'Initialize your agents' })).toBeInTheDocument();
-    expect(screen.getByText('Grok Build')).toBeInTheDocument();
+    expect(screen.queryByText('Grok Build')).not.toBeInTheDocument();
+    expect(screen.getByText('Codex')).toBeInTheDocument();
   });
 
   it('finishes agent setup and shows the Agent worktree directory', async () => {

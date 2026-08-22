@@ -478,3 +478,263 @@ describe('APR-001: hint chip removed in v3', () => {
     expect(document.querySelectorAll('kbd.kc')).toHaveLength(0);
   });
 });
+
+describe('gian.proxy/2.0 interaction actions and inputs', () => {
+  it('renders Proxy action labels/styles and submits input values', async () => {
+    const user = userEvent.setup();
+    const onApprove = vi.fn();
+    render(<ApprovalCard
+      item={makeApproval({
+        actions: [
+          { id: 'allow_once', label: 'Allow once', style: 'primary' },
+          { id: 'reject_once', label: 'Reject', style: 'danger' },
+        ],
+        inputs: [
+          {
+            id: 'reason',
+            type: 'text',
+            label: 'Reason',
+            required: true,
+          },
+          {
+            id: 'confirmed',
+            type: 'boolean',
+            label: 'Confirmed',
+            required: true,
+          },
+        ],
+      })}
+      onApprove={onApprove}
+    />);
+
+    const allow = screen.getByRole('button', { name: 'Allow once' });
+    expect(allow.className).toContain('primary');
+    expect(screen.getByRole('button', { name: 'Reject' }).className).toContain('danger-ghost');
+    expect(allow).toBeDisabled();
+
+    await user.type(screen.getByLabelText('Reason'), 'looks safe');
+    expect(allow).toBeDisabled();
+    await user.click(screen.getByLabelText('Confirmed'));
+    expect(allow).toBeEnabled();
+    await user.click(allow);
+    expect(onApprove).toHaveBeenCalledWith(
+      'appr-1',
+      'allow_once',
+      { reason: 'looks safe', confirmed: true },
+      { category: 'command', nativeOptionId: 'allow_once' },
+    );
+  });
+
+  it('labels the card head from interactionKind (question/choice/confirmation/permission)', () => {
+    const cases = [
+      ['question', 'Question'],
+      ['choice', 'Choice'],
+      ['confirmation', 'Confirmation'],
+      ['permission', 'Approval'],
+      [undefined, 'Approval'],
+    ] as const;
+    for (const [interactionKind, label] of cases) {
+      const { container, unmount } = render(<ApprovalCard
+        item={makeApproval({
+          interactionKind,
+          actions: [{ id: 'ok', label: 'OK', style: 'primary' }],
+        })}
+        onApprove={vi.fn()}
+      />);
+      expect(container.querySelector('.approval.interaction')).not.toBeNull();
+      expect(container.querySelector('.approval-head')).toHaveTextContent(label);
+      unmount();
+    }
+  });
+
+  it('tints the card root with the tone class', () => {
+    const { container, unmount } = render(<ApprovalCard
+      item={makeApproval({
+        interactionKind: 'permission',
+        tone: 'warning',
+        actions: [{ id: 'ok', label: 'OK', style: 'primary' }],
+      })}
+      onApprove={vi.fn()}
+    />);
+    expect(container.querySelector('.approval.interaction.tone-warning')).not.toBeNull();
+    unmount();
+
+    const { container: danger } = render(<ApprovalCard
+      item={makeApproval({
+        interactionKind: 'permission',
+        tone: 'danger',
+        actions: [{ id: 'ok', label: 'OK', style: 'primary' }],
+      })}
+      onApprove={vi.fn()}
+    />);
+    expect(danger.querySelector('.approval.interaction.tone-danger')).not.toBeNull();
+
+    // neutral tone renders no tone class.
+    const { container: neutral } = render(<ApprovalCard
+      item={makeApproval({
+        interactionKind: 'permission',
+        tone: 'neutral',
+        actions: [{ id: 'ok', label: 'OK', style: 'primary' }],
+      })}
+      onApprove={vi.fn()}
+    />);
+    expect(neutral.querySelector('.approval.interaction')).not.toBeNull();
+    expect(neutral.querySelector('.approval[class*="tone-"]')).toBeNull();
+  });
+
+  it('renders a prose subject as text and a context subject as a mono block', () => {
+    const { container: prose, unmount } = render(<ApprovalCard
+      item={makeApproval({
+        interactionKind: 'question',
+        title: 'What should change?',
+        reason: '',
+        cmd: 'What should change?',
+        actions: [{ id: 'ok', label: 'OK', style: 'primary' }],
+      })}
+      onApprove={vi.fn()}
+    />);
+    expect(prose.querySelector('.approval-prose')).toHaveTextContent('What should change?');
+    expect(prose.querySelector('.approval-cmd')).toBeNull();
+    unmount();
+
+    const { container: mono } = render(<ApprovalCard
+      item={makeApproval({
+        interactionKind: 'permission',
+        cmd: 'Bash\nnpm install',
+        hasSubject: true,
+        actions: [{ id: 'ok', label: 'OK', style: 'primary' }],
+      })}
+      onApprove={vi.fn()}
+    />);
+    expect(mono.querySelector('.approval-cmd')).not.toBeNull();
+    expect(mono.querySelector('.approval-prose')).toBeNull();
+  });
+
+  it('renders single_select as a radio list and gates the action on it', async () => {
+    const user = userEvent.setup();
+    const onApprove = vi.fn();
+    const { container } = render(<ApprovalCard
+      item={makeApproval({
+        interactionKind: 'question',
+        cmd: '',
+        reason: '',
+        actions: [{ id: 'submit', label: 'Submit', style: 'primary' }],
+        inputs: [{
+          id: 'dinner',
+          type: 'single_select',
+          label: 'Pick dinner',
+          required: true,
+          choices: [
+            { value: 'rice', displayName: 'Rice' },
+            { value: 'noodles', displayName: 'Noodles' },
+          ],
+        }],
+      })}
+      onApprove={onApprove}
+    />);
+
+    // Radio list, not a native <select> dropdown.
+    expect(container.querySelector('select')).toBeNull();
+    const radios = container.querySelectorAll('input[type="radio"]');
+    expect(radios).toHaveLength(2);
+
+    const submit = screen.getByRole('button', { name: 'Submit' });
+    expect(submit).toBeDisabled();
+    await user.click(screen.getByLabelText('Rice'));
+    expect(submit).toBeEnabled();
+    await user.click(submit);
+    expect(onApprove).toHaveBeenCalledWith(
+      'appr-1',
+      'allow_once',
+      { dinner: 'rice' },
+      { category: 'command', nativeOptionId: 'submit' },
+    );
+  });
+
+  it('renders multi_select as checkboxes and collects an array answer', async () => {
+    const user = userEvent.setup();
+    const onApprove = vi.fn();
+    const { container } = render(<ApprovalCard
+      item={makeApproval({
+        interactionKind: 'question',
+        cmd: '',
+        reason: '',
+        actions: [{ id: 'submit', label: 'Submit', style: 'primary' }],
+        inputs: [{
+          id: 'toppings',
+          type: 'multi_select',
+          label: 'Pick toppings',
+          required: true,
+          choices: [
+            { value: 'egg', displayName: 'Egg' },
+            { value: 'pork', displayName: 'Pork' },
+          ],
+        }],
+      })}
+      onApprove={onApprove}
+    />);
+
+    expect(container.querySelectorAll('input[type="checkbox"]')).toHaveLength(2);
+    const submit = screen.getByRole('button', { name: 'Submit' });
+    expect(submit).toBeDisabled();
+    await user.click(screen.getByLabelText('Egg'));
+    await user.click(screen.getByLabelText('Pork'));
+    expect(submit).toBeEnabled();
+    await user.click(submit);
+    expect(onApprove).toHaveBeenCalledWith(
+      'appr-1',
+      'allow_once',
+      { toppings: ['egg', 'pork'] },
+      { category: 'command', nativeOptionId: 'submit' },
+    );
+  });
+
+  it('renders an actions-only kimi-shaped question as direct option buttons', async () => {
+    const user = userEvent.setup();
+    const onApprove = vi.fn();
+    const { container } = render(<ApprovalCard
+      item={makeApproval({
+        interactionKind: 'question',
+        title: 'AskUserQuestion',
+        cmd: '',
+        reason: 'Pick dinner',
+        nativeOptions: [
+          { optionId: 'opt-rice', label: 'Rice', kind: 'allow_once' },
+          { optionId: 'opt-noodles', label: 'Noodles', kind: 'allow_once' },
+        ],
+        actions: [
+          { id: 'opt-rice', label: 'Rice', style: 'secondary' },
+          { id: 'opt-noodles', label: 'Noodles', style: 'secondary' },
+        ],
+      })}
+      onApprove={onApprove}
+    />);
+
+    // Unified card, not the legacy KimiQuestionCard radio+Submit flow.
+    expect(container.querySelector('.approval.interaction')).not.toBeNull();
+    expect(container.querySelector('.kimi-question')).toBeNull();
+    expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(0);
+    expect(container.querySelector('.approval-head')).toHaveTextContent('Question');
+
+    // Options answer directly — no prior selection step.
+    const rice = screen.getByRole('button', { name: 'Rice' });
+    expect(rice).toBeEnabled();
+    await user.click(rice);
+    expect(onApprove).toHaveBeenCalledWith(
+      'appr-1',
+      'allow_once',
+      undefined,
+      { category: 'command', nativeOptionId: 'opt-rice' },
+    );
+  });
+
+  it('keeps legacy structured questions on the QuestionCard path (no v2 fields)', () => {
+    const { container } = render(<ApprovalCard
+      item={makeQuestion()}
+      onApprove={vi.fn()}
+    />);
+    expect(container.querySelector('.approval.interaction')).toBeNull();
+    expect(container.querySelector('.question-body')).not.toBeNull();
+    expect(screen.getByText('Pick dinner')).toBeInTheDocument();
+  });
+});

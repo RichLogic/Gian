@@ -1,0 +1,23 @@
+{
+  "name": "@gian/dsh-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ai.deepseek.harness — shared-scope Gian Proxy translating gian.proxy/2.0 over gian.dsh.bridge/1.0",
+  "type": "module",
+  "main": "./dist/src/cli/spawn.js",
+  "scripts": {
+    "build": "pnpm run clean && tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "node dist/src/cli/spawn.js",
+    "test": "pnpm run build && node --test 'dist/test/**/*.test.js'",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@gian/proxy-protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.2",
+    "typescript": "^5.9.3"
+  }
+}

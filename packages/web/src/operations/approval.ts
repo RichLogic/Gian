@@ -29,7 +29,7 @@ export interface ApprovalResolveInput {
   approvalId: string;
   decision: ApprovalDecision;
   /** Structured answers for AskUserQuestion-flavored approvals. */
-  answers?: Record<string, string | string[]>;
+  answers?: Record<string, string | boolean | string[]>;
   /** Exact executor option for ACP-native approvals. */
   nativeOptionId?: string;
 }

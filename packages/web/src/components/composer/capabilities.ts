@@ -2,14 +2,20 @@ import type {
   ApprovalMode,
   CcModelCapabilities,
   CodexModelCapabilities,
+  ConfigCondition,
+  ConfigOption,
+  ConfigValue,
   Executor,
   NativeConfigChoice,
   NativeConfigOption,
+  ProxyCapabilities,
   ProxyModeCapabilities,
+  Session,
   SlashCommand,
   SlashCommandSource,
   ThinkingEffort,
 } from '@gian/shared';
+import { isApprovalMode, usesNativeExecutorConfig } from '@gian/shared';
 import { loadProxyCapabilities, loadProxyModels, loadSlashCommands } from '../../api.js';
 
 export type ProxyModel = CcModelCapabilities | CodexModelCapabilities;
@@ -56,6 +62,383 @@ export function getModesCached(executor: 'claude' | 'codex'): ProxyModeCapabilit
   return modeCache.get(executor);
 }
 
+/** Proxy-advertised approval_mode choices, or the legacy `modes` list. */
+export function modesFromCapabilities(
+  capabilities: Pick<ProxyCapabilities, 'modes'> & { configOptions?: ConfigOption[] },
+): ProxyModeCapabilities[] {
+  const option = capabilities.configOptions?.find(entry => entry.role === 'approval_mode');
+  if (option?.choices && option.choices.length > 0) {
+    return option.choices.map(choice => ({
+      id: String(choice.value),
+      label: choice.displayName,
+      description: choice.description ?? '',
+      isDefault: Object.is(choice.value, option.defaultValue),
+    }));
+  }
+  return capabilities.modes ?? [];
+}
+
+/** `undefined` when initialize capabilities were not included in the payload. */
+export function steerAdvertised(capabilities: unknown): boolean | undefined {
+  if (!capabilities || typeof capabilities !== 'object') return undefined;
+  const advertised = (capabilities as { capabilities?: Record<string, unknown> }).capabilities;
+  if (!advertised) return undefined;
+  return advertised['turn.steer'] !== undefined;
+}
+
+const steerCache = new Map<Executor, boolean | undefined>();
+const steerPromises = new Map<Executor, Promise<boolean | undefined>>();
+
+export interface ComposerCatalog {
+  catalogRevision?: string;
+  configOptions: ConfigOption[];
+  input: Array<{ type: string; enabledWhen?: ConfigCondition[] }>;
+  slashCommands: SlashCommand[];
+  /**
+   * Catalog View support declarations for Gian standard Actions (gian.proxy/2.0
+   * proposal §9.4). Absent on catalogs from Proxies predating the amendment —
+   * treated as "not declared", equivalent to `supported:false` (§9.4: 缺失的
+   * 已知 Action 与 supported:false 等价). `catalog.changed` wholesale-replaces
+   * the array, never merges.
+   */
+  actions?: CatalogActionDescriptor[];
+  resolveAdvertised?: boolean;
+}
+
+/**
+ * One `catalog.list`/`catalog.resolve` Action Descriptor (proposal §9.4):
+ * `id` and `supported` are required; `reason` is optional and only used for
+ * greyed-out display.
+ */
+export interface CatalogActionDescriptor {
+  id: string;
+  supported: boolean;
+  reason?: string;
+}
+
+/** Known standard Action ids (proposal §9.4). Unknown ids in a catalog are
+ *  parsed but ignored by gating (forward compatibility, §9.4). */
+export const KNOWN_CATALOG_ACTION_IDS = [
+  'sidechat.create',
+  'session.fork',
+  'session.fork.atTurn',
+] as const;
+
+export type KnownCatalogActionId = typeof KNOWN_CATALOG_ACTION_IDS[number];
+
+const EMPTY_CATALOG: ComposerCatalog = { configOptions: [], input: [], slashCommands: [] };
+const catalogCache = new Map<Executor, ComposerCatalog>();
+const catalogPromises = new Map<Executor, Promise<ComposerCatalog>>();
+
+/** Roles that already have a dedicated Composer slot. */
+export const PLACED_CATALOG_ROLES = new Set([
+  'model',
+  'effort',
+  'fast',
+  'approval_mode',
+  'execution_mode',
+]);
+
+export function mergeTurnCatalog(
+  processOptions: ConfigOption[],
+  sessionTurnOptions: ConfigOption[] | undefined,
+): ConfigOption[] {
+  if (sessionTurnOptions === undefined) return processOptions;
+  return [
+    ...processOptions.filter((option) => option.binding === 'session'),
+    ...sessionTurnOptions,
+  ];
+}
+
+export function optionByRole(
+  options: ConfigOption[],
+  role: string,
+): ConfigOption | undefined {
+  return options.find((option) => option.role === role);
+}
+
+export function modelsFromCatalog(option: ConfigOption | undefined): ProxyModel[] {
+  if (!option?.choices?.length) return [];
+  return option.choices.map((choice) => ({
+    id: String(choice.value),
+    model: String(choice.value),
+    displayName: choice.displayName,
+    description: choice.description ?? '',
+    hidden: false,
+    isDefault: Object.is(choice.value, option.defaultValue),
+    defaultEffort: null,
+    supportedEfforts: [],
+    defaultThinking: null,
+    supportedThinking: [],
+  }));
+}
+
+export function applyResolvedDefaults(
+  values: Record<string, ConfigValue>,
+  defaults: Record<string, ConfigValue> | undefined,
+): Record<string, ConfigValue> {
+  if (!defaults) return values;
+  const next = { ...values };
+  for (const [id, value] of Object.entries(defaults)) {
+    if (next[id] === undefined) next[id] = value;
+  }
+  return next;
+}
+
+export function createConfigsFromCatalog(
+  executor: Executor,
+  options: ConfigOption[],
+  values: Record<string, ConfigValue>,
+): {
+  model?: string;
+  thinkingEffort?: ThinkingEffort | null;
+  approvalMode?: ApprovalMode | null;
+  serviceTier?: 'fast' | null;
+  session_config: Record<string, ConfigValue>;
+  turn_config: Record<string, ConfigValue>;
+} {
+  const session_config: Record<string, ConfigValue> = {};
+  const turn_config: Record<string, ConfigValue> = {};
+  let model: string | undefined;
+  let thinkingEffort: ThinkingEffort | null | undefined;
+  let approvalMode: ApprovalMode | null | undefined;
+  let serviceTier: 'fast' | null | undefined;
+  for (const option of options) {
+    const value = values[option.id];
+    if (value === undefined) continue;
+    if (option.binding === 'session') session_config[option.id] = value;
+    else turn_config[option.id] = value;
+    if (option.role === 'model' && value != null && value !== '') model = String(value);
+    else if (option.role === 'effort') {
+      thinkingEffort = value == null ? null : String(value);
+    } else if (option.role === 'approval_mode' && isApprovalMode(value)
+      && !usesNativeExecutorConfig(executor)) {
+      approvalMode = value;
+    } else if (option.role === 'fast') {
+      serviceTier = value === true ? 'fast' : null;
+    }
+  }
+  return {
+    ...(model ? { model } : {}),
+    ...(thinkingEffort !== undefined ? { thinkingEffort } : {}),
+    ...(approvalMode !== undefined ? { approvalMode } : {}),
+    ...(serviceTier !== undefined ? { serviceTier } : {}),
+    session_config,
+    turn_config,
+  };
+}
+
+export function conditionsMatch(
+  conditions: ConfigCondition[] | undefined,
+  values: Record<string, ConfigValue>,
+): boolean {
+  if (!conditions || conditions.length === 0) return true;
+  return conditions.every(condition =>
+    condition.oneOf.some(candidate => Object.is(candidate, values[condition.optionId])));
+}
+
+export function optionVisible(
+  option: Pick<ConfigOption, 'visibleWhen'>,
+  values: Record<string, ConfigValue>,
+): boolean {
+  return conditionsMatch(option.visibleWhen, values);
+}
+
+export function optionEnabled(
+  option: Pick<ConfigOption, 'enabledWhen'>,
+  values: Record<string, ConfigValue>,
+): boolean {
+  return conditionsMatch(option.enabledWhen, values);
+}
+
+export function composerConfigValues(
+  session: Pick<
+    Session,
+    'turn_config' | 'executor_config' | 'model' | 'thinking_effort' | 'approval_mode' | 'service_tier'
+  >,
+  options: ConfigOption[],
+): Record<string, ConfigValue> {
+  const values: Record<string, ConfigValue> = {
+    ...(session.executor_config?.values ?? {}),
+    ...(session.turn_config ?? {}),
+  };
+  for (const option of options) {
+    if (values[option.id] !== undefined) continue;
+    if (option.role === 'model' && session.model != null && session.model !== '') {
+      values[option.id] = session.model;
+    } else if (option.role === 'effort' && session.thinking_effort != null) {
+      values[option.id] = session.thinking_effort;
+    } else if (option.role === 'approval_mode' && session.approval_mode != null) {
+      values[option.id] = session.approval_mode;
+    } else if (option.role === 'fast') {
+      values[option.id] = session.service_tier === 'fast';
+    } else if (option.defaultValue !== undefined) {
+      values[option.id] = option.defaultValue;
+    }
+  }
+  return values;
+}
+
+export function runtimeCatalogOptions(
+  options: ConfigOption[],
+  values: Record<string, ConfigValue>,
+): ConfigOption[] {
+  return options
+    .filter(option => option.binding === 'turn')
+    .filter(option => !option.role || !PLACED_CATALOG_ROLES.has(option.role))
+    .filter(option => optionVisible(option, values))
+    .sort((left, right) => (left.presentation?.order ?? 0) - (right.presentation?.order ?? 0));
+}
+
+export function inputTypeAdvertised(
+  catalog: ComposerCatalog,
+  type: string,
+  values: Record<string, ConfigValue>,
+): boolean {
+  const descriptor = catalog.input.find(entry => entry.type === type);
+  if (!descriptor) return false;
+  return conditionsMatch(descriptor.enabledWhen, values);
+}
+
+function isConfigCondition(value: unknown): value is ConfigCondition {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as { optionId?: unknown; oneOf?: unknown };
+  return typeof record.optionId === 'string' && Array.isArray(record.oneOf);
+}
+
+function isConfigOption(value: unknown): value is ConfigOption {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as ConfigOption;
+  return typeof record.id === 'string'
+    && (record.binding === 'session' || record.binding === 'turn')
+    && (record.control === 'select' || record.control === 'boolean'
+      || record.control === 'number' || record.control === 'text')
+    && typeof record.required === 'boolean';
+}
+
+function isSlashCommand(value: unknown): value is SlashCommand {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as SlashCommand;
+  return typeof record.name === 'string' && typeof record.description === 'string';
+}
+
+/** Defensive guard for one catalog `actions[]` descriptor (proposal §9.4):
+ *  `id` and `supported` required; `reason` kept only when it is a string. */
+function isActionDescriptor(value: unknown): value is CatalogActionDescriptor {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as CatalogActionDescriptor;
+  return typeof record.id === 'string' && typeof record.supported === 'boolean';
+}
+
+export function catalogFromCapabilities(raw: unknown): ComposerCatalog {
+  if (!raw || typeof raw !== 'object') return { ...EMPTY_CATALOG };
+  const record = raw as {
+    catalogRevision?: unknown;
+    configOptions?: unknown;
+    input?: unknown;
+    actions?: unknown;
+    slashCommands?: unknown;
+    capabilities?: Record<string, unknown>;
+  };
+  return {
+    catalogRevision: typeof record.catalogRevision === 'string' ? record.catalogRevision : undefined,
+    configOptions: Array.isArray(record.configOptions)
+      ? record.configOptions.filter(isConfigOption)
+      : [],
+    input: Array.isArray(record.input)
+      ? record.input.flatMap((entry): ComposerCatalog['input'] => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+        const item = entry as { type?: unknown; enabledWhen?: unknown };
+        if (typeof item.type !== 'string') return [];
+        const enabledWhen = Array.isArray(item.enabledWhen)
+          ? item.enabledWhen.filter(isConfigCondition)
+          : undefined;
+        return [{ type: item.type, ...(enabledWhen ? { enabledWhen } : {}) }];
+      })
+      : [],
+    slashCommands: Array.isArray(record.slashCommands)
+      ? record.slashCommands.filter(isSlashCommand)
+      : [],
+    // `actions` stays undefined when the field is absent — a legacy catalog
+    // — and becomes a (possibly empty) parsed array when the Proxy declares
+    // it. Malformed entries are dropped; a non-string `reason` is stripped.
+    ...(record.actions !== undefined
+      ? {
+          actions: (Array.isArray(record.actions) ? record.actions : [])
+            .filter(isActionDescriptor)
+            .map(descriptor => ({
+              id: descriptor.id,
+              supported: descriptor.supported,
+              ...(typeof descriptor.reason === 'string' ? { reason: descriptor.reason } : {}),
+            })),
+        }
+      : {}),
+    resolveAdvertised: record.capabilities?.['catalog.resolve'] !== undefined,
+  };
+}
+
+export function getCatalogCached(executor: Executor): ComposerCatalog | undefined {
+  return catalogCache.get(executor);
+}
+
+export function fetchCatalogCached(executor: Executor): Promise<ComposerCatalog> {
+  const hit = catalogCache.get(executor);
+  if (hit) return Promise.resolve(hit);
+  const inflight = catalogPromises.get(executor);
+  if (inflight) return inflight;
+  const request = Promise.resolve()
+    .then(() => loadProxyCapabilities(executor))
+    .then(raw => {
+      const catalog = catalogFromCapabilities(raw);
+      catalogCache.set(executor, catalog);
+      catalogPromises.delete(executor);
+      if (executor === 'claude' || executor === 'codex') {
+        const modes = modesFromCapabilities(raw);
+        if (modes.length > 0) modeCache.set(executor, modes);
+      }
+      const advertised = steerAdvertised(raw);
+      if (advertised !== undefined) steerCache.set(executor, advertised);
+      return catalog;
+    })
+    .catch(error => {
+      catalogPromises.delete(executor);
+      throw error;
+    });
+  catalogPromises.set(executor, request);
+  return request;
+}
+
+export function fetchSteerCached(executor: Executor): Promise<boolean | undefined> {
+  if (steerCache.has(executor)) return Promise.resolve(steerCache.get(executor));
+  const inflight = steerPromises.get(executor);
+  if (inflight) return inflight;
+  const request = Promise.resolve()
+    .then(() => loadProxyCapabilities(executor))
+    .then(capabilities => {
+      const advertised = steerAdvertised(capabilities);
+      steerCache.set(executor, advertised);
+      steerPromises.delete(executor);
+      return advertised;
+    })
+    .catch(error => {
+      steerPromises.delete(executor);
+      throw error;
+    });
+  steerPromises.set(executor, request);
+  return request;
+}
+
+export function clearComposerCapabilityCaches(): void {
+  modelCache.clear();
+  modelPromises.clear();
+  modeCache.clear();
+  modePromises.clear();
+  steerCache.clear();
+  steerPromises.clear();
+  catalogCache.clear();
+  catalogPromises.clear();
+}
+
 export function fetchModesCached(executor: 'claude' | 'codex'): Promise<ProxyModeCapabilities[]> {
   const hit = modeCache.get(executor);
   if (hit) return Promise.resolve(hit);
@@ -66,7 +449,7 @@ export function fetchModesCached(executor: 'claude' | 'codex'): Promise<ProxyMod
   const request = Promise.resolve()
     .then(() => loadProxyCapabilities(executor))
     .then(capabilities => {
-      const modes = capabilities.modes ?? [];
+      const modes = modesFromCapabilities(capabilities);
       modeCache.set(executor, modes);
       modePromises.delete(executor);
       return modes;
@@ -240,11 +623,13 @@ export const CODEX_APPROVALS: ComposerModeOption[] = [
 /** Mode dropdown rows: proxy-advertised modes once capabilities resolve, the
  *  built-in fallback list before that. */
 export function composerModeOptions(
-  executor: 'claude' | 'codex',
+  executor: Executor,
   modes: ProxyModeCapabilities[] | undefined,
 ): ComposerModeOption[] {
   if (!modes || modes.length === 0) {
-    return executor === 'codex' ? CODEX_APPROVALS : CLAUDE_MODES;
+    if (executor === 'codex') return CODEX_APPROVALS;
+    if (executor === 'claude') return CLAUDE_MODES;
+    return [];
   }
   const i18n = executor === 'codex' ? CODEX_MODE_I18N : CLAUDE_MODE_I18N;
   return modes.map(mode => ({
@@ -259,8 +644,8 @@ export function composerModeOptions(
 
 /** Collapsed dropdown button label for the active mode. */
 export function composerModeLabel(
-  executor: 'claude' | 'codex',
-  mode: ApprovalMode,
+  executor: Executor,
+  mode: string,
   modes: ProxyModeCapabilities[] | undefined,
   t: (key: string) => string,
 ): string {
@@ -285,7 +670,7 @@ function codexEffortLabel(level: ThinkingEffort | null): string {
 }
 
 export function effortLabel(
-  executor: Exclude<Executor, 'kimi'>,
+  executor: Executor,
   level: ThinkingEffort | null,
 ): string {
   if (!level) return '';
@@ -313,7 +698,13 @@ export function nativeOptionRole(option: NativeConfigOption): NativeOptionRole |
     || id === 'effort'
     || id === 'reasoning_effort'
   ) return 'effort';
-  if (category === 'mode' || id === 'mode' || id === 'permission_mode') return 'mode';
+  if (
+    category === 'mode'
+    || category === 'approval_mode'
+    || id === 'mode'
+    || id === 'permission_mode'
+    || id === 'approval_mode'
+  ) return 'mode';
   return null;
 }
 

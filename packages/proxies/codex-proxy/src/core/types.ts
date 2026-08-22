@@ -1,13 +1,14 @@
-// Per-turn execution policy primitives. These map 1:1 to codex's
-// TurnStartParams fields (codex app-server v2 protocol).
+// Provider-native per-turn configuration primitives. These map 1:1 to
+// Codex app-server TurnStartParams fields and remain independent controls.
 //
 // `SandboxMode`        — what writes / network the sandbox allows
 // `ApprovalPolicy`     — when codex asks for approval
 // `ApprovalsReviewer`  — who reviews approvals (user vs auto_review subagent)
-// `CollaborationMode`  — codex's behavioral mode (plan vs default execution)
+// `CollaborationModeKind` — the Gian catalog choice.
+// `CollaborationMode`     — the structured app-server v2 payload.
 //
-// Host's ApprovalMode (plan/ask/auto) maps to combinations of these. The
-// proxy itself does not know about ApprovalMode — it just transmits.
+// The gian.proxy/2 catalog exposes them directly; Gian does not bundle them
+// into a cross-provider permission mode.
 
 export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 
@@ -28,7 +29,16 @@ export type ApprovalPolicy =
 
 export type ApprovalsReviewer = 'user' | 'auto_review' | 'guardian_subagent';
 
-export type CollaborationMode = 'plan' | 'default';
+export type CollaborationModeKind = 'plan' | 'default';
+
+export interface CollaborationMode {
+  mode: CollaborationModeKind;
+  settings: {
+    model: string;
+    reasoning_effort: ThinkingLevel | null;
+    developer_instructions: string | null;
+  };
+}
 
 export type SessionStatus = 'idle' | 'running' | 'needs-approval' | 'stale' | 'closed' | 'error';
 /** Opaque Codex effort id returned by model/list. */
@@ -191,7 +201,7 @@ export interface StartTurnParams {
   approvalsReviewer?: ApprovalsReviewer | null;
   /** Codex's behavioral mode. `plan` constrains the agent to exploration +
    *  planning even when the sandbox would allow writes. */
-  collaborationMode?: CollaborationMode | null;
+  collaborationMode?: CollaborationModeKind | null;
   reasoningSummary?: 'none' | 'auto' | 'concise' | 'detailed' | null;
   serviceTier?: 'fast' | 'flex' | null;
 }
@@ -210,6 +220,9 @@ export interface ApprovalResponseParams {
   approvalId: string;
   decision: ApprovalDecision;
   scope?: ApprovalScope;
+  /** Structured answers returned by Gian's question card, keyed by Codex's
+   *  stable question ids from `item/tool/requestUserInput`. */
+  answers?: Record<string, string | string[]>;
 }
 
 export interface SessionSnapshotParams {

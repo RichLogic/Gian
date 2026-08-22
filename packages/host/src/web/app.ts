@@ -41,22 +41,27 @@ export interface AppContext {
   dataDir: string;
   hostVersion?: string;
   ccProxyEntry: string;
-  claudeProxyProtocolV1?: {
+  claudeProxy?: {
     pluginVersion: string;
     processScope: 'shared' | 'session';
   };
   codexProxyEntry?: string;
-  codexProxyProtocolV1?: {
+  codexProxy?: {
     pluginVersion: string;
     processScope: 'shared' | 'session';
   };
   kimiProxyEntry?: string;
-  kimiProxyProtocolV1?: {
+  kimiProxy?: {
     pluginVersion: string;
     processScope: 'shared' | 'session';
   };
   grokProxyEntry?: string;
-  grokProxyProtocolV1?: {
+  grokProxy?: {
+    pluginVersion: string;
+    processScope: 'shared' | 'session';
+  };
+  dshProxyEntry?: string;
+  dshProxy?: {
     pluginVersion: string;
     processScope: 'shared' | 'session';
   };
@@ -84,13 +89,15 @@ export function createApp(ctx: AppContext): AppHandle {
     dataDir: ctx.dataDir,
     hostVersion: ctx.hostVersion,
     ccProxyEntry: ctx.ccProxyEntry,
-    claudeProxyProtocolV1: ctx.claudeProxyProtocolV1,
+    claudeProxy: ctx.claudeProxy,
     codexProxyEntry: ctx.codexProxyEntry,
-    codexProxyProtocolV1: ctx.codexProxyProtocolV1,
+    codexProxy: ctx.codexProxy,
     kimiProxyEntry: ctx.kimiProxyEntry,
-    kimiProxyProtocolV1: ctx.kimiProxyProtocolV1,
+    kimiProxy: ctx.kimiProxy,
     grokProxyEntry: ctx.grokProxyEntry,
-    grokProxyProtocolV1: ctx.grokProxyProtocolV1,
+    grokProxy: ctx.grokProxy,
+    dshProxyEntry: ctx.dshProxyEntry,
+    dshProxy: ctx.dshProxy,
     codexBin: ctx.codexBin,
     runtimeManager: ctx.runtimeManager,
   });
@@ -133,10 +140,7 @@ export function createApp(ctx: AppContext): AppHandle {
   // we resume picking up external CLI appends after a host restart. New
   // sessions get watched lazily inside SessionManager.bringUpProxySession.
   bootJsonlWatchers(ctx.db, watcher, {
-    executors: [
-      ...(ctx.claudeProxyProtocolV1 ? [] : ['claude' as const]),
-      ...(ctx.codexProxyProtocolV1 ? [] : ['codex' as const]),
-    ],
+    executors: [],
   });
 
   // Break the circular dependency: ApprovalManager needs to call back into

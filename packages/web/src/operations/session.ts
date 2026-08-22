@@ -21,11 +21,13 @@
  */
 import type {
   ApprovalMode,
+  ConfigValue,
   Executor,
   NativeConfigValue,
   Session,
   ThinkingEffort,
 } from '@gian/shared';
+import { usesNativeExecutorConfig } from '@gian/shared';
 
 import { dropSession, mergeSession } from '../api.js';
 import { toast } from '../feedback.js';
@@ -134,6 +136,23 @@ const sessionAssignTask: OperationDefinition<SessionIdInput & { taskId: string }
   timeoutMs: WS_TIMEOUT_MS,
 };
 
+const sessionSetTurnConfig: OperationDefinition<SessionIdInput & {
+  optionId: string;
+  value: ConfigValue;
+  turnConfig: Record<string, ConfigValue>;
+}> = {
+  policy: 'optimistic',
+  entityKey: input => sessionEntityKey(input.sessionId),
+  optimisticWrites: input => [{ field: 'turn_config', value: input.turnConfig }],
+  buildMessage: input => ({
+    type: 'session:set_turn_config',
+    session_id: input.sessionId,
+    option_id: input.optionId,
+    value: input.value,
+  }),
+  timeoutMs: WS_TIMEOUT_MS,
+};
+
 const sessionSetNativeConfig: OperationDefinition<SessionIdInput & { configId: string; value: NativeConfigValue }> = {
   policy: 'pending',
   // Per-option key: changing two different options of one session is not a
@@ -160,6 +179,8 @@ export interface SessionCreateInput {
   approvalMode?: ApprovalMode | null;
   thinkingEffort?: ThinkingEffort | null;
   serviceTier?: 'fast' | null;
+  sessionConfig?: Record<string, ConfigValue>;
+  turnConfig?: Record<string, ConfigValue>;
 }
 
 const sessionCreate: OperationDefinition<SessionCreateInput> = {
@@ -173,9 +194,17 @@ const sessionCreate: OperationDefinition<SessionCreateInput> = {
     executor: input.executor,
     ...(input.name ? { name: input.name } : {}),
     ...(input.model ? { model: input.model } : {}),
-    ...(input.executor !== 'kimi' && input.approvalMode ? { approval_mode: input.approvalMode } : {}),
+    ...(input.approvalMode && !usesNativeExecutorConfig(input.executor)
+      ? { approval_mode: input.approvalMode }
+      : {}),
     ...(input.thinkingEffort ? { thinking_effort: input.thinkingEffort } : {}),
     ...(input.executor === 'codex' && input.serviceTier === 'fast' ? { service_tier: 'fast' as const } : {}),
+    ...(input.sessionConfig && Object.keys(input.sessionConfig).length > 0
+      ? { session_config: input.sessionConfig }
+      : {}),
+    ...(input.turnConfig && Object.keys(input.turnConfig).length > 0
+      ? { turn_config: input.turnConfig }
+      : {}),
   }),
   timeoutMs: CREATE_TIMEOUT_MS,
 };
@@ -202,10 +231,14 @@ const sessionFork: OperationDefinition<SessionForkInput> = {
   timeoutMs: CREATE_TIMEOUT_MS,
 };
 
-const sessionDelete: OperationDefinition<SessionIdInput> = {
+const sessionDelete: OperationDefinition<SessionIdInput & { confirmedSidechatIds?: string[] }> = {
   policy: 'pending',
   entityKey: input => sessionEntityKey(input.sessionId),
-  buildMessage: input => ({ type: 'session:delete', session_id: input.sessionId }),
+  buildMessage: input => ({
+    type: 'session:delete',
+    session_id: input.sessionId,
+    ...(input.confirmedSidechatIds ? { confirmed_sidechat_ids: input.confirmedSidechatIds } : {}),
+  }),
   timeoutMs: WS_TIMEOUT_MS,
 };
 
@@ -257,6 +290,7 @@ registry.register('session.setEffort', sessionSetEffort);
 registry.register('session.setServiceTier', sessionSetServiceTier);
 registry.register('session.assignTask', sessionAssignTask);
 registry.register('session.setNativeConfig', sessionSetNativeConfig);
+registry.register('session.setTurnConfig', sessionSetTurnConfig);
 registry.register('session.create', sessionCreate);
 registry.register('session.fork', sessionFork);
 registry.register('session.delete', sessionDelete);
@@ -277,6 +311,7 @@ const SESSION_OVERLAY_FIELDS = new Set([
   'service_tier',
   'type',
   'task_id',
+  'turn_config',
 ]);
 
 /**

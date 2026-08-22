@@ -49,7 +49,11 @@ async function reserveE2ePorts() {
   return ports;
 }
 
-export function createE2eEnvironment(source, { dataDir, hostPort, webPort }) {
+export function createE2eEnvironment(
+  source,
+  { dataDir, hostPort, webPort },
+  { proxyMock = false } = {},
+) {
   const clean = sanitizedTestEnv(source);
   delete clean.FORCE_COLOR;
   delete clean.NO_COLOR;
@@ -64,6 +68,22 @@ export function createE2eEnvironment(source, { dataDir, hostPort, webPort }) {
     GIAN_PORT: String(hostPort),
     GIAN_SKIP_PROXY_WARMUP: '1',
     GIAN_WEB_PORT: String(webPort),
+    ...(proxyMock ? {
+      GIAN_E2E_PROXY_MOCK: '1',
+      GIAN_CODEX_PROXY_ENTRY: join(
+        rootDir,
+        'packages',
+        'proxies',
+        'codex-proxy',
+        'scripts',
+        'fake-catalog-ui-proxy.mjs',
+      ),
+      // The mock never executes the vendor binary. Git is an existing,
+      // executable fixture whose `--version` output contains a plain SemVer,
+      // so Agent discovery can exercise the normal readiness path without
+      // touching Codex or consuming a model turn.
+      CODEX_BIN: '/usr/bin/git',
+    } : {}),
   };
 }
 
@@ -181,10 +201,16 @@ function interruptedExitCode(signal) {
 }
 
 export async function main(args = process.argv.slice(2)) {
+  const proxyMock = args.includes('--proxy-mock');
+  args = args.filter(arg => arg !== '--proxy-mock');
   const dataDir = await mkdtemp(join(tmpdir(), 'gian-e2e-'));
   startJanitor(dataDir);
   const [hostPort, webPort] = await reserveE2ePorts();
-  const env = createE2eEnvironment(process.env, { dataDir, hostPort, webPort });
+  const env = createE2eEnvironment(
+    process.env,
+    { dataDir, hostPort, webPort },
+    { proxyMock },
+  );
   const command = pnpmInvocation(['exec', 'playwright', 'test', ...args]);
   let host;
   let playwright;

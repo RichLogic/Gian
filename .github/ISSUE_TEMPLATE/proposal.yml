@@ -1,0 +1,49 @@
+name: Proposal
+description: Discuss a product direction or a decision before implementation
+title: "[Proposal] "
+labels:
+  - proposal
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: 背景
+      description: 为什么现在需要讨论这个问题？
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 要做的决定
+      description: 用一句可回答的问题定义本次讨论。
+    validations:
+      required: true
+
+  - type: textarea
+    id: options
+    attributes:
+      label: 候选方案
+      description: 列出已知方案及主要取舍。
+    validations:
+      required: true
+
+  - type: textarea
+    id: recommendation
+    attributes:
+      label: 当前建议
+      description: 如果已有倾向，请说明推荐方案和理由。
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: 影响范围
+      description: 涉及的用户、模块、数据、兼容性或发布计划。
+
+  - type: textarea
+    id: done
+    attributes:
+      label: 讨论完成标准
+      description: 需要回答哪些问题，才能关闭 Proposal 或转为 Feature？
+    validations:
+      required: true

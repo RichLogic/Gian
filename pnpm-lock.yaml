@@ -93,6 +93,12 @@ importers:
       '@gian/codex-proxy':
         specifier: workspace:*
         version: link:../proxies/codex-proxy
+      '@gian/dsh-bridge':
+        specifier: workspace:*
+        version: link:../proxies/dsh-bridge
+      '@gian/dsh-proxy':
+        specifier: workspace:*
+        version: link:../proxies/dsh-proxy
       '@gian/grok-proxy':
         specifier: workspace:*
         version: link:../proxies/grok-proxy
@@ -108,9 +114,6 @@ importers:
 
   packages/proxies/cc-proxy:
     dependencies:
-      '@gian/proxy-protocol':
-        specifier: workspace:*
-        version: link:../../proxy-protocol
       '@gian/shared':
         specifier: workspace:*
         version: link:../../shared
@@ -121,6 +124,9 @@ importers:
         specifier: ^4.3.6
         version: 4.4.3
     devDependencies:
+      '@gian/proxy-protocol':
+        specifier: workspace:*
+        version: link:../../proxy-protocol
       '@types/node':
         specifier: ^24.12.2
         version: 24.12.2
@@ -130,13 +136,13 @@ importers:
 
   packages/proxies/codex-proxy:
     dependencies:
-      '@gian/proxy-protocol':
-        specifier: workspace:*
-        version: link:../../proxy-protocol
       '@gian/shared':
         specifier: workspace:*
         version: link:../../shared
     devDependencies:
+      '@gian/proxy-protocol':
+        specifier: workspace:*
+        version: link:../../proxy-protocol
       '@types/node':
         specifier: ^24.0.0
         version: 24.12.2
@@ -144,15 +150,37 @@ importers:
         specifier: ^5.9.0
         version: 5.9.3
 
+  packages/proxies/dsh-bridge:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.12.2
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/proxies/dsh-proxy:
+    dependencies:
+      '@gian/proxy-protocol':
+        specifier: workspace:*
+        version: link:../../proxy-protocol
+    devDependencies:
+      '@types/node':
+        specifier: ^24.12.2
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/proxies/grok-proxy:
     dependencies:
       '@agentclientprotocol/sdk':
         specifier: ^0.23.0
         version: 0.23.0(zod@4.4.3)
+    devDependencies:
       '@gian/proxy-protocol':
         specifier: workspace:*
         version: link:../../proxy-protocol
-    devDependencies:
       '@types/node':
         specifier: ^24.0.0
         version: 24.12.2
@@ -165,10 +193,10 @@ importers:
       '@agentclientprotocol/sdk':
         specifier: ^0.23.0
         version: 0.23.0(zod@4.4.3)
+    devDependencies:
       '@gian/proxy-protocol':
         specifier: workspace:*
         version: link:../../proxy-protocol
-    devDependencies:
       '@types/node':
         specifier: ^24.0.0
         version: 24.12.2

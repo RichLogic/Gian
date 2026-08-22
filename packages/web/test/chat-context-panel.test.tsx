@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatContextPanel } from '../src/components/ChatContextPanel.js';
 import { PlanChip } from '../src/components/PlanChip.js';
@@ -114,6 +114,41 @@ describe('chat-owned panel 2 detail', () => {
 
     expect(screen.getByRole('complementary', { name: 'Tool: Asking user questions' })).toBeInTheDocument();
     expect(screen.getByText(/Which path/)).toHaveClass('chat-context-detail');
+  });
+
+  it('renders a trace item detail with evidence, timing, and the payload', () => {
+    render(
+      <ChatContextPanel
+        target={{
+          kind: 'trace-item',
+          sessionId: 'session-1',
+          item: {
+            id: '1:tool:call-1',
+            turnId: 'turn:1',
+            kind: 'tool',
+            title: 'Bash',
+            summary: '{"command":"pnpm test"}',
+            status: 'failed',
+            at: '2026-08-15T10:00:05.000Z',
+            endAt: '2026-08-15T10:01:05.000Z',
+            evidence: 'derived',
+            correlationId: 'call-1',
+            sourceEventIds: ['evt-1', 'evt-2'],
+            detail: { output: 'Connection refused' },
+          },
+        }}
+        items={[]}
+        onClose={() => {}}
+      />,
+    );
+
+    const panel = screen.getByRole('complementary', { name: 'Bash' });
+    expect(within(panel).getByTestId('chat-trace-detail')).toBeInTheDocument();
+    expect(within(panel).getByTestId('trace-evidence-derived')).toBeInTheDocument();
+    expect(within(panel).getByTestId('trace-status-failed')).toBeInTheDocument();
+    expect(within(panel).getByText('call-1')).toBeInTheDocument();
+    expect(within(panel).getByText('2')).toBeInTheDocument();
+    expect(within(panel).getByText(/Connection refused/)).toBeInTheDocument();
   });
 });
 

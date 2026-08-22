@@ -1,18 +1,21 @@
 // Coverage for traceability rows:
-//   QUEUE-004 — Codex busy composer: ⌘/Ctrl+Enter steers the draft into the
-//               active turn; other executors keep queue semantics.
+//   QUEUE-004 — Busy composer with `turn.steer`: ⌘/Ctrl+Enter steers the
+//               draft into the active turn; composers without steer keep
+//               queue semantics.
 //
 // The host-side steer/drain plumbing is pinned by
 // `packages/host/test/queue-and-busy.test.ts` (QUEUE-004). This file pins the
 // composer keyboard semantics.
 
-import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Executor, Session } from '@gian/shared';
 
 import { Composer } from '../src/components/Composer.js';
+import { clearComposerCapabilityCaches } from '../src/components/composer/capabilities.js';
 import { LocaleProvider } from '../src/i18n/index.js';
+import { loadProxyCapabilities } from '../src/api.js';
 
 vi.mock('../src/api.js', () => ({
   loadProxyModels: vi.fn(async () => [{
@@ -25,6 +28,7 @@ vi.mock('../src/api.js', () => ({
     defaultThinking: 'medium',
     supportedThinking: ['medium'],
   }]),
+  loadProxyCapabilities: vi.fn(async () => ({})),
   loadSlashCommands: vi.fn().mockResolvedValue([]),
   loadSessionSlashCommands: vi.fn().mockResolvedValue([]),
   loadNativeConfig: vi.fn().mockResolvedValue(null),
@@ -90,6 +94,11 @@ function renderComposer(
 }
 
 describe('QUEUE-004: composer ⌘/Ctrl+Enter steer semantics', () => {
+  beforeEach(() => {
+    clearComposerCapabilityCaches();
+    vi.mocked(loadProxyCapabilities).mockReset().mockResolvedValue({});
+  });
+
   it('codex busy + draft + Ctrl+Enter steers the draft (no queue)', async () => {
     const user = userEvent.setup();
     const callbacks = renderComposer(makeSession('codex'));
@@ -117,13 +126,41 @@ describe('QUEUE-004: composer ⌘/Ctrl+Enter steer semantics', () => {
 
   it('claude busy + draft + Ctrl+Enter still queues (no steer primitive)', async () => {
     const user = userEvent.setup();
-    const callbacks = renderComposer(makeSession('claude'));
+    const callbacks = renderComposer(makeSession('claude'), { canSteer: false });
 
     await user.type(screen.getByRole('textbox'), 'queue me');
     await user.keyboard('{Control>}{Enter}{/Control}');
 
     expect(callbacks.onQueueAdd).toHaveBeenCalledWith('queue me', []);
     expect(callbacks.onSteer).not.toHaveBeenCalled();
+  });
+
+  it('advertised turn.steer lets grok steer without an explicit canSteer prop', async () => {
+    const user = userEvent.setup();
+    vi.mocked(loadProxyCapabilities).mockResolvedValue({
+      capabilities: { 'turn.steer': 1 },
+    });
+    const callbacks = renderComposer(makeSession('grok'));
+
+    await waitFor(() => {
+      expect(vi.mocked(loadProxyCapabilities)).toHaveBeenCalled();
+    });
+    await user.type(screen.getByRole('textbox'), 'steer from catalog');
+    await user.keyboard('{Control>}{Enter}{/Control}');
+
+    expect(callbacks.onSteer).toHaveBeenCalledWith('steer from catalog', undefined);
+    expect(callbacks.onQueueAdd).not.toHaveBeenCalled();
+  });
+
+  it('any executor with canSteer + busy + draft + Ctrl+Enter steers', async () => {
+    const user = userEvent.setup();
+    const callbacks = renderComposer(makeSession('grok'), { canSteer: true });
+
+    await user.type(screen.getByRole('textbox'), 'steer from capability');
+    await user.keyboard('{Control>}{Enter}{/Control}');
+
+    expect(callbacks.onSteer).toHaveBeenCalledWith('steer from capability', undefined);
+    expect(callbacks.onQueueAdd).not.toHaveBeenCalled();
   });
 
   it('codex idle + draft + Ctrl+Enter sends normally', async () => {

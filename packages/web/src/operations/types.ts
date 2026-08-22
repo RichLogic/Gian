@@ -21,6 +21,10 @@ export type OperationName =
   // Session
   | 'session.create'
   | 'session.fork'
+  | 'session.forkSession'
+  | 'sidechat.create'
+  | 'sidechat.resume'
+  | 'sidechat.close'
   | 'session.delete'
   | 'session.stop'
   | 'session.recover'
@@ -34,8 +38,13 @@ export type OperationName =
   | 'session.setServiceTier'
   | 'session.assignTask'
   | 'session.setNativeConfig'
+  | 'session.setTurnConfig'
   | 'session.merge'
   | 'session.drop'
+  // Side Chat (gian.proxy/2.0 proposal §10.5)
+  | 'sidechat.create'
+  | 'sidechat.resume'
+  | 'sidechat.close'
   // Message / Queue / Approval
   | 'message.send'
   | 'message.sendSkill'
@@ -106,6 +115,11 @@ export type OperationName =
 export const OPERATION_POLICIES = {
   'session.create': 'pending',
   'session.fork': 'pending',
+  // Protocol Fork is distinct from the legacy "Fork as executor" operation.
+  'session.forkSession': 'pending',
+  'sidechat.create': 'pending',
+  'sidechat.resume': 'pending',
+  'sidechat.close': 'pending',
   'session.delete': 'pending',
   'session.stop': 'pending',
   'session.recover': 'pending',
@@ -125,6 +139,7 @@ export const OPERATION_POLICIES = {
   // Composer's local option patch keeps the instant feedback; the run tracks
   // the Host result per config option.
   'session.setNativeConfig': 'pending',
+  'session.setTurnConfig': 'optimistic',
   'session.merge': 'pending',
   'session.drop': 'pending',
   'message.send': 'optimistic',
@@ -207,6 +222,10 @@ export type MutatingClientMessage = Exclude<
  */
 export const WS_TYPE_POLICIES = {
   'session:create': 'pending',
+  'session:fork': 'pending',
+  'sidechat:create': 'pending',
+  'sidechat:resume': 'pending',
+  'sidechat:close': 'pending',
   'message:send': 'optimistic',
   'message:steer': 'pending',
   'approval:resolve': 'pending',
@@ -223,6 +242,7 @@ export const WS_TYPE_POLICIES = {
   'session:set_service_tier': 'optimistic',
   'session:assign_task': 'optimistic',
   'session:set_native_config': 'pending', // see OPERATION_POLICIES note
+  'session:set_turn_config': 'optimistic',
   'task:create': 'pending',
   'task:update': 'optimistic',
   'task:delete': 'pending',

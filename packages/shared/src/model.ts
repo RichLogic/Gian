@@ -1,8 +1,17 @@
-export type Executor = 'codex' | 'claude' | 'kimi' | 'grok';
+export type Executor = 'codex' | 'claude' | 'kimi' | 'grok' | 'dsh';
 
-/** Kimi and Grok expose opaque ACP config options instead of Gian ApprovalMode. */
-export function usesNativeExecutorConfig(executor: Executor): executor is 'kimi' | 'grok' {
-  return executor === 'kimi' || executor === 'grok';
+/** Kimi, Grok and DSH expose opaque native config options instead of the
+ * Gian ApprovalMode segmented control, so the product renders their catalog
+ * options verbatim. */
+export function usesNativeExecutorConfig(executor: Executor): executor is 'kimi' | 'grok' | 'dsh' {
+  return executor === 'kimi' || executor === 'grok' || executor === 'dsh';
+}
+
+/** Executors Gin can list/adopt provider-native sessions through a dedicated
+ * native history surface. DSH does not declare session.native.list, so it is
+ * excluded even though its config is native. */
+export function supportsNativeSessions(executor: Executor): boolean {
+  return executor === 'claude' || executor === 'codex' || executor === 'kimi' || executor === 'grok';
 }
 
 export type SessionType = 'coding' | 'subtask' | 'manager';
@@ -35,6 +44,19 @@ export type SessionType = 'coding' | 'subtask' | 'manager';
  */
 export type ApprovalMode = 'plan' | 'ask' | 'auto' | 'custom' | 'full-access';
 
+export const KNOWN_APPROVAL_MODES: readonly ApprovalMode[] = [
+  'plan',
+  'ask',
+  'auto',
+  'custom',
+  'full-access',
+];
+
+export function isApprovalMode(value: unknown): value is ApprovalMode {
+  return typeof value === 'string'
+    && (KNOWN_APPROVAL_MODES as readonly string[]).includes(value);
+}
+
 export type NativeConfigValue = string | boolean | number | null;
 
 export interface NativeConfigChoice {
@@ -60,6 +82,47 @@ export interface NativeConfigOption {
   currentValue: NativeConfigValue;
   choices?: NativeConfigChoice[];
   scope: 'session' | 'turn';
+}
+
+export type ConfigValue = string | boolean | number | null;
+
+export interface ConfigChoice {
+  value: ConfigValue;
+  displayName: string;
+  description?: string;
+}
+
+export interface ConfigCondition {
+  optionId: string;
+  oneOf: ConfigValue[];
+}
+
+export interface ConfigOption {
+  id: string;
+  displayName: string;
+  description?: string;
+  binding: 'session' | 'turn';
+  role?: string;
+  control: 'select' | 'boolean' | 'number' | 'text';
+  required: boolean;
+  defaultValue: ConfigValue;
+  choices?: ConfigChoice[];
+  constraints?: {
+    minimum?: number;
+    maximum?: number;
+    step?: number;
+    minimumLength?: number;
+    maximumLength?: number;
+    multiline?: boolean;
+  };
+  visibleWhen?: ConfigCondition[];
+  enabledWhen?: ConfigCondition[];
+  presentation?: {
+    group?: string;
+    order?: number;
+    placeholder?: string;
+    sensitive?: boolean;
+  };
 }
 
 export interface ExecutorConfigState {
@@ -137,6 +200,15 @@ export interface Session {
   approval_mode: ApprovalMode | null;
   /** Exact executor-native values, persisted as JSON by the host. */
   executor_config: ExecutorConfigState;
+  /** Next-turn Turn-bound config snapshot. Absent on hosts predating
+   *  migration 050; startTurn then falls back to role columns. */
+  turn_config?: Record<string, ConfigValue>;
+  /** Session-scoped replacement for the process catalog's Turn-bound
+   *  subset (`session.updated.turnConfigOptions`). Undefined means keep
+   *  the process catalog; an empty array means this Session has no
+   *  Turn-bound options. */
+  turn_config_options?: ConfigOption[];
+  turn_config_revision?: string | null;
   /** Dynamic choices reported by the live executor. Empty until attached. */
   native_config_options: NativeConfigOption[];
   /** Reasoning effort. Null = omit the executor-specific effort flag and let
@@ -207,7 +279,45 @@ export interface Session {
   completed_at: string | null;
   created_at: string;
   updated_at: string;
+  /** Dynamic Catalog Action availability for this Session. Absent on older hosts. */
+  available_actions?: import('./sidechat.js').SessionAvailableActions;
+  /** Fork lineage. Absent for ordinary creates. */
+  origin?: import('./sidechat.js').SessionOrigin;
 }
+
+/**
+ * Dynamic availability of one optional standard Action on a Session
+ * (gian.proxy/2.0 proposal §10.3, `docs/proposals/gian-proxy-v2-ui-bridge.md`).
+ * `enabled` is required; `reason` is optional and only ever used for safe
+ * greyed-out display. Every occurrence is a COMPLETE REPLACEMENT of the
+ * previous map — no partial merge.
+ */
+export interface SessionActionAvailability {
+  enabled: boolean;
+  reason?: string;
+}
+
+/**
+ * Fork lineage metadata persisted by Gian Core from the `session.fork`
+ * result `origin` (proposal §10.6). `source_turn_id` is the Proxy-stable
+ * provider turn id: the web must NEVER derive or rewrite it from rendered
+ * transcript text (§10.6: "Gian 不得从已渲染历史推导或改写 Proxy 返回的
+ * sourceTurnId"). Absent for `head` forks, which carry no turn boundary.
+ */
+/**
+ * Web-facing Side Chat read model (proposal §10.5). A Side Chat is a
+ * temporary side conversation bound to a parent Session — never a normal
+ * Gian Session, never part of formal history (§10.5.2).
+ *
+ * - `open` — usable; `closing` — user-confirmed close persisted, idempotent
+ *   cleanup still in flight (§10.5.4); `unavailable` — resume failed with
+ *   SIDECHAT_UNAVAILABLE, content stays viewable/closeable (§10.5.3).
+ * - This type deliberately has NO `resumeRef` (and no stream id): §10.5.1
+ *   makes the provider-owned resume reference never user-visible — it must
+ *   not enter logs, transcripts, traces, replays, URLs, or any web-visible
+ *   payload. The Host owns it as sensitive local runtime state.
+ */
+export type SideChatInfo = import('./sidechat.js').SideChatPublicSnapshot;
 
 export type TaskStatus = 'open' | 'done' | 'archived';
 

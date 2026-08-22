@@ -1,27 +1,35 @@
 #!/usr/bin/env node
 
-import { isAbsolute } from 'node:path';
-import {
-  CORE_METHODS,
-  OPTIONAL_METHOD_CAPABILITIES,
-  ProxyProtocolError,
-  parseNdjsonObject,
-  parseProxyRequest,
-  readNdjsonLines,
-  type ProxyNotification,
-  type ProxyRequest,
-} from '@gian/proxy-protocol';
+import { readFileSync } from 'node:fs';
+import { dirname, isAbsolute, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { GrokProxyService } from '../core/service.js';
-import { writeJsonLine } from '../transport/protocol.js';
-import { GrokProtocolV1Adapter, grokProtocolError } from '../protocol/v1-adapter.js';
+import { GrokProtocolV2Adapter } from '../protocol/v2-adapter.js';
+import {
+  createProtocolWriter,
+  parseRequestLine,
+} from '../transport/protocol.js';
 
 const SELF_TEST_FLAG = '--self-test';
-const PLUGIN_VERSION = '0.2.1';
-const V1_METHODS = new Set<string>([
-  ...CORE_METHODS,
-  ...Object.keys(OPTIONAL_METHOD_CAPABILITIES),
-]);
+
+function readPluginVersion(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 6; i += 1) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { version?: string };
+      if (typeof pkg.version === 'string' && pkg.version.length > 0) return pkg.version;
+    } catch {
+      /* keep walking */
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return '0.3.0';
+}
+
+const PLUGIN_VERSION = readPluginVersion();
 
 function runSelfTest(argv: string[]): boolean {
   if (!argv.includes(SELF_TEST_FLAG)) return false;
@@ -58,79 +66,11 @@ function parseArgs(argv: string[]) {
   return { grokBin };
 }
 
-function createV1Writer() {
-  return {
-    result(id: string | number, result: unknown) {
-      writeJsonLine(process.stdout, { id, result });
-    },
-    error(id: string | number, error: unknown) {
-      writeJsonLine(process.stdout, { id, error: grokProtocolError(error) });
-    },
-    notification(notification: ProxyNotification) {
-      writeJsonLine(process.stdout, notification);
-    },
-  };
-}
-
-function usableRequestId(value: unknown): string | number | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const id = (value as { id?: unknown }).id;
-  return (typeof id === 'string' && id.length > 0) || Number.isSafeInteger(id)
-    ? id as string | number
-    : null;
-}
-
-async function runV1Loop(service: GrokProxyService): Promise<void> {
-  const writer = createV1Writer();
-  const adapter = new GrokProtocolV1Adapter(
-    service,
-    PLUGIN_VERSION,
-    notification => writer.notification(notification),
-  );
-  for await (const line of readNdjsonLines(process.stdin)) {
-    const value = parseNdjsonObject(line);
-    if (value === null) continue;
-    const id = usableRequestId(value);
-    const method = typeof value.method === 'string' ? value.method : null;
-    if (method && !V1_METHODS.has(method)) {
-      if (id === null) {
-        throw new ProxyProtocolError('PROTOCOL_VIOLATION', 'Unknown method omitted a usable id.', true);
-      }
-      writer.error(id, new ProxyProtocolError(
-        'METHOD_NOT_FOUND',
-        `Unknown method "${method}".`,
-        false,
-      ));
-      continue;
-    }
-    let request: ProxyRequest;
-    try {
-      request = parseProxyRequest(value);
-    } catch (error) {
-      if (id === null) throw error;
-      writer.error(id, error);
-      continue;
-    }
-    try {
-      const result = await adapter.handle(request);
-      writer.result(request.id, result);
-      if (request.method === 'shutdown') {
-        process.stdin.pause();
-        await service.close();
-        return;
-      }
-    } catch (error) {
-      writer.error(request.id, error);
-    }
-  }
-  process.stdin.pause();
-  await service.close();
-}
-
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (runSelfTest(argv)) return;
   const options = parseArgs(argv);
+  const writer = createProtocolWriter(process.stdout);
 
   const reportCrash = (kind: 'uncaught' | 'unhandledRejection', error: unknown) => {
     const message = error instanceof Error
@@ -138,17 +78,14 @@ async function main(): Promise<void> {
       : String(error);
     try {
       console.error(`[grok-proxy:${kind}]`, message);
-      writeJsonLine(process.stdout, {
-        method: 'runtime.error',
-        params: {
-          eventId: `crash-${Date.now()}`,
-          emittedAt: new Date().toISOString(),
-          data: {
-            code: 'RUNTIME_ERROR',
-            message,
-            retryable: false,
-            data: { kind },
-          },
+      writer.notification('runtime.error', {
+        eventId: `crash-${Date.now()}`,
+        emittedAt: new Date().toISOString(),
+        data: {
+          domainCode: 'RUNTIME_ERROR',
+          message,
+          retryable: false,
+          details: { kind },
         },
       });
     } finally {
@@ -159,7 +96,67 @@ async function main(): Promise<void> {
   process.on('unhandledRejection', (error) => reportCrash('unhandledRejection', error));
 
   const service = new GrokProxyService({ binaryPath: options.grokBin });
-  await runV1Loop(service);
+  const adapter = new GrokProtocolV2Adapter(
+    service,
+    PLUGIN_VERSION,
+    (method, params) => writer.notification(method, params),
+  );
+
+  let shuttingDown = false;
+  const shutdown = async (code = 0) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await service.close();
+    process.exit(code);
+  };
+  process.on('SIGINT', () => {
+    void shutdown(0);
+  });
+  process.on('SIGTERM', () => {
+    void shutdown(0);
+  });
+
+  const { createInterface } = await import('node:readline');
+  const input = createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+  });
+
+  for await (const line of input) {
+    if (!line.trim()) continue;
+    let request: { id: string; method: string; params: Record<string, unknown> };
+    try {
+      request = parseRequestLine(line);
+    } catch (error) {
+      const id = (() => {
+        try {
+          const value = JSON.parse(line) as { id?: unknown };
+          return typeof value.id === 'string' && value.id.length > 0 ? value.id : null;
+        } catch {
+          return null;
+        }
+      })();
+      writer.error(id, error);
+      continue;
+    }
+
+    adapter.beginRequest();
+    try {
+      const result = await adapter.handle(request);
+      writer.result(request.id, result);
+      adapter.flushNotifications();
+      if (request.method === 'shutdown') {
+        input.close();
+        await shutdown(0);
+        return;
+      }
+    } catch (error) {
+      writer.error(request.id, error);
+      adapter.flushNotifications();
+    }
+  }
+
+  await shutdown(0);
 }
 
 main().catch((error) => {

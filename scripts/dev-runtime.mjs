@@ -79,17 +79,36 @@ export function resolveDevEnvironment(
   const clean = Object.fromEntries(
     Object.entries(env).filter(([key]) => !key.startsWith('GIAN_')),
   );
+  const proxyEntries = {};
+  for (const key of [
+    'GIAN_CC_PROXY_ENTRY',
+    'GIAN_CODEX_PROXY_ENTRY',
+    'GIAN_KIMI_PROXY_ENTRY',
+    'GIAN_GROK_PROXY_ENTRY',
+  ]) {
+    const value = typeof env[key] === 'string' ? env[key].trim() : '';
+    if (value) proxyEntries[key] = value;
+  }
+  const isolatedDataDir = typeof env.GIAN_DEV_DATA_DIR === 'string'
+    ? env.GIAN_DEV_DATA_DIR.trim()
+    : '';
+  const desktopUserDataDir = typeof env.GIAN_DESKTOP_USER_DATA_DIR === 'string'
+    ? env.GIAN_DESKTOP_USER_DATA_DIR.trim()
+    : '';
   const githubBrokerSocket = join(
     tmpdir(),
     `gian-github-${createHash('sha256').update(identity.runtimeId).digest('hex').slice(0, 24)}.sock`,
   );
   return {
     ...clean,
+    ...proxyEntries,
     GIAN_HOST: '127.0.0.1',
     GIAN_PORT: String(DEV_HOST_PORT),
     GIAN_HOST_PORT: String(DEV_HOST_PORT),
     GIAN_WEB_PORT: String(DEV_WEB_PORT),
-    GIAN_DATA_DIR: env.GIAN_DEV_DATA_DIR ?? join(homedir(), '.gian-dev'),
+    GIAN_DATA_DIR: isolatedDataDir || join(homedir(), '.gian-dev'),
+    ...(isolatedDataDir ? { GIAN_DEV_DATA_DIR: isolatedDataDir } : {}),
+    ...(desktopUserDataDir ? { GIAN_DESKTOP_USER_DATA_DIR: desktopUserDataDir } : {}),
     GIAN_DESKTOP_HOST_URL: DEV_HOST_URL,
     GIAN_DESKTOP_WEB_URL: DEV_WEB_URL,
     GIAN_DESKTOP_DISABLE_HOST_MANAGEMENT: '1',

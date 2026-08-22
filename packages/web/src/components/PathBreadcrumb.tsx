@@ -21,7 +21,8 @@ export interface SessionMenuActions {
   onRename: () => void;
   // All others are optional — the menu adapts to the context (full session /
   // subtask). When a callback is absent, its item is hidden.
-  // Subtask drops fork/delete.
+  // Subtask drops the legacy fork-as-executor and delete; the protocol head
+  // Fork (forkHead) shows in BOTH layouts (§15: standard control, greyed).
   onCopyName?: () => void;
   /** Move a standalone Session into one of the user's active Tasks. */
   onAssignTask?: () => void;
@@ -31,6 +32,14 @@ export interface SessionMenuActions {
   recovering?: boolean;
   onMarkUnread?: () => void;
   onFork?: (executor: Executor) => void;
+  /** Protocol head Fork entry (gian.proxy/2.0 proposal §10.6/§15): always
+   *  present on the session menu when provided, greyed with `title` carrying
+   *  the gating reason when disabled. */
+  forkHead?: {
+    disabled?: boolean;
+    title?: string;
+    onFork: () => void;
+  };
   onDelete?: () => void;
 }
 
@@ -103,6 +112,8 @@ const ICON = {
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   task: 'M4 6h6l2 2h8v10H4z M8 12h8 M8 15h5',
   trash: 'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13',
+  // branch — protocol Fork (same glyph constant as CodingView's ICON.branch)
+  branch: 'M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
   // envelope — "mark as unread", same idiom as an unread email
   mail: 'M3 5h18v14H3z M3 7l9 6 9-6',
 };
@@ -118,6 +129,9 @@ interface MenuItemDesc {
   danger?: boolean;
   /** Inert while its operation is in flight (e.g. Force recover pending). */
   disabled?: boolean;
+  /** Tooltip override — carries the gating reason on greyed standard
+   *  controls (defaults to the label). */
+  title?: string;
   /** Right-aligned hint, e.g. the F2 shortcut. */
   hint?: string;
 }
@@ -127,8 +141,8 @@ interface MenuItemDesc {
  * layouts (decided 2026-06-29) — they differ in order, grouping and which
  * actions are destructive, so a single fixed template can't express them:
  *
- *  session : Rename · Copy · Unread ┊ Recover(red)
- *  subtask : Rename · Copy ┊ Unread ┊ Recover(red)
+ *  session : Rename · Copy · AssignTask? · Fork ┊ Unread ┊ Recover(red)
+ *  subtask : Rename · Copy · Fork ┊ Unread ┊ Recover(red)
  *
  * 2026-08-03: the session menu's Fork×3 and Delete items were removed (fork
  * plumbing in use-topbar-model stays, unused by the menu); the subtask
@@ -136,7 +150,9 @@ interface MenuItemDesc {
  * the Tasks-view breadcrumb lost the task segment — task rename/done/delete
  * live on the sidebar rail row's ⋯ menu. 2026-08-05: the subtask menu's
  * Complete/Reopen item was removed too — completion is toggled from the
- * subtask row's hover check in the Tasks rail.
+ * subtask row's hover check in the Tasks rail. 2026-08-21: the protocol head
+ * Fork (§10.6) joined BOTH layouts — it is a standard control that stays
+ * visible (greyed with its reason) everywhere (§15).
  */
 function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuItemDesc[] {
   const items: MenuItemDesc[] = [
@@ -145,9 +161,22 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
   const copy = () => {
     if (m.onCopyName) items.push({ key: 'copy', icon: ICON.copy, label: t('path.menu.copyName'), onClick: m.onCopyName });
   };
+  // Protocol head Fork (§10.6/§15): always on the menu, greyed with the
+  // gating reason in the tooltip when either layer disallows it.
+  const fork = () => {
+    if (m.forkHead) items.push({
+      key: 'fork',
+      icon: ICON.branch,
+      label: t('fork.title'),
+      onClick: m.forkHead.onFork,
+      disabled: m.forkHead.disabled,
+      ...(m.forkHead.title !== undefined ? { title: m.forkHead.title } : {}),
+    });
+  };
 
   if (m.kind === 'subtask') {
     copy();
+    fork();
     if (m.onMarkUnread) items.push({ key: 'unread', icon: ICON.mail, label: t('path.menu.markUnread'), onClick: m.onMarkUnread, ruleBefore: true });
     if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t(m.recovering ? 'path.menu.recovering' : 'path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, disabled: m.recovering, ruleBefore: true });
     return items;
@@ -161,6 +190,7 @@ function buildMenuItems(m: SessionMenuActions, t: (k: string) => string): MenuIt
     label: t('path.menu.assignTask'),
     onClick: m.onAssignTask,
   });
+  fork();
   if (m.onMarkUnread) items.push({ key: 'unread', icon: ICON.mail, label: t('path.menu.markUnread'), onClick: m.onMarkUnread });
   if (m.onForceRecover) items.push({ key: 'recover', icon: ICON.refresh, label: t(m.recovering ? 'path.menu.recovering' : 'path.menu.forceRecover'), onClick: m.onForceRecover, danger: true, disabled: m.recovering, ruleBefore: true });
   return items;
@@ -292,6 +322,8 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                         <button
                           className={`item${it.danger ? ' danger' : ''}`}
                           disabled={it.disabled}
+                          title={it.title ?? it.label}
+                          data-testid={`menu-${it.key}`}
                           onClick={() => { setMenuOpen(false); it.onClick(); }}
                         >
                           <MenuIcon d={it.icon} /> {it.label}

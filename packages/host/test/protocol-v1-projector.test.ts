@@ -1,27 +1,37 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { proxyNotificationSchema } from '@gian/proxy-protocol';
+import type { ProxyNotification } from '@gian/shared';
 import { projectNotification } from '../src/event/project-notification.js';
 
-test('protocol v1 notice.created projects to a generic display notice', () => {
-  const notification = proxyNotificationSchema.parse({
-    method: 'notice.created',
+/** Persisted 1.0 envelopes are not gian.proxy/2.0 notifications. D5 still
+ *  projects them through the legacy DisplayEvent path. */
+function historicalNotification(
+  method: string,
+  data: Record<string, unknown>,
+  extras: { eventId?: string; sequence?: number; emittedAt?: string } = {},
+): ProxyNotification {
+  return {
+    method,
     params: {
-      eventId: 'event-notice-1',
+      eventId: extras.eventId ?? 'event-1',
       streamId: 'stream-1',
-      sequence: 1,
+      sequence: extras.sequence ?? 1,
       sessionId: 'session-1',
       turnId: 'turn-1',
-      emittedAt: '2026-08-10T05:30:00.000Z',
-      data: {
-        noticeId: 'notice-1',
-        severity: 'warning',
-        code: 'PROVIDER_POLICY_NOTICE',
-        title: 'Action blocked',
-        message: 'The provider rejected this action.',
-      },
+      emittedAt: extras.emittedAt ?? '2026-08-10T05:30:00.000Z',
+      data,
     },
-  });
+  } as ProxyNotification;
+}
+
+test('protocol v1 notice.created projects to a generic display notice', () => {
+  const notification = historicalNotification('notice.created', {
+    noticeId: 'notice-1',
+    severity: 'warning',
+    code: 'PROVIDER_POLICY_NOTICE',
+    title: 'Action blocked',
+    message: 'The provider rejected this action.',
+  }, { eventId: 'event-notice-1' });
 
   const [event] = projectNotification('claude', notification, 'session-1', 1);
   assert.equal(event?.call_id, 'notice-1');
@@ -38,25 +48,14 @@ test('protocol v1 notice.created projects to a generic display notice', () => {
 });
 
 function approvalRequestedNotification(data: Record<string, unknown>) {
-  return proxyNotificationSchema.parse({
-    method: 'approval.requested',
-    params: {
-      eventId: 'event-appr-1',
-      streamId: 'stream-1',
-      sequence: 1,
-      sessionId: 'session-1',
-      turnId: 'turn-1',
-      emittedAt: '2026-08-10T05:30:00.000Z',
-      data: {
-        approvalId: 'appr-1',
-        options: [
-          { id: 'allow_once', label: 'Allow once', kind: 'allow_once' },
-          { id: 'reject_once', label: 'Reject', kind: 'reject_once' },
-        ],
-        ...data,
-      },
-    },
-  });
+  return historicalNotification('approval.requested', {
+    approvalId: 'appr-1',
+    options: [
+      { id: 'allow_once', label: 'Allow once', kind: 'allow_once' },
+      { id: 'reject_once', label: 'Reject', kind: 'reject_once' },
+    ],
+    ...data,
+  }, { eventId: 'event-appr-1' });
 }
 
 test('protocol v1 AskUserQuestion approval projects to a structured question', () => {
@@ -215,24 +214,13 @@ test('protocol v1 approval without a cc payload keeps the generic projection', (
 });
 
 test('protocol v1 approval.resolved carries AskUserQuestion answers through', () => {
-  const notification = proxyNotificationSchema.parse({
-    method: 'approval.resolved',
-    params: {
-      eventId: 'event-appr-2',
-      streamId: 'stream-1',
-      sequence: 2,
-      sessionId: 'session-1',
-      turnId: 'turn-1',
-      emittedAt: '2026-08-10T05:31:00.000Z',
-      data: {
-        approvalId: 'appr-1',
-        resolution: 'selected',
-        resolvedBy: 'user',
-        optionId: 'allow_once',
-        answers: { 'Which approach?': 'A' },
-      },
-    },
-  });
+  const notification = historicalNotification('approval.resolved', {
+    approvalId: 'appr-1',
+    resolution: 'selected',
+    resolvedBy: 'user',
+    optionId: 'allow_once',
+    answers: { 'Which approach?': 'A' },
+  }, { eventId: 'event-appr-2', sequence: 2, emittedAt: '2026-08-10T05:31:00.000Z' });
 
   const [event] = projectNotification('claude', notification, 'session-1', 1);
   assert.equal(event?.display?.type, 'interaction.resolved');

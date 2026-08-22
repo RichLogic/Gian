@@ -158,7 +158,7 @@ export function parseAttentionMessage(data: unknown): AttentionMessage | null {
     || !isBoundedString(candidate.title, 1, 256)
     || !isBoundedString(candidate.body, 1, 512)
     || !['turn-completed', 'approval', 'question', 'error'].includes(String(candidate.kind))
-    || !['claude', 'codex', 'kimi', 'grok'].includes(String(candidate.provider))
+    || !['claude', 'codex', 'kimi', 'grok', 'dsh'].includes(String(candidate.provider))
   ) {
     return null;
   }

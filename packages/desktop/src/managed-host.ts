@@ -8,6 +8,7 @@ export const DESKTOP_TOKEN_HEADER = 'X-Gian-Desktop-Token';
 export interface ManagedHostPaths {
   hostEntry: string;
   webDist: string;
+  dshBridgePackageDir: string;
   dataDir: string;
   logFile: string;
 }
@@ -38,6 +39,7 @@ export function resolveManagedHostPaths({
   return {
     hostEntry,
     webDist: join(resourcesPath, 'web'),
+    dshBridgePackageDir: join(resourcesPath, 'dsh-bridge'),
     dataDir,
     logFile: join(dataDir, 'logs', 'desktop-host.log'),
   };
@@ -57,6 +59,9 @@ export function validateManagedHostPaths(paths: ManagedHostPaths): void {
   if (!existsSync(join(paths.webDist, 'index.html'))) {
     throw new Error(`Bundled Gian Web assets are missing: ${paths.webDist}`);
   }
+  if (!existsSync(join(paths.dshBridgePackageDir, 'package.json'))) {
+    throw new Error(`Bundled Gian DSH bridge is missing: ${paths.dshBridgePackageDir}`);
+  }
 }
 
 export function buildManagedHostEnv({
@@ -74,6 +79,7 @@ export function buildManagedHostEnv({
     GIAN_HOST: host,
     GIAN_PORT: String(port),
     GIAN_WEB_DIST: paths.webDist,
+    GIAN_DSH_BRIDGE_PACKAGE_DIR: paths.dshBridgePackageDir,
     GIAN_DESKTOP_TOKEN: desktopToken,
     GIAN_DESKTOP_INSTANCE_ID: instanceId,
     GIAN_DESKTOP_GITHUB_BROKER_SOCKET: githubBrokerSocket,

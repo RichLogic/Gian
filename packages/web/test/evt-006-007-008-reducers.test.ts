@@ -58,7 +58,7 @@ function planUpdate(
 function assistantText(
   itemId: string,
   text: string,
-  opts: { turn?: number; ts?: number } = {},
+  opts: { delta?: boolean; turn?: number; ts?: number } = {},
 ): EventEnvelope {
   return {
     session_id: 'sess-1',
@@ -66,7 +66,7 @@ function assistantText(
     call_id: itemId,
     event: 'assistant_text',
     ts: opts.ts ?? 1_700_000_000_000,
-    data: { itemId, text, delta: true },
+    data: { itemId, text, delta: opts.delta ?? true },
   };
 }
 
@@ -156,6 +156,20 @@ describe('EVT-006: Codex reasoning summary vs full accumulation', () => {
       { id: 'reused', turn: 1, text: 'thought one' },
       { id: 'reused', turn: 2, text: 'thought two' },
     ]);
+  });
+
+  it('replaces streamed assistant text with its non-delta completed snapshot', () => {
+    let items: TranscriptItem[] = [];
+    items = applyEnvelope(items, assistantText('message-1', 'Mock '), 'grok');
+    items = applyEnvelope(items, assistantText('message-1', 'text'), 'grok');
+    items = applyEnvelope(
+      items,
+      assistantText('message-1', 'Mock text', { delta: false }),
+      'grok',
+    );
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: 'assistant', text: 'Mock text' });
   });
 
   it('EVT-006: a non-delta full snapshot REPLACES the accumulated text (delta:false branch)', () => {

@@ -21,9 +21,9 @@ export type PendingFirstMessageValue = string | PendingFirstMessage | null;
 export function pendingFirstMessageForCreatedSession(
   value: PendingFirstMessageValue,
   session: Session,
-  origin?: 'interactive-create' | 'native-adopt' | 'task-create',
+  origin?: 'interactive-create' | 'native-adopt' | 'task-create' | 'session-fork',
 ): PendingFirstMessage | null {
-  if (!value || origin === 'native-adopt') return null;
+  if (!value || origin === 'native-adopt' || origin === 'session-fork') return null;
   if (typeof value === 'string') {
     const scope = session.task_id
       ? { kind: 'task' as const, id: session.task_id }

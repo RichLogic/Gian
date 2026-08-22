@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ApprovalMode, Executor, NativeSession, Session, Workspace } from '@gian/shared';
+import { usesNativeExecutorConfig } from '@gian/shared';
 import { loadNativeSessions } from '../api.js';
 import { confirm } from '../feedback.js';
 import {
@@ -363,7 +364,7 @@ function AdoptDialog({
       request: {
         executor: source.executor,
         native_session_id: source.id,
-        ...(source.executor === 'kimi' ? {} : { approval_mode: mode }),
+        ...(usesNativeExecutorConfig(source.executor) ? {} : { approval_mode: mode }),
         ...(name.trim() ? { name: name.trim() } : {}),
       },
     }).id);
@@ -403,7 +404,7 @@ function AdoptDialog({
             />
           </div>
 
-          {source.executor !== 'kimi' && <div className="adopt-field">
+          {!usesNativeExecutorConfig(source.executor) && <div className="adopt-field">
             <label className="adopt-label">Approval mode</label>
             <div className="segm" style={{ width: 'fit-content' }}>
               {(source.executor === 'codex'

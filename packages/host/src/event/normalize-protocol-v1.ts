@@ -1,11 +1,24 @@
 import type { DisplayEvent, FileChangeSummary } from '@gian/shared';
-import type { ProxyNotification } from '@gian/proxy-protocol';
 import {
   ccApprovalDescription,
   ccApprovalSubject,
   parseAskUserQuestionInput,
   parseCcApprovalInput,
 } from './normalize-cc.js';
+
+/** Persisted gian.proxy/1 envelopes. Not the live 2.0 notification union. */
+interface HistoricalProtocolNotification {
+  method: string;
+  params: {
+    eventId?: string;
+    streamId?: string;
+    sequence?: number;
+    sessionId?: string;
+    turnId?: string;
+    emittedAt: string;
+    data?: unknown;
+  };
+}
 
 function timestamp(value: string): number {
   const parsed = Date.parse(value);
@@ -44,11 +57,11 @@ function diffFiles(
 }
 
 export function projectProtocolV1Notification(
-  notification: ProxyNotification,
+  notification: HistoricalProtocolNotification,
   sessionId: string,
   turn: number,
 ): DisplayEvent[] {
-  if (!('sessionId' in notification.params)) return [];
+  if (!('sessionId' in notification.params) || !notification.params.sessionId) return [];
   // The union is runtime-validated before projection. Zod's nested union does
   // not preserve method -> params.data narrowing through this shared helper.
   const data = notification.params.data as any;
@@ -111,6 +124,7 @@ export function projectProtocolV1Notification(
       return [];
     }
     case 'tool.started':
+      if (!data?.toolCallId) return [];
       return [{
         session_id: sessionId,
         turn,
@@ -126,6 +140,7 @@ export function projectProtocolV1Notification(
         },
       }];
     case 'tool.updated':
+      if (!data?.toolCallId) return [];
       return [{
         session_id: sessionId,
         turn,
@@ -140,6 +155,7 @@ export function projectProtocolV1Notification(
         },
       }];
     case 'tool.completed':
+      if (!data?.toolCallId) return [];
       return [{
         session_id: sessionId,
         turn,
@@ -154,6 +170,7 @@ export function projectProtocolV1Notification(
         },
       }];
     case 'plan.updated':
+      if (!Array.isArray(data?.steps)) return [];
       return [{
         session_id: sessionId,
         turn,
@@ -209,6 +226,7 @@ export function projectProtocolV1Notification(
         },
       }];
     case 'approval.requested': {
+      if (!Array.isArray(data?.options)) return [];
       const nativeOptions = data.options.map((option: {
         id: string;
         label: string;
@@ -382,6 +400,7 @@ export function projectProtocolV1Notification(
         data: { turnId },
       }] : [];
     case 'turn.failed':
+      if (!data?.error || typeof data.error.message !== 'string') return [];
       return turnId ? [{
         session_id: sessionId,
         turn,
@@ -395,6 +414,7 @@ export function projectProtocolV1Notification(
         },
       }] : [];
     case 'runtime.error':
+      if (typeof data?.message !== 'string' || !notification.params.eventId) return [];
       return [{
         session_id: sessionId,
         turn,

@@ -14,9 +14,11 @@ import {
 } from './dev.mjs';
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
+const releaseVersion = JSON.parse(
+  await readFile(join(rootDir, 'package.json'), 'utf8'),
+).version;
 
-test('dev environment pins isolated GianDev services and desktop targets', async () => {
-  const rootPackage = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf8'));
+test('dev environment pins isolated GianDev services and desktop targets', () => {
   const identity = {
     runtimeId: 'gian-0.3.0-abcd1234',
     worktree: '/tmp/gian-0.3.0',
@@ -29,6 +31,7 @@ test('dev environment pins isolated GianDev services and desktop targets', async
     GIAN_PORT: '8990',
     GIAN_DATA_DIR: '/tmp/production-must-not-leak',
     GIAN_DEV_DATA_DIR: '/tmp/gian-dev-test',
+    GIAN_DESKTOP_USER_DATA_DIR: ' /tmp/gian-dev-electron-test ',
     // Inherited from a shell spawned by the production Gian desktop — every
     // one of these must be stripped, not overridden-but-present.
     GIAN_DESKTOP_TOKEN: 'production-token',
@@ -46,7 +49,11 @@ test('dev environment pins isolated GianDev services and desktop targets', async
   assert.equal(env.GIAN_DESKTOP_WEB_URL, DEV_WEB_URL);
   assert.equal(env.GIAN_DESKTOP_DISABLE_HOST_MANAGEMENT, '1');
   assert.equal(env.GIAN_GITHUB_CLIENT_ID, DEFAULT_GITHUB_CLIENT_ID);
-  assert.equal(env.GIAN_RELEASE_VERSION, rootPackage.version);
+  assert.match(
+    env.GIAN_DESKTOP_GITHUB_BROKER_SOCKET,
+    /gian-github-[a-f0-9]{24}\.sock$/,
+  );
+  assert.equal(env.GIAN_RELEASE_VERSION, releaseVersion);
   assert.equal(env.GIAN_DEV_RUNTIME_ID, identity.runtimeId);
   assert.equal(env.GIAN_DEV_WORKTREE, identity.worktree);
   assert.equal(env.GIAN_DESKTOP_LABEL, identity.label);
@@ -54,8 +61,23 @@ test('dev environment pins isolated GianDev services and desktop targets', async
   assert.equal(env.GIAN_DESKTOP_INSTANCE_ID, undefined);
   assert.equal(env.GIAN_PARENT_MANAGED, undefined);
   assert.equal(env.GIAN_WEB_DIST, undefined);
-  assert.equal(env.GIAN_DEV_DATA_DIR, undefined);
+  assert.equal(env.GIAN_DEV_DATA_DIR, '/tmp/gian-dev-test');
+  assert.equal(env.GIAN_DESKTOP_USER_DATA_DIR, '/tmp/gian-dev-electron-test');
+  assert.equal(env.GIAN_CC_PROXY_ENTRY, undefined);
   assert.equal(env.PATH, '/usr/bin');
+});
+
+test('dev environment forwards explicit Proxy entry overrides', () => {
+  const env = resolveDevEnvironment({
+    PATH: '/usr/bin',
+    GIAN_CC_PROXY_ENTRY: ' /tmp/fake-cc.mjs ',
+    GIAN_KIMI_PROXY_ENTRY: '/tmp/fake-kimi.mjs',
+    GIAN_DESKTOP_TOKEN: 'production-token',
+  });
+  assert.equal(env.GIAN_CC_PROXY_ENTRY, '/tmp/fake-cc.mjs');
+  assert.equal(env.GIAN_KIMI_PROXY_ENTRY, '/tmp/fake-kimi.mjs');
+  assert.equal(env.GIAN_CODEX_PROXY_ENTRY, undefined);
+  assert.equal(env.GIAN_DESKTOP_TOKEN, undefined);
 });
 
 test('dev environment preserves an explicit GitHub OAuth client id override', () => {

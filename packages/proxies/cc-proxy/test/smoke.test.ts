@@ -7,9 +7,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 interface JsonRpcMessage {
-  id?: number | string;
+  jsonrpc?: string;
+  id?: number | string | null;
   result?: unknown;
-  error?: { code?: string; message?: string };
+  error?: { code?: string | number; message?: string; data?: { domainCode?: string } };
   method?: string;
   params?: unknown;
 }
@@ -130,15 +131,18 @@ function startProxy(dataDir: string) {
 
   return {
     async request(method: string, params?: unknown, timeoutMs = 2_000) {
-      const id = nextId;
+      const id = `req-${nextId}`;
       nextId += 1;
-      proc.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+      proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params: params ?? {} })}\n`);
       const response = await responses.take(timeoutMs, `response for ${method}`);
       assert.equal(response.id, id, stderr);
       return response;
     },
     sendRaw(line: string) {
       proc.stdin.write(`${line}\n`);
+    },
+    nextResponse(timeoutMs = 2_000) {
+      return responses.take(timeoutMs, 'json-rpc response');
     },
     async nextNotification(method: string, timeoutMs = 2_000) {
       while (true) {
@@ -171,37 +175,50 @@ test('cli smoke covers initialize, session lifecycle, and capabilities', { skip:
   const proxy = startProxy(dataDir);
 
   try {
-    const initialize = await proxy.request('initialize');
-    assert.equal((initialize.result as { mode: string }).mode, 'spawn');
+    const initialize = await proxy.request('initialize', {
+      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      host: { name: 'Gian', version: '9.9.9' },
+    });
+    const handshake = initialize.result as {
+      protocol: { version: string };
+      plugin: { id: string };
+      process: { scope: string };
+    };
+    assert.equal(handshake.protocol.version, '2.0');
+    assert.equal(handshake.plugin.id, 'claude');
+    assert.equal(handshake.process.scope, 'session');
 
     const created = await proxy.request('session.create', {
-      cwd: '/tmp',
+      sessionId: 'smoke-session',
+      workspace: { cwd: '/tmp', roots: ['/tmp'] },
+      config: {},
     });
     const session = (created.result as {
-      session: { id: string; status: string; claudeSessionId: string; sessionKey?: string };
+      session: { id: string; state: string; nativeSession: { id: string }; streamId: string };
     }).session;
-    assert.equal(session.status, 'idle');
-    // Stateless proxy: response carries id + claudeSessionId, no sessionKey.
-    assert.ok(typeof session.claudeSessionId === 'string' && session.claudeSessionId.length > 0);
-    assert.equal(session.sessionKey, undefined);
+    assert.equal(session.id, 'smoke-session');
+    assert.equal(session.state, 'idle');
+    assert.ok(session.nativeSession.id.length > 0);
+    assert.ok(session.streamId.length > 0);
 
     const fetched = await proxy.request('session.get', {
       sessionId: session.id,
     });
     assert.equal((fetched.result as { session: { id: string } }).session.id, session.id);
 
-    // capabilities now exposes only models + slashCommands; mode/defaultMode
-    // were dropped in the 4-mode redesign (per-turn permissionMode replaces).
-    // Probes a real `claude -p` for slash commands (~1-15s), so allow more
-    // headroom than the default 2s — especially when the model-discovery
-    // probes (kicked off at startup) are still resolving in parallel.
-    const capabilities = await proxy.request('capabilities.list', undefined, 20_000);
-    const capabilityResult = capabilities.result as { models: unknown[]; slashCommands: unknown[] };
-    assert.ok(Array.isArray(capabilityResult.models));
-    assert.ok(Array.isArray(capabilityResult.slashCommands));
+    const catalog = await proxy.request('catalog.list', undefined, 20_000);
+    const catalogResult = catalog.result as {
+      catalogRevision: string;
+      configOptions: unknown[];
+      slashCommands: unknown[];
+    };
+    assert.ok(catalogResult.catalogRevision.length > 0);
+    assert.ok(Array.isArray(catalogResult.configOptions));
+    assert.ok(Array.isArray(catalogResult.slashCommands));
 
     const missingMethod = await proxy.request('nonexistent.method');
-    assert.equal(missingMethod.error?.code, 'METHOD_NOT_FOUND');
+    assert.equal(missingMethod.error?.code, -32601);
+    assert.equal(missingMethod.error?.data?.domainCode, 'METHOD_NOT_FOUND');
   } finally {
     await proxy.close();
     await rm(dataDir, { recursive: true, force: true });
@@ -214,8 +231,10 @@ test('cli smoke reports protocol errors for malformed json', { skip: smokeSkip }
 
   try {
     proxy.sendRaw('{not-json');
-    const notification = await proxy.nextNotification('protocol.error');
-    assert.equal((notification.params as { code: string }).code, 'INVALID_JSON');
+    const error = await proxy.nextResponse();
+    assert.equal(error.id, null);
+    assert.equal(error.error?.code, -32700);
+    assert.equal(error.error?.data?.domainCode, 'PARSE_ERROR');
   } finally {
     await proxy.close();
     await rm(dataDir, { recursive: true, force: true });

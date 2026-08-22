@@ -1,0 +1,77 @@
+name: Risk
+description: Track an open product, security, compatibility, data, or release risk
+title: "[Risk] "
+labels:
+  - risk
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include secrets, credentials, private user data, production payloads, or sensitive logs.
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 风险场景
+      description: 描述什么条件下可能发生什么问题，不要只写解决方案。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: likelihood
+    attributes:
+      label: 发生可能性
+      options:
+        - low
+        - medium
+        - high
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: 影响程度
+      options:
+        - low
+        - medium
+        - high
+        - critical
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 触发信号与证据
+      description: 说明如何发现风险正在发生；仅链接已脱敏的证据。
+
+  - type: textarea
+    id: mitigation
+    attributes:
+      label: 缓解方案
+      description: 写明预防、检测、恢复和回滚边界。
+    validations:
+      required: true
+
+  - type: textarea
+    id: done
+    attributes:
+      label: 关闭或接受条件
+      description: 定义何时可以标记 mitigated、accepted 或不再成立。
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: 关联资料
+      description: 相关 requirement、ADR、代码、测试、Issue 或 PR。
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已移除敏感数据，并搜索了现有 Risk/Bug Issue。
+          required: true

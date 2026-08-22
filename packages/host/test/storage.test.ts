@@ -35,6 +35,8 @@ test('openDatabase runs migrations and creates expected tables', () => {
       'proxy_replay_turns',
       'proxy_replay_events',
       'proxy_replay_streams',
+      'proxy_interactions',
+      'sidechat_transients',
     ]) {
       assert.ok(names.includes(expected), `missing table ${expected}`);
     }
@@ -45,6 +47,15 @@ test('openDatabase runs migrations and creates expected tables', () => {
     for (const retired of ['runtime_mode', 'turns', 'tty_turn_seq']) {
       assert.ok(!sessionColumns.includes(retired), `retired session column still exists: ${retired}`);
     }
+    assert.ok(sessionColumns.includes('turn_config_json'), 'missing sessions.turn_config_json');
+    assert.ok(
+      sessionColumns.includes('turn_config_options_json'),
+      'missing sessions.turn_config_options_json',
+    );
+    assert.ok(
+      sessionColumns.includes('turn_config_revision'),
+      'missing sessions.turn_config_revision',
+    );
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -314,6 +325,36 @@ test('migration 036 adds the pending sidechat fork reference', () => {
       )),
       'sidechat fork must clear when its parent session is deleted',
     );
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration 054 persists Side Chat public state', () => {
+  const dir = makeTempDir();
+  try {
+    const db = openDatabase(dir);
+    const columns = db.prepare('PRAGMA table_info(sidechat_transients)').all() as Array<{
+      name: string;
+    }>;
+    assert.ok(
+      columns.some(column => column.name === 'public_state'),
+      'sidechat_transients missing public_state',
+    );
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration 053 persists the canonical Fork request identity', () => {
+  const dir = makeTempDir();
+  try {
+    const db = openDatabase(dir);
+    const columns = db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+    assert.ok(columns.some(column => column.name === 'origin_source_stream_id'));
+    assert.ok(columns.some(column => column.name === 'origin_anchor_type'));
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

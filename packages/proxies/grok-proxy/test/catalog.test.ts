@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { catalogFromModelState, modelStateFromUnknown } from '../src/core/catalog.js';
+import { catalogFromModelState, modelStateFromUnknown, toV2ConfigOptions } from '../src/core/catalog.js';
 
 test('catalog maps Grok modelState to model, reasoning effort, and permission modes', () => {
   const catalog = catalogFromModelState(modelStateFromUnknown({
@@ -32,4 +32,33 @@ test('catalog maps Grok modelState to model, reasoning effort, and permission mo
     catalog.sessionOptions.find(option => option.id === 'permission_mode')?.currentValue,
     'auto',
   );
+
+  const options = toV2ConfigOptions(catalog.sessionOptions);
+  assert.ok(options.every(option => option.binding === 'session'));
+  assert.equal(options.find(option => option.id === 'model')?.role, 'model');
+  assert.equal(options.find(option => option.id === 'reasoning_effort')?.role, 'effort');
+  assert.equal(options.find(option => option.id === 'permission_mode')?.role, 'approval_mode');
+  assert.equal(
+    options.find(option => option.id === 'model')?.choices?.[0]?.displayName,
+    'Grok 4.6',
+  );
+});
+
+test('reasoning effort is enabled only for models that advertise efforts', () => {
+  const options = toV2ConfigOptions(catalogFromModelState({
+    currentModelId: 'grok-fast',
+    availableModels: [
+      { modelId: 'grok-fast', name: 'Grok Fast' },
+      {
+        modelId: 'grok-4.6',
+        name: 'Grok 4.6',
+        _meta: {
+          reasoningEfforts: [{ id: 'high', value: 'high', label: 'High', default: true }],
+        },
+      },
+    ],
+  }).sessionOptions);
+  assert.deepEqual(options.find(option => option.id === 'reasoning_effort')?.enabledWhen, [
+    { optionId: 'model', oneOf: ['grok-4.6'] },
+  ]);
 });

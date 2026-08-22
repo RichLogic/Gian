@@ -18,20 +18,23 @@ function Icon({ d, size = 16 }: { d: string; size?: number }) {
   );
 }
 
-/** Panel toggle glyph: outer frame + side divider; the side section is filled
- *  solid while the panel is open (Air's `sidebar.right` idiom), empty when
- *  collapsed (same visual language for the left sidebar and the right
- *  panel-3 buttons, mirrored). */
+/** Panel toggle glyph — lucide.dev `panel-left-close/open` and
+ *  `panel-right-close/open` (24-grid, project 1.5px stroke). The icon mirrors
+ *  the current state: panel OPEN → the `-close` glyph, panel COLLAPSED →
+ *  the `-open` glyph (same rule for the left sidebar and panel-3). */
+const PANEL_ICON_PATHS = {
+  'left-close': 'M9 3v18 M16 15l-3-3 3-3',
+  'left-open': 'M9 3v18 M14 9l3 3-3 3',
+  'right-close': 'M15 3v18 M8 9l3 3-3 3',
+  'right-open': 'M15 3v18 M10 15l-3-3 3-3',
+} as const;
+
 function PanelIcon({ side, active }: { side: 'left' | 'right'; active: boolean }) {
-  const dividerX = side === 'left' ? 9 : 15;
-  const fill = side === 'left'
-    ? 'M6 3.5h3v17H6a2.5 2.5 0 0 1-2.5-2.5V6A2.5 2.5 0 0 1 6 3.5z'
-    : 'M18 3.5h-3v17h3a2.5 2.5 0 0 0 2.5-2.5V6A2.5 2.5 0 0 0 18 3.5z';
+  const d = PANEL_ICON_PATHS[`${side}-${active ? 'close' : 'open'}`];
   return (
     <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
-      {active && <path d={fill} fill="currentColor" stroke="none" />}
-      <path d="M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
-      <path d={`M${dividerX} 3v18`} />
+      <rect width="18" height="18" x="3" y="3" rx="2" />
+      <path d={d} />
     </svg>
   );
 }

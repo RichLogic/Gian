@@ -19,7 +19,7 @@ import type { ProxyNotification, ServerToClientMessage } from '@gian/shared';
 import { openDatabase } from '../src/storage/db.js';
 import { SessionManager } from '../src/session/manager.js';
 import type { ProxyManager } from '../src/proxy/manager.js';
-import type { ProxyClient, NotificationHandler } from '../src/proxy/types.js';
+import type { CreateSessionParams, NotificationHandler, ProxyClient, StartTurnParams } from '../src/proxy/types.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import { ApprovalManager } from '../src/approval/index.js';
 import { QueueManager } from '../src/queue/index.js';
@@ -35,25 +35,28 @@ class FakeProxyClient implements ProxyClient {
   failNextStartTurn: Error | null = null;
   /** Records every startTurn invocation (for FIFO assertions). */
   startTurnCalls: Array<{ input: unknown }> = [];
+  lastCreateParams: CreateSessionParams | null = null;
 
+  isExited() { return false; }
   async initialize() {
-    return { mode: 'spawn' as const, protocolVersion: '0.1.0', methods: [] };
+    return {
+      protocol: { name: 'gian.proxy' as const, version: '2.0' as const },
+      plugin: { id: this.executor, name: this.executor, version: '0.2.0' },
+      process: { scope: this.executor === 'codex' || this.executor === 'kimi' ? 'shared' as const : 'session' as const },
+      capabilities: {},
+    };
   }
-  async capabilities() {
-    return { protocolVersion: '0.1.0', models: [], slashCommands: [] };
+  async catalog() {
+    return { catalogRevision: 'test', input: [{ type: 'text' as const }], configOptions: [], slashCommands: [] };
   }
-  async listSlashCommands() {
-    return { commands: [] };
-  }
-  async createSession(params: { cwd: string; claudeSessionId?: string; threadId?: string }) {
-    const nativeSessionId = params.claudeSessionId ?? `cc_${randomUUID()}`;
+  async createSession(params: CreateSessionParams) {
+    this.lastCreateParams = params;
+    const nativeSessionId = params.nativeSessionId ?? `cc_${randomUUID()}`;
     return {
       session: {
         id: nativeSessionId,
         cwd: params.cwd,
-        claudeSessionId: nativeSessionId,
-        model: null,
-        status: 'idle' as const,
+        state: 'idle' as const,
         createdAt: '2026-05-17T00:00:00.000Z',
         updatedAt: '2026-05-17T00:00:00.000Z',
         lastError: null,
@@ -62,7 +65,7 @@ class FakeProxyClient implements ProxyClient {
     };
   }
   async interruptTurn() { /* no-op */ }
-  async respondApproval() { /* no-op */ }
+  async respondInteraction() { /* no-op */ }
   async startTurn(params: unknown) {
     this.startTurnCalls.push({ input: params });
     if (this.failNextStartTurn) {
@@ -74,8 +77,7 @@ class FakeProxyClient implements ProxyClient {
       session: {
         id: 'proxy_x',
         cwd: '/tmp',
-        model: null,
-        status: 'running' as const,
+        state: 'running' as const,
         createdAt: '2026-05-17T00:00:00.000Z',
         updatedAt: '2026-05-17T00:00:00.000Z',
         lastError: null,
@@ -775,15 +777,11 @@ test('QUEUE-004: sendQueuedNow while busy on codex steers every entry into the a
     });
 
     await sessions.sendMessage(session.id, 'turn-A');
-    const startParams = codexClient.startTurnCalls[0]!.input as {
-      additionalWorkspaceRoots?: string[];
-    };
-    assert.equal(startParams.additionalWorkspaceRoots?.length, 1);
-    assert.match(
-      startParams.additionalWorkspaceRoots![0]!,
-      new RegExp(`/attachments/${session.id}$`),
-      'every Codex turn exposes its session-owned attachment root for later steers',
-    );
+    const created = codexClient.lastCreateParams;
+    assert.ok(created?.workspaceRoots?.some(root => root.endsWith(`/attachments/${session.id}`)),
+      'session.create exposes the session-owned attachment root for later steers');
+    const startParams = codexClient.startTurnCalls[0]!.input as StartTurnParams;
+    assert.deepEqual(startParams.input, [{ type: 'text', text: 'turn-A' }]);
     sessions.enqueueMessage(session.id, 'later-1');
     sessions.enqueueMessage(session.id, 'later-2');
 

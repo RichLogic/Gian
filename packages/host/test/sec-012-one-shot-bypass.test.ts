@@ -29,30 +29,50 @@ import { QueueManager } from '../src/queue/index.js';
 class RecordingProxyClient implements ProxyClient {
   readonly executor: Executor;
   notificationHandlers: NotificationHandler[] = [];
-  startTurnCalls: Array<Record<string, unknown>> = [];
+  startTurnCalls: Array<import('../src/proxy/types.js').StartTurnParams> = [];
 
   constructor(executor: Executor) {
     this.executor = executor;
   }
 
+  isExited() { return false; }
   async initialize() {
-    return { mode: 'spawn' as const, protocolVersion: '0.1.0', methods: [] };
+    return {
+      protocol: { name: 'gian.proxy' as const, version: '2.0' as const },
+      plugin: { id: this.executor, name: this.executor, version: '0.2.0' },
+      process: { scope: this.executor === 'codex' ? 'shared' as const : 'session' as const },
+      capabilities: {},
+    };
   }
-  async capabilities() {
-    return { protocolVersion: '0.1.0', models: [], slashCommands: [] };
+  async catalog() {
+    return {
+      catalogRevision: 'sec-012',
+      input: [{ type: 'text' as const }],
+      configOptions: [{
+        id: 'permission_mode',
+        displayName: 'Mode',
+        binding: 'turn' as const,
+        role: 'approval_mode',
+        control: 'select' as const,
+        required: false,
+        defaultValue: 'ask',
+        choices: [
+          { value: 'ask', displayName: 'Ask' },
+          { value: 'plan', displayName: 'Plan' },
+          { value: 'auto', displayName: 'Auto' },
+          { value: 'bypassPermissions', displayName: 'Bypass' },
+        ],
+      }],
+      slashCommands: [],
+    };
   }
-  async listSlashCommands() {
-    return { commands: [] };
-  }
-  async createSession(params: { cwd: string; claudeSessionId?: string; threadId?: string }) {
-    const nativeSessionId = params.claudeSessionId ?? params.threadId ?? `${this.executor}_${randomUUID()}`;
+  async createSession(params: { cwd: string; nativeSessionId?: string }) {
+    const nativeSessionId = params.nativeSessionId ?? `${this.executor}_${randomUUID()}`;
     return {
       session: {
         id: nativeSessionId,
         cwd: params.cwd,
-        claudeSessionId: nativeSessionId,
-        model: null,
-        status: 'idle' as const,
+        state: 'idle' as const,
         createdAt: '2026-05-17T00:00:00.000Z',
         updatedAt: '2026-05-17T00:00:00.000Z',
         lastError: null,
@@ -61,15 +81,14 @@ class RecordingProxyClient implements ProxyClient {
     };
   }
   async interruptTurn() {}
-  async respondApproval() {}
-  async startTurn(params: unknown) {
-    this.startTurnCalls.push(params as Record<string, unknown>);
+  async respondInteraction() {}
+  async startTurn(params: import('../src/proxy/types.js').StartTurnParams) {
+    this.startTurnCalls.push(params);
     return {
       session: {
         id: 'proxy_x',
         cwd: '/tmp',
-        model: null,
-        status: 'running' as const,
+        state: 'running' as const,
         createdAt: '2026-05-17T00:00:00.000Z',
         updatedAt: '2026-05-17T00:00:00.000Z',
         lastError: null,
@@ -161,7 +180,7 @@ function fireCompleted(proxyMgr: FakeProxyManager) {
 // Claude executor
 // ---------------------------------------------------------------------------
 
-test('SEC-012: bypass turn (claude) carries permissionMode=bypassPermissions exactly once', async () => {
+test('SEC-012: bypass turn (claude) carries permission_mode=bypassPermissions exactly once', async () => {
   const ctx = setup('claude');
   try {
     const session = await ctx.sessions.createSession({
@@ -170,26 +189,17 @@ test('SEC-012: bypass turn (claude) carries permissionMode=bypassPermissions exa
       approval_mode: 'ask',
     });
 
-    // Bypass turn: caller passes oneShotBypass=true.
     await ctx.sessions.sendMessage(session.id, 'risky shell', undefined, true);
     fireCompleted(ctx.proxyMgr);
 
-    // Next turn: caller does NOT pass oneShotBypass.
     await ctx.sessions.sendMessage(session.id, 'normal follow up');
 
     const calls = ctx.proxyMgr.client.startTurnCalls;
     assert.equal(calls.length, 2, 'two turns started');
-
-    // Bypass turn must carry bypassPermissions only on the first call.
-    assert.equal(calls[0]!.permissionMode, 'bypassPermissions',
+    assert.equal(calls[0]!.config.permission_mode, 'bypassPermissions',
       'bypass turn must override permission to bypassPermissions');
-    assert.notEqual(calls[1]!.permissionMode, 'bypassPermissions',
-      'follow-up turn must NOT carry bypassPermissions');
-
-    // Per `proxyTurnParamsFor`, approval_mode='ask' for claude maps to
-    // permissionMode='default'. The follow-up turn must use that.
-    assert.equal(calls[1]!.permissionMode, 'default',
-      'follow-up turn must use the session.approval_mode mapping (ask → default)');
+    assert.equal(calls[1]!.config.permission_mode, 'ask',
+      'follow-up turn must use the stored session approval_mode');
   } finally {
     teardown(ctx);
   }
@@ -247,10 +257,10 @@ test('SEC-012: second bypass turn re-applies bypassPermissions without coupling 
 
     const calls = ctx.proxyMgr.client.startTurnCalls;
     assert.equal(calls.length, 4);
-    assert.equal(calls[0]!.permissionMode, 'bypassPermissions', 'turn 1 bypass');
-    assert.equal(calls[1]!.permissionMode, 'default', 'turn 2 back to ask→default');
-    assert.equal(calls[2]!.permissionMode, 'bypassPermissions', 'turn 3 bypass again');
-    assert.equal(calls[3]!.permissionMode, 'default', 'turn 4 back to ask→default');
+    assert.equal(calls[0]!.config.permission_mode, 'bypassPermissions', 'turn 1 bypass');
+    assert.equal(calls[1]!.config.permission_mode, 'ask', 'turn 2 back to ask');
+    assert.equal(calls[2]!.config.permission_mode, 'bypassPermissions', 'turn 3 bypass again');
+    assert.equal(calls[3]!.config.permission_mode, 'ask', 'turn 4 back to ask');
   } finally {
     teardown(ctx);
   }

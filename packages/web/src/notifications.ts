@@ -104,6 +104,7 @@ function sessionLabel(session: Pick<Session, 'name' | 'executor'> | null | undef
   if (session.executor === 'codex') return 'Codex session';
   if (session.executor === 'kimi') return 'Kimi session';
   if (session.executor === 'grok') return 'Grok session';
+  if (session.executor === 'dsh') return 'DeepSeek Harness session';
   return 'Claude session';
 }
 

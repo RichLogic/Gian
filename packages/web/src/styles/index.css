@@ -17,6 +17,8 @@
 @import url('./workspaces-v3.css');
 /* Chat-owned detail (Plan, Agent, transcript), separate from dock rails. */
 @import url('./chat-context-panel.css');
+/* Trace view (timeline + turn-grouped event list) — same token set as events.css. */
+@import url('./trace.css');
 @import url('./browser.css');
 @import url('./onboarding.css');
 

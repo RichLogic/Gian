@@ -98,6 +98,10 @@ function ClientReducerHarness({
     setAuthed,
     setWorkspaces: ignoreState,
     setSessions: setSessionsRef,
+    setSideChats: ignoreState,
+    sideChatsRef: { current: [] },
+    setItemsBySidechat: ignoreState,
+    setPendingBySidechat: ignoreState,
     setTasks: ignoreState,
     setSystemConfig: ignoreState,
     setRunner: ignoreState,
@@ -532,7 +536,16 @@ describe('WS-003: Host dispatch failure through the real Web client chain', () =
         activeSessionId: nextCreated.id,
         pendingFirstMessage: null,
       });
-      expect(socket.parsedSent<ClientToServerMessage>()).toContainEqual(expect.objectContaining({
+      const sent = socket.parsedSent<ClientToServerMessage>();
+      const subscribeIndex = sent.findIndex(frame => (
+        frame.type === 'events:subscribe' && frame.session_id === nextCreated.id
+      ));
+      const firstMessageIndex = sent.findIndex(frame => (
+        frame.type === 'message:send' && frame.session_id === nextCreated.id
+      ));
+      expect(subscribeIndex).toBeGreaterThanOrEqual(0);
+      expect(firstMessageIndex).toBeGreaterThan(subscribeIndex);
+      expect(sent).toContainEqual(expect.objectContaining({
         type: 'message:send',
         session_id: nextCreated.id,
         text: 'first message for the next create',

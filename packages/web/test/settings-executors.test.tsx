@@ -151,13 +151,13 @@ describe('SettingsBody Executors', () => {
     );
   }
 
-  it('renders exactly four cards with Proxy-owned defaults inside each card', async () => {
+  it('renders only the three shipping executor cards with Proxy-owned defaults', async () => {
     renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
 
     await waitFor(() => expect(screen.getAllByText('Claude Code')).toHaveLength(1));
     expect(screen.getAllByText('Codex')).toHaveLength(1);
     expect(screen.getAllByText('Kimi Code')).toHaveLength(1);
-    expect(screen.getAllByText('Grok Build')).toHaveLength(1);
+    expect(screen.queryByText('Grok Build')).toBeNull();
     // Claude + Codex: model, thinking/effort, mode. Kimi advertises no
     // models/modes, so it renders no defaults rows at all (2026-08-04).
     await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(6));
@@ -292,10 +292,10 @@ describe('SettingsBody Executors', () => {
   it('shows a Version-row hint only when the CLI version differs from the recommended value', async () => {
     vi.mocked(api.loadAgents).mockResolvedValue([
       {
-        ...agent('grok', 'Grok Build'),
+        ...agent('claude', 'Claude Code'),
         cli: {
           state: 'ready',
-          path: '/bin/grok',
+          path: '/bin/claude',
           version: '1.0.4',
           recommendedVersion: '1.0.3',
           source: 'path',
@@ -303,7 +303,7 @@ describe('SettingsBody Executors', () => {
       },
     ]);
     renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
-    expect(await screen.findByTestId('grok-cli-version-mismatch')).toHaveTextContent('1.0.3');
+    expect(await screen.findByTestId('claude-cli-version-mismatch')).toHaveTextContent('1.0.3');
   });
 
   it('confirms before persisting a changed CLI path and restarting the packaged app', async () => {

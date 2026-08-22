@@ -110,17 +110,16 @@ describe('CLI-aligned composer controls', () => {
     const callbacks = renderComposer(session);
 
     await waitFor(() => {
-      expect(document.querySelector('.cmp-think-btn')?.textContent).toContain('Ultra');
+      expect(document.querySelector('.cmp-options-btn')?.textContent).toContain('Ultra');
     });
     expect(document.querySelector('.cmp-executor-mark.codex')).toBeTruthy();
 
-    await user.click(document.querySelector('.cmp-think-btn')!);
+    await user.click(document.querySelector('.cmp-options-btn')!);
     expect(await screen.findByText('Max', { selector: '.mp-row-title' })).toBeTruthy();
     expect(screen.getByText('Ultra', { selector: '.mp-row-title' })).toBeTruthy();
 
-    const fast = screen.getByRole('button', { name: 'Fast' });
-    expect(fast).toHaveClass('on');
-    expect(fast).toHaveAttribute('aria-pressed', 'true');
+    const fast = screen.getByRole('switch', { name: 'Fast' });
+    expect(fast).toHaveAttribute('aria-checked', 'true');
 
     await user.click(document.querySelector('.cmp-approval-btn')!);
     const custom = await screen.findByText('Custom (config.toml)', { selector: '.mp-row-title' });
@@ -233,7 +232,7 @@ describe('CLI-aligned composer controls', () => {
     expect(document.querySelector('.slash-box')).toBeNull();
     expect(screen.queryByRole('button', { name: /Remote Control/i })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Fast' })).toBeNull();
-    expect(document.querySelector('.cmp-bulb')).toBeTruthy();
+    expect(document.querySelector('.cmp-options-btn')).toBeTruthy();
 
     await user.type(screen.getByRole('textbox'), '/');
     expect(await screen.findByText('/review')).toBeTruthy();

@@ -1,25 +1,15 @@
-// Minimal stdio JSON-RPC fixture for CcProxyClient tests.
-// Reads NDJSON requests from stdin and writes responses + a notification.
-// Mirrors cc-proxy's stateless contract: session response carries id +
-// claudeSessionId; notifications route by params.sessionId. There is no
-// sessionKey on the wire.
-
 import { createInterface } from 'node:readline';
 
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const emittedAt = '2026-04-26T00:00:00.000Z';
 
 function write(obj) {
-  process.stdout.write(JSON.stringify(obj) + '\n');
+  process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
 
-// Fire one notification on startup so tests can verify dispatch.
-write({
-  method: 'debug',
-  params: {
-    sessionId: 'sess_fixture',
-    data: { message: 'fixture ready' },
-  },
-});
+function result(id, value) {
+  write({ jsonrpc: '2.0', id, result: value });
+}
 
 for await (const line of rl) {
   const trimmed = line.trim();
@@ -33,75 +23,111 @@ for await (const line of rl) {
 
   switch (req.method) {
     case 'initialize':
-      write({
-        id: req.id,
-        result: { mode: 'spawn', protocolVersion: '0.1.0', methods: ['initialize', 'shutdown'] },
+      result(req.id, {
+        protocol: { name: 'gian.proxy', version: '2.0' },
+        plugin: {
+          id: process.env.GIAN_PLUGIN_ID ?? 'claude',
+          name: 'Claude Code',
+          version: '0.2.0',
+        },
+        process: { scope: 'session' },
+        capabilities: { 'session.replay': 1, interaction: 1, 'catalog.resolve': 1 },
       });
       break;
-    case 'capabilities.list':
+    case 'catalog.list':
+      result(req.id, {
+        catalogRevision: 'claude-fixture-1',
+        input: [{ type: 'text' }],
+        configOptions: [],
+        slashCommands: [],
+      });
+      break;
+    case 'catalog.resolve':
       write({
+        jsonrpc: '2.0',
         id: req.id,
-        result: { protocolVersion: '0.1.0', models: [], slashCommands: [] },
+        error: {
+          code: -32000,
+          message: 'forced failure',
+          data: { domainCode: 'INTERNAL', retryable: false, details: {} },
+        },
       });
       break;
     case 'session.create':
-      write({
-        id: req.id,
-        result: {
-          session: {
-            id: 'sess_fixture',
-            cwd: req.params?.cwd ?? '/tmp',
-            claudeSessionId: req.params?.claudeSessionId ?? 'cc_fixture',
-            model: null,
-            status: 'idle',
-            createdAt: '2026-04-26T00:00:00.000Z',
-            updatedAt: '2026-04-26T00:00:00.000Z',
-            lastError: null,
-          },
+      result(req.id, {
+        session: {
+          id: req.params.sessionId,
+          nativeSession: { id: req.params.nativeSession?.id ?? 'cc_fixture' },
+          streamId: 'stream-fixture',
+          state: 'idle',
+          sessionConfig: req.params.config ?? {},
+          lastError: null,
+          createdAt: emittedAt,
+          updatedAt: emittedAt,
         },
       });
       break;
-    case 'turn.start':
-      // Send a turn.completed notification then the result.
+    case 'turn.start': {
+      const turnId = req.params.turnId;
+      const base = {
+        streamId: req.params.streamId,
+        sessionId: req.params.sessionId,
+        turnId,
+        sourceTurnId: turnId,
+        emittedAt,
+      };
+      result(req.id, { accepted: true, turnId });
       write({
+        jsonrpc: '2.0',
+        method: 'turn.started',
+        params: { ...base, eventId: 'event-1', sequence: 1, data: {} },
+      });
+      write({
+        jsonrpc: '2.0',
+        method: 'content.delta',
+        params: {
+          ...base,
+          eventId: 'event-2',
+          sequence: 2,
+          data: { contentId: 'c1', kind: 'text', delta: 'ok' },
+        },
+      });
+      write({
+        jsonrpc: '2.0',
+        method: 'content.completed',
+        params: {
+          ...base,
+          eventId: 'event-3',
+          sequence: 3,
+          data: { contentId: 'c1', kind: 'text', content: 'ok' },
+        },
+      });
+      write({
+        jsonrpc: '2.0',
         method: 'turn.completed',
         params: {
-          requestId: req.id,
-          sessionId: 'sess_fixture',
-          turnId: 'turn_fixture',
-          data: { status: 'completed', result: 'ok' },
-        },
-      });
-      write({
-        id: req.id,
-        result: {
-          session: {
-            id: 'sess_fixture',
-            mode: 'agent',
-            cwd: '/tmp',
-            model: null,
-            status: 'idle',
-            createdAt: '2026-04-26T00:00:00.000Z',
-            updatedAt: '2026-04-26T00:00:00.000Z',
-            lastError: null,
-          },
-          turn: { id: 'turn_fixture' },
+          ...base,
+          eventId: 'event-4',
+          sequence: 4,
+          data: { stopReason: 'completed' },
         },
       });
       break;
-    case 'fail.me':
-      write({
-        id: req.id,
-        error: { code: 'INTERNAL_ERROR', message: 'forced failure' },
-      });
-      break;
+    }
+    case 'session.close':
     case 'shutdown':
-      write({ id: req.id, result: { ok: true } });
-      process.exit(0);
+      result(req.id, { ok: true });
+      if (req.method === 'shutdown') process.exit(0);
+      break;
     default:
       write({
+        jsonrpc: '2.0',
         id: req.id,
-        error: { code: 'METHOD_NOT_FOUND', message: req.method },
+        error: {
+          code: -32601,
+          message: req.method,
+          data: { domainCode: 'METHOD_NOT_FOUND', retryable: false, details: {} },
+        },
       });
   }
 }

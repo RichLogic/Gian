@@ -45,7 +45,7 @@ export function Caret({ className = 'evt-caret' }: { className?: string }) {
 type OnApprove = (
   approvalId: string,
   decision: ApprovalDecision,
-  answers?: Record<string, string | string[]>,
+  answers?: Record<string, string | boolean | string[]>,
   context?: ApprovalActionContext,
 ) => void;
 
@@ -54,7 +54,7 @@ type OnApprove = (
  * top of each interactive card distinguishing Approval / Question / Plan at
  * a glance. Resolved `.approval-line` rows carry no head.
  */
-function CardHead({ kind }: { kind: 'approval' | 'question' | 'plan' }) {
+function CardHead({ kind }: { kind: 'approval' | 'question' | 'plan' | 'choice' | 'confirmation' }) {
   const t = useT();
   return <div className="approval-head">{t(`transcript.cardKind.${kind}`)}</div>;
 }
@@ -89,7 +89,10 @@ export function ApprovalCard({
   const t = useT();
   const isQuestion = item.category === 'question' && item.questions && item.questions.length > 0;
   const isPlanExit = item.category === 'exit_plan_mode' && item.planActions && item.planActions.length > 0;
-  const isNative = (item.nativeOptions?.length ?? 0) > 0;
+  const protocolActions = item.actions ?? [];
+  const hasProtocolActions = protocolActions.length > 0;
+  const isNative = !hasProtocolActions && (item.nativeOptions?.length ?? 0) > 0;
+  const [inputValues, setInputValues] = useState<Record<string, string | boolean | string[]>>({});
   const kimiQuestion = isKimiQuestion(item);
   // Plan bodies are model-written markdown — repair spec-invalid tables the
   // same way the transcript renderer does.
@@ -111,7 +114,7 @@ export function ApprovalCard({
   // shortcuts stay.
   const shortcuts = useShortcuts();
   useEffect(() => {
-    if (item.status !== 'pending' || resolving || isQuestion || isPlanExit || isNative) return;
+    if (item.status !== 'pending' || resolving || isQuestion || isPlanExit || isNative || hasProtocolActions) return;
     function handleKey(e: KeyboardEvent) {
       // Ignore if focus is in an input/textarea/contenteditable
       const tag = (e.target as HTMLElement | null)?.tagName ?? '';
@@ -129,12 +132,68 @@ export function ApprovalCard({
     }
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [item.status, item.approvalId, onApprove, resolving, isQuestion, isPlanExit, isNative, sessionScopeAllowed, shortcuts]);
+  }, [item.status, item.approvalId, onApprove, resolving, isQuestion, isPlanExit, isNative, hasProtocolActions, sessionScopeAllowed, shortcuts]);
 
   // Resolved approvals and questions compress to a single line that reads
   // inline with the surrounding process rows.
   if (item.status !== 'pending') {
     return <ApprovalLine item={item} />;
+  }
+
+  // gian.proxy/2.0 §12 unified interaction card: any v2 signal (actions,
+  // inputs, or an explicit presentation kind) takes this single rendering
+  // path — kind label + subject + description + generic inputs + verbatim
+  // action buttons. The legacy QuestionCard / KimiQuestionCard / plan /
+  // generic branches below stay as v1-fallback-only paths.
+  const isProtocol = hasProtocolActions || (item.inputs?.length ?? 0) > 0 || item.interactionKind !== undefined;
+  if (isProtocol) {
+    const answers = interactionAnswers(item.inputs, inputValues);
+    const inputsReady = protocolInputsReady(item.inputs, inputValues);
+    const headKind = item.interactionKind === 'question' ? 'question'
+      : item.interactionKind === 'choice' ? 'choice'
+      : item.interactionKind === 'confirmation' ? 'confirmation'
+      : 'approval';
+    return (
+      <div className={`approval interaction${item.tone && item.tone !== 'neutral' ? ` tone-${item.tone}` : ''}`}>
+        <CardHead kind={headKind} />
+        {item.cmd && (
+          item.hasSubject
+            ? <div className="approval-cmd">{item.cmd}</div>
+            : <div className="approval-prose">{item.cmd}</div>
+        )}
+        {item.reason && <div className="approval-desc">{item.reason}</div>}
+        {item.inputs && item.inputs.length > 0 && (
+          <InteractionInputs
+            approvalId={item.approvalId}
+            inputs={item.inputs}
+            values={inputValues}
+            disabled={resolving}
+            onChange={(id, value) => setInputValues(current => ({ ...current, [id]: value }))}
+          />
+        )}
+        <div className="approval-actions">
+          {protocolActions.map(action => (
+            <button
+              key={action.id}
+              className={actionButtonClass(action.style)}
+              disabled={resolving || !inputsReady}
+              onClick={() => onApprove(
+                item.approvalId,
+                actionDecision(action.id),
+                answers,
+                {
+                  category: item.category,
+                  nativeOptionId: action.id,
+                },
+              )}
+            >
+              {action.label}
+            </button>
+          ))}
+          {resolving && <span className="approval-resolving">{t('transcript.approval.resolving')}</span>}
+        </div>
+      </div>
+    );
   }
 
   if (isQuestion) {
@@ -152,9 +211,20 @@ export function ApprovalCard({
   // Only surface "Allow session" when the category supports it (host
   // disables session scope for `other` / `exit_plan_mode` / `question`).
   const allowSession = sessionScopeAllowed;
+  const answers = interactionAnswers(item.inputs, inputValues);
+  const inputsReady = protocolInputsReady(item.inputs, inputValues);
   return (
     <div className="approval">
       <CardHead kind={isPlanExit ? 'plan' : 'approval'} />
+      {item.inputs && item.inputs.length > 0 && (
+        <InteractionInputs
+          approvalId={item.approvalId}
+          inputs={item.inputs}
+          values={inputValues}
+          disabled={resolving}
+          onChange={(id, value) => setInputValues(current => ({ ...current, [id]: value }))}
+        />
+      )}
       {item.cmd && (
         item.category === 'exit_plan_mode'
           ? (
@@ -171,7 +241,29 @@ export function ApprovalCard({
             </div>
           )
       )}
-      {isNative ? (
+      {hasProtocolActions ? (
+        <div className="approval-actions">
+          {protocolActions.map(action => (
+            <button
+              key={action.id}
+              className={actionButtonClass(action.style)}
+              disabled={resolving || !inputsReady}
+              onClick={() => onApprove(
+                item.approvalId,
+                actionDecision(action.id),
+                answers,
+                {
+                  category: item.category,
+                  nativeOptionId: action.id,
+                },
+              )}
+            >
+              {action.label}
+            </button>
+          ))}
+          {resolving && <span className="approval-resolving">{t('transcript.approval.resolving')}</span>}
+        </div>
+      ) : isNative ? (
         <div className="approval-actions">
           {item.nativeOptions!.map(option => {
             const rejected = option.kind.startsWith('reject');
@@ -238,6 +330,149 @@ export function ApprovalCard({
           {resolving && <span className="approval-resolving">{t('transcript.approval.resolving')}</span>}
         </div>
       )}
+    </div>
+  );
+}
+
+function actionButtonClass(style: 'primary' | 'secondary' | 'danger'): string {
+  if (style === 'primary') return 'btn primary sm';
+  if (style === 'danger') return 'btn danger-ghost sm';
+  return 'btn secondary sm';
+}
+
+function actionDecision(actionId: string): ApprovalDecision {
+  if (actionId.startsWith('reject') || actionId === 'decline' || actionId === 'cancelled') {
+    return 'decline';
+  }
+  if (actionId.includes('always') || actionId.includes('session')) return 'allow_session';
+  return 'allow_once';
+}
+
+function interactionAnswers(
+  inputs: ApprovalItem['inputs'],
+  values: Record<string, string | boolean | string[]>,
+): Record<string, string | boolean | string[]> | undefined {
+  if (!inputs?.length) return undefined;
+  const answers: Record<string, string | boolean | string[]> = {};
+  for (const input of inputs) {
+    const value = values[input.id];
+    if (value === undefined) continue;
+    answers[input.id] = value;
+  }
+  return Object.keys(answers).length > 0 ? answers : undefined;
+}
+
+function protocolInputsReady(
+  inputs: ApprovalItem['inputs'],
+  values: Record<string, string | boolean | string[]>,
+): boolean {
+  if (!inputs?.length) return true;
+  return inputs.every(input => {
+    if (!input.required) return true;
+    const value = values[input.id];
+    if (input.type === 'boolean') return typeof value === 'boolean';
+    if (Array.isArray(value)) return value.length > 0;
+    return typeof value === 'string' && value.trim().length > 0;
+  });
+}
+
+function InteractionInputs({
+  approvalId,
+  inputs,
+  values,
+  disabled,
+  onChange,
+}: {
+  approvalId: string;
+  inputs: NonNullable<ApprovalItem['inputs']>;
+  values: Record<string, string | boolean | string[]>;
+  disabled: boolean;
+  onChange: (id: string, value: string | boolean | string[]) => void;
+}) {
+  return (
+    <div className="approval-inputs">
+      {inputs.map(input => {
+        const value = values[input.id];
+        const description = input.description
+          ? <span className="approval-input-desc">{input.description}</span>
+          : null;
+        if (input.type === 'boolean') {
+          return (
+            <label key={input.id} className="approval-input approval-input-bool">
+              <input
+                type="checkbox"
+                disabled={disabled}
+                checked={value === true}
+                onChange={event => onChange(input.id, event.target.checked)}
+              />
+              <span>{input.label}</span>
+              {description}
+            </label>
+          );
+        }
+        if (input.type === 'single_select' || input.type === 'multi_select') {
+          const multi = input.type === 'multi_select';
+          const selected = Array.isArray(value) ? value : [];
+          return (
+            <div key={input.id} className="approval-input approval-input-select">
+              <span>{input.label}</span>
+              {description}
+              <ul className="question-options">
+                {(input.choices ?? []).map(choice => (
+                  <li key={choice.value} className="question-option">
+                    <label>
+                      <input
+                        type={multi ? 'checkbox' : 'radio'}
+                        name={`approval-input-${approvalId}-${input.id}`}
+                        disabled={disabled}
+                        checked={multi ? selected.includes(choice.value) : value === choice.value}
+                        onChange={event => {
+                          if (multi) {
+                            onChange(
+                              input.id,
+                              event.target.checked
+                                ? [...selected, choice.value]
+                                : selected.filter(item => item !== choice.value),
+                            );
+                          } else {
+                            onChange(input.id, choice.value);
+                          }
+                        }}
+                      />
+                      <span className="question-option-label">{choice.displayName}</span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          );
+        }
+        const multiline = input.type === 'multiline_text' || input.multiline;
+        return (
+          <label key={input.id} className="approval-input approval-input-text">
+            <span>{input.label}</span>
+            {description}
+            {multiline ? (
+              <textarea
+                className="approval-text-field"
+                disabled={disabled}
+                placeholder={input.placeholder}
+                value={typeof value === 'string' ? value : ''}
+                onChange={event => onChange(input.id, event.target.value)}
+              />
+            ) : (
+              <input
+                className="approval-text-field"
+                type={input.sensitive ? 'password' : 'text'}
+                disabled={disabled}
+                placeholder={input.placeholder}
+                value={typeof value === 'string' ? value : ''}
+                onChange={event => onChange(input.id, event.target.value)}
+              />
+            )}
+          </label>
+        );
+      })}
     </div>
   );
 }

@@ -97,6 +97,11 @@ function validateAbsolutePath(value: string, field: string): void {
   if (!isAbsolute(value)) throw new Error(`${field} must be an absolute path.`);
 }
 
+function isMethodNotFound(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /method not found/i.test(message);
+}
+
 function processExit(child: ChildProcessWithoutNullStreams): Promise<GrokAcpExit> {
   return new Promise((resolve) => {
     let settled = false;
@@ -344,7 +349,19 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
   }
 
   async renameSession(sessionId: string, title: string): Promise<unknown> {
-    return (await this.ext()).sendRequest('x.ai/session/rename', { sessionId, title });
+    const ext = await this.ext();
+    const params = { sessionId, title };
+    // Grok's TUI knows x.ai/session/rename; the stdio `grok agent` used by
+    // Gian does not register that ext method. Try both wire names, then
+    // succeed locally so Host bring-up does not fail a new conversation.
+    for (const method of ['x.ai/session/rename', '_x.ai/session/rename'] as const) {
+      try {
+        return await ext.sendRequest(method, params);
+      } catch (error) {
+        if (!isMethodNotFound(error)) throw error;
+      }
+    }
+    return { ok: true };
   }
 
   async deleteSession(sessionId: string): Promise<unknown> {

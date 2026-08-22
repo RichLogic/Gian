@@ -3,189 +3,145 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import type { ProxyNotification } from '@gian/shared';
+import type { ProxyNotification } from '@gian/proxy-protocol';
 import { projectNotification } from '../src/event/project-notification.js';
 import { ProxyManager } from '../src/proxy/manager.js';
 
 const timestamp = '2026-08-10T00:00:00.000Z';
 
-function proxySource(
-  pluginId = 'codex',
-  processScope: 'shared' | 'session' = 'shared',
+function jsonRpcSource(
+  pluginId: string,
+  processScope: 'shared' | 'session',
+  extra = '',
 ): string {
   return `
 import { createInterface } from 'node:readline';
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const timestamp = '${timestamp}';
+function write(payload) {
+  process.stdout.write(JSON.stringify(payload) + '\\n');
+}
+function result(id, value) {
+  write({ jsonrpc: '2.0', id, result: value });
+}
 for await (const line of input) {
   const request = JSON.parse(line);
-  let result;
   if (request.method === 'initialize') {
-    result = {
-      protocol: { name: 'gian.proxy', version: '1.0' },
-      plugin: { id: '${pluginId}', name: 'Protocol fixture', version: '0.1.0' },
+    result(request.id, {
+      protocol: { name: 'gian.proxy', version: '2.0' },
+      plugin: { id: '${pluginId}', name: 'Protocol fixture', version: '0.2.0' },
       process: { scope: '${processScope}' },
-      capabilities: { 'event.reasoning': 1 },
-    };
-  } else if (request.method === 'catalog.list') {
-    result = {
-      models: [{
-        id: 'fixture-model', displayName: 'Fixture model', description: '',
-        hidden: false, isDefault: true,
-        efforts: [{ id: 'medium', displayName: 'Medium', isDefault: true }],
-        input: ['text'],
-      }],
-      modes: [{
-        id: 'ask', displayName: 'Ask', description: '', isDefault: true,
-        approval: 'relay', workspace: 'workspace-write', network: 'ask',
-      }],
-      sessionOptions: [],
-    };
-  } else if (request.method === 'session.create') {
-    result = { session: {
+      capabilities: { 'session.replay': 1, 'session.native.list': 1, interaction: 1 },
+    });
+    continue;
+  }
+  if (request.method === 'catalog.list') {
+    result(request.id, {
+      catalogRevision: '${pluginId}-fixture-1',
+      input: [{ type: 'text' }],
+      configOptions: ${pluginId === 'kimi' ? `[{
+        id: 'mode', displayName: 'Mode', binding: 'session', role: 'approval_mode',
+        control: 'select', required: false, defaultValue: 'ask',
+        choices: [
+          { value: 'ask', displayName: 'Ask' },
+          { value: 'auto', displayName: 'Auto' },
+        ],
+      }]` : '[]'},
+      slashCommands: ${pluginId === 'kimi'
+        ? `[{ name: '/status', description: 'Status', source: 'builtin', argHints: [] }]`
+        : '[]'},
+    });
+    continue;
+  }
+  if (request.method === 'session.create') {
+    result(request.id, { session: {
       id: request.params.sessionId,
-      nativeSession: { id: 'native-${pluginId}-1' },
+      nativeSession: { id: request.params.nativeSession?.id ?? 'native-${pluginId}-1' },
       streamId: 'stream-1',
-      status: 'idle',
-      model: request.params.model ?? null,
-      createdAt: '${timestamp}',
-      updatedAt: '${timestamp}',
-    } };
-  } else if (request.method === 'turn.start') {
-    result = { accepted: true, turnId: request.params.turnId };
-  } else if (request.method === 'session.close' || request.method === 'shutdown') {
-    result = { ok: true };
+      state: 'idle',
+      sessionConfig: request.params.config ?? {},
+      lastError: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    } });
+    continue;
+  }
+  if (request.method === 'session.native.list') {
+    result(request.id, {
+      sessions: [{ id: 'native-existing', displayName: 'Existing', cwd: '/tmp/project', updatedAt: timestamp }],
+      nextCursor: null,
+    });
+    continue;
+  }
+  if (request.method === 'session.replay') {
+    result(request.id, { replayStreamId: 'replay-1', events: [], nextCursor: null });
+    continue;
   }
   if (request.method === 'turn.start') {
     const base = {
       sessionId: request.params.sessionId,
       streamId: request.params.streamId,
       turnId: request.params.turnId,
-      emittedAt: '${timestamp}',
+      sourceTurnId: request.params.turnId,
+      emittedAt: timestamp,
     };
+    result(request.id, { accepted: true, turnId: request.params.turnId });
     for (const notification of [
       { method: 'turn.started', params: { ...base, eventId: 'event-1', sequence: 1, data: {} } },
       { method: 'content.delta', params: { ...base, eventId: 'event-2', sequence: 2, data: {
         contentId: 'message-1', kind: 'text', delta: 'hello from standard protocol',
       } } },
-      { method: 'turn.completed', params: { ...base, eventId: 'event-3', sequence: 3, data: {
+      { method: 'content.completed', params: { ...base, eventId: 'event-3', sequence: 3, data: {
+        contentId: 'message-1', kind: 'text', content: 'hello from standard protocol',
+      } } },
+      { method: 'turn.completed', params: { ...base, eventId: 'event-4', sequence: 4, data: {
         stopReason: 'completed',
       } } },
-    ]) process.stdout.write(JSON.stringify(notification) + '\\n');
+    ]) write({ jsonrpc: '2.0', ...notification });
+    continue;
   }
-  process.stdout.write(JSON.stringify({ id: request.id, result }) + '\\n');
-  if (request.method === 'shutdown') {
-    input.close();
-    process.stdin.pause();
-    break;
+  if (request.method === 'session.close' || request.method === 'shutdown') {
+    result(request.id, { ok: true });
+    if (request.method === 'shutdown') {
+      input.close();
+      process.stdin.pause();
+      break;
+    }
+    continue;
   }
+  ${extra}
+  write({
+    jsonrpc: '2.0',
+    id: request.id,
+    error: {
+      code: -32601,
+      message: request.method,
+      data: { domainCode: 'METHOD_NOT_FOUND', retryable: false, details: {} },
+    },
+  });
 }
 `;
 }
 
-function kimiProxySource(): string {
-  return `
-import { createInterface } from 'node:readline';
-const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
-const timestamp = '${timestamp}';
-const configOptions = [{
-  id: 'mode', displayName: 'Mode', type: 'select', scope: 'session',
-  currentValue: 'ask',
-  choices: [{ value: 'ask', displayName: 'Ask' }, { value: 'auto', displayName: 'Auto' }],
-}];
-for await (const line of input) {
-  const request = JSON.parse(line);
-  let result;
-  if (request.method === 'initialize') {
-    result = {
-      protocol: { name: 'gian.proxy', version: '1.0' },
-      plugin: { id: 'kimi', name: 'Kimi fixture', version: '0.1.0' },
-      process: { scope: 'shared' },
-      capabilities: {
-        'session.nativeList': 1, 'session.replay': 1, 'session.config': 1,
-        'slash.list': 1, 'event.reasoning': 1,
-      },
-    };
-  } else if (request.method === 'catalog.list') {
-    result = {
-      models: [{
-        id: 'kimi-model', displayName: 'Kimi model', description: '',
-        hidden: false, isDefault: true,
-        efforts: [{ id: 'medium', displayName: 'Medium', isDefault: true }],
-        input: ['text'],
-      }],
-      modes: [{
-        id: 'ask', displayName: 'Ask', description: '', isDefault: true,
-        approval: 'relay', workspace: 'workspace-write', network: 'ask',
-      }],
-      sessionOptions: configOptions,
-    };
-  } else if (request.method === 'session.create' || request.method === 'session.get') {
-    const sessionId = request.params.sessionId;
-    result = { session: {
-      id: sessionId, nativeSession: { id: request.params.nativeSession?.id ?? 'native-kimi-1' },
-      streamId: 'stream-kimi-1', status: 'idle', model: 'kimi-model', mode: 'ask',
-      configOptions, createdAt: timestamp, updatedAt: timestamp,
-    } };
-  } else if (request.method === 'session.native.list') {
-    result = { sessions: [{ id: 'native-existing', displayName: 'Existing', cwd: '/tmp/project', updatedAt: timestamp }], nextCursor: null };
-  } else if (request.method === 'session.replay') {
-    result = { replayStreamId: 'replay-kimi-1', events: [], nextCursor: null };
-  } else if (request.method === 'session.config.set') {
-    result = { session: {
-      id: request.params.sessionId, nativeSession: { id: 'native-kimi-1' },
-      streamId: request.params.streamId, status: 'idle', model: 'kimi-model', mode: request.params.value,
-      configOptions: configOptions.map(option => ({ ...option, currentValue: request.params.value })),
-      createdAt: timestamp, updatedAt: timestamp,
-    }, configOptions: configOptions.map(option => ({ ...option, currentValue: request.params.value })) };
-  } else if (request.method === 'slash.list') {
-    result = { commands: [{ name: '/status', description: 'Status', source: 'builtin', argHints: [] }] };
-  } else if (request.method === 'turn.start') {
-    result = { accepted: true, turnId: request.params.turnId };
-  } else if (request.method === 'session.close' || request.method === 'shutdown') {
-    result = { ok: true };
-  }
-  if (request.method === 'turn.start') {
-    const base = {
-      sessionId: request.params.sessionId, streamId: request.params.streamId,
-      turnId: request.params.turnId, emittedAt: timestamp,
-    };
-    for (const notification of [
-      { method: 'turn.started', params: { ...base, eventId: 'kimi-event-1', sequence: 1, data: {} } },
-      { method: 'content.delta', params: { ...base, eventId: 'kimi-event-2', sequence: 2, data: {
-        contentId: 'kimi-message-1', kind: 'text', delta: 'hello from Kimi protocol',
-      } } },
-      { method: 'turn.completed', params: { ...base, eventId: 'kimi-event-3', sequence: 3, data: { stopReason: 'completed' } } },
-    ]) process.stdout.write(JSON.stringify(notification) + '\\n');
-  }
-  process.stdout.write(JSON.stringify({ id: request.id, result }) + '\\n');
-  if (request.method === 'shutdown') {
-    input.close();
-    process.stdin.pause();
-    break;
-  }
-}
-`;
-}
-
-test('ProxyManager routes a manifest-v2 Codex session through the generic client', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'gian-protocol-v1-routing-'));
+test('ProxyManager routes a Codex session through the generic gian.proxy/2 client', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-protocol-v2-routing-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const entry = join(root, 'proxy.mjs');
-  await writeFile(entry, proxySource());
+  await writeFile(entry, jsonRpcSource('codex', 'shared'));
   const manager = new ProxyManager({
     dataDir: join(root, 'data'),
     ccProxyEntry: entry,
     codexProxyEntry: entry,
-    codexProxyProtocolV1: { pluginVersion: '0.1.0', processScope: 'shared' },
+    codexProxy: { pluginVersion: '0.2.0', processScope: 'shared' },
   });
   t.after(() => manager.closeAll().catch(() => undefined));
 
   const client = await manager.getOrCreate('host-session-1', 'codex');
-  assert.equal((await client.initialize()).protocolVersion, 'gian.proxy/1.0');
-  const capabilities = await client.capabilities();
-  assert.equal(capabilities.models[0]?.id, 'fixture-model');
+  assert.equal((await client.initialize()).protocol.version, '2.0');
+  const catalog = await client.catalog();
+  assert.equal(catalog.catalogRevision, 'codex-fixture-1');
 
-  const created = await client.createSession({ cwd: '/tmp/project', model: 'fixture-model' });
+  const created = await client.createSession({ cwd: '/tmp/project' });
   assert.equal(created.session.id, 'host-session-1');
   assert.equal(created.nativeSessionId, 'native-codex-1');
 
@@ -200,16 +156,15 @@ test('ProxyManager routes a manifest-v2 Codex session through the generic client
     sessionId: created.session.id,
     turnId: 'host-turn-1',
     input: [{ type: 'text', text: 'hello' }],
-    sandbox: 'workspace-write',
-    approvalPolicy: 'on-request',
-    approvalsReviewer: 'user',
+    config: {},
   });
   assert.equal(started.turn.id, 'host-turn-1');
-  assert.equal(started.session.status, 'idle');
+  assert.equal(started.session.state, 'running');
   await completed;
   assert.deepEqual(notifications.map(value => value.method), [
     'turn.started',
     'content.delta',
+    'content.completed',
     'turn.completed',
   ]);
   await assert.rejects(client.interruptTurn(), /no active turn/);
@@ -226,21 +181,21 @@ test('ProxyManager routes a manifest-v2 Codex session through the generic client
   await manager.closeAll();
 });
 
-test('ProxyManager routes a manifest-v2 Claude session through a session-scoped generic client', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'gian-protocol-v1-claude-routing-'));
+test('ProxyManager routes a Claude session through a session-scoped generic client', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-protocol-v2-claude-routing-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const entry = join(root, 'proxy.mjs');
-  await writeFile(entry, proxySource('claude', 'session'));
+  await writeFile(entry, jsonRpcSource('claude', 'session'));
   const manager = new ProxyManager({
     dataDir: join(root, 'data'),
     hostVersion: '4.5.6',
     ccProxyEntry: entry,
-    claudeProxyProtocolV1: { pluginVersion: '0.1.0', processScope: 'session' },
+    claudeProxy: { pluginVersion: '0.2.0', processScope: 'session' },
   });
   t.after(() => manager.closeAll().catch(() => undefined));
 
   const client = await manager.getOrCreate('host-claude-session', 'claude');
-  assert.equal((await client.initialize()).protocolVersion, 'gian.proxy/1.0');
+  assert.equal((await client.initialize()).protocol.version, '2.0');
   const created = await client.createSession({ cwd: '/tmp/project' });
   assert.equal(created.session.id, 'host-claude-session');
   assert.equal(created.nativeSessionId, 'native-claude-1');
@@ -256,14 +211,15 @@ test('ProxyManager routes a manifest-v2 Claude session through a session-scoped 
     sessionId: created.session.id,
     turnId: 'host-claude-turn',
     input: [{ type: 'text', text: 'hello' }],
-    permissionMode: 'default',
+    config: {},
   });
   assert.equal(started.turn.id, 'host-claude-turn');
-  assert.equal(started.session.status, 'idle');
+  assert.equal(started.session.state, 'running');
   await completed;
   assert.deepEqual(notifications.map(value => value.method), [
     'turn.started',
     'content.delta',
+    'content.completed',
     'turn.completed',
   ]);
   await assert.rejects(client.interruptTurn(), /no active turn/);
@@ -272,11 +228,11 @@ test('ProxyManager routes a manifest-v2 Claude session through a session-scoped 
   await manager.closeAll();
 });
 
-test('ProxyManager routes a manifest-v2 Kimi session through the shared generic client', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'gian-protocol-v1-kimi-routing-'));
+test('ProxyManager routes a Kimi session through the shared generic client', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-protocol-v2-kimi-routing-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const entry = join(root, 'proxy.mjs');
-  await writeFile(entry, kimiProxySource());
+  await writeFile(entry, jsonRpcSource('kimi', 'shared'));
   const runtimeManager = {
     acquire: async () => ({
       cli: 'kimi',
@@ -286,36 +242,34 @@ test('ProxyManager routes a manifest-v2 Kimi session through the shared generic 
       env: {},
       release: async () => undefined,
     }),
-  } as any;
+  } as never;
   const manager = new ProxyManager({
     dataDir: join(root, 'data'),
     hostVersion: '4.5.6',
     ccProxyEntry: entry,
     kimiProxyEntry: entry,
-    kimiProxyProtocolV1: { pluginVersion: '0.1.0', processScope: 'shared' },
+    kimiProxy: { pluginVersion: '0.2.0', processScope: 'shared' },
     runtimeManager,
   });
   t.after(() => manager.closeAll().catch(() => undefined));
 
   const client = await manager.getOrCreate('host-kimi-session', 'kimi');
-  assert.equal((await client.initialize()).protocolVersion, 'gian.proxy/1.0');
-  assert.equal((await client.capabilities()).models[0]?.id, 'kimi-model');
+  assert.equal((await client.initialize()).protocol.version, '2.0');
+  assert.equal((await client.catalog()).configOptions[0]?.id, 'mode');
   const native = await client.listNativeSessions?.({ cwd: '/tmp/project' }) as {
-    sessions: Array<{ sessionId: string }>;
+    sessions: Array<{ id: string }>;
   };
-  assert.equal(native.sessions[0]?.sessionId, 'native-existing');
+  assert.equal(native.sessions[0]?.id, 'native-existing');
 
   const created = await client.createSession({
     cwd: '/tmp/project',
     nativeSessionId: 'native-existing',
-    resumeMode: 'load',
+    history: 'replay',
   });
   assert.equal(created.session.id, 'host-kimi-session');
   assert.equal(created.nativeSessionId, 'native-existing');
-  assert.equal(created.replayUpdates?.length, 0);
-  assert.equal(created.configOptions?.[0]?.name, 'Mode');
-  assert.equal((await client.listSlashCommands()).commands[0]?.name, '/status');
-  assert.equal((await client.setNativeConfig?.('mode', 'auto'))?.state.values.mode, 'auto');
+  assert.equal(created.replayEvents?.length, 0);
+  assert.equal((await client.catalog()).slashCommands[0]?.name, '/status');
 
   let resolveCompleted!: () => void;
   const completed = new Promise<void>(resolve => { resolveCompleted = resolve; });
@@ -326,11 +280,68 @@ test('ProxyManager routes a manifest-v2 Kimi session through the shared generic 
     sessionId: created.session.id,
     turnId: 'host-kimi-turn',
     input: [{ type: 'text', text: 'hello' }],
+    config: {},
   });
   assert.equal(started.turn.id, 'host-kimi-turn');
-  assert.equal(started.session.status, 'idle');
+  assert.equal(started.session.state, 'running');
   await completed;
   await assert.rejects(client.interruptTurn(), /no active turn/);
+
+  await client.shutdown();
+  await manager.closeAll();
+});
+
+test('ProxyManager routes a Grok session through the session-scoped generic client', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-protocol-v2-grok-routing-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const entry = join(root, 'proxy.mjs');
+  await writeFile(entry, jsonRpcSource('grok', 'session'));
+  const runtimeManager = {
+    acquire: async () => ({
+      cli: 'grok',
+      binaryPath: '/unused/grok',
+      version: 'fixture',
+      source: 'override',
+      env: {},
+      release: async () => undefined,
+    }),
+  } as never;
+  const manager = new ProxyManager({
+    dataDir: join(root, 'data'),
+    hostVersion: '4.5.6',
+    ccProxyEntry: entry,
+    grokProxyEntry: entry,
+    grokProxy: { pluginVersion: '0.2.0', processScope: 'session' },
+    runtimeManager,
+  });
+  t.after(() => manager.closeAll().catch(() => undefined));
+
+  const client = await manager.getOrCreate('host-grok-session', 'grok');
+  assert.equal((await client.initialize()).protocol.version, '2.0');
+  const created = await client.createSession({ cwd: '/tmp/project' });
+  assert.equal(created.session.id, 'host-grok-session');
+  assert.equal(created.nativeSessionId, 'native-grok-1');
+
+  const notifications: ProxyNotification[] = [];
+  let resolveCompleted!: () => void;
+  const completed = new Promise<void>(resolve => { resolveCompleted = resolve; });
+  client.onNotification(notification => {
+    notifications.push(notification);
+    if (notification.method === 'turn.completed') resolveCompleted();
+  });
+  await client.startTurn({
+    sessionId: created.session.id,
+    turnId: 'host-grok-turn',
+    input: [{ type: 'text', text: 'hello' }],
+    config: {},
+  });
+  await completed;
+  assert.deepEqual(notifications.map(value => value.method), [
+    'turn.started',
+    'content.delta',
+    'content.completed',
+    'turn.completed',
+  ]);
 
   await client.shutdown();
   await manager.closeAll();

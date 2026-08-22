@@ -35,24 +35,42 @@ import {
 import { CliRuntimeManager } from '../src/runtime/manager.js';
 import { runProtectedCommand } from '../src/runtime/protected-command.js';
 import { ProxyManager } from '../src/proxy/manager.js';
-import { CcProxyClient } from '../src/proxy/cc-proxy-client.js';
+import { ProtocolV2Client } from '../src/proxy/protocol-v2-client.js';
 import {
-  CodexProxyHost,
-  CodexProxySessionClient,
-} from '../src/proxy/codex-proxy-client.js';
-import {
-  KimiProxyHost,
-  KimiProxySessionClient,
-} from '../src/proxy/kimi-proxy-client.js';
-import {
-  GrokProtocolV1Host,
-  GrokProtocolV1SessionClient,
-} from '../src/proxy/grok-protocol-v1-client.js';
+  ProtocolV2Host,
+  ProtocolV2SessionClient,
+} from '../src/proxy/protocol-v2-session-client.js';
 import {
   createProxyProcessShutdownState,
   shutdownProxyProcess,
 } from '../src/proxy/process-shutdown.js';
 import { registerAgentRoutes } from '../src/web/routes/agents.js';
+
+const PROTOCOL_V2 = {
+  claudeProxy: { pluginVersion: '0.2.0', processScope: 'session' as const },
+  codexProxy: { pluginVersion: '0.2.0', processScope: 'shared' as const },
+  kimiProxy: { pluginVersion: '0.2.0', processScope: 'shared' as const },
+  grokProxy: { pluginVersion: '0.3.0', processScope: 'session' as const },
+};
+
+const PROTOCOL_V2_STDIO_BOOT = `
+      const reply = (request, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');
+      const fail = (request, error) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, error }) + '\\n');
+      if (request.method === 'initialize') {
+        const pluginId = process.env.GIAN_PLUGIN_ID || 'claude';
+        reply(request, {
+          protocol: { name: 'gian.proxy', version: '2.0' },
+          plugin: { id: pluginId, name: pluginId, version: pluginId === 'grok' ? '0.3.0' : '0.2.0' },
+          process: { scope: pluginId === 'codex' || pluginId === 'kimi' ? 'shared' : 'session' },
+          capabilities: {},
+        });
+        continue;
+      }
+      if (request.method === 'catalog.list') {
+        reply(request, { catalogRevision: 'test', input: [{ type: 'text' }], configOptions: [], slashCommands: [] });
+        continue;
+      }
+`;
 
 const execFileAsync = promisify(execFile);
 
@@ -133,56 +151,75 @@ test('subprocess readiness wait rejects when the child exits before output', asy
   );
 });
 
+function proxyPluginMeta(id: string): { displayName: string; processScope: 'session' | 'shared' } {
+  if (id === 'codex') return { displayName: 'Codex', processScope: 'shared' };
+  if (id === 'kimi') return { displayName: 'Kimi Code', processScope: 'shared' };
+  if (id === 'grok') return { displayName: 'Grok Build', processScope: 'session' };
+  return { displayName: 'Claude Code', processScope: 'session' };
+}
+
+function proxyManifest(id: string, version: string) {
+  const meta = proxyPluginMeta(id);
+  return {
+    schemaVersion: 2,
+    id,
+    displayName: meta.displayName,
+    pluginVersion: version,
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
+    process: { scope: meta.processScope },
+  };
+}
+
 function proxySource(
   id: string,
+  version: string,
   ok = true,
   protocolCompatible = true,
   requireManagedEnv = false,
   omittedMethod?: string,
 ): string {
-  const protocol = id === 'kimi' ? 'acp/1' : '0.1.0';
-  const methods = (id === 'kimi'
-    ? [
-        'initialize', 'capabilities.list', 'slash.list', 'session.create',
-        'session.snapshot', 'session.config.set', 'session.listNative',
-        'turn.start', 'turn.interrupt', 'approval.respond', 'session.close', 'shutdown',
-      ]
-    : [
-        'initialize', 'capabilities.list', 'slash.list', 'session.create',
-        'turn.start', 'turn.interrupt', ...(id === 'codex' ? ['turn.steer', 'session.setName'] : []),
-        'approval.respond', 'session.close', 'shutdown',
-      ]).filter(method => method !== omittedMethod);
+  const meta = proxyPluginMeta(id);
+  const protocolVersion = protocolCompatible ? '2.0' : '9.0';
+  const omitCatalog = omittedMethod === 'catalog.list';
   return `
 import { createInterface } from 'node:readline';
 if (process.argv.includes('--self-test')) {
-  process.stdout.write(${JSON.stringify(`${JSON.stringify({ schemaVersion: 1, id, ok })}\n`)});
+  process.stdout.write(${JSON.stringify(`${JSON.stringify({ schemaVersion: 2, id, pluginVersion: version, ok })}\n`)});
 } else {
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of input) {
     const request = JSON.parse(line);
-    let result;
+    const reply = (result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');
+    const fail = (code, message) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { code, message } }) + '\\n');
     if (request.method === 'initialize') {
       const envOk = ${String(!requireManagedEnv)} || (
         process.env.DISABLE_AUTOUPDATER === '1' && process.env.DISABLE_UPDATES === '1'
       );
-      result = envOk ? {
-        mode: 'spawn',
-        protocolVersion: ${JSON.stringify(protocolCompatible ? protocol : 'incompatible/9')},
-        methods: ${JSON.stringify(methods)},
-      } : { mode: 'unsafe-env', protocolVersion: ${JSON.stringify(protocol)}, methods: [] };
-    } else if (request.method === 'capabilities.list') {
-      result = {
-        protocolVersion: ${JSON.stringify(id === 'kimi' ? 1 : '0.1.0')},
-        models: [],
-        modes: [],
-      };
+      if (!envOk) {
+        fail(-32602, 'unsafe-env');
+      } else {
+        reply({
+          protocol: { name: 'gian.proxy', version: ${JSON.stringify(protocolVersion)} },
+          plugin: {
+            id: ${JSON.stringify(id)},
+            name: ${JSON.stringify(meta.displayName)},
+            version: ${JSON.stringify(version)},
+          },
+          process: { scope: ${JSON.stringify(meta.processScope)} },
+          capabilities: {},
+        });
+      }
+    } else if (request.method === 'catalog.list') {
+      ${omitCatalog
+        ? "fail(-32601, 'Method not found');"
+        : "reply({ catalogRevision: 'probe', input: [{ type: 'text' }], configOptions: [], slashCommands: [] });"}
     } else if (request.method === 'shutdown') {
-      result = { ok: true };
+      reply({ ok: true });
     } else {
-      process.stdout.write(JSON.stringify({ id: request.id, error: { code: 'METHOD_NOT_FOUND' } }) + '\\n');
+      fail(-32601, 'Method not found');
       continue;
     }
-    process.stdout.write(JSON.stringify({ id: request.id, result }) + '\\n');
     if (request.method === 'shutdown') break;
   }
 }
@@ -197,13 +234,8 @@ async function writeProxyVersion(
 ): Promise<string> {
   const directory = join(dataDir, 'plugins', id, version);
   await mkdir(directory, { recursive: true });
-  await writeFile(join(directory, 'proxy.mjs'), proxySource(id, ok));
-  await writeFile(join(directory, 'manifest.json'), JSON.stringify({
-    schemaVersion: 1,
-    id,
-    version,
-    entry: 'proxy.mjs',
-  }));
+  await writeFile(join(directory, 'proxy.mjs'), proxySource(id, version, ok));
+  await writeFile(join(directory, 'manifest.json'), JSON.stringify(proxyManifest(id, version)));
   return directory;
 }
 
@@ -226,14 +258,9 @@ async function proxyArchive(
   await mkdir(fixture, { recursive: true });
   await writeFile(
     join(fixture, 'proxy.mjs'),
-    proxySource(id, ok, protocolCompatible, requireManagedEnv, omittedMethod),
+    proxySource(id, version, ok, protocolCompatible, requireManagedEnv, omittedMethod),
   );
-  await writeFile(join(fixture, 'manifest.json'), JSON.stringify({
-    schemaVersion: 1,
-    id,
-    version,
-    entry: 'proxy.mjs',
-  }));
+  await writeFile(join(fixture, 'manifest.json'), JSON.stringify(proxyManifest(id, version)));
   const filename = `gian-proxy-${id}-${version}-darwin-arm64.tar.gz`;
   const archivePath = join(root, filename);
   await execFileAsync('/usr/bin/tar', ['-czf', archivePath, '-C', fixture, '.']);
@@ -710,7 +737,7 @@ printf 'claude 2.0.0\\n'
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath },
+    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath, dsh: proxyPath },
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
@@ -769,7 +796,7 @@ if [ "$count" -eq 1 ]; then printf 'claude 2.0.0\\n'; else printf 'broken\\n'; f
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath },
+    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath, dsh: proxyPath },
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
@@ -800,7 +827,7 @@ test('setCliPath keeps a committed path when only claim retirement fails', {
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath },
+    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath, dsh: proxyPath },
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
@@ -847,7 +874,7 @@ test('committed Proxy defaults invalidate cached status before claim retirement'
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath },
+    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath, dsh: proxyPath },
     environmentCliPaths: { claude: cliPath },
     homeDir: join(root, 'home'),
     pathEnv: '',
@@ -899,7 +926,7 @@ test('config mutations serialize locally and a stale Host reloads before commit'
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false as const,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath },
+    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath, dsh: proxyPath },
     homeDir,
     pathEnv: '',
   };
@@ -1703,9 +1730,13 @@ test('Claude forceKill makes exit cleanup verification-only', async t => {
   let cleanupCalls = 0;
   let finishCleanup!: () => void;
   const cleanupFinished = new Promise<void>(resolve => { finishCleanup = resolve; });
-  const client = new CcProxyClient({
+  const client = new ProtocolV2Client({
     entry,
     dataDir: root,
+    pluginId: 'claude',
+    pluginVersion: '0.2.0',
+    processScope: 'session',
+    hostVersion: '9.9.9',
     async shutdownProcess(input) {
       cleanupCalls += 1;
       try {
@@ -1742,9 +1773,13 @@ test('Claude already-empty observation makes a later exit cleanup signal-free', 
   let cleanupCalls = 0;
   let finishCleanup!: () => void;
   const cleanupFinished = new Promise<void>(resolve => { finishCleanup = resolve; });
-  const client = new CcProxyClient({
+  const client = new ProtocolV2Client({
     entry,
     dataDir: root,
+    pluginId: 'claude',
+    pluginVersion: '0.2.0',
+    processScope: 'session',
+    hostVersion: '9.9.9',
     async shutdownProcess(input) {
       cleanupCalls += 1;
       try {
@@ -1890,7 +1925,7 @@ test('an already-empty compatibility process never enters signalling shutdown', 
       id: 'claude',
       version: '0.1.0',
       entryPath,
-      protocol: 'legacy',
+      protocol: 'gian.proxy',
     }, updateOwner),
     /exited before registration/,
   );
@@ -1898,37 +1933,36 @@ test('an already-empty compatibility process never enters signalling shutdown', 
   assert.equal(releaseUnregisteredCalls, 1);
 });
 
-test('protocol v1 compatibility probe uses generic env and validates the handshake', {
+test('protocol v2 compatibility probe uses generic env and validates the handshake', {
   skip: process.platform === 'win32',
 }, async t => {
-  const root = await mkdtemp(join(tmpdir(), 'gian-compatibility-v1-'));
+  const root = await mkdtemp(join(tmpdir(), 'gian-compatibility-v2-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const entryPath = join(root, 'v1-proxy.mjs');
+  const entryPath = join(root, 'v2-proxy.mjs');
   await writeFile(entryPath, `
 import { createInterface } from 'node:readline';
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 for await (const line of input) {
   const request = JSON.parse(line);
-  let result;
+  const reply = (result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');
   if (request.method === 'initialize') {
     const valid = process.env.GIAN_PLUGIN_ID === 'claude'
       && process.env.GIAN_PLUGIN_DATA_DIR
       && process.env.GIAN_RUNTIME_BIN
-      && process.env.GIAN_PROTOCOL_VERSIONS === '1.0'
+      && process.env.GIAN_PROTOCOL_VERSIONS === '2.0'
       && request.params.protocol.name === 'gian.proxy'
-      && request.params.protocol.versions.includes('1.0');
-    result = {
-      protocol: { name: 'gian.proxy', version: '1.0' },
+      && request.params.protocol.versions.includes('2.0');
+    reply({
+      protocol: { name: 'gian.proxy', version: '2.0' },
       plugin: { id: valid ? 'claude' : 'invalid.fixture', name: 'Claude', version: '7.4.2' },
       process: { scope: 'shared' },
       capabilities: {},
-    };
+    });
   } else if (request.method === 'catalog.list') {
-    result = { models: [], modes: [], sessionOptions: [] };
+    reply({ catalogRevision: 'probe', input: [{ type: 'text' }], configOptions: [], slashCommands: [] });
   } else if (request.method === 'shutdown') {
-    result = { ok: true };
+    reply({ ok: true });
   }
-  process.stdout.write(JSON.stringify({ id: request.id, result }) + '\\n');
   if (request.method === 'shutdown') break;
 }
 `);
@@ -1957,7 +1991,7 @@ for await (const line of input) {
   const updateOwner = await acquireAgentUpdateLock(
     join(root, 'locks'),
     'claude',
-    'protocol v1 compatibility probe',
+    'protocol v2 compatibility probe',
   );
   try {
     await internals.runProxyCompatibilityProbe({
@@ -2017,20 +2051,16 @@ test('an incompatible real protocol handshake never activates the candidate', {
     fetchImpl: proxyReleaseFetch(artifact),
   });
 
-  await assert.rejects(manager.installProxy('claude'), /initialize handshake is incompatible/i);
+  await assert.rejects(manager.installProxy('claude'), /Invalid initialize result|initialize handshake is incompatible/i);
   assert.equal(await readlink(join(dataDir, 'plugins', 'claude', 'current')), '0.0.9');
 });
 
-test('the compatibility gate rejects executor-specific missing methods', {
+test('the compatibility gate rejects a missing catalog.list method', {
   skip: process.platform !== 'darwin' || process.arch !== 'arm64',
 }, async t => {
-  for (const [id, missingMethod] of [
-    ['claude', 'approval.respond'],
-    ['codex', 'session.setName'],
-    ['kimi', 'session.config.set'],
-  ] as const) {
-    await t.test(`${id} requires ${missingMethod}`, async t => {
-      const root = await mkdtemp(join(tmpdir(), `gian-agent-missing-${id}-method-`));
+  for (const id of ['claude', 'codex', 'kimi'] as const) {
+    await t.test(`${id} requires catalog.list`, async t => {
+      const root = await mkdtemp(join(tmpdir(), `gian-agent-missing-${id}-catalog-`));
       t.after(() => rm(root, { recursive: true, force: true }));
       const dataDir = join(root, 'data');
       await writeProxyVersion(dataDir, id, '0.0.9');
@@ -2042,7 +2072,7 @@ test('the compatibility gate rejects executor-specific missing methods', {
         true,
         true,
         false,
-        missingMethod,
+        'catalog.list',
       );
       const cliPath = await writeFakeCli(root, id);
       const manager = await AgentManager.create({
@@ -2055,7 +2085,7 @@ test('the compatibility gate rejects executor-specific missing methods', {
         fetchImpl: proxyReleaseFetch(artifact),
       });
 
-      await assert.rejects(manager.installProxy(id), /initialize handshake is incompatible/i);
+      await assert.rejects(manager.installProxy(id), /catalog\.list failed/i);
       assert.equal(await readlink(join(dataDir, 'plugins', id, 'current')), '0.0.9');
     });
   }
@@ -2153,7 +2183,7 @@ test('an escaped version symlink is never classified as a validated previous ver
   const agentRoot = join(dataDir, 'plugins', 'claude');
   const outside = join(root, 'outside-proxy');
   await mkdir(outside, { recursive: true });
-  await writeFile(join(outside, 'proxy.mjs'), proxySource('claude'));
+  await writeFile(join(outside, 'proxy.mjs'), proxySource('claude', '0.0.9'));
   await writeFile(join(outside, 'manifest.json'), JSON.stringify({
     schemaVersion: 1, id: 'claude', version: '0.0.9', entry: 'proxy.mjs',
   }));
@@ -2196,7 +2226,7 @@ test('Proxy refresh reruns self-test after an entry changes in place', async t =
   });
 
   assert.equal((await manager.status('claude', true)).proxy.state, 'ready');
-  await writeFile(join(directory, 'proxy.mjs'), proxySource('claude', false));
+  await writeFile(join(directory, 'proxy.mjs'), proxySource('claude', '0.1.0', false));
   assert.equal((await manager.status('claude', true)).proxy.state, 'invalid');
 });
 
@@ -2304,7 +2334,7 @@ test('Proxy close barrier waits for an in-flight runtime attempt to release its 
     for await (const line of input) {
       const request = JSON.parse(line);
       if (request.method !== 'shutdown') continue;
-      process.stdout.write(JSON.stringify({ id: request.id, result: { ok: true } }) + '\\n');
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }) + '\\n');
       setTimeout(() => {
         writeFileSync(process.env.EXIT_MARKER, 'exited');
         process.exit(0);
@@ -2342,6 +2372,7 @@ test('Proxy close barrier waits for an in-flight runtime attempt to release its 
     },
   };
   const manager = new ProxyManager({
+    ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: proxyEntry,
     runtimeManager: runtimeManager as never,
@@ -2390,6 +2421,7 @@ test('startup leases remain strongly retryable when reservation and lease cleanu
       },
     };
     const manager = new ProxyManager({
+    ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: '/unused/cc-proxy.mjs',
       ...(executor === 'codex' ? { codexProxyEntry: '/unused/codex-proxy.mjs' } : {}),
@@ -2437,51 +2469,18 @@ test('startup leases remain strongly retryable when reservation and lease cleanu
 test('already-empty Proxy startup skips shutdown and records terminal absence', async t => {
   const observeCalls = { claude: 0, codex: 0, kimi: 0, grok: 0 };
   const shutdownCalls = { claude: 0, codex: 0, kimi: 0, grok: 0 };
-  const originalClaudeObserve = CcProxyClient.prototype.observeProcessGroupAbsence;
-  const originalCodexObserve = CodexProxyHost.prototype.observeProcessGroupAbsence;
-  const originalKimiObserve = KimiProxyHost.prototype.observeProcessGroupAbsence;
-  const originalGrokObserve = GrokProtocolV1Host.prototype.observeProcessGroupAbsence;
-  const originalClaudeShutdown = CcProxyClient.prototype.shutdown;
-  const originalCodexShutdown = CodexProxyHost.prototype.shutdown;
-  const originalKimiShutdown = KimiProxyHost.prototype.shutdown;
-  const originalGrokShutdown = GrokProtocolV1Host.prototype.shutdown;
-  CcProxyClient.prototype.observeProcessGroupAbsence = function observeClaudeAbsence() {
-    observeCalls.claude += 1;
-    originalClaudeObserve.call(this);
+  const originalObserve = ProtocolV2Host.prototype.observeProcessGroupAbsence;
+  const originalShutdown = ProtocolV2Host.prototype.shutdown;
+  ProtocolV2Host.prototype.observeProcessGroupAbsence = function observeAbsence() {
+    observeCalls[this.executor] += 1;
+    originalObserve.call(this);
   };
-  CodexProxyHost.prototype.observeProcessGroupAbsence = function observeCodexAbsence() {
-    observeCalls.codex += 1;
-    originalCodexObserve.call(this);
-  };
-  KimiProxyHost.prototype.observeProcessGroupAbsence = function observeKimiAbsence() {
-    observeCalls.kimi += 1;
-    originalKimiObserve.call(this);
-  };
-  GrokProtocolV1Host.prototype.observeProcessGroupAbsence = function observeGrokAbsence() {
-    observeCalls.grok += 1;
-    originalGrokObserve.call(this);
-  };
-  CcProxyClient.prototype.shutdown = async function skipClaudeShutdown() {
-    shutdownCalls.claude += 1;
-  };
-  CodexProxyHost.prototype.shutdown = async function skipCodexShutdown() {
-    shutdownCalls.codex += 1;
-  };
-  KimiProxyHost.prototype.shutdown = async function skipKimiShutdown() {
-    shutdownCalls.kimi += 1;
-  };
-  GrokProtocolV1Host.prototype.shutdown = async function skipGrokShutdown() {
-    shutdownCalls.grok += 1;
+  ProtocolV2Host.prototype.shutdown = async function skipShutdown() {
+    shutdownCalls[this.executor] += 1;
   };
   t.after(() => {
-    CcProxyClient.prototype.observeProcessGroupAbsence = originalClaudeObserve;
-    CodexProxyHost.prototype.observeProcessGroupAbsence = originalCodexObserve;
-    KimiProxyHost.prototype.observeProcessGroupAbsence = originalKimiObserve;
-    GrokProtocolV1Host.prototype.observeProcessGroupAbsence = originalGrokObserve;
-    CcProxyClient.prototype.shutdown = originalClaudeShutdown;
-    CodexProxyHost.prototype.shutdown = originalCodexShutdown;
-    KimiProxyHost.prototype.shutdown = originalKimiShutdown;
-    GrokProtocolV1Host.prototype.shutdown = originalGrokShutdown;
+    ProtocolV2Host.prototype.observeProcessGroupAbsence = originalObserve;
+    ProtocolV2Host.prototype.shutdown = originalShutdown;
   });
 
   for (const executor of ['claude', 'codex', 'kimi', 'grok'] as const) {
@@ -2518,6 +2517,7 @@ test('already-empty Proxy startup skips shutdown and records terminal absence', 
       },
     };
     const manager = new ProxyManager({
+    ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
@@ -2548,7 +2548,7 @@ test('a stale unpublished Claude runtime retains its lease until shutdown can be
     for await (const line of input) {
       const request = JSON.parse(line);
       if (request.method !== 'shutdown') continue;
-      process.stdout.write(JSON.stringify({ id: request.id, result: { ok: true } }) + '\\n');
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }) + '\\n');
       process.exit(0);
     }
   `);
@@ -2572,15 +2572,16 @@ test('a stale unpublished Claude runtime retains its lease until shutdown can be
     },
   };
   const manager = new ProxyManager({
+    ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: proxyEntry,
     runtimeManager: runtimeManager as never,
   });
-  const originalShutdown = CcProxyClient.prototype.shutdown;
-  CcProxyClient.prototype.shutdown = async function controlledShutdownFailure() {
+  const originalShutdown = ProtocolV2Host.prototype.shutdown;
+  ProtocolV2Host.prototype.shutdown = async function controlledShutdownFailure() {
     throw new Error('controlled unpublished shutdown failure');
   };
-  t.after(() => { CcProxyClient.prototype.shutdown = originalShutdown; });
+  t.after(() => { ProtocolV2Host.prototype.shutdown = originalShutdown; });
 
   const pendingClient = manager.getOrCreate('unpublished-claude', 'claude');
   const pendingRejected = assert.rejects(
@@ -2602,7 +2603,7 @@ test('a stale unpublished Claude runtime retains its lease until shutdown can be
     /controlled unpublished shutdown failure/,
   );
 
-  CcProxyClient.prototype.shutdown = originalShutdown;
+  ProtocolV2Host.prototype.shutdown = originalShutdown;
   await manager.closeByExecutor('claude');
   assert.equal(releaseCalls, 1);
 });
@@ -2618,7 +2619,7 @@ test('failed close blocks replacement runtimes until exact cleanup is retried', 
       for await (const line of input) {
         const request = JSON.parse(line);
         if (request.method !== 'shutdown') continue;
-        process.stdout.write(JSON.stringify({ id: request.id, result: { ok: true } }) + '\\n');
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }) + '\\n');
         process.exit(0);
       }
     `);
@@ -2639,6 +2640,7 @@ test('failed close blocks replacement runtimes until exact cleanup is retried', 
       },
     } : undefined;
     const manager = new ProxyManager({
+    ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
@@ -2647,9 +2649,7 @@ test('failed close blocks replacement runtimes until exact cleanup is retried', 
       ...(runtimeManager ? { runtimeManager: runtimeManager as never } : {}),
     });
     const client = await manager.getOrCreate(`${executor}-failed-close`, executor);
-    const owner = client instanceof CodexProxySessionClient
-      || client instanceof KimiProxySessionClient
-      || client instanceof GrokProtocolV1SessionClient
+    const owner = client instanceof ProtocolV2SessionClient
       ? client.runtimeHost()
       : client;
     const originalShutdown = owner.shutdown;
@@ -2674,9 +2674,7 @@ test('failed close blocks replacement runtimes until exact cleanup is retried', 
     owner.shutdown = originalShutdown;
     await manager.closeByExecutor(executor);
     const replacement = await manager.getOrCreate(`${executor}-replacement`, executor);
-    const replacementOwner = replacement instanceof CodexProxySessionClient
-      || replacement instanceof KimiProxySessionClient
-      || replacement instanceof GrokProtocolV1SessionClient
+    const replacementOwner = replacement instanceof ProtocolV2SessionClient
       ? replacement.runtimeHost()
       : replacement;
     assert.notEqual(replacementOwner, owner);
@@ -2698,7 +2696,7 @@ test('racing dispose holds every same-session creation waiter behind its barrier
     for await (const line of input) {
       const request = JSON.parse(line);
       if (request.method !== 'shutdown') continue;
-      process.stdout.write(JSON.stringify({ id: request.id, result: { ok: true } }) + '\\n');
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }) + '\\n');
       process.exit(0);
     }
   `);
@@ -2734,6 +2732,7 @@ test('racing dispose holds every same-session creation waiter behind its barrier
     },
   };
   const manager = new ProxyManager({
+    ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: proxyEntry,
     runtimeManager: runtimeManager as never,
@@ -2815,6 +2814,7 @@ test('unexpected Proxy leader exit releases runtime only after orphan PGID clean
       },
     };
     const manager = new ProxyManager({
+    ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
@@ -2854,7 +2854,7 @@ test('same-session concurrent getOrCreate is single-flight and releases each cli
     for await (const line of input) {
       const request = JSON.parse(line);
       if (request.method !== 'shutdown') continue;
-      process.stdout.write(JSON.stringify({ id: request.id, result: { ok: true } }) + '\\n');
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }) + '\\n');
       process.exit(0);
     }
   `);
@@ -2885,6 +2885,7 @@ test('same-session concurrent getOrCreate is single-flight and releases each cli
     },
   };
   const manager = new ProxyManager({
+    ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: proxyEntry,
     runtimeManager: runtimeManager as never,
@@ -2938,7 +2939,7 @@ test('an exited Proxy is never published after delayed process-group registratio
       for await (const line of input) {
         const request = JSON.parse(line);
         if (request.method !== 'shutdown') continue;
-        process.stdout.write(JSON.stringify({ id: request.id, result: { ok: true } }) + '\\n');
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }) + '\\n');
         process.exit(0);
       }
     `);
@@ -2970,6 +2971,7 @@ test('an exited Proxy is never published after delayed process-group registratio
       },
     };
     const manager = new ProxyManager({
+    ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
@@ -3021,6 +3023,7 @@ test('executor close waits for unexpected-exit runtime release after cache delet
       },
     };
     const manager = new ProxyManager({
+    ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
@@ -3068,6 +3071,7 @@ test('failed runtime cleanup stays strongly reachable for later close retries', 
     },
   };
   const manager = new ProxyManager({
+    ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: proxyEntry,
     runtimeManager: runtimeManager as never,
@@ -3101,27 +3105,22 @@ test('throwing shared-facade exit handlers cannot interrupt host cleanup', async
     const proxyEntry = join(root, 'throwing-handler-proxy.mjs');
     await writeFile(proxyEntry, `
       import { createInterface } from 'node:readline';
-      const executor = process.env.TEST_EXECUTOR;
       const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
       for await (const line of input) {
         const request = JSON.parse(line);
+        ${PROTOCOL_V2_STDIO_BOOT}
         if (request.method !== 'session.create') continue;
-        const session = executor === 'codex'
-          ? {
-              id: 'codex_throw_session', threadId: 'codex_throw_thread', cwd: '/tmp',
-              status: 'idle', createdAt: new Date(0).toISOString(),
-              updatedAt: new Date(0).toISOString(), lastError: null,
-            }
-          : {
-              id: 'kimi_throw_session', nativeSessionId: 'kimi_throw_native', cwd: '/tmp',
-              status: 'idle', activeTurnId: null, configOptions: [], slashCommands: [],
-              createdAt: new Date(0).toISOString(),
-              updatedAt: new Date(0).toISOString(), lastError: null,
-            };
-        process.stdout.write(JSON.stringify({
-          id: request.id,
-          result: { session, replayUpdates: [] },
-        }) + '\\n');
+        reply(request, {
+          session: {
+            id: request.params.sessionId,
+            nativeSession: { id: process.env.TEST_EXECUTOR === 'codex' ? 'codex_throw_native' : 'kimi_throw_native' },
+            streamId: 'stream-1',
+            state: 'idle',
+            sessionConfig: request.params.config ?? {},
+            createdAt: new Date(0).toISOString(),
+            updatedAt: new Date(0).toISOString(),
+          },
+        });
         setTimeout(() => process.exit(37), 30);
       }
     `);
@@ -3141,6 +3140,7 @@ test('throwing shared-facade exit handlers cannot interrupt host cleanup', async
       },
     };
     const manager = new ProxyManager({
+    ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: '/unused/cc-proxy.mjs',
       ...(executor === 'codex'
@@ -3187,27 +3187,29 @@ test('a Kimi host is removed from reuse before failed-attach retirement awaits',
     const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
     for await (const line of input) {
       const request = JSON.parse(line);
+      ${PROTOCOL_V2_STDIO_BOOT}
       if (request.method === 'session.create') {
         if (first) {
-          process.stdout.write(JSON.stringify({
-            id: request.id, error: { code: 'AUTH_REQUIRED', message: 'login required' },
-          }) + '\\n');
+          fail(request, {
+            code: -32000,
+            message: 'login required',
+            data: { domainCode: 'RUNTIME_AUTH_REQUIRED', retryable: false, details: {} },
+          });
         } else {
-          process.stdout.write(JSON.stringify({
-            id: request.id,
-            result: {
-              session: {
-                id: 'fresh_kimi_session', nativeSessionId: 'fresh_kimi_native', cwd: '/tmp',
-                status: 'idle', activeTurnId: null, configOptions: [], slashCommands: [],
-                createdAt: new Date(0).toISOString(),
-                updatedAt: new Date(0).toISOString(), lastError: null,
-              },
-              replayUpdates: [],
+          reply(request, {
+            session: {
+              id: request.params.sessionId,
+              nativeSession: { id: 'fresh_kimi_native' },
+              streamId: 'stream-1',
+              state: 'idle',
+              sessionConfig: request.params.config ?? {},
+              createdAt: new Date(0).toISOString(),
+              updatedAt: new Date(0).toISOString(),
             },
-          }) + '\\n');
+          });
         }
       } else if (request.method === 'shutdown' && !first) {
-        process.stdout.write(JSON.stringify({ id: request.id, result: { ok: true } }) + '\\n');
+        reply(request, { ok: true });
         process.exit(0);
       }
     }
@@ -3228,6 +3230,7 @@ test('a Kimi host is removed from reuse before failed-attach retirement awaits',
     },
   };
   const manager = new ProxyManager({
+    ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: '/unused/cc-proxy.mjs',
     kimiProxyEntry: proxyEntry,
@@ -3235,7 +3238,7 @@ test('a Kimi host is removed from reuse before failed-attach retirement awaits',
   });
 
   const failed = await manager.getOrCreate('failed-kimi-session', 'kimi');
-  assert.ok(failed instanceof KimiProxySessionClient);
+  assert.ok(failed instanceof ProtocolV2SessionClient);
   await assert.rejects(failed.createSession({ cwd: '/tmp' }), /login required/);
   const oldHost = failed.runtimeHost();
   const disposing = manager.dispose('failed-kimi-session');
@@ -3249,7 +3252,7 @@ test('a Kimi host is removed from reuse before failed-attach retirement awaits',
   assert.equal(replacementSettled, false, 'replacement must wait for exact host retirement');
   assert.equal(acquireCalls, 1, 'replacement cannot acquire while the old host may still run');
   const replacement = await replacementPromise;
-  assert.ok(replacement instanceof KimiProxySessionClient);
+  assert.ok(replacement instanceof ProtocolV2SessionClient);
   assert.notEqual(replacement.runtimeHost(), oldHost);
   assert.equal(acquireCalls, 2);
   assert.equal(replacement.isExited(), false);
@@ -3269,12 +3272,13 @@ test('every dropped Kimi facade awaits the exact shared-host retirement', async 
     for await (const line of input) {
       const request = JSON.parse(line);
       if (request.method !== 'shutdown') continue;
-      process.stdout.write(JSON.stringify({ id: request.id, result: { ok: true } }) + '\\n');
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }) + '\\n');
       process.exit(0);
     }
   `);
   let releaseCalls = 0;
   const manager = new ProxyManager({
+    ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: '/unused/cc-proxy.mjs',
     kimiProxyEntry: proxyEntry,
@@ -3293,8 +3297,8 @@ test('every dropped Kimi facade awaits the exact shared-host retirement', async 
   });
   const first = await manager.getOrCreate('kimi-retire-a', 'kimi');
   const second = await manager.getOrCreate('kimi-retire-b', 'kimi');
-  assert.ok(first instanceof KimiProxySessionClient);
-  assert.ok(second instanceof KimiProxySessionClient);
+  assert.ok(first instanceof ProtocolV2SessionClient);
+  assert.ok(second instanceof ProtocolV2SessionClient);
   const host = first.runtimeHost();
   assert.equal(second.runtimeHost(), host);
   const originalShutdown = host.shutdown;
@@ -3339,7 +3343,7 @@ test('dispose racing Kimi creation retires the newly published unattached host',
     for await (const line of input) {
       const request = JSON.parse(line);
       if (request.method !== 'shutdown') continue;
-      process.stdout.write(JSON.stringify({ id: request.id, result: { ok: true } }) + '\\n');
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }) + '\\n');
       process.exit(0);
     }
   `);
@@ -3368,6 +3372,7 @@ test('dispose racing Kimi creation retires the newly published unattached host',
     },
   };
   const manager = new ProxyManager({
+    ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: '/unused/cc-proxy.mjs',
     kimiProxyEntry: proxyEntry,
@@ -3380,8 +3385,8 @@ test('dispose racing Kimi creation retires the newly published unattached host',
   const disposing = manager.dispose('kimi-create-dispose-race');
   allowFirstAcquire();
   const [replacement, , other] = await Promise.all([getting, disposing, otherGetting]);
-  assert.ok(replacement instanceof KimiProxySessionClient);
-  assert.ok(other instanceof KimiProxySessionClient);
+  assert.ok(replacement instanceof ProtocolV2SessionClient);
+  assert.ok(other instanceof ProtocolV2SessionClient);
   assert.equal(replacement.runtimeHost(), other.runtimeHost());
   assert.equal(acquireCalls, 2, 'the unattached first host must be retired, not returned');
   assert.deepEqual(released, [1]);
@@ -3396,30 +3401,25 @@ test('whole-executor close reaches bounded shared-host shutdown when session.clo
     const proxyEntry = join(root, 'hung-shared-proxy.mjs');
     await writeFile(proxyEntry, `
       import { createInterface } from 'node:readline';
-      const executor = process.env.TEST_EXECUTOR;
       const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
-      const write = payload => process.stdout.write(JSON.stringify(payload) + '\\n');
       for await (const line of input) {
         const request = JSON.parse(line);
+        ${PROTOCOL_V2_STDIO_BOOT}
         if (request.method === 'session.create') {
-          const session = executor === 'codex'
-            ? {
-                id: 'codex_hung_session', threadId: 'codex_hung_thread', cwd: '/tmp',
-                status: 'idle', createdAt: new Date(0).toISOString(),
-                updatedAt: new Date(0).toISOString(), lastError: null,
-              }
-            : {
-                id: 'kimi_hung_session', nativeSessionId: 'kimi_hung_native', cwd: '/tmp',
-                status: 'idle', activeTurnId: null, configOptions: [], slashCommands: [],
-                createdAt: new Date(0).toISOString(),
-                updatedAt: new Date(0).toISOString(), lastError: null,
-              };
-          write({ id: request.id, result: { session, replayUpdates: [] } });
+          reply(request, {
+            session: {
+              id: request.params.sessionId,
+              nativeSession: { id: process.env.TEST_EXECUTOR === 'codex' ? 'codex_hung_native' : 'kimi_hung_native' },
+              streamId: 'stream-1',
+              state: 'idle',
+              sessionConfig: request.params.config ?? {},
+              createdAt: new Date(0).toISOString(),
+              updatedAt: new Date(0).toISOString(),
+            },
+          });
         } else if (request.method === 'session.close' || request.method === 'shutdown') {
           // Deliberately never respond. Whole-executor close must bypass the
           // facade RPC and reach bounded host PGID escalation.
-        } else {
-          write({ id: request.id, result: {} });
         }
       }
     `);
@@ -3437,6 +3437,7 @@ test('whole-executor close reaches bounded shared-host shutdown when session.clo
       },
     };
     const manager = new ProxyManager({
+    ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: '/unused/cc-proxy.mjs',
       ...(executor === 'codex'

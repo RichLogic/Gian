@@ -35,6 +35,9 @@ export interface ClaudeRuntimeEvents {
    *  one summary" UX.  `itemId` is stable across deltas of the same logical
    *  block so the renderer can update in place. */
   assistantText: [sessionId: string, text: string, itemId: string];
+  /** Intermediate thinking/reasoning block from a stream-json assistant
+   *  event. Emitted under the event.reasoning capability. */
+  assistantReasoning: [sessionId: string, text: string, itemId: string];
   permissionRequest: [sessionId: string, requestId: string, toolName: string, description: string, inputPreview: string];
   autoClassifierDenied: [sessionId: string, action: string, reason: string, consecutive: number, total: number];
   autoCircuitBreaker: [sessionId: string, trigger: 'consecutive' | 'total', consecutive: number, total: number];
@@ -55,6 +58,10 @@ export interface ClaudeRuntimeEvents {
   /** Current context samples from assistant events plus the result event's
    *  per-invocation conversation delta and authoritative context-window size. */
   tokenUsage: [sessionId: string, usage: TokenUsageUpdate];
+  /** A stream-json event that is not one of the recognized Claude shapes.
+   *  The adapter degrades these to a generic activity instead of silently
+   *  dropping user-visible Provider output. */
+  unknownClaudeEvent: [sessionId: string, event: Record<string, unknown>];
   processExited: [
     sessionId: string,
     code: number | null,
@@ -138,6 +145,10 @@ export interface ClaudeRuntime extends EventEmitter<ClaudeRuntimeEvents> {
    *  may be a billing-safe "default/no --model override" option rather than
    *  a concrete resolved model id. */
   getModels(): ModelCapabilities[];
+
+  /** Native `--permission-mode` choices discovered from the configured
+   *  Claude CLI help. Optional so lightweight Fake Runtimes can omit it. */
+  getPermissionModes?(): string[];
 
   /** Resolve once the initial capability discovery finishes. Lets callers (like
    *  capabilities.list) avoid returning an empty models array when the

@@ -143,6 +143,17 @@ export function registerSessionRoutes(app: Hono, db: Db, sessions: SessionManage
     }
   });
 
+  // Read-only Trace snapshot. Real-time refresh reuses the existing session
+  // event stream as an invalidation signal: clients re-read this endpoint
+  // when a ChatEvent or session:updated arrives for the session.
+  app.get('/api/sessions/:id/trace', c => {
+    try {
+      return c.json(sessions.getTraceSnapshot(c.req.param('id')));
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 404);
+    }
+  });
+
   app.get('/api/sessions/:id/native-config', async c => {
     try {
       return c.json(await sessions.getNativeConfig(c.req.param('id')));

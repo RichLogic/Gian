@@ -1,0 +1,59 @@
+name: Feature
+description: Propose a scoped user-facing capability or improvement
+title: "[Feature] "
+labels:
+  - feature
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 用户问题
+      description: 先描述用户、场景和障碍，不要只描述实现方式。
+      placeholder: 谁在什么场景下遇到了什么问题？
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 期望结果
+      description: 完成后用户应该能够做到什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 如已有具体方案，请描述主要交互或行为。
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收条件
+      description: 使用可验证的结果描述完成标准。
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: exclusions
+    attributes:
+      label: 暂不包含
+      description: 明确这次需求不解决的内容，避免范围漂移。
+
+  - type: textarea
+    id: references
+    attributes:
+      label: 参考资料
+      description: 相关 Issue、设计稿、日志或外部资料。
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，确认没有重复需求。
+          required: true

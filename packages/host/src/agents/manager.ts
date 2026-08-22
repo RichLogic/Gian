@@ -14,13 +14,13 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { basename, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { once } from 'node:events';
 import { promisify } from 'node:util';
 import {
   HostProtocolValidator,
   PROTOCOL_NAME,
-  PROTOCOL_V1,
+  PROTOCOL_V2,
   SUPPORTED_PROTOCOL_VERSIONS,
   manifestV2Schema,
   protocolRangeIncludes,
@@ -38,6 +38,8 @@ import type {
 } from '@gian/shared';
 import { migrateLegacyGrokProxyDefaults } from '@gian/shared';
 import { CommandRuntimeProvider } from '../runtime/command-provider.js';
+import { DshRuntimeProvider } from '../runtime/dsh-provider.js';
+import { DshRuntimeInstaller } from '../runtime/dsh-installer.js';
 import { KimiSessionStoreRuntimeProvider } from '../runtime/kimi-session-store.js';
 import { runProtectedCommand } from '../runtime/protected-command.js';
 import type { CliRuntimeProvider, RuntimeProbe } from '../runtime/types.js';
@@ -63,28 +65,18 @@ const RECOMMENDED_CLI_VERSIONS: Record<Executor, string> = {
   claude: '2.1.159',
   codex: '0.146.0',
   kimi: '0.31.1',
-  grok: '1.0.3',
+  grok: '1.0.4',
+  // Resolved from the official npm latest dist-tag at install/probe time;
+  // this value is only a diagnostic fallback (plan §0).
+  dsh: '0.1.0-rc.7',
 };
 
-const REQUIRED_PROXY_METHODS: Record<Executor, readonly string[]> = {
-  claude: [
-    'initialize', 'capabilities.list', 'slash.list', 'session.create',
-    'turn.start', 'turn.interrupt', 'approval.respond', 'session.close', 'shutdown',
-  ],
-  codex: [
-    'initialize', 'capabilities.list', 'slash.list', 'session.create',
-    'turn.start', 'turn.interrupt', 'turn.steer', 'approval.respond',
-    'session.setName', 'session.close', 'shutdown',
-  ],
-  kimi: [
-    'initialize', 'capabilities.list', 'slash.list', 'session.create',
-    'session.snapshot', 'session.config.set', 'session.listNative',
-    'turn.start', 'turn.interrupt', 'approval.respond', 'session.close', 'shutdown',
-  ],
-  grok: [
-    'initialize', 'catalog.list', 'session.create',
-    'turn.start', 'turn.interrupt', 'approval.respond', 'session.close', 'shutdown',
-  ],
+const DEVELOPMENT_PROCESS_SCOPE: Record<Executor, 'shared' | 'session'> = {
+  claude: 'session',
+  grok: 'session',
+  codex: 'shared',
+  kimi: 'shared',
+  dsh: 'shared',
 };
 
 interface AgentDefinition {
@@ -115,16 +107,10 @@ type ProxyWireProtocol = 'legacy' | typeof PROTOCOL_NAME;
 
 export interface ProxyLaunchDescriptor {
   entryPath: string;
-  protocolV1?: {
+  protocol?: {
     pluginVersion: string;
     processScope: ManagedProxyManifestV2['process']['scope'];
   };
-}
-
-interface ProxyProtocolResponse {
-  id?: unknown;
-  result?: unknown;
-  error?: { code?: unknown; message?: unknown };
 }
 
 export interface AgentManagerOptions {
@@ -161,6 +147,14 @@ export interface AgentManagerOptions {
   /** Internal test seam for proving an already-empty compatibility process
    * never re-enters a signalling shutdown path. */
   shutdownProxyProcessImpl?: typeof shutdownProxyProcess;
+  /** DSH home the bridge-managed `gian` profile is installed under. */
+  dshHome?: string;
+  /** Absolute directory containing the @gian/dsh-bridge package. */
+  dshBridgePackageDir?: string;
+  /** npm executable override (test seam for the DSH runtime installer). */
+  npmPath?: string;
+  /** npm registry URL override (test seam for the DSH runtime installer). */
+  dshRegistry?: string;
 }
 
 const AGENTS: Record<Executor, AgentDefinition> = {
@@ -221,6 +215,22 @@ const AGENTS: Record<Executor, AgentDefinition> = {
       '/usr/local/bin/grok',
     ],
   },
+  dsh: {
+    id: 'dsh',
+    name: 'DeepSeek Harness',
+    command: 'dsh',
+    // DSH has no shell installer; it resolves from the official npm registry
+    // (plan §3.1). The URL documents the package entry for the settings
+    // surface while actual install goes through DshRuntimeProvider.
+    installerUrl: 'https://www.npmjs.com/package/@deepseek-ai/dsh',
+    installerSha256: '',
+    officialPaths: home => [
+      join(home, '.dsh', 'bin', 'dsh'),
+      join(home, '.local', 'bin', 'dsh'),
+      '/opt/homebrew/bin/dsh',
+      '/usr/local/bin/dsh',
+    ],
+  },
 };
 
 function emptyConfig(): AgentConfigFile {
@@ -250,16 +260,6 @@ function safeReleaseValue(value: string, label: string): string {
   return trimmed;
 }
 
-function isCompatibleProxyVersion(proxyVersion: string, releaseVersion: string): boolean {
-  if (proxyVersion === releaseVersion) return true;
-
-  // A -hotfix release is reserved for app-only fixes. Its Proxy protocol and
-  // bundles remain those of the base release, so an existing base Proxy stays
-  // usable instead of disabling every Agent after the app update.
-  const hotfixMatch = /^(.*)-hotfix$/.exec(releaseVersion);
-  return hotfixMatch?.[1] === proxyVersion;
-}
-
 function isLegacyProxyManifest(manifest: ProxyManifest): manifest is LegacyProxyManifest {
   return manifest.schemaVersion === 1;
 }
@@ -268,17 +268,27 @@ function proxyManifestVersion(manifest: ProxyManifest): string {
   return isLegacyProxyManifest(manifest) ? manifest.version : manifest.pluginVersion;
 }
 
+export function recommendedCliVersionFromManifest(
+  manifest: ProxyManifest | null | undefined,
+  id: Executor,
+): string {
+  if (manifest && !isLegacyProxyManifest(manifest)) {
+    const recommended = manifest.runtime?.recommendedCliVersion;
+    if (typeof recommended === 'string' && recommended.length > 0) return recommended;
+  }
+  return RECOMMENDED_CLI_VERSIONS[id];
+}
+
 function proxyManifestProtocol(manifest: ProxyManifest): ProxyWireProtocol {
   return isLegacyProxyManifest(manifest) ? 'legacy' : manifest.protocol.name;
 }
 
 function isCompatibleProxyManifest(
   manifest: ProxyManifest,
-  releaseVersion: string,
+  _releaseVersion: string,
 ): boolean {
-  return isLegacyProxyManifest(manifest)
-    ? isCompatibleProxyVersion(manifest.version, releaseVersion)
-    : SUPPORTED_PROTOCOL_VERSIONS.some(version => (
+  return !isLegacyProxyManifest(manifest)
+    && SUPPORTED_PROTOCOL_VERSIONS.some(version => (
       protocolRangeIncludes(manifest.protocol.range, version)
     ));
 }
@@ -302,7 +312,41 @@ function managedRuntimeEnvironment(id: Executor): Readonly<Record<string, string
       GROK_SANDBOX: 'workspace',
     };
   }
+  if (id === 'dsh') {
+    return {
+      // Telemetry stays opt-out and stdout stays bridge-pure.
+      DSH_TELEMETRY_DISABLED: '1',
+      NO_COLOR: '1',
+      FORCE_COLOR: '0',
+    };
+  }
   return {};
+}
+
+async function pluginVersionFromEntry(entryPath: string): Promise<string> {
+  let dir = dirname(entryPath);
+  for (let i = 0; i < 8; i += 1) {
+    try {
+      const pkg = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8')) as {
+        name?: string;
+        version?: string;
+      };
+      if (
+        typeof pkg.version === 'string'
+        && typeof pkg.name === 'string'
+        && pkg.name.startsWith('@gian/')
+        && pkg.name.endsWith('-proxy')
+      ) {
+        return pkg.version;
+      }
+    } catch {
+      // Keep walking toward the package root.
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error(`Could not resolve pluginVersion from ${entryPath}`);
 }
 
 /** Parse the checksum for one exact immutable release asset. Accepting an
@@ -464,34 +508,30 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function validateProxyInitialize(id: Executor, value: unknown): void {
-  const result = objectRecord(value);
-  const expectedProtocol = id === 'kimi' ? 'acp/1' : '0.1.0';
-  const methods = result?.['methods'];
-  if (
-    !result
-    || result['mode'] !== 'spawn'
-    || result['protocolVersion'] !== expectedProtocol
-    || !Array.isArray(methods)
-    || !REQUIRED_PROXY_METHODS[id].every(method => methods.includes(method))
-  ) {
-    throw new Error(`${id} Proxy initialize handshake is incompatible.`);
-  }
+/**
+ * Product executor alias to Gian plugin id. `dsh` maps to the reverse-domain
+ * `ai.deepseek.harness` required by the integration plan; every other executor
+ * keeps its short id. Manifest v2 identity must match the initialize result.
+ */
+export function pluginIdFor(id: Executor): string {
+  return id === 'dsh' ? 'ai.deepseek.harness' : id;
 }
 
-function validateProxyCapabilities(id: Executor, value: unknown): void {
+function validateProxyInitialize(id: Executor, value: unknown): void {
   const result = objectRecord(value);
-  const protocol = result?.['protocolVersion'];
-  const compatibleProtocol = id === 'kimi'
-    ? protocol === 1 || protocol === 'acp/1'
-    : protocol === '0.1.0';
+  const protocol = objectRecord(result?.['protocol']);
+  const plugin = objectRecord(result?.['plugin']);
+  const process = objectRecord(result?.['process']);
   if (
     !result
-    || !compatibleProtocol
-    || !Array.isArray(result['models'])
-    || !Array.isArray(result['modes'])
+    || protocol?.['name'] !== PROTOCOL_NAME
+    || protocol?.['version'] !== PROTOCOL_V2
+    || typeof plugin?.['id'] !== 'string'
+    || plugin['id'] !== pluginIdFor(id)
+    || typeof plugin?.['version'] !== 'string'
+    || (process?.['scope'] !== 'shared' && process?.['scope'] !== 'session')
   ) {
-    throw new Error(`${id} Proxy capabilities handshake is incompatible.`);
+    throw new Error(`${id} Proxy initialize handshake is incompatible.`);
   }
 }
 
@@ -576,7 +616,13 @@ export class AgentManager {
         definition.id,
         definition.id === 'kimi'
           ? new KimiSessionStoreRuntimeProvider(commandProvider, this.kimiCodeHome)
-          : commandProvider,
+          : definition.id === 'dsh'
+            ? new DshRuntimeProvider({
+                dataDir: join(options.dataDir, 'runtimes', 'deepseek-harness'),
+                overridePath: options.environmentCliPaths?.dsh,
+                pathEnv: options.pathEnv,
+              })
+            : commandProvider,
       );
     }
   }
@@ -622,13 +668,13 @@ export class AgentManager {
 
   async proxyLaunchDescriptor(id: Executor): Promise<ProxyLaunchDescriptor> {
     if (!this.options.managedProxies) {
+      const entryPath = this.proxyEntry(id);
       return {
-        entryPath: this.proxyEntry(id),
-        // Grok is gian.proxy/1 only. Development still has to negotiate v1
-        // even though there is no downloaded manifest.
-        ...(id === 'grok'
-          ? { protocolV1: { pluginVersion: '0.2.0', processScope: 'session' as const } }
-          : {}),
+        entryPath,
+        protocol: {
+          pluginVersion: await pluginVersionFromEntry(entryPath),
+          processScope: DEVELOPMENT_PROCESS_SCOPE[id],
+        },
       };
     }
     const agentRoot = join(this.options.dataDir, 'plugins', id);
@@ -657,7 +703,7 @@ export class AgentManager {
       entryPath: join(contained, manifest.entry),
       ...(!isLegacyProxyManifest(manifest)
         ? {
-            protocolV1: {
+            protocol: {
               pluginVersion: manifest.pluginVersion,
               processScope: manifest.process.scope,
             },
@@ -919,6 +965,9 @@ export class AgentManager {
       async updateOwner => {
       const definition = AGENTS[id];
       if (!definition) throw new Error(`unsupported agent: ${id}`);
+      if (id === 'dsh') {
+        return this.installDshRuntime(id, updateOwner);
+      }
       const script = await this.download(definition.installerUrl, MAX_INSTALLER_BYTES);
       assertOfficialInstallerIntegrity(
         script,
@@ -950,7 +999,42 @@ export class AgentManager {
     ));
   }
 
-  /** Read-only "is a newer compatible Proxy release available?" check (issue
+  private async installDshRuntime(
+    id: Executor,
+    updateOwner: AgentUpdateLease,
+  ): Promise<AgentInstallResult> {
+    const dshHome = this.options.dshHome
+      ?? process.env.DSH_HOME
+      ?? join(homedir(), '.dsh');
+    if (typeof this.options.dshBridgePackageDir !== 'string') {
+      throw new Error(
+        'dshBridgePackageDir is required to install the @gian/dsh-bridge bundle into the gian profile.',
+      );
+    }
+    const bridgePackageDir = this.options.dshBridgePackageDir;
+    const installer = new DshRuntimeInstaller({
+      runtimesRoot: join(this.options.dataDir, 'runtimes', 'deepseek-harness'),
+      dshHome,
+      bridgePackageDir,
+      ...(this.options.npmPath ? { npmPath: this.options.npmPath } : {}),
+      ...(this.options.dshRegistry ? { registry: this.options.dshRegistry } : {}),
+    });
+    const result = await installer.installLatest();
+    await installer.recordUpdateCheck();
+    this.invalidateStatus(id);
+    const agent = await this.statusUnderUpdateLock(id, updateOwner);
+    if (agent.cli.state !== 'ready') {
+      throw new Error(
+        `DSH runtime installed, but @deepseek-ai/dsh was not usable. ${agent.cli.error ?? ''}`,
+      );
+    }
+    return {
+      agent,
+      output: `resolved @deepseek-ai/dsh@${result.resolvedVersion}\n${result.output}`.trim().slice(-12_000),
+    };
+  }
+
+    /** Read-only "is a newer compatible Proxy release available?" check (issue
    *  #86). No update lock, no filesystem or process side effects: the current
    *  version comes from the status probe and the latest compatible release
    *  from the same resolution the installer uses. */
@@ -1045,7 +1129,7 @@ export class AgentManager {
           throw new Error(`${id} Proxy manifest version does not match release ${release.tag}.`);
         }
         if (!isCompatibleProxyManifest(extractedManifest, this.releaseVersion)) {
-          throw new Error(`${id} Proxy does not support ${PROTOCOL_NAME}/${PROTOCOL_V1}.`);
+          throw new Error(`${id} Proxy does not support ${PROTOCOL_NAME}/${PROTOCOL_V2}.`);
         }
         const candidateVersion = safeReleaseValue(
           proxyManifestVersion(extractedManifest),
@@ -1111,6 +1195,7 @@ export class AgentManager {
     id: Executor,
     claim: AgentUpdateLease,
   ): Promise<AgentCliStatus> {
+    const recommendedVersion = await this.recommendedCliVersion(id);
     const provider = this.providers.get(id)!;
     let installed;
     try {
@@ -1120,7 +1205,7 @@ export class AgentManager {
         state: 'invalid',
         path: this.configuredPath(id),
         version: null,
-        recommendedVersion: RECOMMENDED_CLI_VERSIONS[id],
+        recommendedVersion,
         source: this.configuredPath(id) ? 'override' : null,
         error: error instanceof Error ? error.message : String(error),
       };
@@ -1130,7 +1215,7 @@ export class AgentManager {
         state: 'missing',
         path: null,
         version: null,
-        recommendedVersion: RECOMMENDED_CLI_VERSIONS[id],
+        recommendedVersion,
         source: null,
       };
     }
@@ -1142,7 +1227,7 @@ export class AgentManager {
           state: 'ready',
           path: probe.binaryPath,
           version: probe.version,
-          recommendedVersion: RECOMMENDED_CLI_VERSIONS[id],
+          recommendedVersion,
           source: probe.source === 'managed' ? 'official-user' : probe.source,
         };
       } catch (error) {
@@ -1154,12 +1239,25 @@ export class AgentManager {
       state: 'invalid',
       path: installed[0]?.binaryPath ?? null,
       version: null,
-      recommendedVersion: RECOMMENDED_CLI_VERSIONS[id],
+      recommendedVersion,
       source: installed[0]?.source === 'managed'
         ? 'official-user'
         : installed[0]?.source ?? null,
       error: failures.join(' | '),
     };
+  }
+
+  private async recommendedCliVersion(id: Executor): Promise<string> {
+    if (!this.options.managedProxies) return RECOMMENDED_CLI_VERSIONS[id];
+    try {
+      const agentRoot = join(this.options.dataDir, 'plugins', id);
+      const current = await realpath(join(agentRoot, 'current'));
+      const contained = await this.assertDirectProxyDirectory(agentRoot, current);
+      const manifest = await this.validateProxyDirectory(contained, id);
+      return recommendedCliVersionFromManifest(manifest, id);
+    } catch {
+      return RECOMMENDED_CLI_VERSIONS[id];
+    }
   }
 
   private async proxyStatus(id: Executor): Promise<Omit<AgentProxyStatus, 'defaults'>> {
@@ -1230,14 +1328,14 @@ export class AgentManager {
       const parsed = manifestV2Schema.safeParse(candidate);
       if (
         !parsed.success
-        || parsed.data.id !== id
+        || parsed.data.id !== pluginIdFor(id)
         || (expectedVersion && parsed.data.pluginVersion !== expectedVersion)
       ) {
         throw new Error(`Invalid ${id} proxy manifest.`);
       }
       validated = parsed.data as ManagedProxyManifestV2;
     }
-    if (validated.id !== id) {
+    if (validated.id !== pluginIdFor(id)) {
       throw new Error(`Invalid ${id} proxy manifest.`);
     }
     const resolvedDirectory = await realpath(directory);
@@ -1320,7 +1418,7 @@ export class AgentManager {
     const resolvedCandidate = await this.assertDirectProxyDirectory(agentRoot, candidate);
     const manifest = await this.validateProxyDirectory(resolvedCandidate, id, version);
     if (!isCompatibleProxyManifest(manifest, this.releaseVersion)) {
-      throw new Error(`${id} Proxy does not support ${PROTOCOL_NAME}/${PROTOCOL_V1}.`);
+      throw new Error(`${id} Proxy does not support ${PROTOCOL_NAME}/${PROTOCOL_V2}.`);
     }
     // Compatibility is a gate before the atomic pointer swap. While this is
     // pending or failing, every reader continues to resolve the old `current`.
@@ -1450,18 +1548,10 @@ export class AgentManager {
       `${input.id}-${randomUUID()}`,
     );
     await mkdir(probeDirectory, { recursive: true, mode: 0o700 });
-    const args = [input.entryPath];
-    if (input.protocol === 'legacy') {
-      if (input.id === 'claude') {
-        args.push('--data-dir', probeDirectory);
-      } else if (input.id === 'codex') {
-        args.push('--data-dir', probeDirectory, '--codex-bin', runtime.binaryPath);
-      } else if (input.id === 'grok') {
-        args.push('--grok-bin', runtime.binaryPath);
-      } else {
-        args.push('--kimi-bin', runtime.binaryPath);
-      }
+    if (input.protocol !== PROTOCOL_NAME) {
+      throw new Error(`${input.id} Proxy must speak ${PROTOCOL_NAME}/${PROTOCOL_V2}.`);
     }
+    const args = [input.entryPath];
     let reservation: Awaited<ReturnType<AgentUpdateLease['reserveProcessGroup']>>;
     try {
       reservation = await updateOwner.reserveProcessGroup();
@@ -1484,19 +1574,10 @@ export class AgentManager {
         env: {
           ...process.env,
           ...runtime.env,
-          ...(input.protocol === PROTOCOL_NAME
-            ? {
-                GIAN_PLUGIN_ID: input.id,
-                GIAN_PLUGIN_DATA_DIR: probeDirectory,
-                GIAN_RUNTIME_BIN: runtime.binaryPath,
-                GIAN_PROTOCOL_VERSIONS: SUPPORTED_PROTOCOL_VERSIONS.join(','),
-              }
-            : {
-                ...(input.id === 'claude' ? { CLAUDE_BIN: runtime.binaryPath } : {}),
-                ...(input.id === 'codex' ? { CODEX_BIN: runtime.binaryPath } : {}),
-                ...(input.id === 'kimi' ? { KIMI_BIN: runtime.binaryPath } : {}),
-                ...(input.id === 'grok' ? { GROK_BIN: runtime.binaryPath } : {}),
-              }),
+          GIAN_PLUGIN_ID: pluginIdFor(input.id),
+          GIAN_PLUGIN_DATA_DIR: probeDirectory,
+          GIAN_RUNTIME_BIN: runtime.binaryPath,
+          GIAN_PROTOCOL_VERSIONS: SUPPORTED_PROTOCOL_VERSIONS.join(','),
         },
       });
     } catch (error) {
@@ -1537,20 +1618,19 @@ export class AgentManager {
       const pipeFailure = stdinError as Error | null;
       return spawnFailure?.message || pipeFailure?.message || stderr.trim() || 'process exited';
     };
-    const validator = input.protocol === PROTOCOL_NAME
-      ? new HostProtocolValidator({
-          pluginId: input.id,
-          ...(input.processScope ? { processScope: input.processScope } : {}),
-        })
-      : null;
+    const validator = new HostProtocolValidator({
+      pluginId: pluginIdFor(input.id),
+      pluginVersion: input.version,
+      ...(input.processScope ? { processScope: input.processScope } : {}),
+    });
 
     const request = async (
-      id: number,
+      id: string,
       method: string,
       params: Record<string, unknown> = {},
     ): Promise<unknown> => {
-      const payload = validator ? { id, method, params } : { id, method };
-      if (validator) validator.registerRequest(payload);
+      const payload = { jsonrpc: '2.0', id, method, params };
+      validator.registerRequest(payload);
       const frame = `${JSON.stringify(payload)}\n`;
       if (exited || spawnError || stdinError) {
         throw new Error(`${input.id} Proxy compatibility process stopped: ${processFailureDetail()}`);
@@ -1563,34 +1643,16 @@ export class AgentManager {
         if (next.done) {
           throw new Error(`${input.id} Proxy compatibility process stopped: ${processFailureDetail()}`);
         }
-        if (validator) {
-          const accepted = validator.acceptLine(next.value);
-          if (accepted === null || !('id' in accepted)) continue;
-          if (accepted.id !== id) continue;
-          if (accepted.error !== undefined) {
-            const error = objectRecord(accepted.error);
-            throw new Error(
-              `${input.id} Proxy ${method} failed: ${String(error?.['message'] ?? error?.['code'])}`,
-            );
-          }
-          return accepted.result;
-        }
-        let response: ProxyProtocolResponse;
-        try {
-          response = JSON.parse(next.value) as ProxyProtocolResponse;
-        } catch {
-          throw new Error(`${input.id} Proxy emitted non-protocol stdout during compatibility probe.`);
-        }
-        if (response.id !== id) continue;
-        if (response.error) {
+        const accepted = validator.acceptLine(next.value);
+        if (accepted === null || !('id' in accepted)) continue;
+        if (accepted.id !== id) continue;
+        if (accepted.error !== undefined) {
+          const error = objectRecord(accepted.error);
           throw new Error(
-            `${input.id} Proxy ${method} failed: ${String(response.error.message ?? response.error.code)}`,
+            `${input.id} Proxy ${method} failed: ${String(error?.['message'] ?? error?.['code'])}`,
           );
         }
-        if (!Object.prototype.hasOwnProperty.call(response, 'result')) {
-          throw new Error(`${input.id} Proxy ${method} response omitted result.`);
-        }
-        return response.result;
+        return accepted.result;
       }
     };
 
@@ -1606,24 +1668,19 @@ export class AgentManager {
       if (registration === 'already-empty') {
         throw new Error(`${input.id} Proxy compatibility process exited before registration.`);
       }
-      if (validator) {
-        await request(1, 'initialize', {
-          protocol: {
-            name: PROTOCOL_NAME,
-            versions: [...SUPPORTED_PROTOCOL_VERSIONS],
-          },
-          host: { name: 'Gian', version: this.releaseVersion },
-        });
-        if (validator.initializeResult?.plugin.version !== input.version) {
-          throw new Error(`${input.id} Proxy handshake version does not match its manifest.`);
-        }
-        await request(2, 'catalog.list');
-        await request(3, 'shutdown');
-      } else {
-        validateProxyInitialize(input.id, await request(1, 'initialize'));
-        validateProxyCapabilities(input.id, await request(2, 'capabilities.list'));
-        await request(3, 'shutdown');
+      const initialized = await request('req-1', 'initialize', {
+        protocol: {
+          name: PROTOCOL_NAME,
+          versions: [...SUPPORTED_PROTOCOL_VERSIONS],
+        },
+        host: { name: 'Gian', version: this.releaseVersion },
+      });
+      validateProxyInitialize(input.id, initialized);
+      if (validator.initializeResult?.plugin.version !== input.version) {
+        throw new Error(`${input.id} Proxy handshake version does not match its manifest.`);
       }
+      await request('req-2', 'catalog.list');
+      await request('req-3', 'shutdown');
     } catch (error) {
       operationFailed = true;
       operationError = error;
@@ -1765,7 +1822,7 @@ export class AgentManager {
       const manifest = manifestV2Schema.safeParse(manifestValue);
       if (
         !manifest.success
-        || manifest.data.id !== id
+        || manifest.data.id !== pluginIdFor(id)
         || manifest.data.pluginVersion !== candidate.version
       ) {
         throw new Error(`${id} Proxy release manifest does not match ${candidate.tag}.`);

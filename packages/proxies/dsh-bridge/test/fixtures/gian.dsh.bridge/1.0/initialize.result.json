@@ -1,0 +1,27 @@
+{
+  "protocol": {
+    "name": "gian.dsh.bridge",
+    "version": "1.0"
+  },
+  "plugin": {
+    "id": "ai.deepseek.harness",
+    "bundle": "@gian/dsh-bridge",
+    "version": "0.1.0"
+  },
+  "runtime": {
+    "id": "deepseek-harness",
+    "package": "@deepseek-ai/dsh",
+    "version": "0.1.0-rc.7",
+    "sessionFormatVersion": 0
+  },
+  "capabilities": {
+    "session.resume": 1,
+    "session.events.read": 1,
+    "turn.interrupt": 1,
+    "catalog.changed": 1,
+    "interaction": 1,
+    "event.step": 1,
+    "event.request": 1,
+    "event.usage": 1
+  }
+}

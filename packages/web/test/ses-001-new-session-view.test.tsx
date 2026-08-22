@@ -19,8 +19,14 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentInstallStatus, CodexModelCapabilities, Executor, Workspace } from '@gian/shared';
-import { loadAgents, loadProxyCapabilities, loadProxyModels } from '../src/api.js';
+import {
+  loadAgents,
+  loadProxyCapabilities,
+  loadProxyModels,
+  loadResolvedProxyCatalog,
+} from '../src/api.js';
 import { LocaleProvider } from '../src/i18n/index.js';
+import { clearComposerCapabilityCaches } from '../src/components/composer/capabilities.js';
 import {
   clearNewSessionDraft,
   NewSessionView,
@@ -34,6 +40,7 @@ vi.mock('../src/api.js', () => ({
   peekAgents: vi.fn(() => null),
   loadProxyModels: vi.fn(),
   loadProxyCapabilities: vi.fn(),
+  loadResolvedProxyCatalog: vi.fn(),
 }));
 
 function agent(id: Executor, name: string, ready = true): AgentInstallStatus {
@@ -123,12 +130,20 @@ async function openAgentPicker() {
 describe('NewSessionView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clearComposerCapabilityCaches();
     // The view remembers the last choices in localStorage — isolate tests.
     localStorage.clear();
     vi.mocked(loadAgents).mockResolvedValue(agents);
     vi.mocked(loadProxyModels).mockResolvedValue(codexModels);
     vi.mocked(loadProxyCapabilities).mockResolvedValue({
       protocolVersion: 'test', models: [], modes: [], slashCommands: [],
+    });
+    vi.mocked(loadResolvedProxyCatalog).mockResolvedValue({
+      catalogRevision: 'resolved',
+      input: [{ type: 'text' }],
+      configOptions: [],
+      slashCommands: [],
+      resolvedDefaults: { sessionConfig: {}, turnConfig: {} },
     });
     Object.defineProperties(URL, {
       createObjectURL: { configurable: true, value: vi.fn(() => 'blob:new-session-screenshot') },
@@ -137,11 +152,80 @@ describe('NewSessionView', () => {
   });
 
   it('lists agents from /api/agents in the picker; unready agents are disabled', async () => {
+    vi.mocked(loadAgents).mockResolvedValue([...agents, agent('grok', 'Grok Build')]);
     renderView();
     await openAgentPicker();
     expect(screen.getByTestId('ns-agent-option-codex')).toBeEnabled();
     expect(screen.getByTestId('ns-agent-option-claude')).toBeEnabled();
     expect(screen.getByTestId('ns-agent-option-kimi')).toBeDisabled();
+    expect(screen.queryByTestId('ns-agent-option-grok')).not.toBeInTheDocument();
+  });
+
+  it('calls catalog.resolve only after a Proxy-advertised option changes', async () => {
+    vi.mocked(loadAgents).mockResolvedValue([
+      agent('claude', 'Claude Code'),
+      agent('codex', 'Codex'),
+    ]);
+    const options = [
+      {
+        id: 'workspace_mode',
+        displayName: 'Workspace Dynamic',
+        binding: 'session' as const,
+        control: 'select' as const,
+        required: false,
+        defaultValue: 'default',
+        choices: [
+          { value: 'default', displayName: 'Default' },
+          { value: 'strict', displayName: 'Strict' },
+        ],
+      },
+      {
+        id: 'model',
+        displayName: 'Model',
+        binding: 'turn' as const,
+        role: 'model',
+        control: 'select' as const,
+        required: true,
+        defaultValue: 'mock-model',
+        choices: [{ value: 'mock-model', displayName: 'Mock Model' }],
+      },
+    ];
+    vi.mocked(loadProxyCapabilities).mockResolvedValue({
+      protocolVersion: '2.0',
+      catalogRevision: 'catalog-1',
+      input: [{ type: 'text' }],
+      configOptions: options,
+      slashCommands: [],
+      capabilities: { 'catalog.resolve': 1 },
+      models: [],
+      modes: [],
+    });
+    vi.mocked(loadResolvedProxyCatalog).mockResolvedValue({
+      catalogRevision: 'catalog-1',
+      input: [{ type: 'text' }],
+      configOptions: options,
+      slashCommands: [],
+      resolvedDefaults: { sessionConfig: {}, turnConfig: {} },
+    });
+
+    renderView();
+    await openAgentPicker();
+    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    const select = await screen.findByLabelText('Workspace Dynamic');
+    const row = screen.getByTestId('ns-agent-row');
+    const sessionConfig = screen.getByTestId('ns-session-config');
+    expect(row).toContainElement(sessionConfig);
+    expect(
+      screen.getByTestId('ns-workspace-chip').compareDocumentPosition(sessionConfig)
+      & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(loadResolvedProxyCatalog).not.toHaveBeenCalled();
+    await userEvent.selectOptions(select, 'strict');
+    await waitFor(() => expect(loadResolvedProxyCatalog).toHaveBeenCalledWith('codex', {
+      catalogRevision: 'catalog-1',
+      sessionConfig: { workspace_mode: 'strict' },
+      turnConfig: {},
+    }));
   });
 
   it('keeps Send disabled until an agent is picked and a message typed (multi-agent)', async () => {
@@ -239,7 +323,8 @@ describe('NewSessionView', () => {
     const { onNewWorkspace } = renderView();
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
-    await userEvent.click(screen.getByTestId('ns-fast-chip'));
+    await userEvent.click(screen.getByTestId('ns-model-chip'));
+    await userEvent.click(within(document.querySelector('.catalog-options-pop') as HTMLElement).getByRole('switch', { name: 'Fast' }));
     await userEvent.type(screen.getByTestId('ns-title-input'), 'Draft title');
     await userEvent.type(screen.getByTestId('ns-message-input'), 'draft keeps me');
     await userEvent.click(screen.getByTestId('ns-workspace-chip'));
@@ -274,9 +359,7 @@ describe('NewSessionView', () => {
     expect(await screen.findByTestId('ns-agent-picker')).toHaveTextContent('Codex');
     expect(screen.getByTestId('ns-workspace-chip')).toHaveTextContent('Beta');
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5'));
-    await waitFor(() => {
-      expect(screen.getByTestId('ns-fast-chip')).toHaveAttribute('aria-pressed', 'true');
-    });
+    await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Fast'));
     // Navigation drafts remain until creation succeeds; merely reopening the
     // page is not a destructive read.
     expect(JSON.parse(localStorage.getItem(key) ?? 'null')).toMatchObject({
@@ -525,23 +608,26 @@ describe('NewSessionView', () => {
     const { onCreate } = renderView();
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
-    // Chips appear with the capability-list defaults (nothing explicit yet).
+    // The single summary shows only model / effort; Fast appears only when on.
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5 Codex'));
-    expect(screen.getByTestId('ns-effort-chip')).toHaveTextContent('Medium');
+    expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Medium');
+    expect(screen.getByTestId('ns-model-chip')).not.toHaveTextContent('Fast');
     expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('Ask for approval');
-    const fast = screen.getByTestId('ns-fast-chip');
-    expect(fast).toHaveAttribute('aria-pressed', 'false');
-    await userEvent.click(fast);
-    expect(fast).toHaveAttribute('aria-pressed', 'true');
 
     await userEvent.click(screen.getByTestId('ns-model-chip'));
+    let options = document.querySelector('.catalog-options-pop') as HTMLElement;
+    const fast = within(options).getByRole('switch', { name: 'Fast' });
+    expect(fast).not.toBeChecked();
+    await userEvent.click(fast);
+    expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Fast');
     await userEvent.click(
-      within(document.querySelector('.model-pop') as HTMLElement).getByText('GPT-5'),
+      within(options).getByText('GPT-5', { selector: '.mp-row-title' }),
     );
     expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5');
-    await userEvent.click(screen.getByTestId('ns-effort-chip'));
+    await userEvent.click(screen.getByTestId('ns-model-chip'));
+    options = document.querySelector('.catalog-options-pop') as HTMLElement;
     await userEvent.click(
-      within(document.querySelector('.think-pop') as HTMLElement).getByText('Medium'),
+      within(options).getByText('Medium', { selector: '.mp-row-title' }),
     );
     await userEvent.click(screen.getByTestId('ns-mode-chip'));
     await userEvent.click(
@@ -586,9 +672,10 @@ describe('NewSessionView', () => {
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5 Codex'));
     await userEvent.click(screen.getByTestId('ns-model-chip'));
     await userEvent.click(
-      within(document.querySelector('.model-pop') as HTMLElement).getByText('GPT-5'),
+      within(document.querySelector('.catalog-options-pop') as HTMLElement).getByText('GPT-5', { selector: '.mp-row-title' }),
     );
-    await userEvent.click(screen.getByTestId('ns-fast-chip'));
+    await userEvent.click(screen.getByTestId('ns-model-chip'));
+    await userEvent.click(within(document.querySelector('.catalog-options-pop') as HTMLElement).getByRole('switch', { name: 'Fast' }));
     await userEvent.click(screen.getByTestId('ns-workspace-chip'));
     await userEvent.click(screen.getByTestId('ns-workspace-option-ws-2'));
     await userEvent.type(screen.getByTestId('ns-title-input'), 'One-off title');
@@ -608,9 +695,7 @@ describe('NewSessionView', () => {
     // agent, and capability choices, it must never become a next-open default.
     expect(screen.getByTestId('ns-title-input')).toHaveValue('');
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5'));
-    await waitFor(() => {
-      expect(screen.getByTestId('ns-fast-chip')).toHaveAttribute('aria-pressed', 'true');
-    });
+    await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Fast'));
     await userEvent.type(screen.getByTestId('ns-message-input'), 'second run');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(second.onCreate).toHaveBeenCalledWith({

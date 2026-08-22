@@ -89,7 +89,12 @@
   padding: 0 2px 6px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
+}
+.ns-session-config {
+  padding-left: 0;
+  flex: 1 1 auto;
 }
 /* Optional title is the first row inside the new-session composer. A blank
    value stays omitted from session:create so SES-TITLE-001 can auto-title the
@@ -275,3 +280,105 @@
   color: var(--text-3);
   font-style: italic;
 }
+
+/* ---------- Side Chat surface (gian.proxy/2.0 proposal §10.5) ----------
+   Panel-2 content mounted inside `.chat-context-panel` (opened from the
+   session-scoped Dock rail button). It fills the panel — no overlay CSS of
+   its own; the existing panel-2 splitter/layout machinery owns the width. */
+.sidechat-root {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--hairline-2);
+}
+/* Single terminal-style tab strip — reuses the `.sheet-tabs`/`.sheet-tab`
+   language (gian-v2.css); only the deltas live here. */
+.sidechat-tabs {
+  border-bottom: 1px solid var(--hairline-2);
+  background: var(--surface);
+}
+.sidechat-tabs .sheet-tab .name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidechat-tabs .sheet-tab.is-closing { opacity: 0.6; }
+.sidechat-tabs .sheet-tab.is-unavailable { color: var(--warn); }
+.sidechat-tabs .sheet-tab .tab-x:hover { color: var(--danger); background: var(--danger-soft); }
+.sidechat-tabs .sidechat-new:disabled { opacity: 0.5; cursor: default; }
+.sidechat-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px 16px;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
+}
+.sidechat-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.sidechat-state {
+  flex: none;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+.sidechat-state.is-closing { color: var(--text-3); background: var(--surface-2); }
+.sidechat-state.is-unavailable { color: var(--warn); background: var(--warn-soft); }
+.sidechat-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px 8px;
+}
+.sidechat-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-2);
+  border-top: 1px solid var(--hairline-2);
+}
+.sidechat-banner.warn { color: var(--warn); background: var(--warn-soft); }
+.sidechat-banner .btn { flex: none; }
+
+/* Per-turn Fork affordance (proposal §10.6): sits on a Terminal Turn's
+   boundary row. Quiet at rest so long transcripts stay calm, but never
+   hidden — greyed means unavailable, with the reason on the tooltip. */
+.turn-fork {
+  display: flex;
+  justify-content: flex-end;
+  padding: 2px 4px;
+}
+.fork-turn-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0.55;
+}
+.turn-fork:hover .fork-turn-btn { opacity: 1; }
+.fork-turn-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--hairline);
+}
+.fork-turn-btn:disabled { cursor: default; }

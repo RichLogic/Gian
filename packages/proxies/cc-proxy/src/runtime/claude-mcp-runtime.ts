@@ -309,7 +309,24 @@ export function parseEffortLevelsFromHelp(helpText: string): EffortLevel[] {
   return levels;
 }
 
-function probeEffortLevels(): Promise<EffortLevel[]> {
+/** Parse the exact native `--permission-mode` choices out of `claude --help`.
+ *  The catalog uses this list so it can never advertise a mode the configured
+ *  Runtime does not actually accept. */
+export function parseClaudePermissionModesFromHelp(helpText: string): string[] {
+  const section = helpText.match(/--permission-mode\s+<mode>[\s\S]*?\(choices:\s*([^)]*)\)/);
+  if (!section?.[1]) return [];
+  const seen = new Set<string>();
+  const modes: string[] = [];
+  for (const match of section[1].matchAll(/"([^"]+)"/g)) {
+    const mode = match[1]?.trim();
+    if (!mode || seen.has(mode)) continue;
+    seen.add(mode);
+    modes.push(mode);
+  }
+  return modes;
+}
+
+function probeClaudeHelp(): Promise<string> {
   return new Promise((resolve) => {
     const proc = spawn(claudeExecutable(), ['--help'], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -319,7 +336,7 @@ function probeEffortLevels(): Promise<EffortLevel[]> {
     const finish = () => {
       if (resolved) return;
       resolved = true;
-      resolve(parseEffortLevelsFromHelp(output));
+      resolve(output);
     };
     proc.stdout?.on('data', d => { output += d.toString(); });
     proc.stderr?.on('data', d => { output += d.toString(); });
@@ -331,6 +348,7 @@ function probeEffortLevels(): Promise<EffortLevel[]> {
     }, 10_000);
   });
 }
+
 
 const SCRIPT_PROBE_BYTES = 16 * 1024;
 
@@ -571,6 +589,7 @@ export function sanitizeDisplayName(raw: string | null | undefined): string | nu
 export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRuntime {
   private readonly sessions = new Map<string, ManagedSession>();
   private discoveredModels: ModelCapabilities[] = [];
+  private discoveredPermissionModes: string[] = [];
   private modelDiscoveryPromise: Promise<void> | null = null;
   private readonly approvalServer: ApprovalServer;
   private approvalPort = 0;
@@ -620,6 +639,10 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     return this.discoveredModels;
   }
 
+  getPermissionModes(): string[] {
+    return this.discoveredPermissionModes;
+  }
+
   /** Block until initial capability discovery finishes. Used by
    *  capabilities.list so it doesn't return an empty models array on a
    *  freshly-spawned proxy. */
@@ -629,10 +652,12 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
 
   private async discoverModels(): Promise<void> {
     this.emit('debug', '[runtime] Discovering Claude capabilities (billing-safe)...');
-    const [probedDefaultModel, supportedEfforts] = await Promise.all([
+    const [probedDefaultModel, helpText] = await Promise.all([
       allowClaudePrintProbe() ? probeCurrentModel() : Promise.resolve(null),
-      probeEffortLevels(),
+      probeClaudeHelp(),
     ]);
+    const supportedEfforts = parseEffortLevelsFromHelp(helpText);
+    this.discoveredPermissionModes = parseClaudePermissionModesFromHelp(helpText);
     // Model menu sources, in priority order:
     //  1. The `availableModels` list from the Claude settings.json the
     //     configured CLI actually reads (see resolveClaudeSettingsPath).
@@ -840,6 +865,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     let resultText: string | null = null;
     let resultSubtype: string | null = null;
     let resultError: string | null = null;
+    let stderrText = '';
     // Tracks whether any text has been streamed via `assistantText` this
     // turn. The `result` event echoes the final assistant message verbatim,
     // so emitting it again as channelReply would duplicate the last text
@@ -960,7 +986,19 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
 
             if (blockType === 'text' && typeof b.text === 'string' && b.text.length > 0) {
               streamedAnyText = true;
-              this.emit('assistantText', sessionId, b.text, `${messageId}_${blockIdx}`);
+              const itemId = typeof b.id === 'string' && b.id
+                ? b.id
+                : `${messageId}_${blockIdx}`;
+              this.emit('assistantText', sessionId, b.text, itemId);
+            } else if (
+              (blockType === 'thinking' || blockType === 'reasoning')
+              && typeof (b.thinking ?? b.text) === 'string'
+              && String(b.thinking ?? b.text).length > 0
+            ) {
+              const itemId = typeof b.id === 'string' && b.id
+                ? b.id
+                : `${messageId}_${blockIdx}`;
+              this.emit('assistantReasoning', sessionId, String(b.thinking ?? b.text), itemId);
             } else if (blockType === 'tool_use') {
               const toolName = typeof b.name === 'string' ? b.name : 'unknown';
               const toolInput = typeof b.input === 'object' && b.input !== null
@@ -1021,6 +1059,17 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
           if (usageUpdate) this.emit('tokenUsage', sessionId, usageUpdate);
         }
 
+        const knownEventTypes = new Set(['system', 'assistant', 'user', 'result']);
+        const knownSystemSubtypes = new Set(['init', 'task_started', 'task_notification', 'compact_boundary']);
+        const isRecognized = eventType === undefined
+          ? false
+          : eventType === 'system'
+            ? typeof event.subtype === 'string' && knownSystemSubtypes.has(event.subtype)
+            : knownEventTypes.has(eventType);
+        if (!isRecognized && typeof eventType === 'string' && eventType) {
+          this.emit('unknownClaudeEvent', sessionId, event);
+        }
+
         // Log non-system events.
         if (eventType && eventType !== 'system') {
           this.emit('debug', `[runtime:${sessionId}] ${eventType}${event.subtype ? ':' + String(event.subtype) : ''}`);
@@ -1032,6 +1081,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
 
     proc.stderr?.on('data', (chunk: Buffer) => {
       const text = chunk.toString().trim();
+      if (stderrText.length < 16 * 1024) stderrText += chunk.toString().slice(0, 16 * 1024 - stderrText.length);
       if (text) this.emit('debug', `[runtime:${sessionId}:stderr] ${text}`);
     });
 
@@ -1042,6 +1092,15 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     });
 
     proc.on('exit', (code, signal) => {
+      // A manual stop removes this ManagedSession immediately so the next turn
+      // can register a replacement under the same Gian session id. SIGTERM is
+      // asynchronous, though: the old child may exit after that replacement is
+      // already live. Never let the retired child clear or terminate the new
+      // registration's state.
+      if (this.sessions.get(sessionId) !== session || session.activeProcess !== proc) {
+        this.emit('debug', `[runtime] Ignoring stale child exit for ${sessionId} (code=${code}, signal=${signal})`);
+        return;
+      }
       session.activeProcess = null;
       session.hasHadFirstTurn = true;
 
@@ -1060,7 +1119,9 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
         this.emit('channelReply', sessionId, replyText);
       }
 
-      this.emit('processExited', sessionId, code, signal, resultError ?? undefined);
+      const exitError = resultError
+        ?? (code !== 0 && stderrText.trim() ? stderrText.trim() : undefined);
+      this.emit('processExited', sessionId, code, signal, exitError);
       this.emit('debug', `[runtime] Turn process exited for ${sessionId} (code=${code}, signal=${signal})`);
     });
   }
@@ -1163,55 +1224,79 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       additionalDirectories?: string[];
     },
   ): string[] {
-    const args: string[] = [
-      '-p', content,
-      '--verbose',
-      '--output-format', 'stream-json',
-    ];
-
-    if (options?.additionalDirectories?.length) {
-      args.push('--add-dir', ...options.additionalDirectories);
-    }
-
-    // Pass through host's permissionMode directly to Claude CLI. The host's
-    // SessionManager translates ApprovalMode (plan/ask/auto) → PermissionMode
-    // (plan/default/auto/bypassPermissions). cc-proxy is just a transport.
-    //
-    // For non-bypass modes we attach the in-process approval MCP server so
-    // CLI's permission requests are relayed to host instead of denied
-    // outright (which is how the non-interactive `claude -p` process behaves).
-    const mode = options?.permissionMode ?? 'default';
-    if (mode === 'bypassPermissions') {
-      args.push('--dangerously-skip-permissions');
-    } else {
-      args.push('--permission-mode', mode);
-      if (session.mcpConfigPath) {
-        args.push('--mcp-config', session.mcpConfigPath);
-        args.push('--permission-prompt-tool', APPROVAL_PROMPT_TOOL);
-      }
-    }
-
-    if (options?.effort) {
-      args.push('--effort', options.effort);
-    }
-
-    if (session.hasHadFirstTurn) {
-      args.push('--resume', session.claudeSessionId);
-    } else {
-      args.push('--session-id', session.claudeSessionId);
-      // SESSION-NAME-001: stamp the Gian session name onto the brand-new
-      // Claude session so it's identifiable in `claude --resume` listings.
-      // Only on the first turn — later renames are propagated host-side by
-      // appending a `custom-title` line to the JSONL, so re-asserting an old
-      // `--name` on resume turns would clobber a fresh rename.
-      const displayName = sanitizeDisplayName(options?.displayName);
-      if (displayName) args.push('--name', displayName);
-    }
-
-    if (session.model) {
-      args.push('--model', session.model);
-    }
-
-    return args;
+    return buildClaudeCliArgs(
+      {
+        mcpConfigPath: session.mcpConfigPath,
+        hasHadFirstTurn: session.hasHadFirstTurn,
+        claudeSessionId: session.claudeSessionId,
+        model: session.model,
+      },
+      content,
+      options,
+    );
   }
+}
+
+/** Build the `claude -p` argv for a turn. Extracted and exported so MCP
+ *  isolation and permission-mode passthrough are unit-testable without
+ *  spawning a real Provider. */
+export function buildClaudeCliArgs(
+  session: {
+    mcpConfigPath: string | null;
+    hasHadFirstTurn: boolean;
+    claudeSessionId: string;
+    model: string | null;
+  },
+  content: string,
+  options?: {
+    permissionMode?: PermissionMode | null;
+    effort?: EffortLevel | null;
+    displayName?: string | null;
+    additionalDirectories?: string[];
+  },
+): string[] {
+  const args: string[] = [
+    '-p', content,
+    '--verbose',
+    '--output-format', 'stream-json',
+  ];
+
+  if (options?.additionalDirectories?.length) {
+    args.push('--add-dir', ...options.additionalDirectories);
+  }
+
+  // cc-proxy owns the MCP surface for this process. `--strict-mcp-config`
+  // makes Claude load only the servers named by `--mcp-config`, so a session
+  // can never inherit unrelated user/project MCP servers. It is passed in
+  // bypass mode too: no --mcp-config means no inherited MCP servers.
+  const mode = options?.permissionMode ?? 'default';
+  if (mode === 'bypassPermissions') {
+    args.push('--dangerously-skip-permissions');
+    args.push('--strict-mcp-config');
+  } else {
+    args.push('--permission-mode', mode);
+    if (session.mcpConfigPath) {
+      args.push('--mcp-config', session.mcpConfigPath);
+      args.push('--strict-mcp-config');
+      args.push('--permission-prompt-tool', APPROVAL_PROMPT_TOOL);
+    }
+  }
+
+  if (options?.effort) {
+    args.push('--effort', options.effort);
+  }
+
+  if (session.hasHadFirstTurn) {
+    args.push('--resume', session.claudeSessionId);
+  } else {
+    args.push('--session-id', session.claudeSessionId);
+    const displayName = sanitizeDisplayName(options?.displayName);
+    if (displayName) args.push('--name', displayName);
+  }
+
+  if (session.model) {
+    args.push('--model', session.model);
+  }
+
+  return args;
 }

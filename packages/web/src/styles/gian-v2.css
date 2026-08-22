@@ -76,11 +76,13 @@
   background: var(--bg);
 }
 
-/* Spacer between the window-chrome button cluster and the path breadcrumb — dividers are hidden by design; this is spacing only. */
+/* Hairline between the window-chrome button cluster and the path breadcrumb —
+   restored per Owner call (2026-08-21), reverting the 2363ae8 blanking. */
 .tb-divider {
   width: 1px;
   height: 16px;
   flex: none;
+  background: var(--hairline);
   margin: 0 4px;
 }
 .tb-toggle {
@@ -1942,6 +1944,23 @@ button.sb-section:hover { color: var(--text); }
   box-shadow: var(--shadow-2);
 }
 .dock-btn:hover .lbl { opacity: 1; transition-delay: 200ms; }
+
+/* Count badge (e.g. the Side Chat button's open-side-chat count). */
+.dock-btn .dock-badge {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--accent, var(--text-2));
+  color: var(--accent-text, var(--text-inv));
+  font: 600 9px/14px var(--font-sans);
+  text-align: center;
+  pointer-events: none;
+}
+.dock-btn:disabled .dock-badge { opacity: 0.6; }
 
 .dock-btn:hover .lbl { opacity: 1; transition-delay: 200ms; }
 .dock-spacer { flex: 1; }

@@ -48,8 +48,11 @@ jobs:
       - name: Audit production dependencies
         run: pnpm run quality:audit:prod
 
-      - name: Type-check source
-        run: pnpm typecheck
+      - name: Verify source
+        run: |
+          pnpm quality:traceability
+          pnpm typecheck
+          pnpm test:all
 
       - name: Build unsigned Gian beta
         run: pnpm --filter @gian/desktop make:mac

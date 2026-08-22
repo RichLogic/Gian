@@ -5,6 +5,7 @@ import type {
   RunnerInfo,
   ServerToClientMessage,
   Session,
+  SideChatInfo,
   SystemConfig,
   Task,
   Workspace,
@@ -27,6 +28,11 @@ import {
   applySessionUpdate,
   planCreatedSessionFirstMessage,
 } from '../session-routing.js';
+import { sideChatExecutor } from '../presentation/sidechat.js';
+import {
+  mergeSideChatEchoes,
+  projectSideChatSnapshot,
+} from '../presentation/sidechat-events.js';
 import {
   applyEnvelope,
   applyErrorEnvelopeToSession,
@@ -65,6 +71,18 @@ interface UseAppSocketInput {
    *  worktree selector. The full App always supplies the refresh callback. */
   refreshWorkingTrees?: () => void;
   setSessions: Setter<Session[]>;
+  /** Side Chat read-model setter (proposal §10.5). state_sync replaces the
+   *  whole set; `sidechat:updated` upserts one record. */
+  setSideChats: Setter<SideChatInfo[]>;
+  /** Live mirror of the Side Chat read model for envelope routing: Side Chat
+   *  events arrive on the shared event stream with `session_id = sidechatId`
+   *  (Host contract, proposal §10.5.1) and must land in the Side Chat's own
+   *  item store — never the parent Session's transcript. */
+  sideChatsRef: MutableRefObject<SideChatInfo[]>;
+  /** Per-Side-Chat transcript items / turn-running setters (mirrors
+   *  itemsBySession / pendingBySession, keyed by sidechat id). */
+  setItemsBySidechat: Setter<Record<string, TranscriptItem[]>>;
+  setPendingBySidechat: Setter<Record<string, boolean>>;
   setTasks: Setter<Task[]>;
   setSystemConfig: Setter<SystemConfig | null>;
   setRunner: Setter<RunnerInfo | null>;
@@ -185,6 +203,31 @@ export function useAppSocket(input: UseAppSocketInput): void {
       });
     };
 
+    /**
+     * Side Chat snapshot projection (Host contract, proposal §10.5): the Host
+     * does NOT forward Side Chat events as `event` envelopes — it appends the
+     * route's raw gian.proxy/2.0 notifications to its transient store and
+     * broadcasts the COMPLETE public snapshot (`sidechat:created` /
+     * `sidechat:updated`, plus `state_sync.sidechats`). Each snapshot is
+     * folded through the shared display pipeline with the PARENT session's
+     * executor (§10.5.1: sessionConfig inherited as-is) and merged with the
+     * Side Chat's live optimistic echoes. Parent/child transcripts, pending
+     * state, plan state and notifications stay fully isolated.
+     */
+    const projectSideChat = (snapshot: SideChatInfo) => {
+      const current = latest.current;
+      const parent = current.sessionsRef.current
+        .find(candidate => candidate.id === snapshot.parent_session_id);
+      const executor = sideChatExecutor(parent);
+      const uncertainTurnMessage = current.translate?.('sidechat.turnUncertain')
+        ?? 'The previous turn was interrupted — its outcome is uncertain.';
+      current.setItemsBySidechat(previous => {
+        const projected = projectSideChatSnapshot(snapshot, executor, { uncertainTurnMessage });
+        const next = mergeSideChatEchoes(projected, previous[snapshot.id] ?? []);
+        return { ...previous, [snapshot.id]: next };
+      });
+    };
+
     const offState = input.ws.onState((wsState, attempt) => {
       const current = latest.current;
       current.setWsState(wsState);
@@ -228,6 +271,28 @@ export function useAppSocket(input: UseAppSocketInput): void {
             return next;
           });
           current.setTasks(message.tasks);
+          // Complete replacement of the Side Chat read-model set (proposal
+          // §10.5.2/§10.5.3); Hosts predating the amendment omit the field.
+          const syncSideChats = message.sidechats ?? [];
+          current.setSideChats(syncSideChats);
+          // Re-project every still-known Side Chat from its authoritative
+          // snapshot (restores transcripts after a reload/reconnect), then
+          // drop the transient transcript/pending state of permanently
+          // closed ones (§10.5.4: nothing may remain discoverable).
+          for (const snapshot of syncSideChats) projectSideChat(snapshot);
+          const keptSideChatIds = new Set(syncSideChats.map(entry => entry.id));
+          current.setItemsBySidechat(previous => {
+            const next = Object.fromEntries(
+              Object.entries(previous).filter(([id]) => keptSideChatIds.has(id)),
+            );
+            return Object.keys(next).length === Object.keys(previous).length ? previous : next;
+          });
+          current.setPendingBySidechat(previous => {
+            const next = Object.fromEntries(
+              Object.entries(previous).filter(([id]) => keptSideChatIds.has(id)),
+            );
+            return Object.keys(next).length === Object.keys(previous).length ? previous : next;
+          });
           current.setSystemConfig(message.config);
           current.setRunner(message.runner);
           // A reconnect may have missed workspace:git-updated broadcasts.
@@ -273,6 +338,7 @@ export function useAppSocket(input: UseAppSocketInput): void {
           // frames still own selection and pendingFirstMessage even if a
           // reconnect state_sync already exposed their session id.
           const nativeAdopt = message.origin === 'native-adopt';
+          const sessionFork = message.origin === 'session-fork';
           current.sessionsRef.current = [
             message.session,
             ...current.sessionsRef.current.filter(session => session.id !== message.session.id),
@@ -281,7 +347,7 @@ export function useAppSocket(input: UseAppSocketInput): void {
             message.session,
             ...previous.filter(session => session.id !== message.session.id),
           ]);
-          if (nativeAdopt) return;
+          if (nativeAdopt || sessionFork) return;
           current.setActiveSessionId(message.session.id);
           // The creating/forking busy state is driven by the pending
           // operation run in App and ends on operation:result — nothing to
@@ -293,6 +359,15 @@ export function useAppSocket(input: UseAppSocketInput): void {
           );
           if (pending) {
             current.pendingFirstMessageRef.current = null;
+            // The active-session effect cannot commit before this WebSocket
+            // handler returns. Subscribe synchronously so the first
+            // message's canonical user event cannot race ahead of the new
+            // Session subscription and leave a confirmed optimistic copy
+            // beside history hydration.
+            input.ws.send({
+              type: 'events:subscribe',
+              session_id: message.session.id,
+            });
             // Screenshot Blobs can only be uploaded after the Session exists.
             // The operation path is async; selection already happened above.
             void deliverCreatedSessionFirstMessage(pending, message.session, current);
@@ -406,6 +481,36 @@ export function useAppSocket(input: UseAppSocketInput): void {
           current.setSessions(previous => previous.filter(session => session.id !== message.session_id));
           current.setActiveSessionId(previous => previous === message.session_id ? null : previous);
           return;
+        case 'sidechat:created':
+        case 'sidechat:updated':
+          // Complete replacement of that one record (proposal §10.5): upsert
+          // by id, never field-merge with the previous copy. The snapshot is
+          // also the transcript feed — re-project it through the shared
+          // display pipeline (see projectSideChat above).
+          current.setSideChats(previous => {
+            const existing = previous.findIndex(entry => entry.id === message.sidechat.id);
+            if (existing === -1) return [...previous, message.sidechat];
+            const next = previous.slice();
+            next[existing] = message.sidechat;
+            return next;
+          });
+          projectSideChat(message.sidechat);
+          return;
+        case 'sidechat:closed':
+          current.setSideChats(previous => previous.filter(entry => entry.id !== message.sidechat_id));
+          current.setItemsBySidechat(previous => {
+            if (!(message.sidechat_id in previous)) return previous;
+            const next = { ...previous };
+            delete next[message.sidechat_id];
+            return next;
+          });
+          current.setPendingBySidechat(previous => {
+            if (!(message.sidechat_id in previous)) return previous;
+            const next = { ...previous };
+            delete next[message.sidechat_id];
+            return next;
+          });
+          return;
         case 'task:created':
           current.setTasks(previous => [
             message.task,
@@ -439,6 +544,10 @@ export function useAppSocket(input: UseAppSocketInput): void {
         case 'approval:updated':
           return;
         case 'event': {
+          // Side Chat events never arrive here: their route's notifications
+          // ride the sidechat:created/updated snapshots (Host contract — see
+          // projectSideChat above), so an `event` envelope's session_id is
+          // always an ordinary Session.
           const session = current.sessionsRef.current
             .find(candidate => candidate.id === message.session_id);
           handleEnvelope(message, session?.executor ?? 'claude');
@@ -453,20 +562,30 @@ export function useAppSocket(input: UseAppSocketInput): void {
           if (message.session_id
             && (message.request_type === 'message:send' || message.code === 'MESSAGE_SEND_FAILED')) {
             const sessionId = message.session_id;
+            const isSideChat = current.sideChatsRef.current
+              .some(entry => entry.id === sessionId);
             if (!message.request_id) {
               // UNCORRELATED legacy fallback only: correlated send failures
               // (every send now carries a request_id) mark THEIR echo failed
               // precisely by run id via the operation rollback (proposal §9);
               // this imprecise latest-pending marking must not run for them.
-              current.setItemsBySession(previous => {
-                const delta = applyErrorEnvelopeToSession(previous[sessionId], sessionId);
-                if (!delta || delta.items === previous[sessionId]) return previous;
-                return { ...previous, [sessionId]: delta.items };
-              });
+              // Side Chat sends never take this path either — their echo
+              // lives in the sidechat store and is settled by run id.
+              if (!isSideChat) {
+                current.setItemsBySession(previous => {
+                  const delta = applyErrorEnvelopeToSession(previous[sessionId], sessionId);
+                  if (!delta || delta.items === previous[sessionId]) return previous;
+                  return { ...previous, [sessionId]: delta.items };
+                });
+              }
             }
             // Clear the spinner for both paths (the operation rollback only
             // marks the echo; the session-level pending flag is cleared here).
-            current.setPendingBySession(previous => ({ ...previous, [sessionId]: false }));
+            if (isSideChat) {
+              current.setPendingBySidechat(previous => ({ ...previous, [sessionId]: false }));
+            } else {
+              current.setPendingBySession(previous => ({ ...previous, [sessionId]: false }));
+            }
           }
           toast({ kind: 'error', title: message.code, message: message.message });
         }

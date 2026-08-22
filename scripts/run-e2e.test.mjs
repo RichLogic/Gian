@@ -42,6 +42,18 @@ test('Playwright owns the real Host and Web processes rather than pnpm wrappers'
   assert.doesNotMatch(config, /command: `[^`]*pnpm -F @gian\/(host|web)/);
 });
 
+test('the explicit Proxy mock profile uses the fixture entry and Git as the fake runtime', () => {
+  const env = createE2eEnvironment({ PATH: '/bin' }, {
+    dataDir: '/tmp/gian-e2e-mock',
+    hostPort: 42234,
+    webPort: 42235,
+  }, { proxyMock: true });
+
+  assert.equal(env.GIAN_E2E_PROXY_MOCK, '1');
+  assert.match(env.GIAN_CODEX_PROXY_ENTRY, /codex-proxy\/scripts\/fake-catalog-ui-proxy\.mjs$/);
+  assert.equal(env.CODEX_BIN, '/usr/bin/git');
+});
+
 test('the E2E runner always drains detached process groups', async () => {
   const runner = await readFile(new URL('./run-e2e.mjs', import.meta.url), 'utf8');
 

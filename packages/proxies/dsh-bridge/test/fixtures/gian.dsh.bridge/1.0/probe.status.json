@@ -1,0 +1,16 @@
+{
+  "package": "@deepseek-ai/dsh",
+  "distTag": "latest",
+  "resolvedVersion": "0.1.0-rc.7",
+  "items": {
+    "cordis-bundle-profile": "PASS",
+    "agent-create-resume-steer-cancel": "PASS",
+    "agent-handle-dispose": "PASS",
+    "session-event": "PASS",
+    "approval-request": "PASS",
+    "ctx-user-questions": "PASS",
+    "native-session-persistence": "FAIL_NO_OWNERSHIP_API",
+    "stdout-purity": "PASS",
+    "acp-machine-interface": "FAIL_REMOVED_IN_RC7"
+  }
+}

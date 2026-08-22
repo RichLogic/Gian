@@ -20,7 +20,7 @@ import type {
   ProxyClient,
   NotificationHandler,
   ProxyReplayResult,
-  RespondApprovalParams,
+  RespondInteractionParams,
   StartTurnParams,
 } from '../src/proxy/types.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
@@ -30,7 +30,57 @@ import { writeAttachment } from '../src/storage/attachments.js';
 import { listGitWorktreesAsync } from '../src/workspace/git.js';
 import { createGitRepo } from './fixtures/git-repo.js';
 import { installEventStorageV3 } from '../src/storage/event-storage-v3-schema.js';
-import { proxyNotificationSchema } from '@gian/proxy-protocol';
+import {
+  canonicalFingerprint,
+  proxyNotificationSchema,
+  replayEventSchemaUnion,
+  type ReplayEvent,
+} from '@gian/proxy-protocol';
+import { EMPTY_CATALOG, stubInitialize, stubSession } from './helpers/protocol-v2-stub.js';
+
+function liveNotification(value: {
+  method: string;
+  params: Record<string, unknown> & { turnId?: string };
+}): ProxyNotification {
+  return proxyNotificationSchema.parse({
+    jsonrpc: '2.0',
+    method: value.method,
+    params: {
+      streamId: 'stream-1',
+      sequence: 1,
+      ...(value.params.turnId ? { sourceTurnId: value.params.turnId } : {}),
+      ...value.params,
+    },
+  });
+}
+
+function replayEvent(value: {
+  method: string;
+  eventId: string;
+  sessionId: string;
+  replayStreamId: string;
+  sequence: number;
+  sourceTurnId: string;
+  emittedAt: string;
+  data: unknown;
+}): ReplayEvent {
+  return replayEventSchemaUnion.parse(value);
+}
+
+function liveFromReplay(event: ReplayEvent): ProxyNotification {
+  return liveNotification({
+    method: event.method,
+    params: {
+      eventId: event.eventId,
+      streamId: event.replayStreamId,
+      sequence: event.sequence,
+      sessionId: event.sessionId,
+      turnId: event.sourceTurnId,
+      emittedAt: event.emittedAt,
+      data: event.data,
+    },
+  });
+}
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -45,12 +95,15 @@ class StubProxyClient implements ProxyClient {
   notificationHandlers: NotificationHandler[] = [];
   startTurnCalls: StartTurnParams[] = [];
   exitHandlers: Array<(code: number | null) => void> = [];
+  faultHandlers: Array<(error: Error) => void> = [];
   handlerCountsAtCreate: Array<{ notifications: number; exits: number }> = [];
   notificationDuringCreate: ProxyNotification | null = null;
   notificationDuringInterrupt: ProxyNotification | null = null;
   interruptError: Error | null = null;
   startTurnIds: string[] = [];
-  approvalCalls: RespondApprovalParams[] = [];
+  echoHostTurnId = false;
+  approvalCalls: RespondInteractionParams[] = [];
+  nameCalls: string[] = [];
   createSessionGate: Promise<void> | null = null;
   onCreateSessionStarted: (() => void) | null = null;
 
@@ -58,30 +111,47 @@ class StubProxyClient implements ProxyClient {
     this.executor = executor;
   }
 
+  isExited() { return false; }
   async initialize() {
-    return { mode: 'spawn' as const, protocolVersion: '0.1.0', methods: [] };
+    return stubInitialize(this.executor);
   }
-  async capabilities() {
-    return { protocolVersion: '0.1.0', models: [], slashCommands: [] };
-  }
-  async listSlashCommands() {
-    return { commands: [] };
+  async catalog() {
+    if (this.catalogOverride) return this.catalogOverride;
+    if (this.executor === 'codex') {
+      return {
+        catalogRevision: 'codex-test',
+        input: [{ type: 'text' as const }],
+        configOptions: [{
+          id: 'fast',
+          displayName: 'Fast',
+          binding: 'turn' as const,
+          role: 'fast',
+          control: 'boolean' as const,
+          required: false,
+          defaultValue: false,
+        }],
+        slashCommands: [],
+      };
+    }
+    return EMPTY_CATALOG;
   }
   /** When set, next createSession call rejects (used to test rollback). */
   failNextCreate: Error | null = null;
 
   /** Captures the last createSession params so tests can assert on adoption. */
-  lastCreateParams: {
-    cwd: string;
-    claudeSessionId?: string;
-    threadId?: string;
+  lastCreateParams: import('../src/proxy/types.js').CreateSessionParams | null = null;
+  catalogOverride: import('@gian/shared').ProxyCatalog | null = null;
+  createTurnConfig: {
+    options: import('@gian/shared').ConfigOption[];
+    revision: string;
   } | null = null;
+  resolveCalls: Array<{
+    catalogRevision: string;
+    sessionConfig: Record<string, string | boolean | number | null>;
+    turnConfig: Record<string, string | boolean | number | null>;
+  }> = [];
 
-  async createSession(params: {
-    cwd: string;
-    claudeSessionId?: string;
-    threadId?: string;
-  }) {
+  async createSession(params: import('../src/proxy/types.js').CreateSessionParams) {
     this.onCreateSessionStarted?.();
     if (this.createSessionGate) await this.createSessionGate;
     this.handlerCountsAtCreate.push({
@@ -97,24 +167,34 @@ class StubProxyClient implements ProxyClient {
     // Mirror cc-proxy: re-use the supplied claudeSessionId on adoption,
     // otherwise mint a fresh native id. The proxy's own `id` mirrors the
     // native id so a single value flows through both sides.
-    const nativeSessionId = params.threadId ?? params.claudeSessionId ?? `cc_${randomUUID()}`;
+    const nativeSessionId = params.nativeSessionId ?? `cc_${randomUUID()}`;
     if (this.notificationDuringCreate) {
       const notification = this.notificationDuringCreate;
       this.notificationDuringCreate = null;
       this.fire(notification);
     }
     return {
-      session: {
-        id: nativeSessionId,
-        cwd: params.cwd,
-        claudeSessionId: nativeSessionId,
-        model: null,
-        status: 'idle' as const,
-        createdAt: '2026-04-26T00:00:00.000Z',
-        updatedAt: '2026-04-26T00:00:00.000Z',
-        lastError: null,
-      },
+      session: stubSession(nativeSessionId, params.cwd),
       nativeSessionId,
+      ...(this.createTurnConfig
+        ? {
+            turnConfigOptions: this.createTurnConfig.options,
+            turnConfigRevision: this.createTurnConfig.revision,
+          }
+        : {}),
+    };
+  }
+
+  async resolveCatalog(params: {
+    catalogRevision: string;
+    sessionConfig: Record<string, string | boolean | number | null>;
+    turnConfig: Record<string, string | boolean | number | null>;
+  }) {
+    this.resolveCalls.push(params);
+    const catalog = await this.catalog();
+    return {
+      ...catalog,
+      resolvedDefaults: { sessionConfig: {}, turnConfig: {} },
     };
   }
   async interruptTurn() {
@@ -129,22 +209,19 @@ class StubProxyClient implements ProxyClient {
       throw error;
     }
   }
-  async respondApproval(params: RespondApprovalParams) {
+  async respondInteraction(params: RespondInteractionParams) {
     this.approvalCalls.push(params);
+  }
+  async setName(name: string) {
+    this.nameCalls.push(name);
   }
   async startTurn(params: StartTurnParams) {
     this.startTurnCalls.push(params);
     return {
-      session: {
-        id: 'proxy_x',
-        cwd: '/tmp',
-        model: null,
-        status: 'running' as const,
-        createdAt: '2026-04-26T00:00:00.000Z',
-        updatedAt: '2026-04-26T00:00:00.000Z',
-        lastError: null,
+      session: stubSession('proxy_x', '/tmp', 'running'),
+      turn: {
+        id: this.startTurnIds.shift() ?? (this.echoHostTurnId ? params.turnId : 'proxy_turn'),
       },
-      turn: { id: this.startTurnIds.shift() ?? 'proxy_turn' },
     };
   }
   async closeSession() { /* no-op */ }
@@ -164,9 +241,18 @@ class StubProxyClient implements ProxyClient {
       this.exitHandlers = this.exitHandlers.filter(h => h !== handler);
     };
   }
+  onSessionFault(handler: (error: Error) => void) {
+    this.faultHandlers.push(handler);
+    return () => {
+      this.faultHandlers = this.faultHandlers.filter(h => h !== handler);
+    };
+  }
 
   fire(notification: ProxyNotification): void {
     for (const h of this.notificationHandlers) h(notification);
+  }
+  fireFault(error: Error): void {
+    for (const h of this.faultHandlers) h(error);
   }
 }
 
@@ -205,17 +291,16 @@ class FakeProxyManager {
 
 class StubKimiProxyClient implements ProxyClient {
   readonly executor = 'kimi' as const;
-  readonly protocolV1 = true as const;
+  readonly protocolV2 = true as const;
   notificationHandlers: NotificationHandler[] = [];
   nativeListCalls: Array<{ cwd?: string; cursor?: string }> = [];
   failNativeList = false;
-  replayUpdates: unknown[] = [];
-  replaySession?: () => Promise<ProxyNotification[] | ProxyReplayResult>;
+  replayEvents: unknown[] = [];
+  replaySession?: () => Promise<ProxyReplayResult>;
   forceKillCalls = 0;
   createCalls = 0;
   failNextCreate: Error | null = null;
-  failNextNativeConfig: Error | null = null;
-  setNativeConfigCalls: Array<{ configId: string; value: NativeConfigValue }> = [];
+  lastCreateParams: import('../src/proxy/types.js').CreateSessionParams | null = null;
   readonly options: NativeConfigOption[] = [
     {
       id: 'mode',
@@ -230,24 +315,35 @@ class StubKimiProxyClient implements ProxyClient {
     },
   ];
 
+  isExited() { return false; }
   async initialize() {
-    return { mode: 'spawn' as const, protocolVersion: 'acp/1', methods: [] };
+    return stubInitialize('kimi');
   }
-  async capabilities() {
+  async catalog() {
     return {
-      protocolVersion: '1',
-      models: [],
-      slashCommands: [] as [],
-      sessionCapabilities: {
-        load: true,
-        list: true,
-        resume: true,
-        close: false,
-      },
+      catalogRevision: 'kimi-test',
+      input: [{ type: 'text' as const }],
+      configOptions: this.options.map((option) => ({
+        id: option.id,
+        displayName: option.name,
+        binding: option.scope,
+        role: option.category === 'thought_level'
+          ? 'effort'
+          : option.id === 'model'
+            ? 'model'
+            : option.id === 'mode'
+              ? 'approval_mode'
+              : undefined,
+        control: option.type,
+        required: false,
+        defaultValue: option.currentValue,
+        choices: option.choices?.map((choice) => ({
+          value: choice.value,
+          displayName: choice.label,
+        })),
+      })),
+      slashCommands: [],
     };
-  }
-  async listSlashCommands() {
-    return { commands: [] };
   }
   async listNativeSessions(params: { cwd?: string; cursor?: string } = {}) {
     this.nativeListCalls.push(params);
@@ -255,25 +351,27 @@ class StubKimiProxyClient implements ProxyClient {
     if (params.cursor === 'page-2') {
       return {
         sessions: [{
-          sessionId: 'kimi-native-2',
+          id: 'kimi-native-2',
           cwd: params.cwd,
-          title: 'Older Kimi session',
+          displayName: 'Older Kimi session',
           updatedAt: '2026-07-28T00:00:00.000Z',
         }],
+        nextCursor: null,
       };
     }
     return {
       sessions: [{
-        sessionId: 'kimi-native-1',
+        id: 'kimi-native-1',
         cwd: params.cwd,
-        title: 'Recent Kimi session',
+        displayName: 'Recent Kimi session',
         updatedAt: '2026-07-29T00:00:00.000Z',
       }],
       nextCursor: 'page-2',
     };
   }
-  async createSession(params: { cwd: string; nativeSessionId?: string; resumeMode?: string }) {
+  async createSession(params: import('../src/proxy/types.js').CreateSessionParams) {
     this.createCalls += 1;
+    this.lastCreateParams = params;
     if (this.failNextCreate) {
       const error = this.failNextCreate;
       this.failNextCreate = null;
@@ -281,50 +379,16 @@ class StubKimiProxyClient implements ProxyClient {
     }
     const nativeSessionId = params.nativeSessionId ?? 'kimi_native_1';
     return {
-      session: {
-        id: `kimi_proxy_${randomUUID()}`,
-        cwd: params.cwd,
-        model: null,
-        status: 'idle' as const,
-        createdAt: '2026-07-29T00:00:00.000Z',
-        updatedAt: '2026-07-29T00:00:00.000Z',
-        lastError: null,
-        nativeSessionId,
-        configOptions: this.options,
-      },
+      session: stubSession(`kimi_proxy_${randomUUID()}`, params.cwd),
       nativeSessionId,
-      configOptions: this.options,
-      replayUpdates: this.replayUpdates,
+      replayEvents: this.replayEvents,
     };
   }
-  async getNativeConfig() {
-    return this.snapshot();
-  }
-  async setNativeConfig(configId: string, value: NativeConfigValue) {
-    this.setNativeConfigCalls.push({ configId, value });
-    if (this.failNextNativeConfig) {
-      const error = this.failNextNativeConfig;
-      this.failNextNativeConfig = null;
-      throw error;
-    }
-    const option = this.options.find(item => item.id === configId);
-    if (!option) throw new Error(`unknown config: ${configId}`);
-    option.currentValue = value;
-    return this.snapshot();
-  }
   async interruptTurn() {}
-  async respondApproval() {}
+  async respondInteraction() {}
   async startTurn(params: StartTurnParams) {
     return {
-      session: {
-        id: 'kimi_proxy_1',
-        cwd: '/tmp',
-        model: null,
-        status: 'running' as const,
-        createdAt: '2026-07-29T00:00:00.000Z',
-        updatedAt: '2026-07-29T00:00:00.000Z',
-        lastError: null,
-      },
+      session: stubSession('kimi_proxy_1', '/tmp', 'running'),
       turn: { id: params.turnId ?? 'kimi_turn_1' },
     };
   }
@@ -343,21 +407,6 @@ class StubKimiProxyClient implements ProxyClient {
 
   fire(notification: ProxyNotification): void {
     for (const handler of this.notificationHandlers) handler(notification);
-  }
-
-  private snapshot(): {
-    state: ExecutorConfigState;
-    options: NativeConfigOption[];
-  } {
-    return {
-      state: {
-        schemaVersion: 1,
-        values: Object.fromEntries(
-          this.options.map(option => [option.id, option.currentValue]),
-        ),
-      },
-      options: this.options,
-    };
   }
 }
 
@@ -491,7 +540,7 @@ test('new Codex sessions persist Fast before their first turn starts', async () 
     assert.equal(session.service_tier, 'fast');
 
     await sessions.sendMessage(session.id, 'first fast turn');
-    assert.equal(proxyMgr.client.startTurnCalls.at(-1)?.serviceTier, 'fast');
+    assert.equal(proxyMgr.client.startTurnCalls.at(-1)?.config.fast, true);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -516,42 +565,353 @@ test('blank session titles are normalized to null so auto-title remains enabled'
   }
 });
 
-test('opaque approval options route without an executor-specific Host branch', async () => {
+test('opaque approval options stay pending until interaction.resolved', async () => {
   const { dir, db, wsId, proxyMgr, approvals, sessions } = setup();
   try {
     const session = await sessions.createSession({
       workspace_id: wsId,
       executor: 'claude',
     });
-    const approvalResult = approvals.request({
-      sessionId: session.id,
-      turnId: 'turn-1',
-      category: 'command',
-      risk: 'medium',
-      description: 'Run tests',
-      payload: { approvalId: 'approval-opaque' },
-      nativeOptions: [{
-        optionId: 'opaque-provider-option-42',
-        label: 'Allow once',
-        kind: 'allow_once',
-      }],
-    });
+    proxyMgr.client.echoHostTurnId = true;
+    await sessions.sendMessage(session.id, 'start interaction');
+    const activeTurnId = proxyMgr.client.startTurnCalls.at(-1)!.turnId;
+    proxyMgr.client.fire(liveNotification({
+      method: 'interaction.requested',
+      params: {
+        eventId: 'interaction-requested-1',
+        sessionId: session.id,
+        turnId: activeTurnId,
+        emittedAt: '2026-08-18T00:00:00.000Z',
+        data: {
+          interactionId: 'approval-opaque',
+          title: 'Run tests',
+          presentation: { kind: 'permission' },
+          inputs: [{ id: 'reason', type: 'text', label: 'Reason', required: true }],
+          actions: [{ id: 'opaque-provider-option-42', label: 'Allow once', style: 'primary' }],
+        },
+      },
+    }));
+    await waitFor(() => approvals.getPending('approval-opaque') !== undefined);
 
     await sessions.respondApproval(
       session.id,
       'approval-opaque',
       'allow_once',
-      undefined,
+      { reason: 'looks safe' },
       'opaque-provider-option-42',
     );
 
-    assert.deepEqual(proxyMgr.client.approvalCalls, [{
-      sessionId: session.native_session_id,
-      approvalId: 'approval-opaque',
-      decision: 'accept',
-      nativeOptionId: 'opaque-provider-option-42',
-    }]);
-    assert.equal(await approvalResult, 'allow_once');
+    assert.equal(proxyMgr.client.approvalCalls.length, 1);
+    assert.equal(proxyMgr.client.approvalCalls[0]?.sessionId, session.native_session_id);
+    assert.equal(proxyMgr.client.approvalCalls[0]?.interactionId, 'approval-opaque');
+    assert.equal(proxyMgr.client.approvalCalls[0]?.actionId, 'opaque-provider-option-42');
+    assert.deepEqual(proxyMgr.client.approvalCalls[0]?.values, { reason: 'looks safe' });
+    const responseId = proxyMgr.client.approvalCalls[0]?.responseId;
+    assert.ok(responseId);
+    assert.ok(approvals.getPending('approval-opaque'));
+    const accepted = db.prepare(
+      'SELECT outcome, resolved_at FROM proxy_interactions WHERE session_id = ? AND interaction_id = ?',
+    ).get(session.id, 'approval-opaque') as { outcome: string | null; resolved_at: string | null };
+    assert.equal(accepted.outcome, null);
+    assert.equal(accepted.resolved_at, null);
+
+    await sessions.respondApproval(
+      session.id,
+      'approval-opaque',
+      'allow_once',
+      { reason: 'looks safe' },
+      'opaque-provider-option-42',
+    );
+    assert.equal(proxyMgr.client.approvalCalls.length, 2);
+    assert.equal(proxyMgr.client.approvalCalls[1]?.responseId, responseId);
+
+    proxyMgr.client.fire(liveNotification({
+      method: 'interaction.resolved',
+      params: {
+        eventId: 'interaction-resolved-1',
+        sequence: 2,
+        sessionId: session.id,
+        turnId: activeTurnId,
+        emittedAt: '2026-08-18T00:00:01.000Z',
+        data: {
+          interactionId: 'approval-opaque',
+          outcome: 'submitted',
+          actionId: 'opaque-provider-option-42',
+        },
+      },
+    }));
+    await waitFor(() => approvals.getPending('approval-opaque') === undefined);
+    const resolved = db.prepare(
+      'SELECT outcome, resolved_at FROM proxy_interactions WHERE session_id = ? AND interaction_id = ?',
+    ).get(session.id, 'approval-opaque') as { outcome: string | null; resolved_at: string | null };
+    assert.equal(resolved.outcome, 'submitted');
+    assert.ok(resolved.resolved_at);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('startTurn persists the next-turn config draft without one-shot bypass', async () => {
+  const { dir, db, wsId, sessions } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'codex',
+    });
+    await sessions.sendMessage(session.id, 'hello');
+    const row = db.prepare('SELECT turn_config_json FROM sessions WHERE id = ?')
+      .get(session.id) as { turn_config_json: string | null };
+    assert.ok(row.turn_config_json);
+    assert.deepEqual(JSON.parse(row.turn_config_json), { fast: false });
+    assert.deepEqual(sessions.getSession(session.id).turn_config, { fast: false });
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('create persists session_config, turn_config, and create-result turn options', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    proxyMgr.client.catalogOverride = {
+      catalogRevision: 'claude-create',
+      input: [{ type: 'text' }],
+      configOptions: [
+        {
+          id: 'workspace_mode',
+          displayName: 'Workspace',
+          binding: 'session',
+          control: 'select',
+          required: false,
+          defaultValue: 'default',
+        },
+        {
+          id: 'model',
+          displayName: 'Model',
+          binding: 'turn',
+          role: 'model',
+          control: 'select',
+          required: true,
+          defaultValue: 'base',
+        },
+      ],
+      slashCommands: [],
+    };
+    proxyMgr.client.createTurnConfig = {
+      revision: 'turn-rev-1',
+      options: [{
+        id: 'verbosity',
+        displayName: 'Verbosity',
+        binding: 'turn',
+        control: 'select',
+        required: false,
+        defaultValue: 'quiet',
+      }],
+    };
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+      session_config: { workspace_mode: 'strict' },
+      turn_config: { model: 'sonnet' },
+    });
+    assert.equal(proxyMgr.client.lastCreateParams?.sessionConfig?.workspace_mode, 'strict');
+    assert.equal(session.turn_config?.model, 'sonnet');
+    assert.equal(session.turn_config_revision, 'turn-rev-1');
+    assert.deepEqual(session.turn_config_options?.map((option) => option.id), ['verbosity']);
+    const row = db.prepare(
+      'SELECT turn_config_json, turn_config_options_json, turn_config_revision FROM sessions WHERE id = ?',
+    ).get(session.id) as {
+      turn_config_json: string;
+      turn_config_options_json: string;
+      turn_config_revision: string;
+    };
+    assert.deepEqual(JSON.parse(row.turn_config_json), { model: 'sonnet' });
+    assert.equal(row.turn_config_revision, 'turn-rev-1');
+    assert.deepEqual(JSON.parse(row.turn_config_options_json).map((option: { id: string }) => option.id), ['verbosity']);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('unknown approval catalog values stay off the approval_mode column', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    proxyMgr.client.catalogOverride = {
+      catalogRevision: 'claude-approval',
+      input: [{ type: 'text' }],
+      configOptions: [{
+        id: 'permission_mode',
+        displayName: 'Mode',
+        binding: 'turn',
+        role: 'approval_mode',
+        control: 'select',
+        required: false,
+        defaultValue: 'default',
+        choices: [
+          { value: 'default', displayName: 'Default' },
+          { value: 'yolo', displayName: 'YOLO' },
+          { value: 'ask', displayName: 'Ask' },
+        ],
+      }],
+      slashCommands: [],
+    };
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+      turn_config: { permission_mode: 'yolo' },
+    });
+    assert.notEqual(session.approval_mode, 'yolo');
+    assert.equal(session.turn_config?.permission_mode, 'yolo');
+    sessions.setTurnConfigValue(session.id, 'permission_mode', 'yolo');
+    const afterUnknown = sessions.getSession(session.id);
+    assert.notEqual(afterUnknown.approval_mode, 'yolo');
+    assert.equal(afterUnknown.turn_config?.permission_mode, 'yolo');
+    sessions.setTurnConfigValue(session.id, 'permission_mode', 'ask');
+    const afterKnown = sessions.getSession(session.id);
+    assert.equal(afterKnown.approval_mode, 'ask');
+    const row = db.prepare('SELECT approval_mode FROM sessions WHERE id = ?')
+      .get(session.id) as { approval_mode: string | null };
+    assert.equal(row.approval_mode, 'ask');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('startTurn uses session turn_config_options instead of the process catalog', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'codex',
+    });
+    sessions.persistTurnConfigOptions(session.id, [{
+      id: 'verbosity',
+      displayName: 'Verbosity',
+      binding: 'turn',
+      control: 'select',
+      required: false,
+      defaultValue: 'quiet',
+    }], 'session-turn-rev');
+    await sessions.sendMessage(session.id, 'hello');
+    assert.deepEqual(proxyMgr.client.startTurnCalls[0]?.config, { verbosity: 'quiet' });
+    assert.equal(sessions.getSession(session.id).turn_config?.verbosity, 'quiet');
+    assert.equal(sessions.getSession(session.id).turn_config?.fast, undefined);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('session.updated persists turnConfigOptions as a full replacement', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+    });
+    proxyMgr.client.fire({
+      jsonrpc: '2.0',
+      method: 'session.updated',
+      params: {
+        eventId: 'upd-1',
+        streamId: 'stream-1',
+        sequence: 1,
+        sessionId: session.id,
+        emittedAt: '2026-08-18T04:00:00.000Z',
+        data: {
+          turnConfigOptions: [],
+          turnConfigRevision: 'empty-rev',
+        },
+      },
+    } as ProxyNotification);
+    const updated = sessions.getSession(session.id);
+    assert.deepEqual(updated.turn_config_options, []);
+    assert.equal(updated.turn_config_revision, 'empty-rev');
+    const row = db.prepare(
+      'SELECT turn_config_options_json, turn_config_revision FROM sessions WHERE id = ?',
+    ).get(session.id) as {
+      turn_config_options_json: string;
+      turn_config_revision: string;
+    };
+    assert.deepEqual(JSON.parse(row.turn_config_options_json), []);
+    assert.equal(row.turn_config_revision, 'empty-rev');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('session and process lifecycle events mirror protocol state into the Session row', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+    });
+    proxyMgr.client.fire(liveNotification({
+      method: 'session.updated',
+      params: {
+        eventId: 'session-running-1',
+        sessionId: session.id,
+        emittedAt: '2026-08-18T04:00:00.000Z',
+        data: { state: 'running' },
+      },
+    }));
+    assert.equal(sessions.getSession(session.id).status, 'running');
+
+    proxyMgr.client.fire(proxyNotificationSchema.parse({
+      jsonrpc: '2.0',
+      method: 'runtime.error',
+      params: {
+        eventId: 'process-error-1',
+        emittedAt: '2026-08-18T04:00:01.000Z',
+        data: {
+          domainCode: 'RUNTIME_UNAVAILABLE',
+          message: 'mock runtime disconnected',
+          retryable: true,
+          details: {},
+        },
+      },
+    }));
+    assert.equal(sessions.getSession(session.id).status, 'error');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Grok session rename uses the generic protocol client', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'grok',
+    });
+    sessions.renameSession(session.id, 'Renamed Grok session');
+    await waitFor(() => proxyMgr.client.nameCalls.length === 1);
+    assert.deepEqual(proxyMgr.client.nameCalls, ['Renamed Grok session']);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('role setters and setTurnConfigValue keep the next-turn draft in sync', async () => {
+  const { dir, db, wsId, sessions } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'codex',
+    });
+    sessions.setServiceTier(session.id, 'fast');
+    sessions.setTurnConfigValue(session.id, 'verbosity', 'quiet');
+    const row = db.prepare('SELECT turn_config_json, service_tier FROM sessions WHERE id = ?')
+      .get(session.id) as { turn_config_json: string; service_tier: string | null };
+    assert.equal(row.service_tier, 'fast');
+    assert.deepEqual(JSON.parse(row.turn_config_json), { fast: true, verbosity: 'quiet' });
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -572,24 +932,7 @@ test('a live terminal event still settles the turn when replay already persisted
     const emittedAt = '2026-08-10T03:00:00.000Z';
     const data = { stopReason: 'completed' } as const;
     const eventId = 'overlap-terminal-event';
-    const payloadHash = createHash('sha256').update(JSON.stringify({
-      method: 'turn.completed',
-      turnId: providerTurnId,
-      emittedAt,
-      data,
-    })).digest('hex');
-    db.prepare(
-      `INSERT INTO proxy_replay_turns
-        (session_id, provider_turn_id, turn_id, replay_owned)
-       VALUES (?, ?, ?, 0)`,
-    ).run(session.id, providerTurnId, turnId);
-    db.prepare(
-      `INSERT INTO proxy_replay_events
-        (session_id, event_id, turn_id, payload_sha256)
-       VALUES (?, ?, ?, ?)`,
-    ).run(session.id, eventId, turnId, payloadHash);
-
-    proxyMgr.client.fire(proxyNotificationSchema.parse({
+    const notification = liveNotification({
       method: 'turn.completed',
       params: {
         eventId,
@@ -600,13 +943,51 @@ test('a live terminal event still settles the turn when replay already persisted
         emittedAt,
         data,
       },
-    }) as unknown as ProxyNotification);
+    });
+    const payloadHash = createHash('sha256').update(JSON.stringify({
+      method: notification.method,
+      fingerprint: canonicalFingerprint(notification),
+      turnId: providerTurnId,
+      emittedAt,
+      data,
+    })).digest('hex');
+    db.prepare(
+      `INSERT OR IGNORE INTO proxy_replay_turns
+        (session_id, provider_turn_id, turn_id, replay_owned)
+       VALUES (?, ?, ?, 0)`,
+    ).run(session.id, providerTurnId, turnId);
+    db.prepare(
+      `INSERT INTO proxy_replay_events
+        (session_id, event_id, turn_id, payload_sha256)
+       VALUES (?, ?, ?, ?)`,
+    ).run(session.id, eventId, turnId, payloadHash);
+    proxyMgr.client.fire(notification);
 
     assert.equal(sessions.getSession(session.id).status, 'done');
     assert.deepEqual(
       db.prepare('SELECT status FROM turns WHERE id = ?').get(turnId),
       { status: 'completed' },
     );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi session_config overrides computed session-bound values and stays off approval_mode', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi(() => ({
+    model: '',
+    thinking: '',
+    mode: 'default',
+  }));
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'kimi',
+      session_config: { mode: 'yolo' },
+    });
+    assert.equal(session.approval_mode, null);
+    assert.equal(proxyMgr.client.lastCreateParams?.sessionConfig?.mode, 'yolo');
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -670,11 +1051,11 @@ test('Kimi applies Proxy-owned model and thinking defaults through native config
       model: 'kimi-k2',
       thinking: 'high',
     });
-    assert.deepEqual(proxyMgr.client.setNativeConfigCalls, [
-      { configId: 'model', value: 'kimi-k2' },
-      { configId: 'thinking', value: 'high' },
-      { configId: 'mode', value: 'yolo' },
-    ]);
+    assert.deepEqual(proxyMgr.client.lastCreateParams?.sessionConfig, {
+      mode: 'yolo',
+      model: 'kimi-k2',
+      thinking: 'high',
+    });
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -690,7 +1071,7 @@ test('Kimi skips a stale default when ACP no longer advertises that semantic rol
   try {
     const session = await sessions.createSession({ workspace_id: wsId, executor: 'kimi' });
     assert.deepEqual(session.executor_config.values, { mode: 'default' });
-    assert.deepEqual(proxyMgr.client.setNativeConfigCalls, []);
+    assert.equal(proxyMgr.client.lastCreateParams?.sessionConfig?.thinking, undefined);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -716,13 +1097,13 @@ test('Kimi creation failure names the advertised config id and leaves no Gian ro
         { value: 'high', label: 'High' },
       ],
     });
-    proxyMgr.client.failNextNativeConfig = new Error(
+    proxyMgr.client.failNextCreate = new Error(
       'Invalid params: Unknown configId: thinking',
     );
 
     await assert.rejects(
       sessions.createSession({ workspace_id: wsId, executor: 'kimi' }),
-      /Failed to apply Kimi thinking default using config id "thinking": Invalid params/,
+      /Unknown configId: thinking/,
     );
     const count = db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number };
     assert.equal(count.count, 0);
@@ -756,15 +1137,11 @@ test('Kimi rehydrate remaps a saved thinking alias to the current advertised id'
       }),
       session.id,
     );
-    proxyMgr.client.setNativeConfigCalls.length = 0;
     proxyMgr.dropClient();
 
     const snapshot = await sessions.getNativeConfig(session.id);
 
     assert.equal(snapshot.state.values.thinking, 'high');
-    assert.deepEqual(proxyMgr.client.setNativeConfigCalls, [
-      { configId: 'thinking', value: 'high' },
-    ]);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -865,7 +1242,7 @@ test('failed Kimi native discovery disposes its unattached facade for retry', as
 
 test('Kimi adoption coalesces replay chunks and keeps assistant IDs turn-local', async () => {
   const { dir, db, wsId, proxyMgr, broadcaster, sessions } = setupKimi();
-  proxyMgr.client.replayUpdates = [
+  proxyMgr.client.replayEvents = [
     {
       sessionId: 'kimi-history',
       update: {
@@ -958,50 +1335,54 @@ test('protocol v1 replay deduplicates events already persisted from the live str
     ).get(adopted.session.id, turn.id), { turn_id: turn.id, replay_owned: 0 });
     const streamId = 'replay-live-overlap';
     const replay = [
-      proxyNotificationSchema.parse({
+      replayEvent({
         method: 'turn.started',
-        params: {
-          eventId: 'overlap-start', streamId, sequence: 1,
-          sessionId: adopted.session.id, turnId: turn.id,
-          emittedAt: '2026-08-10T01:00:00.000Z', data: {},
-        },
+        eventId: 'overlap-start',
+        replayStreamId: streamId,
+        sequence: 1,
+        sessionId: adopted.session.id,
+        sourceTurnId: turn.id,
+        emittedAt: '2026-08-10T01:00:00.000Z',
+        data: {},
       }),
-      proxyNotificationSchema.parse({
+      replayEvent({
         method: 'input.recorded',
-        params: {
-          eventId: 'overlap-input', streamId, sequence: 2,
-          sessionId: adopted.session.id, turnId: turn.id,
-          emittedAt: '2026-08-10T01:00:00.100Z',
-          data: {
-            inputId: 'overlap-input-item',
-            input: [{ type: 'text', text: 'live question' }],
-          },
+        eventId: 'overlap-input',
+        replayStreamId: streamId,
+        sequence: 2,
+        sessionId: adopted.session.id,
+        sourceTurnId: turn.id,
+        emittedAt: '2026-08-10T01:00:00.100Z',
+        data: {
+          input: [{ type: 'text', text: 'live question' }],
         },
       }),
-      proxyNotificationSchema.parse({
+      replayEvent({
         method: 'content.completed',
-        params: {
-          eventId: 'overlap-content', streamId, sequence: 3,
-          sessionId: adopted.session.id, turnId: turn.id,
-          emittedAt: '2026-08-10T01:00:01.000Z',
-          data: { contentId: 'overlap-answer', kind: 'text', content: 'live answer' },
-        },
+        eventId: 'overlap-content',
+        replayStreamId: streamId,
+        sequence: 3,
+        sessionId: adopted.session.id,
+        sourceTurnId: turn.id,
+        emittedAt: '2026-08-10T01:00:01.000Z',
+        data: { contentId: 'overlap-answer', kind: 'text', content: 'live answer' },
       }),
-      proxyNotificationSchema.parse({
+      replayEvent({
         method: 'turn.completed',
-        params: {
-          eventId: 'overlap-end', streamId, sequence: 4,
-          sessionId: adopted.session.id, turnId: turn.id,
-          emittedAt: '2026-08-10T01:00:02.000Z',
-          data: { stopReason: 'completed' },
-        },
+        eventId: 'overlap-end',
+        replayStreamId: streamId,
+        sequence: 4,
+        sessionId: adopted.session.id,
+        sourceTurnId: turn.id,
+        emittedAt: '2026-08-10T01:00:02.000Z',
+        data: { stopReason: 'completed' },
       }),
     ];
 
     proxyMgr.client.replaySession = async () => ({ replayStreamId: streamId, events: replay });
     broadcaster.messages.length = 0;
     proxyMgr.client.fire({
-      method: 'session.updated',
+        method: 'history.changed',
       params: {
         eventId: 'overlap-history-changed',
         streamId: 'attached-stream',
@@ -1024,8 +1405,8 @@ test('protocol v1 replay deduplicates events already persisted from the live str
     const beforeLiveEvents = (db.prepare(
       'SELECT COUNT(*) AS count FROM events WHERE session_id = ?',
     ).get(adopted.session.id) as { count: number }).count;
-    for (const notification of [replay[0]!, replay[2]!, replay[3]!]) {
-      proxyMgr.client.fire(notification);
+    for (const event of [replay[0]!, replay[2]!, replay[3]!]) {
+      proxyMgr.client.fire(liveFromReplay(event));
     }
     assert.equal((db.prepare(
       'SELECT COUNT(*) AS count FROM events WHERE session_id = ?',
@@ -1053,22 +1434,25 @@ test('protocol v1 native-history refresh retries a transient replay failure', as
     });
     const streamId = 'replay-transient';
     const events = [
-      proxyNotificationSchema.parse({
+      replayEvent({
         method: 'turn.started',
-        params: {
-          eventId: 'transient-start', streamId, sequence: 1,
-          sessionId: adopted.session.id, turnId: 'transient-turn',
-          emittedAt: '2026-08-10T01:00:00.000Z', data: {},
-        },
+        eventId: 'transient-start',
+        replayStreamId: streamId,
+        sequence: 1,
+        sessionId: adopted.session.id,
+        sourceTurnId: 'transient-turn',
+        emittedAt: '2026-08-10T01:00:00.000Z',
+        data: {},
       }),
-      proxyNotificationSchema.parse({
+      replayEvent({
         method: 'turn.completed',
-        params: {
-          eventId: 'transient-end', streamId, sequence: 2,
-          sessionId: adopted.session.id, turnId: 'transient-turn',
-          emittedAt: '2026-08-10T01:00:01.000Z',
-          data: { stopReason: 'completed' },
-        },
+        eventId: 'transient-end',
+        replayStreamId: streamId,
+        sequence: 2,
+        sessionId: adopted.session.id,
+        sourceTurnId: 'transient-turn',
+        emittedAt: '2026-08-10T01:00:01.000Z',
+        data: { stopReason: 'completed' },
       }),
     ];
     let replayCalls = 0;
@@ -1079,7 +1463,7 @@ test('protocol v1 native-history refresh retries a transient replay failure', as
     };
 
     proxyMgr.client.fire({
-      method: 'session.updated',
+        method: 'history.changed',
       params: {
         eventId: 'transient-history-changed',
         streamId: 'attached-stream',
@@ -1113,56 +1497,47 @@ test('protocol v1 native-history refresh persists new replay eventIds exactly on
     broadcaster.messages.length = 0;
     let streamId = 'replay-native-protocol-history';
     const replayTurn = (turnId: string, startSequence: number) => [
-      proxyNotificationSchema.parse({
+      replayEvent({
         method: 'turn.started',
-        params: {
-          eventId: `start-${turnId}`,
-          streamId,
-          sequence: startSequence,
-          sessionId: adopted.session.id,
-          turnId,
-          emittedAt: '2026-08-10T01:00:00.000Z',
-          data: {},
-        },
+        eventId: `start-${turnId}`,
+        replayStreamId: streamId,
+        sequence: startSequence,
+        sessionId: adopted.session.id,
+        sourceTurnId: turnId,
+        emittedAt: '2026-08-10T01:00:00.000Z',
+        data: {},
       }),
-      proxyNotificationSchema.parse({
+      replayEvent({
         method: 'input.recorded',
-        params: {
-          eventId: `input-${turnId}`,
-          streamId,
-          sequence: startSequence + 1,
-          sessionId: adopted.session.id,
-          turnId,
-          emittedAt: '2026-08-10T01:00:00.000Z',
-          data: {
-            inputId: `input-${turnId}`,
-            input: [{ type: 'text', text: `question ${turnId}` }],
-          },
+        eventId: `input-${turnId}`,
+        replayStreamId: streamId,
+        sequence: startSequence + 1,
+        sessionId: adopted.session.id,
+        sourceTurnId: turnId,
+        emittedAt: '2026-08-10T01:00:00.000Z',
+        data: {
+          input: [{ type: 'text', text: `question ${turnId}` }],
         },
       }),
-      proxyNotificationSchema.parse({
+      replayEvent({
         method: 'content.completed',
-        params: {
-          eventId: `content-${turnId}`,
-          streamId,
-          sequence: startSequence + 2,
-          sessionId: adopted.session.id,
-          turnId,
-          emittedAt: '2026-08-10T01:00:01.000Z',
-          data: { contentId: `content-${turnId}`, kind: 'text', content: 'answer' },
-        },
+        eventId: `content-${turnId}`,
+        replayStreamId: streamId,
+        sequence: startSequence + 2,
+        sessionId: adopted.session.id,
+        sourceTurnId: turnId,
+        emittedAt: '2026-08-10T01:00:01.000Z',
+        data: { contentId: `content-${turnId}`, kind: 'text', content: 'answer' },
       }),
-      proxyNotificationSchema.parse({
+      replayEvent({
         method: 'turn.completed',
-        params: {
-          eventId: `end-${turnId}`,
-          streamId,
-          sequence: startSequence + 3,
-          sessionId: adopted.session.id,
-          turnId,
-          emittedAt: '2026-08-10T01:00:02.000Z',
-          data: { stopReason: 'completed' },
-        },
+        eventId: `end-${turnId}`,
+        replayStreamId: streamId,
+        sequence: startSequence + 3,
+        sessionId: adopted.session.id,
+        sourceTurnId: turnId,
+        emittedAt: '2026-08-10T01:00:02.000Z',
+        data: { stopReason: 'completed' },
       }),
     ];
     let replay = replayTurn('external-1', 1);
@@ -1175,7 +1550,7 @@ test('protocol v1 native-history refresh persists new replay eventIds exactly on
       return { replayStreamId: streamId, events: replay };
     };
     const historyChanged = () => proxyMgr.client.fire({
-      method: 'session.updated',
+        method: 'history.changed',
       params: {
         eventId: randomUUID(),
         streamId: 'attached-stream',
@@ -1248,13 +1623,10 @@ test('protocol v1 native-history refresh persists new replay eventIds exactly on
       'a stream-revision transcript rebuild is historical and stays silent',
     );
 
-    const conflicting = {
+    const conflicting = replayEvent({
       ...replay[2]!,
-      params: {
-        ...replay[2]!.params,
-        data: { contentId: 'content-external-1', kind: 'text', content: 'changed' },
-      },
-    } as ProxyNotification;
+      data: { contentId: 'content-external-rewritten', kind: 'text', content: 'changed' },
+    });
     replay = [...replayTurn('external-3', 1), conflicting];
     historyChanged();
     await waitFor(() => proxyMgr.client.forceKillCalls === 1);
@@ -1274,7 +1646,7 @@ test('protocol v1 native-history refresh persists new replay eventIds exactly on
 
 test('Kimi adoption replaces replayed tool snapshots instead of amplifying history', async () => {
   const { dir, db, wsId, proxyMgr, sessions } = setupKimi(undefined, true);
-  proxyMgr.client.replayUpdates = [
+  proxyMgr.client.replayEvents = [
     {
       sessionId: 'kimi-tool-history',
       update: {
@@ -1991,6 +2363,35 @@ test('turn-scoped runtime.error settles an active Codex turn without waiting for
   }
 });
 
+test('a session-scoped protocol fault persists an error terminal before quarantining the Proxy', async () => {
+  const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'codex' });
+    await sessions.sendMessage(session.id, 'trigger protocol fault');
+
+    proxyMgr.client.fireFault(new Error('Notification sequence gap'));
+
+    const turn = db.prepare(
+      'SELECT status, completed_at FROM turns WHERE session_id = ?',
+    ).get(session.id) as { status: string; completed_at: string | null };
+    assert.equal(turn.status, 'error');
+    assert.ok(turn.completed_at);
+    assert.equal(sessions.getSession(session.id).status, 'error');
+    assert.ok(broadcaster.messages.some(message => (
+      message.type === 'session:updated'
+      && message.session.id === session.id
+      && message.session.status === 'error'
+    )));
+    const events = sessions.listEvents(session.id);
+    assert.equal(events.filter(event => event.display?.type === 'state.error').length, 1);
+    assert.equal(events.filter(event => event.display?.type === 'state.turn-completed').length, 1);
+    assert.equal(proxyMgr.client.faultHandlers.length, 0, 'quarantine detaches the faulted session');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('host-level runtime.error while idle does not invent a transcript turn', async () => {
   const { dir, db, wsId, sessions, proxyMgr } = setup();
   try {
@@ -2146,26 +2547,24 @@ test('session usage survives compact invalidation, deduplicates deltas, and rese
   }
 });
 
-test('user-initiated stop settles status=done WITHOUT marking unread', async () => {
+test('user-initiated stop waits for the authoritative terminal event', async () => {
   const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
   try {
     const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    proxyMgr.client.echoHostTurnId = true;
     await sessions.sendMessage(session.id, 'ping'); // opens an active turn
     const client = proxyMgr.client;
+    const activeTurnId = client.startTurnCalls.at(-1)!.turnId;
     sessions.enqueueMessage(session.id, 'must remain queued');
     broadcaster.messages.length = 0;
-    await sessions.stopTurn(session.id);            // → completeTurn('stopped')
+    await sessions.stopTurn(session.id);
 
-    const row = db.prepare('SELECT status, unread FROM sessions WHERE id = ?').get(session.id) as { status: string; unread: number };
-    assert.equal(row.status, 'done');
-    assert.equal(row.unread, 0, 'a turn the user stopped themselves is not unread');
-    const completions = sessions.listEvents(session.id)
+    let row = db.prepare('SELECT status, unread FROM sessions WHERE id = ?').get(session.id) as { status: string; unread: number };
+    assert.equal(row.status, 'running');
+    assert.equal(row.unread, 0);
+    let completions = sessions.listEvents(session.id)
       .filter(event => event.display?.type === 'state.turn-completed');
-    assert.equal(completions.length, 1);
-    assert.equal(completions[0]?.event, 'gian.turn.completed');
-    assert.ok(broadcaster.messages.some(message => (
-      message.type === 'event' && message.event === 'gian.turn.completed'
-    )), 'local stop broadcasts the same persisted fold boundary');
+    assert.equal(completions.length, 0);
     assert.equal(
       broadcaster.messages.filter(message => message.type === 'attention').length,
       0,
@@ -2176,13 +2575,32 @@ test('user-initiated stop settles status=done WITHOUT marking unread', async () 
     assert.equal(client.notificationHandlers.length, 1, 'stop keeps exactly one live notification binding');
     assert.equal(client.exitHandlers.length, 1, 'stop keeps exactly one live exit binding');
 
+    client.fire(liveNotification({
+      method: 'turn.completed',
+      params: {
+        eventId: 'turn-interrupted-1',
+        sessionId: session.id,
+        turnId: activeTurnId,
+        emittedAt: '2026-08-18T00:00:02.000Z',
+        data: { stopReason: 'interrupted' },
+      },
+    }));
+    row = db.prepare('SELECT status, unread FROM sessions WHERE id = ?').get(session.id) as { status: string; unread: number };
+    assert.equal(row.status, 'done');
+    assert.equal(row.unread, 0, 'a turn the user stopped themselves is not unread');
+    completions = sessions.listEvents(session.id)
+      .filter(event => event.display?.type === 'state.turn-completed');
+    assert.equal(completions.length, 1);
+    assert.equal(completions[0]?.event, 'turn.completed');
+
     await sessions.sendMessage(session.id, 'after stop');
+    const nextTurnId = client.startTurnCalls.at(-1)!.turnId;
     broadcaster.messages.length = 0;
     client.fire({
       method: 'output.text',
       params: {
         sessionId: 'proxy_x',
-        turnId: 'proxy_turn',
+        turnId: nextTurnId,
         data: { text: 'continued', itemId: 'message_after_stop' },
       },
     });
@@ -2332,6 +2750,14 @@ test('late output and terminal from a stopped provider generation cannot pollute
     proxyMgr.client.startTurnIds.push('old-provider-turn');
     await sessions.sendMessage(session.id, 'old turn');
     await sessions.stopTurn(session.id);
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: 'old-provider-turn',
+        data: { status: 'completed' },
+      },
+    });
 
     proxyMgr.client.startTurnIds.push('new-provider-turn');
     await sessions.sendMessage(session.id, 'new turn');
@@ -2379,22 +2805,32 @@ test('late output and terminal from a stopped provider generation cannot pollute
   }
 });
 
-test('local completion flushes the final pending snapshot before the fold boundary', async () => {
+test('terminal completion flushes the final pending snapshot before the fold boundary', async () => {
   const { dir, db, wsId, sessions, proxyMgr } = setup(undefined, true);
   try {
     const session = await sessions.createSession({ workspace_id: wsId, executor: 'codex' });
+    proxyMgr.client.echoHostTurnId = true;
     await sessions.sendMessage(session.id, 'change it');
+    const activeTurnId = proxyMgr.client.startTurnCalls.at(-1)!.turnId;
     for (const revision of ['old', 'final']) {
       proxyMgr.client.fire({
         method: 'diff.updated',
         params: {
           sessionId: 'proxy_x',
-          turnId: 'proxy_turn',
+          turnId: activeTurnId,
           data: { diff: revision },
         },
       });
     }
     await sessions.stopTurn(session.id);
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: {
+        sessionId: 'proxy_x',
+        turnId: activeTurnId,
+        data: { status: 'completed' },
+      },
+    });
 
     const events = sessions.listEvents(session.id);
     const diff = events.filter(event => event.event === 'diff.updated');
@@ -2773,9 +3209,9 @@ test('sendMessage rehydrates proxy session after host restart via native_session
     // Adoption: createSession was called with the persisted claudeSessionId.
     assert.ok(proxyMgr.client.lastCreateParams, 'createSession invoked on second host');
     assert.equal(
-      proxyMgr.client.lastCreateParams!.claudeSessionId,
+      proxyMgr.client.lastCreateParams!.nativeSessionId,
       originalNativeId,
-      'createSession passed persisted native_session_id as claudeSessionId for adoption',
+      'createSession passed persisted native_session_id for adoption',
     );
     assert.equal(
       (db.prepare('SELECT native_session_id FROM sessions WHERE id = ?').get(sessionId) as {

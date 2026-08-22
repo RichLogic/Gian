@@ -17,6 +17,7 @@ test('managed host paths keep mutable data outside the application bundle', () =
     {
       hostEntry: '/Applications/Gian.app/Contents/Resources/app.asar/node_modules/@gian/host/dist/index.js',
       webDist: '/Applications/Gian.app/Contents/Resources/web',
+      dshBridgePackageDir: '/Applications/Gian.app/Contents/Resources/dsh-bridge',
       dataDir: '/Users/test/.config/gian',
       logFile: join('/Users/test/.config/gian', 'logs', 'desktop-host.log'),
     },
@@ -27,6 +28,7 @@ test('managed host environment configures the bundled Node runtime boundary', ()
   const paths = {
     hostEntry: '/app/host.js',
     webDist: '/app/web',
+    dshBridgePackageDir: '/app/dsh-bridge',
     dataDir: '/data/gian',
     logFile: '/data/gian/logs/desktop-host.log',
   };
@@ -46,6 +48,7 @@ test('managed host environment configures the bundled Node runtime boundary', ()
     GIAN_HOST: '127.0.0.1',
     GIAN_PORT: '8990',
     GIAN_WEB_DIST: '/app/web',
+    GIAN_DSH_BRIDGE_PACKAGE_DIR: '/app/dsh-bridge',
     GIAN_DESKTOP_TOKEN: 'secret',
     GIAN_DESKTOP_INSTANCE_ID: 'instance-1',
     GIAN_DESKTOP_GITHUB_BROKER_SOCKET: '/tmp/gian-github.sock',

@@ -85,23 +85,33 @@ test('attachment canary rejects a response that did not read the fixture', async
     }
     async ensureStarted() {}
     async request(method, params) {
-      if (method === 'initialize') return { methods: ['session.create', 'turn.start'] };
+      if (method === 'initialize') {
+        return { protocol: { version: '2.0' }, capabilities: { 'input.localFile': 1 } };
+      }
       if (method === 'session.create') {
-        canaryRoot = params.cwd;
-        return { session: { id: 'session-1' } };
+        canaryRoot = params.workspace?.cwd ?? params.cwd;
+        return { session: { id: params.sessionId, streamId: 'stream-1' } };
       }
       if (method === 'turn.start') {
         queueMicrotask(() => {
           this.listeners.get('notification')?.({
-            method: 'output.text',
-            params: { sessionId: 'session-1', turnId: 'turn-1', data: { text: 'guessed' } },
+            method: 'content.delta',
+            params: {
+              sessionId: params.sessionId,
+              turnId: params.turnId,
+              data: { kind: 'text', delta: 'guessed' },
+            },
           });
           this.listeners.get('notification')?.({
             method: 'turn.completed',
-            params: { sessionId: 'session-1', turnId: 'turn-1', data: { status: 'completed' } },
+            params: {
+              sessionId: params.sessionId,
+              turnId: params.turnId,
+              data: { stopReason: 'completed' },
+            },
           });
         });
-        return { turn: { id: 'turn-1' } };
+        return { accepted: true, turnId: params.turnId };
       }
       return { ok: true };
     }
@@ -123,7 +133,7 @@ test('attachment canary rejects a response that did not read the fixture', async
   await assert.rejects(stat(canaryRoot), { code: 'ENOENT' });
 });
 
-test('Grok attachment canary preserves the original failure and cleans up with V1 ids', async () => {
+test('Grok attachment canary preserves the original failure and cleans up with 2.0 ids', async () => {
   let canaryRoot;
   let interruptParams;
   let closeParams;
@@ -132,10 +142,10 @@ test('Grok attachment canary preserves the original failure and cleans up with V
     async ensureStarted() {}
     async request(method, params) {
       if (method === 'initialize') {
-        return { protocol: { version: '1.0' }, capabilities: { 'input.localFile': 1 } };
+        return { protocol: { version: '2.0' }, capabilities: { 'input.localFile': 1 } };
       }
       if (method === 'session.create') {
-        canaryRoot = params.cwd;
+        canaryRoot = params.workspace?.cwd ?? params.cwd;
         return { session: { id: params.sessionId, streamId: 'stream-grok' } };
       }
       if (method === 'turn.start') throw new Error('controlled Grok turn failure');
@@ -180,11 +190,11 @@ test('attachment canary source keeps its quota gate and localFile contract visib
   const source = await readFile(scriptUrl, 'utf8');
   assert.match(source, /GIAN_ALLOW_REAL_AGENT_TURN/);
   assert.match(source, /type: 'localFile'/);
-  assert.match(source, /provider === 'codex' \? \{ ephemeral: true \}/);
+  assert.match(source, /provider === 'codex' \? \{ nativeSession: \{ history: 'none' \} \}/);
   assert.match(source, /client\.request\('turn\.steer'/);
   assert.match(source, /runDefaultKimiPreflight/);
   assert.match(source, /attachmentContentObserved: true/);
-  assert.match(source, /GIAN_PROTOCOL_VERSIONS: '1.0'/);
+  assert.match(source, /GIAN_PROTOCOL_VERSIONS: '2.0'/);
   assert.match(source, /provider === 'grok'/);
-  assert.match(source, /approval: 'relay', network: 'ask'/);
+  assert.match(source, /versions: \['2.0'\]/);
 });

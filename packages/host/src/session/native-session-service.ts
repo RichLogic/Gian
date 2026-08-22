@@ -6,6 +6,14 @@ import type { WsBroadcaster } from '../web/ws-broadcast.js';
 import type { ProxySessionCoordinator } from './proxy-session-coordinator.js';
 import { executorConfigFromOptions, type SessionRepository } from './repository.js';
 
+function capabilityAdvertised(
+  capabilities: Record<string, unknown> | undefined,
+  name: string,
+): boolean {
+  if (capabilities == null || Object.keys(capabilities).length === 0) return true;
+  return capabilities[name] !== undefined;
+}
+
 interface NativeSessionCallbacks {
   persistKimiReplay: (
     sessionId: string,
@@ -36,15 +44,21 @@ export class NativeSessionService {
   private async listFromProxy(
     executor: Executor,
     cwd: string,
-    requireProtocolV1: boolean,
+    requireNativeList: boolean,
   ): Promise<NativeSession[] | null> {
-    if (requireProtocolV1 && !this.proxy.usesProtocolV1(executor)) return null;
     const cacheKey = `__native_sessions_${executor}__`;
-    const client = await this.proxy.getOrCreate(cacheKey, executor);
+    let client;
     try {
-      if (requireProtocolV1 && !client.protocolV1) return null;
-      await client.initialize();
-      if (!client.listNativeSessions) return requireProtocolV1 ? null : [];
+      client = await this.proxy.getOrCreate(cacheKey, executor);
+      const initialized = await client.initialize();
+      if (!client.listNativeSessions || !capabilityAdvertised(initialized.capabilities, 'session.native.list')) {
+        return requireNativeList ? null : [];
+      }
+    } catch {
+      await this.proxy.dispose(cacheKey).catch(() => undefined);
+      return null;
+    }
+    try {
       const rows: unknown[] = [];
       const seenCursors = new Set<string>();
       let cursor: string | undefined;
@@ -66,10 +80,15 @@ export class NativeSessionService {
       return rows.flatMap(row => {
         if (!row || typeof row !== 'object') return [];
         const item = row as Record<string, unknown>;
-        if (typeof item.sessionId !== 'string' || !item.sessionId) return [];
-        const title = typeof item.title === 'string' ? item.title : '';
+        const nativeId = typeof item.id === 'string' && item.id
+          ? item.id
+          : typeof item.sessionId === 'string' ? item.sessionId : '';
+        if (!nativeId) return [];
+        const title = typeof item.displayName === 'string'
+          ? item.displayName
+          : typeof item.title === 'string' ? item.title : '';
         return [{
-          id: item.sessionId,
+          id: nativeId,
           executor,
           filePath: '',
           cwd: typeof item.cwd === 'string' ? item.cwd : cwd,
@@ -93,10 +112,10 @@ export class NativeSessionService {
     _cwd: string,
   ): Promise<void> {
     const cacheKey = `__native_sessions_${executor}__`;
-    const client = await this.proxy.getOrCreate(cacheKey, executor);
     try {
-      await client.initialize();
-      if (!client.deleteNativeSession) {
+      const client = await this.proxy.getOrCreate(cacheKey, executor);
+      const initialized = await client.initialize();
+      if (!client.deleteNativeSession || !capabilityAdvertised(initialized.capabilities, 'session.native.delete')) {
         throw new Error(`${executor} does not expose native-session deletion.`);
       }
       await client.deleteNativeSession(nativeSessionId);

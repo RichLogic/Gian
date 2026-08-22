@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 
-import { requestViolation } from './errors.js';
-import type { ProxyNotification } from './schemas.js';
+import { jsonRpcRequestViolation } from './errors.js';
+import { canonicalFingerprint } from './conformance.js';
+import type { ReplayEvent } from './schemas.js';
 
 export interface NativeReplaySnapshot {
   streamId: string;
-  events: ProxyNotification[];
+  events: ReplayEvent[];
 }
 
 export interface ReplayPage<T> {
@@ -30,7 +31,7 @@ export class ReplaySnapshotPager<T> {
       ? latest
       : this.active.get(sessionId);
     if (snapshot === undefined) {
-      throw requestViolation('INVALID_REQUEST', 'Replay cursor has no active snapshot.');
+      throw jsonRpcRequestViolation('INVALID_PARAMS', 'Replay cursor has no active snapshot.');
     }
     if (cursor === null) this.active.set(sessionId, snapshot);
 
@@ -38,7 +39,7 @@ export class ReplaySnapshotPager<T> {
       ? Number(cursor ?? 0)
       : Number.NaN;
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > snapshot.events.length) {
-      throw requestViolation('INVALID_REQUEST', 'Invalid replay cursor.');
+      throw jsonRpcRequestViolation('INVALID_PARAMS', 'Invalid replay cursor.');
     }
     const end = Math.min(offset + limit, snapshot.events.length);
     const nextCursor = end < snapshot.events.length ? String(end) : null;
@@ -55,26 +56,18 @@ export class ReplaySnapshotPager<T> {
   }
 }
 
-function turnGroups(snapshot: NativeReplaySnapshot): Map<string, ProxyNotification[]> {
-  const groups = new Map<string, ProxyNotification[]>();
+function turnGroups(snapshot: NativeReplaySnapshot): Map<string, ReplayEvent[]> {
+  const groups = new Map<string, ReplayEvent[]>();
   for (const event of snapshot.events) {
-    if (!('turnId' in event.params)) continue;
-    const events = groups.get(event.params.turnId) ?? [];
+    const events = groups.get(event.sourceTurnId) ?? [];
     events.push(event);
-    groups.set(event.params.turnId, events);
+    groups.set(event.sourceTurnId, events);
   }
   return groups;
 }
 
-function groupFingerprint(events: ProxyNotification[]): string {
-  return JSON.stringify(events.map(event => ({
-    method: event.method,
-    params: {
-      ...event.params,
-      streamId: undefined,
-      sequence: undefined,
-    },
-  })));
+function groupFingerprint(events: ReplayEvent[]): string {
+  return JSON.stringify(events.map((event) => canonicalFingerprint(event)));
 }
 
 /** Tracks complete replay turns instead of raw file bytes. A changed turn is
@@ -141,23 +134,20 @@ export class IncrementalReplayTracker {
     this.observed = new Map(
       [...groups].map(([turnId, events]) => [turnId, groupFingerprint(events)]),
     );
-    this.includedTurns = new Set([...included].filter(turnId => groups.has(turnId)));
+    this.includedTurns = new Set([...included].filter((turnId) => groups.has(turnId)));
   }
 
   replay(): NativeReplaySnapshot {
-    const selected = this.latest.events.filter(event => (
-      'turnId' in event.params && this.includedTurns.has(event.params.turnId)
+    const selected = this.latest.events.filter((event) => (
+      this.includedTurns.has(event.sourceTurnId)
     ));
     return {
       streamId: this.replayStreamId,
       events: selected.map((event, index) => ({
         ...event,
-        params: {
-          ...event.params,
-          streamId: this.replayStreamId,
-          sequence: index + 1,
-        },
-      } as ProxyNotification)),
+        replayStreamId: this.replayStreamId,
+        sequence: index + 1,
+      })),
     };
   }
 

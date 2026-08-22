@@ -44,11 +44,9 @@ async function waitForBrowserState(window, tabId, predicate, timeout = 15_000) {
   throw new Error(`Timed out waiting for Browser tab ${tabId}: ${JSON.stringify(lastState)}`);
 }
 
-async function browserChildViewCount(application) {
-  return application.evaluate(({ BrowserWindow }) => {
-    const window = BrowserWindow.getAllWindows()[0];
-    return window?.contentView.children.length ?? 0;
-  });
+async function browserChildViewCount(application, page) {
+  const browserWindow = await application.browserWindow(page);
+  return browserWindow.evaluate(window => window.contentView.children.length);
 }
 
 let hostVersion = '0.0.0-mismatch';
@@ -225,7 +223,7 @@ try {
   );
   assert.equal(loadedProjectState.title, 'Browser Smoke Ready');
   assert.equal(loadedProjectState.canOpenExternal, true);
-  assert.equal(await browserChildViewCount(electronApp), 1);
+  assert.equal(await browserChildViewCount(electronApp, window), 1);
 
   await window.evaluate(() => window.gianDesktop.browser.reload('browser-smoke-primary'));
   await waitForBrowserState(
@@ -277,7 +275,7 @@ try {
   assert.equal(independentTabs[1].title, 'Browser HTTP Ready');
   assert.equal(independentTabs[1].url, `${host.origin}/browser-http`);
   assert.equal(
-    await browserChildViewCount(electronApp),
+    await browserChildViewCount(electronApp, window),
     1,
     'switching Browser tabs must leave exactly one native view attached',
   );
@@ -311,7 +309,7 @@ try {
     false,
   ));
   assert.equal(
-    await browserChildViewCount(electronApp),
+    await browserChildViewCount(electronApp, window),
     0,
     'hiding Browser must detach its native view so renderer UI cannot be covered',
   );

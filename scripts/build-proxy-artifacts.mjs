@@ -50,6 +50,18 @@ const definitions = [
     },
   },
   {
+    id: 'dsh',
+    pluginId: 'ai.deepseek.harness',
+    directory: 'dsh-proxy',
+    displayName: 'DeepSeek Harness',
+    processScope: 'shared',
+    runtime: {
+      id: 'dsh',
+      displayName: 'DeepSeek Harness',
+      recommendedCliVersion: '0.1.0-rc.7',
+    },
+  },
+  {
     id: 'grok',
     directory: 'grok-proxy',
     displayName: 'Grok Build',
@@ -62,7 +74,11 @@ const definitions = [
   },
 ];
 
-const BUILTIN_PROXY_IDS = new Set(definitions.map(definition => definition.id));
+export const shippingProxyIds = definitions
+  .filter(definition => definition.id !== 'grok')
+  .map(definition => definition.id);
+
+const BUILTIN_PROXY_IDS = new Set(definitions.map(definition => definition.pluginId ?? definition.id));
 const SEMVER_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 export function assertRuntimeManifest(manifest) {
@@ -117,7 +133,7 @@ export async function assertProxySelfTest(entryPoint, manifest) {
       ...(manifest.schemaVersion === 2
         ? {
             GIAN_PLUGIN_ID: manifest.id,
-            GIAN_PROTOCOL_VERSIONS: '1.0',
+            GIAN_PROTOCOL_VERSIONS: '2.0',
           }
         : {}),
     },
@@ -154,7 +170,7 @@ async function main() {
   }
   const selectedDefinitions = requestedPlugin
     ? definitions.filter(definition => definition.id === requestedPlugin)
-    : definitions;
+    : definitions.filter(definition => shippingProxyIds.includes(definition.id));
   const outputDir = resolve(root, args.get('output') ?? 'artifacts/proxies');
   await mkdir(outputDir, { recursive: true });
 
@@ -179,11 +195,11 @@ async function main() {
     }
     const manifest = {
       schemaVersion: 2,
-      id,
+      id: definition.pluginId ?? id,
       displayName: definition.displayName,
       pluginVersion,
       entry: 'proxy.mjs',
-      protocol: { name: 'gian.proxy', range: '>=1.0 <2.0' },
+      protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
       process: { scope: definition.processScope },
       runtime: definition.runtime,
     };

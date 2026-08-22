@@ -140,6 +140,17 @@ describe('operation dispatcher (proposal §4.3/§4.4)', () => {
     expect(store.getEntityOverlays('session:s1')).toHaveLength(0);
   });
 
+  it('reconnects result listeners after a StrictMode-style lifecycle cleanup', () => {
+    const { store, transport, dispatcher } = setup({ canonical: { name: 'Before' } });
+
+    dispatcher.dispose();
+    dispatcher.connect();
+    const run = dispatcher.dispatch('session.rename', { sessionId: 's1', name: 'After' });
+
+    transport.emitResult(requestIdOf(transport.sent[0]), true);
+    expect(store.getRun(run.id)?.phase).toBe('confirmed');
+  });
+
   it('renders a stable pending state synchronously for pending-policy operations', () => {
     const { store, transport, dispatcher } = setup();
 

@@ -129,6 +129,10 @@ export function catalogFromModelState(
           value: effort.id,
           displayName: effort.displayName,
         })),
+        ...(() => {
+          const enabledWhen = effortEnabledWhen(models);
+          return enabledWhen ? { enabledWhen } : {};
+        })(),
       }]),
       {
         id: 'permission_mode',
@@ -144,6 +148,43 @@ export function catalogFromModelState(
       },
     ].filter(option => !option.choices || option.choices.length > 0),
   };
+}
+
+export function toV2ConfigOptions(
+  sessionOptions: ReturnType<typeof catalogFromModelState>['sessionOptions'],
+) {
+  return sessionOptions.map((option) => {
+    const role = option.id === 'model'
+      ? 'model' as const
+      : option.id === 'reasoning_effort'
+        ? 'effort' as const
+        : option.id === 'permission_mode'
+          ? 'approval_mode' as const
+          : undefined;
+    return {
+      id: option.id,
+      displayName: option.displayName,
+      binding: 'session' as const,
+      ...(role ? { role } : {}),
+      control: 'select' as const,
+      required: false,
+      defaultValue: option.currentValue ?? null,
+      ...(option.choices && option.choices.length > 0 ? { choices: option.choices } : {}),
+      ...('enabledWhen' in option && option.enabledWhen ? { enabledWhen: option.enabledWhen } : {}),
+      ...('visibleWhen' in option && option.visibleWhen ? { visibleWhen: option.visibleWhen } : {}),
+      ...('constraints' in option && option.constraints ? { constraints: option.constraints } : {}),
+    };
+  });
+}
+
+type ConfigCondition = { optionId: string; oneOf: Array<string | boolean | number | null> };
+
+function effortEnabledWhen(
+  models: Array<{ id: string; efforts: Array<{ id: string; displayName: string }> }>,
+): ConfigCondition[] | undefined {
+  const withEffort = models.filter((model) => model.efforts.length > 0);
+  if (withEffort.length === 0 || withEffort.length === models.length) return undefined;
+  return [{ optionId: 'model', oneOf: withEffort.map((model) => model.id) }];
 }
 
 function uniqueEfforts(models: Array<{ efforts: Array<{ id: string; displayName: string }> }>) {

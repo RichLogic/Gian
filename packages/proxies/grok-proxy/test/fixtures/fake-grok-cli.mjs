@@ -56,9 +56,21 @@ new AgentSideConnection((agentConn) => ({
     return { sessionId: 'native-new' };
   },
   async listSessions() {
-    return { sessions: [{ sessionId: 'native-existing', cwd: process.cwd() }] };
+    return { sessions: [{ sessionId: 'native-existing', cwd: process.cwd(), title: 'Existing' }] };
+  },
+  async loadSession({ sessionId }) {
+    return { sessionId };
+  },
+  async resumeSession({ sessionId }) {
+    return { sessionId };
   },
   async closeSession() {
+    return {};
+  },
+  extMethod: async (method) => {
+    if (method === 'x.ai/session/delete' || method === '_x.ai/session/delete') {
+      return { ok: true };
+    }
     return {};
   },
   async prompt() {

@@ -1,21 +1,24 @@
 import type {
   AgentProxyDefaults,
+  ConfigOption,
+  ConfigValue,
   Executor,
   ExecutorConfigState,
   NativeConfigOption,
-  NativeConfigValue,
-  ProxyCapabilities,
+  ProxyCatalog,
   ProxyNotification,
+  ResolvedProxyCatalog,
   Session,
+  SessionAvailableActions,
   SlashListResult,
 } from '@gian/shared';
-import { usesNativeExecutorConfig } from '@gian/shared';
-import { locateNativeJsonl } from '../native/locate-jsonl.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import type { ProxyManager } from '../proxy/manager.js';
 import type { ProxyClient, ProxyReplayResult } from '../proxy/types.js';
+import { ensureSessionAttachmentDir } from '../storage/attachments.js';
 import type { Db } from '../storage/db.js';
 import type { SessionHistoryStore } from './history-store.js';
+import { requestViolation } from '@gian/proxy-protocol';
 import { executorConfigFromOptions, type SessionRepository } from './repository.js';
 
 export interface BringUpProxySessionInput {
@@ -28,6 +31,7 @@ export interface BringUpProxySessionInput {
   executorDefaults?: AgentProxyDefaults;
   resumeMode?: 'load' | 'resume';
   displayName?: string | null;
+  sessionConfig?: Record<string, string | boolean | number | null>;
 }
 
 export interface BringUpProxySessionResult {
@@ -36,74 +40,75 @@ export interface BringUpProxySessionResult {
   configOptions: NativeConfigOption[];
   replayUpdates: unknown[];
   replayStreamId?: string;
+  turnConfigOptions?: ConfigOption[];
+  turnConfigRevision?: string;
+  availableActions?: SessionAvailableActions;
 }
 
 interface ProxySessionCallbacks {
   onNotification(sessionId: string, notification: ProxyNotification): void;
   onExit(sessionId: string, code: number | null): void;
+  onSessionFault(sessionId: string, error: Error): void;
   onSessionUpdated(sessionId: string, partial: Partial<Session>): void;
+  onAttached?(sessionId: string): void;
 }
 
 interface ProxySessionBindings {
   offNotification: () => void;
   offExit: () => void;
+  offFault: () => void;
 }
 
-type NativeConfigRole = keyof AgentProxyDefaults;
-
-const NATIVE_CONFIG_ROLE_ORDER: readonly NativeConfigRole[] = [
-  'model',
-  'thinking',
-  'mode',
-];
-
-function nativeConfigRole(
-  option: Pick<NativeConfigOption, 'id' | 'category'>,
-): NativeConfigRole | null {
-  const category = option.category?.trim().toLowerCase() ?? '';
-  const id = option.id.trim().toLowerCase();
-  if (category === 'model' || id === 'model') return 'model';
-  if (
-    category === 'thought_level'
-    || category === 'thought'
-    || category === 'thinking'
-    || category === 'effort'
-    || category === 'reasoning_effort'
-    || id === 'thought_level'
-    || id === 'thought'
-    || id === 'thinking'
-    || id === 'effort'
-    || id === 'reasoning_effort'
-  ) return 'thinking';
-  if (category === 'mode' || id === 'mode' || id === 'permission_mode') return 'mode';
-  return null;
+function catalogHasModelChoices(catalog: ProxyCatalog): boolean {
+  return catalog.configOptions.some((option) => (
+    option.role === 'model' && (option.choices?.length ?? 0) > 0
+  ));
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function nativeOptionsFromCatalog(
+  catalog: ProxyCatalog,
+  values: Record<string, string | boolean | number | null>,
+): NativeConfigOption[] {
+  return catalog.configOptions.map((option: ConfigOption) => ({
+    id: option.id,
+    name: option.displayName,
+    type: option.control,
+    currentValue: values[option.id] ?? option.defaultValue,
+    scope: option.binding,
+    ...(option.role ? { category: option.role } : {}),
+    ...(option.choices ? {
+      choices: option.choices.map((choice) => ({
+        value: choice.value,
+        label: choice.displayName,
+      })),
+    } : {}),
+  }));
 }
 
 export class ProxySessionCoordinator {
   private sessionIds = new Map<string, string>();
   private bringUps = new Map<string, Promise<string>>();
   private bindings = new Map<string, ProxySessionBindings>();
-  private capabilitiesByExecutor = new Map<string, ProxyCapabilities>();
+  private catalogByExecutor = new Map<string, ProxyCatalog>();
+  private protocolCapabilitiesByExecutor = new Map<string, Record<string, unknown>>();
+  private emptyCatalogKeys = new Set<string>();
+  private sessionStore: SessionRepository;
 
   constructor(
     private db: Db,
     private proxy: ProxyManager,
-    private sessions: SessionRepository,
+    sessions: SessionRepository,
     private history: SessionHistoryStore,
-    private watcher: NativeJsonlWatcher | null,
+    watcher: NativeJsonlWatcher | null,
     private callbacks: ProxySessionCallbacks,
-  ) {}
+    private dataDir?: string,
+  ) {
+    this.sessionStore = sessions;
+    void watcher;
+  }
 
   get(sessionId: string): string | undefined {
     return this.sessionIds.get(sessionId);
-  }
-
-  usesProtocolV1(sessionId: string): boolean {
-    return this.proxy.get(sessionId)?.protocolV1 === true;
   }
 
   async replay(sessionId: string): Promise<ProxyReplayResult> {
@@ -115,6 +120,20 @@ export class ProxySessionCoordinator {
 
   abort(sessionId: string): void {
     this.proxy.get(sessionId)?.forceKill();
+  }
+
+  quarantine(sessionId: string, error: Error): void {
+    console.error(`[proxy] quarantined session ${sessionId}: ${error.message}`);
+    const client = this.proxy.get(sessionId);
+    this.callbacks.onSessionFault(sessionId, error);
+    void client?.closeSession?.().catch(() => undefined);
+  }
+
+  async refreshCatalog(sessionId: string): Promise<void> {
+    const client = this.proxy.get(sessionId);
+    if (!client) return;
+    const catalog = await client.catalog();
+    this.catalogByExecutor.set(client.executor, catalog);
   }
 
   forget(sessionId: string): void {
@@ -140,7 +159,7 @@ export class ProxySessionCoordinator {
     try {
       return await pending;
     } catch (error) {
-      if (usesNativeExecutorConfig(session.executor)) await this.dispose(session.id);
+      await this.dispose(session.id);
       throw error;
     } finally {
       if (this.bringUps.get(session.id) === pending) this.bringUps.delete(session.id);
@@ -148,6 +167,9 @@ export class ProxySessionCoordinator {
   }
 
   private async rehydrate(session: Session): Promise<string> {
+    if (session.origin?.kind === 'fork' && !session.native_session_id) {
+      throw requestViolation('RUNTIME_ERROR', 'Fork Session has no durable nativeSession');
+    }
     const workspace = this.db.prepare('SELECT path FROM workspaces WHERE id = ?')
       .get(session.workspace_id) as { path: string } | undefined;
     if (!workspace) throw new Error(`workspace missing for session ${session.id}`);
@@ -161,6 +183,24 @@ export class ProxySessionCoordinator {
       executorConfig: session.executor_config,
       displayName: session.name,
     });
+    const remapped = executorConfigFromOptions(result.configOptions);
+    const now = new Date().toISOString();
+    this.sessionStore.setNativeOptions(session.id, result.configOptions);
+    this.db.prepare(
+      result.availableActions
+        ? 'UPDATE sessions SET executor_config_json = ?, available_actions_json = ?, updated_at = ? WHERE id = ?'
+        : 'UPDATE sessions SET executor_config_json = ?, updated_at = ? WHERE id = ?',
+    ).run(
+      ...(result.availableActions
+        ? [JSON.stringify(remapped), JSON.stringify(result.availableActions), now, session.id]
+        : [JSON.stringify(remapped), now, session.id]),
+    );
+    this.callbacks.onSessionUpdated(session.id, {
+      executor_config: remapped,
+      native_config_options: result.configOptions,
+      ...(result.availableActions ? { available_actions: result.availableActions } : {}),
+      updated_at: now,
+    });
     return result.proxySessionId;
   }
 
@@ -170,41 +210,49 @@ export class ProxySessionCoordinator {
     // Native create/adopt may emit notifications or exit before createSession
     // resolves, so binding only at the end of bring-up would lose that state.
     this.bind(args.sessionId, client);
-    await client.initialize();
-    const capabilities = await client.capabilities();
-    this.capabilitiesByExecutor.set(args.executor, capabilities);
+    const initialized = await client.initialize();
+    this.rememberProtocolCapabilities(args.executor, initialized);
+    const catalog = await client.catalog();
+    this.catalogByExecutor.set(args.executor, catalog);
 
     const adoptParams: {
-      claudeSessionId?: string;
-      threadId?: string;
       nativeSessionId?: string;
+      history?: 'none' | 'replay';
       resumeMode?: 'load' | 'resume';
     } = {};
     if (args.nativeSessionId) {
+      adoptParams.nativeSessionId = args.nativeSessionId;
+      adoptParams.history = args.resumeMode === 'load' ? 'replay' : 'none';
       adoptParams.resumeMode = args.resumeMode ?? 'resume';
-      if (args.executor === 'claude') adoptParams.claudeSessionId = args.nativeSessionId;
-      else if (args.executor === 'codex') adoptParams.threadId = args.nativeSessionId;
-      else {
-        adoptParams.nativeSessionId = args.nativeSessionId;
-      }
     }
-    let created: {
-      session: import('@gian/shared').ProxySession;
-      nativeSessionId: string;
-      configOptions?: NativeConfigOption[];
-      replayUpdates?: unknown[];
-      replayStreamId?: string;
-    };
+    const sessionConfig: Record<string, string | boolean | number | null> = {};
+    for (const option of catalog.configOptions) {
+      if (option.binding !== 'session') continue;
+      const persisted = args.executorConfig?.values[option.id]
+        ?? (option.role === 'effort'
+          ? args.executorConfig?.values.thought_level
+          : undefined);
+      const byRole = option.role === 'model'
+        ? args.model
+        : option.role === 'effort'
+          ? args.executorDefaults?.thinking
+          : option.role === 'approval_mode'
+            ? args.executorDefaults?.mode
+            : undefined;
+      const value = args.sessionConfig?.[option.id]
+        ?? persisted
+        ?? byRole
+        ?? option.defaultValue;
+      if (value !== undefined && value !== '') sessionConfig[option.id] = value;
+    }
+    const attachmentDir = await ensureSessionAttachmentDir(args.sessionId, this.dataDir);
+    const workspaceRoots = [args.cwd, attachmentDir];
+    let created;
     try {
-      const persistedMode = args.executorConfig?.values.permission_mode
-        ?? args.executorConfig?.values.mode;
-      const createMode = typeof persistedMode === 'string' && persistedMode
-        ? persistedMode
-        : args.executorDefaults?.mode;
       created = await client.createSession({
         cwd: args.cwd,
-        model: args.model ?? undefined,
-        ...(args.executor === 'grok' && createMode ? { mode: createMode } : {}),
+        workspaceRoots,
+        sessionConfig,
         ...adoptParams,
       });
     } catch (error) {
@@ -215,9 +263,13 @@ export class ProxySessionCoordinator {
         || message.includes('Could not resume')
       );
       const turnCount = isMissing ? this.history.countTurns(args.sessionId) : -1;
-      if (!isMissing || turnCount > 0 || usesNativeExecutorConfig(args.executor)) throw error;
+      if (!isMissing || turnCount > 0) throw error;
 
-      created = await client.createSession({ cwd: args.cwd, model: args.model ?? undefined });
+      created = await client.createSession({
+        cwd: args.cwd,
+        workspaceRoots,
+        sessionConfig,
+      });
       const now = new Date().toISOString();
       this.db.prepare('UPDATE sessions SET native_session_id = ?, updated_at = ? WHERE id = ?')
         .run(created.nativeSessionId, now, args.sessionId);
@@ -228,122 +280,51 @@ export class ProxySessionCoordinator {
     }
 
     this.sessionIds.set(args.sessionId, created.session.id);
-    let configOptions = created.configOptions ?? created.session.configOptions ?? [];
-    if (
-      usesNativeExecutorConfig(args.executor)
-      && client.setNativeConfig
-      && (args.executorConfig || args.executorDefaults)
-    ) {
-      const setNativeConfig = client.setNativeConfig.bind(client);
-      const optionForRole = (role: NativeConfigRole) =>
-        configOptions.find(option => nativeConfigRole(option) === role);
-      const applyValue = async (
-        option: NativeConfigOption,
-        value: NativeConfigValue,
-        label: string,
-      ) => {
-        if (Object.is(option.currentValue, value)) return;
-        try {
-          const updated = await setNativeConfig(option.id, value);
-          configOptions = updated.options;
-        } catch (error) {
-          const executorName = `${args.executor[0]!.toUpperCase()}${args.executor.slice(1)}`;
-          throw new Error(
-            `Failed to apply ${executorName} ${label} using config id "${option.id}": ${errorMessage(error)}`,
-          );
-        }
-      };
-
-      // Settings defaults name semantic roles. Resolve them only after
-      // session/new or session/load returns the authoritative ACP options;
-      // option.category may stay stable while option.id changes between Kimi
-      // versions (for example thought_level -> thinking).
-      for (const role of NATIVE_CONFIG_ROLE_ORDER) {
-        const value = args.executorDefaults?.[role];
-        if (!value) continue;
-        const option = optionForRole(role);
-        if (option) await applyValue(option, value, `${role} default`);
-      }
-
-      // Persisted state normally contains exact native ids. If an upgrade
-      // renames one, remap known semantic aliases to the id advertised by the
-      // current session. Unknown, no-longer-advertised ids are never sent.
-      const persistedEntries = Object.entries(args.executorConfig?.values ?? {})
-        .sort(([left], [right]) => {
-          const leftRole = nativeConfigRole({ id: left });
-          const rightRole = nativeConfigRole({ id: right });
-          const leftIndex = leftRole ? NATIVE_CONFIG_ROLE_ORDER.indexOf(leftRole) : -1;
-          const rightIndex = rightRole ? NATIVE_CONFIG_ROLE_ORDER.indexOf(rightRole) : -1;
-          if (leftIndex !== -1 || rightIndex !== -1) {
-            return (leftIndex === -1 ? NATIVE_CONFIG_ROLE_ORDER.length : leftIndex)
-              - (rightIndex === -1 ? NATIVE_CONFIG_ROLE_ORDER.length : rightIndex);
-          }
-          return left.localeCompare(right);
-        });
-      for (const [storedId, value] of persistedEntries) {
-        const exact = configOptions.find(option => option.id === storedId);
-        const role = nativeConfigRole({ id: storedId });
-        const option = exact ?? (role ? optionForRole(role) : undefined);
-        if (option) await applyValue(option, value, `session setting "${option.name}"`);
-      }
-    }
-    this.sessions.setNativeOptions(args.sessionId, configOptions);
-
-    const persisted = this.db.prepare('SELECT id FROM sessions WHERE id = ?')
-      .get(args.sessionId) as { id: string } | undefined;
-    if (persisted) {
-      const state = executorConfigFromOptions(configOptions);
-      const now = new Date().toISOString();
-      this.db.prepare('UPDATE sessions SET executor_config_json = ?, updated_at = ? WHERE id = ?')
-        .run(JSON.stringify(state), now, args.sessionId);
-      this.callbacks.onSessionUpdated(args.sessionId, {
-        executor_config: state,
-        native_config_options: configOptions,
-        updated_at: now,
-      });
-    }
-
-    if (
-      this.watcher
-      && !usesNativeExecutorConfig(args.executor)
-      && !client.protocolV1
-    ) {
-      const filePath = locateNativeJsonl(args.executor, created.nativeSessionId, args.cwd);
-      if (filePath) this.watcher.start(args.sessionId, filePath, args.executor);
-    }
-    // Re-read the authoritative name after the potentially slow native
-    // create/adopt. A rename can land while createSession is in flight, when
-    // the facade exists but has not bound a native thread yet. Row absence is
-    // intentional during first creation, so only then fall back to args.
     const persistedName = this.db.prepare('SELECT name FROM sessions WHERE id = ?')
       .get(args.sessionId) as { name: string | null } | undefined;
     const displayName = (persistedName ? persistedName.name : args.displayName)?.trim();
-    const shouldSyncName = args.executor === 'codex'
-      || args.executor === 'grok'
-      || (args.executor === 'claude' && client.protocolV1);
-    if (shouldSyncName && displayName && client.setName) {
+    if (displayName && client.setName) {
       try {
         await client.setName(displayName);
       } catch (error) {
         console.warn(`[session] ${args.executor} setName on bring-up failed for ${args.sessionId}: ${String(error)}`);
       }
     }
+    this.callbacks.onAttached?.(args.sessionId);
     return {
       proxySessionId: created.session.id,
-      nativeSessionId: created.nativeSessionId,
-      configOptions,
-      replayUpdates: created.replayUpdates ?? [],
+      nativeSessionId: created.nativeSessionId ?? args.nativeSessionId ?? '',
+      configOptions: nativeOptionsFromCatalog(catalog, sessionConfig),
+      replayUpdates: created.replayEvents ?? [],
       ...(created.replayStreamId ? { replayStreamId: created.replayStreamId } : {}),
+      ...(created.turnConfigOptions !== undefined
+        ? {
+            turnConfigOptions: created.turnConfigOptions,
+            turnConfigRevision: created.turnConfigRevision,
+          }
+        : {}),
+      ...(created.availableActions ? { availableActions: created.availableActions } : {}),
     };
+  }
+
+  attachAdopted(sessionId: string, proxySessionId: string): void {
+    const client = this.proxy.get(sessionId);
+    if (!client) throw new Error(`no adopted proxy for session: ${sessionId}`);
+    this.bind(sessionId, client);
+    this.sessionIds.set(sessionId, proxySessionId);
+    this.callbacks.onAttached?.(sessionId);
   }
 
   private bind(sessionId: string, client: ProxyClient): void {
     this.unbind(sessionId);
     this.bindings.set(sessionId, {
-      offNotification: client.onNotification(notification => (
-        this.callbacks.onNotification(sessionId, notification)
+      offNotification: client.onNotification((notification) => (
+        this.callbacks.onNotification(sessionId, notification as ProxyNotification)
       )),
-      offExit: client.onExit(code => this.callbacks.onExit(sessionId, code)),
+      offExit: client.onExit((code) => this.callbacks.onExit(sessionId, code)),
+      offFault: client.onSessionFault
+        ? client.onSessionFault((error) => this.quarantine(sessionId, error))
+        : () => undefined,
     });
   }
 
@@ -353,34 +334,72 @@ export class ProxySessionCoordinator {
     this.bindings.delete(sessionId);
     binding.offNotification();
     binding.offExit();
+    binding.offFault();
   }
 
-  getCapabilities(executor: string): ProxyCapabilities | null {
-    return this.capabilitiesByExecutor.get(executor) ?? null;
+  getCapabilities(executor: string): ProxyCatalog | null {
+    return this.catalogByExecutor.get(executor) ?? null;
   }
 
-  async warmCapabilities(executor: Executor): Promise<ProxyCapabilities> {
-    const cached = this.capabilitiesByExecutor.get(executor);
-    if (cached && (usesNativeExecutorConfig(executor) || cached.models.length > 0)) return cached;
+  getProtocolCapabilities(executor: string): Record<string, unknown> | null {
+    return this.protocolCapabilitiesByExecutor.get(executor) ?? null;
+  }
+
+  async warmCapabilities(executor: Executor): Promise<ProxyCatalog> {
+    const cached = this.catalogByExecutor.get(executor);
+    if (cached) return cached;
     const tempKey = `__caps__${executor}`;
-    if (cached) {
-      this.capabilitiesByExecutor.delete(executor);
+    if (this.emptyCatalogKeys.has(tempKey)) {
+      this.emptyCatalogKeys.delete(tempKey);
       await this.proxy.dispose(tempKey).catch(() => undefined);
     }
     const client = await this.proxy.getOrCreate(tempKey, executor);
-    await client.initialize();
-    const capabilities = await client.capabilities();
-    this.capabilitiesByExecutor.set(executor, capabilities);
-    return capabilities;
+    const initialized = await client.initialize();
+    this.rememberProtocolCapabilities(executor, initialized);
+    const catalog = await client.catalog();
+    if (catalogHasModelChoices(catalog)) {
+      this.catalogByExecutor.set(executor, catalog);
+    } else {
+      this.emptyCatalogKeys.add(tempKey);
+    }
+    return catalog;
+  }
+
+  async resolveCatalog(
+    executor: Executor,
+    params: {
+      catalogRevision: string;
+      sessionConfig: Record<string, ConfigValue>;
+      turnConfig: Record<string, ConfigValue>;
+    },
+    sessionId?: string,
+  ): Promise<ResolvedProxyCatalog> {
+    let client = sessionId ? this.proxy.get(sessionId) : undefined;
+    if (!client) {
+      const tempKey = `__caps__${executor}`;
+      client = await this.proxy.getOrCreate(tempKey, executor);
+      await client.initialize();
+    }
+    if (!client.resolveCatalog) {
+      throw new Error('catalog.resolve is not available');
+    }
+    return client.resolveCatalog(params);
   }
 
   async listSlashCommands(
     executor: 'codex' | 'claude',
-    cwd?: string,
+    _cwd?: string,
   ): Promise<SlashListResult> {
-    const tempKey = `__caps__${executor}`;
-    const client = this.proxy.get(tempKey) ?? await this.proxy.getOrCreate(tempKey, executor);
-    await client.initialize();
-    return client.listSlashCommands(cwd);
+    const catalog = this.catalogByExecutor.get(executor) ?? await this.warmCapabilities(executor);
+    return { commands: catalog.slashCommands };
+  }
+
+  private rememberProtocolCapabilities(
+    executor: string,
+    initialized: { capabilities?: Record<string, unknown> },
+  ): void {
+    if (initialized.capabilities) {
+      this.protocolCapabilitiesByExecutor.set(executor, initialized.capabilities);
+    }
   }
 }

@@ -264,6 +264,33 @@ export interface ApprovalRequestedData {
   /** Exact choices supplied by the executor. When present the UI must return
    *  one `optionId` rather than translating through Gian ApprovalDecision. */
   nativeOptions?: import('./model.js').NativeApprovalOption[];
+  /** gian.proxy/2.0 interaction actions, rendered as-is when present. */
+  actions?: InteractionAction[];
+  /** gian.proxy/2.0 interaction inputs, rendered as-is when present. */
+  inputs?: InteractionInput[];
+}
+
+export interface InteractionAction {
+  id: string;
+  label: string;
+  style: 'primary' | 'secondary' | 'danger';
+}
+
+export interface InteractionInputChoice {
+  value: string;
+  displayName: string;
+}
+
+export interface InteractionInput {
+  id: string;
+  type: 'text' | 'multiline_text' | 'single_select' | 'multi_select' | 'boolean';
+  label: string;
+  required: boolean;
+  description?: string;
+  choices?: InteractionInputChoice[];
+  sensitive?: boolean;
+  placeholder?: string;
+  multiline?: boolean;
 }
 
 export interface AskQuestionOption {
@@ -350,6 +377,9 @@ export interface TurnStartedData {
  */
 export interface TurnCompletedData {
   turnId: string;
+  /** Proxy-stable identity for the same native Turn, used with turnId as an
+   *  exact session.fork.atTurn boundary. */
+  sourceTurnId?: string;
   /** Final assistant text for the turn, when available (codex summary.assistantText). */
   summary?: string;
 }

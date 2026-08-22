@@ -17,15 +17,16 @@ class ExplodingClient {
 function configOptions(mode = 'default') {
   return [{
     id: 'mode',
-    name: 'Mode',
-    category: 'mode',
-    type: 'select',
+    role: 'approval_mode',
+    binding: 'session',
+    control: 'select',
+    defaultValue: 'default',
     currentValue: mode,
-    options: [
-      { value: 'default', name: 'Default' },
-      { value: 'plan', name: 'Plan' },
-      { value: 'auto', name: 'Auto' },
-      { value: 'yolo', name: 'YOLO' },
+    choices: [
+      { value: 'default', displayName: 'Default' },
+      { value: 'plan', displayName: 'Plan' },
+      { value: 'auto', displayName: 'Auto' },
+      { value: 'yolo', displayName: 'YOLO' },
     ],
   }];
 }
@@ -61,34 +62,29 @@ class FakeKimiLifecycleClient extends EventEmitter {
   sessionRecord(session) {
     return {
       id: session.id,
-      nativeSessionId: session.nativeSessionId,
-      cwd: session.cwd,
-      status: session.activeTurnId ? 'running' : 'idle',
-      activeTurnId: session.activeTurnId,
-      configOptions: configOptions(session.mode),
-      slashCommands: [],
-      mcpServers: [],
+      nativeSession: { id: session.nativeSessionId },
+      streamId: session.streamId,
+      state: session.activeTurnId ? 'running' : 'idle',
+      sessionConfig: { mode: session.mode },
+      lastError: null,
+      createdAt: '2026-08-09T00:00:00.000Z',
+      updatedAt: '2026-08-09T00:00:00.000Z',
     };
   }
 
   completeTextTurn(session, turnId, marker) {
     const native = FakeKimiLifecycleClient.nativeSessions.get(session.nativeSessionId);
     native.history.push(marker);
-    this.notify('acp.sessionUpdate', {
+    this.notify('content.delta', {
       sessionId: session.id,
       turnId,
-      data: {
-        update: {
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: marker },
-        },
-      },
+      data: { kind: 'text', delta: marker },
     });
     session.activeTurnId = null;
     this.notify('turn.completed', {
       sessionId: session.id,
       turnId,
-      data: { status: 'completed' },
+      data: { stopReason: 'completed' },
     });
   }
 
@@ -96,18 +92,22 @@ class FakeKimiLifecycleClient extends EventEmitter {
     if (this.stopped) throw new Error('fake Kimi proxy is stopped');
     if (method === 'initialize') {
       return {
-        methods: [
-          'session.create',
-          'session.config.set',
-          'turn.start',
-          'turn.interrupt',
-          'session.snapshot',
-          'session.close',
-        ],
+        protocol: { name: 'gian.proxy', version: '2.0' },
+        plugin: { id: 'kimi', name: 'Kimi Code', version: '0.2.0' },
+        process: { scope: 'shared' },
+        capabilities: { 'session.replay': 1, interaction: 1 },
+      };
+    }
+    if (method === 'catalog.list') {
+      return {
+        catalogRevision: 'kimi-fixture-1',
+        input: [{ type: 'text' }, { type: 'localFile' }],
+        configOptions: configOptions(),
+        slashCommands: [],
       };
     }
     if (method === 'session.create') {
-      const nativeSessionId = params.nativeSessionId
+      const nativeSessionId = params.nativeSession?.id
         ?? `native-${FakeKimiLifecycleClient.nextNative++}`;
       let native = FakeKimiLifecycleClient.nativeSessions.get(nativeSessionId);
       if (!native) {
@@ -115,25 +115,15 @@ class FakeKimiLifecycleClient extends EventEmitter {
         FakeKimiLifecycleClient.nativeSessions.set(nativeSessionId, native);
       }
       const session = {
-        id: `proxy-${FakeKimiLifecycleClient.nextProxy++}`,
+        id: params.sessionId ?? `proxy-${FakeKimiLifecycleClient.nextProxy++}`,
         nativeSessionId,
-        cwd: params.cwd,
-        mode: 'default',
+        streamId: `stream-${params.sessionId ?? FakeKimiLifecycleClient.nextProxy}`,
+        cwd: params.workspace?.cwd ?? params.cwd,
+        mode: params.config?.mode ?? 'default',
         activeTurnId: null,
       };
       this.sessions.set(session.id, session);
-      return {
-        session: this.sessionRecord(session),
-        replayUpdates: params.nativeSessionId
-          ? native.history.map(text => ({
-              sessionId: nativeSessionId,
-              update: {
-                sessionUpdate: 'agent_message_chunk',
-                content: { type: 'text', text },
-              },
-            }))
-          : [],
-      };
+      return { session: this.sessionRecord(session) };
     }
     const session = this.sessions.get(params.sessionId);
     if (!session) {
@@ -141,33 +131,40 @@ class FakeKimiLifecycleClient extends EventEmitter {
       error.code = 'SESSION_NOT_FOUND';
       throw error;
     }
-    if (method === 'session.config.set') {
-      session.mode = params.value;
-      return {
-        session: this.sessionRecord(session),
-        configOptions: configOptions(session.mode),
-      };
+    if (method === 'session.get') {
+      return { session: this.sessionRecord(session) };
     }
-    if (method === 'session.snapshot') {
+    if (method === 'session.replay') {
+      const native = FakeKimiLifecycleClient.nativeSessions.get(session.nativeSessionId);
       return {
-        session: this.sessionRecord(session),
-        configOptions: configOptions(session.mode),
+        replayStreamId: `replay-${session.id}`,
+        events: (native?.history ?? []).map((text, index) => ({
+          method: 'content.delta',
+          eventId: `replay-${index}`,
+          sessionId: session.id,
+          replayStreamId: `replay-${session.id}`,
+          sequence: index + 1,
+          sourceTurnId: `native-${index}`,
+          emittedAt: '2026-08-09T00:00:00.000Z',
+          data: { kind: 'text', delta: text },
+        })),
+        nextCursor: null,
       };
     }
     if (method === 'session.close') {
       this.sessions.delete(session.id);
-      return { ok: true, nativeClosed: false, detached: true };
+      return { ok: true };
     }
     if (method === 'turn.interrupt') {
-      const turnId = session.activeTurnId;
+      const turnId = params.turnId ?? session.activeTurnId;
       if (!turnId) throw new Error('no active turn');
       session.activeTurnId = null;
       queueMicrotask(() => this.notify('turn.completed', {
         sessionId: session.id,
         turnId,
-        data: { status: 'cancelled' },
+        data: { stopReason: 'cancelled' },
       }));
-      return { ok: true, session: this.sessionRecord(session) };
+      return { accepted: true, turnId };
     }
     if (method === 'turn.start') {
       if (session.activeTurnId) {
@@ -175,31 +172,35 @@ class FakeKimiLifecycleClient extends EventEmitter {
         error.code = 'SESSION_BUSY';
         throw error;
       }
-      const turnId = `turn-${FakeKimiLifecycleClient.nextTurn++}`;
+      const turnId = params.turnId ?? `turn-${FakeKimiLifecycleClient.nextTurn++}`;
       session.activeTurnId = turnId;
+      if (params.config?.mode) session.mode = params.config.mode;
       const text = params.input
         .filter(item => item?.type === 'text')
         .map(item => item.text)
         .join('\n');
       if (text.includes('do not finish until explicitly interrupted')) {
-        return { session: this.sessionRecord(session), turn: { id: turnId } };
+        return { accepted: true, turnId };
       }
       if (text.includes('run_in_background=true')) {
         const fixturePath = text.match(/read (.+?background-agent-fixture\.txt)/)?.[1];
         assert.ok(fixturePath, 'fake could not find background fixture path');
         const marker = (await readFile(fixturePath, 'utf8')).trim();
         queueMicrotask(() => {
-          this.notify('acp.sessionUpdate', {
+          this.notify('activity.updated', {
             sessionId: session.id,
             turnId,
             data: {
-              update: {
-                sessionUpdate: 'tool_call_update',
-                toolCallId: 'background-tool-1',
-                title: 'Launching coder agent',
-                status: 'completed',
-                rawInput: { subagent_type: 'coder', run_in_background: true },
-                rawOutput: 'task_id: task-1\nagent_id: agent-1\nstatus: running',
+              activityId: 'background-tool-1',
+              presentation: {
+                type: 'agent',
+                data: {
+                  toolCallId: 'background-tool-1',
+                  title: 'Launching coder agent',
+                  status: 'completed',
+                  rawInput: { subagent_type: 'coder', run_in_background: true },
+                  rawOutput: 'task_id: task-1\nagent_id: agent-1\nstatus: running',
+                },
               },
             },
           });
@@ -207,29 +208,32 @@ class FakeKimiLifecycleClient extends EventEmitter {
           this.notify('turn.completed', {
             sessionId: session.id,
             turnId,
-            data: { status: 'completed' },
+            data: { stopReason: 'completed' },
           });
           setTimeout(() => {
             FakeKimiLifecycleClient.nativeSessions.get(session.nativeSessionId).history.push(marker);
-            this.notify('acp.sessionUpdate', {
+            this.notify('activity.updated', {
               sessionId: session.id,
               data: {
-                update: {
-                  sessionUpdate: 'tool_call_update',
-                  toolCallId: 'background-tool-1',
-                  title: 'Agent',
-                  status: 'completed',
-                  rawOutput: `task_id: task-1\nagent_id: agent-1\nstatus: completed\n\n[summary]\n${marker}`,
+                activityId: 'background-tool-1',
+                presentation: {
+                  type: 'agent',
+                  data: {
+                    toolCallId: 'background-tool-1',
+                    title: 'Agent',
+                    status: 'completed',
+                    rawOutput: `task_id: task-1\nagent_id: agent-1\nstatus: completed\n\n[summary]\n${marker}`,
+                  },
                 },
               },
             });
           }, 5);
         });
-        return { session: this.sessionRecord(session), turn: { id: turnId } };
+        return { accepted: true, turnId };
       }
       const marker = text.match(/GIAN_KIMI_[A-Z_]+_[0-9a-f-]+/)?.[0] ?? text;
       queueMicrotask(() => this.completeTextTurn(session, turnId, marker));
-      return { session: this.sessionRecord(session), turn: { id: turnId } };
+      return { accepted: true, turnId };
     }
     throw new Error(`unexpected fake method: ${method}`);
   }

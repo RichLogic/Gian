@@ -1,17 +1,50 @@
 import assert from 'node:assert/strict';
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ReplayPageValidator } from '@gian/proxy-protocol';
 import {
+  claudeHistoryProjectDir,
   ClaudeNativeHistoryWatcher,
   listClaudeNativeSessions,
+  nativeTurnSourceId,
+  normalizeNativePrompt,
   renameClaudeNativeSession,
   replayClaudeNativeSession,
+  turnStartedEventId,
 } from '../src/protocol/native-history.js';
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+test('Claude native history follows the configured CLI settings directory', () => {
+  assert.equal(
+    claudeHistoryProjectDir('/tmp/work', '/home/tester', '/home/tester/.claude-mix/settings.json'),
+    '/home/tester/.claude-mix/projects/-tmp-work',
+  );
+});
+
+test('Claude native history uses Claude Code project-name sanitization', () => {
+  assert.equal(
+    claudeHistoryProjectDir('/private/var/folders/a_b/project.name', '/home/tester', '/home/tester/.claude-mix/settings.json'),
+    '/home/tester/.claude-mix/projects/-private-var-folders-a-b-project-name',
+  );
+});
+
+test('Claude native history canonicalizes a symlinked workspace cwd', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-claude-history-cwd-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const target = join(root, 'real-workspace');
+  const alias = join(root, 'workspace-alias');
+  await mkdir(target);
+  await symlink(target, alias, 'dir');
+  const canonicalTarget = await realpath(target);
+
+  assert.equal(
+    claudeHistoryProjectDir(alias, '/home/tester', '/home/tester/.claude-mix/settings.json'),
+    join('/home/tester/.claude-mix/projects', canonicalTarget.replace(/[^A-Za-z0-9-]/g, '-')),
+  );
+});
 
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -24,8 +57,8 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 test('Claude plugin owns native discovery and normalized replay', async t => {
   const home = await mkdtemp(join(tmpdir(), 'gian-claude-native-'));
   t.after(() => rm(home, { recursive: true, force: true }));
-  const cwd = '/workspace/project';
-  const directory = join(home, '.claude', 'projects', '-workspace-project');
+  const cwd = '/workspace/project_name';
+  const directory = join(home, '.claude', 'projects', '-workspace-project-name');
   await mkdir(directory, { recursive: true });
   const path = join(directory, 'native-claude.jsonl');
   await writeFile(path, [
@@ -53,8 +86,8 @@ test('Claude plugin owns native discovery and normalized replay', async t => {
     'turn.started',
     'input.recorded',
     'content.completed',
-    'tool.started',
-    'tool.completed',
+    'activity.updated',
+    'activity.updated',
     'turn.completed',
     'turn.started',
     'input.recorded',
@@ -68,6 +101,25 @@ test('Claude plugin owns native discovery and normalized replay', async t => {
     events: replay.events,
     nextCursor: null,
   }));
+  const replayedText = replay.events.filter(event => (
+    event.method === 'content.completed' && event.data.kind === 'text'
+  ));
+  assert.ok(replayedText.every(event => event.data.format === 'plain'));
+  assert.ok(replay.events.every(event => (
+    event.sourceTurnId.length > 0
+    && event.replayStreamId === replay.streamId
+    && !('turnId' in event)
+    && !('streamId' in event)
+  )));
+
+  const firstSourceTurnId = nativeTurnSourceId(
+    'native-claude',
+    normalizeNativePrompt('Fix it'),
+    0,
+  );
+  assert.equal(replay.events[0]?.sourceTurnId, firstSourceTurnId);
+  assert.equal(replay.events[0]?.eventId, turnStartedEventId(firstSourceTurnId));
+  assert.notEqual(firstSourceTurnId, 'host-session');
 
   assert.equal(renameClaudeNativeSession(
     'native-claude',
@@ -101,8 +153,8 @@ test('Claude plugin owns native discovery and normalized replay', async t => {
   const appended = replayClaudeNativeSession('host-session', 'native-claude', cwd, home);
   assert.equal(appended.streamId, replay.streamId);
   assert.deepEqual(
-    appended.events.slice(0, replay.events.length).map(event => event.params.eventId),
-    replay.events.map(event => event.params.eventId),
+    appended.events.slice(0, replay.events.length).map(event => event.eventId),
+    replay.events.map(event => event.eventId),
   );
 
   watcher.pause();

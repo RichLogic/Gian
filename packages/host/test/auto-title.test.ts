@@ -149,7 +149,12 @@ class StubNativeProxyManager {
     assert.equal(key, `__native_sessions_${this.executor}__`);
     assert.equal(executor, this.executor);
     return {
-      initialize: async () => ({ mode: 'spawn' as const, protocolVersion: 'test', methods: [] }),
+      initialize: async () => ({
+        protocol: { name: 'gian.proxy' as const, version: '2.0' as const },
+        plugin: { id: this.executor, name: this.executor, version: '0.2.0' },
+        process: { scope: 'shared' as const },
+        capabilities: { 'session.native.list': 1 },
+      }),
       listNativeSessions: async () => {
         this.listCalls += 1;
         if (this.gate) await this.gate;
@@ -470,23 +475,24 @@ class RecordingProxyClient implements ProxyClient {
     private readonly manager: RecordingProxyManager,
   ) {}
 
+  isExited() { return false; }
   async initialize() {
-    return { mode: 'spawn' as const, protocolVersion: 'test', methods: [] };
+    return {
+      protocol: { name: 'gian.proxy' as const, version: '2.0' as const },
+      plugin: { id: this.executor, name: this.executor, version: '0.2.0' },
+      process: { scope: this.executor === 'codex' ? 'shared' as const : 'session' as const },
+      capabilities: {},
+    };
   }
 
-  async capabilities() {
-    return { protocolVersion: 'test', models: [], slashCommands: [] };
-  }
-
-  async listSlashCommands() {
-    return { commands: [] };
+  async catalog() {
+    return { catalogRevision: 'test', input: [{ type: 'text' as const }], configOptions: [], slashCommands: [] };
   }
 
   async createSession(params: CreateSessionParams) {
     this.bound = true;
-    const nativeSessionId = this.executor === 'claude'
-      ? params.claudeSessionId ?? `claude-native-${this.key}`
-      : `codex-native-${this.key}`;
+    const nativeSessionId = params.nativeSessionId
+      ?? (this.executor === 'claude' ? `claude-native-${this.key}` : `codex-native-${this.key}`);
     this.manager.recordNativeSession(
       this.executor,
       nativeSessionId,
@@ -496,8 +502,7 @@ class RecordingProxyClient implements ProxyClient {
       session: {
         id: `proxy-${this.key}`,
         cwd: params.cwd,
-        model: params.model ?? null,
-        status: 'idle' as const,
+        state: 'idle' as const,
         createdAt: '2026-08-10T00:00:00.000Z',
         updatedAt: '2026-08-10T00:00:00.000Z',
         lastError: null,
@@ -511,8 +516,7 @@ class RecordingProxyClient implements ProxyClient {
       session: {
         id: `proxy-${this.key}`,
         cwd: '/workspace',
-        model: null,
-        status: 'running' as const,
+        state: 'running' as const,
         createdAt: '2026-08-10T00:00:00.000Z',
         updatedAt: '2026-08-10T00:00:00.000Z',
         lastError: null,
@@ -523,7 +527,10 @@ class RecordingProxyClient implements ProxyClient {
 
   async listNativeSessions() {
     return {
-      sessions: this.manager.listNativeSessions(this.executor),
+      sessions: this.manager.listNativeSessions(this.executor).map((item) => ({
+        id: item.sessionId,
+        displayName: item.title,
+      })),
     };
   }
 
@@ -533,7 +540,7 @@ class RecordingProxyClient implements ProxyClient {
   }
 
   async interruptTurn() {}
-  async respondApproval() {}
+  async respondInteraction() {}
   async closeSession() {}
   async shutdown() {}
   forceKill() {}
@@ -714,14 +721,8 @@ test('e2e: claude session picks up the ai-title from its JSONL on turn completio
           && message.session.name === 'Fix Login Bug'),
       'rename broadcasts session:updated with the generated name for UI state',
     );
-    // renameSession also appended a custom-title line for the native CLI.
-    await waitFor(() => readFileSync(jsonl, 'utf8').includes('custom-title'));
-    const lastLine = readFileSync(jsonl, 'utf8').trim().split('\n').at(-1)!;
-    assert.deepEqual(JSON.parse(lastLine), {
-      type: 'custom-title',
-      customTitle: 'Fix Login Bug',
-      sessionId: session.native_session_id,
-    });
+    await waitFor(() => proxies.client(session.id).setNameCalls.includes('Fix Login Bug'));
+    assert.deepEqual(proxies.client(session.id).setNameCalls, ['Fix Login Bug']);
   } finally {
     db.close();
     if (previousHome === undefined) delete process.env.HOME;

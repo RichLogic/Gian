@@ -1,0 +1,9 @@
+# Gian-managed DSH profile layer. Applied after @deepseek-ai/dsh-base.
+# This bundle must not mount DSH Web, Browser UI, or the headless one-shot runner.
+# stdout is reserved for gian.dsh.bridge/1.0 JSON-RPC.
+
+- insert:
+    - id: gian-dsh-bridge
+      name: '@gian/dsh-bridge'
+      config:
+        stdio: true

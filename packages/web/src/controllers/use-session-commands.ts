@@ -2,6 +2,7 @@ import { useMemo, type RefObject } from 'react';
 import type {
   ApprovalDecision,
   ApprovalMode,
+  ConfigValue,
   NativeConfigValue,
   Session,
   ThinkingEffort,
@@ -30,7 +31,7 @@ export interface SessionCommands {
     sessionId: string,
     approvalId: string,
     decision: ApprovalDecision,
-    answers?: Record<string, string | string[]>,
+    answers?: Record<string, string | boolean | string[]>,
     context?: ApprovalActionContext,
   ) => void;
   onQueueAdd: (
@@ -52,6 +53,12 @@ export interface SessionCommands {
   onSetEffort: (sessionId: string, effort: ThinkingEffort | null) => void;
   onSetServiceTier: (sessionId: string, tier: 'fast' | null) => void;
   onSetNativeConfig: (sessionId: string, configId: string, value: NativeConfigValue) => void;
+  onSetTurnConfig: (
+    sessionId: string,
+    optionId: string,
+    value: ConfigValue,
+    turnConfig: Record<string, ConfigValue>,
+  ) => void;
   onArchive: (sessionId: string, archived: boolean) => void;
   onPin: (sessionId: string, pinned: boolean) => void;
   onDelete: (sessionId: string) => void;
@@ -136,6 +143,8 @@ export function useSessionCommands({
       onSetServiceTier: (sessionId, tier) => ops.dispatch('session.setServiceTier', { sessionId, tier }),
       onSetNativeConfig: (sessionId, configId, value) =>
         ops.dispatch('session.setNativeConfig', { sessionId, configId, value }),
+      onSetTurnConfig: (sessionId, optionId, value, turnConfig) =>
+        ops.dispatch('session.setTurnConfig', { sessionId, optionId, value, turnConfig }),
       onArchive: (sessionId, archived) => ops.dispatch('session.archive', { sessionId, archived }),
       onPin: (sessionId, pinned) => ops.dispatch('session.pin', { sessionId, pinned }),
       onDelete: sessionId => ops.dispatch('session.delete', { sessionId }),

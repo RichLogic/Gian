@@ -77,7 +77,11 @@ describe('stable core UI visual contracts', () => {
     expect(screen.getByTestId('topbar-back')).toBeEnabled();
     expect(screen.getByTestId('topbar-forward')).toBeEnabled();
     expect(screen.getByTestId('topbar-toggle-p3')).toBeEnabled();
-    expect(screen.getByTestId('topbar-toggle-p3').querySelector('path[fill="currentColor"]')).not.toBeNull();
+    // lucide panel-right-close glyph while p3 is open (left-pointing arrow);
+    // panel-right-open (right-pointing) when collapsed.
+    expect(screen.getByTestId('topbar-toggle-p3').querySelector('path[d*="M8 9l3 3-3 3"]')).not.toBeNull();
+    rerender(inEnglish(<Topbar {...props} canGoBack canGoForward p3Available p3Visible={false} />));
+    expect(screen.getByTestId('topbar-toggle-p3').querySelector('path[d*="M10 15l-3-3 3-3"]')).not.toBeNull();
     expect(container.querySelectorAll('.tb-toggle svg[stroke-width="1.5"]')).toHaveLength(4);
   });
 

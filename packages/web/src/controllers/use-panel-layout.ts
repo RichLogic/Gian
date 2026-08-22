@@ -269,11 +269,14 @@ export function usePanelLayout({
       return;
     }
 
-    if (!panel1VisibleRef.current || snapshot.mainWidth <= 0) {
+    if (!panel1VisibleRef.current) {
       if (snapshot.sheetWidth < min) setSheetWidth(min);
       return;
     }
 
+    // Panel 1 can momentarily render at zero width when a zoom change lands
+    // before the initial layout reconciliation. Keep treating the visible
+    // middle pair as a pair so shrinking Panel 2 gives Panel 1 room to recover.
     const middleWidth = snapshot.mainWidth + snapshot.sheetWidth;
     const targetSheet = sheetWidthForMiddleRatio(
       middleWidth,

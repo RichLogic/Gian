@@ -13,8 +13,8 @@ stores its SQLite database at `~/.gian/gian.db`.
 
 ## Prerequisites
 
-- **Node v22+** — required for the `better-sqlite3` native binding. Node v25
-  breaks the binding; stay on v22 LTS until an upstream fix lands.
+- **Node v24 LTS** — Gian pins the Host and `better-sqlite3` native binding to
+  one Node ABI. Other Node major versions are rejected before installation.
 - Packages must be built before installing.
 
 ## Build

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export const EXCLUDED_EXTENSIONS = [
   'rewind',
   'cancel_rewind',
@@ -19,6 +21,20 @@ function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function stableId(prefix: string, value: unknown): string {
+  return `${prefix}-${createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 20)}`;
+}
+
+/** gian.proxy/2 `diff.updated` data. File path lives only in `files`. */
+export function grokDiffUpdatedData(path: string, diff: string) {
+  return {
+    diffId: stableId('diff', { path, diff }),
+    diff,
+    truncated: false,
+    files: [{ path, status: 'modified' as const }],
+  };
 }
 
 export function jsonClone(value: unknown): unknown {
@@ -85,6 +101,54 @@ function toolContentText(content: unknown): string {
   return Array.isArray(content) ? content.map(textFromContent).join('') : '';
 }
 
+function activityStatus(value: unknown): 'running' | 'succeeded' | 'failed' {
+  if (value === 'failed') return 'failed';
+  if (value === 'completed') return 'succeeded';
+  return 'running';
+}
+
+function noticeActivity(params: {
+  noticeId: string;
+  title: string;
+  message: string;
+  code?: string;
+  status?: 'succeeded' | 'failed';
+}): TranslatedEvent {
+  return {
+    method: 'activity.updated',
+    data: {
+      activityId: params.noticeId,
+      kind: 'notice',
+      title: params.title,
+      status: params.status ?? 'succeeded',
+      presentation: {
+        type: 'notice',
+        data: {
+          message: params.message,
+          title: params.title,
+          ...(params.code ? { code: params.code } : {}),
+        },
+      },
+    },
+  };
+}
+
+function genericActivity(name: string, payload: Record<string, unknown>): TranslatedEvent {
+  return {
+    method: 'activity.updated',
+    data: {
+      activityId: `grok-${name}-${stableId('upd', payload)}`,
+      kind: 'generic',
+      title: name,
+      status: 'succeeded',
+      presentation: {
+        type: 'generic',
+        data: { name, payload: jsonClone(payload) },
+      },
+    },
+  };
+}
+
 export function translateSessionUpdate(update: unknown): TranslatedEvent[] {
   const value = record(update);
   const kind = String(value.sessionUpdate ?? '');
@@ -94,8 +158,8 @@ export function translateSessionUpdate(update: unknown): TranslatedEvent[] {
     const contentKind = kind === 'agent_thought_chunk' ? 'reasoning' : 'text';
     if (kind === 'user_message_chunk') {
       // The CLI echoes the Host's own input back to us. input.recorded is a
-      // session.replay-only notification in gian.proxy/1 and the Host rejects
-      // it on the live stream, so the echo contributes nothing live.
+      // session.replay-only notification and the Host rejects it on the live
+      // stream, so the echo contributes nothing live.
       return [];
     }
     return [{
@@ -106,56 +170,63 @@ export function translateSessionUpdate(update: unknown): TranslatedEvent[] {
 
   if (kind === 'tool_call') {
     return [{
-      method: 'tool.started',
+      method: 'activity.updated',
       data: {
-        toolCallId: String(value.toolCallId || 'grok-tool'),
-        name: String(value.title ?? value.kind ?? 'tool'),
-        ...(typeof value.title === 'string' ? { title: value.title } : {}),
-        input: jsonClone(value.rawInput ?? value.input ?? null),
+        activityId: String(value.toolCallId || 'grok-tool'),
+        kind: 'tool',
+        title: String(value.title ?? 'Tool'),
+        status: 'running',
+        presentation: {
+          type: 'tool',
+          data: { name: String(value.kind ?? value.title ?? 'tool') },
+        },
+        ...(value.rawInput !== undefined || value.input !== undefined
+          ? { details: jsonClone(value.rawInput ?? value.input ?? null) }
+          : {}),
       },
     }];
   }
 
   if (kind === 'tool_call_update') {
-    const toolCallId = String(value.toolCallId ?? '');
+    const activityId = String(value.toolCallId ?? '');
     const content = Array.isArray(value.content) ? value.content : [];
     const text = toolContentText(content);
     const events: TranslatedEvent[] = [];
     for (const item of content) {
       const payload = record(item);
       if (payload.type !== 'diff') continue;
-      const path = String(payload.path ?? 'unknown');
       events.push({
         method: 'diff.updated',
-        data: {
-          path,
-          diff: String(payload.diff ?? payload.unifiedDiff ?? ''),
-          files: [{ path, status: 'modified' }],
-        },
+        data: grokDiffUpdatedData(
+          String(payload.path ?? 'unknown'),
+          String(payload.diff ?? payload.unifiedDiff ?? ''),
+        ),
       });
     }
-    if (value.status === 'completed' || value.status === 'failed') {
-      events.push({
-        method: 'tool.completed',
-        data: {
-          toolCallId,
-          status: value.status === 'failed' ? 'failed' : 'succeeded',
-          output: jsonClone(value.rawOutput ?? text),
+    const status = activityStatus(value.status);
+    events.push({
+      method: 'activity.updated',
+      data: {
+        activityId: activityId || 'grok-tool',
+        kind: 'tool',
+        title: String(value.title ?? 'Tool'),
+        status,
+        presentation: {
+          type: 'tool',
+          data: { name: String(value.kind ?? value.title ?? 'tool') },
         },
-      });
-    } else {
-      events.push({
-        method: 'tool.updated',
-        data: {
-          toolCallId,
-          ...(text ? { outputDelta: text } : {}),
-          data: jsonClone({
-            ...(Array.isArray(value.locations) ? { locations: value.locations } : {}),
-            content,
-          }),
-        },
-      });
-    }
+        ...(value.rawOutput !== undefined || text || Array.isArray(value.locations)
+          ? {
+            details: jsonClone({
+              ...(value.rawOutput !== undefined ? { output: value.rawOutput } : {}),
+              ...(text ? { outputDelta: text } : {}),
+              ...(Array.isArray(value.locations) ? { locations: value.locations } : {}),
+              content,
+            }),
+          }
+          : {}),
+      },
+    });
     return events;
   }
 
@@ -181,19 +252,10 @@ export function translateSessionUpdate(update: unknown): TranslatedEvent[] {
   }
 
   if (kind === 'current_mode_update' || kind === 'current_model_update' || kind === 'config_update') {
-    const mode = typeof value.currentModeId === 'string'
-      && (value.currentModeId === 'default'
-        || value.currentModeId === 'auto'
-        || value.currentModeId === 'always_approve')
-      ? value.currentModeId
-      : undefined;
-    const data = {
-      ...(mode ? { mode } : {}),
-      ...(typeof value.currentModelId === 'string' ? { model: value.currentModelId } : {}),
-    };
-    return Object.keys(data).length > 0
-      ? [{ method: 'session.updated', data: { ...data, reason: 'runtime-state-changed' } }]
-      : [];
+    return [{
+      method: 'session.updated',
+      data: { updatedAt: new Date().toISOString() },
+    }];
   }
 
   if (kind === 'available_commands_update') {
@@ -201,18 +263,28 @@ export function translateSessionUpdate(update: unknown): TranslatedEvent[] {
   }
 
   if (kind === 'usage_update') {
+    const used = numberOr(value.used);
+    if (used === undefined) return [];
+    const window = numberOr(value.size);
     return [{
       method: 'usage.updated',
       data: {
         context: {
-          ...(numberOr(value.used) !== undefined ? { used: numberOr(value.used) } : {}),
-          ...(numberOr(value.size) !== undefined ? { window: numberOr(value.size) } : {}),
+          used,
+          ...(window !== undefined && window > 0 ? { window } : {}),
         },
       },
     }];
   }
 
-  return [];
+  return [genericActivity(
+    kind ? `session-update-${kind}` : 'session-update-unknown',
+    value,
+  )];
+}
+
+export function sessionUpdateText(update: unknown): string {
+  return textFromContent(record(update).content ?? update);
 }
 
 function compactEvents(name: string): TranslatedEvent[] {
@@ -226,32 +298,28 @@ function compactEvents(name: string): TranslatedEvent[] {
       method: 'usage.updated',
       data: {
         conversation: { mode: 'reset' },
-        reason: 'compact_started',
       },
     });
   }
-  events.push({
-    method: 'notice.created',
-    data: {
-      noticeId: `grok-compact-${suffix}`,
-      severity: failed ? 'error' : 'info',
-      code: `GROK_COMPACT_${suffix.toUpperCase()}`,
-      title: started
-        ? 'Grok is compacting context'
-        : failed
-          ? 'Grok compact failed'
-          : cancelled
-            ? 'Grok compact cancelled'
-            : 'Grok compact completed',
-      message: started
-        ? 'Grok started compacting the session context.'
-        : failed
-          ? 'Grok compact failed.'
-          : cancelled
-            ? 'Grok compact was cancelled.'
-            : 'Grok finished compacting the session context.',
-    },
-  });
+  events.push(noticeActivity({
+    noticeId: `grok-compact-${suffix}`,
+    title: started
+      ? 'Grok is compacting context'
+      : failed
+        ? 'Grok compact failed'
+        : cancelled
+          ? 'Grok compact cancelled'
+          : 'Grok compact completed',
+    message: started
+      ? 'Grok started compacting the session context.'
+      : failed
+        ? 'Grok compact failed.'
+        : cancelled
+          ? 'Grok compact was cancelled.'
+          : 'Grok finished compacting the session context.',
+    code: `GROK_COMPACT_${suffix.toUpperCase()}`,
+    status: failed ? 'failed' : 'succeeded',
+  }));
   return events;
 }
 
@@ -273,10 +341,10 @@ export function translateExtension(method: string, params: unknown): TranslatedE
       method: 'turn.failed',
       data: {
         error: {
-          code: 'RUNTIME_ERROR',
+          domainCode: 'RUNTIME_ERROR',
           message: String(payload.message ?? 'Grok turn failed.'),
           retryable: false,
-          data: {},
+          details: {},
         },
       },
       terminal: 'failed',
@@ -293,14 +361,12 @@ export function translateExtension(method: string, params: unknown): TranslatedE
     }];
   }
   if (/diff/.test(normalized)) {
-    const path = String(payload.path ?? payload.file ?? 'unknown');
     return [{
       method: 'diff.updated',
-      data: {
-        path,
-        diff: String(payload.diff ?? payload.unifiedDiff ?? ''),
-        files: [{ path, status: 'modified' }],
-      },
+      data: grokDiffUpdatedData(
+        String(payload.path ?? payload.file ?? 'unknown'),
+        String(payload.diff ?? payload.unifiedDiff ?? ''),
+      ),
     }];
   }
   if (/model/.test(normalized)) {
@@ -308,104 +374,77 @@ export function translateExtension(method: string, params: unknown): TranslatedE
       ? payload.modelId
       : typeof payload.model === 'string' ? payload.model : null;
     return [
-      ...(model ? [{
-        method: 'session.updated',
-        data: { model, reason: 'runtime-state-changed' as const },
-      }] : []),
       {
-        method: 'notice.created',
-        data: {
-          noticeId: `grok-${name}`,
-          severity: 'info',
-          code: 'GROK_MODEL_CHANGED',
-          title: 'Grok model changed',
-          message: model ? `Grok switched to ${model}.` : 'Grok changed the active model.',
-        },
+        method: 'session.updated',
+        data: { updatedAt: new Date().toISOString() },
       },
+      noticeActivity({
+        noticeId: `grok-${name}`,
+        title: 'Grok model changed',
+        message: model ? `Grok switched to ${model}.` : 'Grok changed the active model.',
+        code: 'GROK_MODEL_CHANGED',
+      }),
     ];
   }
   if (/subagent|background|monitor|workflow|goal/.test(normalized)) {
-    const status = /fail/.test(normalized)
-      ? 'failed'
-      : /finish|done|complete/.test(normalized)
-        ? 'completed'
-        : 'running';
+    const state = /fail/.test(normalized)
+      ? 'failed' as const
+      : /cancel|interrupt/.test(normalized)
+        ? 'interrupted' as const
+        : /finish|done|complete/.test(normalized)
+          ? 'completed' as const
+          : 'running' as const;
+    const status = state === 'failed'
+      ? 'failed' as const
+      : state === 'interrupted'
+        ? 'cancelled' as const
+        : state === 'completed'
+          ? 'succeeded' as const
+          : 'running' as const;
+    const agentId = String(payload.agentId ?? payload.id ?? name);
     return [{
-      method: 'agent.updated',
+      method: 'activity.updated',
       data: {
-        agentId: String(payload.agentId ?? payload.id ?? name),
+        activityId: agentId,
+        kind: 'agent',
+        title: String(payload.description ?? payload.title ?? name),
         status,
-        description: String(payload.description ?? payload.title ?? name),
+        presentation: {
+          type: 'agent',
+          data: { agentId, state },
+        },
       },
     }];
   }
   if (/memory|flush|dream|session[_-]?saved/.test(normalized)) {
-    return [{
-      method: 'notice.created',
-      data: {
-        noticeId: `grok-${name}`,
-        severity: 'info',
-        code: 'GROK_SESSION_NOTICE',
-        title: name,
-        message: String(payload.message ?? name),
-      },
-    }];
+    return [noticeActivity({
+      noticeId: `grok-${name}`,
+      title: name,
+      message: String(payload.message ?? name),
+      code: 'GROK_SESSION_NOTICE',
+    })];
   }
   if (/image/.test(normalized) && /compress|drop/.test(normalized)) {
-    return [{
-      method: 'notice.created',
-      data: {
-        noticeId: `grok-${name}`,
-        severity: 'warning',
-        code: 'GROK_IMAGE_DROPPED',
-        title: 'A Grok image input was compressed or dropped',
-        message: String(payload.message ?? 'Grok could not keep the original image payload.'),
-      },
-    }];
+    return [noticeActivity({
+      noticeId: `grok-${name}`,
+      title: 'A Grok image input was compressed or dropped',
+      message: String(payload.message ?? 'Grok could not keep the original image payload.'),
+      code: 'GROK_IMAGE_DROPPED',
+    })];
   }
   if (/hook/.test(normalized)) {
-    const events: TranslatedEvent[] = [{
-      method: 'extension.event',
-      data: {
-        namespace: 'grok',
-        name,
-        schemaVersion: 1,
-        payload,
-      },
-    }];
+    const events: TranslatedEvent[] = [genericActivity(name, payload)];
     if (/error|fail/.test(normalized)) {
-      events.push({
-        method: 'notice.created',
-        data: {
-          noticeId: `grok-${name}`,
-          severity: 'error',
-          code: 'GROK_HOOK_FAILED',
-          title: 'Grok hook failed',
-          message: String(payload.message ?? name),
-        },
-      });
+      events.push(noticeActivity({
+        noticeId: `grok-${name}`,
+        title: 'Grok hook failed',
+        message: String(payload.message ?? name),
+        code: 'GROK_HOOK_FAILED',
+        status: 'failed',
+      }));
     }
     return events;
   }
-  if (/recap|summary/.test(normalized)) {
-    return [{
-      method: 'extension.event',
-      data: {
-        namespace: 'grok',
-        name,
-        schemaVersion: 1,
-        payload,
-      },
-    }];
-  }
 
-  return [{
-    method: 'extension.event',
-    data: {
-      namespace: 'grok',
-      name,
-      schemaVersion: 1,
-      payload,
-    },
-  }];
+  return [genericActivity(name, payload)];
 }

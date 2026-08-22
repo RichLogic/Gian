@@ -1,7 +1,7 @@
 {
   "name": "@gian/desktop",
   "productName": "Gian",
-  "version": "0.4.5",
+  "version": "0.5.0",
   "private": true,
   "description": "macOS desktop shell for the Gian coding agent workspace",
   "author": "RichLogic",
@@ -15,7 +15,7 @@
     "test:smoke:run": "node test/electron-smoke.mjs",
     "dev": "pnpm run build && electron .",
     "start": "electron .",
-    "bundle:build": "node ../../scripts/prepare-desktop-runtime.mjs && pnpm --filter @gian/desktop... build && pnpm --filter @gian/web build",
+    "bundle:build": "node ../../scripts/prepare-desktop-runtime.mjs && pnpm --filter @gian/dsh-bridge build && pnpm --filter @gian/desktop... build && pnpm --filter @gian/web build",
     "package:mac": "pnpm run bundle:build && electron-builder --mac dir --arm64 --publish never",
     "make:mac": "pnpm run bundle:build && electron-builder --mac dmg zip --arm64 --publish never",
     "make:mac:release": "node -e \"for (const name of ['CSC_LINK','CSC_KEY_PASSWORD','APPLE_API_KEY','APPLE_API_KEY_ID','APPLE_API_ISSUER','GIAN_GITHUB_CLIENT_ID']) if (!process.env[name]) throw new Error('Missing release environment: ' + name)\" && pnpm run bundle:build && electron-builder --mac dmg zip --arm64 --config.forceCodeSigning=true --config.mac.notarize=true --config.extraMetadata.gianReleaseChannel=stable --publish never && pnpm run verify:update-artifacts",
@@ -61,6 +61,15 @@
         "to": "runtime",
         "filter": [
           "**/*"
+        ]
+      },
+      {
+        "from": "../proxies/dsh-bridge",
+        "to": "dsh-bridge",
+        "filter": [
+          "package.json",
+          "cordis.patch.yml",
+          "dist/src/**/*.js"
         ]
       }
     ],

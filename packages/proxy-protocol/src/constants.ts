@@ -1,8 +1,22 @@
 export const PROTOCOL_NAME = 'gian.proxy' as const;
-export const PROTOCOL_V1 = '1.0' as const;
-export const SUPPORTED_PROTOCOL_VERSIONS = [PROTOCOL_V1] as const;
+export const PROTOCOL_V2 = '2.0' as const;
+export const SUPPORTED_PROTOCOL_VERSIONS = [PROTOCOL_V2] as const;
 
 export const MAX_NDJSON_LINE_BYTES = 16 * 1024 * 1024;
+export const MAX_DIFF_UTF8_BYTES = 8 * 1024 * 1024;
+export const MAX_ACTIVITY_JSON_BYTES = 1 * 1024 * 1024;
+export const MAX_REQUEST_JSON_BYTES = 1 * 1024 * 1024;
+
+export const JSONRPC_VERSION = '2.0' as const;
+
+export const JSONRPC_ERROR_CODES = {
+  PARSE_ERROR: -32700,
+  INVALID_REQUEST: -32600,
+  METHOD_NOT_FOUND: -32601,
+  INVALID_PARAMS: -32602,
+  INTERNAL_ERROR: -32603,
+  DOMAIN_ERROR: -32000,
+} as const;
 
 export const PROCESS_SCOPES = ['shared', 'session'] as const;
 
@@ -18,37 +32,81 @@ export const CORE_METHODS = [
 ] as const;
 
 export const OPTIONAL_METHOD_CAPABILITIES = {
-  'slash.list': 'slash.list',
+  'catalog.resolve': 'catalog.resolve',
   'session.rename': 'session.rename',
-  'session.native.list': 'session.nativeList',
-  'session.native.delete': 'session.nativeDelete',
+  'session.native.list': 'session.native.list',
+  'session.native.delete': 'session.native.delete',
   'session.replay': 'session.replay',
-  'session.config.set': 'session.config',
+  'sidechat.create': 'sidechat',
+  'sidechat.resume': 'sidechat',
+  'sidechat.close': 'sidechat',
+  'session.fork': 'session.fork',
   'turn.steer': 'turn.steer',
-  'approval.respond': 'approval.relay',
+  'interaction.respond': 'interaction',
 } as const;
 
 export const CAPABILITY_NAMES = [
   'input.localFile',
   'input.localImage',
   'input.skill',
-  ...Object.values(OPTIONAL_METHOD_CAPABILITIES),
+  'catalog.resolve',
+  'session.rename',
+  'session.native.list',
+  'session.native.delete',
+  'session.replay',
+  'sidechat',
+  'session.fork',
+  'session.fork.atTurn',
+  'turn.steer',
+  'interaction',
   'event.reasoning',
   'event.plan',
-  'event.command',
-  'event.status',
-  'event.tool',
   'event.diff',
   'event.usage',
-  'event.agent',
-  'event.notice',
-  'extension.events',
+  'event.step',
+  'event.request',
+  'integration.mcp.streamableHttp',
 ] as const;
 
-export const SESSION_STATUSES = [
+export const CATALOG_ACTION_IDS = [
+  'sidechat.create',
+  'session.fork',
+  'session.fork.atTurn',
+] as const;
+
+export const ACTION_REQUIRED_CAPABILITIES = {
+  'sidechat.create': 'sidechat',
+  'session.fork': 'session.fork',
+  'session.fork.atTurn': 'session.fork.atTurn',
+} as const;
+
+export const CAPABILITY_DEPENDENCIES = {
+  'session.fork': ['session.replay'],
+  'session.fork.atTurn': ['session.fork'],
+} as const;
+
+export const SIDECHAT_ALLOWED_METHODS = [
+  'turn.start',
+  'turn.interrupt',
+  'turn.steer',
+  'interaction.respond',
+  'sidechat.create',
+  'sidechat.resume',
+  'sidechat.close',
+] as const;
+
+export const SIDECHAT_REJECTED_SESSION_METHODS = [
+  'session.get',
+  'session.rename',
+  'session.replay',
+  'session.close',
+  'catalog.resolve',
+] as const;
+
+export const SESSION_STATES = [
   'idle',
   'running',
-  'needs-approval',
+  'waiting_interaction',
   'stale',
   'closed',
   'error',
@@ -57,10 +115,10 @@ export const SESSION_STATUSES = [
 export const CONTENT_KINDS = [
   'text',
   'reasoning',
-  'plan',
-  'command',
   'status',
 ] as const;
+
+export const CONTENT_FORMATS = ['plain', 'markdown'] as const;
 
 export const STOP_REASONS = [
   'completed',
@@ -71,17 +129,104 @@ export const STOP_REASONS = [
   'other',
 ] as const;
 
-export const APPROVAL_OPTION_KINDS = [
-  'allow_once',
-  'allow_session',
-  'allow_always',
-  'reject_once',
-  'reject_always',
+export const CONFIG_BINDINGS = ['session', 'turn'] as const;
+
+export const CONFIG_CONTROLS = ['select', 'boolean', 'number', 'text'] as const;
+
+export const CONFIG_ROLES = [
+  'model',
+  'effort',
+  'fast',
+  'approval_mode',
+  'execution_mode',
 ] as const;
 
-export const PROTOCOL_ERROR_CODES = [
-  'INVALID_REQUEST',
-  'METHOD_NOT_FOUND',
+export const INPUT_TYPES = ['text', 'localFile', 'localImage', 'skill'] as const;
+
+export const INTERACTION_KINDS = [
+  'question',
+  'choice',
+  'confirmation',
+  'permission',
+] as const;
+
+export const INTERACTION_INPUT_TYPES = [
+  'text',
+  'multiline_text',
+  'single_select',
+  'multi_select',
+  'boolean',
+] as const;
+
+export const INTERACTION_ACTION_STYLES = [
+  'primary',
+  'secondary',
+  'danger',
+] as const;
+
+export const INTERACTION_OUTCOMES = [
+  'submitted',
+  'cancelled',
+  'expired',
+  'turn_ended',
+  'runtime_ended',
+] as const;
+
+export const PRESENTATION_TONES = [
+  'neutral',
+  'info',
+  'warning',
+  'danger',
+] as const;
+
+export const ACTIVITY_STATUSES = [
+  'pending',
+  'running',
+  'succeeded',
+  'failed',
+  'cancelled',
+] as const;
+
+export const STEP_STATUSES = ['running', 'completed', 'failed'] as const;
+
+export const REQUEST_REASONS = ['initial', 'resume', 'change'] as const;
+
+export const ACTIVITY_PRESENTATION_TYPES = [
+  'generic',
+  'tool',
+  'command',
+  'search',
+  'file',
+  'agent',
+  'notice',
+] as const;
+
+export const FILE_OPERATIONS = ['read', 'write', 'delete', 'rename'] as const;
+
+export const AGENT_STATES = [
+  'running',
+  'completed',
+  'failed',
+  'interrupted',
+] as const;
+
+export const PLAN_STEP_STATUSES = [
+  'pending',
+  'in_progress',
+  'completed',
+  'failed',
+] as const;
+
+export const DIFF_FILE_STATUSES = [
+  'added',
+  'modified',
+  'deleted',
+  'renamed',
+] as const;
+
+export const NATIVE_HISTORY_MODES = ['none', 'replay'] as const;
+
+export const DOMAIN_CODES = [
   'NOT_INITIALIZED',
   'ALREADY_INITIALIZED',
   'INCOMPATIBLE_PROTOCOL',
@@ -92,11 +237,15 @@ export const PROTOCOL_ERROR_CODES = [
   'SESSION_ERROR',
   'SESSION_BUSY',
   'TURN_NOT_FOUND',
-  'APPROVAL_NOT_FOUND',
-  'APPROVAL_OPTION_NOT_FOUND',
+  'INTERACTION_NOT_FOUND',
+  'INTERACTION_ACTION_NOT_FOUND',
+  'CONFIG_REQUIRED',
+  'CONFIG_VALUE_INVALID',
+  'CONFIG_BINDING_INVALID',
   'NATIVE_SESSION_NOT_FOUND',
+  'SIDECHAT_UNAVAILABLE',
+  'FORK_BOUNDARY_UNAVAILABLE',
   'CONFLICT',
-  'POLICY_NOT_SUPPORTED',
   'RUNTIME_UNAVAILABLE',
   'RUNTIME_AUTH_REQUIRED',
   'RUNTIME_ERROR',
@@ -104,11 +253,36 @@ export const PROTOCOL_ERROR_CODES = [
   'INTERNAL',
 ] as const;
 
+export const FINGERPRINT_EXCLUDED_FIELDS = [
+  'jsonrpc',
+  'eventId',
+  'sessionId',
+  'turnId',
+  'streamId',
+  'replayStreamId',
+  'sequence',
+  'emittedAt',
+] as const;
+
 export type CoreMethod = typeof CORE_METHODS[number];
 export type OptionalMethod = keyof typeof OPTIONAL_METHOD_CAPABILITIES;
 export type ProxyMethod = CoreMethod | OptionalMethod;
 export type CapabilityName = typeof CAPABILITY_NAMES[number];
-export type ProtocolErrorCode = typeof PROTOCOL_ERROR_CODES[number];
+export type CatalogActionId = typeof CATALOG_ACTION_IDS[number];
+export type DomainCode = typeof DOMAIN_CODES[number];
+export type ProtocolErrorCode = DomainCode;
+
+export function isCatalogActionId(value: string): value is CatalogActionId {
+  return (CATALOG_ACTION_IDS as readonly string[]).includes(value);
+}
+
+export function isSidechatAllowedMethod(method: string): boolean {
+  return (SIDECHAT_ALLOWED_METHODS as readonly string[]).includes(method);
+}
+
+export function isSidechatRejectedSessionMethod(method: string): boolean {
+  return (SIDECHAT_REJECTED_SESSION_METHODS as readonly string[]).includes(method);
+}
 
 interface ParsedProtocolVersion {
   major: number;

@@ -3,12 +3,10 @@ import { randomUUID } from 'node:crypto';
 import {
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
-  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import type {
@@ -17,7 +15,6 @@ import type {
   ServerToClientMessage,
 } from '@gian/shared';
 import { ApprovalManager } from '../src/approval/index.js';
-import { locateCcJsonl } from '../src/native/locate-jsonl.js';
 import type { ProxyManager } from '../src/proxy/manager.js';
 import type {
   CreateSessionParams,
@@ -31,7 +28,6 @@ import { openDatabase, type Db } from '../src/storage/db.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 
 class RecordingProxyClient implements ProxyClient {
-  readonly protocolV1?: true;
   readonly createCalls: CreateSessionParams[] = [];
   readonly startTurnCalls: StartTurnParams[] = [];
   readonly setNameCalls: string[] = [];
@@ -42,36 +38,34 @@ class RecordingProxyClient implements ProxyClient {
     readonly executor: Executor,
     private readonly key: string,
     private readonly createGate?: Promise<void>,
-    protocolV1 = false,
-  ) {
-    if (protocolV1) this.protocolV1 = true;
-  }
+  ) {}
+
+  isExited() { return false; }
 
   async initialize() {
-    return { mode: 'spawn' as const, protocolVersion: 'test', methods: [] };
+    return {
+      protocol: { name: 'gian.proxy' as const, version: '2.0' as const },
+      plugin: { id: this.executor, name: this.executor, version: '0.2.0' },
+      process: { scope: this.executor === 'codex' ? 'shared' as const : 'session' as const },
+      capabilities: { 'session.rename': 1 },
+    };
   }
 
-  async capabilities() {
-    return { protocolVersion: 'test', models: [], slashCommands: [] };
-  }
-
-  async listSlashCommands() {
-    return { commands: [] };
+  async catalog() {
+    return { catalogRevision: 'test', input: [{ type: 'text' as const }], configOptions: [], slashCommands: [] };
   }
 
   async createSession(params: CreateSessionParams) {
     this.createCalls.push(params);
     await this.createGate;
     this.bound = true;
-    const nativeSessionId = this.executor === 'claude'
-      ? params.claudeSessionId ?? `claude-native-${this.key}`
-      : params.threadId ?? `codex-native-${this.key}`;
+    const nativeSessionId = params.nativeSessionId
+      ?? (this.executor === 'claude' ? `claude-native-${this.key}` : `codex-native-${this.key}`);
     return {
       session: {
         id: `proxy-${this.key}`,
         cwd: params.cwd,
-        model: params.model ?? null,
-        status: 'idle' as const,
+        state: 'idle' as const,
         createdAt: '2026-08-08T00:00:00.000Z',
         updatedAt: '2026-08-08T00:00:00.000Z',
         lastError: null,
@@ -86,8 +80,7 @@ class RecordingProxyClient implements ProxyClient {
       session: {
         id: `proxy-${this.key}`,
         cwd: '/workspace',
-        model: null,
-        status: 'running' as const,
+        state: 'running' as const,
         createdAt: '2026-08-08T00:00:00.000Z',
         updatedAt: '2026-08-08T00:00:00.000Z',
         lastError: null,
@@ -102,7 +95,7 @@ class RecordingProxyClient implements ProxyClient {
   }
 
   async interruptTurn() {}
-  async respondApproval() {}
+  async respondInteraction() {}
   async closeSession() {}
   async shutdown() {}
   forceKill() {}
@@ -126,13 +119,12 @@ class RecordingProxyManager {
 
   constructor(
     private readonly createGate?: Promise<void>,
-    private readonly protocolV1 = false,
   ) {}
 
   async getOrCreate(key: string, executor: Executor): Promise<ProxyClient> {
     let client = this.clients.get(key);
     if (!client) {
-      client = new RecordingProxyClient(executor, key, this.createGate, this.protocolV1);
+      client = new RecordingProxyClient(executor, key, this.createGate);
       this.clients.set(key, client);
     }
     return client;
@@ -213,28 +205,18 @@ test('SESSION-NAME-001: Claude first turn carries the latest Gian name and renam
     assert.equal(client.startTurnCalls.length, 0, 'session creation must not spend a Claude turn');
 
     sessions.renameSession(session.id, '  Latest\nClaude  ');
+    await waitFor(() => client.setNameCalls.includes('Latest\nClaude'));
     await sessions.sendMessage(session.id, 'first turn');
     assert.equal(client.startTurnCalls.length, 1);
-    assert.equal(client.startTurnCalls[0]!.displayName, 'Latest\nClaude');
-
-    const jsonl = locateCcJsonl(session.native_session_id!, workspacePath);
-    assert.ok(jsonl);
-    mkdirSync(dirname(jsonl!), { recursive: true });
-    writeFileSync(jsonl!, '{"type":"user","message":{"content":"hello"}}\n', 'utf8');
+    assert.deepEqual(client.setNameCalls, ['Initial Claude', 'Latest\nClaude']);
 
     sessions.renameSession(session.id, 'Renamed\tClaude');
-    await waitFor(() => readFileSync(jsonl!, 'utf8').includes('custom-title'));
-    const title = JSON.parse(readFileSync(jsonl!, 'utf8').trim().split('\n').at(-1)!);
-    assert.deepEqual(title, {
-      type: 'custom-title',
-      customTitle: 'Renamed Claude',
-      sessionId: session.native_session_id,
-    });
+    await waitFor(() => client.setNameCalls.includes('Renamed\tClaude'));
 
-    const beforeBlank = readFileSync(jsonl!, 'utf8');
+    const beforeBlank = client.setNameCalls.slice();
     sessions.renameSession(session.id, '   ');
     await new Promise(resolve => setTimeout(resolve, 0));
-    assert.equal(readFileSync(jsonl!, 'utf8'), beforeBlank, 'blank names never clear native titles');
+    assert.deepEqual(client.setNameCalls, beforeBlank, 'blank names never clear native titles');
   } finally {
     db.close();
     if (previousHome === undefined) delete process.env.HOME;
@@ -243,12 +225,12 @@ test('SESSION-NAME-001: Claude first turn carries the latest Gian name and renam
   }
 });
 
-test('SESSION-NAME-001: Claude gian.proxy/1 delegates native naming to the plugin', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'gian-session-name-claude-v1-'));
+test('SESSION-NAME-001: Claude gian.proxy/2 delegates native naming to the plugin', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-session-name-claude-v2-'));
   const workspacePath = join(dir, 'workspace');
   mkdirSync(workspacePath, { recursive: true });
   const db = openDatabase(dir);
-  const proxies = new RecordingProxyManager(undefined, true);
+  const proxies = new RecordingProxyManager();
   const sessions = makeManager(db, dir, proxies);
   try {
     const workspaceId = seedWorkspace(db, workspacePath);
@@ -302,7 +284,7 @@ test('SESSION-NAME-001: Codex create, active rename, and rehydrate all route thr
     const resumedManager = makeManager(db, dir, resumedProxies);
     await resumedManager.listSessionSlashCommands(session.id);
     const resumedClient = resumedProxies.client(session.id);
-    assert.equal(resumedClient.createCalls[0]!.threadId, session.native_session_id);
+    assert.equal(resumedClient.createCalls[0]!.nativeSessionId, session.native_session_id);
     assert.deepEqual(resumedClient.setNameCalls, ['Codex Active']);
   } finally {
     try { db.close(); } catch { /* already closed between host generations */ }

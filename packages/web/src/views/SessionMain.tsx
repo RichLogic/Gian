@@ -1,19 +1,26 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ApprovalDecision,
   ApprovalMode,
+  ConfigValue,
   NativeConfigValue,
   Session,
   ThinkingEffort,
   Workspace,
 } from '@gian/shared';
 import { Composer } from '../components/Composer.js';
+import { loadSessionTrace } from '../api.js';
 import { GitBadge } from '../components/GitBadge.js';
 import { PlanChip } from '../components/PlanChip.js';
 import { QueueList } from '../components/QueueList.js';
+import { ForkOriginBanner } from '../components/ForkControls.js';
+import type { ActionControlState } from '../components/action-gating.js';
 import { TurnDiffChip } from '../components/TurnDiffChip.js';
 import { UnderbarPanelGroup } from '../components/UnderbarPanelGroup.js';
 import { useT } from '../i18n/index.js';
+import { deriveTraceSnapshot } from '../trace/derive.js';
+import { TraceView } from '../trace/TraceView.js';
+import type { TraceSnapshot } from '../trace/types.js';
 import { Transcript } from '../transcript/Transcript.js';
 import {
   TranscriptMinimap,
@@ -51,7 +58,7 @@ export interface SessionMainProps {
   onApprove: (
     approvalId: string,
     decision: ApprovalDecision,
-    answers?: Record<string, string | string[]>,
+    answers?: Record<string, string | boolean | string[]>,
     context?: ApprovalActionContext,
   ) => void;
   onQueueAdd: (
@@ -73,6 +80,7 @@ export interface SessionMainProps {
   onSetEffort: (effort: ThinkingEffort | null) => void;
   onSetServiceTier: (tier: 'fast' | null) => void;
   onSetNativeConfig: (configId: string, value: NativeConfigValue) => void;
+  onSetTurnConfig?: (optionId: string, value: ConfigValue) => void;
   onDelete: () => void;
   onReopen?: () => void;
   onShowChanges: () => void;
@@ -80,6 +88,14 @@ export interface SessionMainProps {
   onShowLastTurnChanges: (turn: number, path: string) => void;
   workingTreeId: string | null;
   branch: string | null;
+  /** Session Fork standard controls (proposal §10.6): `forkAtTurnControl`
+   *  gates the per-turn transcript affordance (`session.fork.atTurn`) —
+   *  always rendered when provided, greyed never hidden (§15). The head-fork
+   *  entry lives in the session dropdown menu (PathBreadcrumb), not here.
+   *  `originParentName` is the caller-resolved parent session name for the
+   *  origin banner. */
+  forkAtTurnControl?: ActionControlState | null;
+  originParentName?: string;
 }
 
 export function SessionMain({
@@ -111,12 +127,15 @@ export function SessionMain({
   onSetEffort,
   onSetServiceTier,
   onSetNativeConfig,
+  onSetTurnConfig,
   onDelete,
   onReopen,
   onShowChanges,
   onShowLastTurnChanges,
   workingTreeId,
   branch,
+  forkAtTurnControl,
+  originParentName,
 }: SessionMainProps) {
   const t = useT();
   const terminal = session.worktree_outcome !== null;
@@ -126,6 +145,56 @@ export function SessionMain({
   const sessionCompleted = session.completed_at != null;
   const [gitRefreshKey, setGitRefreshKey] = useState(0);
   const previousPendingRef = useRef(pending);
+
+  // Chat / Trace tab. Core's persisted projection is authoritative because it
+  // contains protocol-only step/request evidence that Transcript cannot carry.
+  // The local projection keeps older/offline sessions readable while the Host
+  // snapshot is loading or temporarily unavailable.
+  const [sessionView, setSessionView] = useState<'chat' | 'trace'>('chat');
+  const [hostTraceSnapshot, setHostTraceSnapshot] = useState<TraceSnapshot | null>(null);
+  const running = pending || session.status === 'running' || session.status === 'pending';
+  const derivedTraceSnapshot = useMemo(
+    () => deriveTraceSnapshot(items, session.id, {
+      partial: running || hydrated === false,
+      generatedAt: new Date().toISOString(),
+    }),
+    [items, session.id, running, hydrated],
+  );
+  const traceSnapshot = useMemo<TraceSnapshot>(() => {
+    if (hostTraceSnapshot?.sessionId !== session.id) return derivedTraceSnapshot;
+    return {
+      ...hostTraceSnapshot,
+      partial: hostTraceSnapshot.partial || running || hydrated === false,
+    };
+  }, [derivedTraceSnapshot, hostTraceSnapshot, hydrated, running, session.id]);
+
+  useEffect(() => {
+    setHostTraceSnapshot(null);
+  }, [session.id]);
+
+  useEffect(() => {
+    if (sessionView !== 'trace') return;
+    const controller = new AbortController();
+    let refreshTimer: number | undefined;
+
+    const refresh = async () => {
+      try {
+        const snapshot = await loadSessionTrace(session.id, controller.signal);
+        if (!controller.signal.aborted) setHostTraceSnapshot(snapshot);
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.warn(`[trace] failed to load session ${session.id}:`, error);
+        }
+      }
+    };
+
+    void refresh();
+    if (running) refreshTimer = window.setInterval(() => { void refresh(); }, 500);
+    return () => {
+      controller.abort();
+      if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
+    };
+  }, [hydrated, items, running, session.id, sessionView]);
 
   useEffect(() => {
     if (previousPendingRef.current && !pending) {
@@ -137,6 +206,20 @@ export function SessionMain({
   return (
     <main className="main">
       <div className="main-head session-chat-head">
+        <div className="segm session-view-tabs" data-testid="session-view-tabs">
+          <button
+            className={`segm-item ${sessionView === 'chat' ? 'active' : ''}`}
+            onClick={() => setSessionView('chat')}
+          >
+            {t('trace.tab.chat')}
+          </button>
+          <button
+            className={`segm-item ${sessionView === 'trace' ? 'active' : ''}`}
+            onClick={() => setSessionView('trace')}
+          >
+            {t('trace.tab.trace')}
+          </button>
+        </div>
         <div className="main-head-r">
           <GitBadge
             workingTreeId={workingTreeId}
@@ -146,6 +229,12 @@ export function SessionMain({
           />
         </div>
       </div>
+      {/* Fork lineage (proposal §10.6): a forked session is a normal
+          persistent session — the banner only names its parent and boundary.
+          No auto-switch, no source-session side effects. */}
+      {session.origin?.kind === 'fork' && (
+        <ForkOriginBanner origin={session.origin} parentName={originParentName} />
+      )}
       {terminal && (
         <div className={`session-banner ${session.worktree_outcome}`}>
           <span>
@@ -171,20 +260,27 @@ export function SessionMain({
         </div>
       )}
       <div className="main-scroll">
-        <Transcript
-          key={session.id}
-          items={items}
-          hydrated={hydrated}
-          hasOlder={history?.hasMore ?? false}
-          loadingOlder={history?.loadingOlder ?? false}
-          onLoadOlder={onLoadOlder}
-          historyError={history?.error}
-          onRetryHistory={onRetryHistory}
-          pending={pending || session.status === 'running' || session.status === 'pending'}
-          onApprove={onApprove}
-        />
+        {sessionView === 'trace' ? (
+          <TraceView snapshot={traceSnapshot} />
+        ) : (
+          <Transcript
+            key={session.id}
+            items={items}
+            hydrated={hydrated}
+            hasOlder={history?.hasMore ?? false}
+            loadingOlder={history?.loadingOlder ?? false}
+            onLoadOlder={onLoadOlder}
+            historyError={history?.error}
+            onRetryHistory={onRetryHistory}
+            pending={running}
+            onApprove={onApprove}
+            forkAtTurn={forkAtTurnControl
+              ? { sourceSessionId: session.id, state: forkAtTurnControl }
+              : null}
+          />
+        )}
       </div>
-      <TranscriptMinimap items={items} />
+      {sessionView === 'chat' && <TranscriptMinimap items={items} />}
       <QueueList
         sessionId={session.id}
         queue={queue}
@@ -224,6 +320,7 @@ export function SessionMain({
         onSetEffort={onSetEffort}
         onSetServiceTier={onSetServiceTier}
         onSetNativeConfig={onSetNativeConfig}
+        onSetTurnConfig={onSetTurnConfig}
         disabled={pending || terminal || sessionCompleted}
         running={isTurnRunning(session.status, pending)}
         disabledSubmitBehavior={terminal || sessionCompleted ? 'block' : 'queue'}

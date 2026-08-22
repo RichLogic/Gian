@@ -46,4 +46,59 @@ describe('parseApprovalRequested', () => {
     const item = parseApprovalRequested(envelope({ title: 'Review request' }));
     expect(item?.cmd).toBe('Review request');
   });
+
+  it('passes through gian.proxy/2.0 actions and inputs', () => {
+    const item = parseApprovalRequested(envelope({
+      subject: 'git status --short',
+      actions: [
+        { id: 'allow_once', label: 'Allow once', style: 'primary' },
+        { id: 'reject_once', label: 'Reject', style: 'danger' },
+      ],
+      inputs: [{
+        id: 'reason',
+        type: 'text',
+        label: 'Reason',
+        required: true,
+      }],
+    }));
+    expect(item?.actions).toEqual([
+      { id: 'allow_once', label: 'Allow once', style: 'primary' },
+      { id: 'reject_once', label: 'Reject', style: 'danger' },
+    ]);
+    expect(item?.inputs).toEqual([{
+      id: 'reason',
+      type: 'text',
+      label: 'Reason',
+      required: true,
+    }]);
+  });
+
+  it('passes through gian.proxy/2.0 interactionKind and tone', () => {
+    const item = parseApprovalRequested(envelope({
+      interactionKind: 'confirmation',
+      tone: 'danger',
+    }));
+    expect(item?.interactionKind).toBe('confirmation');
+    expect(item?.tone).toBe('danger');
+  });
+
+  it('drops unknown interactionKind and tone values', () => {
+    const item = parseApprovalRequested(envelope({
+      interactionKind: 'widget',
+      tone: 'blink',
+    }));
+    expect(item && 'interactionKind' in item).toBe(false);
+    expect(item && 'tone' in item).toBe(false);
+    expect(item?.interactionKind).toBeUndefined();
+    expect(item?.tone).toBeUndefined();
+  });
+
+  it('marks items whose cmd came from a context subject', () => {
+    const withSubject = parseApprovalRequested(envelope({ subject: 'Bash\nnpm install' }));
+    expect(withSubject?.hasSubject).toBe(true);
+    expect(withSubject?.cmd).toBe('Bash\nnpm install');
+
+    const withoutSubject = parseApprovalRequested(envelope({}));
+    expect(withoutSubject && 'hasSubject' in withoutSubject).toBe(false);
+  });
 });

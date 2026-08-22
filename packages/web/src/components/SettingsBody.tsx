@@ -43,6 +43,7 @@ import {
   useShortcuts,
 } from '../shortcut-prefs.js';
 import { desktopBridge } from '../desktop-bridge.js';
+import { releaseAgents } from '../release-executors.js';
 import { confirm, toast } from '../feedback.js';
 import { agentEntityKey } from '../operations/agents.js';
 import { AUTH_ENTITY_KEY } from '../operations/auth.js';
@@ -864,7 +865,7 @@ function AgentInstallBlock() {
   async function refresh() {
     setLoading(true);
     try {
-      setAgents(await loadAgents({ refresh: true }));
+      setAgents(releaseAgents(await loadAgents({ refresh: true })));
       setError('');
     } catch (value) {
       setError(value instanceof Error ? value.message : String(value));

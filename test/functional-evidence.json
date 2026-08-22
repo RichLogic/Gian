@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "inventory": "docs/quality/functional-test-inventory-2026-08-10.md",
+  "domains": [
+    {
+      "id": "desktop",
+      "prefixes": ["FT-DESK"],
+      "evidence": ["packages/desktop/test/*.test.ts", "packages/desktop/test/electron-smoke.mjs", "scripts/run-packaged-app-smoke.mjs"]
+    },
+    {
+      "id": "auth-onboarding",
+      "prefixes": ["FT-AUTH", "FT-ONB"],
+      "evidence": ["packages/host/test/auth.test.ts", "packages/host/test/onboarding-state.test.ts", "packages/host/test/onboarding-pure.test.ts", "packages/host/test/agent-instruction-targets.test.ts", "packages/desktop/test/github-auth.test.ts", "packages/web/test/app-auth.test.tsx", "packages/web/test/github-login-view.test.tsx", "packages/web/test/onboarding-view.test.tsx", "scripts/run-packaged-app-smoke.mjs"]
+    },
+    {
+      "id": "agent-runtime",
+      "prefixes": ["FT-AGENT"],
+      "evidence": ["packages/host/test/agent-*.test.ts", "packages/host/test/*runtime*.test.ts", "packages/host/test/kimi-proxy-manager.test.ts", "packages/host/test/compare-kimi-versions.test.ts", "packages/host/test/proxy-shutdown-state.test.ts", "packages/proxies/cc-proxy/test/*.test.ts", "packages/proxies/codex-proxy/test/*.test.ts", "packages/proxies/kimi-proxy/test/*.test.ts"]
+    },
+    {
+      "id": "workspace",
+      "prefixes": ["FT-WS"],
+      "evidence": ["packages/host/test/workspace-*.test.ts", "packages/host/test/command-error-message.test.ts", "packages/host/test/expand-home.test.ts", "packages/host/test/map-concurrency.test.ts", "packages/host/test/err-010-workspace-delete.test.ts", "packages/web/test/*workspace*.test.ts*", "e2e/specs/02-workspace-and-session.spec.ts", "e2e/specs/08-workspace-management.spec.ts"]
+    },
+    {
+      "id": "tasks",
+      "prefixes": ["FT-TASK"],
+      "evidence": ["packages/host/test/subtask-lifecycle.test.ts", "packages/host/test/task-session-archive.test.ts", "packages/host/test/skill-templates.test.ts", "packages/web/test/tasks-view.test.tsx", "packages/web/test/subtasks-for.test.ts", "e2e/specs/05-tasks.spec.ts"]
+    },
+    {
+      "id": "sessions",
+      "prefixes": ["FT-SES"],
+      "evidence": ["packages/host/test/session-*.test.ts", "packages/host/test/auto-title.test.ts", "packages/host/test/title-sanitize.test.ts", "packages/host/test/fork-inherit-config.test.ts", "packages/host/test/executor-config.test.ts", "packages/host/test/queue-and-busy.test.ts", "packages/host/test/turn-runtime.test.ts", "packages/web/test/*session*.test.ts*", "packages/web/test/fork-presentation.test.ts", "e2e/specs/02-workspace-and-session.spec.ts"]
+    },
+    {
+      "id": "composer-queue-approval-question",
+      "prefixes": ["FT-COMP", "FT-QUEUE", "FT-APR", "FT-Q"],
+      "evidence": ["packages/host/test/queue-and-busy.test.ts", "packages/host/test/sec-012-one-shot-bypass.test.ts", "packages/web/test/*composer*.test.ts*", "packages/web/test/*queue*.test.ts*", "packages/web/test/*approval*.test.ts*", "e2e/specs/11-queue.spec.ts"]
+    },
+    {
+      "id": "transcript-events-history",
+      "prefixes": ["FT-EVT", "FT-HIST"],
+      "evidence": ["packages/host/test/event-*.test.ts", "packages/host/test/history-canonicalize.test.ts", "packages/host/test/history-store.test.ts", "packages/host/test/compact-history-envelopes.test.ts", "packages/host/test/normalize-cc-parsers.test.ts", "packages/host/test/project-notification-input.test.ts", "packages/web/test/*transcript*.test.ts*", "packages/web/test/history-hydrated.test.ts", "packages/web/test/format-helpers.test.ts", "packages/web/test/gfm-tables.test.ts", "e2e/specs/04-events-smoke.spec.ts"]
+    },
+    {
+      "id": "provider-protocol",
+      "prefixes": ["FT-PROTO", "FT-CC", "FT-CODEX", "FT-KIMI", "FT-PROVIDER"],
+      "evidence": ["packages/proxy-protocol/test/*.test.ts", "packages/host/test/normalize-protocol-v1.test.ts", "packages/host/test/parse-codex-jsonl.test.ts", "packages/host/test/protocol-*.test.ts", "packages/host/test/sidechat-fork-*.test.ts", "packages/host/test/sidechat-state-machine.test.ts", "packages/proxies/cc-proxy/test/*.test.ts", "packages/proxies/codex-proxy/test/*.test.ts", "packages/proxies/kimi-proxy/test/*.test.ts", "scripts/run-*-canary.test.mjs"]
+    },
+    {
+      "id": "websocket-operations",
+      "prefixes": ["FT-WSOCK"],
+      "evidence": ["packages/host/test/ws-*.test.ts", "packages/web/test/*socket*.test.ts*", "packages/web/test/operation-*.test.ts*", "packages/web/test/entity-keys.test.ts", "packages/web/test/overlay-apply.test.ts", "packages/web/test/owner-keys.test.ts", "packages/web/test/ws-*.test.ts*"]
+    },
+    {
+      "id": "files-attachments-open",
+      "prefixes": ["FT-FILE", "FT-ATT", "FT-OPEN"],
+      "evidence": ["packages/host/test/attachments-path.test.ts", "packages/host/test/bounded-file.test.ts", "packages/host/test/file-*.test.ts", "packages/host/test/input-items.test.ts", "packages/host/test/safe-path.test.ts", "packages/host/test/open-*.test.ts", "packages/web/test/*attachment*.test.ts*", "packages/web/test/*file*.test.ts*", "packages/web/test/insert-preview-tab.test.ts", "packages/web/test/screenshot-scope.test.ts", "scripts/run-provider-attachment-canary.test.mjs", "e2e/specs/06-raw-preview.spec.ts"]
+    },
+    {
+      "id": "git-worktree-history",
+      "prefixes": ["FT-GIT", "FT-WT", "FT-HGIT"],
+      "evidence": ["packages/host/test/git-*.test.ts", "packages/host/test/working-tree-*.test.ts", "packages/host/test/ext-tree-id.test.ts", "packages/web/test/*git*.test.ts*", "packages/web/test/*history*.test.ts*", "e2e/specs/08-changes-review.spec.ts", "e2e/specs/09-worktree-git.spec.ts"]
+    },
+    {
+      "id": "terminal",
+      "prefixes": ["FT-TERM"],
+      "evidence": ["packages/host/test/term-*.test.ts", "packages/web/test/*terminal*.test.ts*", "e2e/specs/10-workbench-terminal.spec.ts"]
+    },
+    {
+      "id": "native-sessions",
+      "prefixes": ["FT-NATIVE"],
+      "evidence": ["packages/host/test/native-*.test.ts", "packages/host/test/events-lifecycle.test.ts", "packages/host/test/locate-jsonl-pure.test.ts", "packages/host/test/parse-cc-line-pure.test.ts", "packages/web/test/native-sessions.test.tsx", "e2e/specs/10-native-sessions.spec.ts"]
+    },
+    {
+      "id": "settings-navigation-experience",
+      "prefixes": ["FT-SET", "FT-NAV", "FT-NOTIFY", "FT-UX"],
+      "evidence": ["packages/web/test/*settings*.test.ts*", "packages/web/test/*navigation*.test.ts*", "packages/web/test/*notification*.test.ts*", "packages/web/test/clamp-panel.test.ts", "packages/web/test/zoom-normalize.test.ts", "packages/web/test/shortcut-helpers.test.ts", "packages/desktop/test/attention-client.test.ts", "packages/desktop/test/native-notifications.test.ts", "packages/host/test/attention-broadcast.test.ts", "packages/host/test/ws-broadcast.test.ts", "e2e/specs/10-ui-regression.spec.ts"]
+    },
+    {
+      "id": "storage-migration-performance",
+      "prefixes": ["FT-DATA", "FT-PERF"],
+      "evidence": ["packages/host/test/config-sanitize-pure.test.ts", "packages/host/test/storage.test.ts", "packages/host/test/storage-paths.test.ts", "packages/host/test/maintenance-lock-path.test.ts", "packages/host/test/event-store.test.ts", "packages/host/test/event-storage-v3-helpers.test.ts", "packages/host/test/event-storage-v3-migrator.test.ts", "packages/host/test/history-store.test.ts", "packages/host/test/working-tree-refresh.test.ts", "scripts/run-packaged-app-smoke.mjs"]
+    },
+    {
+      "id": "security",
+      "prefixes": ["FT-SEC"],
+      "evidence": ["packages/host/test/attachments-path.test.ts", "packages/host/test/safe-path.test.ts", "packages/host/test/sec-*.test.ts", "packages/host/test/redact.test.ts", "packages/host/test/desktop-boundary.test.ts", "packages/web/test/sec-012-composer-bypass.test.tsx", "e2e/specs/06-one-shot-bypass.spec.ts"]
+    },
+    {
+      "id": "quality-release-canary",
+      "prefixes": ["FT-QA", "FT-UPDATE", "FT-CANARY"],
+      "evidence": ["scripts/*quality*.test.mjs", "scripts/run-e2e.test.mjs", "scripts/e2e-janitor.test.mjs", "scripts/run-*-canary.test.mjs", "scripts/verify-update-artifacts.test.mjs", "packages/desktop/test/app-updater.test.ts", "packages/desktop/test/managed-host-shutdown.test.ts", "packages/desktop/test/electron-smoke.mjs", "scripts/run-packaged-app-smoke.mjs"]
+    }
+  ]
+}

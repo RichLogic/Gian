@@ -6,9 +6,51 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { AgentManager, parseIndependentProxyRelease } from '../src/agents/manager.js';
+import {
+  AgentManager,
+  parseIndependentProxyRelease,
+  recommendedCliVersionFromManifest,
+} from '../src/agents/manager.js';
 
 const execFileAsync = promisify(execFile);
+
+test('recommended CLI version prefers the installed Proxy manifest over the Host fallback', () => {
+  assert.equal(recommendedCliVersionFromManifest(null, 'grok'), '1.0.4');
+  assert.equal(recommendedCliVersionFromManifest({
+    schemaVersion: 1,
+    id: 'grok',
+    version: '0.1.0',
+    entry: 'proxy.mjs',
+  }, 'grok'), '1.0.4');
+  assert.equal(recommendedCliVersionFromManifest({
+    schemaVersion: 2,
+    id: 'grok',
+    displayName: 'Grok Build',
+    pluginVersion: '0.2.2',
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
+    process: { scope: 'session' },
+    runtime: {
+      id: 'grok',
+      displayName: 'Grok Build CLI',
+      recommendedCliVersion: '1.0.4',
+    },
+  }, 'grok'), '1.0.4');
+  assert.equal(recommendedCliVersionFromManifest({
+    schemaVersion: 2,
+    id: 'grok',
+    displayName: 'Grok Build',
+    pluginVersion: '0.2.2',
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
+    process: { scope: 'session' },
+    runtime: {
+      id: 'grok',
+      displayName: 'Grok Build CLI',
+      recommendedCliVersion: '9.9.9',
+    },
+  }, 'grok'), '9.9.9');
+});
 
 test('independent Proxy releases select the highest stable plugin SemVer', () => {
   assert.deepEqual(parseIndependentProxyRelease([
@@ -69,7 +111,7 @@ test('agent manager detects configured official CLIs and development proxies', a
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy },
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy },
     environmentCliPaths: bins,
     homeDir: join(root, 'home'),
     pathEnv: '',
@@ -81,11 +123,53 @@ test('agent manager detects configured official CLIs and development proxies', a
     ['codex', true, '0.146.0'],
     ['kimi', true, '0.31.1'],
     ['grok', true, '0.1.42'],
+    ['dsh', false, null],
   ]);
 
   await executable(bins.codex, 'codex-cli 0.147.0');
   assert.equal((await manager.status('codex')).cli.version, '0.146.0');
   assert.equal((await manager.status('codex', true)).cli.version, '0.147.0');
+  assert.equal((await manager.status('grok')).cli.recommendedVersion, '1.0.4');
+});
+
+test('managed Grok Proxy recommended CLI version comes from the plugin manifest', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-grok-recommended-cli-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const grok = join(root, 'bin', 'grok');
+  await executable(grok, 'grok 1.0.4');
+
+  const proxyDir = join(root, 'data', 'plugins', 'grok', '0.2.2');
+  await mkdir(proxyDir, { recursive: true });
+  await writeFile(join(proxyDir, 'proxy.mjs'), selfTestingProxyV2('grok', '0.2.2'));
+  await writeFile(join(proxyDir, 'manifest.json'), JSON.stringify({
+    schemaVersion: 2,
+    id: 'grok',
+    displayName: 'Grok Build',
+    pluginVersion: '0.2.2',
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
+    process: { scope: 'session' },
+    runtime: {
+      id: 'grok',
+      displayName: 'Grok Build CLI',
+      recommendedCliVersion: '1.0.4',
+    },
+  }));
+  await symlink('0.2.2', join(root, 'data', 'plugins', 'grok', 'current'), 'dir');
+
+  const manager = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.4.5',
+    managedProxies: true,
+    independentProxyReleases: true,
+    environmentCliPaths: { grok },
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+
+  const status = await manager.status('grok');
+  assert.equal(status.cli.version, '1.0.4');
+  assert.equal(status.cli.recommendedVersion, '1.0.4');
 });
 
 test('fresh managed profile exposes onboarding before any Proxy is installed', async t => {
@@ -124,7 +208,7 @@ test('agent manager validates and persists a user CLI path', async t => {
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy },
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy },
     homeDir: join(root, 'home'),
     pathEnv: '',
   } as const;
@@ -152,7 +236,7 @@ test('agent manager migrates and persists Proxy-owned session defaults', async t
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy },
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy },
     homeDir: join(root, 'home'),
     pathEnv: '',
     legacyProxyDefaults: {
@@ -183,12 +267,15 @@ test('agent manager verifies and atomically activates a GitHub proxy archive', {
   t.after(() => rm(root, { recursive: true, force: true }));
   const packageDir = join(root, 'fixture');
   await mkdir(packageDir, { recursive: true });
-  await writeFile(join(packageDir, 'proxy.mjs'), selfTestingProxy('claude'));
+  await writeFile(join(packageDir, 'proxy.mjs'), selfTestingProxyV2('claude', '0.1.0'));
   await writeFile(join(packageDir, 'manifest.json'), JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: 'claude',
-    version: '0.1.0',
+    displayName: 'Claude Code',
+    pluginVersion: '0.1.0',
     entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
+    process: { scope: 'session' },
   }));
   const archivePath = join(root, 'proxy.tar.gz');
   await execFileAsync('/usr/bin/tar', ['-czf', archivePath, '-C', packageDir, '.']);
@@ -238,21 +325,24 @@ test('agent manager verifies and atomically activates a GitHub proxy archive', {
   );
 });
 
-test('agent manager activates a manifest v2 bundle under its independent plugin version', {
+test('agent manager activates the DSH alias with its reverse-domain manifest identity', {
   skip: process.platform !== 'darwin' || process.arch !== 'arm64',
 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-agent-proxy-v2-install-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const packageDir = join(root, 'fixture');
   await mkdir(packageDir, { recursive: true });
-  await writeFile(join(packageDir, 'proxy.mjs'), selfTestingProxyV2('codex', '7.4.2'));
+  await writeFile(
+    join(packageDir, 'proxy.mjs'),
+    selfTestingProxyV2('ai.deepseek.harness', '7.4.2'),
+  );
   const manifest = {
     schemaVersion: 2,
-    id: 'codex',
-    displayName: 'Codex',
+    id: 'ai.deepseek.harness',
+    displayName: 'DeepSeek Harness',
     pluginVersion: '7.4.2',
     entry: 'proxy.mjs',
-    protocol: { name: 'gian.proxy', range: '>=1.0 <2.0' },
+    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
     process: { scope: 'shared' },
   };
   const manifestBody = Buffer.from(`${JSON.stringify(manifest)}\n`);
@@ -261,7 +351,7 @@ test('agent manager activates a manifest v2 bundle under its independent plugin 
   await execFileAsync('/usr/bin/tar', ['-czf', archivePath, '-C', packageDir, '.']);
   const archive = await readFile(archivePath);
   const checksum = createHash('sha256').update(archive).digest('hex');
-  const assetName = 'gian-proxy-codex-7.4.2-darwin-arm64.tar.gz';
+  const assetName = 'gian-proxy-dsh-7.4.2-darwin-arm64.tar.gz';
   const checksumBody = Buffer.from(`${checksum}  ${assetName}\n`);
   const checksumDigest = createHash('sha256').update(checksumBody).digest('hex');
   const manifestName = `${assetName}.manifest.json`;
@@ -269,9 +359,9 @@ test('agent manager activates a manifest v2 bundle under its independent plugin 
   const incompatibleManifestBody = Buffer.from(`${JSON.stringify({
     ...manifest,
     pluginVersion: '9.0.0',
-    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
+    protocol: { name: 'gian.proxy', range: '>=3.0 <4.0' },
   })}\n`);
-  const incompatibleManifestName = 'gian-proxy-codex-9.0.0-darwin-arm64.tar.gz.manifest.json';
+  const incompatibleManifestName = 'gian-proxy-dsh-9.0.0-darwin-arm64.tar.gz.manifest.json';
   const incompatibleManifestDigest = createHash('sha256')
     .update(incompatibleManifestBody)
     .digest('hex');
@@ -289,18 +379,18 @@ test('agent manager activates a manifest v2 bundle under its independent plugin 
       if (url.endsWith('/releases?per_page=100')) {
         return new Response(JSON.stringify([
           {
-            tag_name: 'proxy-codex-v9.0.0', draft: false, prerelease: false,
+            tag_name: 'proxy-dsh-v9.0.0', draft: false, prerelease: false,
             assets: [{ name: incompatibleManifestName, digest: `sha256:${incompatibleManifestDigest}` }],
           },
           {
-            tag_name: 'proxy-codex-v7.4.2', draft: false, prerelease: false,
+            tag_name: 'proxy-dsh-v7.4.2', draft: false, prerelease: false,
             assets: [{ name: manifestName, digest: `sha256:${manifestDigest}` }],
           },
         ]));
       }
       if (url.startsWith('https://api.github.com/')) {
         return new Response(JSON.stringify({
-          tag_name: 'proxy-codex-v7.4.2',
+          tag_name: 'proxy-dsh-v7.4.2',
           assets: [
             { name: assetName, digest: `sha256:${checksum}` },
             { name: `${assetName}.sha256`, digest: `sha256:${checksumDigest}` },
@@ -315,20 +405,20 @@ test('agent manager activates a manifest v2 bundle under its independent plugin 
     proxyActivationProbe: async input => { probes.push(input); },
   });
 
-  const result = await manager.installProxy('codex');
+  const result = await manager.installProxy('dsh');
   assert.equal(result.agent.proxy.state, 'ready');
   assert.equal(result.agent.proxy.version, '7.4.2');
-  assert.equal(await readlink(join(root, 'data', 'plugins', 'codex', 'current')), '7.4.2');
+  assert.equal(await readlink(join(root, 'data', 'plugins', 'dsh', 'current')), '7.4.2');
   const installedEntry = await realpath(join(
     root,
     'data',
     'plugins',
-    'codex',
+    'dsh',
     '7.4.2',
     'proxy.mjs',
   ));
   assert.deepEqual(probes, [{
-    id: 'codex',
+    id: 'dsh',
     version: '7.4.2',
     entryPath: installedEntry,
     protocol: 'gian.proxy',
@@ -413,12 +503,15 @@ test('agent manager keeps the base Proxy ready for an app-only hotfix', async t 
 
   const proxyDir = join(root, 'data', 'plugins', 'claude', '0.2.1');
   await mkdir(proxyDir, { recursive: true });
-  await writeFile(join(proxyDir, 'proxy.mjs'), selfTestingProxy('claude'));
+  await writeFile(join(proxyDir, 'proxy.mjs'), selfTestingProxyV2('claude', '0.2.1'));
   await writeFile(join(proxyDir, 'manifest.json'), JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: 'claude',
-    version: '0.2.1',
+    displayName: 'Claude Code',
+    pluginVersion: '0.2.1',
     entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
+    process: { scope: 'session' },
   }));
   await symlink('0.2.1', join(root, 'data', 'plugins', 'claude', 'current'), 'dir');
 
@@ -452,7 +545,7 @@ test('manifest v2 keeps a compatible independently-versioned Proxy ready', async
     displayName: 'Claude Code',
     pluginVersion: '7.4.2',
     entry: 'proxy.mjs',
-    protocol: { name: 'gian.proxy', range: '>=1.0 <2.0' },
+    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
     process: { scope: 'session' },
     runtime: { id: 'claude', displayName: 'Claude Code CLI' },
   }));
@@ -485,7 +578,7 @@ test('manifest v2 reports an incompatible protocol range as outdated', async t =
     displayName: 'Codex',
     pluginVersion: '4.0.0',
     entry: 'proxy.mjs',
-    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
+    protocol: { name: 'gian.proxy', range: '>=3.0 <4.0' },
     process: { scope: 'shared' },
   }));
   await symlink('4.0.0', join(root, 'data', 'plugins', 'codex', 'current'), 'dir');
@@ -539,7 +632,7 @@ async function fabricateInstalledProxyV2(
   root: string,
   id: string,
   version: string,
-  range = '>=1.0 <2.0',
+  range = '>=2.0 <3.0',
 ): Promise<void> {
   const proxyDir = join(root, 'data', 'plugins', id, version);
   await mkdir(proxyDir, { recursive: true });
@@ -566,7 +659,7 @@ test('checkProxyUpdate is unmanaged for development proxies', async t => {
     dataDir: join(root, 'data'),
     releaseVersion: '0.4.4',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy },
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy },
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
@@ -590,7 +683,7 @@ test('checkProxyUpdate reports the newest compatible independent release', async
     displayName: 'Codex',
     pluginVersion: '7.5.0',
     entry: 'proxy.mjs',
-    protocol: { name: 'gian.proxy', range: '>=1.0 <2.0' },
+    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
     process: { scope: 'shared' },
   })}\n`);
   const compatibleName = 'gian-proxy-codex-7.5.0-darwin-arm64.tar.gz.manifest.json';
@@ -601,7 +694,7 @@ test('checkProxyUpdate reports the newest compatible independent release', async
     displayName: 'Codex',
     pluginVersion: '9.0.0',
     entry: 'proxy.mjs',
-    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
+    protocol: { name: 'gian.proxy', range: '>=3.0 <4.0' },
     process: { scope: 'shared' },
   })}\n`);
   const incompatibleName = 'gian-proxy-codex-9.0.0-darwin-arm64.tar.gz.manifest.json';
@@ -654,7 +747,7 @@ test('checkProxyUpdate reports up to date when the installed version matches', a
     displayName: 'Codex',
     pluginVersion: '7.5.0',
     entry: 'proxy.mjs',
-    protocol: { name: 'gian.proxy', range: '>=1.0 <2.0' },
+    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
     process: { scope: 'shared' },
   })}\n`);
   const manifestName = 'gian-proxy-codex-7.5.0-darwin-arm64.tar.gz.manifest.json';
