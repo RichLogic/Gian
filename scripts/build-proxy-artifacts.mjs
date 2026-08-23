@@ -149,7 +149,9 @@ export async function assertProxySelfTest(entryPoint, manifest) {
     : response?.schemaVersion === 2
       && response?.pluginVersion === manifest.pluginVersion;
   if (!validVersion || response?.id !== manifest.id || response?.ok !== true) {
-    throw new Error(`${manifest.id} proxy self-test returned an invalid result`);
+    throw new Error(
+      `${manifest.id} proxy self-test returned an invalid result: ${JSON.stringify(response)}`,
+    );
   }
 }
 

@@ -17,8 +17,19 @@ function readPluginVersion(): string {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 6; i += 1) {
     try {
-      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { version?: string };
-      if (typeof pkg.version === 'string' && pkg.version.length > 0) return pkg.version;
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
+        name?: string;
+        version?: string;
+      };
+      if (
+        typeof pkg.version === 'string'
+        && pkg.version.length > 0
+        && typeof pkg.name === 'string'
+        && pkg.name.startsWith('@gian/')
+        && pkg.name.endsWith('-proxy')
+      ) {
+        return pkg.version;
+      }
     } catch {
       /* keep walking */
     }

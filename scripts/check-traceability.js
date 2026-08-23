@@ -223,9 +223,17 @@ function checkChangedFiles() {
   }
 }
 
+function isCuratedPublicSource() {
+  return !existsSync('AGENTS.md') && !existsSync('docs');
+}
+
 try {
-  checkMatrix();
-  checkChangedFiles();
+  if (isCuratedPublicSource()) {
+    console.log('[traceability] curated public source omits internal docs; traceability gate skipped.');
+  } else {
+    checkMatrix();
+    checkChangedFiles();
+  }
 } catch (error) {
   const msg = error instanceof Error ? error.message : String(error);
   fail(msg);

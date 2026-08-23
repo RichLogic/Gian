@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 
@@ -13,6 +14,7 @@ import {
 } from './build-proxy-artifacts.mjs';
 
 const execFileAsync = promisify(execFile);
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 test('the default release set includes DSH and excludes the hidden Grok Proxy', () => {
   assert.deepEqual(shippingProxyIds, ['claude', 'codex', 'kimi', 'dsh']);
@@ -46,6 +48,42 @@ test('proxy bundle has one shebang and supports CommonJS dynamic require', async
     encoding: 'utf8',
   });
   assert.equal(result.stdout.trim(), join('proxy', 'ready'));
+});
+
+test('bundled shipping proxy self-test ignores an ancestor app package.json', async t => {
+  const plugins = [
+    {
+      id: 'claude',
+      source: 'packages/proxies/cc-proxy/src/cli/spawn.ts',
+      manifest: 'packages/proxies/cc-proxy/package.json',
+    },
+    {
+      id: 'codex',
+      source: 'packages/proxies/codex-proxy/src/cli/spawn.ts',
+      manifest: 'packages/proxies/codex-proxy/package.json',
+    },
+    {
+      id: 'kimi',
+      source: 'packages/proxies/kimi-proxy/src/cli/spawn.ts',
+      manifest: 'packages/proxies/kimi-proxy/package.json',
+    },
+  ];
+
+  for (const plugin of plugins) {
+    const root = await mkdtemp(join(tmpdir(), `gian-proxy-self-test-${plugin.id}-`));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    await writeFile(join(root, 'package.json'), `${JSON.stringify({ name: 'gian', version: '9.9.9' })}\n`);
+    const packageDir = join(root, 'package');
+    await mkdir(packageDir);
+    const output = join(packageDir, 'proxy.mjs');
+    await buildProxyBundle(join(repoRoot, plugin.source), output);
+    const expectedVersion = JSON.parse(await readFile(join(repoRoot, plugin.manifest), 'utf8')).version;
+    const result = await execFileAsync(process.execPath, [output, '--self-test'], { encoding: 'utf8' });
+    const response = JSON.parse(result.stdout.trim());
+    assert.equal(response.id, plugin.id);
+    assert.equal(response.ok, true);
+    assert.equal(response.pluginVersion, expectedVersion);
+  }
 });
 
 test('built-in proxy manifests require SemVer recommended CLI versions', () => {

@@ -91,3 +91,54 @@ test('changed-file gate rejects a relevant base diff and permits only the explic
   });
   assert.match(bypass.stdout, /changed-file gate bypassed by TRACEABILITY_NOT_REQUIRED=1/);
 });
+
+test('curated public source skips the gate when internal docs are omitted', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-traceability-curated-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await mkdir(join(root, 'scripts'), { recursive: true });
+  await writeFile(join(root, 'scripts', 'change.mjs'), 'export const value = 1;\n');
+
+  await git(root, ['init', '--quiet']);
+  await git(root, ['config', 'user.email', 'ci-fixture@example.invalid']);
+  await git(root, ['config', 'user.name', 'CI Fixture']);
+  await git(root, ['add', '.']);
+  await git(root, ['commit', '--quiet', '-m', 'curated public source']);
+  const base = await git(root, ['rev-parse', 'HEAD']);
+
+  await writeFile(join(root, 'scripts', 'change.mjs'), 'export const value = 2;\n');
+  await git(root, ['add', 'scripts/change.mjs']);
+  await git(root, ['commit', '--quiet', '-m', 'relevant change']);
+
+  const curated = await execFileAsync(process.execPath, [checker], {
+    cwd: root,
+    encoding: 'utf8',
+    env: traceabilityEnv({ TRACEABILITY_BASE_REF: base }),
+  });
+  assert.match(curated.stdout, /curated public source omits internal docs; traceability gate skipped/);
+});
+
+test('a private tree still fails closed when the matrix file is missing', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-traceability-private-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await writeFile(join(root, 'AGENTS.md'), '# private tree\n');
+  await git(root, ['init', '--quiet']);
+  await git(root, ['config', 'user.email', 'ci-fixture@example.invalid']);
+  await git(root, ['config', 'user.name', 'CI Fixture']);
+  await git(root, ['add', '.']);
+  await git(root, ['commit', '--quiet', '-m', 'private tree without matrix']);
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [checker], {
+      cwd: root,
+      encoding: 'utf8',
+      env: traceabilityEnv(),
+    }),
+    error => {
+      assert.equal(error.code, 1);
+      assert.match(error.stderr, /docs\/quality\/traceability\.md is missing/);
+      return true;
+    },
+  );
+});
