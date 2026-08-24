@@ -194,23 +194,44 @@ function modesFromConfigOptions(options: SessionConfigOption[]): ModeCapability[
   }));
 }
 
-/** Kimi thinking levels are session-global (one thought-level select, not
- *  per-model), so extract them once and attach the same list to every model
- *  — the generic Settings UI reads supportedThinking off the selected model. */
-function thinkingLevelsFromConfigOptions(options: SessionConfigOption[]): string[] {
+interface ModelThinking {
+  supportedThinking: string[];
+  defaultThinking: string | null;
+}
+
+function thinkingFromConfigOptions(options: SessionConfigOption[]): ModelThinking {
   const thinkingOption = selectOptionByRole(options, 'thinking');
-  if (!thinkingOption) return [];
-  return flatChoices(thinkingOption).map(choice => String(choice.value));
+  if (!thinkingOption) return { supportedThinking: [], defaultThinking: null };
+  const current = typeof thinkingOption.currentValue === 'string'
+    ? thinkingOption.currentValue
+    : null;
+  return {
+    supportedThinking: flatChoices(thinkingOption).map(choice => String(choice.value)),
+    defaultThinking: current,
+  };
+}
+
+function currentModelId(options: SessionConfigOption[]): string | null {
+  const modelOption = selectOptionByRole(options, 'model');
+  return modelOption && typeof modelOption.currentValue === 'string'
+    ? modelOption.currentValue
+    : null;
+}
+
+function modelIdsFromOptions(options: SessionConfigOption[]): string[] {
+  const modelOption = selectOptionByRole(options, 'model');
+  return modelOption ? flatChoices(modelOption).map(choice => String(choice.value)) : [];
 }
 
 function modelsFromConfigOptions(
   options: SessionConfigOption[],
-  supportedThinking: string[],
+  thinkingByModel: Map<string, ModelThinking>,
 ): ModelCapability[] {
   const modelOption = selectOptionByRole(options, 'model');
   if (!modelOption) return [];
   return flatChoices(modelOption).map(choice => {
     const value = String(choice.value);
+    const thinking = thinkingByModel.get(value) ?? { supportedThinking: [], defaultThinking: null };
     return {
       id: `kimi-model-${value}`,
       model: value,
@@ -218,16 +239,19 @@ function modelsFromConfigOptions(
       description: typeof modelOption.description === 'string' ? modelOption.description : '',
       hidden: false,
       isDefault: choice.value === modelOption.currentValue,
-      defaultThinking: null,
-      supportedThinking,
+      defaultThinking: thinking.defaultThinking,
+      supportedThinking: thinking.supportedThinking,
     };
   });
 }
 
-function capabilitiesFromConfigOptions(options: SessionConfigOption[]): ProbedCapabilities {
+function capabilitiesFromConfigOptions(
+  options: SessionConfigOption[],
+  thinkingByModel: Map<string, ModelThinking>,
+): ProbedCapabilities {
   return {
     modes: modesFromConfigOptions(options),
-    models: modelsFromConfigOptions(options, thinkingLevelsFromConfigOptions(options)),
+    models: modelsFromConfigOptions(options, thinkingByModel),
     sessionOptions: [...options],
   };
 }
@@ -365,38 +389,76 @@ export class KimiProxyService {
 
   private probedCapabilities: ProbedCapabilities | null = null;
 
-  /** Kimi only reveals its model/thinking/mode choices per session
-   *  (configOptions from session/new), so learn them once: reuse an
-   *  already-attached session's options when there is one, otherwise create
-   *  a throwaway session in the temp dir and close it again. Cached for the
-   *  process lifetime — the choices only change with the Kimi version, and
-   *  the proxy is respawned on upgrade (2026-08-04). On any failure (e.g.
-   *  not logged in) report no modes/models rather than breaking
-   *  capabilities. */
+  /** Kimi reveals thinking choices per current model (`session/set_config_option`
+   *  on `model` rewrites the thought-level select). Learn the baseline snapshot
+   *  once, then probe every other model on a throwaway session — never mutate a
+   *  live user session. Cached for the process lifetime; the proxy is
+   *  respawned on upgrade. On any failure (e.g. not logged in) report no
+   *  modes/models rather than breaking capabilities. */
   private async probeCapabilities(): Promise<ProbedCapabilities> {
     if (this.probedCapabilities) return this.probedCapabilities;
+
+    let baseline: SessionConfigOption[] | null = null;
+    let throwawayId: string | null = null;
     for (const session of this.sessionsById.values()) {
-      const probed = capabilitiesFromConfigOptions(session.configOptions);
-      if (
-        probed.modes.length > 0
-        || probed.models.length > 0
-        || probed.sessionOptions.length > 0
-      ) {
-        this.probedCapabilities = probed;
-        return probed;
+      if (session.configOptions.length === 0) continue;
+      baseline = session.configOptions;
+      break;
+    }
+    if (!baseline) {
+      try {
+        const response = await this.runtime.newSession({ cwd: tmpdir(), mcpServers: [] });
+        baseline = response.configOptions ?? [];
+        throwawayId = response.sessionId;
+      } catch {
+        return { modes: [], models: [], sessionOptions: [] };
       }
     }
-    try {
-      const response = await this.runtime.newSession({ cwd: tmpdir(), mcpServers: [] });
-      const probed = capabilitiesFromConfigOptions(response.configOptions ?? []);
-      try {
-        await this.runtime.closeSession({ sessionId: response.sessionId });
-      } catch { /* close unsupported or failed — the probe session stays detached */ }
-      this.probedCapabilities = probed;
-      return probed;
-    } catch {
-      return { modes: [], models: [], sessionOptions: [] };
+
+    const thinkingByModel = new Map<string, ModelThinking>();
+    const current = currentModelId(baseline);
+    if (current) thinkingByModel.set(current, thinkingFromConfigOptions(baseline));
+
+    const others = modelIdsFromOptions(baseline).filter((modelId) => !thinkingByModel.has(modelId));
+    if (others.length > 0) {
+      if (!throwawayId) {
+        try {
+          const extra = await this.runtime.newSession({ cwd: tmpdir(), mcpServers: [] });
+          throwawayId = extra.sessionId;
+          const extraCurrent = currentModelId(extra.configOptions ?? []);
+          if (extraCurrent && !thinkingByModel.has(extraCurrent)) {
+            thinkingByModel.set(extraCurrent, thinkingFromConfigOptions(extra.configOptions ?? []));
+          }
+        } catch {
+          /* keep unknown models empty rather than rewriting a live session */
+        }
+      }
+      const modelOption = selectOptionByRole(baseline, 'model');
+      if (throwawayId && modelOption) {
+        for (const modelId of others) {
+          if (thinkingByModel.has(modelId)) continue;
+          try {
+            const response = await this.runtime.setSessionConfigOption({
+              sessionId: throwawayId,
+              configId: modelOption.id,
+              value: modelId,
+            });
+            thinkingByModel.set(modelId, thinkingFromConfigOptions(response.configOptions ?? []));
+          } catch {
+            thinkingByModel.set(modelId, { supportedThinking: [], defaultThinking: null });
+          }
+        }
+      }
     }
+
+    if (throwawayId) {
+      try {
+        await this.runtime.closeSession({ sessionId: throwawayId });
+      } catch { /* close unsupported or failed — the probe session stays detached */ }
+    }
+
+    this.probedCapabilities = capabilitiesFromConfigOptions(baseline, thinkingByModel);
+    return this.probedCapabilities;
   }
 
   async listNativeSessions(params: ListNativeSessionsParams) {

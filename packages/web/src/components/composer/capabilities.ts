@@ -8,7 +8,6 @@ import type {
   Executor,
   NativeConfigChoice,
   NativeConfigOption,
-  ProxyCapabilities,
   ProxyModeCapabilities,
   Session,
   SlashCommand,
@@ -63,10 +62,9 @@ export function getModesCached(executor: 'claude' | 'codex'): ProxyModeCapabilit
 }
 
 /** Proxy-advertised approval_mode choices, or the legacy `modes` list. */
-export function modesFromCapabilities(
-  capabilities: Pick<ProxyCapabilities, 'modes'> & { configOptions?: ConfigOption[] },
-): ProxyModeCapabilities[] {
-  const option = capabilities.configOptions?.find(entry => entry.role === 'approval_mode');
+export function modesFromCapabilities(capabilities: unknown): ProxyModeCapabilities[] {
+  const catalog = catalogFromCapabilities(capabilities);
+  const option = catalog.configOptions.find(entry => entry.role === 'approval_mode');
   if (option?.choices && option.choices.length > 0) {
     return option.choices.map(choice => ({
       id: String(choice.value),
@@ -75,7 +73,15 @@ export function modesFromCapabilities(
       isDefault: Object.is(choice.value, option.defaultValue),
     }));
   }
-  return capabilities.modes ?? [];
+  if (!capabilities || typeof capabilities !== 'object') return [];
+  const modes = (capabilities as { modes?: unknown }).modes;
+  if (!Array.isArray(modes)) return [];
+  return modes.filter((mode): mode is ProxyModeCapabilities => (
+    !!mode
+    && typeof mode === 'object'
+    && typeof (mode as { id?: unknown }).id === 'string'
+    && typeof (mode as { label?: unknown }).label === 'string'
+  ));
 }
 
 /** `undefined` when initialize capabilities were not included in the payload. */
@@ -173,6 +179,73 @@ export function modelsFromCatalog(option: ConfigOption | undefined): ProxyModel[
   }));
 }
 
+/** Prefer the active catalog's model choices. Fall back to the process /
+ *  session snapshot, then the Claude/Codex capability list. Native executors
+ *  (Kimi/Grok) have no `/models` list, so an empty primary option must not
+ *  wipe a still-valid snapshot. */
+export function displayModelsFromCatalog(
+  primary: ConfigOption | undefined,
+  fallback?: ConfigOption,
+  extras: ProxyModel[] = [],
+): ProxyModel[] {
+  const fromPrimary = modelsFromCatalog(primary);
+  if (fromPrimary.length > 0) return fromPrimary;
+  const fromFallback = modelsFromCatalog(fallback);
+  if (fromFallback.length > 0) return fromFallback;
+  return extras;
+}
+
+function stringChoices(option: ConfigOption | undefined): string[] {
+  return (option?.choices ?? []).flatMap(choice => (
+    typeof choice.value === 'string' && choice.value ? [choice.value] : []
+  ));
+}
+
+function legacyModels(raw: unknown): ProxyModel[] {
+  if (!raw || typeof raw !== 'object' || !('models' in raw)) return [];
+  const models = (raw as { models?: unknown }).models;
+  if (!Array.isArray(models)) return [];
+  return models.filter((model): model is ProxyModel => (
+    !!model
+    && typeof model === 'object'
+    && 'hidden' in model
+    && !(model as ProxyModel).hidden
+  ));
+}
+
+/** Settings Executors defaults: prefer gian.proxy/2.0 catalog roles, keep
+ *  Protocol 1 `models`/`modes` arrays as a fallback. Never assume `models`
+ *  exists on the capabilities payload. */
+export function executorSettingsFromCapabilities(executor: Executor, raw: unknown): {
+  models: ProxyModel[];
+  thinkingLevels: string[];
+  modes: ProxyModeCapabilities[];
+} {
+  const catalog = catalogFromCapabilities(raw);
+  const catalogModels = modelsFromCatalog(optionByRole(catalog.configOptions, 'model'));
+  const models = catalogModels.length > 0 ? catalogModels : legacyModels(raw);
+  const thinkingLevels = stringChoices(optionByRole(catalog.configOptions, 'effort'));
+  const catalogMode = optionByRole(catalog.configOptions, 'approval_mode');
+  const advertisedModes = modesFromCapabilities(raw)
+    .filter(mode => mode.id.length > 0 && mode.id !== 'null');
+  const legacyModes = raw && typeof raw === 'object'
+    ? modesFromCapabilities({ modes: (raw as { modes?: unknown }).modes })
+    : [];
+  // Managed Claude/Codex defaults are Gian's semantic ApprovalMode values.
+  // A Protocol 2 Proxy that publishes native, low-level permission values in
+  // the approval role (Codex 0.2.0, Claude 0.2.0) must not turn those into an
+  // AgentProxyDefaults.mode that Host cannot apply. Native executors own their
+  // mode vocabulary and therefore keep the Catalog values verbatim.
+  const catalogModesAreSemantic = advertisedModes.length > 0
+    && advertisedModes.every(mode => isApprovalMode(mode.id));
+  const modes = usesNativeExecutorConfig(executor)
+    ? advertisedModes
+    : catalogMode?.choices?.length && catalogModesAreSemantic
+      ? advertisedModes
+      : legacyModes.filter(mode => isApprovalMode(mode.id));
+  return { models, thinkingLevels, modes };
+}
+
 export function applyResolvedDefaults(
   values: Record<string, ConfigValue>,
   defaults: Record<string, ConfigValue> | undefined,
@@ -206,6 +279,14 @@ export function createConfigsFromCatalog(
   for (const option of options) {
     const value = values[option.id];
     if (value === undefined) continue;
+    if (
+      (option.role === 'effort' || option.role === 'model')
+      && option.choices
+      && option.choices.length > 0
+      && !option.choices.some(choice => Object.is(choice.value, value))
+    ) {
+      continue;
+    }
     if (option.binding === 'session') session_config[option.id] = value;
     else turn_config[option.id] = value;
     if (option.role === 'model' && value != null && value !== '') model = String(value);

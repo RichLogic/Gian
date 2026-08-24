@@ -5,7 +5,9 @@ import {
   composerModeOptions,
   effortLabel,
   modesFromCapabilities,
+  displayModelsFromCatalog,
   modelsFromCatalog,
+  executorSettingsFromCapabilities,
   nativeChoiceDisplayLabel,
   nativeChoiceLabel,
   nativeOptionRole,
@@ -63,6 +65,24 @@ describe('modelsFromCatalog / labels', () => {
     expect(modelsFromCatalog(undefined)).toEqual([]);
   });
 
+  it('keeps snapshot model choices when the resolved option has none', () => {
+    const snapshot: ConfigOption = {
+      ...approval,
+      role: 'model',
+      defaultValue: 'kimi-code/k3',
+      choices: [
+        { value: 'kimi-code/kimi-for-coding', displayName: 'Kimi for Coding' },
+        { value: 'kimi-code/k3', displayName: 'K3' },
+      ],
+    };
+    const resolved: ConfigOption = {
+      ...snapshot,
+      choices: undefined,
+    };
+    expect(displayModelsFromCatalog(resolved, snapshot).map(model => model.model))
+      .toEqual(['kimi-code/kimi-for-coding', 'kimi-code/k3']);
+  });
+
   it('labels efforts and composer modes', () => {
     expect(effortLabel('codex', 'low')).toBe('Light');
     expect(effortLabel('claude', 'extra_high')).toBe('Extra High');
@@ -72,6 +92,78 @@ describe('modelsFromCatalog / labels', () => {
       .toBe('Yolo');
     expect(composerModeOptions('kimi', undefined)).toEqual([]);
     expect(composerModeOptions('claude', undefined).map(row => row.mode)).toEqual(['plan', 'ask', 'auto']);
+  });
+});
+
+describe('executorSettingsFromCapabilities', () => {
+  it('reads model/effort/mode from a catalog that has no models array', () => {
+    const settings = executorSettingsFromCapabilities('claude', {
+      catalogRevision: 'v2',
+      input: [{ type: 'text' }],
+      configOptions: [
+        {
+          ...approval,
+          id: 'model',
+          role: 'model',
+          defaultValue: 'sonnet',
+          choices: [{ value: 'sonnet', displayName: 'Sonnet' }],
+        },
+        {
+          ...approval,
+          id: 'effort',
+          role: 'effort',
+          defaultValue: 'high',
+          choices: [{ value: 'high', displayName: 'High' }],
+        },
+        approval,
+      ],
+      slashCommands: [],
+      capabilities: {},
+    });
+    expect(settings.models.map(model => model.model)).toEqual(['sonnet']);
+    expect(settings.thinkingLevels).toEqual(['high']);
+    expect(settings.modes.map(mode => mode.id)).toEqual(['ask', 'auto']);
+  });
+
+  it('does not throw when the payload omits models', () => {
+    expect(executorSettingsFromCapabilities('codex', { catalogRevision: 'v2', configOptions: [] }))
+      .toEqual({ models: [], thinkingLevels: [], modes: [] });
+  });
+
+  it('does not expose low-level permission fields as managed Agent modes', () => {
+    const settings = executorSettingsFromCapabilities('codex', {
+      configOptions: [{
+        ...approval,
+        id: 'approval_policy',
+        defaultValue: null,
+        choices: [
+          { value: null, displayName: 'Configured default' },
+          { value: 'on-request', displayName: 'On request' },
+          { value: 'never', displayName: 'Never' },
+        ],
+      }, {
+        ...approval,
+        id: 'sandbox',
+        role: 'execution_mode',
+        defaultValue: null,
+        choices: [{ value: 'workspace-write', displayName: 'Workspace write' }],
+      }],
+    });
+    expect(settings.modes).toEqual([]);
+  });
+
+  it('keeps arbitrary Catalog mode values for native executors', () => {
+    const settings = executorSettingsFromCapabilities('dsh', {
+      configOptions: [{
+        ...approval,
+        defaultValue: 'ask',
+        choices: [
+          { value: 'ask', displayName: 'Ask' },
+          { value: 'never', displayName: 'Never' },
+        ],
+      }],
+    });
+    expect(settings.modes.map(mode => mode.id)).toEqual(['ask', 'never']);
   });
 });
 

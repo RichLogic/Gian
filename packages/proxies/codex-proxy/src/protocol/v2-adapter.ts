@@ -6,7 +6,6 @@ import type {
   ApprovalPolicy,
   ApprovalsReviewer,
   CapabilitiesPayload,
-  CollaborationModeKind,
   InputItem,
   ModelCapabilities,
   SandboxMode,
@@ -327,65 +326,35 @@ function catalogConfigOptions(capabilities: CapabilitiesPayload): CatalogOption[
     });
   }
   options.push({
-    id: 'approval_policy',
-    displayName: 'Approval policy',
-    description: 'Codex app-server approvalPolicy for this turn.',
+    id: 'approval_mode',
+    displayName: 'Approval',
+    description: 'Choose how Codex actions are approved for this turn.',
     binding: 'turn',
     role: 'approval_mode',
     control: 'select',
     required: false,
-    defaultValue: null,
+    defaultValue: 'ask',
     choices: [
-      { value: null, displayName: 'Configured default' },
-      { value: 'untrusted', displayName: 'Untrusted' },
-      { value: 'on-request', displayName: 'On request' },
-      { value: 'on-failure', displayName: 'On failure' },
-      { value: 'never', displayName: 'Never' },
-    ],
-  });
-  options.push({
-    id: 'sandbox',
-    displayName: 'Sandbox',
-    description: 'Codex app-server sandboxPolicy for this turn.',
-    binding: 'turn',
-    role: 'execution_mode',
-    control: 'select',
-    required: false,
-    defaultValue: null,
-    choices: [
-      { value: null, displayName: 'Configured default' },
-      { value: 'read-only', displayName: 'Read only' },
-      { value: 'workspace-write', displayName: 'Workspace write' },
-      { value: 'danger-full-access', displayName: 'Danger full access' },
-    ],
-  });
-  options.push({
-    id: 'approvals_reviewer',
-    displayName: 'Approvals reviewer',
-    description: 'Codex app-server reviewer for approval requests.',
-    binding: 'turn',
-    control: 'select',
-    required: false,
-    defaultValue: null,
-    choices: [
-      { value: null, displayName: 'Configured default' },
-      { value: 'user', displayName: 'User' },
-      { value: 'auto_review', displayName: 'Auto review' },
-      { value: 'guardian_subagent', displayName: 'Guardian subagent' },
-    ],
-  });
-  options.push({
-    id: 'collaboration_mode',
-    displayName: 'Collaboration mode',
-    description: 'Codex app-server collaborationMode for this turn.',
-    binding: 'turn',
-    control: 'select',
-    required: false,
-    defaultValue: null,
-    choices: [
-      { value: null, displayName: 'Configured default' },
-      { value: 'default', displayName: 'Default' },
-      { value: 'plan', displayName: 'Plan' },
+      {
+        value: 'ask',
+        displayName: 'Ask for approval',
+        description: 'Always ask to edit external files and use the internet.',
+      },
+      {
+        value: 'auto',
+        displayName: 'Approve for me',
+        description: 'Let Codex review approval requests automatically.',
+      },
+      {
+        value: 'full-access',
+        displayName: 'Full access',
+        description: 'Run without sandbox restrictions or approval prompts.',
+      },
+      {
+        value: 'custom',
+        displayName: 'Custom (config.toml)',
+        description: 'Use the permission configuration loaded from config.toml.',
+      },
     ],
   });
   options.push({
@@ -547,6 +516,38 @@ function configChoice<T extends string>(
 ): T | null {
   const value = config[key];
   return typeof value === 'string' && allowed.includes(value as T) ? value as T : null;
+}
+
+type CodexApprovalMode = 'ask' | 'auto' | 'full-access' | 'custom';
+
+function approvalModeParams(mode: CodexApprovalMode): {
+  sandbox?: SandboxMode;
+  useConfiguredPermissions?: boolean;
+  approvalPolicy?: Extract<ApprovalPolicy, string>;
+  approvalsReviewer?: ApprovalsReviewer;
+} {
+  switch (mode) {
+    case 'ask':
+      return {
+        sandbox: 'workspace-write',
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user',
+      };
+    case 'auto':
+      return {
+        sandbox: 'workspace-write',
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'auto_review',
+      };
+    case 'full-access':
+      return {
+        sandbox: 'danger-full-access',
+        approvalPolicy: 'never',
+        approvalsReviewer: 'auto_review',
+      };
+    case 'custom':
+      return { useConfiguredPermissions: true };
+  }
 }
 
 function conditionsMatch(
@@ -1083,32 +1084,19 @@ export class CodexProtocolV2Adapter {
       );
       const turnModel = configString(turnConfig, 'model');
       const turnEffort = configString(turnConfig, 'effort');
+      const approvalMode = configChoice<CodexApprovalMode>(turnConfig, 'approval_mode', [
+        'ask',
+        'auto',
+        'full-access',
+        'custom',
+      ]) ?? 'ask';
       await this.service.startTurn({
         sessionId: session.serviceSessionId,
         input: this.codexInput(input),
         additionalWorkspaceRoots: session.roots,
         ...(turnModel ? { model: turnModel } : {}),
         ...(turnEffort ? { thinking: turnEffort } : {}),
-        sandbox: configChoice<SandboxMode>(turnConfig, 'sandbox', [
-          'read-only',
-          'workspace-write',
-          'danger-full-access',
-        ]),
-        approvalPolicy: configChoice<Extract<ApprovalPolicy, string>>(
-          turnConfig,
-          'approval_policy',
-          ['untrusted', 'on-request', 'on-failure', 'never'],
-        ),
-        approvalsReviewer: configChoice<ApprovalsReviewer>(
-          turnConfig,
-          'approvals_reviewer',
-          ['user', 'auto_review', 'guardian_subagent'],
-        ),
-        collaborationMode: configChoice<CollaborationModeKind>(
-          turnConfig,
-          'collaboration_mode',
-          ['default', 'plan'],
-        ),
+        ...approvalModeParams(approvalMode),
         serviceTier: configChoice<'fast' | 'flex'>(
           turnConfig,
           'service_tier',

@@ -239,9 +239,13 @@ export class ProxySessionCoordinator {
           : option.role === 'approval_mode'
             ? args.executorDefaults?.mode
             : undefined;
+      const supportedRoleValue = byRole === undefined || byRole === null
+        || !option.choices || option.choices.some(choice => Object.is(choice.value, byRole))
+        ? byRole
+        : undefined;
       const value = args.sessionConfig?.[option.id]
         ?? persisted
-        ?? byRole
+        ?? supportedRoleValue
         ?? option.defaultValue;
       if (value !== undefined && value !== '') sessionConfig[option.id] = value;
     }

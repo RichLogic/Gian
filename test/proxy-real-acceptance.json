@@ -152,16 +152,13 @@
     },
     "codex": {
       "displayName": "Codex",
-      "pluginVersion": "0.2.0",
+      "pluginVersion": "0.2.1",
       "processScope": "shared",
       "binary": "codex",
       "cheapestConfig": {
         "model": "gpt-5.6-luna",
         "effort": "low",
-        "approval_policy": "on-request",
-        "sandbox": "workspace-write",
-        "approvals_reviewer": "user",
-        "collaboration_mode": "default",
+        "approval_mode": "ask",
         "service_tier": "flex"
       },
       "capabilities": [

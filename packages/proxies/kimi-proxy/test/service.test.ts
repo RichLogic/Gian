@@ -889,8 +889,7 @@ test('capabilities probes model and thinking choices from configOptions', async 
     description: 'Model to use for this session',
     hidden: false,
     isDefault: true,
-    defaultThinking: null,
-    // Session-global thinking levels are attached to every model.
+    defaultThinking: 'medium',
     supportedThinking: ['low', 'medium', 'high'],
   });
   assert.deepEqual(capabilities.models[1], {
@@ -899,7 +898,151 @@ test('capabilities probes model and thinking choices from configOptions', async 
     model: 'kimi-k2-thinking',
     displayName: 'Kimi K2 Thinking',
     isDefault: false,
+    defaultThinking: null,
+    // No setSessionConfigOption on this probe — other models stay unknown.
+    supportedThinking: [],
   });
+  await service.close();
+});
+
+const PER_MODEL_THINKING: Record<string, string[]> = {
+  'kimi-code/kimi-for-coding': ['on'],
+  'kimi-code/k3': ['low', 'high', 'max'],
+};
+
+function configOptionsForModel(modelId: string) {
+  const thinking = PER_MODEL_THINKING[modelId] ?? ['on'];
+  return [
+    {
+      type: 'select' as const,
+      category: 'model',
+      id: 'model',
+      name: 'Model',
+      currentValue: modelId,
+      options: Object.keys(PER_MODEL_THINKING).map((value) => ({ value, name: value })),
+    },
+    {
+      type: 'select' as const,
+      category: 'thought_level',
+      id: 'thinking',
+      name: 'Thinking',
+      currentValue: thinking[0]!,
+      options: thinking.map((value) => ({
+        value,
+        name: `${value[0]!.toUpperCase()}${value.slice(1)}`,
+      })),
+    },
+    ...MODE_CONFIG_OPTIONS,
+  ];
+}
+
+function effortValues(options: Array<{ role?: string; choices?: Array<{ value: unknown }> }>) {
+  return options
+    .find((option) => option.role === 'effort')
+    ?.choices
+    ?.map((choice) => choice.value);
+}
+
+test('capabilities probes per-model thinking on a throwaway session', async () => {
+  const setConfigCalls: Array<{ sessionId: string; configId: string; value: unknown }> = [];
+  let newSessionCalls = 0;
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => {
+        newSessionCalls += 1;
+        return {
+          sessionId: `native-probe-${newSessionCalls}`,
+          configOptions: configOptionsForModel('kimi-code/kimi-for-coding'),
+        };
+      },
+      setSessionConfigOption: async (params: {
+        sessionId: string;
+        configId: string;
+        value: unknown;
+      }) => {
+        setConfigCalls.push(params);
+        if (params.configId !== 'model' || typeof params.value !== 'string') {
+          throw new Error(`unexpected config ${params.configId}`);
+        }
+        return { configOptions: configOptionsForModel(params.value) };
+      },
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+
+  const capabilities = await service.listCapabilities();
+
+  assert.equal(newSessionCalls, 1);
+  assert.deepEqual(
+    setConfigCalls.map((call) => ({ configId: call.configId, value: call.value })),
+    [{ configId: 'model', value: 'kimi-code/k3' }],
+  );
+  assert.deepEqual(
+    capabilities.models.map((model: { model: string; supportedThinking: string[]; defaultThinking: string | null }) => ({
+      model: model.model,
+      supportedThinking: model.supportedThinking,
+      defaultThinking: model.defaultThinking,
+    })),
+    [
+      {
+        model: 'kimi-code/kimi-for-coding',
+        supportedThinking: ['on'],
+        defaultThinking: 'on',
+      },
+      {
+        model: 'kimi-code/k3',
+        supportedThinking: ['low', 'high', 'max'],
+        defaultThinking: 'low',
+      },
+    ],
+  );
+  await service.close();
+});
+
+test('capabilities never mutates a live session while probing other models', async () => {
+  const setConfigCalls: Array<{ sessionId: string; configId: string; value: unknown }> = [];
+  let newSessionCalls = 0;
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => {
+        newSessionCalls += 1;
+        return {
+          sessionId: newSessionCalls === 1 ? 'native-live' : `native-probe-${newSessionCalls}`,
+          configOptions: configOptionsForModel('kimi-code/kimi-for-coding'),
+        };
+      },
+      setSessionConfigOption: async (params: {
+        sessionId: string;
+        configId: string;
+        value: unknown;
+      }) => {
+        setConfigCalls.push(params);
+        if (params.configId !== 'model' || typeof params.value !== 'string') {
+          throw new Error(`unexpected config ${params.configId}`);
+        }
+        return { configOptions: configOptionsForModel(params.value) };
+      },
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.createSession({ cwd: '/workspace/live' });
+  assert.equal(newSessionCalls, 1);
+
+  const capabilities = await service.listCapabilities();
+
+  assert.equal(newSessionCalls, 2, 'other models must be probed on a throwaway session');
+  assert.deepEqual(setConfigCalls.map((call) => call.sessionId), ['native-probe-2']);
+  assert.deepEqual(
+    capabilities.models.find((model: { model: string }) => model.model === 'kimi-code/k3')
+      ?.supportedThinking,
+    ['low', 'high', 'max'],
+  );
   await service.close();
 });
 
@@ -1423,6 +1566,136 @@ test('Kimi gian.proxy/2 validates turn config before touching the runtime', asyn
   );
   assert.deepEqual(duplicate, { accepted: true, turnId: 't-cfg' });
   assert.equal(promptCalls, 1, 'an idempotent duplicate must not start another prompt');
+  await service.close();
+});
+
+test('Kimi gian.proxy/2 advertises catalog.resolve and rebuilds thinking per model', async () => {
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({
+        sessionId: 'native-catalog',
+        configOptions: configOptionsForModel('kimi-code/kimi-for-coding'),
+      }),
+      setSessionConfigOption: async (params: { configId: string; value: unknown }) => {
+        if (params.configId !== 'model' || typeof params.value !== 'string') {
+          throw new Error(`unexpected config ${params.configId}`);
+        }
+        return { configOptions: configOptionsForModel(params.value) };
+      },
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', () => undefined);
+  const initialized = await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  })) as { capabilities: Record<string, unknown> };
+  assert.equal(initialized.capabilities['catalog.resolve'], 1);
+
+  const catalog = await adapter.handle(v2Request('cat', 'catalog.list', {})) as {
+    catalogRevision: string;
+    configOptions: Array<{ role?: string; choices?: Array<{ value: unknown }> }>;
+  };
+  assert.deepEqual(effortValues(catalog.configOptions), ['on']);
+
+  const resolved = await adapter.handle(v2Request('res', 'catalog.resolve', {
+    catalogRevision: catalog.catalogRevision,
+    sessionConfig: {},
+    turnConfig: { model: 'kimi-code/k3' },
+  })) as {
+    configOptions: Array<{ role?: string; defaultValue?: unknown; choices?: Array<{ value: unknown }> }>;
+    resolvedDefaults: { turnConfig: Record<string, unknown> };
+  };
+  assert.deepEqual(effortValues(resolved.configOptions), ['low', 'high', 'max']);
+  assert.deepEqual(
+    resolved.configOptions.find((option) => option.role === 'model')?.choices?.map((choice) => choice.value),
+    ['kimi-code/kimi-for-coding', 'kimi-code/k3'],
+  );
+  assert.equal(
+    resolved.configOptions.find((option) => option.role === 'effort')?.defaultValue,
+    'low',
+  );
+  assert.equal(resolved.resolvedDefaults.turnConfig.thinking, 'low');
+  await service.close();
+});
+
+test('Kimi gian.proxy/2 validates thinking against the requested model', async () => {
+  const configCalls: Array<{ configId: string; value: unknown }> = [];
+  let promptCalls = 0;
+  let newSessionCalls = 0;
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => {
+        newSessionCalls += 1;
+        return {
+          sessionId: newSessionCalls === 1 ? 'native-turn-model' : `native-probe-${newSessionCalls}`,
+          configOptions: configOptionsForModel('kimi-code/kimi-for-coding'),
+        };
+      },
+      setSessionConfigOption: async (params: {
+        sessionId: string;
+        configId: string;
+        value: unknown;
+      }) => {
+        if (params.sessionId === 'native-turn-model') {
+          configCalls.push({ configId: params.configId, value: params.value });
+        }
+        if (params.configId === 'model' && typeof params.value === 'string') {
+          return { configOptions: configOptionsForModel(params.value) };
+        }
+        return { configOptions: configOptionsForModel('kimi-code/k3') };
+      },
+      prompt: async () => {
+        promptCalls += 1;
+        return { stopReason: 'end_turn' };
+      },
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', () => undefined);
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 's-model-thinking',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })) as { session: { streamId: string } };
+
+  const domainCode = (error: unknown) => (error as { domainCode?: string }).domainCode;
+  await assert.rejects(
+    adapter.handle(v2Request('3', 'turn.start', {
+      sessionId: 's-model-thinking',
+      streamId: created.session.streamId,
+      turnId: 't-invalid',
+      input: [{ type: 'text', text: 'go' }],
+      config: { model: 'kimi-code/kimi-for-coding', thinking: 'low' },
+    })),
+    (error: unknown) => domainCode(error) === 'CONFIG_VALUE_INVALID',
+  );
+  assert.equal(configCalls.length, 0, 'invalid thinking must not reach the runtime');
+  assert.equal(promptCalls, 0);
+
+  const accepted = await adapter.handle(v2Request('4', 'turn.start', {
+    sessionId: 's-model-thinking',
+    streamId: created.session.streamId,
+    turnId: 't-valid',
+    input: [{ type: 'text', text: 'go' }],
+    config: { model: 'kimi-code/k3', thinking: 'high' },
+  }));
+  assert.deepEqual(accepted, { accepted: true, turnId: 't-valid' });
+  await waitFor(() => promptCalls === 1, 'prompt did not start');
+  assert.deepEqual(configCalls.map((call) => call.configId), ['model', 'thinking']);
+  assert.deepEqual(configCalls.map((call) => call.value), ['kimi-code/k3', 'high']);
   await service.close();
 });
 

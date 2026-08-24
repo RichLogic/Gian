@@ -228,6 +228,88 @@ describe('NewSessionView', () => {
     }));
   });
 
+  it('shows DSH Catalog controls with Settings defaults without making them explicit', async () => {
+    const dsh = agent('dsh', 'DeepSeek Harness');
+    dsh.proxy.defaults = {
+      model: 'deepseek-reasoner',
+      thinking: 'high',
+      mode: 'never',
+    };
+    vi.mocked(loadAgents).mockResolvedValue([dsh]);
+    vi.mocked(loadProxyCapabilities).mockResolvedValue({
+      protocolVersion: '2.0',
+      catalogRevision: 'dsh-v2',
+      input: [{ type: 'text' }],
+      configOptions: [
+        {
+          id: 'model',
+          displayName: 'Model',
+          binding: 'turn',
+          role: 'model',
+          control: 'select',
+          required: true,
+          defaultValue: 'deepseek-chat',
+          choices: [
+            { value: 'deepseek-chat', displayName: 'DeepSeek Chat' },
+            { value: 'deepseek-reasoner', displayName: 'DeepSeek Reasoner' },
+          ],
+        },
+        {
+          id: 'effort',
+          displayName: 'Reasoning effort',
+          binding: 'turn',
+          role: 'effort',
+          control: 'select',
+          required: false,
+          defaultValue: 'medium',
+          choices: [
+            { value: 'medium', displayName: 'Medium' },
+            { value: 'high', displayName: 'High' },
+          ],
+        },
+        {
+          id: 'approval_policy',
+          displayName: 'Approval policy',
+          binding: 'turn',
+          role: 'approval_mode',
+          control: 'select',
+          required: false,
+          defaultValue: 'ask',
+          choices: [
+            { value: 'ask', displayName: 'Ask' },
+            { value: 'never', displayName: 'Never' },
+          ],
+        },
+      ],
+      slashCommands: [],
+      capabilities: {},
+      models: [],
+      modes: [],
+    });
+    localStorage.setItem(newSessionDraftStorageKey({ kind: 'workspace', id: 'ws-1' }), JSON.stringify({
+      workspaceId: 'ws-1',
+      executor: 'codex',
+      model: 'gpt-5',
+      thinkingEffort: 'low',
+      approvalMode: 'auto',
+    }));
+
+    const { onCreate } = renderView({ initialExecutor: 'dsh' });
+    expect(await screen.findByTestId('ns-agent-picker')).toHaveTextContent('DeepSeek Harness');
+    await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('DeepSeek Reasoner'));
+    expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('High');
+    expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('Never');
+
+    await userEvent.type(screen.getByTestId('ns-message-input'), 'use configured defaults');
+    await userEvent.click(screen.getByTestId('ns-send'));
+    expect(onCreate).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      name: '',
+      executor: 'dsh',
+      firstMessage: 'use configured defaults',
+    });
+  });
+
   it('keeps Send disabled until an agent is picked and a message typed (multi-agent)', async () => {
     renderView();
     const send = screen.getByTestId('ns-send');
@@ -663,6 +745,83 @@ describe('NewSessionView', () => {
       executor: 'codex',
       firstMessage: 'defaults please',
     });
+  });
+
+  it('does not carry leftover Claude effort onto a Kimi catalog that only advertises on', async () => {
+    vi.mocked(loadAgents).mockResolvedValue([
+      agent('claude', 'Claude Code'),
+      agent('kimi', 'Kimi Code'),
+    ]);
+    vi.mocked(loadProxyModels).mockResolvedValue([{
+      id: 'sonnet',
+      model: 'sonnet',
+      displayName: 'Sonnet',
+      description: '',
+      hidden: false,
+      isDefault: true,
+      defaultEffort: 'medium',
+      supportedEfforts: ['low', 'medium', 'high'],
+    }]);
+    vi.mocked(loadProxyCapabilities).mockImplementation(async (executor) => {
+      if (executor !== 'kimi') {
+        return { protocolVersion: 'test', models: [], modes: [], slashCommands: [] };
+      }
+      return {
+        protocolVersion: '2.0',
+        catalogRevision: 'kimi-on',
+        capabilities: {},
+        input: [{ type: 'text' }],
+        slashCommands: [],
+        configOptions: [
+          {
+            id: 'model',
+            displayName: 'Model',
+            binding: 'turn',
+            role: 'model',
+            control: 'select',
+            required: false,
+            defaultValue: 'kimi-code/kimi-for-coding',
+            choices: [
+              { value: 'kimi-code/kimi-for-coding', displayName: 'Kimi for Coding' },
+              { value: 'kimi-code/k3', displayName: 'K3' },
+            ],
+          },
+          {
+            id: 'thinking',
+            displayName: 'Thinking',
+            binding: 'turn',
+            role: 'effort',
+            control: 'select',
+            required: false,
+            defaultValue: 'on',
+            choices: [{ value: 'on', displayName: 'On' }],
+          },
+        ],
+      };
+    });
+    const { onCreate } = renderView();
+    await openAgentPicker();
+    await userEvent.click(screen.getByTestId('ns-agent-option-claude'));
+    await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Sonnet'));
+    await userEvent.click(screen.getByTestId('ns-model-chip'));
+    await userEvent.click(
+      within(document.querySelector('.catalog-options-pop') as HTMLElement).getByText('Low', { selector: '.mp-row-title' }),
+    );
+    await openAgentPicker();
+    await userEvent.click(screen.getByTestId('ns-agent-option-kimi'));
+    await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('On'));
+    await userEvent.type(screen.getByTestId('ns-message-input'), 'test kimi');
+    await userEvent.click(screen.getByTestId('ns-model-chip'));
+    const kimiMenu = document.querySelector('.catalog-options-pop') as HTMLElement;
+    expect(within(kimiMenu).getByText('Kimi for Coding')).toBeInTheDocument();
+    expect(within(kimiMenu).getByText('K3')).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('ns-model-chip'));
+    await userEvent.click(screen.getByTestId('ns-send'));
+    expect(onCreate).toHaveBeenCalledTimes(1);
+    const payload = onCreate.mock.calls[0]![0] as Record<string, unknown>;
+    expect(payload.executor).toBe('kimi');
+    expect(payload.thinkingEffort).toBeUndefined();
+    expect(payload.turnConfig).toBeUndefined();
   });
 
   it('remembers the last workspace / agent / chips as the next defaults', async () => {

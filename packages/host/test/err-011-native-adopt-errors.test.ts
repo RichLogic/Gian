@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { randomUUID } from 'node:crypto';
-import type { ServerToClientMessage } from '@gian/shared';
+import type { ProxyCatalog, ServerToClientMessage } from '@gian/shared';
 import { Hono } from 'hono';
 import { makeTestApp, type TestAppCtx } from './fixtures/test-app.js';
 import { makeNativeHome, type NativeHome } from './fixtures/native-home.js';
@@ -24,6 +24,7 @@ import type { SessionManager } from '../src/session/manager.js';
 import { NativeSessionService } from '../src/session/native-session-service.js';
 import { SessionRepository } from '../src/session/repository.js';
 import { registerNativeSessionRoutes } from '../src/web/routes/native-sessions.js';
+import { registerProxyRoutes } from '../src/web/routes/proxy.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 
 interface NativeTestCtx {
@@ -456,14 +457,40 @@ test('ERR-011: concurrent adopt/delete resolves to one complete outcome without 
   }
 });
 
-test('Grok capabilities route is a known executor', async () => {
-  const ctx = await makeTestApp();
-  try {
-    const res = await ctx.fetch('/api/proxy/grok/capabilities');
-    const body = await res.json() as { error?: string };
-    assert.notEqual(body.error, 'unknown executor');
-    assert.notEqual(res.status, 400);
-  } finally {
-    await ctx.cleanup();
-  }
+test('DSH capabilities route returns its Protocol 2 Catalog and unknown executors stay 400', async () => {
+  const catalog: ProxyCatalog = {
+    catalogRevision: 'dsh-route-v2',
+    input: [{ type: 'text' }],
+    configOptions: [{
+      id: 'model',
+      displayName: 'Model',
+      binding: 'turn',
+      role: 'model',
+      control: 'select',
+      required: true,
+      defaultValue: 'deepseek-chat',
+      choices: [{ value: 'deepseek-chat', displayName: 'DeepSeek Chat' }],
+    }],
+    slashCommands: [],
+  };
+  const app = new Hono();
+  const sessions = {
+    warmCapabilities: async (executor: string) => {
+      assert.equal(executor, 'dsh');
+      return catalog;
+    },
+    getProtocolCapabilities: () => ({ 'catalog.resolve': 1 }),
+  } as unknown as SessionManager;
+  registerProxyRoutes(app, {} as never, sessions);
+
+  const response = await app.request('/api/proxy/dsh/capabilities');
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ...catalog,
+    capabilities: { 'catalog.resolve': 1 },
+  });
+
+  const unknown = await app.request('/api/proxy/other/capabilities');
+  assert.equal(unknown.status, 400);
+  assert.deepEqual(await unknown.json(), { error: 'unknown executor' });
 });

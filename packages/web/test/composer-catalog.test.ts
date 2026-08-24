@@ -132,6 +132,23 @@ describe('catalog condition evaluation', () => {
     expect(merged.map(option => option.id)).toEqual(['workspace', 'verbosity']);
   });
 
+  it('drops leftover effort values that the current catalog does not advertise', () => {
+    const payload = createConfigsFromCatalog('kimi', [
+      {
+        id: 'thinking',
+        displayName: 'Thinking',
+        binding: 'turn',
+        role: 'effort',
+        control: 'select',
+        required: false,
+        defaultValue: 'on',
+        choices: [{ value: 'on', displayName: 'On' }],
+      },
+    ], { thinking: 'low' });
+    expect(payload.thinkingEffort).toBeUndefined();
+    expect(payload.turn_config).toEqual({});
+  });
+
   it('maps catalog values into session_config / turn_config without writing unknown approval modes', () => {
     const payload = createConfigsFromCatalog('kimi', [
       {

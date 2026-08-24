@@ -786,7 +786,7 @@ export class SessionManager {
         ? undefined
         : session.turn_config?.[option.id]
           ?? session.executor_config.values[option.id];
-      const byRole = option.role === 'model'
+      const roleValue = option.role === 'model'
         ? session.model
         : option.role === 'effort'
           ? session.thinking_effort
@@ -795,6 +795,10 @@ export class SessionManager {
             : option.role === 'fast'
               ? session.service_tier === 'fast'
               : undefined;
+      const byRole = roleValue === undefined || roleValue === null
+        || !option.choices || option.choices.some(choice => Object.is(choice.value, roleValue))
+        ? roleValue
+        : undefined;
       const draftValue = persisted ?? byRole ?? option.defaultValue;
       let value = draftValue;
       if (oneShotBypass && option.role === 'approval_mode' && option.choices) {

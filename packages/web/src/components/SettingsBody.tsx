@@ -4,11 +4,11 @@ import type {
   AgentProxyDefaults,
   AgentProxyUpdateCheck,
   ChatFontFamily,
+  ConfigValue,
   ExternalEditor,
   GianScreenshotPreferences,
   GianScreenshotState,
   OpenFileCategory,
-  ProxyCapabilities,
   ShortcutAction,
   SystemConfig,
   TerminalOptions,
@@ -23,6 +23,7 @@ import {
 import {
   loadAgents,
   loadProxyCapabilities,
+  loadResolvedProxyCatalog,
 } from '../api.js';
 import {
   MAX_ZOOM_PERCENT,
@@ -58,6 +59,10 @@ import {
 } from '../operations/use-operations.js';
 import type { OperationRun } from '../operations/types.js';
 import { AppIcon } from './AppIcon.js';
+import {
+  catalogFromCapabilities,
+  executorSettingsFromCapabilities,
+} from './composer/capabilities.js';
 import { DEFAULT_OPEN_TARGET } from './sheet-model.js';
 import { useT } from '../i18n/index.js';
 import type { AppIdentity } from '../controllers/use-app-auth.js';
@@ -1026,7 +1031,11 @@ function AgentInstallRow({
   const busy = usePendingOperations(agentEntityKey(agent.id)).length > 0;
   const [path, setPath] = useState(agent.cli.path ?? '');
   const pathInputRef = useRef<HTMLInputElement>(null);
-  const [capabilities, setCapabilities] = useState<ProxyCapabilities | null>(null);
+  const [capabilities, setCapabilities] = useState<unknown>(null);
+  const [resolvedCapabilities, setResolvedCapabilities] = useState<unknown>(null);
+  const [resolvedModel, setResolvedModel] = useState('');
+  const [resolvingDefaults, setResolvingDefaults] = useState(false);
+  const resolveSequence = useRef(0);
   const [capabilityError, setCapabilityError] = useState(false);
   useEffect(() => setPath(agent.cli.path ?? ''), [agent.cli.path]);
   // Show the tail of long paths when the field isn't being edited — the
@@ -1038,7 +1047,11 @@ function AgentInstallRow({
   useEffect(showPathTail, [path, agent.cli.path]);
   useEffect(() => {
     let alive = true;
+    resolveSequence.current += 1;
     setCapabilities(null);
+    setResolvedCapabilities(null);
+    setResolvedModel('');
+    setResolvingDefaults(false);
     setCapabilityError(false);
     if (agent.proxy.state !== 'ready') return () => { alive = false; };
     loadProxyCapabilities(agent.id)
@@ -1068,19 +1081,128 @@ function AgentInstallRow({
   }
 
   const defaults = agent.proxy.defaults ?? { model: '', thinking: '', mode: '' };
-  const models = capabilities?.models.filter(model => !model.hidden) ?? [];
+  const settingsCapabilities = resolvedCapabilities ?? capabilities;
+  const { models, thinkingLevels: catalogThinking, modes } = executorSettingsFromCapabilities(
+    agent.id,
+    settingsCapabilities,
+  );
+  const baseCatalog = catalogFromCapabilities(capabilities);
   const selectedModel = models.find(model => model.model === defaults.model)
     ?? models.find(model => model.isDefault)
     ?? models[0];
-  const thinkingLevels = selectedModel
+  const modelThinking = selectedModel
     ? ('supportedEfforts' in selectedModel
         ? selectedModel.supportedEfforts
         : selectedModel.supportedThinking)
     : [];
-  const modes = capabilities?.modes ?? [];
+  const thinkingLevels = catalogThinking.length > 0
+    ? catalogThinking
+    : modelThinking.filter((level): level is string => typeof level === 'string' && level.length > 0);
   const selectedMode = modes.some(mode => mode.id === defaults.mode)
     ? defaults.mode
     : modes.find(mode => mode.isDefault)?.id ?? modes[0]?.id ?? '';
+
+  function configWithModel(
+    model: string,
+  ): { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> } {
+    const sessionConfig: Record<string, ConfigValue> = {};
+    const turnConfig: Record<string, ConfigValue> = {};
+    const option = baseCatalog.configOptions.find(candidate => candidate.role === 'model');
+    if (option && model) {
+      (option.binding === 'session' ? sessionConfig : turnConfig)[option.id] = model;
+    }
+    return { sessionConfig, turnConfig };
+  }
+
+  async function changeDefaultModel(model: string): Promise<void> {
+    const modelOption = baseCatalog.configOptions.find(option => option.role === 'model');
+    const canResolve = !!model
+      && !!modelOption
+      && !!baseCatalog.catalogRevision
+      && baseCatalog.resolveAdvertised;
+    if (!canResolve) {
+      setResolvedCapabilities(null);
+      setResolvedModel('');
+      const nextModel = models.find(candidate => candidate.model === model)
+        ?? models.find(candidate => candidate.isDefault)
+        ?? models[0];
+      const supported = nextModel
+        ? ('supportedEfforts' in nextModel
+            ? nextModel.supportedEfforts
+            : nextModel.supportedThinking).filter((level): level is string => (
+              typeof level === 'string' && level.length > 0
+            ))
+        : [];
+      onSetDefaults({
+        model,
+        ...(defaults.thinking && !supported.includes(defaults.thinking)
+          ? { thinking: '' }
+          : {}),
+      });
+      return;
+    }
+
+    const sequence = ++resolveSequence.current;
+    setResolvingDefaults(true);
+    try {
+      const config = configWithModel(model);
+      const resolved = await loadResolvedProxyCatalog(agent.id, {
+        catalogRevision: baseCatalog.catalogRevision!,
+        ...config,
+      });
+      if (resolveSequence.current !== sequence) return;
+      setResolvedCapabilities(resolved);
+      setResolvedModel(model);
+      const resolvedThinking = executorSettingsFromCapabilities(agent.id, resolved).thinkingLevels;
+      onSetDefaults({
+        model,
+        ...(defaults.thinking && !resolvedThinking.includes(defaults.thinking)
+          ? { thinking: '' }
+          : {}),
+      });
+    } catch {
+      if (resolveSequence.current !== sequence) return;
+      // Do not retain a model-specific effort when the Proxy could not
+      // resolve the new model. Saving the model with Proxy-default effort is
+      // the only fail-closed combination.
+      setResolvedCapabilities(null);
+      setResolvedModel('');
+      onSetDefaults({ model, ...(defaults.thinking ? { thinking: '' } : {}) });
+    } finally {
+      if (resolveSequence.current === sequence) setResolvingDefaults(false);
+    }
+  }
+
+  useEffect(() => {
+    if (
+      !capabilities
+      || !defaults.model
+      || !!resolvedCapabilities
+      || resolvedModel === defaults.model
+      || !baseCatalog.resolveAdvertised
+      || !baseCatalog.catalogRevision
+      || !baseCatalog.configOptions.some(option => (
+        option.role === 'model' && !Object.is(option.defaultValue, defaults.model)
+      ))
+    ) return;
+    const sequence = ++resolveSequence.current;
+    setResolvingDefaults(true);
+    const config = configWithModel(defaults.model);
+    void loadResolvedProxyCatalog(agent.id, {
+      catalogRevision: baseCatalog.catalogRevision,
+      ...config,
+    }).then(resolved => {
+      if (resolveSequence.current !== sequence) return;
+      setResolvedCapabilities(resolved);
+      setResolvedModel(defaults.model);
+    }).catch(() => {
+      if (resolveSequence.current !== sequence) return;
+      setResolvedCapabilities(null);
+      setResolvedModel('');
+    }).finally(() => {
+      if (resolveSequence.current === sequence) setResolvingDefaults(false);
+    });
+  }, [agent.id, capabilities, defaults.model, resolvedCapabilities, resolvedModel]);
 
   const state = agent.ready
     ? { cls: 'ok', label: t('settings.agents.ready') }
@@ -1208,23 +1330,10 @@ function AgentInstallRow({
                     <select
                       className="select mono"
                       value={defaults.model}
-                      disabled={busy || !capabilities}
+                      disabled={busy || resolvingDefaults || !capabilities}
                       onChange={event => {
                         const model = event.target.value;
-                        const nextModel = models.find(candidate => candidate.model === model)
-                          ?? models.find(candidate => candidate.isDefault)
-                          ?? models[0];
-                        const supported = nextModel
-                          ? ('supportedEfforts' in nextModel
-                              ? nextModel.supportedEfforts
-                              : nextModel.supportedThinking)
-                          : [];
-                        onSetDefaults({
-                          model,
-                          ...(defaults.thinking && !supported.includes(defaults.thinking)
-                            ? { thinking: '' }
-                            : {}),
-                        });
+                        void changeDefaultModel(model);
                       }}
                     >
                       <option value="">{t('settings.executors.proxyDefault')}</option>
@@ -1244,7 +1353,7 @@ function AgentInstallRow({
                     <select
                       className="select mono"
                       value={defaults.thinking}
-                      disabled={busy || !capabilities}
+                      disabled={busy || resolvingDefaults || !capabilities}
                       onChange={event => onSetDefaults({ thinking: event.target.value })}
                     >
                       <option value="">{t('settings.executors.modelDefault')}</option>
@@ -1264,7 +1373,7 @@ function AgentInstallRow({
                       <select
                         className="select mono"
                         value={selectedMode}
-                        disabled={busy || !capabilities}
+                        disabled={busy || resolvingDefaults || !capabilities}
                         onChange={event => onSetDefaults({ mode: event.target.value })}
                       >
                         {modes.map(mode => (

@@ -293,7 +293,7 @@ test('gian.proxy/2 config validation enforces binding, choices, constraints, req
 
 test('gian.proxy/2 rejects turn-bound config before creating a Provider session', async () => {
   const harness = await createHarness();
-  const adapter = new CodexProtocolV2Adapter(harness.service, '0.2.0', () => undefined);
+  const adapter = new CodexProtocolV2Adapter(harness.service, '0.2.1', () => undefined);
   try {
     await adapter.handle(v2Request('1', 'initialize', {
       protocol: { name: 'gian.proxy', versions: ['2.0'] },
@@ -315,9 +315,98 @@ test('gian.proxy/2 rejects turn-bound config before creating a Provider session'
   }
 });
 
+test('gian.proxy/2 exposes four approval presets and maps them inside Codex Proxy', async () => {
+  const harness = await createHarness();
+  const adapter = new CodexProtocolV2Adapter(harness.service, '0.2.1', () => undefined);
+  try {
+    await adapter.handle(v2Request('preset-initialize', 'initialize', {
+      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      host: { name: 'Gian', version: '9.9.9' },
+    }));
+    const catalog = resultSchemas['catalog.list'].parse(
+      await adapter.handle(v2Request('preset-catalog', 'catalog.list')),
+    );
+    const approval = catalog.configOptions.find(option => option.id === 'approval_mode');
+    assert.deepEqual(
+      approval?.choices?.map(choice => [choice.value, choice.displayName]),
+      [
+        ['ask', 'Ask for approval'],
+        ['auto', 'Approve for me'],
+        ['full-access', 'Full access'],
+        ['custom', 'Custom (config.toml)'],
+      ],
+    );
+    assert.equal(approval?.defaultValue, 'ask');
+    assert.deepEqual(
+      catalog.configOptions.filter(option => [
+        'approval_policy',
+        'sandbox',
+        'approvals_reviewer',
+        'collaboration_mode',
+      ].includes(option.id)),
+      [],
+    );
+
+    for (const [index, mode] of ['ask', 'auto', 'full-access', 'custom'].entries()) {
+      const sessionId = `preset-session-${mode}`;
+      const created = resultSchemas['session.create'].parse(
+        await adapter.handle(v2Request(`preset-create-${index}`, 'session.create', {
+          sessionId,
+          workspace: { cwd: '/tmp/work', roots: ['/tmp/work'] },
+          config: {},
+        })),
+      );
+      await adapter.handle(v2Request(`preset-turn-${index}`, 'turn.start', {
+        sessionId,
+        streamId: created.session.streamId,
+        turnId: `preset-host-turn-${index}`,
+        input: [{ type: 'text', text: `test ${mode}` }],
+        config: { approval_mode: mode },
+      }));
+    }
+
+    assert.deepEqual(
+      harness.runtime.startTurnCalls.map(call => ({
+        sandbox: call.options.sandbox,
+        permissions: call.options.permissions,
+        approvalPolicy: call.options.approvalPolicy,
+        approvalsReviewer: call.options.approvalsReviewer,
+      })),
+      [
+        {
+          sandbox: 'workspace-write',
+          permissions: null,
+          approvalPolicy: 'on-request',
+          approvalsReviewer: 'user',
+        },
+        {
+          sandbox: 'workspace-write',
+          permissions: null,
+          approvalPolicy: 'on-request',
+          approvalsReviewer: 'auto_review',
+        },
+        {
+          sandbox: 'danger-full-access',
+          permissions: null,
+          approvalPolicy: 'never',
+          approvalsReviewer: 'auto_review',
+        },
+        {
+          sandbox: null,
+          permissions: ':workspace',
+          approvalPolicy: 'on-request',
+          approvalsReviewer: 'user',
+        },
+      ],
+    );
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('gian.proxy/2 session.create is idempotent only for an identical parameter fingerprint', async () => {
   const harness = await createHarness();
-  const adapter = new CodexProtocolV2Adapter(harness.service, '0.2.0', () => undefined);
+  const adapter = new CodexProtocolV2Adapter(harness.service, '0.2.1', () => undefined);
   try {
     await adapter.handle(v2Request('1', 'initialize', {
       protocol: { name: 'gian.proxy', versions: ['2.0'] },
@@ -582,11 +671,10 @@ test('capabilities preserve new Codex effort ids from model/list', async () => {
     assert.deepEqual(capabilities.models[0]?.supportedThinking, ['medium', 'max', 'ultra']);
     assert.equal(capabilities.models[0]?.defaultThinking, 'ultra');
     assert.deepEqual(capabilities.modes?.map(mode => mode.id), [
-      'plan',
       'ask',
       'auto',
-      'custom',
       'full-access',
+      'custom',
     ]);
   } finally {
     await harness.cleanup();
@@ -741,7 +829,7 @@ test('gian.proxy/2 emits compact turn.started before its turn-scoped usage reset
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = new CodexProtocolV2Adapter(
     harness.service,
-    '0.2.0',
+    '0.2.1',
     (method, params) => {
       notifications.push({ method, params });
       proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
@@ -1411,7 +1499,7 @@ test('gian.proxy/2 adapter owns Host ids, validates events, and deduplicates tur
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = new CodexProtocolV2Adapter(
     harness.service,
-    '0.2.0',
+    '0.2.1',
     (method, params) => {
       notifications.push({ method, params });
       proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
@@ -1442,10 +1530,7 @@ test('gian.proxy/2 adapter owns Host ids, validates events, and deduplicates tur
       config: {
         model: 'gpt-5-codex',
         effort: 'medium',
-        approval_policy: 'on-request',
-        sandbox: 'workspace-write',
-        approvals_reviewer: 'auto_review',
-        collaboration_mode: 'plan',
+        approval_mode: 'auto',
         service_tier: 'fast',
       },
     };
@@ -1467,14 +1552,7 @@ test('gian.proxy/2 adapter owns Host ids, validates events, and deduplicates tur
         approvalPolicy: 'on-request',
         sandbox: 'workspace-write',
         approvalsReviewer: 'auto_review',
-        collaborationMode: {
-          mode: 'plan',
-          settings: {
-            model: 'gpt-5-codex',
-            reasoning_effort: 'medium',
-            developer_instructions: null,
-          },
-        },
+        collaborationMode: null,
         serviceTier: 'fast',
       },
     );
@@ -1595,7 +1673,7 @@ test('gian.proxy/2 generation fence drops late events from the replaced Provider
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = new CodexProtocolV2Adapter(
     harness.service,
-    '0.2.0',
+    '0.2.1',
     (method, params) => notifications.push({ method, params }),
   );
   try {
@@ -1665,7 +1743,7 @@ test('Provider interrupted status is cancelled unless Gian accepted a Host inter
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = new CodexProtocolV2Adapter(
     harness.service,
-    '0.2.0',
+    '0.2.1',
     (method, params) => notifications.push({ method, params }),
   );
   try {
@@ -1713,7 +1791,7 @@ test('Provider token limits map to the protocol limit_reached stop reason', asyn
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = new CodexProtocolV2Adapter(
     harness.service,
-    '0.2.0',
+    '0.2.1',
     (method, params) => {
       notifications.push({ method, params });
       proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
@@ -1765,7 +1843,7 @@ test('gian.proxy/2 native list exposes app-server thread names as display titles
   const harness = await createHarness();
   const adapter = new CodexProtocolV2Adapter(
     harness.service,
-    '0.2.0',
+    '0.2.1',
     () => undefined,
   );
   harness.runtime.nativeThreads = [{
@@ -1805,7 +1883,7 @@ test('gian.proxy/2 adapter resolves interaction before an interrupted turn termi
   const notifications: Array<{ method: string; params: { data?: { stopReason?: string } } }> = [];
   const adapter = new CodexProtocolV2Adapter(
     harness.service,
-    '0.2.0',
+    '0.2.1',
     (method, params) => notifications.push({ method, params }),
   );
   try {
@@ -1858,7 +1936,7 @@ test('gian.proxy/2 adapter relays Codex request_user_input answers and cancellat
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = new CodexProtocolV2Adapter(
     harness.service,
-    '0.2.0',
+    '0.2.1',
     (method, params) => notifications.push({ method, params }),
   );
   try {

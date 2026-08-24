@@ -84,7 +84,7 @@ test('Codex CLI negotiates gian.proxy/2.0 independently from its app-server vers
   const result = initializeResultSchema.parse(initialized.result);
   assert.equal(result.protocol.version, '2.0');
   assert.equal(result.plugin.id, 'codex');
-  assert.equal(result.plugin.version, '0.2.0');
+  assert.equal(result.plugin.version, '0.2.1');
   assert.equal(result.process.scope, 'shared');
   assert.equal(result.capabilities.interaction, 1);
   assert.equal(result.capabilities['session.replay'], 1);
@@ -137,18 +137,33 @@ test('real Codex Proxy CLI completes a full lifecycle through the Fake app-serve
     proxy.send({ jsonrpc: '2.0', id: 'lifecycle-catalog', method: 'catalog.list', params: {} });
     const catalogResponse = (await responseFor(proxy, 'lifecycle-catalog')).response;
     const configOptions = (
-      catalogResponse.result as { configOptions: Array<{ id: string }> }
+      catalogResponse.result as {
+        configOptions: Array<{
+          id: string;
+          role?: string;
+          defaultValue: unknown;
+          choices?: Array<{ value: unknown; displayName: string; description?: string }>;
+        }>;
+      }
     ).configOptions;
+    const approval = configOptions.find(option => option.role === 'approval_mode');
+    assert.equal(approval?.id, 'approval_mode');
+    assert.equal(approval?.defaultValue, 'ask');
+    assert.deepEqual(approval?.choices, [
+      { value: 'ask', displayName: 'Ask for approval', description: 'Always ask to edit external files and use the internet.' },
+      { value: 'auto', displayName: 'Approve for me', description: 'Let Codex review approval requests automatically.' },
+      { value: 'full-access', displayName: 'Full access', description: 'Run without sandbox restrictions or approval prompts.' },
+      { value: 'custom', displayName: 'Custom (config.toml)', description: 'Use the permission configuration loaded from config.toml.' },
+    ]);
     assert.deepEqual(
       configOptions.filter(option => [
         'approval_policy',
         'sandbox',
         'approvals_reviewer',
         'collaboration_mode',
-      ].includes(option.id)).map(option => option.id),
-      ['approval_policy', 'sandbox', 'approvals_reviewer', 'collaboration_mode'],
+      ].includes(option.id)),
+      [],
     );
-    assert.equal(configOptions.some(option => option.id === 'mode'), false);
 
     proxy.send({
       jsonrpc: '2.0',
@@ -176,10 +191,7 @@ test('real Codex Proxy CLI completes a full lifecycle through the Fake app-serve
         turnId: 'fake-host-turn',
         input: [{ type: 'text', text: 'exercise fake runtime' }],
         config: {
-          approval_policy: 'on-request',
-          sandbox: 'workspace-write',
-          approvals_reviewer: 'user',
-          collaboration_mode: 'default',
+          approval_mode: 'ask',
           service_tier: 'flex',
         },
       },

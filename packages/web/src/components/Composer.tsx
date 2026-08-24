@@ -40,7 +40,7 @@ import {
   getSlashCached,
   inputTypeAdvertised,
   mergeTurnCatalog,
-  modelsFromCatalog,
+  displayModelsFromCatalog,
   optionByRole,
   optionEnabled,
   optionVisible,
@@ -568,11 +568,15 @@ export function Composer({
     composerConfigValues(session, viewOptions),
     resolvedOverlay?.defaults,
   );
-  const catalogModelOption = optionByRole(viewOptions, 'model');
+  const catalogModelOption = optionByRole(viewOptions, 'model')
+    ?? optionByRole(mergedOptions, 'model');
   const catalogEffortOption = optionByRole(viewOptions, 'effort');
   const catalogApprovalOption = optionByRole(viewOptions, 'approval_mode');
-  const catalogModels = modelsFromCatalog(catalogModelOption);
-  const displayModels = catalogModels.length > 0 ? catalogModels : models;
+  const displayModels = displayModelsFromCatalog(
+    optionByRole(viewOptions, 'model'),
+    optionByRole(mergedOptions, 'model'),
+    models,
+  );
   const catalogEfforts = (catalogEffortOption?.choices ?? []).map(choice => String(choice.value));
   const currentModel = session.model
     ?? (catalogModelOption && catalogModelOption.defaultValue != null

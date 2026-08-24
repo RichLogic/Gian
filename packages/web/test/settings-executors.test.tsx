@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   AgentInstallStatus,
+  ConfigOption,
   Executor,
   ProxyCapabilities,
   SystemConfig,
@@ -21,6 +22,7 @@ vi.mock('../src/api.js', async () => {
     ...actual,
     loadAgents: vi.fn(),
     loadProxyCapabilities: vi.fn(),
+    loadResolvedProxyCatalog: vi.fn(),
     setAgentCliPath: vi.fn(),
     setAgentProxyDefaults: vi.fn(),
     checkAgentProxyUpdate: vi.fn(),
@@ -61,7 +63,7 @@ function agent(id: Executor, name: string): AgentInstallStatus {
       path: `/proxy/${id}`,
       version: '0.1.0',
       source: 'development',
-      defaults: id === 'kimi' || id === 'grok'
+      defaults: id === 'kimi' || id === 'grok' || id === 'dsh'
         ? { model: '', thinking: '', mode: '' }
         : { model: `${id}-model`, thinking: 'high', mode: 'ask' },
     },
@@ -69,8 +71,50 @@ function agent(id: Executor, name: string): AgentInstallStatus {
   };
 }
 
-function capabilities(id: Executor): ProxyCapabilities {
+function catalogOption(
+  id: string,
+  role: ConfigOption['role'],
+  defaultValue: string,
+  choices: string[],
+): ConfigOption {
+  return {
+    id,
+    displayName: id,
+    binding: 'turn',
+    role,
+    control: 'select',
+    required: false,
+    defaultValue,
+    choices: choices.map(value => ({ value, displayName: value })),
+  };
+}
+
+/** Shape returned by GET /api/proxy/:executor/capabilities after gian.proxy/2.0. */
+function v2Catalog(id: Executor): Record<string, unknown> {
   if (id === 'kimi' || id === 'grok') {
+    return {
+      catalogRevision: `${id}-v2`,
+      input: [{ type: 'text' }],
+      configOptions: [],
+      slashCommands: [],
+      capabilities: {},
+    };
+  }
+  return {
+    catalogRevision: `${id}-v2`,
+    input: [{ type: 'text' }],
+    configOptions: [
+      catalogOption('model', 'model', `${id}-model`, [`${id}-model`]),
+      catalogOption('effort', 'effort', 'high', ['high', 'xhigh']),
+      catalogOption('permission_mode', 'approval_mode', 'ask', ['ask', 'auto']),
+    ],
+    slashCommands: [],
+    capabilities: {},
+  };
+}
+
+function capabilities(id: Executor): ProxyCapabilities {
+  if (id === 'kimi' || id === 'grok' || id === 'dsh') {
     return {
       protocolVersion: 'acp/1',
       models: [],
@@ -113,6 +157,7 @@ describe('SettingsBody Executors', () => {
     agent('claude', 'Claude Code'),
     agent('codex', 'Codex'),
     agent('kimi', 'Kimi Code'),
+    agent('dsh', 'DeepSeek Harness'),
     agent('grok', 'Grok Build'),
   ];
 
@@ -122,16 +167,19 @@ describe('SettingsBody Executors', () => {
     // failure from a timed-out test cannot leak into the next case.
     vi.mocked(api.loadAgents).mockReset().mockResolvedValue(agents);
     vi.mocked(api.loadProxyCapabilities).mockReset().mockImplementation(async id => capabilities(id));
+    vi.mocked(api.loadResolvedProxyCatalog).mockReset();
     vi.mocked(api.setAgentCliPath).mockReset().mockImplementation(async id => agent(
       id,
       id === 'claude' ? 'Claude Code'
         : id === 'codex' ? 'Codex'
+          : id === 'dsh' ? 'DeepSeek Harness'
           : id === 'grok' ? 'Grok Build' : 'Kimi Code',
     ));
     vi.mocked(api.setAgentProxyDefaults).mockReset().mockImplementation(async id => agent(
       id,
       id === 'claude' ? 'Claude Code'
         : id === 'codex' ? 'Codex'
+          : id === 'dsh' ? 'DeepSeek Harness'
           : id === 'grok' ? 'Grok Build' : 'Kimi Code',
     ));
     vi.mocked(api.checkAgentProxyUpdate).mockReset();
@@ -151,18 +199,139 @@ describe('SettingsBody Executors', () => {
     );
   }
 
-  it('renders only the three shipping executor cards with Proxy-owned defaults', async () => {
+  it('renders all four shipping executor cards with Proxy-owned defaults', async () => {
     renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
 
     await waitFor(() => expect(screen.getAllByText('Claude Code')).toHaveLength(1));
     expect(screen.getAllByText('Codex')).toHaveLength(1);
     expect(screen.getAllByText('Kimi Code')).toHaveLength(1);
+    expect(screen.getAllByText('DeepSeek Harness')).toHaveLength(1);
     expect(screen.queryByText('Grok Build')).toBeNull();
-    // Claude + Codex: model, thinking/effort, mode. Kimi advertises no
-    // models/modes, so it renders no defaults rows at all (2026-08-04).
+    // Claude + Codex: model, thinking/effort, mode. Kimi/DSH advertise no
+    // legacy models/modes in this fixture, so they render no defaults rows.
     await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(6));
     const kimiCard = screen.getByText('Kimi Code').closest('.exec-row') as HTMLElement;
     expect(within(kimiCard).queryByRole('combobox')).toBeNull();
+    const dshCard = screen.getByText('DeepSeek Harness').closest('.exec-row') as HTMLElement;
+    expect(within(dshCard).queryByRole('combobox')).toBeNull();
+  });
+
+  it('renders defaults from a gian.proxy/2.0 catalog that has no models array', async () => {
+    vi.mocked(api.loadProxyCapabilities).mockImplementation(async id => (
+      v2Catalog(id) as unknown as ProxyCapabilities
+    ));
+    renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
+
+    await waitFor(() => expect(screen.getAllByText('Claude Code')).toHaveLength(1));
+    expect(screen.getAllByText('Codex')).toHaveLength(1);
+    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(9));
+    const claudeCard = screen.getByText('Claude Code').closest('.exec-row') as HTMLElement;
+    expect(within(claudeCard).getByRole('combobox', { name: 'Model' })).toHaveValue('claude-model');
+    const dshCard = screen.getByText('DeepSeek Harness').closest('.exec-row') as HTMLElement;
+    const dshModel = within(dshCard).getByRole('combobox', { name: 'Model' });
+    expect(dshModel).toHaveValue('');
+    expect(within(dshModel).getByRole('option', { name: 'dsh-model' })).toBeInTheDocument();
+  });
+
+  it('reloads DSH defaults after saving Catalog-backed values', async () => {
+    let dsh = agent('dsh', 'DeepSeek Harness');
+    vi.mocked(api.loadAgents).mockImplementation(async () => [dsh]);
+    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(
+      v2Catalog('dsh') as unknown as ProxyCapabilities,
+    );
+    vi.mocked(api.setAgentProxyDefaults).mockImplementation(async (_id, patch) => {
+      dsh = {
+        ...dsh,
+        proxy: {
+          ...dsh.proxy,
+          defaults: { ...dsh.proxy.defaults, ...patch },
+        },
+      };
+      return dsh;
+    });
+
+    const first = renderWithOperations(
+      <SettingsBody config={config()} activeSection="executors" />,
+    );
+    const firstCard = (await screen.findByText('DeepSeek Harness')).closest('.exec-row') as HTMLElement;
+    const model = await within(firstCard).findByRole('combobox', { name: 'Model' });
+    fireEvent.change(model, { target: { value: 'dsh-model' } });
+    await waitFor(() => expect(model).toHaveValue('dsh-model'));
+
+    const effort = within(firstCard).getByRole('combobox', { name: 'Thinking' });
+    fireEvent.change(effort, { target: { value: 'xhigh' } });
+    await waitFor(() => expect(effort).toHaveValue('xhigh'));
+
+    const mode = within(firstCard).getByRole('combobox', { name: 'Mode' });
+    fireEvent.change(mode, { target: { value: 'auto' } });
+    await waitFor(() => expect(mode).toHaveValue('auto'));
+    expect(dsh.proxy.defaults).toEqual({ model: 'dsh-model', thinking: 'xhigh', mode: 'auto' });
+
+    first.unmount();
+    renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
+    const reloaded = (await screen.findByText('DeepSeek Harness')).closest('.exec-row') as HTMLElement;
+    await waitFor(() => {
+      expect(within(reloaded).getByRole('combobox', { name: 'Model' })).toHaveValue('dsh-model');
+      expect(within(reloaded).getByRole('combobox', { name: 'Thinking' })).toHaveValue('xhigh');
+      expect(within(reloaded).getByRole('combobox', { name: 'Mode' })).toHaveValue('auto');
+    });
+  });
+
+  it('resolves effort choices for the selected model before persisting defaults', async () => {
+    const defaultCatalog = {
+      catalogRevision: 'claude-models-v2',
+      input: [{ type: 'text' }],
+      configOptions: [
+        catalogOption('model', 'model', 'default', ['default', 'opus']),
+        catalogOption('effort', 'effort', 'medium', ['low', 'medium', 'high']),
+        catalogOption('permission_mode', 'approval_mode', 'ask', ['ask', 'auto']),
+      ],
+      slashCommands: [],
+      capabilities: { 'catalog.resolve': 1 },
+    };
+    const claude = {
+      ...agent('claude', 'Claude Code'),
+      proxy: {
+        ...agent('claude', 'Claude Code').proxy,
+        defaults: { model: 'default', thinking: 'medium', mode: 'ask' },
+      },
+    };
+    vi.mocked(api.loadAgents).mockResolvedValue([
+      claude,
+      agent('codex', 'Codex'),
+      agent('kimi', 'Kimi Code'),
+      agent('dsh', 'DeepSeek Harness'),
+    ]);
+    vi.mocked(api.loadProxyCapabilities).mockImplementation(async id => (
+      id === 'claude' ? defaultCatalog as unknown as ProxyCapabilities : capabilities(id)
+    ));
+    vi.mocked(api.loadResolvedProxyCatalog).mockResolvedValue({
+      ...defaultCatalog,
+      configOptions: [
+        catalogOption('model', 'model', 'opus', ['default', 'opus']),
+        catalogOption('effort', 'effort', 'high', ['low', 'high', 'max']),
+        catalogOption('permission_mode', 'approval_mode', 'ask', ['ask', 'auto']),
+      ],
+      resolvedDefaults: { sessionConfig: {}, turnConfig: { effort: 'high' } },
+    });
+    renderWithOperations(<SettingsBody config={config()} activeSection="executors" />);
+
+    const claudeCard = (await screen.findByText('Claude Code')).closest('.exec-row') as HTMLElement;
+    const model = await within(claudeCard).findByRole('combobox', { name: 'Model' });
+    fireEvent.change(model, { target: { value: 'opus' } });
+
+    await waitFor(() => expect(api.loadResolvedProxyCatalog).toHaveBeenCalledWith('claude', {
+      catalogRevision: 'claude-models-v2',
+      sessionConfig: {},
+      turnConfig: { model: 'opus' },
+    }));
+    await waitFor(() => expect(api.setAgentProxyDefaults).toHaveBeenCalledWith('claude', {
+      model: 'opus',
+      thinking: '',
+    }));
+    const effort = within(claudeCard).getByRole('combobox', { name: 'Effort' });
+    expect(within(effort).getByRole('option', { name: 'max' })).toBeInTheDocument();
+    expect(within(effort).queryByRole('option', { name: 'medium' })).toBeNull();
   });
 
   it('renders a Mode picker for Kimi when the proxy advertises modes (ACP probe, 2026-08-04)', async () => {

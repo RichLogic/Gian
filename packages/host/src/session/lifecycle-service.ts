@@ -68,7 +68,7 @@ function initialTurnConfigFromCreate(
   roles: {
     model: string | null;
     effort: ThinkingEffort | null;
-    approvalMode: ApprovalMode | null;
+    mode: string | null;
     serviceTier: 'fast' | null;
   },
 ): Record<string, ConfigValue> {
@@ -77,8 +77,9 @@ function initialTurnConfigFromCreate(
     if (option.scope !== 'turn' || config[option.id] !== undefined) continue;
     if (option.category === 'model' && roles.model) config[option.id] = roles.model;
     else if (option.category === 'effort' && roles.effort) config[option.id] = roles.effort;
-    else if (option.category === 'approval_mode' && roles.approvalMode) {
-      config[option.id] = roles.approvalMode;
+    else if (option.category === 'approval_mode' && roles.mode
+      && (!option.choices || option.choices.some(choice => Object.is(choice.value, roles.mode)))) {
+      config[option.id] = roles.mode;
     } else if (option.category === 'fast') config[option.id] = roles.serviceTier === 'fast';
   }
   return config;
@@ -217,7 +218,9 @@ export class SessionLifecycleService {
       {
         model: effectiveModel,
         effort: effectiveEffort,
-        approvalMode,
+        mode: usesNativeExecutorConfig(input.executor)
+          ? configuredMode || null
+          : approvalMode,
         serviceTier,
       },
     );

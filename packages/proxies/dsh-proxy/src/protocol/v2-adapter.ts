@@ -329,11 +329,12 @@ export class DshV2Adapter {
       nativeSessionId: null,
       createFingerprint: createFp,
     });
-    await this.bridge.request('session.create', {
+    const remote = await this.bridge.request('session.create', {
       sessionId: parsed.sessionId,
       workspace: { cwd: parsed.workspace.cwd, roots: parsed.workspace.roots },
       config: parsed.config,
     });
+    attached.nativeSessionId = nativeIdFromBridge(remote) ?? attached.id;
     return { session: this.snapshot(attached.id, attached.streamId) };
   }
 
@@ -549,6 +550,14 @@ function stringField(params: Record<string, unknown>, key: string): string {
     throw new ServiceError('INVALID_PARAMS', `params.${key} must be a non-empty string.`);
   }
   return value;
+}
+
+function nativeIdFromBridge(remote: unknown): string | null {
+  if (remote === null || typeof remote !== 'object') return null;
+  const session = (remote as { session?: unknown }).session;
+  if (session === null || typeof session !== 'object') return null;
+  const nativeId = (session as { nativeId?: unknown }).nativeId;
+  return typeof nativeId === 'string' && nativeId.length > 0 ? nativeId : null;
 }
 
 function coerceInput(input: unknown[]): Array<Record<string, unknown>> {

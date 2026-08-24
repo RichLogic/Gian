@@ -8,7 +8,7 @@ import { isAbsolute } from 'node:path';
 import { DshV2Adapter } from '../protocol/v2-adapter.js';
 import { BridgeClient, BridgeClientError } from '../runtime/bridge-client.js';
 
-const PLUGIN_VERSION = '0.1.0';
+const PLUGIN_VERSION = '0.1.1';
 
 function bridgeArgs(argv: string[], explicit: string | undefined): string[] {
   const configured = process.env.GIAN_DSH_HOST_ARGS;

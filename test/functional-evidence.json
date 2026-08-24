@@ -25,7 +25,7 @@
     {
       "id": "tasks",
       "prefixes": ["FT-TASK"],
-      "evidence": ["packages/host/test/subtask-lifecycle.test.ts", "packages/host/test/task-session-archive.test.ts", "packages/host/test/skill-templates.test.ts", "packages/web/test/tasks-view.test.tsx", "packages/web/test/subtasks-for.test.ts", "e2e/specs/05-tasks.spec.ts"]
+      "evidence": ["packages/host/test/subtask-lifecycle.test.ts", "packages/host/test/task-session-archive.test.ts", "packages/host/test/task-subtask-create.test.ts", "packages/host/test/skill-templates.test.ts", "packages/web/test/tasks-view.test.tsx", "packages/web/test/subtasks-for.test.ts", "e2e/specs/05-tasks.spec.ts"]
     },
     {
       "id": "sessions",

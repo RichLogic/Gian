@@ -217,6 +217,15 @@ export function createApp(ctx: AppContext): AppHandle {
       runtimes: ctx.runtimeManager,
       closeProxy: executor => proxy.closeByExecutor(executor),
       capabilities: executor => sessions.warmCapabilities(executor),
+      resolveDefaultsCatalog: async (executor, catalog, config) => {
+        if (sessions.getProtocolCapabilities(executor)?.['catalog.resolve'] === undefined) {
+          return catalog;
+        }
+        return sessions.resolveCatalog(executor, {
+          catalogRevision: catalog.catalogRevision,
+          ...config,
+        });
+      },
     });
   }
 

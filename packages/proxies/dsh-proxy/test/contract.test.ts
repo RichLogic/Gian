@@ -101,7 +101,7 @@ function fakeBridge(turnNumber = 0): FakeBridge {
 }
 
 function adapterWith(bridge: FakeBridge) {
-  const adapter = new DshV2Adapter(bridge as never, { pluginVersion: '0.1.0' });
+  const adapter = new DshV2Adapter(bridge as never, { pluginVersion: '0.1.1' });
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   adapter.setEmitSink((method, params) => notifications.push({ method, params }));
   return { adapter, notifications };
@@ -141,7 +141,7 @@ test('initialize: only accepts gian.proxy 2.0 and returns exact identity', async
   };
   assert.equal(result.protocol.version, '2.0');
   assert.equal(result.plugin.id, PLUGIN_ID);
-  assert.equal(result.plugin.version, '0.1.0');
+  assert.equal(result.plugin.version, '0.1.1');
   assert.equal(result.process.scope, 'shared');
   assert.equal(result.capabilities['input.localFile'], 1);
   assert.equal(result.capabilities['input.localImage'], 1);
@@ -174,7 +174,7 @@ test('session.create returns a session snapshot; non-empty hostServices rejected
   const session = (created.result as { session: { id: string; state: string; nativeSession?: unknown } }).session;
   assert.equal(session.id, 's_1');
   assert.equal(session.state, 'idle');
-  assert.equal(session.nativeSession, undefined);
+  assert.deepEqual(session.nativeSession, { id: 'native-1' });
 
   const blocked = await call(adapter, 'session.create', {
     sessionId: 's_2',
@@ -247,7 +247,7 @@ test('turn.start correlates pending Gian turn ids FIFO for native turn ordinals'
   assert.equal(started.error, null);
   const turnStarted = started.notifications.find((n) => n.method === 'turn.started');
   assert.equal(turnStarted?.params.turnId, 't_user_1');
-  assert.equal(turnStarted?.params.sourceTurnId, 's_1:turn:1');
+  assert.equal(turnStarted?.params.sourceTurnId, 'native-1:turn:1');
   const terminal = started.notifications.find((n) => n.method === 'turn.completed');
   assert.equal(terminal?.params.turnId, 't_user_1');
 });

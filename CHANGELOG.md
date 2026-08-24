@@ -4,9 +4,30 @@ This file records user-facing changes in published Gian builds. It is updated
 whenever a version is packaged and tagged for release; local test packages are
 not listed.
 
-Releases through 0.5.0 are unsigned macOS Apple Silicon beta builds. Signed
+Releases through 0.5.1 are unsigned macOS Apple Silicon beta builds. Signed
 and notarized native notifications and automatic updates remain disabled
 until Developer ID signing and notarization are available.
+
+## [0.5.1] - 2026-08-24
+
+### Fixed
+
+- Settings and new-session now consume Proxy v2 catalogs safely, so Kimi
+  models stay visible and thinking is resolved per selected model.
+- Restored Codex semantic approval presets in the catalog-backed mode
+  control.
+- Allowed DeepSeek Harness Task subtask creation and persisted native
+  session ids so a second DSH create no longer collides.
+
+### Changed
+
+- Published Codex Proxy 0.2.1, Kimi Proxy 0.2.1, and DeepSeek Harness
+  Proxy 0.1.1 with those catalog and DSH session fixes.
+
+### Known limitations
+
+- The macOS build remains unsigned and supports Apple Silicon only.
+- Grok is not included in the 0.5.1 product surface.
 
 ## [0.5.0] - 2026-08-22
 

@@ -160,11 +160,19 @@ const CAPABILITIES = {
   'session.rename': 1,
   'session.native.list': 1,
   'session.replay': 1,
+  'catalog.resolve': 1,
   interaction: 1,
   'event.reasoning': 1,
   'event.plan': 1,
   'event.usage': 1,
 } as const;
+
+interface CatalogModelCapability {
+  model: string;
+  isDefault: boolean;
+  defaultThinking: string | null;
+  supportedThinking: string[];
+}
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -289,6 +297,59 @@ function catalogConfigOption(option: SessionConfigOption) {
     defaultValue,
     ...(control === 'select' && choices.length > 0 ? { choices } : {}),
   };
+}
+
+function hasCatalogChoices(option: ReturnType<typeof catalogConfigOption>): boolean {
+  return option.control !== 'select' || Boolean(option.choices && option.choices.length > 0);
+}
+
+function choiceDisplayName(option: SessionConfigOption, value: string): string {
+  const found = flatChoices(option).find((choice) => String(choice.value) === value);
+  return found?.name || `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
+}
+
+function requestedModelId(
+  turnConfig: Record<string, unknown>,
+  options: SessionConfigOption[],
+  models: CatalogModelCapability[],
+): string | null {
+  const modelOption = options.find((option) => configRole(option) === 'model');
+  return nonEmptyString(turnConfig[modelOption?.id ?? 'model'])
+    ?? (modelOption && typeof modelOption.currentValue === 'string' ? modelOption.currentValue : null)
+    ?? models.find((model) => model.isDefault)?.model
+    ?? null;
+}
+
+function catalogOptionsForModel(
+  sessionOptions: SessionConfigOption[],
+  models: CatalogModelCapability[],
+  requestedModel: string | null,
+) {
+  const modelCap = requestedModel
+    ? models.find((model) => model.model === requestedModel)
+    : undefined;
+  return sessionOptions.map((option) => {
+    const mapped = catalogConfigOption(option);
+    if (configRole(option) === 'model' && requestedModel) {
+      return { ...mapped, defaultValue: requestedModel };
+    }
+    if (configRole(option) === 'effort' && modelCap) {
+      const choices = modelCap.supportedThinking.map((value) => ({
+        value,
+        displayName: choiceDisplayName(option, value),
+      }));
+      const defaultValue = modelCap.defaultThinking
+        && choices.some((choice) => Object.is(choice.value, modelCap.defaultThinking))
+        ? modelCap.defaultThinking
+        : (choices[0]?.value ?? null);
+      return {
+        ...mapped,
+        defaultValue,
+        ...(choices.length > 0 ? { choices } : {}),
+      };
+    }
+    return mapped;
+  }).filter(hasCatalogChoices);
 }
 
 function kimiInput(items: unknown[]) {
@@ -490,9 +551,9 @@ export class KimiProtocolV2Adapter {
       case 'session.rename': return this.renameSession(request.params);
       case 'session.native.list': return this.listNative(request.params);
       case 'session.replay': return this.replay(request.params);
+      case 'catalog.resolve': return this.resolveCatalog(request.params);
       case 'session.native.delete':
       case 'turn.steer':
-      case 'catalog.resolve':
         throw new KimiProtocolError(
           'CAPABILITY_NOT_SUPPORTED',
           `${request.method} is not advertised by Kimi Proxy.`,
@@ -524,9 +585,48 @@ export class KimiProtocolV2Adapter {
   private async catalog() {
     const capabilities = await this.service.listCapabilities();
     const sessionOptions = capabilities.sessionOptions as SessionConfigOption[];
-    const configOptions = sessionOptions
-      .map(catalogConfigOption)
-      .filter((option) => option.control !== 'select' || (option.choices && option.choices.length > 0));
+    return this.finishCatalog(sessionOptions.map(catalogConfigOption).filter(hasCatalogChoices));
+  }
+
+  private async resolveCatalog(params: Record<string, unknown>) {
+    const catalogRevision = nonEmptyString(params.catalogRevision);
+    if (!catalogRevision) throw new KimiProtocolError('INVALID_PARAMS', 'catalogRevision is required.');
+    const sessionId = nonEmptyString(params.sessionId);
+    const streamId = nonEmptyString(params.streamId);
+    if ((sessionId === null) !== (streamId === null)) {
+      throw new KimiProtocolError('INVALID_PARAMS', 'sessionId and streamId must be sent together.');
+    }
+    if (sessionId && streamId) this.requireAttached(sessionId, streamId);
+    const sessionConfig = record(params.sessionConfig);
+    if (Object.keys(sessionConfig).length > 0) {
+      throw new KimiProtocolError(
+        'CONFIG_BINDING_INVALID',
+        'Kimi config options are turn-bound; send them in turnConfig, not sessionConfig.',
+      );
+    }
+    const turnConfig = record(params.turnConfig);
+    const capabilities = await this.service.listCapabilities();
+    const sessionOptions = capabilities.sessionOptions as SessionConfigOption[];
+    const models = capabilities.models as CatalogModelCapability[];
+    const requestedModel = requestedModelId(turnConfig, sessionOptions, models);
+    this.validateTurnConfig(turnConfig, sessionOptions, models, requestedModel);
+    const configOptions = catalogOptionsForModel(sessionOptions, models, requestedModel);
+    const payload = await this.finishCatalog(configOptions);
+    const resolvedDefaults: { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> } = {
+      sessionConfig: {},
+      turnConfig: {},
+    };
+    for (const option of configOptions) {
+      if (turnConfig[option.id] !== undefined) continue;
+      if (!isConfigValue(option.defaultValue) || option.defaultValue === null) continue;
+      resolvedDefaults.turnConfig[option.id] = option.defaultValue;
+    }
+    return { ...payload, resolvedDefaults };
+  }
+
+  private async finishCatalog(
+    configOptions: Array<ReturnType<typeof catalogConfigOption>>,
+  ) {
     const slashCommands = [] as Array<{
       name: string;
       description: string;
@@ -595,10 +695,18 @@ export class KimiProtocolV2Adapter {
     serviceSessionId: string,
     config: Record<string, unknown>,
     advertised: Set<string>,
+    modelConfigId?: string,
   ) {
     let last = null as Awaited<ReturnType<KimiProxyService['setConfigOption']>> | null;
-    for (const [configId, value] of Object.entries(config)) {
-      if (value === null) continue;
+    const entries = Object.entries(config).filter(([, value]) => value !== null);
+    if (modelConfigId) {
+      entries.sort(([left], [right]) => {
+        if (left === modelConfigId) return -1;
+        if (right === modelConfigId) return 1;
+        return 0;
+      });
+    }
+    for (const [configId, value] of entries) {
       if (!advertised.has(configId)) {
         throw new KimiProtocolError('CONFIG_VALUE_INVALID', `Unknown config option ${configId}.`);
       }
@@ -624,7 +732,12 @@ export class KimiProtocolV2Adapter {
   private validateTurnConfig(
     config: Record<string, unknown>,
     options: SessionConfigOption[],
+    models: CatalogModelCapability[] = [],
+    requestedModel: string | null = null,
   ): void {
+    const modelCap = requestedModel
+      ? models.find((model) => model.model === requestedModel)
+      : undefined;
     for (const [configId, value] of Object.entries(config)) {
       const option = options.find((candidate) => candidate.id === configId);
       if (!option) {
@@ -647,7 +760,9 @@ export class KimiProtocolV2Adapter {
         continue;
       }
       if (option.type === 'select') {
-        const choices = flatChoices(option).map((choice) => choice.value);
+        const choices = configRole(option) === 'effort' && modelCap && modelCap.supportedThinking.length > 0
+          ? modelCap.supportedThinking
+          : flatChoices(option).map((choice) => choice.value);
         if (!choices.some((choice) => Object.is(choice, value))) {
           throw new KimiProtocolError(
             'CONFIG_VALUE_INVALID',
@@ -790,8 +905,12 @@ export class KimiProtocolV2Adapter {
     if (input.length === 0) throw new KimiProtocolError('INVALID_PARAMS', 'input is required.');
     const config = record(params.config);
     // Validate the full snapshot before recording the idempotency fingerprint
-    // or touching the native session.
-    this.validateTurnConfig(config, session.configOptions);
+    // or touching the native session. Thinking choices are per-model, so the
+    // requested model (not the create-time snapshot) is authoritative.
+    const capabilities = await this.service.listCapabilities();
+    const models = capabilities.models as CatalogModelCapability[];
+    const requestedModel = requestedModelId(config, session.configOptions, models);
+    this.validateTurnConfig(config, session.configOptions, models, requestedModel);
     const accepted = this.ledger.accept({ sessionId, streamId, turnId, input, config });
     if (accepted === 'duplicate') return { accepted: true as const, turnId };
     if (this.activeTurnBySession.has(session.id)) {
@@ -807,7 +926,13 @@ export class KimiProtocolV2Adapter {
     this.openContentByTurn.set(key, new Map());
     try {
       const advertised = this.advertisedOptionIds(session.configOptions);
-      const applied = await this.applyConfigMap(session.serviceSessionId, config, advertised);
+      const modelOption = session.configOptions.find((option) => configRole(option) === 'model');
+      const applied = await this.applyConfigMap(
+        session.serviceSessionId,
+        config,
+        advertised,
+        modelOption?.id,
+      );
       if (applied) {
         session.configOptions = [...applied.configOptions];
       }

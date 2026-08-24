@@ -345,6 +345,23 @@ describe('subtask REST operations (proposal §8, product definitions)', () => {
     expect(store.getRun(run.id)?.result).toBe(session);
   });
 
+  it('task.createSubtask omits Gian approval_mode for native executors including dsh', async () => {
+    const { dispatcher } = setup();
+    vi.mocked(createSubtask).mockResolvedValue({ id: 'sub-dsh', task_id: 't1' } as Session);
+
+    dispatcher.dispatch('task.createSubtask', {
+      taskId: 't1',
+      workspaceId: 'w1',
+      executor: 'dsh',
+      approvalMode: 'ask',
+    });
+
+    expect(createSubtask).toHaveBeenCalledWith('t1', {
+      workspace_id: 'w1',
+      executor: 'dsh',
+    });
+  });
+
   it('task.createSubtask failure settles the run as failed (view toasts)', async () => {
     const { store, dispatcher } = setup();
     vi.mocked(createSubtask).mockResolvedValue(null);

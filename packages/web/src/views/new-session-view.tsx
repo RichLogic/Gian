@@ -34,6 +34,7 @@ import {
   inputTypeAdvertised,
   modelLabel,
   modelsFromCatalog,
+  displayModelsFromCatalog,
   optionByRole,
   optionEnabled,
   optionVisible,
@@ -112,8 +113,8 @@ export function buildSessionCreatePayload(
     ...(!usesNativeExecutorConfig(form.executor) && (catalog?.approvalMode ?? form.approvalMode)
       ? { approvalMode: catalog?.approvalMode ?? form.approvalMode }
       : {}),
-    ...((catalog?.thinkingEffort ?? form.thinkingEffort)
-      ? { thinkingEffort: catalog?.thinkingEffort ?? form.thinkingEffort }
+    ...((catalog ? catalog.thinkingEffort : form.thinkingEffort)
+      ? { thinkingEffort: catalog ? catalog.thinkingEffort : form.thinkingEffort }
       : {}),
     ...(form.executor === 'codex' && (catalog?.serviceTier ?? form.serviceTier) === 'fast'
       ? { serviceTier: 'fast' as const }
@@ -309,8 +310,9 @@ export function NewSessionView({
   const [executor, setExecutor] = useState<Executor | null>(
     requestedExecutor && isReleaseExecutor(requestedExecutor) ? requestedExecutor : null,
   );
-  // Capability chip state (claude/codex only — kimi shows its configured
-  // defaults as static text, its native options only exist on a live session).
+  // Capability chip state holds only explicit per-draft choices. Catalog-backed
+  // native executors use the same state now that their options are available
+  // before session.create; configured Agent defaults remain display fallbacks.
   const [model, setModel] = useState(draft?.model ?? '');
   const [effort, setEffort] = useState<ThinkingEffort | null>(draft?.thinkingEffort ?? null);
   const [mode, setMode] = useState<ApprovalMode | null>(draft?.approvalMode ?? null);
@@ -367,21 +369,30 @@ export function NewSessionView({
   // configured defaults stay authoritative otherwise. Models/modes load
   // lazily per executor (cached).
   useEffect(() => {
-    if (!executor || usesNativeExecutorConfig(executor)) {
+    if (!executor) {
+      setModels([]);
+      setProxyModes([]);
+      setModel('');
+      setEffort(null);
+      setMode(null);
+      setServiceTier(null);
+      return;
+    }
+    const remembered = draft?.executor === executor
+      ? draft
+      : (last?.executor === executor ? last : null);
+    setModel(remembered?.model ?? '');
+    setEffort(remembered?.thinkingEffort ?? null);
+    setMode(remembered?.approvalMode ?? null);
+    if (usesNativeExecutorConfig(executor)) {
       setModels([]);
       setProxyModes([]);
       setServiceTier(null);
       return;
     }
     const cli = executor;
-    const remembered = draft?.executor === cli
-      ? draft
-      : (last?.executor === cli ? last : null);
     setModels(getModelsCached(cli) ?? []);
     setProxyModes(getModesCached(cli) ?? []);
-    setModel(remembered?.model ?? '');
-    setEffort(remembered?.thinkingEffort ?? null);
-    setMode(remembered?.approvalMode ?? null);
     setServiceTier(cli === 'codex' ? (remembered?.serviceTier ?? null) : null);
 
     let alive = true;
@@ -395,16 +406,21 @@ export function NewSessionView({
   }, [executor, draft, last]);
 
   useEffect(() => {
+    // Config IDs are Proxy-owned. Never carry values across executors even
+    // when two catalogs happen to reuse an ID such as `model` or `effort`.
+    setCatalogValues({});
+    catalogResolveSignature.current = '';
     if (!executor) {
       setCatalog({ configOptions: [], input: [], slashCommands: [] });
       setCatalogExecutor(null);
-      setCatalogValues({});
       return;
     }
     const cached = getCatalogCached(executor);
     if (cached) {
       setCatalog(cached);
       setCatalogExecutor(executor);
+      const fromCatalog = modelsFromCatalog(optionByRole(cached.configOptions, 'model'));
+      if (fromCatalog.length > 0) setModels(fromCatalog);
       return;
     }
     setCatalogExecutor(null);
@@ -440,7 +456,11 @@ export function NewSessionView({
     const values: Record<string, ConfigValue> = { ...catalogValues };
     for (const option of catalog.configOptions) {
       if (option.role === 'model' && model) values[option.id] = model;
-      else if (option.role === 'effort' && effort) values[option.id] = effort;
+      else if (
+        option.role === 'effort'
+        && effort
+        && option.choices?.some(choice => Object.is(choice.value, effort))
+      ) values[option.id] = effort;
       else if (option.role === 'approval_mode' && mode) values[option.id] = mode;
       else if (option.role === 'fast') values[option.id] = serviceTier === 'fast';
     }
@@ -471,6 +491,8 @@ export function NewSessionView({
         slashCommands: resolved.slashCommands,
         resolveAdvertised: true,
       });
+      const fromCatalog = modelsFromCatalog(optionByRole(resolved.configOptions, 'model'));
+      if (fromCatalog.length > 0) setModels(fromCatalog);
       setCatalogValues(current => applyResolvedDefaults(current, {
         ...resolved.resolvedDefaults.sessionConfig,
         ...resolved.resolvedDefaults.turnConfig,
@@ -596,42 +618,60 @@ export function NewSessionView({
   // (not-ready rows render disabled).
   const showAgentPicker = readyAgents.length !== 1;
   const cliExecutor = executor && usesNativeExecutorConfig(executor) ? null : executor;
-  const cliDefaults = cliExecutor
-    ? agents?.find(a => a.id === cliExecutor)?.proxy?.defaults
-    : undefined;
+  const configuredDefaults = selectedAgent?.proxy.defaults;
   const catalogReady = catalog.configOptions.length > 0;
   const catalogModel = optionByRole(catalog.configOptions, 'model');
   const catalogEffort = optionByRole(catalog.configOptions, 'effort');
   const catalogApproval = optionByRole(catalog.configOptions, 'approval_mode');
   const catalogFast = optionByRole(catalog.configOptions, 'fast');
+  const displayModels = displayModelsFromCatalog(catalogModel, undefined, models);
   // Display fallbacks: explicit chip state > Settings proxy defaults >
   // capability-list defaults.
   const displayModel = model
-    || cliDefaults?.model.trim()
-    || (cliExecutor ? defaultModel(models, cliExecutor) : '');
-  const currentModelMeta = models.find(m => m.model === displayModel)
-    ?? models.find(m => m.isDefault)
-    ?? models[0];
-  const displayEffort = effort
+    || configuredDefaults?.model.trim()
+    || (cliExecutor ? defaultModel(displayModels, cliExecutor) : '')
+    || (catalogModel?.defaultValue != null ? String(catalogModel.defaultValue) : '')
+    || (displayModels.find(candidate => candidate.isDefault)?.model ?? displayModels[0]?.model ?? '');
+  const currentModelMeta = displayModels.find(m => m.model === displayModel)
+    ?? displayModels.find(m => m.isDefault)
+    ?? displayModels[0];
+  const catalogEffortChoices = new Set(
+    (catalogEffort?.choices ?? []).map(choice => String(choice.value)),
+  );
+  const explicitEffort = effort
+    && (catalogEffortChoices.size === 0 || catalogEffortChoices.has(effort))
+    ? effort
+    : null;
+  const configuredEffort = (configuredDefaults?.thinking.trim() || null) as ThinkingEffort | null;
+  const validConfiguredEffort = configuredEffort
+    && (catalogEffortChoices.size === 0 || catalogEffortChoices.has(configuredEffort))
+    ? configuredEffort
+    : null;
+  const displayEffort = explicitEffort
+    ?? validConfiguredEffort
     ?? (catalogEffort?.defaultValue != null
       ? String(catalogEffort.defaultValue) as ThinkingEffort
       : null)
-    ?? ((cliDefaults?.thinking.trim() || null) as ThinkingEffort | null)
     ?? defaultEffort(currentModelMeta);
+  const catalogDefaultMode = typeof catalogApproval?.defaultValue === 'string'
+    && catalogApproval.defaultValue
+    ? catalogApproval.defaultValue as ApprovalMode
+    : null;
   const displayMode = mode
-    ?? ((cliDefaults?.mode.trim() || null) as ApprovalMode | null)
+    ?? ((configuredDefaults?.mode.trim() || null) as ApprovalMode | null)
+    ?? catalogDefaultMode
     ?? 'ask';
   const nativeDefaults = executor && usesNativeExecutorConfig(executor)
-    ? agents?.find(a => a.id === executor)?.proxy?.defaults
+    ? configuredDefaults
     : undefined;
-  const modeOptions = catalogApproval?.choices?.length
-    ? composerModeOptions(executor ?? 'claude', catalogApproval.choices.map((choice) => ({
-      id: String(choice.value),
-      label: choice.displayName,
-      description: choice.description ?? '',
-      isDefault: Object.is(choice.value, catalogApproval.defaultValue),
-    })))
-    : (cliExecutor ? composerModeOptions(cliExecutor, proxyModes) : []);
+  const catalogModes: ProxyModeCapabilities[] = catalogApproval?.choices?.map((choice) => ({
+    id: String(choice.value),
+    label: choice.displayName,
+    description: choice.description ?? '',
+    isDefault: Object.is(choice.value, catalogApproval.defaultValue),
+  })) ?? [];
+  const advertisedModes = catalogModes.length > 0 ? catalogModes : proxyModes;
+  const modeOptions = composerModeOptions(executor ?? 'claude', advertisedModes);
   const turnModel = catalogModel?.binding === 'turn' ? catalogModel : undefined;
   const turnEffort = catalogEffort?.binding === 'turn' ? catalogEffort : undefined;
   const turnFast = catalogFast?.binding === 'turn' ? catalogFast : undefined;
@@ -642,7 +682,7 @@ export function NewSessionView({
   const showFastChip = executor === 'codex' || Boolean(turnFast);
   const catalogViewValues: Record<string, ConfigValue> = { ...catalogValues };
   if (catalogModel && model) catalogViewValues[catalogModel.id] = model;
-  if (catalogEffort && effort) catalogViewValues[catalogEffort.id] = effort;
+  if (catalogEffort && explicitEffort) catalogViewValues[catalogEffort.id] = explicitEffort;
   if (catalogApproval && mode) catalogViewValues[catalogApproval.id] = mode;
   if (catalogFast) catalogViewValues[catalogFast.id] = serviceTier === 'fast';
   const sessionExtras = catalog.configOptions.filter((option) => (
@@ -671,7 +711,7 @@ export function NewSessionView({
 
   function pickModel(next: string) {
     setModel(next);
-    const meta = models.find(m => m.model === next);
+    const meta = displayModels.find(m => m.model === next);
     const efforts = supportedEfforts(meta);
     // Keep an explicit effort only when the new model supports it.
     if (effort && efforts.length > 0 && !efforts.includes(effort)) {
@@ -751,7 +791,11 @@ export function NewSessionView({
     if (catalogReady) {
       for (const option of catalog.configOptions) {
         if (option.role === 'model' && model) values[option.id] = model;
-        else if (option.role === 'effort' && effort) values[option.id] = effort;
+        else if (
+          option.role === 'effort'
+          && effort
+          && option.choices?.some(choice => Object.is(choice.value, effort))
+        ) values[option.id] = effort;
         else if (option.role === 'approval_mode' && mode) values[option.id] = mode;
         else if (option.role === 'fast') values[option.id] = serviceTier === 'fast';
       }
@@ -1155,16 +1199,16 @@ export function NewSessionView({
               <CatalogOptionsMenu
                 executor={executor}
                 summary={[
-                  ...(showModelChip ? [modelLabel(models, displayModel) || displayModel] : []),
+                  ...(showModelChip ? [modelLabel(displayModels, displayModel) || displayModel] : []),
                   ...(showEffortChip ? [effortLabel(executor, displayEffort)] : []),
                   ...(serviceTier === 'fast' ? [t('composer.fast.button')] : []),
                 ]}
                 model={showModelChip ? {
                   label: t('composer.model.section'),
-                  value: models.some(candidate => candidate.model === displayModel)
+                  value: displayModels.some(candidate => candidate.model === displayModel)
                     ? displayModel
                     : claudeModelFamily(displayModel),
-                  choices: models.filter(candidate => !candidate.hidden).map(candidate => ({
+                  choices: displayModels.filter(candidate => !candidate.hidden).map(candidate => ({
                     value: candidate.model,
                     label: candidate.displayName,
                     ...(candidate.description && executor !== 'codex'
@@ -1224,7 +1268,7 @@ export function NewSessionView({
                   onClick={() => modeDrop.setOpen(open => !open)}
                 >
                   <span className="name">
-                    {composerModeLabel(executor ?? 'claude', displayMode, proxyModes, t)}
+                    {composerModeLabel(executor ?? 'claude', displayMode, advertisedModes, t)}
                   </span>
                   <span className="caret cmp-caret" aria-hidden="true">▾</span>
                 </button>

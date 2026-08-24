@@ -164,7 +164,7 @@ test('ERR-004: Codex CLI stays responsive after malformed JSON', async () => {
     });
     const result = initializeResultSchema.parse(response.result);
     assert.equal(result.protocol.version, '2.0');
-    assert.equal(result.plugin.version, '0.2.0');
+    assert.equal(result.plugin.version, '0.2.1');
   } finally {
     await proxy.close();
   }

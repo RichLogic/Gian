@@ -554,12 +554,7 @@ async function runPromptScenario(context, scenario, session) {
     if (provider === 'kimi') config.mode = 'plan';
   }
   if (scenario.id === 'interaction.permission' && provider === 'codex') {
-    config.sandbox = 'read-only';
-    config.approval_policy = 'on-request';
-    config.approvals_reviewer = 'user';
-  }
-  if (scenario.id === 'interaction.question' && provider === 'codex') {
-    config.collaboration_mode = 'plan';
+    config.approval_mode = 'ask';
   }
   if (scenario.id === 'interaction.exit_plan_confirmation' && provider === 'kimi') config.mode = 'plan';
   const from = client.notificationIndex();
@@ -718,9 +713,7 @@ async function runConcurrencyScenario(context, scenario) {
   const from = client.notificationIndex();
   const firstConfig = { ...turnConfig };
   if (provider === 'codex') {
-    firstConfig.sandbox = 'read-only';
-    firstConfig.approval_policy = 'on-request';
-    firstConfig.approvals_reviewer = 'user';
+    firstConfig.approval_mode = 'ask';
   }
   await client.request('turn.start', {
     sessionId: first.id,

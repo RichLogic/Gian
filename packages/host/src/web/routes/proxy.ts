@@ -6,7 +6,8 @@ import type { Db } from '../../storage/db.js';
 export function registerProxyRoutes(app: Hono, db: Db, sessions: SessionManager): void {
   app.get('/api/proxy/:executor/capabilities', async c => {
     const executor = c.req.param('executor');
-    if (executor !== 'codex' && executor !== 'claude' && executor !== 'kimi' && executor !== 'grok') {
+    if (executor !== 'codex' && executor !== 'claude' && executor !== 'kimi'
+      && executor !== 'grok' && executor !== 'dsh') {
       return c.json({ error: 'unknown executor' }, 400);
     }
     try {
@@ -22,7 +23,8 @@ export function registerProxyRoutes(app: Hono, db: Db, sessions: SessionManager)
 
   app.post('/api/proxy/:executor/catalog/resolve', async c => {
     const executor = c.req.param('executor');
-    if (executor !== 'codex' && executor !== 'claude' && executor !== 'kimi' && executor !== 'grok') {
+    if (executor !== 'codex' && executor !== 'claude' && executor !== 'kimi'
+      && executor !== 'grok' && executor !== 'dsh') {
       return c.json({ error: 'unknown executor' }, 400);
     }
     try {

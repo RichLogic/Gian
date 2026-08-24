@@ -145,6 +145,7 @@
         "packages/host/test/storage.test.ts",
         "packages/host/test/subtask-lifecycle.test.ts",
         "packages/host/test/task-session-archive.test.ts",
+        "packages/host/test/task-subtask-create.test.ts",
         "packages/host/test/trace-evidence-store.test.ts",
         "packages/host/test/trace-route.test.ts",
         "packages/host/test/working-tree-refresh.test.ts",

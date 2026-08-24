@@ -30,7 +30,14 @@
  * stays visible with a pending affordance (TasksView) until `task:deleted`
  * lands — a failed delete never requires a surprising reinsert (§5).
  */
-import type { ApprovalMode, Executor, Session, Task, ThinkingEffort } from '@gian/shared';
+import {
+  usesNativeExecutorConfig,
+  type ApprovalMode,
+  type Executor,
+  type Session,
+  type Task,
+  type ThinkingEffort,
+} from '@gian/shared';
 
 import { completeSubtask, createSubtask, reopenSubtask } from '../api.js';
 import { toast } from '../feedback.js';
@@ -138,7 +145,9 @@ const taskCreateSubtask: OperationDefinition<TaskCreateSubtaskInput, Session> = 
       executor: input.executor,
       ...(input.name ? { name: input.name } : {}),
       ...(input.model ? { model: input.model } : {}),
-      ...(input.executor !== 'kimi' && input.approvalMode ? { approval_mode: input.approvalMode } : {}),
+      ...(!usesNativeExecutorConfig(input.executor) && input.approvalMode
+        ? { approval_mode: input.approvalMode }
+        : {}),
       ...(input.thinkingEffort ? { thinking_effort: input.thinkingEffort } : {}),
       ...(input.executor === 'codex' && input.serviceTier === 'fast' ? { service_tier: 'fast' as const } : {}),
     });

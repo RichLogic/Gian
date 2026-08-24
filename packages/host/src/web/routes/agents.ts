@@ -1,9 +1,11 @@
 import type { Hono } from 'hono';
 import type {
   AgentProxyDefaults,
+  ConfigValue,
   Executor,
   ProxyCatalog,
 } from '@gian/shared';
+import { isApprovalMode, usesNativeExecutorConfig } from '@gian/shared';
 import type { AgentManager } from '../../agents/manager.js';
 import type { CliRuntimeManager } from '../../runtime/manager.js';
 import { pickPath } from '../pick-path.js';
@@ -33,7 +35,9 @@ function optionChoices(catalog: ProxyCatalog, role: string): string[] {
 }
 
 function validateProxyDefaults(
+  executorId: Executor,
   defaults: AgentProxyDefaults,
+  patch: Partial<AgentProxyDefaults>,
   catalog: ProxyCatalog,
 ): void {
   const models = optionChoices(catalog, 'model');
@@ -44,12 +48,43 @@ function validateProxyDefaults(
   if (defaults.thinking && efforts.length > 0 && !efforts.includes(defaults.thinking)) {
     throw new Error('thinking/effort is not supported by the selected Proxy model');
   }
-  const modes = optionChoices(catalog, 'execution_mode');
   const approvalModes = optionChoices(catalog, 'approval_mode');
-  const modeValues = modes.length > 0 ? modes : approvalModes;
-  if (defaults.mode && modeValues.length > 0 && !modeValues.includes(defaults.mode)) {
-    throw new Error('mode is not advertised by the Proxy');
+  const executionModes = optionChoices(catalog, 'execution_mode');
+  if (defaults.mode) {
+    if (usesNativeExecutorConfig(executorId)) {
+      const nativeModes = approvalModes.length > 0 ? approvalModes : executionModes;
+      if (nativeModes.length > 0 && !nativeModes.includes(defaults.mode)) {
+        throw new Error('mode is not advertised by the Proxy');
+      }
+    } else {
+      const semanticModes = approvalModes.length > 0
+        && approvalModes.every(isApprovalMode)
+        ? approvalModes
+        : [];
+      if (!isApprovalMode(defaults.mode)) {
+        throw new Error('mode is not a Gian approval preset');
+      }
+      if (semanticModes.length > 0 && !semanticModes.includes(defaults.mode)) {
+        throw new Error('mode is not advertised by the Proxy');
+      }
+      if (patch.mode !== undefined && semanticModes.length === 0) {
+        throw new Error('Proxy does not advertise product-level approval modes');
+      }
+    }
   }
+}
+
+function modelConfig(
+  catalog: ProxyCatalog,
+  model: string,
+): { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> } {
+  const sessionConfig: Record<string, ConfigValue> = {};
+  const turnConfig: Record<string, ConfigValue> = {};
+  const option = catalog.configOptions.find(item => item.role === 'model');
+  if (option && model) {
+    (option.binding === 'session' ? sessionConfig : turnConfig)[option.id] = model;
+  }
+  return { sessionConfig, turnConfig };
 }
 
 export function registerAgentRoutes(
@@ -59,6 +94,11 @@ export function registerAgentRoutes(
     runtimes: CliRuntimeManager;
     closeProxy: (id: Executor) => Promise<void>;
     capabilities: (id: Executor) => Promise<ProxyCatalog>;
+    resolveDefaultsCatalog?: (
+      id: Executor,
+      catalog: ProxyCatalog,
+      config: { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> },
+    ) => Promise<ProxyCatalog>;
   },
 ): void {
   app.get('/api/agents', async c => c.json({
@@ -125,7 +165,11 @@ export function registerAgentRoutes(
         if (typeof value === 'string') patch[key] = value;
       }
       const next = { ...options.agents.proxyDefaults(id), ...patch };
-      validateProxyDefaults(next, await options.capabilities(id));
+      const catalog = await options.capabilities(id);
+      const validationCatalog = options.resolveDefaultsCatalog && next.model
+        ? await options.resolveDefaultsCatalog(id, catalog, modelConfig(catalog, next.model))
+        : catalog;
+      validateProxyDefaults(id, next, patch, validationCatalog);
       return c.json({ agent: await options.agents.setProxyDefaults(id, patch) });
     } catch (error) {
       return c.json(errorResponse(error), 400);

@@ -98,6 +98,26 @@ describe('SES-001: minimal session payload from form state', () => {
     expect(payload.approvalMode).toBeUndefined();
   });
 
+  it('drops leftover thinkingEffort that the current catalog does not advertise', () => {
+    const payload = buildSessionCreatePayload(formState({
+      executor: 'kimi',
+      thinkingEffort: 'low',
+      catalogOptions: [{
+        id: 'thinking',
+        displayName: 'Thinking',
+        binding: 'turn',
+        role: 'effort',
+        control: 'select',
+        required: false,
+        defaultValue: 'on',
+        choices: [{ value: 'on', displayName: 'On' }],
+      }],
+      catalogValues: { thinking: 'low' },
+    })) as Record<string, unknown>;
+    expect(payload.thinkingEffort).toBeUndefined();
+    expect(payload.turnConfig).toBeUndefined();
+  });
+
   it('sends session-bound catalog values as sessionConfig', () => {
     const payload = buildSessionCreatePayload(formState({
       executor: 'kimi',

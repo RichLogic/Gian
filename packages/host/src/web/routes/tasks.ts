@@ -1,8 +1,9 @@
-import type {
-  ApprovalMode,
-  Executor,
-  TaskStatus,
-  ThinkingEffort,
+import {
+  usesNativeExecutorConfig,
+  type ApprovalMode,
+  type Executor,
+  type TaskStatus,
+  type ThinkingEffort,
 } from '@gian/shared';
 import type { Hono } from 'hono';
 import type { SessionManager } from '../../session/manager.js';
@@ -98,8 +99,14 @@ export function registerTaskRoutes(
     if (typeof body.workspace_id !== 'string' || body.workspace_id === '') {
       return c.json({ error: 'workspace_id required' }, 400);
     }
-    if (body.executor !== 'claude' && body.executor !== 'codex' && body.executor !== 'kimi' && body.executor !== 'grok') {
-      return c.json({ error: 'executor must be claude, codex, kimi, or grok' }, 400);
+    if (
+      body.executor !== 'claude'
+      && body.executor !== 'codex'
+      && body.executor !== 'kimi'
+      && body.executor !== 'grok'
+      && body.executor !== 'dsh'
+    ) {
+      return c.json({ error: 'executor must be claude, codex, kimi, grok, or dsh' }, 400);
     }
     try {
       const session = await sessions.createSession({
@@ -109,7 +116,9 @@ export function registerTaskRoutes(
         task_id: id,
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.model !== undefined ? { model: body.model } : {}),
-        ...(body.approval_mode !== undefined ? { approval_mode: body.approval_mode } : {}),
+        ...(body.approval_mode !== undefined && !usesNativeExecutorConfig(body.executor)
+          ? { approval_mode: body.approval_mode }
+          : {}),
         ...(body.thinking_effort !== undefined ? { thinking_effort: body.thinking_effort } : {}),
         ...(body.service_tier !== undefined ? { service_tier: body.service_tier } : {}),
       });

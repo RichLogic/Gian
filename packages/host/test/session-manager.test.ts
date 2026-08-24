@@ -290,7 +290,7 @@ class FakeProxyManager {
 }
 
 class StubKimiProxyClient implements ProxyClient {
-  readonly executor = 'kimi' as const;
+  readonly executor: 'kimi' | 'dsh';
   readonly protocolV2 = true as const;
   notificationHandlers: NotificationHandler[] = [];
   nativeListCalls: Array<{ cwd?: string; cursor?: string }> = [];
@@ -301,6 +301,7 @@ class StubKimiProxyClient implements ProxyClient {
   createCalls = 0;
   failNextCreate: Error | null = null;
   lastCreateParams: import('../src/proxy/types.js').CreateSessionParams | null = null;
+  startTurnCalls: StartTurnParams[] = [];
   readonly options: NativeConfigOption[] = [
     {
       id: 'mode',
@@ -315,9 +316,13 @@ class StubKimiProxyClient implements ProxyClient {
     },
   ];
 
+  constructor(executor: 'kimi' | 'dsh' = 'kimi') {
+    this.executor = executor;
+  }
+
   isExited() { return false; }
   async initialize() {
-    return stubInitialize('kimi');
+    return stubInitialize(this.executor);
   }
   async catalog() {
     return {
@@ -329,6 +334,8 @@ class StubKimiProxyClient implements ProxyClient {
         binding: option.scope,
         role: option.category === 'thought_level'
           ? 'effort'
+          : option.category
+            ? option.category
           : option.id === 'model'
             ? 'model'
             : option.id === 'mode'
@@ -387,6 +394,7 @@ class StubKimiProxyClient implements ProxyClient {
   async interruptTurn() {}
   async respondInteraction() {}
   async startTurn(params: StartTurnParams) {
+    this.startTurnCalls.push(params);
     return {
       session: stubSession('kimi_proxy_1', '/tmp', 'running'),
       turn: { id: params.turnId ?? 'kimi_turn_1' },
@@ -411,9 +419,12 @@ class StubKimiProxyClient implements ProxyClient {
 }
 
 class FakeKimiProxyManager {
-  client = new StubKimiProxyClient();
+  client: StubKimiProxyClient;
   disposeCalls: string[] = [];
   private available = true;
+  constructor(executor: 'kimi' | 'dsh' = 'kimi') {
+    this.client = new StubKimiProxyClient(executor);
+  }
   async getOrCreate(): Promise<ProxyClient> {
     this.available = true;
     return this.client;
@@ -491,6 +502,34 @@ function setupKimi(
     'INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)',
   ).run(wsId, 'test', '/tmp/test-ws');
   const proxyMgr = new FakeKimiProxyManager();
+  const broadcaster = new CapturingBroadcaster();
+  const approvals = new ApprovalManager(broadcaster as unknown as WsBroadcaster);
+  const queue = new QueueManager(db);
+  const sessions = new SessionManager(
+    db,
+    proxyMgr as unknown as ProxyManager,
+    broadcaster as unknown as WsBroadcaster,
+    approvals,
+    queue,
+    dir,
+    null,
+    proxyDefaults,
+  );
+  approvals.setRespondFn((sid, aid, dec) => sessions.respondApproval(sid, aid, dec));
+  approvals.setGetModeFn(sid => sessions.getSession(sid).approval_mode);
+  return { dir, db, wsId, proxyMgr, broadcaster, sessions };
+}
+
+function setupDsh(
+  proxyDefaults?: (executor: Executor) => AgentProxyDefaults,
+) {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-sm-dsh-test-'));
+  const db = openDatabase(dir);
+  const wsId = randomUUID();
+  db.prepare(
+    'INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)',
+  ).run(wsId, 'test', '/tmp/test-ws');
+  const proxyMgr = new FakeKimiProxyManager('dsh');
   const broadcaster = new CapturingBroadcaster();
   const approvals = new ApprovalManager(broadcaster as unknown as WsBroadcaster);
   const queue = new QueueManager(db);
@@ -1007,6 +1046,176 @@ test('Kimi applies a Proxy-owned default mode through native config', async () =
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi applies a turn-bound Proxy-owned default mode on the first turn', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi(() => ({
+    model: '',
+    thinking: '',
+    mode: 'yolo',
+  }));
+  try {
+    proxyMgr.client.options[0] = { ...proxyMgr.client.options[0]!, scope: 'turn' };
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'kimi' });
+    assert.equal(session.approval_mode, null);
+    assert.equal(session.turn_config?.mode, 'yolo');
+
+    await sessions.sendMessage(session.id, 'use the configured native mode');
+    assert.equal(proxyMgr.client.startTurnCalls.at(-1)?.config.mode, 'yolo');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('DSH applies Settings model, effort, and mode defaults on its first turn', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupDsh(() => ({
+    model: 'deepseek-reasoner',
+    thinking: 'high',
+    mode: 'never',
+  }));
+  try {
+    proxyMgr.client.options.splice(0, proxyMgr.client.options.length,
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: 'deepseek-chat',
+        scope: 'turn',
+        choices: [
+          { value: 'deepseek-chat', label: 'DeepSeek Chat' },
+          { value: 'deepseek-reasoner', label: 'DeepSeek Reasoner' },
+        ],
+      },
+      {
+        id: 'effort',
+        name: 'Reasoning effort',
+        category: 'effort',
+        type: 'select',
+        currentValue: 'medium',
+        scope: 'turn',
+        choices: [
+          { value: 'medium', label: 'Medium' },
+          { value: 'high', label: 'High' },
+        ],
+      },
+      {
+        id: 'approval_policy',
+        name: 'Approval policy',
+        category: 'approval_mode',
+        type: 'select',
+        currentValue: 'ask',
+        scope: 'turn',
+        choices: [
+          { value: 'ask', label: 'Ask' },
+          { value: 'never', label: 'Never' },
+        ],
+      },
+    );
+
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'dsh' });
+    assert.equal(session.approval_mode, null);
+    assert.equal(session.model, 'deepseek-reasoner');
+    assert.equal(session.thinking_effort, 'high');
+    assert.deepEqual(session.turn_config, {
+      model: 'deepseek-reasoner',
+      effort: 'high',
+      approval_policy: 'never',
+    });
+
+    await sessions.sendMessage(session.id, 'use every configured DSH default');
+    assert.equal(proxyMgr.client.startTurnCalls.at(-1)?.config.model, 'deepseek-reasoner');
+    assert.equal(proxyMgr.client.startTurnCalls.at(-1)?.config.effort, 'high');
+    assert.equal(proxyMgr.client.startTurnCalls.at(-1)?.config.approval_policy, 'never');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('managed approval presets do not leak into an older Codex native policy catalog', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup(() => ({
+    model: '',
+    thinking: '',
+    mode: 'ask',
+  }));
+  try {
+    await proxyMgr.getOrCreate(undefined, 'codex');
+    proxyMgr.client.catalogOverride = {
+      catalogRevision: 'codex-low-level-policy',
+      input: [{ type: 'text' }],
+      configOptions: [{
+        id: 'approval_policy',
+        displayName: 'Approval policy',
+        binding: 'turn',
+        role: 'approval_mode',
+        control: 'select',
+        required: false,
+        defaultValue: null,
+        choices: [
+          { value: null, displayName: 'Configured default' },
+          { value: 'on-request', displayName: 'On request' },
+          { value: 'never', displayName: 'Never' },
+        ],
+      }],
+      slashCommands: [],
+    };
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'codex' });
+    assert.equal(session.approval_mode, 'ask');
+    assert.equal(session.turn_config?.approval_policy, undefined);
+
+    await sessions.sendMessage(session.id, 'use config.toml permissions');
+    assert.equal(proxyMgr.client.startTurnCalls.at(-1)?.config.approval_policy, null);
+    assert.notEqual(proxyMgr.client.startTurnCalls.at(-1)?.config.approval_policy, 'ask');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Codex semantic approval presets reach the first turn unchanged', async t => {
+  for (const mode of ['ask', 'auto', 'full-access', 'custom'] as const) {
+    await t.test(mode, async () => {
+      const { dir, db, wsId, proxyMgr, sessions } = setup(() => ({
+        model: '',
+        thinking: '',
+        mode,
+      }));
+      try {
+        await proxyMgr.getOrCreate(undefined, 'codex');
+        proxyMgr.client.catalogOverride = {
+          catalogRevision: 'codex-semantic-approval',
+          input: [{ type: 'text' }],
+          configOptions: [{
+            id: 'approval_mode',
+            displayName: 'Approval',
+            binding: 'turn',
+            role: 'approval_mode',
+            control: 'select',
+            required: false,
+            defaultValue: 'ask',
+            choices: [
+              { value: 'ask', displayName: 'Ask for approval' },
+              { value: 'auto', displayName: 'Approve for me' },
+              { value: 'full-access', displayName: 'Full access' },
+              { value: 'custom', displayName: 'Custom (config.toml)' },
+            ],
+          }],
+          slashCommands: [],
+        };
+        const session = await sessions.createSession({ workspace_id: wsId, executor: 'codex' });
+        assert.equal(session.approval_mode, mode);
+        assert.equal(session.turn_config?.approval_mode, mode);
+
+        await sessions.sendMessage(session.id, `use ${mode}`);
+        assert.equal(proxyMgr.client.startTurnCalls.at(-1)?.config.approval_mode, mode);
+      } finally {
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   }
 });
 

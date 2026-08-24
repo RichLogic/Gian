@@ -1,6 +1,6 @@
 {
   "name": "gian",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "One local desktop app for Codex, Claude Code, Kimi Code, and DeepSeek Harness",
   "packageManager": "pnpm@10.33.2",
