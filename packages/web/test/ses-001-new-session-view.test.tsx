@@ -18,7 +18,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentInstallStatus, CodexModelCapabilities, Executor, Workspace } from '@gian/shared';
+import type { CodexModelCapabilities, Executor, UserAgentStatus, Workspace } from '@gian/shared';
 import {
   loadAgents,
   loadProxyCapabilities,
@@ -43,21 +43,28 @@ vi.mock('../src/api.js', () => ({
   loadResolvedProxyCatalog: vi.fn(),
 }));
 
-function agent(id: Executor, name: string, ready = true): AgentInstallStatus {
+const AGENT_COLORS = { claude: 'ember', codex: 'ink', kimi: 'citron', dsh: 'teal' } as const;
+
+function agent(kind: Executor, name: string, ready = true): UserAgentStatus {
   return {
-    id,
+    id: `agent-${kind}-1`,
     name,
+    color: (AGENT_COLORS as Record<string, 'ember'>)[kind] ?? 'azure',
+    proxy: kind as UserAgentStatus['proxy'],
+    cliPath: ready ? `/bin/${kind}` : null,
+    defaults: { model: '', thinking: '', mode: '' },
+    proxyName: name,
     ready,
     cli: ready
-      ? { state: 'ready', path: `/bin/${id}`, version: '1.0.0', source: 'path' }
+      ? { state: 'ready', path: `/bin/${kind}`, version: '1.0.0', source: 'path' }
       : { state: 'missing', path: null, version: null, source: null },
-    proxy: ready
+    plugin: ready
       ? {
-          state: 'ready', path: `/proxy/${id}`, version: '0.1.0', source: 'github-release',
+          state: 'ready', path: `/proxy/${kind}`, version: '0.1.0', source: 'github-release',
           defaults: { model: '', thinking: '', mode: '' },
         }
       : {
-          state: 'missing', path: `/proxy/${id}`, version: null, source: 'github-release',
+          state: 'missing', path: `/proxy/${kind}`, version: null, source: 'github-release',
           defaults: { model: '', thinking: '', mode: '' },
         },
     officialInstallUrl: 'https://example.invalid',
@@ -151,14 +158,15 @@ describe('NewSessionView', () => {
     });
   });
 
-  it('lists agents from /api/agents in the picker; unready agents are disabled', async () => {
-    vi.mocked(loadAgents).mockResolvedValue([...agents, agent('grok', 'Grok Build')]);
+  it('lists only saved-and-ready agents in the picker', async () => {
+    vi.mocked(loadAgents).mockResolvedValue([...agents, agent('dsh', 'DeepSeek Harness', false)]);
     renderView();
     await openAgentPicker();
-    expect(screen.getByTestId('ns-agent-option-codex')).toBeEnabled();
-    expect(screen.getByTestId('ns-agent-option-claude')).toBeEnabled();
-    expect(screen.getByTestId('ns-agent-option-kimi')).toBeDisabled();
-    expect(screen.queryByTestId('ns-agent-option-grok')).not.toBeInTheDocument();
+    expect(screen.getByTestId('ns-agent-option-agent-codex-1')).toBeEnabled();
+    expect(screen.getByTestId('ns-agent-option-agent-claude-1')).toBeEnabled();
+    // Saved but not-ready Agents are not offered (⌘J/⌘K stays disabled too).
+    expect(screen.queryByTestId('ns-agent-option-agent-kimi-1')).toBeNull();
+    expect(screen.queryByTestId('ns-agent-option-agent-dsh-1')).toBeNull();
   });
 
   it('calls catalog.resolve only after a Proxy-advertised option changes', async () => {
@@ -210,7 +218,7 @@ describe('NewSessionView', () => {
 
     renderView();
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
     const select = await screen.findByLabelText('Workspace Dynamic');
     const row = screen.getByTestId('ns-agent-row');
     const sessionConfig = screen.getByTestId('ns-session-config');
@@ -225,12 +233,12 @@ describe('NewSessionView', () => {
       catalogRevision: 'catalog-1',
       sessionConfig: { workspace_mode: 'strict' },
       turnConfig: {},
-    }));
+    }, 'agent-codex-1'));
   });
 
   it('shows DSH Catalog controls with Settings defaults without making them explicit', async () => {
     const dsh = agent('dsh', 'DeepSeek Harness');
-    dsh.proxy.defaults = {
+    dsh.defaults = {
       model: 'deepseek-reasoner',
       thinking: 'high',
       mode: 'never',
@@ -294,7 +302,7 @@ describe('NewSessionView', () => {
       approvalMode: 'auto',
     }));
 
-    const { onCreate } = renderView({ initialExecutor: 'dsh' });
+    const { onCreate } = renderView({ initialAgentId: 'agent-dsh-1' });
     expect(await screen.findByTestId('ns-agent-picker')).toHaveTextContent('DeepSeek Harness');
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('DeepSeek Reasoner'));
     expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('High');
@@ -305,6 +313,7 @@ describe('NewSessionView', () => {
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
       name: '',
+      agentId: 'agent-dsh-1',
       executor: 'dsh',
       firstMessage: 'use configured defaults',
     });
@@ -318,7 +327,7 @@ describe('NewSessionView', () => {
     await userEvent.type(screen.getByTestId('ns-message-input'), 'fix the bug');
     expect(send).toBeDisabled();
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
     expect(send).toBeEnabled();
   });
 
@@ -332,6 +341,7 @@ describe('NewSessionView', () => {
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
       name: '',
+      agentId: 'agent-kimi-1',
       executor: 'kimi',
       firstMessage: 'summarize this repo',
     });
@@ -340,7 +350,7 @@ describe('NewSessionView', () => {
   it('shows an optional title above the message and submits both trimmed values', async () => {
     const { onCreate } = renderView();
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-claude'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-claude-1'));
     expect(screen.queryByTestId('ns-fast-chip')).toBeNull();
     const title = screen.getByTestId('ns-title-input');
     const message = screen.getByTestId('ns-message-input');
@@ -351,6 +361,7 @@ describe('NewSessionView', () => {
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
       name: 'Auth cleanup',
+      agentId: 'agent-claude-1',
       executor: 'claude',
       firstMessage: 'refactor auth',
     });
@@ -361,25 +372,27 @@ describe('NewSessionView', () => {
     await screen.findByTestId('ns-agent-picker');
     expect(screen.getByTestId('ns-workspace-chip')).toHaveTextContent('Beta');
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
     await userEvent.type(screen.getByTestId('ns-message-input'), 'go');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-2',
       name: '',
+      agentId: 'agent-codex-1',
       executor: 'codex',
       firstMessage: 'go',
     });
   });
 
-  it('preselects initialExecutor (⌘J/⌘K shortcut carries the agent choice)', async () => {
-    const { onCreate } = renderView({ initialExecutor: 'claude' });
+  it('preselects initialAgentId (⌘J/⌘K shortcut carries the agent choice)', async () => {
+    const { onCreate } = renderView({ initialAgentId: 'agent-claude-1' });
     expect(await screen.findByTestId('ns-agent-picker')).toHaveTextContent('Claude Code');
     await userEvent.type(screen.getByTestId('ns-message-input'), 'go');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
       name: '',
+      agentId: 'agent-claude-1',
       executor: 'claude',
       firstMessage: 'go',
     });
@@ -395,7 +408,7 @@ describe('NewSessionView', () => {
     await userEvent.click(screen.getByTestId('ns-workspace-option-ws-2'));
     expect(screen.getByTestId('ns-workspace-chip')).toHaveTextContent('Beta');
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
     await userEvent.type(screen.getByTestId('ns-message-input'), 'go');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'ws-2' }));
@@ -404,7 +417,7 @@ describe('NewSessionView', () => {
   it('"+ New workspace" stashes the draft and jumps to the Workspaces sheet', async () => {
     const { onNewWorkspace } = renderView();
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
     await userEvent.click(screen.getByTestId('ns-model-chip'));
     await userEvent.click(within(document.querySelector('.catalog-options-pop') as HTMLElement).getByRole('switch', { name: 'Fast' }));
     await userEvent.type(screen.getByTestId('ns-title-input'), 'Draft title');
@@ -438,7 +451,12 @@ describe('NewSessionView', () => {
     renderView({ initialWorkspaceId: 'ws-2' });
     expect(screen.getByTestId('ns-title-input')).toHaveValue('Backlog cleanup');
     expect(screen.getByTestId('ns-message-input')).toHaveValue('back from the sheet');
-    expect(await screen.findByTestId('ns-agent-picker')).toHaveTextContent('Codex');
+    // A legacy (executor-only) draft resolves to the kind's ready Agent once
+    // the agents list lands — wait for the async pick.
+    await waitFor(
+      () => expect(screen.getByTestId('ns-agent-picker')).toHaveTextContent('Codex'),
+      { timeout: 5_000 },
+    );
     expect(screen.getByTestId('ns-workspace-chip')).toHaveTextContent('Beta');
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5'));
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Fast'));
@@ -506,7 +524,7 @@ describe('NewSessionView', () => {
   it('accepts an attachment-only screenshot draft and submits its original Blob', async () => {
     const { onCreate } = renderView();
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
     await act(async () => {
       await storeNewSessionScreenshot(
         { kind: 'workspace', id: 'ws-1' },
@@ -531,6 +549,7 @@ describe('NewSessionView', () => {
     const input = onCreate.mock.calls[0]![0];
     expect(input).toMatchObject({
       workspaceId: 'ws-1',
+      agentId: 'agent-codex-1',
       executor: 'codex',
       firstMessage: '',
       firstAttachments: [{
@@ -547,7 +566,7 @@ describe('NewSessionView', () => {
   it('stages a pasted image as an attachment chip and submits its Blob', async () => {
     const { onCreate } = renderView();
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
 
     const pasted = new File([new Uint8Array([0x89, 0x50])], '', { type: 'image/png' });
     fireEvent.paste(screen.getByTestId('ns-message-input'), {
@@ -586,7 +605,7 @@ describe('NewSessionView', () => {
   it('stages picked files (including non-images) and submits their Blobs', async () => {
     const { onCreate } = renderView();
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
 
     const pdf = new File([new Uint8Array([0x25, 0x50, 0x44, 0x46])], 'spec.pdf', { type: 'application/pdf' });
     const image = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'shot.png', { type: 'image/png' });
@@ -689,7 +708,7 @@ describe('NewSessionView', () => {
   it('renders capability chips for the picked agent and sends explicit choices', async () => {
     const { onCreate } = renderView();
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
     // The single summary shows only model / effort; Fast appears only when on.
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5 Codex'));
     expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Medium');
@@ -721,6 +740,7 @@ describe('NewSessionView', () => {
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
       name: '',
+      agentId: 'agent-codex-1',
       executor: 'codex',
       firstMessage: 'do the thing',
       model: 'gpt-5',
@@ -730,10 +750,58 @@ describe('NewSessionView', () => {
     });
   });
 
+  it('disables and clears Fast when the catalog says the selected model lacks it', async () => {
+    vi.mocked(loadProxyCapabilities).mockResolvedValue({
+      protocolVersion: '2.0',
+      catalogRevision: 'codex-fast-by-model',
+      capabilities: {},
+      models: [],
+      modes: [],
+      input: [{ type: 'text' }],
+      slashCommands: [],
+      configOptions: [{
+        id: 'model',
+        displayName: 'Model',
+        binding: 'turn',
+        role: 'model',
+        control: 'select',
+        required: false,
+        defaultValue: 'gpt-5-codex',
+        choices: [
+          { value: 'gpt-5-codex', displayName: 'GPT-5 Codex' },
+          { value: 'gpt-5', displayName: 'GPT-5' },
+        ],
+      }, {
+        id: 'service_tier',
+        displayName: 'Fast',
+        binding: 'turn',
+        role: 'fast',
+        control: 'boolean',
+        required: false,
+        defaultValue: false,
+        enabledWhen: [{ optionId: 'model', oneOf: ['gpt-5-codex'] }],
+      }],
+    });
+    renderView();
+    await openAgentPicker();
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
+    await userEvent.click(await screen.findByTestId('ns-model-chip'));
+    const options = document.querySelector('.catalog-options-pop') as HTMLElement;
+    const fast = within(options).getByRole('switch', { name: 'Fast' });
+    expect(fast).toBeEnabled();
+    await userEvent.click(fast);
+    await userEvent.click(within(options).getByText('GPT-5', { selector: '.mp-row-title' }));
+    await waitFor(() => expect(screen.getByTestId('ns-model-chip')).not.toHaveTextContent('Fast'));
+
+    await userEvent.click(screen.getByTestId('ns-model-chip'));
+    expect(within(document.querySelector('.catalog-options-pop') as HTMLElement)
+      .getByRole('switch', { name: 'Fast' })).toBeDisabled();
+  });
+
   it('leaves model/effort/mode out of the payload unless explicitly picked', async () => {
     const { onCreate } = renderView();
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5 Codex'));
     await userEvent.type(screen.getByTestId('ns-message-input'), 'defaults please');
     await userEvent.click(screen.getByTestId('ns-send'));
@@ -742,6 +810,7 @@ describe('NewSessionView', () => {
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
       name: '',
+      agentId: 'agent-codex-1',
       executor: 'codex',
       firstMessage: 'defaults please',
     });
@@ -801,14 +870,14 @@ describe('NewSessionView', () => {
     });
     const { onCreate } = renderView();
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-claude'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-claude-1'));
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Sonnet'));
     await userEvent.click(screen.getByTestId('ns-model-chip'));
     await userEvent.click(
       within(document.querySelector('.catalog-options-pop') as HTMLElement).getByText('Low', { selector: '.mp-row-title' }),
     );
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-kimi'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-kimi-1'));
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('On'));
     await userEvent.type(screen.getByTestId('ns-message-input'), 'test kimi');
     await userEvent.click(screen.getByTestId('ns-model-chip'));
@@ -827,7 +896,7 @@ describe('NewSessionView', () => {
   it('remembers the last workspace / agent / chips as the next defaults', async () => {
     const first = renderView();
     await openAgentPicker();
-    await userEvent.click(screen.getByTestId('ns-agent-option-codex'));
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5 Codex'));
     await userEvent.click(screen.getByTestId('ns-model-chip'));
     await userEvent.click(
@@ -860,6 +929,7 @@ describe('NewSessionView', () => {
     expect(second.onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-2',
       name: '',
+      agentId: 'agent-codex-1',
       executor: 'codex',
       firstMessage: 'second run',
       model: 'gpt-5',

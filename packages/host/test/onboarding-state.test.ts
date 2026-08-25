@@ -98,7 +98,7 @@ test('WT-001: completing onboarding triggers managed agent instructions for the 
 
   const synced: string[] = [];
   const agents = {
-    list: async () => [readyAgent('codex', 'Codex')],
+    listAgentStatuses: async () => [readyAgent('codex', 'Codex')],
   } as unknown as AgentManager;
   const app = new Hono();
   registerOnboardingRoutes(app, {

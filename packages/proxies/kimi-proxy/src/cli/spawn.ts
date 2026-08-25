@@ -39,7 +39,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.2.1';
+  return '0.2.2';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -168,10 +168,19 @@ async function main(): Promise<void> {
       // The response line always precedes any notification the request
       // produced (contract §16), even when the handler emitted them while
       // awaiting the runtime.
-      if (outcome.ok) writer.result(request.id, outcome.result);
-      else writer.error(request.id, outcome.error);
-      for (const notification of outcome.notifications) {
-        writer.notification(notification.method, notification.params);
+      if (outcome.ok && request.method === 'sidechat.close') {
+        // Side Chat close is the explicit teardown-order exception: finish
+        // the route before acknowledging permanent local deletion.
+        for (const notification of outcome.notifications) {
+          writer.notification(notification.method, notification.params);
+        }
+        writer.result(request.id, outcome.result);
+      } else {
+        if (outcome.ok) writer.result(request.id, outcome.result);
+        else writer.error(request.id, outcome.error);
+        for (const notification of outcome.notifications) {
+          writer.notification(notification.method, notification.params);
+        }
       }
       if (outcome.ok && request.method === 'shutdown') {
         input.close();

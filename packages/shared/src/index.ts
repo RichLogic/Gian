@@ -14,3 +14,4 @@ export * from './screenshot.js';
 export * from './trace.js';
 export * from './sidechat.js';
 export * from './operations.js';
+export * from './tool.js';

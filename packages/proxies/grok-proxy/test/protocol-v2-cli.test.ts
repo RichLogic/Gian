@@ -66,7 +66,7 @@ test('Grok CLI negotiates gian.proxy/2.0 independently from its ACP runtime vers
   const result = initializeResultSchema.parse(initialized.result);
   assert.equal(result.protocol.version, '2.0');
   assert.equal(result.plugin.id, 'grok');
-  assert.equal(result.plugin.version, '0.3.0');
+  assert.equal(result.plugin.version, '0.3.1');
   assert.equal(result.process.scope, 'session');
   assert.equal(result.capabilities.interaction, 1);
   assert.equal(result.capabilities['session.native.delete'], 1);

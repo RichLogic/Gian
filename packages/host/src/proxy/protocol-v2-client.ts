@@ -23,6 +23,17 @@ interface PendingRequest {
   reject: (reason: unknown) => void;
 }
 
+export function proxyChildEnvironment(
+  inherited: NodeJS.ProcessEnv,
+  override: Readonly<Record<string, string>> | undefined,
+): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = { ...inherited, ...override };
+  for (const key of Object.keys(result)) {
+    if (key.startsWith('GIAN_TOOL_')) delete result[key];
+  }
+  return result;
+}
+
 export interface ProtocolV2ClientOptions {
   entry: string;
   pluginId: string;
@@ -71,8 +82,7 @@ export class ProtocolV2Client {
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true,
       env: {
-        ...process.env,
-        ...options.env,
+        ...proxyChildEnvironment(process.env, options.env),
         GIAN_PLUGIN_ID: options.pluginId,
         GIAN_PLUGIN_DATA_DIR: options.dataDir,
         ...(options.runtimeBin ? { GIAN_RUNTIME_BIN: options.runtimeBin } : {}),

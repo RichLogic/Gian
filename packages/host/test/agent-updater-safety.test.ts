@@ -655,7 +655,7 @@ test('real status --version probe blocks installer fetch and post-install status
   assert.equal(body.agent.cli.version, '2.0.0');
 });
 
-test('setCliPath restores the previous configured path when its status claim is busy', async t => {
+test('updateAgent rejects while the kind claim is busy and leaves agents.json untouched', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-set-cli-path-busy-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const oldPath = await writeFakeCli(root, 'old-claude');
@@ -683,6 +683,7 @@ test('setCliPath restores the previous configured path when its status claim is 
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
+  const agent = agents.listAgents().find(candidate => candidate.proxy === 'claude')!;
   const writer = await acquireAgentUpdateLock(
     agents.updateLockDataDir(),
     'claude',
@@ -691,37 +692,34 @@ test('setCliPath restores the previous configured path when its status claim is 
   const persistedBefore = await readFile(configPath, 'utf8');
   try {
     await assert.rejects(
-      agents.setCliPath('claude', newPath),
+      agents.updateAgent(agent.id, { cliPath: newPath }),
       (error: unknown) => error instanceof AgentUpdateBusyError,
     );
     await assert.rejects(
-      agents.setCliPath('claude', null),
+      agents.createAgent({ name: 'Second Claude', proxy: 'claude', cliPath: newPath }),
       (error: unknown) => error instanceof AgentUpdateBusyError,
     );
-    assert.equal(agents.configuredPath('claude'), oldPath);
+    assert.equal(agents.getAgent(agent.id).cliPath, oldPath);
     assert.equal(await readFile(configPath, 'utf8'), persistedBefore);
+    // Write-through updates (name/color/defaults) never queue behind the
+    // kind updater — they only need the cross-Host config claim.
+    const renamed = await agents.updateAgent(agent.id, { name: 'Renamed Claude' });
+    assert.equal(renamed.name, 'Renamed Claude');
   } finally {
     await writer.release();
   }
 });
 
-test('setCliPath holds one runtime claim through its persisted final status', async t => {
+test('updateAgent holds the kind claim from the path probe through persistence', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-set-cli-path-transaction-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const oldPath = await writeFakeCli(root, 'old-claude');
   const newPath = join(root, 'new-claude');
-  const countPath = join(root, 'probe-count');
-  const finalStarted = join(root, 'final-started');
-  const finalRelease = join(root, 'final-release');
+  const probeStarted = join(root, 'probe-started');
+  const probeRelease = join(root, 'probe-release');
   await writeFile(newPath, `#!/bin/sh
-count=0
-if [ -f '${countPath}' ]; then count=$(cat '${countPath}'); fi
-count=$((count + 1))
-printf '%s' "$count" > '${countPath}'
-if [ "$count" -eq 2 ]; then
-  : > '${finalStarted}'
-  while [ ! -f '${finalRelease}' ]; do sleep 0.02; done
-fi
+: > '${probeStarted}'
+while [ ! -f '${probeRelease}' ]; do sleep 0.02; done
 printf 'claude 2.0.0\\n'
 `, { mode: 0o700 });
   const proxyPath = join(root, 'proxy.mjs');
@@ -742,46 +740,41 @@ printf 'claude 2.0.0\\n'
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
+  const agent = agents.listAgents().find(candidate => candidate.proxy === 'claude')!;
 
-  const updating = agents.setCliPath('claude', newPath);
+  const updating = agents.updateAgent(agent.id, { cliPath: newPath });
   const deadline = Date.now() + 3_000;
   while (Date.now() < deadline) {
     try {
-      await readFile(finalStarted);
+      await readFile(probeStarted);
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       await new Promise(resolve => setTimeout(resolve, 20));
     }
   }
-  assert.equal(await readFile(finalStarted, 'utf8'), '');
+  assert.equal(await readFile(probeStarted, 'utf8'), '');
   await assert.rejects(
     acquireAgentUpdateLock(agents.updateLockDataDir(), 'claude', 'racing installer'),
     (error: unknown) => error instanceof AgentUpdateBusyError,
   );
-  await writeFile(finalRelease, 'go');
-  const status = await updating;
-  assert.equal(status.cli.state, 'ready');
-  assert.equal(agents.configuredPath('claude'), newPath);
+  await writeFile(probeRelease, 'go');
+  const updated = await updating;
+  assert.equal(updated.cliPath, newPath);
   const persisted = JSON.parse(await readFile(configPath, 'utf8')) as {
-    cliPaths: { claude?: string };
+    schemaVersion: number;
+    agents: Array<{ id: string; cliPath: string | null }>;
   };
-  assert.equal(persisted.cliPaths.claude, newPath);
+  assert.equal(persisted.schemaVersion, 2);
+  assert.equal(persisted.agents.find(candidate => candidate.id === agent.id)?.cliPath, newPath);
 });
 
-test('setCliPath rolls persisted state back when its final probe fails', async t => {
+test('updateAgent leaves persisted state untouched when the path probe fails', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-set-cli-path-final-failure-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const oldPath = await writeFakeCli(root, 'old-claude');
   const newPath = join(root, 'flaky-claude');
-  const countPath = join(root, 'probe-count');
-  await writeFile(newPath, `#!/bin/sh
-count=0
-if [ -f '${countPath}' ]; then count=$(cat '${countPath}'); fi
-count=$((count + 1))
-printf '%s' "$count" > '${countPath}'
-if [ "$count" -eq 1 ]; then printf 'claude 2.0.0\\n'; else printf 'broken\\n'; fi
-`, { mode: 0o700 });
+  await writeFile(newPath, "#!/bin/sh\nprintf 'broken\\n'\n", { mode: 0o700 });
   const proxyPath = join(root, 'proxy.mjs');
   await writeFile(proxyPath, 'export {};\n');
   const dataDir = join(root, 'data');
@@ -801,13 +794,19 @@ if [ "$count" -eq 1 ]; then printf 'claude 2.0.0\\n'; else printf 'broken\\n'; f
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
+  const agent = agents.listAgents().find(candidate => candidate.proxy === 'claude')!;
+  const persistedAfterMigration = await readFile(configPath, 'utf8');
 
-  await assert.rejects(agents.setCliPath('claude', newPath), /did not report a semantic version/i);
-  assert.equal(agents.configuredPath('claude'), oldPath);
-  assert.equal(await readFile(configPath, 'utf8'), persistedBefore);
+  await assert.rejects(
+    agents.updateAgent(agent.id, { cliPath: newPath }),
+    /did not report a semantic version/i,
+  );
+  assert.equal(agents.getAgent(agent.id).cliPath, oldPath);
+  assert.equal(await readFile(configPath, 'utf8'), persistedAfterMigration);
+  assert.notEqual(persistedAfterMigration, persistedBefore, 'migration itself persists v2');
 });
 
-test('setCliPath keeps a committed path when only claim retirement fails', {
+test('updateAgent keeps a committed path when only claim retirement fails', {
   skip: process.platform === 'win32',
 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-set-cli-path-retirement-failure-'));
@@ -832,37 +831,40 @@ test('setCliPath keeps a committed path when only claim retirement fails', {
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
+  const agent = agents.listAgents().find(candidate => candidate.proxy === 'claude')!;
   const claimDirectory = join(
     agents.updateLockDataDir(),
     'update-locks',
     'agent-claude-claims',
   );
   const internals = agents as unknown as {
-    statusInternal: (...args: unknown[]) => Promise<unknown>;
+    saveConfig: (config: unknown) => Promise<void>;
   };
-  const statusInternal = internals.statusInternal;
-  internals.statusInternal = async (...args: unknown[]) => {
-    const result = await Reflect.apply(statusInternal, agents, args);
+  const saveConfig = internals.saveConfig;
+  internals.saveConfig = async config => {
+    await Reflect.apply(saveConfig, agents, [config]);
     await chmod(claimDirectory, 0o500);
-    return result;
   };
 
   try {
     await assert.rejects(
-      agents.setCliPath('claude', newPath),
+      agents.updateAgent(agent.id, { cliPath: newPath }),
       (error: unknown) => error instanceof AggregateError,
     );
   } finally {
+    internals.saveConfig = saveConfig;
     await chmod(claimDirectory, 0o700);
   }
-  assert.equal(agents.configuredPath('claude'), newPath);
+  // Persistence is the commit point: a claim-retirement failure cannot roll
+  // the new path back.
+  assert.equal(agents.getAgent(agent.id).cliPath, newPath);
   const persisted = JSON.parse(await readFile(configPath, 'utf8')) as {
-    cliPaths: { claude?: string };
+    agents: Array<{ id: string; cliPath: string | null }>;
   };
-  assert.equal(persisted.cliPaths.claude, newPath);
+  assert.equal(persisted.agents.find(candidate => candidate.id === agent.id)?.cliPath, newPath);
 });
 
-test('committed Proxy defaults invalidate cached status before claim retirement', {
+test('committed Agent defaults invalidate cached status before claim retirement', {
   skip: process.platform === 'win32',
 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-proxy-defaults-retirement-failure-'));
@@ -880,6 +882,7 @@ test('committed Proxy defaults invalidate cached status before claim retirement'
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
+  const agent = agents.listAgents().find(candidate => candidate.proxy === 'claude')!;
   const cached = await agents.status('claude', true);
   assert.equal(cached.proxy.defaults.mode, '');
   const claimDirectory = join(
@@ -897,16 +900,16 @@ test('committed Proxy defaults invalidate cached status before claim retirement'
   };
 
   try {
-    await assert.rejects(agents.setProxyDefaults('claude', { mode: 'auto' }));
+    await assert.rejects(agents.updateAgent(agent.id, { defaults: { mode: 'auto' } }));
   } finally {
     internals.saveConfig = saveConfig;
     await chmod(claimDirectory, 0o700);
   }
   assert.equal(agents.proxyDefaults('claude').mode, 'auto');
   const persisted = JSON.parse(await readFile(join(dataDir, 'agents.json'), 'utf8')) as {
-    proxyDefaults: { claude?: { mode?: string } };
+    agents: Array<{ id: string; defaults: { mode: string } }>;
   };
-  assert.equal(persisted.proxyDefaults.claude?.mode, 'auto');
+  assert.equal(persisted.agents.find(candidate => candidate.id === agent.id)?.defaults.mode, 'auto');
   const refreshed = await agents.status('claude');
   assert.equal(refreshed.proxy.defaults.mode, 'auto');
 });
@@ -918,11 +921,6 @@ test('config mutations serialize locally and a stale Host reloads before commit'
   const homeDir = join(root, 'home');
   const proxyPath = join(root, 'proxy.mjs');
   await writeFile(proxyPath, 'export {};\n');
-  const paths = {
-    claude: await writeFakeCli(root, 'claude-concurrent'),
-    codex: await writeFakeCli(root, 'codex-concurrent'),
-    kimi: await writeFakeCli(root, 'kimi-stale-host'),
-  };
   const options = {
     dataDir,
     releaseVersion: '0.1.0',
@@ -935,15 +933,20 @@ test('config mutations serialize locally and a stale Host reloads before commit'
   const staleHost = await AgentManager.create(options);
 
   await Promise.all([
-    firstHost.setCliPath('claude', paths.claude),
-    firstHost.setCliPath('codex', paths.codex),
+    firstHost.createAgent({ name: 'Claude A', proxy: 'claude' }),
+    firstHost.createAgent({ name: 'Codex A', proxy: 'codex' }),
   ]);
-  await staleHost.setCliPath('kimi', paths.kimi);
+  // The stale Host's in-memory config predates both creates; it must reload
+  // under the cross-Host claim rather than overwrite the newer file.
+  await staleHost.createAgent({ name: 'Kimi A', proxy: 'kimi' });
 
   const persisted = JSON.parse(await readFile(join(dataDir, 'agents.json'), 'utf8')) as {
-    cliPaths: Partial<Record<string, string>>;
+    agents: Array<{ name: string; proxy: string }>;
   };
-  assert.deepEqual(persisted.cliPaths, paths);
+  assert.deepEqual(
+    persisted.agents.map(agent => [agent.name, agent.proxy]),
+    [['Claude A', 'claude'], ['Codex A', 'codex'], ['Kimi A', 'kimi']],
+  );
 });
 
 test('GitHub release integrity binds both exact Proxy assets to SHA-256 digests', () => {
@@ -2296,12 +2299,20 @@ test('Proxy defaults keep managed approval presets separate from native policy v
     slashCommands: [],
   };
   const agents = {
-    proxyDefaults: () => ({ ...defaults }),
-    setProxyDefaults: async (_id: string, patch: Partial<AgentProxyDefaults>) => {
-      writes.push(patch);
-      Object.assign(defaults, patch);
+    getAgent: () => ({
+      id: 'agent-codex',
+      name: 'Codex',
+      color: 'ink',
+      proxy: 'codex',
+      cliPath: null,
+      defaults: { ...defaults },
+    }),
+    updateAgent: async (_id: string, patch: { defaults?: Partial<AgentProxyDefaults> }) => {
+      writes.push(patch.defaults ?? {});
+      Object.assign(defaults, patch.defaults);
       return {};
     },
+    agentStatus: async () => ({}),
   } as unknown as AgentManager;
   const app = new Hono();
   registerAgentRoutes(app, {
@@ -2311,11 +2322,11 @@ test('Proxy defaults keep managed approval presets separate from native policy v
     capabilities: async () => catalog,
   });
   const put = (body: Partial<AgentProxyDefaults>) => app.request(
-    '/api/agents/codex/proxy-defaults',
+    '/api/agents/agent-codex',
     {
-      method: 'PUT',
+      method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ defaults: body }),
     },
   );
 
@@ -2357,12 +2368,20 @@ test('native DSH defaults accept the Proxy-owned mode vocabulary', async () => {
   const defaults: AgentProxyDefaults = { model: '', thinking: '', mode: '' };
   const writes: Array<Partial<AgentProxyDefaults>> = [];
   const agents = {
-    proxyDefaults: () => ({ ...defaults }),
-    setProxyDefaults: async (_id: string, patch: Partial<AgentProxyDefaults>) => {
-      writes.push(patch);
-      Object.assign(defaults, patch);
+    getAgent: () => ({
+      id: 'agent-dsh',
+      name: 'DeepSeek Harness',
+      color: 'teal',
+      proxy: 'dsh',
+      cliPath: null,
+      defaults: { ...defaults },
+    }),
+    updateAgent: async (_id: string, patch: { defaults?: Partial<AgentProxyDefaults> }) => {
+      writes.push(patch.defaults ?? {});
+      Object.assign(defaults, patch.defaults);
       return {};
     },
+    agentStatus: async () => ({}),
   } as unknown as AgentManager;
   const app = new Hono();
   registerAgentRoutes(app, {
@@ -2389,10 +2408,10 @@ test('native DSH defaults accept the Proxy-owned mode vocabulary', async () => {
     }),
   });
 
-  const response = await app.request('/api/agents/dsh/proxy-defaults', {
-    method: 'PUT',
+  const response = await app.request('/api/agents/agent-dsh', {
+    method: 'PATCH',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ mode: 'never' }),
+    body: JSON.stringify({ defaults: { mode: 'never' } }),
   });
   assert.equal(response.status, 200);
   assert.deepEqual(writes, [{ mode: 'never' }]);
@@ -2450,12 +2469,20 @@ test('Proxy defaults validate effort against the catalog resolved for the select
   };
   const resolveCalls: unknown[] = [];
   const agents = {
-    proxyDefaults: () => ({ ...defaults }),
-    setProxyDefaults: async (_id: string, patch: Partial<AgentProxyDefaults>) => {
-      writes.push(patch);
-      Object.assign(defaults, patch);
+    getAgent: () => ({
+      id: 'agent-claude',
+      name: 'Claude Code',
+      color: 'ember',
+      proxy: 'claude',
+      cliPath: null,
+      defaults: { ...defaults },
+    }),
+    updateAgent: async (_id: string, patch: { defaults?: Partial<AgentProxyDefaults> }) => {
+      writes.push(patch.defaults ?? {});
+      Object.assign(defaults, patch.defaults);
       return {};
     },
+    agentStatus: async () => ({}),
   } as unknown as AgentManager;
   const app = new Hono();
   registerAgentRoutes(app, {
@@ -2482,10 +2509,10 @@ test('Proxy defaults validate effort against the catalog resolved for the select
     },
   });
 
-  const response = await app.request('/api/agents/claude/proxy-defaults', {
-    method: 'PUT',
+  const response = await app.request('/api/agents/agent-claude', {
+    method: 'PATCH',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'opus', thinking: 'max' }),
+    body: JSON.stringify({ defaults: { model: 'opus', thinking: 'max' } }),
   });
   assert.equal(response.status, 200);
   assert.deepEqual(resolveCalls, [{
@@ -2539,10 +2566,18 @@ test('Agent install routes drain CLI use before mutation without self-locking Pr
   assert.deepEqual(events, ['install-proxy', 'close-claude']);
 });
 
-test('CLI path route invalidates a committed runtime even when claim retirement reports failure', async () => {
+test('Agent path route invalidates a committed runtime even when claim retirement reports failure', async () => {
   let invalidations = 0;
   const agents = {
-    async setCliPath() {
+    getAgent: () => ({
+      id: 'agent-claude',
+      name: 'Claude Code',
+      color: 'ember',
+      proxy: 'claude' as const,
+      cliPath: null,
+      defaults: { model: '', thinking: '', mode: '' },
+    }),
+    async updateAgent() {
       throw new Error('configuration committed but claim retirement failed');
     },
   } as unknown as AgentManager;
@@ -2559,10 +2594,10 @@ test('CLI path route invalidates a committed runtime even when claim retirement 
     capabilities: async () => ({ models: [], modes: [] }),
   });
 
-  const response = await app.request('/api/agents/claude/cli-path', {
-    method: 'PUT',
+  const response = await app.request('/api/agents/agent-claude', {
+    method: 'PATCH',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ path: '/new/claude' }),
+    body: JSON.stringify({ cliPath: '/new/claude' }),
   });
   assert.equal(response.status, 400);
   assert.equal(invalidations, 1);
@@ -3751,7 +3786,8 @@ test('check-proxy-update route is read-only and rejects unknown agents', async t
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     managed: false,
-    currentVersion: null,
+    // Development builds report the vendored/App fallback version for display.
+    currentVersion: '0.4.4',
     latestVersion: null,
     updateAvailable: false,
   });

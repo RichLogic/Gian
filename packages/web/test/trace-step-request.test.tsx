@@ -44,6 +44,19 @@ function renderRequestPanel(item: TraceItem) {
   return screen.getByTestId('trace-request-card');
 }
 
+function renderItemPanel(item: TraceItem) {
+  render(
+    <LocaleProvider locale="en">
+      <ChatContextPanel
+        target={{ kind: 'trace-item', item, sessionId: 'session-1' }}
+        items={[]}
+        onClose={() => {}}
+      />
+    </LocaleProvider>,
+  );
+  return screen.getByTestId('chat-trace-detail');
+}
+
 describe('step groups in the Trace list', () => {
   it('folds step children behind the step row until it is expanded', async () => {
     renderTrace(traceFixtureStepRequest);
@@ -146,5 +159,54 @@ describe('request card', () => {
     expect(card).toHaveTextContent('read_file');
     expect(card).toHaveTextContent('Read one workspace file.');
     expect(card).toHaveTextContent('write_file');
+  });
+});
+
+describe('semantic trace detail', () => {
+  it('separates provider payload, result, and timing instead of dumping the event wrapper', async () => {
+    const item: TraceItem = {
+      id: 'activity-1',
+      turnId: 'turn-1',
+      kind: 'tool',
+      shape: 'span',
+      title: 'filesystem.read_file',
+      summary: 'Read project notes',
+      status: 'succeeded',
+      at: '2026-08-15T10:00:01.000Z',
+      endAt: '2026-08-15T10:00:02.500Z',
+      evidence: 'derived',
+      correlationId: 'codex-item-1',
+      sourceEventIds: ['event-1', 'event-2'],
+      detail: {
+        presentation: {
+          type: 'tool',
+          data: {
+            name: 'filesystem.read_file',
+            input: { path: '/workspace/AGENTS.md' },
+            output: { text: 'project rules' },
+          },
+        },
+        details: {
+          nativeType: 'mcpToolCall',
+          item: { id: 'codex-item-1', type: 'mcpToolCall' },
+        },
+      },
+    };
+    renderItemPanel(item);
+    expect(screen.getByTestId('trace-detail-panel-summary')).toHaveTextContent('Read project notes');
+    expect(screen.getByTestId('trace-detail-tab-payload')).toBeInTheDocument();
+    expect(screen.getByTestId('trace-detail-tab-result')).toBeInTheDocument();
+    expect(screen.queryByTestId('trace-detail-tab-schema')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId('trace-detail-tab-payload'));
+    expect(screen.getByTestId('trace-detail-panel-payload')).toHaveTextContent('/workspace/AGENTS.md');
+    expect(screen.getByTestId('trace-detail-panel-payload')).not.toHaveTextContent('nativeType');
+
+    await userEvent.click(screen.getByTestId('trace-detail-tab-result'));
+    expect(screen.getByTestId('trace-detail-panel-result')).toHaveTextContent('project rules');
+
+    await userEvent.click(screen.getByTestId('trace-detail-tab-timing'));
+    expect(screen.getByTestId('trace-detail-panel-timing')).toHaveTextContent('1s');
+    expect(screen.getByTestId('trace-detail-panel-timing')).toHaveTextContent('codex-item-1');
   });
 });

@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
+import { OpaqueSidechatResumeStore } from '@gian/proxy-protocol';
+
 import { AppError } from '../core/errors.js';
 import { normalizeInputItems } from '../core/input.js';
 import { buildPrompt, CcProxyService } from '../core/service.js';
@@ -11,6 +13,7 @@ import {
   activityEventId,
   contentCompletedEventId,
   countReplayableNativeTurns,
+  forkClaudeNativeSession,
   listClaudeNativeSessions,
   nativeTurnSourceId,
   normalizeNativePrompt,
@@ -191,6 +194,26 @@ interface ClosedAttach {
   closedAt: string;
 }
 
+type SidechatAnchor =
+  | { type: 'empty' }
+  | { type: 'turn'; turnId: string; sourceTurnId: string };
+
+interface SidechatRecord {
+  parentSessionId: string;
+  resumeRefId: string;
+  anchor: SidechatAnchor;
+  createFingerprint?: string;
+  resumeFingerprint?: string;
+}
+
+interface ServiceSessionShape {
+  id: string;
+  claudeSessionId: string;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 const PROTOCOL_NAME = 'gian.proxy';
 const PROTOCOL_V2 = '2.0';
 const MAX_ACTIVITY_JSON_BYTES = 1024 * 1024;
@@ -202,6 +225,9 @@ const CAPABILITIES = {
   'session.rename': 1,
   'session.native.list': 1,
   'session.replay': 1,
+  sidechat: 1,
+  'session.fork': 1,
+  'session.fork.atTurn': 1,
   interaction: 1,
   'event.reasoning': 1,
   'event.usage': 1,
@@ -503,6 +529,10 @@ export class ClaudeProtocolV2Adapter {
   private readonly replayPager = new ReplayPager();
   private readonly historyWatchers = new Map<string, ClaudeNativeHistoryWatcher>();
   private readonly ledger = new TurnLedger();
+  private readonly resumeStore = new OpaqueSidechatResumeStore();
+  private readonly sidechats = new Map<string, SidechatRecord>();
+  private readonly terminalOrderBySession = new Map<string, Array<{ turnId: string; sourceTurnId: string }>>();
+  private readonly forkResults = new Map<string, { fingerprint: string; result: unknown }>();
   private initialized = false;
   private catalogRevision = '';
   private deferDepth = 0;
@@ -527,7 +557,11 @@ export class ClaudeProtocolV2Adapter {
         case 'catalog.list': return await this.catalog();
         case 'catalog.resolve': return await this.resolveCatalog(request.params);
         case 'session.create': return await this.createSession(request.params);
-        case 'session.get': return { session: this.serialize(this.requireSession(String(request.params.sessionId ?? ''))) };
+        case 'session.get': return { session: this.serialize(this.requireOrdinarySession(String(request.params.sessionId ?? ''))) };
+        case 'sidechat.create': return await this.createSidechat(request.params);
+        case 'sidechat.resume': return await this.resumeSidechat(request.params);
+        case 'sidechat.close': return await this.closeSidechat(request.params);
+        case 'session.fork': return await this.forkSession(request.params);
         case 'turn.start': return await this.startTurn(request.params, request.id);
         case 'turn.interrupt': return await this.interruptTurn(request.params);
         case 'interaction.respond': return await this.respondInteraction(request.params);
@@ -733,11 +767,17 @@ export class ClaudeProtocolV2Adapter {
         { type: 'localImage' as const },
       ],
       configOptions: options.map((option) => this.serializeOption(option)),
+      actions: [
+        { id: 'sidechat.create', supported: true },
+        { id: 'session.fork', supported: true },
+        { id: 'session.fork.atTurn', supported: true },
+      ],
       slashCommands,
     };
     payload.catalogRevision = stableId('catalog', {
       input: payload.input,
       configOptions: payload.configOptions,
+      actions: payload.actions,
       slashCommands: payload.slashCommands,
     });
     return payload;
@@ -762,7 +802,7 @@ export class ClaudeProtocolV2Adapter {
     if ((sessionId === null) !== (streamId === null)) {
       throw new ClaudeProtocolError('INVALID_PARAMS', 'sessionId and streamId must be sent together.');
     }
-    if (sessionId && streamId) this.requireAttached(sessionId, streamId);
+    if (sessionId && streamId) this.requireOrdinaryAttached(sessionId, streamId);
     if (this.advertised().length === 0) await this.catalog();
     const sessionConfig = this.validateConfig(requireRecord(params.sessionConfig, 'sessionConfig'), 'session');
     const explicitTurnConfig = this.validateConfig(requireRecord(params.turnConfig, 'turnConfig'), 'turn');
@@ -914,6 +954,9 @@ export class ClaudeProtocolV2Adapter {
     });
     const existing = this.sessions.get(sessionId);
     if (existing) {
+      if (this.sidechats.has(sessionId)) {
+        throw new ClaudeProtocolError('SESSION_NOT_FOUND', 'Session not found.');
+      }
       if (this.creationFingerprints.get(sessionId) !== fingerprint) {
         throw new ClaudeProtocolError('CONFLICT', `Session ${sessionId} was reused with different parameters.`);
       }
@@ -971,6 +1014,312 @@ export class ClaudeProtocolV2Adapter {
     this.historyWatchers.set(session.id, historyWatcher);
     void this.publishCatalogIfCommandsArrive(session);
     return { session: this.serialize(session) };
+  }
+
+  private async createSidechat(params: Record<string, unknown>) {
+    const parentSessionId = nonEmptyString(params.parentSessionId);
+    const parentStreamId = nonEmptyString(params.parentStreamId);
+    const sidechatId = nonEmptyString(params.sidechatId);
+    if (!parentSessionId || !parentStreamId || !sidechatId) {
+      throw new ClaudeProtocolError('INVALID_PARAMS', 'parentSessionId, parentStreamId, and sidechatId are required.');
+    }
+    const parent = this.requireOrdinaryAttached(parentSessionId, parentStreamId);
+    const fingerprint = JSON.stringify({ parentSessionId, parentStreamId });
+    const existing = this.sidechats.get(sidechatId);
+    if (existing) {
+      if (existing.createFingerprint !== fingerprint) {
+        throw new ClaudeProtocolError('CONFLICT', 'sidechatId was reused with a different parent.');
+      }
+      return { sidechat: this.serializeSidechat(this.requireSession(sidechatId), existing) };
+    }
+    if (this.sessions.has(sidechatId)) {
+      throw new ClaudeProtocolError('CONFLICT', 'sidechatId already belongs to an ordinary Session.');
+    }
+    const anchor = this.sidechatAnchor(parent);
+    const nativeSessionId = randomUUID();
+    if (anchor.type === 'turn') {
+      forkClaudeNativeSession(
+        parent.nativeSessionId,
+        nativeSessionId,
+        parent.cwd,
+        anchor.sourceTurnId,
+      );
+    }
+    const created = await this.service.createSession({
+      cwd: parent.cwd,
+      claudeSessionId: nativeSessionId,
+      resumeExisting: anchor.type === 'turn',
+    });
+    const session = this.attachForkedSession(sidechatId, created.session as ServiceSessionShape);
+    const createdAt = new Date().toISOString();
+    const resumeRef = this.resumeStore.seal({
+      sidechatId,
+      parentSessionId,
+      nativeSessionId,
+      anchor,
+      sessionConfig: parent.sessionConfig,
+      createdAt,
+    });
+    const sidechat: SidechatRecord = {
+      parentSessionId,
+      resumeRefId: resumeRef.id,
+      anchor,
+      createFingerprint: fingerprint,
+    };
+    this.sidechats.set(sidechatId, sidechat);
+    return { sidechat: this.serializeSidechat(session, sidechat, createdAt) };
+  }
+
+  private async resumeSidechat(params: Record<string, unknown>) {
+    const sidechatId = nonEmptyString(params.sidechatId);
+    const parentSessionId = nonEmptyString(params.parentSessionId);
+    const resumeRefId = nonEmptyString(requireRecord(params.resumeRef, 'resumeRef').id);
+    if (!sidechatId || !parentSessionId || !resumeRefId) {
+      throw new ClaudeProtocolError('INVALID_PARAMS', 'sidechatId, parentSessionId, and resumeRef are required.');
+    }
+    if (this.resumeStore.closed(resumeRefId)) {
+      throw new ClaudeProtocolError('SIDECHAT_UNAVAILABLE', 'Side Chat was already closed.');
+    }
+    const payload = this.resumeStore.open(resumeRefId);
+    if (!payload) throw new ClaudeProtocolError('SIDECHAT_UNAVAILABLE', 'Side Chat resume reference is unavailable.');
+    if (payload.sidechatId !== sidechatId || payload.parentSessionId !== parentSessionId) {
+      throw new ClaudeProtocolError('CONFLICT', 'Side Chat resume identity does not match.');
+    }
+    const parent = this.requireOrdinarySession(parentSessionId);
+    const fingerprint = JSON.stringify({ parentSessionId, resumeRefId });
+    const existing = this.sidechats.get(sidechatId);
+    if (existing) {
+      if (existing.resumeFingerprint !== fingerprint) {
+        throw new ClaudeProtocolError('CONFLICT', 'Side Chat is already attached with another resume reference.');
+      }
+      return { sidechat: this.serializeSidechat(this.requireSession(sidechatId), existing, payload.createdAt) };
+    }
+    if (this.sessions.has(sidechatId)) {
+      throw new ClaudeProtocolError('CONFLICT', 'sidechatId already belongs to an ordinary Session.');
+    }
+    const resumed = await this.service.createSession({
+      cwd: parent.cwd,
+      claudeSessionId: payload.nativeSessionId,
+      resumeExisting: countReplayableNativeTurns(payload.nativeSessionId, parent.cwd) > 0,
+    });
+    const session = this.attachForkedSession(sidechatId, resumed.session as ServiceSessionShape, payload.sessionConfig);
+    const sidechat: SidechatRecord = {
+      parentSessionId,
+      resumeRefId,
+      anchor: payload.anchor as SidechatAnchor,
+      resumeFingerprint: fingerprint,
+    };
+    this.sidechats.set(sidechatId, sidechat);
+    return { sidechat: this.serializeSidechat(session, sidechat, payload.createdAt) };
+  }
+
+  private async closeSidechat(params: Record<string, unknown>) {
+    const sidechatId = nonEmptyString(params.sidechatId);
+    const resumeRefId = nonEmptyString(requireRecord(params.resumeRef, 'resumeRef').id);
+    const streamId = params.streamId === undefined ? null : nonEmptyString(params.streamId);
+    if (!sidechatId || !resumeRefId || (params.streamId !== undefined && !streamId)) {
+      throw new ClaudeProtocolError('INVALID_PARAMS', 'sidechatId and resumeRef are required; streamId must be non-empty.');
+    }
+    const closed = this.resumeStore.closed(resumeRefId);
+    if (closed) {
+      return {
+        ok: true as const,
+        sidechatId,
+        providerDataDeleted: closed.sidechatId === sidechatId ? closed.providerDataDeleted : false,
+      };
+    }
+    const payload = this.resumeStore.open(resumeRefId);
+    if (payload && payload.sidechatId !== sidechatId) {
+      throw new ClaudeProtocolError('CONFLICT', 'resumeRef belongs to another live Side Chat.');
+    }
+    const live = this.sidechats.get(sidechatId);
+    if (live && live.resumeRefId !== resumeRefId) {
+      throw new ClaudeProtocolError('CONFLICT', 'resumeRef belongs to another Side Chat attachment.');
+    }
+    if (live) {
+      const session = this.requireSession(sidechatId);
+      if (streamId && session.streamId !== streamId) {
+        throw new ClaudeProtocolError('SESSION_STALE', 'Side Chat stream is stale.');
+      }
+      await this.detachSession(session, false);
+      this.sidechats.delete(sidechatId);
+    }
+    // Claude Code has no stable non-destructive delete API for JSONL history.
+    // Invalidate Gian's encrypted resume ref and report Provider retention.
+    const providerDataDeleted = false;
+    this.resumeStore.rememberClosed(resumeRefId, { sidechatId, providerDataDeleted });
+    return { ok: true as const, sidechatId, providerDataDeleted };
+  }
+
+  private async forkSession(params: Record<string, unknown>) {
+    const sourceSessionId = nonEmptyString(params.sourceSessionId);
+    const sourceStreamId = nonEmptyString(params.sourceStreamId);
+    const sessionId = nonEmptyString(params.sessionId);
+    const anchor = requireRecord(params.anchor, 'anchor');
+    if (!sourceSessionId || !sourceStreamId || !sessionId || (anchor.type !== 'head' && anchor.type !== 'turn')) {
+      throw new ClaudeProtocolError('INVALID_PARAMS', 'sourceSessionId, sourceStreamId, sessionId, and anchor are required.');
+    }
+    const fingerprint = JSON.stringify({ sourceSessionId, sourceStreamId, anchor });
+    const previous = this.forkResults.get(sessionId);
+    if (previous) {
+      if (previous.fingerprint !== fingerprint) {
+        throw new ClaudeProtocolError('CONFLICT', 'Fork sessionId was reused with another source boundary.');
+      }
+      return previous.result;
+    }
+    if (this.sessions.has(sessionId)) {
+      throw new ClaudeProtocolError('CONFLICT', 'Fork sessionId already belongs to another Session.');
+    }
+    const source = this.requireOrdinaryAttached(sourceSessionId, sourceStreamId);
+    const boundary = this.forkBoundary(source, anchor);
+    const nativeSessionId = randomUUID();
+    forkClaudeNativeSession(
+      source.nativeSessionId,
+      nativeSessionId,
+      source.cwd,
+      boundary.sourceTurnId,
+    );
+    const created = await this.service.createSession({
+      cwd: source.cwd,
+      claudeSessionId: nativeSessionId,
+      resumeExisting: true,
+    });
+    const child = this.attachForkedSession(sessionId, created.session as ServiceSessionShape);
+    this.attachNativeReplay(child, true);
+    const result = {
+      session: this.serialize(child),
+      origin: {
+        kind: 'fork' as const,
+        sessionId: source.id,
+        turnId: boundary.turnId,
+        sourceTurnId: boundary.sourceTurnId,
+      },
+    };
+    this.forkResults.set(sessionId, { fingerprint, result });
+    return result;
+  }
+
+  private attachForkedSession(
+    id: string,
+    serviceSession: ServiceSessionShape,
+    sessionConfig: Record<string, ConfigValue> = {},
+  ): AttachedSession {
+    const session: AttachedSession = {
+      id,
+      serviceSessionId: serviceSession.id,
+      nativeSessionId: serviceSession.claudeSessionId,
+      streamId: randomUUID(),
+      cwd: this.service.getSession({ sessionId: serviceSession.id }).session.cwd,
+      state: 'idle',
+      lastError: serviceSession.lastError,
+      createdAt: serviceSession.createdAt,
+      updatedAt: serviceSession.updatedAt,
+      sessionConfig: { ...sessionConfig },
+      displayName: null,
+      sequence: 0,
+    };
+    this.sessions.set(session.id, session);
+    this.sessionByServiceId.set(session.serviceSessionId, session);
+    this.creationFingerprints.set(session.id, `fork:${session.nativeSessionId}`);
+    this.ledger.attach(session.id, session.streamId);
+    return session;
+  }
+
+  private attachNativeReplay(session: AttachedSession, importExisting: boolean): void {
+    const tracker = new IncrementalReplayTracker();
+    tracker.attach(
+      replayClaudeNativeSession(session.id, session.nativeSessionId, session.cwd),
+      importExisting,
+    );
+    this.replayTrackers.set(session.id, tracker);
+    this.replayBySession.set(session.id, tracker.replay());
+    const watcher = new ClaudeNativeHistoryWatcher(
+      session.nativeSessionId,
+      session.cwd,
+      () => {
+        if (!this.sessions.has(session.id)) return;
+        const full = replayClaudeNativeSession(session.id, session.nativeSessionId, session.cwd);
+        if (!tracker.observe(full)) return;
+        this.replayBySession.set(session.id, tracker.replay());
+        this.emitSessionEvent('history.changed', session, { reason: 'native-history-changed' });
+      },
+    );
+    watcher.start();
+    this.historyWatchers.set(session.id, watcher);
+  }
+
+  private sidechatAnchor(session: AttachedSession): SidechatAnchor {
+    if (this.activeTurnBySession.has(session.id)) {
+      throw new ClaudeProtocolError('SESSION_BUSY', 'Side Chat requires an idle parent Session.');
+    }
+    const boundary = this.latestTerminalBoundary(session.id);
+    if (boundary) return { type: 'turn', ...boundary };
+    if ((this.replayBySession.get(session.id)?.events.length ?? 0) === 0) return { type: 'empty' };
+    throw new ClaudeProtocolError('FORK_BOUNDARY_UNAVAILABLE', 'No stable terminal Turn is available in this attach generation.');
+  }
+
+  private forkBoundary(
+    session: AttachedSession,
+    anchor: Record<string, unknown>,
+  ): { turnId: string; sourceTurnId: string } {
+    if (this.activeTurnBySession.has(session.id)) {
+      throw new ClaudeProtocolError('SESSION_BUSY', 'Fork requires an idle source Session.');
+    }
+    if (anchor.type === 'head') {
+      const boundary = this.latestTerminalBoundary(session.id);
+      if (boundary) return boundary;
+    } else {
+      const turnId = nonEmptyString(anchor.turnId);
+      const sourceTurnId = nonEmptyString(anchor.sourceTurnId);
+      if ((this.terminalOrderBySession.get(session.id) ?? []).some((entry) => (
+        entry.turnId === turnId && entry.sourceTurnId === sourceTurnId
+      ))) {
+        return { turnId: turnId!, sourceTurnId: sourceTurnId! };
+      }
+    }
+    throw new ClaudeProtocolError('FORK_BOUNDARY_UNAVAILABLE', 'Fork requires the exact terminal Turn.');
+  }
+
+  private latestTerminalBoundary(sessionId: string): { turnId: string; sourceTurnId: string } | null {
+    return this.terminalOrderBySession.get(sessionId)?.at(-1) ?? null;
+  }
+
+  private availableActions(session: AttachedSession) {
+    const busy = this.activeTurnBySession.has(session.id) || session.state !== 'idle';
+    const boundary = this.latestTerminalBoundary(session.id);
+    const historyEmpty = (this.replayBySession.get(session.id)?.events.length ?? 0) === 0;
+    const reason = busy
+      ? 'Wait for the active turn to finish.'
+      : 'No stable terminal turn is available in this attach generation.';
+    return {
+      'sidechat.create': {
+        enabled: !busy && (boundary !== null || historyEmpty),
+        ...(!busy && (boundary !== null || historyEmpty) ? {} : { reason }),
+      },
+      'session.fork': {
+        enabled: !busy && boundary !== null,
+        ...(!busy && boundary !== null ? {} : { reason }),
+      },
+      'session.fork.atTurn': {
+        enabled: !busy && boundary !== null,
+        ...(!busy && boundary !== null ? {} : { reason }),
+      },
+    };
+  }
+
+  private serializeSidechat(session: AttachedSession, sidechat: SidechatRecord, createdAt = session.createdAt) {
+    return {
+      id: session.id,
+      parentSessionId: sidechat.parentSessionId,
+      streamId: session.streamId,
+      state: session.state,
+      resumeRef: { id: sidechat.resumeRefId },
+      anchor: sidechat.anchor,
+      sessionConfig: session.sessionConfig,
+      lastError: session.lastError,
+      createdAt,
+      updatedAt: session.updatedAt,
+    };
   }
 
   private async publishCatalogIfCommandsArrive(session: AttachedSession): Promise<void> {
@@ -1260,7 +1609,7 @@ export class ClaudeProtocolV2Adapter {
   }
 
   private async renameSession(params: Record<string, unknown>) {
-    const session = this.requireAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
+    const session = this.requireOrdinaryAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
     const name = typeof params.name === 'string' ? params.name : '';
     if ([...name].length > 200) {
       throw new ClaudeProtocolError('INVALID_PARAMS', 'Session name must not exceed 200 Unicode code points.');
@@ -1278,7 +1627,12 @@ export class ClaudeProtocolV2Adapter {
     }
     const closed = this.closedAttaches.get(sessionId);
     if (closed?.streamId === streamId) return { ok: true as const };
-    const session = this.requireAttached(sessionId, streamId);
+    const session = this.requireOrdinaryAttached(sessionId, streamId);
+    return this.detachSession(session, true);
+  }
+
+  private async detachSession(session: AttachedSession, rememberClosed: boolean) {
+    const streamId = session.streamId;
     const activeTurn = this.activeTurnBySession.get(session.id);
     if (activeTurn) {
       try {
@@ -1308,7 +1662,10 @@ export class ClaudeProtocolV2Adapter {
     this.replayBySession.delete(session.id);
     this.replayTrackers.delete(session.id);
     this.replayPager.close(session.id);
-    this.closedAttaches.set(session.id, { streamId, closedAt: new Date().toISOString() });
+    this.terminalOrderBySession.delete(session.id);
+    if (rememberClosed) {
+      this.closedAttaches.set(session.id, { streamId, closedAt: new Date().toISOString() });
+    }
     return { ok: true as const };
   }
 
@@ -1329,7 +1686,7 @@ export class ClaudeProtocolV2Adapter {
   }
 
   private replay(params: Record<string, unknown>) {
-    const session = this.requireAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
+    const session = this.requireOrdinaryAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
     const limit = this.positiveLimit(params.limit, 100);
     const state = this.replayBySession.get(session.id)
       ?? { streamId: stableId('replay', session.id), events: [] };
@@ -1703,6 +2060,11 @@ export class ClaudeProtocolV2Adapter {
   ): void {
     if (this.activeTurnBySession.get(session.id) !== turnId) return;
     const sourceTurnId = this.activeTurnStateBySession.get(session.id)?.sourceTurnId ?? turnId;
+    const terminalOrder = this.terminalOrderBySession.get(session.id) ?? [];
+    if (!terminalOrder.some((entry) => entry.turnId === turnId)) {
+      terminalOrder.push({ turnId, sourceTurnId });
+    }
+    this.terminalOrderBySession.set(session.id, terminalOrder);
     this.resolveInteractionsForTurn(session, turnId, failed ? 'runtime_ended' : 'turn_ended');
     this.closeOpenWork(session, turnId, failed ? 'failed' : 'succeeded');
     if (failed) {
@@ -1722,6 +2084,14 @@ export class ClaudeProtocolV2Adapter {
       }, turnCompletedEventId(sourceTurnId));
     }
     this.clearTurn(session.id, turnId);
+    if (!this.sidechats.has(session.id)) {
+      this.emitSessionEvent('session.updated', session, {
+        state: session.state,
+        lastError: session.lastError,
+        availableActions: this.availableActions(session),
+        updatedAt: session.updatedAt,
+      });
+    }
     this.historyWatchers.get(session.id)?.resume();
     this.rebaseHistory(session);
   }
@@ -1888,6 +2258,7 @@ export class ClaudeProtocolV2Adapter {
       state: session.state,
       sessionConfig: session.sessionConfig,
       lastError: session.lastError,
+      availableActions: this.availableActions(session),
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
     };
@@ -1902,8 +2273,23 @@ export class ClaudeProtocolV2Adapter {
     return session;
   }
 
+  private requireOrdinarySession(sessionId: string): AttachedSession {
+    if (this.sidechats.has(sessionId)) {
+      throw new ClaudeProtocolError('SESSION_NOT_FOUND', 'Session not found.');
+    }
+    return this.requireSession(sessionId);
+  }
+
   private requireAttached(sessionId: string, streamId: string): AttachedSession {
     const session = this.requireSession(sessionId);
+    if (session.streamId !== streamId) {
+      throw new ClaudeProtocolError('SESSION_STALE', 'Session stream is stale.');
+    }
+    return session;
+  }
+
+  private requireOrdinaryAttached(sessionId: string, streamId: string): AttachedSession {
+    const session = this.requireOrdinarySession(sessionId);
     if (session.streamId !== streamId) {
       throw new ClaudeProtocolError('SESSION_STALE', 'Session stream is stale.');
     }

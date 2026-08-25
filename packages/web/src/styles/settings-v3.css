@@ -457,3 +457,60 @@
 .settings2 .exec-row .kv-grid dd > .select {
   width: 100%;
 }
+
+/* ── AI Agents (issue #97): draft card, color-dot swatch popover, catalog modal ── */
+.s2-card.draft { box-shadow: inset 0 0 0 1px var(--accent-ring); }
+.exec-dot.btnish {
+  width: 14px; height: 14px;
+  border: 0; padding: 0; cursor: pointer;
+  box-shadow: inset 0 0 0 1px oklch(0 0 0 / 0.12);
+}
+.exec-dot.btnish:hover { transform: scale(1.08); }
+.name-edit-wrap { position: relative; display: inline-flex; }
+.swatch-pop {
+  position: absolute; z-index: 30; top: calc(100% + 6px); left: -4px;
+  padding: 8px; display: flex; gap: 4px; flex-wrap: wrap; width: 168px;
+  background: var(--surface); border: 1px solid var(--hairline);
+  border-radius: var(--r-2); box-shadow: var(--shadow-2);
+}
+.exec-name-input {
+  width: 180px; height: 22px;
+  background: transparent; border: 0; outline: 0;
+  font: 500 13px/1 var(--font-sans); color: var(--text);
+  padding: 0 4px; margin: 0 -4px; border-radius: var(--r-1);
+}
+.exec-name-input:hover { background: var(--surface-2); }
+.exec-name-input:focus { background: var(--surface-2); box-shadow: 0 0 0 2px var(--accent-ring); }
+.exec-name-input.bad { box-shadow: 0 0 0 2px oklch(from var(--danger) l c h / 0.45); }
+.exec-status.warn { background: oklch(from var(--warn) l c h / 0.16); color: var(--warn); }
+.exec-status.draft { background: var(--accent-soft); color: var(--accent-text); }
+.delete-slot { margin-left: 6px; }
+.proxy-line { color: var(--text-2); font: 500 12px/1.4 var(--font-sans); }
+.card-actions { display: flex; gap: 8px; margin-top: 14px; }
+.s2-card .field-error { display: block; margin-top: 5px; color: var(--danger); font: var(--fz-12)/1.3 var(--font-sans); }
+.s2-card .empty {
+  padding: 8px 2px 4px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
+}
+.s2-card .empty p { font: var(--fz-12)/1.5 var(--font-sans); color: var(--text-3); max-width: 42em; margin: 0; }
+.confirm-modal.wide { width: min(460px, 100%); }
+.catalog { display: flex; flex-direction: column; gap: 4px; margin: 12px 0 4px; }
+.catalog-item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; text-align: left;
+  padding: 9px 10px; border: 0; border-radius: var(--r-2);
+  background: transparent; color: var(--text); cursor: pointer;
+}
+.catalog-item:hover { background: var(--surface-2); }
+.catalog-item.active { background: var(--accent-soft); }
+.catalog-dot { width: 8px; height: 8px; border-radius: var(--r-1); flex: none; }
+.catalog-name { font: 500 13px/1.2 var(--font-sans); }
+.catalog-sub { font: 12px/1.3 var(--font-sans); color: var(--text-3); margin-top: 2px; }
+
+/* Version row: version on one line, the mismatch note below it. */
+.exec-version { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.s2-card .hint {
+  margin-top: 2px;
+  color: var(--text-3);
+  font: var(--fz-11)/1.4 var(--font-sans);
+}

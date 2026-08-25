@@ -38,7 +38,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.2.1';
+  return '0.2.3';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -167,9 +167,17 @@ async function main(): Promise<void> {
     responsePending = true;
     try {
       const result = await adapter.handle(request);
-      writer.result(request.id, result);
-      responsePending = false;
-      flushNotifications();
+      if (request.method === 'sidechat.close') {
+        // Contract §10.5.4: terminal teardown notifications are the one
+        // explicit exception to normal Response-before-Notification order.
+        responsePending = false;
+        flushNotifications();
+        writer.result(request.id, result);
+      } else {
+        writer.result(request.id, result);
+        responsePending = false;
+        flushNotifications();
+      }
       if (request.method === 'shutdown') {
         input.close();
         await shutdown(0);

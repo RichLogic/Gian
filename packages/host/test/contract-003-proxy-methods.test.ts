@@ -114,12 +114,7 @@ test('CONTRACT-003: every shared method is handled by at least one adapter', () 
   assert.deepEqual(orphans, [], `shared methods no adapter handles: ${orphans.join(', ')}`);
 });
 
-const PROVIDER_DEFERRED_METHODS = new Set([
-  'sidechat.create',
-  'sidechat.resume',
-  'sidechat.close',
-  'session.fork',
-]);
+const PROVIDER_DEFERRED_METHODS = new Set<string>();
 
 const CLIENT_OPTIONAL_METHODS = new Set([
   'session.get',

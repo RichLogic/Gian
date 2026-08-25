@@ -329,6 +329,52 @@ test('TRACE: step, request, and usage evidence keeps bounded identity and step l
   });
 });
 
+test('TRACE: activity evidence preserves safe native timing and redacts details', () => {
+  withDb(db => {
+    const store = new TraceEvidenceStore(db);
+    const nativeStart = Date.parse('2026-08-10T05:30:01.250Z');
+    const nativeEnd = Date.parse('2026-08-10T05:30:03.750Z');
+    store.persist(notification('turn.started', {}, 1));
+    store.persist(notification('activity.updated', {
+      activityId: 'command-1',
+      kind: 'command',
+      title: 'Command',
+      status: 'running',
+      presentation: { type: 'command', data: { command: 'git status' } },
+      details: {
+        timing: { phase: 'started', timestampMs: nativeStart },
+        token: 'must-not-survive',
+      },
+    }, 2));
+    store.persist(notification('activity.updated', {
+      activityId: 'command-1',
+      kind: 'command',
+      title: 'Command',
+      status: 'succeeded',
+      presentation: { type: 'command', data: { command: 'git status' } },
+      details: {
+        timing: { phase: 'completed', timestampMs: nativeEnd },
+        token: 'must-not-survive',
+      },
+    }, 3));
+    store.persist(notification('turn.completed', { stopReason: 'completed' }, 4));
+
+    const activityRows = store.listEvidence('s1').filter(row => row.method === 'activity.updated');
+    assert.deepEqual(activityRows.map(row => row.data['timing']), [
+      { phase: 'started', timestampMs: nativeStart },
+      { phase: 'completed', timestampMs: nativeEnd },
+    ]);
+    assert.equal(
+      ((activityRows[0]!.data['details'] as Record<string, unknown>)['token']),
+      '[redacted]',
+    );
+    const activity = projectTraceSnapshot('s1', store.listEvidence('s1'), 'GENERATED')
+      .items.find(item => item.correlationId === 'command-1')!;
+    assert.equal(activity.shape, 'span');
+    assert.equal(activity.durationMs, 2_500);
+  });
+});
+
 test('TRACE: nested sensitive keys are redacted recursively', () => {
   withDb(db => {
     const store = new TraceEvidenceStore(db);

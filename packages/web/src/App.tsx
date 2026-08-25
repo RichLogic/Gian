@@ -607,7 +607,7 @@ export function App() {
       : [],
     [sideChats, activeSessionId],
   );
-  const catalogActions = useCatalogActions(activeSession?.executor ?? null);
+  const catalogActions = useCatalogActions(activeSession?.executor ?? null, activeSession?.agent_id ?? null);
   const sideChatControl = useMemo(
     () => activeSession
       ? actionControlState(catalogActions, activeSession.available_actions, 'sidechat.create')
@@ -1380,6 +1380,7 @@ export function App() {
                 };
                 const run = ops.dispatch('session.create', {
                   workspaceId: input.workspaceId,
+                  ...(input.agentId ? { agentId: input.agentId } : {}),
                   executor: input.executor,
                   ...(input.name ? { name: input.name } : {}),
                   ...(input.model ? { model: input.model } : {}),
@@ -1487,6 +1488,11 @@ export function App() {
             }}>
             <RelativeLinkOpenContext.Provider value={openRelativeFileHref}>
             <FileRefRehypeContext.Provider value={fileRehype}>
+            {/* Rows rendered INSIDE the panel (event feed) push their detail
+             *  back into this same panel — same routing as transcript rows. */}
+            <ChatPanelOpenContext.Provider value={(request) => {
+              if (activeSessionId) openChatPanel(activeSessionId, request);
+            }}>
               <ChatContextPanel
                 target={chatPanel}
                 items={itemsBySession[chatPanel.sessionId] ?? []}
@@ -1511,6 +1517,7 @@ export function App() {
                   : null}
                 onClose={() => setChatPanel(null)}
               />
+            </ChatPanelOpenContext.Provider>
             </FileRefRehypeContext.Provider>
             </RelativeLinkOpenContext.Provider>
             </FileLinkOpenContext.Provider>

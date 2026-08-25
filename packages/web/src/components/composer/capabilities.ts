@@ -19,29 +19,43 @@ import { loadProxyCapabilities, loadProxyModels, loadSlashCommands } from '../..
 
 export type ProxyModel = CcModelCapabilities | CodexModelCapabilities;
 
-const modelCache = new Map<'claude' | 'codex', ProxyModel[]>();
-const modelPromises = new Map<'claude' | 'codex', Promise<ProxyModel[]>>();
-
-export function getModelsCached(executor: 'claude' | 'codex'): ProxyModel[] | undefined {
-  return modelCache.get(executor);
+/** Capability catalogs differ per (Proxy kind, Agent CLI path) — two Agents
+ *  of one kind never share a cached catalog/models/modes entry. The
+ *  agent-less key is the kind default (first saved Agent's runtime). */
+function scopeKey(executor: Executor, agentId?: string | null): string {
+  return agentId ? `${executor}::${agentId}` : executor;
 }
 
-export function fetchModelsCached(executor: 'claude' | 'codex'): Promise<ProxyModel[]> {
-  const hit = modelCache.get(executor);
+const modelCache = new Map<string, ProxyModel[]>();
+const modelPromises = new Map<string, Promise<ProxyModel[]>>();
+
+export function getModelsCached(
+  executor: 'claude' | 'codex',
+  agentId?: string | null,
+): ProxyModel[] | undefined {
+  return modelCache.get(scopeKey(executor, agentId));
+}
+
+export function fetchModelsCached(
+  executor: 'claude' | 'codex',
+  agentId?: string | null,
+): Promise<ProxyModel[]> {
+  const key = scopeKey(executor, agentId);
+  const hit = modelCache.get(key);
   if (hit) return Promise.resolve(hit);
-  const inflight = modelPromises.get(executor);
+  const inflight = modelPromises.get(key);
   if (inflight) return inflight;
-  const request = loadProxyModels(executor)
+  const request = loadProxyModels(executor, agentId)
     .then(models => {
-      modelCache.set(executor, models);
-      modelPromises.delete(executor);
+      modelCache.set(key, models);
+      modelPromises.delete(key);
       return models;
     })
     .catch(error => {
-      modelPromises.delete(executor);
+      modelPromises.delete(key);
       throw error;
     });
-  modelPromises.set(executor, request);
+  modelPromises.set(key, request);
   return request;
 }
 
@@ -54,11 +68,14 @@ export function modelLabel(models: ProxyModel[], id: string): string {
   return models.find(model => model.model === id)?.displayName ?? id;
 }
 
-const modeCache = new Map<'claude' | 'codex', ProxyModeCapabilities[]>();
-const modePromises = new Map<'claude' | 'codex', Promise<ProxyModeCapabilities[]>>();
+const modeCache = new Map<string, ProxyModeCapabilities[]>();
+const modePromises = new Map<string, Promise<ProxyModeCapabilities[]>>();
 
-export function getModesCached(executor: 'claude' | 'codex'): ProxyModeCapabilities[] | undefined {
-  return modeCache.get(executor);
+export function getModesCached(
+  executor: 'claude' | 'codex',
+  agentId?: string | null,
+): ProxyModeCapabilities[] | undefined {
+  return modeCache.get(scopeKey(executor, agentId));
 }
 
 /** Proxy-advertised approval_mode choices, or the legacy `modes` list. */
@@ -92,8 +109,8 @@ export function steerAdvertised(capabilities: unknown): boolean | undefined {
   return advertised['turn.steer'] !== undefined;
 }
 
-const steerCache = new Map<Executor, boolean | undefined>();
-const steerPromises = new Map<Executor, Promise<boolean | undefined>>();
+const steerCache = new Map<string, boolean | undefined>();
+const steerPromises = new Map<string, Promise<boolean | undefined>>();
 
 export interface ComposerCatalog {
   catalogRevision?: string;
@@ -133,8 +150,8 @@ export const KNOWN_CATALOG_ACTION_IDS = [
 export type KnownCatalogActionId = typeof KNOWN_CATALOG_ACTION_IDS[number];
 
 const EMPTY_CATALOG: ComposerCatalog = { configOptions: [], input: [], slashCommands: [] };
-const catalogCache = new Map<Executor, ComposerCatalog>();
-const catalogPromises = new Map<Executor, Promise<ComposerCatalog>>();
+const catalogCache = new Map<string, ComposerCatalog>();
+const catalogPromises = new Map<string, Promise<ComposerCatalog>>();
 
 /** Roles that already have a dedicated Composer slot. */
 export const PLACED_CATALOG_ROLES = new Set([
@@ -277,6 +294,7 @@ export function createConfigsFromCatalog(
   let approvalMode: ApprovalMode | null | undefined;
   let serviceTier: 'fast' | null | undefined;
   for (const option of options) {
+    if (!optionVisible(option, values) || !optionEnabled(option, values)) continue;
     const value = values[option.id];
     if (value === undefined) continue;
     if (
@@ -458,54 +476,65 @@ export function catalogFromCapabilities(raw: unknown): ComposerCatalog {
   };
 }
 
-export function getCatalogCached(executor: Executor): ComposerCatalog | undefined {
-  return catalogCache.get(executor);
+export function getCatalogCached(
+  executor: Executor,
+  agentId?: string | null,
+): ComposerCatalog | undefined {
+  return catalogCache.get(scopeKey(executor, agentId));
 }
 
-export function fetchCatalogCached(executor: Executor): Promise<ComposerCatalog> {
-  const hit = catalogCache.get(executor);
+export function fetchCatalogCached(
+  executor: Executor,
+  agentId?: string | null,
+): Promise<ComposerCatalog> {
+  const key = scopeKey(executor, agentId);
+  const hit = catalogCache.get(key);
   if (hit) return Promise.resolve(hit);
-  const inflight = catalogPromises.get(executor);
+  const inflight = catalogPromises.get(key);
   if (inflight) return inflight;
   const request = Promise.resolve()
-    .then(() => loadProxyCapabilities(executor))
+    .then(() => loadProxyCapabilities(executor, agentId))
     .then(raw => {
       const catalog = catalogFromCapabilities(raw);
-      catalogCache.set(executor, catalog);
-      catalogPromises.delete(executor);
+      catalogCache.set(key, catalog);
+      catalogPromises.delete(key);
       if (executor === 'claude' || executor === 'codex') {
         const modes = modesFromCapabilities(raw);
-        if (modes.length > 0) modeCache.set(executor, modes);
+        if (modes.length > 0) modeCache.set(key, modes);
       }
       const advertised = steerAdvertised(raw);
-      if (advertised !== undefined) steerCache.set(executor, advertised);
+      if (advertised !== undefined) steerCache.set(key, advertised);
       return catalog;
     })
     .catch(error => {
-      catalogPromises.delete(executor);
+      catalogPromises.delete(key);
       throw error;
     });
-  catalogPromises.set(executor, request);
+  catalogPromises.set(key, request);
   return request;
 }
 
-export function fetchSteerCached(executor: Executor): Promise<boolean | undefined> {
-  if (steerCache.has(executor)) return Promise.resolve(steerCache.get(executor));
-  const inflight = steerPromises.get(executor);
+export function fetchSteerCached(
+  executor: Executor,
+  agentId?: string | null,
+): Promise<boolean | undefined> {
+  const key = scopeKey(executor, agentId);
+  if (steerCache.has(key)) return Promise.resolve(steerCache.get(key));
+  const inflight = steerPromises.get(key);
   if (inflight) return inflight;
   const request = Promise.resolve()
-    .then(() => loadProxyCapabilities(executor))
+    .then(() => loadProxyCapabilities(executor, agentId))
     .then(capabilities => {
       const advertised = steerAdvertised(capabilities);
-      steerCache.set(executor, advertised);
-      steerPromises.delete(executor);
+      steerCache.set(key, advertised);
+      steerPromises.delete(key);
       return advertised;
     })
     .catch(error => {
-      steerPromises.delete(executor);
+      steerPromises.delete(key);
       throw error;
     });
-  steerPromises.set(executor, request);
+  steerPromises.set(key, request);
   return request;
 }
 
@@ -520,26 +549,30 @@ export function clearComposerCapabilityCaches(): void {
   catalogPromises.clear();
 }
 
-export function fetchModesCached(executor: 'claude' | 'codex'): Promise<ProxyModeCapabilities[]> {
-  const hit = modeCache.get(executor);
+export function fetchModesCached(
+  executor: 'claude' | 'codex',
+  agentId?: string | null,
+): Promise<ProxyModeCapabilities[]> {
+  const key = scopeKey(executor, agentId);
+  const hit = modeCache.get(key);
   if (hit) return Promise.resolve(hit);
-  const inflight = modePromises.get(executor);
+  const inflight = modePromises.get(key);
   if (inflight) return inflight;
   // Defer the call so a missing/broken api export rejects instead of throwing
   // synchronously — callers treat either as "keep the built-in fallback".
   const request = Promise.resolve()
-    .then(() => loadProxyCapabilities(executor))
+    .then(() => loadProxyCapabilities(executor, agentId))
     .then(capabilities => {
       const modes = modesFromCapabilities(capabilities);
-      modeCache.set(executor, modes);
-      modePromises.delete(executor);
+      modeCache.set(key, modes);
+      modePromises.delete(key);
       return modes;
     })
     .catch(error => {
-      modePromises.delete(executor);
+      modePromises.delete(key);
       throw error;
     });
-  modePromises.set(executor, request);
+  modePromises.set(key, request);
   return request;
 }
 
@@ -571,15 +604,20 @@ const slashPromises = new Map<string, Promise<SlashCommand[]>>();
  *  session remount. */
 export const SLASH_CACHE_INVALIDATED_EVENT = 'gian:slash-cache-invalidated';
 
-function slashCacheKey(executor: 'claude' | 'codex', workspaceId: string | undefined): string {
-  return `${executor}:${workspaceId ?? '_'}`;
+function slashCacheKey(
+  executor: 'claude' | 'codex',
+  workspaceId: string | undefined,
+  agentId?: string | null,
+): string {
+  return `${scopeKey(executor, agentId)}:${workspaceId ?? '_'}`;
 }
 
 export function getSlashCached(
   executor: 'claude' | 'codex',
   workspaceId?: string,
+  agentId?: string | null,
 ): SlashCommand[] | undefined {
-  return slashCache.get(slashCacheKey(executor, workspaceId));
+  return slashCache.get(slashCacheKey(executor, workspaceId, agentId));
 }
 
 /** Drop both executor entries for a workspace. Project commands/skills can
@@ -603,14 +641,18 @@ export function clearSlashCache(): void {
   slashPromises.clear();
 }
 
-export function fetchSlashCached(executor: 'claude' | 'codex', workspaceId?: string): Promise<SlashCommand[]> {
-  const key = slashCacheKey(executor, workspaceId);
+export function fetchSlashCached(
+  executor: 'claude' | 'codex',
+  workspaceId?: string,
+  agentId?: string | null,
+): Promise<SlashCommand[]> {
+  const key = slashCacheKey(executor, workspaceId, agentId);
   const hit = slashCache.get(key);
   if (hit) return Promise.resolve(hit);
   const inflight = slashPromises.get(key);
   if (inflight) return inflight;
   let request: Promise<SlashCommand[]>;
-  request = loadSlashCommands(executor, workspaceId)
+  request = loadSlashCommands(executor, workspaceId, agentId)
     .then(commands => {
       // Cache only if this is still the request registered for the key. A
       // workspace invalidation can deliberately detach an older in-flight

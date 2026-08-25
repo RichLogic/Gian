@@ -148,6 +148,11 @@ export interface ModelCapabilities {
   isDefault: boolean;
   defaultThinking: ThinkingLevel | null;
   supportedThinking: ThinkingLevel[];
+  serviceTiers: Array<{
+    id: string;
+    displayName: string;
+    description: string;
+  }>;
 }
 
 export interface CapabilitiesPayload {

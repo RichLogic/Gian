@@ -3,12 +3,14 @@ import {
   appendFileSync,
   closeSync,
   existsSync,
+  mkdirSync,
   openSync,
   readFileSync,
   realpathSync,
   readSync,
   readdirSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -198,6 +200,62 @@ function projectDir(cwd: string, homeDir = homedir()): string {
 
 function sessionPath(nativeSessionId: string, cwd: string, homeDir = homedir()): string {
   return join(projectDir(cwd, homeDir), `${nativeSessionId}.jsonl`);
+}
+
+/**
+ * Clone Claude Code's durable JSONL conversation without starting `claude -p`.
+ * This keeps Side Chat/Fork creation billing-safe. A turn boundary includes
+ * the selected user turn and every following record up to (but excluding)
+ * the next replayable user turn.
+ */
+export function forkClaudeNativeSession(
+  sourceNativeSessionId: string,
+  targetNativeSessionId: string,
+  cwd: string,
+  throughSourceTurnId?: string,
+  homeDir = homedir(),
+): { copiedTurns: number } {
+  const sourcePath = sessionPath(sourceNativeSessionId, cwd, homeDir);
+  if (!existsSync(sourcePath)) {
+    if (throughSourceTurnId) throw new Error('Claude fork source history is unavailable.');
+    return { copiedTurns: 0 };
+  }
+
+  const output: string[] = [];
+  let replayableTurnIndex = 0;
+  let copiedTurns = 0;
+  let foundBoundary = throughSourceTurnId === undefined;
+  for (const line of readFileSync(sourcePath, 'utf8').split('\n')) {
+    if (!line) continue;
+    let value: Record<string, unknown>;
+    try {
+      value = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (value.type === 'user') {
+      const message = value.message as { content?: unknown } | undefined;
+      if (typeof message?.content === 'string' && !systemNoise(message.content)) {
+        const prompt = normalizeNativePrompt(message.content);
+        const sourceTurnId = nativeTurnSourceId(sourceNativeSessionId, prompt, replayableTurnIndex);
+        replayableTurnIndex += 1;
+        if (throughSourceTurnId && foundBoundary) break;
+        copiedTurns += 1;
+        if (sourceTurnId === throughSourceTurnId) foundBoundary = true;
+      }
+    }
+    output.push(JSON.stringify({ ...value, sessionId: targetNativeSessionId }));
+  }
+  if (!foundBoundary) throw new Error('Claude fork turn boundary is unavailable.');
+
+  const targetPath = sessionPath(targetNativeSessionId, cwd, homeDir);
+  mkdirSync(dirname(targetPath), { recursive: true });
+  writeFileSync(targetPath, output.length > 0 ? `${output.join('\n')}\n` : '', {
+    encoding: 'utf8',
+    flag: 'wx',
+    mode: 0o600,
+  });
+  return { copiedTurns };
 }
 
 export function renameClaudeNativeSession(

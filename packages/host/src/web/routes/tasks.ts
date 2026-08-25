@@ -89,6 +89,7 @@ export function registerTaskRoutes(
     if (!tasks.getTask(id)) return c.json({ error: 'task not found' }, 404);
     const body = await c.req.json<{
       workspace_id?: string;
+      agent_id?: string;
       executor?: Executor;
       name?: string;
       model?: string | null;
@@ -99,7 +100,7 @@ export function registerTaskRoutes(
     if (typeof body.workspace_id !== 'string' || body.workspace_id === '') {
       return c.json({ error: 'workspace_id required' }, 400);
     }
-    if (
+    if (body.agent_id === undefined &&
       body.executor !== 'claude'
       && body.executor !== 'codex'
       && body.executor !== 'kimi'
@@ -111,12 +112,13 @@ export function registerTaskRoutes(
     try {
       const session = await sessions.createSession({
         workspace_id: body.workspace_id,
-        executor: body.executor,
+        ...(body.agent_id !== undefined ? { agent_id: body.agent_id } : {}),
+        ...(body.executor !== undefined ? { executor: body.executor } : {}),
         type: 'subtask',
         task_id: id,
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.model !== undefined ? { model: body.model } : {}),
-        ...(body.approval_mode !== undefined && !usesNativeExecutorConfig(body.executor)
+        ...(body.approval_mode !== undefined && body.executor && !usesNativeExecutorConfig(body.executor)
           ? { approval_mode: body.approval_mode }
           : {}),
         ...(body.thinking_effort !== undefined ? { thinking_effort: body.thinking_effort } : {}),

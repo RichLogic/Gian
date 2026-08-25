@@ -7,6 +7,7 @@ import { ReplayPageValidator } from '@gian/proxy-protocol';
 import {
   claudeHistoryProjectDir,
   ClaudeNativeHistoryWatcher,
+  forkClaudeNativeSession,
   listClaudeNativeSessions,
   nativeTurnSourceId,
   normalizeNativePrompt,
@@ -22,6 +23,36 @@ test('Claude native history follows the configured CLI settings directory', () =
     claudeHistoryProjectDir('/tmp/work', '/home/tester', '/home/tester/.claude-mix/settings.json'),
     '/home/tester/.claude-mix/projects/-tmp-work',
   );
+});
+
+test('Claude native history forks exactly through a stable terminal turn without a model call', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'gian-claude-fork-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const cwd = '/workspace/fork_project';
+  const directory = join(home, '.claude', 'projects', '-workspace-fork-project');
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, 'parent.jsonl'), [
+    { type: 'user', sessionId: 'parent', message: { content: 'one' } },
+    { type: 'assistant', sessionId: 'parent', message: { content: [{ type: 'text', text: 'first' }] } },
+    { type: 'user', sessionId: 'parent', message: { content: 'two' } },
+    { type: 'assistant', sessionId: 'parent', message: { content: [{ type: 'text', text: 'second' }] } },
+  ].map((value) => JSON.stringify(value)).join('\n'));
+  const firstTurn = nativeTurnSourceId('parent', 'one', 0);
+
+  assert.deepEqual(
+    forkClaudeNativeSession('parent', 'child', cwd, firstTurn, home),
+    { copiedTurns: 1 },
+  );
+  const childLines = (await readFile(join(directory, 'child.jsonl'), 'utf8'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as { sessionId: string; message: { content: unknown } });
+  assert.equal(childLines.length, 2);
+  assert.ok(childLines.every((line) => line.sessionId === 'child'));
+  assert.equal(childLines[0]?.message.content, 'one');
+  assert.equal(replayClaudeNativeSession('host-child', 'child', cwd, home).events.some(
+    (event) => event.method === 'turn.completed',
+  ), true);
 });
 
 test('Claude native history uses Claude Code project-name sanitization', () => {

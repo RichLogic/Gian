@@ -163,6 +163,19 @@ body[data-scale-code="xl"] .md-preview                             { --zone-scal
    THEME — LIGHT (cool cream, high softness, low contrast chrome)
    ============================================================ */
 body[data-theme="light"] {
+  /* Agent color tokens (issue #97): user-Agent identity dots/swatches.
+   * Same 8-name palette as the Appearance accents but an independent
+   * concern — never driven by body[data-accent]. */
+  --agent-rose:   oklch(0.55 0.15 5);
+  --agent-ember:  oklch(0.55 0.14 35);
+  --agent-citron: oklch(0.55 0.13 95);
+  --agent-moss:   oklch(0.55 0.11 150);
+  --agent-teal:   oklch(0.55 0.11 195);
+  --agent-azure:  oklch(0.55 0.13 230);
+  --agent-ink:    oklch(0.55 0.13 270);
+  --agent-plum:   oklch(0.55 0.14 320);
+  --dsh: oklch(0.62 0.12 195);
+
   --bg:            oklch(0.955 0.004 280);
   --surface:       oklch(1.000 0.000 0);
   --surface-2:    oklch(0.970 0.003 280);
@@ -214,6 +227,19 @@ body[data-theme="light"] {
    THEME — WARM (cream paper, toasted walnut text)
    ============================================================ */
 body[data-theme="warm"] {
+  /* Agent color tokens (issue #97): user-Agent identity dots/swatches.
+   * Same 8-name palette as the Appearance accents but an independent
+   * concern — never driven by body[data-accent]. */
+  --agent-rose:   oklch(0.52 0.15 5);
+  --agent-ember:  oklch(0.52 0.14 35);
+  --agent-citron: oklch(0.52 0.13 95);
+  --agent-moss:   oklch(0.52 0.11 150);
+  --agent-teal:   oklch(0.52 0.11 195);
+  --agent-azure:  oklch(0.52 0.13 230);
+  --agent-ink:    oklch(0.52 0.13 270);
+  --agent-plum:   oklch(0.52 0.14 320);
+  --dsh: oklch(0.62 0.12 195);
+
   --bg:            oklch(0.955 0.020 80);
   --surface:       oklch(0.990 0.012 82);
   --surface-2:    oklch(0.965 0.018 80);
@@ -269,6 +295,19 @@ body[data-theme="warm"] {
    border = 13% white.)
    ============================================================ */
 body[data-theme="dark"] {
+  /* Agent color tokens (issue #97): user-Agent identity dots/swatches.
+   * Same 8-name palette as the Appearance accents but an independent
+   * concern — never driven by body[data-accent]. */
+  --agent-rose:   oklch(0.72 0.15 5);
+  --agent-ember:  oklch(0.72 0.14 35);
+  --agent-citron: oklch(0.72 0.13 95);
+  --agent-moss:   oklch(0.72 0.11 150);
+  --agent-teal:   oklch(0.72 0.11 195);
+  --agent-azure:  oklch(0.72 0.13 230);
+  --agent-ink:    oklch(0.72 0.13 270);
+  --agent-plum:   oklch(0.72 0.14 320);
+  --dsh: oklch(0.62 0.12 195);
+
   --bg:            oklch(0.140 0.004 265);
   --surface:       oklch(0.213 0.004 265);
   --surface-2:    oklch(0.269 0.006 271);

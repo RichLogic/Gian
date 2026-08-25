@@ -12,6 +12,14 @@ export type ChatPanelRequest =
       sourceId?: string;
     }
   | {
+      /** The event box expanded into panel 2: the live process-event feed
+       *  of one turn, re-projected from the session's `items` by
+       *  ChatContextPanel (`eventFeedItems`), so it keeps updating in real
+       *  time while the turn runs. */
+      kind: 'event-feed';
+      turn: number;
+    }
+  | {
       /** The Side Chat surface (gian.proxy/2.0 proposal §10.5): renders the
        *  active parent session's Side Chats as panel 2 via ChatContextPanel.
        *  `sessionId` on the target is the PARENT session id. */

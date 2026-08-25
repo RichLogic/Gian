@@ -15,10 +15,10 @@ test('catalog reconciles every current standard test exactly once', () => {
   const counts = Object.groupBy(entries, entry => entry.scope);
   const hasE2eSources = existsSync(new URL('../e2e/specs', import.meta.url));
 
-  assert.equal(entries.length, hasE2eSources ? 391 : 375);
-  assert.equal(counts.unit.length, 166);
-  assert.equal(counts.integration.length, 157);
-  assert.equal(counts.system.length, 52);
+  assert.equal(entries.length, hasE2eSources ? 405 : 389);
+  assert.equal(counts.unit.length, 169);
+  assert.equal(counts.integration.length, 165);
+  assert.equal(counts.system.length, 55);
   assert.equal(counts.e2e?.length ?? 0, hasE2eSources ? 16 : 0);
   assert.deepEqual(catalog.defaultScopes, ['unit', 'integration']);
   assert.deepEqual(catalog.fullScopes, ['unit', 'integration', 'system']);

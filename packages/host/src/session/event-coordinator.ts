@@ -99,7 +99,12 @@ function protocolEventPayloadHash(notification: ProtocolNotification): string {
 const SNAPSHOT_FLUSH_MS = 120;
 
 interface EventCoordinatorCallbacks {
-  sendMessage: (sessionId: string, text: string, items?: InputItem[]) => Promise<void>;
+  sendMessage: (
+    sessionId: string,
+    text: string,
+    items?: InputItem[],
+    toolRequestId?: string,
+  ) => Promise<unknown>;
   onInteractionResolved?: (interactionId: string) => void;
 }
 
@@ -1154,7 +1159,14 @@ export class SessionEventCoordinator {
         risk: d.risk,
         description: d.description,
         subject: d.subject,
-        payload: { approvalId: d.approvalId },
+        payload: {
+          approvalId: d.approvalId,
+          scopeOptions: d.scopeOptions,
+          ...(d.questions ? { questions: d.questions } : {}),
+          ...(d.planActions ? { planActions: d.planActions } : {}),
+          ...(d.actions ? { actions: d.actions } : {}),
+          ...(d.inputs ? { inputs: d.inputs } : {}),
+        },
         nativeOptions: d.nativeOptions,
         ...(attention ? { attention } : {}),
       }).catch(err => {
@@ -1182,7 +1194,11 @@ export class SessionEventCoordinator {
           : selected?.kind === 'allow_once'
             ? 'allow_once'
             : d.decision;
-      this.approvals.resolve(d.approvalId, decision, d.auto ? 'auto' : 'web');
+      this.approvals.resolve(
+        d.approvalId,
+        decision,
+        this.approvals.consumeResolutionSource(d.approvalId) ?? (d.auto ? 'auto' : 'web'),
+      );
       this.callbacks.onInteractionResolved?.(d.approvalId);
     }
     if (e.display?.type === 'activity.command') {
@@ -1285,7 +1301,7 @@ export class SessionEventCoordinator {
     const next = this.queue.popNext(sessionId);
     if (!next) return false;
     this.broadcastQueueUpdated(sessionId);
-    void this.callbacks.sendMessage(sessionId, next.text, next.items).catch(err => {
+    void this.callbacks.sendMessage(sessionId, next.text, next.items, next.toolRequestId).catch(err => {
       console.error('[queue] auto-send failed', err);
     });
     return true;

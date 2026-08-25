@@ -45,6 +45,13 @@ export interface CodexRuntime extends RuntimeEventSource {
     thread: { id: string };
     configuredPermissions: ConfiguredPermissions;
   }>;
+  forkThread(threadId: string, options?: {
+    lastTurnId?: string;
+    cwd?: string;
+  }): Promise<{
+    thread: { id: string };
+    configuredPermissions: ConfiguredPermissions;
+  }>;
   readThread(threadId: string): Promise<{ thread: unknown }>;
   compactThread(threadId: string): Promise<unknown>;
   startTurn(
@@ -85,6 +92,7 @@ export interface CodexRuntime extends RuntimeEventSource {
    *  runtimes may not expose this RPC, so protocol adapters retain rollout
    *  discovery as a compatibility fallback. */
   listNativeThreads?(cwd?: string): Promise<CodexNativeThreadSummary[]>;
+  archiveThread?(threadId: string): Promise<unknown>;
   respond(id: number | string, result: unknown): Promise<unknown>;
   listAllModels(): Promise<unknown[]>;
   listSkills(cwd?: string): Promise<SkillsListResponse>;

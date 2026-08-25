@@ -227,7 +227,7 @@ function isApproval(value: unknown): value is Approval {
     && isOneOf(value.status, [
       'pending', 'approved', 'approved-session', 'auto-approved', 'declined',
     ])
-    && (value.resolved_by === null || isOneOf(value.resolved_by, ['web', 'im', 'auto']))
+    && (value.resolved_by === null || isOneOf(value.resolved_by, ['web', 'im', 'auto', 'tool']))
     && isNullableString(value.resolved_at)
     && isString(value.created_at)
     && isOptional(value, 'native_options', candidate => isArrayOf(candidate, isNativeApprovalOption));

@@ -139,6 +139,7 @@ function projectTurn(
     id: `turn:${turnId}`,
     turnId,
     kind: 'turn',
+    shape: 'span',
     title: 'Turn',
     ...(summary ? { summary } : {}),
     status: failed ? 'failed' : completed ? mapStopReason(completed.row.data['stopReason']) : 'running',
@@ -192,6 +193,10 @@ function projectTurn(
   const activities = new Map<string, TimedRow[]>();
   for (const entry of group) {
     if (entry.row.method !== 'activity.updated') continue;
+    // Older Codex adapters exposed every app-server notification as a generic
+    // activity. Keep that raw evidence in storage, but do not promote those
+    // transport diagnostics into either conversation rows or Trace spans.
+    if (isLegacyCodexNotificationActivity(entry.row.data)) continue;
     const activityId = stringValue(entry.row.data['activityId']);
     if (!activityId) {
       markPartial();
@@ -203,6 +208,22 @@ function projectTurn(
   }
   for (const [activityId, rows] of activities) {
     projected.push(projectActivity(turnId, activityId, rows, markPartial));
+  }
+
+  const requests = new Map<string, TimedRow[]>();
+  for (const entry of group) {
+    if (entry.row.method !== 'request.updated') continue;
+    const requestId = stringValue(entry.row.data['requestId']);
+    if (!requestId) {
+      markPartial();
+      continue;
+    }
+    const list = requests.get(requestId) ?? [];
+    list.push(entry);
+    requests.set(requestId, list);
+  }
+  for (const [requestId, rows] of requests) {
+    projected.push(projectRequest(turnId, requestId, rows));
   }
 
   // --- Content streams: text/reasoning/plan aggregate by contentId ---
@@ -239,6 +260,19 @@ function projectTurn(
     if (single) projected.push(single);
   }
   return projected;
+}
+
+function isLegacyCodexNotificationActivity(data: Record<string, unknown>): boolean {
+  const presentation = data['presentation'];
+  if (!presentation || typeof presentation !== 'object' || Array.isArray(presentation)) return false;
+  const record = presentation as Record<string, unknown>;
+  const presentationData = record['data'];
+  if (!presentationData || typeof presentationData !== 'object' || Array.isArray(presentationData)) {
+    return false;
+  }
+  return record['type'] === 'generic'
+    && typeof (presentationData as Record<string, unknown>)['nativeMethod'] === 'string'
+    && stringValue(data['title'])?.startsWith('Codex event: ') === true;
 }
 
 function projectTool(
@@ -280,6 +314,7 @@ function projectTool(
     id: `tool:${turnId}:${toolCallId}`,
     turnId,
     kind: 'tool',
+    shape: 'span',
     title,
     ...(summary ? { summary } : {}),
     status: completed ? mapToolStatus(completedData['status']) : 'running',
@@ -309,29 +344,56 @@ function projectActivity(
   const first = rows[0]!;
   const last = rows[rows.length - 1]!;
   const lastData = last.row.data;
-  const presentation = lastData['presentation'] && typeof lastData['presentation'] === 'object'
-    ? lastData['presentation'] as Record<string, unknown>
+  const reversedRows = [...rows].reverse();
+  const semanticRow = reversedRows.find(entry => {
+    const candidate = entry.row.data['presentation'];
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
+    const candidateType = stringValue((candidate as Record<string, unknown>)['type']);
+    return candidateType !== 'generic' && candidateType !== 'tool';
+  }) ?? reversedRows.find(entry => {
+    const candidate = entry.row.data['presentation'];
+    return candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+      && stringValue((candidate as Record<string, unknown>)['type']) !== 'generic';
+  });
+  const semanticData = semanticRow?.row.data ?? lastData;
+  const presentation = semanticData['presentation'] && typeof semanticData['presentation'] === 'object'
+    ? semanticData['presentation'] as Record<string, unknown>
     : {};
   const type = stringValue(presentation['type']) ?? 'generic';
   const title = boundedString(
-    stringValue(lastData['title']) ?? stringValue(lastData['kind']) ?? type,
+    stringValue(semanticData['title']) ?? stringValue(lastData['title'])
+      ?? stringValue(semanticData['kind']) ?? type,
     TRACE_TITLE_MAX_CHARS,
   ) ?? 'Activity';
   const status = mapToolStatus(lastData['status']);
-  if (rows.length === 1 && status === 'running') markPartial();
+  const pointEvent = type === 'notice';
+  const started = rows.find(entry => entry.row.data['status'] === 'running');
+  if (!pointEvent && !started) markPartial();
+  const nativeStartMs = nativeActivityTimestamp(rows, 'started');
+  const nativeEndMs = nativeActivityTimestamp(rows, 'completed');
+  const terminal = status === 'running' ? undefined : last;
+  const detail: Record<string, unknown> = { presentation };
+  if (lastData['details'] !== undefined) detail['details'] = lastData['details'];
+  else if (semanticData['details'] !== undefined) detail['details'] = semanticData['details'];
   const item: TraceItem = {
     id: `activity:${turnId}:${activityId}`,
     turnId,
-    kind: type === 'agent' ? 'agent' : 'tool',
+    kind: type === 'agent' ? 'agent' : pointEvent ? 'notice' : 'tool',
+    shape: pointEvent ? 'event' : 'span',
     title,
-    ...(stringValue(lastData['summary']) ? { summary: boundedString(lastData['summary']) } : {}),
+    ...(stringValue(lastData['summary']) || stringValue(semanticData['summary'])
+      ? { summary: boundedString(stringValue(lastData['summary']) ?? semanticData['summary']) }
+      : {}),
     status,
-    at: first.row.emittedAt,
-    ...terminalTiming(first, status === 'running' ? undefined : last),
+    at: nativeStartMs !== null ? new Date(nativeStartMs).toISOString() : first.row.emittedAt,
+    ...(pointEvent
+      ? {}
+      : nativeActivityTiming(nativeStartMs, nativeEndMs) ?? terminalTiming(started, terminal)),
     evidence: rows.length > 1 ? 'derived' : 'native',
     ...stepParent(turnId, rows),
     correlationId: activityId,
     sourceEventIds: rows.map((entry) => entry.row.eventId),
+    detail: toJsonValue(detail),
   };
   return {
     item,
@@ -360,6 +422,7 @@ function projectContent(
     id: `content:${turnId}:${contentId}:${kind}`,
     turnId,
     kind: itemKind,
+    shape: 'span',
     title: kind === 'text' ? 'Assistant' : kind === 'reasoning' ? 'Reasoning' : 'Plan',
     ...(text ? { summary: boundedString(text) } : {}),
     status: completed ? 'succeeded' : 'running',
@@ -390,6 +453,7 @@ function projectStep(turnId: string, stepId: string, rows: TimedRow[]): Projecte
     id: stepTraceId(turnId, stepId),
     turnId,
     kind: 'step',
+    shape: 'span',
     title: index !== undefined ? `Step ${index + 1}` : 'Step',
     summary: stepId,
     status: last.row.data['status'] === 'completed'
@@ -398,9 +462,43 @@ function projectStep(turnId: string, stepId: string, rows: TimedRow[]): Projecte
     at: (running ?? first).row.emittedAt,
     ...terminalTiming(running, terminal),
     evidence: rows.length > 1 ? 'derived' : 'native',
+    parentId: `turn:${turnId}`,
     correlationId: stepId,
     sourceEventIds: rows.map(entry => entry.row.eventId),
     detail: toJsonValue({ stepId, ...(index !== undefined ? { index } : {}) }),
+  };
+  return {
+    item,
+    firstGeneration: first.row.streamGeneration,
+    firstSequence: first.row.sequence,
+  };
+}
+
+function projectRequest(
+  turnId: string,
+  requestId: string,
+  rows: TimedRow[],
+): Projected {
+  const first = rows[0]!;
+  const data = Object.assign({}, ...rows.map(entry => entry.row.data)) as Record<string, unknown>;
+  const reason = stringValue(data['reason']);
+  const model = data['model'] && typeof data['model'] === 'object' && !Array.isArray(data['model'])
+    ? data['model'] as Record<string, unknown>
+    : {};
+  const modelTitle = stringValue(model['displayName']) ?? stringValue(model['id']);
+  const item: TraceItem = {
+    id: `request:${turnId}:${requestId}`,
+    turnId,
+    kind: 'request',
+    shape: 'event',
+    title: boundedString(modelTitle, TRACE_TITLE_MAX_CHARS) ?? 'Request',
+    ...(reason ? { summary: reason } : {}),
+    at: first.row.emittedAt,
+    evidence: rows.length > 1 ? 'derived' : 'native',
+    ...stepParent(turnId, rows),
+    correlationId: requestId,
+    sourceEventIds: rows.map(entry => entry.row.eventId),
+    detail: toJsonValue(data),
   };
   return {
     item,
@@ -419,10 +517,12 @@ function projectSingleEventItem(turnId: string, entry: TimedRow): Projected | nu
         id: `input:${turnId}:${inputId ?? entry.row.eventId}`,
         turnId,
         kind: 'input',
+        shape: 'event',
         title: 'Input',
         ...(inputSummary ? { summary: inputSummary } : {}),
         at: entry.row.emittedAt,
         evidence: 'native',
+        ...stepParent(turnId, [entry]),
         ...(inputId ? { correlationId: inputId } : {}),
         sourceEventIds: [entry.row.eventId],
         ...(inputId ? { detail: { inputId } } : {}),
@@ -447,11 +547,13 @@ function projectSingleEventItem(turnId: string, entry: TimedRow): Projected | nu
         id: `agent:${turnId}:${agentId ?? entry.row.eventId}:${entry.row.eventId}`,
         turnId,
         kind: 'agent',
+        shape: 'event',
         title,
         ...(boundedString(data['output']) ? { summary: boundedString(data['output']) } : {}),
         status: mapAgentStatus(data['status']),
         at: entry.row.emittedAt,
         evidence: 'native',
+        ...stepParent(turnId, [entry]),
         ...(agentId ? { correlationId: agentId } : {}),
         sourceEventIds: [entry.row.eventId],
         detail: toJsonValue(detail),
@@ -468,10 +570,12 @@ function projectSingleEventItem(turnId: string, entry: TimedRow): Projected | nu
         id: `notice:${turnId}:${noticeId ?? entry.row.eventId}`,
         turnId,
         kind: 'notice',
+        shape: 'event',
         title: boundedString(data['title'], TRACE_TITLE_MAX_CHARS) ?? 'Notice',
         ...(boundedString(data['message']) ? { summary: boundedString(data['message']) } : {}),
         at: entry.row.emittedAt,
         evidence: 'native',
+        ...stepParent(turnId, [entry]),
         ...(noticeId ? { correlationId: noticeId } : {}),
         sourceEventIds: [entry.row.eventId],
         ...(noticeId ? { detail: toJsonValue({ severity: data['severity'], code: data['code'] }) } : {}),
@@ -501,39 +605,15 @@ function projectSingleEventItem(turnId: string, entry: TimedRow): Projected | nu
         id: `plan:${turnId}:${planId ?? entry.row.eventId}:${entry.row.eventId}`,
         turnId,
         kind: 'plan',
+        shape: 'event',
         title: boundedString(data['title'], TRACE_TITLE_MAX_CHARS) ?? 'Plan',
         ...(boundedString(summary) ? { summary: boundedString(summary) } : {}),
         at: entry.row.emittedAt,
         evidence: 'native',
+        ...stepParent(turnId, [entry]),
         ...(planId ? { correlationId: planId } : {}),
         sourceEventIds: [entry.row.eventId],
         ...(planId ? { detail: toJsonValue({ planId, ...(steps.length > 0 ? { steps: data['steps'] } : {}) }) } : {}),
-      };
-      return {
-        item,
-        firstGeneration: entry.row.streamGeneration,
-        firstSequence: entry.row.sequence,
-      };
-    }
-    case 'request.updated': {
-      const requestId = stringValue(data['requestId']);
-      const reason = stringValue(data['reason']);
-      const model = data['model'] && typeof data['model'] === 'object' && !Array.isArray(data['model'])
-        ? data['model'] as Record<string, unknown>
-        : {};
-      const modelTitle = stringValue(model['displayName']) ?? stringValue(model['id']);
-      const item: TraceItem = {
-        id: `request:${turnId}:${requestId ?? entry.row.eventId}`,
-        turnId,
-        kind: 'request',
-        title: boundedString(modelTitle, TRACE_TITLE_MAX_CHARS) ?? 'Request',
-        ...(reason ? { summary: reason } : {}),
-        at: entry.row.emittedAt,
-        evidence: 'native',
-        ...stepParent(turnId, [entry]),
-        ...(requestId ? { correlationId: requestId } : {}),
-        sourceEventIds: [entry.row.eventId],
-        detail: toJsonValue(data),
       };
       return {
         item,
@@ -546,6 +626,7 @@ function projectSingleEventItem(turnId: string, entry: TimedRow): Projected | nu
         id: `usage:${turnId}:${entry.row.eventId}`,
         turnId,
         kind: 'notice',
+        shape: 'event',
         title: 'Usage',
         ...(boundedJson({
           context: data['context'],
@@ -580,12 +661,43 @@ function stepTraceId(turnId: string, stepId: string): string {
 function stepParent(
   turnId: string,
   rows: TimedRow[],
-): Pick<TraceItem, 'parentId'> | Record<string, never> {
+): Pick<TraceItem, 'parentId'> {
   for (const entry of rows) {
     const stepId = stringValue(entry.row.data['stepId']);
     if (stepId) return { parentId: stepTraceId(turnId, stepId) };
   }
-  return {};
+  return { parentId: `turn:${turnId}` };
+}
+
+function nativeActivityTimestamp(
+  rows: TimedRow[],
+  phase: 'started' | 'completed',
+): number | null {
+  for (const entry of rows) {
+    const details = entry.row.data['details'];
+    const timing = entry.row.data['timing'] ?? (
+      details && typeof details === 'object' && !Array.isArray(details)
+        ? (details as Record<string, unknown>)['timing']
+        : undefined
+    );
+    if (!timing || typeof timing !== 'object' || Array.isArray(timing)) continue;
+    const record = timing as Record<string, unknown>;
+    if (record['phase'] !== phase) continue;
+    const timestampMs = record['timestampMs'];
+    if (typeof timestampMs === 'number' && Number.isFinite(timestampMs)) return timestampMs;
+  }
+  return null;
+}
+
+function nativeActivityTiming(
+  startMs: number | null,
+  endMs: number | null,
+): Partial<TraceItem> | null {
+  if (endMs === null) return null;
+  return {
+    endAt: new Date(endMs).toISOString(),
+    ...(startMs !== null && endMs >= startMs ? { durationMs: endMs - startMs } : {}),
+  };
 }
 
 /**
@@ -634,7 +746,7 @@ function mapToolStatus(status: unknown): TraceStatus {
     ? 'succeeded'
     : status === 'failed'
       ? 'failed'
-      : status === 'interrupted'
+      : status === 'interrupted' || status === 'cancelled'
         ? 'interrupted'
         : 'running';
 }

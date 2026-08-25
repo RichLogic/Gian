@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
-import { catalogResultSchema, proxyNotificationSchema, sessionSchema } from '@gian/proxy-protocol';
+import { catalogResultSchema, proxyNotificationSchema, resultSchemas, sessionSchema } from '@gian/proxy-protocol';
 import { CcProxyService } from '../src/core/service.js';
 import { ClaudeProtocolError, jsonRpcError, parseRequestLine } from '../src/transport/protocol.js';
 import { ClaudeProtocolV2Adapter, type WireRequest } from '../src/protocol/v2-adapter.js';
 import type { ModelCapabilities } from '../src/core/types.js';
 import type { ClaudeRuntime, ClaudeRuntimeEvents } from '../src/runtime/types.js';
+import { claudeHistoryProjectDir } from '../src/protocol/native-history.js';
 
 class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRuntime {
   readonly messages: Array<{
@@ -143,7 +147,14 @@ async function setup(permissionModes?: string[]) {
   // start asserting notification ordering.
   await new Promise((resolve) => setImmediate(resolve));
   notifications.length = 0;
-  return { runtime, service, adapter, notifications, streamId: created.session.streamId };
+  return {
+    runtime,
+    service,
+    adapter,
+    notifications,
+    streamId: created.session.streamId,
+    nativeSessionId: created.session.nativeSession.id,
+  };
 }
 
 test('Claude gian.proxy/2 initializes once and exposes catalog.resolve capability', async () => {
@@ -547,6 +558,7 @@ test('Claude gian.proxy/2 pairs tool results and content completion before turn 
       'activity.updated',
       'content.completed',
       'turn.completed',
+      'session.updated',
     ]);
     const content = notifications.find((item) => item.method === 'content.completed')!;
     assert.equal((content.params.data as { content: string }).content, 'working');
@@ -748,6 +760,101 @@ test('Claude gian.proxy/2 notifications satisfy the protocol schema', async () =
         params: notification.params,
       }));
     }
+  } finally {
+    await service.close();
+  }
+});
+
+test('Claude gian.proxy/2 implements billing-safe Side Chat and exact JSONL Fork', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-claude-sidechat-'));
+  const configDir = join(root, 'claude-config');
+  await mkdir(configDir, { recursive: true });
+  await writeFile(join(configDir, 'settings.json'), '{}');
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = configDir;
+  t.after(async () => {
+    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const { runtime, service, adapter, notifications, streamId, nativeSessionId } = await setup();
+  try {
+    const catalog = resultSchemas['catalog.list'].parse(await adapter.handle(request('catalog', 'catalog.list', {})));
+    assert.deepEqual(catalog.actions, [
+      { id: 'sidechat.create', supported: true },
+      { id: 'session.fork', supported: true },
+      { id: 'session.fork.atTurn', supported: true },
+    ]);
+    await adapter.handle(request('turn', 'turn.start', {
+      sessionId: 'host-session',
+      streamId,
+      turnId: 'host-turn-1',
+      input: [{ type: 'text', text: 'establish a fork boundary' }],
+      config: {},
+    }));
+    adapter.flushDeferredNotifications();
+
+    const historyDir = claudeHistoryProjectDir('/tmp');
+    await mkdir(historyDir, { recursive: true });
+    await writeFile(join(historyDir, `${nativeSessionId}.jsonl`), [
+      {
+        type: 'user',
+        sessionId: nativeSessionId,
+        timestamp: '2026-08-25T00:00:00.000Z',
+        message: { content: 'establish a fork boundary' },
+      },
+      {
+        type: 'assistant',
+        sessionId: nativeSessionId,
+        timestamp: '2026-08-25T00:00:01.000Z',
+        message: { content: [{ type: 'text', text: 'done' }] },
+      },
+    ].map((value) => JSON.stringify(value)).join('\n'));
+    runtime.emit('channelReply', runtime.messages[0]!.sessionId, '');
+    const terminal = notifications.find((event) => event.method === 'turn.completed');
+    const sourceTurnId = String(terminal?.params.sourceTurnId);
+    assert.ok(sourceTurnId.startsWith('claude-turn-'));
+
+    const forked = resultSchemas['session.fork'].parse(await adapter.handle(request('fork', 'session.fork', {
+      sourceSessionId: 'host-session',
+      sourceStreamId: streamId,
+      sessionId: 'fork-1',
+      anchor: { type: 'turn', turnId: 'host-turn-1', sourceTurnId },
+    })));
+    assert.deepEqual(forked.origin, {
+      kind: 'fork',
+      sessionId: 'host-session',
+      turnId: 'host-turn-1',
+      sourceTurnId,
+    });
+    assert.ok(forked.session.nativeSession?.id);
+    const replay = resultSchemas['session.replay'].parse(await adapter.handle(request('replay', 'session.replay', {
+      sessionId: 'fork-1',
+      streamId: forked.session.streamId,
+      cursor: null,
+      limit: 100,
+    })));
+    assert.ok(replay.events.some((event) => event.method === 'turn.completed'));
+
+    const sidechat = resultSchemas['sidechat.create'].parse(await adapter.handle(request('side', 'sidechat.create', {
+      parentSessionId: 'host-session',
+      parentStreamId: streamId,
+      sidechatId: 'side-1',
+    })));
+    assert.deepEqual(sidechat.sidechat.anchor, {
+      type: 'turn',
+      turnId: 'host-turn-1',
+      sourceTurnId,
+    });
+    assert.deepEqual(
+      resultSchemas['sidechat.close'].parse(await adapter.handle(request('close-side', 'sidechat.close', {
+        sidechatId: 'side-1',
+        streamId: sidechat.sidechat.streamId,
+        resumeRef: sidechat.sidechat.resumeRef,
+      }))),
+      { ok: true, sidechatId: 'side-1', providerDataDeleted: false },
+    );
   } finally {
     await service.close();
   }

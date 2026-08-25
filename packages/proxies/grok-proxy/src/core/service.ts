@@ -45,6 +45,7 @@ type ProxyEventSink = (method: string, params: Record<string, unknown>) => void;
 interface ActiveTurn {
   turnId: string;
   completed: boolean;
+  generation: number;
 }
 
 export interface ServiceOptions {
@@ -105,7 +106,11 @@ export class GrokProxyService {
   private readonly createRuntime: (cwd: string) => GrokAcpClient;
   private emitEvent: ProxyEventSink;
   private runtime: GrokAcpClient | null = null;
-  private session: SessionRecord | null = null;
+  private runtimeCwd: string | null = null;
+  private readonly sessionsById = new Map<string, SessionRecord>();
+  private readonly proxyIdByNativeId = new Map<string, string>();
+  private readonly unclaimedUpdates = new Map<string, SessionNotification[]>();
+  private readonly replayCollectors = new Map<string, SessionNotification[]>();
   private modelState: GrokModelState = {};
   private permissionMode: GrokPermissionMode = 'default';
   private currentModel: string | null = null;
@@ -113,8 +118,8 @@ export class GrokProxyService {
   private slashCommands: AvailableCommand[] = [];
   private readonly activeTurns = new Map<string, ActiveTurn>();
   private readonly approvalsById = new Map<string, PendingApproval>();
-  private activePromptGeneration = 0;
   private promptGeneration = 0;
+  private forkSupported = false;
 
   constructor(options: ServiceOptions) {
     this.binaryPath = options.binaryPath;
@@ -133,6 +138,7 @@ export class GrokProxyService {
     const aux = this.createRuntime(resolve(tmpdir()));
     try {
       const initialized = await aux.ensureStarted();
+      this.forkSupported = initialized.agentCapabilities?.sessionCapabilities?.fork != null;
       const meta = (initialized as { _meta?: Record<string, unknown> })._meta ?? {};
       this.modelState = modelStateFromUnknown(meta.modelState);
       this.slashCommands = commandsFromUnknown(meta.availableCommands) as AvailableCommand[];
@@ -147,6 +153,11 @@ export class GrokProxyService {
     } finally {
       await aux.stop();
     }
+  }
+
+  supportsFork(): boolean {
+    return this.forkSupported
+      || this.runtime?.negotiated?.agentCapabilities?.sessionCapabilities?.fork != null;
   }
 
   async listNativeSessions(params: ListNativeSessionsParams) {
@@ -166,34 +177,18 @@ export class GrokProxyService {
   }
 
   async createSession(input: CreateSessionParams) {
-    if (this.session) {
+    if (this.sessionsById.size > 0 && input.allowAdditional !== true) {
       throw createAppError(409, 'NATIVE_SESSION_ATTACHED', 'This Grok Proxy already has an attached session.');
     }
     if (Array.isArray(input.mcpServers) && input.mcpServers.length > 0) {
       throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', 'Grok MCP servers are not supported.');
     }
     const cwd = resolve(nonEmptyString(input.cwd, 'cwd'));
-    const runtime = this.createRuntime(cwd);
-    runtime.setPermissionHandler(request => this.handlePermissionRequest(request));
-    runtime.on('extensionNotification', (method, params) => {
-      this.emitEvent('extension.notification', { method, params });
-    });
-    runtime.on('runtimeStopped', (event) => {
-      if (!event.expected && this.session) {
-        this.session.status = 'stale';
-        this.session.lastError = 'Grok runtime stopped.';
-        this.emitEvent('session.updated', this.envelope({ status: 'stale' }));
-      }
-    });
-    const replayUpdates: SessionNotification[] = [];
-    const collectReplay = (notification: SessionNotification) => {
-      replayUpdates.push(notification);
-    };
-    const liveUpdate = (notification: SessionNotification) => this.handleSessionUpdate(notification);
+    const runtime = await this.ensureRuntime(cwd);
     const importHistory = Boolean(input.nativeSessionId?.trim()) && input.resumeMode !== 'resume';
-    runtime.on('sessionUpdate', importHistory ? collectReplay : liveUpdate);
+    const nativeId = input.nativeSessionId?.trim() || null;
+    if (importHistory && nativeId) this.replayCollectors.set(nativeId, []);
     try {
-      await runtime.ensureStarted();
       const initialized = runtime.negotiated;
       const meta = (initialized as { _meta?: Record<string, unknown> } | null)?._meta ?? {};
       if (this.modelState.availableModels == null) {
@@ -201,7 +196,6 @@ export class GrokProxyService {
       }
       this.slashCommands = commandsFromUnknown(meta.availableCommands) as AvailableCommand[];
       const permission = grokPermissionSpec(this.permissionMode);
-      const nativeId = input.nativeSessionId?.trim() || null;
       const response = nativeId
         ? input.resumeMode === 'resume'
           ? await runtime.resumeSession({ sessionId: nativeId, cwd, mcpServers: [] })
@@ -218,12 +212,10 @@ export class GrokProxyService {
         ? (response as { sessionId: string }).sessionId
         : nativeId;
       if (!sessionId) throw createAppError(502, 'RUNTIME_ERROR', 'Grok did not return a session id.');
-      if (importHistory) {
-        runtime.off('sessionUpdate', collectReplay);
-        runtime.on('sessionUpdate', liveUpdate);
+      if (this.proxyIdByNativeId.has(sessionId)) {
+        throw createAppError(409, 'NATIVE_SESSION_ATTACHED', `Native Grok session ${sessionId} is already attached.`);
       }
-      this.runtime = runtime;
-      this.session = {
+      const session: SessionRecord = {
         id: randomId('sess'),
         cwd,
         nativeSessionId: sessionId,
@@ -237,18 +229,57 @@ export class GrokProxyService {
         createdAt: nowIso(),
         updatedAt: nowIso(),
       };
+      this.sessionsById.set(session.id, session);
+      this.proxyIdByNativeId.set(session.nativeSessionId, session.id);
       this.currentModel = this.modelState.currentModelId ?? this.currentModel;
-      const created = this.session;
+      const replayUpdates = this.replayCollectors.get(session.nativeSessionId)
+        ?? this.unclaimedUpdates.get(session.nativeSessionId)
+        ?? [];
+      this.replayCollectors.delete(session.nativeSessionId);
+      this.unclaimedUpdates.delete(session.nativeSessionId);
+      if (!importHistory) {
+        for (const notification of replayUpdates) this.handleSessionUpdate(notification);
+      }
       return {
-        session: this.serializeSession(created),
+        session: this.serializeSession(session),
         replayUpdates: importHistory ? replayUpdates : [],
       };
     } catch (error) {
-      runtime.off('sessionUpdate', collectReplay);
-      runtime.off('sessionUpdate', liveUpdate);
-      await runtime.stop();
+      if (nativeId) this.replayCollectors.delete(nativeId);
+      if (this.sessionsById.size === 0) await this.stopRuntime();
       throw mapRuntimeError(error, this.binaryPath);
     }
+  }
+
+  async forkSession(params: { sessionId: string }) {
+    const source = this.requireSession(params.sessionId);
+    if (source.activeTurnId) {
+      throw createAppError(409, 'SESSION_BUSY', 'Stop the active turn before forking the session.');
+    }
+    if (!this.supportsFork()) {
+      throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', 'Grok ACP does not advertise session/fork.');
+    }
+    const response = await this.requireRuntime().forkSession({
+      sessionId: source.nativeSessionId,
+      cwd: source.cwd,
+      mcpServers: source.mcpServers,
+    });
+    const createdAt = nowIso();
+    const session: SessionRecord = {
+      ...source,
+      id: randomId('sess'),
+      nativeSessionId: response.sessionId,
+      configOptions: response.configOptions ?? source.configOptions,
+      slashCommands: [...source.slashCommands],
+      activeTurnId: null,
+      status: 'idle',
+      lastError: null,
+      createdAt,
+      updatedAt: createdAt,
+    };
+    this.sessionsById.set(session.id, session);
+    this.proxyIdByNativeId.set(session.nativeSessionId, session.id);
+    return { session: this.serializeSession(session) };
   }
 
   async listSlashCommands() {
@@ -300,11 +331,10 @@ export class GrokProxyService {
     const turnId = randomId('turn');
     session.activeTurnId = turnId;
     session.status = 'running';
-    this.activeTurns.set(session.id, { turnId, completed: false });
-    this.promptGeneration += 1;
-    this.activePromptGeneration = this.promptGeneration;
-    this.emitEvent('turn.started', this.envelope({ turnId, status: 'running' }, turnId));
-    return { session, turnId, input, generation: this.activePromptGeneration };
+    const generation = ++this.promptGeneration;
+    this.activeTurns.set(session.id, { turnId, completed: false, generation });
+    this.emitEvent('turn.started', this.envelope(session, { turnId, status: 'running' }, turnId));
+    return { session, turnId, input, generation };
   }
 
   private async runPreparedTurn(prepared: {
@@ -320,19 +350,15 @@ export class GrokProxyService {
         prompt: await toPromptBlocks(prepared.input),
         _meta: { mode: 'agent' },
       } as never);
-      if (this.activePromptGeneration === prepared.generation) {
+      if (this.activeTurns.get(prepared.session.id)?.generation === prepared.generation) {
         this.emitPromptUsage(prepared.session, prepared.turnId, response);
         this.completeTurn(prepared.session, prepared.turnId, this.promptStopReason(response));
       }
     } catch (error) {
-      if (this.activePromptGeneration === prepared.generation) {
+      if (this.activeTurns.get(prepared.session.id)?.generation === prepared.generation) {
         this.failTurn(prepared.session, prepared.turnId, error);
       }
       throw mapRuntimeError(error, this.binaryPath);
-    } finally {
-      if (this.activePromptGeneration === prepared.generation) {
-        this.activePromptGeneration = 0;
-      }
     }
   }
 
@@ -432,10 +458,10 @@ export class GrokProxyService {
   }
 
   async deleteNativeSession(nativeSessionId: string) {
-    if (this.session?.nativeSessionId === nativeSessionId) {
+    if (this.proxyIdByNativeId.has(nativeSessionId)) {
       throw createAppError(409, 'CONFLICT', 'Cannot delete an attached Grok session.');
     }
-    const aux = this.createRuntime(this.session?.cwd ?? resolve(tmpdir()));
+    const aux = this.createRuntime(this.sessionsById.values().next().value?.cwd ?? resolve(tmpdir()));
     try {
       await aux.ensureStarted();
       if (!await nativeSessionListed(aux, nativeSessionId)) {
@@ -464,29 +490,80 @@ export class GrokProxyService {
       if (this.runtime) {
         await this.runtime.cancel(session.nativeSessionId).catch(() => undefined);
         await this.runtime.closeSession({ sessionId: session.nativeSessionId }).catch(() => undefined);
-        await this.runtime.stop();
       }
     } finally {
-      this.runtime = null;
-      this.session = null;
-      this.activeTurns.clear();
-      this.approvalsById.clear();
+      this.sessionsById.delete(session.id);
+      this.proxyIdByNativeId.delete(session.nativeSessionId);
+      this.activeTurns.delete(session.id);
+      for (const [approvalId, approval] of this.approvalsById) {
+        if (approval.sessionId === session.id) this.approvalsById.delete(approvalId);
+      }
+      if (this.sessionsById.size === 0) await this.stopRuntime();
     }
   }
 
   async close() {
-    if (this.session) await this.closeSession({ sessionId: this.session.id });
+    for (const session of [...this.sessionsById.values()]) {
+      await this.closeSession({ sessionId: session.id });
+    }
+    await this.stopRuntime();
   }
 
   setPermissionMode(mode: GrokPermissionMode) {
     this.permissionMode = mode;
   }
 
-  private requireSession(sessionId: string): SessionRecord {
-    if (!this.session || this.session.id !== sessionId) {
-      throw createAppError(404, 'SESSION_NOT_FOUND', 'Session not found.');
+  private async ensureRuntime(cwd: string): Promise<GrokAcpClient> {
+    if (this.runtime) {
+      if (this.runtimeCwd !== cwd) {
+        throw createAppError(409, 'NATIVE_SESSION_ATTACHED', 'Forked Grok sessions must share the parent cwd.');
+      }
+      return this.runtime;
     }
-    return this.session;
+    const runtime = this.createRuntime(cwd);
+    runtime.setPermissionHandler(request => this.handlePermissionRequest(request));
+    runtime.on('extensionNotification', (method, params) => {
+      const nativeSessionId = params && typeof params === 'object'
+        ? String((params as Record<string, unknown>).sessionId ?? '')
+        : '';
+      const direct = nativeSessionId
+        ? this.sessionsById.get(this.proxyIdByNativeId.get(nativeSessionId) ?? '')
+        : undefined;
+      const active = direct ?? [...this.sessionsById.values()].filter(session => session.activeTurnId).at(0);
+      if (active) this.emitEvent('extension.notification', this.envelope(active, { method, params }));
+    });
+    runtime.on('sessionUpdate', notification => this.handleSessionUpdate(notification));
+    runtime.on('runtimeStopped', (event) => {
+      if (event.expected) return;
+      for (const session of this.sessionsById.values()) {
+        session.status = 'stale';
+        session.lastError = 'Grok runtime stopped.';
+        this.emitEvent('session.updated', this.envelope(session, { status: 'stale' }));
+      }
+    });
+    try {
+      const initialized = await runtime.ensureStarted();
+      this.runtime = runtime;
+      this.runtimeCwd = cwd;
+      this.forkSupported = initialized.agentCapabilities?.sessionCapabilities?.fork != null;
+      return runtime;
+    } catch (error) {
+      await runtime.stop();
+      throw error;
+    }
+  }
+
+  private async stopRuntime(): Promise<void> {
+    const runtime = this.runtime;
+    this.runtime = null;
+    this.runtimeCwd = null;
+    if (runtime) await runtime.stop();
+  }
+
+  private requireSession(sessionId: string): SessionRecord {
+    const session = this.sessionsById.get(sessionId);
+    if (!session) throw createAppError(404, 'SESSION_NOT_FOUND', 'Session not found.');
+    return session;
   }
 
   private requireRuntime(): GrokAcpClient {
@@ -503,10 +580,10 @@ export class GrokProxyService {
     };
   }
 
-  private envelope(data: Record<string, unknown>, turnId?: string) {
+  private envelope(session: SessionRecord, data: Record<string, unknown>, turnId?: string) {
     return {
-      sessionId: this.session?.id ?? '',
-      nativeSessionId: this.session?.nativeSessionId,
+      sessionId: session.id,
+      nativeSessionId: session.nativeSessionId,
       ...(turnId ? { turnId } : {}),
       data,
     };
@@ -518,7 +595,7 @@ export class GrokProxyService {
     active.completed = true;
     session.activeTurnId = null;
     session.status = 'idle';
-    this.emitEvent('turn.completed', this.envelope({ stopReason }, turnId));
+    this.emitEvent('turn.completed', this.envelope(session, { stopReason }, turnId));
   }
 
   private failTurn(session: SessionRecord, turnId: string, error: unknown) {
@@ -528,7 +605,7 @@ export class GrokProxyService {
     session.activeTurnId = null;
     session.status = 'error';
     session.lastError = error instanceof Error ? error.message : String(error);
-    this.emitEvent('turn.failed', this.envelope({
+    this.emitEvent('turn.failed', this.envelope(session, {
       code: /auth|login/i.test(session.lastError) ? 'RUNTIME_AUTH_REQUIRED' : 'RUNTIME_ERROR',
       message: session.lastError,
     }, turnId));
@@ -538,7 +615,7 @@ export class GrokProxyService {
     const meta = (response as { _meta?: unknown })._meta;
     const usage = parsePromptUsage(meta);
     if (!usage) return;
-    this.emitEvent('usage.updated', this.envelope({
+    this.emitEvent('usage.updated', this.envelope(session, {
       conversation: {
         mode: 'delta',
         ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
@@ -550,7 +627,19 @@ export class GrokProxyService {
   }
 
   private handleSessionUpdate(notification: SessionNotification) {
-    if (!this.session) return;
+    const collecting = this.replayCollectors.get(notification.sessionId);
+    if (collecting) {
+      collecting.push(notification);
+      return;
+    }
+    const proxySessionId = this.proxyIdByNativeId.get(notification.sessionId);
+    const session = proxySessionId ? this.sessionsById.get(proxySessionId) : undefined;
+    if (!session) {
+      const pending = this.unclaimedUpdates.get(notification.sessionId) ?? [];
+      pending.push(notification);
+      this.unclaimedUpdates.set(notification.sessionId, pending.slice(-200));
+      return;
+    }
     const update = notification.update as { sessionUpdate?: string } & Record<string, unknown>;
     const kind = String(update.sessionUpdate ?? '');
     const sessionScoped = kind === 'available_commands_update'
@@ -558,57 +647,59 @@ export class GrokProxyService {
       || kind === 'current_model_update'
       || kind === 'config_update'
       || kind === 'usage_update';
-    if (!sessionScoped && this.activePromptGeneration === 0) return;
+    if (!sessionScoped && !session.activeTurnId) return;
     if (update.sessionUpdate === 'available_commands_update' && Array.isArray(update.availableCommands)) {
       this.slashCommands = update.availableCommands as AvailableCommand[];
-      this.session.slashCommands = this.slashCommands;
-      this.emitEvent('slash.updated', this.envelope({ commands: this.slashCommands }));
+      session.slashCommands = this.slashCommands;
+      this.emitEvent('slash.updated', this.envelope(session, { commands: this.slashCommands }));
     }
     if (
       update.sessionUpdate === 'current_mode_update'
       && parseGrokPermissionMode(String(update.currentModeId ?? ''))
     ) {
       this.permissionMode = parseGrokPermissionMode(String(update.currentModeId))!;
-      this.emitEvent('session.updated', this.envelope({ mode: this.permissionMode }));
+      this.emitEvent('session.updated', this.envelope(session, { mode: this.permissionMode }));
     }
     if (update.sessionUpdate === 'current_model_update' && typeof update.currentModelId === 'string') {
       this.currentModel = update.currentModelId;
       this.modelState = { ...this.modelState, currentModelId: update.currentModelId };
-      this.emitEvent('session.updated', this.envelope({ model: update.currentModelId }));
+      this.emitEvent('session.updated', this.envelope(session, { model: update.currentModelId }));
     }
     if (update.sessionUpdate === 'usage_update') {
-      this.emitEvent('usage.updated', this.envelope({
+      this.emitEvent('usage.updated', this.envelope(session, {
         context: {
           used: update.used,
           window: update.size,
         },
-      }, this.session.activeTurnId ?? undefined));
+      }, session.activeTurnId ?? undefined));
     }
-    this.emitEvent('session.update', this.envelope({ update }, this.session.activeTurnId ?? undefined));
+    this.emitEvent('session.update', this.envelope(session, { update }, session.activeTurnId ?? undefined));
   }
 
   private async handlePermissionRequest(
     request: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
-    if (!this.session) return { outcome: { outcome: 'cancelled' } };
+    const proxySessionId = this.proxyIdByNativeId.get(request.sessionId);
+    const session = proxySessionId ? this.sessionsById.get(proxySessionId) : undefined;
+    if (!session) return { outcome: { outcome: 'cancelled' } };
     const approvalId = randomId('appr');
-    const turnId = this.session.activeTurnId;
+    const turnId = session.activeTurnId;
     const response = await new Promise<RequestPermissionResponse>((resolve) => {
       this.approvalsById.set(approvalId, {
         approvalId,
-        sessionId: this.session!.id,
+        sessionId: session.id,
         turnId,
         options: request.options,
         resolve,
       });
-      this.emitEvent('approval.requested', this.envelope({
+      this.emitEvent('approval.requested', this.envelope(session, {
         approvalId,
         title: request.toolCall.title ?? request.toolCall.kind ?? 'Permission',
         options: request.options,
         payload: request.toolCall,
       }, turnId ?? undefined));
     });
-    this.emitEvent('approval.resolved', this.envelope({
+    this.emitEvent('approval.resolved', this.envelope(session, {
       approvalId,
       optionId: 'outcome' in response.outcome && response.outcome.outcome === 'selected'
         ? response.outcome.optionId

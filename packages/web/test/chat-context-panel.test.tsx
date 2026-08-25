@@ -116,7 +116,7 @@ describe('chat-owned panel 2 detail', () => {
     expect(screen.getByText(/Which path/)).toHaveClass('chat-context-detail');
   });
 
-  it('renders a trace item detail with evidence, timing, and the payload', () => {
+  it('renders a trace item detail with semantic summary, result, and timing tabs', async () => {
     render(
       <ChatContextPanel
         target={{
@@ -126,6 +126,7 @@ describe('chat-owned panel 2 detail', () => {
             id: '1:tool:call-1',
             turnId: 'turn:1',
             kind: 'tool',
+            shape: 'span',
             title: 'Bash',
             summary: '{"command":"pnpm test"}',
             status: 'failed',
@@ -146,8 +147,10 @@ describe('chat-owned panel 2 detail', () => {
     expect(within(panel).getByTestId('chat-trace-detail')).toBeInTheDocument();
     expect(within(panel).getByTestId('trace-evidence-derived')).toBeInTheDocument();
     expect(within(panel).getByTestId('trace-status-failed')).toBeInTheDocument();
+    await userEvent.click(within(panel).getByTestId('trace-detail-tab-timing'));
     expect(within(panel).getByText('call-1')).toBeInTheDocument();
     expect(within(panel).getByText('2')).toBeInTheDocument();
+    await userEvent.click(within(panel).getByTestId('trace-detail-tab-result'));
     expect(within(panel).getByText(/Connection refused/)).toBeInTheDocument();
   });
 });

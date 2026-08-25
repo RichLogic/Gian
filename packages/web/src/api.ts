@@ -1,22 +1,24 @@
 import type {
+  AgentColor,
   AgentInstallResult,
-  AgentInstallStatus,
   AgentProxyDefaults,
   AgentProxyUpdateCheck,
   EventEnvelope,
   Executor,
+  ProductExecutor,
+  ProxyCatalogEntry,
   Session,
   SystemConfig,
   TerminalOptions,
   Task,
   TraceSnapshot,
+  UserAgentStatus,
   Workspace,
   OnboardingState,
   OnboardingProjectRootResult,
   ProxyCapabilities,
 } from '@gian/shared';
 import { parseListNativeSessionsResponse, parseSessionList } from '@gian/shared';
-import { releaseAgents } from './release-executors.js';
 
 export interface TreeEntry {
   name: string;
@@ -456,15 +458,23 @@ export async function unstageFile(workingTreeId: string, path: string): Promise<
   return res.ok;
 }
 
-export async function loadProxyModels(executor: 'claude' | 'codex'): Promise<Array<import('@gian/shared').CcModelCapabilities | import('@gian/shared').CodexModelCapabilities>> {
-  const res = await fetch(`/api/proxy/${executor}/models`);
+export async function loadProxyModels(
+  executor: 'claude' | 'codex',
+  agentId?: string | null,
+): Promise<Array<import('@gian/shared').CcModelCapabilities | import('@gian/shared').CodexModelCapabilities>> {
+  const query = agentId ? `?agent=${encodeURIComponent(agentId)}` : '';
+  const res = await fetch(`/api/proxy/${executor}/models${query}`);
   if (!res.ok) return [];
   const body = (await res.json()) as { models: Array<import('@gian/shared').CcModelCapabilities | import('@gian/shared').CodexModelCapabilities> };
   return body.models ?? [];
 }
 
-export async function loadProxyCapabilities(executor: Executor): Promise<ProxyCapabilities> {
-  const response = await fetch(`/api/proxy/${executor}/capabilities`);
+export async function loadProxyCapabilities(
+  executor: Executor,
+  agentId?: string | null,
+): Promise<ProxyCapabilities> {
+  const query = agentId ? `?agent=${encodeURIComponent(agentId)}` : '';
+  const response = await fetch(`/api/proxy/${executor}/capabilities${query}`);
   return agentResponse<ProxyCapabilities>(response);
 }
 
@@ -487,8 +497,10 @@ export async function loadResolvedProxyCatalog(
     turnConfig: Record<string, import('@gian/shared').ConfigValue>;
     sessionId?: string;
   },
+  agentId?: string | null,
 ): Promise<import('@gian/shared').ResolvedProxyCatalog> {
-  return postJson(`/api/proxy/${executor}/catalog/resolve`, params);
+  const query = agentId ? `?agent=${encodeURIComponent(agentId)}` : '';
+  return postJson(`/api/proxy/${executor}/catalog/resolve${query}`, params);
 }
 
 async function agentResponse<T>(response: Response): Promise<T> {
@@ -498,56 +510,114 @@ async function agentResponse<T>(response: Response): Promise<T> {
 }
 
 const AGENT_CACHE_TTL_MS = 30_000;
-const AGENT_ORDER = ['claude', 'codex', 'kimi', 'dsh'];
-let agentCache: { agents: AgentInstallStatus[]; expiresAt: number } | null = null;
-let agentRequest: Promise<AgentInstallStatus[]> | null = null;
+let agentCache: { agents: UserAgentStatus[]; expiresAt: number } | null = null;
+let agentRequest: Promise<UserAgentStatus[]> | null = null;
 
-export function peekAgents(): AgentInstallStatus[] | null {
+export function peekAgents(): UserAgentStatus[] | null {
   return agentCache?.agents ?? null;
 }
 
-function cacheAgent(agent: AgentInstallStatus): AgentInstallStatus {
+function cacheAgent(agent: UserAgentStatus): UserAgentStatus {
   const current = agentCache?.agents ?? [];
   agentCache = {
-    agents: releaseAgents([agent, ...current.filter(candidate => candidate.id !== agent.id)])
-      .sort((a, b) => AGENT_ORDER.indexOf(a.id) - AGENT_ORDER.indexOf(b.id)),
+    agents: [agent, ...current.filter(candidate => candidate.id !== agent.id)],
     expiresAt: Date.now() + AGENT_CACHE_TTL_MS,
   };
   return agent;
 }
 
-export async function loadAgents(options: { refresh?: boolean } = {}): Promise<AgentInstallStatus[]> {
+/** Saved user Agents with their live path/Proxy probe status. Unsaved
+ *  catalog kinds are never listed (issue #97). */
+export async function loadAgents(options: { refresh?: boolean } = {}): Promise<UserAgentStatus[]> {
   if (!options.refresh && agentCache && agentCache.expiresAt > Date.now()) return agentCache.agents;
   if (agentRequest) return agentRequest;
   const query = options.refresh ? '?refresh=1' : '';
   agentRequest = fetch(`/api/agents${query}`)
-    .then(response => agentResponse<{ agents: AgentInstallStatus[] }>(response))
+    .then(response => agentResponse<{ agents: UserAgentStatus[] }>(response))
     .then(body => {
-      const agents = releaseAgents(body.agents);
-      agentCache = { agents, expiresAt: Date.now() + AGENT_CACHE_TTL_MS };
-      return agents;
+      agentCache = { agents: body.agents, expiresAt: Date.now() + AGENT_CACHE_TTL_MS };
+      return body.agents;
     })
     .finally(() => { agentRequest = null; });
   return agentRequest;
 }
 
-export async function setAgentCliPath(
-  executor: Executor,
-  path: string | null,
-): Promise<AgentInstallStatus> {
-  const response = await fetch(`/api/agents/${executor}/cli-path`, {
-    method: 'PUT',
+/** Static Proxy-kind catalog metadata (no spawn, no probe). */
+export async function loadProxies(): Promise<ProxyCatalogEntry[]> {
+  const response = await fetch('/api/proxies');
+  const body = await agentResponse<{ proxies: ProxyCatalogEntry[] }>(response);
+  return body.proxies;
+}
+
+export interface AgentDraftDefaults {
+  name: string;
+  color: AgentColor;
+  cliPath: string | null;
+}
+
+/** Prefill for a new draft card of one kind: numbered name, rotated color,
+ *  and the kind's existing path copied for second-of-kind Agents. */
+export async function loadAgentDraftDefaults(
+  proxy: ProductExecutor,
+): Promise<AgentDraftDefaults> {
+  const response = await fetch(`/api/proxies/${proxy}/draft-defaults`);
+  return agentResponse<AgentDraftDefaults>(response);
+}
+
+export interface CreateAgentInput {
+  name: string;
+  proxy: ProductExecutor;
+  color?: AgentColor;
+  cliPath?: string | null;
+  defaults?: Partial<AgentProxyDefaults>;
+}
+
+export async function createAgent(input: CreateAgentInput): Promise<UserAgentStatus> {
+  const response = await fetch('/api/agents', {
+    method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ path }),
+    body: JSON.stringify(input),
   });
-  const body = await agentResponse<{ agent: AgentInstallStatus }>(response);
+  const body = await agentResponse<{ agent: UserAgentStatus }>(response);
   return cacheAgent(body.agent);
+}
+
+export interface UpdateAgentInput {
+  name?: string;
+  color?: AgentColor;
+  cliPath?: string | null;
+  proxy?: ProductExecutor;
+  defaults?: Partial<AgentProxyDefaults>;
+}
+
+export async function updateAgent(
+  agentId: string,
+  patch: UpdateAgentInput,
+): Promise<UserAgentStatus> {
+  const response = await fetch(`/api/agents/${agentId}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  const body = await agentResponse<{ agent: UserAgentStatus }>(response);
+  return cacheAgent(body.agent);
+}
+
+export async function deleteAgent(agentId: string): Promise<void> {
+  const response = await fetch(`/api/agents/${agentId}`, { method: 'DELETE' });
+  await agentResponse<{ ok: boolean }>(response);
+  if (agentCache) {
+    agentCache = {
+      agents: agentCache.agents.filter(candidate => candidate.id !== agentId),
+      expiresAt: agentCache.expiresAt,
+    };
+  }
 }
 
 /** Ask the host to open the native file picker so the user can browse for a
  *  CLI executable instead of typing the path (macOS only; mirrors
  *  `pickWorkspaceFolder`). Resolves to the picked absolute path, or null when
- *  the dialog was canceled. */
+ *  the dialog was canceled. Kind-level: drafts have no Agent id yet. */
 export async function pickAgentCliPath(executor: Executor): Promise<string | null> {
   const response = await fetch(`/api/agents/${executor}/pick-cli-path`, { method: 'POST' });
   const body = await response.json().catch(() => ({})) as { path?: string; canceled?: boolean; error?: string };
@@ -555,35 +625,18 @@ export async function pickAgentCliPath(executor: Executor): Promise<string | nul
   return body.path ?? null;
 }
 
-export async function setAgentProxyDefaults(
-  executor: Executor,
-  defaults: Partial<AgentProxyDefaults>,
-): Promise<AgentInstallStatus> {
-  const response = await fetch(`/api/agents/${executor}/proxy-defaults`, {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(defaults),
-  });
-  const body = await agentResponse<{ agent: AgentInstallStatus }>(response);
-  return cacheAgent(body.agent);
-}
-
 export async function installAgentCli(executor: Executor): Promise<AgentInstallResult> {
   const response = await fetch(`/api/agents/${executor}/install-cli`, {
     method: 'POST',
   });
-  const result = await agentResponse<AgentInstallResult>(response);
-  cacheAgent(result.agent);
-  return result;
+  return agentResponse<AgentInstallResult>(response);
 }
 
 export async function installAgentProxy(executor: Executor): Promise<AgentInstallResult> {
   const response = await fetch(`/api/agents/${executor}/install-proxy`, {
     method: 'POST',
   });
-  const result = await agentResponse<AgentInstallResult>(response);
-  cacheAgent(result.agent);
-  return result;
+  return agentResponse<AgentInstallResult>(response);
 }
 
 /** Read-only "newer compatible Proxy release available?" probe (issue #86).
@@ -626,10 +679,13 @@ export async function resetOnboarding(): Promise<void> {
 export async function loadSlashCommands(
   executor: 'claude' | 'codex',
   workspaceId?: string,
+  agentId?: string | null,
 ): Promise<import('@gian/shared').SlashCommand[]> {
-  const url = workspaceId
-    ? `/api/proxy/${executor}/slash?workspace=${encodeURIComponent(workspaceId)}`
-    : `/api/proxy/${executor}/slash`;
+  const params = new URLSearchParams();
+  if (workspaceId) params.set('workspace', workspaceId);
+  if (agentId) params.set('agent', agentId);
+  const query = params.size > 0 ? `?${params.toString()}` : '';
+  const url = `/api/proxy/${executor}/slash${query}`;
   const res = await fetch(url);
   if (!res.ok) return [];
   const body = (await res.json()) as { commands?: import('@gian/shared').SlashCommand[] };
@@ -849,6 +905,7 @@ export async function createSubtask(
   taskId: string,
   input: {
     workspace_id: string;
+    agent_id?: string;
     executor: import('@gian/shared').Executor;
     name?: string;
     model?: string | null;

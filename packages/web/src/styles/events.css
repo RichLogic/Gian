@@ -185,7 +185,8 @@
   transition: opacity 100ms var(--ease);
 }
 .trow.expandable:hover .trow-ext,
-.trow.clickable:hover .trow-ext { opacity: 1; }
+.trow.clickable:hover .trow-ext,
+.turnsum:hover .trow-ext { opacity: 1; }
 
 /* Level-2 detail: in-place expansion for small content */
 .trow-detail {
@@ -269,6 +270,71 @@
   padding-left: 11px;
   border-left: 1px solid var(--hairline);
   display: flex; flex-direction: column; gap: 1px;
+}
+
+/* ============================================================
+   Event box (2026-08-24) — an IN-FLIGHT turn's process events collect
+   into one live tail instead of flooding the transcript: a header
+   (breathing live dot + label + TOTAL count + hover ⇥ panel hint) above
+   the LATEST 5 events, each exactly one line, so the box always shows the
+   5 most recent events and never clips a row. The whole box is one click
+   target → panel-2 event feed. When the turn ends the .turnsum fold above
+   takes over the same rows.
+   ============================================================ */
+.eventbox {
+  margin: 4px 0;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: background 80ms, border-color 80ms;
+}
+.eventbox:hover { background: var(--surface-3); border-color: var(--text-3); }
+.eventbox-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--hairline);
+  font-size: var(--fz-11);
+  color: var(--text-3);
+}
+.eventbox-live {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent-text);
+  animation: breath 1.8s ease-in-out infinite;
+  flex-shrink: 0;
+}
+.eventbox-title { font-weight: 600; color: var(--text-2); }
+.eventbox-count {
+  font-family: var(--font-mono); font-size: 10.5px;
+}
+/* Same hover-revealed ⇥ panel affordance as level-3 rows. */
+.eventbox-ext {
+  margin-left: auto;
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--text-3);
+  opacity: 0;
+  transition: opacity 100ms var(--ease);
+}
+.eventbox:hover .eventbox-ext,
+.eventbox:focus-visible .eventbox-ext { opacity: 1; }
+.eventbox-body {
+  /* No internal scroll: the box renders the turn's LATEST --eventbox-lines
+   * events (slice in EventBox), each exactly one line — the body height is
+   * always exactly that many rows, so no row can ever be clipped. */
+  padding: 2px 0;
+  display: flex; flex-direction: column; gap: 1px;
+}
+/* Box lines carry no caret and no per-row interaction — the box handles
+ * the click — so they drop the 28px caret indent and the row cursors. */
+.eventbox .trow {
+  padding-left: 10px;
+  cursor: inherit;
+  user-select: none;
+}
+.eventbox .trow:hover { background: none; }
+.eventbox .approval-line { cursor: inherit; }
+@media (prefers-reduced-motion: reduce) {
+  .eventbox-live { animation: none; }
 }
 
 /* Session meta: status as a centered plain-text line (pill removed) */

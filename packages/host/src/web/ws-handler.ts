@@ -272,9 +272,16 @@ async function dispatch(
       return;
     }
     case 'session:create': {
+      if (msg.agent_id === undefined && msg.executor === undefined) {
+        throw Object.assign(
+          new Error('session:create requires agent_id'),
+          { code: 'AGENT_REQUIRED' },
+        );
+      }
       const session = await sessions.createSession({
         workspace_id: msg.workspace_id,
-        executor: msg.executor,
+        ...(msg.agent_id !== undefined ? { agent_id: msg.agent_id } : {}),
+        ...(msg.executor !== undefined ? { executor: msg.executor } : {}),
         model: msg.model,
         approval_mode: msg.approval_mode,
         ...(msg.thinking_effort !== undefined ? { thinking_effort: msg.thinking_effort } : {}),

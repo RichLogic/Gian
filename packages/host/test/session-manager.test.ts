@@ -957,6 +957,49 @@ test('role setters and setTurnConfigValue keep the next-turn draft in sync', asy
   }
 });
 
+test('turn dispatch omits catalog options disabled for the selected model', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'codex',
+      model: 'gpt-standard',
+      service_tier: 'fast',
+    });
+    sessions.persistTurnConfigOptions(session.id, [{
+      id: 'model',
+      displayName: 'Model',
+      binding: 'turn',
+      role: 'model',
+      control: 'select',
+      required: false,
+      defaultValue: 'gpt-fast',
+      choices: [
+        { value: 'gpt-fast', displayName: 'GPT Fast' },
+        { value: 'gpt-standard', displayName: 'GPT Standard' },
+      ],
+    }, {
+      id: 'service_tier',
+      displayName: 'Fast',
+      binding: 'turn',
+      role: 'fast',
+      control: 'boolean',
+      required: false,
+      defaultValue: false,
+      enabledWhen: [{ optionId: 'model', oneOf: ['gpt-fast'] }],
+    }], 'codex-fast-conditions');
+
+    await sessions.sendMessage(session.id, 'standard turn');
+
+    assert.deepEqual(proxyMgr.client.startTurnCalls[0]?.config, {
+      model: 'gpt-standard',
+    });
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a live terminal event still settles the turn when replay already persisted it', async () => {
   const { dir, db, wsId, proxyMgr, sessions } = setup();
   try {

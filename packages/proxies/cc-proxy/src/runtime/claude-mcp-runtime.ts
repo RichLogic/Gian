@@ -49,6 +49,49 @@ export function isClaudeCompactBoundary(event: Record<string, unknown>): boolean
   return event.type === 'system' && event.subtype === 'compact_boundary';
 }
 
+const HANDLED_EVENT_TYPES = new Set(['assistant', 'user', 'result']);
+const HANDLED_SYSTEM_SUBTYPES = new Set([
+  'init',
+  'task_started',
+  'task_notification',
+  'compact_boundary',
+]);
+/** High-frequency Claude Code 2.1.237+ progress pulses. Each would otherwise
+ *  become a unique transcript activity and freeze the page. */
+const IGNORED_EVENT_TYPES = new Set(['tool_progress']);
+const IGNORED_SYSTEM_SUBTYPES = new Set([
+  'thinking_tokens',
+  'task_progress',
+  'task_updated',
+  'background_tasks_changed',
+  'vcs_state_changed',
+]);
+
+export type ClaudeStreamEventClass = 'handled' | 'ignored' | 'unknown';
+
+/** Classify a Claude stream-json frame for transcript surfacing.
+ *  `handled` already has a dedicated runtime emitter; `ignored` is known
+ *  progress noise; `unknown` may surface once per (type, subtype) per turn. */
+export function classifyClaudeStreamEvent(event: Record<string, unknown>): ClaudeStreamEventClass {
+  const eventType = typeof event.type === 'string' ? event.type : '';
+  if (!eventType) return 'ignored';
+  if (HANDLED_EVENT_TYPES.has(eventType)) return 'handled';
+  if (IGNORED_EVENT_TYPES.has(eventType)) return 'ignored';
+  if (eventType === 'system') {
+    const subtype = typeof event.subtype === 'string' ? event.subtype : '';
+    if (HANDLED_SYSTEM_SUBTYPES.has(subtype)) return 'handled';
+    if (IGNORED_SYSTEM_SUBTYPES.has(subtype)) return 'ignored';
+    return 'unknown';
+  }
+  return 'unknown';
+}
+
+export function unknownClaudeEventKey(event: Record<string, unknown>): string {
+  const eventType = typeof event.type === 'string' && event.type ? event.type : 'unknown';
+  const subtype = typeof event.subtype === 'string' ? event.subtype : '';
+  return subtype ? `${eventType}:${subtype}` : eventType;
+}
+
 /** A top-level assistant event is the only stream-json sample that describes
  * the prompt currently occupying Claude's context. `result.usage` is an
  * aggregate across API calls and must never be used as this numerator. */
@@ -872,6 +915,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     // block. When this is true we suppress the result-side text and only
     // signal turn completion.
     let streamedAnyText = false;
+    const emittedUnknownKeys = new Set<string>();
     let currentContext: { used: number } | null = null;
     let currentModel: string | null = null;
     const agentTasks = new Map<string, {
@@ -1059,15 +1103,12 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
           if (usageUpdate) this.emit('tokenUsage', sessionId, usageUpdate);
         }
 
-        const knownEventTypes = new Set(['system', 'assistant', 'user', 'result']);
-        const knownSystemSubtypes = new Set(['init', 'task_started', 'task_notification', 'compact_boundary']);
-        const isRecognized = eventType === undefined
-          ? false
-          : eventType === 'system'
-            ? typeof event.subtype === 'string' && knownSystemSubtypes.has(event.subtype)
-            : knownEventTypes.has(eventType);
-        if (!isRecognized && typeof eventType === 'string' && eventType) {
-          this.emit('unknownClaudeEvent', sessionId, event);
+        if (classifyClaudeStreamEvent(event) === 'unknown') {
+          const key = unknownClaudeEventKey(event);
+          if (!emittedUnknownKeys.has(key)) {
+            emittedUnknownKeys.add(key);
+            this.emit('unknownClaudeEvent', sessionId, event);
+          }
         }
 
         // Log non-system events.

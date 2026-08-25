@@ -49,6 +49,7 @@ export class ApprovalManager {
   private pending = new Map<string, ApprovalRecord>();
   private sessionAllowed = new Map<string, Set<ApprovalCategory>>();
   private resolvers = new Map<string, (decision: ApprovalDecision) => void>();
+  private resolutionSources = new Map<string, ApprovalResolvedBy>();
 
   private respondFn: RespondApprovalFn | null = null;
   private getModeFn: GetApprovalModeFn | null = null;
@@ -211,6 +212,20 @@ export class ApprovalManager {
     return [...this.pending.values()];
   }
 
+  markResolutionSource(approvalId: string, source: ApprovalResolvedBy): void {
+    if (!this.resolutionSources.has(approvalId)) this.resolutionSources.set(approvalId, source);
+  }
+
+  consumeResolutionSource(approvalId: string): ApprovalResolvedBy | undefined {
+    const source = this.resolutionSources.get(approvalId);
+    this.resolutionSources.delete(approvalId);
+    return source;
+  }
+
+  clearResolutionSource(approvalId: string): void {
+    this.resolutionSources.delete(approvalId);
+  }
+
   /**
    * Tear down all state for a session: resolves any pending request promises
    * with `decline`, drops them from the pending map, clears the
@@ -231,6 +246,7 @@ export class ApprovalManager {
       this.pending.delete(id);
       this.resolvers.get(id)?.('decline');
       this.resolvers.delete(id);
+      this.resolutionSources.delete(id);
       this.broadcaster.broadcast({
         type: 'approval:updated',
         approval: {

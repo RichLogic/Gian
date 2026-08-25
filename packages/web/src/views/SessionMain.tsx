@@ -6,10 +6,11 @@ import type {
   NativeConfigValue,
   Session,
   ThinkingEffort,
+  UserAgentStatus,
   Workspace,
 } from '@gian/shared';
 import { Composer } from '../components/Composer.js';
-import { loadSessionTrace } from '../api.js';
+import { loadSessionTrace, loadAgents } from '../api.js';
 import { GitBadge } from '../components/GitBadge.js';
 import { PlanChip } from '../components/PlanChip.js';
 import { QueueList } from '../components/QueueList.js';
@@ -143,6 +144,19 @@ export function SessionMain({
   // input — the composer blocks and a banner explains how to reopen. The host
   // enforces the same rule in `sendMessage` and the queue drain.
   const sessionCompleted = session.completed_at != null;
+  const [knownAgents, setKnownAgents] = useState<UserAgentStatus[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    loadAgents()
+      .then(list => { if (alive) setKnownAgents(list); })
+      .catch(() => { if (alive) setKnownAgents([]); });
+    return () => { alive = false; };
+  }, []);
+  // A deleted Agent's session stays readable from its snapshots but cannot
+  // run turns — the composer is disabled and the snapshot name is shown.
+  const agentDeleted = !!session.agent_id
+    && knownAgents !== null
+    && !knownAgents.some(agent => agent.id === session.agent_id);
   const [gitRefreshKey, setGitRefreshKey] = useState(0);
   const previousPendingRef = useRef(pending);
 
@@ -308,6 +322,11 @@ export function SessionMain({
         />
         <TranscriptNavigation items={items} />
       </UnderbarPanelGroup>
+      {agentDeleted && (
+        <p className="s2-help" role="note" data-testid="agent-deleted-note">
+          {t('session.agentDeleted').replace('{name}', session.agent_name ?? '')}
+        </p>
+      )}
       <Composer
         session={session}
         onSend={onSend}
@@ -321,10 +340,11 @@ export function SessionMain({
         onSetServiceTier={onSetServiceTier}
         onSetNativeConfig={onSetNativeConfig}
         onSetTurnConfig={onSetTurnConfig}
-        disabled={pending || terminal || sessionCompleted}
+        disabled={pending || terminal || sessionCompleted || agentDeleted}
         running={isTurnRunning(session.status, pending)}
         disabledSubmitBehavior={terminal || sessionCompleted ? 'block' : 'queue'}
         executor={session.executor}
+        agentId={session.agent_id ?? null}
         workspaceId={workspace?.id}
       />
     </main>

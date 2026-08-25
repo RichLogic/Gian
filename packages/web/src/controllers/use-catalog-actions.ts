@@ -16,9 +16,10 @@ import {
 
 export function useCatalogActions(
   executor: Executor | null,
+  agentId?: string | null,
 ): CatalogActionDescriptor[] | undefined {
   const [actions, setActions] = useState<CatalogActionDescriptor[] | undefined>(
-    () => (executor ? getCatalogCached(executor)?.actions : undefined),
+    () => (executor ? getCatalogCached(executor, agentId)?.actions : undefined),
   );
 
   useEffect(() => {
@@ -26,13 +27,13 @@ export function useCatalogActions(
       setActions(undefined);
       return;
     }
-    const cached = getCatalogCached(executor);
+    const cached = getCatalogCached(executor, agentId);
     if (cached) {
       setActions(cached.actions);
       return;
     }
     let alive = true;
-    void fetchCatalogCached(executor)
+    void fetchCatalogCached(executor, agentId)
       .then(catalog => { if (alive) setActions(catalog.actions); })
       .catch(() => {
         // Catalog fetch failure = no declarations → controls stay greyed with
@@ -40,7 +41,7 @@ export function useCatalogActions(
         if (alive) setActions(undefined);
       });
     return () => { alive = false; };
-  }, [executor]);
+  }, [executor, agentId]);
 
   return actions;
 }

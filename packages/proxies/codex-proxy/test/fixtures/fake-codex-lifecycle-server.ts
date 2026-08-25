@@ -31,6 +31,27 @@ input.on('line', (line) => {
   }
   if (message.id === 700 && !message.method) {
     setTimeout(() => {
+      send({
+        method: 'item/completed',
+        params: {
+          threadId,
+          turnId,
+          completedAtMs: 2_000,
+          item: {
+            type: 'mcpToolCall',
+            id: 'fake-tool-1',
+            server: 'fixture',
+            tool: 'inspect',
+            status: 'completed',
+            arguments: { target: 'trace' },
+            appContext: null,
+            pluginId: null,
+            result: { content: [{ type: 'text', text: 'ok' }], structuredContent: null, _meta: null },
+            error: null,
+            durationMs: 1_000,
+          },
+        },
+      });
       turnStatus = 'completed';
       send({
         method: 'turn/completed',
@@ -57,6 +78,11 @@ input.on('line', (line) => {
             isDefault: true,
             defaultReasoningEffort: 'medium',
             supportedReasoningEfforts: [{ reasoningEffort: 'medium' }],
+            serviceTiers: [{
+              id: 'fast',
+              name: 'Fast',
+              description: 'Faster responses.',
+            }],
           }],
           nextCursor: null,
         },
@@ -102,8 +128,25 @@ input.on('line', (line) => {
         params: { threadId, turnId, itemId: 'fake-message-1', delta: 'hello from fake codex' },
       });
       send({
-        method: 'item/futureVisible',
-        params: { threadId, turnId, fixture: true },
+        method: 'item/started',
+        params: {
+          threadId,
+          turnId,
+          startedAtMs: 1_000,
+          item: {
+            type: 'mcpToolCall',
+            id: 'fake-tool-1',
+            server: 'fixture',
+            tool: 'inspect',
+            status: 'inProgress',
+            arguments: { target: 'trace' },
+            appContext: null,
+            pluginId: null,
+            result: null,
+            error: null,
+            durationMs: null,
+          },
+        },
       });
       send({
         id: 700,

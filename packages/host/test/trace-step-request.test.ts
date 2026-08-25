@@ -76,6 +76,8 @@ test('TRACE: step/request evidence groups assistant, tool, and usage items under
 
   const step = snapshot.items.find(item => item.kind === 'step')!;
   assert.equal(step.id, `step:turn-1:${stepId}`);
+  assert.equal(step.shape, 'span');
+  assert.equal(step.parentId, 'turn:turn-1');
   assert.equal(step.status, 'succeeded');
   assert.equal(step.durationMs, 6_000);
   assert.deepEqual(step.sourceEventIds, ['event-2', 'event-8']);
@@ -85,8 +87,12 @@ test('TRACE: step/request evidence groups assistant, tool, and usage items under
   }
   const usage = snapshot.items.find(item => item.title === 'Usage')!;
   assert.equal(usage.kind, 'notice');
+  assert.equal(usage.shape, 'event');
   assert.equal(usage.parentId, step.id);
   const request = snapshot.items.find(item => item.kind === 'request')!;
+  assert.equal(request.shape, 'event');
   assert.equal(request.title, 'deepseek-chat');
   assert.equal((request.detail as Record<string, unknown>)['reason'], 'initial');
+  assert.equal(snapshot.items.find(item => item.kind === 'tool')!.shape, 'span');
+  assert.equal(snapshot.items.find(item => item.kind === 'assistant')!.shape, 'span');
 });

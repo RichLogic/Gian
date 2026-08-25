@@ -160,6 +160,18 @@ export function main(argv = process.argv.slice(2)) {
   }
 
   runNodeTests(entriesForRunner(selected, 'shared-node'), env);
+  const toolCliPaths = entriesForRunner(selected, 'tool-cli-node');
+  const toolMcpPaths = entriesForRunner(selected, 'tool-mcp-node');
+  if (toolCliPaths.length > 0 || toolMcpPaths.length > 0) {
+    runPnpm(['--filter', '@gian/tool-cli', 'build'], env);
+  }
+  if (toolCliPaths.length > 0) {
+    runNodeTests(toolCliPaths, env);
+  }
+  if (toolMcpPaths.length > 0) {
+    runPnpm(['--filter', '@gian/tool-mcp', 'build'], env);
+    runNodeTests(toolMcpPaths, env);
+  }
   const hostRoot = join(rootDir, 'packages', 'host');
   const hostPaths = entriesForRunner(selected, 'host-node-tsx')
     .map(path => relative(hostRoot, join(rootDir, path)));

@@ -58,7 +58,7 @@ test('Claude CLI negotiates gian.proxy/2.0 independently from its runtime versio
   const result = initializeResultSchema.parse(initialized.result);
   assert.equal(result.protocol.version, '2.0');
   assert.equal(result.plugin.id, 'claude');
-  assert.equal(result.plugin.version, '0.2.0');
+  assert.equal(result.plugin.version, '0.2.2');
   assert.equal(result.process.scope, 'session');
   assert.equal(result.capabilities.interaction, 1);
   assert.equal(result.capabilities['session.replay'], 1);
@@ -207,6 +207,10 @@ test('Claude CLI writes turn.start response before turn.started with a Fake Runt
       ((unknown.params?.data as { presentation?: { type?: string } }).presentation ?? {}).type,
       'generic',
     );
+
+    const actionUpdate = await proxy.next() as { method?: string; params?: { sequence?: number } };
+    assert.equal(actionUpdate.method, 'session.updated');
+    assert.equal(actionUpdate.params?.sequence, 10);
 
     proxy.send({ jsonrpc: '2.0', id: 'req-5', method: 'shutdown', params: {} });
     assert.deepEqual(await proxy.next(), { jsonrpc: '2.0', id: 'req-5', result: { ok: true } });

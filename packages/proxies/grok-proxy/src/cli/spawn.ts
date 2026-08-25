@@ -37,7 +37,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.3.0';
+  return '0.3.1';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -154,8 +154,13 @@ async function main(): Promise<void> {
     adapter.beginRequest();
     try {
       const result = await adapter.handle(request);
-      writer.result(request.id, result);
-      adapter.flushNotifications();
+      if (request.method === 'sidechat.close') {
+        adapter.flushNotifications();
+        writer.result(request.id, result);
+      } else {
+        writer.result(request.id, result);
+        adapter.flushNotifications();
+      }
       if (request.method === 'shutdown') {
         input.close();
         await shutdown(0);

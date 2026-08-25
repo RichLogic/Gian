@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { AgentInstallStatus, Workspace } from '@gian/shared';
+import type { UserAgentStatus, Workspace } from '@gian/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { App } from '../src/App.js';
 import { sessionContractFixture, stateSyncFixture } from './fixtures/ws-contract.js';
@@ -17,9 +17,14 @@ const workspace: Workspace = {
   updated_at: '2026-08-08T00:00:00.000Z',
 };
 
-const claudeAgent: AgentInstallStatus = {
-  id: 'claude',
+const claudeAgent: UserAgentStatus = {
+  id: 'agent-claude-1',
   name: 'Claude Code',
+  color: 'ember',
+  proxy: 'claude',
+  cliPath: '/bin/fake-claude',
+  defaults: { model: '', thinking: '', mode: 'ask' },
+  proxyName: 'Claude Code',
   ready: true,
   cli: {
     state: 'ready',
@@ -27,7 +32,7 @@ const claudeAgent: AgentInstallStatus = {
     version: 'fixture-v1',
     source: 'path',
   },
-  proxy: {
+  plugin: {
     state: 'ready',
     path: '/proxy/fake-claude',
     version: 'fixture-v1',
@@ -115,8 +120,8 @@ describe('BILLING-001: read-only App navigation', () => {
 
     await user.click(screen.getByTestId('dock-settings'));
     expect(await screen.findByTestId('settings-body')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Executors' }));
-    expect(await screen.findByText('Claude Code')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'AI Agents' }));
+    expect(await screen.findByDisplayValue('Claude Code')).toBeInTheDocument();
 
     // Startup, Settings, and Composer may discover metadata, but this whole
     // read-only path must not cross either mutation boundary that can start a

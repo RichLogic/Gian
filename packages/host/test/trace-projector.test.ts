@@ -126,6 +126,100 @@ test('TRACE: one tool with started + multiple updates + completed yields one ite
   assert.equal(snap.partial, false);
 });
 
+test('TRACE: request snapshots aggregate as one point event', () => {
+  const rows = [
+    evt('e1', 'turn.started', 1, 't1', {}),
+    evt('e2', 'request.updated', 2, 't1', {
+      requestId: 'request-1',
+      reason: 'initial',
+      model: { provider: 'deepseek', id: 'deepseek-chat' },
+      tools: [{ name: 'bash' }],
+    }),
+    evt('e3', 'request.updated', 3, 't1', {
+      requestId: 'request-1',
+      reason: 'change',
+      context: { window: 128_000 },
+    }),
+    evt('e4', 'turn.completed', 4, 't1', { stopReason: 'completed' }),
+  ];
+  const snap = snapshot(rows);
+  const requests = byKind(snap, 'request');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]!.shape, 'event');
+  assert.equal(requests[0]!.title, 'deepseek-chat');
+  assert.equal(requests[0]!.parentId, 'turn:t1');
+  assert.deepEqual(requests[0]!.sourceEventIds, ['e2', 'e3']);
+  assert.equal((requests[0]!.detail as { reason: string }).reason, 'change');
+  assert.deepEqual((requests[0]!.detail as { context: unknown }).context, { window: 128_000 });
+});
+
+test('TRACE: activity spans prefer Provider-native lifecycle timestamps', () => {
+  const nativeStart = Date.parse(T0) + 2_250;
+  const nativeEnd = Date.parse(T0) + 5_750;
+  const rows = [
+    evt('e1', 'turn.started', 1, 't1', {}),
+    evt('e2', 'activity.updated', 2, 't1', {
+      activityId: 'command-1',
+      kind: 'command',
+      title: 'Command',
+      status: 'running',
+      presentation: { type: 'command', data: { command: 'git status' } },
+      details: { timing: { phase: 'started', timestampMs: nativeStart } },
+    }),
+    evt('e3', 'activity.updated', 8, 't1', {
+      activityId: 'command-1',
+      kind: 'command',
+      title: 'Command',
+      status: 'succeeded',
+      presentation: { type: 'command', data: { command: 'git status' } },
+      details: { timing: { phase: 'completed', timestampMs: nativeEnd } },
+    }),
+    evt('e4', 'turn.completed', 9, 't1', { stopReason: 'completed' }),
+  ];
+  const activity = byKind(snapshot(rows), 'tool')[0]!;
+  assert.equal(activity.shape, 'span');
+  assert.equal(activity.at, new Date(nativeStart).toISOString());
+  assert.equal(activity.endAt, new Date(nativeEnd).toISOString());
+  assert.equal(activity.durationMs, 3_500);
+  assert.equal(activity.parentId, 'turn:t1');
+});
+
+test('TRACE: legacy Codex transport notifications stay out of the projected trajectory', () => {
+  const rows = [
+    evt('e1', 'turn.started', 1, 't1', {}),
+    evt('e2', 'activity.updated', 2, 't1', {
+      activityId: 'codex-event-1',
+      kind: 'item/started',
+      title: 'Codex event: item/started',
+      status: 'succeeded',
+      presentation: {
+        type: 'generic',
+        tone: 'info',
+        data: { nativeMethod: 'item/started' },
+      },
+    }),
+    evt('e3', 'activity.updated', 3, 't1', {
+      activityId: 'command-1',
+      kind: 'command',
+      title: 'Command',
+      status: 'running',
+      presentation: { type: 'command', data: { command: 'git status' } },
+    }),
+    evt('e4', 'activity.updated', 4, 't1', {
+      activityId: 'command-1',
+      kind: 'tool',
+      title: 'Activity',
+      status: 'succeeded',
+      presentation: { type: 'tool', data: { name: 'tool' } },
+    }),
+    evt('e5', 'turn.completed', 5, 't1', { stopReason: 'completed' }),
+  ];
+
+  const tools = byKind(snapshot(rows), 'tool');
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0]!.title, 'Command');
+});
+
 test('TRACE: tool failed and interrupted map to their own statuses', () => {
   const rows = [
     evt('e1', 'turn.started', 1, 't1', {}),

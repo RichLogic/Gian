@@ -16,6 +16,7 @@ vi.mock('../src/api.js', () => {
     loadSlashCommands: never,
     loadSessionSlashCommands: never,
     loadNativeConfig: never,
+    loadAgents: async () => [],
   };
 });
 

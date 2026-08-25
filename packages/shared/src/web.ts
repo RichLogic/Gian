@@ -110,7 +110,7 @@ export interface SessionCreatedMessage {
   session: Session;
   /** Creation path that owns the broadcast. Optional for compatibility with
    *  older Hosts; absent messages keep the ordinary interactive behavior. */
-  origin?: 'interactive-create' | 'native-adopt' | 'task-create' | 'session-fork';
+  origin?: 'interactive-create' | 'native-adopt' | 'task-create' | 'session-fork' | 'tool-create';
 }
 
 export interface SessionDeletedMessage {
@@ -318,7 +318,14 @@ export interface SessionCreateMessage {
   type: 'session:create';
   name?: string;
   workspace_id: string;
-  executor: Executor;
+  /** Owning user Agent (agents.json). Interactive creation always sends it;
+   *  the Host resolves the Proxy kind, CLI path, defaults, display name, and
+   *  color from it. Optional on the wire only so a fork of a pre-migration
+   *  (unbound) session can still fall back to `executor`. */
+  agent_id?: string;
+  /** Resolved by the Host from the Agent; retained on the wire only for
+   *  older clients and legacy unbound sessions. */
+  executor?: Executor;
   model?: string;
   /** Required for Claude/Codex. Kimi uses executor-native configuration. */
   approval_mode?: ApprovalMode;

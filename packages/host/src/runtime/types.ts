@@ -19,7 +19,11 @@ export interface RuntimeProbe {
 
 export interface CliRuntimeProvider {
   readonly id: Executor;
-  inspectInstalled(): Promise<InstalledRuntime[]>;
+  /** Scan for usable runtimes. An explicit `overridePath` wins over the
+   *  provider's configured-path callback and becomes the single 'override'
+   *  candidate; omit it to use the configured path, PATH, and official
+   *  install locations. */
+  inspectInstalled(overridePath?: string): Promise<InstalledRuntime[]>;
   probe(
     runtime: InstalledRuntime,
     protector?: RuntimeProcessGroupProtector,

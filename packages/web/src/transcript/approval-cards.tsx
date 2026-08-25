@@ -482,8 +482,10 @@ function InteractionInputs({
  * (`.approval-line`) that mixes in with the process rows: ✓ (ok) / ✕
  * (danger) + subject (the command or the question text) + right note
  * (`Allowed once · by web` / the picked answer / `Declined · by web`).
+ * Exported for the event box, where a resolved interaction joins the live
+ * tail as the same one-line summary.
  */
-function ApprovalLine({ item }: { item: ApprovalItem }) {
+export function ApprovalLine({ item }: { item: ApprovalItem }) {
   const t = useT();
   const ok = item.status !== 'declined';
   let subject: React.ReactNode;

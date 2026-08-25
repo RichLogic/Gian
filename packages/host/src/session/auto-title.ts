@@ -5,6 +5,7 @@ import type { ProxyManager } from '../proxy/manager.js';
 import type { Db } from '../storage/db.js';
 import type { SessionHistoryStore } from './history-store.js';
 import type { SessionRepository } from './repository.js';
+import { nativeSessionsCacheKey } from './native-session-service.js';
 
 /**
  * Issue #57: derive a session name automatically once an unnamed session has
@@ -73,6 +74,8 @@ interface AutoTitleDeps {
   proxy: ProxyManager;
   /** SessionManager.renameSession — DB write + broadcast + native name sync. */
   rename: (sessionId: string, name: string) => void;
+  /** Resolves the session's owning Agent CLI path for the lookup client. */
+  cliPathForSession?: (session: Session) => string | null;
   /** Test seam for the bounded native-title polling schedule. */
   nativePollDelaysMs?: readonly number[];
   /** Test seam for advancing polling without wall-clock delays. */
@@ -163,9 +166,10 @@ export class AutoTitleService {
     if (!session.native_session_id) return null;
     const cwd = this.cwdFor(session);
     if (!cwd) return null;
-    const cacheKey = `__native_sessions_${session.executor}__`;
+    const cliPath = this.deps.cliPathForSession?.(session) ?? null;
+    const cacheKey = nativeSessionsCacheKey(session.executor, cliPath);
     try {
-      const client = await this.deps.proxy.getOrCreate(cacheKey, session.executor);
+      const client = await this.deps.proxy.getOrCreate(cacheKey, session.executor, { cliPath });
       await client.initialize();
       if (!client.listNativeSessions) return null;
       // Same pagination pattern as NativeSessionService.listFromProxy.

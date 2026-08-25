@@ -34,6 +34,7 @@ import { buildHealthPayload } from './health.js';
 import { requireDesktopClient } from './desktop-boundary.js';
 import { RuntimeGuardian } from '../runtime/guardian.js';
 import type { ApplicationRouteOptions } from './routes/applications.js';
+import { GianToolService } from '../tool/service.js';
 
 export interface AppContext {
   db: Db;
@@ -78,6 +79,7 @@ export interface AppHandle {
   app: Hono;
   injectWebSocket: ReturnType<typeof createNodeWebSocket>['injectWebSocket'];
   shutdown: () => Promise<void>;
+  toolService: GianToolService;
 }
 
 export function createApp(ctx: AppContext): AppHandle {
@@ -128,8 +130,51 @@ export function createApp(ctx: AppContext): AppHandle {
     watcher,
     ctx.agentManager ? executor => ctx.agentManager!.proxyDefaults(executor) : undefined,
     attention,
+    ctx.agentManager
+      ? {
+          cliPathForKind: executor => ctx.agentManager!.firstAgentPath(executor),
+          cliPathForSession: session => {
+            if (session.agent_id) {
+              try {
+                return ctx.agentManager!.agentRuntimePath(session.agent_id).cliPath;
+              } catch {
+                return null;
+              }
+            }
+            return ctx.agentManager!.firstAgentPath(session.executor);
+          },
+          requireCliPathForSession: session => {
+            if (session.agent_id) {
+              try {
+                return ctx.agentManager!.agentRuntimePath(session.agent_id).cliPath;
+              } catch {
+                throw Object.assign(
+                  new Error(`Agent was deleted: ${session.agent_name ?? session.agent_id}`),
+                  { code: 'AGENT_DELETED' },
+                );
+              }
+            }
+            return ctx.agentManager!.firstAgentPath(session.executor);
+          },
+          agentRuntime: agentId => {
+            const agent = ctx.agentManager!.getAgent(agentId);
+            return { agent, cliPath: ctx.agentManager!.agentRuntimePath(agentId).cliPath };
+          },
+          agentsForKind: executor => (
+            ctx.agentManager!.listAgents().filter(agent => agent.proxy === executor)
+          ),
+        }
+      : undefined,
   );
   const tasks = new TaskManager(ctx.db);
+  const toolService = new GianToolService({
+    db: ctx.db,
+    tasks,
+    sessions,
+    approvals,
+    broadcaster,
+    ...(ctx.agentManager ? { agents: ctx.agentManager } : {}),
+  });
 
   // Workbench terminal manager — standalone shell PTYs, independent of
   // any Gian session. The xterm tabs in the workbench pane are bound to
@@ -148,26 +193,31 @@ export function createApp(ctx: AppContext): AppHandle {
   // can't import SessionManager from ApprovalManager. Inject the callbacks
   // here after both objects exist.
   approvals.setRespondFn((sid, aid, dec) => sessions.respondApproval(sid, aid, dec));
-  approvals.setGetModeFn(sid => sessions.getSession(sid).approval_mode);
+  approvals.setGetModeFn(sid => sessions.getApprovalModeForActiveTurn(sid));
 
   // Pre-warm proxy capabilities so model controls are ready before the first
   // session opens. Async, non-blocking; failures are tolerated.
   //
-  // Skipped when `GIAN_SKIP_PROXY_WARMUP=1` so tests can `createApp` an
-  // in-memory Hono harness without spawning a real cc-proxy / codex-proxy
-  // child. The fire-and-forget warmup would otherwise leak subprocesses
-  // and a fixture tmp dir gets polluted with daemon logs.
-  if (process.env['GIAN_SKIP_PROXY_WARMUP'] !== '1') {
-    const warm = (executor: 'claude' | 'codex') => {
-      const run = () => sessions.warmCapabilities(executor).catch(err => {
-        console.warn(`[proxy] warmCapabilities(${executor}) failed:`, err instanceof Error ? err.message : err);
+  // Only saved Agents' (kind, path) pairs warm: the catalog itself never
+  // spawns at boot, and an Agent whose CLI/Proxy is not ready is skipped.
+  // `GIAN_SKIP_PROXY_WARMUP=1` lets tests `createApp` an in-memory Hono
+  // harness without spawning a real cc-proxy / codex-proxy child.
+  if (process.env['GIAN_SKIP_PROXY_WARMUP'] !== '1' && ctx.agentManager) {
+    const agentManager = ctx.agentManager;
+    const warm = (agentId: string, proxy: 'claude' | 'codex') => {
+      const cliPath = agentManager.agentRuntimePath(agentId).cliPath;
+      const run = () => sessions.warmCapabilities(proxy, cliPath).catch(err => {
+        console.warn(`[proxy] warmCapabilities(${proxy}) failed:`, err instanceof Error ? err.message : err);
       });
-      if (!ctx.agentManager) return run();
-      return ctx.agentManager.status(executor).then(status => (
+      return agentManager.agentStatus(agentId).then(status => (
         status.ready ? run() : undefined
       ));
     };
-    void Promise.all([warm('claude'), warm('codex')]);
+    void Promise.all(
+      agentManager.listAgents()
+        .filter(agent => agent.proxy === 'claude' || agent.proxy === 'codex')
+        .map(agent => warm(agent.id, agent.proxy as 'claude' | 'codex')),
+    );
   }
 
   const handlers = makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db: ctx.db });
@@ -198,7 +248,14 @@ export function createApp(ctx: AppContext): AppHandle {
   registerSettingsRoutes(app, ctx.db);
   registerWorkspaceRoutes(app, ctx.db);
   registerTaskRoutes(app, { tasks, sessions, broadcaster });
-  registerProxyRoutes(app, ctx.db, sessions);
+  registerProxyRoutes(
+    app,
+    ctx.db,
+    sessions,
+    ctx.agentManager
+      ? agentId => ctx.agentManager!.agentRuntimePath(agentId)
+      : undefined,
+  );
   registerSessionRoutes(app, ctx.db, sessions);
   registerNativeSessionRoutes(app, { db: ctx.db, sessions, broadcaster });
   registerWorkspaceFileRoutes(app, ctx.db);
@@ -245,7 +302,9 @@ export function createApp(ctx: AppContext): AppHandle {
   return {
     app,
     injectWebSocket,
+    toolService,
     shutdown: async () => {
+      toolService.close();
       watcher.stopAll();
       await term.closeAll();
       await runtimeGuardian?.stop();

@@ -40,6 +40,8 @@
         "proxy-protocol",
         "scripts",
         "shared",
+        "tool-cli",
+        "tool-mcp",
         "web"
       ],
       "scopes": [
@@ -195,6 +197,35 @@
       "reason": "Host behavior selects Host tests plus Web contract and component integration."
     },
     {
+      "id": "gian-tool",
+      "patterns": [
+        "packages/shared/src/tool.ts",
+        "packages/host/src/tool/**",
+        "packages/host/migrations/056_gian_tool_v0.sql",
+        "packages/host/test/gian-tool-*.test.ts",
+        "packages/tool-cli/**",
+        "packages/tool-mcp/**",
+        "scripts/fixtures/gian-tool-mcp-provider-cases.json"
+      ],
+      "modules": [
+        "shared",
+        "host",
+        "tool-cli",
+        "tool-mcp"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:traceability",
+        "quality:docs"
+      ],
+      "reason": "Gian Tool contracts cross shared validation, Host domain orchestration, the private UDS boundary, and the CLI/MCP clients."
+    },
+    {
       "id": "host-process-git-runtime",
       "patterns": [
         "packages/host/src/proxy/**",
@@ -221,6 +252,8 @@
         "packages/proxy-protocol/src/schemas.ts",
         "packages/proxy-protocol/src/conformance.ts",
         "packages/proxy-protocol/src/redact.ts",
+        "packages/proxy-protocol/src/sidechat-resume-store.ts",
+        "packages/proxy-protocol/test/sidechat-resume-store.test.ts",
         "packages/shared/src/sidechat.ts",
         "packages/shared/src/operations.ts",
         "packages/host/src/session/sidechat-*.ts",
@@ -229,7 +262,11 @@
         "packages/host/migrations/053_fork_request_identity.sql",
         "packages/host/migrations/054_sidechat_public_state.sql",
         "packages/host/test/fixtures/fake-sidechat-fork-proxy.mjs",
-        "packages/host/test/sidechat-fork-*.test.ts"
+        "packages/host/test/sidechat-fork-*.test.ts",
+        "packages/proxies/cc-proxy/src/protocol/v2-adapter.ts",
+        "packages/proxies/codex-proxy/src/protocol/v2-adapter.ts",
+        "packages/proxies/kimi-proxy/src/protocol/v2-adapter.ts",
+        "packages/proxies/grok-proxy/src/protocol/v2-adapter.ts"
       ],
       "modules": [
         "proxy-protocol",

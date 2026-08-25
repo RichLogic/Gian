@@ -9,7 +9,7 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-width: 860px;
+  max-width: 1120px;
   margin: 0 auto;
   width: 100%;
 }
@@ -29,6 +29,102 @@
   text-align: center;
   color: var(--text-3);
   font-size: var(--fz-12);
+}
+
+/* --- Trajectory controls ---------------------------------------------- */
+
+.trace-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-bottom: 2px;
+}
+
+.trace-toolbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.trace-toolbar-btn,
+.trace-toolbar-icon {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
+  color: var(--text-2);
+  background: transparent;
+  font: 500 var(--fz-11)/1 var(--font-sans);
+  cursor: pointer;
+}
+
+.trace-toolbar-btn:hover,
+.trace-toolbar-icon:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.trace-toolbar-btn[aria-pressed="true"] {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+.trace-control-count {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.trace-toolbar-icon {
+  width: 44px;
+  flex: none;
+  padding: 0;
+}
+
+.trace-search {
+  min-width: 0;
+  width: 100%;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-1);
+  color: var(--text-3);
+  background: var(--surface);
+}
+
+.trace-search:focus-within {
+  border-color: var(--accent);
+  color: var(--text-2);
+}
+
+.trace-search input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font: var(--fz-11)/1 var(--font-sans);
+}
+
+.trace-search input::placeholder { color: var(--text-3); }
+
+.trace-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 0 2px 2px;
+  color: var(--text-3);
+  font: 500 10.5px/1.3 var(--font-mono);
 }
 
 /* --- Timeline: Input / Model / Tools lanes ----------------------------- */
@@ -68,8 +164,7 @@
   overflow: hidden;
 }
 
-/* Sequence mode: equal-width blocks ordered by `at`; color follows the
-   lane, failed items render red. */
+/* Duration bars use provider time. Point events and open spans are ticks. */
 .trace-span {
   position: absolute;
   top: 2px;
@@ -80,6 +175,24 @@
   cursor: pointer;
   background: var(--text-3);
 }
+.trace-span.duration { min-width: 2px; }
+.trace-span.point,
+.trace-span.open {
+  width: 2px;
+  min-width: 2px;
+  border-radius: 0;
+  transform: translateX(-1px);
+}
+.trace-span.point { top: 1px; bottom: 1px; }
+.trace-span.open {
+  top: 3px;
+  bottom: 3px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+.trace-span.open.input { color: var(--ok); background: transparent; }
+.trace-span.open.model { color: var(--accent); background: transparent; }
+.trace-span.open.tools { color: var(--warn); background: transparent; }
 .trace-span.input { background: var(--ok); }
 .trace-span.model { background: var(--accent); }
 .trace-span.tools { background: var(--warn); }
@@ -94,9 +207,8 @@
 /* --- Turn sections ----------------------------------------------------- */
 
 .trace-turn {
-  border-radius: var(--r-2);
-  background: var(--surface-2);
-  padding: 4px 6px 6px;
+  border-top: 1px solid var(--border);
+  padding: 4px 0 6px;
 }
 
 .trace-turn-head {
@@ -113,6 +225,29 @@
   font-size: var(--fz-12);
   color: var(--text);
 }
+
+.trace-turn-toggle {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.trace-turn-caret {
+  width: 9px;
+  height: 9px;
+  flex: none;
+  color: var(--text-3);
+  transform: rotate(90deg);
+  transition: transform 120ms var(--ease);
+}
+
+.trace-turn.collapsed .trace-turn-caret { transform: rotate(0deg); }
 
 .trace-turn-dur {
   font-family: var(--font-mono);
@@ -189,6 +324,26 @@
 .trace-kind.agent { color: var(--warn); }
 
 .trace-row.selected { background: var(--surface-3); }
+
+.trace-shape {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  color: var(--text-3);
+}
+
+.trace-shape.span {
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+}
+
+.trace-shape.event {
+  width: 5px;
+  height: 5px;
+  border: 1px solid currentColor;
+  transform: rotate(45deg);
+}
 
 .trace-row-summary {
   flex: 1 1 0;
@@ -334,4 +489,77 @@
   border-radius: var(--r-1);
   color: var(--text-2);
   font-size: var(--fz-11);
+}
+
+/* --- Semantic detail tabs --------------------------------------------- */
+
+.trace-detail-presentation {
+  color: var(--text-3);
+  font: 500 10px/1 var(--font-mono);
+}
+
+.trace-detail-tabs {
+  display: flex;
+  gap: 16px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.trace-detail-tabs button {
+  min-height: 44px;
+  flex: none;
+  padding: 0 1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text-3);
+  background: transparent;
+  font: 500 var(--fz-11)/1 var(--font-sans);
+  cursor: pointer;
+}
+
+.trace-detail-tabs button:hover { color: var(--text-2); }
+.trace-detail-tabs button.active {
+  color: var(--accent-text);
+  border-bottom-color: var(--accent);
+}
+
+.trace-detail-tabpanel { padding-top: 8px; }
+.trace-detail-summary-meta { padding-top: 4px; }
+
+.trace-detail-summary-text {
+  margin: 8px 0 0;
+  color: var(--text-2);
+  font: var(--fz-12)/1.55 var(--font-sans);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.trace-detail-value {
+  margin: 0;
+  padding: 10px 0;
+}
+
+/* Browser-level rendering containment keeps very long traces responsive
+   without changing item identity or scroll targets. */
+.trace-view.large .trace-turn {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 360px;
+}
+
+@media (min-width: 720px) {
+  .trace-toolbar { flex-wrap: nowrap; }
+  .trace-toolbar-btn,
+  .trace-toolbar-icon { min-height: 30px; }
+  .trace-toolbar-icon { width: 30px; }
+  .trace-search {
+    width: min(260px, 32vw);
+    min-height: 30px;
+    margin-left: auto;
+  }
+  .trace-detail-tabs button { min-height: 34px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trace-turn-caret,
+  .trace-step-caret { transition: none; }
 }

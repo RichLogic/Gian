@@ -44,6 +44,7 @@ export function registerNativeSessionRoutes(
       native_session_id?: string;
       name?: string;
       approval_mode?: ApprovalMode;
+      agent_id?: string;
     }>();
     const executor = body.executor;
     const nativeId = body.native_session_id;
@@ -86,16 +87,20 @@ export function registerNativeSessionRoutes(
             nativeSessionId: nativeId,
             approvalMode,
             ...(body.name ? { name: body.name } : {}),
+            ...(body.agent_id ? { agentId: body.agent_id } : {}),
           }));
         }
       } catch (error) {
-        const value = error as { code?: unknown; sessionId?: unknown; message?: unknown };
+        const value = error as { code?: unknown; sessionId?: unknown; message?: unknown; agents?: unknown };
         const message = typeof value.message === 'string' ? value.message : String(error);
         if (value.code === 'SESSION_ALREADY_EXISTS') {
           return c.json({
             error: message,
             ...(typeof value.sessionId === 'string' ? { gian_session_id: value.sessionId } : {}),
           }, 409);
+        }
+        if (value.code === 'AGENT_REQUIRED') {
+          return c.json({ error: message, code: 'AGENT_REQUIRED', agents: value.agents ?? [] }, 400);
         }
         return c.json({ error: message }, value.code === 'AUTH_REQUIRED' ? 401 : 400);
       }
@@ -107,15 +112,19 @@ export function registerNativeSessionRoutes(
             cwd: workspace.path,
             nativeSessionId: nativeId,
             ...(body.name ? { name: body.name } : {}),
+            ...(body.agent_id ? { agentId: body.agent_id } : {}),
           }));
         } catch (error) {
-          const value = error as { code?: unknown; sessionId?: unknown; message?: unknown };
+          const value = error as { code?: unknown; sessionId?: unknown; message?: unknown; agents?: unknown };
           const message = typeof value.message === 'string' ? value.message : String(error);
           if (value.code === 'SESSION_ALREADY_EXISTS') {
             return c.json({
               error: message,
               ...(typeof value.sessionId === 'string' ? { gian_session_id: value.sessionId } : {}),
             }, 409);
+          }
+          if (value.code === 'AGENT_REQUIRED') {
+            return c.json({ error: message, code: 'AGENT_REQUIRED', agents: value.agents ?? [] }, 400);
           }
           return c.json({ error: message }, value.code === 'AUTH_REQUIRED' ? 401 : 400);
         }
@@ -134,20 +143,52 @@ export function registerNativeSessionRoutes(
       const now = new Date().toISOString();
       const sessionName = body.name?.trim() || `adopted ${nativeId.slice(0, 8)}`;
 
+      let binding: {
+        agentId: string | null;
+        agentName: string | null;
+        agentColor: string | null;
+      };
+      try {
+        binding = sessions.resolveAdoptAgent(executor, body.agent_id);
+      } catch (error) {
+        const value = error as { code?: unknown; message?: unknown; agents?: unknown };
+        if (value.code === 'AGENT_REQUIRED') {
+          return c.json({
+            error: String(value.message ?? error),
+            code: 'AGENT_REQUIRED',
+            agents: value.agents ?? [],
+          }, 400);
+        }
+        return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+      }
+
       db.prepare(
         `INSERT INTO sessions
-          (id, name, type, workspace_id, executor, model, approval_mode,
+          (id, name, type, workspace_id, executor, agent_id, agent_name, agent_color,
+           model, approval_mode,
            active_channel, status, archived,
            worktree_path, branch, base_branch, worktree_outcome,
            native_session_id,
            created_at, updated_at)
          VALUES
-          (?, ?, 'coding', ?, ?, NULL, ?,
+          (?, ?, 'coding', ?, ?, ?, ?, ?, NULL, ?,
            'web', 'new', 0,
            NULL, NULL, NULL, NULL,
            ?,
            ?, ?)`,
-      ).run(sessionId, sessionName, workspace.id, executor, approvalMode, nativeId, now, now);
+      ).run(
+        sessionId,
+        sessionName,
+        workspace.id,
+        executor,
+        binding.agentId,
+        binding.agentName,
+        binding.agentColor,
+        approvalMode,
+        nativeId,
+        now,
+        now,
+      );
 
       const replay = replayNativeJsonl(db, sessionId, native.filePath, executor);
       clearNativeSessionsCache();

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { SessionConfigOption, SessionNotification } from '@agentclientprotocol/sdk';
+import { OpaqueSidechatResumeStore } from '@gian/proxy-protocol';
 import { KimiProxyError } from '../core/errors.js';
 import { KimiProxyService } from '../core/service.js';
 import { KimiProtocolError, type DomainCode } from '../transport/protocol.js';
@@ -151,6 +152,28 @@ interface ReplayState {
   turnCount: number;
 }
 
+type SidechatAnchor =
+  | { type: 'empty' }
+  | { type: 'turn'; turnId: string; sourceTurnId: string };
+
+interface SidechatRecord {
+  parentSessionId: string;
+  resumeRefId: string;
+  anchor: SidechatAnchor;
+  createFingerprint?: string;
+  resumeFingerprint?: string;
+}
+
+interface ServiceSessionShape {
+  id: string;
+  nativeSessionId: string;
+  status: 'idle' | 'running' | 'needs-approval' | 'stale' | 'closed' | 'error';
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  configOptions: SessionConfigOption[];
+}
+
 const PROTOCOL_NAME = 'gian.proxy';
 const PROTOCOL_V2 = '2.0';
 
@@ -160,6 +183,8 @@ const CAPABILITIES = {
   'session.rename': 1,
   'session.native.list': 1,
   'session.replay': 1,
+  sidechat: 1,
+  'session.fork': 1,
   'catalog.resolve': 1,
   interaction: 1,
   'event.reasoning': 1,
@@ -483,6 +508,12 @@ export class KimiProtocolV2Adapter {
   private readonly replayBySession = new Map<string, ReplayState>();
   private readonly replayPager = new ReplayPager();
   private readonly ledger = new TurnLedger();
+  private readonly resumeStore = new OpaqueSidechatResumeStore();
+  private readonly sidechats = new Map<string, SidechatRecord>();
+  private readonly terminalTurns = new Set<string>();
+  private readonly terminalOrderBySession = new Map<string, string[]>();
+  private readonly terminalSourceTurnIds = new Map<string, string>();
+  private readonly forkResults = new Map<string, { fingerprint: string; result: unknown }>();
   private notificationQueue: Array<{ method: string; params: Record<string, unknown> }> | null = null;
   private initialized = false;
   private catalogRevision = 'kimi-empty';
@@ -543,7 +574,11 @@ export class KimiProtocolV2Adapter {
       case 'initialize': return this.initialize(request.params);
       case 'catalog.list': return this.catalog();
       case 'session.create': return this.createSession(request.params);
-      case 'session.get': return { session: this.serialize(this.requireSession(String(request.params.sessionId ?? ''))) };
+      case 'session.get': return { session: this.serialize(this.requireOrdinarySession(String(request.params.sessionId ?? ''))) };
+      case 'sidechat.create': return this.createSidechat(request.params);
+      case 'sidechat.resume': return this.resumeSidechat(request.params);
+      case 'sidechat.close': return this.closeSidechat(request.params);
+      case 'session.fork': return this.forkSession(request.params);
       case 'turn.start': return this.startTurn(request.params, request.id);
       case 'turn.interrupt': return this.interruptTurn(request.params);
       case 'interaction.respond': return this.respondInteraction(request.params);
@@ -596,7 +631,7 @@ export class KimiProtocolV2Adapter {
     if ((sessionId === null) !== (streamId === null)) {
       throw new KimiProtocolError('INVALID_PARAMS', 'sessionId and streamId must be sent together.');
     }
-    if (sessionId && streamId) this.requireAttached(sessionId, streamId);
+    if (sessionId && streamId) this.requireOrdinaryAttached(sessionId, streamId);
     const sessionConfig = record(params.sessionConfig);
     if (Object.keys(sessionConfig).length > 0) {
       throw new KimiProtocolError(
@@ -659,11 +694,25 @@ export class KimiProtocolV2Adapter {
         { type: 'localImage' as const },
       ],
       configOptions,
+      actions: [
+        {
+          id: 'sidechat.create',
+          supported: this.service.supportsFork(),
+          ...(this.service.supportsFork() ? {} : { reason: 'Current Kimi ACP runtime does not support session/fork.' }),
+        },
+        {
+          id: 'session.fork',
+          supported: this.service.supportsFork(),
+          ...(this.service.supportsFork() ? {} : { reason: 'Current Kimi ACP runtime does not support session/fork.' }),
+        },
+        { id: 'session.fork.atTurn', supported: false, reason: 'Kimi ACP only forks the current head.' },
+      ],
       slashCommands,
     };
     payload.catalogRevision = stableId('catalog', {
       input: payload.input,
       configOptions,
+      actions: payload.actions,
       slashCommands,
     });
     this.catalogRevision = payload.catalogRevision;
@@ -838,6 +887,9 @@ export class KimiProtocolV2Adapter {
     const fingerprint = JSON.stringify({ cwd, roots, nativeSessionId, history });
     const existing = this.sessions.get(sessionId);
     if (existing) {
+      if (this.sidechats.has(sessionId)) {
+        throw new KimiProtocolError('SESSION_NOT_FOUND', 'Session not found.');
+      }
       if (existing.createFingerprint !== fingerprint) {
         throw new KimiProtocolError(
           'CONFLICT',
@@ -883,6 +935,293 @@ export class KimiProtocolV2Adapter {
     this.replayBySession.set(session.id, replay);
     void this.publishCatalogIfCommandsArrive(session);
     return { session: this.serialize(session) };
+  }
+
+  private async createSidechat(params: Record<string, unknown>) {
+    this.assertForkSupported();
+    const parentSessionId = nonEmptyString(params.parentSessionId);
+    const parentStreamId = nonEmptyString(params.parentStreamId);
+    const sidechatId = nonEmptyString(params.sidechatId);
+    if (!parentSessionId || !parentStreamId || !sidechatId) {
+      throw new KimiProtocolError('INVALID_PARAMS', 'parentSessionId, parentStreamId, and sidechatId are required.');
+    }
+    const parent = this.requireOrdinaryAttached(parentSessionId, parentStreamId);
+    const fingerprint = JSON.stringify({ parentSessionId, parentStreamId });
+    const existing = this.sidechats.get(sidechatId);
+    if (existing) {
+      if (existing.createFingerprint !== fingerprint) {
+        throw new KimiProtocolError('CONFLICT', 'sidechatId was reused with a different parent.');
+      }
+      return { sidechat: this.serializeSidechat(this.requireSession(sidechatId), existing) };
+    }
+    if (this.sessions.has(sidechatId)) {
+      throw new KimiProtocolError('CONFLICT', 'sidechatId already belongs to an ordinary Session.');
+    }
+    const anchor = this.sidechatAnchor(parent);
+    const forked = await this.service.forkSession({ sessionId: parent.serviceSessionId });
+    const session = this.attachForkedSession(sidechatId, parent, forked.session as ServiceSessionShape);
+    const createdAt = new Date().toISOString();
+    const resumeRef = this.resumeStore.seal({
+      sidechatId,
+      parentSessionId,
+      nativeSessionId: session.nativeSessionId,
+      anchor,
+      sessionConfig: session.sessionConfig,
+      createdAt,
+    });
+    const sidechat: SidechatRecord = {
+      parentSessionId,
+      resumeRefId: resumeRef.id,
+      anchor,
+      createFingerprint: fingerprint,
+    };
+    this.sidechats.set(sidechatId, sidechat);
+    return { sidechat: this.serializeSidechat(session, sidechat, createdAt) };
+  }
+
+  private async resumeSidechat(params: Record<string, unknown>) {
+    this.assertForkSupported();
+    const sidechatId = nonEmptyString(params.sidechatId);
+    const parentSessionId = nonEmptyString(params.parentSessionId);
+    const resumeRefId = nonEmptyString(record(params.resumeRef).id);
+    if (!sidechatId || !parentSessionId || !resumeRefId) {
+      throw new KimiProtocolError('INVALID_PARAMS', 'sidechatId, parentSessionId, and resumeRef are required.');
+    }
+    if (this.resumeStore.closed(resumeRefId)) {
+      throw new KimiProtocolError('SIDECHAT_UNAVAILABLE', 'Side Chat was already closed.');
+    }
+    const payload = this.resumeStore.open(resumeRefId);
+    if (!payload) throw new KimiProtocolError('SIDECHAT_UNAVAILABLE', 'Side Chat resume reference is unavailable.');
+    if (payload.sidechatId !== sidechatId || payload.parentSessionId !== parentSessionId) {
+      throw new KimiProtocolError('CONFLICT', 'Side Chat resume identity does not match.');
+    }
+    const parent = this.requireOrdinarySession(parentSessionId);
+    const fingerprint = JSON.stringify({ parentSessionId, resumeRefId });
+    const existing = this.sidechats.get(sidechatId);
+    if (existing) {
+      if (existing.resumeFingerprint !== fingerprint) {
+        throw new KimiProtocolError('CONFLICT', 'Side Chat is already attached with another resume reference.');
+      }
+      return { sidechat: this.serializeSidechat(this.requireSession(sidechatId), existing, payload.createdAt) };
+    }
+    if (this.sessions.has(sidechatId)) {
+      throw new KimiProtocolError('CONFLICT', 'sidechatId already belongs to an ordinary Session.');
+    }
+    const resumed = await this.service.createSession({
+      cwd: parent.cwd,
+      nativeSessionId: payload.nativeSessionId,
+      resumeMode: 'resume',
+      mcpServers: [],
+    });
+    const session = this.attachForkedSession(
+      sidechatId,
+      parent,
+      resumed.session as ServiceSessionShape,
+      payload.sessionConfig,
+    );
+    const sidechat: SidechatRecord = {
+      parentSessionId,
+      resumeRefId,
+      anchor: payload.anchor as SidechatAnchor,
+      resumeFingerprint: fingerprint,
+    };
+    this.sidechats.set(sidechatId, sidechat);
+    return { sidechat: this.serializeSidechat(session, sidechat, payload.createdAt) };
+  }
+
+  private async closeSidechat(params: Record<string, unknown>) {
+    const sidechatId = nonEmptyString(params.sidechatId);
+    const resumeRefId = nonEmptyString(record(params.resumeRef).id);
+    const streamId = params.streamId === undefined ? null : nonEmptyString(params.streamId);
+    if (!sidechatId || !resumeRefId || (params.streamId !== undefined && !streamId)) {
+      throw new KimiProtocolError('INVALID_PARAMS', 'sidechatId and resumeRef are required; streamId must be non-empty.');
+    }
+    const closed = this.resumeStore.closed(resumeRefId);
+    if (closed) {
+      return {
+        ok: true as const,
+        sidechatId,
+        providerDataDeleted: closed.sidechatId === sidechatId ? closed.providerDataDeleted : false,
+      };
+    }
+    const payload = this.resumeStore.open(resumeRefId);
+    if (payload && payload.sidechatId !== sidechatId) {
+      throw new KimiProtocolError('CONFLICT', 'resumeRef belongs to another live Side Chat.');
+    }
+    const live = this.sidechats.get(sidechatId);
+    if (live && live.resumeRefId !== resumeRefId) {
+      throw new KimiProtocolError('CONFLICT', 'resumeRef belongs to another Side Chat attachment.');
+    }
+    if (live) {
+      const session = this.requireSession(sidechatId);
+      if (streamId && session.streamId !== streamId) {
+        throw new KimiProtocolError('SESSION_STALE', 'Side Chat stream is stale.');
+      }
+      await this.detachSession(session, false);
+      this.sidechats.delete(sidechatId);
+    }
+    // Kimi's current ACP delete method is unstable. Gian invalidates its own
+    // encrypted ref durably and reports that Provider history may remain.
+    const providerDataDeleted = false;
+    this.resumeStore.rememberClosed(resumeRefId, { sidechatId, providerDataDeleted });
+    return { ok: true as const, sidechatId, providerDataDeleted };
+  }
+
+  private async forkSession(params: Record<string, unknown>) {
+    this.assertForkSupported();
+    const sourceSessionId = nonEmptyString(params.sourceSessionId);
+    const sourceStreamId = nonEmptyString(params.sourceStreamId);
+    const sessionId = nonEmptyString(params.sessionId);
+    const anchor = record(params.anchor);
+    if (!sourceSessionId || !sourceStreamId || !sessionId || anchor.type !== 'head') {
+      throw new KimiProtocolError(
+        anchor.type === 'turn' ? 'CAPABILITY_NOT_SUPPORTED' : 'INVALID_PARAMS',
+        anchor.type === 'turn' ? 'Kimi ACP does not support exact turn forks.' : 'A head fork anchor is required.',
+      );
+    }
+    const fingerprint = JSON.stringify({ sourceSessionId, sourceStreamId, anchor });
+    const previous = this.forkResults.get(sessionId);
+    if (previous) {
+      if (previous.fingerprint !== fingerprint) {
+        throw new KimiProtocolError('CONFLICT', 'Fork sessionId was reused with another source boundary.');
+      }
+      return previous.result;
+    }
+    if (this.sessions.has(sessionId)) {
+      throw new KimiProtocolError('CONFLICT', 'Fork sessionId already belongs to another Session.');
+    }
+    const source = this.requireOrdinaryAttached(sourceSessionId, sourceStreamId);
+    const boundary = this.forkBoundary(source);
+    const forked = await this.service.forkSession({ sessionId: source.serviceSessionId });
+    const child = this.attachForkedSession(sessionId, source, forked.session as ServiceSessionShape);
+    this.replayBySession.set(child.id, this.cloneReplay(source, child));
+    const result = {
+      session: this.serialize(child),
+      origin: {
+        kind: 'fork' as const,
+        sessionId: source.id,
+        turnId: boundary.turnId,
+        sourceTurnId: boundary.sourceTurnId,
+      },
+    };
+    this.forkResults.set(sessionId, { fingerprint, result });
+    return result;
+  }
+
+  private assertForkSupported(): void {
+    if (!this.service.supportsFork()) {
+      throw new KimiProtocolError('CAPABILITY_NOT_SUPPORTED', 'Current Kimi ACP runtime does not support session/fork.');
+    }
+  }
+
+  private attachForkedSession(
+    id: string,
+    parent: AttachedSession,
+    serviceSession: ServiceSessionShape,
+    sessionConfig: Record<string, ConfigValue> = parent.sessionConfig,
+  ): AttachedSession {
+    const session: AttachedSession = {
+      id,
+      serviceSessionId: serviceSession.id,
+      nativeSessionId: serviceSession.nativeSessionId,
+      streamId: randomUUID(),
+      cwd: parent.cwd,
+      state: serviceSession.status === 'needs-approval' ? 'waiting_interaction' : 'idle',
+      lastError: serviceSession.lastError,
+      createdAt: serviceSession.createdAt,
+      updatedAt: serviceSession.updatedAt,
+      configOptions: [...serviceSession.configOptions],
+      sessionConfig: { ...sessionConfig },
+      createFingerprint: `fork:${serviceSession.nativeSessionId}`,
+      turnOrdinal: this.replayBySession.get(parent.id)?.turnCount ?? parent.turnOrdinal,
+      sequence: 0,
+    };
+    this.sessions.set(session.id, session);
+    this.sessionByServiceId.set(session.serviceSessionId, session);
+    this.ledger.attach(session.id, session.streamId);
+    return session;
+  }
+
+  private cloneReplay(source: AttachedSession, child: AttachedSession): ReplayState {
+    const parent = this.replayBySession.get(source.id) ?? {
+      streamId: stableId('replay', source.nativeSessionId),
+      events: [],
+      turnCount: 0,
+    };
+    const streamId = stableId('replay', child.nativeSessionId);
+    return {
+      streamId,
+      turnCount: parent.turnCount,
+      events: parent.events.map((event) => ({
+        ...event,
+        sessionId: child.id,
+        replayStreamId: streamId,
+      })),
+    };
+  }
+
+  private sidechatAnchor(session: AttachedSession): SidechatAnchor {
+    if (this.activeTurnBySession.has(session.id)) {
+      throw new KimiProtocolError('SESSION_BUSY', 'Side Chat requires an idle parent Session.');
+    }
+    const boundary = this.latestTerminalBoundary(session.id);
+    if (boundary) return { type: 'turn', ...boundary };
+    if ((this.replayBySession.get(session.id)?.events.length ?? 0) === 0) return { type: 'empty' };
+    throw new KimiProtocolError('FORK_BOUNDARY_UNAVAILABLE', 'No stable terminal Turn is available in this attach generation.');
+  }
+
+  private forkBoundary(session: AttachedSession): { turnId: string; sourceTurnId: string } {
+    if (this.activeTurnBySession.has(session.id)) {
+      throw new KimiProtocolError('SESSION_BUSY', 'Fork requires an idle source Session.');
+    }
+    const boundary = this.latestTerminalBoundary(session.id);
+    if (!boundary) throw new KimiProtocolError('FORK_BOUNDARY_UNAVAILABLE', 'Fork requires a terminal Turn.');
+    return boundary;
+  }
+
+  private latestTerminalBoundary(sessionId: string): { turnId: string; sourceTurnId: string } | null {
+    const turns = this.terminalOrderBySession.get(sessionId) ?? [];
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turnId = turns[index]!;
+      const sourceTurnId = this.terminalSourceTurnIds.get(this.turnKey(sessionId, turnId));
+      if (sourceTurnId) return { turnId, sourceTurnId };
+    }
+    return null;
+  }
+
+  private availableActions(session: AttachedSession) {
+    const busy = this.activeTurnBySession.has(session.id) || session.state !== 'idle';
+    const boundary = this.latestTerminalBoundary(session.id);
+    const historyEmpty = (this.replayBySession.get(session.id)?.events.length ?? 0) === 0;
+    const reason = busy
+      ? 'Wait for the active turn to finish.'
+      : 'No stable terminal turn is available in this attach generation.';
+    return {
+      'sidechat.create': {
+        enabled: !busy && (boundary !== null || historyEmpty),
+        ...(!busy && (boundary !== null || historyEmpty) ? {} : { reason }),
+      },
+      'session.fork': {
+        enabled: !busy && boundary !== null,
+        ...(!busy && boundary !== null ? {} : { reason }),
+      },
+    };
+  }
+
+  private serializeSidechat(session: AttachedSession, sidechat: SidechatRecord, createdAt = session.createdAt) {
+    return {
+      id: session.id,
+      parentSessionId: sidechat.parentSessionId,
+      streamId: session.streamId,
+      state: session.state,
+      resumeRef: { id: sidechat.resumeRefId },
+      anchor: sidechat.anchor,
+      sessionConfig: session.sessionConfig,
+      ...this.turnConfigFields(session.configOptions),
+      lastError: session.lastError,
+      createdAt,
+      updatedAt: session.updatedAt,
+    };
   }
 
   private async publishCatalogIfCommandsArrive(session: AttachedSession): Promise<void> {
@@ -1050,7 +1389,7 @@ export class KimiProtocolV2Adapter {
   }
 
   private async renameSession(params: Record<string, unknown>) {
-    this.requireAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
+    this.requireOrdinaryAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
     const name = typeof params.name === 'string' ? params.name : '';
     if ([...name].length > 200) {
       throw new KimiProtocolError('INVALID_PARAMS', 'Session name must not exceed 200 Unicode code points.');
@@ -1067,7 +1406,11 @@ export class KimiProtocolV2Adapter {
       if (closedStreamId === streamId) return { ok: true as const };
       throw new KimiProtocolError('SESSION_STALE', 'Session stream is stale.');
     }
-    const session = this.requireAttached(sessionId, streamId);
+    const session = this.requireOrdinaryAttached(sessionId, streamId);
+    return this.detachSession(session, true);
+  }
+
+  private async detachSession(session: AttachedSession, rememberClosed: boolean) {
     const activeTurn = this.activeTurnBySession.get(session.id);
     if (activeTurn) {
       this.resolveInteractionsForTurn(session, activeTurn, 'turn_ended');
@@ -1081,10 +1424,18 @@ export class KimiProtocolV2Adapter {
     this.sessionByServiceId.delete(session.serviceSessionId);
     this.replayBySession.delete(session.id);
     this.replayPager.close(session.id);
-    this.closedAttaches.set(session.id, session.streamId);
-    if (this.closedAttaches.size > 200) {
-      const oldest = this.closedAttaches.keys().next().value;
-      if (oldest !== undefined) this.closedAttaches.delete(oldest);
+    this.terminalOrderBySession.delete(session.id);
+    for (const key of this.terminalTurns) {
+      if (!key.startsWith(`${session.id}\u0000`)) continue;
+      this.terminalTurns.delete(key);
+      this.terminalSourceTurnIds.delete(key);
+    }
+    if (rememberClosed) {
+      this.closedAttaches.set(session.id, session.streamId);
+      if (this.closedAttaches.size > 200) {
+        const oldest = this.closedAttaches.keys().next().value;
+        if (oldest !== undefined) this.closedAttaches.delete(oldest);
+      }
     }
     return { ok: true as const };
   }
@@ -1114,7 +1465,7 @@ export class KimiProtocolV2Adapter {
   }
 
   private replay(params: Record<string, unknown>) {
-    this.requireAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
+    this.requireOrdinaryAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
     const replay = this.replayBySession.get(String(params.sessionId ?? ''))
       ?? { streamId: stableId('replay', params.sessionId), events: [], turnCount: 0 };
     const rawLimit = params.limit;
@@ -1439,6 +1790,13 @@ export class KimiProtocolV2Adapter {
     failed: boolean,
     data: Record<string, unknown>,
   ): void {
+    const turnKey = this.turnKey(session.id, turnId);
+    if (this.terminalTurns.has(turnKey)) return;
+    this.terminalTurns.add(turnKey);
+    this.terminalSourceTurnIds.set(turnKey, this.sourceTurnIdFor(session, turnId));
+    const terminalOrder = this.terminalOrderBySession.get(session.id) ?? [];
+    if (!terminalOrder.includes(turnId)) terminalOrder.push(turnId);
+    this.terminalOrderBySession.set(session.id, terminalOrder);
     this.resolveInteractionsForTurn(session, turnId, failed ? 'runtime_ended' : 'turn_ended');
     this.closeOpenWork(session, turnId, failed ? 'failed' : 'succeeded');
     if (failed) {
@@ -1465,6 +1823,14 @@ export class KimiProtocolV2Adapter {
       this.emitTurnEvent('turn.completed', session, turnId, { stopReason });
     }
     this.clearTurn(session.id, turnId);
+    if (!this.sidechats.has(session.id) && this.service.supportsFork()) {
+      this.emitSessionEvent('session.updated', session, {
+        state: session.state,
+        lastError: session.lastError,
+        availableActions: this.availableActions(session),
+        updatedAt: session.updatedAt,
+      });
+    }
   }
 
   private closeOpenWork(
@@ -1749,16 +2115,34 @@ export class KimiProtocolV2Adapter {
     const occurrenceKey = `${key}\u0000event:${method}`;
     const occurrence = (this.eventOccurrences.get(occurrenceKey) ?? 0) + 1;
     this.eventOccurrences.set(occurrenceKey, occurrence);
+    const eventId = this.turnEventId(sourceTurnId, method, data, identity, occurrence);
+    const emittedAt = new Date().toISOString();
     this.emit(method, {
-      eventId: this.turnEventId(sourceTurnId, method, data, identity, occurrence),
+      eventId,
       streamId: session.streamId,
       sequence: session.sequence,
       sessionId: session.id,
       turnId,
       sourceTurnId,
-      emittedAt: new Date().toISOString(),
+      emittedAt,
       data,
     });
+    if (!this.sidechats.has(session.id)) {
+      const replay = this.replayBySession.get(session.id);
+      if (replay) {
+        replay.events.push({
+          method,
+          eventId,
+          sessionId: session.id,
+          replayStreamId: replay.streamId,
+          sequence: (replay.events.at(-1)?.sequence ?? 0) + 1,
+          sourceTurnId,
+          emittedAt,
+          data,
+        });
+        if (method === 'turn.completed' || method === 'turn.failed') replay.turnCount += 1;
+      }
+    }
   }
 
   private turnEventId(
@@ -1844,6 +2228,7 @@ export class KimiProtocolV2Adapter {
       sessionConfig: session.sessionConfig,
       ...this.turnConfigFields(session.configOptions),
       lastError: session.lastError,
+      ...(this.service.supportsFork() ? { availableActions: this.availableActions(session) } : {}),
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
     };
@@ -1860,8 +2245,23 @@ export class KimiProtocolV2Adapter {
     return session;
   }
 
+  private requireOrdinarySession(sessionId: string): AttachedSession {
+    if (this.sidechats.has(sessionId)) {
+      throw new KimiProtocolError('SESSION_NOT_FOUND', 'Session not found.');
+    }
+    return this.requireSession(sessionId);
+  }
+
   private requireAttached(sessionId: string, streamId: string): AttachedSession {
     const session = this.requireSession(sessionId);
+    if (session.streamId !== streamId) {
+      throw new KimiProtocolError('SESSION_STALE', 'Session stream is stale.');
+    }
+    return session;
+  }
+
+  private requireOrdinaryAttached(sessionId: string, streamId: string): AttachedSession {
+    const session = this.requireOrdinarySession(sessionId);
     if (session.streamId !== streamId) {
       throw new KimiProtocolError('SESSION_STALE', 'Session stream is stale.');
     }

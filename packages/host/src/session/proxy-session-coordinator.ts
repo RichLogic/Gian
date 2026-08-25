@@ -26,6 +26,9 @@ export interface BringUpProxySessionInput {
   executor: Executor;
   cwd: string;
   model: string | null;
+  /** The owning Agent's resolved CLI path; null resolves through the
+   *  provider default (environment override / PATH / official install). */
+  cliPath?: string | null;
   nativeSessionId?: string | null;
   executorConfig?: ExecutorConfigState;
   executorDefaults?: AgentProxyDefaults;
@@ -85,6 +88,13 @@ function nativeOptionsFromCatalog(
   }));
 }
 
+/** Catalog/runtime caches are keyed by (kind, resolved CLI path): two Agents
+ *  on one Proxy kind with different CLI paths never share a cached catalog
+ *  or a capabilities probe process. */
+function catalogKey(executor: Executor | string, cliPath?: string | null): string {
+  return `${executor}${cliPath ?? ''}`;
+}
+
 export class ProxySessionCoordinator {
   private sessionIds = new Map<string, string>();
   private bringUps = new Map<string, Promise<string>>();
@@ -102,6 +112,8 @@ export class ProxySessionCoordinator {
     watcher: NativeJsonlWatcher | null,
     private callbacks: ProxySessionCallbacks,
     private dataDir?: string,
+    /** Resolves a session's owning Agent CLI path for rehydrate/refresh. */
+    private resolveCliPath?: (executor: Executor, session?: Session) => string | null,
   ) {
     this.sessionStore = sessions;
     void watcher;
@@ -133,7 +145,11 @@ export class ProxySessionCoordinator {
     const client = this.proxy.get(sessionId);
     if (!client) return;
     const catalog = await client.catalog();
-    this.catalogByExecutor.set(client.executor, catalog);
+    const session = this.sessionStore.find(sessionId);
+    const cliPath = session
+      ? this.resolveCliPath?.(session.executor, session) ?? null
+      : null;
+    this.catalogByExecutor.set(catalogKey(client.executor, cliPath), catalog);
   }
 
   forget(sessionId: string): void {
@@ -179,6 +195,7 @@ export class ProxySessionCoordinator {
       executor: session.executor,
       cwd: session.worktree_path ?? workspace.path,
       model: session.model,
+      cliPath: this.resolveCliPath?.(session.executor, session) ?? null,
       nativeSessionId: session.native_session_id,
       executorConfig: session.executor_config,
       displayName: session.name,
@@ -205,15 +222,16 @@ export class ProxySessionCoordinator {
   }
 
   async bringUp(args: BringUpProxySessionInput): Promise<BringUpProxySessionResult> {
-    const client = await this.proxy.getOrCreate(args.sessionId, args.executor);
+    const cliPath = args.cliPath ?? null;
+    const client = await this.proxy.getOrCreate(args.sessionId, args.executor, { cliPath });
     // Replace any stale callbacks before the new facade starts initialization.
     // Native create/adopt may emit notifications or exit before createSession
     // resolves, so binding only at the end of bring-up would lose that state.
     this.bind(args.sessionId, client);
     const initialized = await client.initialize();
-    this.rememberProtocolCapabilities(args.executor, initialized);
+    this.rememberProtocolCapabilities(catalogKey(args.executor, cliPath), initialized);
     const catalog = await client.catalog();
-    this.catalogByExecutor.set(args.executor, catalog);
+    this.catalogByExecutor.set(catalogKey(args.executor, cliPath), catalog);
 
     const adoptParams: {
       nativeSessionId?: string;
@@ -341,28 +359,29 @@ export class ProxySessionCoordinator {
     binding.offFault();
   }
 
-  getCapabilities(executor: string): ProxyCatalog | null {
-    return this.catalogByExecutor.get(executor) ?? null;
+  getCapabilities(executor: string, cliPath?: string | null): ProxyCatalog | null {
+    return this.catalogByExecutor.get(catalogKey(executor, cliPath)) ?? null;
   }
 
-  getProtocolCapabilities(executor: string): Record<string, unknown> | null {
-    return this.protocolCapabilitiesByExecutor.get(executor) ?? null;
+  getProtocolCapabilities(executor: string, cliPath?: string | null): Record<string, unknown> | null {
+    return this.protocolCapabilitiesByExecutor.get(catalogKey(executor, cliPath)) ?? null;
   }
 
-  async warmCapabilities(executor: Executor): Promise<ProxyCatalog> {
-    const cached = this.catalogByExecutor.get(executor);
+  async warmCapabilities(executor: Executor, cliPath?: string | null): Promise<ProxyCatalog> {
+    const key = catalogKey(executor, cliPath);
+    const cached = this.catalogByExecutor.get(key);
     if (cached) return cached;
-    const tempKey = `__caps__${executor}`;
+    const tempKey = `__caps__${key}`;
     if (this.emptyCatalogKeys.has(tempKey)) {
       this.emptyCatalogKeys.delete(tempKey);
       await this.proxy.dispose(tempKey).catch(() => undefined);
     }
-    const client = await this.proxy.getOrCreate(tempKey, executor);
+    const client = await this.proxy.getOrCreate(tempKey, executor, { cliPath: cliPath ?? null });
     const initialized = await client.initialize();
-    this.rememberProtocolCapabilities(executor, initialized);
+    this.rememberProtocolCapabilities(key, initialized);
     const catalog = await client.catalog();
     if (catalogHasModelChoices(catalog)) {
-      this.catalogByExecutor.set(executor, catalog);
+      this.catalogByExecutor.set(key, catalog);
     } else {
       this.emptyCatalogKeys.add(tempKey);
     }
@@ -377,11 +396,12 @@ export class ProxySessionCoordinator {
       turnConfig: Record<string, ConfigValue>;
     },
     sessionId?: string,
+    cliPath?: string | null,
   ): Promise<ResolvedProxyCatalog> {
     let client = sessionId ? this.proxy.get(sessionId) : undefined;
     if (!client) {
-      const tempKey = `__caps__${executor}`;
-      client = await this.proxy.getOrCreate(tempKey, executor);
+      const tempKey = `__caps__${catalogKey(executor, cliPath)}`;
+      client = await this.proxy.getOrCreate(tempKey, executor, { cliPath: cliPath ?? null });
       await client.initialize();
     }
     if (!client.resolveCatalog) {
@@ -393,17 +413,19 @@ export class ProxySessionCoordinator {
   async listSlashCommands(
     executor: 'codex' | 'claude',
     _cwd?: string,
+    cliPath?: string | null,
   ): Promise<SlashListResult> {
-    const catalog = this.catalogByExecutor.get(executor) ?? await this.warmCapabilities(executor);
+    const catalog = this.catalogByExecutor.get(catalogKey(executor, cliPath))
+      ?? await this.warmCapabilities(executor, cliPath);
     return { commands: catalog.slashCommands };
   }
 
   private rememberProtocolCapabilities(
-    executor: string,
+    key: string,
     initialized: { capabilities?: Record<string, unknown> },
   ): void {
     if (initialized.capabilities) {
-      this.protocolCapabilitiesByExecutor.set(executor, initialized.capabilities);
+      this.protocolCapabilitiesByExecutor.set(key, initialized.capabilities);
     }
   }
 }

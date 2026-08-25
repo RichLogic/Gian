@@ -122,6 +122,8 @@ const taskDelete: OperationDefinition<TaskIdInput> = {
 export interface TaskCreateSubtaskInput {
   taskId: string;
   workspaceId: string;
+  /** Owning saved Agent (the new-session form always carries it). */
+  agentId?: string;
   executor: Executor;
   name?: string;
   /** New-session composer chips (issue #57 v2) — same semantics as
@@ -142,6 +144,7 @@ const taskCreateSubtask: OperationDefinition<TaskCreateSubtaskInput, Session> = 
   execute: async input => {
     const session = await createSubtask(input.taskId, {
       workspace_id: input.workspaceId,
+      ...(input.agentId ? { agent_id: input.agentId } : {}),
       executor: input.executor,
       ...(input.name ? { name: input.name } : {}),
       ...(input.model ? { model: input.model } : {}),

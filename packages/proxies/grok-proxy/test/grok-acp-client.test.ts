@@ -9,6 +9,7 @@ import {
   type Client,
   type InitializeRequest,
   type InitializeResponse,
+  type ForkSessionRequest,
   type ListSessionsRequest,
   type LoadSessionRequest,
   type NewSessionRequest,
@@ -65,6 +66,7 @@ class RecordingAgent {
   newRequest: NewSessionRequest | null = null;
   loadRequest: LoadSessionRequest | null = null;
   resumeRequest: ResumeSessionRequest | null = null;
+  forkRequest: ForkSessionRequest | null = null;
   listRequest: ListSessionsRequest | null = null;
   promptRequest: PromptRequest | null = null;
   configRequest: SetSessionConfigOptionRequest | null = null;
@@ -105,6 +107,11 @@ class RecordingAgent {
   async resumeSession(params: ResumeSessionRequest) {
     this.resumeRequest = params;
     return {};
+  }
+
+  async unstable_forkSession(params: ForkSessionRequest) {
+    this.forkRequest = params;
+    return { sessionId: 'native-fork' };
   }
 
   async listSessions(params: ListSessionsRequest) {
@@ -226,7 +233,7 @@ test('negotiates ACP v1 without filesystem or terminal reverse capabilities', as
   await client.stop();
 });
 
-test('preserves cwd and mcpServers across new, load, and resume', async () => {
+test('preserves cwd and mcpServers across new, load, resume, and fork', async () => {
   let agent!: RecordingAgent;
   const client = new GrokAcpClient({
     binaryPath: '/managed/grok',
@@ -248,6 +255,11 @@ test('preserves cwd and mcpServers across new, load, and resume', async () => {
     cwd: '/workspace/three',
     mcpServers: [],
   });
+  await client.forkSession({
+    sessionId: 'native-parent',
+    cwd: '/workspace/four',
+    mcpServers: [],
+  });
 
   assert.deepEqual(agent.newRequest, {
     cwd: '/workspace/one',
@@ -261,6 +273,11 @@ test('preserves cwd and mcpServers across new, load, and resume', async () => {
   assert.deepEqual(agent.resumeRequest, {
     sessionId: 'native-resume',
     cwd: '/workspace/three',
+    mcpServers: [],
+  });
+  assert.deepEqual(agent.forkRequest, {
+    sessionId: 'native-parent',
+    cwd: '/workspace/four',
     mcpServers: [],
   });
 

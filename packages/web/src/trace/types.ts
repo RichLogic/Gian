@@ -4,6 +4,7 @@ export type {
   TraceEvidence,
   TraceItem,
   TraceItemKind,
+  TraceItemShape,
   TraceSnapshot,
   TraceStatus,
 } from '@gian/shared';

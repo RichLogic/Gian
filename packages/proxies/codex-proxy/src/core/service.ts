@@ -29,6 +29,7 @@ import type { CodexRuntime, RuntimeNotification, RuntimeServerRequest } from '..
 type ProxyEventSink = (method: string, params: Record<string, unknown>) => void;
 
 const REQUEST_USER_INPUT_METHOD = 'item/tool/requestUserInput';
+const MCP_SERVER_ELICITATION_METHOD = 'mcpServer/elicitation/request';
 
 interface ActiveTurnContext {
   sessionId: string;
@@ -128,7 +129,20 @@ function inProgressTurnId(snapshot: unknown): string | null {
   return null;
 }
 
-function approvalTitle(method: string) {
+function mcpElicitationMetadata(params: Record<string, unknown>) {
+  const value = params._meta ?? params.meta;
+  return value && typeof value === 'object'
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function mcpElicitationSupportsSession(params: Record<string, unknown>) {
+  const persist = mcpElicitationMetadata(params).persist;
+  return persist === 'session'
+    || (Array.isArray(persist) && persist.includes('session'));
+}
+
+function approvalTitle(method: string, params: Record<string, unknown>) {
   switch (method) {
     case 'item/commandExecution/requestApproval':
       return 'Approve command execution';
@@ -138,6 +152,12 @@ function approvalTitle(method: string) {
       return 'Grant extra permissions';
     case REQUEST_USER_INPUT_METHOD:
       return 'Codex needs your input';
+    case MCP_SERVER_ELICITATION_METHOD: {
+      const connectorName = mcpElicitationMetadata(params).connector_name;
+      return typeof connectorName === 'string' && connectorName.trim()
+        ? `Allow ${connectorName.trim()}`
+        : 'Review MCP request';
+    }
     default:
       return 'Review Codex request';
   }
@@ -157,6 +177,11 @@ function approvalReason(method: string, params: Record<string, unknown>) {
     const questions = requestUserInputQuestions(params);
     return questions[0]?.question ?? 'Codex asked a question.';
   }
+  if (method === MCP_SERVER_ELICITATION_METHOD) {
+    return typeof params.message === 'string' && params.message.trim()
+      ? params.message.trim()
+      : 'An MCP server requested a user decision.';
+  }
   return 'Codex requested a user decision.';
 }
 
@@ -171,6 +196,12 @@ function approvalSeverity(method: string, params: Record<string, unknown>): 'low
       : 'medium';
   }
   if (method === REQUEST_USER_INPUT_METHOD) return 'low';
+  if (method === MCP_SERVER_ELICITATION_METHOD) {
+    const riskLevel = mcpElicitationMetadata(params).riskLevel;
+    if (riskLevel === 'low' || riskLevel === 'medium' || riskLevel === 'high') {
+      return riskLevel;
+    }
+  }
   return 'medium';
 }
 
@@ -210,9 +241,9 @@ function requestUserInputResponse(
 }
 
 function cancelledServerRequestResponse(method: string) {
-  return method === REQUEST_USER_INPUT_METHOD
-    ? { answers: {} }
-    : { decision: 'cancel' };
+  if (method === REQUEST_USER_INPUT_METHOD) return { answers: {} };
+  if (method === MCP_SERVER_ELICITATION_METHOD) return { action: 'cancel', content: null };
+  return { decision: 'cancel' };
 }
 
 function classifyPermissionsKind(
@@ -289,6 +320,63 @@ function isContextCompactionItem(params: unknown): boolean {
   if (!item || typeof item !== 'object') return false;
   const type = (item as { type?: unknown }).type;
   return type === 'contextCompaction' || type === 'context_compaction';
+}
+
+const CONTENT_ONLY_ITEM_TYPES = new Set([
+  'userMessage',
+  'hookPrompt',
+  'agentMessage',
+  'plan',
+  'reasoning',
+  'contextCompaction',
+]);
+
+function codexItemLifecycle(
+  params: unknown,
+  phase: 'started' | 'completed',
+): Record<string, unknown> | null {
+  if (!params || typeof params !== 'object') return null;
+  const envelope = params as Record<string, unknown>;
+  const item = envelope.item;
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+  const record = item as Record<string, unknown>;
+  if (typeof record.id !== 'string' || !record.id) return null;
+  if (typeof record.type !== 'string' || CONTENT_ONLY_ITEM_TYPES.has(record.type)) return null;
+
+  const timestamp = phase === 'started' ? envelope.startedAtMs : envelope.completedAtMs;
+  return {
+    phase,
+    item: record,
+    ...(typeof timestamp === 'number' && Number.isFinite(timestamp)
+      ? { nativeTimestampMs: timestamp }
+      : {}),
+  };
+}
+
+function codexNotice(method: string, params: unknown): Record<string, unknown> | null {
+  if (!params || typeof params !== 'object') return null;
+  const record = params as Record<string, unknown>;
+  if (method === 'warning' || method === 'guardianWarning') {
+    if (typeof record.message !== 'string' || !record.message) return null;
+    return {
+      code: method,
+      title: method === 'guardianWarning' ? 'Guardian warning' : 'Codex warning',
+      message: record.message,
+      tone: 'warning',
+    };
+  }
+  if (method === 'model/rerouted') {
+    const fromModel = typeof record.fromModel === 'string' ? record.fromModel : 'requested model';
+    const toModel = typeof record.toModel === 'string' ? record.toModel : 'fallback model';
+    return {
+      code: method,
+      title: 'Model rerouted',
+      message: `${fromModel} -> ${toModel}`,
+      tone: 'info',
+      details: record,
+    };
+  }
+  return null;
 }
 
 interface CodexAgentUpdate {
@@ -537,6 +625,39 @@ export class CodexProxyService {
     return { session: this.serializeSession(session) };
   }
 
+  async forkSession(params: { sessionId: string; lastTurnId?: string }) {
+    const source = await this.ensureSessionUsable(this.requireSessionById(params.sessionId));
+    if (source.activeTurnId) {
+      throw createAppError(409, 'SESSION_BUSY', 'Stop the active turn before forking the session.');
+    }
+    const forked = await this.runtime.forkThread(source.threadId, {
+      cwd: source.cwd,
+      ...(params.lastTurnId ? { lastTurnId: params.lastTurnId } : {}),
+    });
+    const createdAt = nowIso();
+    const session: SessionRecord = {
+      id: randomId('sess'),
+      cwd: source.cwd,
+      threadId: forked.thread.id,
+      configuredPermissions: forked.configuredPermissions,
+      model: source.model,
+      thinking: source.thinking,
+      status: 'idle',
+      activeTurnId: null,
+      lastError: null,
+      createdAt,
+      updatedAt: createdAt,
+    };
+    this.addSession(session);
+    return { session: this.serializeSession(session) };
+  }
+
+  async archiveNativeThread(threadId: string): Promise<boolean> {
+    if (!this.runtime.archiveThread) return false;
+    await this.runtime.archiveThread(threadId);
+    return false;
+  }
+
   getSession(params: GetSessionParams) {
     const session = this.requireSessionById(params.sessionId);
     return { session: this.serializeSession(session) };
@@ -751,6 +872,14 @@ export class CodexProxyService {
         permissions: accepted ? permissions : {},
         scope: scope === 'session' ? 'session' : 'turn',
       });
+    } else if (approval.method === MCP_SERVER_ELICITATION_METHOD) {
+      await this.runtime.respond(approval.rpcRequestId, accepted
+        ? {
+          action: 'accept',
+          content: {},
+          ...(scope === 'session' ? { _meta: { persist: 'session' } } : {}),
+        }
+        : { action: 'decline', content: null });
     } else {
       await this.runtime.respond(approval.rpcRequestId, {
         decision: accepted ? 'accept' : 'cancel',
@@ -1286,6 +1415,38 @@ export class CodexProxyService {
       return;
     }
 
+    if (message.method === 'item/started' || message.method === 'item/completed') {
+      const lifecycle = codexItemLifecycle(
+        message.params,
+        message.method === 'item/started' ? 'started' : 'completed',
+      );
+      if (lifecycle) {
+        this.emitEvent('codex.item', {
+          requestId,
+          sessionId: session.id,
+          turnId,
+          data: lifecycle,
+          rawRuntimeEvent: message,
+        });
+      }
+      // The wrapper notification is never independently user-visible. A
+      // supported ThreadItem becomes one stable activity above; content-only
+      // and internal items are already represented by their semantic streams.
+      return;
+    }
+
+    const notice = codexNotice(message.method, message.params);
+    if (notice) {
+      this.emitEvent('codex.notice', {
+        requestId,
+        sessionId: session.id,
+        turnId,
+        data: notice,
+        rawRuntimeEvent: message,
+      });
+      return;
+    }
+
     if (message.method === 'thread/tokenUsage/updated') {
       // App-server can publish the compaction request's own (pre-summary)
       // token sample and a heuristic replacement-history estimate. Do not
@@ -1449,14 +1610,18 @@ export class CodexProxyService {
       sessionId: session.id,
       rpcRequestId: message.id,
       method: message.method,
-      title: approvalTitle(message.method),
+      title: approvalTitle(message.method, params),
       reason,
       severity: approvalSeverity(message.method, params),
       ...(permissionsKind !== undefined ? { permissionsKind } : {}),
       // Mirror reason into the legacy `risk` field so older consumers don't
       // regress while the host migrates to `reason` + `severity`.
       risk: reason,
-      scopeOptions: message.method === REQUEST_USER_INPUT_METHOD ? ['once'] : ['once', 'session'],
+      scopeOptions: message.method === REQUEST_USER_INPUT_METHOD
+        ? ['once']
+        : message.method === MCP_SERVER_ELICITATION_METHOD && !mcpElicitationSupportsSession(params)
+          ? ['once']
+          : ['once', 'session'],
       payload: params,
       createdAt: nowIso(),
     };

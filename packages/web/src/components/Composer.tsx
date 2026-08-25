@@ -216,7 +216,7 @@ export function Composer({
   session,
   onSend, onSendSkill, onStop, onQueueAdd, onSteer, onSetMode, onSetModel, onSetEffort,
   onSetNativeConfig, onSetTurnConfig, onSetServiceTier, canSteer,
-  disabled, running, executor,
+  disabled, running, executor, agentId = null,
   workspaceId,
   footer,
   disabledSubmitBehavior = 'queue',
@@ -275,6 +275,9 @@ export function Composer({
   running: boolean;
   disabledSubmitBehavior?: 'queue' | 'block';
   executor: Executor;
+  /** Owning Agent of the session — scopes capability caches to its CLI
+   *  path; undefined resolves through the kind default. */
+  agentId?: string | null;
   workspaceId?: string;
   footer?: import('react').ReactNode;
   /** `'minimal'` strips the model / approval-mode / attachment / bypass
@@ -332,7 +335,7 @@ export function Composer({
   const [slashLoading, setSlashLoading] = useState(false);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>(
     () => cliExecutor
-      ? (getSlashCached(cliExecutor, workspaceId) ?? [])
+      ? (getSlashCached(cliExecutor, workspaceId, agentId) ?? [])
       : [],
   );
   const [slashRefreshVersion, setSlashRefreshVersion] = useState(0);
@@ -341,13 +344,13 @@ export function Composer({
   // single Cursor-style options menu rendered in the composer bar.
   const approvalDrop = useUpDrop(340);
   const [models, setModels] = useState<ProxyModel[]>(
-    cliExecutor ? (getModelsCached(cliExecutor) ?? []) : [],
+    cliExecutor ? (getModelsCached(cliExecutor, agentId) ?? []) : [],
   );
   const [proxyModes, setProxyModes] = useState<ProxyModeCapabilities[]>(
-    cliExecutor ? (getModesCached(cliExecutor) ?? []) : [],
+    cliExecutor ? (getModesCached(cliExecutor, agentId) ?? []) : [],
   );
   const [fetchedSteer, setFetchedSteer] = useState<boolean | undefined>(undefined);
-  const [catalog, setCatalog] = useState(() => getCatalogCached(executor) ?? {
+  const [catalog, setCatalog] = useState(() => getCatalogCached(executor, agentId) ?? {
     configOptions: [],
     input: [],
     slashCommands: [],
@@ -376,13 +379,13 @@ export function Composer({
       setModels([]);
       return;
     }
-    const cached = getModelsCached(cliExecutor);
+    const cached = getModelsCached(cliExecutor, agentId);
     if (cached) {
       setModels(cached);
       return;
     }
     let alive = true;
-    void fetchModelsCached(cliExecutor)
+    void fetchModelsCached(cliExecutor, agentId)
       .then(list => { if (alive) setModels(list); })
       .catch(() => {
         // Keep rendering the session with its persisted model/effort. The
@@ -399,13 +402,13 @@ export function Composer({
       setProxyModes([]);
       return;
     }
-    const cached = getModesCached(cliExecutor);
+    const cached = getModesCached(cliExecutor, agentId);
     if (cached) {
       setProxyModes(cached);
       return;
     }
     let alive = true;
-    void fetchModesCached(cliExecutor)
+    void fetchModesCached(cliExecutor, agentId)
       .then(list => { if (alive) setProxyModes(list); })
       .catch(() => {
         // Keep rendering the built-in mode lists; the fetch retries the next
@@ -416,13 +419,13 @@ export function Composer({
   }, [cliExecutor]);
 
   useEffect(() => {
-    const cached = getCatalogCached(executor);
+    const cached = getCatalogCached(executor, agentId);
     if (cached) {
       setCatalog(cached);
       return;
     }
     let alive = true;
-    void fetchCatalogCached(executor)
+    void fetchCatalogCached(executor, agentId)
       .then(next => {
         if (!alive) return;
         setCatalog(next);
@@ -440,11 +443,11 @@ export function Composer({
       return;
     }
     let alive = true;
-    void fetchSteerCached(executor)
+    void fetchSteerCached(executor, agentId)
       .then(advertised => { if (alive) setFetchedSteer(advertised); })
       .catch(() => { if (alive) setFetchedSteer(undefined); });
     return () => { alive = false; };
-  }, [executor, canSteer]);
+  }, [executor, agentId, canSteer]);
 
   useEffect(() => {
     setResolvedOverlay(null);
@@ -494,7 +497,7 @@ export function Composer({
         });
       return () => { alive = false; };
     }
-    const cached = getSlashCached(executor, workspaceId);
+    const cached = getSlashCached(executor, workspaceId, agentId);
     if (cached) {
       setSlashCommands(cached);
       setSlashLoading(false);
@@ -506,7 +509,7 @@ export function Composer({
     // command belonging to the session the user just left.
     setSlashCommands([]);
     setSlashLoading(true);
-    void fetchSlashCached(executor, workspaceId)
+    void fetchSlashCached(executor, workspaceId, agentId)
       .then(list => {
         if (!alive) return;
         setSlashCommands(list);
@@ -518,7 +521,7 @@ export function Composer({
         setSlashLoading(false);
       });
     return () => { alive = false; };
-  }, [catalogReady, catalog.slashCommands, executor, minimal, session.id, workspaceId, slashRefreshVersion]);
+  }, [catalogReady, catalog.slashCommands, executor, agentId, minimal, session.id, workspaceId, slashRefreshVersion]);
 
   useEffect(() => {
     if (catalogReady || usesNativeExecutorConfig(executor) || !workspaceId) return;
@@ -610,7 +613,7 @@ export function Composer({
   const showFast = Boolean(onSetServiceTier) && (
     fastOption
       ? optionVisible(fastOption, configValues)
-      : executor === 'codex'
+      : !catalogReady && executor === 'codex'
   );
   const fastEnabled = !fastOption || optionEnabled(fastOption, configValues);
   const showAttach = catalog.input.length === 0
@@ -948,7 +951,17 @@ export function Composer({
   }
 
   function setCatalogOption(option: ConfigOption, value: ConfigValue) {
-    if (option.role === 'model') onSetModel(String(value ?? ''));
+    if (option.role === 'model') {
+      onSetModel(String(value ?? ''));
+      const nextValues = { ...configValues, [option.id]: value };
+      if (
+        fastOption
+        && session.service_tier === 'fast'
+        && (!optionVisible(fastOption, nextValues) || !optionEnabled(fastOption, nextValues))
+      ) {
+        onSetServiceTier?.(null);
+      }
+    }
     else if (option.role === 'effort') onSetEffort(value == null ? null : String(value));
     else if (option.role === 'approval_mode') {
       if (isApprovalMode(value) && !usesNativeExecutorConfig(executor)) onSetMode(value);
@@ -1313,6 +1326,7 @@ export function Composer({
             {!minimal && showOptionsMenu && (
               <CatalogOptionsMenu
                 executor={executor}
+                agentColor={session.agent_color ?? null}
                 summary={[
                   ...(showModelChip ? [modelLabel(displayModels, activeModel) || activeModel] : []),
                   ...(showEffortChip ? [effortLabel(executor, thinkLevel)] : []),

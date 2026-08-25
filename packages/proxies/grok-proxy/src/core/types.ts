@@ -62,6 +62,9 @@ export interface CreateSessionParams {
   nativeSessionId?: string;
   resumeMode?: 'load' | 'resume';
   mcpServers?: McpServer[];
+  /** Internal Side Chat reattach path; ordinary session.create remains one
+   *  per session-scoped Proxy process. */
+  allowAdditional?: boolean;
 }
 
 export interface GetSessionParams {

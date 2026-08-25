@@ -72,6 +72,7 @@ vi.mock('../src/api.js', () => ({
   loadSlashCommands: vi.fn(async () => []),
   loadSessionSlashCommands: vi.fn(async () => []),
   loadNativeConfig: vi.fn(async () => null),
+  loadAgents: vi.fn(async () => []),
   loadResolvedProxyCatalog: vi.fn(async () => ({})),
 }));
 

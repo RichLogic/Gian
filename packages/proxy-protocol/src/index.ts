@@ -5,3 +5,4 @@ export * from './framing.js';
 export * from './redact.js';
 export * from './schemas.js';
 export * from './replay-tracker.js';
+export * from './sidechat-resume-store.js';

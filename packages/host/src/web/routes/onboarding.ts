@@ -26,7 +26,7 @@ export function registerOnboardingRoutes(
   },
 ): void {
   app.get('/api/onboarding', async c => c.json(
-    await buildOnboardingState(options.db, await options.agents.list()),
+    await buildOnboardingState(options.db, await options.agents.listAgentStatuses()),
   ));
 
   app.put('/api/onboarding/project-root', async c => {
@@ -43,7 +43,7 @@ export function registerOnboardingRoutes(
 
   app.post('/api/onboarding/complete', async c => {
     try {
-      const agents = await options.agents.list();
+      const agents = await options.agents.listAgentStatuses();
       if (!hasReadyAgent(agents)) {
         return c.json({ error: 'Set up at least one Agent before continuing.' }, 409);
       }

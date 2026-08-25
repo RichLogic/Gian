@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
+import { OpaqueSidechatResumeStore } from '@gian/proxy-protocol';
+
 import { AppError } from '../core/errors.js';
 import { CodexProxyService } from '../core/service.js';
 import type {
@@ -132,6 +134,27 @@ interface AttachedSession {
   sequence: number;
 }
 
+interface ServiceSessionShape {
+  id: string;
+  threadId: string;
+  status: 'idle' | 'running' | 'needs-approval' | 'stale' | 'closed' | 'error';
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+type SidechatAnchor =
+  | { type: 'empty' }
+  | { type: 'turn'; turnId: string; sourceTurnId: string };
+
+interface SidechatRecord {
+  parentSessionId: string;
+  resumeRefId: string;
+  anchor: SidechatAnchor;
+  createFingerprint?: string;
+  resumeFingerprint?: string;
+}
+
 interface HostTurnRef {
   sessionId: string;
   turnId: string;
@@ -150,6 +173,14 @@ interface OpenContent {
   kind: 'text' | 'reasoning' | 'status';
   content: string;
   deltaCount: number;
+}
+
+interface ActivityDescriptor {
+  kind: string;
+  title: string;
+  presentation: Record<string, unknown>;
+  summary?: string;
+  details?: unknown;
 }
 
 interface InteractionInput {
@@ -198,6 +229,9 @@ const CAPABILITIES = {
   'session.rename': 1,
   'session.native.list': 1,
   'session.replay': 1,
+  sidechat: 1,
+  'session.fork': 1,
+  'session.fork.atTurn': 1,
   'turn.steer': 1,
   interaction: 1,
   'event.reasoning': 1,
@@ -229,6 +263,162 @@ function jsonValue(value: unknown): unknown {
   } catch {
     return String(value);
   }
+}
+
+function boundedJsonValue(value: unknown, maxBytes = 32_768): unknown {
+  const normalized = jsonValue(value);
+  const serialized = JSON.stringify(normalized);
+  return Buffer.byteLength(serialized, 'utf8') <= maxBytes
+    ? normalized
+    : {
+      truncated: true,
+      preview: Buffer.from(serialized, 'utf8')
+        .subarray(0, Math.max(0, maxBytes - 64))
+        .toString('utf8'),
+    };
+}
+
+function boundedText(value: unknown, maxLength = 32_768): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}\n...[truncated]`;
+}
+
+function codexActivityStatus(
+  phase: unknown,
+  nativeStatus: unknown,
+): 'running' | 'succeeded' | 'failed' | 'cancelled' {
+  if (phase === 'started') return 'running';
+  if (nativeStatus === 'failed' || nativeStatus === 'errored') return 'failed';
+  if (
+    nativeStatus === 'declined'
+    || nativeStatus === 'interrupted'
+    || nativeStatus === 'cancelled'
+    || nativeStatus === 'canceled'
+  ) return 'cancelled';
+  return 'succeeded';
+}
+
+function codexItemActivity(data: Record<string, unknown>): {
+  activityId: string;
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled';
+  descriptor: ActivityDescriptor;
+} | null {
+  const item = record(data.item);
+  const activityId = nonEmptyString(item.id);
+  const nativeType = nonEmptyString(item.type);
+  if (!activityId || !nativeType) return null;
+  const status = codexActivityStatus(data.phase, item.status);
+  const timing = typeof data.nativeTimestampMs === 'number'
+    ? { phase: data.phase, timestampMs: data.nativeTimestampMs }
+    : undefined;
+  const details = boundedJsonValue({
+    nativeType,
+    ...(timing ? { timing } : {}),
+    item,
+  });
+
+  if (nativeType === 'commandExecution') {
+    const command = nonEmptyString(item.command) ?? 'command';
+    const cwd = nonEmptyString(item.cwd);
+    const output = boundedText(item.aggregatedOutput);
+    return {
+      activityId,
+      status,
+      descriptor: {
+        kind: 'command',
+        title: 'Command',
+        presentation: {
+          type: 'command',
+          data: {
+            command,
+            ...(cwd ? { cwd } : {}),
+            ...(typeof item.exitCode === 'number' ? { exitCode: item.exitCode } : {}),
+          },
+        },
+        ...(output ? { summary: output } : {}),
+        details,
+      },
+    };
+  }
+
+  if (nativeType === 'mcpToolCall' || nativeType === 'dynamicToolCall') {
+    const server = nativeType === 'mcpToolCall' ? nonEmptyString(item.server) : nonEmptyString(item.namespace);
+    const tool = nonEmptyString(item.tool) ?? 'tool';
+    const name = server ? `${server}.${tool}` : tool;
+    const result = item.error ?? item.result ?? item.contentItems;
+    return {
+      activityId,
+      status,
+      descriptor: {
+        kind: nativeType === 'mcpToolCall' ? 'mcp' : 'tool',
+        title: name,
+        presentation: {
+          type: 'tool',
+          data: {
+            name,
+            ...(item.arguments !== undefined ? { input: boundedJsonValue(item.arguments) } : {}),
+            ...(result !== undefined && result !== null ? { output: boundedJsonValue(result) } : {}),
+          },
+        },
+        details,
+      },
+    };
+  }
+
+  if (nativeType === 'webSearch') {
+    const query = nonEmptyString(item.query) ?? 'Web search';
+    return {
+      activityId,
+      status,
+      descriptor: {
+        kind: 'web-search',
+        title: 'Web search',
+        presentation: { type: 'search', data: { query } },
+        details,
+      },
+    };
+  }
+
+  if (nativeType === 'imageView') {
+    const path = nonEmptyString(item.path) ?? 'image';
+    return {
+      activityId,
+      status,
+      descriptor: {
+        kind: 'file-read',
+        title: 'View image',
+        presentation: { type: 'file', data: { path, operation: 'read' } },
+        details,
+      },
+    };
+  }
+
+  const title = nativeType === 'fileChange'
+    ? 'File change'
+    : nativeType === 'imageGeneration'
+      ? 'Image generation'
+      : nativeType === 'sleep'
+        ? 'Sleep'
+        : nativeType;
+  const input = nativeType === 'fileChange'
+    ? { files: Array.isArray(item.changes) ? item.changes.map(change => record(change).path) : [] }
+    : item;
+  return {
+    activityId,
+    status,
+    descriptor: {
+      kind: nativeType,
+      title,
+      presentation: {
+        type: 'tool',
+        data: {
+          name: title,
+          input: boundedJsonValue(input),
+        },
+      },
+      details,
+    },
+  };
 }
 
 function stableId(prefix: string, value: unknown): string {
@@ -280,6 +470,7 @@ function sessionUpdatedData(data: Record<string, unknown>): Record<string, unkno
   if (data.lastError !== undefined) next.lastError = data.lastError;
   if (data.turnConfigOptions !== undefined) next.turnConfigOptions = data.turnConfigOptions;
   if (data.turnConfigRevision !== undefined) next.turnConfigRevision = data.turnConfigRevision;
+  if (data.availableActions !== undefined) next.availableActions = data.availableActions;
   if (data.updatedAt !== undefined) next.updatedAt = data.updatedAt;
   if (Object.keys(next).length === 0) next.updatedAt = new Date().toISOString();
   return next;
@@ -357,20 +548,32 @@ function catalogConfigOptions(capabilities: CapabilitiesPayload): CatalogOption[
       },
     ],
   });
-  options.push({
-    id: 'service_tier',
-    displayName: 'Service tier',
-    description: 'Codex app-server serviceTier for this turn.',
-    binding: 'turn',
-    role: 'fast',
-    control: 'select',
-    required: false,
-    defaultValue: 'flex',
-    choices: [
-      { value: 'flex', displayName: 'Flex' },
-      { value: 'fast', displayName: 'Fast' },
-    ],
-  });
+  const fastModels = models.filter((model) => (
+    model.serviceTiers.some((tier) => tier.id === 'fast')
+  ));
+  if (fastModels.length > 0) {
+    const fastTier = fastModels
+      .flatMap((model) => model.serviceTiers)
+      .find((tier) => tier.id === 'fast');
+    options.push({
+      id: 'service_tier',
+      displayName: fastTier?.displayName || 'Fast',
+      description: fastTier?.description || 'Use the Codex Fast service tier for this turn.',
+      binding: 'turn',
+      role: 'fast',
+      control: 'boolean',
+      required: false,
+      defaultValue: false,
+      ...(fastModels.length < models.length
+        ? {
+            enabledWhen: [{
+              optionId: 'model',
+              oneOf: fastModels.map((model) => model.id),
+            }],
+          }
+        : {}),
+    });
+  }
   return options;
 }
 
@@ -655,7 +858,7 @@ function validateInteractionValues(
   }
 }
 
-function interactionActions(method: string) {
+function interactionActions(method: string, scopeOptions: unknown) {
   if (method === REQUEST_USER_INPUT_METHOD) {
     return [
       { id: 'submit', label: 'Submit', style: 'primary' as const },
@@ -669,9 +872,12 @@ function interactionActions(method: string) {
       { id: 'deny', label: 'Deny', style: 'danger' as const },
     ];
   }
+  const allowSession = Array.isArray(scopeOptions) && scopeOptions.includes('session');
   return [
     { id: 'accept', label: 'Accept', style: 'primary' as const },
-    { id: 'acceptForSession', label: 'Accept for session', style: 'secondary' as const },
+    ...(allowSession
+      ? [{ id: 'acceptForSession', label: 'Accept for session', style: 'secondary' as const }]
+      : []),
     { id: 'decline', label: 'Decline', style: 'danger' as const },
   ];
 }
@@ -778,7 +984,8 @@ export class CodexProtocolV2Adapter {
     fingerprint: string;
     result: { accepted: true; interactionId: string; responseId: string };
   }>();
-  private readonly openActivitiesByTurn = new Map<string, Set<string>>();
+  private readonly openActivitiesByTurn = new Map<string, Map<string, ActivityDescriptor>>();
+  private readonly activityOutputByTurn = new Map<string, Map<string, string>>();
   private readonly openContentByTurn = new Map<string, Map<string, OpenContent>>();
   private readonly replayBySession = new Map<string, NativeReplay>();
   private readonly replayTrackers = new Map<string, IncrementalReplayTracker>();
@@ -787,6 +994,10 @@ export class CodexProtocolV2Adapter {
   private readonly ledger = new TurnLedger();
   private readonly advertisedOptions = new Map<string, CatalogOption>();
   private readonly identityStore = new NativeTurnIdentityStore();
+  private readonly resumeStore = new OpaqueSidechatResumeStore();
+  private readonly sidechats = new Map<string, SidechatRecord>();
+  private readonly terminalOrderBySession = new Map<string, string[]>();
+  private readonly forkResults = new Map<string, { fingerprint: string; result: unknown }>();
   private initialized = false;
   private catalogRevision = 'codex-empty';
 
@@ -806,7 +1017,11 @@ export class CodexProtocolV2Adapter {
       case 'initialize': return this.initialize(request.params);
       case 'catalog.list': return this.catalog();
       case 'session.create': return this.createSession(request.params);
-      case 'session.get': return { session: this.serialize(this.requireSession(String(request.params.sessionId ?? ''))) };
+      case 'session.get': return { session: this.serialize(this.requireOrdinarySession(String(request.params.sessionId ?? ''))) };
+      case 'sidechat.create': return this.createSidechat(request.params);
+      case 'sidechat.resume': return this.resumeSidechat(request.params);
+      case 'sidechat.close': return this.closeSidechat(request.params);
+      case 'session.fork': return this.forkSession(request.params);
       case 'turn.start': return this.startTurn(request.params, request.id);
       case 'turn.interrupt': return this.interruptTurn(request.params);
       case 'turn.steer': return this.steer(request.params);
@@ -883,11 +1098,17 @@ export class CodexProtocolV2Adapter {
         { type: 'skill' as const },
       ],
       configOptions,
+      actions: [
+        { id: 'sidechat.create', supported: true },
+        { id: 'session.fork', supported: true },
+        { id: 'session.fork.atTurn', supported: true },
+      ],
       slashCommands,
     };
     payload.catalogRevision = stableId('catalog', {
       input: payload.input,
       configOptions,
+      actions: payload.actions,
     });
     this.catalogRevision = payload.catalogRevision;
     return payload;
@@ -941,6 +1162,12 @@ export class CodexProtocolV2Adapter {
         throw new CodexProtocolError('SESSION_CLOSED', `Session ${sessionId} is closed.`);
       }
       return { session: this.serialize(existing) };
+    }
+    if (this.sidechats.has(sessionId)) {
+      throw new CodexProtocolError('CONFLICT', `Session ${sessionId} is already a Side Chat.`);
+    }
+    if (this.sessions.has(sessionId)) {
+      throw new CodexProtocolError('CONFLICT', `Session ${sessionId} is already attached.`);
     }
     if (params.hostServices !== undefined) {
       throw new CodexProtocolError(
@@ -1016,6 +1243,321 @@ export class CodexProtocolV2Adapter {
     return { session: this.serialize(session) };
   }
 
+  private async createSidechat(params: Record<string, unknown>) {
+    const parentSessionId = nonEmptyString(params.parentSessionId);
+    const parentStreamId = nonEmptyString(params.parentStreamId);
+    const sidechatId = nonEmptyString(params.sidechatId);
+    if (!parentSessionId || !parentStreamId || !sidechatId) {
+      throw new CodexJsonRpcError(-32602, 'parentSessionId, parentStreamId, and sidechatId are required.');
+    }
+    const parent = this.requireOrdinaryAttached(parentSessionId, parentStreamId);
+    const fingerprint = stableStringify({ parentSessionId, parentStreamId });
+    const existing = this.sidechats.get(sidechatId);
+    if (existing) {
+      if (existing.createFingerprint !== fingerprint) {
+        throw new CodexProtocolError('CONFLICT', 'sidechatId was reused with a different parent.');
+      }
+      return { sidechat: this.serializeSidechat(this.requireSession(sidechatId), existing) };
+    }
+    if (this.sessions.has(sidechatId)) {
+      throw new CodexProtocolError('CONFLICT', 'sidechatId already belongs to an ordinary Session.');
+    }
+    const anchor = this.sidechatAnchor(parent);
+    const forked = await this.service.forkSession({
+      sessionId: parent.serviceSessionId,
+      ...(anchor.type === 'turn' ? { lastTurnId: anchor.sourceTurnId } : {}),
+    });
+    const serviceSession = forked.session as ServiceSessionShape;
+    const session = this.attachForkedSession(sidechatId, parent, serviceSession);
+    const createdAt = new Date().toISOString();
+    const resumeRef = this.resumeStore.seal({
+      sidechatId,
+      parentSessionId,
+      nativeSessionId: session.nativeSessionId,
+      anchor,
+      sessionConfig: session.sessionConfig,
+      createdAt,
+    });
+    const record: SidechatRecord = {
+      parentSessionId,
+      resumeRefId: resumeRef.id,
+      anchor,
+      createFingerprint: fingerprint,
+    };
+    this.sidechats.set(sidechatId, record);
+    return { sidechat: this.serializeSidechat(session, record, createdAt) };
+  }
+
+  private async resumeSidechat(params: Record<string, unknown>) {
+    const sidechatId = nonEmptyString(params.sidechatId);
+    const parentSessionId = nonEmptyString(params.parentSessionId);
+    const resumeRefId = nonEmptyString(record(params.resumeRef).id);
+    if (!sidechatId || !parentSessionId || !resumeRefId) {
+      throw new CodexJsonRpcError(-32602, 'sidechatId, parentSessionId, and resumeRef are required.');
+    }
+    if (this.resumeStore.closed(resumeRefId)) {
+      throw new CodexProtocolError('SIDECHAT_UNAVAILABLE', 'Side Chat was already closed.');
+    }
+    const payload = this.resumeStore.open(resumeRefId);
+    if (!payload) throw new CodexProtocolError('SIDECHAT_UNAVAILABLE', 'Side Chat resume reference is unavailable.');
+    if (payload.sidechatId !== sidechatId || payload.parentSessionId !== parentSessionId) {
+      throw new CodexProtocolError('CONFLICT', 'Side Chat resume identity does not match.');
+    }
+    const parent = this.requireOrdinarySession(parentSessionId);
+    const fingerprint = stableStringify({ parentSessionId, resumeRefId });
+    const existing = this.sidechats.get(sidechatId);
+    if (existing) {
+      if (existing.resumeFingerprint !== fingerprint) {
+        throw new CodexProtocolError('CONFLICT', 'Side Chat is already attached with another resume reference.');
+      }
+      return { sidechat: this.serializeSidechat(this.requireSession(sidechatId), existing, payload.createdAt) };
+    }
+    if (this.sessions.has(sidechatId)) {
+      throw new CodexProtocolError('CONFLICT', 'sidechatId already belongs to an ordinary Session.');
+    }
+    const resumed = await this.service.createSession({ cwd: parent.cwd, threadId: payload.nativeSessionId });
+    const session = this.attachForkedSession(
+      sidechatId,
+      parent,
+      resumed.session as ServiceSessionShape,
+      payload.sessionConfig,
+    );
+    const next: SidechatRecord = {
+      parentSessionId,
+      resumeRefId,
+      anchor: payload.anchor as SidechatAnchor,
+      resumeFingerprint: fingerprint,
+    };
+    this.sidechats.set(sidechatId, next);
+    return { sidechat: this.serializeSidechat(session, next, payload.createdAt) };
+  }
+
+  private async closeSidechat(params: Record<string, unknown>) {
+    const sidechatId = nonEmptyString(params.sidechatId);
+    const resumeRefId = nonEmptyString(record(params.resumeRef).id);
+    const streamId = params.streamId === undefined ? null : nonEmptyString(params.streamId);
+    if (!sidechatId || !resumeRefId || (params.streamId !== undefined && !streamId)) {
+      throw new CodexJsonRpcError(-32602, 'sidechatId and resumeRef are required; streamId must be non-empty.');
+    }
+    const closed = this.resumeStore.closed(resumeRefId);
+    if (closed) {
+      return {
+        ok: true as const,
+        sidechatId,
+        providerDataDeleted: closed.sidechatId === sidechatId ? closed.providerDataDeleted : false,
+      };
+    }
+    const payload = this.resumeStore.open(resumeRefId);
+    if (payload && payload.sidechatId !== sidechatId) {
+      throw new CodexProtocolError('CONFLICT', 'resumeRef belongs to another live Side Chat.');
+    }
+    const live = this.sidechats.get(sidechatId);
+    if (live && live.resumeRefId !== resumeRefId) {
+      throw new CodexProtocolError('CONFLICT', 'resumeRef belongs to another Side Chat attachment.');
+    }
+    if (live) {
+      const session = this.requireSession(sidechatId);
+      if (streamId && session.streamId !== streamId) {
+        throw new CodexProtocolError('SESSION_STALE', 'Side Chat stream is stale.');
+      }
+      await this.detachSession(session);
+      this.sidechats.delete(sidechatId);
+    }
+    let providerDataDeleted = false;
+    if (payload) {
+      providerDataDeleted = await this.service.archiveNativeThread(payload.nativeSessionId);
+    }
+    this.resumeStore.rememberClosed(resumeRefId, { sidechatId, providerDataDeleted });
+    return { ok: true as const, sidechatId, providerDataDeleted };
+  }
+
+  private async forkSession(params: Record<string, unknown>) {
+    const sourceSessionId = nonEmptyString(params.sourceSessionId);
+    const sourceStreamId = nonEmptyString(params.sourceStreamId);
+    const sessionId = nonEmptyString(params.sessionId);
+    const anchor = record(params.anchor);
+    if (!sourceSessionId || !sourceStreamId || !sessionId || (anchor.type !== 'head' && anchor.type !== 'turn')) {
+      throw new CodexJsonRpcError(-32602, 'sourceSessionId, sourceStreamId, sessionId, and anchor are required.');
+    }
+    const fingerprint = stableStringify({ sourceSessionId, sourceStreamId, anchor });
+    const previous = this.forkResults.get(sessionId);
+    if (previous) {
+      if (previous.fingerprint !== fingerprint) {
+        throw new CodexProtocolError('CONFLICT', 'Fork sessionId was reused with another source boundary.');
+      }
+      return previous.result;
+    }
+    if (this.sessions.has(sessionId)) {
+      throw new CodexProtocolError('CONFLICT', 'Fork sessionId already belongs to another Session.');
+    }
+    const source = this.requireOrdinaryAttached(sourceSessionId, sourceStreamId);
+    const boundary = this.forkBoundary(source, anchor);
+    const forked = await this.service.forkSession({
+      sessionId: source.serviceSessionId,
+      lastTurnId: boundary.sourceTurnId,
+    });
+    const child = this.attachForkedSession(
+      sessionId,
+      source,
+      forked.session as ServiceSessionShape,
+    );
+    this.attachNativeReplay(child, true);
+    const result = {
+      session: this.serialize(child),
+      origin: {
+        kind: 'fork' as const,
+        sessionId: source.id,
+        turnId: boundary.turnId,
+        sourceTurnId: boundary.sourceTurnId,
+      },
+    };
+    this.forkResults.set(sessionId, { fingerprint, result });
+    return result;
+  }
+
+  private attachForkedSession(
+    id: string,
+    parent: AttachedSession,
+    serviceSession: ServiceSessionShape,
+    sessionConfig: Record<string, ConfigValue> = parent.sessionConfig,
+  ): AttachedSession {
+    const session: AttachedSession = {
+      id,
+      serviceSessionId: serviceSession.id,
+      nativeSessionId: serviceSession.threadId,
+      streamId: randomUUID(),
+      cwd: parent.cwd,
+      roots: [...parent.roots],
+      state: serviceSession.status === 'needs-approval' ? 'waiting_interaction' : 'idle',
+      lastError: serviceSession.lastError,
+      createdAt: serviceSession.createdAt,
+      updatedAt: serviceSession.updatedAt,
+      sessionConfig: { ...sessionConfig },
+      sequence: 0,
+    };
+    this.sessions.set(session.id, session);
+    this.sessionByServiceId.set(session.serviceSessionId, session);
+    this.ledger.attach(session.id, session.streamId);
+    return session;
+  }
+
+  private attachNativeReplay(session: AttachedSession, importExisting: boolean): void {
+    const replayTracker = new IncrementalReplayTracker();
+    replayTracker.attach(
+      replayCodexNativeSession(session.id, session.nativeSessionId, undefined, this.identityStore),
+      importExisting,
+    );
+    this.replayTrackers.set(session.id, replayTracker);
+    this.replayBySession.set(session.id, replayTracker.replay());
+    const historyWatcher = new CodexNativeHistoryWatcher(
+      session.nativeSessionId,
+      () => {
+        if (!this.sessions.has(session.id)) return;
+        const full = replayCodexNativeSession(
+          session.id,
+          session.nativeSessionId,
+          undefined,
+          this.identityStore,
+        );
+        if (!replayTracker.observe(full)) return;
+        this.replayBySession.set(session.id, replayTracker.replay());
+        this.emitSessionEvent('history.changed', session, { reason: 'native-history-changed' });
+      },
+    );
+    historyWatcher.start();
+    this.historyWatchers.set(session.id, historyWatcher);
+  }
+
+  private sidechatAnchor(session: AttachedSession): SidechatAnchor {
+    if (this.activeTurnBySession.has(session.id)) {
+      throw new CodexProtocolError('SESSION_BUSY', 'Side Chat requires an idle parent Session.');
+    }
+    const boundary = this.latestTerminalBoundary(session.id);
+    if (boundary) return { type: 'turn', ...boundary };
+    if ((this.replayBySession.get(session.id)?.events.length ?? 0) === 0) return { type: 'empty' };
+    throw new CodexProtocolError(
+      'FORK_BOUNDARY_UNAVAILABLE',
+      'No stable Host turn identity is available in this attach generation.',
+    );
+  }
+
+  private forkBoundary(
+    session: AttachedSession,
+    anchor: Record<string, unknown>,
+  ): { turnId: string; sourceTurnId: string } {
+    if (this.activeTurnBySession.has(session.id)) {
+      throw new CodexProtocolError('SESSION_BUSY', 'Fork requires an idle source Session.');
+    }
+    if (anchor.type === 'head') {
+      const latest = this.latestTerminalBoundary(session.id);
+      if (latest) return latest;
+    } else {
+      const turnId = nonEmptyString(anchor.turnId);
+      const sourceTurnId = nonEmptyString(anchor.sourceTurnId);
+      if (
+        turnId
+        && sourceTurnId
+        && this.terminalTurns.has(this.turnKey(session.id, turnId))
+        && this.sourceTurnByHostTurn.get(this.turnKey(session.id, turnId)) === sourceTurnId
+      ) {
+        return { turnId, sourceTurnId };
+      }
+    }
+    throw new CodexProtocolError('FORK_BOUNDARY_UNAVAILABLE', 'Fork requires the exact terminal Turn.');
+  }
+
+  private latestTerminalBoundary(sessionId: string): { turnId: string; sourceTurnId: string } | null {
+    const turns = this.terminalOrderBySession.get(sessionId) ?? [];
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turnId = turns[index]!;
+      const sourceTurnId = this.sourceTurnByHostTurn.get(this.turnKey(sessionId, turnId));
+      if (sourceTurnId) return { turnId, sourceTurnId };
+    }
+    return null;
+  }
+
+  private availableActions(session: AttachedSession) {
+    const busy = this.activeTurnBySession.has(session.id) || session.state !== 'idle';
+    const boundary = this.latestTerminalBoundary(session.id);
+    const historyEmpty = (this.replayBySession.get(session.id)?.events.length ?? 0) === 0;
+    const unavailableReason = busy
+      ? 'Wait for the active turn to finish.'
+      : 'No stable terminal turn is available in this attach generation.';
+    return {
+      'sidechat.create': {
+        enabled: !busy && (boundary !== null || historyEmpty),
+        ...(!busy && (boundary !== null || historyEmpty) ? {} : { reason: unavailableReason }),
+      },
+      'session.fork': {
+        enabled: !busy && boundary !== null,
+        ...(!busy && boundary !== null ? {} : { reason: unavailableReason }),
+      },
+      'session.fork.atTurn': {
+        enabled: !busy && boundary !== null,
+        ...(!busy && boundary !== null ? {} : { reason: unavailableReason }),
+      },
+    };
+  }
+
+  private serializeSidechat(
+    session: AttachedSession,
+    sidechat: SidechatRecord,
+    createdAt = session.createdAt,
+  ) {
+    return {
+      id: session.id,
+      parentSessionId: sidechat.parentSessionId,
+      streamId: session.streamId,
+      state: session.state,
+      resumeRef: { id: sidechat.resumeRefId },
+      anchor: sidechat.anchor,
+      sessionConfig: session.sessionConfig,
+      lastError: session.lastError,
+      createdAt,
+      updatedAt: session.updatedAt,
+    };
+  }
+
   private async publishCatalogIfCommandsArrive(session: AttachedSession): Promise<void> {
     try {
       const listed = await this.service.listSlashCommands(session.cwd);
@@ -1073,7 +1615,8 @@ export class CodexProtocolV2Adapter {
     this.turnsByRequest.set(requestId, { sessionId: session.id, turnId });
     this.requestByTurn.set(this.turnKey(session.id, turnId), requestId);
     this.activeTurnBySession.set(session.id, turnId);
-    this.openActivitiesByTurn.set(this.turnKey(session.id, turnId), new Set());
+    this.openActivitiesByTurn.set(this.turnKey(session.id, turnId), new Map());
+    this.activityOutputByTurn.set(this.turnKey(session.id, turnId), new Map());
     this.openContentByTurn.set(this.turnKey(session.id, turnId), new Map());
     this.pendingInputByTurn.set(this.turnKey(session.id, turnId), input);
     this.historyWatchers.get(session.id)?.pause();
@@ -1097,11 +1640,7 @@ export class CodexProtocolV2Adapter {
         ...(turnModel ? { model: turnModel } : {}),
         ...(turnEffort ? { thinking: turnEffort } : {}),
         ...approvalModeParams(approvalMode),
-        serviceTier: configChoice<'fast' | 'flex'>(
-          turnConfig,
-          'service_tier',
-          ['fast', 'flex'],
-        ),
+        serviceTier: turnConfig.service_tier === true ? 'fast' : null,
       }, requestId);
       return { accepted: true as const, turnId };
     } catch (error) {
@@ -1201,7 +1740,7 @@ export class CodexProtocolV2Adapter {
   }
 
   private async renameSession(params: Record<string, unknown>) {
-    const session = this.requireAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
+    const session = this.requireOrdinaryAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
     const name = typeof params.name === 'string' ? params.name : '';
     if ([...name].length > 200) {
       throw new CodexJsonRpcError(-32602, 'Session name must not exceed 200 Unicode code points.');
@@ -1211,7 +1750,11 @@ export class CodexProtocolV2Adapter {
   }
 
   private async closeSession(params: Record<string, unknown>) {
-    const session = this.requireAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
+    const session = this.requireOrdinaryAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
+    return this.detachSession(session);
+  }
+
+  private async detachSession(session: AttachedSession) {
     const activeTurn = this.activeTurnBySession.get(session.id);
     if (activeTurn) {
       this.resolveInteractionsForTurn(session, activeTurn, 'turn_ended');
@@ -1231,6 +1774,7 @@ export class CodexProtocolV2Adapter {
     this.replayBySession.delete(session.id);
     this.replayTrackers.delete(session.id);
     this.replayPager.close(session.id);
+    this.terminalOrderBySession.delete(session.id);
     for (const [responseId, response] of this.interactionResponses) {
       if (response.sessionId === session.id) this.interactionResponses.delete(responseId);
     }
@@ -1270,7 +1814,7 @@ export class CodexProtocolV2Adapter {
   }
 
   private replay(params: Record<string, unknown>) {
-    const session = this.requireAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
+    const session = this.requireOrdinaryAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
     const state = this.replayBySession.get(session.id)
       ?? { streamId: stableId('replay', session.id), events: [] };
     const result = this.replayPager.page(
@@ -1367,45 +1911,75 @@ export class CodexProtocolV2Adapter {
       case 'output.command.delta': {
         if (!turnId) return;
         const activityId = nonEmptyString(data.itemId) ?? `command:${turnId}`;
-        const open = this.openActivitiesByTurn.get(this.turnKey(session.id, turnId));
-        open?.add(activityId);
-        const command = String(data.command ?? data.delta ?? 'command');
-        this.emitTurnEvent('activity.updated', session, turnId, {
-          activityId,
+        const turnKey = this.turnKey(session.id, turnId);
+        const open = this.openActivitiesByTurn.get(turnKey);
+        const outputs = this.activityOutputByTurn.get(turnKey);
+        const previousOutput = outputs?.get(activityId) ?? '';
+        const delta = typeof data.delta === 'string' ? data.delta : '';
+        const output = boundedText(`${previousOutput}${delta}`) ?? '';
+        outputs?.set(activityId, output);
+        const descriptor = open?.get(activityId) ?? {
           kind: 'command',
           title: 'Command',
+          presentation: {
+            type: 'command',
+            data: { command: nonEmptyString(data.command) ?? 'command' },
+          },
+        };
+        open?.set(activityId, descriptor);
+        this.emitTurnEvent('activity.updated', session, turnId, {
+          activityId,
+          ...descriptor,
           status: 'running',
-          presentation: { type: 'command', data: { command } },
-          ...(data.delta !== undefined ? { details: jsonValue(data.delta) } : {}),
+          ...(output ? { summary: output } : {}),
         });
         return;
       }
-      case 'codex.unknown': {
+      case 'codex.item': {
         if (!turnId) return;
-        const nativeMethod = nonEmptyString(data.method) ?? 'unknown';
-        const payload = jsonValue(data.payload);
-        const serialized = JSON.stringify(payload);
-        const details = serialized.length <= 32_768
-          ? payload
-          : { truncated: true, preview: serialized.slice(0, 32_768) };
+        const activity = codexItemActivity(data);
+        if (!activity) return;
+        const turnKey = this.turnKey(session.id, turnId);
+        const open = this.openActivitiesByTurn.get(turnKey);
+        const streamedOutput = this.activityOutputByTurn.get(turnKey)?.get(activity.activityId);
+        const descriptor = streamedOutput && !activity.descriptor.summary
+          ? { ...activity.descriptor, summary: streamedOutput }
+          : activity.descriptor;
+        if (activity.status === 'running') open?.set(activity.activityId, descriptor);
+        else {
+          open?.delete(activity.activityId);
+          this.activityOutputByTurn.get(turnKey)?.delete(activity.activityId);
+        }
         this.emitTurnEvent('activity.updated', session, turnId, {
-          activityId: stableId('codex-event', {
-            sourceTurnId: this.sourceTurnByHostTurn.get(this.turnKey(session.id, turnId)) ?? turnId,
-            nativeMethod,
-            payload,
-          }),
-          kind: nativeMethod,
-          title: `Codex event: ${nativeMethod}`,
+          activityId: activity.activityId,
+          ...descriptor,
+          status: activity.status,
+        });
+        return;
+      }
+      case 'codex.notice': {
+        if (!turnId) return;
+        const code = nonEmptyString(data.code) ?? 'codex.notice';
+        const message = nonEmptyString(data.message) ?? nonEmptyString(data.title) ?? 'Codex notice';
+        this.emitTurnEvent('activity.updated', session, turnId, {
+          activityId: stableId('codex-notice', { turnId, code, message }),
+          kind: 'notice',
+          title: nonEmptyString(data.title) ?? 'Codex notice',
           status: 'succeeded',
           presentation: {
-            type: 'generic',
-            tone: 'info',
-            data: { nativeMethod },
+            type: 'notice',
+            tone: data.tone === 'warning' || data.tone === 'danger' ? data.tone : 'info',
+            data: { code, message },
           },
-          details,
+          ...(data.details !== undefined ? { details: boundedJsonValue(data.details) } : {}),
         });
         return;
       }
+      case 'codex.unknown':
+        // Unknown app-server notifications remain available to the proxy's
+        // debug/diagnostic path, but are not conversation activities. Only a
+        // semantic item lifecycle or explicit notice may cross the UI bridge.
+        return;
       case 'diff.updated': {
         if (!turnId) return;
         const inner = record(data.params ?? data);
@@ -1437,13 +2011,9 @@ export class CodexProtocolV2Adapter {
           if (!agentId) continue;
           const state = agentState(update.status);
           const open = this.openActivitiesByTurn.get(this.turnKey(session.id, turnId));
-          if (state === 'running') open?.add(agentId);
-          else open?.delete(agentId);
-          this.emitTurnEvent('activity.updated', session, turnId, {
-            activityId: agentId,
+          const descriptor: ActivityDescriptor = {
             kind: 'agent',
             title: nonEmptyString(update.description) ?? 'Agent',
-            status: agentActivityStatus(state),
             presentation: {
               type: 'agent',
               data: {
@@ -1453,6 +2023,13 @@ export class CodexProtocolV2Adapter {
                 ...(nonEmptyString(update.output) ? { output: update.output } : {}),
               },
             },
+          };
+          if (state === 'running') open?.set(agentId, descriptor);
+          else open?.delete(agentId);
+          this.emitTurnEvent('activity.updated', session, turnId, {
+            activityId: agentId,
+            ...descriptor,
+            status: agentActivityStatus(state),
           });
         }
         return;
@@ -1462,7 +2039,7 @@ export class CodexProtocolV2Adapter {
         if (!interactionId) return;
         const nativeMethod = String(data.method ?? '');
         const requestUserInput = nativeMethod === REQUEST_USER_INPUT_METHOD;
-        const actions = interactionActions(nativeMethod);
+        const actions = interactionActions(nativeMethod, data.scopeOptions);
         const inputs = requestUserInput ? questionInputs(data.payload) : [];
         this.interactions.set(interactionId, {
           sessionId: session.id,
@@ -1597,6 +2174,9 @@ export class CodexProtocolV2Adapter {
     const turnKey = this.turnKey(session.id, turnId);
     if (this.terminalTurns.has(turnKey)) return;
     this.terminalTurns.add(turnKey);
+    const terminalOrder = this.terminalOrderBySession.get(session.id) ?? [];
+    if (!terminalOrder.includes(turnId)) terminalOrder.push(turnId);
+    this.terminalOrderBySession.set(session.id, terminalOrder);
     this.resolveInteractionsForTurn(session, turnId, failed ? 'runtime_ended' : 'turn_ended');
     this.closeOpenWork(session, turnId, failed ? 'failed' : 'succeeded');
     if (failed) {
@@ -1623,6 +2203,14 @@ export class CodexProtocolV2Adapter {
       this.emitTurnEvent('turn.completed', session, turnId, { stopReason });
     }
     this.clearTurn(session.id, turnId);
+    if (!this.sidechats.has(session.id)) {
+      this.emitSessionEvent('session.updated', session, sessionUpdatedData({
+        state: session.state,
+        lastError: session.lastError,
+        availableActions: this.availableActions(session),
+        updatedAt: session.updatedAt,
+      }));
+    }
     this.historyWatchers.get(session.id)?.resume();
     this.rebaseHistory(session);
   }
@@ -1646,15 +2234,11 @@ export class CodexProtocolV2Adapter {
     }
     const activities = this.openActivitiesByTurn.get(this.turnKey(session.id, turnId));
     if (activities) {
-      for (const activityId of activities) {
+      for (const [activityId, descriptor] of activities) {
         this.emitTurnEvent('activity.updated', session, turnId, {
           activityId,
-          kind: activityId.startsWith('command:') ? 'command' : 'tool',
-          title: 'Activity',
+          ...descriptor,
           status,
-          presentation: activityId.startsWith('command:')
-            ? { type: 'command', data: { command: 'command' } }
-            : { type: 'tool', data: { name: 'tool' } },
         });
       }
       activities.clear();
@@ -1763,6 +2347,7 @@ export class CodexProtocolV2Adapter {
     this.pendingUsageByTurn.delete(key);
     this.interruptedTurns.delete(key);
     this.openActivitiesByTurn.delete(key);
+    this.activityOutputByTurn.delete(key);
     this.openContentByTurn.delete(key);
     this.emittedFactsByTurn.delete(key);
     this.pendingInputByTurn.delete(key);
@@ -1790,6 +2375,7 @@ export class CodexProtocolV2Adapter {
       state: session.state,
       sessionConfig: session.sessionConfig,
       lastError: session.lastError,
+      availableActions: this.availableActions(session),
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
     };
@@ -1801,8 +2387,23 @@ export class CodexProtocolV2Adapter {
     return session;
   }
 
+  private requireOrdinarySession(sessionId: string): AttachedSession {
+    if (this.sidechats.has(sessionId)) {
+      throw new CodexProtocolError('SESSION_NOT_FOUND', 'Session not found.');
+    }
+    return this.requireSession(sessionId);
+  }
+
   private requireAttached(sessionId: string, streamId: string): AttachedSession {
     const session = this.requireSession(sessionId);
+    if (session.streamId !== streamId) {
+      throw new CodexProtocolError('SESSION_STALE', 'Session stream is stale.');
+    }
+    return session;
+  }
+
+  private requireOrdinaryAttached(sessionId: string, streamId: string): AttachedSession {
+    const session = this.requireOrdinarySession(sessionId);
     if (session.streamId !== streamId) {
       throw new CodexProtocolError('SESSION_STALE', 'Session stream is stale.');
     }

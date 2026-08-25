@@ -118,13 +118,28 @@ test('agent manager detects configured official CLIs and development proxies', a
   });
 
   const agents = await manager.list();
+  // The kind-level catalog is product-only: no Grok row.
   assert.deepEqual(agents.map(agent => [agent.id, agent.ready, agent.cli.version]), [
     ['claude', true, '2.1.220'],
     ['codex', true, '0.146.0'],
     ['kimi', true, '0.31.1'],
-    ['grok', true, '0.1.42'],
     ['dsh', false, null],
   ]);
+  // Kind status still works for Grok (adapter stays in the tree).
+  assert.equal((await manager.status('grok')).cli.version, '0.1.42');
+
+  // The environment CLI paths migrate into saved Agents (product kinds only).
+  const saved = manager.listAgents();
+  assert.deepEqual(saved.map(agent => [agent.name, agent.proxy, agent.cliPath]), [
+    ['Claude Code', 'claude', bins.claude],
+    ['Codex', 'codex', bins.codex],
+    ['Kimi Code', 'kimi', bins.kimi],
+  ]);
+  assert.deepEqual(saved.map(agent => agent.color), ['ember', 'ink', 'citron']);
+  const claudeStatus = await manager.agentStatus(saved[0]!.id);
+  assert.equal(claudeStatus.ready, true);
+  assert.equal(claudeStatus.cli.version, '2.1.220');
+  assert.equal(claudeStatus.proxyName, 'Claude Code');
 
   await executable(bins.codex, 'codex-cli 0.147.0');
   assert.equal((await manager.status('codex')).cli.version, '0.146.0');
@@ -214,17 +229,25 @@ test('agent manager validates and persists a user CLI path', async t => {
   } as const;
   const manager = await AgentManager.create(options);
 
-  const status = await manager.setCliPath('claude', claude);
+  const agent = await manager.createAgent({
+    name: 'Claude Code',
+    proxy: 'claude',
+    cliPath: claude,
+  });
+  const status = await manager.agentStatus(agent.id);
   assert.equal(status.cli.state, 'ready');
   assert.equal(status.cli.source, 'override');
 
   const reloaded = await AgentManager.create(options);
-  assert.equal(reloaded.configuredPath('claude'), claude);
+  assert.equal(reloaded.getAgent(agent.id).cliPath, claude);
   await assert.rejects(
-    reloaded.setCliPath('claude', join(root, 'missing')),
-    /not usable|ENOENT/i,
+    reloaded.updateAgent(agent.id, { cliPath: join(root, 'missing') }),
+    /not usable|ENOENT|access/i,
   );
-  assert.equal(reloaded.configuredPath('claude'), claude);
+  // A failed path probe never reaches the persisted config.
+  assert.equal(reloaded.getAgent(agent.id).cliPath, claude);
+  const reloadedAgain = await AgentManager.create(options);
+  assert.equal(reloadedAgain.getAgent(agent.id).cliPath, claude);
 });
 
 test('agent manager migrates and persists Proxy-owned session defaults', async t => {
@@ -250,9 +273,15 @@ test('agent manager migrates and persists Proxy-owned session defaults', async t
     thinking: 'high',
     mode: 'ask',
   });
-  await manager.setProxyDefaults('claude', { mode: 'auto', thinking: 'xhigh' });
+  const agent = manager.listAgents().find(candidate => candidate.proxy === 'claude')!;
+  await manager.updateAgent(agent.id, { defaults: { mode: 'auto', thinking: 'xhigh' } });
 
   const reloaded = await AgentManager.create(options);
+  assert.deepEqual(reloaded.agentDefaults(agent.id), {
+    model: 'opus',
+    thinking: 'xhigh',
+    mode: 'auto',
+  });
   assert.deepEqual(reloaded.proxyDefaults('claude'), {
     model: 'opus',
     thinking: 'xhigh',
@@ -666,7 +695,9 @@ test('checkProxyUpdate is unmanaged for development proxies', async t => {
 
   assert.deepEqual(await manager.checkProxyUpdate('claude'), {
     managed: false,
-    currentVersion: null,
+    // A fixture entry without a @gian/*-proxy package keeps the App version
+    // as the diagnostic fallback.
+    currentVersion: '0.4.4',
     latestVersion: null,
     updateAvailable: false,
   });
@@ -800,5 +831,243 @@ test('checkProxyUpdate treats a missing install as updatable without network in 
     currentVersion: null,
     latestVersion: '0.4.4',
     updateAvailable: true,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// agents.json schema v2 — user Agents
+// ---------------------------------------------------------------------------
+
+test('v1 agents.json migrates one default Agent per configured kind', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-v1-migrate-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'data');
+  await mkdir(dataDir, { recursive: true });
+  const claude = join(root, 'bin', 'claude');
+  await executable(claude, 'claude 2.1.220');
+  await writeFile(join(dataDir, 'agents.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    cliPaths: { claude, grok: join(root, 'bin', 'grok') },
+    proxyDefaults: {
+      claude: { model: 'sonnet', thinking: '', mode: 'ask' },
+      codex: { model: 'gpt-5', thinking: 'high', mode: '' },
+    },
+  }, null, 2)}\n`);
+
+  const manager = await AgentManager.create({
+    dataDir,
+    releaseVersion: '0.1.0',
+    managedProxies: false,
+    developmentProxyEntries: {},
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+
+  const agents = manager.listAgents();
+  // claude (path + defaults), codex (defaults only); grok never migrates;
+  // kimi/dsh had no path, no Proxy, and no session history — no Agent.
+  assert.deepEqual(agents.map(agent => [agent.proxy, agent.name, agent.cliPath]), [
+    ['claude', 'Claude Code', claude],
+    ['codex', 'Codex', null],
+  ]);
+  assert.deepEqual(agents[0]!.defaults, { model: 'sonnet', thinking: '', mode: 'ask' });
+  assert.deepEqual(agents[1]!.defaults, { model: 'gpt-5', thinking: 'high', mode: '' });
+
+  // The persisted file is schema v2 and survives a reload untouched.
+  const persisted = JSON.parse(await readFile(join(dataDir, 'agents.json'), 'utf8')) as {
+    schemaVersion: number;
+    agents: unknown[];
+  };
+  assert.equal(persisted.schemaVersion, 2);
+  assert.equal(persisted.agents.length, 2);
+  const reloaded = await AgentManager.create({
+    dataDir,
+    releaseVersion: '0.1.0',
+    managedProxies: false,
+    developmentProxyEntries: {},
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+  assert.deepEqual(
+    reloaded.listAgents().map(agent => agent.id),
+    agents.map(agent => agent.id),
+  );
+});
+
+test('v2 migration creates an Agent for a kind that only appears in sessions', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-session-migrate-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const manager = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.1.0',
+    managedProxies: false,
+    developmentProxyEntries: {},
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+    sessionExecutors: () => ['kimi', 'grok'],
+  });
+
+  const agents = manager.listAgents();
+  // kimi migrates from session history; grok is out of the product catalog;
+  // claude/codex/dsh have no configuration, Proxy, or session — no Agent.
+  assert.deepEqual(agents.map(agent => [agent.proxy, agent.name, agent.color]), [
+    ['kimi', 'Kimi Code', 'citron'],
+  ]);
+});
+
+test('agent names are unique case-insensitively after trim', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-names-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const proxy = join(root, 'proxy.mjs');
+  await writeFile(proxy, 'export {};\n');
+  const options = {
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.1.0',
+    managedProxies: false,
+    developmentProxyEntries: { claude: proxy },
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  } as const;
+  const manager = await AgentManager.create(options);
+
+  const first = await manager.createAgent({ name: '  My Claude ', proxy: 'claude' });
+  assert.equal(first.name, 'My Claude');
+  await assert.rejects(
+    manager.createAgent({ name: 'my claude', proxy: 'codex' }),
+    (error: unknown) => error instanceof Error && error.name === 'AgentNameTakenError',
+  );
+  await assert.rejects(
+    manager.createAgent({ name: '   ', proxy: 'codex' }),
+    /must not be empty/,
+  );
+
+  const second = await manager.createAgent({ name: 'Work Codex', proxy: 'codex' });
+  await assert.rejects(
+    manager.updateAgent(second.id, { name: 'MY CLAUDE' }),
+    (error: unknown) => error instanceof Error && error.name === 'AgentNameTakenError',
+  );
+  // Renaming to the same name (different case) is allowed for the same Agent.
+  const renamed = await manager.updateAgent(second.id, { name: 'work codex' });
+  assert.equal(renamed.name, 'work codex');
+});
+
+test('agent draft helpers number names and rotate colors per kind', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-helpers-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const proxy = join(root, 'proxy.mjs');
+  await writeFile(proxy, 'export {};\n');
+  const manager = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.1.0',
+    managedProxies: false,
+    developmentProxyEntries: { claude: proxy, codex: proxy },
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+
+  assert.equal(manager.nextAgentName('claude'), 'Claude Code');
+  assert.equal(manager.nextAgentColor('claude'), 'ember');
+  await manager.createAgent({ name: 'Claude Code', proxy: 'claude' });
+  assert.equal(manager.nextAgentName('claude'), 'Claude Code 2');
+  // A second Agent of the same kind gets the next unoccupied palette color.
+  const second = await manager.createAgent({ name: 'Claude Code 2', proxy: 'claude' });
+  assert.equal(second.color, 'rose');
+  assert.equal(manager.nextAgentName('claude'), 'Claude Code 3');
+
+  // Explicit color choices are honored and occupied colors are skipped.
+  const third = await manager.createAgent({ name: 'Claude Code 3', proxy: 'claude', color: 'moss' });
+  assert.equal(third.color, 'moss');
+  assert.equal(manager.nextAgentColor('claude'), 'citron');
+  // A different kind still starts from its own default color.
+  assert.equal(manager.nextAgentColor('codex'), 'ink');
+});
+
+test('agent CRUD persists and delete removes only the target Agent', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-crud-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const proxy = join(root, 'proxy.mjs');
+  await writeFile(proxy, 'export {};\n');
+  const options = {
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.1.0',
+    managedProxies: false,
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy },
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  } as const;
+  const manager = await AgentManager.create(options);
+
+  const claudeA = await manager.createAgent({ name: 'Claude A', proxy: 'claude' });
+  const claudeB = await manager.createAgent({ name: 'Claude B', proxy: 'claude' });
+  await manager.updateAgent(claudeB.id, { color: 'azure', defaults: { model: 'opus' } });
+  await manager.deleteAgent(claudeA.id);
+
+  const reloaded = await AgentManager.create(options);
+  assert.deepEqual(reloaded.listAgents().map(agent => [agent.name, agent.color]), [
+    ['Claude B', 'azure'],
+  ]);
+  assert.deepEqual(reloaded.agentDefaults(claudeB.id), { model: 'opus', thinking: '', mode: '' });
+  assert.throws(() => reloaded.getAgent(claudeA.id), /agent not found/);
+  await assert.rejects(reloaded.deleteAgent(claudeA.id), /agent not found/);
+});
+
+test('proxies catalog is static product metadata without Grok', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-catalog-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manager = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.1.0',
+    managedProxies: false,
+    developmentProxyEntries: {},
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+
+  assert.deepEqual(
+    manager.proxiesCatalog().map(entry => [entry.id, entry.name, entry.defaultColor]),
+    [
+      ['claude', 'Claude Code', 'ember'],
+      ['codex', 'Codex', 'ink'],
+      ['kimi', 'Kimi Code', 'citron'],
+      ['dsh', 'DeepSeek Harness', 'teal'],
+    ],
+  );
+  for (const entry of manager.proxiesCatalog()) {
+    assert.ok(entry.tagline.length > 0);
+    assert.ok(entry.officialInstallUrl.length > 0);
+  }
+});
+
+test('development proxy status reports the vendored plugin package version', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-dev-proxy-version-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const packageDir = join(root, 'packages', 'cc-proxy');
+  await mkdir(join(packageDir, 'dist', 'src', 'cli'), { recursive: true });
+  const entry = join(packageDir, 'dist', 'src', 'cli', 'spawn.js');
+  await writeFile(entry, "export {};\n");
+  await writeFile(join(packageDir, 'package.json'), JSON.stringify({
+    name: '@gian/cc-proxy',
+    version: '0.2.1',
+  }));
+
+  const manager = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.5.2',
+    managedProxies: false,
+    developmentProxyEntries: { claude: entry },
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+
+  const status = await manager.status('claude');
+  // GianDev must show the Proxy's own version, never the App's 0.5.2.
+  assert.equal(status.proxy.version, '0.2.1');
+  assert.equal(status.proxy.source, 'development');
+  assert.deepEqual(await manager.checkProxyUpdate('claude'), {
+    managed: false,
+    currentVersion: '0.2.1',
+    latestVersion: null,
+    updateAvailable: false,
   });
 });

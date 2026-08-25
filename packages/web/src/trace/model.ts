@@ -139,6 +139,133 @@ export function traceItemDurationMs(item: TraceItem): number | undefined {
   return undefined;
 }
 
+export type TraceTimelineMode = 'sequence' | 'duration';
+
+export interface TraceTimelinePosition {
+  item: TraceItem;
+  leftPct: number;
+  widthPct: number;
+  point: boolean;
+  open: boolean;
+}
+
+/** Timeline geometry shared by every lane. Duration mode uses the real
+ * provider time domain; point events and open spans render as ticks. */
+export function layoutTraceTimeline(
+  items: TraceItem[],
+  mode: TraceTimelineMode,
+): TraceTimelinePosition[] {
+  const ordered = sortTraceItems(items);
+  if (ordered.length === 0) return [];
+  if (mode === 'sequence') {
+    const slot = 100 / ordered.length;
+    return ordered.map((item, index) => {
+      const point = item.shape === 'event';
+      const open = item.shape === 'span' && !item.endAt;
+      return {
+        item,
+        leftPct: point || open ? (index + 0.5) * slot : index * slot,
+        widthPct: point || open ? 0 : slot,
+        point,
+        open,
+      };
+    });
+  }
+
+  const starts = ordered.map(item => parseTime(item.at));
+  const ends = ordered.map(item => parseTime(item.endAt ?? item.at));
+  const domainStart = Math.min(...starts);
+  const rawEnd = Math.max(...ends);
+  const domainMs = Math.max(1, rawEnd - domainStart);
+  return ordered.map((item, index) => {
+    const start = starts[index]!;
+    const end = ends[index]!;
+    const point = item.shape === 'event';
+    const open = item.shape === 'span' && !item.endAt;
+    return {
+      item,
+      leftPct: Math.max(0, Math.min(100, ((start - domainStart) / domainMs) * 100)),
+      widthPct: point || open ? 0 : Math.max(0, ((end - start) / domainMs) * 100),
+      point,
+      open,
+    };
+  });
+}
+
+function traceSearchText(item: TraceItem): string {
+  let detail = '';
+  try {
+    detail = item.detail === undefined ? '' : JSON.stringify(item.detail);
+  } catch {
+    detail = '';
+  }
+  return [
+    item.id,
+    item.turnId,
+    item.kind,
+    item.shape,
+    item.title,
+    item.summary,
+    item.status,
+    item.correlationId,
+    detail,
+  ].filter(Boolean).join('\n').toLowerCase();
+}
+
+/** Search matches semantic content and retains the item's step/turn ancestors
+ * so filtered results never lose their execution context. */
+export function filterTraceItems(items: TraceItem[], query: string): TraceItem[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return items;
+  const byId = new Map(items.map(item => [item.id, item]));
+  const turnByTurnId = new Map(
+    items.filter(item => item.kind === 'turn').map(item => [item.turnId, item]),
+  );
+  const retained = new Set<string>();
+  for (const item of items) {
+    if (!traceSearchText(item).includes(needle)) continue;
+    retained.add(item.id);
+    let parentId = item.parentId;
+    while (parentId) {
+      const parent = byId.get(parentId);
+      if (!parent || retained.has(parent.id)) break;
+      retained.add(parent.id);
+      parentId = parent.parentId;
+    }
+    const turn = turnByTurnId.get(item.turnId);
+    if (turn) retained.add(turn.id);
+  }
+  return items.filter(item => retained.has(item.id));
+}
+
+export interface TraceStats {
+  turns: number;
+  steps: number;
+  calls: number;
+  events: number;
+  modelDurationMs: number;
+  toolDurationMs: number;
+}
+
+export function summarizeTrace(items: TraceItem[]): TraceStats {
+  const turns = new Set(items.map(item => item.turnId));
+  let modelDurationMs = 0;
+  let toolDurationMs = 0;
+  for (const item of items) {
+    const duration = traceItemDurationMs(item) ?? 0;
+    if (item.kind === 'assistant' || item.kind === 'reasoning') modelDurationMs += duration;
+    if (item.kind === 'tool' || item.kind === 'agent') toolDurationMs += duration;
+  }
+  return {
+    turns: turns.size,
+    steps: items.filter(item => item.kind === 'step').length,
+    calls: items.filter(item => item.kind === 'tool' || item.kind === 'agent').length,
+    events: items.filter(item => item.shape === 'event').length,
+    modelDurationMs,
+    toolDurationMs,
+  };
+}
+
 /** Convenience for views: group a whole snapshot in one call. */
 export function groupSnapshotByTurn(snapshot: TraceSnapshot): TraceTurnGroup[] {
   return groupTraceByTurn(snapshot.items);

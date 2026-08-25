@@ -158,6 +158,18 @@ test('Fake Proxy subprocess covers head/atTurn Fork, restart recovery, and rejec
     (error: unknown) => error instanceof ProxyProtocolError && error.code === 'FORK_BOUNDARY_UNAVAILABLE',
   );
 
+  const forkClient = ctx.proxy.get('fork-sys-1');
+  assert.ok(forkClient);
+  const forkEventCount = ctx.sessions.listEvents('fork-sys-1').length;
+  await ctx.proxy.dispose(parent.id);
+  assert.equal(
+    ctx.proxy.get('fork-sys-1'),
+    forkClient,
+    'closing a session-scoped parent must not tear down its persistent Fork child',
+  );
+  await ctx.sessions.sendMessage('fork-sys-1', 'child survives parent detach');
+  await waitFor(() => ctx.sessions.listEvents('fork-sys-1').length > forkEventCount);
+
   const sidechat = await ctx.sessions.createSidechat(parent.id, 'sc_sys_restart');
   const parentClient = ctx.proxy.get(parent.id) as ProtocolV2SessionClient;
   assert.ok(parentClient?.runtimeHost);

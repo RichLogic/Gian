@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Session, SideChatInfo } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import type { ChatPanelTarget } from '../presentation/chat-panel.js';
@@ -12,6 +12,9 @@ import { traceItemDurationMs } from '../trace/model.js';
 import { EvidenceChip, formatTraceClock, StatusBadge } from '../trace/TraceView.js';
 import type { TraceItem } from '../trace/types.js';
 import { formatElapsed, MarkdownText } from '../transcript/items.js';
+import { eventFeedItems } from '../transcript/event-feed.js';
+import { EventFeed } from '../transcript/EventFeed.js';
+import { transcriptItemIdentity } from '../transcript/identity.js';
 import type { TranscriptItem } from '../types.js';
 
 interface Props {
@@ -96,13 +99,31 @@ export function ChatContextPanel({
   const plan = target.kind === 'plan' ? context.plan : null;
   const traceItem = target.kind === 'trace-item' ? target.item : null;
   const detail = target.kind === 'transcript-detail' ? target : null;
+  // Event feed (event box → panel 2): the SAME live projection the box
+  // renders, recomputed from `items` on every update so the panel tracks
+  // the turn in real time. Every row drills into its detail (structured
+  // payload or raw-item JSON) via the surrounding ChatPanelOpenContext.
+  const feedTurn = target.kind === 'event-feed' ? target.turn : null;
+  const feed = useMemo(
+    () => (feedTurn === null ? null : eventFeedItems(items, feedTurn)),
+    [items, feedTurn],
+  );
+  const feedScrollRef = useRef<HTMLDivElement>(null);
+  const feedTail = feed && feed.length > 0 ? transcriptItemIdentity(feed[feed.length - 1]!) : '';
+  // Live tail, same pinning rule as the box: newest event stays visible.
+  useLayoutEffect(() => {
+    const el = feedScrollRef.current;
+    if (feed && el) el.scrollTop = el.scrollHeight;
+  }, [feed, feed?.length, feedTail]);
   const title = target.kind === 'plan'
     ? t('chatPanel.plan.title')
     : target.kind === 'agent'
       ? t('chatPanel.agent.title')
       : target.kind === 'trace-item'
         ? target.item.title
-        : target.title;
+        : target.kind === 'event-feed'
+          ? t('chatPanel.eventFeed.title')
+          : target.title;
 
   return (
     <aside className="chat-context-panel" aria-label={title}>
@@ -122,7 +143,7 @@ export function ChatContextPanel({
         </button>
       </header>
 
-      <div className="chat-context-scroll">
+      <div className="chat-context-scroll" ref={feed ? feedScrollRef : undefined}>
         {plan && (
           <section className="chat-context-plan approval-plan-md">
             {plan.totalSteps > 0 && (
@@ -141,7 +162,13 @@ export function ChatContextPanel({
 
         {detail && <pre className="chat-context-detail">{detail.text}</pre>}
 
-        {!plan && !agent && !traceItem && !detail && (
+        {feed && feed.length > 0 && <EventFeed items={feed} />}
+
+        {feed && feed.length === 0 && (
+          <div className="chat-context-empty">{t('chatPanel.eventFeed.empty')}</div>
+        )}
+
+        {!plan && !agent && !traceItem && !detail && !feed && (
           <div className="chat-context-empty">{t('chatPanel.unavailable')}</div>
         )}
       </div>
@@ -246,46 +273,141 @@ function AgentDetail({ agent }: { agent: AgentRunDisplayItem }) {
   );
 }
 
-/** Panel-2 detail for one trace item — the fields the old inline
- *  TraceDetail region showed, on the chat-context Meta/dl pattern. */
+type TraceDetailTab = 'summary' | 'payload' | 'result' | 'schema' | 'timing';
+
+/** Panel-2 detail for one trace item. Provider wrappers stay evidence; the
+ * visible surface is organized around the semantic payload and result. */
 function TraceItemDetail({ item }: { item: TraceItem }) {
   const t = useT();
   const duration = traceItemDurationMs(item);
+  const semantic = semanticTraceDetail(item);
+  const tabs: TraceDetailTab[] = [
+    'summary',
+    ...(hasTraceDetail(semantic.payload) ? ['payload' as const] : []),
+    ...(hasTraceDetail(semantic.result) ? ['result' as const] : []),
+    ...(hasTraceDetail(semantic.schema) ? ['schema' as const] : []),
+    'timing',
+  ];
+  const [selectedTab, setSelectedTab] = useState<TraceDetailTab>('summary');
+  const activeTab = tabs.includes(selectedTab) ? selectedTab : 'summary';
   return (
     <article className="chat-trace-detail" data-testid="chat-trace-detail">
       <div className="chat-agent-kicker">
         <span className={`trace-kind ${item.kind}`}>{t(`trace.kind.${item.kind}`)}</span>
+        {semantic.presentationType && (
+          <span className="trace-detail-presentation">
+            {t('trace.detail.presentation')}: {semantic.presentationType}
+          </span>
+        )}
       </div>
-      <dl className="chat-agent-meta">
-        <div>
-          <dt>{t('trace.detail.evidence')}</dt>
-          <dd><EvidenceChip evidence={item.evidence} /></dd>
-        </div>
-        <div>
-          <dt>{t('trace.detail.status')}</dt>
-          <dd>{item.status ? <StatusBadge status={item.status} /> : '—'}</dd>
-        </div>
-        <Meta label={t('trace.detail.started')} value={formatTraceClock(item.at)} mono />
-        {item.endAt && (
-          <Meta label={t('trace.detail.ended')} value={formatTraceClock(item.endAt)} mono />
+      <div className="trace-detail-tabs" role="tablist">
+        {tabs.map(tab => (
+          <button
+            key={tab}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab}
+            className={activeTab === tab ? 'active' : undefined}
+            onClick={() => setSelectedTab(tab)}
+            data-testid={`trace-detail-tab-${tab}`}
+          >
+            {t(`trace.detail.${tab}`)}
+          </button>
+        ))}
+      </div>
+      <div className="trace-detail-tabpanel" role="tabpanel" data-testid={`trace-detail-panel-${activeTab}`}>
+        {activeTab === 'summary' && (
+          <>
+            <dl className="chat-agent-meta trace-detail-summary-meta">
+              <div>
+                <dt>{t('trace.detail.evidence')}</dt>
+                <dd><EvidenceChip evidence={item.evidence} /></dd>
+              </div>
+              <div>
+                <dt>{t('trace.detail.status')}</dt>
+                <dd>{item.status ? <StatusBadge status={item.status} /> : '-'}</dd>
+              </div>
+            </dl>
+            {item.summary && <p className="trace-detail-summary-text">{item.summary}</p>}
+            {item.kind === 'request' && <TraceRequestPayload item={item} />}
+            {!item.summary && item.kind !== 'request' && !hasTraceDetail(semantic.payload)
+              && !hasTraceDetail(semantic.result) && (
+                <p className="chat-agent-waiting">{t('trace.detail.empty')}</p>
+              )}
+          </>
         )}
-        {duration !== undefined && (
-          <Meta label={t('trace.detail.duration')} value={formatElapsed(duration)} />
+        {activeTab === 'payload' && <TraceDetailValue value={semantic.payload} />}
+        {activeTab === 'result' && <TraceDetailValue value={semantic.result} />}
+        {activeTab === 'schema' && <TraceDetailValue value={semantic.schema} />}
+        {activeTab === 'timing' && (
+          <dl className="chat-agent-meta">
+            <Meta label={t('trace.detail.started')} value={formatTraceClock(item.at)} mono />
+            {item.endAt && (
+              <Meta label={t('trace.detail.ended')} value={formatTraceClock(item.endAt)} mono />
+            )}
+            {duration !== undefined && (
+              <Meta label={t('trace.detail.duration')} value={formatElapsed(duration)} />
+            )}
+            {item.correlationId && (
+              <Meta label={t('trace.detail.correlation')} value={item.correlationId} mono />
+            )}
+            <Meta label={t('trace.detail.sourceEvents')} value={String(item.sourceEventIds.length)} />
+          </dl>
         )}
-        {item.correlationId && (
-          <Meta label={t('trace.detail.correlation')} value={item.correlationId} mono />
-        )}
-        <Meta label={t('trace.detail.sourceEvents')} value={String(item.sourceEventIds.length)} />
-      </dl>
-      {item.kind === 'request' ? (
-        <TraceRequestPayload item={item} />
-      ) : item.detail !== undefined ? (
-        <pre className="chat-context-detail">{JSON.stringify(item.detail, null, 2)}</pre>
-      ) : (
-        <p className="chat-agent-waiting">{t('trace.detail.empty')}</p>
-      )}
+      </div>
     </article>
   );
+}
+
+function semanticTraceDetail(item: TraceItem): {
+  presentationType: string;
+  payload: unknown;
+  result: unknown;
+  schema: unknown;
+} {
+  const detail = asRecord(item.detail);
+  if (item.kind === 'request') {
+    return { presentationType: 'request', payload: item.detail, result: undefined, schema: detail.schema };
+  }
+
+  const presentation = asRecord(detail.presentation);
+  const presentationType = typeof presentation.type === 'string' ? presentation.type : '';
+  const data = asRecord(presentation.data);
+  const nativeItem = asRecord(asRecord(detail.details).item);
+  const { output: _output, ...presentationPayload } = data;
+  const result = data.output
+    ?? nativeItem.aggregatedOutput
+    ?? nativeItem.result
+    ?? nativeItem.error
+    ?? detail.result
+    ?? detail.output
+    ?? detail.error;
+  let payload: unknown = data.input;
+  if (payload === undefined && ['command', 'search', 'file', 'agent', 'notice'].includes(presentationType)) {
+    payload = presentationPayload;
+  }
+  if (payload === undefined && presentationType === '') {
+    payload = detail.payload ?? detail.input;
+    if (payload === undefined && result === undefined) payload = item.detail;
+  }
+  return {
+    presentationType,
+    payload,
+    result,
+    schema: detail.schema ?? nativeItem.schema,
+  };
+}
+
+function hasTraceDetail(value: unknown): boolean {
+  if (value === undefined || value === null || value === '') return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value as Record<string, unknown>).length > 0;
+  return true;
+}
+
+function TraceDetailValue({ value }: { value: unknown }) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  return <pre className="chat-context-detail trace-detail-value">{text}</pre>;
 }
 
 function TraceRequestPayload({ item }: { item: TraceItem }) {

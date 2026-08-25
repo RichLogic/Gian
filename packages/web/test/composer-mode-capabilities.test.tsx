@@ -279,6 +279,62 @@ describe('Composer mode dropdown from proxy capabilities', () => {
     expect(callbacks.onSetServiceTier).toHaveBeenCalledWith('fast');
   });
 
+  it('does not use the Codex Fast fallback once a catalog without role=fast is ready', async () => {
+    loadProxyCapabilitiesMock.mockResolvedValue({
+      catalogRevision: 'rev-codex-standard-only',
+      input: [{ type: 'text' }],
+      slashCommands: [],
+      configOptions: [{
+        id: 'model',
+        displayName: 'Model',
+        binding: 'turn',
+        role: 'model',
+        control: 'select',
+        required: false,
+        defaultValue: 'gpt-5.6-sol',
+        choices: [{ value: 'gpt-5.6-sol', displayName: 'GPT-5.6-Sol' }],
+      }],
+    });
+    renderComposer(makeSession('codex'));
+    await userEvent.click(await screen.findByTestId('composer-options-chip'));
+    expect(screen.queryByRole('switch', { name: 'Fast' })).toBeNull();
+  });
+
+  it('clears Fast when the selected model does not satisfy the catalog condition', async () => {
+    loadProxyCapabilitiesMock.mockResolvedValue({
+      catalogRevision: 'rev-codex-fast-by-model',
+      input: [{ type: 'text' }],
+      slashCommands: [],
+      configOptions: [{
+        id: 'model',
+        displayName: 'Model',
+        binding: 'turn',
+        role: 'model',
+        control: 'select',
+        required: false,
+        defaultValue: 'gpt-5.6-sol',
+        choices: [
+          { value: 'gpt-5.6-sol', displayName: 'Sol' },
+          { value: 'gpt-5.6-luna', displayName: 'Luna' },
+        ],
+      }, {
+        id: 'service_tier',
+        displayName: 'Fast',
+        binding: 'turn',
+        role: 'fast',
+        control: 'boolean',
+        required: false,
+        defaultValue: false,
+        enabledWhen: [{ optionId: 'model', oneOf: ['gpt-5.6-sol'] }],
+      }],
+    });
+    const callbacks = renderComposer(makeSession('codex', { service_tier: 'fast' }));
+    await userEvent.click(await screen.findByTestId('composer-options-chip'));
+    await userEvent.click(await screen.findByText('Luna', { selector: '.mp-row-title' }));
+    expect(callbacks.onSetModel).toHaveBeenCalledWith('gpt-5.6-luna');
+    expect(callbacks.onSetServiceTier).toHaveBeenCalledWith(null);
+  });
+
   it('hides the attachment button when the catalog only advertises text input', async () => {
     loadProxyCapabilitiesMock.mockResolvedValue({
       catalogRevision: 'rev-text',

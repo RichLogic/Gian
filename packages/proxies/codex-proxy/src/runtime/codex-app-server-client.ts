@@ -279,7 +279,7 @@ function normalizeDeadlines(overrides: Partial<CodexAppServerDeadlines> | undefi
 
 export function buildInitializeParams() {
   return {
-    clientInfo: { name: 'codex-proxy', version: '0.2.1' },
+    clientInfo: { name: 'codex-proxy', version: '0.2.3' },
     capabilities: {
       experimentalApi: true,
       requestAttestation: false,
@@ -705,6 +705,14 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
     return normalizeThreadBootstrap(await this.request('thread/resume', { threadId }));
   }
 
+  async forkThread(threadId: string, options: { lastTurnId?: string; cwd?: string } = {}) {
+    return normalizeThreadBootstrap(await this.request('thread/fork', {
+      threadId,
+      ...(options.lastTurnId ? { lastTurnId: options.lastTurnId } : {}),
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+    }));
+  }
+
   async readThread(threadId: string) {
     return this.request('thread/read', {
       threadId,
@@ -720,6 +728,10 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
    *  in `codex resume` / Codex app listings. */
   async setThreadName(threadId: string, name: string) {
     return this.request('thread/name/set', { threadId, name });
+  }
+
+  async archiveThread(threadId: string) {
+    return this.request('thread/archive', { threadId });
   }
 
   /** Read every persisted thread page. `name` is Codex's user-facing title

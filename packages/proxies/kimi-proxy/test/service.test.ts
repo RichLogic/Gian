@@ -14,7 +14,7 @@ import {
 
 import { KimiProxyService, parseKimiConversationUsage } from '../src/core/service.js';
 import { KimiProtocolV2Adapter, type WireRequest } from '../src/protocol/v2-adapter.js';
-import { proxyNotificationSchema, replayEventSchemaUnion } from '@gian/proxy-protocol';
+import { proxyNotificationSchema, replayEventSchemaUnion, resultSchemas } from '@gian/proxy-protocol';
 import {
   KimiAcpClient,
   type KimiAcpExit,
@@ -2597,6 +2597,114 @@ test('Kimi gian.proxy/2 auto-cancels a permission request whose options have no 
   assert.equal(
     (notice?.params.data as { presentation: { type: string } }).presentation.type,
     'notice',
+  );
+  await service.close();
+});
+
+test('Kimi gian.proxy/2 maps ACP session/fork to durable Side Chat and head Fork', async () => {
+  let nextNativeId = 1;
+  const forkCalls: string[] = [];
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory(() => ({
+      initialize: async () => ({
+        protocolVersion: 1,
+        agentCapabilities: {
+          loadSession: true,
+          sessionCapabilities: { list: {}, resume: {}, close: {}, fork: {} },
+        },
+      }),
+      newSession: async () => ({ sessionId: `native-${nextNativeId++}`, configOptions: [] }),
+      unstable_forkSession: async (params: { sessionId: string }) => {
+        forkCalls.push(params.sessionId);
+        return { sessionId: `native-${nextNativeId++}`, configOptions: [] };
+      },
+      resumeSession: async () => ({ configOptions: [] }),
+      loadSession: async () => ({ configOptions: [] }),
+      closeSession: async () => undefined,
+      prompt: async () => ({ stopReason: 'end_turn' }),
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.1', (method, params) => {
+    notifications.push({ method, params });
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+  });
+
+  const initialized = resultSchemas.initialize.parse(await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  })));
+  assert.equal(initialized.capabilities.sidechat, 1);
+  assert.equal(initialized.capabilities['session.fork'], 1);
+  assert.equal(initialized.capabilities['session.fork.atTurn'], undefined);
+  const catalog = resultSchemas['catalog.list'].parse(await adapter.handle(v2Request('2', 'catalog.list', {})));
+  assert.equal(catalog.actions?.find((action) => action.id === 'sidechat.create')?.supported, true);
+  assert.equal(catalog.actions?.find((action) => action.id === 'session.fork.atTurn')?.supported, false);
+
+  const parent = resultSchemas['session.create'].parse(await adapter.handle(v2Request('3', 'session.create', {
+    sessionId: 'parent',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })));
+  await adapter.handle(v2Request('4', 'turn.start', {
+    sessionId: 'parent',
+    streamId: parent.session.streamId,
+    turnId: 'host-turn-1',
+    input: [{ type: 'text', text: 'establish a boundary' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notifications.some((event) => event.method === 'turn.completed'),
+    'parent turn did not complete',
+  );
+  const sourceTurnId = String(
+    notifications.find((event) => event.method === 'turn.started')?.params.sourceTurnId,
+  );
+
+  const forked = resultSchemas['session.fork'].parse(await adapter.handle(v2Request('5', 'session.fork', {
+    sourceSessionId: 'parent',
+    sourceStreamId: parent.session.streamId,
+    sessionId: 'fork-1',
+    anchor: { type: 'head' },
+  })));
+  assert.deepEqual(forked.origin, {
+    kind: 'fork',
+    sessionId: 'parent',
+    turnId: 'host-turn-1',
+    sourceTurnId,
+  });
+  assert.ok(forked.session.nativeSession?.id);
+  const replay = resultSchemas['session.replay'].parse(await adapter.handle(v2Request('6', 'session.replay', {
+    sessionId: 'fork-1',
+    streamId: forked.session.streamId,
+    cursor: null,
+    limit: 100,
+  })));
+  assert.ok(replay.events.some((event) => event.method === 'turn.completed'));
+  assert.ok(replay.events.every((event) => event.sessionId === 'fork-1'));
+
+  const sidechat = resultSchemas['sidechat.create'].parse(await adapter.handle(v2Request('7', 'sidechat.create', {
+    parentSessionId: 'parent',
+    parentStreamId: parent.session.streamId,
+    sidechatId: 'side-1',
+  })));
+  assert.deepEqual(sidechat.sidechat.anchor, {
+    type: 'turn',
+    turnId: 'host-turn-1',
+    sourceTurnId,
+  });
+  assert.equal(forkCalls.length, 2);
+  assert.deepEqual(
+    resultSchemas['sidechat.close'].parse(await adapter.handle(v2Request('8', 'sidechat.close', {
+      sidechatId: 'side-1',
+      streamId: sidechat.sidechat.streamId,
+      resumeRef: sidechat.sidechat.resumeRef,
+    }))),
+    { ok: true, sidechatId: 'side-1', providerDataDeleted: false },
   );
   await service.close();
 });

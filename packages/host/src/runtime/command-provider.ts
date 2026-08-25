@@ -59,8 +59,8 @@ export class CommandRuntimeProvider implements CliRuntimeProvider {
     this.id = options.id;
   }
 
-  async inspectInstalled(): Promise<InstalledRuntime[]> {
-    const configured = this.options.configuredPath()?.trim();
+  async inspectInstalled(overridePath?: string): Promise<InstalledRuntime[]> {
+    const configured = (overridePath ?? this.options.configuredPath())?.trim();
     const candidates: Candidate[] = [];
     if (configured) {
       if (!isAbsolute(configured)) {

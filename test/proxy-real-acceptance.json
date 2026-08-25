@@ -114,7 +114,7 @@
   "providers": {
     "claude": {
       "displayName": "Claude Code",
-      "pluginVersion": "0.2.0",
+      "pluginVersion": "0.2.2",
       "processScope": "session",
       "binary": "/Users/richlogic/.local/bin/claude-mix",
       "cheapestConfig": {
@@ -129,6 +129,9 @@
         "session.rename",
         "session.native.list",
         "session.replay",
+        "sidechat",
+        "session.fork",
+        "session.fork.atTurn",
         "interaction",
         "event.reasoning",
         "event.usage"
@@ -152,7 +155,7 @@
     },
     "codex": {
       "displayName": "Codex",
-      "pluginVersion": "0.2.1",
+      "pluginVersion": "0.2.3",
       "processScope": "shared",
       "binary": "codex",
       "cheapestConfig": {
@@ -167,6 +170,9 @@
         "session.rename",
         "session.native.list",
         "session.replay",
+        "sidechat",
+        "session.fork",
+        "session.fork.atTurn",
         "turn.steer",
         "interaction",
         "event.reasoning",
@@ -195,7 +201,7 @@
     },
     "kimi": {
       "displayName": "Kimi Code",
-      "pluginVersion": "0.2.0",
+      "pluginVersion": "0.2.2",
       "processScope": "shared",
       "binary": "~/.kimi-code/bin/kimi",
       "cheapestConfig": {
@@ -208,6 +214,8 @@
         "session.rename",
         "session.native.list",
         "session.replay",
+        "sidechat",
+        "session.fork",
         "interaction",
         "event.reasoning",
         "event.plan",
@@ -232,7 +240,7 @@
     },
     "grok": {
       "displayName": "Grok Build",
-      "pluginVersion": "0.3.0",
+      "pluginVersion": "0.3.1",
       "processScope": "session",
       "binary": "grok",
       "cheapestConfig": {
@@ -247,6 +255,8 @@
         "session.native.list",
         "session.native.delete",
         "session.replay",
+        "sidechat",
+        "session.fork",
         "turn.steer",
         "interaction",
         "event.reasoning",
@@ -600,14 +610,14 @@
       "providers": {"claude": "unsupported", "codex": "unsupported", "kimi": "unsupported", "grok": "unsupported", "dsh": "contract_only"}
     },
     {
-      "id": "sidechat_fork.unsupported_contract",
+      "id": "sidechat_fork.native_contract",
       "category": "sidechat_fork",
       "trigger": "control",
-      "purpose": "Keep the standard Side Chat and native Session Fork method schemas visible while every current Provider adapter honestly reports them unsupported.",
+      "purpose": "Validate the four built-in Proxies map their native context-fork primitive to durable Side Chat and Session Fork without contaminating the parent route.",
       "methods": ["sidechat.create", "sidechat.resume", "sidechat.close", "session.fork"],
       "notifications": [],
-      "steps": ["initialize Proxy", "read catalog actions and capabilities", "assert Side Chat and Fork are not advertised", "assert Host gates the standard methods as unsupported without Provider side effects"],
-      "providers": {"claude": "unsupported", "codex": "unsupported", "kimi": "unsupported", "grok": "unsupported", "dsh": "unsupported"}
+      "steps": ["create a parent terminal turn", "create, resume, run, and close a Side Chat", "assert parent and child streams remain isolated", "fork head and replay inherited history", "for Claude/Codex also fork the exact terminal turn", "restart and reattach by durable nativeSession.id"],
+      "providers": {"claude": "required", "codex": "required", "kimi": "partial", "grok": "partial", "dsh": "unsupported"}
     },
     {
       "id": "shutdown.cleanup",

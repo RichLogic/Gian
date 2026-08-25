@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
-  AgentInstallStatus,
+  AgentColor,
   AgentProxyDefaults,
   AgentProxyUpdateCheck,
   ChatFontFamily,
@@ -9,10 +9,13 @@ import type {
   GianScreenshotPreferences,
   GianScreenshotState,
   OpenFileCategory,
+  ProductExecutor,
+  ProxyCatalogEntry,
   ShortcutAction,
   SystemConfig,
   TerminalOptions,
   TerminalPreferences,
+  UserAgentStatus,
 } from '@gian/shared';
 import {
   DEFAULT_TERMINAL_PREFERENCES,
@@ -21,7 +24,9 @@ import {
   THEME_DEFAULT_ACCENT,
 } from '@gian/shared';
 import {
+  loadAgentDraftDefaults,
   loadAgents,
+  loadProxies,
   loadProxyCapabilities,
   loadResolvedProxyCatalog,
 } from '../api.js';
@@ -44,9 +49,8 @@ import {
   useShortcuts,
 } from '../shortcut-prefs.js';
 import { desktopBridge } from '../desktop-bridge.js';
-import { releaseAgents } from '../release-executors.js';
 import { confirm, toast } from '../feedback.js';
-import { agentEntityKey } from '../operations/agents.js';
+import { agentEntityKey, agentIdEntityKey } from '../operations/agents.js';
 import { AUTH_ENTITY_KEY } from '../operations/auth.js';
 import { SETTINGS_ONBOARDING_ENTITY_KEY } from '../operations/settings.js';
 import { BROWSER_PROFILE_ENTITY_KEY } from '../operations/browser.js';
@@ -476,13 +480,10 @@ function SettingsBodyInner({
         </section>
         )}
 
-        {/* ── Executors ── */}
+        {/* ── AI Agents ── */}
         {activeSection === 'executors' && (
         <section className="s2-section">
-          <h3 className="s2-sectiontitle">{t('settings.section.executor')}</h3>
-          <div className="s2-card">
-            <AgentInstallBlock />
-          </div>
+          <AgentInstallBlock />
         </section>
         )}
 
@@ -854,23 +855,125 @@ function AccountBlock({
   );
 }
 
+// ---------------------------------------------------------------------------
+// AI Agents (issue #97) — user-managed Agents on the Proxy-kind catalog.
+// Visual/interaction contract: .cursor/ai-agents-ui-prototype.html. Draft
+// cards are local state until Save & Restart writes agents.json; kind-level
+// install/update APIs stay draft-safe (no Agent id required).
+// ---------------------------------------------------------------------------
+
+const AGENT_SWATCHES: readonly AgentColor[] = [
+  'rose', 'ember', 'citron', 'moss', 'teal', 'azure', 'ink', 'plum',
+];
+
+interface AgentDraftState {
+  name: string;
+  proxy: ProductExecutor;
+  color: AgentColor;
+  cliPath: string;
+}
+
+function draftNameError(
+  draft: AgentDraftState,
+  agents: UserAgentStatus[],
+): 'empty' | 'taken' | null {
+  const name = draft.name.trim();
+  if (!name) return 'empty';
+  return agents.some(agent => agent.name.trim().toLowerCase() === name.toLowerCase())
+    ? 'taken'
+    : null;
+}
+
+/** 8-color popover anchored to a color-dot button. Owns its outside-click
+ *  dismissal; the parent re-renders the dot from the committed value. */
+function ColorSwatchPopover({
+  value,
+  onPick,
+  onClose,
+}: {
+  value: AgentColor;
+  onPick: (color: AgentColor) => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const listener = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) onClose();
+    };
+    document.addEventListener('mousedown', listener);
+    return () => document.removeEventListener('mousedown', listener);
+  }, [onClose]);
+  return (
+    <div className="swatch-pop" ref={ref} role="listbox" aria-label="Agent color">
+      {AGENT_SWATCHES.map(color => (
+        <button
+          key={color}
+          type="button"
+          className={`accent-swatch ${value === color ? 'active' : ''}`}
+          style={{ background: `var(--agent-${color})` }}
+          title={color}
+          onClick={() => { onPick(color); onClose(); }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** Color dot = the Agent's color; clicking opens the swatch popover. */
+function AgentColorDot({
+  value,
+  onPick,
+  title,
+}: {
+  value: AgentColor;
+  onPick: (color: AgentColor) => void;
+  title: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="name-edit-wrap">
+      <button
+        type="button"
+        className="exec-dot btnish"
+        style={{ background: `var(--agent-${value})` }}
+        title={title}
+        aria-label={title}
+        onClick={() => setOpen(previous => !previous)}
+      />
+      {open && (
+        <ColorSwatchPopover
+          value={value}
+          onPick={onPick}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </span>
+  );
+}
+
 function AgentInstallBlock() {
   const t = useT();
   const dispatch = useOperationDispatch();
   const store = useOperationStore();
-  const [agents, setAgents] = useState<AgentInstallStatus[]>([]);
+  const [agents, setAgents] = useState<UserAgentStatus[]>([]);
+  const [proxies, setProxies] = useState<ProxyCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  /** Per-executor result of the last manual Proxy update check (issue #86).
-   *  Not persisted; a successful install clears the stale entry. */
+  const [draft, setDraft] = useState<AgentDraftState | null>(null);
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [catalogKind, setCatalogKind] = useState<ProductExecutor | null>(null);
+  /** Per-kind result of the last manual Proxy update check (issue #86). */
   const [proxyChecks, setProxyChecks] = useState<
     Partial<Record<string, AgentProxyUpdateCheck>>
   >({});
 
+  const desktop = desktopBridge();
+  const desktopApp = desktop?.appVariant === 'production'
+    || desktop?.appVariant === 'development';
+
   async function refresh() {
-    setLoading(true);
     try {
-      setAgents(releaseAgents(await loadAgents({ refresh: true })));
+      setAgents(await loadAgents({ refresh: true }));
       setError('');
     } catch (value) {
       setError(value instanceof Error ? value.message : String(value));
@@ -881,13 +984,23 @@ function AgentInstallBlock() {
 
   useEffect(() => {
     void refresh();
+    loadProxies()
+      .then(setProxies)
+      .catch(() => setProxies([]));
   }, []);
 
-  /** Dispatch one agent operation and wait for its settle (Phase 3b): the
-   *  pending run drives the row's busy state; this promise preserves the
-   *  pre-migration success-boolean contract (refresh + inline error). */
+  /** Dispatch one agent operation and wait for its settle: the pending run
+   *  drives busy states; this promise preserves the success-boolean
+   *  contract (refresh + inline error). */
   async function run(
-    name: 'agent.installCli' | 'agent.installProxy' | 'agent.setCliPath' | 'agent.setProxyDefaults',
+    name:
+      | 'agent.installCli'
+      | 'agent.installProxy'
+      | 'agent.create'
+      | 'agent.delete'
+      | 'agent.patch'
+      | 'agent.setPath'
+      | 'agent.switchProxy',
     input: Parameters<typeof dispatch>[1],
   ): Promise<boolean> {
     setError('');
@@ -897,139 +1010,406 @@ function AgentInstallBlock() {
       await refresh();
       return true;
     }
-    // Failure: surface the run's error inline; no refresh (that would clear
-    // it — the pre-migration catch path didn't refresh either).
     setError(settled.error ?? 'Agent operation failed');
     return false;
   }
 
-  async function setup(agent: AgentInstallStatus) {
-    if (agent.proxy.state !== 'ready'
-      && !(await run('agent.installProxy', { executor: agent.id }))) return;
-    if (agent.cli.state !== 'ready') {
-      await run('agent.installCli', { executor: agent.id });
+  /** Load-set changes restart Gian on desktop; the confirm stays in the
+   *  view while the operation sequences write → restart → rollback. In a
+   *  plain browser there is no bridge to restart with, so the write simply
+   *  lands and takes effect at the next launch. */
+  async function confirmRestart(): Promise<boolean> {
+    if (!desktopApp) return true;
+    const accepted = await confirm({
+      title: t('settings.agents.restartTitle'),
+      message: t('settings.agents.restartMessage'),
+      confirmLabel: t('settings.agents.restartConfirm'),
+      cancelLabel: t('settings.agents.restartCancel'),
+    });
+    if (!accepted) return false;
+    if (!desktop?.restartApp) {
+      setError(t('settings.agents.restartFailed'));
+      return false;
+    }
+    return true;
+  }
+
+  function openCatalog() {
+    setCatalogKind(proxies[0]?.id ?? 'claude');
+    setCatalogOpen(true);
+  }
+
+  async function startDraft(kind: ProductExecutor) {
+    setCatalogOpen(false);
+    try {
+      const defaults = await loadAgentDraftDefaults(kind);
+      setDraft({
+        name: defaults.name,
+        proxy: kind,
+        color: defaults.color,
+        cliPath: defaults.cliPath ?? '',
+      });
+    } catch {
+      setDraft({ name: '', proxy: kind, color: 'azure', cliPath: '' });
     }
   }
 
-  /** Install (or update) the Proxy, then drop the now-stale check result. */
-  async function installProxy(agent: AgentInstallStatus) {
-    if (await run('agent.installProxy', { executor: agent.id })) {
+  async function changeDraftProxy(kind: ProductExecutor) {
+    if (!draft || kind === draft.proxy) return;
+    // The name stays (it is free text); an untouched path/color re-defaults
+    // for the new kind (prototype behavior).
+    const keepPath = draft.cliPath.trim() !== '';
+    try {
+      const defaults = await loadAgentDraftDefaults(kind);
+      setDraft({
+        name: draft.name,
+        proxy: kind,
+        color: keepPath ? draft.color : defaults.color,
+        cliPath: keepPath ? draft.cliPath : defaults.cliPath ?? '',
+      });
+    } catch {
+      setDraft({ ...draft, proxy: kind });
+    }
+  }
+
+  async function saveDraft() {
+    if (!draft || draftNameError(draft, agents)) return;
+    if (!(await confirmRestart())) return;
+    const ok = await run('agent.create', {
+      name: draft.name.trim(),
+      proxy: draft.proxy,
+      color: draft.color,
+      cliPath: draft.cliPath.trim() || null,
+      restart: desktopApp,
+      restartFailedMessage: t('settings.agents.restartFailed'),
+    });
+    if (ok) setDraft(null);
+  }
+
+  async function savePath(agent: UserAgentStatus, path: string | null): Promise<boolean> {
+    if (!(await confirmRestart())) return false;
+    return run('agent.setPath', {
+      agentId: agent.id,
+      path,
+      restart: desktopApp,
+      previousPath: agent.cliPath,
+      restartFailedMessage: t('settings.agents.restartFailed'),
+    });
+  }
+
+  async function switchProxy(agent: UserAgentStatus, proxy: ProductExecutor): Promise<void> {
+    if (proxy === agent.proxy) return;
+    if (!(await confirmRestart())) return;
+    // Retarget the path in the same write: the old kind's binary is never
+    // the right runtime. Copy the new kind's existing path when one exists.
+    let cliPath: string | null = null;
+    try {
+      const defaults = await loadAgentDraftDefaults(proxy);
+      cliPath = defaults.cliPath;
+    } catch {
+      cliPath = null;
+    }
+    await run('agent.switchProxy', {
+      agentId: agent.id,
+      proxy,
+      cliPath,
+      previousProxy: agent.proxy,
+      previousCliPath: agent.cliPath,
+      restart: desktopApp,
+      restartFailedMessage: t('settings.agents.restartFailed'),
+    });
+  }
+
+  async function removeAgent(agent: UserAgentStatus): Promise<void> {
+    const accepted = await confirm({
+      title: t('settings.agents.deleteTitle'),
+      message: t('settings.agents.deleteMessage').replace('{name}', agent.name),
+      confirmLabel: t('settings.agents.deleteConfirm'),
+      cancelLabel: t('common.cancel'),
+    });
+    if (!accepted) return;
+    if (!(await confirmRestart())) return;
+    await run('agent.delete', {
+      agentId: agent.id,
+      snapshot: {
+        name: agent.name,
+        proxy: agent.proxy,
+        color: agent.color,
+        cliPath: agent.cliPath,
+        defaults: agent.defaults,
+      },
+      restart: desktopApp,
+      restartFailedMessage: t('settings.agents.restartFailed'),
+    });
+  }
+
+  /** Install (or update) the kind's Proxy, then drop the stale check. */
+  async function installProxy(agent: UserAgentStatus) {
+    if (await run('agent.installProxy', { executor: agent.proxy })) {
       setProxyChecks(previous => {
         const next = { ...previous };
-        delete next[agent.id];
+        delete next[agent.proxy];
         return next;
       });
     }
   }
 
-  /** Read-only check against the release repository; the confirmed run's
-   *  result is the check payload, shown inline on the row. */
-  async function checkProxyUpdate(agent: AgentInstallStatus) {
+  async function checkProxyUpdate(agent: UserAgentStatus) {
     setError('');
-    const dispatched = dispatch('agent.checkProxyUpdate', { executor: agent.id });
+    const dispatched = dispatch('agent.checkProxyUpdate', { executor: agent.proxy });
     const settled: OperationRun = await waitForRunSettle(store, dispatched.id);
     if (settled.phase === 'confirmed') {
       setProxyChecks(previous => ({
         ...previous,
-        [agent.id]: settled.result as AgentProxyUpdateCheck,
+        [agent.proxy]: settled.result as AgentProxyUpdateCheck,
       }));
     } else {
       setError(settled.error ?? 'Agent operation failed');
     }
   }
 
-  async function changeCliPath(
-    agent: AgentInstallStatus,
-    path: string | null,
-  ): Promise<boolean> {
-    const desktop = desktopBridge();
-    const desktopApp = desktop?.appVariant === 'production'
-      || desktop?.appVariant === 'development';
-    if (desktopApp) {
-      // The restart confirm stays in the view (user interaction); the
-      // operation executor runs path-set → restart → rollback (see
-      // operations/agents.ts).
-      const accepted = await confirm({
-        title: t('settings.agents.restartTitle'),
-        message: t('settings.agents.restartMessage'),
-        confirmLabel: t('settings.agents.restartConfirm'),
-        cancelLabel: t('settings.agents.restartCancel'),
-      });
-      if (!accepted) return false;
-      if (!desktop?.restartApp) {
-        setError(t('settings.agents.restartFailed'));
-        return false;
-      }
-    }
-
-    return run('agent.setCliPath', {
-      executor: agent.id,
-      path,
-      restart: desktopApp,
-      previousPath: agent.cli.path ?? null,
-      restartFailedMessage: t('settings.agents.restartFailed'),
-    });
-  }
-
   if (loading && agents.length === 0) {
     return <p className="s2-help">{t('settings.agents.loading')}</p>;
   }
 
+  const draftError = draft ? draftNameError(draft, agents) : null;
+
   return (
     <>
+      <div className="s2-section-heading">
+        <h3 className="s2-sectiontitle">{t('settings.section.executor')}</h3>
+        <button type="button" className="btn sm primary" onClick={openCatalog}>
+          {t('settings.agents.add')}
+        </button>
+      </div>
       <p className="s2-help">{t('settings.agents.help')}</p>
-      {agents.map(agent => (
-        <AgentInstallRow
-          key={agent.id}
-          agent={agent}
-          onSetup={() => { void setup(agent); }}
-          onInstallCli={() => { void run('agent.installCli', { executor: agent.id }); }}
-          onInstallProxy={() => { void installProxy(agent); }}
-          onCheckProxyUpdate={() => { void checkProxyUpdate(agent); }}
-          proxyCheck={proxyChecks[agent.id]}
-          onSetPath={path => changeCliPath(agent, path)}
-          onSetDefaults={defaults => { void run('agent.setProxyDefaults', { executor: agent.id, defaults }); }}
-          onPickPath={async () => {
-            const settled = await waitForRunSettle(
-              store,
-              dispatch('agent.pickCliPath', { executor: agent.id }).id,
-            );
-            return settled.phase === 'confirmed' ? (settled.result as string | null) : null;
-          }}
-        />
-      ))}
+
+      {draft && (
+        <div className="s2-card draft" data-testid="agent-draft-card">
+          <div className="exec-row">
+            <div className="exec-head">
+              <AgentColorDot
+                value={draft.color}
+                title={t('settings.agents.color')}
+                onPick={color => setDraft({ ...draft, color })}
+              />
+              <input
+                className={`exec-name-input ${draftError === 'taken' ? 'bad' : ''}`}
+                value={draft.name}
+                spellCheck={false}
+                aria-label={t('settings.agents.name')}
+                onChange={event => setDraft({ ...draft, name: event.target.value })}
+              />
+              <span className="exec-status draft">{t('settings.agents.draft')}</span>
+            </div>
+            <dl className="kv-grid">
+              <dt>{t('settings.agents.proxy')}</dt>
+              <dd>
+                <select
+                  className="select"
+                  value={draft.proxy}
+                  aria-label={t('settings.agents.proxy')}
+                  onChange={event => void changeDraftProxy(event.target.value as ProductExecutor)}
+                >
+                  {proxies.map(entry => (
+                    <option key={entry.id} value={entry.id}>{entry.name}</option>
+                  ))}
+                </select>
+              </dd>
+              <dt>{t('settings.agents.cliPath')}</dt>
+              <dd>
+                <div className="cli-path-row">
+                  <input
+                    className="input mono"
+                    value={draft.cliPath}
+                    placeholder="/absolute/path/to/cli"
+                    aria-label={t('settings.agents.cliPath')}
+                    onChange={event => setDraft({ ...draft, cliPath: event.target.value })}
+                  />
+                  <button
+                    type="button"
+                    className="btn xs secondary"
+                    onClick={() => {
+                      void (async () => {
+                        const settled = await waitForRunSettle(
+                          store,
+                          dispatch('agent.pickCliPath', { executor: draft.proxy }).id,
+                        );
+                        if (settled.phase === 'confirmed' && typeof settled.result === 'string') {
+                          setDraft(previous => previous ? { ...previous, cliPath: settled.result as string } : previous);
+                        }
+                      })();
+                    }}
+                  >
+                    {t('settings.agents.browse')}
+                  </button>
+                </div>
+                {!draft.cliPath.trim() && (
+                  <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                    <button
+                      type="button"
+                      className="btn xs secondary"
+                      onClick={() => { void run('agent.installCli', { executor: draft.proxy }); }}
+                    >
+                      {t('settings.agents.installOfficial')}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn xs secondary"
+                      onClick={() => { void run('agent.installProxy', { executor: draft.proxy }); }}
+                    >
+                      {t('settings.agents.setupProxy')}
+                    </button>
+                  </div>
+                )}
+              </dd>
+            </dl>
+            {draftError === 'taken' && (
+              <span className="field-error">{t('settings.agents.nameTaken')}</span>
+            )}
+            <div className="card-actions">
+              <button type="button" className="btn ghost" onClick={() => setDraft(null)}>
+                {t('common.cancel')}
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                disabled={draftError !== null}
+                onClick={() => { void saveDraft(); }}
+              >
+                {t('settings.agents.saveRestart')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {agents.length > 0 && (
+        <div className="s2-card">
+          {agents.map(agent => (
+            <AgentInstallRow
+              key={agent.id}
+              agent={agent}
+              proxies={proxies}
+              proxyCheck={proxyChecks[agent.proxy]}
+              onRename={name => run('agent.patch', { agentId: agent.id, patch: { name } })}
+              onRecolor={color => run('agent.patch', { agentId: agent.id, patch: { color } })}
+              onSwitchProxy={kind => switchProxy(agent, kind)}
+              onSetPath={path => savePath(agent, path)}
+              onSetDefaults={defaults => run('agent.patch', { agentId: agent.id, patch: { defaults } })}
+              onInstallCli={() => { void run('agent.installCli', { executor: agent.proxy }); }}
+              onInstallProxy={() => { void installProxy(agent); }}
+              onCheckProxyUpdate={() => { void checkProxyUpdate(agent); }}
+              onPickPath={async () => {
+                const settled = await waitForRunSettle(
+                  store,
+                  dispatch('agent.pickCliPath', { executor: agent.proxy }).id,
+                );
+                return settled.phase === 'confirmed' ? (settled.result as string | null) : null;
+              }}
+              onDelete={() => { void removeAgent(agent); }}
+            />
+          ))}
+        </div>
+      )}
+
+      {agents.length === 0 && !draft && (
+        <div className="s2-card">
+          <div className="empty">
+            <p>{t('settings.agents.empty')}</p>
+            <button type="button" className="btn primary" onClick={openCatalog}>
+              {t('settings.agents.add')}
+            </button>
+          </div>
+        </div>
+      )}
+
       {error && <p className="s2-help" role="alert">{error}</p>}
+
+      {catalogOpen && (
+        <div className="confirm-overlay" role="dialog" aria-modal="true">
+          <div className="confirm-modal wide">
+            <div className="confirm-title">{t('settings.agents.catalogTitle')}</div>
+            <div className="confirm-msg">{t('settings.agents.catalogHelp')}</div>
+            <div className="catalog">
+              {proxies.map(entry => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  className={`catalog-item ${catalogKind === entry.id ? 'active' : ''}`}
+                  onClick={() => setCatalogKind(entry.id)}
+                >
+                  <span
+                    className="catalog-dot"
+                    style={{ background: `var(--agent-${entry.defaultColor})` }}
+                  />
+                  <span>
+                    <div className="catalog-name">{entry.name}</div>
+                    <div className="catalog-sub">{entry.tagline}</div>
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div className="confirm-actions">
+              <button type="button" className="btn ghost" onClick={() => setCatalogOpen(false)}>
+                {t('common.cancel')}
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                disabled={!catalogKind}
+                onClick={() => { if (catalogKind) void startDraft(catalogKind); }}
+              >
+                {t('settings.agents.continue')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
 
 function AgentInstallRow({
   agent,
-  onSetup,
+  proxies,
+  proxyCheck,
+  onRename,
+  onRecolor,
+  onSwitchProxy,
+  onSetPath,
+  onSetDefaults,
   onInstallCli,
   onInstallProxy,
   onCheckProxyUpdate,
-  proxyCheck,
-  onSetPath,
-  onSetDefaults,
   onPickPath,
+  onDelete,
 }: {
-  agent: AgentInstallStatus;
-  onSetup: () => void;
+  agent: UserAgentStatus;
+  proxies: ProxyCatalogEntry[];
+  proxyCheck: AgentProxyUpdateCheck | undefined;
+  onRename: (name: string) => Promise<boolean>;
+  onRecolor: (color: AgentColor) => Promise<boolean>;
+  onSwitchProxy: (proxy: ProductExecutor) => Promise<void>;
+  onSetPath: (path: string | null) => Promise<boolean>;
+  onSetDefaults: (defaults: Partial<AgentProxyDefaults>) => Promise<boolean>;
   onInstallCli: () => void;
   onInstallProxy: () => void;
   onCheckProxyUpdate: () => void;
-  /** Last manual update-check result for this row, if any (issue #86). */
-  proxyCheck: AgentProxyUpdateCheck | undefined;
-  onSetPath: (path: string | null) => Promise<boolean>;
-  onSetDefaults: (defaults: Partial<AgentProxyDefaults>) => void;
   onPickPath: () => Promise<string | null>;
+  onDelete: () => void;
 }) {
   const t = useT();
-  // Busy = any in-flight agent operation for THIS executor (Phase 3b — the
-  // runs carry the state the pre-migration `busy` flag duplicated).
-  const busy = usePendingOperations(agentEntityKey(agent.id)).length > 0;
-  const [path, setPath] = useState(agent.cli.path ?? '');
+  // Busy = any in-flight operation for THIS Agent or its kind (the runs
+  // carry the state the pre-migration `busy` flag duplicated).
+  const agentRuns = usePendingOperations(agentIdEntityKey(agent.id));
+  const kindRuns = usePendingOperations(agentEntityKey(agent.proxy));
+  const busy = agentRuns.length > 0 || kindRuns.length > 0;
+  const [name, setName] = useState(agent.name);
+  // Echo the resolved path: an Agent without an explicit cliPath still
+  // runs on a resolved binary — show it (saving it back is a no-op).
+  const resolvedPath = agent.cliPath ?? agent.cli.path ?? '';
+  const [path, setPath] = useState(resolvedPath);
   const pathInputRef = useRef<HTMLInputElement>(null);
   const [capabilities, setCapabilities] = useState<unknown>(null);
   const [resolvedCapabilities, setResolvedCapabilities] = useState<unknown>(null);
@@ -1037,14 +1417,15 @@ function AgentInstallRow({
   const [resolvingDefaults, setResolvingDefaults] = useState(false);
   const resolveSequence = useRef(0);
   const [capabilityError, setCapabilityError] = useState(false);
-  useEffect(() => setPath(agent.cli.path ?? ''), [agent.cli.path]);
+  useEffect(() => setName(agent.name), [agent.name]);
+  useEffect(() => setPath(resolvedPath), [resolvedPath]);
   // Show the tail of long paths when the field isn't being edited — the
   // executable name matters more than the prefix (2026-08-04).
   const showPathTail = () => {
     const input = pathInputRef.current;
     if (input) input.scrollLeft = input.scrollWidth;
   };
-  useEffect(showPathTail, [path, agent.cli.path]);
+  useEffect(showPathTail, [path, resolvedPath]);
   useEffect(() => {
     let alive = true;
     resolveSequence.current += 1;
@@ -1053,8 +1434,9 @@ function AgentInstallRow({
     setResolvedModel('');
     setResolvingDefaults(false);
     setCapabilityError(false);
-    if (agent.proxy.state !== 'ready') return () => { alive = false; };
-    loadProxyCapabilities(agent.id)
+    if (agent.plugin.state !== 'ready') return () => { alive = false; };
+    // Agent-scoped catalog: the same kind can differ per CLI path.
+    loadProxyCapabilities(agent.proxy, agent.id)
       .then(value => {
         if (alive) setCapabilities(value);
       })
@@ -1062,28 +1444,42 @@ function AgentInstallRow({
         if (alive) setCapabilityError(true);
       });
     return () => { alive = false; };
-  }, [agent.id, agent.proxy.state, agent.proxy.version]);
+  }, [agent.id, agent.proxy, agent.cliPath, agent.plugin.state, agent.plugin.version]);
+
+  // Title = the Agent's name (inline edit, write-through on commit).
+  async function commitName() {
+    const next = name.trim();
+    if (!next || next === agent.name) {
+      setName(agent.name);
+      return;
+    }
+    if (!(await onRename(next))) setName(agent.name);
+  }
 
   // Native file picker → fill + save the CLI path in one click (2026-08-04).
   async function onBrowse() {
     const picked = await onPickPath();
     if (picked) {
       setPath(picked);
-      if (!(await onSetPath(picked))) setPath(agent.cli.path ?? '');
+      if (!(await onSetPath(picked))) setPath(resolvedPath);
     }
   }
 
   async function commitPath(next: string | null) {
+    if ((next ?? '') === resolvedPath) {
+      setPath(resolvedPath);
+      return;
+    }
     if (!(await onSetPath(next))) {
-      setPath(agent.cli.path ?? '');
+      setPath(resolvedPath);
       requestAnimationFrame(showPathTail);
     }
   }
 
-  const defaults = agent.proxy.defaults ?? { model: '', thinking: '', mode: '' };
+  const defaults = agent.defaults;
   const settingsCapabilities = resolvedCapabilities ?? capabilities;
   const { models, thinkingLevels: catalogThinking, modes } = executorSettingsFromCapabilities(
-    agent.id,
+    agent.proxy,
     settingsCapabilities,
   );
   const baseCatalog = catalogFromCapabilities(capabilities);
@@ -1133,7 +1529,7 @@ function AgentInstallRow({
               typeof level === 'string' && level.length > 0
             ))
         : [];
-      onSetDefaults({
+      await onSetDefaults({
         model,
         ...(defaults.thinking && !supported.includes(defaults.thinking)
           ? { thinking: '' }
@@ -1146,15 +1542,15 @@ function AgentInstallRow({
     setResolvingDefaults(true);
     try {
       const config = configWithModel(model);
-      const resolved = await loadResolvedProxyCatalog(agent.id, {
+      const resolved = await loadResolvedProxyCatalog(agent.proxy, {
         catalogRevision: baseCatalog.catalogRevision!,
         ...config,
-      });
+      }, agent.id);
       if (resolveSequence.current !== sequence) return;
       setResolvedCapabilities(resolved);
       setResolvedModel(model);
-      const resolvedThinking = executorSettingsFromCapabilities(agent.id, resolved).thinkingLevels;
-      onSetDefaults({
+      const resolvedThinking = executorSettingsFromCapabilities(agent.proxy, resolved).thinkingLevels;
+      await onSetDefaults({
         model,
         ...(defaults.thinking && !resolvedThinking.includes(defaults.thinking)
           ? { thinking: '' }
@@ -1167,7 +1563,7 @@ function AgentInstallRow({
       // the only fail-closed combination.
       setResolvedCapabilities(null);
       setResolvedModel('');
-      onSetDefaults({ model, ...(defaults.thinking ? { thinking: '' } : {}) });
+      await onSetDefaults({ model, ...(defaults.thinking ? { thinking: '' } : {}) });
     } finally {
       if (resolveSequence.current === sequence) setResolvingDefaults(false);
     }
@@ -1182,144 +1578,184 @@ function AgentInstallRow({
       || !baseCatalog.resolveAdvertised
       || !baseCatalog.catalogRevision
       || !baseCatalog.configOptions.some(option => (
-        option.role === 'model' && !Object.is(option.defaultValue, defaults.model)
+        option.role === 'model' && option.choices?.some(choice => String(choice.value) === defaults.model)
       ))
-    ) return;
-    const sequence = ++resolveSequence.current;
-    setResolvingDefaults(true);
-    const config = configWithModel(defaults.model);
-    void loadResolvedProxyCatalog(agent.id, {
-      catalogRevision: baseCatalog.catalogRevision,
-      ...config,
-    }).then(resolved => {
-      if (resolveSequence.current !== sequence) return;
-      setResolvedCapabilities(resolved);
-      setResolvedModel(defaults.model);
-    }).catch(() => {
-      if (resolveSequence.current !== sequence) return;
-      setResolvedCapabilities(null);
-      setResolvedModel('');
-    }).finally(() => {
-      if (resolveSequence.current === sequence) setResolvingDefaults(false);
-    });
-  }, [agent.id, capabilities, defaults.model, resolvedCapabilities, resolvedModel]);
+    ) {
+      return;
+    }
+    void changeDefaultModel(defaults.model);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [capabilities, defaults.model]);
 
-  const state = agent.ready
-    ? { cls: 'ok', label: t('settings.agents.ready') }
-    : { cls: 'err', label: t('settings.agents.setupRequired') };
-  const proxyInstalled = agent.proxy.state === 'ready' || agent.proxy.state === 'outdated';
+  const cliMismatch = agent.cli.state === 'ready'
+    && agent.cli.recommendedVersion
+    && agent.cli.version !== agent.cli.recommendedVersion;
 
   return (
     <div className="exec-row">
       <div className="exec-head">
-        <span className={`exec-dot ${agent.id}`} />
-        <span className="exec-name">{agent.name}</span>
-        <span className={`exec-status ${state.cls}`}>{state.label}</span>
-        {!agent.ready && (
-          <button className="btn xs primary" type="button" disabled={busy} onClick={onSetup}>
-            {busy ? t('settings.agents.installing') : t('settings.agents.setup')}
-          </button>
-        )}
+        <AgentColorDot
+          value={agent.color}
+          title={t('settings.agents.color')}
+          onPick={color => { void onRecolor(color); }}
+        />
+        <input
+          className="exec-name-input"
+          value={name}
+          spellCheck={false}
+          aria-label={t('settings.agents.name')}
+          disabled={busy}
+          onChange={event => setName(event.target.value)}
+          onBlur={() => { void commitName(); }}
+          onKeyDown={event => {
+            if (event.key === 'Enter') (event.target as HTMLInputElement).blur();
+            if (event.key === 'Escape') setName(agent.name);
+          }}
+        />
+        <span className={`exec-status ${agent.ready ? 'ok' : 'warn'}`}>
+          {agent.ready ? t('settings.agents.ready') : t('settings.agents.setupRequired')}
+        </span>
+        <button
+          type="button"
+          className="btn xs ghost delete-slot"
+          disabled={busy}
+          onClick={onDelete}
+        >
+          {t('settings.agents.delete')}
+        </button>
       </div>
       <dl className="kv-grid">
-        {/* Row order (2026-08-04): Path → Version → Defaults. The path input
-            auto-saves on blur/Enter (no Save button) and shows the tail of
-            long paths when not focused. */}
-        <dt>{t('settings.agents.cliPath')}</dt>
-        <dd className="cli-path-row">
-          <input
-            ref={pathInputRef}
-            className="input mono"
-            value={path}
-            disabled={busy}
-            placeholder="/absolute/path/to/cli"
-            onChange={event => setPath(event.target.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter') event.currentTarget.blur();
-              if (event.key === 'Escape') setPath(agent.cli.path ?? '');
-            }}
-            onBlur={event => {
-              const next = event.currentTarget.value.trim();
-              if (next !== (agent.cli.path ?? '')) void commitPath(next || null);
-              showPathTail();
-            }}
-          />
-          <button
-            className="btn xs secondary"
-            type="button"
-            disabled={busy}
-            onClick={() => { void onBrowse(); }}
+        <dt>{t('settings.agents.proxy')}</dt>
+        <dd>
+          <select
+            className="select"
+            value={agent.proxy}
+            disabled={busy || proxies.length === 0}
+            aria-label={t('settings.agents.proxy')}
+            onChange={event => void onSwitchProxy(event.target.value as ProductExecutor)}
           >
-            {t('settings.agents.browse')}
-          </button>
+            {proxies.map(entry => (
+              <option key={entry.id} value={entry.id}>{entry.name}</option>
+            ))}
+          </select>
+        </dd>
+        <dt>{t('settings.agents.cliPath')}</dt>
+        <dd>
+          <div className="cli-path-row">
+            <input
+              ref={pathInputRef}
+              className="input mono"
+              value={path}
+              placeholder="/absolute/path/to/cli"
+              aria-label={t('settings.agents.cliPath')}
+              disabled={busy}
+              onChange={event => setPath(event.target.value)}
+              onBlur={() => { void commitPath(path.trim() || null); }}
+              onKeyDown={event => {
+                if (event.key === 'Enter') (event.target as HTMLInputElement).blur();
+              }}
+            />
+            <button
+              type="button"
+              className="btn xs secondary"
+              disabled={busy}
+              onClick={() => { void onBrowse(); }}
+            >
+              {t('settings.agents.browse')}
+            </button>
+          </div>
         </dd>
         <dt>{t('settings.agents.version')}</dt>
         <dd>
           {agent.cli.state === 'ready'
-            ? agent.cli.version ?? t('settings.agents.ready')
-            : t(agent.cli.state === 'invalid' ? 'settings.agents.invalid' : 'settings.agents.notInstalled')}
-          {agent.cli.state === 'ready'
-            && agent.cli.version
-            && agent.cli.recommendedVersion
-            && agent.cli.version !== agent.cli.recommendedVersion && (
-            <div className="hint" data-testid={`${agent.id}-cli-version-mismatch`}>
-              {t('settings.agents.cliVersionMismatch').replace('{version}', agent.cli.recommendedVersion)}
-            </div>
-          )}
-          {agent.cli.state !== 'ready' && (
-            <button className="btn xs secondary" type="button" disabled={busy} onClick={onInstallCli}>
-              {t('settings.agents.installOfficial')}
-            </button>
-          )}
+            ? (
+              <div className="exec-version">
+                <span>{agent.cli.version}</span>
+                {cliMismatch && (
+                  <div className="hint">
+                    {t('settings.agents.cliVersionMismatch').replace('{version}', agent.cli.recommendedVersion ?? '')}
+                  </div>
+                )}
+              </div>
+            )
+            : (
+              <>
+                {t('settings.agents.setupRequired')}
+                {' '}
+                <button
+                  type="button"
+                  className="btn xs secondary"
+                  disabled={busy}
+                  onClick={onInstallCli}
+                >
+                  {t('settings.agents.installOfficial')}
+                </button>
+              </>
+            )}
         </dd>
-        <dt>Proxy</dt>
+        <dt>{t('settings.agents.plugin')}</dt>
         <dd>
-          {proxyInstalled
-            ? `${agent.proxy.version ?? ''} · GitHub`
-            : t('settings.agents.notInstalled')}
-          {agent.proxy.state !== 'ready' && (
-            <button className="btn xs secondary" type="button" disabled={busy} onClick={onInstallProxy}>
-              {t(agent.proxy.state === 'outdated'
-                ? 'settings.agents.updateProxy'
-                : 'settings.agents.installProxy')}
-            </button>
-          )}
-          {/* Manual update check (issue #86): only managed github-release
-              proxies have an update channel; development trees never do. */}
-          {agent.proxy.state === 'ready' && agent.proxy.source === 'github-release' && (
-            <>
-              <button
-                className="btn xs secondary"
-                type="button"
-                disabled={busy}
-                data-testid={`${agent.id}-proxy-check-update`}
-                onClick={onCheckProxyUpdate}
-              >
-                {t('settings.agents.checkProxyUpdate')}
-              </button>
-              {proxyCheck?.managed && (proxyCheck.updateAvailable ? (
-                <span className="hint" data-testid={`${agent.id}-proxy-update-available`}>
-                  {t('settings.agents.proxyUpdateAvailable')
-                    .replace('{version}', proxyCheck.latestVersion ?? '')}
-                  {' '}
-                  <button
-                    className="btn xs secondary"
-                    type="button"
-                    disabled={busy}
-                    onClick={onInstallProxy}
-                  >
-                    {t('settings.agents.updateProxy')}
-                  </button>
-                </span>
-              ) : (
-                <span className="hint" data-testid={`${agent.id}-proxy-up-to-date`}>
-                  {t('settings.agents.proxyUpToDate')}
-                </span>
-              ))}
-            </>
-          )}
+          {agent.plugin.state === 'ready'
+            ? (
+              <>
+                {agent.plugin.version}
+                {agent.plugin.source === 'github-release'
+                  ? ' · GitHub'
+                  : agent.plugin.source === 'development' ? ' · Dev' : ''}
+                {' '}
+                <button
+                  type="button"
+                  className="btn xs secondary"
+                  disabled={busy}
+                  onClick={onCheckProxyUpdate}
+                >
+                  {t('settings.agents.checkProxyUpdate')}
+                </button>
+                {proxyCheck?.updateAvailable && (
+                  <>
+                    {' '}
+                    <button
+                      type="button"
+                      className="btn xs secondary"
+                      disabled={busy}
+                      onClick={onInstallProxy}
+                    >
+                      {t('settings.agents.updateProxy')}
+                    </button>
+                    <span className="hint">
+                      {t('settings.agents.proxyUpdateAvailable').replace('{version}', proxyCheck.latestVersion ?? '')}
+                    </span>
+                  </>
+                )}
+                {proxyCheck && !proxyCheck.updateAvailable && proxyCheck.managed && (
+                  <span className="hint" data-testid={`${agent.id}-proxy-up-to-date`}>
+                    {t('settings.agents.proxyUpToDate')}
+                  </span>
+                )}
+                {proxyCheck && !proxyCheck.managed && (
+                  <span className="hint" data-testid={`${agent.id}-proxy-dev-channel`}>
+                    {t('settings.agents.proxyDevChannel')}
+                  </span>
+                )}
+              </>
+            )
+            : (
+              <>
+                {t('settings.agents.setupRequired')}
+                {' '}
+                <button
+                  type="button"
+                  className="btn xs secondary"
+                  disabled={busy}
+                  onClick={onInstallProxy}
+                >
+                  {t('settings.agents.setupProxy')}
+                </button>
+              </>
+            )}
         </dd>
-        {(models.length > 0 || thinkingLevels.length > 0 || modes.length > 0 || capabilityError) && (
+        {agent.ready
+          && (models.length > 0 || thinkingLevels.length > 0 || modes.length > 0 || capabilityError) && (
           <>
             <dt>{t('settings.executors.defaults')}</dt>
             <dd>
@@ -1347,14 +1783,14 @@ function AgentInstallRow({
                 )}
                 {thinkingLevels.length > 0 && (
                   <label className="exec-default">
-                    <span className="lbl">{agent.id === 'claude'
+                    <span className="lbl">{agent.proxy === 'claude'
                       ? t('settings.executors.effort')
                       : t('settings.executors.thinking')}</span>
                     <select
                       className="select mono"
                       value={defaults.thinking}
                       disabled={busy || resolvingDefaults || !capabilities}
-                      onChange={event => onSetDefaults({ thinking: event.target.value })}
+                      onChange={event => void onSetDefaults({ thinking: event.target.value })}
                     >
                       <option value="">{t('settings.executors.modelDefault')}</option>
                       {thinkingLevels.map(level => (
@@ -1363,9 +1799,6 @@ function AgentInstallRow({
                     </select>
                   </label>
                 )}
-                {/* Mode picker: only when the proxy advertises modes (Claude/
-                    Codex always; Kimi since the 2026-08-04 ACP probe). A
-                    capability fetch failure keeps the note instead. */}
                 {(modes.length > 0 || capabilityError) && (
                   <label className="exec-default">
                     <span className="lbl">{t('settings.executors.mode')}</span>
@@ -1374,7 +1807,7 @@ function AgentInstallRow({
                         className="select mono"
                         value={selectedMode}
                         disabled={busy || resolvingDefaults || !capabilities}
-                        onChange={event => onSetDefaults({ mode: event.target.value })}
+                        onChange={event => void onSetDefaults({ mode: event.target.value })}
                       >
                         {modes.map(mode => (
                           <option key={mode.id} value={mode.id}>{mode.label}</option>

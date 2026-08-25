@@ -4,9 +4,46 @@ This file records user-facing changes in published Gian builds. It is updated
 whenever a version is packaged and tagged for release; local test packages are
 not listed.
 
-Releases through 0.5.1 are unsigned macOS Apple Silicon beta builds. Signed
+Releases through 0.5.2 are unsigned macOS Apple Silicon beta builds. Signed
 and notarized native notifications and automatic updates remain disabled
 until Developer ID signing and notarization are available.
+
+## [0.5.2] - 2026-08-25
+
+### Added
+
+- Settings now manages user AI Agents (name, color, Proxy, CLI path, and
+  defaults) instead of one executor per kind. New sessions and the composer
+  list only ready Agents, and each session stays bound to the Agent that
+  created it.
+- Live turns collect tool, command, and search activity into a 5-line
+  Activity box. Clicking it opens the full event feed in the side panel.
+- Added Gian Tool v0, a local CLI and MCP control plane for Task, Session,
+  and approval operations. Gian sessions do not receive it automatically.
+- Side Chat and Session Fork now work on Claude, Codex, and Kimi, not just
+  the protocol and UI shell.
+- Codex traces render as a semantic timeline instead of a flat tool list.
+
+### Changed
+
+- Published Claude Proxy 0.2.2, Codex Proxy 0.2.3, and Kimi Proxy 0.2.2
+  with Side Chat, Fork, and the transcript and approval fixes below.
+- Codex catalogs now advertise the Fast service tier where the selected
+  model supports it.
+
+### Fixed
+
+- Stopped Claude Code thinking-token heartbeats from flooding the
+  transcript and freezing the page.
+- Codex MCP tool approvals now send the native accept, session, decline,
+  and cancel responses the app-server expects.
+- Long completed-turn summaries open the side-panel event feed instead of
+  expanding hundreds of rows inline.
+
+### Known limitations
+
+- The macOS build remains unsigned and supports Apple Silicon only.
+- Grok is not included in the 0.5.2 product surface.
 
 ## [0.5.1] - 2026-08-24
 
@@ -387,6 +424,8 @@ until Developer ID signing and notarization are available.
 - The published build contained a placeholder GitHub OAuth client ID and could
   not complete first-run login. It was superseded by 0.1.1.
 
+[0.5.2]: https://github.com/RichLogic/Gian/releases/tag/v0.5.2
+[0.5.1]: https://github.com/RichLogic/Gian/releases/tag/v0.5.1
 [0.5.0]: https://github.com/RichLogic/Gian/releases/tag/v0.5.0
 [0.2.1-hotfix]: https://github.com/RichLogic/Gian/releases/tag/v0.2.1-hotfix
 [0.2.1]: https://github.com/RichLogic/Gian/releases/tag/v0.2.1

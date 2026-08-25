@@ -46,7 +46,7 @@ export function buildFunctionalEvidenceReport(config, inventory, availableEviden
     if (!domain) throw new Error(`functional inventory id has no evidence domain: ${entry.id}`);
     return { ...entry, domain: domain.id, evidence: domain.evidence };
   });
-  if (cases.length !== 277) throw new Error(`expected 277 functional cases, found ${cases.length}`);
+  if (cases.length !== 285) throw new Error(`expected 285 functional cases, found ${cases.length}`);
   return { version: 1, total: cases.length, cases };
 }
 

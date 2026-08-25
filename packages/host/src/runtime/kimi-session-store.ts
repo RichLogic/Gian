@@ -224,8 +224,8 @@ export class KimiSessionStoreRuntimeProvider implements CliRuntimeProvider {
     this.guard = new KimiSessionStoreGuard(kimiCodeHome);
   }
 
-  inspectInstalled(): Promise<InstalledRuntime[]> {
-    return this.delegate.inspectInstalled();
+  inspectInstalled(overridePath?: string): Promise<InstalledRuntime[]> {
+    return this.delegate.inspectInstalled(overridePath);
   }
 
   async probe(

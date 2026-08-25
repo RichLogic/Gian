@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { loadAgents } from '../api.js';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 import type { Session } from '@gian/shared';
 import type { Mode } from '../components/Topbar.js';
@@ -56,7 +57,14 @@ export function useAppShortcuts({
 
     function spawnChild(executor: 'claude' | 'codex') {
       if (mode === 'tasks' && activeTaskId && !activeSubtaskId) {
-        window.dispatchEvent(new CustomEvent('gian:new-subtask', { detail: { executor } }));
+        // ⌘J/⌘K targets the kind's MOST RECENTLY USED ready Agent — never a
+        // silent first-ready pick; with none ready the shortcut is a no-op.
+        void resolveRecentReadyAgent(executor).then(agentId => {
+          if (!agentId) return;
+          window.dispatchEvent(new CustomEvent('gian:new-subtask', {
+            detail: { executor, agentId },
+          }));
+        });
         return;
       }
       const session = activeSessionId
@@ -74,9 +82,35 @@ export function useAppShortcuts({
       ops.dispatch('session.fork', {
         workspaceId: session.workspace_id,
         executor,
+        ...(session.agent_id && session.executor === executor
+          ? { agentId: session.agent_id }
+          : {}),
         approvalMode: session.approval_mode,
         name: `${baseName} copy`,
       });
+    }
+
+    /** The kind's most recently used ready Agent: latest session bound to a
+     *  ready Agent of the kind wins, else the kind's first ready Agent. */
+    async function resolveRecentReadyAgent(kind: 'claude' | 'codex'): Promise<string | null> {
+      try {
+        const agents = await loadAgents();
+        const ready = agents.filter(agent => agent.proxy === kind && agent.ready);
+        if (ready.length === 0) return null;
+        const readyIds = new Set(ready.map(agent => agent.id));
+        let recentId: string | null = null;
+        let recentUpdated = '';
+        for (const session of sessionsRef.current ?? []) {
+          if (!session.agent_id || !readyIds.has(session.agent_id)) continue;
+          if (session.updated_at >= recentUpdated) {
+            recentUpdated = session.updated_at;
+            recentId = session.agent_id;
+          }
+        }
+        return recentId ?? ready[0]!.id;
+      } catch {
+        return null;
+      }
     }
 
     function onKey(event: KeyboardEvent) {

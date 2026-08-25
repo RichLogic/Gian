@@ -5,6 +5,7 @@ export interface ActiveTurn {
   id: string;
   number: number;
   providerTurnId?: string;
+  configSnapshot?: Record<string, unknown>;
 }
 
 export class TurnRuntime {
@@ -70,7 +71,12 @@ export class TurnRuntime {
     return true;
   }
 
-  start(sessionId: string, turnId: string, createdAt: string): ActiveTurn {
+  start(
+    sessionId: string,
+    turnId: string,
+    createdAt: string,
+    options: { toolRequestId?: string } = {},
+  ): ActiveTurn {
     if (this.active.has(sessionId)) {
       throw new Error(`turn already in flight for session ${sessionId}; enqueue instead`);
     }
@@ -92,14 +98,23 @@ export class TurnRuntime {
       };
       this.db
         .prepare(
-          `INSERT INTO turns (id, session_id, turn_number, status, created_at)
-           VALUES (?, ?, ?, 'running', ?)`,
+          `INSERT INTO turns
+            (id, session_id, turn_number, status, created_at, tool_request_id)
+           VALUES (?, ?, ?, 'running', ?, ?)`,
         )
-        .run(next.id, sessionId, next.number, createdAt);
+        .run(next.id, sessionId, next.number, createdAt, options.toolRequestId ?? null);
       return next;
     })();
     this.active.set(sessionId, turn);
     return turn;
+  }
+
+  setConfig(sessionId: string, turnId: string, snapshot: Record<string, unknown>): void {
+    const turn = this.active.get(sessionId);
+    if (!turn || turn.id !== turnId) throw new Error(`turn is not active: ${turnId}`);
+    turn.configSnapshot = snapshot;
+    this.db.prepare('UPDATE turns SET config_json = ? WHERE id = ?')
+      .run(JSON.stringify(snapshot), turnId);
   }
 
   finish(
@@ -112,6 +127,9 @@ export class TurnRuntime {
     this.db
       .prepare(`UPDATE turns SET status = ?, completed_at = ? WHERE id = ?`)
       .run(status, completedAt, turn.id);
+    this.db.prepare(
+      `UPDATE tool_deliveries SET state = ?, updated_at = ? WHERE turn_id = ?`,
+    ).run(status, completedAt, turn.id);
     this.active.delete(sessionId);
     this.stopIntents.delete(sessionId);
     if (turn.providerTurnId) {

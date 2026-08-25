@@ -2,7 +2,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { serve } from '@hono/node-server';
+import type { Executor } from '@gian/shared';
 import { createApp } from './web/app.js';
+import { startGianToolRpc } from './tool/rpc-server.js';
 import { openDatabase } from './storage/db.js';
 import { loadConfig } from './storage/config.js';
 import { resolveDataDir } from './storage/paths.js';
@@ -10,6 +12,7 @@ import { assertNoEventStorageMaintenance } from './storage/maintenance-lock.js';
 import { sweepColdEvents } from './events/lifecycle.js';
 import { CliRuntimeManager } from './runtime/manager.js';
 import { AgentManager } from './agents/manager.js';
+import { resolveBootProxyDescriptors } from './proxy/boot-descriptors.js';
 import { createGitHubReleaseFetch } from './agents/github-release-fetch.js';
 import { syncAgentInstructionBlocks } from './onboarding/agent-instructions.js';
 import { expandHome } from './workspace/index.js';
@@ -147,37 +150,37 @@ async function main(): Promise<void> {
       ...(process.env.GROK_BIN ? { grok: process.env.GROK_BIN } : {}),
       ...(process.env.DSH_BIN ? { dsh: process.env.DSH_BIN } : {}),
     },
+    // v2 migration source: kinds that appear in existing sessions get one
+    // default Agent even without a configured path or installed Proxy.
+    sessionExecutors: () => (
+      db.prepare('SELECT DISTINCT executor FROM sessions').all() as Array<{ executor: Executor }>
+    ).map(row => row.executor),
   });
   const runtimeManager = new CliRuntimeManager(
     agentManager.runtimeProviders(),
     agentManager.updateLockDataDir(),
   );
-  const [claudeProxy, codexProxy, kimiProxy, grokProxy, dshProxy] = await Promise.all([
-    agentManager.proxyLaunchDescriptor('claude'),
-    agentManager.proxyLaunchDescriptor('codex'),
-    agentManager.proxyLaunchDescriptor('kimi'),
-    agentManager.proxyLaunchDescriptor('grok'),
-    agentManager.proxyLaunchDescriptor('dsh'),
-  ]);
+  const bootDescriptors = await resolveBootProxyDescriptors(agentManager);
 
   const handle = createApp({
     db,
     config,
     dataDir,
     hostVersion: releaseVersion,
-    ccProxyEntry: claudeProxy.entryPath,
-    claudeProxy: claudeProxy.protocol,
-    codexProxyEntry: codexProxy.entryPath,
-    kimiProxyEntry: kimiProxy.entryPath,
-    grokProxyEntry: grokProxy.entryPath,
-    dshProxyEntry: dshProxy.entryPath,
-    codexProxy: codexProxy.protocol,
-    kimiProxy: kimiProxy.protocol,
-    grokProxy: grokProxy.protocol,
-    dshProxy: dshProxy.protocol,
+    ccProxyEntry: bootDescriptors.claude.entryPath,
+    claudeProxy: bootDescriptors.claude.protocol,
+    codexProxyEntry: bootDescriptors.codex?.entryPath,
+    kimiProxyEntry: bootDescriptors.kimi?.entryPath,
+    grokProxyEntry: bootDescriptors.grok?.entryPath,
+    dshProxyEntry: bootDescriptors.dsh?.entryPath,
+    codexProxy: bootDescriptors.codex?.protocol,
+    kimiProxy: bootDescriptors.kimi?.protocol,
+    grokProxy: bootDescriptors.grok?.protocol,
+    dshProxy: bootDescriptors.dsh?.protocol,
     runtimeManager,
     agentManager,
   });
+  const toolRpc = await startGianToolRpc({ dataDir, service: handle.toolService });
 
   const server = serve({ fetch: handle.app.fetch, hostname: config.host, port: config.port }, info => {
     console.log(`[gian] listening on http://${info.address}:${info.port}`);
@@ -190,6 +193,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log('[gian] shutting down…');
+    await toolRpc.close();
     await handle.shutdown();
     db.close();
     server.close();

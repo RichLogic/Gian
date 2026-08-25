@@ -31,7 +31,13 @@ function at(minute: number, second = 0, ms = 0): string {
 }
 
 function item(partial: Partial<TraceItem> & Pick<TraceItem, 'id' | 'turnId' | 'kind' | 'title' | 'at'>): TraceItem {
-  return { evidence: SYNTHETIC, sourceEventIds: [`evt-${partial.id}`], ...partial };
+  const pointKinds = new Set<TraceItem['kind']>(['input', 'request', 'notice']);
+  return {
+    evidence: SYNTHETIC,
+    shape: pointKinds.has(partial.kind) ? 'event' : 'span',
+    sourceEventIds: [`evt-${partial.id}`],
+    ...partial,
+  };
 }
 
 function turn(n: number, startMin: number, endMin?: number, status?: TraceItem['status']): TraceItem {

@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "name": "Gian Tool MCP real Codex Provider acceptance",
+  "methods": [
+    { "method": "catalog.get_create_options", "expect": "returns the GianDev Workspace and ready Agents" },
+    { "method": "task.list", "expect": "lists canonical Tasks without direct database access" },
+    { "method": "task.create", "expect": "creates exactly one canary Task" },
+    { "method": "task.get", "expect": "returns the created Task" },
+    { "method": "task.update", "expect": "updates name, description, pinned, and lifecycle state" },
+    { "method": "session.list", "expect": "filters Sessions by the canary Task" },
+    { "method": "session.create", "expect": "creates a cheap-model Codex Session from workspace_id and agent_id" },
+    { "method": "session.get", "expect": "returns the created Session and resolved config" },
+    { "method": "session.update", "expect": "updates Session metadata and next-Turn config" },
+    { "method": "session.assign_task", "expect": "assigns an initially unassigned child Session to the canary Task" },
+    { "method": "session.send", "expect": "starts one child Turn and queues a second delivery while busy" },
+    { "method": "session.cancel_delivery", "expect": "cancels the queued delivery without cancelling the active Turn" },
+    { "method": "session.wait", "expect": "observes terminal child delivery state without polling SQLite" },
+    { "method": "session.read", "expect": "returns child messages and Turn config snapshot" },
+    { "method": "interaction.list", "expect": "lists pending interactions, including an empty result when none exist" },
+    { "method": "interaction.respond", "expect": "resolves a real child Provider interaction when one can be provoked" },
+    { "method": "session.stop", "expect": "stops an active child Turn and is an idempotent no-op when idle" },
+    { "method": "session.set_subtask_state", "expect": "completes and reopens the child Subtask" },
+    { "method": "session.archive", "expect": "archives and restores the child Session explicitly" }
+  ],
+  "crossChecks": [
+    "Every listed method appears as a real MCP tool call in the controller Session transcript.",
+    "If Codex defers a method-specific tool, gian_call reaches the same method without bypassing validation or idempotency.",
+    "The controller and child Sessions use the cheapest ready Codex model advertised by catalog.",
+    "Repeating one write with the same explicit idempotency_key replays rather than duplicating its Host side effect.",
+    "No Electron process is started and ports 8990/5190 remain untouched.",
+    "Created canary resources are left archived and clearly named for later inspection."
+  ]
+}

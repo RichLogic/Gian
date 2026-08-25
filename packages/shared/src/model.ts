@@ -1,5 +1,16 @@
 export type Executor = 'codex' | 'claude' | 'kimi' | 'grok' | 'dsh';
 
+/** Proxy kinds exposed in the product AI Agents catalog. `grok` remains a
+ *  valid protocol/vendor `Executor` (its Proxy and Host adapter stay in the
+ *  tree) but is no longer offered anywhere in the product surface. */
+export const PRODUCT_EXECUTORS = ['claude', 'codex', 'kimi', 'dsh'] as const;
+export type ProductExecutor = (typeof PRODUCT_EXECUTORS)[number];
+
+export function isProductExecutor(value: unknown): value is ProductExecutor {
+  return typeof value === 'string'
+    && (PRODUCT_EXECUTORS as readonly string[]).includes(value);
+}
+
 /** Kimi, Grok and DSH expose opaque native config options instead of the
  * Gian ApprovalMode segmented control, so the product renders their catalog
  * options verbatim. */
@@ -160,7 +171,7 @@ export type ApprovalStatus =
   | 'auto-approved'
   | 'declined';
 
-export type ApprovalResolvedBy = 'web' | 'im' | 'auto';
+export type ApprovalResolvedBy = 'web' | 'im' | 'auto' | 'tool';
 
 export interface Workspace {
   id: string;
@@ -194,6 +205,16 @@ export interface Session {
    *  无归属 (Unfiled) group and can no longer run turns. */
   workspace_id: string | null;
   executor: Executor;
+  /** Owning user Agent (agents.json schema v2). No SQL FK — Agents live
+   *  outside SQLite and can be deleted; a deleted Agent's sessions stay
+   *  read-only (no new turns) and render from the snapshots below. NULL for
+   *  sessions created before migration 055, which resolve through the
+   *  kind's default Agent. Optional for compatibility with older hosts. */
+  agent_id?: string | null;
+  /** Snapshot of the owning Agent's display name at creation/bind time. */
+  agent_name?: string | null;
+  /** Snapshot of the owning Agent's color token. */
+  agent_color?: AgentColor | null;
   model: string | null;
   /** Legacy Claude/Codex policy. Kimi stores its exact ACP mode in
    *  `executor_config` and therefore keeps this NULL. */
@@ -387,6 +408,11 @@ export type OpenAppPrefs = Partial<Record<OpenFileCategory, string>>;
 export type Accent =
   | 'rose' | 'ember' | 'citron' | 'moss'
   | 'teal' | 'azure' | 'ink' | 'plum';
+
+/** Agent color token. Same 8-name palette as Appearance accents, but an
+ *  independent concern: it renders through `--agent-*` tokens / `data-color`,
+ *  never through the site-wide `body[data-accent]`. */
+export type AgentColor = Accent;
 
 export type FontScale = 'sm' | 'md' | 'lg' | 'xl';
 

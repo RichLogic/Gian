@@ -84,7 +84,7 @@ test('Codex CLI negotiates gian.proxy/2.0 independently from its app-server vers
   const result = initializeResultSchema.parse(initialized.result);
   assert.equal(result.protocol.version, '2.0');
   assert.equal(result.plugin.id, 'codex');
-  assert.equal(result.plugin.version, '0.2.1');
+  assert.equal(result.plugin.version, '0.2.3');
   assert.equal(result.process.scope, 'shared');
   assert.equal(result.capabilities.interaction, 1);
   assert.equal(result.capabilities['session.replay'], 1);
@@ -141,7 +141,9 @@ test('real Codex Proxy CLI completes a full lifecycle through the Fake app-serve
         configOptions: Array<{
           id: string;
           role?: string;
+          control: string;
           defaultValue: unknown;
+          enabledWhen?: Array<{ optionId: string; oneOf: unknown[] }>;
           choices?: Array<{ value: unknown; displayName: string; description?: string }>;
         }>;
       }
@@ -164,6 +166,11 @@ test('real Codex Proxy CLI completes a full lifecycle through the Fake app-serve
       ].includes(option.id)),
       [],
     );
+    const fast = configOptions.find(option => option.role === 'fast');
+    assert.equal(fast?.id, 'service_tier');
+    assert.equal(fast?.control, 'boolean');
+    assert.equal(fast?.defaultValue, false);
+    assert.equal(fast?.choices, undefined);
 
     proxy.send({
       jsonrpc: '2.0',
@@ -192,7 +199,7 @@ test('real Codex Proxy CLI completes a full lifecycle through the Fake app-serve
         input: [{ type: 'text', text: 'exercise fake runtime' }],
         config: {
           approval_mode: 'ask',
-          service_tier: 'flex',
+          service_tier: false,
         },
       },
     });
@@ -241,20 +248,32 @@ test('real Codex Proxy CLI completes a full lifecycle through the Fake app-serve
       'activity.updated',
       'interaction.requested',
       'interaction.resolved',
+      'activity.updated',
       'content.completed',
       'turn.completed',
     ]);
     assert.ok(events.every(event => event.params.sourceTurnId === 'fake-turn-1'));
+    const activityEvents = events.filter(event => event.method === 'activity.updated');
     assert.match(
-      String((events.find(event => event.method === 'activity.updated')?.params.data as { title?: unknown }).title),
-      /item\/futureVisible/,
+      String((activityEvents[0]?.params.data as { title?: unknown }).title),
+      /fixture\.inspect/,
+    );
+    assert.deepEqual(
+      activityEvents.map(event => {
+        const data = event.params.data as { activityId?: unknown; status?: unknown };
+        return { activityId: data.activityId, status: data.status };
+      }),
+      [
+        { activityId: 'fake-tool-1', status: 'running' },
+        { activityId: 'fake-tool-1', status: 'succeeded' },
+      ],
     );
     assert.equal(
-      ((events.find(event => event.method === 'activity.updated')?.params.data as {
+      ((activityEvents[0]?.params.data as {
         presentation?: { type?: unknown };
       }).presentation?.type),
-      'generic',
-      'unknown visible Provider events must use the generic presentation fallback',
+      'tool',
+      'native item lifecycle must use a semantic presentation',
     );
 
     proxy.send({ jsonrpc: '2.0', id: 'lifecycle-shutdown', method: 'shutdown', params: {} });

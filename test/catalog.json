@@ -11,6 +11,8 @@
     "packages/proxies/codex-proxy/test",
     "packages/proxies/kimi-proxy/test",
     "packages/proxies/grok-proxy/test",
+    "packages/tool-cli/test",
+    "packages/tool-mcp/test",
     "e2e/specs",
     "packages/proxies/dsh-bridge/test",
     "packages/proxies/dsh-proxy/test"
@@ -50,6 +52,7 @@
         "packages/host/test/file-003-raw-preview.test.ts",
         "packages/host/test/fork-inherit-config.test.ts",
         "packages/host/test/git-classify-failure.test.ts",
+        "packages/host/test/gian-tool-environment.test.ts",
         "packages/host/test/health.test.ts",
         "packages/host/test/history-canonicalize.test.ts",
         "packages/host/test/input-items.test.ts",
@@ -152,7 +155,10 @@
         "packages/host/test/workspace-hide.test.ts",
         "packages/host/test/workspace-management.test.ts",
         "packages/host/test/workspace-pin.test.ts",
-        "packages/host/test/ws-state-sync-contract.test.ts"
+        "packages/host/test/ws-state-sync-contract.test.ts",
+        "packages/host/test/boot-descriptors.test.ts",
+        "packages/host/test/session-agent-binding.test.ts",
+        "packages/host/test/gian-tool-service.test.ts"
       ],
       "module": "host",
       "scope": "integration",
@@ -175,6 +181,8 @@
       "patterns": [
         "packages/host/test/agent-manager.test.ts",
         "packages/host/test/agent-updater-safety.test.ts",
+        "packages/host/test/agents-routes.test.ts",
+        "packages/host/test/runtime-keying.test.ts",
         "packages/host/test/apps-route.test.ts",
         "packages/host/test/codex-proxy-client.test.ts",
         "packages/host/test/command-runtime-provider.test.ts",
@@ -204,7 +212,8 @@
         "packages/host/test/workspace-create-path.test.ts",
         "packages/host/test/workspace-clone.test.ts",
         "packages/host/test/worktree-detect.test.ts",
-        "packages/host/test/wt-001-worktree-lifecycle.test.ts"
+        "packages/host/test/wt-001-worktree-lifecycle.test.ts",
+        "packages/host/test/gian-tool-rpc.test.ts"
       ],
       "module": "host",
       "scope": "system",
@@ -336,6 +345,47 @@
         "any"
       ],
       "runner": "shared-node"
+    },
+    {
+      "id": "tool-cli-integration",
+      "patterns": [
+        "packages/tool-cli/test/*.test.mjs"
+      ],
+      "module": "tool-cli",
+      "scope": "integration",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "unix-socket"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "tool-cli-node"
+    },
+    {
+      "id": "tool-mcp-integration",
+      "patterns": [
+        "packages/tool-mcp/test/*.test.mjs"
+      ],
+      "module": "tool-mcp",
+      "scope": "integration",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "unix-socket",
+        "child-process"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "tool-mcp-node"
     },
     {
       "id": "proxy-protocol-unit",

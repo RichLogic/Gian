@@ -8,6 +8,8 @@ import {
   ndJsonStream,
   type Client,
   type CloseSessionRequest,
+  type ForkSessionRequest,
+  type ForkSessionResponse,
   type InitializeResponse,
   type ListSessionsRequest,
   type ListSessionsResponse,
@@ -312,6 +314,10 @@ export class KimiAcpClient extends EventEmitter<KimiAcpClientEvents> {
       throw new Error('Kimi ACP does not advertise session/load.');
     }
     return (await this.connection()).loadSession(params);
+  }
+
+  async forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
+    return (await this.connection()).unstable_forkSession(params);
   }
 
   async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {

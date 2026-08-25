@@ -9,6 +9,7 @@ export interface QueueEntry {
   /** Structured input items (e.g. localImage attachments) carried with the
    *  message — drained entries pass them straight to sendMessage. */
   items?: InputItem[];
+  toolRequestId?: string;
   createdAt: number;
 }
 
@@ -19,6 +20,7 @@ interface QueueRow {
   items_json: string | null;
   sort_order: number;
   created_at: string;
+  tool_request_id: string | null;
 }
 
 function rowToEntry(row: QueueRow): QueueEntry {
@@ -36,6 +38,7 @@ function rowToEntry(row: QueueRow): QueueEntry {
     sessionId: row.session_id,
     text: row.text,
     ...(items ? { items } : {}),
+    ...(row.tool_request_id ? { toolRequestId: row.tool_request_id } : {}),
     createdAt: Date.parse(row.created_at),
   };
 }
@@ -51,8 +54,13 @@ function rowToEntry(row: QueueRow): QueueEntry {
 export class QueueManager {
   constructor(private db: Db) {}
 
-  add(sessionId: string, text: string, items?: InputItem[]): QueueEntry {
-    const id = randomUUID();
+  add(
+    sessionId: string,
+    text: string,
+    items?: InputItem[],
+    options: { id?: string; toolRequestId?: string } = {},
+  ): QueueEntry {
+    const id = options.id ?? randomUUID();
     const now = new Date().toISOString();
     const maxRow = this.db
       .prepare('SELECT MAX(sort_order) AS m FROM queue_entries WHERE session_id = ?')
@@ -61,11 +69,20 @@ export class QueueManager {
     const itemsJson = items && items.length > 0 ? JSON.stringify(items) : null;
     this.db
       .prepare(
-        `INSERT INTO queue_entries (id, session_id, text, items_json, sort_order, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO queue_entries
+          (id, session_id, text, items_json, sort_order, created_at, tool_request_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, sessionId, text, itemsJson, sortOrder, now);
-    return rowToEntry({ id, session_id: sessionId, text, items_json: itemsJson, sort_order: sortOrder, created_at: now });
+      .run(id, sessionId, text, itemsJson, sortOrder, now, options.toolRequestId ?? null);
+    return rowToEntry({
+      id,
+      session_id: sessionId,
+      text,
+      items_json: itemsJson,
+      sort_order: sortOrder,
+      created_at: now,
+      tool_request_id: options.toolRequestId ?? null,
+    });
   }
 
   list(sessionId: string): QueueEntry[] {
@@ -75,10 +92,16 @@ export class QueueManager {
     return rows.map(rowToEntry);
   }
 
-  remove(sessionId: string, queueId: string): void {
-    this.db
+  findByToolRequest(toolRequestId: string): QueueEntry | null {
+    const row = this.db.prepare('SELECT * FROM queue_entries WHERE tool_request_id = ?')
+      .get(toolRequestId) as QueueRow | undefined;
+    return row ? rowToEntry(row) : null;
+  }
+
+  remove(sessionId: string, queueId: string): boolean {
+    return this.db
       .prepare('DELETE FROM queue_entries WHERE session_id = ? AND id = ?')
-      .run(sessionId, queueId);
+      .run(sessionId, queueId).changes > 0;
   }
 
   /** Update an entry's text in place — its position (sort_order) is kept. */

@@ -1,13 +1,13 @@
 import { useContext, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type {
-  AgentInstallStatus,
   ApprovalMode,
   ConfigOption,
   ConfigValue,
   Executor,
   ProxyModeCapabilities,
   ThinkingEffort,
+  UserAgentStatus,
   Workspace,
 } from '@gian/shared';
 import { usesNativeExecutorConfig } from '@gian/shared';
@@ -43,7 +43,7 @@ import {
 import type { ComposerCatalog } from '../components/composer/capabilities.js';
 import type { ProxyModel } from '../components/composer/capabilities.js';
 import { CatalogOptionsMenu } from '../components/composer/catalog-options-menu.js';
-import { ExecutorMark, useUpDrop } from '../components/composer/option-drops.js';
+import { useUpDrop } from '../components/composer/option-drops.js';
 import {
   clearNewSessionDraftStorage,
   loadNewSessionScreenshotBlob,
@@ -56,7 +56,6 @@ import {
 } from '../screenshot-drafts.js';
 import { publishScreenshotTarget, startScreenshotCapture } from '../screenshot-target.js';
 import { ImageZoomContext } from '../transcript/items.js';
-import { isReleaseExecutor, releaseAgents } from '../release-executors.js';
 
 export { newSessionDraftStorageKey } from '../screenshot-drafts.js';
 
@@ -67,6 +66,8 @@ export interface NewSessionFirstAttachment extends NewSessionScreenshotDraftAtta
 export interface CreateSessionInput {
   workspaceId: string;
   name: string;
+  /** Owning saved Agent — the Host resolves kind/path/defaults from it. */
+  agentId?: string;
   executor: Executor;
   /** First user message — sent automatically once the session exists. The
    *  create payload itself stays free of it (ses-001 contract); App hands it
@@ -90,6 +91,7 @@ export interface CreateSessionInput {
 export interface SessionCreateFormState {
   workspaceId: string;
   sessionName: string;
+  agentId?: string;
   executor: Executor;
   model?: string;
   thinkingEffort?: ThinkingEffort | null;
@@ -108,6 +110,7 @@ export function buildSessionCreatePayload(
   return {
     workspaceId: form.workspaceId,
     name: form.sessionName.trim(),
+    ...(form.agentId ? { agentId: form.agentId } : {}),
     executor: form.executor,
     ...((catalog?.model ?? form.model) ? { model: catalog?.model ?? form.model } : {}),
     ...(!usesNativeExecutorConfig(form.executor) && (catalog?.approvalMode ?? form.approvalMode)
@@ -127,15 +130,6 @@ export function buildSessionCreatePayload(
       : {}),
   };
 }
-
-/** Display blurbs for the built-in agents. Temporary: once agents become
- *  plugins, the manifest owns this metadata and this map goes away. */
-const AGENT_DESC: Record<string, string> = {
-  codex: 'OpenAI · gpt-5-codex',
-  claude: 'CLI plan',
-  kimi: 'Moonshot AI · ACP',
-  grok: 'xAI · ACP',
-};
 
 /** Last-used new-session choices, remembered across opens (localStorage). */
 const LAST_KEY = 'gian.new-session.last.v1';
@@ -158,6 +152,7 @@ const RETURN_KEY = 'gian.new-session.return.v1';
 
 interface StoredNewSession {
   workspaceId?: string;
+  agentId?: string;
   executor?: Executor;
   model?: string;
   thinkingEffort?: ThinkingEffort | null;
@@ -224,7 +219,7 @@ function FolderIcon() {
 export function NewSessionView({
   workspaces,
   initialWorkspaceId,
-  initialExecutor,
+  initialAgentId,
   draftScope,
   draftLabel,
   onCreate,
@@ -240,8 +235,8 @@ export function NewSessionView({
   /** Preselected workspace (sidebar workspace-row "+" entry point, or the
    *  auto-return from the New Workspace sheet). */
   initialWorkspaceId?: string;
-  /** Preselected agent (⌘J/⌘K "new subtask" shortcut carries the choice). */
-  initialExecutor?: Executor;
+  /** Preselected Agent (⌘J/⌘K "new subtask" shortcut carries the choice). */
+  initialAgentId?: string;
   /** Task-owned forms keep one persistent draft per Task. Session-mode forms
    *  omit this prop and are automatically keyed by the selected Workspace. */
   draftScope?: NewSessionDraftScope;
@@ -302,14 +297,11 @@ export function NewSessionView({
   /** Which agents exist and whether they're usable — driven by the host's
    *  /api/agents install status so the picker follows Settings, not a
    *  hardcoded list. Null while loading. */
-  const [agents, setAgents] = useState<AgentInstallStatus[] | null>(() => {
-    const cached = peekAgents();
-    return cached ? releaseAgents(cached) : null;
-  });
-  const requestedExecutor = initialExecutor ?? draft?.executor ?? null;
-  const [executor, setExecutor] = useState<Executor | null>(
-    requestedExecutor && isReleaseExecutor(requestedExecutor) ? requestedExecutor : null,
-  );
+  const [agents, setAgents] = useState<UserAgentStatus[] | null>(() => peekAgents());
+  const requestedAgentId = initialAgentId ?? draft?.agentId ?? null;
+  const [agentId, setAgentId] = useState<string | null>(requestedAgentId);
+  const selectedAgent = agents?.find(agent => agent.id === agentId) ?? null;
+  const executor = selectedAgent?.proxy ?? null;
   // Capability chip state holds only explicit per-draft choices. Catalog-backed
   // native executors use the same state now that their options are available
   // before session.create; configured Agent defaults remain display fallbacks.
@@ -318,7 +310,7 @@ export function NewSessionView({
   const [mode, setMode] = useState<ApprovalMode | null>(draft?.approvalMode ?? null);
   const [serviceTier, setServiceTier] = useState<'fast' | null>(draft?.serviceTier ?? null);
   const [initialCatalog] = useState(() => (
-    executor ? getCatalogCached(executor) : undefined
+    executor ? getCatalogCached(executor, agentId) : undefined
   ));
   const [catalog, setCatalog] = useState<ComposerCatalog>(() => (
     initialCatalog ?? { configOptions: [], input: [], slashCommands: [] }
@@ -342,25 +334,33 @@ export function NewSessionView({
   useEffect(() => {
     let cancelled = false;
     loadAgents()
-      .then(list => { if (!cancelled) setAgents(releaseAgents(list)); })
+      .then(list => { if (!cancelled) setAgents(list); })
       .catch(() => { if (!cancelled) setAgents([]); });
     return () => { cancelled = true; };
   }, []);
 
   // Agent default: explicit preselect (⌘J/⌘K) > restored draft > last-used
-  // (still ready) > the single ready agent (auto-selected, picker static).
-  // With several ready agents and no memory, nothing is selected and Send
-  // stays disabled.
+  // Agent (still ready) > legacy last-used kind's first ready Agent > the
+  // single ready agent (auto-selected, picker static). With several ready
+  // agents and no memory, nothing is selected and Send stays disabled.
   useEffect(() => {
-    if (!agents || executor) return;
-    const remembered = draft?.executor ?? last?.executor;
-    if (remembered && agents.some(a => a.id === remembered && a.ready)) {
-      setExecutor(remembered);
+    if (!agents || agentId) return;
+    const ready = agents.filter(agent => agent.ready);
+    const rememberedId = draft?.agentId ?? last?.agentId;
+    if (rememberedId && ready.some(agent => agent.id === rememberedId)) {
+      setAgentId(rememberedId);
       return;
     }
-    const ready = agents.filter(agent => agent.ready);
-    if (ready.length === 1) setExecutor(ready[0]!.id);
-  }, [agents, executor, draft, last]);
+    const rememberedKind = draft?.executor ?? last?.executor;
+    if (rememberedKind) {
+      const ofKind = ready.find(agent => agent.proxy === rememberedKind);
+      if (ofKind) {
+        setAgentId(ofKind.id);
+        return;
+      }
+    }
+    if (ready.length === 1) setAgentId(ready[0]!.id);
+  }, [agents, agentId, draft, last]);
 
   // Chip state holds ONLY explicit choices (restored draft / last-used values
   // for this agent, or rows the user picks from a drop). Display falls back
@@ -391,19 +391,19 @@ export function NewSessionView({
       return;
     }
     const cli = executor;
-    setModels(getModelsCached(cli) ?? []);
-    setProxyModes(getModesCached(cli) ?? []);
+    setModels(getModelsCached(cli, agentId) ?? []);
+    setProxyModes(getModesCached(cli, agentId) ?? []);
     setServiceTier(cli === 'codex' ? (remembered?.serviceTier ?? null) : null);
 
     let alive = true;
-    void fetchModelsCached(cli)
+    void fetchModelsCached(cli, agentId)
       .then(list => { if (alive) setModels(list); })
       .catch(() => { /* chips keep the built-in fallbacks */ });
-    void fetchModesCached(cli)
+    void fetchModesCached(cli, agentId)
       .then(list => { if (alive) setProxyModes(list); })
       .catch(() => { /* built-in mode lists */ });
     return () => { alive = false; };
-  }, [executor, draft, last]);
+  }, [executor, agentId, draft, last]);
 
   useEffect(() => {
     // Config IDs are Proxy-owned. Never carry values across executors even
@@ -415,7 +415,7 @@ export function NewSessionView({
       setCatalogExecutor(null);
       return;
     }
-    const cached = getCatalogCached(executor);
+    const cached = getCatalogCached(executor, agentId);
     if (cached) {
       setCatalog(cached);
       setCatalogExecutor(executor);
@@ -425,7 +425,7 @@ export function NewSessionView({
     }
     setCatalogExecutor(null);
     let alive = true;
-    void fetchCatalogCached(executor)
+    void fetchCatalogCached(executor, agentId)
       .then(next => {
         if (!alive) return;
         setCatalog(next);
@@ -440,7 +440,7 @@ export function NewSessionView({
         }
       });
     return () => { alive = false; };
-  }, [executor]);
+  }, [executor, agentId]);
 
   useEffect(() => {
     if (
@@ -482,7 +482,7 @@ export function NewSessionView({
       catalogRevision: catalog.catalogRevision,
       sessionConfig: configs.session_config,
       turnConfig: configs.turn_config,
-    }).then((resolved) => {
+    }, agentId).then((resolved) => {
       if (!alive) return;
       setCatalog({
         catalogRevision: resolved.catalogRevision,
@@ -511,6 +511,7 @@ export function NewSessionView({
       sessionName,
       message,
       ...(screenshotAttachments.length > 0 ? { screenshotAttachments } : {}),
+      ...(agentId ? { agentId } : {}),
       ...(executor ? { executor } : {}),
       ...(model ? { model } : {}),
       ...(effort ? { thinkingEffort: effort } : {}),
@@ -539,6 +540,7 @@ export function NewSessionView({
     selectedWs,
     sessionName,
     message,
+    agentId,
     executor,
     model,
     effort,
@@ -611,14 +613,13 @@ export function NewSessionView({
     el.style.height = Math.min(160, el.scrollHeight) + 'px';
   }, [message]);
 
-  const selectedAgent = agents?.find(agent => agent.id === executor) ?? null;
   const readyAgents = (agents ?? []).filter(agent => agent.ready);
   // Exactly one usable agent: no choice to make — the chip shows it
   // statically (issue #57). Zero or 2+ ready agents get the picker drop
   // (not-ready rows render disabled).
   const showAgentPicker = readyAgents.length !== 1;
   const cliExecutor = executor && usesNativeExecutorConfig(executor) ? null : executor;
-  const configuredDefaults = selectedAgent?.proxy.defaults;
+  const configuredDefaults = selectedAgent?.defaults;
   const catalogReady = catalog.configOptions.length > 0;
   const catalogModel = optionByRole(catalog.configOptions, 'model');
   const catalogEffort = optionByRole(catalog.configOptions, 'effort');
@@ -679,12 +680,15 @@ export function NewSessionView({
   const showEffortChip = Boolean(cliExecutor || (catalogReady && turnEffort));
   const showApprovalChip = Boolean(cliExecutor || (catalogReady && catalogApproval));
   const showNativeStatic = Boolean(executor && usesNativeExecutorConfig(executor) && !catalogReady);
-  const showFastChip = executor === 'codex' || Boolean(turnFast);
   const catalogViewValues: Record<string, ConfigValue> = { ...catalogValues };
-  if (catalogModel && model) catalogViewValues[catalogModel.id] = model;
-  if (catalogEffort && explicitEffort) catalogViewValues[catalogEffort.id] = explicitEffort;
-  if (catalogApproval && mode) catalogViewValues[catalogApproval.id] = mode;
+  if (catalogModel && displayModel) catalogViewValues[catalogModel.id] = displayModel;
+  if (catalogEffort && displayEffort) catalogViewValues[catalogEffort.id] = displayEffort;
+  if (catalogApproval && displayMode) catalogViewValues[catalogApproval.id] = displayMode;
   if (catalogFast) catalogViewValues[catalogFast.id] = serviceTier === 'fast';
+  const showFastChip = turnFast
+    ? optionVisible(turnFast, catalogViewValues)
+    : !catalogReady && executor === 'codex';
+  const fastEnabled = !turnFast || optionEnabled(turnFast, catalogViewValues);
   const sessionExtras = catalog.configOptions.filter((option) => (
     option.binding === 'session'
     && option.id !== catalogApproval?.id
@@ -716,6 +720,15 @@ export function NewSessionView({
     // Keep an explicit effort only when the new model supports it.
     if (effort && efforts.length > 0 && !efforts.includes(effort)) {
       setEffort(defaultEffort(meta));
+    }
+    if (turnFast && serviceTier === 'fast') {
+      const nextValues = {
+        ...catalogViewValues,
+        ...(catalogModel ? { [catalogModel.id]: next } : {}),
+      };
+      if (!optionVisible(turnFast, nextValues) || !optionEnabled(turnFast, nextValues)) {
+        setServiceTier(null);
+      }
     }
   }
 
@@ -751,7 +764,7 @@ export function NewSessionView({
       setSessionName(nextDraft.sessionName ?? '');
       setMessage(nextDraft.message ?? '');
       setScreenshotAttachments(nextDraft.screenshotAttachments ?? []);
-      setExecutor(nextDraft.executor ?? null);
+      setAgentId(nextDraft.agentId ?? null);
       setModel(nextDraft.model ?? '');
       setEffort(nextDraft.thinkingEffort ?? null);
       setMode(nextDraft.approvalMode ?? null);
@@ -803,6 +816,7 @@ export function NewSessionView({
     const payload = buildSessionCreatePayload({
       workspaceId: selectedWs,
       sessionName,
+      ...(selectedAgent ? { agentId: selectedAgent.id } : {}),
       executor,
       model: cliExecutor || catalogReady ? model : undefined,
       thinkingEffort: cliExecutor || catalogReady ? effort : undefined,
@@ -816,6 +830,7 @@ export function NewSessionView({
     });
     writeJson(LAST_KEY, {
       workspaceId: selectedWs,
+      ...(selectedAgent ? { agentId: selectedAgent.id } : {}),
       executor,
       ...(payload.model ? { model: payload.model } : {}),
       ...(payload.thinkingEffort ? { thinkingEffort: payload.thinkingEffort } : {}),
@@ -973,7 +988,12 @@ export function NewSessionView({
               title={t('coding.new.agent.title')}
               onClick={() => agentDrop.setOpen(open => !open)}
             >
-              {selectedAgent && <ExecutorMark executor={selectedAgent.id} />}
+              {selectedAgent && (
+                <span
+                  className="exec-dot"
+                  style={{ background: `var(--agent-${selectedAgent.color})` }}
+                />
+              )}
               <span className="name">
                 {selectedAgent ? selectedAgent.name : t('coding.new.agent.select')}
               </span>
@@ -981,7 +1001,10 @@ export function NewSessionView({
             </button>
           ) : selectedAgent ? (
             <span className="composer-opt ns-chip-static" data-testid="ns-agent-picker">
-              <ExecutorMark executor={selectedAgent.id} />
+              <span
+                className="exec-dot"
+                style={{ background: `var(--agent-${selectedAgent.color})` }}
+              />
               <span className="name">{selectedAgent.name}</span>
             </span>
           ) : null}
@@ -1029,22 +1052,22 @@ export function NewSessionView({
               <span className="mp-section-title">{t('coding.new.agent.title')}</span>
             </div>
             <div className="mp-list">
-              {agents.map(agent => (
+              {readyAgents.map(agent => (
                 <button
                   key={agent.id}
                   type="button"
-                  className={`mp-row${executor === agent.id ? ' active' : ''}`}
+                  className={`mp-row${agentId === agent.id ? ' active' : ''}`}
                   data-testid={`ns-agent-option-${agent.id}`}
-                  disabled={!agent.ready}
-                  title={agent.ready ? undefined : t('coding.new.executor.notReady')}
-                  onClick={() => { setExecutor(agent.id); agentDrop.setOpen(false); }}
+                  onClick={() => { setAgentId(agent.id); agentDrop.setOpen(false); }}
                 >
-                  <span className="mp-check">{executor === agent.id ? '✓' : ''}</span>
+                  <span className="mp-check">{agentId === agent.id ? '✓' : ''}</span>
+                  <span
+                    className="exec-dot"
+                    style={{ background: `var(--agent-${agent.color})` }}
+                  />
                   <span className="mp-row-body">
                     <span className="mp-row-title">{agent.name}</span>
-                    <span className="mp-row-hint">
-                      {agent.ready ? (AGENT_DESC[agent.id] ?? '') : t('coding.new.executor.notReady')}
-                    </span>
+                    <span className="mp-row-hint">{agent.proxyName}</span>
                   </span>
                 </button>
               ))}
@@ -1233,7 +1256,7 @@ export function NewSessionView({
                   label: turnFast?.displayName ?? t('composer.fast.button'),
                   description: turnFast?.description ?? t('composer.fast.title'),
                   checked: serviceTier === 'fast',
-                  disabled: creating,
+                  disabled: creating || !fastEnabled,
                   onChange: checked => setServiceTier(checked ? 'fast' : null),
                 } : undefined}
                 options={turnMenuExtras}
@@ -1248,7 +1271,12 @@ export function NewSessionView({
             )}
             {showNativeStatic && (
               <span className="composer-opt ns-chip-static cmp-options-btn" data-testid="ns-model-chip">
-                {executor && <ExecutorMark executor={executor} />}
+                {selectedAgent && (
+                  <span
+                    className="exec-dot"
+                    style={{ background: `var(--agent-${selectedAgent.color})` }}
+                  />
+                )}
                 <span className="name">{nativeDefaults?.model.trim() || t('coding.new.chip.default')}</span>
                 <span className="cmp-opt-sep" aria-hidden="true">|</span>
                 <span className="name">{nativeDefaults?.thinking.trim() || t('coding.new.chip.default')}</span>

@@ -351,6 +351,10 @@ export class KimiProxyService {
     await this.runtime.ensureStarted();
   }
 
+  supportsFork(): boolean {
+    return this.runtime.negotiated?.agentCapabilities?.sessionCapabilities?.fork != null;
+  }
+
   setEventSink(handler: ProxyEventSink): void {
     this.emitEvent = handler;
   }
@@ -548,6 +552,37 @@ export class KimiProxyService {
       throw mapRuntimeError(error, this.runtime.binaryPath);
     }
   }
+
+  async forkSession(params: { sessionId: string }) {
+    const source = this.requireSession(params.sessionId);
+    if (source.activeTurnId) {
+      throw createAppError(409, 'SESSION_BUSY', 'Stop the active turn before forking the session.');
+    }
+    if (!this.supportsFork()) {
+      throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', 'Kimi ACP does not advertise session/fork.');
+    }
+    try {
+      const response = await this.runtime.forkSession({
+        sessionId: source.nativeSessionId,
+        cwd: source.cwd,
+        mcpServers: source.mcpServers,
+      });
+      const createdAt = nowIso();
+      const session = this.makeSession({
+        id: randomId('sess'),
+        cwd: source.cwd,
+        nativeSessionId: response.sessionId,
+        mcpServers: source.mcpServers,
+        configOptions: response.configOptions ?? source.configOptions,
+        createdAt,
+      });
+      this.addSession(session);
+      return { session: this.serializeSession(session) };
+    } catch (error) {
+      throw mapRuntimeError(error, this.runtime.binaryPath);
+    }
+  }
+
 
   getSession(params: GetSessionParams) {
     return { session: this.serializeSession(this.requireSession(params.sessionId)) };

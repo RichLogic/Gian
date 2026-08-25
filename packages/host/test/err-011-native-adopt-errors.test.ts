@@ -261,6 +261,12 @@ test('ERR-011: native adopt broadcast identifies its Host origin', async () => {
       sessions: {
         getSession: (sessionId: string) => repository.get(sessionId),
         listPluginNativeSessions: async () => null,
+        resolveAdoptAgent: () => ({
+          agentId: null,
+          agentName: null,
+          agentColor: null,
+          cliPath: null,
+        }),
       } as unknown as SessionManager,
       broadcaster: {
         broadcast: (message: ServerToClientMessage) => messages.push(message),

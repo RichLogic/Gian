@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import type { Executor } from '@gian/shared';
 import {
   ProtocolV2Host,
@@ -103,15 +104,20 @@ export class ProxyManager {
    * being disposed. Failed barriers remain closed until an explicit dispose
    * or executor close retries the exact cleanup. */
   private disposingBySession = new Map<string, SessionDisposal>();
-  private codexHost: SharedRuntimeHost | null = null;
-  private codexHostInit: Promise<SharedRuntimeHost> | null = null;
-  private kimiHost: SharedRuntimeHost | null = null;
-  private kimiHostInit: Promise<SharedRuntimeHost> | null = null;
-  private dshHost: SharedRuntimeHost | null = null;
-  private dshHostInit: Promise<SharedRuntimeHost> | null = null;
+  /** Shared hosts are keyed by the Agent's resolved CLI path ('' = the
+   *  provider default): two Agents on one Proxy kind with different CLI
+   *  paths get independent host processes; same-path Agents share one. */
+  private codexHosts = new Map<string, SharedRuntimeHost>();
+  private codexHostInits = new Map<string, Promise<SharedRuntimeHost>>();
+  private kimiHosts = new Map<string, SharedRuntimeHost>();
+  private kimiHostInits = new Map<string, Promise<SharedRuntimeHost>>();
+  private dshHosts = new Map<string, SharedRuntimeHost>();
+  private dshHostInits = new Map<string, Promise<SharedRuntimeHost>>();
   /** A failed-attach Kimi host is never replaced until this exact host has
-   * completed process-tree and updater-lease retirement. */
-  private kimiHostRetirement: KimiHostRetirement | null = null;
+   * completed process-tree and updater-lease retirement. Records are keyed by
+   * the exact host so hosts of different (kind, path) pairs retire
+   * independently. */
+  private kimiHostRetirements = new Map<SharedRuntimeHost, KimiHostRetirement>();
   private retiringKimiHostBySession = new Map<string, SharedRuntimeHost>();
   private closeEpochByExecutor = new Map<ProxyExecutor, number>();
   private closingByExecutor = new Map<ProxyExecutor, Promise<void>>();
@@ -120,11 +126,26 @@ export class ProxyManager {
     Set<Promise<ProxyClient | null>>
   >();
   private runtimeLeaseReleases = new WeakMap<RuntimeLease, Promise<void>>();
+  /** Session-scoped Proxies may temporarily host persistent Fork children.
+   *  Once that happens, runtime ownership moves from the parent facade to the
+   *  exact ProtocolV2Host until its last attached facade closes. */
+  private readonly forkOwningSessionHosts = new WeakSet<ProtocolV2Host>();
 
   constructor(private cfg: ProxyManagerConfig) {}
 
-  async getOrCreate(sessionId: string, executor: Executor): Promise<ProxyClient> {
+  /** Shared-host map key for one Agent's resolved CLI path. '' is the
+   *  provider-default resolution (environment override / PATH / official). */
+  private static hostKey(cliPath?: string | null): string {
+    return cliPath ?? '';
+  }
+
+  async getOrCreate(
+    sessionId: string,
+    executor: Executor,
+    options?: { cliPath?: string | null },
+  ): Promise<ProxyClient> {
     const proxyExecutor: ProxyExecutor = executor;
+    const cliPath = options?.cliPath ?? null;
     while (true) {
       const closing = this.closingByExecutor.get(proxyExecutor);
       if (closing) {
@@ -192,7 +213,7 @@ export class ProxyManager {
       }
 
       const closeEpoch = this.closeEpochByExecutor.get(proxyExecutor) ?? 0;
-      const attempt = this.createClientAttempt(sessionId, proxyExecutor, closeEpoch);
+      const attempt = this.createClientAttempt(sessionId, proxyExecutor, closeEpoch, cliPath);
       this.creatingBySession.set(sessionId, { executor: proxyExecutor, promise: attempt });
       let attempts = this.creatingByExecutor.get(proxyExecutor);
       if (!attempts) {
@@ -224,16 +245,17 @@ export class ProxyManager {
     sessionId: string,
     executor: ProxyExecutor,
     closeEpoch: number,
+    cliPath: string | null,
   ): Promise<ProxyClient | null> {
     const client = executor === 'codex'
-      ? await this.createCodexClient(sessionId)
+      ? await this.createCodexClient(sessionId, cliPath)
       : executor === 'kimi'
-        ? await this.createKimiClient(sessionId)
+        ? await this.createKimiClient(sessionId, cliPath)
         : executor === 'grok'
-          ? await this.createGrokClient(sessionId)
+          ? await this.createGrokClient(sessionId, cliPath)
           : executor === 'dsh'
-            ? await this.createDshClient(sessionId)
-            : await this.createClaudeClient(sessionId);
+            ? await this.createDshClient(sessionId, cliPath)
+            : await this.createClaudeClient(sessionId, cliPath);
 
     if (!client) return null;
 
@@ -298,6 +320,12 @@ export class ProxyManager {
     }
     this.clients.set(sessionId, client);
     this.executorBySession.set(sessionId, client.executor as ProxyExecutor);
+    if (
+      client instanceof ProtocolV2SessionClient
+      && (client.executor === 'claude' || client.executor === 'grok')
+    ) {
+      this.promoteForkOwningSessionHost(client.runtimeHost());
+    }
     client.onExit((code) => {
       if (this.clients.get(sessionId) !== client) return;
       console.log(`[proxy] session=${sessionId} exited code=${code}`);
@@ -306,6 +334,25 @@ export class ProxyManager {
         this.executorBySession.delete(sessionId);
       }
     });
+  }
+
+  private promoteForkOwningSessionHost(host: ProtocolV2Host): void {
+    if (this.forkOwningSessionHosts.has(host)) return;
+    for (const [owner, binding] of this.runtimeByOwner) {
+      if (!(owner instanceof ProtocolV2SessionClient) || owner.runtimeHost() !== host) continue;
+      this.runtimeByOwner.set(host, binding);
+      this.runtimeByOwner.delete(owner);
+      this.forkOwningSessionHosts.add(host);
+      host.onHostExit(() => {
+        this.dropSessionScopedClientsForHost(host.executor, host);
+        this.markRuntimeBindingReleaseEligible(host);
+        void this.releaseRuntimeBinding(host).catch(error => {
+          console.error(`[proxy] failed to release fork-owning ${host.executor} runtime:`, error);
+        });
+      });
+      return;
+    }
+    throw new Error('Fork child runtime ownership could not be promoted to its Protocol host.');
   }
 
   /** Drop an adopted facade without disposing the parent Proxy process. */
@@ -326,11 +373,16 @@ export class ProxyManager {
   private isCurrentSharedClient(client: ProxyClient): boolean {
     if (!(client instanceof ProtocolV2SessionClient)) return true;
     const host = client.runtimeHost();
-    if (client.executor === 'codex') return this.codexHost === host;
-    if (client.executor === 'kimi') {
-      return this.kimiHost === host && this.kimiHostRetirement?.host !== host;
+    if (client.executor === 'codex') {
+      return [...this.codexHosts.values()].includes(host);
     }
-    if (client.executor === 'dsh') return this.dshHost === host;
+    if (client.executor === 'kimi') {
+      return [...this.kimiHosts.values()].includes(host)
+        && !this.kimiHostRetirements.has(host);
+    }
+    if (client.executor === 'dsh') {
+      return [...this.dshHosts.values()].includes(host);
+    }
     return true;
   }
 
@@ -379,6 +431,10 @@ export class ProxyManager {
     if (this.runtimeByOwner.has(client)) {
       void this.releaseRuntimeBinding(client).catch(error => {
         console.error(`[proxy] failed to release recovered runtime for session=${sessionId}:`, error);
+      });
+    } else {
+      void this.releaseForkHostIfEmpty(client).catch(error => {
+        console.error(`[proxy] failed to release recovered fork host for session=${sessionId}:`, error);
       });
     }
   }
@@ -476,7 +532,10 @@ export class ProxyManager {
 
     if (executor === 'claude' || executor === 'grok') {
       if (this.runtimeByOwner.has(client)) await this.releaseRuntimeBinding(client);
-      else await client.shutdown();
+      else {
+        await client.shutdown();
+        await this.releaseForkHostIfEmpty(client);
+      }
     } else {
       await client.shutdown();
     }
@@ -573,15 +632,13 @@ export class ProxyManager {
         });
       }
     } else if (executor === 'codex') {
-      const pending = this.codexHostInit;
-      if (pending) await pending.catch(() => undefined);
-      if (this.codexHostInit === pending) this.codexHostInit = null;
-      const host = this.codexHost;
-      if (this.codexHost === host) {
-        this.codexHost = null;
-        this.dropExecutorClients('codex');
-      }
-      if (host) {
+      const pendings = [...this.codexHostInits.values()];
+      if (pendings.length > 0) await Promise.allSettled(pendings);
+      this.codexHostInits.clear();
+      const hosts = [...this.codexHosts.values()];
+      this.codexHosts.clear();
+      if (hosts.length > 0) this.dropExecutorClients('codex');
+      for (const host of hosts) {
         cleanupAttempts.push({
           owner: host,
           promise: this.runtimeByOwner.has(host)
@@ -590,15 +647,13 @@ export class ProxyManager {
         });
       }
     } else if (executor === 'dsh') {
-      const pending = this.dshHostInit;
-      if (pending) await pending.catch(() => undefined);
-      if (this.dshHostInit === pending) this.dshHostInit = null;
-      const host = this.dshHost;
-      if (this.dshHost === host) {
-        this.dshHost = null;
-        this.dropExecutorClients('dsh');
-      }
-      if (host) {
+      const pendings = [...this.dshHostInits.values()];
+      if (pendings.length > 0) await Promise.allSettled(pendings);
+      this.dshHostInits.clear();
+      const hosts = [...this.dshHosts.values()];
+      this.dshHosts.clear();
+      if (hosts.length > 0) this.dropExecutorClients('dsh');
+      for (const host of hosts) {
         cleanupAttempts.push({
           owner: host,
           promise: this.runtimeByOwner.has(host)
@@ -607,18 +662,19 @@ export class ProxyManager {
         });
       }
     } else {
-      const pending = this.kimiHostInit;
-      if (pending) await pending.catch(() => undefined);
-      if (this.kimiHostInit === pending) this.kimiHostInit = null;
-      const host = this.kimiHost;
-      if (host) {
+      const pendings = [...this.kimiHostInits.values()];
+      if (pendings.length > 0) await Promise.allSettled(pendings);
+      this.kimiHostInits.clear();
+      const hosts = [...this.kimiHosts.values()];
+      for (const host of hosts) {
         this.detachKimiHostForRetirement(host);
         cleanupAttempts.push({ owner: host, promise: this.beginKimiHostRetirement(host) });
-      } else if (this.kimiHostRetirement) {
-        const retiringHost = this.kimiHostRetirement.host;
+      }
+      for (const record of [...this.kimiHostRetirements.values()]) {
+        if (hosts.includes(record.host)) continue;
         cleanupAttempts.push({
-          owner: retiringHost,
-          promise: this.retryKimiHostRetirement(retiringHost),
+          owner: record.host,
+          promise: this.retryKimiHostRetirement(record.host),
         });
       }
     }
@@ -687,11 +743,11 @@ export class ProxyManager {
     });
   }
 
-  private async createClaudeClient(sessionId: string): Promise<ProxyClient> {
+  private async createClaudeClient(sessionId: string, cliPath: string | null): Promise<ProxyClient> {
     const dataDir = join(this.cfg.dataDir, 'proxy', sessionId);
     mkdirSync(dataDir, { recursive: true });
     const lease = this.cfg.runtimeManager
-      ? await this.cfg.runtimeManager.acquire('claude')
+      ? await this.cfg.runtimeManager.acquire('claude', cliPath)
       : null;
     let runtimeOwner: object | undefined = lease
       ? this.trackStartupRuntime('claude', lease)
@@ -754,33 +810,35 @@ export class ProxyManager {
     }
   }
 
-  private async createCodexClient(sessionId: string): Promise<ProxyClient> {
-    const host = await this.getOrCreateCodexHost();
+  private async createCodexClient(sessionId: string, cliPath: string | null): Promise<ProxyClient> {
+    const host = await this.getOrCreateCodexHost(cliPath);
     return host.createSessionClient(sessionId);
   }
 
-  private async getOrCreateCodexHost(): Promise<SharedRuntimeHost> {
+  private async getOrCreateCodexHost(cliPath: string | null): Promise<SharedRuntimeHost> {
     if (!this.cfg.codexProxyEntry) {
       throw new Error(
         'codex executor requested but codexProxyEntry is not configured',
       );
     }
-    if (this.codexHost) return this.codexHost;
-    let pending = this.codexHostInit;
+    const key = ProxyManager.hostKey(cliPath);
+    const current = this.codexHosts.get(key);
+    if (current) return current;
+    let pending = this.codexHostInits.get(key);
     if (!pending) {
-      pending = this.startCodexHost();
-      this.codexHostInit = pending;
+      pending = this.startCodexHost(key, cliPath);
+      this.codexHostInits.set(key, pending);
     }
     try {
       return await pending;
     } finally {
-      if (this.codexHostInit === pending) this.codexHostInit = null;
+      if (this.codexHostInits.get(key) === pending) this.codexHostInits.delete(key);
     }
   }
 
-  private async startCodexHost(): Promise<SharedRuntimeHost> {
+  private async startCodexHost(key: string, cliPath: string | null): Promise<SharedRuntimeHost> {
     const lease = this.cfg.runtimeManager
-      ? await this.cfg.runtimeManager.acquire('codex')
+      ? await this.cfg.runtimeManager.acquire('codex', cliPath)
       : null;
     let runtimeOwner: object | undefined = lease
       ? this.trackStartupRuntime('codex', lease)
@@ -795,7 +853,7 @@ export class ProxyManager {
           () => reservation!.cancelBeforeSpawn(),
         );
       }
-      const dataDir = join(this.cfg.dataDir, 'proxy', 'codex');
+      const dataDir = this.hostDataDir('codex', key);
       mkdirSync(dataDir, { recursive: true });
       const protocol = this.requireProtocol('codex', this.cfg.codexProxy, 'shared');
       host = this.createProtocolHost('codex', {
@@ -835,11 +893,11 @@ export class ProxyManager {
         this.setRuntimeProtection(runtimeOwner, () => reservation!.release());
       }
       const startedHost = host;
-      this.codexHost = startedHost;
+      this.codexHosts.set(key, startedHost);
       startedHost.onHostExit(() => {
-        if (this.codexHost === startedHost) {
-          this.codexHost = null;
-          this.dropExecutorClients('codex');
+        if (this.codexHosts.get(key) === startedHost) {
+          this.codexHosts.delete(key);
+          this.dropSharedClientsForHost('codex', startedHost);
         }
         this.markRuntimeBindingReleaseEligible(startedHost);
         void this.releaseRuntimeBinding(startedHost).catch(error => {
@@ -859,13 +917,13 @@ export class ProxyManager {
     }
   }
 
-  private async createDshClient(sessionId: string): Promise<ProxyClient | null> {
-    const host = await this.getOrCreateDshHost();
+  private async createDshClient(sessionId: string, cliPath: string | null): Promise<ProxyClient | null> {
+    const host = await this.getOrCreateDshHost(cliPath);
     if (!host) return null;
     return host.createSessionClient(sessionId);
   }
 
-  private async getOrCreateDshHost(): Promise<SharedRuntimeHost | null> {
+  private async getOrCreateDshHost(cliPath: string | null): Promise<SharedRuntimeHost | null> {
     if (!this.cfg.dshProxyEntry) {
       throw new Error(
         'dsh executor requested but dshProxyEntry is not configured',
@@ -876,21 +934,23 @@ export class ProxyManager {
         'dsh executor requested but CliRuntimeManager is not configured',
       );
     }
-    if (this.dshHost) return this.dshHost;
-    let pending = this.dshHostInit;
+    const key = ProxyManager.hostKey(cliPath);
+    const current = this.dshHosts.get(key);
+    if (current) return current;
+    let pending = this.dshHostInits.get(key);
     if (!pending) {
-      pending = this.startDshHost();
-      this.dshHostInit = pending;
+      pending = this.startDshHost(key, cliPath);
+      this.dshHostInits.set(key, pending);
     }
     try {
       return await pending;
     } finally {
-      if (this.dshHostInit === pending) this.dshHostInit = null;
+      if (this.dshHostInits.get(key) === pending) this.dshHostInits.delete(key);
     }
   }
 
-  private async startDshHost(): Promise<SharedRuntimeHost> {
-    const lease = await this.cfg.runtimeManager!.acquire('dsh');
+  private async startDshHost(key: string, cliPath: string | null): Promise<SharedRuntimeHost> {
+    const lease = await this.cfg.runtimeManager!.acquire('dsh', cliPath);
     let runtimeOwner: object | undefined = this.trackStartupRuntime('dsh', lease);
     let reservation: RuntimeProcessGroupReservation | undefined;
     let host: SharedRuntimeHost | undefined;
@@ -906,7 +966,7 @@ export class ProxyManager {
       host = this.createProtocolHost('dsh', {
         protocol,
         entry: this.cfg.dshProxyEntry!,
-        dataDir: join(this.cfg.dataDir, 'proxy', 'dsh'),
+        dataDir: this.hostDataDir('dsh', key),
         runtimeBin: lease.binaryPath,
         env: lease.env,
       });
@@ -932,11 +992,11 @@ export class ProxyManager {
         this.setRuntimeProtection(runtimeOwner, () => reservation!.release());
       }
       const startedHost = host;
-      this.dshHost = startedHost;
+      this.dshHosts.set(key, startedHost);
       startedHost.onHostExit(() => {
-        if (this.dshHost === startedHost) {
-          this.dshHost = null;
-          this.dropExecutorClients('dsh');
+        if (this.dshHosts.get(key) === startedHost) {
+          this.dshHosts.delete(key);
+          this.dropSharedClientsForHost('dsh', startedHost);
         }
         this.markRuntimeBindingReleaseEligible(startedHost);
         void this.releaseRuntimeBinding(startedHost).catch(error => {
@@ -954,54 +1014,51 @@ export class ProxyManager {
     }
   }
 
-  private async createKimiClient(sessionId: string): Promise<ProxyClient | null> {
-    const host = await this.getOrCreateKimiHost(sessionId);
+  private async createKimiClient(sessionId: string, cliPath: string | null): Promise<ProxyClient | null> {
+    const host = await this.getOrCreateKimiHost(sessionId, cliPath);
     if (!host) return null;
     return host.createSessionClient(sessionId);
   }
 
-  private currentKimiHost(): SharedRuntimeHost | null {
-    return this.kimiHost;
-  }
-
-  private currentKimiHostRetirement(): KimiHostRetirement | null {
-    return this.kimiHostRetirement;
-  }
-
-  private async getOrCreateKimiHost(sessionId: string): Promise<SharedRuntimeHost | null> {
+  private async getOrCreateKimiHost(
+    sessionId: string,
+    cliPath: string | null,
+  ): Promise<SharedRuntimeHost | null> {
     if (!this.cfg.kimiProxyEntry) {
       throw new Error('kimi executor requested but kimiProxyEntry is not configured');
     }
     if (!this.cfg.runtimeManager) {
       throw new Error('kimi executor requested but CliRuntimeManager is not configured');
     }
+    const key = ProxyManager.hostKey(cliPath);
     while (true) {
       if (this.disposingBySession.has(sessionId)) {
-        if (this.kimiHostRetirement) await this.retryKimiHostRetirement();
+        if (this.kimiHostRetirements.size > 0) await this.retryKimiHostRetirement();
         return null;
       }
       // Preserve a synchronous fast path when no host is retiring. Awaiting an
       // already-resolved helper here would open a microtask window in which a
       // failed-attach dispose can detach the old host after this check.
-      if (this.kimiHostRetirement) {
+      if (this.kimiHostRetirements.size > 0) {
         await this.retryKimiHostRetirement();
         continue;
       }
-      if (this.kimiHost) return this.kimiHost;
+      const current = this.kimiHosts.get(key);
+      if (current) return current;
 
-      let pending = this.kimiHostInit;
+      let pending = this.kimiHostInits.get(key);
       if (!pending) {
-        pending = this.startKimiHost();
-        this.kimiHostInit = pending;
+        pending = this.startKimiHost(key, cliPath);
+        this.kimiHostInits.set(key, pending);
       }
       try {
         const host = await pending;
         if (this.disposingBySession.has(sessionId)) {
-          if (this.currentKimiHost() === host && !host.hasSessions()) {
+          if (this.kimiHosts.get(key) === host && !host.hasSessions()) {
             this.detachKimiHostForRetirement(host);
             this.beginKimiHostRetirement(host);
           }
-          if (this.currentKimiHostRetirement()?.host === host) {
+          if (this.kimiHostRetirements.has(host)) {
             await this.retryKimiHostRetirement(host);
           }
           return null;
@@ -1009,16 +1066,16 @@ export class ProxyManager {
         // A waiter can resume after another session synchronously detached
         // this just-started host. Re-enter the barrier instead of publishing a
         // facade for the retiring identity.
-        if (this.currentKimiHostRetirement() || this.currentKimiHost() !== host) continue;
+        if (this.kimiHostRetirements.size > 0 || this.kimiHosts.get(key) !== host) continue;
         return host;
       } finally {
-        if (this.kimiHostInit === pending) this.kimiHostInit = null;
+        if (this.kimiHostInits.get(key) === pending) this.kimiHostInits.delete(key);
       }
     }
   }
 
-  private async startKimiHost(): Promise<SharedRuntimeHost> {
-    const lease = await this.cfg.runtimeManager!.acquire('kimi');
+  private async startKimiHost(key: string, cliPath: string | null): Promise<SharedRuntimeHost> {
+    const lease = await this.cfg.runtimeManager!.acquire('kimi', cliPath);
     let runtimeOwner: object = this.trackStartupRuntime('kimi', lease);
     let reservation: RuntimeProcessGroupReservation | undefined;
     let host: SharedRuntimeHost | undefined;
@@ -1034,7 +1091,7 @@ export class ProxyManager {
       host = this.createProtocolHost('kimi', {
         protocol,
         entry: this.cfg.kimiProxyEntry!,
-        dataDir: join(this.cfg.dataDir, 'proxy', 'kimi'),
+        dataDir: this.hostDataDir('kimi', key),
         runtimeBin: lease.binaryPath,
         env: lease.env,
       });
@@ -1060,9 +1117,9 @@ export class ProxyManager {
         this.setRuntimeProtection(runtimeOwner, () => reservation!.release());
       }
       const startedHost = host;
-      this.kimiHost = startedHost;
+      this.kimiHosts.set(key, startedHost);
       startedHost.onHostExit(() => {
-        if (this.kimiHost === startedHost) {
+        if (this.kimiHosts.get(key) === startedHost) {
           // Attached facades receive their own exit callback from the host.
           // This also clears facades that never attached a native session.
           this.detachKimiHostForRetirement(startedHost);
@@ -1085,7 +1142,7 @@ export class ProxyManager {
     }
   }
 
-  private async createGrokClient(sessionId: string): Promise<ProxyClient | null> {
+  private async createGrokClient(sessionId: string, cliPath: string | null): Promise<ProxyClient | null> {
     if (!this.cfg.grokProxyEntry) {
       throw new Error('grok executor requested but grokProxyEntry is not configured');
     }
@@ -1095,7 +1152,7 @@ export class ProxyManager {
     if (this.disposingBySession.has(sessionId)) return null;
     const dataDir = join(this.cfg.dataDir, 'proxy', sessionId);
     mkdirSync(dataDir, { recursive: true });
-    const lease = await this.cfg.runtimeManager.acquire('grok');
+    const lease = await this.cfg.runtimeManager.acquire('grok', cliPath);
     let runtimeOwner: object = this.trackStartupRuntime('grok', lease);
     let reservation: RuntimeProcessGroupReservation | undefined;
     let host: ProtocolV2Host | undefined;
@@ -1169,6 +1226,45 @@ export class ProxyManager {
     }
   }
 
+  /** Drop only the facades bound to one exact shared host — other (kind,
+   *  path) hosts of the same executor keep their sessions. */
+  private dropSharedClientsForHost(executorToDrop: ProxyExecutor, host: SharedRuntimeHost): void {
+    for (const [sessionId, executor] of this.executorBySession) {
+      if (executor !== executorToDrop) continue;
+      const client = this.clients.get(sessionId);
+      if (
+        client instanceof ProtocolV2SessionClient
+        && client.runtimeHost() === host
+      ) {
+        this.clients.delete(sessionId);
+        this.executorBySession.delete(sessionId);
+      }
+    }
+  }
+
+  private dropSessionScopedClientsForHost(executorToDrop: ProxyExecutor, host: ProtocolV2Host): void {
+    for (const [sessionId, executor] of this.executorBySession) {
+      if (executor !== executorToDrop) continue;
+      const client = this.clients.get(sessionId);
+      if (
+        client instanceof ProtocolV2SessionClient
+        && client.runtimeHost() === host
+      ) {
+        this.clients.delete(sessionId);
+        this.executorBySession.delete(sessionId);
+      }
+    }
+  }
+
+  /** Per-(kind, path) host state directory. The default path keeps the
+   *  legacy `{kind}` directory so existing profiles stay compatible. */
+  private hostDataDir(kind: string, key: string): string {
+    const suffix = key
+      ? `-${createHash('sha256').update(key).digest('hex').slice(0, 12)}`
+      : '';
+    return join(this.cfg.dataDir, 'proxy', `${kind}${suffix}`);
+  }
+
   private trackStartupRuntime(executor: ProxyExecutor, lease: RuntimeLease): object {
     const owner = {};
     this.runtimeByOwner.set(owner, {
@@ -1232,19 +1328,18 @@ export class ProxyManager {
   }
 
   private detachKimiHostForRetirement(host: SharedRuntimeHost): void {
-    if (this.kimiHost === host) this.kimiHost = null;
+    for (const [key, current] of this.kimiHosts) {
+      if (current === host) this.kimiHosts.delete(key);
+    }
     this.dropKimiClientsForHost(host);
-    const current = this.kimiHostRetirement;
-    if (!current) {
-      this.kimiHostRetirement = { host, promise: null };
-    } else if (current.host !== host) {
-      throw new Error('Cannot retire two Kimi Proxy hosts concurrently.');
+    if (!this.kimiHostRetirements.has(host)) {
+      this.kimiHostRetirements.set(host, { host, promise: null });
     }
   }
 
   private beginKimiHostRetirement(host: SharedRuntimeHost): Promise<void> {
     this.detachKimiHostForRetirement(host);
-    const record = this.kimiHostRetirement!;
+    const record = this.kimiHostRetirements.get(host)!;
     if (record.promise) return record.promise;
     record.failure = undefined;
     const attempt = this.runtimeByOwner.has(host)
@@ -1253,13 +1348,15 @@ export class ProxyManager {
     record.promise = attempt;
     void attempt.then(
       () => {
-        if (this.kimiHostRetirement === record) this.kimiHostRetirement = null;
+        if (this.kimiHostRetirements.get(host) === record) {
+          this.kimiHostRetirements.delete(host);
+        }
         for (const [sessionId, retiringHost] of this.retiringKimiHostBySession) {
           if (retiringHost === host) this.retiringKimiHostBySession.delete(sessionId);
         }
       },
       error => {
-        if (this.kimiHostRetirement === record) {
+        if (this.kimiHostRetirements.get(host) === record) {
           record.promise = null;
           record.failure = { error, reported: false };
         }
@@ -1269,12 +1366,17 @@ export class ProxyManager {
   }
 
   private async retryKimiHostRetirement(expectedHost?: SharedRuntimeHost): Promise<void> {
-    const record = this.kimiHostRetirement;
-    if (!record) return;
-    if (expectedHost && record.host !== expectedHost) {
-      throw new Error('A different Kimi Proxy host is already retiring.');
+    if (expectedHost) {
+      const record = this.kimiHostRetirements.get(expectedHost);
+      if (!record) return;
+      await this.beginKimiHostRetirement(record.host);
+      return;
     }
-    await this.beginKimiHostRetirement(record.host);
+    await Promise.all(
+      [...this.kimiHostRetirements.values()].map(record => (
+        this.beginKimiHostRetirement(record.host)
+      )),
+    );
   }
 
   private async drainSessionDisposals(
@@ -1327,10 +1429,10 @@ export class ProxyManager {
   private async cleanupExitedClientBeforePublish(client: ProxyClient): Promise<void> {
     if (client instanceof ProtocolV2SessionClient && client.executor === 'codex') {
       const host = client.runtimeHost();
-      if (this.codexHost === host) {
-        this.codexHost = null;
-        this.dropExecutorClients('codex');
+      for (const [key, current] of this.codexHosts) {
+        if (current === host) this.codexHosts.delete(key);
       }
+      this.dropSharedClientsForHost('codex', host);
       if (this.runtimeByOwner.has(host)) await this.releaseRuntimeBinding(host);
       else await host.shutdown();
       return;
@@ -1342,7 +1444,21 @@ export class ProxyManager {
       return;
     }
     if (this.runtimeByOwner.has(client)) await this.releaseRuntimeBinding(client);
-    else await client.shutdown();
+    else {
+      await client.shutdown();
+      await this.releaseForkHostIfEmpty(client);
+    }
+  }
+
+  private async releaseForkHostIfEmpty(client: ProxyClient): Promise<void> {
+    if (
+      !(client instanceof ProtocolV2SessionClient)
+      || (client.executor !== 'claude' && client.executor !== 'grok')
+    ) return;
+    const host = client.runtimeHost();
+    if (!host.hasSessions() && this.runtimeByOwner.has(host)) {
+      await this.releaseRuntimeBinding(host);
+    }
   }
 
   private markRuntimeBindingReleaseEligible(owner: object): void {

@@ -2,9 +2,9 @@ import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import type {
-  AgentInstallStatus,
   OnboardingState,
   OnboardingProjectRootResult,
+  UserAgentStatus,
 } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 import { loadConfig, saveConfig } from '../storage/config.js';
@@ -44,7 +44,7 @@ export function onboardingCompleted(db: Db): boolean {
   return row?.value === '1';
 }
 
-export function hasReadyAgent(agents: AgentInstallStatus[]): boolean {
+export function hasReadyAgent(agents: UserAgentStatus[]): boolean {
   return agents.some(agent => agent.ready);
 }
 
@@ -77,7 +77,7 @@ export function resetOnboarding(db: Db): void {
 
 export async function buildOnboardingState(
   db: Db,
-  agents: AgentInstallStatus[],
+  agents: UserAgentStatus[],
   homeDir = homedir(),
 ): Promise<OnboardingState> {
   const config = loadConfig(db);

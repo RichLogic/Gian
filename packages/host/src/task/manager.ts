@@ -13,6 +13,14 @@ export interface UpdateTaskInput {
   status?: TaskStatus;
 }
 
+const TASK_STATUSES = new Set<TaskStatus>(['open', 'done', 'archived']);
+
+function normalizedTaskName(value: string): string {
+  const name = value.trim();
+  if (!name) throw new Error('task name must not be empty');
+  return name;
+}
+
 /**
  * Persistence for the Task abstraction layer (PRD-v3). A Task is a lightweight
  * container ("one thing the user is doing") that groups multiple Subtasks
@@ -27,16 +35,17 @@ export interface UpdateTaskInput {
 export class TaskManager {
   constructor(private db: Db) {}
 
-  createTask(input: CreateTaskInput): Task {
-    const id = randomUUID();
+  createTask(input: CreateTaskInput, requestedId?: string): Task {
+    const id = requestedId ?? randomUUID();
     const now = new Date().toISOString();
+    const name = normalizedTaskName(input.name);
     const description = input.description ?? null;
     this.db
       .prepare(
         `INSERT INTO tasks (id, name, description, status, created_at, updated_at)
          VALUES (@id, @name, @description, 'open', @now, @now)`,
       )
-      .run({ id, name: input.name, description, now });
+      .run({ id, name, description, now });
     return this.getTaskOrThrow(id);
   }
 
@@ -107,13 +116,14 @@ export class TaskManager {
     const params: Record<string, unknown> = { id };
     if (input.name !== undefined) {
       sets.push('name = @name');
-      params['name'] = input.name;
+      params['name'] = normalizedTaskName(input.name);
     }
     if (input.description !== undefined) {
       sets.push('description = @description');
       params['description'] = input.description;
     }
     if (input.status !== undefined) {
+      if (!TASK_STATUSES.has(input.status)) throw new Error(`invalid task status: ${input.status}`);
       sets.push('status = @status');
       params['status'] = input.status;
     }

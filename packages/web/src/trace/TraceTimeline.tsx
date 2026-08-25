@@ -9,13 +9,14 @@
  * inline-style percentage positions, because the current projection carries
  * a single timestamp per item (no token/TTFT data to justify a duration
  * axis). Color follows the lane; `status: 'failed'` renders red. Clicking a
- * block selects the item and scrolls the matching list row into view — the
- * detail itself opens from the row (panel 2), not from the timeline.
+ * block selects the item, opens its detail, and scrolls the matching list row
+ * into view. Duration mode uses real timestamps; point events and open spans
+ * render as narrow ticks rather than fabricated bars.
  */
 
 import { useMemo } from 'react';
 import { useT } from '../i18n/index.js';
-import { sortTraceItems } from './model.js';
+import { layoutTraceTimeline, type TraceTimelineMode } from './model.js';
 import type { TraceItem, TraceItemKind } from './types.js';
 
 export type TraceLane = 'input' | 'model' | 'tools';
@@ -45,43 +46,52 @@ export function traceLaneFor(kind: TraceItemKind): TraceLane | null {
 export function TraceTimeline({
   items,
   selectedId,
+  mode,
   onSelect,
 }: {
   items: TraceItem[];
   selectedId: string | null;
+  mode: TraceTimelineMode;
   onSelect: (itemId: string) => void;
 }) {
   const t = useT();
-  const spans = useMemo(
-    () => sortTraceItems(items.filter(item => traceLaneFor(item.kind) !== null)),
-    [items],
+  const positions = useMemo(
+    () => layoutTraceTimeline(
+      items.filter(item => traceLaneFor(item.kind) !== null),
+      mode,
+    ),
+    [items, mode],
   );
-  if (spans.length === 0) return null;
-  const width = 100 / spans.length;
+  if (positions.length === 0) return null;
   return (
-    <div className="trace-timeline" data-testid="trace-timeline">
+    <div className="trace-timeline" data-testid="trace-timeline" data-mode={mode}>
       {LANES.map(lane => (
         <div className="trace-lane" data-lane={lane} key={lane}>
           <span className="trace-lane-label">{t(`trace.timeline.lane.${lane}`)}</span>
           <div className="trace-lane-track">
-            {spans.map((item, index) =>
-              traceLaneFor(item.kind) === lane && (
+            {positions.map(position => {
+              const item = position.item;
+              return traceLaneFor(item.kind) === lane && (
                 <button
                   key={item.id}
                   type="button"
                   className={
-                    `trace-span ${lane}`
+                    `trace-span ${lane} ${position.point ? 'point' : position.open ? 'open' : 'duration'}`
                     + `${item.status === 'failed' ? ' failed' : ''}`
                     + `${selectedId === item.id ? ' selected' : ''}`
                   }
-                  style={{ left: `${index * width}%`, width: `${width}%` }}
+                  style={{
+                    left: `${position.leftPct}%`,
+                    width: position.widthPct > 0 ? `${position.widthPct}%` : undefined,
+                  }}
                   title={item.title}
                   aria-label={item.title}
+                  data-shape={item.shape}
                   data-testid={`trace-span-${item.id}`}
                   onClick={() => onSelect(item.id)}
                 />
-              ),
-            )}
+              );
+            })}
           </div>
         </div>
       ))}

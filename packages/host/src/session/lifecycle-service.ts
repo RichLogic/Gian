@@ -8,6 +8,7 @@ import type {
   Session,
   SessionType,
   ThinkingEffort,
+  UserAgent,
   WorktreeOutcome,
 } from '@gian/shared';
 import { migrateLegacyGrokProxyDefaults, usesNativeExecutorConfig } from '@gian/shared';
@@ -24,8 +25,14 @@ import {
 } from './repository.js';
 
 export interface CreateSessionInput {
+  /** Stable Host id used by idempotent non-UI callers. */
+  id?: string;
   workspace_id: string;
-  executor: Executor;
+  /** Owning user Agent. Required for interactive creation (WS
+   *  `session:create`); the Proxy kind, defaults, and CLI path resolve from
+   *  it. Legacy callers without an Agent keep kind-level `executor`. */
+  agent_id?: string;
+  executor?: Executor;
   name?: string;
   model?: string | null;
   approval_mode?: ApprovalMode;
@@ -43,6 +50,8 @@ interface BringUpInput {
   cwd: string;
   model: string | null;
   displayName: string | null;
+  /** Owning Agent's resolved CLI path (injected by SessionManager). */
+  cliPath?: string | null;
   executorDefaults?: AgentProxyDefaults;
   sessionConfig?: Record<string, ConfigValue>;
 }
@@ -119,6 +128,9 @@ export class SessionLifecycleService {
     private broadcaster: WsBroadcaster,
     private runtime: LifecycleRuntime,
     private proxyDefaults?: (executor: Executor) => AgentProxyDefaults | undefined,
+    /** Resolves a saved Agent and its runtime CLI path. Must throw when the
+     *  Agent id is unknown (deleted Agents cannot start new sessions). */
+    private agentRuntime?: (agentId: string) => { agent: UserAgent; cliPath: string | null },
   ) {}
 
   async create(input: CreateSessionInput): Promise<Session> {
@@ -127,7 +139,31 @@ export class SessionLifecycleService {
       .get(input.workspace_id) as { id: string; path: string } | undefined;
     if (!workspace) throw new Error(`workspace not found: ${input.workspace_id}`);
 
-    const id = randomUUID();
+    const resolvedAgent = input.agent_id !== undefined
+      ? this.agentRuntime?.(input.agent_id)
+      : undefined;
+    if (input.agent_id !== undefined && !resolvedAgent) {
+      throw new Error(`agent not found: ${input.agent_id}`);
+    }
+    const executor = resolvedAgent?.agent.proxy ?? input.executor;
+    if (!executor) throw new Error('session requires an agent_id or an executor');
+    if (resolvedAgent && input.executor && input.executor !== resolvedAgent.agent.proxy) {
+      throw new Error(
+        `agent ${input.agent_id} is a ${resolvedAgent.agent.proxy} Agent, not ${input.executor}`,
+      );
+    }
+
+    if (input.task_id !== undefined && input.task_id !== null) {
+      const task = this.db.prepare('SELECT status FROM tasks WHERE id = ?').get(input.task_id) as
+        { status: string } | undefined;
+      if (!task) throw new Error(`task not found: ${input.task_id}`);
+      if (task.status !== 'open') throw new Error(`task is not open: ${input.task_id}`);
+      if (input.type !== 'subtask') throw new Error('task_id requires a subtask session');
+    } else if (input.type === 'subtask') {
+      throw new Error('subtask session requires task_id');
+    }
+
+    const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
     // Treat a blank title exactly like an omitted title at the Host boundary.
     // The Web client already omits blank values, but protocol/API callers can
@@ -139,40 +175,42 @@ export class SessionLifecycleService {
       && input.service_tier !== 'fast') {
       throw new Error(`unsupported service tier: ${String(input.service_tier)}`);
     }
-    if (input.executor !== 'codex' && input.service_tier != null) {
+    if (executor !== 'codex' && input.service_tier != null) {
       throw new Error('service_tier is codex-only');
     }
-    const serviceTier = input.executor === 'codex' ? input.service_tier ?? null : null;
-    if (usesNativeExecutorConfig(input.executor) && input.approval_mode !== undefined) {
-      throw new Error(`${input.executor} uses executor-native mode; approval_mode must be omitted`);
+    const serviceTier = executor === 'codex' ? input.service_tier ?? null : null;
+    if (usesNativeExecutorConfig(executor) && input.approval_mode !== undefined) {
+      throw new Error(`${executor} uses executor-native mode; approval_mode must be omitted`);
     }
-    const managedDefaults = input.executor === 'grok'
-      ? migrateLegacyGrokProxyDefaults(this.proxyDefaults?.(input.executor) ?? {
-        model: '',
-        thinking: '',
-        mode: '',
-      })
-      : this.proxyDefaults?.(input.executor);
+    const managedDefaults = resolvedAgent
+      ? resolvedAgent.agent.defaults
+      : executor === 'grok'
+        ? migrateLegacyGrokProxyDefaults(this.proxyDefaults?.(executor) ?? {
+          model: '',
+          thinking: '',
+          mode: '',
+        })
+        : this.proxyDefaults?.(executor);
     const configuredMode = managedDefaults?.mode.trim() ?? '';
     const fallbackMode: ApprovalMode = managedDefaults ? 'ask' : 'auto';
-    const approvalMode: ApprovalMode | null = usesNativeExecutorConfig(input.executor)
+    const approvalMode: ApprovalMode | null = usesNativeExecutorConfig(executor)
       ? null
       : (input.approval_mode ?? (configuredMode || fallbackMode) as ApprovalMode);
-    if (approvalMode) assertApprovalModeAllowed(input.executor, approvalMode);
+    if (approvalMode) assertApprovalModeAllowed(executor, approvalMode);
 
     const cfg = loadConfig(this.db);
     const defaultModel = managedDefaults
       ? managedDefaults.model.trim()
-      : input.executor === 'claude'
+      : executor === 'claude'
         ? cfg.default_claude_model.trim()
-        : input.executor === 'codex'
+        : executor === 'codex'
           ? cfg.default_codex_model.trim()
           : '';
     const defaultEffort = managedDefaults
       ? managedDefaults.thinking.trim()
-      : input.executor === 'claude'
+      : executor === 'claude'
         ? cfg.default_claude_effort.trim()
-        : input.executor === 'codex'
+        : executor === 'codex'
           ? cfg.default_codex_effort.trim()
           : '';
     const explicitModel = typeof input.model === 'string' ? input.model.trim() : '';
@@ -190,10 +228,11 @@ export class SessionLifecycleService {
     try {
       proxyResult = await this.runtime.bringUpProxySession({
         sessionId: id,
-        executor: input.executor,
+        executor,
         cwd: workspace.path,
         model: effectiveModel,
         displayName: name,
+        ...(resolvedAgent ? { cliPath: resolvedAgent.cliPath } : {}),
         // Semantic roles owned by Gian Settings. The coordinator resolves
         // each role against this session's catalog before sending config.
         ...(managedDefaults
@@ -218,7 +257,7 @@ export class SessionLifecycleService {
       {
         model: effectiveModel,
         effort: effectiveEffort,
-        mode: usesNativeExecutorConfig(input.executor)
+        mode: usesNativeExecutorConfig(executor)
           ? configuredMode || null
           : approvalMode,
         serviceTier,
@@ -227,14 +266,16 @@ export class SessionLifecycleService {
     this.db
       .prepare(
         `INSERT INTO sessions
-          (id, name, type, task_id, workspace_id, executor, model, approval_mode,
+          (id, name, type, task_id, workspace_id, executor, agent_id, agent_name, agent_color,
+           model, approval_mode,
            executor_config_json, thinking_effort, service_tier, active_channel, status,
            archived, worktree_path, branch, base_branch, worktree_outcome,
            native_session_id, fork_from_session_id, conversation_usage_complete,
            turn_config_json, turn_config_options_json, turn_config_revision,
            available_actions_json, created_at, updated_at)
          VALUES
-          (@id, @name, @type, @task_id, @workspace_id, @executor, @model,
+          (@id, @name, @type, @task_id, @workspace_id, @executor, @agent_id, @agent_name,
+           @agent_color, @model,
            @approval_mode, @executor_config_json, @thinking_effort, @service_tier, 'web', 'new',
            0, NULL, NULL, NULL, NULL, @native_session_id,
            @fork_from_session_id, 1,
@@ -247,7 +288,10 @@ export class SessionLifecycleService {
         type: input.type ?? 'coding',
         task_id: input.task_id ?? null,
         workspace_id: input.workspace_id,
-        executor: input.executor,
+        executor,
+        agent_id: resolvedAgent?.agent.id ?? null,
+        agent_name: resolvedAgent?.agent.name ?? null,
+        agent_color: resolvedAgent?.agent.color ?? null,
         model: effectiveModel,
         approval_mode: approvalMode,
         executor_config_json: JSON.stringify(executorConfigFromOptions(proxyResult.configOptions)),

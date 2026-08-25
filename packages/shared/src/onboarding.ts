@@ -1,9 +1,9 @@
-import type { AgentInstallStatus } from './agents.js';
+import type { UserAgentStatus } from './agents.js';
 
 export interface OnboardingState {
   completed: boolean;
   projectRoot: string;
-  agents: AgentInstallStatus[];
+  agents: UserAgentStatus[];
 }
 
 export interface OnboardingProjectRootResult {

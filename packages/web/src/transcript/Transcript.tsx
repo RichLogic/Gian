@@ -1,10 +1,13 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from 'react';
+import { Fragment, useContext, useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from 'react';
 import type { ApprovalDecision } from '@gian/shared';
 import type { TranscriptHistoryError } from '../controllers/use-transcript-hydration.js';
 import { useT } from '../i18n/index.js';
 import type { ApprovalActionContext, ApprovalItem, StatusItem, TranscriptItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
-import { AgentSpawnRow, ApprovalCard, AssistantMessage, AutoNoticeCard, Caret, CommandCard, CompactionRow, DiffCard, FileReadCard, FileSearchCard, formatElapsed, MinimalErrorCard, ReasoningCard, ToolEvent, UserMessage, useStableExpand, WebSearchRow } from './items.js';
+import { AgentSpawnRow, ApprovalCard, AssistantMessage, AutoNoticeCard, Caret, CommandCard, CompactionRow, DiffCard, FileReadCard, FileSearchCard, formatElapsed, INLINE_OUTPUT_LINES, MinimalErrorCard, PanelExtHint, ReasoningCard, ToolEvent, UserMessage, useStableExpand, WebSearchRow } from './items.js';
+import { EventBox } from './EventBox.js';
+import { EVENT_BOX_KINDS, isEventBoxItem } from './event-feed.js';
+import { ChatPanelOpenContext } from '../presentation/chat-panel.js';
 import { GianMascot } from '../components/GianMascot.js';
 import { ForkFromTurnControl } from '../components/ForkControls.js';
 import type { ActionControlState } from '../components/action-gating.js';
@@ -14,18 +17,29 @@ import { transcriptItemIdentity } from './identity.js';
  * P2 render-time grouping (2026-08-08): a completed turn folds ALL of its
  * process events into one `.turnsum` summary row ("完成即折" — collapse as
  * soon as the turn ends, historical replays included). A turn counts as
- * complete once its `turn-end` item is in the flow. Turns still in flight
- * (no turn-end) render their rows flat in P1 process form.
+ * complete once its `turn-end` item is in the flow.
  *
- * Fold rules (docs/work-items/transcript-redesign-acd.md §3):
+ * Event box (2026-08-24): while the session reports a turn in flight
+ * (`live` — the transcript's `pending` prop), the open turn (no turn-end
+ * yet) no longer renders its process rows flat — they collect into ONE
+ * `.eventbox` live tail (≤5 lines, newest at bottom), emitted at the
+ * position of the turn's LAST boxed row so the box sits at the bottom of
+ * the live reply flow. Clicking the box routes the same items to panel 2
+ * (`event-feed`). When the turn-end arrives the turnsum fold below takes
+ * over the same items unchanged. A dangling turn with no turn-end in an
+ * IDLE session (crashed or finished mid-turn) is NOT boxed — its rows keep
+ * the legacy flat rendering so they stay fully interactive history.
+ *
+ * Fold/box rules (docs/work-items/transcript-redesign-acd.md §3):
  * - tool / command / diff / file-read / file-search / web-search / reasoning
  *   / agent-spawn / auto-notice / compaction rows and RESOLVED approvals
  *   fold (resolved approvals render as `.approval-line` rows in the body);
- * - PENDING approvals/questions never fold — they render right after their
- *   turn's summary row;
+ * - PENDING approvals/questions never fold and never enter the box — they
+ *   render inline (right after their turn's summary row for a completed
+ *   turn), waiting on the user;
  * - user/assistant messages, status and error items are turn-boundary
- *   content and stay outside the fold;
- * - a turn with no process events at all gets no summary row.
+ *   content and stay outside the fold and the box;
+ * - a turn with no process events at all gets no summary row and no box.
  */
 type RenderableItem =
   | TranscriptItem
@@ -39,40 +53,45 @@ type RenderableItem =
     actions: number;
     startTs: number;
     endTs: number;
+  }
+  | {
+    kind: 'event-box';
+    id: string;
+    turn: number;
+    /** Live process rows of a turn still in flight, newest last. */
+    items: TranscriptItem[];
+    /** ts of the newest boxed row (drives extras interleaving). */
+    ts: number;
   };
 
-/** Item kinds that fold into a completed turn's summary (one action each). */
-const TURN_FOLD_KINDS: ReadonlySet<TranscriptItem['kind']> = new Set([
-  'tool',
-  'command',
-  'diff',
-  'file-read',
-  'file-search',
-  'web-search',
-  'reasoning',
-  'agent-spawn',
-  'auto-notice',
-  'compaction',
-]);
-
-function groupIntoBlocks(items: TranscriptItem[]): RenderableItem[] {
+function groupIntoBlocks(items: TranscriptItem[], live: boolean): RenderableItem[] {
   const endByTurn = new Map<number, number>();
   for (const it of items) {
     if (it.kind === 'turn-end' && !endByTurn.has(it.turn)) endByTurn.set(it.turn, it.ts);
   }
-  if (endByTurn.size === 0) return [...items];
 
   const foldablesByTurn = new Map<number, TranscriptItem[]>();
   const pendingByTurn = new Map<number, ApprovalItem[]>();
+  const boxByTurn = new Map<number, TranscriptItem[]>();
   const skip = new Set<TranscriptItem>();
+  /** Flow index of each in-flight turn's last boxed row — the box's emit
+   *  position, so it stays at the bottom of the live reply flow. */
+  const lastBoxIndexByTurn = new Map<number, number>();
   const pushTo = (map: Map<number, TranscriptItem[]>, turn: number, it: TranscriptItem) => {
     const list = map.get(turn) ?? [];
     list.push(it);
     map.set(turn, list);
   };
-  for (const it of items) {
-    if (!endByTurn.has(it.turn)) continue;
-    if (TURN_FOLD_KINDS.has(it.kind)) {
+  items.forEach((it, index) => {
+    if (!endByTurn.has(it.turn)) {
+      if (live && isEventBoxItem(it)) {
+        pushTo(boxByTurn, it.turn, it);
+        skip.add(it);
+        lastBoxIndexByTurn.set(it.turn, index);
+      }
+      return;
+    }
+    if (EVENT_BOX_KINDS.has(it.kind)) {
       pushTo(foldablesByTurn, it.turn, it);
       skip.add(it);
     } else if (it.kind === 'approval') {
@@ -80,17 +99,29 @@ function groupIntoBlocks(items: TranscriptItem[]): RenderableItem[] {
       else pushTo(foldablesByTurn, it.turn, it); // resolved → `.approval-line`
       skip.add(it);
     }
-  }
+  });
 
   const out: RenderableItem[] = [];
   const emitted = new Set<number>();
-  for (const it of items) {
+  items.forEach((it, index) => {
     if (!skip.has(it)) {
       out.push(it);
-      continue;
+      return;
     }
     const turn = it.turn;
-    if (emitted.has(turn)) continue;
+    if (!endByTurn.has(turn)) {
+      if (lastBoxIndexByTurn.get(turn) !== index) return;
+      const boxItems = boxByTurn.get(turn)!;
+      out.push({
+        kind: 'event-box',
+        id: `eventbox_${turn}_${boxItems[0]!.id}`,
+        turn,
+        items: boxItems,
+        ts: boxItems[boxItems.length - 1]!.ts,
+      });
+      return;
+    }
+    if (emitted.has(turn)) return;
     emitted.add(turn);
     const foldables = foldablesByTurn.get(turn) ?? [];
     const pendings = pendingByTurn.get(turn) ?? [];
@@ -108,7 +139,7 @@ function groupIntoBlocks(items: TranscriptItem[]): RenderableItem[] {
     // Pending interactions of a finished turn stay expanded, right after the
     // summary row (or in place when the turn had nothing foldable).
     out.push(...pendings);
-  }
+  });
   return out;
 }
 
@@ -190,6 +221,13 @@ function TranscriptErrorCard({ item }: { item: StatusItem }) {
  * 1 file +6 −2` with the turn-end time on the right. Doubles as the turn
  * boundary. Click expands the full process list on a left guide rail; the
  * rows inside behave exactly like the live process rows.
+ *
+ * Long-turn routing (2026-08-24): a turn with MORE folded rows than the
+ * level-2 inline threshold would flood the transcript exactly like the
+ * pre-event-box live stream did, so its click routes to the panel-2 event
+ * feed (`{kind:'event-feed', turn}`) instead — same projection, rows
+ * expanding in place over there. Short turns keep the cheap inline peek.
+ * Without a chat-panel context the inline body remains the fallback.
  */
 function TurnSumBlock({
   block,
@@ -205,6 +243,8 @@ function TurnSumBlock({
 }) {
   const t = useT();
   const { open, toggle } = useStableExpand();
+  const openChatPanel = useContext(ChatPanelOpenContext);
+  const toPanel = block.items.length > INLINE_OUTPUT_LINES && openChatPanel !== null;
   // Stats per the locked口径: files deduped by path with add/del summed
   // across the turn's diffs; failed = command errors + agent errors (kept
   // danger-red, never discounted).
@@ -228,12 +268,16 @@ function TurnSumBlock({
   const fileCount = paths.size;
   return (
     <>
-      <div className={`turnsum${open ? ' open' : ''}`} onClick={toggle}>
+      <div
+        className={`turnsum${!toPanel && open ? ' open' : ''}`}
+        onClick={toPanel ? () => openChatPanel({ kind: 'event-feed', turn: block.turn }) : toggle}
+      >
         <Caret className="turnsum-caret" />
         <span className="turnsum-lead">
           {t('transcript.turnsum.worked')} {formatElapsed(block.endTs - block.startTs)}
         </span>
         <span className="turnsum-stats">
+          {toPanel && <PanelExtHint />}
           <span>{block.actions} {t(block.actions === 1 ? 'transcript.turnsum.action' : 'transcript.turnsum.actions')}</span>
           {fileCount > 0 && (
             <>
@@ -252,7 +296,7 @@ function TurnSumBlock({
         </span>
         <span className="turnsum-time">{formatTime(block.endTs)}</span>
       </div>
-      {open && (
+      {!toPanel && open && (
         <div className="turnsum-body">
           {block.items.map(child => renderItem(
             child,
@@ -483,7 +527,7 @@ export function Transcript({
           const visibleItems = hiddenApprovalId
             ? items.filter(it => !(it.kind === 'approval' && it.approvalId === hiddenApprovalId))
             : items;
-          const blocks = groupIntoBlocks(visibleItems);
+          const blocks = groupIntoBlocks(visibleItems, pending);
           // Interleave `extras` (Manager subtask cards) by timestamp: each one
           // renders after the last block whose ts ≤ its afterTs. A card is a
           // sender break, like any non-text item.
@@ -505,6 +549,9 @@ export function Transcript({
             if (item.kind === 'turnsum') {
               prevSender = null;
               out.push(<TurnSumBlock key={`turnsum:${item.turn}:${item.id}`} block={item} onApprove={onApprove} />);
+            } else if (item.kind === 'event-box') {
+              prevSender = null;
+              out.push(<EventBox key={item.id} block={item} />);
             } else if (item.kind === 'turn-end' && forkAtTurn) {
               // Terminal Turn boundary: the standard per-turn Fork control
               // (§10.6). Only Terminal Turns have a turn-end item, so the

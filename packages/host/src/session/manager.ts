@@ -12,6 +12,7 @@ import type {
   Session,
   ChatEvent,
   TraceSnapshot,
+  UserAgent,
 } from '@gian/shared';
 import { isApprovalMode } from '@gian/shared';
 import { existsSync } from 'node:fs';
@@ -63,6 +64,24 @@ export type { CreateSessionInput } from './lifecycle-service.js';
 
 const PROXY_CLOSE_TIMEOUT_MS = 5_000;
 
+/** Resolves which (kind, CLI path) runtime a session or kind maps to. The
+ *  Host wires this from AgentManager; tests may omit it (provider default). */
+export interface SessionAgentResolver {
+  /** Resolved CLI path of the kind's default (first saved) Agent. */
+  cliPathForKind(executor: Executor): string | null;
+  /** Resolved CLI path of the session's owning Agent. Tolerant: null when
+   *  the Agent was deleted (read paths keep working from snapshots). */
+  cliPathForSession(session: Session): string | null;
+  /** Strict: throws AGENT_DELETED when the session's Agent was deleted —
+   *  turn/runtime paths fail closed for deleted Agents. */
+  requireCliPathForSession(session: Session): string | null;
+  /** The saved Agent and its runtime CLI path; throws when the id is
+   *  unknown (deleted Agents cannot start new sessions). */
+  agentRuntime(agentId: string): { agent: UserAgent; cliPath: string | null };
+  /** Saved Agents of one Proxy kind (native adopt binds one explicitly). */
+  agentsForKind(executor: Executor): UserAgent[];
+}
+
 function assertSessionAcceptsInput(session: Session): void {
   if (session.worktree_outcome) {
     throw new Error(`session is ${session.worktree_outcome}; create a new session to continue`);
@@ -70,6 +89,15 @@ function assertSessionAcceptsInput(session: Session): void {
   if (session.completed_at) {
     throw new Error('session is completed; reopen it before sending more messages');
   }
+}
+
+function configConditionsMatch(
+  conditions: ConfigOption['visibleWhen'] | ConfigOption['enabledWhen'],
+  values: Record<string, ConfigValue>,
+): boolean {
+  return (conditions ?? []).every((condition) => (
+    condition.oneOf.some((candidate) => Object.is(candidate, values[condition.optionId]))
+  ));
 }
 
 /**
@@ -107,6 +135,7 @@ export class SessionManager {
     private watcher: NativeJsonlWatcher | null = null,
     private proxyDefaults?: (executor: Executor) => AgentProxyDefaults,
     attention?: AttentionDispatcher,
+    private agentResolver?: SessionAgentResolver,
   ) {
     this.sessions = new SessionRepository(db);
     this.history = new SessionHistoryStore(db);
@@ -135,6 +164,11 @@ export class SessionManager {
         },
       },
       this.dataDir,
+      (executor, session) => (
+        session
+          ? this.agentResolver?.requireCliPathForSession(session)
+          : this.agentResolver?.cliPathForKind(executor)
+      ) ?? null,
     );
     this.autoTitle = new AutoTitleService({
       db,
@@ -142,6 +176,9 @@ export class SessionManager {
       history: this.history,
       proxy,
       rename: (sessionId, name) => this.renameSession(sessionId, name),
+      ...(agentResolver
+        ? { cliPathForSession: session => agentResolver.cliPathForSession(session) }
+        : {}),
     });
     this.events = new SessionEventCoordinator(
       db,
@@ -155,7 +192,9 @@ export class SessionManager {
       this.proxySessions,
       this.autoTitle,
       {
-        sendMessage: (sessionId, text, items) => this.sendMessage(sessionId, text, items),
+        sendMessage: (sessionId, text, items, toolRequestId) => (
+          this.sendMessage(sessionId, text, items, undefined, toolRequestId)
+        ),
         onInteractionResolved: (interactionId) => {
           this.interactionResponseIds.delete(interactionId);
         },
@@ -175,6 +214,7 @@ export class SessionManager {
         persistKimiReplay: (sessionId, updates, timestamp, replayStreamId) =>
           this.persistKimiReplay(sessionId, updates, timestamp, replayStreamId),
       },
+      agentResolver ? executor => agentResolver.cliPathForKind(executor) : undefined,
     );
     this.lifecycle = new SessionLifecycleService(
       db,
@@ -182,7 +222,10 @@ export class SessionManager {
       approvals,
       broadcaster,
       {
-        bringUpProxySession: input => this.proxySessions.bringUp(input),
+        bringUpProxySession: input => this.proxySessions.bringUp({
+          ...input,
+          cliPath: input.cliPath ?? this.agentResolver?.cliPathForKind(input.executor) ?? null,
+        }),
         discardProxy: async sessionId => {
           await this.proxySessions.dispose(sessionId);
           this.sessions.forget(sessionId);
@@ -193,6 +236,7 @@ export class SessionManager {
         },
       },
       executor => this.proxyDefaults?.(executor),
+      agentResolver ? agentId => agentResolver.agentRuntime(agentId) : undefined,
     );
   }
 
@@ -289,7 +333,8 @@ export class SessionManager {
       const publish = this.db.transaction(() => {
         this.db.prepare(
           `INSERT INTO sessions
-            (id, name, type, task_id, workspace_id, executor, model, approval_mode,
+            (id, name, type, task_id, workspace_id, executor, agent_id, agent_name, agent_color,
+             model, approval_mode,
              executor_config_json, thinking_effort, service_tier, active_channel, status,
              archived, worktree_path, branch, base_branch, worktree_outcome,
              native_session_id, fork_from_session_id, conversation_usage_complete,
@@ -298,7 +343,8 @@ export class SessionManager {
              origin_source_stream_id, origin_anchor_type,
              available_actions_json, created_at, updated_at)
            VALUES
-            (@id, @name, @type, @task_id, @workspace_id, @executor, @model,
+            (@id, @name, @type, @task_id, @workspace_id, @executor, @agent_id, @agent_name,
+             @agent_color, @model,
              @approval_mode, @executor_config_json, @thinking_effort, @service_tier, 'web', 'new',
              0, @worktree_path, @branch, @base_branch, NULL, @native_session_id,
              NULL, 1,
@@ -313,6 +359,9 @@ export class SessionManager {
           task_id: source.task_id,
           workspace_id: source.workspace_id,
           executor: source.executor,
+          agent_id: source.agent_id ?? null,
+          agent_name: source.agent_name ?? null,
+          agent_color: source.agent_color ?? null,
           model: source.model,
           approval_mode: source.approval_mode,
           executor_config_json: JSON.stringify({ schemaVersion: 1, values: inherited }),
@@ -392,8 +441,10 @@ export class SessionManager {
     cwd: string;
     nativeSessionId: string;
     name?: string;
+    agentId?: string;
   }): Promise<{ session: Session; replay: { turns: number; events: number } }> {
-    return this.nativeSessions.adoptKimi(input);
+    const binding = this.resolveAdoptAgent('kimi', input.agentId);
+    return this.nativeSessions.adoptKimi({ ...input, ...binding });
   }
 
   async deletePluginNativeSession(
@@ -411,8 +462,61 @@ export class SessionManager {
     nativeSessionId: string;
     name?: string;
     approvalMode?: ApprovalMode;
+    agentId?: string;
   }): Promise<{ session: Session; replay: { turns: number; events: number } }> {
-    return this.nativeSessions.adopt(input);
+    const binding = this.resolveAdoptAgent(input.executor, input.agentId);
+    return this.nativeSessions.adopt({ ...input, ...binding });
+  }
+
+  /** Bind an adopted native session to its Agent. `AGENT_REQUIRED` when the
+   *  kind has several saved Agents and the caller did not choose one —
+   *  never silently bind the first. */
+  resolveAdoptAgent(
+    executor: Executor,
+    agentId?: string,
+  ): {
+    agentId: string | null;
+    agentName: string | null;
+    agentColor: string | null;
+    cliPath: string | null;
+  } {
+    const none = { agentId: null, agentName: null, agentColor: null, cliPath: null };
+    if (!this.agentResolver) return none;
+    if (agentId !== undefined) {
+      const { agent, cliPath } = this.agentResolver.agentRuntime(agentId);
+      if (agent.proxy !== executor) {
+        throw new Error(`agent ${agentId} is a ${agent.proxy} Agent, not ${executor}`);
+      }
+      return {
+        agentId: agent.id,
+        agentName: agent.name,
+        agentColor: agent.color,
+        cliPath,
+      };
+    }
+    const candidates = this.agentResolver.agentsForKind(executor);
+    if (candidates.length > 1) {
+      throw Object.assign(
+        new Error(`choose an Agent for this ${executor} session`),
+        {
+          code: 'AGENT_REQUIRED',
+          agents: candidates.map(agent => ({ id: agent.id, name: agent.name })),
+        },
+      );
+    }
+    const only = candidates[0];
+    if (!only) return none;
+    return {
+      agentId: only.id,
+      agentName: only.name,
+      agentColor: only.color,
+      cliPath: this.agentResolver.agentRuntime(only.id).cliPath,
+    };
+  }
+
+  /** Saved Agents of one Proxy kind (native adopt chooser). */
+  agentsForExecutor(executor: Executor): UserAgent[] {
+    return this.agentResolver?.agentsForKind(executor) ?? [];
   }
 
   async stopTurn(sessionId: string): Promise<void> {
@@ -490,12 +594,38 @@ export class SessionManager {
     await this.proxy.forceDispose(sessionId);
   }
 
+  /**
+   * Settle a durable running Turn after this Host process lost its in-memory
+   * runtime. A real active Turn always has a matching TurnRuntime entry; a DB
+   * row without one can only be left by a Host/process restart.
+   */
+  settleLostRuntimeTurn(sessionId: string, turnId: string): boolean {
+    if (this.turns.has(sessionId)) return false;
+    const persisted = this.db.prepare(
+      `SELECT 1 FROM turns WHERE id = ? AND session_id = ? AND status = 'running'`,
+    ).get(turnId, sessionId);
+    if (!persisted) return false;
+
+    const now = new Date().toISOString();
+    this.approvals.clearSession(sessionId);
+    this.watcher?.resume(sessionId);
+    this.proxySessions.forget(sessionId);
+    const orphaned = this.turns.stopOrphaned(sessionId, now);
+    this.events.settleOrphanedTurns(sessionId, orphaned, 'stopped', now);
+    this.db.prepare(
+      `UPDATE sessions SET status = 'done', updated_at = ? WHERE id = ? AND status = 'running'`,
+    ).run(now, sessionId);
+    this.broadcastSessionUpdated(sessionId, { status: 'done', updated_at: now });
+    return true;
+  }
+
   async respondApproval(
     sessionId: string,
     approvalId: string,
     decision: import('@gian/shared').ApprovalDecision,
     answers?: Record<string, string | boolean | string[]>,
     nativeOptionId?: string,
+    resolvedBy: import('@gian/shared').ApprovalResolvedBy = 'web',
   ): Promise<void> {
     this.getSession(sessionId);
     const proxySessionId = this.proxySessions.get(sessionId);
@@ -506,95 +636,99 @@ export class SessionManager {
     // Snapshot the pending record before resolving so we can inspect category
     // for plan-mode-exit ceremony below.
     const pending = this.approvals.getPending(approvalId);
-    const persisted = this.loadInteraction(sessionId, approvalId);
-    const responseId = persisted?.response_id
-      ?? this.interactionResponseIds.get(approvalId)
-      ?? randomUUID();
-    this.interactionResponseIds.set(approvalId, responseId);
+    this.approvals.markResolutionSource(approvalId, resolvedBy);
+    let savedResponseId: string | null = null;
+    let responseSent = false;
+    try {
+      const persisted = this.loadInteraction(sessionId, approvalId);
+      const responseId = persisted?.response_id
+        ?? this.interactionResponseIds.get(approvalId)
+        ?? randomUUID();
+      this.interactionResponseIds.set(approvalId, responseId);
 
-    if (!pending && persisted) {
-      await client.respondInteraction({
-        sessionId: proxySessionId,
-        interactionId: approvalId,
-        responseId: persisted.response_id,
-        actionId: persisted.action_id ?? 'allow_once',
-        values: persisted.values,
-      });
-      return;
-    }
-
-    if ((pending?.nativeOptions?.length ?? 0) > 0 || nativeOptionId !== undefined) {
-      const option = pending?.nativeOptions?.find(item => item.optionId === nativeOptionId);
-      if (!option) {
-        throw Object.assign(
-          new Error('Select one of the approval options supplied by the Agent.'),
-          { code: 'INVALID_APPROVAL_OPTION' },
-        );
+      if (!pending && persisted) {
+        await client.respondInteraction({
+          sessionId: proxySessionId,
+          interactionId: approvalId,
+          responseId: persisted.response_id,
+          actionId: persisted.action_id ?? 'allow_once',
+          values: persisted.values,
+        });
+        this.approvals.clearResolutionSource(approvalId);
+        return;
       }
-      await client.respondInteraction({
-        sessionId: proxySessionId,
-        interactionId: approvalId,
-        responseId,
-        actionId: option.optionId,
-        values: answers ?? {},
-      });
+
+      if ((pending?.nativeOptions?.length ?? 0) > 0 || nativeOptionId !== undefined) {
+        const option = pending?.nativeOptions?.find(item => item.optionId === nativeOptionId);
+        if (!option) {
+          throw Object.assign(
+            new Error('Select one of the approval options supplied by the Agent.'),
+            { code: 'INVALID_APPROVAL_OPTION' },
+          );
+        }
+        this.saveInteraction(sessionId, approvalId, {
+          responseId,
+          turnId: pending?.turnId,
+          actionId: option.optionId,
+          values: answers ?? {},
+        });
+        savedResponseId = responseId;
+        await client.respondInteraction({
+          sessionId: proxySessionId,
+          interactionId: approvalId,
+          responseId,
+          actionId: option.optionId,
+          values: answers ?? {},
+        });
+        responseSent = true;
+        return;
+      }
+
+      // Persist the response identity before crossing the Proxy boundary. A
+      // lost reply can then be retried with the same response id and payload.
+      const isDeny = decision === 'decline' || decision === 'keep_planning';
+      const actionId = isDeny ? 'decline' : decision === 'allow_session' ? 'allow_session' : 'allow_once';
+      const values = isDeny ? {} : answers ?? {};
       this.saveInteraction(sessionId, approvalId, {
         responseId,
         turnId: pending?.turnId,
-        actionId: option.optionId,
-        values: answers ?? {},
+        actionId,
+        values,
       });
-      return;
-    }
-
-    // Plan-mode-exit decisions get mapped to plain allow/deny on the proxy
-    // wire; the auto/ask flip happens in the ceremony below. `keep_planning`
-    // is a denial — the agent stays in plan mode.
-    const isDeny = decision === 'decline' || decision === 'keep_planning';
-
-    if (isDeny) {
+      savedResponseId = responseId;
       await client.respondInteraction({
         sessionId: proxySessionId,
         interactionId: approvalId,
         responseId,
-        actionId: 'decline',
-        values: {},
+        actionId,
+        values,
       });
-    } else {
-      await client.respondInteraction({
-        sessionId: proxySessionId,
-        interactionId: approvalId,
-        responseId,
-        actionId: decision === 'allow_session' ? 'allow_session' : 'allow_once',
-        values: answers ?? {},
-      });
-    }
-    const actionId = isDeny ? 'decline' : decision === 'allow_session' ? 'allow_session' : 'allow_once';
-    this.saveInteraction(sessionId, approvalId, {
-      responseId,
-      turnId: pending?.turnId,
-      actionId,
-      values: isDeny ? {} : answers ?? {},
-    });
+      responseSent = true;
 
-    // Plan-mode exit ceremony: flip session.approval_mode based on which of
-    // the three plan-mode-exit actions the user chose. Skip for non-plan
-    // approvals or when keep_planning leaves the session in plan mode.
-    if (pending?.category === 'exit_plan_mode') {
-      const session = this.db
-        .prepare('SELECT approval_mode FROM sessions WHERE id = ?')
-        .get(sessionId) as { approval_mode: ApprovalMode } | undefined;
-      if (session?.approval_mode === 'plan') {
-        if (decision === 'accept_with_auto') {
-          this.setApprovalMode(sessionId, 'auto');
-        } else if (decision === 'accept_with_ask' || decision === 'allow_once' || decision === 'allow_session') {
-          // Default behaviour for legacy `allow_once` / `allow_session` is
-          // 'ask' — preserves the prior contract for any caller that hasn't
-          // adopted the three-way decisions yet.
-          this.setApprovalMode(sessionId, 'ask');
+      // Plan-mode-exit decisions get mapped to plain allow/deny on the proxy
+      // wire; the auto/ask flip happens only after the response succeeds.
+      if (pending?.category === 'exit_plan_mode') {
+        const session = this.db
+          .prepare('SELECT approval_mode FROM sessions WHERE id = ?')
+          .get(sessionId) as { approval_mode: ApprovalMode } | undefined;
+        if (session?.approval_mode === 'plan') {
+          if (decision === 'accept_with_auto') {
+            this.setApprovalMode(sessionId, 'auto');
+          } else if (decision === 'accept_with_ask' || decision === 'allow_once' || decision === 'allow_session') {
+            // Legacy allow decisions retain their historical ask-mode exit.
+            this.setApprovalMode(sessionId, 'ask');
+          }
+          // decline / keep_planning leaves the session in plan mode.
         }
-        // decline / keep_planning → no flip, agent stays in plan mode.
       }
+    } catch (error) {
+      if (savedResponseId && !responseSent) {
+        this.db.prepare(
+          'DELETE FROM proxy_interactions WHERE session_id = ? AND interaction_id = ? AND response_id = ?',
+        ).run(sessionId, approvalId, savedResponseId);
+      }
+      this.approvals.clearResolutionSource(approvalId);
+      throw error;
     }
   }
 
@@ -648,8 +782,9 @@ export class SessionManager {
     return config;
   }
 
-  private optionIdForRole(executor: Executor, role: string): string {
-    return this.proxySessions.getCapabilities(executor)
+  private optionIdForRole(executor: Executor, role: string, session?: Session): string {
+    const cliPath = session ? this.agentResolver?.cliPathForSession(session) : undefined;
+    return this.proxySessions.getCapabilities(executor, cliPath)
       ?.configOptions.find((option) => option.role === role)?.id
       ?? role;
   }
@@ -690,13 +825,18 @@ export class SessionManager {
     text: string,
     items?: import('@gian/shared').InputItem[],
     oneShotBypass?: boolean,
-  ): Promise<void> {
+    toolRequestId?: string,
+  ): Promise<{
+    turnId: string;
+    turnNumber: number;
+    configSnapshot: Record<string, unknown>;
+  } | null> {
     if (this.sidechats.has(sessionId)) {
       const sidechatItems = items && items.length > 0
         ? items
         : [{ type: 'text' as const, text }];
       await this.sidechats.startTurn(sessionId, sidechatItems);
-      return;
+      return null;
     }
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
@@ -729,7 +869,7 @@ export class SessionManager {
 
     const turnId = randomUUID();
     const now = new Date().toISOString();
-    const turn = this.turns.start(sessionId, turnId, now);
+    const turn = this.turns.start(sessionId, turnId, now, { toolRequestId });
     try {
       this.db.prepare(
         `INSERT INTO proxy_replay_turns
@@ -775,12 +915,17 @@ export class SessionManager {
     // escalates it to 'auto' for writes. It still binds the root workspace
     // (`~/Coding`, spanning all projects), so 'auto' there is broad — the mode
     // picker is the gate.
-    const catalog = this.proxySessions.getCapabilities(session.executor);
+    const catalog = this.proxySessions.getCapabilities(
+      session.executor,
+      this.agentResolver?.cliPathForSession(session),
+    );
     const turnOptions = session.turn_config_options !== undefined
       ? session.turn_config_options
       : (catalog?.configOptions.filter((option) => option.binding === 'turn') ?? []);
     const config: Record<string, string | boolean | number | null> = {};
     const draft: Record<string, string | boolean | number | null> = {};
+    const candidateValues: Record<string, string | boolean | number | null> = {};
+    const dispatchValues = new Map<string, ConfigValue>();
     for (const option of turnOptions) {
       const persisted = option.role === 'fast'
         ? undefined
@@ -808,8 +953,31 @@ export class SessionManager {
         if (bypass) value = bypass.value;
       }
       if (draftValue !== undefined && draftValue !== '') draft[option.id] = draftValue;
+      if (value !== undefined && value !== '') {
+        candidateValues[option.id] = value;
+        dispatchValues.set(option.id, value);
+      }
+    }
+    for (const option of turnOptions) {
+      if (!configConditionsMatch(option.visibleWhen, candidateValues)
+        || !configConditionsMatch(option.enabledWhen, candidateValues)) {
+        continue;
+      }
+      const value = dispatchValues.get(option.id);
       if (value !== undefined && value !== '') config[option.id] = value;
     }
+    const configSnapshot = {
+      agent_id: session.agent_id ?? null,
+      agent_name: session.agent_name ?? null,
+      proxy: session.executor,
+      model: session.model,
+      thinking_effort: session.thinking_effort,
+      approval_mode: session.approval_mode,
+      service_tier: session.service_tier,
+      session: { ...session.executor_config.values },
+      turn: { ...config },
+    };
+    this.turns.setConfig(sessionId, turnId, configSnapshot);
     const dispatchItems = items && items.length > 0
       ? translateItemsForExecutor(session.executor, items)
       : [{ type: 'text' as const, text }];
@@ -822,6 +990,14 @@ export class SessionManager {
       });
       this.turns.bindProviderTurn(sessionId, turnId, started.turn.id, true);
       this.persistTurnConfig(sessionId, draft);
+      if (toolRequestId) {
+        this.db.prepare(
+          `UPDATE tool_deliveries
+             SET turn_id = ?, queue_entry_id = NULL, state = 'started', updated_at = ?
+           WHERE request_id = ?`,
+        ).run(turnId, new Date().toISOString(), toolRequestId);
+      }
+      return { turnId, turnNumber, configSnapshot };
     } catch (err) {
       // startTurn rejected. The host already optimistically wrote
       // turn=running / session=running and paused the watcher above; roll
@@ -852,7 +1028,7 @@ export class SessionManager {
   setApprovalMode(sessionId: string, mode: ApprovalMode): void {
     const session = this.getSession(sessionId);
     const now = new Date().toISOString();
-    const optionId = this.optionIdForRole(session.executor, 'approval_mode');
+    const optionId = this.optionIdForRole(session.executor, 'approval_mode', session);
     const turn_config = { ...(session.turn_config ?? {}), [optionId]: mode };
     this.db
       .prepare(`UPDATE sessions SET approval_mode = ?, turn_config_json = ?, updated_at = ? WHERE id = ?`)
@@ -869,7 +1045,7 @@ export class SessionManager {
     const trimmed = model.trim();
     const stored = trimmed.length > 0 ? trimmed : null;
     const now = new Date().toISOString();
-    const optionId = this.optionIdForRole(session.executor, 'model');
+    const optionId = this.optionIdForRole(session.executor, 'model', session);
     const turn_config = { ...(session.turn_config ?? {}), [optionId]: stored };
     this.db
       .prepare(`UPDATE sessions SET model = ?, turn_config_json = ?, updated_at = ? WHERE id = ?`)
@@ -880,7 +1056,10 @@ export class SessionManager {
   setTurnConfigValue(sessionId: string, optionId: string, value: ConfigValue): void {
     const session = this.getSession(sessionId);
     const option = (session.turn_config_options
-      ?? this.proxySessions.getCapabilities(session.executor)?.configOptions)
+      ?? this.proxySessions.getCapabilities(
+        session.executor,
+        this.agentResolver?.cliPathForSession(session),
+      )?.configOptions)
       ?.find((entry) => entry.id === optionId);
     if (option?.role === 'model') {
       this.setModel(sessionId, value == null ? '' : String(value));
@@ -928,19 +1107,20 @@ export class SessionManager {
       turnConfig: Record<string, ConfigValue>;
     },
     sessionId?: string,
+    cliPath?: string | null,
   ): Promise<ResolvedProxyCatalog> {
     if (sessionId) await this.proxySessions.ensure(this.getSession(sessionId));
-    return this.proxySessions.resolveCatalog(executor, params, sessionId);
+    return this.proxySessions.resolveCatalog(executor, params, sessionId, cliPath);
   }
 
   /** Returns cached capabilities or null if no session has booted that
    *  executor yet (in which case the caller should warm by spawning). */
-  getCapabilities(executor: string): import('@gian/shared').ProxyCatalog | null {
-    return this.proxySessions.getCapabilities(executor);
+  getCapabilities(executor: string, cliPath?: string | null): import('@gian/shared').ProxyCatalog | null {
+    return this.proxySessions.getCapabilities(executor, cliPath);
   }
 
-  getProtocolCapabilities(executor: string): Record<string, unknown> | null {
-    return this.proxySessions.getProtocolCapabilities(executor);
+  getProtocolCapabilities(executor: string, cliPath?: string | null): Record<string, unknown> | null {
+    return this.proxySessions.getProtocolCapabilities(executor, cliPath);
   }
 
   async getNativeConfig(sessionId: string): Promise<{
@@ -987,19 +1167,32 @@ export class SessionManager {
 
   /** Force-fetch capabilities by spawning a proxy if not cached.
    *  Used by GET /api/proxy/:executor/models when no session exists yet. */
-  async warmCapabilities(executor: Executor): Promise<import('@gian/shared').ProxyCatalog> {
-    return this.proxySessions.warmCapabilities(executor);
+  async warmCapabilities(
+    executor: Executor,
+    cliPath?: string | null,
+  ): Promise<import('@gian/shared').ProxyCatalog> {
+    const path = cliPath !== undefined
+      ? cliPath
+      : this.agentResolver?.cliPathForKind(executor) ?? null;
+    return this.proxySessions.warmCapabilities(executor, path);
   }
 
   /** Slash commands for an executor. With cwd, includes project-level. */
-  async listSlashCommands(executor: 'codex' | 'claude', cwd?: string): Promise<import('@gian/shared').SlashListResult> {
-    return this.proxySessions.listSlashCommands(executor, cwd);
+  async listSlashCommands(
+    executor: 'codex' | 'claude',
+    cwd?: string,
+    cliPath?: string | null,
+  ): Promise<import('@gian/shared').SlashListResult> {
+    const path = cliPath !== undefined
+      ? cliPath
+      : this.agentResolver?.cliPathForKind(executor) ?? null;
+    return this.proxySessions.listSlashCommands(executor, cwd, path);
   }
 
   setEffort(sessionId: string, effort: import('@gian/shared').ThinkingEffort | null): void {
     const session = this.getSession(sessionId);
     const now = new Date().toISOString();
-    const optionId = this.optionIdForRole(session.executor, 'effort');
+    const optionId = this.optionIdForRole(session.executor, 'effort', session);
     const turn_config = { ...(session.turn_config ?? {}), [optionId]: effort };
     this.db
       .prepare(`UPDATE sessions SET thinking_effort = ?, turn_config_json = ?, updated_at = ? WHERE id = ?`)
@@ -1013,7 +1206,7 @@ export class SessionManager {
   setServiceTier(sessionId: string, tier: 'fast' | null): void {
     const session = this.getSession(sessionId);
     const now = new Date().toISOString();
-    const optionId = this.optionIdForRole(session.executor, 'fast');
+    const optionId = this.optionIdForRole(session.executor, 'fast', session);
     const turn_config = { ...(session.turn_config ?? {}), [optionId]: tier === 'fast' };
     this.db
       .prepare(`UPDATE sessions SET service_tier = ?, turn_config_json = ?, updated_at = ? WHERE id = ?`)
@@ -1088,12 +1281,18 @@ export class SessionManager {
   // call site and the broadcast/popNext machinery lives next to SessionManager.
   // -------------------------------------------------------------------------
 
-  enqueueMessage(sessionId: string, text: string, items?: import('@gian/shared').InputItem[]): void {
+  enqueueMessage(
+    sessionId: string,
+    text: string,
+    items?: import('@gian/shared').InputItem[],
+    toolRequestId?: string,
+  ): import('../queue/manager.js').QueueEntry {
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
     assertLocalFilesBelongToSession(sessionId, items);
-    this.queue.add(sessionId, text, items);
+    const entry = this.queue.add(sessionId, text, items, { toolRequestId });
     this.broadcastQueueUpdated(sessionId);
+    return entry;
   }
 
   removeFromQueue(sessionId: string, queueId: string): void {
@@ -1138,7 +1337,10 @@ export class SessionManager {
           await this.steerMessage(sessionId, drained[i]!.text, drained[i]!.items);
         } catch (err) {
           for (let j = i; j < drained.length; j++) {
-            this.queue.add(sessionId, drained[j]!.text, drained[j]!.items);
+            this.queue.add(sessionId, drained[j]!.text, drained[j]!.items, {
+              id: drained[j]!.id,
+              ...(drained[j]!.toolRequestId ? { toolRequestId: drained[j]!.toolRequestId } : {}),
+            });
           }
           this.broadcastQueueUpdated(sessionId);
           throw err;
@@ -1155,7 +1357,7 @@ export class SessionManager {
     const next = this.queue.popNext(sessionId);
     if (!next) return;
     this.broadcastQueueUpdated(sessionId);
-    await this.sendMessage(sessionId, next.text, next.items);
+    await this.sendMessage(sessionId, next.text, next.items, undefined, next.toolRequestId);
   }
 
   /** Codex-only mid-turn injection (`turn/steer`): append the message to the
@@ -1219,6 +1421,20 @@ export class SessionManager {
   /** Convenience read for IM router to check queue depth without importing QueueManager. */
   getQueueLength(sessionId: string): number {
     return this.queue.list(sessionId).length;
+  }
+
+  getQueue(sessionId: string): import('../queue/manager.js').QueueEntry[] {
+    return this.queue.list(sessionId);
+  }
+
+  getActiveTurn(sessionId: string): import('./turn-runtime.js').ActiveTurn | null {
+    return this.turns.get(sessionId) ?? null;
+  }
+
+  getApprovalModeForActiveTurn(sessionId: string): ApprovalMode | null {
+    const snapshot = this.turns.get(sessionId)?.configSnapshot;
+    const mode = snapshot?.['approval_mode'];
+    return isApprovalMode(mode) ? mode : this.getSession(sessionId).approval_mode;
   }
 
   // -------------------------------------------------------------------------

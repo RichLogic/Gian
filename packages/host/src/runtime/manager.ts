@@ -10,6 +10,7 @@ import type {
 } from './types.js';
 
 interface ActiveRuntime {
+  key: RuntimeKey;
   probe: RuntimeProbe;
   snapshot?: string;
   env: Readonly<Record<string, string>>;
@@ -23,25 +24,40 @@ interface ActiveRuntime {
 }
 
 interface FailedResolutionClaim {
+  key: RuntimeKey;
   cli: Executor;
   claim: AgentUpdateLease;
   retirement?: Promise<void>;
   failure: unknown;
 }
 
+/** Runtimes are keyed by (kind, resolved CLI path): two Agents sharing one
+ *  Proxy kind but pointing at different CLI binaries get independent
+ *  runtimes; Agents resolving to the same path share one process lease. A
+ *  null path means the provider's environment/PATH/official scan. */
+export type RuntimeKey = string;
+
+export function runtimeKey(cli: Executor, overridePath?: string | null): RuntimeKey {
+  return JSON.stringify([cli, overridePath ?? null]);
+}
+
+function keyCli(key: RuntimeKey): Executor {
+  return (JSON.parse(key) as [Executor, string | null])[0];
+}
+
 export class CliRuntimeManager {
   private readonly providers = new Map<Executor, CliRuntimeProvider>();
-  private readonly active = new Map<Executor, ActiveRuntime>();
-  private readonly resolving = new Map<Executor, {
+  private readonly active = new Map<RuntimeKey, ActiveRuntime>();
+  private readonly resolving = new Map<RuntimeKey, {
     generation: number;
     promise: Promise<ActiveRuntime>;
   }>();
-  private readonly generations = new Map<Executor, number>();
+  private readonly generations = new Map<RuntimeKey, number>();
   /** Strongly owns every exact runtime whose shared claim is retiring. A
    * failed claim release stays here until acquire() or drain() retries it. */
-  private readonly retirementsByExecutor = new Map<Executor, Set<ActiveRuntime>>();
-  private readonly failedResolutionClaimsByExecutor = new Map<
-    Executor,
+  private readonly retirementsByKey = new Map<RuntimeKey, Set<ActiveRuntime>>();
+  private readonly failedResolutionClaimsByKey = new Map<
+    RuntimeKey,
     Set<FailedResolutionClaim>
   >();
 
@@ -57,29 +73,47 @@ export class CliRuntimeManager {
     }
   }
 
-  async acquire(cli: Executor): Promise<RuntimeLease> {
+  private keysFor(cli: Executor, overridePath?: string | null): RuntimeKey[] {
+    if (overridePath !== undefined) return [runtimeKey(cli, overridePath)];
+    const keys = new Set<RuntimeKey>();
+    for (const key of [
+      ...this.active.keys(),
+      ...this.resolving.keys(),
+      ...this.generations.keys(),
+      ...this.retirementsByKey.keys(),
+      ...this.failedResolutionClaimsByKey.keys(),
+    ]) {
+      if (keyCli(key) === cli) keys.add(key);
+    }
+    return [...keys];
+  }
+
+  /** Acquire a lease on the runtime for (cli, overridePath). The path is the
+   *  owning Agent's resolved CLI path; omit it for the provider default. */
+  async acquire(cli: Executor, overridePath?: string | null): Promise<RuntimeLease> {
+    const key = runtimeKey(cli, overridePath);
     while (true) {
-      const retirement = this.retryRetirements(cli);
+      const retirement = this.retryRetirements(key);
       if (retirement) {
         await retirement;
         // Another exact runtime can enter retirement during the await. Recheck
         // the strong registries without opening a resolve/publication window.
         continue;
       }
-      const generation = this.generations.get(cli) ?? 0;
-      let active = this.active.get(cli);
+      const generation = this.generations.get(key) ?? 0;
+      let active = this.active.get(key);
       if (active?.generation !== generation || active?.retired) active = undefined;
       if (!active) {
-        let pending = this.resolving.get(cli);
+        let pending = this.resolving.get(key);
         if (pending?.generation !== generation) {
-          const promise = this.resolve(cli, generation);
+          const promise = this.resolve(cli, overridePath ?? undefined, generation, key);
           pending = { generation, promise };
-          this.resolving.set(cli, pending);
+          this.resolving.set(key, pending);
         }
         try {
           active = await pending.promise;
         } finally {
-          if (this.resolving.get(cli)?.promise === pending.promise) this.resolving.delete(cli);
+          if (this.resolving.get(key)?.promise === pending.promise) this.resolving.delete(key);
         }
       }
 
@@ -87,7 +121,7 @@ export class CliRuntimeManager {
       // before this continuation runs. Never resurrect a generation after its
       // shared cross-process claim has started retiring.
       if (active.retired) continue;
-      if ((this.generations.get(cli) ?? 0) !== generation) {
+      if ((this.generations.get(key) ?? 0) !== generation) {
         if (active.leases === 0) await this.retire(active);
         continue;
       }
@@ -96,7 +130,12 @@ export class CliRuntimeManager {
     }
   }
 
-  private async resolve(cli: Executor, generation: number): Promise<ActiveRuntime> {
+  private async resolve(
+    cli: Executor,
+    overridePath: string | undefined,
+    generation: number,
+    key: RuntimeKey,
+  ): Promise<ActiveRuntime> {
     const provider = this.providers.get(cli);
     if (!provider) {
       throw new Error(`CLI runtime provider is not configured: ${cli}`);
@@ -107,7 +146,7 @@ export class CliRuntimeManager {
       `${cli} CLI runtime use`,
     );
     try {
-      const installed = await provider.inspectInstalled();
+      const installed = await provider.inspectInstalled(overridePath);
       if (installed.length === 0) {
         throw Object.assign(
           new Error(`${cli} CLI is not installed. Install it with the official installer, then retry.`),
@@ -134,6 +173,7 @@ export class CliRuntimeManager {
           }
           await provider.activate?.(probe);
           resolved = {
+            key,
             probe,
             ...(snapshot ? { snapshot } : {}),
             env: Object.freeze({ ...provider.managedEnv(), ...probe.env }),
@@ -172,8 +212,8 @@ export class CliRuntimeManager {
         );
       }
 
-      if ((this.generations.get(cli) ?? 0) === generation) {
-        this.active.set(cli, resolved);
+      if ((this.generations.get(key) ?? 0) === generation) {
+        this.active.set(key, resolved);
       }
       return resolved;
     } catch (error) {
@@ -181,7 +221,7 @@ export class CliRuntimeManager {
       try {
         await claim.release();
       } catch (cleanupError) {
-        this.trackFailedResolutionClaim(cli, claim, cleanupError);
+        this.trackFailedResolutionClaim(key, cli, claim, cleanupError);
         cleanupErrors.push(cleanupError);
       }
       if (cleanupErrors.length > 0) {
@@ -200,29 +240,37 @@ export class CliRuntimeManager {
    * work resolves the next runtime generation immediately. This coordinates
    * Gian-managed installers; it does not make externally mutable path bytes
    * into a content-addressed snapshot.
+   *
+   * With `overridePath` omitted every runtime of the kind is retired;
+   * pass an Agent's previous path to retire exactly one (kind, path) pair.
    */
-  invalidate(cli: Executor): boolean {
-    const generation = this.generations.get(cli) ?? 0;
-    this.generations.set(cli, generation + 1);
-    const wasResolving = this.resolving.get(cli)?.generation === generation;
-    const active = this.active.get(cli);
-    this.active.delete(cli);
-    // Existing leases retain their selection, but the active map is retired
-    // immediately so every later acquire resolves the new generation.
-    if (active?.leases === 0) {
-      void this.retire(active).catch(error => {
-        console.error(`[runtime] failed to retire idle ${cli} claim:`, error);
-      });
+  invalidate(cli: Executor, overridePath?: string | null): boolean {
+    let idle = true;
+    for (const key of this.keysFor(cli, overridePath)) {
+      const generation = this.generations.get(key) ?? 0;
+      this.generations.set(key, generation + 1);
+      const wasResolving = this.resolving.get(key)?.generation === generation;
+      const active = this.active.get(key);
+      this.active.delete(key);
+      // Existing leases retain their selection, but the active map is retired
+      // immediately so every later acquire resolves the new generation.
+      if (active?.leases === 0) {
+        void this.retire(active).catch(error => {
+          console.error(`[runtime] failed to retire idle ${cli} claim:`, error);
+        });
+      }
+      if (wasResolving || (active && active.leases > 0)) idle = false;
     }
-    return !wasResolving && (!active || active.leases === 0);
+    return idle;
   }
 
   /** Detect externally mutated launcher/runtime bytes without disturbing a
    * healthy active generation. Snapshot errors (including a removed binary)
    * count as a change so the guardian fails closed and retires its owner. */
   async detectExternalChanges(): Promise<Executor[]> {
-    const checks = Array.from(this.active.entries()).map(async ([cli, active]) => {
+    const checks = Array.from(this.active.entries()).map(async ([key, active]) => {
       if (active.retired || !active.snapshot) return null;
+      const cli = keyCli(key);
       const provider = this.providers.get(cli);
       if (!provider?.snapshot) return null;
       let changed = false;
@@ -231,40 +279,45 @@ export class CliRuntimeManager {
       } catch {
         changed = true;
       }
-      if (!changed || active.retired || this.active.get(cli) !== active) return null;
-      if ((this.generations.get(cli) ?? 0) !== active.generation) return null;
+      if (!changed || active.retired || this.active.get(key) !== active) return null;
+      if ((this.generations.get(key) ?? 0) !== active.generation) return null;
       return cli;
     });
     const changed = await Promise.all(checks);
-    return changed.filter((cli): cli is Executor => cli !== null);
+    return [...new Set(changed.filter((cli): cli is Executor => cli !== null))];
   }
 
-  /** Retire every idle exact runtime and retry any previously failed claim
-   * retirement. Install routes use this after Proxy shutdown and before they
-   * request the exclusive updater claim. Active leases remain fail-closed and
-   * are rejected by the updater lock itself. */
+  /** Retire every idle exact runtime of the kind (all paths) and retry any
+   * previously failed claim retirement. Install routes use this after Proxy
+   * shutdown and before they request the exclusive updater claim. Active
+   * leases remain fail-closed and are rejected by the updater lock itself. */
   async drain(cli: Executor): Promise<void> {
     while (true) {
-      const resolving = this.resolving.get(cli)?.promise;
-      if (resolving) {
-        // Resolution failure itself is not the drain target, but resolve()
-        // registers any failed claim cleanup before rejecting. Loop so that
-        // strong cleanup record is retried instead of returning false success.
-        await resolving.catch(() => undefined);
-        await Promise.resolve();
-        continue;
+      let progressed = false;
+      for (const key of this.keysFor(cli)) {
+        const resolving = this.resolving.get(key)?.promise;
+        if (resolving) {
+          // Resolution failure itself is not the drain target, but resolve()
+          // registers any failed claim cleanup before rejecting. Loop so that
+          // strong cleanup record is retried instead of returning false success.
+          await resolving.catch(() => undefined);
+          await Promise.resolve();
+          progressed = true;
+          continue;
+        }
+        const active = this.active.get(key);
+        if (active && active.leases === 0) {
+          await this.retire(active);
+          progressed = true;
+          continue;
+        }
+        const retirement = this.retryRetirements(key);
+        if (retirement) {
+          await retirement;
+          progressed = true;
+        }
       }
-      const active = this.active.get(cli);
-      if (active && active.leases === 0) {
-        await this.retire(active);
-        continue;
-      }
-      const retirement = this.retryRetirements(cli);
-      if (retirement) {
-        await retirement;
-        continue;
-      }
-      return;
+      if (!progressed) return;
     }
   }
 
@@ -293,16 +346,17 @@ export class CliRuntimeManager {
 
   private retire(active: ActiveRuntime): Promise<void> {
     if (active.retirementComplete) return Promise.resolve();
-    let retirements = this.retirementsByExecutor.get(active.probe.cli);
+    const bindingKey = active.key;
+    let retirements = this.retirementsByKey.get(bindingKey);
     if (!retirements) {
       retirements = new Set();
-      this.retirementsByExecutor.set(active.probe.cli, retirements);
+      this.retirementsByKey.set(bindingKey, retirements);
     }
     retirements.add(active);
     if (active.retirement) return active.retirement;
     active.retired = true;
-    if (this.active.get(active.probe.cli) === active) {
-      this.active.delete(active.probe.cli);
+    if (this.active.get(bindingKey) === active) {
+      this.active.delete(bindingKey);
     }
     active.retirementFailure = undefined;
     const retirement = active.claim.release().then(
@@ -311,9 +365,9 @@ export class CliRuntimeManager {
         retirements!.delete(active);
         if (
           retirements!.size === 0
-          && this.retirementsByExecutor.get(active.probe.cli) === retirements
+          && this.retirementsByKey.get(bindingKey) === retirements
         ) {
-          this.retirementsByExecutor.delete(active.probe.cli);
+          this.retirementsByKey.delete(bindingKey);
         }
       },
       error => {
@@ -329,10 +383,10 @@ export class CliRuntimeManager {
     return active.retirement;
   }
 
-  private retryRetirements(cli: Executor): Promise<void> | null {
-    const retirements = Array.from(this.retirementsByExecutor.get(cli) ?? []);
+  private retryRetirements(key: RuntimeKey): Promise<void> | null {
+    const retirements = Array.from(this.retirementsByKey.get(key) ?? []);
     const failedResolutions = Array.from(
-      this.failedResolutionClaimsByExecutor.get(cli) ?? [],
+      this.failedResolutionClaimsByKey.get(key) ?? [],
     );
     if (retirements.length === 0 && failedResolutions.length === 0) return null;
     return Promise.all([
@@ -342,25 +396,26 @@ export class CliRuntimeManager {
   }
 
   private trackFailedResolutionClaim(
+    key: RuntimeKey,
     cli: Executor,
     claim: AgentUpdateLease,
     failure: unknown,
   ): void {
-    let failed = this.failedResolutionClaimsByExecutor.get(cli);
+    let failed = this.failedResolutionClaimsByKey.get(key);
     if (!failed) {
       failed = new Set();
-      this.failedResolutionClaimsByExecutor.set(cli, failed);
+      this.failedResolutionClaimsByKey.set(key, failed);
     }
-    failed.add({ cli, claim, failure });
+    failed.add({ key, cli, claim, failure });
   }
 
   private retireFailedResolutionClaim(failed: FailedResolutionClaim): Promise<void> {
     if (failed.retirement) return failed.retirement;
     const retirement = failed.claim.release().then(
       () => {
-        const claims = this.failedResolutionClaimsByExecutor.get(failed.cli);
+        const claims = this.failedResolutionClaimsByKey.get(failed.key);
         claims?.delete(failed);
-        if (claims?.size === 0) this.failedResolutionClaimsByExecutor.delete(failed.cli);
+        if (claims?.size === 0) this.failedResolutionClaimsByKey.delete(failed.key);
       },
       error => {
         failed.failure = error;

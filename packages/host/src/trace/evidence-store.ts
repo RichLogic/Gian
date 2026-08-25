@@ -71,7 +71,7 @@ const TRACE_CORE_FIELDS: Readonly<Record<string, ReadonlySet<string>>> = {
   'tool.started': new Set(['toolCallId', 'name', 'title', 'stepId']),
   'tool.updated': new Set(['toolCallId', 'statusText', 'stepId']),
   'tool.completed': new Set(['toolCallId', 'status', 'stepId']),
-  'activity.updated': new Set(['activityId', 'kind', 'title', 'status', 'stepId']),
+  'activity.updated': new Set(['activityId', 'kind', 'title', 'status', 'stepId', 'timing']),
   'step.updated': new Set(['stepId', 'index', 'status']),
   'request.updated': new Set(['requestId', 'reason', 'stepId']),
   'usage.updated': new Set(['stepId']),
@@ -303,6 +303,8 @@ function normalizeTraceEvidenceData(method: string, data: unknown): Record<strin
       return {
         ...pickStrings(data, 'activityId', 'kind', 'title', 'status', 'summary', 'stepId'),
         ...(data['presentation'] !== undefined ? { presentation: sanitizeValue(data['presentation']) } : {}),
+        ...(activityTiming(data['details']) ? { timing: activityTiming(data['details']) } : {}),
+        ...(data['details'] !== undefined ? { details: sanitizeValue(data['details']) } : {}),
       };
     case 'step.updated':
       return {
@@ -347,6 +349,16 @@ function normalizeTraceEvidenceData(method: string, data: unknown): Record<strin
     default:
       return {};
   }
+}
+
+function activityTiming(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value) || !isRecord(value['timing'])) return null;
+  const timing = value['timing'];
+  const phase = timing['phase'];
+  const timestampMs = timing['timestampMs'];
+  if ((phase !== 'started' && phase !== 'completed') || typeof timestampMs !== 'number') return null;
+  if (!Number.isFinite(timestampMs) || timestampMs < 0) return null;
+  return { phase, timestampMs };
 }
 
 function sanitizeUsageConversation(value: unknown): unknown {

@@ -15,6 +15,8 @@ import {
   parseEffortLevelsFromHelp,
   isClaudeCompactBoundary,
   shouldRetryWithoutNoSessionPersistence,
+  classifyClaudeStreamEvent,
+  unknownClaudeEventKey,
 } from '../src/runtime/claude-mcp-runtime.js';
 import type { ModelCapabilities } from '../src/core/types.js';
 import {
@@ -471,6 +473,95 @@ test('Claude -p native task lifecycle keeps Agent tool id and terminal summary',
       outputFile: '/tmp/task-1.output',
       completedAt: agentUpdates[1]!.completedAt,
     });
+  } finally {
+    await runtime.stop();
+    if (oldClaudeBin === undefined) delete process.env.CLAUDE_BIN;
+    else process.env.CLAUDE_BIN = oldClaudeBin;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Claude 2.1.237 thinking_tokens and progress pulses are ignored, not unknown', () => {
+  assert.equal(classifyClaudeStreamEvent({
+    type: 'system',
+    subtype: 'thinking_tokens',
+    estimated_tokens: 5670,
+    estimated_tokens_delta: 1,
+  }), 'ignored');
+  assert.equal(classifyClaudeStreamEvent({ type: 'system', subtype: 'task_progress' }), 'ignored');
+  assert.equal(classifyClaudeStreamEvent({ type: 'system', subtype: 'task_updated' }), 'ignored');
+  assert.equal(classifyClaudeStreamEvent({ type: 'system', subtype: 'background_tasks_changed' }), 'ignored');
+  assert.equal(classifyClaudeStreamEvent({ type: 'system', subtype: 'vcs_state_changed' }), 'ignored');
+  assert.equal(classifyClaudeStreamEvent({ type: 'tool_progress' }), 'ignored');
+  assert.equal(classifyClaudeStreamEvent({ type: 'system', subtype: 'init' }), 'handled');
+  assert.equal(classifyClaudeStreamEvent({ type: 'system', subtype: 'task_started' }), 'handled');
+  assert.equal(classifyClaudeStreamEvent({ type: 'assistant' }), 'handled');
+  assert.equal(classifyClaudeStreamEvent({ type: 'system', subtype: 'notification' }), 'unknown');
+  assert.equal(classifyClaudeStreamEvent({ type: 'web_search' }), 'unknown');
+  assert.equal(unknownClaudeEventKey({ type: 'system', subtype: 'notification' }), 'system:notification');
+  assert.equal(unknownClaudeEventKey({ type: 'web_search' }), 'web_search');
+});
+
+test('Claude thinking_tokens flood does not emit unknown activities; unknown types cap at one per turn', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cc-proxy-thinking-tokens-'));
+  const fakeClaude = join(dir, 'claude');
+  const frames = [
+    ...Array.from({ length: 40 }, (_, i) => ({
+      type: 'system',
+      subtype: 'thinking_tokens',
+      estimated_tokens: 100 + i,
+      estimated_tokens_delta: 1,
+    })),
+    ...Array.from({ length: 8 }, () => ({ type: 'tool_progress', tool_use_id: 'tool-1' })),
+    ...Array.from({ length: 5 }, (_, i) => ({
+      type: 'system',
+      subtype: 'notification',
+      message: `notice-${i}`,
+    })),
+    { type: 'future_event', payload: { ok: true } },
+    { type: 'future_event', payload: { ok: false } },
+    { type: 'assistant', message: { id: 'msg-1', content: [{ type: 'text', text: 'done' }] } },
+    { type: 'result', subtype: 'success', result: 'done' },
+  ];
+  writeFileSync(fakeClaude, [
+    '#!/usr/bin/env node',
+    ...frames.map(frame => `console.log(${JSON.stringify(JSON.stringify(frame))});`),
+  ].join('\n'));
+  chmodSync(fakeClaude, 0o755);
+
+  const oldClaudeBin = process.env.CLAUDE_BIN;
+  process.env.CLAUDE_BIN = fakeClaude;
+  const runtime = new ClaudeMcpRuntime();
+  const unknown: Array<Record<string, unknown>> = [];
+  runtime.on('unknownClaudeEvent', (_sessionId, event) => {
+    unknown.push(event);
+  });
+  const exited = new Promise<void>(resolve => runtime.once('processExited', () => resolve()));
+
+  try {
+    await runtime.spawnSession({
+      sessionId: 'session-thinking-tokens',
+      claudeSessionId: '00000000-0000-4000-8000-000000000003',
+      cwd: dir,
+      model: null,
+      isResume: false,
+    });
+    await runtime.sendMessage('session-thinking-tokens', 'think', {
+      permissionMode: 'bypassPermissions',
+    });
+    await exited;
+
+    assert.equal(
+      unknown.filter(event => event.subtype === 'thinking_tokens').length,
+      0,
+    );
+    assert.equal(unknown.filter(event => event.type === 'tool_progress').length, 0);
+    assert.deepEqual(unknown.map(event => (
+      typeof event.subtype === 'string' ? `${String(event.type)}:${event.subtype}` : String(event.type)
+    )), [
+      'system:notification',
+      'future_event',
+    ]);
   } finally {
     await runtime.stop();
     if (oldClaudeBin === undefined) delete process.env.CLAUDE_BIN;

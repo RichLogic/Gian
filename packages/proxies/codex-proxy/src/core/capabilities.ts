@@ -6,6 +6,14 @@ type RuntimeEffortEntry =
     reasoningEffort?: string;
   };
 
+type RuntimeServiceTierEntry =
+  | string
+  | {
+    id?: string;
+    name?: string;
+    description?: string;
+  };
+
 type RuntimeModelRecord = {
   id?: string;
   model?: string;
@@ -15,6 +23,10 @@ type RuntimeModelRecord = {
   isDefault?: boolean;
   defaultReasoningEffort?: string | null;
   supportedReasoningEfforts?: RuntimeEffortEntry[];
+  /** Current app-server field. */
+  serviceTiers?: RuntimeServiceTierEntry[];
+  /** Compatibility field used by older app-server model catalogs. */
+  additionalSpeedTiers?: string[];
 };
 
 function normalizeThinking(value: unknown): ThinkingLevel | null {
@@ -42,6 +54,25 @@ function defaultThinking(record: RuntimeModelRecord, supported: ThinkingLevel[])
   return supported[0] ?? null;
 }
 
+function serviceTiers(record: RuntimeModelRecord) {
+  const tiers = new Map<string, { id: string; displayName: string; description: string }>();
+  for (const entry of record.serviceTiers ?? []) {
+    const id = (typeof entry === 'string' ? entry : entry.id)?.trim();
+    if (!id || tiers.has(id)) continue;
+    tiers.set(id, {
+      id,
+      displayName: typeof entry === 'string' ? id : entry.name?.trim() || id,
+      description: typeof entry === 'string' ? '' : entry.description?.trim() || '',
+    });
+  }
+  for (const value of record.additionalSpeedTiers ?? []) {
+    const id = value.trim();
+    if (!id || tiers.has(id)) continue;
+    tiers.set(id, { id, displayName: id, description: '' });
+  }
+  return [...tiers.values()];
+}
+
 export function buildCapabilitiesPayload(models: unknown[]) {
   const normalizedModels: ModelCapabilities[] = (models as RuntimeModelRecord[]).map((record) => {
     const supported = supportedThinking(record.supportedReasoningEfforts);
@@ -54,6 +85,7 @@ export function buildCapabilitiesPayload(models: unknown[]) {
       isDefault: Boolean(record.isDefault),
       defaultThinking: defaultThinking(record, supported),
       supportedThinking: supported,
+      serviceTiers: serviceTiers(record),
     };
   });
 

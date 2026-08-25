@@ -29,14 +29,26 @@ import {
 } from '@gian/proxy-protocol';
 import type {
   AgentCliStatus,
+  AgentColor,
   AgentInstallResult,
   AgentInstallStatus,
   AgentProxyDefaults,
   AgentProxyStatus,
   AgentProxyUpdateCheck,
   Executor,
+  ProductExecutor,
+  ProxyCatalogEntry,
+  UserAgent,
+  UserAgentStatus,
 } from '@gian/shared';
-import { migrateLegacyGrokProxyDefaults } from '@gian/shared';
+import {
+  AGENT_COLORS,
+  DEFAULT_AGENT_COLORS,
+  isAgentColor,
+  isProductExecutor,
+  migrateLegacyGrokProxyDefaults,
+  PRODUCT_EXECUTORS,
+} from '@gian/shared';
 import { CommandRuntimeProvider } from '../runtime/command-provider.js';
 import { DshRuntimeProvider } from '../runtime/dsh-provider.js';
 import { DshRuntimeInstaller } from '../runtime/dsh-installer.js';
@@ -88,10 +100,17 @@ interface AgentDefinition {
   officialPaths: (home: string) => string[];
 }
 
-interface AgentConfigFile {
+interface AgentConfigFileV1 {
   schemaVersion: 1;
   cliPaths: Partial<Record<Executor, string>>;
   proxyDefaults: Partial<Record<Executor, AgentProxyDefaults>>;
+}
+
+/** agents.json schema v2: Agents are user entities keyed by uuid. The Proxy
+ *  kind catalog is NOT persisted here — it lives in the AGENTS definitions. */
+interface AgentConfigFile {
+  schemaVersion: 2;
+  agents: UserAgent[];
 }
 
 interface LegacyProxyManifest {
@@ -131,6 +150,10 @@ export interface AgentManagerOptions {
   officialInstallerSha256?: Partial<Record<Executor, string>>;
   /** One-time migration source for defaults previously stored in SystemConfig. */
   legacyProxyDefaults?: Partial<Record<Executor, Partial<AgentProxyDefaults>>>;
+  /** v2 migration source: executors that appear in existing sessions. A kind
+   *  with no configured path, no installed Proxy, and no session history does
+   *  NOT get an auto-created Agent. */
+  sessionExecutors?: () => Executor[] | Promise<Executor[]>;
   /** Test override for the production initialize + capabilities handshake.
    * Omitted in production so the candidate process and resolved vendor CLI
    * must complete the real stdio protocol before activation. */
@@ -234,6 +257,13 @@ const AGENTS: Record<Executor, AgentDefinition> = {
 };
 
 function emptyConfig(): AgentConfigFile {
+  return { schemaVersion: 2, agents: [] };
+}
+
+/** A missing/unreadable agents.json migrates from "empty v1" so the
+ *  environment-CLI / installed-Proxy / session-history sources still produce
+ *  the user's first default Agents. */
+function emptyConfigV1(): AgentConfigFileV1 {
   return { schemaVersion: 1, cliPaths: {}, proxyDefaults: {} };
 }
 
@@ -250,6 +280,111 @@ function normalizeProxyDefaults(value: unknown): AgentProxyDefaults {
     thinking: typeof record.thinking === 'string' ? record.thinking.trim() : '',
     mode: typeof record.mode === 'string' ? record.mode.trim() : '',
   };
+}
+
+export function normalizeAgentName(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+/** Error thrown when a create/rename collides with a saved Agent name
+ *  (case-insensitive, after trim). Routes map the code to 409. */
+export class AgentNameTakenError extends Error {
+  readonly code = 'AGENT_NAME_TAKEN';
+  constructor(name: string) {
+    super(`Agent name is already taken: ${name}`);
+    this.name = 'AgentNameTakenError';
+  }
+}
+
+function assertAgentColor(value: unknown): AgentColor {
+  if (!isAgentColor(value)) {
+    throw new Error(`unsupported Agent color: ${String(value)}`);
+  }
+  return value;
+}
+
+function normalizeCliPathInput(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!isAbsolute(trimmed)) throw new Error('CLI path must be absolute');
+  return trimmed;
+}
+
+function assertAgentNameAvailable(
+  agents: readonly UserAgent[],
+  name: string,
+  excludeId?: string,
+): void {
+  const key = name.toLowerCase();
+  if (agents.some(agent => agent.id !== excludeId && agent.name.toLowerCase() === key)) {
+    throw new AgentNameTakenError(name);
+  }
+}
+
+const PROXY_TAGLINES: Record<ProductExecutor, string> = {
+  claude: 'Anthropic Claude Code agent',
+  codex: 'OpenAI Codex agent',
+  kimi: 'Moonshot Kimi Code agent',
+  dsh: 'DeepSeek Harness agent',
+};
+
+/** Lenient read-side normalization of one persisted Agent. Returns null for
+ *  entries that cannot identify a usable Agent at all (bad id/name/kind). */
+function normalizeUserAgent(value: unknown): UserAgent | null {
+  const record = objectRecord(value);
+  if (!record) return null;
+  const id = typeof record['id'] === 'string' ? record['id'].trim() : '';
+  const name = normalizeAgentName(record['name']);
+  const proxy = record['proxy'];
+  if (!id || !name || !isProductExecutor(proxy)) return null;
+  const cliPath = typeof record['cliPath'] === 'string' && isAbsolute(record['cliPath'])
+    ? record['cliPath']
+    : null;
+  return {
+    id,
+    name,
+    color: isAgentColor(record['color']) ? record['color'] : DEFAULT_AGENT_COLORS[proxy],
+    proxy,
+    cliPath,
+    defaults: normalizeProxyDefaults(record['defaults']),
+  };
+}
+
+function parseConfigV2(parsed: { agents?: unknown }): AgentConfigFile {
+  const agents: UserAgent[] = [];
+  const seenIds = new Set<string>();
+  const seenNames = new Set<string>();
+  for (const candidate of Array.isArray(parsed.agents) ? parsed.agents : []) {
+    const agent = normalizeUserAgent(candidate);
+    if (!agent || seenIds.has(agent.id)) continue;
+    const nameKey = agent.name.toLowerCase();
+    if (seenNames.has(nameKey)) continue;
+    seenIds.add(agent.id);
+    seenNames.add(nameKey);
+    agents.push(agent);
+  }
+  return { schemaVersion: 2, agents };
+}
+
+function parseConfigV1(parsed: Partial<AgentConfigFileV1>): AgentConfigFileV1 {
+  const cliPaths: Partial<Record<Executor, string>> = {};
+  const proxyDefaults: Partial<Record<Executor, AgentProxyDefaults>> = {};
+  for (const id of Object.keys(AGENTS) as Executor[]) {
+    const path = parsed.cliPaths?.[id];
+    if (typeof path === 'string' && isAbsolute(path)) cliPaths[id] = path;
+    if (parsed.proxyDefaults?.[id]) {
+      proxyDefaults[id] = normalizeProxyDefaults(parsed.proxyDefaults[id]);
+    }
+  }
+  return { schemaVersion: 1, cliPaths, proxyDefaults };
+}
+
+function parseConfig(raw: string): AgentConfigFile | AgentConfigFileV1 {
+  const parsed = JSON.parse(raw) as { schemaVersion?: unknown };
+  return parsed?.schemaVersion === 2
+    ? parseConfigV2(parsed as { agents?: unknown })
+    : parseConfigV1(parsed as Partial<AgentConfigFileV1>);
 }
 
 function safeReleaseValue(value: string, label: string): string {
@@ -535,20 +670,6 @@ function validateProxyInitialize(id: Executor, value: unknown): void {
   }
 }
 
-function parseConfig(raw: string): AgentConfigFile {
-  const parsed = JSON.parse(raw) as Partial<AgentConfigFile>;
-  const cliPaths: Partial<Record<Executor, string>> = {};
-  const proxyDefaults: Partial<Record<Executor, AgentProxyDefaults>> = {};
-  for (const id of Object.keys(AGENTS) as Executor[]) {
-    const path = parsed.cliPaths?.[id];
-    if (typeof path === 'string' && isAbsolute(path)) cliPaths[id] = path;
-    if (parsed.proxyDefaults?.[id]) {
-      proxyDefaults[id] = normalizeProxyDefaults(parsed.proxyDefaults[id]);
-    }
-  }
-  return { schemaVersion: 1, cliPaths, proxyDefaults };
-}
-
 async function existsReadable(path: string): Promise<boolean> {
   try {
     await access(path, constants.R_OK);
@@ -573,6 +694,12 @@ export class AgentManager {
     promise: Promise<AgentInstallStatus>;
   }>();
   private readonly statusGenerations = new Map<Executor, number>();
+  private readonly agentStatusCache = new Map<string, { value: UserAgentStatus; expiresAt: number }>();
+  private readonly agentStatusProbes = new Map<string, {
+    generation: number;
+    promise: Promise<UserAgentStatus>;
+  }>();
+  private readonly agentStatusGenerations = new Map<string, number>();
   private configMutationTail: Promise<void> = Promise.resolve();
   private config: AgentConfigFile = emptyConfig();
 
@@ -601,10 +728,10 @@ export class AgentManager {
       const commandProvider = new CommandRuntimeProvider({
         id: definition.id,
         command: definition.command,
-        configuredPath: () => (
-          this.config.cliPaths[definition.id] ??
-          this.options.environmentCliPaths?.[definition.id]
-        ),
+        // The closure only consults the environment override. A saved Agent's
+        // explicit path reaches the provider through inspectInstalled(path) /
+        // CliRuntimeManager.acquire(kind, path), never through this global.
+        configuredPath: () => this.options.environmentCliPaths?.[definition.id],
         officialPaths,
         pathEnv: () => options.pathEnv ?? process.env.PATH,
         env: {
@@ -630,23 +757,73 @@ export class AgentManager {
   static async create(options: AgentManagerOptions): Promise<AgentManager> {
     const manager = new AgentManager(options);
     await mkdir(options.dataDir, { recursive: true });
+    let persisted: AgentConfigFile | AgentConfigFileV1;
     try {
-      manager.config = parseConfig(await readFile(manager.configPath, 'utf8'));
+      persisted = parseConfig(await readFile(manager.configPath, 'utf8'));
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
-      manager.config = emptyConfig();
+      persisted = emptyConfigV1();
     }
-    let migrated = false;
-    for (const id of Object.keys(AGENTS) as Executor[]) {
-      const legacy = options.legacyProxyDefaults?.[id];
-      if (!manager.config.proxyDefaults[id] && legacy) {
-        manager.config.proxyDefaults[id] = normalizeProxyDefaults(legacy);
-        migrated = true;
-      }
+    if (persisted.schemaVersion === 2) {
+      manager.config = persisted;
+      return manager;
     }
-    if (migrated) await manager.saveConfig();
+    manager.config = await manager.migrateV1(persisted);
+    await manager.saveConfig();
     return manager;
+  }
+
+  /** v1 → v2 migration. Each PRODUCT kind gets at most one default Agent,
+   *  sourced from (first hit wins for the path): v1 cliPaths, the environment
+   *  CLI override; the Agent is created when any of these hold: a path/defaults
+   *  were configured, a Proxy is installed, or the kind appears in existing
+   *  sessions. Kinds the user never touched get NO Agent — no setup-required
+   *  empty rows migrate. Grok is out of the product catalog and never migrates. */
+  private async migrateV1(v1: AgentConfigFileV1): Promise<AgentConfigFile> {
+    const sessionExecutors = new Set(
+      (await this.options.sessionExecutors?.() ?? []).filter(isProductExecutor),
+    );
+    const agents: UserAgent[] = [];
+    for (const kind of PRODUCT_EXECUTORS) {
+      const envPath = this.options.environmentCliPaths?.[kind];
+      const cliPath = v1.cliPaths[kind]
+        ?? (typeof envPath === 'string' && isAbsolute(envPath) ? envPath : null)
+        ?? null;
+      const legacy = this.options.legacyProxyDefaults?.[kind];
+      const defaults = v1.proxyDefaults[kind]
+        ?? (legacy ? normalizeProxyDefaults(legacy) : emptyProxyDefaults());
+      const configured = cliPath !== null
+        || defaults.model !== '' || defaults.thinking !== '' || defaults.mode !== '';
+      if (
+        !configured
+        && !await this.hasInstalledProxy(kind)
+        && !sessionExecutors.has(kind)
+      ) {
+        continue;
+      }
+      agents.push({
+        id: randomUUID(),
+        name: AGENTS[kind].name,
+        color: DEFAULT_AGENT_COLORS[kind],
+        proxy: kind,
+        cliPath,
+        defaults,
+      });
+    }
+    return { schemaVersion: 2, agents };
+  }
+
+  private async hasInstalledProxy(id: ProductExecutor): Promise<boolean> {
+    // Development proxy entries are the vendored in-tree packages, not a
+    // user installation — they carry no signal for the v2 migration.
+    if (!this.options.managedProxies) return false;
+    try {
+      await lstat(join(this.options.dataDir, 'plugins', id, 'current'));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   runtimeProviders(): CliRuntimeProvider[] {
@@ -712,8 +889,10 @@ export class AgentManager {
     };
   }
 
+  /** Kind-level statuses for the PRODUCT catalog (no Grok). Used by draft
+   *  Agents and onboarding; saved-Agent statuses go through agentStatus(). */
   async list(refresh = false): Promise<AgentInstallStatus[]> {
-    return Promise.all((Object.keys(AGENTS) as Executor[]).map(id => this.status(id, refresh)));
+    return Promise.all(PRODUCT_EXECUTORS.map(id => this.status(id, refresh)));
   }
 
   async status(id: Executor, refresh = false): Promise<AgentInstallStatus> {
@@ -762,197 +941,341 @@ export class AgentManager {
     return probe;
   }
 
+  /** Kind-level configured CLI override (environment only). A saved Agent's
+   *  own path is resolved per Agent and reaches the runtime through
+   *  `CliRuntimeManager.acquire(kind, path)` — never through this global. */
   configuredPath(id: Executor): string | null {
-    return (
-      this.config.cliPaths[id] ??
-      this.options.environmentCliPaths?.[id] ??
-      null
-    );
+    if (!AGENTS[id]) throw new Error(`unsupported agent: ${id}`);
+    return this.options.environmentCliPaths?.[id] ?? null;
   }
 
+  /** Kind-level defaults view used by legacy callers (session creation until
+   *  it resolves the Session's own Agent, and the kind status payload): the
+   *  first saved Agent of the kind wins. */
   proxyDefaults(id: Executor): AgentProxyDefaults {
     if (!AGENTS[id]) throw new Error(`unsupported agent: ${id}`);
-    const defaults = { ...(this.config.proxyDefaults[id] ?? emptyProxyDefaults()) };
+    const agent = isProductExecutor(id)
+      ? this.config.agents.find(candidate => candidate.proxy === id)
+      : undefined;
+    const defaults = { ...(agent?.defaults ?? emptyProxyDefaults()) };
     return id === 'grok' ? migrateLegacyGrokProxyDefaults(defaults) : defaults;
   }
 
-  async setProxyDefaults(
-    id: Executor,
-    patch: Partial<AgentProxyDefaults>,
-  ): Promise<AgentInstallStatus> {
-    if (!AGENTS[id]) throw new Error(`unsupported agent: ${id}`);
-    const finishMutation = await this.acquireConfigMutationTurn();
+  // ------------------------------------------------------------------
+  // User Agents (agents.json schema v2)
+  // ------------------------------------------------------------------
+
+  listAgents(): UserAgent[] {
+    return this.config.agents.map(agent => ({ ...agent, defaults: { ...agent.defaults } }));
+  }
+
+  getAgent(id: string): UserAgent {
+    const agent = this.config.agents.find(candidate => candidate.id === id);
+    if (!agent) throw new Error(`agent not found: ${id}`);
+    return { ...agent, defaults: { ...agent.defaults } };
+  }
+
+  agentDefaults(id: string): AgentProxyDefaults {
+    return { ...this.getAgent(id).defaults };
+  }
+
+  /** Resolved runtime CLI path for one saved Agent: its own path, then the
+   *  kind's environment override, then null (provider auto-scan). */
+  agentRuntimePath(id: string): { proxy: ProductExecutor; cliPath: string | null } {
+    const agent = this.getAgent(id);
+    return {
+      proxy: agent.proxy,
+      cliPath: agent.cliPath ?? this.options.environmentCliPaths?.[agent.proxy] ?? null,
+    };
+  }
+
+  /** First locally detected CLI candidate for a kind (PATH then official
+   *  install locations). Filesystem scan only — never spawns a probe. Used
+   *  to prefill a draft Agent's Path. */
+  async scannedCliPath(id: Executor): Promise<string | null> {
+    const provider = this.providers.get(id);
+    if (!provider) return null;
     try {
-    const claim = await acquireAgentProxyUpdateLock(
-      this.updateLockDataDir(),
-      CONFIG_LOCK_AGENT_ID,
-      'Agent configuration update',
-    );
-    let operationFailed = false;
-    let operationError: unknown;
-    try {
-      const currentConfig = await this.readPersistedConfig();
-      const current = currentConfig.proxyDefaults[id] ?? emptyProxyDefaults();
-      const nextConfig: AgentConfigFile = {
-        ...currentConfig,
-        cliPaths: { ...currentConfig.cliPaths },
-        proxyDefaults: {
-          ...currentConfig.proxyDefaults,
-          [id]: normalizeProxyDefaults({ ...current, ...patch }),
-        },
-      };
-      await this.saveConfig(nextConfig);
-      this.config = nextConfig;
-      // Persistence is the commit point. Invalidate immediately so a later
-      // claim-retirement failure cannot leave the old defaults cached.
-      this.invalidateStatus(id);
-    } catch (error) {
-      operationFailed = true;
-      operationError = error;
-    }
-    try {
-      await claim.release();
-    } catch (cleanupError) {
-      if (operationFailed) {
-        throw new AggregateError(
-          [operationError, cleanupError],
-          `${id} Proxy defaults update failed and its configuration claim was retained.`,
-        );
-      }
-      throw cleanupError;
-    }
-    if (operationFailed) throw operationError;
-    return this.status(id, true);
-    } finally {
-      finishMutation();
+      const installed = await provider.inspectInstalled();
+      return installed[0]?.binaryPath ?? null;
+    } catch {
+      return null;
     }
   }
 
-  async setCliPath(id: Executor, path: string | null): Promise<AgentInstallStatus> {
+  /** The kind's default runtime path — its first saved Agent's resolved
+   *  path, or the environment override when the kind has no Agent. */
+  firstAgentPath(id: Executor): string | null {
     if (!AGENTS[id]) throw new Error(`unsupported agent: ${id}`);
+    if (isProductExecutor(id)) {
+      const agent = this.config.agents.find(candidate => candidate.proxy === id);
+      if (agent) return this.agentRuntimePath(agent.id).cliPath;
+    }
+    return this.options.environmentCliPaths?.[id] ?? null;
+  }
+
+  /** Static Proxy-kind catalog. Pure metadata — never spawns or probes. */
+  proxiesCatalog(): ProxyCatalogEntry[] {
+    return PRODUCT_EXECUTORS.map(id => ({
+      id,
+      name: AGENTS[id].name,
+      defaultColor: DEFAULT_AGENT_COLORS[id],
+      tagline: PROXY_TAGLINES[id],
+      officialInstallUrl: AGENTS[id].installerUrl,
+    }));
+  }
+
+  /** Default name for a new draft Agent of the kind: the Proxy display name,
+   *  or "<name> N" when the plain name is already taken. */
+  nextAgentName(proxy: ProductExecutor): string {
+    const base = AGENTS[proxy].name;
+    const taken = new Set(this.config.agents.map(agent => agent.name.toLowerCase()));
+    if (!taken.has(base.toLowerCase())) return base;
+    for (let suffix = 2; ; suffix += 1) {
+      const candidate = `${base} ${suffix}`;
+      if (!taken.has(candidate.toLowerCase())) return candidate;
+    }
+  }
+
+  /** Default color for a new draft Agent: the kind default for the kind's
+   *  first Agent, else the next palette color no saved Agent occupies. */
+  nextAgentColor(proxy: ProductExecutor): AgentColor {
+    if (!this.config.agents.some(agent => agent.proxy === proxy)) {
+      return DEFAULT_AGENT_COLORS[proxy];
+    }
+    const used = new Set(this.config.agents.map(agent => agent.color));
+    for (const color of AGENT_COLORS) {
+      if (!used.has(color)) return color;
+    }
+    return DEFAULT_AGENT_COLORS[proxy];
+  }
+
+  async createAgent(input: {
+    name: string;
+    proxy: ProductExecutor;
+    color?: AgentColor;
+    cliPath?: string | null;
+    defaults?: Partial<AgentProxyDefaults>;
+  }): Promise<UserAgent> {
+    if (!isProductExecutor(input.proxy)) {
+      throw new Error(`unsupported proxy: ${String(input.proxy)}`);
+    }
+    const proxy = input.proxy;
+    const name = normalizeAgentName(input.name);
+    if (!name) throw new Error('Agent name must not be empty');
+    const color = input.color !== undefined
+      ? assertAgentColor(input.color)
+      : this.nextAgentColor(proxy);
+    const cliPath = normalizeCliPathInput(input.cliPath);
+    // The per-kind claim excludes updater/path writers while the candidate
+    // path is being probed; a path-less create only needs the config claim.
+    const kinds = cliPath !== null ? [proxy] : [];
+    return this.withAgentConfigLock(kinds, 'Agent create', async (current, leases) => {
+      assertAgentNameAvailable(current.agents, name);
+      if (cliPath !== null) {
+        await this.probeAgentCliPath(proxy, cliPath, leases.get(proxy)!);
+      }
+      const agent: UserAgent = {
+        id: randomUUID(),
+        name,
+        color,
+        proxy,
+        cliPath,
+        defaults: normalizeProxyDefaults(input.defaults),
+      };
+      await this.commitConfig(
+        { schemaVersion: 2, agents: [...current.agents, agent] },
+        [agent.id],
+        [proxy],
+      );
+      return agent;
+    });
+  }
+
+  async updateAgent(id: string, patch: {
+    name?: string;
+    color?: AgentColor;
+    cliPath?: string | null;
+    proxy?: ProductExecutor;
+    defaults?: Partial<AgentProxyDefaults>;
+  }): Promise<UserAgent> {
+    const existing = this.getAgent(id);
+    const nextProxy = patch.proxy ?? existing.proxy;
+    if (!isProductExecutor(nextProxy)) {
+      throw new Error(`unsupported proxy: ${String(patch.proxy)}`);
+    }
+    const name = patch.name !== undefined ? normalizeAgentName(patch.name) : existing.name;
+    if (!name) throw new Error('Agent name must not be empty');
+    const color = patch.color !== undefined ? assertAgentColor(patch.color) : existing.color;
+    const cliPath = patch.cliPath !== undefined
+      ? normalizeCliPathInput(patch.cliPath)
+      : existing.cliPath;
+    const pathOrProxyChanged = patch.cliPath !== undefined || patch.proxy !== undefined;
+    // Name/color/defaults stay write-through under the config claim only —
+    // they never touch the runtime load set, so they must not queue behind
+    // a kind updater. Path/Proxy changes take the kind claim for the probe.
+    const claimKinds = pathOrProxyChanged
+      ? [...new Set<Executor>([existing.proxy, nextProxy])]
+      : [];
+    return this.withAgentConfigLock(claimKinds, 'Agent update', async (current, leases) => {
+      assertAgentNameAvailable(current.agents, name, id);
+      const index = current.agents.findIndex(candidate => candidate.id === id);
+      if (index === -1) throw new Error(`agent not found: ${id}`);
+      const previous = current.agents[index]!;
+      if (pathOrProxyChanged && cliPath !== null) {
+        await this.probeAgentCliPath(nextProxy, cliPath, leases.get(nextProxy)!);
+      }
+      const agent: UserAgent = {
+        ...previous,
+        name,
+        color,
+        proxy: nextProxy,
+        cliPath,
+        defaults: patch.defaults
+          ? normalizeProxyDefaults({ ...previous.defaults, ...patch.defaults })
+          : previous.defaults,
+      };
+      const agents = [...current.agents];
+      agents[index] = agent;
+      // The kind-level status view carries the first-Agent defaults/path, so
+      // every committed update invalidates both touched kinds — even a
+      // write-through defaults rename.
+      await this.commitConfig(
+        { schemaVersion: 2, agents },
+        [id],
+        [...new Set<Executor>([existing.proxy, nextProxy])],
+      );
+      return agent;
+    });
+  }
+
+  async deleteAgent(id: string): Promise<void> {
+    const existing = this.getAgent(id);
+    await this.withAgentConfigLock([], 'Agent delete', async current => {
+      const agents = current.agents.filter(candidate => candidate.id !== id);
+      if (agents.length === current.agents.length) throw new Error(`agent not found: ${id}`);
+      await this.commitConfig({ schemaVersion: 2, agents }, [id], [existing.proxy]);
+    });
+  }
+
+  /** Live path/Proxy probe status for one saved Agent. The CLI probe resolves
+   *  the Agent's own path first (then the kind's environment override, PATH,
+   *  and official install locations); the Proxy side stays kind-level because
+   *  a kind has exactly one installed Proxy. */
+  async agentStatus(id: string, refresh = false): Promise<UserAgentStatus> {
+    const agent = this.getAgent(id);
+    if (refresh) this.invalidateAgentStatus(id);
+    const generation = this.agentStatusGenerations.get(id) ?? 0;
+    const cached = this.agentStatusCache.get(id);
+    if (!refresh && cached && cached.expiresAt > Date.now()) return cached.value;
+    const pending = this.agentStatusProbes.get(id);
+    if (!refresh && pending?.generation === generation) return pending.promise;
+    const probe = Promise.all([
+      this.cliStatus(agent.proxy, undefined, agent.cliPath ?? undefined),
+      this.proxyStatus(agent.proxy),
+    ]).then(([cli, plugin]) => {
+      const value: UserAgentStatus = {
+        ...agent,
+        proxyName: AGENTS[agent.proxy].name,
+        ready: cli.state === 'ready' && plugin.state === 'ready',
+        cli,
+        plugin: { ...plugin, defaults: { ...agent.defaults } },
+        officialInstallUrl: AGENTS[agent.proxy].installerUrl,
+      };
+      if ((this.agentStatusGenerations.get(id) ?? 0) === generation) {
+        this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
+      }
+      return value;
+    }).finally(() => {
+      if (this.agentStatusProbes.get(id)?.promise === probe) this.agentStatusProbes.delete(id);
+    });
+    this.agentStatusProbes.set(id, { generation, promise: probe });
+    return probe;
+  }
+
+  async listAgentStatuses(refresh = false): Promise<UserAgentStatus[]> {
+    return Promise.all(this.config.agents.map(agent => this.agentStatus(agent.id, refresh)));
+  }
+
+  private async probeAgentCliPath(
+    kind: ProductExecutor,
+    path: string,
+    claim: AgentUpdateLease,
+  ): Promise<void> {
+    const provider = this.providers.get(kind);
+    if (!provider) throw new Error(`CLI runtime provider is not configured: ${kind}`);
+    await provider.probe({ cli: kind, binaryPath: path, source: 'override' }, claim);
+  }
+
+  private async commitConfig(
+    next: AgentConfigFile,
+    invalidateAgentIds: readonly string[] = [],
+    invalidateKinds: readonly Executor[] = [],
+  ): Promise<void> {
+    // Persistence is the commit point. Invalidate immediately so a later
+    // claim-retirement failure cannot leave stale statuses cached.
+    await this.saveConfig(next);
+    this.config = next;
+    for (const id of invalidateAgentIds) this.invalidateAgentStatus(id);
+    for (const kind of invalidateKinds) this.invalidateStatus(kind);
+  }
+
+  /** Serialize agents.json writers in this Host, then across Hosts via the
+   *  shared config claim; per-kind claims additionally exclude updater/path
+   *  writers while a CLI path is being validated. The callback re-reads the
+   *  persisted config so an older snapshot can never overwrite a newer one. */
+  private async withAgentConfigLock<T>(
+    kinds: readonly Executor[],
+    operation: string,
+    run: (
+      current: AgentConfigFile,
+      leases: ReadonlyMap<Executor, AgentUpdateLease>,
+    ) => Promise<T>,
+  ): Promise<T> {
     const finishMutation = await this.acquireConfigMutationTurn();
     try {
-    const nextPath = path === null || path.trim() === '' ? undefined : path.trim();
-    if (nextPath !== undefined && !isAbsolute(nextPath)) {
-      throw new Error('CLI path must be absolute');
-    }
-
-    // Serialize the shared agents.json across Agents and Hosts, then exclude
-    // updater/path writers for this Agent without blocking ordinary runtime
-    // users. Both claims stay owned through validation, persistence, and the
-    // returned final status.
-    const configClaim = await acquireAgentProxyUpdateLock(
-      this.updateLockDataDir(),
-      CONFIG_LOCK_AGENT_ID,
-      'Agent configuration update',
-    );
-    let claim: AgentUpdateLease;
-    try {
-      claim = await acquireAgentProxyUpdateLock(
-        this.updateLockDataDir(),
-        id,
-        `${id} CLI path update`,
-      );
-    } catch (error) {
+      const claims: AgentUpdateLease[] = [];
+      const leases = new Map<Executor, AgentUpdateLease>();
+      let result: T | undefined;
+      let operationFailed = false;
+      let operationError: unknown;
       try {
-        await configClaim.release();
-      } catch (cleanupError) {
+        claims.push(await acquireAgentProxyUpdateLock(
+          this.updateLockDataDir(),
+          CONFIG_LOCK_AGENT_ID,
+          operation,
+        ));
+        for (const kind of [...new Set(kinds)].sort()) {
+          const lease = await acquireAgentProxyUpdateLock(
+            this.updateLockDataDir(),
+            kind,
+            operation,
+          );
+          claims.push(lease);
+          leases.set(kind, lease);
+        }
+        const current = await this.readPersistedConfig();
+        result = await run(current, leases);
+      } catch (error) {
+        operationFailed = true;
+        operationError = error;
+      }
+      const cleanupErrors: unknown[] = [];
+      for (const claim of claims.reverse()) {
+        try {
+          await claim.release();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
+      if (operationFailed || cleanupErrors.length > 0) {
+        if (cleanupErrors.length === 0) throw operationError;
         throw new AggregateError(
-          [error, cleanupError],
-          `${id} CLI path update could not release its configuration claim.`,
+          operationFailed ? [operationError, ...cleanupErrors] : cleanupErrors,
+          `${operation} failed or retained one of its coordination claims.`,
         );
       }
-      throw error;
-    }
-
-    let previousConfig: AgentConfigFile | undefined;
-    let nextConfig: AgentConfigFile | undefined;
-    let persisted = false;
-    let rolledBack = false;
-    let result: AgentInstallStatus | undefined;
-    let operationFailed = false;
-    let operationError: unknown;
-    let releaseWasPrimaryFailure = false;
-    const cleanupErrors: unknown[] = [];
-    const restorePrevious = async (): Promise<void> => {
-      if (rolledBack || !previousConfig) return;
-      if (persisted) await this.saveConfig(previousConfig);
-      this.config = previousConfig;
-      rolledBack = true;
-      this.invalidateStatus(id);
-    };
-
-    try {
-      // Reload under the cross-Host claim so an older Host cannot overwrite
-      // another Host's newer config with its stale in-memory snapshot.
-      previousConfig = await this.readPersistedConfig();
-      const cliPaths = { ...previousConfig.cliPaths };
-      if (nextPath === undefined) delete cliPaths[id];
-      else cliPaths[id] = nextPath;
-      nextConfig = {
-        ...previousConfig,
-        cliPaths,
-        proxyDefaults: { ...previousConfig.proxyDefaults },
-      };
-
-      if (nextPath !== undefined) {
-        const provider = this.providers.get(id)!;
-        await provider.probe({
-          cli: id,
-          binaryPath: nextPath,
-          source: 'override',
-        }, claim);
-      }
-      await this.saveConfig(nextConfig);
-      persisted = true;
-      this.config = nextConfig;
-      this.invalidateStatus(id);
-      result = await this.statusInternal(id, true, claim);
-      if (nextPath !== undefined && result.cli.state !== 'ready') {
-        throw new Error(result.cli.error ?? 'CLI path is not usable');
-      }
-    } catch (error) {
-      operationFailed = true;
-      operationError = error;
-      try {
-        await restorePrevious();
-      } catch (cleanupError) {
-        cleanupErrors.push(cleanupError);
-      }
-    }
-
-    try {
-      await claim.release();
-    } catch (error) {
-      if (operationFailed) {
-        cleanupErrors.push(error);
-      } else {
-        operationFailed = true;
-        operationError = error;
-        releaseWasPrimaryFailure = true;
-      }
-    }
-
-    try {
-      await configClaim.release();
-    } catch (error) {
-      if (operationFailed) {
-        cleanupErrors.push(error);
-      } else {
-        operationFailed = true;
-        operationError = error;
-        releaseWasPrimaryFailure = true;
-      }
-    }
-
-    if (operationFailed) {
-      if (cleanupErrors.length === 0 && !releaseWasPrimaryFailure) throw operationError;
-      throw new AggregateError(
-        [operationError, ...cleanupErrors],
-        `${id} CLI path update failed or retained one of its coordination claims.`,
-      );
-    }
-    return result!;
+      return result as T;
     } finally {
       finishMutation();
     }
@@ -1043,7 +1366,7 @@ export class AgentManager {
     if (!this.options.managedProxies) {
       return {
         managed: false,
-        currentVersion: null,
+        currentVersion: (await this.proxyStatus(id)).version,
         latestVersion: null,
         updateAvailable: false,
       };
@@ -1157,6 +1480,7 @@ export class AgentManager {
   private async cliStatus(
     id: Executor,
     updateOwner?: AgentUpdateLease,
+    overridePath?: string,
   ): Promise<AgentCliStatus> {
     const claim = updateOwner ?? await acquireAgentRuntimeUseLock(
       this.updateLockDataDir(),
@@ -1167,7 +1491,7 @@ export class AgentManager {
     let operationFailed = false;
     let operationError: unknown;
     try {
-      result = await this.cliStatusWithClaim(id, claim);
+      result = await this.cliStatusWithClaim(id, claim, overridePath);
     } catch (error) {
       operationFailed = true;
       operationError = error;
@@ -1194,19 +1518,21 @@ export class AgentManager {
   private async cliStatusWithClaim(
     id: Executor,
     claim: AgentUpdateLease,
+    overridePath?: string,
   ): Promise<AgentCliStatus> {
     const recommendedVersion = await this.recommendedCliVersion(id);
     const provider = this.providers.get(id)!;
+    const configured = overridePath ?? this.configuredPath(id) ?? undefined;
     let installed;
     try {
-      installed = await provider.inspectInstalled();
+      installed = await provider.inspectInstalled(configured);
     } catch (error) {
       return {
         state: 'invalid',
-        path: this.configuredPath(id),
+        path: configured ?? null,
         version: null,
         recommendedVersion,
-        source: this.configuredPath(id) ? 'override' : null,
+        source: configured ? 'override' : null,
         error: error instanceof Error ? error.message : String(error),
       };
     }
@@ -1263,19 +1589,29 @@ export class AgentManager {
   private async proxyStatus(id: Executor): Promise<Omit<AgentProxyStatus, 'defaults'>> {
     const path = this.proxyEntry(id);
     if (!this.options.managedProxies) {
-      return await existsReadable(path)
-        ? {
-            state: 'ready',
-            path,
-            version: this.releaseVersion,
-            source: 'development',
-          }
-        : {
-            state: 'missing',
-            path,
-            version: null,
-            source: 'development',
-          };
+      if (!(await existsReadable(path))) {
+        return {
+          state: 'missing',
+          path,
+          version: null,
+          source: 'development',
+        };
+      }
+      // Development mode: report the vendored Proxy package's own version
+      // (e.g. @gian/cc-proxy 0.2.1), never the App's release version.
+      let version = this.releaseVersion;
+      try {
+        version = await pluginVersionFromEntry(path);
+      } catch {
+        // Entry without a resolvable @gian/*-proxy package (test fixtures)
+        // keeps the App version as a diagnostic fallback.
+      }
+      return {
+        state: 'ready',
+        path,
+        version,
+        source: 'development',
+      };
     }
     try {
       const agentRoot = join(this.options.dataDir, 'plugins', id);
@@ -1871,7 +2207,11 @@ export class AgentManager {
 
   private async readPersistedConfig(): Promise<AgentConfigFile> {
     try {
-      return parseConfig(await readFile(this.configPath, 'utf8'));
+      const parsed = parseConfig(await readFile(this.configPath, 'utf8'));
+      // A v1 file can still appear here when an older Host wrote it after
+      // this Host migrated in memory. Migrate it again on the fly; the next
+      // successful commit persists v2.
+      return parsed.schemaVersion === 2 ? parsed : await this.migrateV1(parsed);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyConfig();
       throw error;
@@ -1944,5 +2284,10 @@ export class AgentManager {
   private invalidateStatus(id: Executor): void {
     this.statusCache.delete(id);
     this.statusGenerations.set(id, (this.statusGenerations.get(id) ?? 0) + 1);
+  }
+
+  private invalidateAgentStatus(id: string): void {
+    this.agentStatusCache.delete(id);
+    this.agentStatusGenerations.set(id, (this.agentStatusGenerations.get(id) ?? 0) + 1);
   }
 }

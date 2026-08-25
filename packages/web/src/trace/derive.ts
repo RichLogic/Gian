@@ -43,6 +43,8 @@ function turnIdOf(turn: number): string {
 function projectItem(item: TranscriptItem): TraceItem | null {
   const base = {
     turnId: turnIdOf(item.turn),
+    parentId: turnIdOf(item.turn),
+    shape: 'span' as const,
     at: iso(item.ts),
     evidence: DERIVED_EVIDENCE,
     sourceEventIds: [transcriptItemIdentity(item)],
@@ -51,6 +53,7 @@ function projectItem(item: TranscriptItem): TraceItem | null {
     case 'user':
       return {
         ...base,
+        shape: 'event',
         id: transcriptItemIdentity(item),
         kind: 'input',
         title: firstLine(item.text) || '(attachment)',
@@ -168,6 +171,7 @@ function projectItem(item: TranscriptItem): TraceItem | null {
     case 'approval':
       return {
         ...base,
+        shape: 'event',
         id: transcriptItemIdentity(item),
         kind: 'notice',
         title: item.title,
@@ -180,6 +184,7 @@ function projectItem(item: TranscriptItem): TraceItem | null {
     case 'auto-notice':
       return {
         ...base,
+        shape: 'event',
         id: transcriptItemIdentity(item),
         kind: 'notice',
         title: item.title || item.code || item.variant,
@@ -190,6 +195,7 @@ function projectItem(item: TranscriptItem): TraceItem | null {
     case 'error':
       return {
         ...base,
+        shape: 'event',
         id: transcriptItemIdentity(item),
         kind: 'notice',
         title: firstLine(item.text),
@@ -199,6 +205,7 @@ function projectItem(item: TranscriptItem): TraceItem | null {
     case 'status':
       return {
         ...base,
+        shape: 'event',
         id: transcriptItemIdentity(item),
         kind: 'notice',
         title: firstLine(item.text),
@@ -207,6 +214,7 @@ function projectItem(item: TranscriptItem): TraceItem | null {
     case 'compaction':
       return {
         ...base,
+        shape: 'event',
         id: transcriptItemIdentity(item),
         kind: 'notice',
         title: 'Context compacted',
@@ -280,6 +288,7 @@ export function deriveTraceSnapshot(
         id: turnIdOf(turn),
         turnId: turnIdOf(turn),
         kind: 'turn' as const,
+        shape: 'span' as const,
         title: `Turn ${turn}`,
         status,
         at: iso(at),

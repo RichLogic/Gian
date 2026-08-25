@@ -245,7 +245,7 @@ function FileLink({
  * ------------------------------------------------------------------ */
 
 /** Level-2 thresholds (locked in docs/work-items/transcript-redesign-acd.md). */
-const INLINE_OUTPUT_LINES = 10;
+export const INLINE_OUTPUT_LINES = 10;
 const INLINE_DIFF_LINES = 30;
 const INLINE_DETAIL_COLUMNS = 120;
 
@@ -267,8 +267,9 @@ export function formatElapsed(ms: number): string {
   return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
 }
 
-/** Right-meta for a running row: breathing dot + live timer from item.ts. */
-function RunningMeta({ since }: { since: number }) {
+/** Right-meta for a running row: breathing dot + live timer from item.ts.
+ *  Exported for the event box's live tail lines. */
+export function RunningMeta({ since }: { since: number }) {
   const now = useNowSeconds(true);
   return <span className="trow-run">running · {formatElapsed(now - since)}</span>;
 }
@@ -277,8 +278,10 @@ function RunningMeta({ since }: { since: number }) {
  *  click; `onRowClick` rows (panel-2 detail / inspector push / chat panel)
  *  are clickable but never expand inline. `caret` forces the caret glyph on
  *  a clickable level-3 row (the mockup marks every drill-down row with it;
- *  only level-1 "row is everything" rows go caret-less). */
-function TRow({
+ *  only level-1 "row is everything" rows go caret-less). Exported for the
+ *  event box, whose lines reuse the row grammar without any per-row click
+ *  behavior (the whole box is the click target). */
+export function TRow({
   verb,
   subject,
   subjectDim = false,
@@ -327,8 +330,9 @@ function TRow({
   );
 }
 
-/** Hover-revealed `⇥ panel` hint on level-3 rows (P3). */
-function PanelExtHint() {
+/** Hover-revealed `⇥ panel` hint on level-3 rows (P3). Exported for the
+ *  event feed, whose rows all drill into panel 2. */
+export function PanelExtHint() {
   const t = useT();
   return <span className="trow-ext" title={t('transcript.panel.open')}>⇥ panel</span>;
 }
@@ -475,8 +479,9 @@ export function ToolEvent({
 }
 
 /** Build full panel text and its routing metadata in one parse. With both
- * input and output present, retain the inline card's input-first ordering. */
-function measureToolDetail(summary: string, output: string | undefined): {
+ * input and output present, retain the inline card's input-first ordering.
+ * Exported for the event feed's per-row detail routing. */
+export function measureToolDetail(summary: string, output: string | undefined): {
   text: string;
   lines: number;
   summaryTruncated: boolean;

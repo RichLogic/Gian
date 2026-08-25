@@ -234,8 +234,11 @@ export class CcProxyService {
     // If host passed a pre-existing claudeSessionId (adoption / reconnect),
     // use it so the next `claude -p --resume <id>` finds the existing on-disk
     // session. Otherwise generate fresh and the next spawn uses --session-id.
-    const wasResumed = typeof input.claudeSessionId === 'string' && input.claudeSessionId.trim().length > 0;
-    const claudeSessionId = wasResumed ? input.claudeSessionId!.trim() : randomUUID();
+    const suppliedSessionId = typeof input.claudeSessionId === 'string' && input.claudeSessionId.trim()
+      ? input.claudeSessionId.trim()
+      : null;
+    const wasResumed = suppliedSessionId !== null && input.resumeExisting !== false;
+    const claudeSessionId = suppliedSessionId ?? randomUUID();
     const createdAt = nowIso();
 
     const session: SessionRecord = {

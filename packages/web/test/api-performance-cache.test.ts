@@ -6,11 +6,13 @@ describe('performance-sensitive API clients', () => {
   });
 
   it('reuses the Agent status cache and exposes it synchronously to remounted views', async () => {
+    // The Host returns saved user Agents verbatim — no client-side
+    // filtering (Grok is already out of the product catalog server-side).
     const agents = [
-      { id: 'codex', name: 'Codex', ready: true },
-      { id: 'grok', name: 'Grok Build', ready: true },
+      { id: 'agent-codex-1', name: 'Codex', proxy: 'codex', ready: true },
+      { id: 'agent-claude-1', name: 'Claude Work', proxy: 'claude', ready: true },
     ];
-    const visibleAgents = [agents[0]];
+    const visibleAgents = agents;
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ agents }), {
         status: 200,

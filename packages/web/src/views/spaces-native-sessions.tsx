@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ApprovalMode, Executor, NativeSession, Session, Workspace } from '@gian/shared';
+import type {
+  ApprovalMode,
+  Executor,
+  NativeSession,
+  Session,
+  UserAgentStatus,
+  Workspace,
+} from '@gian/shared';
 import { usesNativeExecutorConfig } from '@gian/shared';
-import { loadNativeSessions } from '../api.js';
+import { loadAgents, loadNativeSessions } from '../api.js';
 import { confirm } from '../feedback.js';
 import {
   useOperationDispatch,
@@ -330,6 +337,22 @@ function AdoptDialog({
   const [name, setName] = useState('');
   const [mode, setMode] = useState<ApprovalMode>('ask');
   const [error, setError] = useState<string | null>(null);
+  // Agent binding: the kind's saved Agents (adopt binds one explicitly when
+  // the kind has several — never silently the first).
+  const [kindAgents, setKindAgents] = useState<UserAgentStatus[]>([]);
+  const [agentId, setAgentId] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    loadAgents()
+      .then(list => {
+        if (!alive) return;
+        const ofKind = list.filter(agent => agent.proxy === source.executor);
+        setKindAgents(ofKind);
+        setAgentId(ofKind.length === 1 ? ofKind[0]!.id : null);
+      })
+      .catch(() => { if (alive) setKindAgents([]); });
+    return () => { alive = false; };
+  }, [source.executor]);
   // Submitting state is the in-flight native.adopt run (Phase 3b).
   const submitting = useOperationPending(
     nativeEntityKey(workspaceId, source.executor, source.id),
@@ -366,6 +389,7 @@ function AdoptDialog({
         native_session_id: source.id,
         ...(usesNativeExecutorConfig(source.executor) ? {} : { approval_mode: mode }),
         ...(name.trim() ? { name: name.trim() } : {}),
+        ...(agentId ? { agent_id: agentId } : {}),
       },
     }).id);
   }
@@ -393,6 +417,31 @@ function AdoptDialog({
               </div>
             </div>
           </div>
+
+          {kindAgents.length > 0 && (
+            <div className="adopt-field">
+              <label className="adopt-label">Agent</label>
+              {kindAgents.length === 1 ? (
+                <span className="adopt-static">
+                  <span className="exec-dot" style={{ background: `var(--agent-${kindAgents[0]!.color})` }} />
+                  {kindAgents[0]!.name}
+                </span>
+              ) : (
+                <div className="segm" style={{ width: 'fit-content', flexWrap: 'wrap' }}>
+                  {kindAgents.map(agent => (
+                    <button
+                      key={agent.id}
+                      type="button"
+                      className={`segm-item${agentId === agent.id ? ' active' : ''}`}
+                      onClick={() => setAgentId(agent.id)}
+                    >
+                      {agent.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="adopt-field">
             <label className="adopt-label">Session name</label>
@@ -440,7 +489,7 @@ function AdoptDialog({
           <button
             className="btn primary"
             onClick={submit}
-            disabled={submitting}
+            disabled={submitting || (kindAgents.length > 1 && !agentId)}
           >
             {submitting ? 'Adopting…' : 'Adopt'}
           </button>

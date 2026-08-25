@@ -15,9 +15,12 @@ import {
 import {
   applyTraceUpdates,
   deriveStepTimeline,
+  filterTraceItems,
   groupSnapshotByTurn,
   groupTraceByTurn,
+  layoutTraceTimeline,
   sortTraceItems,
+  summarizeTrace,
   traceItemDurationMs,
   traceItemKey,
   upsertTraceItem,
@@ -27,6 +30,7 @@ import type { TraceItem } from '../src/trace/types.js';
 function tool(overrides: Partial<TraceItem> & Pick<TraceItem, 'id' | 'turnId'>): TraceItem {
   return {
     kind: 'tool',
+    shape: 'span',
     title: 'Bash',
     at: '2026-08-15T10:00:01.000Z',
     status: 'running',
@@ -145,6 +149,40 @@ describe('traceItemDurationMs', () => {
     expect(traceItemDurationMs(bounded)).toBe(3500);
     const running = tool({ id: 'c', turnId: 'turn-1' });
     expect(traceItemDurationMs(running)).toBeUndefined();
+  });
+});
+
+describe('trace shape, filtering, and summary controls', () => {
+  it('lays duration spans on the real time domain and leaves events as points', () => {
+    const event: TraceItem = {
+      ...tool({ id: 'event', turnId: 'turn-1', at: '2026-08-15T10:00:00.000Z' }),
+      kind: 'input', shape: 'event',
+    };
+    const short = tool({
+      id: 'short', turnId: 'turn-1', at: '2026-08-15T10:00:01.000Z',
+      endAt: '2026-08-15T10:00:02.000Z',
+    });
+    const long = tool({
+      id: 'long', turnId: 'turn-1', at: '2026-08-15T10:00:02.000Z',
+      endAt: '2026-08-15T10:00:12.000Z',
+    });
+    const layout = layoutTraceTimeline([event, short, long], 'duration');
+    expect(layout.find(entry => entry.item.id === 'event')).toMatchObject({ point: true, widthPct: 0 });
+    expect(layout.find(entry => entry.item.id === 'long')!.widthPct)
+      .toBeGreaterThan(layout.find(entry => entry.item.id === 'short')!.widthPct);
+  });
+
+  it('searches semantic detail and retains the matching item ancestors', () => {
+    const filtered = filterTraceItems(traceFixtureStepRequest.items, 'deepseek-chat');
+    expect(filtered.map(item => item.id)).toEqual([
+      'turn-1', 'step:turn-1:native-turn-1:0', 'request-1',
+    ]);
+  });
+
+  it('summarizes turns, calls, events, and real span durations', () => {
+    const stats = summarizeTrace(traceFixtureMultiTurn.items);
+    expect(stats).toMatchObject({ turns: 2, steps: 0, calls: 5, events: 2 });
+    expect(stats.toolDurationMs).toBe(107_000);
   });
 });
 

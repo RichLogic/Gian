@@ -37,9 +37,9 @@ function laneOf(testid: string): string | null {
 }
 
 describe('TraceTimeline', () => {
-  it('plots every non-turn item as an equal-width span on its lane', () => {
+  it('plots semantic events and real duration spans on their lanes', async () => {
     renderTrace(traceFixtureMultiTurn);
-    expect(screen.getByTestId('trace-timeline')).toBeInTheDocument();
+    expect(screen.getByTestId('trace-timeline')).toHaveAttribute('data-mode', 'duration');
     // kind → lane: input → Input, reasoning/assistant/plan → Model,
     // tool/agent → Tools.
     expect(laneOf('trace-span-t1-input')).toBe('input');
@@ -50,12 +50,21 @@ describe('TraceTimeline', () => {
     expect(laneOf('trace-span-t2-agent')).toBe('tools');
     // Turn items bound the groups; they are never plotted.
     expect(screen.queryByTestId('trace-span-turn-1')).not.toBeInTheDocument();
-    // Sequence mode: equal widths, chronological positions.
+    // Point events are ticks; completed spans use their real durations.
     const plottable = traceFixtureMultiTurn.items.filter(i => i.kind !== 'turn');
-    const span = screen.getByTestId('trace-span-t1-input');
-    expect(span.style.width).toBe(`${100 / plottable.length}%`);
-    expect(span.style.left).toBe('0%');
-    expect(span).toHaveAttribute('title', 'Add a greeting endpoint to the server');
+    const input = screen.getByTestId('trace-span-t1-input');
+    expect(input).toHaveClass('point');
+    expect(input).toHaveAttribute('data-shape', 'event');
+    expect(input.style.width).toBe('');
+    expect(screen.getByTestId('trace-span-t2-tool-bash').style.width)
+      .not.toBe(screen.getByTestId('trace-span-t1-tool-read').style.width);
+    expect(input).toHaveAttribute('title', 'Add a greeting endpoint to the server');
+
+    // Duration is a real mode control; sequence mode normalizes completed spans.
+    await userEvent.click(screen.getByTestId('trace-control-duration'));
+    expect(screen.getByTestId('trace-timeline')).toHaveAttribute('data-mode', 'sequence');
+    expect(screen.getByTestId('trace-span-t1-tool-read').style.width)
+      .toBe(`${100 / plottable.length}%`);
   });
 
   it('marks failed spans red', () => {
@@ -66,14 +75,17 @@ describe('TraceTimeline', () => {
 
   it('selects the row and scrolls it into view when a span is clicked', async () => {
     const scrollIntoView = vi.fn();
+    const open = vi.fn();
     window.HTMLElement.prototype.scrollIntoView = scrollIntoView;
-    renderTrace(traceFixtureMultiTurn);
+    renderTrace(traceFixtureMultiTurn, open);
     await userEvent.click(screen.getByTestId('trace-span-t1-tool-edit'));
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' });
     expect(screen.getByTestId('trace-span-t1-tool-edit')).toHaveClass('selected');
     expect(screen.getByTestId('trace-row-t1-tool-edit')).toHaveClass('selected');
-    // The timeline never opens the detail itself.
-    expect(screen.queryByTestId('trace-detail')).not.toBeInTheDocument();
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'trace-item',
+      item: expect.objectContaining({ id: 't1-tool-edit' }),
+    }));
   });
 });
 
@@ -169,13 +181,33 @@ describe('TraceView event list', () => {
     expect(screen.queryByTestId(/^trace-span-.*reasoning/)).not.toBeInTheDocument();
   });
 
-  it('renders pre-step sessions flat: no step groups, carets, or durations', () => {
+  it('renders pre-step sessions flat while preserving real call durations', () => {
     renderTrace(traceFixtureMultiTurn);
     expect(document.querySelectorAll('[data-kind="step"]')).toHaveLength(0);
     expect(document.querySelectorAll('[data-kind="request"]')).toHaveLength(0);
     expect(document.querySelectorAll('.trace-step-caret')).toHaveLength(0);
     expect(document.querySelectorAll('.trace-step-group')).toHaveLength(0);
-    expect(screen.queryByTestId(/^trace-step-dur-/)).not.toBeInTheDocument();
+    expect(screen.getByTestId('trace-step-dur-t1-tool-read')).toHaveTextContent('1s');
+  });
+
+  it('collapses turns and call rows through the trajectory controls', async () => {
+    renderTrace(traceFixtureMultiTurn);
+    await userEvent.click(screen.getByTestId('trace-control-turns'));
+    expect(document.querySelectorAll('.trace-turn-body')).toHaveLength(0);
+    await userEvent.click(screen.getByTestId('trace-control-turns'));
+    expect(screen.getByTestId('trace-row-t1-tool-read')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId('trace-control-calls'));
+    expect(screen.queryByTestId('trace-row-t1-tool-read')).not.toBeInTheDocument();
+    expect(screen.getByTestId('trace-row-t1-assistant')).toBeInTheDocument();
+  });
+
+  it('searches semantic content without losing the containing turn', async () => {
+    renderTrace(traceFixtureMultiTurn);
+    await userEvent.type(screen.getByTestId('trace-search'), 'pnpm test');
+    expect(screen.getByTestId('trace-turn-turn-2')).toBeInTheDocument();
+    expect(screen.getByTestId('trace-row-t2-tool-bash')).toBeInTheDocument();
+    expect(screen.queryByTestId('trace-turn-turn-1')).not.toBeInTheDocument();
   });
 
   it('shows no duration on a step row that never reported durationMs', () => {
@@ -186,11 +218,13 @@ describe('TraceView event list', () => {
       items: [
         {
           id: 'turn-1', turnId: 'turn-1', kind: 'turn', title: 'Turn 1',
+          shape: 'span',
           status: 'running', at: '2026-08-15T10:00:00.000Z',
           evidence: 'synthetic', sourceEventIds: ['evt-turn-1'],
         },
         {
           id: 'step-running', turnId: 'turn-1', kind: 'step', title: 'Step 1',
+          shape: 'span',
           status: 'running', at: '2026-08-15T10:00:01.000Z',
           evidence: 'synthetic', sourceEventIds: ['evt-step-1'],
         },
@@ -214,6 +248,7 @@ describe('TraceView event list', () => {
       items: [
         {
           id: 'turn-1', turnId: 'turn-1', kind: 'turn', title: 'Turn 1',
+          shape: 'span',
           status: 'succeeded', at: '2026-08-15T10:00:00.000Z',
           endAt: '2026-08-15T10:01:00.000Z',
           evidence: 'synthetic', sourceEventIds: ['evt-turn-1'],

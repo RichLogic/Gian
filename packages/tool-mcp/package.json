@@ -1,0 +1,25 @@
+{
+  "name": "@gian/tool-mcp",
+  "version": "0.5.2",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "gian-tool-mcp": "./dist/cli.js"
+  },
+  "main": "./dist/adapter.js",
+  "types": "./dist/adapter.d.ts",
+  "scripts": {
+    "build": "pnpm run clean && tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm --filter @gian/shared build && pnpm --filter @gian/tool-cli build && pnpm run build && node --test test/*.test.mjs",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@gian/shared": "workspace:*",
+    "@gian/tool-cli": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.2"
+  }
+}

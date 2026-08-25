@@ -28,6 +28,9 @@ export type TraceEvidence = 'native' | 'derived' | 'synthetic';
 /** Lifecycle status of a turn, tool, or content stream. */
 export type TraceStatus = 'running' | 'succeeded' | 'failed' | 'interrupted';
 
+/** Temporal shape of an item in the execution model. */
+export type TraceItemShape = 'span' | 'event';
+
 /** The closed set of item kinds the Trace projection can emit. */
 export type TraceItemKind =
   | 'turn'
@@ -57,6 +60,8 @@ export interface TraceItem {
   id: string;
   turnId: string;
   kind: TraceItemKind;
+  /** A lifecycle with a start/end (`span`) or a point-in-time fact (`event`). */
+  shape: TraceItemShape;
   title: string;
   summary?: string;
   status?: TraceStatus;
@@ -64,7 +69,7 @@ export interface TraceItem {
   endAt?: string;
   durationMs?: number;
   evidence: TraceEvidence;
-  /** Stable Trace item id of the containing step, when one was reported. */
+  /** Stable Trace item id of the containing turn or step. */
   parentId?: string;
   /** Provider-scoped identity the item is bound to (toolCallId, contentId, …). */
   correlationId?: string;

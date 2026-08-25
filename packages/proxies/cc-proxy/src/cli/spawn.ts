@@ -40,7 +40,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.2.0';
+  return '0.2.2';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -160,11 +160,18 @@ async function main(): Promise<void> {
 
     try {
       const result = await adapter.handle(request);
-      writer.result(request.id, result);
-      // Response-before-Notification: turn.started and interaction.resolved
-      // are produced inside handle(), so the CLI must flush them only after
-      // the JSON-RPC Response has been written.
-      adapter.flushDeferredNotifications();
+      if (request.method === 'sidechat.close') {
+        // Contract §10.5.4 explicitly requires teardown terminals before the
+        // close Success response.
+        adapter.flushDeferredNotifications();
+        writer.result(request.id, result);
+      } else {
+        writer.result(request.id, result);
+        // Response-before-Notification: turn.started and interaction.resolved
+        // are produced inside handle(), so the CLI must flush them only after
+        // the JSON-RPC Response has been written.
+        adapter.flushDeferredNotifications();
+      }
       if (request.method === 'shutdown') {
         input.close();
         await shutdown(0);

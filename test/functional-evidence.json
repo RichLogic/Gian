@@ -83,6 +83,11 @@
       "evidence": ["packages/host/test/config-sanitize-pure.test.ts", "packages/host/test/storage.test.ts", "packages/host/test/storage-paths.test.ts", "packages/host/test/maintenance-lock-path.test.ts", "packages/host/test/event-store.test.ts", "packages/host/test/event-storage-v3-helpers.test.ts", "packages/host/test/event-storage-v3-migrator.test.ts", "packages/host/test/history-store.test.ts", "packages/host/test/working-tree-refresh.test.ts", "scripts/run-packaged-app-smoke.mjs"]
     },
     {
+      "id": "gian-tool",
+      "prefixes": ["FT-TOOL"],
+      "evidence": ["packages/shared/test/tool-contract.test.mjs", "packages/host/test/gian-tool-*.test.ts", "packages/tool-cli/test/*.test.mjs", "packages/tool-mcp/test/*.test.mjs"]
+    },
+    {
       "id": "security",
       "prefixes": ["FT-SEC"],
       "evidence": ["packages/host/test/attachments-path.test.ts", "packages/host/test/safe-path.test.ts", "packages/host/test/sec-*.test.ts", "packages/host/test/redact.test.ts", "packages/host/test/desktop-boundary.test.ts", "packages/web/test/sec-012-composer-bypass.test.tsx", "e2e/specs/06-one-shot-bypass.spec.ts"]

@@ -1,6 +1,6 @@
 {
   "name": "gian",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
   "description": "One local desktop app for Codex, Claude Code, Kimi Code, and DeepSeek Harness",
   "packageManager": "pnpm@10.33.2",
@@ -18,7 +18,7 @@
     "dev:restart": "node scripts/dev.mjs restart",
     "dev:down": "node scripts/dev.mjs down",
     "dev:web": "node scripts/dev.mjs up",
-    "typecheck": "pnpm -F @gian/shared build && pnpm -F @gian/proxy-protocol build && pnpm -r typecheck",
+    "typecheck": "pnpm -F @gian/shared build && pnpm -F @gian/proxy-protocol build && pnpm -F @gian/tool-cli build && pnpm -r typecheck",
     "test": "node scripts/run-tests.mjs --scope unit --scope integration --quality-gates",
     "test:all": "node scripts/run-tests.mjs --scope unit --scope integration --scope system --quality-gates",
     "test:unit:all": "node scripts/run-tests.mjs --scope unit",

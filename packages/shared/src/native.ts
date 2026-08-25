@@ -51,4 +51,8 @@ export interface AdoptNativeSessionRequest {
   name?: string;
   /** Claude/Codex only. Defaults to 'ask' if omitted; Kimi must omit it. */
   approval_mode?: ApprovalMode;
+  /** Agent to bind. Required by the Host when the kind has several saved
+   *  Agents (AGENT_REQUIRED otherwise); a single-Agent kind binds it
+   *  implicitly. */
+  agent_id?: string;
 }

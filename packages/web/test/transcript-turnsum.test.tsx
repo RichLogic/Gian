@@ -26,6 +26,7 @@ import type {
   TranscriptItem,
 } from '../src/types.js';
 import { Transcript } from '../src/transcript/Transcript.js';
+import { ChatPanelOpenContext } from '../src/presentation/chat-panel.js';
 import { applyEnvelope } from '../src/transcript/apply.js';
 import type { EventEnvelope } from '@gian/shared';
 
@@ -365,5 +366,67 @@ describe('P2边角形态', () => {
     const compaction: CompactionItem = { kind: 'compaction', id: 'cmp-2', ts: 1_600, turn: 1 };
     const { container } = renderTranscript([userMsg(), command(), notice, compaction, turnEnd()]);
     expect(container.querySelector('.turnsum-stats')).toHaveTextContent('3 actions');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 长列表路由 — >10 folded rows open the panel-2 event feed instead of
+// flooding the transcript with the inline body (2026-08-24, issue #96)
+// ---------------------------------------------------------------------------
+
+describe('turnsum: long lists route to panel 2', () => {
+  function manyCommands(n: number): TranscriptItem[] {
+    return Array.from({ length: n }, (_, i) =>
+      command({ id: `cmd-${i}`, command: `run-${i}`, ts: 1_000 + i * 100 }));
+  }
+
+  it('>10 folded rows: click opens the event feed instead of expanding inline', async () => {
+    const user = userEvent.setup();
+    const open = vi.fn();
+    const { container } = render(
+      <ChatPanelOpenContext.Provider value={open}>
+        <Transcript
+          items={[userMsg(), ...manyCommands(11), turnEnd()]}
+          pending={false}
+          onApprove={vi.fn()}
+        />
+      </ChatPanelOpenContext.Provider>,
+    );
+
+    await user.click(container.querySelector('.turnsum') as HTMLElement);
+    expect(open).toHaveBeenCalledWith({ kind: 'event-feed', turn: 1 });
+    expect(container.querySelector('.turnsum-body')).toBeNull();
+    // The panel affordance is advertised on the row.
+    expect(container.querySelector('.turnsum .trow-ext')).not.toBeNull();
+  });
+
+  it('≤10 folded rows keep the inline guide-rail expansion', async () => {
+    const user = userEvent.setup();
+    const open = vi.fn();
+    const { container } = render(
+      <ChatPanelOpenContext.Provider value={open}>
+        <Transcript
+          items={[userMsg(), ...manyCommands(10), turnEnd()]}
+          pending={false}
+          onApprove={vi.fn()}
+        />
+      </ChatPanelOpenContext.Provider>,
+    );
+
+    await user.click(container.querySelector('.turnsum') as HTMLElement);
+    expect(open).not.toHaveBeenCalled();
+    const body = container.querySelector('.turnsum-body');
+    expect(body).not.toBeNull();
+    expect(within(body as HTMLElement).getByText('run-9')).toBeInTheDocument();
+  });
+
+  it('falls back to inline expansion when no chat-panel context exists', async () => {
+    const user = userEvent.setup();
+    const { container } = renderTranscript([userMsg(), ...manyCommands(11), turnEnd()]);
+
+    await user.click(container.querySelector('.turnsum') as HTMLElement);
+    const body = container.querySelector('.turnsum-body');
+    expect(body).not.toBeNull();
+    expect(within(body as HTMLElement).getByText('run-10')).toBeInTheDocument();
   });
 });

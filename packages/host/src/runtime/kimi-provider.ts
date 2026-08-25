@@ -33,9 +33,9 @@ export class KimiRuntimeProvider implements CliRuntimeProvider {
 
   constructor(private readonly options: KimiRuntimeProviderOptions) {}
 
-  async inspectInstalled(): Promise<InstalledRuntime[]> {
+  async inspectInstalled(overridePath?: string): Promise<InstalledRuntime[]> {
     const candidates: Candidate[] = [];
-    const override = this.options.overridePath?.trim();
+    const override = (overridePath ?? this.options.overridePath)?.trim();
     if (override) {
       if (!isAbsolute(override)) {
         throw new Error('KIMI_BIN must be an absolute path.');

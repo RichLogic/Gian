@@ -104,6 +104,9 @@ export interface CreateSessionParams {
    *  When omitted, the proxy generates a fresh UUID and the next spawn
    *  uses `--session-id <new>` for a clean conversation. */
   claudeSessionId?: string;
+  /** A native id may name a freshly prepared zero-turn fork. In that case
+   *  the next turn must use --session-id rather than --resume. */
+  resumeExisting?: boolean;
 }
 
 export interface GetSessionParams {

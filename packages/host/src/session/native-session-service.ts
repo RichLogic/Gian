@@ -14,6 +14,12 @@ function capabilityAdvertised(
   return capabilities[name] !== undefined;
 }
 
+/** Cached native-listing facade per (kind, resolved CLI path) — two Agents
+ *  on one kind with different CLI paths never share a listing process. */
+export function nativeSessionsCacheKey(executor: Executor, cliPath?: string | null): string {
+  return `__native_sessions_${executor}__${cliPath ?? ''}`;
+}
+
 interface NativeSessionCallbacks {
   persistKimiReplay: (
     sessionId: string,
@@ -31,25 +37,29 @@ export class NativeSessionService {
     private sessions: SessionRepository,
     private broadcaster: WsBroadcaster,
     private callbacks: NativeSessionCallbacks,
+    /** Fallback runtime path when an operation does not name an Agent. */
+    private resolveKindCliPath?: (executor: Executor) => string | null,
   ) {}
 
-  async listKimi(cwd: string): Promise<NativeSession[]> {
-    return (await this.listFromProxy('kimi', cwd, false)) ?? [];
+  async listKimi(cwd: string, cliPath?: string | null): Promise<NativeSession[]> {
+    return (await this.listFromProxy('kimi', cwd, false, cliPath)) ?? [];
   }
 
-  async listPlugin(executor: Executor, cwd: string): Promise<NativeSession[] | null> {
-    return this.listFromProxy(executor, cwd, true);
+  async listPlugin(executor: Executor, cwd: string, cliPath?: string | null): Promise<NativeSession[] | null> {
+    return this.listFromProxy(executor, cwd, true, cliPath);
   }
 
   private async listFromProxy(
     executor: Executor,
     cwd: string,
     requireNativeList: boolean,
+    cliPath?: string | null,
   ): Promise<NativeSession[] | null> {
-    const cacheKey = `__native_sessions_${executor}__`;
+    const path = cliPath !== undefined ? cliPath : this.resolveKindCliPath?.(executor) ?? null;
+    const cacheKey = nativeSessionsCacheKey(executor, path);
     let client;
     try {
-      client = await this.proxy.getOrCreate(cacheKey, executor);
+      client = await this.proxy.getOrCreate(cacheKey, executor, { cliPath: path });
       const initialized = await client.initialize();
       if (!client.listNativeSessions || !capabilityAdvertised(initialized.capabilities, 'session.native.list')) {
         return requireNativeList ? null : [];
@@ -110,10 +120,12 @@ export class NativeSessionService {
     executor: Executor,
     nativeSessionId: string,
     _cwd: string,
+    cliPath?: string | null,
   ): Promise<void> {
-    const cacheKey = `__native_sessions_${executor}__`;
+    const path = cliPath !== undefined ? cliPath : this.resolveKindCliPath?.(executor) ?? null;
+    const cacheKey = nativeSessionsCacheKey(executor, path);
     try {
-      const client = await this.proxy.getOrCreate(cacheKey, executor);
+      const client = await this.proxy.getOrCreate(cacheKey, executor, { cliPath: path });
       const initialized = await client.initialize();
       if (!client.deleteNativeSession || !capabilityAdvertised(initialized.capabilities, 'session.native.delete')) {
         throw new Error(`${executor} does not expose native-session deletion.`);
@@ -140,6 +152,10 @@ export class NativeSessionService {
     nativeSessionId: string;
     name?: string;
     approvalMode?: ApprovalMode;
+    cliPath?: string | null;
+    agentId?: string | null;
+    agentName?: string | null;
+    agentColor?: string | null;
   }): Promise<{ session: Session; replay: { turns: number; events: number } }> {
     const duplicate = this.db
       .prepare('SELECT id FROM sessions WHERE executor = ? AND native_session_id = ?')
@@ -159,6 +175,7 @@ export class NativeSessionService {
         executor: input.executor,
         cwd: input.cwd,
         model: null,
+        cliPath: input.cliPath ?? this.resolveKindCliPath?.(input.executor) ?? null,
         nativeSessionId: input.nativeSessionId,
         resumeMode: 'load',
       });
@@ -176,12 +193,13 @@ export class NativeSessionService {
         this.db
           .prepare(
             `INSERT INTO sessions
-              (id, name, type, workspace_id, executor, model, approval_mode,
+              (id, name, type, workspace_id, executor, agent_id, agent_name, agent_color,
+               model, approval_mode,
                executor_config_json, active_channel, status, archived,
                worktree_path, branch, base_branch, worktree_outcome,
                native_session_id, created_at, updated_at)
              VALUES
-              (?, ?, 'coding', ?, ?, NULL, ?, ?, 'web', 'new', 0,
+              (?, ?, 'coding', ?, ?, ?, ?, ?, NULL, ?, ?, 'web', 'new', 0,
                NULL, NULL, NULL, NULL, ?, ?, ?)`,
           )
           .run(
@@ -189,6 +207,9 @@ export class NativeSessionService {
             name,
             input.workspaceId,
             input.executor,
+            input.agentId ?? null,
+            input.agentName ?? null,
+            input.agentColor ?? null,
             input.executor === 'kimi' || input.executor === 'grok' ? null : input.approvalMode ?? 'ask',
             JSON.stringify(executorConfigFromOptions(broughtUp.configOptions)),
             input.nativeSessionId,

@@ -48,7 +48,19 @@ vi.mock('../src/api.js', () => ({
   loadProxyModels: vi.fn().mockResolvedValue([]),
   loadProxyCapabilities: vi.fn().mockResolvedValue({ protocolVersion: 'test', models: [], modes: [], slashCommands: [] }),
   loadAgents: vi.fn().mockResolvedValue([
-    { id: 'codex', name: 'Codex', ready: true, cli: { state: 'ready', path: '/bin/codex', version: '1.0.0', source: 'path' }, proxy: { state: 'ready', path: '/proxy/codex', version: '0.1.0', source: 'github-release' }, officialInstallUrl: 'https://example.invalid' },
+    {
+      id: 'agent-codex-1',
+      name: 'Codex',
+      color: 'ink',
+      proxy: 'codex',
+      cliPath: '/bin/codex',
+      defaults: { model: '', thinking: '', mode: '' },
+      proxyName: 'Codex',
+      ready: true,
+      cli: { state: 'ready', path: '/bin/codex', version: '1.0.0', source: 'path' },
+      plugin: { state: 'ready', path: '/proxy/codex', version: '0.1.0', source: 'github-release', defaults: { model: '', thinking: '', mode: '' } },
+      officialInstallUrl: 'https://example.invalid',
+    },
   ]),
 }));
 
@@ -361,6 +373,7 @@ describe('task group row actions', () => {
     await waitFor(() => {
       expect(createSubtask).toHaveBeenCalledWith('task-1', {
         workspace_id: 'ws-1',
+        agent_id: 'agent-codex-1',
         executor: 'codex',
         name: 'Child title',
         service_tier: 'fast',

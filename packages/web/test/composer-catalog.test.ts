@@ -168,6 +168,25 @@ describe('catalog condition evaluation', () => {
     expect(payload.model).toBe('vision-model');
   });
 
+  it('omits Fast when the selected model does not satisfy its catalog condition', () => {
+    const fast: ConfigOption = {
+      id: 'service_tier',
+      displayName: 'Fast',
+      binding: 'turn',
+      role: 'fast',
+      control: 'boolean',
+      required: false,
+      defaultValue: false,
+      enabledWhen: [{ optionId: 'model', oneOf: ['vision-model'] }],
+    };
+    const payload = createConfigsFromCatalog('codex', [model, fast], {
+      model: 'base',
+      service_tier: true,
+    });
+    expect(payload.serviceTier).toBeUndefined();
+    expect(payload.turn_config).toEqual({ model: 'base' });
+  });
+
   it('fills only missing values from catalog.resolve defaults', () => {
     expect(applyResolvedDefaults({ model: 'base' }, { model: 'other', verbosity: 'quiet' }))
       .toEqual({ model: 'base', verbosity: 'quiet' });

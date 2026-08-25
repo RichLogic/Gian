@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { Executor, Session, Task, Workspace } from '@gian/shared';
+import type { Session, Task, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import type { RailLayoutController } from '../components/RailLayout.js';
@@ -145,7 +145,7 @@ export function TasksView({
   // run drives the form's creating state; the created Session arrives as the
   // run's result and is selected on confirm.
   const [newForTaskId, setNewForTaskId] = useState<string | null>(null);
-  const [newForExecutor, setNewForExecutor] = useState<Executor | undefined>(undefined);
+  const [newForAgentId, setNewForAgentId] = useState<string | undefined>(undefined);
   const [subtaskRun, setSubtaskRun] = useState<{
     runId: string;
     taskId: string;
@@ -188,8 +188,8 @@ export function TasksView({
   useEffect(() => {
     const open = (event: Event) => {
       if (!activeTaskId || activeSubtaskId) return;
-      const executor = (event as CustomEvent<{ executor?: Executor }>).detail?.executor;
-      setNewForExecutor(executor);
+      const agentId = (event as CustomEvent<{ agentId?: string }>).detail?.agentId;
+      setNewForAgentId(agentId);
       setNewForTaskId(activeTaskId);
     };
     window.addEventListener('gian:new-subtask', open);
@@ -205,7 +205,7 @@ export function TasksView({
     : null;
 
   function openNewForTask(taskId: string) {
-    setNewForExecutor(undefined);
+    setNewForAgentId(undefined);
     setNewForTaskId(taskId);
   }
 
@@ -214,7 +214,7 @@ export function TasksView({
     // immediately and let the selected Session surface take over; reopening
     // the Task's "+" restores this Task's own persisted draft.
     setNewForTaskId(null);
-    setNewForExecutor(undefined);
+    setNewForAgentId(undefined);
     onSelectSubtask(taskId, subtaskId);
   }
 
@@ -230,6 +230,7 @@ export function TasksView({
     const run = dispatch('task.createSubtask', {
       taskId,
       workspaceId: input.workspaceId,
+      ...(input.agentId ? { agentId: input.agentId } : {}),
       executor: input.executor,
       ...(input.name ? { name: input.name } : {}),
       ...(input.model ? { model: input.model } : {}),
@@ -265,14 +266,14 @@ export function TasksView({
         <NewSessionView
           key={`task:${newForTask.id}`}
           workspaces={workspaces}
-          initialExecutor={newForExecutor}
+          initialAgentId={newForAgentId}
           draftScope={{ kind: 'task', id: newForTask.id }}
           draftLabel={newForTask.name}
           onNewWorkspace={onNewWorkspace}
           creating={creatingSubtask}
           onCancel={() => {
             setNewForTaskId(null);
-            setNewForExecutor(undefined);
+            setNewForAgentId(undefined);
           }}
           onCreate={input => { submitNewSubtask(newForTask.id, input); }}
         />

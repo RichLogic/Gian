@@ -170,6 +170,9 @@ const sessionSetNativeConfig: OperationDefinition<SessionIdInput & { configId: s
 
 export interface SessionCreateInput {
   workspaceId: string;
+  /** Owning saved Agent. New sessions always carry it; the Host resolves
+   *  the Proxy kind, CLI path, and defaults from it. */
+  agentId?: string;
   executor: Executor;
   name?: string;
   /** New-session composer chips (issue #57 v2): omitted fields fall back to
@@ -191,6 +194,7 @@ const sessionCreate: OperationDefinition<SessionCreateInput> = {
   buildMessage: input => ({
     type: 'session:create',
     workspace_id: input.workspaceId,
+    ...(input.agentId ? { agent_id: input.agentId } : {}),
     executor: input.executor,
     ...(input.name ? { name: input.name } : {}),
     ...(input.model ? { model: input.model } : {}),
@@ -213,6 +217,8 @@ export interface SessionForkInput {
   workspaceId: string;
   executor: Executor;
   name: string;
+  /** Inherited from the source session when it is Agent-bound. */
+  agentId?: string;
   /** Inherited from the source session; omitted for Kimi (executor-native
    *  configuration, see SessionCreateMessage). */
   approvalMode?: ApprovalMode | null;
@@ -224,6 +230,7 @@ const sessionFork: OperationDefinition<SessionForkInput> = {
   buildMessage: input => ({
     type: 'session:create',
     workspace_id: input.workspaceId,
+    ...(input.agentId ? { agent_id: input.agentId } : {}),
     executor: input.executor,
     ...(input.executor !== 'kimi' && input.approvalMode ? { approval_mode: input.approvalMode } : {}),
     name: input.name,

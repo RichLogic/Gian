@@ -93,9 +93,12 @@ export type OperationName =
   | 'agent.installCli'
   | 'agent.installProxy'
   | 'agent.checkProxyUpdate'
-  | 'agent.setCliPath'
-  | 'agent.setProxyDefaults'
   | 'agent.pickCliPath'
+  | 'agent.create'
+  | 'agent.delete'
+  | 'agent.patch'
+  | 'agent.setPath'
+  | 'agent.switchProxy'
   | 'agent.restartApp'
   | 'onboarding.saveProjectRoot'
   | 'onboarding.complete'
@@ -184,8 +187,11 @@ export const OPERATION_POLICIES = {
   'agent.installCli': 'pending',
   'agent.installProxy': 'pending',
   'agent.checkProxyUpdate': 'pending',
-  'agent.setCliPath': 'pending',
-  'agent.setProxyDefaults': 'pending',
+  'agent.create': 'pending',
+  'agent.delete': 'pending',
+  'agent.patch': 'pending',
+  'agent.setPath': 'pending',
+  'agent.switchProxy': 'pending',
   'agent.pickCliPath': 'pending',
   'agent.restartApp': 'pending',
   'onboarding.saveProjectRoot': 'pending',
