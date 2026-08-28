@@ -1,6 +1,6 @@
 {
   "name": "@gian/codex-proxy",
-  "version": "0.2.3",
+  "version": "0.2.10",
   "private": true,
   "type": "module",
   "main": "./dist/src/cli/spawn.js",

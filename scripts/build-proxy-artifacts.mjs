@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import {
   chmod,
+  copyFile,
   mkdir,
   readFile,
   rm,
@@ -21,10 +22,11 @@ const definitions = [
     directory: 'cc-proxy',
     displayName: 'Claude Code',
     processScope: 'session',
+    branding: true,
     runtime: {
       id: 'claude',
       displayName: 'Claude Code CLI',
-      recommendedCliVersion: '2.1.159',
+      verifiedCliVersions: ['2.1.159'],
     },
   },
   {
@@ -32,10 +34,12 @@ const definitions = [
     directory: 'codex-proxy',
     displayName: 'Codex',
     processScope: 'shared',
+    branding: true,
+    skill: 'gian-session',
     runtime: {
       id: 'codex',
       displayName: 'Codex CLI',
-      recommendedCliVersion: '0.146.0',
+      verifiedCliVersions: ['0.146.0'],
     },
   },
   {
@@ -43,10 +47,11 @@ const definitions = [
     directory: 'kimi-proxy',
     displayName: 'Kimi Code',
     processScope: 'shared',
+    branding: true,
     runtime: {
       id: 'kimi',
       displayName: 'Kimi Code CLI',
-      recommendedCliVersion: '0.31.1',
+      verifiedCliVersions: ['0.31.1'],
     },
   },
   {
@@ -55,10 +60,11 @@ const definitions = [
     directory: 'dsh-proxy',
     displayName: 'DeepSeek Harness',
     processScope: 'shared',
+    branding: true,
     runtime: {
       id: 'dsh',
       displayName: 'DeepSeek Harness',
-      recommendedCliVersion: '0.1.0-rc.7',
+      verifiedCliVersions: ['0.1.0-rc.7'],
     },
   },
   {
@@ -69,7 +75,7 @@ const definitions = [
     runtime: {
       id: 'grok',
       displayName: 'Grok Build CLI',
-      recommendedCliVersion: '1.0.4',
+      verifiedCliVersions: ['1.0.4'],
     },
   },
 ];
@@ -85,19 +91,22 @@ export function assertRuntimeManifest(manifest) {
   const runtime = manifest.runtime;
   if (!runtime || typeof runtime !== 'object') {
     if (BUILTIN_PROXY_IDS.has(manifest.id)) {
-      throw new Error(`${manifest.id} built-in proxy must declare runtime.recommendedCliVersion`);
+      throw new Error(`${manifest.id} built-in proxy must declare runtime.verifiedCliVersions`);
     }
     return;
   }
-  const recommended = runtime.recommendedCliVersion;
-  if (recommended == null || recommended === '') {
+  const verified = runtime.verifiedCliVersions;
+  if (!Array.isArray(verified) || verified.length === 0) {
     if (BUILTIN_PROXY_IDS.has(manifest.id)) {
-      throw new Error(`${manifest.id} built-in proxy must declare runtime.recommendedCliVersion`);
+      throw new Error(`${manifest.id} built-in proxy must declare runtime.verifiedCliVersions`);
     }
     return;
   }
-  if (typeof recommended !== 'string' || !SEMVER_RE.test(recommended)) {
-    throw new Error(`${manifest.id} runtime.recommendedCliVersion must be SemVer`);
+  if (verified.some(version => typeof version !== 'string' || !SEMVER_RE.test(version))) {
+    throw new Error(`${manifest.id} runtime.verifiedCliVersions must contain SemVer values`);
+  }
+  if (new Set(verified).size !== verified.length) {
+    throw new Error(`${manifest.id} runtime.verifiedCliVersions must not contain duplicates`);
   }
 }
 
@@ -130,10 +139,10 @@ export async function assertProxySelfTest(entryPoint, manifest) {
     encoding: 'utf8',
     env: {
       ...process.env,
-      ...(manifest.schemaVersion === 2
+      ...(manifest.schemaVersion >= 2
         ? {
             GIAN_PLUGIN_ID: manifest.id,
-            GIAN_PROTOCOL_VERSIONS: '2.0',
+            GIAN_PROTOCOL_VERSIONS: '2.1,2.0',
           }
         : {}),
     },
@@ -144,10 +153,8 @@ export async function assertProxySelfTest(entryPoint, manifest) {
   } catch {
     throw new Error(`${manifest.id} proxy self-test returned invalid JSON`);
   }
-  const validVersion = manifest.schemaVersion === 1
-    ? response?.schemaVersion === 1
-    : response?.schemaVersion === 2
-      && response?.pluginVersion === manifest.pluginVersion;
+  const validVersion = response?.schemaVersion === manifest.schemaVersion
+    && (manifest.schemaVersion === 1 || response?.pluginVersion === manifest.pluginVersion);
   if (!validVersion || response?.id !== manifest.id || response?.ok !== true) {
     throw new Error(
       `${manifest.id} proxy self-test returned an invalid result: ${JSON.stringify(response)}`,
@@ -195,15 +202,40 @@ async function main() {
         `${id} package version ${pluginVersion} does not match requested ${requestedVersion}`,
       );
     }
+    const logoSources = definition.branding ? {
+      light: join(root, 'packages', 'proxies', directory, 'assets', 'logo-light.png'),
+      dark: join(root, 'packages', 'proxies', directory, 'assets', 'logo-dark.png'),
+    } : null;
+    const skillSource = definition.skill
+      ? join(root, 'packages', 'proxies', directory, 'skills', definition.skill, 'SKILL.md')
+      : null;
+    const skills = skillSource ? [{
+      name: definition.skill,
+      path: `skills/${definition.skill}/SKILL.md`,
+      sha256: createHash('sha256').update(await readFile(skillSource)).digest('hex'),
+    }] : undefined;
+    const logoDescriptor = async (variant) => ({
+      path: `assets/logo-${variant}.png`,
+      mediaType: 'image/png',
+      sha256: createHash('sha256').update(await readFile(logoSources[variant])).digest('hex'),
+    });
+    const branding = logoSources ? {
+      logo: {
+        light: await logoDescriptor('light'),
+        dark: await logoDescriptor('dark'),
+      },
+    } : undefined;
     const manifest = {
-      schemaVersion: 2,
+      schemaVersion: branding ? 3 : 2,
       id: definition.pluginId ?? id,
       displayName: definition.displayName,
       pluginVersion,
       entry: 'proxy.mjs',
-      protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
+      protocol: { name: 'gian.proxy', range: '>=2.1 <3.0' },
       process: { scope: definition.processScope },
       runtime: definition.runtime,
+      ...(skills ? { skills } : {}),
+      ...(branding ? { branding } : {}),
     };
     assertRuntimeManifest(manifest);
     const staging = join(outputDir, `.staging-${id}`);
@@ -227,6 +259,17 @@ async function main() {
     try {
       await buildProxyBundle(sourceEntry, proxyEntry);
       await chmod(proxyEntry, 0o755);
+      if (logoSources) {
+        const assetDir = join(packageDir, 'assets');
+        await mkdir(assetDir, { recursive: true });
+        await copyFile(logoSources.light, join(assetDir, 'logo-light.png'));
+        await copyFile(logoSources.dark, join(assetDir, 'logo-dark.png'));
+      }
+      if (skillSource) {
+        const skillDir = join(packageDir, 'skills', definition.skill);
+        await mkdir(skillDir, { recursive: true });
+        await copyFile(skillSource, join(skillDir, 'SKILL.md'));
+      }
       await assertProxySelfTest(proxyEntry, manifest);
       const manifestJson = `${JSON.stringify(manifest, null, 2)}\n`;
       await writeFile(join(packageDir, 'manifest.json'), manifestJson);

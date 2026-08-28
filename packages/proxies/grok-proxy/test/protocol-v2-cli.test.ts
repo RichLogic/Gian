@@ -20,7 +20,7 @@ function startV2Proxy(environment: NodeJS.ProcessEnv = {}) {
       GIAN_PLUGIN_ID: 'grok',
       GIAN_PLUGIN_DATA_DIR: '/tmp/gian-grok-v2-test',
       GIAN_RUNTIME_BIN: resolve('test/fixtures/fake-grok-cli.mjs'),
-      GIAN_PROTOCOL_VERSIONS: '2.0',
+      GIAN_PROTOCOL_VERSIONS: '2.1',
       ...environment,
     },
   });
@@ -50,23 +50,23 @@ function startV2Proxy(environment: NodeJS.ProcessEnv = {}) {
   };
 }
 
-test('Grok CLI negotiates gian.proxy/2.0 independently from its ACP runtime version', async () => {
+test('Grok CLI negotiates gian.proxy/2.1 independently from its ACP runtime version', async () => {
   const proxy = startV2Proxy();
   proxy.send({
     jsonrpc: '2.0',
     id: 'req-1',
     method: 'initialize',
     params: {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: '9.9.9' },
     },
   });
   const initialized = await proxy.next() as { id: string; result: unknown };
   assert.equal(initialized.id, 'req-1');
   const result = initializeResultSchema.parse(initialized.result);
-  assert.equal(result.protocol.version, '2.0');
+  assert.equal(result.protocol.version, '2.1');
   assert.equal(result.plugin.id, 'grok');
-  assert.equal(result.plugin.version, '0.3.1');
+  assert.equal(result.plugin.version, '0.3.2');
   assert.equal(result.process.scope, 'session');
   assert.equal(result.capabilities.interaction, 1);
   assert.equal(result.capabilities['session.native.delete'], 1);
@@ -109,7 +109,7 @@ test('Grok gian.proxy/2 CLI reports a JSON-RPC parse error for malformed NDJSON'
   assert.equal(await waitForExit(proxy.child), 0);
 });
 
-test('Grok CLI speaks gian.proxy/2.0 even when GIAN_PROTOCOL_VERSIONS is omitted', async () => {
+test('Grok CLI speaks gian.proxy/2.1 even when GIAN_PROTOCOL_VERSIONS is omitted', async () => {
   const child = spawn(process.execPath, [resolve('dist/src/cli/spawn.js')], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: {
@@ -137,13 +137,13 @@ test('Grok CLI speaks gian.proxy/2.0 even when GIAN_PROTOCOL_VERSIONS is omitted
     id: 'req-1',
     method: 'initialize',
     params: {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: '9.9.9' },
     },
   })}\n`);
   const initialized = await next() as { id: string; result: unknown };
   assert.equal(initialized.id, 'req-1');
-  assert.equal(initializeResultSchema.parse(initialized.result).protocol.version, '2.0');
+  assert.equal(initializeResultSchema.parse(initialized.result).protocol.version, '2.1');
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 'req-2', method: 'shutdown', params: {} })}\n`);
   assert.deepEqual(await next(), { jsonrpc: '2.0', id: 'req-2', result: { ok: true } });
   assert.equal(await waitForExit(child), 0);
@@ -162,7 +162,7 @@ test('Grok runtime uses the locked ACP command and forces the workspace sandbox'
     id: 'req-1',
     method: 'initialize',
     params: {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: '9.9.9' },
     },
   });
@@ -170,6 +170,7 @@ test('Grok runtime uses the locked ACP command and forces the workspace sandbox'
   proxy.send({ jsonrpc: '2.0', id: 'req-2', method: 'catalog.list', params: {} });
   const catalog = await proxy.next() as {
     result?: {
+      specialCatalogs?: { approvalMode?: string };
       configOptions?: Array<{
         id: string;
         role?: string;
@@ -179,7 +180,8 @@ test('Grok runtime uses the locked ACP command and forces the workspace sandbox'
     };
   };
   const permission = catalog.result?.configOptions?.find(option => option.id === 'permission_mode');
-  assert.equal(permission?.role, 'approval_mode');
+  assert.equal(catalog.result?.specialCatalogs?.approvalMode, 'permission_mode');
+  assert.equal(permission?.role, undefined);
   assert.equal(permission?.binding, 'session');
   assert.deepEqual(permission?.choices?.map(choice => choice.value), ['default', 'auto', 'always_approve']);
   const recorded = JSON.parse(await readFile(recordPath, 'utf8')) as {
@@ -209,7 +211,7 @@ test('Grok turn notifications all carry the Host turn id and sourceTurnId', asyn
       id: 'req-1',
       method: 'initialize',
       params: {
-        protocol: { name: 'gian.proxy', versions: ['2.0'] },
+        protocol: { name: 'gian.proxy', versions: ['2.1'] },
         host: { name: 'Gian', version: '9.9.9' },
       },
     });
@@ -316,7 +318,7 @@ test('Grok CLI lists native sessions and rejects session-bound turn config', asy
       id: 'req-1',
       method: 'initialize',
       params: {
-        protocol: { name: 'gian.proxy', versions: ['2.0'] },
+        protocol: { name: 'gian.proxy', versions: ['2.1'] },
         host: { name: 'Gian', version: '9.9.9' },
       },
     });

@@ -172,6 +172,8 @@ export interface CreateSessionParams {
    *  instead of starting a fresh thread. Used by Gian's "adopt native
    *  session" flow so the on-disk rollout JSONL stays the source of truth. */
   threadId?: string;
+  /** Thread-scoped Codex config supplied by the trusted Gian Host. */
+  config?: Record<string, unknown>;
 }
 
 export interface GetSessionParams {

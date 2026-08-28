@@ -1,5 +1,4 @@
 import type {
-  AgentColor,
   AgentInstallResult,
   AgentProxyDefaults,
   AgentProxyUpdateCheck,
@@ -551,12 +550,10 @@ export async function loadProxies(): Promise<ProxyCatalogEntry[]> {
 
 export interface AgentDraftDefaults {
   name: string;
-  color: AgentColor;
   cliPath: string | null;
 }
 
-/** Prefill for a new draft card of one kind: numbered name, rotated color,
- *  and the kind's existing path copied for second-of-kind Agents. */
+/** Prefill for a new draft card: numbered name and the kind's existing path. */
 export async function loadAgentDraftDefaults(
   proxy: ProductExecutor,
 ): Promise<AgentDraftDefaults> {
@@ -567,7 +564,6 @@ export async function loadAgentDraftDefaults(
 export interface CreateAgentInput {
   name: string;
   proxy: ProductExecutor;
-  color?: AgentColor;
   cliPath?: string | null;
   defaults?: Partial<AgentProxyDefaults>;
 }
@@ -584,7 +580,6 @@ export async function createAgent(input: CreateAgentInput): Promise<UserAgentSta
 
 export interface UpdateAgentInput {
   name?: string;
-  color?: AgentColor;
   cliPath?: string | null;
   proxy?: ProductExecutor;
   defaults?: Partial<AgentProxyDefaults>;

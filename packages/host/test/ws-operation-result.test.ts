@@ -44,7 +44,10 @@ interface Harness {
  * produced by the command under test.
  */
 async function setup(overrides?: {
-  sessions?: Partial<Record<'renameSession' | 'enqueueMessage', (...args: never[]) => void>>;
+  sessions?: Partial<Record<
+    'renameSession' | 'enqueueMessage' | 'activateSession',
+    (...args: never[]) => void | Promise<void>
+  >>;
   term?: Partial<WorkbenchTerminalManager>;
 }): Promise<Harness> {
   const broadcaster = new WsBroadcaster();
@@ -65,6 +68,7 @@ async function setup(overrides?: {
         queue: [],
       } as never);
     },
+    async activateSession(_sessionId: string) {},
     ...overrides?.sessions,
   } as unknown as SessionManager;
 
@@ -173,6 +177,31 @@ test('exempt types (events:subscribe, term:input) produce no operation:result', 
   await send({ type: 'term:input', term_id: 't1', data: 'ls\n' });
 
   assert.equal(results(sent).length, 0);
+});
+
+test('events:subscribe activates and awaits the selected session', async () => {
+  let activatedSessionId: string | null = null;
+  let finishActivation!: () => void;
+  const activation = new Promise<void>((resolve) => { finishActivation = resolve; });
+  const { send } = await setup({
+    sessions: {
+      activateSession(sessionId: string) {
+        activatedSessionId = sessionId;
+        return activation;
+      },
+    },
+  });
+
+  let settled = false;
+  const pending = send({ type: 'events:subscribe', session_id: 's1' })
+    .then(() => { settled = true; });
+  await new Promise<void>((resolve) => { setImmediate(resolve); });
+
+  assert.equal(activatedSessionId, 's1');
+  assert.equal(settled, false, 'subscription dispatch must await Proxy reattach');
+  finishActivation();
+  await pending;
+  assert.equal(settled, true);
 });
 
 test('two rapid same-type commands with different request_ids each get their own correlated result', async () => {

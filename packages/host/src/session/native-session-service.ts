@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ApprovalMode, Executor, NativeSession, Session } from '@gian/shared';
+import type { AgentRuntimeProfile, ApprovalMode, Executor, NativeSession, Session } from '@gian/shared';
 import type { ProxyManager } from '../proxy/manager.js';
 import type { Db } from '../storage/db.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
@@ -155,7 +155,7 @@ export class NativeSessionService {
     cliPath?: string | null;
     agentId?: string | null;
     agentName?: string | null;
-    agentColor?: string | null;
+    runtimeProfile?: AgentRuntimeProfile | null;
   }): Promise<{ session: Session; replay: { turns: number; events: number } }> {
     const duplicate = this.db
       .prepare('SELECT id FROM sessions WHERE executor = ? AND native_session_id = ?')
@@ -175,9 +175,23 @@ export class NativeSessionService {
         executor: input.executor,
         cwd: input.cwd,
         model: null,
-        cliPath: input.cliPath ?? this.resolveKindCliPath?.(input.executor) ?? null,
+        cliPath: input.runtimeProfile?.cliPath
+          ?? input.cliPath
+          ?? this.resolveKindCliPath?.(input.executor)
+          ?? null,
+        proxyVersion: input.runtimeProfile?.proxyVersion ?? null,
         nativeSessionId: input.nativeSessionId,
         resumeMode: 'load',
+        ...(input.executor === 'codex'
+          ? {
+              hostServiceIdentity: {
+                agentId: input.agentId ?? null,
+                workspaceId: input.workspaceId,
+                taskId: null,
+                role: 'admin',
+              },
+            }
+          : {}),
       });
     } catch (error) {
       await this.proxy.dispose(sessionId).catch(() => undefined);
@@ -193,7 +207,8 @@ export class NativeSessionService {
         this.db
           .prepare(
             `INSERT INTO sessions
-              (id, name, type, workspace_id, executor, agent_id, agent_name, agent_color,
+              (id, name, type, workspace_id, executor, agent_id, agent_name,
+               runtime_profile_json,
                model, approval_mode,
                executor_config_json, active_channel, status, archived,
                worktree_path, branch, base_branch, worktree_outcome,
@@ -209,13 +224,14 @@ export class NativeSessionService {
             input.executor,
             input.agentId ?? null,
             input.agentName ?? null,
-            input.agentColor ?? null,
+            input.runtimeProfile ? JSON.stringify(input.runtimeProfile) : null,
             input.executor === 'kimi' || input.executor === 'grok' ? null : input.approvalMode ?? 'ask',
             JSON.stringify(executorConfigFromOptions(broughtUp.configOptions)),
             input.nativeSessionId,
             now,
             now,
           );
+        this.proxySessions.activateHostServices(sessionId);
         replay = this.callbacks.persistKimiReplay(
           sessionId,
           broughtUp.replayUpdates,

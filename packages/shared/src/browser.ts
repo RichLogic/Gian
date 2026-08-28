@@ -1,3 +1,5 @@
+import type { GianBrowserElementCapture } from './browser-context.js';
+
 export interface GianBrowserBounds {
   x: number;
   y: number;
@@ -12,6 +14,7 @@ export interface GianBrowserState {
   canGoBack: boolean;
   canGoForward: boolean;
   canOpenExternal: boolean;
+  inspecting: boolean;
   error?: string;
 }
 
@@ -34,5 +37,7 @@ export interface GianBrowserApi {
   openExternal(tabId: string): Promise<boolean>;
   closeTab(tabId: string): Promise<boolean>;
   clearData(): Promise<boolean>;
+  setInspectMode(tabId: string, enabled: boolean): Promise<GianBrowserState>;
   subscribe(listener: (tabId: string, state: GianBrowserState) => void): () => void;
+  subscribeElement(listener: (tabId: string, capture: GianBrowserElementCapture) => void): () => void;
 }

@@ -3,7 +3,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { agentInstructionTargets } from '../src/onboarding/agent-instructions.js';
 
-test('agentInstructionTargets maps each agent onto an injected home', () => {
+test('agentInstructionTargets maps every legacy cleanup target', () => {
   const home = '/tmp/gian-unit-home';
   const targets = agentInstructionTargets(home);
   assert.deepEqual(

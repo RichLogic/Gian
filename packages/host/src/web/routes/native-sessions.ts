@@ -146,10 +146,10 @@ export function registerNativeSessionRoutes(
       let binding: {
         agentId: string | null;
         agentName: string | null;
-        agentColor: string | null;
+        runtimeProfile: import('@gian/shared').AgentRuntimeProfile | null;
       };
       try {
-        binding = sessions.resolveAdoptAgent(executor, body.agent_id);
+        binding = await sessions.resolveAdoptAgent(executor, body.agent_id);
       } catch (error) {
         const value = error as { code?: unknown; message?: unknown; agents?: unknown };
         if (value.code === 'AGENT_REQUIRED') {
@@ -164,7 +164,8 @@ export function registerNativeSessionRoutes(
 
       db.prepare(
         `INSERT INTO sessions
-          (id, name, type, workspace_id, executor, agent_id, agent_name, agent_color,
+          (id, name, type, workspace_id, executor, agent_id, agent_name,
+           runtime_profile_json,
            model, approval_mode,
            active_channel, status, archived,
            worktree_path, branch, base_branch, worktree_outcome,
@@ -183,7 +184,7 @@ export function registerNativeSessionRoutes(
         executor,
         binding.agentId,
         binding.agentName,
-        binding.agentColor,
+        binding.runtimeProfile ? JSON.stringify(binding.runtimeProfile) : null,
         approvalMode,
         nativeId,
         now,

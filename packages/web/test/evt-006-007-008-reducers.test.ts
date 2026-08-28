@@ -343,6 +343,21 @@ describe('EVT-008: turn_started / turn_completed do not produce transcript rows'
     expect(twice).toBe(once);
     expect(twice.filter(item => item.kind === 'turn-end' && item.turn === 4)).toHaveLength(1);
   });
+
+  it('projects completed, stopped, and failed terminal states onto the boundary', () => {
+    const outcome = (status: 'completed' | 'stopped' | 'error') => {
+      const event = turnEnvelope('turn_completed');
+      event.display = {
+        type: 'state.turn-completed',
+        data: { turnId: 'turn-1', status },
+      };
+      return applyEnvelope([], event, 'codex')[0];
+    };
+
+    expect(outcome('completed')).toMatchObject({ kind: 'turn-end', outcome: 'worked' });
+    expect(outcome('stopped')).toMatchObject({ kind: 'turn-end', outcome: 'stopped' });
+    expect(outcome('error')).toMatchObject({ kind: 'turn-end', outcome: 'failed' });
+  });
 });
 
 // ---------------------------------------------------------------------------

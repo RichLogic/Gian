@@ -228,16 +228,16 @@ describe('Kimi transcript events', () => {
 
     render(<ApprovalCard item={item} onApprove={onApprove} />);
 
-    // The question text is the content; the accept option is a radio, the
-    // reject-kind option collapses into the Cancel button.
-    expect(document.querySelector('.approval-head')).toHaveTextContent('Question');
+    // The question text is the content; the accept option is a radio row,
+    // the reject-kind option collapses into the Cancel button.
+    expect(document.querySelector('.ap2-kind')).toHaveTextContent('Question');
     expect(screen.getByText('这个进行中的 merge 是你发起的吗?')).toBeInTheDocument();
     expect(screen.getByLabelText('是,继续等它完成')).toHaveAttribute('type', 'radio');
     expect(screen.queryByRole('button', { name: '不是,abort 掉' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
     // Kimi question card limits: no header chip, no Other free text.
-    expect(document.querySelector('.question-header')).toBeNull();
-    expect(document.querySelector('.question-option--other')).toBeNull();
+    expect(document.querySelector('.ap2-q-chip')).toBeNull();
+    expect(document.querySelector('.ap2-opt-other')).toBeNull();
 
     // Submit returns the picked option through the native decision channel.
     const submit = screen.getByRole('button', { name: 'Submit' });

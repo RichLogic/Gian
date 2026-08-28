@@ -6,7 +6,11 @@ import { test } from 'node:test';
 import { loadConfig, loadPasswordHash, saveConfig, savePasswordHash } from '../src/storage/config.js';
 import { terminalOptions } from '../src/term/manager.js';
 import { makeTestApp, type TestAppCtx } from './fixtures/test-app.js';
-import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
+import {
+  DEFAULT_LAYOUT_PREFERENCES,
+  DEFAULT_TERMINAL_PREFERENCES,
+  DEFAULT_TOOL_PREFERENCES,
+} from '@gian/shared';
 
 async function patchSettings(ctx: TestAppCtx, body: unknown): Promise<Response> {
   return ctx.fetch('/api/settings', {
@@ -84,6 +88,12 @@ test('SEC-016 · malformed, non-object, wrong-type, and out-of-range bodies retu
       { shortcuts: { commandPalette: 'mod+shift' } },
       { shortcuts: { commandPalette: 'mod+shift+shift+k' } },
       { shortcuts: { commandPalette: 'MOD+K' } },
+      { keymap: [] },
+      { keymap: { preset: 'default', bindings: { 'provider.claude.new': 'mod+n' } } },
+      { keymap: { preset: 'default', bindings: { 'tool.terminal': 'mod+mod+6' } } },
+      { layout: { ...DEFAULT_LAYOUT_PREFERENCES, sidebar_width: 100 } },
+      { layout: { ...DEFAULT_LAYOUT_PREFERENCES, remember_sizes: 'yes' } },
+      { tools: { ...DEFAULT_TOOL_PREFERENCES, diffs: { ...DEFAULT_TOOL_PREFERENCES.diffs, layout: 'columns' } } },
       { external_editors: {} },
       { external_editors: [{ id: 'editor', name: '', command: 'code', args: [] }] },
       { external_editors: [{ id: 'editor', name: 'Code', command: 'code', args: [42] }] },
@@ -130,6 +140,21 @@ test('SEC-016 · retired appearance preferences normalize while current settings
       shortcuts: {
         commandPalette: 'mod+shift+p',
         approveOnce: 'o',
+      },
+      keymap: {
+        preset: 'default' as const,
+        bindings: {
+          'app.quickSwitcher': 'mod+k',
+          'tool.terminal': 'mod+6',
+          'session.later': 'mod+shift+l',
+          'session.archive': null,
+        },
+      },
+      layout: { ...DEFAULT_LAYOUT_PREFERENCES, sidebar_width: 304 },
+      tools: {
+        ...DEFAULT_TOOL_PREFERENCES,
+        files: { ...DEFAULT_TOOL_PREFERENCES.files, show_hidden_files: true },
+        diffs: { ...DEFAULT_TOOL_PREFERENCES.diffs, layout: 'stacked' as const },
       },
       locale: 'en',
       external_editors: [
@@ -187,6 +212,9 @@ test('SEC-016 · retired appearance preferences normalize while current settings
     assert.equal(stored.chat_font_size, payload.chat_font_size);
     assert.equal(stored.chat_font_family, payload.chat_font_family);
     assert.deepEqual(stored.shortcuts, payload.shortcuts);
+    assert.deepEqual(stored.keymap, payload.keymap);
+    assert.deepEqual(stored.layout, payload.layout);
+    assert.deepEqual(stored.tools, payload.tools);
     assert.equal(stored.locale, payload.locale);
     assert.deepEqual(stored.external_editors, payload.external_editors);
     assert.deepEqual(stored.open_apps, payload.open_apps);

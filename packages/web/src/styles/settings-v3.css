@@ -3,7 +3,7 @@
    Left-nav scrollspy locator + vertical-stacked cards.
 
    Base component classes (.select, .segm, .switch, .kv-grid,
-   .theme-chip, .accent-swatch, .exec-row, .exec-dot, .exec-status,
+   .theme-chip, .accent-swatch, .exec-row, .exec-status,
    .kv-grid.shortcuts) already live in gian-v2.css; this file adds the
    v3 layout shell (.settings2*, .s2-*) and the per-card overrides the
    prototype applies, plus the "Open with" panel rules. Imported LAST so
@@ -12,11 +12,41 @@
    ============================================================ */
 
 .settings2 {
-  display: flex;
-  align-items: stretch;
+  width: 100%;
+  height: 100%;
   min-height: 100%;
   container-type: inline-size;
+  overflow: hidden;
 }
+
+.settings2-frame {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  grid-template-areas: "nav main";
+  align-items: stretch;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.settings2-internal-nav {
+  grid-area: nav;
+  min-width: 0;
+  padding: 18px 12px 24px;
+  border-right: 1px solid var(--hairline);
+  background: var(--surface);
+  overflow: auto;
+}
+.settings2-nav-title {
+  padding: 0 8px 18px;
+  font: 600 16px/1.2 var(--font-sans);
+  color: var(--text);
+}
+.settings2-internal-nav .settings-nav-body,
+.settings2-mobile-nav .settings-nav-body { display: grid; gap: 20px; }
+.settings2-mobile-head { display: none; grid-area: header; }
+.settings2-mobile-nav { display: none; }
 
 .s2-group {
   display: flex;
@@ -55,15 +85,20 @@
 .settings2 .mono { font-family: var(--font-mono); }
 
 .settings2-main {
-  flex: 1;
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  gap: 34px;
   min-width: 0;
+  width: 100%;
   padding: 18px 22px 30px;
-  max-width: 760px;
+  overflow: auto;
+  scroll-padding-top: 18px;
 }
 
-/* Single-section switcher — the nav lives in the panel-3 SettingsNavInspector. */
-.s2-section { scroll-margin-top: 16px; }
-.s2-section + .s2-section { margin-top: 26px; }
+/* Continuous preference document; the internal locator owns section jumps. */
+.s2-section { scroll-margin-top: 16px; min-width: 0; }
+.s2-section + .s2-section { margin-top: 0; }
 .s2-section-heading {
   min-height: 28px;
   margin-bottom: 8px;
@@ -75,8 +110,8 @@
 .s2-section-heading .s2-sectiontitle { margin-bottom: 0; }
 .s2-sectiontitle {
   margin: 0 0 12px;
-  font: 600 14px/1.2 var(--font-sans);
-  letter-spacing: -0.005em;
+  font: 600 18px/1.25 var(--font-sans);
+  letter-spacing: 0;
   color: var(--text);
 }
 
@@ -92,6 +127,7 @@
   padding: 18px 20px;
 }
 .s2-card + .s2-card { margin-top: 14px; }
+.settings-section-deferred { min-height: 88px; background: var(--surface-2); }
 
 /* Per-card kv-grid override (the global base is 160px + mono dt). */
 .s2-card .kv-grid {
@@ -198,13 +234,13 @@
 }
 
 .terminal-settings .select { width: 100%; }
-.terminal-stepper {
+.settings-stepper {
   display: grid;
-  grid-template-columns: 28px 56px 28px;
+  grid-template-columns: 28px minmax(56px, auto) 28px;
   align-items: center;
   width: max-content;
 }
-.terminal-stepper button {
+.settings-stepper button {
   width: 28px;
   height: 28px;
   border: 1px solid var(--hairline);
@@ -212,11 +248,11 @@
   color: var(--text-2);
   font: 500 15px/1 var(--font-sans);
 }
-.terminal-stepper button:first-child { border-radius: var(--r-1) 0 0 var(--r-1); }
-.terminal-stepper button:last-child { border-radius: 0 var(--r-1) var(--r-1) 0; }
-.terminal-stepper button:hover:not(:disabled) { color: var(--text); border-color: var(--text-3); }
-.terminal-stepper button:disabled { opacity: 0.4; cursor: default; }
-.terminal-stepper output {
+.settings-stepper button:first-child { border-radius: var(--r-1) 0 0 var(--r-1); }
+.settings-stepper button:last-child { border-radius: 0 var(--r-1) var(--r-1) 0; }
+.settings-stepper button:hover:not(:disabled) { color: var(--text); border-color: var(--text-3); }
+.settings-stepper button:disabled { opacity: 0.4; cursor: default; }
+.settings-stepper output {
   height: 28px;
   display: grid;
   place-items: center;
@@ -224,19 +260,7 @@
   background: var(--surface);
   color: var(--text);
   font: 500 var(--fz-12)/1 var(--font-mono);
-}
-.terminal-range {
-  min-height: 28px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 42px;
-  align-items: center;
-  gap: 10px;
-}
-.terminal-range input { width: 100%; min-width: 0; accent-color: var(--accent); }
-.terminal-range output {
-  color: var(--text-2);
-  font: 500 var(--fz-12)/1 var(--font-mono);
-  text-align: right;
+  padding: 0 10px;
 }
 .terminal-shell-select { text-overflow: ellipsis; }
 .terminal-settings .field-error {
@@ -262,6 +286,170 @@
   }
   .s2-card .kv-grid dt { align-self: auto; }
   .s2-card .kv-grid dd:not(:last-child) { margin-bottom: 8px; }
+}
+
+@container (max-width: 680px) {
+  .settings2-frame {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas: "header" "main";
+  }
+  .settings2-internal-nav { display: none; }
+  .settings2-mobile-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 48px;
+    padding: 6px 14px;
+    border-bottom: 1px solid var(--hairline);
+    background: var(--surface);
+  }
+  .settings2-mobile-head strong { font: 600 var(--fz-13)/1.2 var(--font-sans); }
+  .settings2-nav-toggle { width: 34px; height: 34px; }
+  .settings2-mobile-nav {
+    display: block;
+    position: absolute;
+    inset: 48px 0 auto 0;
+    z-index: 20;
+    max-height: calc(100% - 58px);
+    overflow: auto;
+    padding: 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--hairline);
+    box-shadow: 0 16px 32px color-mix(in oklab, var(--text) 12%, transparent);
+  }
+  .settings2-main { padding: 16px; }
+}
+
+.settings-page { min-width: 0; }
+.settings-page-heading {
+  min-height: 36px;
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.settings-page-heading h2 {
+  margin: 0;
+  font: 600 18px/1.25 var(--font-sans);
+  letter-spacing: 0;
+  color: var(--text);
+}
+.settings-page-heading .btn { display: inline-flex; align-items: center; gap: 7px; }
+.settings-danger-action { white-space: nowrap; }
+
+.management-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(130px, auto) minmax(150px, auto);
+  gap: 10px;
+  margin-bottom: 26px;
+}
+.management-toolbar.adopt-toolbar {
+  grid-template-columns: minmax(200px, 1fr) repeat(2, minmax(130px, auto));
+}
+.management-toolbar select,
+.settings-search {
+  min-height: 38px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  color: var(--text);
+}
+.management-toolbar select { padding: 0 32px 0 12px; }
+.settings-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px;
+  color: var(--text-3);
+}
+.settings-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.settings-search input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: var(--fz-13)/1.3 var(--font-sans);
+}
+
+.management-group + .management-group,
+.workspace-settings-section + .workspace-settings-section { margin-top: 26px; }
+.management-group-heading {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px 8px;
+  color: var(--text-2);
+}
+.management-group-heading strong { font: 600 var(--fz-13)/1.2 var(--font-sans); color: var(--text); }
+.management-group-heading span { font: 500 var(--fz-11)/1 var(--font-mono); color: var(--text-3); }
+.management-list {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-3);
+  background: var(--surface);
+  overflow: hidden;
+}
+.management-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 66px;
+  padding: 10px 14px;
+}
+.management-row + .management-row { border-top: 1px solid var(--hairline); }
+.management-row-copy { min-width: 0; display: grid; gap: 4px; }
+.management-row-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 550 var(--fz-13)/1.25 var(--font-sans);
+  color: var(--text);
+}
+.management-row-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--fz-12)/1.25 var(--font-sans);
+  color: var(--text-3);
+}
+.management-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.management-primary-action { min-width: 96px; min-height: 34px; justify-content: center; }
+.management-trash { color: var(--text-3); }
+.management-trash:hover { color: var(--danger); }
+.management-empty { padding: 28px 16px; text-align: center; color: var(--text-3); font: var(--fz-13)/1.4 var(--font-sans); }
+.native-management-row { grid-template-columns: 12px minmax(0, 1fr) auto; }
+.native-provider-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+.native-provider-dot.claude { background: var(--claude); }
+.native-provider-dot.codex { background: var(--codex); }
+.native-provider-dot.kimi { background: var(--kimi, #239b65); }
+.workspace-management-row { grid-template-columns: minmax(0, 1fr) 34px 34px auto; }
+.workspace-settings-section:last-child .workspace-management-row { grid-template-columns: minmax(0, 1fr) auto; }
+
+.settings-switch span { color: var(--text-2); }
+.settings-toggle-spacer { display: none; }
+.kv-grid dd.settings-toggle-row { grid-column: 1 / -1; }
+.settings-reset-layout { margin-top: 14px; }
+.s2-subsection-block { margin-top: 20px; }
+.s2-subsection-block h4 { margin: 0 0 10px; font: 600 var(--fz-12)/1.2 var(--font-sans); color: var(--text-2); }
+.tool-settings-grid .input,
+.tool-settings-grid .select { width: 100%; }
+
+@container (max-width: 540px) {
+  .management-toolbar,
+  .management-toolbar.adopt-toolbar { grid-template-columns: minmax(0, 1fr); }
+  .management-row,
+  .native-management-row,
+  .workspace-management-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .management-row-copy { grid-column: 1 / -1; }
+  .management-row-actions { grid-column: 1 / -1; }
+  .native-provider-dot { display: none; }
+  .workspace-management-row .management-row-copy { grid-column: 1 / -1; }
 }
 
 .s2-help {
@@ -458,21 +646,8 @@
   width: 100%;
 }
 
-/* ── AI Agents (issue #97): draft card, color-dot swatch popover, catalog modal ── */
+/* ── AI Agents: draft card and Proxy catalog modal ── */
 .s2-card.draft { box-shadow: inset 0 0 0 1px var(--accent-ring); }
-.exec-dot.btnish {
-  width: 14px; height: 14px;
-  border: 0; padding: 0; cursor: pointer;
-  box-shadow: inset 0 0 0 1px oklch(0 0 0 / 0.12);
-}
-.exec-dot.btnish:hover { transform: scale(1.08); }
-.name-edit-wrap { position: relative; display: inline-flex; }
-.swatch-pop {
-  position: absolute; z-index: 30; top: calc(100% + 6px); left: -4px;
-  padding: 8px; display: flex; gap: 4px; flex-wrap: wrap; width: 168px;
-  background: var(--surface); border: 1px solid var(--hairline);
-  border-radius: var(--r-2); box-shadow: var(--shadow-2);
-}
 .exec-name-input {
   width: 180px; height: 22px;
   background: transparent; border: 0; outline: 0;
@@ -503,7 +678,6 @@
 }
 .catalog-item:hover { background: var(--surface-2); }
 .catalog-item.active { background: var(--accent-soft); }
-.catalog-dot { width: 8px; height: 8px; border-radius: var(--r-1); flex: none; }
 .catalog-name { font: 500 13px/1.2 var(--font-sans); }
 .catalog-sub { font: 12px/1.3 var(--font-sans); color: var(--text-3); margin-top: 2px; }
 
@@ -514,3 +688,5 @@
   color: var(--text-3);
   font: var(--fz-11)/1.4 var(--font-sans);
 }
+.s2-card .hint.danger-hint,
+.danger-text { color: var(--danger); }

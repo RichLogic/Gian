@@ -13,8 +13,10 @@
  *   file's block and scroll it into view (again once its patch settles).
  * - stacked⇄side-by-side and word-wrap share their persisted preference with
  *   the History commit body.
+ * - the stats/actions header stays pinned; previous/next follows the file
+ *   nearest that header while the body scrolls.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangedEntry } from '../api.js';
 import { useT } from '../i18n/index.js';
 import {
@@ -30,7 +32,12 @@ import {
   type ChangesDiffAnchor,
   type ChangesDiffPatch,
 } from '../controllers/use-changes-diff.js';
-import { DiffViewControls, useDiffViewPreferences } from './DiffViewControls.js';
+import { useReviewFileNavigation } from '../controllers/use-review-file-navigation.js';
+import {
+  DiffViewControls,
+  FileNavigationControls,
+  useDiffViewPreferences,
+} from './DiffViewControls.js';
 import { DiffBody } from './Sheet.js';
 
 function Icon({ d, size = 13, stroke = 1.5 }: { d: string; size?: number; stroke?: number }) {
@@ -185,6 +192,8 @@ export function ChangesDiffBody({
   const { wrap, split, toggleWrap, toggleSplit } = useDiffViewPreferences();
   const rootRef = useRef<HTMLDivElement>(null);
   const [pendingAnchor, setPendingAnchor] = useState<ChangesDiffAnchor | null>(null);
+  const filePaths = useMemo(() => state.files.map(file => file.path), [state.files]);
+  const fileNavigation = useReviewFileNavigation(rootRef, filePaths);
 
   useEffect(() => {
     if (workingTreeId) ensureChangesDiffLoaded(workingTreeId, ownerSessionId);
@@ -267,22 +276,30 @@ export function ChangesDiffBody({
         </div>
       ) : (
         <>
-          <div className="cs-toolbar">
-            <span className="cs-stats">
-              <span className="files">{state.files.length} {t('changes.files')}</span>
-              <span className="add">+{totals.add}</span>
-              <span className="del">−{totals.del}</span>
-            </span>
-            <span className="cs-actions">
-              <button className="sheet-tabs-act"
-                      title={allCollapsed ? t('history.expandAll') : t('history.collapseAll')}
-                      aria-label={allCollapsed ? t('history.expandAll') : t('history.collapseAll')}
-                      onClick={() => setAllChangesDiffCollapsed(workingTreeId, !allCollapsed, ownerSessionId)}>
-                <Icon d={allCollapsed ? I.unfold : I.fold} size={12} stroke={1.6} />
-              </button>
-              <DiffViewControls split={split} wrap={wrap}
-                                onToggleSplit={toggleSplit} onToggleWrap={toggleWrap} />
-            </span>
+          <div className="cs-pinned-head">
+            <div className="cs-toolbar">
+              <span className="cs-stats">
+                <span className="files">{state.files.length} {t('changes.files')}</span>
+                <span className="add">+{totals.add}</span>
+                <span className="del">−{totals.del}</span>
+              </span>
+              <span className="cs-actions">
+                <FileNavigationControls
+                  canPrevious={fileNavigation.canPrevious}
+                  canNext={fileNavigation.canNext}
+                  onPrevious={fileNavigation.previous}
+                  onNext={fileNavigation.next}
+                />
+                <button className="sheet-tabs-act"
+                        title={allCollapsed ? t('history.expandAll') : t('history.collapseAll')}
+                        aria-label={allCollapsed ? t('history.expandAll') : t('history.collapseAll')}
+                        onClick={() => setAllChangesDiffCollapsed(workingTreeId, !allCollapsed, ownerSessionId)}>
+                  <Icon d={allCollapsed ? I.unfold : I.fold} size={12} stroke={1.6} />
+                </button>
+                <DiffViewControls split={split} wrap={wrap}
+                                  onToggleSplit={toggleSplit} onToggleWrap={toggleWrap} />
+              </span>
+            </div>
           </div>
           {state.files.length === 0 ? (
             <div className="sheet-empty">{t('changes.empty')}</div>

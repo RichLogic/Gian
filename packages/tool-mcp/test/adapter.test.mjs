@@ -10,6 +10,7 @@ import {
   dispatchGianMcpTool,
   gianMcpCallerId,
 } from '../dist/adapter.js';
+import { gianMcpToolDefinitions } from '../dist/schemas.js';
 
 test('MCP exposes every Gian Tool method one-to-one with explicit write idempotency', () => {
   assert.deepEqual(
@@ -26,6 +27,36 @@ test('MCP exposes every Gian Tool method one-to-one with explicit write idempote
     assert.equal('idempotency_key' in tool.inputSchema.properties, mutation);
     assert.equal(tool.inputSchema.required?.includes('idempotency_key') ?? false, mutation);
   }
+});
+
+test('credential-scoped MCP catalogs and dispatch reject methods outside grants', async () => {
+  const definitions = gianMcpToolDefinitions(['session.get', 'interaction.list']);
+  assert.deepEqual(definitions.map(tool => tool.name), [
+    'session.get',
+    'interaction.list',
+    'gian_call',
+  ]);
+  assert.deepEqual(definitions.at(-1).inputSchema.properties.method.enum, [
+    'session.get',
+    'interaction.list',
+  ]);
+
+  let called = false;
+  const result = await dispatchGianMcpCall({
+    args: { method: 'interaction.respond', params: {} },
+    requestId: 'scoped-request',
+    hostRequestId: () => 'scoped-request',
+    dataDir: '/tmp/gian-mcp-test',
+    callerId: 'internal-session:session-1',
+    allowedMethods: ['session.get'],
+    call: async () => {
+      called = true;
+      throw new Error('must not dispatch');
+    },
+  });
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.error.code, 'PERMISSION_DENIED');
+  assert.equal(called, false);
 });
 
 test('generic MCP dispatcher reaches deferred method-specific tools without adding domain behavior', async () => {
@@ -100,6 +131,7 @@ test('MCP validates and dispatches all methods through the local RPC client', as
     'session.cancel_delivery': { delivery_id: 'delivery-1' },
     'session.wait': { session_id: 'session-1', timeout_ms: 0 },
     'session.stop': { session_id: 'session-1' },
+    'worktree.create_and_bind': { branch: 'feat/managed-view', base_ref: 'HEAD' },
     'interaction.list': {},
     'interaction.respond': {
       session_id: 'session-1',

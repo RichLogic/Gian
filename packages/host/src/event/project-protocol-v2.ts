@@ -18,6 +18,12 @@ function activityStatus(status: string): 'running' | 'success' | 'error' {
   return 'running';
 }
 
+function turnCompletionStatus(stopReason: unknown): 'completed' | 'stopped' {
+  return stopReason === 'interrupted' || stopReason === 'cancelled'
+    ? 'stopped'
+    : 'completed';
+}
+
 function diffFiles(
   files: Array<{ path: string; status: string }> | undefined,
   diff: string,
@@ -384,6 +390,7 @@ export function projectProtocolV2Notification(
         data: {
           turnId,
           sourceTurnId: notification.params.sourceTurnId,
+          status: turnCompletionStatus(data.stopReason),
         },
       }] : [];
     case 'turn.failed':

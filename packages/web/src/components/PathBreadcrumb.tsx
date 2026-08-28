@@ -112,8 +112,9 @@ const ICON = {
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   task: 'M4 6h6l2 2h8v10H4z M8 12h8 M8 15h5',
   trash: 'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13',
-  // branch — protocol Fork (same glyph constant as CodingView's ICON.branch)
-  branch: 'M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
+  // branch — protocol Fork (lucide git-fork; visually distinct from the
+  // breadcrumb's git-branch WorktreeIcon)
+  branch: 'M15 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0z M9 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0z M21 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0z M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9 M12 12v3',
   // envelope — "mark as unread", same idiom as an unread email
   mail: 'M3 5h18v14H3z M3 7l9 6 9-6',
 };

@@ -20,6 +20,24 @@ export function fmtBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/**
+ * De-duplicate an attachment display name against already-staged names:
+ * `image.png` → `image-2.png` → `image-3.png` on collision. Clipboard
+ * screenshots often arrive with the same name (`image.png`, or several
+ * unnamed files in one paste sharing a timestamp), which made multiple
+ * pasted images indistinguishable in the composer.
+ */
+export function dedupeAttachmentName(name: string, taken: ReadonlySet<string>): string {
+  if (!taken.has(name)) return name;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  for (let i = 2; ; i += 1) {
+    const candidate = `${stem}-${i}${ext}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
 export interface ComposerAttachmentPayload {
   path: string;
   name: string;

@@ -5,6 +5,33 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import type { ProxyNotification } from '@gian/proxy-protocol';
 import { ProtocolV2Client } from '../src/proxy/protocol-v2-client.js';
+import { normalizeProtocolCatalog } from '../src/proxy/protocol-v2-session-client.js';
+
+test('Host normalizes 2.1 Special Catalog ids for existing internal config projections', () => {
+  const catalog = normalizeProtocolCatalog({
+    catalogRevision: 'rev-21',
+    input: [{ type: 'text' }],
+    configOptions: [
+      { id: 'native-model', displayName: 'Model', binding: 'turn', control: 'select', required: false, defaultValue: 'm', choices: [{ value: 'm', displayName: 'M' }] },
+      { id: 'native-thinking', displayName: 'Thinking', binding: 'turn', control: 'select', required: false, defaultValue: 'high', choices: [{ value: 'high', displayName: 'High' }] },
+      { id: 'native-fast', displayName: 'Fast', binding: 'turn', control: 'boolean', required: false, defaultValue: false },
+      { id: 'native-approval', displayName: 'Approval', binding: 'turn', control: 'select', required: false, defaultValue: 'ask', choices: [{ value: 'ask', displayName: 'Ask' }] },
+    ],
+    specialCatalogs: {
+      model: 'native-model',
+      thinking: 'native-thinking',
+      fast: 'native-fast',
+      approvalMode: 'native-approval',
+    },
+    slashCommands: [],
+  });
+  assert.deepEqual(catalog.configOptions.map(option => [option.id, option.role]), [
+    ['native-model', 'model'],
+    ['native-thinking', 'effort'],
+    ['native-fast', 'fast'],
+    ['native-approval', 'approval_mode'],
+  ]);
+});
 
 function fixtureSource(options: { malformedCatalog?: boolean; invalidUtf8Catalog?: boolean } = {}): string {
   return `

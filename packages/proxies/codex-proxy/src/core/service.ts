@@ -30,6 +30,45 @@ type ProxyEventSink = (method: string, params: Record<string, unknown>) => void;
 
 const REQUEST_USER_INPUT_METHOD = 'item/tool/requestUserInput';
 const MCP_SERVER_ELICITATION_METHOD = 'mcpServer/elicitation/request';
+const ACTIVE_SIDECHAT_BOUNDARY = `Side Chat context boundary.
+
+The messages immediately before this boundary are the accepted user inputs from the parent Session's active Turn. They are reference context only, not instructions to continue that Turn.
+
+Only user messages after this boundary are active instructions for this Side Chat. Do not continue or complete the parent Turn unless the user explicitly asks here.`;
+
+function activeSidechatResponseItems(inputBatches: InputItem[][]): Array<Record<string, unknown>> {
+  const messages = inputBatches.flatMap((batch) => {
+    const content: Array<Record<string, unknown>> = [];
+    for (const item of batch) {
+      if (item.type === 'text') {
+        content.push({ type: 'input_text', text: item.text });
+        continue;
+      }
+      if (item.type === 'localImage') {
+        content.push({
+          type: 'input_text',
+          text: `Referenced image from active parent input: ${item.path}`,
+        });
+        continue;
+      }
+      content.push({
+        type: 'input_text',
+        text: `Selected skill in active parent input: $${item.name} (${item.path})`,
+      });
+    }
+    return content.length === 0
+      ? []
+      : [{ type: 'message', role: 'user', content }];
+  });
+  return [
+    ...messages,
+    {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: ACTIVE_SIDECHAT_BOUNDARY }],
+    },
+  ];
+}
 
 interface ActiveTurnContext {
   sessionId: string;
@@ -514,8 +553,8 @@ export class CodexProxyService {
       });
     });
 
-    this.runtime.on('runtimeStopped', () => {
-      void this.handleRuntimeStopped();
+    this.runtime.on('runtimeStopped', (cause) => {
+      void this.handleRuntimeStopped(cause);
     });
   }
 
@@ -588,7 +627,9 @@ export class CodexProxyService {
       : null;
     if (adoptThreadId) {
       try {
-        const resumed = await this.runtime.resumeThread(adoptThreadId);
+        const resumed = await this.runtime.resumeThread(adoptThreadId, {
+          ...(input.config ? { config: input.config } : {}),
+        });
         threadId = adoptThreadId;
         configuredPermissions = resumed.configuredPermissions;
       } catch (err) {
@@ -601,6 +642,7 @@ export class CodexProxyService {
         cwd,
         model: typeof input.model === 'string' && input.model.trim() ? input.model.trim() : null,
         ephemeral: input.ephemeral === true,
+        ...(input.config ? { config: input.config } : {}),
       });
       threadId = thread.thread.id;
       configuredPermissions = thread.configuredPermissions;
@@ -625,15 +667,42 @@ export class CodexProxyService {
     return { session: this.serializeSession(session) };
   }
 
-  async forkSession(params: { sessionId: string; lastTurnId?: string }) {
+  async forkSession(params: {
+    sessionId: string;
+    lastTurnId?: string;
+    beforeTurnId?: string;
+    activeInput?: InputItem[][];
+    config?: Record<string, unknown>;
+  }) {
     const source = await this.ensureSessionUsable(this.requireSessionById(params.sessionId));
-    if (source.activeTurnId) {
+    const activeInputFork = Boolean(
+      params.beforeTurnId
+      && params.activeInput?.length
+      && source.activeTurnId === params.beforeTurnId,
+    );
+    if (source.activeTurnId && !activeInputFork) {
       throw createAppError(409, 'SESSION_BUSY', 'Stop the active turn before forking the session.');
+    }
+    if (params.lastTurnId && params.beforeTurnId) {
+      throw createAppError(400, 'INVALID_REQUEST', 'lastTurnId and beforeTurnId are mutually exclusive.');
     }
     const forked = await this.runtime.forkThread(source.threadId, {
       cwd: source.cwd,
       ...(params.lastTurnId ? { lastTurnId: params.lastTurnId } : {}),
+      ...(params.beforeTurnId ? { beforeTurnId: params.beforeTurnId } : {}),
+      ...(params.config ? { config: params.config } : {}),
     });
+    if (params.activeInput?.length) {
+      try {
+        await this.runtime.injectThreadItems(
+          forked.thread.id,
+          activeSidechatResponseItems(params.activeInput),
+        );
+      } catch (error) {
+        await this.runtime.archiveThread?.(forked.thread.id).catch(() => undefined);
+        throw error;
+      }
+    }
     const createdAt = nowIso();
     const session: SessionRecord = {
       id: randomId('sess'),
@@ -1198,7 +1267,9 @@ export class CodexProxyService {
     return session;
   }
 
-  private async handleRuntimeStopped() {
+  private async handleRuntimeStopped(cause: Error) {
+    const detail = cause.message.trim() || 'Codex app-server stopped.';
+    const message = `Codex runtime stopped while the session had an active turn: ${detail}`;
     for (const session of this.sessionsById.values()) {
       const context = this.activeTurnsByThreadId.get(session.threadId);
       if (context) {
@@ -1209,13 +1280,13 @@ export class CodexProxyService {
           data: {
             turnId: context.turnId,
             code: 'RUNTIME_STOPPED',
-            message: 'Codex runtime stopped while the session had an active turn.',
+            message,
           },
         });
       }
       this.updateSession(session, {
         status: session.activeTurnId ? 'stale' : session.status,
-        lastError: session.activeTurnId ? 'Codex runtime stopped while the session had an active turn.' : session.lastError,
+        lastError: session.activeTurnId ? message : session.lastError,
         activeTurnId: session.activeTurnId ? null : session.activeTurnId,
       });
     }
@@ -1606,7 +1677,12 @@ export class CodexProxyService {
       ? classifyPermissionsKind(requestedPermissionsFromParams(params))
       : undefined;
     const approval: PendingApproval = {
-      approvalId: String(message.id),
+      // app-server JSON-RPC request ids are process-local and restart from a
+      // small counter after a runtime restart. Gian persists interaction ids
+      // for the life of the session, so exposing the native id would collide
+      // with historical cards and response ledgers. Keep the native id only
+      // in rpcRequestId and publish an opaque identity instead.
+      approvalId: randomId('interaction'),
       sessionId: session.id,
       rpcRequestId: message.id,
       method: message.method,

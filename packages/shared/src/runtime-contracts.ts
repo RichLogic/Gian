@@ -11,6 +11,8 @@ import type {
   Task,
   Workspace,
 } from './model.js';
+import { normalizeBrowserElementCapture } from './browser-context.js';
+import { normalizeComposerDocument } from './context.js';
 import type { ListNativeSessionsResponse, NativeSession } from './native.js';
 import type { RunnerInfo, StateSyncMessage } from './web.js';
 
@@ -89,6 +91,23 @@ function isExecutorConfigState(value: unknown): boolean {
   return Object.values(value.values).every(isNativeConfigValue);
 }
 
+function isAgentRuntimeProfile(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.skill)) return false;
+  return isString(value.id)
+    && isString(value.agentId)
+    && isOneOf(value.proxy, ['codex', 'claude', 'kimi', 'dsh'])
+    && isString(value.cliPath)
+    && isString(value.cliVersion)
+    && isNullableString(value.configHome)
+    && isNullableString(value.cliFingerprint)
+    && isString(value.proxyVersion)
+    && isArrayOf(value.verifiedCliVersions, isString)
+    && isOneOf(value.verification, ['verified', 'unverified', 'incompatible'])
+    && value.skill.name === 'gian-session'
+    && isString(value.skill.version)
+    && isOneOf(value.skill.state, ['ready', 'missing', 'conflict', 'invalid']);
+}
+
 /** Runtime contract for the canonical shared model crossing REST/WS boundaries. */
 export function isSession(value: unknown): value is Session {
   if (!isRecord(value)) return false;
@@ -97,7 +116,13 @@ export function isSession(value: unknown): value is Session {
     && isOneOf(value.type, ['coding', 'subtask', 'manager'])
     && isNullableString(value.task_id)
     && isNullableString(value.workspace_id)
+    && isOptional(value, 'created_by_actor_kind', entry => (
+      entry === null || isOneOf(entry, ['internal_session', 'external_controller'])
+    ))
+    && isOptional(value, 'created_by_actor_id', isNullableString)
+    && isOptional(value, 'created_by_session_id', isNullableString)
     && isOneOf(value.executor, ['codex', 'claude', 'kimi', 'grok', 'dsh'])
+    && isOptional(value, 'runtime_profile', entry => entry === null || isAgentRuntimeProfile(entry))
     && isNullableString(value.model)
     && (value.approval_mode === null
       || isOneOf(value.approval_mode, ['plan', 'ask', 'auto', 'custom', 'full-access']))
@@ -112,6 +137,12 @@ export function isSession(value: unknown): value is Session {
     && isZeroOrOne(value.unread)
     && isNullableString(value.worktree_path)
     && isOptional(value, 'detected_worktree_path', isNullableString)
+    && isOptional(value, 'detected_worktree_source', item => (
+      item === null || item === 'agent' || item === 'gian_tool'
+    ))
+    && isOptional(value, 'detected_worktree_revision', item => (
+      typeof item === 'number' && Number.isSafeInteger(item) && item >= 0
+    ))
     && isNullableString(value.branch)
     && isNullableString(value.base_branch)
     && (value.worktree_outcome === null || isOneOf(value.worktree_outcome, ['merged', 'discarded']))
@@ -162,22 +193,55 @@ function isSideChatAnchor(value: unknown): boolean {
     && isString(value.source_turn_id);
 }
 
+function isMessageContextItem(value: unknown): boolean {
+  if (!isRecord(value) || !isString(value.id) || !isString(value.type)) return false;
+  if (value.type === 'folder') {
+    return isString(value.path) && isString(value.name);
+  }
+  if (value.type === 'browserElement') {
+    const normalized = normalizeBrowserElementCapture(value);
+    return normalized !== null
+      && isString(value.pageUrl)
+      && isString(value.pageTitle)
+      && isString(value.tagName)
+      && isString(value.selector)
+      && isRecord(value.attributes)
+      && typeof value.contentOmitted === 'boolean'
+      && isString(value.snippet);
+  }
+  return value.type === 'pastedText'
+    && isString(value.text)
+    && isFiniteNumber(value.lineCount)
+    && isFiniteNumber(value.byteSize);
+}
+
 function isSideChatUserInput(value: unknown): boolean {
   return isRecord(value)
     && isString(value.turn_id)
     && 'input' in value
-    && isString(value.created_at);
+    && isString(value.created_at)
+    && (!('context_items' in value) || isArrayOf(value.context_items, isMessageContextItem))
+    && (!('composer_document' in value) || normalizeComposerDocument(value.composer_document) !== null);
 }
 
 export function isSideChatPublicSnapshot(value: unknown): value is SideChatInfo {
   if (!isRecord(value)) return false;
   return isString(value.id)
     && isString(value.parent_session_id)
+    && isFiniteNumber(value.ordinal)
+    && Number.isSafeInteger(value.ordinal)
+    && value.ordinal > 0
+    && isNullableString(value.name)
     && isNullableString(value.stream_id)
     && isOneOf(value.state, ['idle', 'running', 'waiting_interaction', 'stale', 'closed', 'error'])
     && isOneOf(value.status, ['open', 'closing', 'unavailable'])
     && isSideChatAnchor(value.anchor)
     && isRecord(value.session_config)
+    && isOptional(value, 'turn_config', (entry) => (
+      isRecord(entry) && Object.values(entry).every(isNativeConfigValue)
+    ))
+    && isOptional(value, 'turn_config_options', (entry) => isArrayOf(entry, isRecord))
+    && isOptional(value, 'turn_config_revision', isNullableString)
     && isNullableString(value.last_error)
     && isNullableString(value.uncertain_turn_id)
     && Array.isArray(value.events)

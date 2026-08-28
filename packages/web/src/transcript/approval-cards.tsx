@@ -1,31 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ApprovalDecision } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { normalizeGfmTables } from '../markdown-tables.js';
 import { useOperationPending } from '../operations/use-operations.js';
-import { comboMatches, useShortcuts } from '../shortcut-prefs.js';
 import type { ApprovalActionContext, ApprovalItem } from '../types.js';
-
-export function SeverityIcon({ risk }: { risk: 'low' | 'medium' | 'high' }) {
-  if (risk === 'low') {
-    // Muted circle for low risk
-    return (
-      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-        <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="1.5" />
-        <circle cx="8" cy="8" r="2.5" fill="currentColor" />
-      </svg>
-    );
-  }
-  // Filled triangle for medium (warn) and high (danger)
-  return (
-    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-      <path d="M8 2L1.5 13h13z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M8 7v3M8 12v.2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
 
 /**
  * Caret used in expand toggles. SVG chevron (right-pointing) so the 90deg
@@ -49,14 +29,131 @@ type OnApprove = (
   context?: ApprovalActionContext,
 ) => void;
 
+/* ────────────────────────────────────────────────────────────────────────────
+   .ap2 card chrome (2026-08-27 redesign, mockup §5′/§6′)
+   Every pending interactive card shares one shell: a head row (type icon +
+   uppercase mono kind label + right meta), a content body, and a right-aligned
+   action row. Risk / v2 tone drive only the 3px left tone bar and the head
+   meta — low / unreported risk renders a fully neutral card.
+   ──────────────────────────────────────────────────────────────────────────── */
+
+type CardIconKind = 'command' | 'file' | 'plan' | 'question' | 'choice' | 'confirmation';
+
+/** Type icons copied verbatim from the 2026-08-26 mockup (.ap2-icon svgs). */
+function CardIcon({ kind }: { kind: CardIconKind }) {
+  switch (kind) {
+    case 'command':
+      return (
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M2 4.5 6 8l-4 3.5M8 12h6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      );
+    case 'plan':
+      return (
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M3 2.5h10M3 8h10M3 13.5h6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        </svg>
+      );
+    case 'question':
+      return (
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeWidth="1.3" />
+          <path d="M6.2 6.3c.2-1 1-1.6 1.9-1.6 1 0 1.8.7 1.8 1.6 0 1.2-1.2 1.5-1.8 2.1-.2.2-.3.5-.3.9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          <circle cx="8" cy="11.4" r=".8" fill="currentColor" />
+        </svg>
+      );
+    case 'choice':
+      return (
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="8" r="5.5" stroke="currentColor" strokeWidth="1.3" />
+          <path d="M8 5v3l2 1.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        </svg>
+      );
+    case 'confirmation':
+      return (
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M8 2 1.8 13h12.4z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+          <path d="M8 6.5v3M8 11.5v.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        </svg>
+      );
+    case 'file':
+    default:
+      return (
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M4 1.75h5l3 3V14.25H4z" stroke="currentColor" strokeWidth="1.2" />
+          <path d="M9 1.75v3h3" stroke="currentColor" strokeWidth="1.2" />
+        </svg>
+      );
+  }
+}
+
+/** Icon for a generic permission subject: commands get the terminal glyph,
+ *  file writes and every other subject get the file glyph. */
+function subjectIcon(item: ApprovalItem): CardIconKind {
+  return item.category === 'command' ? 'command' : 'file';
+}
+
 /**
- * Card type label row (P1 revision, 2026-08-08): a mono micro-label at the
- * top of each interactive card distinguishing Approval / Question / Plan at
- * a glance. Resolved `.approval-line` rows carry no head.
+ * Left tone bar driver. Two signals compete and the more severe wins:
+ * the v2 presentation `tone` (warning / danger) and the normalized `risk`
+ * (medium → warn, high → danger). low / unreported risk and neutral / info
+ * tone render no bar at all — a neutral card, by design.
  */
-function CardHead({ kind }: { kind: 'approval' | 'question' | 'plan' | 'choice' | 'confirmation' }) {
+function ap2ToneClass(item: ApprovalItem): string {
+  const riskTone = item.risk === 'high' ? 'danger' : item.risk === 'medium' ? 'warning' : null;
+  const hintTone = item.tone === 'danger' ? 'danger' : item.tone === 'warning' ? 'warning' : null;
+  const tone = riskTone === 'danger' || hintTone === 'danger' ? 'danger' : (riskTone ?? hintTone);
+  return tone ? ` tone-${tone}` : '';
+}
+
+/**
+ * Right head meta for risk: `▲ medium risk` (warn) / `▲ high risk` (danger).
+ * low or unreported risk renders NOTHING — safety earns no badge.
+ */
+function RiskMeta({ risk }: { risk?: ApprovalItem['risk'] }) {
   const t = useT();
-  return <div className="approval-head">{t(`transcript.cardKind.${kind}`)}</div>;
+  if (risk === 'medium') {
+    return (
+      <span className="ap2-head-meta">
+        <span className="is-medium">▲</span> {t('transcript.approval.mediumRisk')}
+      </span>
+    );
+  }
+  if (risk === 'high') {
+    return (
+      <span className="ap2-head-meta">
+        <span className="is-high">▲</span> {t('transcript.approval.highRisk')}
+      </span>
+    );
+  }
+  return null;
+}
+
+/** Card head row: type icon + uppercase mono kind label + right meta. */
+function CardHead({
+  kind,
+  icon,
+  meta,
+}: {
+  kind: 'approval' | 'question' | 'plan' | 'choice' | 'confirmation';
+  icon: CardIconKind;
+  meta?: React.ReactNode;
+}) {
+  const t = useT();
+  return (
+    <div className="ap2-head">
+      <span className="ap2-icon"><CardIcon kind={icon} /></span>
+      <span className="ap2-kind">{t(`transcript.cardKind.${kind}`)}</span>
+      {meta}
+    </div>
+  );
+}
+
+/** Resolving indicator — pinned to the far left of the action row
+ *  (`margin-right: auto` in CSS), so the buttons stay right-aligned. */
+function ResolvingNote() {
+  const t = useT();
+  return <span className="ap2-resolving">{t('transcript.approval.resolving')}</span>;
 }
 
 /**
@@ -72,12 +169,11 @@ function isKimiQuestion(item: ApprovalItem): boolean {
 }
 
 /**
- * Approval card — minimal v3 (transcript redesign P1, 2026-08-08).
- * Pending: a card-type label row (`.approval-head`) + the command body
- * (`.approval-cmd`) + a button row. The v2 chrome (icon, title, risk pill,
- * timestamp, kbd hints, high-risk outline) is gone. Allow session sits
- * left; Allow / Decline sit right; everything is a secondary /
- * danger-ghost button — no primary.
+ * Approval card — `.ap2` shell (2026-08-27 redesign).
+ * Pending: head row (icon + kind label + risk meta) + command body
+ * (`.ap2-cmd` / `.ap2-plan`) + a right-aligned button row. Buttons are all
+ * secondary / danger-ghost — never primary, never with kbd hints — and the
+ * danger action is pinned last. Resolved items compress to `.approval-line`.
  */
 export function ApprovalCard({
   item,
@@ -107,33 +203,6 @@ export function ApprovalCard({
   // host's error envelope surfaces the error.
   const resolving = useOperationPending(`approval:${item.approvalId}`, 'approval.resolve');
 
-  // Keyboard shortcut wiring (remappable; defaults A / Shift+A / D) while
-  // pending — only for ordinary approvals; AskUserQuestion uses option
-  // pickers, and the plan exit card uses semantic three-way buttons rather
-  // than allow/deny. The visible kbd hint chips were removed in v3; the
-  // shortcuts stay.
-  const shortcuts = useShortcuts();
-  useEffect(() => {
-    if (item.status !== 'pending' || resolving || isQuestion || isPlanExit || isNative || hasProtocolActions) return;
-    function handleKey(e: KeyboardEvent) {
-      // Ignore if focus is in an input/textarea/contenteditable
-      const tag = (e.target as HTMLElement | null)?.tagName ?? '';
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement | null)?.isContentEditable) return;
-      if (comboMatches(e, shortcuts.approveSession) && sessionScopeAllowed) {
-        e.preventDefault();
-        onApprove(item.approvalId, 'allow_session');
-      } else if (comboMatches(e, shortcuts.approveOnce)) {
-        e.preventDefault();
-        onApprove(item.approvalId, 'allow_once');
-      } else if (comboMatches(e, shortcuts.decline)) {
-        e.preventDefault();
-        onApprove(item.approvalId, 'decline');
-      }
-    }
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [item.status, item.approvalId, onApprove, resolving, isQuestion, isPlanExit, isNative, hasProtocolActions, sessionScopeAllowed, shortcuts]);
-
   // Resolved approvals and questions compress to a single line that reads
   // inline with the surrounding process rows.
   if (item.status !== 'pending') {
@@ -153,15 +222,19 @@ export function ApprovalCard({
       : item.interactionKind === 'choice' ? 'choice'
       : item.interactionKind === 'confirmation' ? 'confirmation'
       : 'approval';
+    const headIcon: CardIconKind = item.interactionKind === 'question' ? 'question'
+      : item.interactionKind === 'choice' ? 'choice'
+      : item.interactionKind === 'confirmation' ? 'confirmation'
+      : subjectIcon(item);
     return (
-      <div className={`approval interaction${item.tone && item.tone !== 'neutral' ? ` tone-${item.tone}` : ''}`}>
-        <CardHead kind={headKind} />
+      <div className={`ap2${ap2ToneClass(item)}`}>
+        <CardHead kind={headKind} icon={headIcon} meta={<RiskMeta risk={item.risk} />} />
         {item.cmd && (
           item.hasSubject
-            ? <div className="approval-cmd">{item.cmd}</div>
-            : <div className="approval-prose">{item.cmd}</div>
+            ? <div className="ap2-cmd">{item.cmd}</div>
+            : <div className="ap2-prose">{item.cmd}</div>
         )}
-        {item.reason && <div className="approval-desc">{item.reason}</div>}
+        {item.reason && <div className="ap2-desc">{item.reason}</div>}
         {item.inputs && item.inputs.length > 0 && (
           <InteractionInputs
             approvalId={item.approvalId}
@@ -171,8 +244,9 @@ export function ApprovalCard({
             onChange={(id, value) => setInputValues(current => ({ ...current, [id]: value }))}
           />
         )}
-        <div className="approval-actions">
-          {protocolActions.map(action => (
+        <div className="ap2-actions">
+          {resolving && <ResolvingNote />}
+          {dangerLast(protocolActions).map(action => (
             <button
               key={action.id}
               className={actionButtonClass(action.style)}
@@ -190,7 +264,6 @@ export function ApprovalCard({
               {action.label}
             </button>
           ))}
-          {resolving && <span className="approval-resolving">{t('transcript.approval.resolving')}</span>}
         </div>
       </div>
     );
@@ -214,8 +287,12 @@ export function ApprovalCard({
   const answers = interactionAnswers(item.inputs, inputValues);
   const inputsReady = protocolInputsReady(item.inputs, inputValues);
   return (
-    <div className="approval">
-      <CardHead kind={isPlanExit ? 'plan' : 'approval'} />
+    <div className={`ap2${ap2ToneClass(item)}`}>
+      <CardHead
+        kind={isPlanExit ? 'plan' : 'approval'}
+        icon={isPlanExit ? 'plan' : subjectIcon(item)}
+        meta={<RiskMeta risk={item.risk} />}
+      />
       {item.inputs && item.inputs.length > 0 && (
         <InteractionInputs
           approvalId={item.approvalId}
@@ -228,22 +305,23 @@ export function ApprovalCard({
       {item.cmd && (
         item.category === 'exit_plan_mode'
           ? (
-            <div className="approval-plan">
+            <div className="ap2-plan">
               <div className="approval-plan-md">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{planMarkdown}</ReactMarkdown>
               </div>
             </div>
           )
           : (
-            <div className="approval-cmd">
+            <div className="ap2-cmd">
               {cmdPrefix && <span className="prompt">{cmdPrefix}</span>}
               {item.cmd}
             </div>
           )
       )}
       {hasProtocolActions ? (
-        <div className="approval-actions">
-          {protocolActions.map(action => (
+        <div className="ap2-actions">
+          {resolving && <ResolvingNote />}
+          {dangerLast(protocolActions).map(action => (
             <button
               key={action.id}
               className={actionButtonClass(action.style)}
@@ -261,11 +339,11 @@ export function ApprovalCard({
               {action.label}
             </button>
           ))}
-          {resolving && <span className="approval-resolving">{t('transcript.approval.resolving')}</span>}
         </div>
       ) : isNative ? (
-        <div className="approval-actions">
-          {item.nativeOptions!.map(option => {
+        <div className="ap2-actions">
+          {resolving && <ResolvingNote />}
+          {dangerLastNative(item.nativeOptions!).map(option => {
             const rejected = option.kind.startsWith('reject');
             const decision: ApprovalDecision = rejected
               ? 'decline'
@@ -291,18 +369,10 @@ export function ApprovalCard({
               </button>
             );
           })}
-          {resolving && <span className="approval-resolving">{t('transcript.approval.resolving')}</span>}
         </div>
       ) : isPlanExit ? (
-        <div className="approval-actions">
-          <button
-            className="btn danger-ghost sm"
-            disabled={resolving}
-            onClick={() => onApprove(item.approvalId, 'keep_planning')}
-          >
-            {t('transcript.approval.keepPlanning')}
-          </button>
-          <span className="spacer" />
+        <div className="ap2-actions">
+          {resolving && <ResolvingNote />}
           <button
             className="btn secondary sm"
             disabled={resolving}
@@ -317,27 +387,43 @@ export function ApprovalCard({
           >
             {t('transcript.approval.autoAccept')}
           </button>
-          {resolving && <span className="approval-resolving">{t('transcript.approval.resolving')}</span>}
+          <button
+            className="btn danger-ghost sm"
+            disabled={resolving}
+            onClick={() => onApprove(item.approvalId, 'keep_planning')}
+          >
+            {t('transcript.approval.keepPlanning')}
+          </button>
         </div>
       ) : (
-        <div className="approval-actions">
+        <div className="ap2-actions">
+          {resolving && <ResolvingNote />}
           {allowSession && (
             <button className="btn secondary sm" disabled={resolving} onClick={() => onApprove(item.approvalId, 'allow_session')}>{t('transcript.approval.allowSession')}</button>
           )}
-          <span className="spacer" />
           <button className="btn secondary sm" disabled={resolving} onClick={() => onApprove(item.approvalId, 'allow_once')}>{t('transcript.approval.allowOnce')}</button>
           <button className="btn danger-ghost sm" disabled={resolving} onClick={() => onApprove(item.approvalId, 'decline')}>{t('transcript.approval.decline')}</button>
-          {resolving && <span className="approval-resolving">{t('transcript.approval.resolving')}</span>}
         </div>
       )}
     </div>
   );
 }
 
+/** Buttons never use primary (2026-08-27 decision, kept from v3: approvals
+ *  don't nudge) — a protocol `primary` style degrades to secondary. */
 function actionButtonClass(style: 'primary' | 'secondary' | 'danger'): string {
-  if (style === 'primary') return 'btn primary sm';
   if (style === 'danger') return 'btn danger-ghost sm';
   return 'btn secondary sm';
+}
+
+/** Danger-styled actions pin to the end of the row (stable partition). */
+function dangerLast<T extends { style: 'primary' | 'secondary' | 'danger' }>(actions: T[]): T[] {
+  return [...actions.filter(a => a.style !== 'danger'), ...actions.filter(a => a.style === 'danger')];
+}
+
+/** Reject-kind native options pin to the end of the row (stable partition). */
+function dangerLastNative<T extends { kind: string }>(options: T[]): T[] {
+  return [...options.filter(o => !o.kind.startsWith('reject')), ...options.filter(o => o.kind.startsWith('reject'))];
 }
 
 function actionDecision(actionId: string): ApprovalDecision {
@@ -417,32 +503,37 @@ function InteractionInputs({
             <div key={input.id} className="approval-input approval-input-select">
               <span>{input.label}</span>
               {description}
-              <ul className="question-options">
-                {(input.choices ?? []).map(choice => (
-                  <li key={choice.value} className="question-option">
-                    <label>
-                      <input
-                        type={multi ? 'checkbox' : 'radio'}
-                        name={`approval-input-${approvalId}-${input.id}`}
-                        disabled={disabled}
-                        checked={multi ? selected.includes(choice.value) : value === choice.value}
-                        onChange={event => {
-                          if (multi) {
-                            onChange(
-                              input.id,
-                              event.target.checked
-                                ? [...selected, choice.value]
-                                : selected.filter(item => item !== choice.value),
-                            );
-                          } else {
-                            onChange(input.id, choice.value);
-                          }
-                        }}
-                      />
-                      <span className="question-option-label">{choice.displayName}</span>
-                    </label>
-                  </li>
-                ))}
+              <ul className="ap2-opts">
+                {(input.choices ?? []).map(choice => {
+                  const picked = multi ? selected.includes(choice.value) : value === choice.value;
+                  return (
+                    <li key={choice.value} className={`ap2-opt${picked ? ' is-picked' : ''}`}>
+                      <label>
+                        <input
+                          type={multi ? 'checkbox' : 'radio'}
+                          name={`approval-input-${approvalId}-${input.id}`}
+                          disabled={disabled}
+                          checked={picked}
+                          onChange={event => {
+                            if (multi) {
+                              onChange(
+                                input.id,
+                                event.target.checked
+                                  ? [...selected, choice.value]
+                                  : selected.filter(item => item !== choice.value),
+                              );
+                            } else {
+                              onChange(input.id, choice.value);
+                            }
+                          }}
+                        />
+                        <span>
+                          <span className="ap2-opt-label">{choice.displayName}</span>
+                        </span>
+                      </label>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           );
@@ -526,11 +617,13 @@ export function ApprovalLine({ item }: { item: ApprovalItem }) {
  * Pending AskUserQuestion approval from the structured cc-proxy bridge,
  * tagged with `category='question'` plus parsed questions.
  *
- * v3 (P1 redesign): no icon / title / pill — the question IS the content;
+ * `.ap2` shell (2026-08-27): options are whole-row clickable card rows —
+ * the picked row gets the accent ring + accent-soft fill (`.is-picked`);
  * the CLI-sent `header` stays as a small chip; multiSelect uses checkboxes;
- * "Other" free text stays. Multi-question cards page one question per
- * screen (Back/Next + a mono `N / M` progress in the button row); answers
- * collect across all pages and submit together on the last one.
+ * "Other" free text is the same row shape with an inline input. Multi-
+ * question cards page one question per screen (Back/Next, the `N / M`
+ * progress lives in the head meta); answers collect across all pages and
+ * submit together on the last one.
  *
  * Submit serializes selections as an `answers` map keyed by question text.
  * The parent view sends the structured `approval:resolve` response.
@@ -601,73 +694,73 @@ function QuestionCard({
     onApprove(item.approvalId, 'allow_once', answers, { category: item.category });
   }
 
+  const q = cur;
+  const sel = q ? selections[q.question] : undefined;
   return (
-    <div className="approval question">
-      <CardHead kind="question" />
-      <div className="question-body">
-        {(() => {
-          const q = cur;
-          const qi = idx;
-          if (!q) return null;
-          const sel = selections[q.question];
-          return (
-            <div key={qi} className="question-block">
-              <div className="question-text">
-                {q.header && <span className="question-header">{q.header}</span>}
-                <span>{q.question}</span>
-              </div>
-              <ul className="question-options">
-                {q.options.map((opt, oi) => {
-                  const isPicked = q.multiSelect
-                    ? Array.isArray(sel) && sel.includes(opt.label)
-                    : sel === opt.label;
-                  return (
-                    <li key={oi} className="question-option">
-                      <label>
-                        <input
-                          type={q.multiSelect ? 'checkbox' : 'radio'}
-                          name={`q-${item.approvalId}-${qi}`}
-                          checked={isPicked}
-                          onChange={() => q.multiSelect
-                            ? toggleMulti(q.question, opt.label)
-                            : pickSingle(q.question, opt.label)}
-                        />
-                        <span className="question-option-label">{opt.label}</span>
-                        {opt.description && (
-                          <span className="question-option-desc">{opt.description}</span>
-                        )}
-                      </label>
-                    </li>
-                  );
-                })}
-                <li className="question-option question-option--other">
+    <div className={`ap2${ap2ToneClass(item)}`}>
+      <CardHead
+        kind="question"
+        icon="question"
+        meta={(
+          <>
+            {total > 1 && <span className="ap2-head-meta">{`${idx + 1} / ${total}`}</span>}
+            <RiskMeta risk={item.risk} />
+          </>
+        )}
+      />
+      {q && (
+        <>
+          {q.header && <span className="ap2-q-chip">{q.header}</span>}
+          <div className="ap2-q-text">{q.question}</div>
+          <ul className="ap2-opts">
+            {q.options.map((opt, oi) => {
+              const isPicked = q.multiSelect
+                ? Array.isArray(sel) && sel.includes(opt.label)
+                : sel === opt.label;
+              return (
+                <li key={oi} className={`ap2-opt${isPicked ? ' is-picked' : ''}`}>
                   <label>
-                    <span className="question-option-label">{t('transcript.question.other')}</span>
                     <input
-                      type="text"
-                      placeholder={t('transcript.question.placeholder')}
-                      value={other[q.question] ?? ''}
-                      onChange={e => setOther(prev => ({ ...prev, [q.question]: e.target.value }))}
+                      type={q.multiSelect ? 'checkbox' : 'radio'}
+                      name={`q-${item.approvalId}-${idx}`}
+                      checked={isPicked}
+                      onChange={() => q.multiSelect
+                        ? toggleMulti(q.question, opt.label)
+                        : pickSingle(q.question, opt.label)}
                     />
+                    <span>
+                      <span className="ap2-opt-label">{opt.label}</span>
+                      {opt.description && (
+                        <span className="ap2-opt-desc">{opt.description}</span>
+                      )}
+                    </span>
                   </label>
                 </li>
-              </ul>
-            </div>
-          );
-        })()}
-      </div>
-      <div className="approval-actions">
+              );
+            })}
+            <li className="ap2-opt ap2-opt-other">
+              <label>
+                <span className="ap2-opt-label">{t('transcript.question.other')}</span>
+                <input
+                  type="text"
+                  placeholder={t('transcript.question.placeholder')}
+                  value={other[q.question] ?? ''}
+                  onChange={e => setOther(prev => ({ ...prev, [q.question]: e.target.value }))}
+                />
+              </label>
+            </li>
+          </ul>
+        </>
+      )}
+      <div className="ap2-actions">
+        {resolving && <ResolvingNote />}
         <button
-          className="btn danger-ghost sm"
+          className="btn ghost sm"
           disabled={resolving}
           onClick={() => onApprove(item.approvalId, 'decline', undefined, { category: item.category })}
         >
           {t('common.cancel')}
         </button>
-        <span className="spacer" />
-        {total > 1 && (
-          <span className="question-progress">{`${idx + 1} / ${total}`}</span>
-        )}
         {idx > 0 && (
           <button
             className="btn secondary sm"
@@ -694,7 +787,6 @@ function QuestionCard({
             {t('common.submit')}
           </button>
         )}
-        {resolving && <span className="approval-resolving">{t('transcript.approval.resolving')}</span>}
       </div>
     </div>
   );
@@ -702,7 +794,7 @@ function QuestionCard({
 
 /**
  * Kimi's AskUserQuestion, which arrives as a nativeOptions approval (see
- * `isKimiQuestion`). Renders the same minimal question card as the
+ * `isKimiQuestion`). Renders the same `.ap2` question card as the
  * structured variant with the limits the transport imposes: no header chip,
  * no option descriptions, no "Other" free text, a single question with
  * single-select. Reject-kind options collapse into the Cancel button (its
@@ -725,33 +817,30 @@ function KimiQuestionCard({
   const rejectOption = options.find(o => o.kind.startsWith('reject'));
   const questionText = item.reason || item.title;
   return (
-    <div className="approval question kimi-question">
-      <CardHead kind="question" />
-      <div className="question-body">
-        <div className="question-block">
-          <div className="question-text">
-            <span>{questionText}</span>
-          </div>
-          <ul className="question-options">
-            {acceptOptions.map(opt => (
-              <li key={opt.optionId} className="question-option">
-                <label>
-                  <input
-                    type="radio"
-                    name={`kimi-q-${item.approvalId}`}
-                    checked={picked === opt.optionId}
-                    onChange={() => setPicked(opt.optionId)}
-                  />
-                  <span className="question-option-label">{opt.label}</span>
-                </label>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-      <div className="approval-actions">
+    <div className={`ap2${ap2ToneClass(item)}`}>
+      <CardHead kind="question" icon="question" meta={<RiskMeta risk={item.risk} />} />
+      <div className="ap2-q-text">{questionText}</div>
+      <ul className="ap2-opts">
+        {acceptOptions.map(opt => (
+          <li key={opt.optionId} className={`ap2-opt${picked === opt.optionId ? ' is-picked' : ''}`}>
+            <label>
+              <input
+                type="radio"
+                name={`kimi-q-${item.approvalId}`}
+                checked={picked === opt.optionId}
+                onChange={() => setPicked(opt.optionId)}
+              />
+              <span>
+                <span className="ap2-opt-label">{opt.label}</span>
+              </span>
+            </label>
+          </li>
+        ))}
+      </ul>
+      <div className="ap2-actions">
+        {resolving && <ResolvingNote />}
         <button
-          className="btn danger-ghost sm"
+          className="btn ghost sm"
           disabled={resolving}
           onClick={() => onApprove(
             item.approvalId,
@@ -765,7 +854,6 @@ function KimiQuestionCard({
         >
           {t('common.cancel')}
         </button>
-        <span className="spacer" />
         <button
           className="btn secondary sm"
           disabled={!picked || resolving}
@@ -778,7 +866,6 @@ function KimiQuestionCard({
         >
           {t('common.submit')}
         </button>
-        {resolving && <span className="approval-resolving">{t('transcript.approval.resolving')}</span>}
       </div>
     </div>
   );

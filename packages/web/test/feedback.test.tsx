@@ -104,4 +104,18 @@ describe('<Toaster /> confirm dialog', () => {
     fireEvent.pointerDown(overlay);
     await waitFor(() => expect(result).toBe(false));
   });
+
+  it('renders a red consequence warning separately from the confirmation copy', async () => {
+    renderToaster();
+    act(() => {
+      void confirm({
+        message: 'Open this worktree?',
+        dangerMessage: 'Agent and Terminal cwd will not change.',
+        danger: true,
+      });
+    });
+    const warning = await screen.findByRole('alert');
+    expect(warning.textContent).toContain('will not change');
+    expect(warning.classList.contains('confirm-danger')).toBe(true);
+  });
 });

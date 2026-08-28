@@ -1,5 +1,5 @@
 /**
- * gian.proxy/2.0 adapter for ai.deepseek.harness.
+ * gian.proxy/2.1 adapter for ai.deepseek.harness.
  *
  * The adapter owns the outer wire contract: initialize identity, capability
  * narrowing, catalog projection from bridge facts, session/turn request
@@ -186,7 +186,6 @@ export class DshV2Adapter {
         displayName: 'Model',
         description: 'Provider model for DeepSeek Harness turns.',
         binding: 'turn',
-        role: 'model',
         control: 'select',
         required: true,
         defaultValue: 'deepseek-chat',
@@ -199,7 +198,6 @@ export class DshV2Adapter {
         id: 'effort',
         displayName: 'Reasoning effort',
         binding: 'turn',
-        role: 'effort',
         control: 'select',
         required: false,
         defaultValue: 'medium',
@@ -213,7 +211,6 @@ export class DshV2Adapter {
         id: 'approval_policy',
         displayName: 'Approval policy',
         binding: 'turn',
-        role: 'approval_mode',
         control: 'select',
         required: false,
         defaultValue: 'ask',
@@ -232,8 +229,8 @@ export class DshV2Adapter {
       throw new ServiceError('INCOMPATIBLE_PROTOCOL', 'Expected gian.proxy protocol name.');
     }
     const versions = Array.isArray(protocol.versions) ? protocol.versions as unknown[] : [];
-    if (!versions.includes('2.0')) {
-      throw new ServiceError('INCOMPATIBLE_PROTOCOL', 'Only gian.proxy/2.0 is supported.');
+    if (!versions.includes('2.1')) {
+      throw new ServiceError('INCOMPATIBLE_PROTOCOL', 'Only gian.proxy/2.1 is supported.');
     }
     // Bridge initialize: fail hard when the child cannot establish the bridge.
     await this.bridge.request('initialize', { protocol: { versions: ['1.0'] } });
@@ -241,7 +238,7 @@ export class DshV2Adapter {
     this.catalogState.configOptions = this.catalogOptionsFrom(catalog);
     this.initialized = true;
     return {
-      protocol: { name: 'gian.proxy', version: '2.0' },
+      protocol: { name: 'gian.proxy', version: '2.1' },
       plugin: { id: PLUGIN_ID, name: PLUGIN_NAME, version: this.options.pluginVersion ?? PLUGIN_VERSION },
       process: { scope: 'shared' },
       capabilities: CAPABILITIES,
@@ -272,6 +269,11 @@ export class DshV2Adapter {
       catalogRevision: `dsh-catalog-${PLUGIN_VERSION}`,
       input: [{ type: 'text' }, { type: 'localFile' }, { type: 'localImage' }],
       configOptions: this.catalogState.configOptions,
+      specialCatalogs: {
+        model: 'model',
+        thinking: 'effort',
+        approvalMode: 'approval_policy',
+      },
       slashCommands: [],
     };
   }

@@ -8,6 +8,7 @@ import {
   writeWtViewOverride,
   readWtAutoApplied,
   writeWtAutoApplied,
+  decideWorktreeViewRequest,
   resolveViewedTreeId,
   worktreeDisplayName,
 } from '../src/presentation/wt-view.js';
@@ -107,5 +108,37 @@ describe('resolveViewedTreeId', () => {
       trees,
       defaultId: 'ws:main',
     })).toBe('ws:main');
+  });
+});
+
+describe('worktree view requests', () => {
+  it('opens trusted Tool requests immediately, including during a Turn', () => {
+    expect(decideWorktreeViewRequest({
+      source: 'gian_tool', status: 'running', processed: false,
+    })).toBe('open');
+  });
+
+  it('waits for direct Agent detection to reach a terminal Turn before prompting', () => {
+    expect(decideWorktreeViewRequest({
+      source: 'agent', status: 'running', processed: false,
+    })).toBe('wait');
+    expect(decideWorktreeViewRequest({
+      source: 'agent', status: 'pending', processed: false,
+    })).toBe('wait');
+    expect(decideWorktreeViewRequest({
+      source: 'agent', status: 'done', processed: false,
+    })).toBe('prompt');
+    expect(decideWorktreeViewRequest({
+      source: null, status: 'error', processed: false,
+    })).toBe('prompt');
+  });
+
+  it('never reopens a processed request over a newer manual pick', () => {
+    expect(decideWorktreeViewRequest({
+      source: 'gian_tool', status: 'done', processed: true,
+    })).toBe('ignore');
+    expect(decideWorktreeViewRequest({
+      source: 'agent', status: 'done', processed: true,
+    })).toBe('ignore');
   });
 });

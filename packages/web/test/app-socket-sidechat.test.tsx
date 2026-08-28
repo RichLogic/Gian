@@ -15,7 +15,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { useAppSocket } from '../src/controllers/use-app-socket.js';
 import type { GianWs, WsListener, WsStateListener } from '../src/ws.js';
 import type { OperationDispatcher } from '../src/operations/dispatcher.js';
-import type { OperationStore } from '../src/operations/store.js';
+import { createOperationStore } from '../src/operations/store.js';
 import type { TranscriptItem } from '../src/types.js';
 
 vi.mock('../src/api.js', () => ({
@@ -60,6 +60,8 @@ function sideChat(
   return {
     id,
     parent_session_id: 'session-1',
+    ordinal: 1,
+    name: null,
     stream_id: `stream-${id}`,
     state: status === 'unavailable' ? 'error' : status === 'closing' ? 'stale' : 'idle',
     status,
@@ -110,9 +112,7 @@ function stateSync(sidechats?: SideChatInfo[]): ServerToClientMessage {
 
 function setup() {
   const ws = new FakeWs();
-  const operationStore = {
-    absorbMatchingOverlays: vi.fn(),
-  } as unknown as OperationStore;
+  const operationStore = createOperationStore();
   const ops = { dispatch: vi.fn() } as unknown as OperationDispatcher;
 
   const hook = renderHook(() => {
@@ -156,7 +156,7 @@ function setup() {
     });
     return { sideChats, itemsBySession, pendingBySession, itemsBySidechat, pendingBySidechat };
   });
-  return { ws, hook };
+  return { ws, hook, operationStore };
 }
 
 describe('useAppSocket side-chat read model (proposal §10.5)', () => {
@@ -186,6 +186,44 @@ describe('useAppSocket side-chat read model (proposal §10.5)', () => {
     act(() => ws.emit({ type: 'sidechat:updated', sidechat: replacement }));
     expect(hook.result.current.sideChats).toHaveLength(2);
     expect(hook.result.current.sideChats.find(entry => entry.id === 'sc-2')).toEqual(replacement);
+  });
+
+  it('absorbs confirmed config overlays and drops unresolved drafts on authoritative reconnect', () => {
+    const { ws, operationStore } = setup();
+    const entityKey = 'sidechat:sc-config';
+    const confirmed = operationStore.startRun({
+      id: 'config-confirmed',
+      name: 'sidechat.setTurnConfig',
+      entityKey,
+      policy: 'optimistic',
+    });
+    operationStore.writeOverlays(confirmed.id, [{
+      field: 'turn_config',
+      value: { effort: 'high' },
+      previous: { effort: 'medium' },
+    }]);
+    act(() => ws.emit({
+      type: 'sidechat:updated',
+      sidechat: sideChat('sc-config', 'open', { turn_config: { effort: 'high' } }),
+    }));
+    expect(operationStore.getOverlay(`${entityKey}:turn_config`)).toBeUndefined();
+
+    const unresolved = operationStore.startRun({
+      id: 'config-unresolved',
+      name: 'sidechat.setTurnConfig',
+      entityKey,
+      policy: 'optimistic',
+    });
+    operationStore.writeOverlays(unresolved.id, [{
+      field: 'turn_config',
+      value: { effort: 'low' },
+      previous: { effort: 'high' },
+    }]);
+    operationStore.markTimedOut(unresolved.id);
+    act(() => ws.emit(stateSync([
+      sideChat('sc-config', 'open', { turn_config: { effort: 'high' } }),
+    ])));
+    expect(operationStore.getOverlay(`${entityKey}:turn_config`)).toBeUndefined();
   });
 
   it('sidechat:closed removes the read model and transient event state', () => {

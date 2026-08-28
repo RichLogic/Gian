@@ -18,6 +18,8 @@ function snapshot(overrides: Partial<SideChatInfo> = {}): SideChatInfo {
   return {
     id: 'sc-1',
     parent_session_id: 's-parent',
+    ordinal: 1,
+    name: null,
     stream_id: 'stream-1',
     state: 'idle',
     status: 'open',

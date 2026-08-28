@@ -1,19 +1,8 @@
-// Event box (2026-08-24) — 进行态.
-// Pins the `.eventbox` in-flight-turn grouping (GitHub issue #96):
-//   - a turn WITHOUT turn-end collects all its process events (tool /
-//     command / diff / file-read / file-search / web-search / reasoning /
-//     agent-spawn / auto-notice / compaction) + RESOLVED approvals into ONE
-//     box instead of flooding the transcript row by row
-//   - the box emits at the turn's LAST boxed row so it stays at the bottom
-//     of the live reply flow; new events join the tail (newest at bottom)
-//   - PENDING approvals/questions stay inline — they wait on the user
-//   - user/assistant messages, status and error items stay inline
-//   - clicking the box routes the same live set to panel 2 (event-feed);
-//     when the turn-end arrives the turnsum fold takes over the same items
-// plus the panel-2 event feed: same predicate, live re-projection.
+// Stable Working / terminal Turn boundary (Issue #116), plus the unchanged
+// Panel-2 event-feed projection and in-place row drill-down.
 
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type {
   AgentSpawnItem,
@@ -94,223 +83,254 @@ function renderTranscript(items: TranscriptItem[], pending = true) {
   return render(<Transcript items={items} pending={pending} onApprove={vi.fn()} />);
 }
 
-function boxOf(container: HTMLElement): HTMLElement {
-  const box = container.querySelector('[data-testid="event-box"]');
-  expect(box).not.toBeNull();
-  return box as HTMLElement;
+function workOf(container: HTMLElement): HTMLElement {
+  const work = container.querySelector('[data-testid="turn-work"]');
+  expect(work).not.toBeNull();
+  return work as HTMLElement;
 }
 
 // ---------------------------------------------------------------------------
 // 进行态收纳 — in-flight turns collect process rows into ONE box
 // ---------------------------------------------------------------------------
 
-describe('event box: in-flight turn grouping', () => {
-  it('collects every process kind of an in-flight turn into one box', () => {
+describe('turn work boundary: live grouping and terminal handoff', () => {
+  it('keeps the auto-expanded live preview under the restyled Working header', () => {
     const view = renderTranscript([
-      userMsg(),
-      assistantMsg(),
-      tool({ name: 'Bash' }),
-      command(),
-      fileRead(),
-      diff(),
-      reasoning(),
+      userMsg(), assistantMsg(), tool({ name: 'Bash' }), command(), fileRead(), diff(), reasoning(),
     ]);
-
-    const box = boxOf(view.container);
-    expect(view.container.querySelectorAll('[data-testid="event-box"]')).toHaveLength(1);
-    const rows = box.querySelectorAll('.trow');
-    expect(rows).toHaveLength(5);
-    expect(within(box).getByText('Bash')).toBeInTheDocument();
-    expect(within(box).getByText('pnpm test')).toBeInTheDocument();
-    expect(within(box).getByText('/w/a.ts')).toBeInTheDocument();
-    expect(within(box).getByText('a.ts')).toBeInTheDocument();
-    expect(within(box).getByText('checking the reducer')).toBeInTheDocument();
-
-    // Nothing process-shaped leaks outside the box…
+    const work = workOf(view.container);
+    expect(work).toHaveAttribute('data-state', 'working');
+    expect(work).toHaveTextContent('Working');
+    expect(work).not.toHaveTextContent('actions');
     expect(view.container.querySelectorAll('.transcript > .trow')).toHaveLength(0);
-    // …while the conversation content stays inline.
-    expect(screen.getByText('do the thing')).toBeInTheDocument();
     expect(screen.getByText('working on it')).toBeInTheDocument();
+
+    const body = within(work).getByTestId('turn-work-preview');
+    expect(body.querySelectorAll('.trow')).toHaveLength(5);
+    expect(within(body).getByText('Bash')).toBeInTheDocument();
+    expect(within(body).getByText('pnpm test')).toBeInTheDocument();
+    expect(within(body).getByText('/w/a.ts')).toBeInTheDocument();
+    expect(within(body).getByText('a.ts')).toBeInTheDocument();
+    expect(within(body).getByText('checking the reducer')).toBeInTheDocument();
   });
 
-  it('keeps a PENDING approval inline and out of the box, after the box', () => {
-    const view = renderTranscript([
-      userMsg(),
-      tool(),
-      approval({ status: 'pending' }),
-    ]);
-
-    const box = boxOf(view.container);
-    expect(within(box).queryByText(/pnpm dev:web/)).toBeNull();
-    expect(box.querySelectorAll('.approval-line')).toHaveLength(0);
-
-    // The pending card renders inline, AFTER the box (it is the live
-    // question the user must answer).
+  it('keeps a pending approval inline after Working', () => {
+    const view = renderTranscript([userMsg(), tool(), approval({ status: 'pending' })]);
+    const work = workOf(view.container);
     const card = screen.getByText('pnpm dev:web');
-    expect(
-      box.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    expect(work.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('moves a RESOLVED approval into the box as a one-line summary', () => {
+  it('keeps resolved approvals inside the live preview', () => {
+    const view = renderTranscript([userMsg(), tool(), approval({ status: 'approved-once' })]);
+    const body = within(workOf(view.container)).getByTestId('turn-work-preview');
+    expect(body.querySelectorAll('.approval-line')).toHaveLength(1);
+    expect(within(body).getByText(/pnpm dev:web/)).toBeInTheDocument();
+  });
+
+  it('keeps errors and error-level notices inline', () => {
     const view = renderTranscript([
-      userMsg(),
-      tool(),
-      approval({ status: 'approved-once' }),
-    ]);
-
-    const box = boxOf(view.container);
-    const lines = box.querySelectorAll('.approval-line');
-    expect(lines).toHaveLength(1);
-    expect(within(lines[0] as HTMLElement).getByText(/pnpm dev:web/)).toBeInTheDocument();
-    // No interactive card remains for the resolved approval.
-    expect(screen.queryByRole('button', { name: /allow/i })).toBeNull();
-  });
-
-  it('keeps error items inline and out of the box', () => {
-    const view = renderTranscript([userMsg(), tool(), errorItem()]);
-
-    const box = boxOf(view.container);
-    expect(within(box).queryByText(/boom/)).toBeNull();
-    expect(screen.getByText(/boom/)).toBeInTheDocument();
-  });
-
-  it('keeps error-level auto-notices inline as the minimal error card', () => {
-    const view = renderTranscript([
-      userMsg(),
-      tool(),
-      {
+      userMsg(), tool(), errorItem(), {
         kind: 'auto-notice', id: 'an-1', variant: 'circuit-breaker',
-        trigger: 'consecutive', consecutive: 3, total: 5, ts: 6_000, turn: 1,
+        trigger: 'consecutive', consecutive: 3, total: 5, ts: 8_000, turn: 1,
       } as TranscriptItem,
     ]);
-
-    const box = boxOf(view.container);
-    expect(box.querySelectorAll('.trow')).toHaveLength(1);
-    // The danger signal stays inline as the full error card.
-    const card = view.container.querySelector('.approval');
-    expect(card).not.toBeNull();
-    expect(card!.querySelector('.error-label')).toHaveTextContent(/stopped/i);
+    expect(workOf(view.container)).not.toHaveTextContent(/boom|stopped/i);
+    expect(screen.getByText(/boom/)).toBeInTheDocument();
+    expect(Array.from(view.container.querySelectorAll('.error-label')).some(
+      label => /stopped/i.test(label.textContent ?? ''),
+    )).toBe(true);
   });
 
-  it('emits the box at the last boxed row so interleaved text keeps its place', () => {
+  it('puts every live process message above Working', () => {
     const view = renderTranscript([
-      userMsg(),
-      tool({ id: 'tool-1', name: 'Read', ts: 1_000 }),
-      assistantMsg({ id: 'a-mid', text: 'mid-turn note', ts: 1_500 }),
-      command({ id: 'cmd-1', ts: 2_000 }),
+      userMsg(), tool({ ts: 1_000 }), assistantMsg({ id: 'a-mid', text: 'mid-turn note', ts: 2_000 }),
     ]);
-
-    const box = boxOf(view.container);
     const note = screen.getByText('mid-turn note');
-    // Box sits AFTER the mid-turn assistant text (its last row is later).
-    expect(
-      note.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(within(box).getByText('Read')).toBeInTheDocument();
-    expect(within(box).getByText('pnpm test')).toBeInTheDocument();
+    const work = workOf(view.container);
+    expect(note.compareDocumentPosition(work) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('appends new live events to the same box (newest at the bottom)', () => {
+  it('updates the same Working node as new events arrive', () => {
     const items = [userMsg(), tool({ id: 'tool-1', name: 'Read', ts: 1_000 })];
     const view = renderTranscript(items);
-
-    view.rerender(
-      <Transcript
-        items={[...items, command({ id: 'cmd-1', ts: 2_000 })]}
-        pending
-        onApprove={vi.fn()}
-      />,
-    );
-
-    const boxes = view.container.querySelectorAll('[data-testid="event-box"]');
-    expect(boxes).toHaveLength(1);
-    const rows = boxes[0]!.querySelectorAll('.trow');
-    expect(rows).toHaveLength(2);
-    expect(within(rows[1] as HTMLElement).getByText('pnpm test')).toBeInTheDocument();
+    const before = workOf(view.container);
+    view.rerender(<Transcript items={[...items, command({ ts: 2_000 })]} pending onApprove={vi.fn()} />);
+    const after = workOf(view.container);
+    expect(after).toBe(before);
+    expect(within(after).getByTestId('turn-work-preview').querySelectorAll('.trow')).toHaveLength(2);
   });
 
-  it('shows a live running timer for a running tool row', () => {
+  it('lists EVERY folded row in the scrollable live preview (no five-row cap)', () => {
     const view = renderTranscript([
       userMsg(),
-      tool({ id: 'tool-1', name: 'Bash', status: 'running', output: undefined }),
+      ...Array.from({ length: 7 }, (_, index) => tool({
+        id: `t-${index + 1}`,
+        name: `Tool ${index + 1}`,
+        ts: index + 1_000,
+      })),
     ]);
-    expect(within(boxOf(view.container)).getByText(/running · /)).toBeInTheDocument();
+    const preview = within(workOf(view.container)).getByTestId('turn-work-preview');
+    expect(preview).toHaveClass('turn-work-scroll');
+    expect(preview.querySelectorAll('.trow')).toHaveLength(7);
+    expect(within(preview).getByText('Tool 1')).toBeInTheDocument();
+    expect(within(preview).getByText('Tool 7')).toBeInTheDocument();
   });
 
-  it('hands the same items to the turnsum fold once the turn ends', () => {
-    const items = [userMsg(), tool(), command()];
+  it('ticks Working elapsed time and freezes it at terminal', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(6_000);
+      const items = [userMsg(), tool({ ts: 1_000 })];
+      const view = renderTranscript(items);
+      expect(workOf(view.container)).toHaveTextContent('Working');
+      expect(workOf(view.container).querySelector('.turn-work-duration')).toHaveTextContent('5s');
+      act(() => vi.advanceTimersByTime(2_000));
+      expect(workOf(view.container).querySelector('.turn-work-duration')).toHaveTextContent('7s');
+      view.rerender(<Transcript items={[...items, turnEnd({ ts: 9_000 })]} pending={false} onApprove={vi.fn()} />);
+      expect(workOf(view.container)).toHaveTextContent('Worked');
+      expect(workOf(view.container).querySelector('.turn-work-duration')).toHaveTextContent('8s');
+      act(() => vi.advanceTimersByTime(5_000));
+      expect(workOf(view.container).querySelector('.turn-work-duration')).toHaveTextContent('8s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('morphs in place at turn-end, with process text above and final summary below', () => {
+    const liveItems = [
+      userMsg(), tool({ ts: 1_000 }), assistantMsg({ id: 'a-mid', text: 'process note', ts: 2_000 }),
+    ];
+    const view = renderTranscript(liveItems);
+    const before = workOf(view.container);
+    view.rerender(<Transcript items={[
+      ...liveItems, turnEnd({ ts: 3_000 }), assistantMsg({ id: 'a-final', text: 'final summary', ts: 4_000 }),
+    ]} pending={false} onApprove={vi.fn()} />);
+    const after = workOf(view.container);
+    expect(after).toBe(before);
+    expect(after).toHaveAttribute('data-state', 'worked');
+    expect(screen.getByText('process note').compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(after.compareDocumentPosition(screen.getByText('final summary')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('shows Failed and Stopped terminal variants', () => {
+    const failed = renderTranscript([userMsg(), tool(), errorItem(), turnEnd({ outcome: 'failed' })], false);
+    expect(workOf(failed.container)).toHaveTextContent('Failed');
+    failed.unmount();
+    const stopped = renderTranscript([userMsg(), tool(), turnEnd({ outcome: 'stopped' })], false);
+    expect(workOf(stopped.container)).toHaveTextContent('Stopped');
+  });
+
+  it('remembers a manual collapse across new events and auto-collapses at turn-end', async () => {
+    const user = userEvent.setup();
+    const items = [userMsg(), tool({ ts: 1_000 })];
     const view = renderTranscript(items);
-    expect(view.container.querySelectorAll('[data-testid="event-box"]')).toHaveLength(1);
-    expect(view.container.querySelectorAll('.turnsum')).toHaveLength(0);
+    // Working: auto-expanded by default.
+    expect(within(workOf(view.container)).getByTestId('turn-work-preview')).toBeInTheDocument();
 
-    view.rerender(
-      <Transcript items={[...items, turnEnd()]} pending={false} onApprove={vi.fn()} />,
-    );
+    // Manual collapse is remembered — new events must not re-expand.
+    await user.click(workOf(view.container));
+    expect(workOf(view.container).querySelector('[data-testid="turn-work-preview"]')).toBeNull();
+    view.rerender(<Transcript items={[...items, command({ ts: 2_000 })]} pending onApprove={vi.fn()} />);
+    expect(workOf(view.container).querySelector('[data-testid="turn-work-preview"]')).toBeNull();
 
-    expect(view.container.querySelectorAll('[data-testid="event-box"]')).toHaveLength(0);
-    expect(view.container.querySelectorAll('.turnsum')).toHaveLength(1);
+    // Turn completes → the block stays collapsed as Worked.
+    view.rerender(<Transcript
+      items={[...items, command({ ts: 2_000 }), turnEnd({ ts: 3_000 })]}
+      pending={false}
+      onApprove={vi.fn()}
+    />);
+    const done = workOf(view.container);
+    expect(done).toHaveAttribute('data-state', 'worked');
+    expect(done.querySelector('.turnsum-body')).toBeNull();
   });
 
-  it('routes the box click to panel 2 as an event-feed request', async () => {
+  it('auto-collapses at turn-end unless the user manually expanded during the turn', async () => {
+    const user = userEvent.setup();
+    const items = [userMsg(), tool({ ts: 1_000 })];
+
+    // Untouched Working block: completion collapses it.
+    const untouched = renderTranscript(items);
+    expect(within(workOf(untouched.container)).getByTestId('turn-work-preview')).toBeInTheDocument();
+    untouched.rerender(<Transcript items={[...items, turnEnd({ ts: 3_000 })]} pending={false} onApprove={vi.fn()} />);
+    expect(workOf(untouched.container).querySelector('.turnsum-body')).toBeNull();
+    untouched.unmount();
+
+    // Collapse-then-re-expand counts as a manual expand: completion keeps it open.
+    const view = renderTranscript(items);
+    await user.click(workOf(view.container));
+    await user.click(workOf(view.container));
+    expect(within(workOf(view.container)).getByTestId('turn-work-preview')).toBeInTheDocument();
+    view.rerender(<Transcript items={[...items, turnEnd({ ts: 3_000 })]} pending={false} onApprove={vi.fn()} />);
+    const done = workOf(view.container);
+    expect(done).toHaveAttribute('data-state', 'worked');
+    // The no-panel fallback body is a SIBLING of the .turnsum element.
+    expect(view.container.querySelector('.turnsum-body')).not.toBeNull();
+  });
+
+  it('keeps the streaming output under the running Bash row; it returns to a single line when the command ends', () => {
+    const items = [userMsg(), command({ status: 'running', stdout: 'chunk 1\n', ts: 1_500 })];
+    const view = renderTranscript(items);
+    const preview = within(workOf(view.container)).getByTestId('turn-work-preview');
+    const stream = preview.querySelector('.turn-work-live-stream .cmd-stream');
+    expect(stream).not.toBeNull();
+    expect(stream!.textContent).toContain('chunk 1');
+    expect(stream!.querySelector('.cmd-cursor')).not.toBeNull();
+
+    view.rerender(<Transcript
+      items={[userMsg(), command({ status: 'success', stdout: 'chunk 1\n', ts: 1_500 })]}
+      pending
+      onApprove={vi.fn()}
+    />);
+    const after = within(workOf(view.container)).getByTestId('turn-work-preview');
+    expect(after.querySelector('.turn-work-live-stream')).toBeNull();
+    expect(within(after).getByText('pnpm test')).toBeInTheDocument();
+  });
+
+  it('head click toggles; the head carries no panel hint (rows open the feed)', async () => {
+    const user = userEvent.setup();
+    const open = vi.fn();
+    const { container } = render(
+      <ChatPanelOpenContext.Provider value={open}>
+        <Transcript
+          items={[userMsg(), tool()]}
+          pending
+          onApprove={vi.fn()}
+        />
+      </ChatPanelOpenContext.Provider>,
+    );
+    // Head click toggles the block instead of routing to the panel.
+    await user.click(screen.getByTestId('turn-work'));
+    expect(open).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('turn-work-preview')).toBeNull();
+    // No ⇥ panel hint on the head — preview rows open the anchored feed.
+    expect(container.querySelector('.turnsum .trow-ext')).toBeNull();
+  });
+
+  it('clicking a preview row opens the panel-2 feed anchored at that row without toggling the block', async () => {
     const user = userEvent.setup();
     const open = vi.fn();
     render(
       <ChatPanelOpenContext.Provider value={open}>
-        <Transcript items={[userMsg(), tool()]} pending onApprove={vi.fn()} />
+        <Transcript
+          items={[userMsg(), tool(), command()]}
+          pending
+          onApprove={vi.fn()}
+        />
       </ChatPanelOpenContext.Provider>,
     );
-
-    await user.click(screen.getByTestId('event-box'));
-    expect(open).toHaveBeenCalledWith({ kind: 'event-feed', turn: 1 });
+    await user.click(screen.getByText('pnpm test'));
+    expect(open).toHaveBeenCalledWith({ kind: 'event-feed', turn: 1, anchorId: '1:command:cmd-1' });
+    expect(screen.getByTestId('turn-work-preview')).toBeInTheDocument();
   });
 
-  it('renders no box for a turn with no process events', () => {
-    const view = renderTranscript([userMsg(), assistantMsg()]);
-    expect(view.container.querySelectorAll('[data-testid="event-box"]')).toHaveLength(0);
-  });
-
-  it('leaves a dangling turn (no turn-end) flat in an IDLE session', () => {
-    // A session that ended mid-turn (crash / completed status) is history,
-    // not a live tail: rows stay flat and fully interactive.
-    const view = render(
-      <Transcript
-        items={[userMsg(), reasoning(), tool({ output: undefined })]}
-        pending={false}
-        onApprove={vi.fn()}
-      />,
-    );
-    expect(view.container.querySelectorAll('[data-testid="event-box"]')).toHaveLength(0);
-    expect(view.container.querySelectorAll('.transcript > .trow')).toHaveLength(2);
-  });
-
-  it('shows a header with the live label and the event count', () => {
-    const view = renderTranscript([userMsg(), tool(), command()]);
-    const box = boxOf(view.container);
-    const head = box.querySelector('.eventbox-head');
-    expect(head).not.toBeNull();
-    expect(head!).toHaveTextContent('Activity');
-    expect(head!).toHaveTextContent('2 actions');
-    expect(head!.querySelector('.eventbox-live')).not.toBeNull();
-  });
-
-  it('shows only the LATEST 5 events; the header keeps the total count', () => {
-    const view = renderTranscript([
-      userMsg(),
-      ...[1, 2, 3, 4, 5, 6, 7].map(n =>
-        tool({ id: `t${n}`, name: `T${n}`, ts: n * 1_000 })),
-    ]);
-    const box = boxOf(view.container);
-    const rows = box.querySelectorAll('.eventbox-body .trow');
-    expect(rows).toHaveLength(5);
-    // The two oldest events scrolled out of the window entirely.
-    expect(within(box).queryByText('T1')).toBeNull();
-    expect(within(box).queryByText('T2')).toBeNull();
-    expect(within(box).getByText('T3')).toBeInTheDocument();
-    expect(within(box).getByText('T7')).toBeInTheDocument();
-    // …but the header still counts everything, advertising that panel 2
-    // has more.
-    expect(box.querySelector('.eventbox-head')).toHaveTextContent('7 actions');
+  it('renders no boundary without process events and leaves idle dangling rows flat', () => {
+    const messages = renderTranscript([userMsg(), assistantMsg()]);
+    expect(messages.container.querySelector('[data-testid="turn-work"]')).toBeNull();
+    messages.unmount();
+    const dangling = render(<Transcript items={[userMsg(), reasoning(), tool()]} pending={false} onApprove={vi.fn()} />);
+    expect(dangling.container.querySelector('[data-testid="turn-work"]')).toBeNull();
+    expect(dangling.container.querySelectorAll('.transcript > .trow')).toHaveLength(2);
   });
 });
 
@@ -435,6 +455,25 @@ describe('event feed drill-down (in-place)', () => {
 // ---------------------------------------------------------------------------
 
 describe('panel-2 event feed', () => {
+  it('shows the complete turn even when the transcript preview is capped at five', () => {
+    const tools = Array.from({ length: 7 }, (_, index) => tool({
+      id: `t-${index + 1}`,
+      name: `Tool ${index + 1}`,
+      ts: index + 1_000,
+    }));
+    render(
+      <ChatContextPanel
+        target={{ kind: 'event-feed', turn: 1, sessionId: 'session-1' }}
+        items={[userMsg(), ...tools]}
+        onClose={() => {}}
+      />,
+    );
+    const feed = screen.getByTestId('chat-event-feed');
+    expect(feed.querySelectorAll('.trow')).toHaveLength(7);
+    expect(within(feed).getByText('Tool 1')).toBeInTheDocument();
+    expect(within(feed).getByText('Tool 7')).toBeInTheDocument();
+  });
+
   it('renders exactly the box predicate: process rows + resolved approvals of the turn', () => {
     render(
       <ChatContextPanel
@@ -493,5 +532,35 @@ describe('panel-2 event feed', () => {
     );
     expect(screen.queryByTestId('chat-event-feed')).toBeNull();
     expect(screen.getByText('No process events in this turn yet.')).toBeInTheDocument();
+  });
+
+  it('anchors the requested row: scrolls it into view and flashes it', () => {
+    const scrollIntoView = vi.fn();
+    window.HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    render(
+      <ChatContextPanel
+        target={{ kind: 'event-feed', turn: 1, sessionId: 'session-1', anchorId: '1:command:cmd-1' }}
+        items={[userMsg(), tool(), command()]}
+        onClose={() => {}}
+      />,
+    );
+    const feed = screen.getByTestId('chat-event-feed');
+    const row = within(feed).getByText('pnpm test').closest('.trow');
+    expect(row).not.toBeNull();
+    expect(row!).toHaveClass('is-anchor-flash');
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
+    // Other rows stay unflashed.
+    expect(feed.querySelectorAll('.is-anchor-flash')).toHaveLength(1);
+  });
+
+  it('flashes nothing without an anchor request', () => {
+    render(
+      <ChatContextPanel
+        target={{ kind: 'event-feed', turn: 1, sessionId: 'session-1' }}
+        items={[userMsg(), tool(), command()]}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByTestId('chat-event-feed').querySelector('.is-anchor-flash')).toBeNull();
   });
 });

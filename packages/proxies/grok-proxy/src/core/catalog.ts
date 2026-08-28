@@ -154,18 +154,10 @@ export function toV2ConfigOptions(
   sessionOptions: ReturnType<typeof catalogFromModelState>['sessionOptions'],
 ) {
   return sessionOptions.map((option) => {
-    const role = option.id === 'model'
-      ? 'model' as const
-      : option.id === 'reasoning_effort'
-        ? 'effort' as const
-        : option.id === 'permission_mode'
-          ? 'approval_mode' as const
-          : undefined;
     return {
       id: option.id,
       displayName: option.displayName,
       binding: 'session' as const,
-      ...(role ? { role } : {}),
       control: 'select' as const,
       required: false,
       defaultValue: option.currentValue ?? null,

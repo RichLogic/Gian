@@ -1,6 +1,4 @@
-import type { AgentColor, Executor, ProductExecutor } from './model.js';
-
-export type { AgentColor } from './model.js';
+import type { Executor, ProductExecutor } from './model.js';
 
 export interface AgentProxyDefaults {
   /** Empty means the Proxy/CLI default. */
@@ -12,38 +10,46 @@ export interface AgentProxyDefaults {
 }
 
 /** Stable user-Agent primary key (uuid). Agents live in `agents.json`
- *  (schema v2), not in SQLite — sessions reference them by plain text. */
+ *  (schema v3), not in SQLite — sessions reference them by plain text. */
 export type AgentId = string;
 
-export const AGENT_COLORS: readonly AgentColor[] = [
-  'rose', 'ember', 'citron', 'moss', 'teal', 'azure', 'ink', 'plum',
-];
-
-/** Default color for the first saved Agent of each Proxy kind. */
-export const DEFAULT_AGENT_COLORS: Readonly<Record<ProductExecutor, AgentColor>> = {
-  claude: 'ember',
-  codex: 'ink',
-  kimi: 'citron',
-  dsh: 'teal',
-};
-
-export function isAgentColor(value: unknown): value is AgentColor {
-  return typeof value === 'string' && (AGENT_COLORS as readonly string[]).includes(value);
-}
-
-/** A user-owned Agent: a named, colored configuration on top of one Proxy
+/** A user-owned Agent: a named configuration on top of one Proxy
  *  kind. Multiple Agents may share a kind; the kind's official CLI / GitHub
  *  Proxy is still installed once per kind. */
 export interface UserAgent {
   id: AgentId;
   /** Trimmed, case-insensitively unique across saved Agents; never empty. */
   name: string;
-  color: AgentColor;
   proxy: ProductExecutor;
   /** Absolute CLI path chosen by the user; null = resolve via the kind's
    *  environment override, PATH, then official install locations. */
   cliPath: string | null;
   defaults: AgentProxyDefaults;
+}
+
+export type AgentRuntimeVerification = 'verified' | 'unverified' | 'incompatible';
+
+/** Immutable facts selected for one Agent generation. Sessions snapshot this
+ * object so a later Agent path change cannot retarget their native runtime. */
+export interface AgentRuntimeProfile {
+  id: string;
+  agentId: AgentId;
+  proxy: ProductExecutor;
+  cliPath: string;
+  cliVersion: string;
+  /** Runtime state/config root when Gian can resolve it without guessing a
+   * wrapper's private environment. */
+  configHome: string | null;
+  /** Provider-owned launcher/runtime content identity when available. */
+  cliFingerprint: string | null;
+  proxyVersion: string;
+  verifiedCliVersions: string[];
+  verification: AgentRuntimeVerification;
+  skill: {
+    name: 'gian-session';
+    version: string;
+    state: 'ready' | 'missing' | 'conflict' | 'invalid';
+  };
 }
 
 /** Static catalog metadata for one Proxy kind. Served without spawning or
@@ -52,7 +58,10 @@ export interface ProxyCatalogEntry {
   id: ProductExecutor;
   /** Display name, e.g. "Claude Code". */
   name: string;
-  defaultColor: AgentColor;
+  logo: {
+    light: string;
+    dark: string;
+  };
   /** One-line product description. */
   tagline: string;
   officialInstallUrl: string;
@@ -67,6 +76,7 @@ export interface UserAgentStatus extends UserAgent {
   /** Installed Proxy (plugin) status of the Agent's kind. A kind has exactly
    *  one installed Proxy no matter how many Agents reference it. */
   plugin: AgentProxyStatus;
+  runtimeProfile: AgentRuntimeProfile | null;
   officialInstallUrl: string;
 }
 
@@ -76,7 +86,10 @@ export interface AgentCliStatus {
   state: AgentComponentState;
   path: string | null;
   version: string | null;
-  recommendedVersion?: string | null;
+  /** Exact versions covered by release regression for the selected Proxy. */
+  verifiedVersions?: string[];
+  /** Stable launcher/runtime identity used by immutable Session profiles. */
+  contentFingerprint?: string | null;
   source: 'override' | 'official-user' | 'path' | null;
   error?: string;
 }
@@ -85,6 +98,7 @@ export interface AgentProxyStatus {
   state: AgentComponentState;
   path: string | null;
   version: string | null;
+  verifiedCliVersions?: string[];
   source: 'github-release' | 'development' | null;
   defaults: AgentProxyDefaults;
   error?: string;

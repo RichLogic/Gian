@@ -70,7 +70,7 @@ describe('Composer capability failures', () => {
 
       expect(screen.getByRole('textbox')).toBeTruthy();
       await waitFor(() => {
-        expect(screen.getByRole('textbox')).toBeEnabled();
+        expect(screen.getByRole('textbox')).toHaveAttribute('contenteditable', 'true');
       });
     },
   );

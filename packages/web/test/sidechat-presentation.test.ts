@@ -20,10 +20,18 @@ import {
 
 const t = (key: string) => EN[key] ?? key;
 
-function sideChat(id: string, createdAt: string, parent = 's-parent'): SideChatInfo {
+function sideChat(
+  id: string,
+  createdAt: string,
+  parent = 's-parent',
+  ordinal = 1,
+  name: string | null = null,
+): SideChatInfo {
   return {
     id,
     parent_session_id: parent,
+    ordinal,
+    name,
     stream_id: `stream-${id}`,
     state: 'idle',
     status: 'open',
@@ -35,7 +43,7 @@ function sideChat(id: string, createdAt: string, parent = 's-parent'): SideChatI
     user_inputs: [],
     created_at: createdAt,
     updated_at: createdAt,
-  };
+  } as unknown as SideChatInfo;
 }
 
 describe('sideChatsForParent', () => {
@@ -50,9 +58,16 @@ describe('sideChatsForParent', () => {
 });
 
 describe('sideChatLabel', () => {
-  it('uses the Gian standard name plus a 1-based ordinal — never the provider id', () => {
-    expect(sideChatLabel(t, sideChat('sc-1', '2026-08-20T08:00:00.000Z'), 0)).toBe('Side Chat 1');
-    expect(sideChatLabel(t, sideChat('sc-2', '2026-08-20T09:00:00.000Z'), 1)).toBe('Side Chat 2');
+  it('uses the stable Chat ordinal until an agent-derived name replaces it', () => {
+    expect(sideChatLabel(t, sideChat('sc-1', '2026-08-20T08:00:00.000Z', 's-parent', 1), 0))
+      .toBe('Chat1');
+    expect(sideChatLabel(t, sideChat('sc-3', '2026-08-20T09:00:00.000Z', 's-parent', 3), 1))
+      .toBe('Chat3');
+    expect(sideChatLabel(
+      t,
+      sideChat('sc-2', '2026-08-20T09:00:00.000Z', 's-parent', 2, 'Repair Fork boundaries'),
+      0,
+    )).toBe('Repair Fork boundaries');
   });
 });
 
@@ -88,12 +103,12 @@ describe('sideChatParentCascadeSuffix (§10.5.4 parent close cascade)', () => {
 
   it('lists the open side chats by their chip labels, oldest first', () => {
     const suffix = sideChatParentCascadeSuffix(t, [
-      sideChat('sc-b', '2026-08-20T09:00:00.000Z'),
-      sideChat('sc-a', '2026-08-20T08:00:00.000Z'),
+      sideChat('sc-b', '2026-08-20T09:00:00.000Z', 's-parent', 2),
+      sideChat('sc-a', '2026-08-20T08:00:00.000Z', 's-parent', 1),
     ]);
-    expect(suffix).toContain('Side Chat 1');
-    expect(suffix).toContain('Side Chat 2');
-    expect(suffix.indexOf('Side Chat 1')).toBeLessThan(suffix.indexOf('Side Chat 2'));
+    expect(suffix).toContain('Chat1');
+    expect(suffix).toContain('Chat2');
+    expect(suffix.indexOf('Chat1')).toBeLessThan(suffix.indexOf('Chat2'));
     expect(EN['sidechat.parentCloseCascade']).toContain('{names}');
   });
 });
@@ -131,5 +146,33 @@ describe('sideChatComposerSession', () => {
     expect(adapted.worktree_outcome).toBeNull();
     expect(adapted.unread).toBe(0);
     expect(adapted.status).toBe('done');
+  });
+
+  it('keeps Session-bound fields inherited but projects the independent Turn draft by role', () => {
+    const record = {
+      ...sideChat('sc-config', '2026-08-20T08:00:00.000Z'),
+      session_config: { execution_mode: 'agent' },
+      turn_config: { side_model: 'gpt-side', side_effort: 'medium', side_fast: true },
+      turn_config_revision: 'side-options-1',
+      turn_config_options: [{
+        id: 'side_model', displayName: 'Model', role: 'model' as const,
+        binding: 'turn' as const, control: 'select' as const, required: true,
+      }, {
+        id: 'side_effort', displayName: 'Thinking', role: 'effort' as const,
+        binding: 'turn' as const, control: 'select' as const, required: true,
+      }, {
+        id: 'side_fast', displayName: 'Fast', role: 'fast' as const,
+        binding: 'turn' as const, control: 'boolean' as const, required: true,
+      }],
+    } satisfies SideChatInfo;
+
+    const adapted = sideChatComposerSession(record, parent);
+    expect(adapted.executor).toBe(parent.executor);
+    expect(adapted.workspace_id).toBe(parent.workspace_id);
+    expect(adapted.model).toBe('gpt-side');
+    expect(adapted.thinking_effort).toBe('medium');
+    expect(adapted.service_tier).toBe('fast');
+    expect(adapted.turn_config).toEqual(record.turn_config);
+    expect(adapted.turn_config_options).toEqual(record.turn_config_options);
   });
 });

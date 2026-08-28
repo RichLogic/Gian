@@ -1,4 +1,4 @@
-import { Fragment } from 'react';
+import { Fragment, useLayoutEffect, useRef } from 'react';
 import type { DiffItem, TranscriptItem } from '../types.js';
 import { useStableExpand } from './items.js';
 import { ApprovalLine } from './approval-cards.js';
@@ -13,13 +13,41 @@ import { transcriptItemIdentity } from './identity.js';
  * view, no extra layer. Every row has SOME detail: the structured payload
  * when one exists, otherwise the raw-item JSON dump. Resolved approval
  * lines stay static (they already are the full record).
+ *
+ * `anchorId` (2026-08-27): a transcript item identity the feed locates
+ * after render — the row scrolls into view and flashes once
+ * (`.trow.is-anchor-flash`, ~1.6s × 2). The turn work block sets it when a
+ * preview row is clicked.
  */
-export function EventFeed({ items }: { items: TranscriptItem[] }) {
+export function EventFeed({ items, anchorId }: { items: TranscriptItem[]; anchorId?: string }) {
+  const rowsRef = useRef(new Map<string, HTMLElement>());
+  useLayoutEffect(() => {
+    if (!anchorId) return;
+    const el = rowsRef.current.get(anchorId);
+    if (!el) return;
+    el.scrollIntoView({ block: 'center' });
+    el.classList.add('is-anchor-flash');
+    const timer = window.setTimeout(() => el.classList.remove('is-anchor-flash'), 3_400);
+    return () => {
+      window.clearTimeout(timer);
+      el.classList.remove('is-anchor-flash');
+    };
+  }, [anchorId]);
   return (
     <section className="chat-context-feed" data-testid="chat-event-feed">
-      {items.map(item => (
-        <EventFeedRow key={transcriptItemIdentity(item)} item={item} />
-      ))}
+      {items.map(item => {
+        const id = transcriptItemIdentity(item);
+        return (
+          <EventFeedRow
+            key={id}
+            item={item}
+            rowRef={(el) => {
+              if (el) rowsRef.current.set(id, el);
+              else rowsRef.current.delete(id);
+            }}
+          />
+        );
+      })}
     </section>
   );
 }
@@ -27,18 +55,24 @@ export function EventFeed({ items }: { items: TranscriptItem[] }) {
 /** Long details keep the transcript's capped, scrolling detail form. */
 const FEED_DETAIL_SCROLL_LINES = 16;
 
-function EventFeedRow({ item }: { item: TranscriptItem }) {
+function EventFeedRow({
+  item,
+  rowRef,
+}: {
+  item: TranscriptItem;
+  rowRef?: (el: HTMLElement | null) => void;
+}) {
   const { open, toggle } = useStableExpand();
   if (item.kind === 'approval') return <ApprovalLine item={item} />;
   const text = eventDetailText(item);
-  if (!text) return <EventLine item={item} />;
+  if (!text) return <EventLine item={item} rowRef={rowRef} />;
   const scroll = text.split('\n').length > FEED_DETAIL_SCROLL_LINES;
   // Colored hunks only when hunks actually exist; a hunk-less diff (stats
   // only) falls back to the text form so the expansion is never empty.
   const hasHunks = item.kind === 'diff' && item.files.some(f => f.hunks.length > 0);
   return (
     <>
-      <EventLine item={item} expand={{ open, toggle }} />
+      <EventLine item={item} expand={{ open, toggle }} rowRef={rowRef} />
       {open && (
         hasHunks && item.kind === 'diff'
           ? <DiffDetail item={item} />

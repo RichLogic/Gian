@@ -3,9 +3,9 @@
  *
  * HOST CONTRACT (sidechat-coordinator/sidechat-store): the Host does NOT
  * forward Side Chat events as `event` envelopes on the shared event stream.
- * Every raw gian.proxy/2.0 notification of a Side Chat route is appended to
- * the transient store (redacted, bounded to the last 200) and the COMPLETE
- * public snapshot — `events`, `user_inputs`, `uncertain_turn_id`, `state` —
+ * Transcript-relevant gian.proxy/2.0 notifications of a Side Chat route are
+ * redacted and semantically compacted into a bounded transient event set. The
+ * COMPLETE public snapshot — `events`, `user_inputs`, `uncertain_turn_id`, `state` —
  * is broadcast via `sidechat:created` / `sidechat:updated` and carried in
  * `state_sync.sidechats`. This module is the web-side read boundary for that
  * contract: it folds the snapshot's raw notifications through the SAME
@@ -437,7 +437,10 @@ export function projectSideChatSnapshot(
         call_id: `sidechat-input:${entry.turn_id}:${order}`,
         event: 'user_message',
         ts,
-        data: { text },
+        data: {
+          text,
+          ...(entry.context_items ? { context_items: entry.context_items } : {}),
+        },
       },
     });
   }

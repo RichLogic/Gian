@@ -132,6 +132,60 @@ describe('message send echo (proposal §9, product definitions)', () => {
     expect(requestIdOf(transport.sent[0])).toBeTruthy();
   });
 
+  it('carries context cards through the wire, optimistic echo, and canonical reconciliation', () => {
+    const { transport, dispatcher, sink } = setup();
+    const contextItems = [{
+      type: 'pastedText' as const,
+      id: 'paste-1',
+      text: 'reference text',
+      lineCount: 1,
+      byteSize: 14,
+    }];
+    dispatchMessageSend(dispatcher.dispatch, payload({ contextItems }));
+
+    expect(transport.sent[0]).toMatchObject({ context_items: contextItems });
+    const echo = sink.appended[0]!.item;
+    expect(echo.contextItems).toEqual(contextItems);
+    const envelope: EventEnvelope = {
+      session_id: 's1',
+      turn: 1,
+      call_id: 'real-user-context',
+      event: 'user_message',
+      ts: echo.ts + 1,
+      data: { text: 'hello', context_items: contextItems },
+    };
+    const after = applyEnvelope([echo], envelope, 'claude');
+    expect(after).toHaveLength(1);
+    expect((after[0] as MsgItem).contextItems).toEqual(contextItems);
+    expect((after[0] as MsgItem).sendCanonical).toBe(true);
+  });
+
+  it('carries an ordered composer document through wire, echo, and canonical reconciliation', () => {
+    const { transport, dispatcher, sink } = setup();
+    const composerDocument = {
+      version: 1 as const,
+      segments: [
+        { type: 'text' as const, text: 'Review ' },
+        { type: 'reference' as const, id: 'file-1', referenceType: 'attachment' as const, label: 'notes.md' },
+        { type: 'text' as const, text: ' carefully' },
+      ],
+    };
+    dispatchMessageSend(dispatcher.dispatch, payload({ composerDocument }));
+
+    expect(transport.sent[0]).toMatchObject({ composer_document: composerDocument });
+    const echo = sink.appended[0]!.item;
+    expect(echo.composerDocument).toEqual(composerDocument);
+    const after = applyEnvelope([echo], {
+      session_id: 's1',
+      turn: 1,
+      call_id: 'real-user-document',
+      event: 'user_message',
+      ts: echo.ts + 1,
+      data: { text: 'Review  carefully', composer_document: composerDocument },
+    }, 'claude');
+    expect((after[0] as MsgItem).composerDocument).toEqual(composerDocument);
+  });
+
   it.each(['codex', 'kimi'] as const)(
     'one-shot bypass fails closed before transport or optimistic echo for %s',
     exec => {

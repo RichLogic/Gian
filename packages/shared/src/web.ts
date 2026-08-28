@@ -13,6 +13,7 @@ import type {
   Workspace,
 } from './model.js';
 import type { InputItem } from './proxy.js';
+import type { MessageContextItem } from './context.js';
 import type { SideChatPublicSnapshot, SessionOrigin } from './sidechat.js';
 import type { SidechatCloseResult } from './operations.js';
 
@@ -189,7 +190,11 @@ export interface QueueUpdatedMessage {
   session_id: string;
   /** Items carry the entry's attachments (localImage/localFile) so the queue
    *  drawer can render thumbnails without a second fetch. */
-  queue: Array<Pick<QueueEntry, 'id' | 'text'> & { items?: InputItem[] }>;
+  queue: Array<Pick<QueueEntry, 'id' | 'text'> & {
+    items?: InputItem[];
+    context_items?: MessageContextItem[];
+    composer_document?: import('./context.js').ComposerDocument;
+  }>;
 }
 
 export interface RunnerUpdatedMessage {
@@ -253,7 +258,7 @@ export interface WorkspaceGitUpdatedMessage {
   type: 'workspace:git-updated';
   workspace_id: string;
   /** Free-form reason — shown in dev console when debugging refresh storms. */
-  reason: 'fetch' | 'branch-created' | 'merge' | 'drop' | 'session-deleted' | 'worktree-detected';
+  reason: 'fetch' | 'branch-created' | 'merge' | 'drop' | 'session-deleted' | 'worktree-detected' | 'worktree-created';
 }
 
 /**
@@ -361,6 +366,15 @@ export interface MessageSendMessage {
    * markdown rather than receiving the slash as plain text.
    */
   items?: InputItem[];
+  /** Gian-owned context cards. The Host validates and compiles these into the
+   *  existing Provider-neutral text input while preserving this structure in
+   *  canonical history. */
+  context_items?: MessageContextItem[];
+  /** Ordered text/reference document used for inline Composer replay and
+   *  Host-side position-aware context compilation. */
+  composer_document?: import('./context.js').ComposerDocument;
+  /** Atomic next-turn draft for a Side Chat send. Ordinary Sessions reject it. */
+  turn_config?: Record<string, import('./model.js').ConfigValue>;
   /**
    * Claude-only single-turn bypass: when true, this turn runs with all
    * approvals skipped regardless of session.approval_mode. Does NOT mutate
@@ -498,6 +512,14 @@ export interface SidechatCloseMessage {
   request_id?: string;
 }
 
+export interface SidechatSetTurnConfigMessage {
+  type: 'sidechat:set_turn_config';
+  sidechat_id: string;
+  option_id: string;
+  value: import('./model.js').ConfigValue;
+  request_id?: string;
+}
+
 export interface SessionForkMessage {
   type: 'session:fork';
   source_session_id: string;
@@ -609,6 +631,8 @@ export interface QueueAddMessage {
   /** Structured input items (image attachments) carried with the message —
    *  same shape as MessageSendMessage.items. */
   items?: InputItem[];
+  context_items?: MessageContextItem[];
+  composer_document?: import('./context.js').ComposerDocument;
   /** Correlation id — see `OperationResultMessage`. */
   request_id?: string;
 }
@@ -654,6 +678,8 @@ export interface MessageSteerMessage {
   session_id: string;
   text: string;
   items?: InputItem[];
+  context_items?: MessageContextItem[];
+  composer_document?: import('./context.js').ComposerDocument;
   /** Correlation id — see `OperationResultMessage`. */
   request_id?: string;
 }
@@ -727,6 +753,7 @@ export type ClientToServerMessage =
   | SidechatCreateMessage
   | SidechatResumeMessage
   | SidechatCloseMessage
+  | SidechatSetTurnConfigMessage
   | SessionForkMessage
   | QueueAddMessage
   | QueueRemoveMessage

@@ -227,8 +227,7 @@ describe('Composer mode dropdown from proxy capabilities', () => {
     expect(screen.getByText('YOLO everything', { selector: '.mp-row-title' })).toBeTruthy();
   });
 
-  it('keeps unknown-role turn options inside the unified options panel', async () => {
-    const user = userEvent.setup();
+  it('does not auto-render unknown-role turn options', async () => {
     loadProxyCapabilitiesMock.mockResolvedValue({
       catalogRevision: 'rev-runtime',
       input: [{ type: 'text' }, { type: 'localFile' }],
@@ -248,11 +247,11 @@ describe('Composer mode dropdown from proxy capabilities', () => {
       }],
     });
     const callbacks = renderComposer(makeSession('claude'));
-    const trigger = await screen.findByTestId('composer-options-chip');
-    expect(trigger).not.toHaveTextContent('Verbosity');
-    await user.click(trigger);
-    await user.click(await screen.findByRole('button', { name: 'Quiet' }));
-    expect(callbacks.onSetTurnConfig).toHaveBeenCalledWith('verbosity', 'quiet');
+    await waitFor(() => {
+      expect(screen.queryByText('Verbosity')).toBeNull();
+      expect(screen.queryByText('Quiet')).toBeNull();
+    });
+    expect(callbacks.onSetTurnConfig).not.toHaveBeenCalled();
   });
 
   it('shows Fast when the catalog advertises role=fast on a non-codex executor', async () => {
@@ -271,12 +270,73 @@ describe('Composer mode dropdown from proxy capabilities', () => {
       }],
     });
     const callbacks = renderComposer(makeSession('grok'));
-    // Fast lives inside the combined options menu as a switch row now.
-    const trigger = await screen.findByRole('button', { name: 'Options' });
-    await userEvent.click(trigger);
-    const toggle = await screen.findByRole('switch', { name: 'Turbo' });
-    await userEvent.click(toggle);
+    await userEvent.click(await screen.findByTestId('composer-fast-chip'));
     expect(callbacks.onSetServiceTier).toHaveBeenCalledWith('fast');
+  });
+
+  it('orders the restored Composer controls exactly around the spacer', async () => {
+    loadProxyCapabilitiesMock.mockResolvedValue({
+      catalogRevision: 'rev-21-layout',
+      input: [{ type: 'text' }, { type: 'localFile' }],
+      slashCommands: [],
+      specialCatalogs: {
+        model: 'model',
+        thinking: 'thinking',
+        fast: 'fast',
+        approvalMode: 'approval',
+      },
+      configOptions: [
+        { id: 'model', displayName: 'Model', binding: 'turn', control: 'select', required: false, defaultValue: 'gpt', choices: [{ value: 'gpt', displayName: 'GPT' }] },
+        { id: 'thinking', displayName: 'Thinking', binding: 'turn', control: 'select', required: false, defaultValue: 'high', choices: [{ value: 'high', displayName: 'High' }] },
+        { id: 'fast', displayName: 'Fast', binding: 'turn', control: 'boolean', required: false, defaultValue: false },
+        { id: 'approval', displayName: 'Approval', binding: 'turn', control: 'select', required: false, defaultValue: 'ask', choices: [{ value: 'ask', displayName: 'Ask' }] },
+      ],
+    });
+    renderComposer(makeSession('codex'));
+    await screen.findByTestId('composer-fast-chip');
+    const bar = document.querySelector('.composer-bar')!;
+    const children = Array.from(bar.children);
+    const index = (selector: string) => children.indexOf(bar.querySelector(selector)!);
+    const order = children.map(element => {
+      if (element.classList.contains('context-usage-anchor')) return 'context';
+      if (element.classList.contains('cmp-control-sep')) return 'separator';
+      if (element.classList.contains('spacer')) return 'spacer';
+      return element.getAttribute('data-testid') ?? element.getAttribute('aria-label');
+    });
+    expect(order).toEqual([
+      'context',
+      'composer-model-chip',
+      'separator',
+      'composer-thinking-chip',
+      'separator',
+      'composer-fast-chip',
+      'spacer',
+      null,
+      'Add context',
+      'Send',
+    ]);
+    expect(index('.context-usage-anchor')).toBeLessThan(index('[data-testid="composer-model-chip"]'));
+    expect(index('[data-testid="composer-model-chip"]')).toBeLessThan(index('[data-testid="composer-thinking-chip"]'));
+    expect(index('[data-testid="composer-thinking-chip"]')).toBeLessThan(index('[data-testid="composer-fast-chip"]'));
+    expect(index('[data-testid="composer-fast-chip"]')).toBeLessThan(index('.spacer'));
+    expect(index('.spacer')).toBeLessThan(index('.cmp-approval-btn'));
+    expect(index('.cmp-approval-btn')).toBeLessThan(index('[aria-label="Add context"]'));
+    expect(index('[aria-label="Add context"]')).toBeLessThan(index('[aria-label="Send"]'));
+    expect(bar.querySelector('[data-testid="composer-model-chip"] .agent-logo')).toBeNull();
+    expect(bar.querySelector('[data-testid="composer-model-chip"] .cmp-executor-mark')).toBeNull();
+    expect(bar.querySelector('.cmp-bulb')).toBeNull();
+    expect(bar.querySelector('.cmp-caret')).toBeNull();
+  });
+
+  it('keeps every approval mode on the normal text treatment', async () => {
+    const user = userEvent.setup();
+    renderComposer(makeSession('codex', { approval_mode: 'auto' }));
+    const approval = document.querySelector('.cmp-approval-btn')!;
+    expect(approval).not.toHaveClass('risky');
+
+    await user.click(approval);
+    expect(await screen.findByText('Approve for me', { selector: '.mp-row-title' })).toBeTruthy();
+    expect(document.querySelector('.danger-option')).toBeNull();
   });
 
   it('does not use the Codex Fast fallback once a catalog without role=fast is ready', async () => {
@@ -296,8 +356,8 @@ describe('Composer mode dropdown from proxy capabilities', () => {
       }],
     });
     renderComposer(makeSession('codex'));
-    await userEvent.click(await screen.findByTestId('composer-options-chip'));
-    expect(screen.queryByRole('switch', { name: 'Fast' })).toBeNull();
+    await screen.findByTestId('composer-model-chip');
+    expect(screen.queryByTestId('composer-fast-chip')).toBeNull();
   });
 
   it('clears Fast when the selected model does not satisfy the catalog condition', async () => {
@@ -329,7 +389,7 @@ describe('Composer mode dropdown from proxy capabilities', () => {
       }],
     });
     const callbacks = renderComposer(makeSession('codex', { service_tier: 'fast' }));
-    await userEvent.click(await screen.findByTestId('composer-options-chip'));
+    await userEvent.click(await screen.findByTestId('composer-model-chip'));
     await userEvent.click(await screen.findByText('Luna', { selector: '.mp-row-title' }));
     expect(callbacks.onSetModel).toHaveBeenCalledWith('gpt-5.6-luna');
     expect(callbacks.onSetServiceTier).toHaveBeenCalledWith(null);

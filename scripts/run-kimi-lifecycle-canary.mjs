@@ -299,10 +299,10 @@ export async function runKimiLifecycleCanary(options = {}) {
     journal = new NotificationJournal(client, timeoutMs);
     await client.ensureStarted();
     const initialized = await client.request('initialize', {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: 'canary' },
     });
-    assert.equal(initialized?.protocol?.version, '2.0', 'Kimi canary must negotiate gian.proxy/2.0.');
+    assert.equal(initialized?.protocol?.version, '2.1', 'Kimi canary must negotiate gian.proxy/2.1.');
     assert.ok(initialized?.capabilities, 'Kimi initialize returned no capabilities.');
     await sample('initialized');
 
@@ -412,7 +412,7 @@ export async function runKimiLifecycleCanary(options = {}) {
     journal = new NotificationJournal(client, timeoutMs);
     await client.ensureStarted();
     await client.request('initialize', {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: 'canary' },
     });
     sessionA = await createWorkspaceSession(client, canaryRoot, {

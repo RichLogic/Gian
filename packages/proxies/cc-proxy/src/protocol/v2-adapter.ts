@@ -215,7 +215,7 @@ interface ServiceSessionShape {
 }
 
 const PROTOCOL_NAME = 'gian.proxy';
-const PROTOCOL_V2 = '2.0';
+const PROTOCOL_V2 = '2.1';
 const MAX_ACTIVITY_JSON_BYTES = 1024 * 1024;
 
 const CAPABILITIES = {
@@ -601,7 +601,7 @@ export class ClaudeProtocolV2Adapter {
       ? protocol.versions.filter((item): item is string => typeof item === 'string' && item.length > 0)
       : [];
     if (protocol.name !== PROTOCOL_NAME || !versions.includes(PROTOCOL_V2)) {
-      throw new ClaudeProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.0 is required.');
+      throw new ClaudeProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.1 is required.');
     }
     const host = requireRecord(params.host, 'host');
     if (typeof host.name !== 'string' || host.name.length === 0
@@ -722,12 +722,20 @@ export class ClaudeProtocolV2Adapter {
       displayName: option.displayName,
       ...(option.description ? { description: option.description } : {}),
       binding: option.binding,
-      ...(option.role ? { role: option.role } : {}),
       control: option.control,
       required: option.required,
       defaultValue: option.defaultValue,
       choices: option.choices,
       ...(option.enabledWhen ? { enabledWhen: option.enabledWhen } : {}),
+    };
+  }
+
+  private specialCatalogs(options: CatalogOption[]) {
+    const id = (role: CatalogOption['role']) => options.find((option) => option.role === role)?.id;
+    return {
+      ...(id('model') ? { model: id('model') } : {}),
+      ...(id('effort') ? { thinking: id('effort') } : {}),
+      ...(id('approval_mode') ? { approvalMode: id('approval_mode') } : {}),
     };
   }
 
@@ -767,6 +775,7 @@ export class ClaudeProtocolV2Adapter {
         { type: 'localImage' as const },
       ],
       configOptions: options.map((option) => this.serializeOption(option)),
+      specialCatalogs: this.specialCatalogs(options),
       actions: [
         { id: 'sidechat.create', supported: true },
         { id: 'session.fork', supported: true },
@@ -777,6 +786,7 @@ export class ClaudeProtocolV2Adapter {
     payload.catalogRevision = stableId('catalog', {
       input: payload.input,
       configOptions: payload.configOptions,
+      specialCatalogs: payload.specialCatalogs,
       actions: payload.actions,
       slashCommands: payload.slashCommands,
     });

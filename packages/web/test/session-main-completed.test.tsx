@@ -130,9 +130,9 @@ describe('SES-COMPLETE-001: completed Session composer', () => {
 
     expect(screen.getByText('This session is completed. Reopen it to send more messages.'))
       .toBeVisible();
-    expect(screen.getByRole('textbox')).toBeDisabled();
+    expect(screen.getByRole('textbox')).toHaveAttribute('contenteditable', 'false');
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add context' })).toBeDisabled();
     expectReadOnlyQueue();
 
     await userEvent.click(screen.getByRole('button', { name: 'Reopen' }));
@@ -144,7 +144,7 @@ describe('SES-COMPLETE-001: completed Session composer', () => {
   it('keeps an ordinary completed turn editable when the user completion flag is absent', () => {
     renderSession(sessionContractFixture({ status: 'done', completed_at: null }));
 
-    expect(screen.getByRole('textbox')).toBeEnabled();
+    expect(screen.getByRole('textbox')).toHaveAttribute('contenteditable', 'true');
     expect(screen.queryByText('This session is completed. Reopen it to send more messages.'))
       .not.toBeInTheDocument();
   });
@@ -164,9 +164,9 @@ describe('WT-003: finalized worktree Session composer', () => {
       }), queuedFollowUp);
 
       expect(document.querySelector(`.session-banner.${outcome}`)).toBeVisible();
-      expect(screen.getByRole('textbox')).toBeDisabled();
+      expect(screen.getByRole('textbox')).toHaveAttribute('contenteditable', 'false');
       expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
-      expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Add context' })).toBeDisabled();
       expectReadOnlyQueue();
       expect(callbacks.onSend).not.toHaveBeenCalled();
       expect(callbacks.onQueueAdd).not.toHaveBeenCalled();

@@ -4,9 +4,55 @@ This file records user-facing changes in published Gian builds. It is updated
 whenever a version is packaged and tagged for release; local test packages are
 not listed.
 
-Releases through 0.5.2 are unsigned macOS Apple Silicon beta builds. Signed
+Releases through 0.5.3 are unsigned macOS Apple Silicon beta builds. Signed
 and notarized native notifications and automatic updates remain disabled
 until Developer ID signing and notarization are available.
+
+## [0.5.3] - 2026-08-28
+
+### Added
+
+- Composer can attach files, folders, selected transcript text, and Browser
+  elements as context cards, and keep those references inline through copy
+  and paste.
+- Side Chat can be created and titled explicitly, keep its own model,
+  Thinking, Fast, and approval settings, and open from a running Codex turn
+  without stopping the parent.
+- Live turns show a Working / Worked block with the turn's tool rows, and
+  approval or question cards use a shared risk-aware layout.
+- Settings range controls use minus / value / plus steppers. AI Agents,
+  Adopt, and Archive no longer show unused filters or bulk-delete actions.
+- Review headers stay pinned while scrolling, and file navigation stays in
+  the inspector.
+- Codex sessions receive a session-scoped Gian MCP identity and the
+  `gian-session` Skill. A Worktree tool can create and bind a view-only
+  checkout without changing the Agent working directory.
+- New Sessions bind to a verified Agent runtime profile: exact CLI path,
+  CLI version, and Proxy version.
+
+### Changed
+
+- Published Claude Proxy 0.2.3, Codex Proxy 0.2.10, Kimi Proxy 0.2.3, and
+  DeepSeek Harness Proxy 0.1.3.
+- Gian Tool now authenticates Host-listened MCP and authorizes methods by
+  role and direct Session ownership.
+- Trace folds tool calls into summaries and compresses idle gaps between
+  turns.
+
+### Fixed
+
+- Codex no longer fails large-thread resume, reuses interaction identities
+  after restart, or loses Fork actions after recovery and reattach.
+- Forked sessions get distinct titles, newly created forks open immediately,
+  and the per-turn Fork control hides when the Proxy cannot fork.
+- The new-session title and first message no longer overlap.
+- DeepSeek Harness multi-step turns no longer reuse one content or finalize
+  event identity.
+
+### Known limitations
+
+- The macOS build remains unsigned and supports Apple Silicon only.
+- Grok is not included in the 0.5.3 product surface.
 
 ## [0.5.2] - 2026-08-25
 
@@ -424,6 +470,7 @@ until Developer ID signing and notarization are available.
 - The published build contained a placeholder GitHub OAuth client ID and could
   not complete first-run login. It was superseded by 0.1.1.
 
+[0.5.3]: https://github.com/RichLogic/Gian/releases/tag/v0.5.3
 [0.5.2]: https://github.com/RichLogic/Gian/releases/tag/v0.5.2
 [0.5.1]: https://github.com/RichLogic/Gian/releases/tag/v0.5.1
 [0.5.0]: https://github.com/RichLogic/Gian/releases/tag/v0.5.0

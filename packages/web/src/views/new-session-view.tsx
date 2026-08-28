@@ -2,19 +2,29 @@ import { useContext, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type {
   ApprovalMode,
+  ComposerDocument,
+  ComposerReferenceSegment,
   ConfigOption,
   ConfigValue,
   Executor,
+  MessageContextItem,
+  PickComposerResourcesResult,
   ProxyModeCapabilities,
   ThinkingEffort,
   UserAgentStatus,
   Workspace,
 } from '@gian/shared';
-import { usesNativeExecutorConfig } from '@gian/shared';
+import {
+  MAX_MESSAGE_CONTEXT_ITEMS,
+  MAX_PASTED_TEXT_BYTES,
+  composerDocumentUserText,
+  normalizeBrowserElementCapture,
+  normalizeComposerDocument,
+  usesNativeExecutorConfig,
+} from '@gian/shared';
 import { loadAgents, loadResolvedProxyCatalog, peekAgents } from '../api.js';
-import { MAX_FILE_BYTES, fmtBytes, isNativeImageMime } from '../attachments.js';
+import { MAX_FILE_BYTES, dedupeAttachmentName, fmtBytes, isNativeImageMime } from '../attachments.js';
 import { desktopBridge } from '../desktop-bridge.js';
-import { toast } from '../feedback.js';
 import { useT } from '../i18n/index.js';
 import {
   applyResolvedDefaults,
@@ -42,8 +52,25 @@ import {
 } from '../components/composer/capabilities.js';
 import type { ComposerCatalog } from '../components/composer/capabilities.js';
 import type { ProxyModel } from '../components/composer/capabilities.js';
-import { CatalogOptionsMenu } from '../components/composer/catalog-options-menu.js';
+import { AgentLogo } from '../components/AgentLogo.js';
 import { useUpDrop } from '../components/composer/option-drops.js';
+import {
+  ContextReferencePopover,
+  REFERENCE_ICONS,
+  ReferencePopover,
+  ReferencePopoverHead,
+} from '../components/composer/reference-popover.js';
+import type { ReferenceAnchor } from '../components/composer/reference-popover.js';
+import {
+  InlineComposerEditor,
+  type InlineComposerEditorHandle,
+} from '../components/composer/InlineComposerEditor.js';
+import {
+  useOperationDispatchOptional,
+  useOperationStoreOptional,
+  waitForRunSettle,
+} from '../operations/use-operations.js';
+import '../operations/context.js';
 import {
   clearNewSessionDraftStorage,
   loadNewSessionScreenshotBlob,
@@ -54,7 +81,7 @@ import {
   storeNewSessionAttachment,
   type NewSessionScreenshotDraftAttachment,
 } from '../screenshot-drafts.js';
-import { publishScreenshotTarget, startScreenshotCapture } from '../screenshot-target.js';
+import { publishScreenshotTarget } from '../screenshot-target.js';
 import { ImageZoomContext } from '../transcript/items.js';
 
 export { newSessionDraftStorageKey } from '../screenshot-drafts.js';
@@ -73,9 +100,11 @@ export interface CreateSessionInput {
    *  create payload itself stays free of it (ses-001 contract); App hands it
    *  to the `session:created` socket handler via pendingFirstMessageRef. */
   firstMessage: string;
+  composerDocument?: ComposerDocument;
   /** Screenshots captured before the Session exists. They are uploaded into
    *  the newly-created Session before its first structured message is sent. */
   firstAttachments?: NewSessionFirstAttachment[];
+  contextItems?: MessageContextItem[];
   /** Capability chips the user picked on the new-session composer; omitted
    *  fields fall back to the host's configured defaults. Kimi never carries
    *  approvalMode (executor-native configuration); serviceTier is Codex-only. */
@@ -149,6 +178,8 @@ const ACTIVE_WORKSPACE_DRAFT_KEY = 'gian.new-session.draft.active-workspace.v1';
  *  returns to a fresh new-session page (with the created workspace
  *  preselected) when the sheet reports a successful create. */
 const RETURN_KEY = 'gian.new-session.return.v1';
+const PASTED_TEXT_CARD_MIN_CHARS = 800;
+const PASTED_TEXT_CARD_MIN_LINES = 8;
 
 interface StoredNewSession {
   workspaceId?: string;
@@ -163,7 +194,78 @@ interface StoredNewSession {
 interface NewSessionDraft extends StoredNewSession {
   sessionName?: string;
   message?: string;
+  document?: ComposerDocument;
   screenshotAttachments?: NewSessionScreenshotDraftAttachment[];
+  contextItems?: MessageContextItem[];
+}
+
+const EMPTY_COMPOSER_DOCUMENT: ComposerDocument = { version: 1, segments: [] };
+
+function newSessionContextLabel(item: MessageContextItem): string {
+  if (item.type === 'folder') return item.name;
+  if (item.type === 'browserElement') return item.name || item.selector;
+  const preview = item.text.replace(/\s+/g, ' ').trim();
+  return preview.slice(0, 80) || 'Pasted text';
+}
+
+function newSessionReferenceIds(document: ComposerDocument): Set<string> {
+  return new Set(document.segments.flatMap(segment => (
+    segment.type === 'reference' ? [segment.id] : []
+  )));
+}
+
+function newSessionComposerDocument(draft: NewSessionDraft | null): ComposerDocument {
+  const normalized = normalizeComposerDocument(draft?.document);
+  if (normalized) return normalized;
+  const attachments = draft?.screenshotAttachments ?? [];
+  const contextItems = savedContextItems(draft?.contextItems);
+  const references: ComposerReferenceSegment[] = [
+    ...attachments.map(attachment => ({
+      type: 'reference' as const,
+      id: attachment.id,
+      referenceType: 'attachment' as const,
+      label: attachment.name,
+    })),
+    ...contextItems.map(item => ({
+      type: 'reference' as const,
+      id: item.id,
+      referenceType: 'context' as const,
+      label: newSessionContextLabel(item),
+    })),
+  ];
+  const text = draft?.message ?? '';
+  const segments: ComposerDocument['segments'] = [];
+  references.forEach((reference, index) => {
+    segments.push(reference);
+    if (index < references.length - 1 || text) segments.push({ type: 'text', text: '\n' });
+  });
+  if (text) segments.push({ type: 'text', text });
+  return normalizeComposerDocument({ version: 1, segments }) ?? EMPTY_COMPOSER_DOCUMENT;
+}
+
+function savedContextItems(value: unknown): MessageContextItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): MessageContextItem[] => {
+    if (!item || typeof item !== 'object') return [];
+    const candidate = item as Record<string, unknown>;
+    if (typeof candidate.id !== 'string') return [];
+    if (candidate.type === 'folder') {
+      return typeof candidate.path === 'string' && typeof candidate.name === 'string'
+        ? [candidate as unknown as MessageContextItem]
+        : [];
+    }
+    if (candidate.type === 'pastedText'
+      && typeof candidate.text === 'string'
+      && typeof candidate.lineCount === 'number'
+      && typeof candidate.byteSize === 'number') {
+      return [candidate as unknown as MessageContextItem];
+    }
+    if (candidate.type === 'browserElement') {
+      const capture = normalizeBrowserElementCapture(candidate);
+      return capture ? [{ type: 'browserElement', id: candidate.id, ...capture }] : [];
+    }
+    return [];
+  }).slice(0, MAX_MESSAGE_CONTEXT_ITEMS);
 }
 
 export interface NewSessionDraftScope {
@@ -216,6 +318,10 @@ function FolderIcon() {
   );
 }
 
+function ControlSeparator() {
+  return <span className="cmp-control-sep" aria-hidden="true">|</span>;
+}
+
 export function NewSessionView({
   workspaces,
   initialWorkspaceId,
@@ -258,6 +364,8 @@ export function NewSessionView({
   // Thumbnail click opens the app-level ImageLightbox (App.tsx provides this
   // context), same as the session Composer's pending-attachment chips.
   const zoomImage = useContext(ImageZoomContext);
+  const operationDispatch = useOperationDispatchOptional();
+  const operationStore = useOperationStoreOptional();
   const [last] = useState(() => readJson<StoredNewSession>(LAST_KEY));
   const [initial] = useState(() => {
     const usable = (id: string | undefined) =>
@@ -282,12 +390,16 @@ export function NewSessionView({
     if (draftScope?.kind === 'task' && usable(saved?.workspaceId)) {
       workspaceId = saved!.workspaceId!;
     }
-    return { draft: saved, workspaceId };
+    return { draft: saved, workspaceId, composerDocument: newSessionComposerDocument(saved) };
   });
   const [draft, setDraft] = useState<NewSessionDraft | null>(initial.draft);
   const [selectedWs, setSelectedWs] = useState(initial.workspaceId);
   const [sessionName, setSessionName] = useState(draft?.sessionName ?? '');
-  const [message, setMessage] = useState(draft?.message ?? '');
+  const [composerDocument, setComposerDocument] = useState(initial.composerDocument);
+  const [message, setMessage] = useState(() => composerDocumentUserText(initial.composerDocument));
+  const [contextItems, setContextItems] = useState<MessageContextItem[]>(
+    () => savedContextItems(draft?.contextItems),
+  );
   const [screenshotAttachments, setScreenshotAttachments] = useState<
     NewSessionScreenshotDraftAttachment[]
   >(() => draft?.screenshotAttachments ?? []);
@@ -325,11 +437,22 @@ export function NewSessionView({
   const [wsQuery, setWsQuery] = useState('');
   const agentDrop = useUpDrop(280);
   const wsDrop = useUpDrop(320);
-  const modeDrop = useUpDrop(340);
-  const taRef = useRef<HTMLTextAreaElement>(null);
+  const modelDrop = useUpDrop(320);
+  const thinkDrop = useUpDrop(210);
+  const modeDrop = useUpDrop(340, { align: 'right' });
+  const addDrop = useUpDrop(220, { align: 'right' });
+  const [resourcePicking, setResourcePicking] = useState(false);
+  const [activeReference, setActiveReference] = useState<{
+    id: string;
+    anchor: ReferenceAnchor;
+    anchorEl: HTMLElement;
+  } | null>(null);
+  const editorRef = useRef<InlineComposerEditorHandle>(null);
+  const attachmentIdsRef = useRef(new Set(initial.draft?.screenshotAttachments?.map(item => item.id) ?? []));
   const catalogResolveSignature = useRef('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const screenshotAvailable = !!desktopBridge()?.screenshot;
+  const resourcePickerAvailable = !!desktopBridge()?.resources;
 
   useEffect(() => {
     let cancelled = false;
@@ -506,11 +629,18 @@ export function NewSessionView({
   }, [executor, catalogExecutor, catalog, catalogValues, model, effort, mode, serviceTier]);
 
   function currentDraft(workspaceId = selectedWs): NewSessionDraft {
+    const referenceIds = newSessionReferenceIds(composerDocument);
     return {
       workspaceId,
       sessionName,
       message,
-      ...(screenshotAttachments.length > 0 ? { screenshotAttachments } : {}),
+      document: composerDocument,
+      ...(contextItems.some(item => referenceIds.has(item.id))
+        ? { contextItems: contextItems.filter(item => referenceIds.has(item.id)) }
+        : {}),
+      ...(screenshotAttachments.some(item => referenceIds.has(item.id))
+        ? { screenshotAttachments: screenshotAttachments.filter(item => referenceIds.has(item.id)) }
+        : {}),
       ...(agentId ? { agentId } : {}),
       ...(executor ? { executor } : {}),
       ...(model ? { model } : {}),
@@ -540,6 +670,8 @@ export function NewSessionView({
     selectedWs,
     sessionName,
     message,
+    composerDocument,
+    contextItems,
     agentId,
     executor,
     model,
@@ -563,9 +695,18 @@ export function NewSessionView({
     const onScreenshot = (event: Event) => {
       const detail = (event as CustomEvent).detail;
       if (!screenshotEventMatchesScope(detail, currentScope)) return;
+      const additions = detail.attachments.filter(item => !attachmentIdsRef.current.has(item.id));
+      attachmentIdsRef.current = new Set(detail.attachments.map(item => item.id));
       setScreenshotAttachments(detail.attachments);
       setAttachmentError(null);
-      requestAnimationFrame(() => taRef.current?.focus());
+      for (const attachment of additions) {
+        editorRef.current?.insertReference({
+          id: attachment.id,
+          referenceType: 'attachment',
+          label: attachment.name,
+        });
+      }
+      requestAnimationFrame(() => editorRef.current?.focus());
     };
     window.addEventListener(NEW_SESSION_SCREENSHOT_EVENT, onScreenshot);
     return () => window.removeEventListener(NEW_SESSION_SCREENSHOT_EVENT, onScreenshot);
@@ -604,14 +745,6 @@ export function NewSessionView({
       : (selectedWorkspace?.name || t('coding.new.title'));
     return publishScreenshotTarget({ kind: 'new-session', scope: currentScope, label });
   }, [currentScopeKey, draftLabel, draftScope?.kind, screenshotAvailable, selectedWorkspace?.name, t]);
-
-  // Auto-grow the message box, same 160px cap as the session Composer.
-  useEffect(() => {
-    const el = taRef.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = Math.min(160, el.scrollHeight) + 'px';
-  }, [message]);
 
   const readyAgents = (agents ?? []).filter(agent => agent.ready);
   // Exactly one usable agent: no choice to make — the chip shows it
@@ -680,6 +813,8 @@ export function NewSessionView({
   const showEffortChip = Boolean(cliExecutor || (catalogReady && turnEffort));
   const showApprovalChip = Boolean(cliExecutor || (catalogReady && catalogApproval));
   const showNativeStatic = Boolean(executor && usesNativeExecutorConfig(executor) && !catalogReady);
+  const modelControlVisible = showModelChip || showNativeStatic;
+  const effortControlVisible = showEffortChip || showNativeStatic;
   const catalogViewValues: Record<string, ConfigValue> = { ...catalogValues };
   if (catalogModel && displayModel) catalogViewValues[catalogModel.id] = displayModel;
   if (catalogEffort && displayEffort) catalogViewValues[catalogEffort.id] = displayEffort;
@@ -689,23 +824,19 @@ export function NewSessionView({
     ? optionVisible(turnFast, catalogViewValues)
     : !catalogReady && executor === 'codex';
   const fastEnabled = !turnFast || optionEnabled(turnFast, catalogViewValues);
+  const specialOptionIds = new Set(
+    [catalogModel, catalogEffort, catalogFast, catalogApproval]
+      .filter((option): option is ConfigOption => Boolean(option))
+      .map((option) => option.id),
+  );
   const sessionExtras = catalog.configOptions.filter((option) => (
     option.binding === 'session'
+    && specialOptionIds.has(option.id)
     && option.id !== catalogApproval?.id
     && optionVisible(option, catalogViewValues)
   ));
-  const turnMenuExtras = catalog.configOptions.filter((option) => (
-    option.binding === 'turn'
-    && option.id !== turnModel?.id
-    && option.id !== turnEffort?.id
-    && option.id !== turnFast?.id
-    && option.id !== catalogApproval?.id
-    && optionVisible(option, catalogViewValues)
-  ));
-  const showOptionsMenu = showModelChip || showEffortChip || showFastChip || turnMenuExtras.length > 0;
-  const showAttach = catalog.input.length === 0
-    || inputTypeAdvertised(catalog, 'localFile', catalogValues)
-    || inputTypeAdvertised(catalog, 'localImage', catalogValues);
+  const canAttachLocalFile = catalog.input.length === 0
+    || inputTypeAdvertised(catalog, 'localFile', catalogValues);
 
   const wsRows = workspaces.filter(w => w.name !== '__gian_root__');
   const query = wsQuery.trim().toLowerCase();
@@ -758,12 +889,18 @@ export function NewSessionView({
         ...currentDraft(nextWorkspaceId),
         sessionName: '',
         message: '',
+        document: EMPTY_COMPOSER_DOCUMENT,
       };
+      const nextDocument = newSessionComposerDocument(nextDraft);
       setDraft(nextDraft);
       setSelectedWs(nextWorkspaceId);
       setSessionName(nextDraft.sessionName ?? '');
-      setMessage(nextDraft.message ?? '');
+      setComposerDocument(nextDocument);
+      setMessage(composerDocumentUserText(nextDocument));
+      setContextItems(savedContextItems(nextDraft.contextItems));
       setScreenshotAttachments(nextDraft.screenshotAttachments ?? []);
+      attachmentIdsRef.current = new Set(nextDraft.screenshotAttachments?.map(item => item.id) ?? []);
+      editorRef.current?.setDocument(nextDocument);
       setAgentId(nextDraft.agentId ?? null);
       setModel(nextDraft.model ?? '');
       setEffort(nextDraft.thinkingEffort ?? null);
@@ -776,7 +913,7 @@ export function NewSessionView({
   const canSend = !!selectedWorkspace
     && selectedWorkspace.hidden !== 1
     && selectedAgent?.ready === true
-    && (!!message.trim() || screenshotAttachments.length > 0)
+    && (composerDocument.segments.length > 0)
     && !creating
     && !preparingAttachments
     && !createUnknown;
@@ -787,9 +924,12 @@ export function NewSessionView({
     if (!owner) return;
     setPreparingAttachments(true);
     setAttachmentError(null);
+    const referenceIds = newSessionReferenceIds(composerDocument);
+    const referencedAttachments = screenshotAttachments.filter(item => referenceIds.has(item.id));
+    const referencedContextItems = contextItems.filter(item => referenceIds.has(item.id));
     const firstAttachments: NewSessionFirstAttachment[] = [];
     try {
-      for (const attachment of screenshotAttachments) {
+      for (const attachment of referencedAttachments) {
         const blob = await loadNewSessionScreenshotBlob(owner, attachment.id);
         if (!blob) throw new Error(`missing screenshot blob: ${attachment.id}`);
         firstAttachments.push({ ...attachment, blob });
@@ -839,8 +979,12 @@ export function NewSessionView({
     });
     onCreate({
       ...payload,
-      firstMessage: message.trim(),
+      firstMessage: composerDocumentUserText(composerDocument).trim(),
+      ...(composerDocument.segments.some(segment => segment.type === 'reference')
+        ? { composerDocument }
+        : {}),
       ...(firstAttachments.length > 0 ? { firstAttachments } : {}),
+      ...(referencedContextItems.length > 0 ? { contextItems: referencedContextItems } : {}),
     });
     setPreparingAttachments(false);
     // The text stays put on failure (the form stays open with the error);
@@ -857,26 +1001,96 @@ export function NewSessionView({
     onNewWorkspace();
   }
 
-  function handleMessageKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+  function handleMessageKeyDown(event: KeyboardEvent): boolean {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       void submit();
+      return true;
     }
+    return false;
   }
 
-  async function captureScreenshot(): Promise<void> {
-    try {
-      await startScreenshotCapture();
-    } catch {
-      toast({ kind: 'error', message: t('screenshot.startFailed') });
-    }
+  function handleDocumentChange(nextDocument: ComposerDocument, userText: string): void {
+    setComposerDocument(nextDocument);
+    setMessage(userText);
+    const referenceIds = newSessionReferenceIds(nextDocument);
+    if (activeReference && !referenceIds.has(activeReference.id)) setActiveReference(null);
   }
 
   function removeScreenshot(id: string): void {
     const owner = activeDraftScope();
     if (!owner) return;
+    editorRef.current?.removeReference(id);
     setScreenshotAttachments(previous => previous.filter(item => item.id !== id));
+    attachmentIdsRef.current.delete(id);
     void removeNewSessionScreenshot(owner, id);
+  }
+
+  function removeContextItem(id: string): void {
+    editorRef.current?.removeReference(id);
+    setContextItems(previous => previous.filter(item => item.id !== id));
+  }
+
+  const activeContextItem = activeReference
+    ? contextItems.find(item => item.id === activeReference.id) ?? null
+    : null;
+  const activeScreenshot = activeReference
+    ? screenshotAttachments.find(item => item.id === activeReference.id) ?? null
+    : null;
+  const activeScreenshotThumb = activeScreenshot
+    ? screenshotPreviews[activeScreenshot.id]
+    : undefined;
+
+  async function pickComposerResources(): Promise<void> {
+    addDrop.setOpen(false);
+    setResourcePicking(true);
+    setAttachmentError(null);
+    try {
+      if (!operationDispatch || !operationStore) {
+        setAttachmentError(t('composer.context.pickerUnavailable'));
+        return;
+      }
+      const run = operationDispatch('context.pickResources', {});
+      const settled = await waitForRunSettle(operationStore, run.id);
+      if (settled.phase !== 'confirmed') {
+        setAttachmentError(t('composer.context.pickerUnavailable'));
+        return;
+      }
+      const result = settled.result as PickComposerResourcesResult | undefined;
+      if (!result) return;
+      if (result.rejectedFiles.length > 0) {
+        setAttachmentError(t('composer.context.filesRejected'));
+      }
+      const folders = result.resources.filter(resource => resource.type === 'folder');
+      const paths = new Set(contextItems.flatMap(item => item.type === 'folder' ? [item.path] : []));
+      const additions: MessageContextItem[] = folders
+        .filter(folder => {
+          if (paths.has(folder.path)) return false;
+          paths.add(folder.path);
+          return true;
+        })
+        .map(folder => ({
+          type: 'folder' as const,
+          id: crypto.randomUUID(),
+          path: folder.path,
+          name: folder.name,
+        }))
+        .slice(0, Math.max(0, MAX_MESSAGE_CONTEXT_ITEMS - contextItems.length));
+      setContextItems(previous => [...previous, ...additions]);
+      for (const item of additions) {
+        editorRef.current?.insertReference({
+          id: item.id,
+          referenceType: 'context',
+          label: newSessionContextLabel(item),
+        });
+      }
+      const files = result.resources.flatMap(resource => resource.type === 'file'
+        ? [new File([new Uint8Array(resource.data)], resource.name, { type: resource.mime })]
+        : []);
+      if (files.length > 0) await addFiles(files);
+    } finally {
+      setResourcePicking(false);
+    }
   }
 
   /** Paste/picker entry point, mirroring the session Composer's pipeline but
@@ -900,17 +1114,58 @@ export function NewSessionView({
     }
   }
 
-  function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>): void {
+  function handlePaste(event: ClipboardEvent): boolean {
     const items = Array.from(event.clipboardData?.items ?? []);
     const images = items.filter(item => item.kind === 'file' && item.type.startsWith('image/'));
-    if (images.length === 0) return; // let normal text paste through
+    if (images.length > 0) {
+      event.preventDefault();
+      const takenNames = new Set(screenshotAttachments.map(attachment => attachment.name));
+      const files = images
+        .map(item => item.getAsFile())
+        .filter((file): file is File => file !== null)
+        .map(file => {
+          const name = dedupeAttachmentName(file.name || `paste-${Date.now()}.png`, takenNames);
+          takenNames.add(name);
+          return new File([file], name, { type: file.type });
+        });
+      void addFiles(files);
+      return true;
+    }
+    const pastedText = typeof event.clipboardData?.getData === 'function'
+      ? event.clipboardData.getData('text/plain')
+      : '';
+    const lineCount = pastedText ? pastedText.split(/\r\n|\r|\n/).length : 0;
+    if (
+      !pastedText
+      || (pastedText.length <= PASTED_TEXT_CARD_MIN_CHARS && lineCount <= PASTED_TEXT_CARD_MIN_LINES)
+      || contextItems.length >= MAX_MESSAGE_CONTEXT_ITEMS
+    ) return false;
+    const byteSize = new Blob([pastedText]).size;
+    if (byteSize > MAX_PASTED_TEXT_BYTES) {
+      if (!canAttachLocalFile) return false;
+      event.preventDefault();
+      void addFiles([new File(
+        [pastedText],
+        `pasted-text-${Date.now()}.txt`,
+        { type: 'text/plain' },
+      )]);
+      return true;
+    }
     event.preventDefault();
-    const files = images
-      .map(item => item.getAsFile())
-      .filter((file): file is File => file !== null)
-      // Screenshots have empty names — fabricate one, same as the Composer.
-      .map(file => file.name ? file : new File([file], `paste-${Date.now()}.png`, { type: file.type }));
-    void addFiles(files);
+    const item: MessageContextItem = {
+      type: 'pastedText',
+      id: crypto.randomUUID(),
+      text: pastedText,
+      lineCount,
+      byteSize,
+    };
+    setContextItems(previous => [...previous, item]);
+    editorRef.current?.insertReference({
+      id: item.id,
+      referenceType: 'context',
+      label: newSessionContextLabel(item),
+    });
+    return true;
   }
 
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>): void {
@@ -922,7 +1177,7 @@ export function NewSessionView({
   function handleTitleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
     if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
       event.preventDefault();
-      taRef.current?.focus();
+      editorRef.current?.focus();
     }
   }
 
@@ -989,10 +1244,7 @@ export function NewSessionView({
               onClick={() => agentDrop.setOpen(open => !open)}
             >
               {selectedAgent && (
-                <span
-                  className="exec-dot"
-                  style={{ background: `var(--agent-${selectedAgent.color})` }}
-                />
+                <AgentLogo proxy={selectedAgent.proxy} size={18} />
               )}
               <span className="name">
                 {selectedAgent ? selectedAgent.name : t('coding.new.agent.select')}
@@ -1001,13 +1253,16 @@ export function NewSessionView({
             </button>
           ) : selectedAgent ? (
             <span className="composer-opt ns-chip-static" data-testid="ns-agent-picker">
-              <span
-                className="exec-dot"
-                style={{ background: `var(--agent-${selectedAgent.color})` }}
-              />
+              <AgentLogo proxy={selectedAgent.proxy} size={18} />
               <span className="name">{selectedAgent.name}</span>
             </span>
           ) : null}
+
+          {selectedAgent?.runtimeProfile?.verification === 'unverified' && (
+            <p className="ns-runtime-warning" role="alert" data-testid="ns-runtime-unverified">
+              {t('coding.new.agent.unverified')}
+            </p>
+          )}
 
           <button
             ref={wsDrop.btnRef}
@@ -1061,13 +1316,14 @@ export function NewSessionView({
                   onClick={() => { setAgentId(agent.id); agentDrop.setOpen(false); }}
                 >
                   <span className="mp-check">{agentId === agent.id ? '✓' : ''}</span>
-                  <span
-                    className="exec-dot"
-                    style={{ background: `var(--agent-${agent.color})` }}
-                  />
+                  <AgentLogo proxy={agent.proxy} size={24} />
                   <span className="mp-row-body">
                     <span className="mp-row-title">{agent.name}</span>
-                    <span className="mp-row-hint">{agent.proxyName}</span>
+                    <span className={`mp-row-hint${agent.runtimeProfile?.verification === 'unverified' ? ' danger-text' : ''}`}>
+                      {agent.runtimeProfile?.verification === 'unverified'
+                        ? `${agent.proxyName} · ${t('coding.new.agent.unverifiedShort')}`
+                        : agent.proxyName}
+                    </span>
                   </span>
                 </button>
               ))}
@@ -1160,127 +1416,195 @@ export function NewSessionView({
               onKeyDown={handleTitleKeyDown}
               placeholder={t('coding.new.sessionTitle.placeholder')}
             />
-            <textarea
-              ref={taRef}
-              className="composer-ta"
-              data-testid="ns-message-input"
-              rows={1}
+            <InlineComposerEditor
+              ref={editorRef}
+              testId="ns-message-input"
               autoFocus
-              value={message}
-              onChange={event => setMessage(event.target.value)}
+              initialDocument={initial.composerDocument}
+              disabled={creating || preparingAttachments || createUnknown}
+              onChange={handleDocumentChange}
               onKeyDown={handleMessageKeyDown}
               onPaste={handlePaste}
               placeholder={t('coding.new.message.placeholder')}
+              onReferenceActivate={(id, _referenceType, anchorEl) => setActiveReference(previous => previous?.id === id
+                ? null
+                : { id, anchor: anchorEl.getBoundingClientRect(), anchorEl })}
             />
           </div>
-          {screenshotAttachments.length > 0 && (
-            <div className="composer-attachments" data-testid="new-session-screenshots">
-              {screenshotAttachments.map(attachment => {
-                const thumbUrl = screenshotPreviews[attachment.id];
-                return (
-                <div key={attachment.id} className="att-chip">
-                  {isNativeImageMime(attachment.mime) ? (
-                    thumbUrl ? (
-                      <button
-                        type="button"
-                        className="att-thumb-btn"
-                        title={attachment.name}
-                        onClick={() => zoomImage?.(thumbUrl, attachment.name)}
-                      >
-                        <img
-                          className="att-thumb"
-                          src={thumbUrl}
-                          alt={attachment.name}
-                        />
-                      </button>
-                    ) : (
-                      <span className="spinner" aria-label={t('common.loading')} />
-                    )
+          {activeReference && activeContextItem && (
+            <ContextReferencePopover
+              item={activeContextItem}
+              anchor={activeReference.anchor}
+              anchorEl={activeReference.anchorEl}
+              onClose={() => setActiveReference(null)}
+              onRemove={removeContextItem}
+            />
+          )}
+          {activeReference && activeScreenshot && (
+            <ReferencePopover
+              anchor={activeReference.anchor}
+              anchorEl={activeReference.anchorEl}
+              onClose={() => setActiveReference(null)}
+            >
+              <ReferencePopoverHead
+                icon={REFERENCE_ICONS.file}
+                title={activeScreenshot.name}
+                onRemove={() => removeScreenshot(activeScreenshot.id)}
+                removeLabel={t('composer.attachment.remove')}
+                onClose={() => setActiveReference(null)}
+              />
+              <div className="ref-pop-body" data-testid="new-session-screenshots">
+                {isNativeImageMime(activeScreenshot.mime) && (
+                  activeScreenshotThumb ? (
+                    <img
+                      className="ref-pop-thumb"
+                      src={activeScreenshotThumb}
+                      alt={activeScreenshot.name}
+                      onClick={() => zoomImage?.(activeScreenshotThumb, activeScreenshot.name)}
+                    />
                   ) : (
-                    <span className="att-file-icon" aria-hidden="true">
-                      <svg viewBox="0 0 16 16" fill="none">
-                        <path d="M4 1.75h5l3 3V14.25H4z" stroke="currentColor" strokeWidth="1.2" />
-                        <path d="M9 1.75v3h3" stroke="currentColor" strokeWidth="1.2" />
-                      </svg>
-                    </span>
-                  )}
-                  <span className="att-name" title={attachment.name}>{attachment.name}</span>
-                  <span className="att-size">{fmtBytes(attachment.size)}</span>
-                  <button
-                    className="att-remove"
-                    type="button"
-                    onClick={() => removeScreenshot(attachment.id)}
-                    aria-label={t('composer.attachment.remove')}
-                  >✕</button>
-                </div>
-                );
-              })}
-            </div>
+                    <span className="spinner" aria-label={t('common.loading')} />
+                  )
+                )}
+                <span className="ref-pop-meta">{fmtBytes(activeScreenshot.size)}</span>
+              </div>
+            </ReferencePopover>
           )}
           <div className="composer-bar">
-            {showOptionsMenu && executor && (
-              <CatalogOptionsMenu
-                executor={executor}
-                summary={[
-                  ...(showModelChip ? [modelLabel(displayModels, displayModel) || displayModel] : []),
-                  ...(showEffortChip ? [effortLabel(executor, displayEffort)] : []),
-                  ...(serviceTier === 'fast' ? [t('composer.fast.button')] : []),
-                ]}
-                model={showModelChip ? {
-                  label: t('composer.model.section'),
-                  value: displayModels.some(candidate => candidate.model === displayModel)
-                    ? displayModel
-                    : claudeModelFamily(displayModel),
-                  choices: displayModels.filter(candidate => !candidate.hidden).map(candidate => ({
-                    value: candidate.model,
-                    label: candidate.displayName,
-                    ...(candidate.description && executor !== 'codex'
-                      ? { description: candidate.description }
-                      : {}),
-                  })),
-                  disabled: creating,
-                  onChange: pickModel,
-                } : undefined}
-                effort={showEffortChip ? {
-                  label: t('composer.reasoning.effort'),
-                  value: displayEffort ?? '',
-                  choices: (turnEffort?.choices?.map(choice => String(choice.value))
-                    ?? supportedEfforts(currentModelMeta)).map(level => ({
-                    value: level,
-                    label: effortLabel(executor, level),
-                  })),
-                  disabled: creating,
-                  onChange: value => setEffort(value),
-                } : undefined}
-                fast={showFastChip ? {
-                  label: turnFast?.displayName ?? t('composer.fast.button'),
-                  description: turnFast?.description ?? t('composer.fast.title'),
-                  checked: serviceTier === 'fast',
-                  disabled: creating || !fastEnabled,
-                  onChange: checked => setServiceTier(checked ? 'fast' : null),
-                } : undefined}
-                options={turnMenuExtras}
-                values={catalogViewValues}
-                optionDisabled={option => creating || !optionEnabled(option, catalogViewValues)}
-                onOptionChange={(option, value) => setCatalogValues(current => ({
-                  ...current,
-                  [option.id]: value,
-                }))}
-                testId="ns-model-chip"
-              />
+            {showModelChip && executor && (
+              <>
+                <button
+                  ref={modelDrop.btnRef}
+                  type="button"
+                  className={`composer-opt cmp-model-btn${modelDrop.open ? ' open' : ''}`}
+                  data-testid="ns-model-chip"
+                  title={t('composer.model.section')}
+                  disabled={creating}
+                  onClick={() => modelDrop.setOpen(open => !open)}
+                >
+                  <span className="name cmp-model">
+                    {modelLabel(displayModels, displayModel) || displayModel}
+                  </span>
+                </button>
+                {modelDrop.open && modelDrop.pos && createPortal(
+                  <div
+                    ref={modelDrop.popRef}
+                    className="popover model-pop"
+                    role="dialog"
+                    style={{ left: modelDrop.pos.left, bottom: modelDrop.pos.bottom }}
+                  >
+                    <div className="mp-section-head">
+                      <span className="mp-section-title">{t('composer.model.section')}</span>
+                    </div>
+                    <div className="mp-list">
+                      {displayModels.filter(candidate => !candidate.hidden).map(candidate => {
+                        const active = candidate.model === displayModel
+                          || claudeModelFamily(displayModel) === candidate.model;
+                        return (
+                          <button
+                            key={candidate.model}
+                            type="button"
+                            className={`mp-row${active ? ' active' : ''}`}
+                            onClick={() => {
+                              pickModel(candidate.model);
+                              modelDrop.setOpen(false);
+                            }}
+                          >
+                            <span className="mp-check">{active ? '✓' : ''}</span>
+                            <span className="mp-row-body">
+                              <span className="mp-row-title">{candidate.displayName}</span>
+                              {candidate.description && executor !== 'codex' && (
+                                <span className="mp-row-hint">{candidate.description}</span>
+                              )}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>,
+                  document.body,
+                )}
+              </>
             )}
             {showNativeStatic && (
-              <span className="composer-opt ns-chip-static cmp-options-btn" data-testid="ns-model-chip">
-                {selectedAgent && (
-                  <span
-                    className="exec-dot"
-                    style={{ background: `var(--agent-${selectedAgent.color})` }}
-                  />
-                )}
-                <span className="name">{nativeDefaults?.model.trim() || t('coding.new.chip.default')}</span>
-                <span className="cmp-opt-sep" aria-hidden="true">|</span>
-                <span className="name">{nativeDefaults?.thinking.trim() || t('coding.new.chip.default')}</span>
+              <span className="composer-opt ns-chip-static cmp-model-btn" data-testid="ns-model-chip">
+                <span className="name cmp-model">
+                  {nativeDefaults?.model.trim() || t('coding.new.chip.default')}
+                </span>
               </span>
+            )}
+
+            {modelControlVisible && effortControlVisible && <ControlSeparator />}
+
+            {showEffortChip && executor && (
+              <>
+                <button
+                  ref={thinkDrop.btnRef}
+                  type="button"
+                  className={`composer-opt cmp-think-btn${thinkDrop.open ? ' open' : ''}`}
+                  data-testid="ns-thinking-chip"
+                  title={t('composer.reasoning.effort')}
+                  disabled={creating}
+                  onClick={() => thinkDrop.setOpen(open => !open)}
+                >
+                  <span className="name">{effortLabel(executor, displayEffort)}</span>
+                </button>
+                {thinkDrop.open && thinkDrop.pos && createPortal(
+                  <div
+                    ref={thinkDrop.popRef}
+                    className="popover think-pop"
+                    role="dialog"
+                    style={{ left: thinkDrop.pos.left, bottom: thinkDrop.pos.bottom }}
+                  >
+                    <div className="mp-section-head">
+                      <span className="mp-section-title">{t('composer.reasoning.effort')}</span>
+                    </div>
+                    <div className="mp-list">
+                      {(turnEffort?.choices?.map(choice => String(choice.value))
+                        ?? supportedEfforts(currentModelMeta)).map(level => (
+                        <button
+                          key={level}
+                          type="button"
+                          className={`mp-row${displayEffort === level ? ' active' : ''}`}
+                          onClick={() => {
+                            setEffort(level);
+                            thinkDrop.setOpen(false);
+                          }}
+                        >
+                          <span className="mp-check">{displayEffort === level ? '✓' : ''}</span>
+                          <span className="mp-row-body">
+                            <span className="mp-row-title">{effortLabel(executor, level)}</span>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>,
+                  document.body,
+                )}
+              </>
+            )}
+            {showNativeStatic && (
+              <span className="composer-opt ns-chip-static cmp-think-btn" data-testid="ns-thinking-chip">
+                <span className="name">
+                  {nativeDefaults?.thinking.trim() || t('coding.new.chip.default')}
+                </span>
+              </span>
+            )}
+
+            {showFastChip && (modelControlVisible || effortControlVisible) && <ControlSeparator />}
+
+            {showFastChip && (
+              <button
+                type="button"
+                className={`composer-opt cmp-fast${serviceTier === 'fast' ? ' on' : ''}`}
+                data-testid="ns-fast-chip"
+                title={turnFast?.description ?? t('composer.fast.title')}
+                aria-pressed={serviceTier === 'fast'}
+                disabled={creating || !fastEnabled}
+                onClick={() => setServiceTier(current => current === 'fast' ? null : 'fast')}
+              >
+                {turnFast?.displayName ?? t('composer.fast.button')}
+              </button>
             )}
 
             <span className="spacer" />
@@ -1298,7 +1622,6 @@ export function NewSessionView({
                   <span className="name">
                     {composerModeLabel(executor ?? 'claude', displayMode, advertisedModes, t)}
                   </span>
-                  <span className="caret cmp-caret" aria-hidden="true">▾</span>
                 </button>
                 {modeDrop.open && modeDrop.pos && createPortal(
                   <div
@@ -1348,36 +1671,63 @@ export function NewSessionView({
               </span>
             )}
 
-            {/* Attach files — plus glyph, same as the session Composer. */}
-            {showAttach && <button
-              type="button"
-              className={`composer-act${screenshotAttachments.length > 0 ? ' active' : ''}`}
-              data-testid="ns-attach-button"
-              disabled={creating || preparingAttachments || createUnknown}
-              title={t('composer.attachment.addFiles')}
-              onClick={() => fileInputRef.current?.click()}
-              aria-label={t('composer.attachment.addFiles')}
-            >
-              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-              </svg>
-            </button>}
-
-            {screenshotAvailable && (
+            {/* Add resources - same files/folder menu as the session Composer. */}
+            <>
               <button
+                ref={addDrop.btnRef}
                 type="button"
-                className="composer-act"
-                disabled={creating || preparingAttachments || createUnknown}
-                title={t('screenshot.capture')}
-                aria-label={t('screenshot.capture')}
-                onClick={() => { void captureScreenshot(); }}
+                className={`composer-act${addDrop.open ? ' active' : ''}`}
+                data-testid="ns-attach-button"
+                disabled={creating || preparingAttachments || createUnknown || resourcePicking}
+                title={t('composer.context.add')}
+                onClick={() => addDrop.setOpen(open => !open)}
+                aria-label={t('composer.context.add')}
               >
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
-                  <path d="M5 3.5 6 2h4l1 1.5h2A1.5 1.5 0 0 1 14.5 5v7A1.5 1.5 0 0 1 13 13.5H3A1.5 1.5 0 0 1 1.5 12V5A1.5 1.5 0 0 1 3 3.5h2Z" strokeWidth="1.2" />
-                  <circle cx="8" cy="8.5" r="2.5" strokeWidth="1.2" />
-                </svg>
+                {resourcePicking ? <span className="spinner" aria-hidden="true" /> : (
+                  <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                )}
               </button>
-            )}
+              {addDrop.open && addDrop.pos && createPortal(
+                <div
+                  ref={addDrop.popRef}
+                  className="popover composer-add-pop"
+                  style={{ left: addDrop.pos.left, bottom: addDrop.pos.bottom }}
+                >
+                  <div className="mp-list">
+                    <button
+                      type="button"
+                      className="mp-row"
+                      onClick={() => {
+                        if (resourcePickerAvailable) void pickComposerResources();
+                        else {
+                          addDrop.setOpen(false);
+                          fileInputRef.current?.click();
+                        }
+                      }}
+                    >
+                      <span className="composer-add-icon" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none">
+                          <path d="M5.25 8.75 9.8 4.2a2 2 0 0 1 2.8 2.8l-5.35 5.35a3 3 0 0 1-4.25-4.25l5-5" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                      <span className="mp-row-body">
+                        <span className="mp-row-title">
+                          {resourcePickerAvailable
+                            ? t('composer.context.filesAndFolders')
+                            : t('composer.context.files')}
+                        </span>
+                        {!resourcePickerAvailable && (
+                          <span className="mp-row-hint">{t('composer.context.foldersDesktopOnly')}</span>
+                        )}
+                      </span>
+                    </button>
+                  </div>
+                </div>,
+                document.body,
+              )}
+            </>
 
             <button
               type="button"

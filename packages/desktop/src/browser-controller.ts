@@ -11,6 +11,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import type {
   GianBrowserBounds,
+  GianBrowserElementCapture,
   GianBrowserProjectTarget,
   GianBrowserState,
 } from '@gian/shared';
@@ -22,6 +23,11 @@ import {
   type BrowserProjectSite,
 } from './browser-project.js';
 import { DESKTOP_TOKEN_HEADER } from './managed-host.js';
+import {
+  captureFromCdpNode,
+  type CdpAxNode,
+  type CdpDomNode,
+} from './browser-element.js';
 
 export const GIAN_BROWSER_SCHEME = 'gian-browser';
 const BROWSER_PARTITION = 'persist:gian-browser';
@@ -47,6 +53,7 @@ interface BrowserControllerOptions {
   desktopToken: string | null;
   openExternalUrl: (url: string) => Promise<void>;
   onState: (tabId: string, state: GianBrowserState) => void;
+  onElement: (tabId: string, capture: GianBrowserElementCapture) => void;
 }
 
 interface BrowserTab {
@@ -57,6 +64,9 @@ interface BrowserTab {
   bounds: GianBrowserBounds;
   lastError?: string;
   navigationCommand: number;
+  inspectGeneration: number;
+  inspecting: boolean;
+  debuggerOwned: boolean;
 }
 
 interface BrowserProjectRegistration {
@@ -103,12 +113,14 @@ export class BrowserController {
       canGoBack: !!contents && !contents.isDestroyed() && contents.navigationHistory.canGoBack(),
       canGoForward: !!contents && !contents.isDestroyed() && contents.navigationHistory.canGoForward(),
       canOpenExternal: this.canOpenCurrentExternally(url),
+      inspecting: tab.inspecting,
       ...(tab.lastError ? { error: tab.lastError } : {}),
     };
   }
 
   async navigate(tabId: string, candidate: string): Promise<GianBrowserState> {
     const tab = this.ensureTab(tabId);
+    this.cancelInspect(tab);
     if (!isAllowedBrowserUrl(candidate)) {
       tab.lastError = 'Unsupported or invalid URL';
       this.emitState(tab);
@@ -148,6 +160,7 @@ export class BrowserController {
 
   goBack(tabId: string): GianBrowserState {
     const tab = this.ensureTab(tabId);
+    this.cancelInspect(tab);
     tab.navigationCommand += 1;
     const contents = this.ensureView(tab).webContents;
     if (contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
@@ -158,6 +171,7 @@ export class BrowserController {
 
   goForward(tabId: string): GianBrowserState {
     const tab = this.ensureTab(tabId);
+    this.cancelInspect(tab);
     tab.navigationCommand += 1;
     const contents = this.ensureView(tab).webContents;
     if (contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward();
@@ -168,6 +182,7 @@ export class BrowserController {
 
   reload(tabId: string): GianBrowserState {
     const tab = this.ensureTab(tabId);
+    this.cancelInspect(tab);
     tab.navigationCommand += 1;
     const contents = this.ensureView(tab).webContents;
     tab.lastError = undefined;
@@ -179,6 +194,7 @@ export class BrowserController {
   stop(tabId: string): GianBrowserState {
     const tab = this.tabs.get(tabId);
     if (!tab) return emptyBrowserState();
+    this.cancelInspect(tab);
     tab.navigationCommand += 1;
     const contents = tab.view?.webContents;
     if (contents && !contents.isDestroyed()) contents.stop();
@@ -188,6 +204,7 @@ export class BrowserController {
 
   setLayout(tabId: string, bounds: GianBrowserBounds, visible: boolean): boolean {
     const tab = this.ensureTab(tabId);
+    if (!visible) this.cancelInspect(tab);
     if (visible) {
       // Renderer layout messages are asynchronous and native views always sit
       // above the renderer DOM. Enforce the exclusivity invariant in the main
@@ -195,6 +212,7 @@ export class BrowserController {
       // even if that sibling's `visible=false` message is still in flight.
       for (const sibling of this.tabs.values()) {
         if (sibling === tab) continue;
+        this.cancelInspect(sibling);
         sibling.requestedVisible = false;
         this.applyVisibility(sibling);
       }
@@ -203,6 +221,7 @@ export class BrowserController {
       // Never leave a previously valid native view painted over a new,
       // transiently invalid DOM layout (panel animation/resize/window edge).
       tab.requestedVisible = false;
+      this.cancelInspect(tab);
       this.applyVisibility(tab);
       return false;
     }
@@ -361,6 +380,9 @@ export class BrowserController {
       requestedVisible: false,
       bounds: { ...EMPTY_BOUNDS },
       navigationCommand: 0,
+      inspectGeneration: 0,
+      inspecting: false,
+      debuggerOwned: false,
     };
     this.tabs.set(tabId, tab);
     return tab;
@@ -406,24 +428,51 @@ export class BrowserController {
     contents.on('will-attach-webview', event => event.preventDefault());
     contents.on('devtools-opened', () => contents.closeDevTools());
     contents.on('did-start-loading', () => {
+      this.cancelInspect(tab);
       tab.lastError = undefined;
       this.emitState(tab);
     });
     contents.on('did-stop-loading', () => this.emitState(tab));
     contents.on('did-navigate', () => this.emitState(tab));
-    contents.on('did-navigate-in-page', () => this.emitState(tab));
+    contents.on('did-navigate-in-page', () => {
+      this.cancelInspect(tab);
+      this.emitState(tab);
+    });
     contents.on('page-title-updated', () => this.emitState(tab));
     contents.on('did-fail-load', (_event, errorCode, errorDescription, _url, isMainFrame) => {
       if (isMainFrame && errorCode !== -3) tab.lastError = errorDescription;
       this.emitState(tab);
     });
     contents.on('render-process-gone', (_event, details) => {
+      this.cancelInspect(tab);
       tab.lastError = `Browser renderer stopped: ${details.reason}`;
+      this.emitState(tab);
+    });
+    contents.debugger.on('message', (_event, method, params, sessionId) => {
+      if (method === 'Overlay.inspectNodeRequested') {
+        const backendNodeId = readBackendNodeId(params);
+        if (backendNodeId === null) return;
+        if (sessionId) {
+          tab.lastError = 'Elements inside cross-origin frames cannot be captured';
+          this.cancelInspect(tab);
+          return;
+        }
+        void this.captureInspectedNode(tab, contents, backendNodeId);
+      } else if (method === 'Overlay.inspectModeCanceled') {
+        this.cancelInspect(tab);
+      }
+    });
+    contents.debugger.on('detach', () => {
+      if (!tab.debuggerOwned && !tab.inspecting) return;
+      tab.debuggerOwned = false;
+      tab.inspecting = false;
+      tab.inspectGeneration += 1;
       this.emitState(tab);
     });
   }
 
   private destroyView(tab: BrowserTab): void {
+    this.cancelInspect(tab);
     const view = tab.view;
     tab.view = null;
     if (!view) return;
@@ -475,6 +524,7 @@ export class BrowserController {
       return;
     }
 
+    this.cancelInspect(tab);
     // setVisible(false) alone has proved insufficient on macOS during rapid
     // Sheet/Tab transitions: a stale native surface can keep painting and
     // intercepting input above the new renderer UI. Detaching preserves the
@@ -493,6 +543,122 @@ export class BrowserController {
   private emitState(tab: BrowserTab): void {
     if (this.tabs.get(tab.id) !== tab) return;
     this.options.onState(tab.id, this.getState(tab.id));
+  }
+
+  async setInspectMode(tabId: string, enabled: boolean): Promise<GianBrowserState> {
+    const tab = this.ensureTab(tabId);
+    if (!enabled) {
+      this.cancelInspect(tab);
+      return this.getState(tabId);
+    }
+    const contents = this.ensureView(tab).webContents;
+    if (!contents.getURL() || contents.getURL() === 'about:blank') {
+      tab.lastError = 'Open a page before selecting an element';
+      this.emitState(tab);
+      return this.getState(tabId);
+    }
+    for (const sibling of this.tabs.values()) {
+      if (sibling !== tab) this.cancelInspect(sibling);
+    }
+    if (contents.debugger.isAttached() && !tab.debuggerOwned) {
+      tab.lastError = 'Browser inspection is already in use';
+      this.emitState(tab);
+      return this.getState(tabId);
+    }
+    const generation = ++tab.inspectGeneration;
+    try {
+      if (!contents.debugger.isAttached()) contents.debugger.attach();
+      tab.debuggerOwned = true;
+      await contents.debugger.sendCommand('DOM.enable', { includeWhitespace: 'none' });
+      await contents.debugger.sendCommand('Overlay.enable');
+      if (generation !== tab.inspectGeneration || contents.isDestroyed()) {
+        this.cancelInspect(tab);
+        return this.getState(tabId);
+      }
+      await contents.debugger.sendCommand('Overlay.setInspectMode', {
+        mode: 'searchForNode',
+        highlightConfig: {
+          showInfo: true,
+          showStyles: false,
+          showAccessibilityInfo: true,
+          contentColor: { r: 91, g: 155, b: 255, a: 0.22 },
+          paddingColor: { r: 122, g: 214, b: 170, a: 0.18 },
+          borderColor: { r: 255, g: 196, b: 92, a: 0.7 },
+          marginColor: { r: 244, g: 126, b: 126, a: 0.14 },
+        },
+      });
+      if (generation !== tab.inspectGeneration || contents.isDestroyed()) {
+        this.cancelInspect(tab);
+        return this.getState(tabId);
+      }
+      tab.lastError = undefined;
+      tab.inspecting = true;
+      this.emitState(tab);
+    } catch (error) {
+      if (generation === tab.inspectGeneration) {
+        tab.lastError = error instanceof Error ? error.message : String(error);
+        this.cancelInspect(tab);
+      }
+    }
+    return this.getState(tabId);
+  }
+
+  private cancelInspect(tab: BrowserTab): void {
+    if (!tab.inspecting && !tab.debuggerOwned) return;
+    tab.inspectGeneration += 1;
+    tab.inspecting = false;
+    const contents = tab.view?.webContents;
+    if (contents && !contents.isDestroyed() && contents.debugger.isAttached() && tab.debuggerOwned) {
+      void contents.debugger.sendCommand('Overlay.setInspectMode', { mode: 'none' }).catch(() => {});
+      try {
+        contents.debugger.detach();
+      } catch {
+        // The renderer may have disappeared between isAttached and detach.
+      }
+    }
+    tab.debuggerOwned = false;
+    this.emitState(tab);
+  }
+
+  private async captureInspectedNode(
+    tab: BrowserTab,
+    contents: WebContents,
+    backendNodeId: number,
+  ): Promise<void> {
+    if (!tab.inspecting || !tab.debuggerOwned || !contents.debugger.isAttached()) return;
+    const generation = tab.inspectGeneration;
+    tab.inspecting = false;
+    this.emitState(tab);
+    try {
+      const described = await contents.debugger.sendCommand('DOM.describeNode', {
+        backendNodeId,
+        depth: 0,
+        pierce: false,
+      }) as { node?: CdpDomNode };
+      const accessibility = await contents.debugger.sendCommand('Accessibility.getPartialAXTree', {
+        backendNodeId,
+        fetchRelatives: false,
+      }) as { nodes?: CdpAxNode[] };
+      if (generation !== tab.inspectGeneration || contents.isDestroyed()) return;
+      const capture = described.node
+        ? captureFromCdpNode({
+            pageUrl: contents.getURL(),
+            pageTitle: contents.getTitle(),
+            node: described.node,
+            axNodes: accessibility.nodes,
+          })
+        : null;
+      this.cancelInspect(tab);
+      if (capture) this.options.onElement(tab.id, capture);
+      else {
+        tab.lastError = 'The selected element could not be captured safely';
+        this.emitState(tab);
+      }
+    } catch (error) {
+      if (generation !== tab.inspectGeneration) return;
+      tab.lastError = error instanceof Error ? error.message : String(error);
+      this.cancelInspect(tab);
+    }
   }
 
   private isManagedContents(contents: WebContents): boolean {
@@ -536,7 +702,16 @@ function emptyBrowserState(): GianBrowserState {
     canGoBack: false,
     canGoForward: false,
     canOpenExternal: false,
+    inspecting: false,
   };
+}
+
+function readBackendNodeId(value: unknown): number | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = (value as { backendNodeId?: unknown }).backendNodeId;
+  return typeof candidate === 'number' && Number.isInteger(candidate) && candidate > 0
+    ? candidate
+    : null;
 }
 
 function isAllowedBrowserUrl(candidate: string): boolean {

@@ -42,6 +42,14 @@
   padding-bottom: 2px;
 }
 
+.trace-pinned-head {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  padding-top: 4px;
+  background: var(--surface);
+}
+
 .trace-toolbar-controls {
   display: flex;
   align-items: center;
@@ -324,6 +332,24 @@
 .trace-kind.agent { color: var(--warn); }
 
 .trace-row.selected { background: var(--surface-3); }
+
+.trace-call-group {
+  color: var(--text-2);
+}
+
+.trace-call-caret {
+  width: 9px;
+  height: 9px;
+  flex: none;
+  color: var(--text-3);
+}
+
+.trace-call-count {
+  min-width: 18px;
+  text-align: center;
+  font-family: var(--font-mono);
+  color: var(--text-3);
+}
 
 .trace-shape {
   width: 7px;

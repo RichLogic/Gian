@@ -106,6 +106,8 @@ describe('WS-002: reconnect and state_sync queue contract', () => {
     sync.sidechats = [{
       id: 'sc-1',
       parent_session_id: 's1',
+      ordinal: 1,
+      name: null,
       stream_id: 'stream-sc-1',
       state: 'idle',
       status: 'open',

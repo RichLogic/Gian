@@ -131,6 +131,12 @@ export interface ProxyCatalog {
     enabledWhen?: import('./model.js').ConfigCondition[];
   }>;
   configOptions: import('./model.js').ConfigOption[];
+  specialCatalogs?: {
+    model?: string;
+    thinking?: string;
+    fast?: string;
+    approvalMode?: string;
+  };
   actions?: import('./sidechat.js').CatalogActionDescriptor[];
   slashCommands: SlashCommand[];
 }
@@ -145,7 +151,7 @@ export interface ResolvedProxyCatalog extends ProxyCatalog {
 export interface InitializeResult {
   protocol: {
     name: 'gian.proxy';
-    version: '2.0';
+    version: '2.0' | '2.1';
   };
   plugin: {
     id: string;

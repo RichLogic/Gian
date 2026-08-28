@@ -21,7 +21,7 @@
  *   `confirmed_sidechat_ids` (Host requirement);
  * - no `resumeRef` ever reaches rendered output or an outgoing WS message.
  */
-import { act, fireEvent, render, renderHook, screen } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import type {
   ClientToServerMessage,
@@ -31,6 +31,7 @@ import type {
   SideChatInfo,
 } from '@gian/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { typeInlineComposer } from './inline-composer-test-utils.js';
 
 import {
   __resetSideChatResumeMarksForTests,
@@ -61,7 +62,7 @@ import '../src/operations/sidechat.js';
 import { applyEnvelope } from '../src/transcript/apply.js';
 import type { TranscriptItem } from '../src/types.js';
 
-// The dock's Composer discovers executor capabilities lazily — keep the REST
+// The dock's fixed Composer discovers executor capabilities lazily — keep the REST
 // layer inert (catalog parsing itself is covered by composer-catalog.test).
 vi.mock('../src/api.js', () => ({
   loadProxyCapabilities: vi.fn(async () => ({})),
@@ -141,6 +142,8 @@ function sideChat(
   return {
     id,
     parent_session_id: 's-parent',
+    ordinal: recordSeq,
+    name: null,
     stream_id: `stream-${id}`,
     state,
     status,
@@ -152,7 +155,7 @@ function sideChat(
     user_inputs: [],
     created_at: `2026-08-20T08:${String(recordSeq).padStart(2, '0')}:00.000Z`,
     updated_at: '2026-08-20T08:00:00.000Z',
-  };
+  } as unknown as SideChatInfo;
 }
 
 /** A standard event sequence applied through the REAL transcript pipeline —
@@ -250,6 +253,7 @@ function renderDock(
 }
 
 beforeEach(() => {
+  recordSeq = 0;
   __resetFeedback();
   __resetSideChatResumeMarksForTests();
 });
@@ -337,6 +341,40 @@ describe('ChatContextPanel sidechat kind (panel 2)', () => {
     expect(document.querySelector('.chat-context-panel.sidechat .chat-context-head')).toBeNull();
     expect(document.querySelector('.sidechat-panel-head')).toBeNull();
     expect(document.querySelectorAll('.sidechat-root > .sheet-tabs')).toHaveLength(1);
+    expect(harness.transport.sentOfType('sidechat:create')).toHaveLength(0);
+  });
+
+  it('keeps the empty panel idle until the prominent New button is clicked', async () => {
+    const harness = makeHarness();
+    render(
+      <Providers harness={harness}>
+        <ChatContextPanel
+          target={{ kind: 'sidechat', sessionId: 's-parent', createIfEmpty: true } as never}
+          items={[]}
+          sideChat={{
+            parent: PARENT,
+            sideChats: [],
+            items: {},
+            control: ENABLED_CONTROL,
+            onClosed: () => {},
+          }}
+          onClose={() => {}}
+        />
+      </Providers>,
+    );
+
+    await act(async () => {});
+    expect(harness.transport.sentOfType('sidechat:create')).toHaveLength(0);
+    const create = screen.getByTestId('sidechat-create-empty');
+    expect(create).toHaveAccessibleName('New Side Chat');
+    expect(create).toHaveClass('primary');
+    expect(create).toHaveClass('sidechat-create-cta');
+    expect(create.querySelector('svg')).not.toBeNull();
+    fireEvent.click(create);
+    expect(harness.transport.sentOfType('sidechat:create')).toHaveLength(1);
+    expect(harness.transport.sentOfType('sidechat:create')[0]).toMatchObject({
+      parent_session_id: 's-parent',
+    });
   });
 });
 
@@ -351,6 +389,7 @@ describe('SideChatDock create affordance', () => {
     expect(cta).toHaveAttribute('title', EN['sidechat.unavailable']);
     // The strip "+" is equally gated.
     expect(screen.getByTestId('sidechat-create')).toBeDisabled();
+    expect(screen.getByTestId('sidechat-create')).toHaveClass('prominent');
 
     view.rerender(
       <Providers harness={harness}>
@@ -395,6 +434,7 @@ describe('SideChatDock create affordance', () => {
     fireEvent.click(screen.getByTestId('sidechat-create-empty'));
     act(() => harness.transport.settle(false, { code: 'SIDECHAT_UNSUPPORTED', message: 'nope' }));
     const errorToasts = getSnapshot().toasts.filter(toast => toast.kind === 'error');
+    expect(errorToasts).toHaveLength(1);
     expect(errorToasts.map(toast => toast.message)).toContain('nope');
   });
 });
@@ -471,8 +511,8 @@ describe('SideChatDock', () => {
     act(() => harness.transport.settle(true)); // resume confirmed
 
     const textarea = screen.getByRole('textbox');
-    expect(textarea).toBeDisabled();
-    expect(textarea).toHaveAttribute('placeholder', EN['sidechat.turnRunning']);
+    expect(textarea).toHaveAttribute('contenteditable', 'false');
+    expect(textarea).toHaveAttribute('aria-placeholder', EN['sidechat.turnRunning']);
   });
 
   it('reload recovery: an open record resumes once, recovering blocks sends, success enables the composer', () => {
@@ -502,7 +542,121 @@ describe('SideChatDock', () => {
     act(() => harness.transport.settle(true));
     expect(screen.queryByTestId('sidechat-recovering')).toBeNull();
     const textarea = screen.getByRole('textbox');
-    expect(textarea).toBeEnabled();
+    expect(textarea).toHaveAttribute('contenteditable', 'true');
+
+    const panel = screen.getByTestId('sidechat-panel-sc-1');
+    expect(within(panel).getByTestId('fixed-composer-model-chip')).toHaveTextContent('gpt-5.6-sol');
+    expect(within(panel).getByTestId('fixed-composer-thinking-chip')).toHaveTextContent('High');
+    expect(within(panel).queryByTestId('fixed-composer-fast-chip')).toBeNull();
+    expect(within(panel).getByTestId('fixed-composer-approval-chip')).toHaveTextContent('Ask for approval');
+    const bar = panel.querySelector('.composer-bar') as HTMLElement;
+    const order = Array.from(bar.children).map(element => (
+      element.classList.contains('spacer') ? 'spacer'
+        : element.classList.contains('cmp-control-sep') ? 'separator'
+          : element.getAttribute('data-testid') ?? element.getAttribute('aria-label')
+    ));
+    expect(order).toEqual([
+      'fixed-composer-model-chip',
+      'separator',
+      'fixed-composer-thinking-chip',
+      'spacer',
+      'fixed-composer-approval-chip',
+      'Send',
+    ]);
+    expect(bar.querySelector('.cmp-bulb')).toBeNull();
+    expect(bar.querySelector('.cmp-caret')).toBeNull();
+    expect(within(panel).queryByRole('button', { name: 'Screenshot' })).toBeNull();
+  });
+
+  it('advertised Turn-bound controls change only the Side Chat draft and ride the atomic send', () => {
+    const harness = makeHarness();
+    const record = {
+      ...sideChat('sc-config'),
+      turn_config: {
+        model: 'gpt-5.6-sol',
+        effort: 'high',
+        fast: false,
+        approval: 'ask',
+      },
+      turn_config_revision: 'turn-options-1',
+      turn_config_options: [{
+        id: 'model',
+        displayName: 'Model',
+        role: 'model' as const,
+        binding: 'turn' as const,
+        control: 'select' as const,
+        required: true,
+        defaultValue: 'gpt-5.6-sol',
+        choices: [
+          { value: 'gpt-5.6-sol', displayName: 'Sol' },
+          { value: 'gpt-5.6-terra', displayName: 'Terra' },
+        ],
+      }, {
+        id: 'effort',
+        displayName: 'Thinking',
+        role: 'effort' as const,
+        binding: 'turn' as const,
+        control: 'select' as const,
+        required: true,
+        defaultValue: 'high',
+        choices: [
+          { value: 'medium', displayName: 'Medium' },
+          { value: 'high', displayName: 'High' },
+        ],
+      }, {
+        id: 'fast',
+        displayName: 'Fast',
+        role: 'fast' as const,
+        binding: 'turn' as const,
+        control: 'boolean' as const,
+        required: true,
+        defaultValue: false,
+      }, {
+        id: 'approval',
+        displayName: 'Approval',
+        role: 'approval_mode' as const,
+        binding: 'turn' as const,
+        control: 'select' as const,
+        required: true,
+        defaultValue: 'ask',
+        choices: [
+          { value: 'ask', displayName: 'Ask' },
+          { value: 'auto', displayName: 'Auto' },
+        ],
+      }],
+    } satisfies SideChatInfo;
+    renderDock(harness, { sideChats: [record] });
+    act(() => harness.transport.settle(true)); // resume confirmed
+
+    const panel = screen.getByTestId('sidechat-panel-sc-config');
+    expect(within(panel).getByTestId('composer-model-chip')).toHaveTextContent('Sol');
+    expect(within(panel).getByTestId('composer-thinking-chip')).toHaveTextContent('High');
+    expect(within(panel).getByTestId('composer-fast-chip')).toHaveAttribute('aria-pressed', 'false');
+    expect(within(panel).getByRole('button', { name: 'Ask for approval' })).toBeInTheDocument();
+
+    fireEvent.click(within(panel).getByTestId('composer-model-chip'));
+    fireEvent.click(screen.getByText('Terra'));
+    expect(within(panel).getByTestId('composer-model-chip')).toHaveTextContent('Terra');
+    expect(harness.transport.sentOfType('sidechat:set_turn_config').at(-1)).toMatchObject({
+      sidechat_id: 'sc-config',
+      option_id: 'model',
+      value: 'gpt-5.6-terra',
+    });
+
+    const textarea = within(panel).getByRole('textbox');
+    typeInlineComposer(textarea, 'configured turn');
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    expect(harness.transport.sentOfType('message:send').at(-1)).toMatchObject({
+      session_id: 'sc-config',
+      text: 'configured turn',
+      turn_config: {
+        model: 'gpt-5.6-terra',
+        effort: 'high',
+        fast: false,
+        approval: 'ask',
+      },
+    });
+    expect(PARENT.model).toBe('gpt-5.6-sol');
   });
 
   it('resume failure keeps the content and shows cannot-continue + a close entry (never a fake fresh Side Chat)', () => {
@@ -594,7 +748,7 @@ describe('SideChatDock', () => {
     act(() => harness.transport.settle(true)); // resume confirmed
 
     const textarea = screen.getByRole('textbox');
-    fireEvent.change(textarea, { target: { value: 'hello side chat' } });
+    typeInlineComposer(textarea, 'hello side chat');
     fireEvent.keyDown(textarea, { key: 'Enter' });
 
     const sends = harness.transport.sentOfType('message:send');
@@ -638,8 +792,8 @@ describe('parent session delete confirm cascade', () => {
     act(() => { void hook.result.current.sessionMenu!.onDelete!(); });
 
     const confirm = getSnapshot().confirms.at(-1)!;
-    expect(confirm.message).toContain('Side Chat 1');
-    expect(confirm.message).toContain('Side Chat 2');
+    expect(confirm.message).toContain('Chat1');
+    expect(confirm.message).toContain('Chat2');
     expect(confirm.message).toContain('permanently closed');
 
     await act(async () => resolveConfirm(confirm.id, true));

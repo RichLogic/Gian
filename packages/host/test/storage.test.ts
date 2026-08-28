@@ -37,6 +37,7 @@ test('openDatabase runs migrations and creates expected tables', () => {
       'proxy_replay_streams',
       'proxy_interactions',
       'sidechat_transients',
+      'tool_credentials',
     ]) {
       assert.ok(names.includes(expected), `missing table ${expected}`);
     }
@@ -56,6 +57,19 @@ test('openDatabase runs migrations and creates expected tables', () => {
       sessionColumns.includes('turn_config_revision'),
       'missing sessions.turn_config_revision',
     );
+    assert.ok(sessionColumns.includes('detected_worktree_source'));
+    assert.ok(sessionColumns.includes('detected_worktree_revision'));
+    for (const ownership of [
+      'created_by_actor_kind',
+      'created_by_actor_id',
+      'created_by_session_id',
+    ]) {
+      assert.ok(sessionColumns.includes(ownership), `missing sessions.${ownership}`);
+    }
+    const credentialColumns = (db.prepare('PRAGMA table_info(tool_credentials)').all() as Array<{ name: string }>)
+      .map(column => column.name);
+    assert.ok(credentialColumns.includes('role'), 'missing tool_credentials.role');
+    assert.ok(credentialColumns.includes('renewable'), 'missing tool_credentials.renewable');
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -107,6 +121,119 @@ test('migration 047 upgrades databases that already applied the original 046', (
     assert.ok(upgraded.prepare(
       "SELECT 1 FROM migrations WHERE filename = '047_proxy_replay_stream_ownership.sql'",
     ).get());
+    upgraded.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration 057 repairs provisional live-turn Fork boundaries', () => {
+  const dir = makeTempDir();
+  try {
+    const raw = new Database(join(dir, 'gian.db'));
+    raw.exec(`
+      CREATE TABLE migrations (
+        filename TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE sessions (id TEXT PRIMARY KEY);
+      CREATE TABLE turns (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
+      );
+      CREATE TABLE events (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        call_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        data TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE proxy_replay_turns (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        provider_turn_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id) ON DELETE CASCADE,
+        replay_owned INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (session_id, provider_turn_id)
+      );
+      INSERT INTO sessions (id) VALUES ('s-live');
+      INSERT INTO turns (id, session_id) VALUES ('host-turn', 's-live');
+      INSERT INTO proxy_replay_turns
+        (session_id, provider_turn_id, turn_id, replay_owned)
+      VALUES ('s-live', 'host-turn', 'host-turn', 0);
+      INSERT INTO events
+        (id, session_id, turn_id, call_id, type, data, created_at)
+      VALUES (
+        'terminal-event',
+        's-live',
+        'host-turn',
+        'host-turn',
+        'turn.completed',
+        '{"display":{"type":"state.turn-completed","data":{"turnId":"host-turn","sourceTurnId":"provider-turn"}}}',
+        '2026-08-25T11:00:00.000Z'
+      );
+    `);
+    const migrationDir = new URL('../migrations/', import.meta.url);
+    const insert = raw.prepare('INSERT INTO migrations (filename) VALUES (?)');
+    for (const filename of readdirSync(migrationDir).filter(name => name.endsWith('.sql'))) {
+      if (filename !== '057_repair_live_fork_boundaries.sql') insert.run(filename);
+    }
+    raw.close();
+
+    const upgraded = openDatabase(dir);
+    assert.deepEqual(upgraded.prepare(
+      'SELECT provider_turn_id, turn_id, replay_owned FROM proxy_replay_turns WHERE session_id = ?',
+    ).get('s-live'), {
+      provider_turn_id: 'provider-turn',
+      turn_id: 'host-turn',
+      replay_owned: 0,
+    });
+    assert.ok(upgraded.prepare(
+      "SELECT 1 FROM migrations WHERE filename = '057_repair_live_fork_boundaries.sql'",
+    ).get());
+    upgraded.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration 059 backfills stable Side Chat ordinals and nullable names', () => {
+  const dir = makeTempDir();
+  try {
+    const raw = new Database(join(dir, 'gian.db'));
+    raw.exec(`
+      CREATE TABLE migrations (
+        filename TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE sidechat_transients (
+        sidechat_id TEXT PRIMARY KEY,
+        parent_session_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO sidechat_transients (sidechat_id, parent_session_id, created_at) VALUES
+        ('sc-b', 'parent-1', '2026-08-26T08:01:00.000Z'),
+        ('sc-a', 'parent-1', '2026-08-26T08:00:00.000Z'),
+        ('sc-other', 'parent-2', '2026-08-26T08:02:00.000Z');
+    `);
+    const migrationDir = new URL('../migrations/', import.meta.url);
+    const insert = raw.prepare('INSERT INTO migrations (filename) VALUES (?)');
+    for (const filename of readdirSync(migrationDir).filter(name => name.endsWith('.sql'))) {
+      if (filename !== '059_sidechat_titles.sql') insert.run(filename);
+    }
+    raw.close();
+
+    const upgraded = openDatabase(dir);
+    assert.deepEqual(upgraded.prepare(
+      `SELECT sidechat_id, ordinal, name
+       FROM sidechat_transients
+       ORDER BY parent_session_id, ordinal`,
+    ).all(), [
+      { sidechat_id: 'sc-a', ordinal: 1, name: null },
+      { sidechat_id: 'sc-b', ordinal: 2, name: null },
+      { sidechat_id: 'sc-other', ordinal: 1, name: null },
+    ]);
     upgraded.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -342,6 +469,34 @@ test('migration 054 persists Side Chat public state', () => {
       columns.some(column => column.name === 'public_state'),
       'sidechat_transients missing public_state',
     );
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration 063 persists Side Chat turn drafts and advertised options', () => {
+  const dir = makeTempDir();
+  try {
+    const db = openDatabase(dir);
+    const columns = db.prepare('PRAGMA table_info(sidechat_transients)').all() as Array<{
+      name: string;
+    }>;
+    for (const name of ['turn_config_json', 'turn_config_options_json', 'turn_config_revision']) {
+      assert.ok(columns.some(column => column.name === name), `sidechat_transients missing ${name}`);
+    }
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration 064 persists the immutable Session Runtime Profile', () => {
+  const dir = makeTempDir();
+  try {
+    const db = openDatabase(dir);
+    const columns = db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+    assert.ok(columns.some(column => column.name === 'runtime_profile_json'));
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

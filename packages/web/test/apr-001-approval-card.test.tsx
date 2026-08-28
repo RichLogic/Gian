@@ -1,6 +1,6 @@
 // Coverage for traceability row (UI dimension):
 //   APR-001 — Approval card must support Allow once / Allow session /
-//             Decline (via click AND keyboard shortcuts A / Shift+A / D)
+//             Decline through explicit card controls
 //             and surface risk / category / subject / reason text. The
 //             "Allow session" button must only appear when the category
 //             allows session scope.
@@ -8,7 +8,7 @@
 // Click + risk text path is already touched in
 // `packages/host/test/event-smoke.test.ts` and `e2e/specs/04-events-smoke.spec.ts`.
 // This file fills the remaining UI dimensions through React Testing Library:
-// keyboard shortcuts, conditional Allow-session button, category-aware
+// explicit-decision behavior, conditional Allow-session button, category-aware
 // subject formatting, resolved-state rendering.
 
 import { describe, it, expect, vi } from 'vitest';
@@ -57,10 +57,10 @@ function makeQuestion(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
 }
 
 // ---------------------------------------------------------------------------
-// APR-001 — surface text: minimal v3 shows only the subject + buttons
+// APR-001 — surface text: the .ap2 shell shows head + subject + buttons
 // ---------------------------------------------------------------------------
 
-describe('APR-001: pending approval card surface (v3)', () => {
+describe('APR-001: pending approval card surface (.ap2)', () => {
   it('renders the cmd subject with a `$ ` prompt and no v2 chrome', () => {
     const onApprove = vi.fn();
     render(<ApprovalCard item={makeApproval()} onApprove={onApprove} />);
@@ -68,21 +68,23 @@ describe('APR-001: pending approval card surface (v3)', () => {
     // Command category renders the `$ ` prompt prefix.
     expect(screen.getByText('npm install')).toBeInTheDocument();
     expect(screen.getByText('$')).toBeInTheDocument();
-    // v3 removed the icon / v2 title / risk pill / reason line / timestamp.
+    // The v2/v3 chrome (icon title / reason line / risk pill) stays gone —
+    // risk surfaces only as the head meta (see the risk-meta suite below).
     expect(screen.queryByText('Run shell command')).toBeNull();
     expect(screen.queryByText('install project deps')).toBeNull();
-    expect(screen.queryByText(/risk/i)).toBeNull();
     expect(document.querySelector('.approval-top')).toBeNull();
     expect(document.querySelector('.approval-ico')).toBeNull();
     expect(document.querySelector('.approval-risk')).toBeNull();
   });
 
-  it('APR-001: cards carry a mono type-label head (Approval / Question / Plan)', () => {
+  it('APR-001: cards carry an icon + uppercase kind label head (Approval / Question / Plan)', () => {
     const { container, rerender } = render(<ApprovalCard item={makeApproval()} onApprove={vi.fn()} />);
-    expect(container.querySelector('.approval-head')).toHaveTextContent('Approval');
+    expect(container.querySelector('.ap2-head')).not.toBeNull();
+    expect(container.querySelector('.ap2-icon svg')).not.toBeNull();
+    expect(container.querySelector('.ap2-kind')).toHaveTextContent('Approval');
 
     rerender(<ApprovalCard item={makeQuestion()} onApprove={vi.fn()} />);
-    expect(container.querySelector('.approval-head')).toHaveTextContent('Question');
+    expect(container.querySelector('.ap2-kind')).toHaveTextContent('Question');
 
     rerender(<ApprovalCard
       item={makeApproval({
@@ -93,29 +95,51 @@ describe('APR-001: pending approval card surface (v3)', () => {
       })}
       onApprove={vi.fn()}
     />);
-    expect(container.querySelector('.approval-head')).toHaveTextContent('Plan');
+    expect(container.querySelector('.ap2-kind')).toHaveTextContent('Plan');
   });
 
-  it('APR-001: the resolved .approval-line carries no type-label head', () => {
+  it('APR-001: the resolved .approval-line carries no .ap2 head', () => {
     const { container } = render(<ApprovalCard
       item={makeApproval({ status: 'approved-once' })}
       onApprove={vi.fn()}
     />);
-    expect(container.querySelector('.approval-head')).toBeNull();
+    expect(container.querySelector('.ap2-head')).toBeNull();
   });
 
-  it('APR-001: high risk no longer earns a red outline or badge', () => {
-    const { container } = render(<ApprovalCard item={makeApproval({ risk: 'high', title: 'Dangerous shell' })} onApprove={vi.fn()} />);
-    expect(container.querySelector('.approval.high')).toBeNull();
-    expect(screen.queryByText(/high risk/i)).toBeNull();
+  it('APR-001: risk meta renders only for medium / high; low stays fully neutral', () => {
+    // medium → warn meta + warn tone bar class.
+    const { container, rerender } = render(<ApprovalCard item={makeApproval({ risk: 'medium' })} onApprove={vi.fn()} />);
+    expect(container.querySelector('.ap2.tone-warning')).not.toBeNull();
+    const meta = container.querySelector('.ap2-head-meta');
+    expect(meta).toHaveTextContent('medium risk');
+    expect(meta!.querySelector('.is-medium')).not.toBeNull();
+
+    // high → danger meta + danger tone bar class.
+    rerender(<ApprovalCard item={makeApproval({ risk: 'high', title: 'Dangerous shell' })} onApprove={vi.fn()} />);
+    expect(container.querySelector('.ap2.tone-danger')).not.toBeNull();
+    const highMeta = container.querySelector('.ap2-head-meta');
+    expect(highMeta).toHaveTextContent('high risk');
+    expect(highMeta!.querySelector('.is-high')).not.toBeNull();
+
+    // low → NO meta, NO tone class: a fully neutral card.
+    rerender(<ApprovalCard item={makeApproval({ risk: 'low' })} onApprove={vi.fn()} />);
+    expect(container.querySelector('.ap2-head-meta')).toBeNull();
+    expect(container.querySelector('.ap2[class*="tone-"]')).toBeNull();
+    expect(screen.queryByText(/risk/i)).toBeNull();
   });
 
-  it('APR-001: buttons are secondary / danger-ghost — no primary', () => {
+  it('APR-001: buttons are secondary / danger-ghost — no primary, danger pinned last', () => {
     const { container } = render(<ApprovalCard item={makeApproval()} onApprove={vi.fn()} />);
     expect(container.querySelector('.btn.primary')).toBeNull();
     expect(screen.getByRole('button', { name: /Allow once/i })).toHaveClass('secondary');
     expect(screen.getByRole('button', { name: /Allow session/i })).toHaveClass('secondary');
     expect(screen.getByRole('button', { name: /Decline/i })).toHaveClass('danger-ghost');
+
+    // The action row is right-aligned with the danger action fixed last.
+    const actions = container.querySelector('.ap2-actions')!;
+    const buttons = Array.from(actions.querySelectorAll('button'));
+    expect(buttons.at(-1)).toHaveClass('danger-ghost');
+    expect(buttons.at(-1)).toHaveTextContent(/Decline/i);
   });
 
   it('APR-001: non-command categories omit the `$ ` shell prefix', () => {
@@ -189,6 +213,41 @@ describe('APR-001: click-path decisions', () => {
     expect(onApprove).toHaveBeenCalledWith('appr-1', 'decline');
   });
 
+  it('APR-001: the picked question option row carries is-picked', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<ApprovalCard item={makeQuestion()} onApprove={vi.fn()} />);
+
+    // Whole-row option cards; nothing picked yet.
+    const rows = container.querySelectorAll('.ap2-opt');
+    expect(rows.length).toBeGreaterThanOrEqual(3); // Rice, Noodles, Other
+    expect(container.querySelector('.ap2-opt.is-picked')).toBeNull();
+
+    await user.click(screen.getByLabelText(/Rice/i));
+    const picked = container.querySelector('.ap2-opt.is-picked');
+    expect(picked).not.toBeNull();
+    expect(picked).toHaveTextContent('Rice');
+
+    // The question progress moved from the button row to the head meta —
+    // single-question cards show no progress at all.
+    expect(container.querySelector('.question-progress')).toBeNull();
+
+    // "Other" is the same row shape with an inline text input.
+    expect(container.querySelector('.ap2-opt.ap2-opt-other input[type="text"]')).not.toBeNull();
+  });
+
+  it('APR-001: multi-question progress lives in the head meta', () => {
+    const { container } = render(<ApprovalCard
+      item={makeQuestion({
+        questions: [
+          { question: 'Pick dinner', options: [{ label: 'Rice' }] },
+          { question: 'Pick drink', options: [{ label: 'Tea' }] },
+        ],
+      })}
+      onApprove={vi.fn()}
+    />);
+    expect(container.querySelector('.ap2-head .ap2-head-meta')).toHaveTextContent('1 / 2');
+  });
+
   it('APR-001: Question submit includes answers and category context', async () => {
     const user = userEvent.setup();
     const onApprove = vi.fn();
@@ -241,89 +300,20 @@ describe('APR-001: click-path decisions', () => {
 });
 
 // ---------------------------------------------------------------------------
-// APR-001 — keyboard shortcuts (A / Shift+A / D)
+// Approval decisions require an explicit click. Bare approval-card shortcuts
+// were removed from the Keymap because they could fire while the user was
+// navigating transcript content.
 // ---------------------------------------------------------------------------
 
-describe('APR-001: keyboard shortcuts', () => {
-  it('A key triggers allow_once on a pending command approval', async () => {
+describe('APR-001: explicit decisions', () => {
+  it('does not bind A, Shift+A, or D to approval decisions', async () => {
     const user = userEvent.setup();
     const onApprove = vi.fn();
     render(<ApprovalCard item={makeApproval()} onApprove={onApprove} />);
 
     await user.keyboard('a');
-    expect(onApprove).toHaveBeenCalledWith('appr-1', 'allow_once');
-  });
-
-  it('APR-001: Shift+A triggers allow_session when scopeOptions includes session', async () => {
-    const user = userEvent.setup();
-    const onApprove = vi.fn();
-    render(<ApprovalCard item={makeApproval()} onApprove={onApprove} />);
-
     await user.keyboard('{Shift>}A{/Shift}');
-    expect(onApprove).toHaveBeenCalledWith('appr-1', 'allow_session');
-  });
-
-  it('APR-001: Shift+A is suppressed when scopeOptions excludes session', async () => {
-    // Categories with once-only scope must NOT respond to Shift+A — the
-    // host disallows session-scope for them and the UI must mirror.
-    const user = userEvent.setup();
-    const onApprove = vi.fn();
-    render(<ApprovalCard
-      item={makeApproval({ scopeOptions: ['once'] })}
-      onApprove={onApprove}
-    />);
-
-    await user.keyboard('{Shift>}A{/Shift}');
-    expect(onApprove).not.toHaveBeenCalled();
-  });
-
-  it('APR-001: D key triggers decline', async () => {
-    const user = userEvent.setup();
-    const onApprove = vi.fn();
-    render(<ApprovalCard item={makeApproval()} onApprove={onApprove} />);
-
     await user.keyboard('d');
-    expect(onApprove).toHaveBeenCalledWith('appr-1', 'decline');
-  });
-
-  it('APR-001: keyboard shortcuts are gated to pending status only', async () => {
-    const user = userEvent.setup();
-    const onApprove = vi.fn();
-    render(<ApprovalCard
-      item={makeApproval({ status: 'approved-once' })}
-      onApprove={onApprove}
-    />);
-
-    await user.keyboard('a');
-    await user.keyboard('d');
-    expect(onApprove).not.toHaveBeenCalled();
-  });
-
-  it('APR-001: keyboard shortcuts are suppressed while focus is in an input/textarea', async () => {
-    const user = userEvent.setup();
-    const onApprove = vi.fn();
-    render(
-      <div>
-        <textarea data-testid="composer" />
-        <ApprovalCard item={makeApproval()} onApprove={onApprove} />
-      </div>,
-    );
-
-    const textarea = screen.getByTestId('composer');
-    textarea.focus();
-    await user.keyboard('a');
-    await user.keyboard('d');
-    expect(onApprove).not.toHaveBeenCalled();
-  });
-
-  it('APR-001: A with a modifier (Cmd/Ctrl/Alt) does NOT trigger — only the raw shortcut works', async () => {
-    const user = userEvent.setup();
-    const onApprove = vi.fn();
-    render(<ApprovalCard item={makeApproval()} onApprove={onApprove} />);
-
-    await user.keyboard('{Meta>}a{/Meta}');   // Cmd+A — text selection
-    await user.keyboard('{Control>}a{/Control}'); // Ctrl+A — text selection
-    await user.keyboard('{Alt>}a{/Alt}');     // Alt+A — accent / OS shortcut
     expect(onApprove).not.toHaveBeenCalled();
   });
 });
@@ -334,7 +324,7 @@ describe('APR-001: keyboard shortcuts', () => {
 
 describe('APR-001: exit_plan_mode three-way actions', () => {
   it('renders the three semantic buttons instead of allow/decline', () => {
-    render(<ApprovalCard
+    const { container } = render(<ApprovalCard
       item={makeApproval({
         category: 'exit_plan_mode',
         title: 'Plan ready for review',
@@ -350,6 +340,16 @@ describe('APR-001: exit_plan_mode three-way actions', () => {
     // Allow/Decline are hidden in plan-exit mode.
     expect(screen.queryByRole('button', { name: /Allow once/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /^Decline$/i })).toBeNull();
+    // Order: manually approve → auto-accept → keep planning (danger last).
+    const buttons = Array.from(container.querySelectorAll('.ap2-actions button'));
+    expect(buttons.map(b => b.textContent)).toEqual([
+      'Yes, manually approve edits',
+      'Yes, auto-accept edits',
+      'No, keep planning',
+    ]);
+    expect(buttons.at(-1)).toHaveClass('danger-ghost');
+    // The plan body renders in the height-capped markdown block.
+    expect(container.querySelector('.ap2-plan')).not.toBeNull();
   });
 
   it('APR-001: A/D shortcuts are suppressed in exit_plan_mode', async () => {
@@ -508,7 +508,10 @@ describe('gian.proxy/2.0 interaction actions and inputs', () => {
     />);
 
     const allow = screen.getByRole('button', { name: 'Allow once' });
-    expect(allow.className).toContain('primary');
+    // No primary anywhere (2026-08-27): a protocol `primary` style degrades
+    // to secondary; danger renders danger-ghost and pins to the row's end.
+    expect(allow.className).toContain('secondary');
+    expect(allow.className).not.toContain('primary');
     expect(screen.getByRole('button', { name: 'Reject' }).className).toContain('danger-ghost');
     expect(allow).toBeDisabled();
 
@@ -541,45 +544,94 @@ describe('gian.proxy/2.0 interaction actions and inputs', () => {
         })}
         onApprove={vi.fn()}
       />);
-      expect(container.querySelector('.approval.interaction')).not.toBeNull();
-      expect(container.querySelector('.approval-head')).toHaveTextContent(label);
+      expect(container.querySelector('.ap2')).not.toBeNull();
+      expect(container.querySelector('.ap2-kind')).toHaveTextContent(label);
       unmount();
     }
   });
 
+  it('pins danger-styled protocol actions to the end of the row', () => {
+    const { container } = render(<ApprovalCard
+      item={makeApproval({
+        actions: [
+          // Proxy order puts the danger action FIRST — the card must move it last.
+          { id: 'reject_once', label: 'Reject', style: 'danger' },
+          { id: 'allow_once', label: 'Allow once', style: 'primary' },
+          { id: 'allow_session', label: 'Allow session', style: 'secondary' },
+        ],
+      })}
+      onApprove={vi.fn()}
+    />);
+    const buttons = Array.from(container.querySelectorAll('.ap2-actions button'));
+    expect(buttons.map(b => b.textContent)).toEqual(['Allow once', 'Allow session', 'Reject']);
+    expect(buttons.at(-1)).toHaveClass('danger-ghost');
+    expect(container.querySelector('.btn.primary')).toBeNull();
+  });
+
   it('tints the card root with the tone class', () => {
+    // Low-risk fixture: tone comes from the v2 hint alone.
     const { container, unmount } = render(<ApprovalCard
       item={makeApproval({
         interactionKind: 'permission',
         tone: 'warning',
+        risk: 'low',
         actions: [{ id: 'ok', label: 'OK', style: 'primary' }],
       })}
       onApprove={vi.fn()}
     />);
-    expect(container.querySelector('.approval.interaction.tone-warning')).not.toBeNull();
+    expect(container.querySelector('.ap2.tone-warning')).not.toBeNull();
     unmount();
 
     const { container: danger } = render(<ApprovalCard
       item={makeApproval({
         interactionKind: 'permission',
         tone: 'danger',
+        risk: 'low',
         actions: [{ id: 'ok', label: 'OK', style: 'primary' }],
       })}
       onApprove={vi.fn()}
     />);
-    expect(danger.querySelector('.approval.interaction.tone-danger')).not.toBeNull();
+    expect(danger.querySelector('.ap2.tone-danger')).not.toBeNull();
 
-    // neutral tone renders no tone class.
+    // neutral tone + low risk renders no tone class.
     const { container: neutral } = render(<ApprovalCard
       item={makeApproval({
         interactionKind: 'permission',
         tone: 'neutral',
+        risk: 'low',
         actions: [{ id: 'ok', label: 'OK', style: 'primary' }],
       })}
       onApprove={vi.fn()}
     />);
-    expect(neutral.querySelector('.approval.interaction')).not.toBeNull();
-    expect(neutral.querySelector('.approval[class*="tone-"]')).toBeNull();
+    expect(neutral.querySelector('.ap2')).not.toBeNull();
+    expect(neutral.querySelector('.ap2[class*="tone-"]')).toBeNull();
+  });
+
+  it('combines v2 tone and risk — the more severe wins the tone bar', () => {
+    // warning hint + high risk → danger bar.
+    const { container, unmount } = render(<ApprovalCard
+      item={makeApproval({
+        interactionKind: 'confirmation',
+        tone: 'warning',
+        risk: 'high',
+        actions: [{ id: 'ok', label: 'OK', style: 'secondary' }],
+      })}
+      onApprove={vi.fn()}
+    />);
+    expect(container.querySelector('.ap2.tone-danger')).not.toBeNull();
+    unmount();
+
+    // danger hint + medium risk → danger bar.
+    const { container: danger } = render(<ApprovalCard
+      item={makeApproval({
+        interactionKind: 'confirmation',
+        tone: 'danger',
+        risk: 'medium',
+        actions: [{ id: 'ok', label: 'OK', style: 'secondary' }],
+      })}
+      onApprove={vi.fn()}
+    />);
+    expect(danger.querySelector('.ap2.tone-danger')).not.toBeNull();
   });
 
   it('renders a prose subject as text and a context subject as a mono block', () => {
@@ -593,8 +645,8 @@ describe('gian.proxy/2.0 interaction actions and inputs', () => {
       })}
       onApprove={vi.fn()}
     />);
-    expect(prose.querySelector('.approval-prose')).toHaveTextContent('What should change?');
-    expect(prose.querySelector('.approval-cmd')).toBeNull();
+    expect(prose.querySelector('.ap2-prose')).toHaveTextContent('What should change?');
+    expect(prose.querySelector('.ap2-cmd')).toBeNull();
     unmount();
 
     const { container: mono } = render(<ApprovalCard
@@ -606,8 +658,8 @@ describe('gian.proxy/2.0 interaction actions and inputs', () => {
       })}
       onApprove={vi.fn()}
     />);
-    expect(mono.querySelector('.approval-cmd')).not.toBeNull();
-    expect(mono.querySelector('.approval-prose')).toBeNull();
+    expect(mono.querySelector('.ap2-cmd')).not.toBeNull();
+    expect(mono.querySelector('.ap2-prose')).toBeNull();
   });
 
   it('renders single_select as a radio list and gates the action on it', async () => {
@@ -711,10 +763,9 @@ describe('gian.proxy/2.0 interaction actions and inputs', () => {
     />);
 
     // Unified card, not the legacy KimiQuestionCard radio+Submit flow.
-    expect(container.querySelector('.approval.interaction')).not.toBeNull();
-    expect(container.querySelector('.kimi-question')).toBeNull();
+    expect(container.querySelector('.ap2')).not.toBeNull();
     expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(0);
-    expect(container.querySelector('.approval-head')).toHaveTextContent('Question');
+    expect(container.querySelector('.ap2-kind')).toHaveTextContent('Question');
 
     // Options answer directly — no prior selection step.
     const rice = screen.getByRole('button', { name: 'Rice' });
@@ -733,8 +784,9 @@ describe('gian.proxy/2.0 interaction actions and inputs', () => {
       item={makeQuestion()}
       onApprove={vi.fn()}
     />);
-    expect(container.querySelector('.approval.interaction')).toBeNull();
-    expect(container.querySelector('.question-body')).not.toBeNull();
+    // QuestionCard: paged radio options + Back/Next/Submit, not protocol
+    // action buttons.
+    expect(container.querySelector('.ap2-opts')).not.toBeNull();
     expect(screen.getByText('Pick dinner')).toBeInTheDocument();
   });
 });

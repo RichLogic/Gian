@@ -496,6 +496,47 @@ test('QUEUE-002: QueueManager assigns monotonically increasing sort_order and li
   }
 });
 
+test('QUEUE-002: QueueManager persists context cards until the entry drains', async () => {
+  const ctx = setup();
+  try {
+    const sid = await makeSessionId(ctx);
+    const contextItems = [{
+      type: 'pastedText' as const,
+      id: 'paste-queued',
+      text: 'queued context',
+      lineCount: 1,
+      byteSize: 14,
+    }];
+    ctx.queue.add(sid, 'later', undefined, { contextItems });
+    assert.deepEqual(ctx.queue.list(sid)[0]?.contextItems, contextItems);
+    assert.deepEqual(ctx.queue.popNext(sid)?.contextItems, contextItems);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-002: QueueManager persists an ordered composer document until drain', async () => {
+  const ctx = setup();
+  try {
+    const sid = await makeSessionId(ctx);
+    const composerDocument = {
+      version: 1 as const,
+      segments: [
+        { type: 'text' as const, text: 'Review ' },
+        { type: 'reference' as const, id: 'file-1', referenceType: 'attachment' as const, label: 'notes.md' },
+        { type: 'text' as const, text: ' now' },
+      ],
+    };
+    ctx.queue.add(sid, 'Review  now', [{ type: 'localFile', path: '/tmp/notes.md' }], {
+      composerDocument,
+    });
+    assert.deepEqual(ctx.queue.list(sid)[0]?.composerDocument, composerDocument);
+    assert.deepEqual(ctx.queue.popNext(sid)?.composerDocument, composerDocument);
+  } finally {
+    teardown(ctx);
+  }
+});
+
 test('QUEUE-002: update rewrites the text in place and keeps the position', async () => {
   const ctx = setup();
   try {

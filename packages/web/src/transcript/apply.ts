@@ -1,5 +1,5 @@
-import type { DisplayEventType, EventEnvelope, Executor } from '@gian/shared';
-import { stripManagerSystemPrefix, stripGianRolePrefix, stripGianActionBlocks, GIAN_ACTION_CLOSE } from '@gian/shared';
+import type { ComposerDocument, DisplayEventType, EventEnvelope, Executor, MessageContextItem } from '@gian/shared';
+import { normalizeComposerDocument, stripManagerSystemPrefix, stripGianRolePrefix, stripGianActionBlocks, GIAN_ACTION_CLOSE } from '@gian/shared';
 
 /** Strip complete gian:action blocks from accumulating assistant text — only
  *  once a CLOSE sentinel is present, so a block split across streaming deltas is
@@ -567,6 +567,10 @@ export function applyEnvelope(
 
   // ── turn_completed (unified) / turn.started / turn.completed (legacy) ──
   if (ev === 'state.turn-completed') {
+    const terminalState = String(data.status ?? data.stopReason ?? data.stop_reason ?? '').toLowerCase();
+    const outcome = /interrupt|cancel|stopp/.test(terminalState)
+      ? 'stopped' as const
+      : /fail|error/.test(terminalState) ? 'failed' as const : 'worked' as const;
     return ensureTurnEnd(
       items,
       env.turn,
@@ -574,6 +578,7 @@ export function applyEnvelope(
       env.ts,
       typeof data.turnId === 'string' ? data.turnId : undefined,
       typeof data.sourceTurnId === 'string' ? data.sourceTurnId : undefined,
+      outcome,
     );
   }
 
@@ -585,6 +590,10 @@ export function applyEnvelope(
     // dealt with — dismiss orphans so they don't re-surface on reload.
     const base = dismissStalePendingQuestions(items);
     let text = String(data.text ?? '');
+    const contextItems = Array.isArray(data.context_items)
+      ? data.context_items as MessageContextItem[]
+      : [];
+    const composerDocument = normalizeComposerDocument(data.composer_document) ?? undefined;
     const rawAttachments = Array.isArray(data.attachments) ? data.attachments : [];
     let attachments = rawAttachments
       .filter((a): a is { name: string; mime: string; url: string; size?: number } =>
@@ -621,6 +630,8 @@ export function applyEnvelope(
       kind: 'user', id: env.call_id, text: stripGianRolePrefix(text), exec: executor,
       ts: env.ts, turn: env.turn,
       ...(attachments.length > 0 ? { attachments } : {}),
+      ...(contextItems.length > 0 ? { contextItems } : {}),
+      ...(composerDocument ? { composerDocument } : {}),
     };
     // The host prepends a sentinel-wrapped meta block to the user text: the
     // Manager system prompt / a `create_subtask` note (<<gian:manager-system>>),
@@ -641,6 +652,7 @@ export function applyEnvelope(
         && !cand.sendCanonical
         && (cand.text === item.text || cand.text === strippedItemText)
         && (cand.attachments?.length ?? 0) === attachments.length
+        && (cand.contextItems?.length ?? 0) === contextItems.length
       ) {
         optimisticIndex = i;
         break;
@@ -724,10 +736,12 @@ export function ensureTurnEnd(
   ts: number,
   turnId?: string,
   sourceTurnId?: string,
+  outcome?: 'worked' | 'failed' | 'stopped',
 ): TranscriptItem[] {
   const boundary = {
     ...(turnId !== undefined ? { turn_id: turnId } : {}),
     ...(sourceTurnId !== undefined ? { source_turn_id: sourceTurnId } : {}),
+    ...(outcome !== undefined ? { outcome } : {}),
   };
   const existingIndex = items.findIndex(item => item.kind === 'turn-end' && item.turn === turn);
   if (existingIndex >= 0) {
@@ -740,7 +754,8 @@ export function ensureTurnEnd(
       && !id.startsWith('session-terminal:');
     const recoverBoundary = (existing.turn_id === undefined && turnId !== undefined)
       || (existing.source_turn_id === undefined && sourceTurnId !== undefined);
-    if (replaceFallback || recoverBoundary) {
+    const recoverOutcome = existing.outcome === undefined && outcome !== undefined;
+    if (replaceFallback || recoverBoundary || recoverOutcome) {
       const next = items.slice();
       next[existingIndex] = {
         ...existing,
@@ -806,6 +821,8 @@ export function createOptimisticEcho(params: {
    *  URL the caller still owns — reconciliation revokes it when the server
    *  user_message arrives. */
   attachments?: import('@gian/shared').MessageAttachment[];
+  contextItems?: MessageContextItem[];
+  composerDocument?: ComposerDocument;
 }): MsgItem {
   const now = (params.now ?? Date.now)();
   const item: MsgItem = {
@@ -820,6 +837,10 @@ export function createOptimisticEcho(params: {
   if (params.attachments && params.attachments.length > 0) {
     item.attachments = params.attachments;
   }
+  if (params.contextItems && params.contextItems.length > 0) {
+    item.contextItems = params.contextItems;
+  }
+  if (params.composerDocument) item.composerDocument = params.composerDocument;
   return item;
 }
 

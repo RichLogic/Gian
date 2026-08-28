@@ -14,11 +14,15 @@ import { openDatabase, type Db } from '../../src/storage/db.js';
 import { loadConfig } from '../../src/storage/config.js';
 import { createApp, type AppHandle } from '../../src/web/app.js';
 import type { OpenCommand } from '../../src/web/open-with.js';
+import type { GianToolMethod } from '@gian/shared';
 
 export interface TestAppOptions {
   platform?: NodeJS.Platform;
   runOpenSync?: (command: OpenCommand) => void;
   runOpen?: (command: OpenCommand, onError: (error: Error) => void) => void;
+  toolMcpLimits?: { requests?: number; waits?: number };
+  toolMcpBeforeCall?: (method: GianToolMethod) => Promise<void>;
+  beforeCreateApp?: (db: Db) => void;
 }
 
 export interface TestAppCtx {
@@ -46,6 +50,7 @@ export async function makeTestApp(options: TestAppOptions = {}): Promise<TestApp
   process.env['GIAN_DATA_DIR'] = dataDir;
   const db = openDatabase(dataDir);
   const config = loadConfig(db);
+  options.beforeCreateApp?.(db);
   const openedCommands: Array<{ mode: 'sync' | 'detached'; command: OpenCommand }> = [];
 
   const app = createApp({
@@ -67,6 +72,8 @@ export async function makeTestApp(options: TestAppOptions = {}): Promise<TestApp
         openedCommands.push({ mode: 'detached', command });
       }),
     },
+    ...(options.toolMcpLimits ? { toolMcpLimits: options.toolMcpLimits } : {}),
+    ...(options.toolMcpBeforeCall ? { toolMcpBeforeCall: options.toolMcpBeforeCall } : {}),
   });
 
   async function fetch(path: string, init: RequestInit = {}): Promise<Response> {

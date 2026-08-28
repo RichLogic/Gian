@@ -6,7 +6,11 @@ import type { Executor } from '@gian/shared';
 import { createApp } from './web/app.js';
 import { startGianToolRpc } from './tool/rpc-server.js';
 import { openDatabase } from './storage/db.js';
-import { loadConfig } from './storage/config.js';
+import {
+  configureUserSettingsFile,
+  ensureUserSettingsFile,
+  loadConfig,
+} from './storage/config.js';
 import { resolveDataDir } from './storage/paths.js';
 import { assertNoEventStorageMaintenance } from './storage/maintenance-lock.js';
 import { sweepColdEvents } from './events/lifecycle.js';
@@ -14,8 +18,7 @@ import { CliRuntimeManager } from './runtime/manager.js';
 import { AgentManager } from './agents/manager.js';
 import { resolveBootProxyDescriptors } from './proxy/boot-descriptors.js';
 import { createGitHubReleaseFetch } from './agents/github-release-fetch.js';
-import { syncAgentInstructionBlocks } from './onboarding/agent-instructions.js';
-import { expandHome } from './workspace/index.js';
+import { cleanupAgentInstructionBlocks } from './onboarding/agent-instructions.js';
 
 // Vendored proxies live under packages/proxies/{cc,codex}-proxy in the
 // monorepo. At runtime this file resolves from packages/host/{src or
@@ -56,7 +59,9 @@ async function main(): Promise<void> {
   delete process.env.GIAN_DESKTOP_GITHUB_BROKER_SOCKET;
   assertNoEventStorageMaintenance(dataDir);
   const db = openDatabase(dataDir);
+  configureUserSettingsFile(dataDir);
   const config = loadConfig(db);
+  ensureUserSettingsFile(config);
 
   // Sweep cold events on every boot. Sessions whose events haven't been
   // touched in 30 days (or that are archived) get their events / turns
@@ -75,16 +80,15 @@ async function main(): Promise<void> {
     console.warn('[gian] event sweep failed:', err);
   }
 
-  // Publish the workspace-root convention (worktrees live under
-  // `<root>/worktrees/`) into each agent CLI's global instruction file, so
-  // agent-created worktrees land in one predictable place.
+  // Retire the old global instruction mutation. Dynamic Gian identity and
+  // workspace guidance belongs to the authenticated Session MCP boundary.
   try {
-    const synced = await syncAgentInstructionBlocks(expandHome(config.workspace_root));
-    if (synced.length > 0) {
-      console.log(`[gian] synced agent instruction files: ${synced.join(', ')}`);
+    const cleaned = await cleanupAgentInstructionBlocks();
+    if (cleaned.length > 0) {
+      console.log(`[gian] removed legacy agent instruction blocks: ${cleaned.join(', ')}`);
     }
   } catch (err) {
-    console.warn('[gian] agent instruction sync failed:', err);
+    console.warn('[gian] agent instruction cleanup failed:', err);
   }
 
   const developmentProxyEntries = {
@@ -156,6 +160,14 @@ async function main(): Promise<void> {
       db.prepare('SELECT DISTINCT executor FROM sessions').all() as Array<{ executor: Executor }>
     ).map(row => row.executor),
   });
+  const skillResults = await agentManager.reconcileManagedSkills();
+  for (const result of skillResults) {
+    if (result.state === 'ready') {
+      if (result.changed) console.log(`[gian] reconciled managed Skill: ${result.path}`);
+    } else {
+      console.warn(`[gian] managed Skill ${result.state}: ${result.path}${result.error ? ` (${result.error})` : ''}`);
+    }
+  }
   const runtimeManager = new CliRuntimeManager(
     agentManager.runtimeProviders(),
     agentManager.updateLockDataDir(),

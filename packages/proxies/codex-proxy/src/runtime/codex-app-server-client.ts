@@ -279,7 +279,7 @@ function normalizeDeadlines(overrides: Partial<CodexAppServerDeadlines> | undefi
 
 export function buildInitializeParams() {
   return {
-    clientInfo: { name: 'codex-proxy', version: '0.2.3' },
+    clientInfo: { name: 'codex-proxy', version: '0.2.10' },
     capabilities: {
       experimentalApi: true,
       requestAttestation: false,
@@ -518,7 +518,7 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
     if (startupAbort && !startupAbort.signal.aborted) startupAbort.abort(error);
 
     if (child) this.terminateProcess(child);
-    this.emit('runtimeStopped');
+    this.emit('runtimeStopped', error);
     return true;
   }
 
@@ -691,26 +691,55 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
     cwd: string;
     model?: string | null;
     ephemeral?: boolean;
+    config?: Record<string, unknown>;
   }) {
     const response = await this.request('thread/start', {
       cwd: options.cwd,
       experimentalRawEvents: false,
       ...(options.model ? { model: options.model } : {}),
       ...(options.ephemeral ? { ephemeral: true } : {}),
+      ...(options.config ? { config: options.config } : {}),
     });
     return normalizeThreadBootstrap(response);
   }
 
-  async resumeThread(threadId: string) {
-    return normalizeThreadBootstrap(await this.request('thread/resume', { threadId }));
+  async resumeThread(threadId: string, options: { config?: Record<string, unknown> } = {}) {
+    return normalizeThreadBootstrap(await this.request('thread/resume', {
+      threadId,
+      ...(options.config ? { config: options.config } : {}),
+      // A persisted rollout can be hundreds of MiB. Gian only needs the
+      // bootstrap metadata here; returning every historical turn in one
+      // JSONL response can otherwise exceed the bounded stdio frame.
+      excludeTurns: true,
+    }));
   }
 
-  async forkThread(threadId: string, options: { lastTurnId?: string; cwd?: string } = {}) {
+  async forkThread(
+    threadId: string,
+    options: {
+      lastTurnId?: string;
+      beforeTurnId?: string;
+      cwd?: string;
+      config?: Record<string, unknown>;
+    } = {},
+  ) {
     return normalizeThreadBootstrap(await this.request('thread/fork', {
       threadId,
+      excludeTurns: true,
       ...(options.lastTurnId ? { lastTurnId: options.lastTurnId } : {}),
+      ...(options.beforeTurnId ? { beforeTurnId: options.beforeTurnId } : {}),
       ...(options.cwd ? { cwd: options.cwd } : {}),
+      ...(options.config ? { config: options.config } : {}),
     }));
+  }
+
+  async injectThreadItems(threadId: string, items: Array<Record<string, unknown>>) {
+    // Preserve the bounded stdio frame even when one active Turn accumulated
+    // several accepted steer batches.
+    for (const item of items) {
+      await this.request('thread/inject_items', { threadId, items: [item] });
+    }
+    return {};
   }
 
   async readThread(threadId: string) {

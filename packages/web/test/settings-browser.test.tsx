@@ -47,7 +47,7 @@ describe('Settings Browser integration', () => {
   });
 
   it('confirms and clears the isolated Browser profile through an operation', async () => {
-    renderWithOperations(<SettingsBody activeSection="openwith" config={config} />);
+    renderWithOperations(<SettingsBody activeSection="browser" config={config} />);
     fireEvent.click(screen.getByRole('button', { name: 'Clear Browser data' }));
     const record = getSnapshot().confirms.at(-1);
     expect(record?.message).toMatch(/signs Browser out/i);

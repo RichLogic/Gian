@@ -269,6 +269,7 @@ async function dispatch(
   switch (msg.type) {
     case 'events:subscribe': {
       broadcaster.subscribeToEvents(ws, msg.session_id);
+      if (msg.session_id) await sessions.activateSession(msg.session_id);
       return;
     }
     case 'session:create': {
@@ -302,7 +303,7 @@ async function dispatch(
       return;
     }
     case 'session:archive': {
-      sessions.archiveSession(msg.session_id, msg.archived);
+      await sessions.archiveSession(msg.session_id, msg.archived);
       return;
     }
     case 'session:assign_task': {
@@ -328,6 +329,10 @@ async function dispatch(
     case 'sidechat:close': {
       const result = await sessions.closeSidechat(msg.sidechat_id);
       return { result };
+    }
+    case 'sidechat:set_turn_config': {
+      sessions.setSidechatTurnConfigValue(msg.sidechat_id, msg.option_id, msg.value);
+      return;
     }
     case 'session:fork': {
       const result = await sessions.forkSession({
@@ -374,11 +379,26 @@ async function dispatch(
       return;
     }
     case 'message:send': {
-      await sessions.sendMessage(msg.session_id, msg.text, msg.items, msg.oneShotBypass);
+      await sessions.sendMessage(
+        msg.session_id,
+        msg.text,
+        msg.items,
+        msg.oneShotBypass,
+        undefined,
+        msg.context_items,
+        msg.composer_document,
+        msg.turn_config,
+      );
       return;
     }
     case 'message:steer': {
-      await sessions.steerMessage(msg.session_id, msg.text, msg.items);
+      await sessions.steerMessage(
+        msg.session_id,
+        msg.text,
+        msg.items,
+        msg.context_items,
+        msg.composer_document,
+      );
       return;
     }
     case 'approval:resolve': {
@@ -424,7 +444,14 @@ async function dispatch(
       return;
     }
     case 'queue:add': {
-      sessions.enqueueMessage(msg.session_id, msg.text, msg.items);
+      sessions.enqueueMessage(
+        msg.session_id,
+        msg.text,
+        msg.items,
+        undefined,
+        msg.context_items,
+        msg.composer_document,
+      );
       return;
     }
     case 'queue:remove': {

@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "protocol": "gian.proxy/2.0",
-  "description": "Real Provider acceptance catalog for every Proxy behavior implemented in Gian 0.5.0.",
+  "protocol": "gian.proxy/2.1",
+  "description": "Real Provider acceptance catalog for every Proxy behavior implemented in Gian 0.5.2.",
   "resultSchemas": {
     "initialize": "initializeResultSchema",
     "catalog.list": "catalogResultSchema",
@@ -114,7 +114,7 @@
   "providers": {
     "claude": {
       "displayName": "Claude Code",
-      "pluginVersion": "0.2.2",
+      "pluginVersion": "0.2.3",
       "processScope": "session",
       "binary": "/Users/richlogic/.local/bin/claude-mix",
       "cheapestConfig": {
@@ -155,7 +155,7 @@
     },
     "codex": {
       "displayName": "Codex",
-      "pluginVersion": "0.2.3",
+      "pluginVersion": "0.2.10",
       "processScope": "shared",
       "binary": "codex",
       "cheapestConfig": {
@@ -201,7 +201,7 @@
     },
     "kimi": {
       "displayName": "Kimi Code",
-      "pluginVersion": "0.2.2",
+      "pluginVersion": "0.2.3",
       "processScope": "shared",
       "binary": "~/.kimi-code/bin/kimi",
       "cheapestConfig": {
@@ -240,7 +240,7 @@
     },
     "grok": {
       "displayName": "Grok Build",
-      "pluginVersion": "0.3.1",
+      "pluginVersion": "0.3.2",
       "processScope": "session",
       "binary": "grok",
       "cheapestConfig": {
@@ -285,7 +285,7 @@
     "dsh": {
       "displayName": "DeepSeek Harness Bridge",
       "pluginId": "ai.deepseek.harness",
-      "pluginVersion": "0.1.0",
+      "pluginVersion": "0.1.3",
       "processScope": "shared",
       "binary": "packages/proxies/dsh-bridge/.dsh-runtime/node_modules/.bin/dsh",
       "preferredProvider": "opencode-go",

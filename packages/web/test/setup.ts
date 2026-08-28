@@ -59,6 +59,30 @@ if (typeof window.HTMLElement.prototype.scrollIntoView !== 'function') {
   window.HTMLElement.prototype.scrollIntoView = function scrollIntoView() {};
 }
 
+// Lexical keeps the caret visible by measuring DOM Ranges. jsdom exposes the
+// Range API but not its layout methods, so editor interaction needs a stable
+// zero-sized rectangle in tests.
+if (typeof Range.prototype.getBoundingClientRect !== 'function') {
+  Range.prototype.getBoundingClientRect = () => ({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: 0,
+    height: 0,
+    toJSON: () => ({}),
+  } as DOMRect);
+}
+
+if (!('ClipboardEvent' in globalThis)) {
+  Object.defineProperty(globalThis, 'ClipboardEvent', {
+    configurable: true,
+    value: window.Event,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket — the App opens one on mount. Without a stub the test
 // framework throws on `new WebSocket(...)`. Tests that want to assert on

@@ -1,6 +1,6 @@
 /* ============================================================
    Transcript event rendering — .trow single-line system (P1) +
-   .turnsum completed-turn fold (P2), per the 2026-08-05 redesign
+   .turnsum Turn work boundary (P2), per the 2026-08-05 redesign
    mockup (docs/mockups/2026-08-05-transcript-redesign-acd.html).
    The legacy .evt card system was removed in P2 (2026-08-08): its
    last consumers (TurnActionsBlock, AutoNoticeCard, ErrorCard,
@@ -89,9 +89,12 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-/* Streaming command output cursor (running command detail) */
+/* Streaming command output cursor (running command detail). Plain block:
+ * the inline-block cursor lands at the END of the output (on a fresh empty
+ * line when stdout ends with \n, like a terminal). The old flex row pinned
+ * it top-aligned beside the first output line (fixed 2026-08-27). */
 .cmd-stream {
-  display: flex; align-items: flex-start; gap: 6px;
+  display: block; white-space: pre-wrap;
   font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.6;
@@ -176,17 +179,6 @@
   background: currentColor;
   animation: breath 1.8s ease-in-out infinite;
 }
-/* Level-3 rows: hover-revealed "detail opens in panel 2" hint */
-.trow-ext {
-  display: inline-flex; align-items: center; gap: 3px;
-  font-family: var(--font-mono); font-size: 10px;
-  color: var(--text-3);
-  opacity: 0;
-  transition: opacity 100ms var(--ease);
-}
-.trow.expandable:hover .trow-ext,
-.trow.clickable:hover .trow-ext,
-.turnsum:hover .trow-ext { opacity: 1; }
 
 /* Level-2 detail: in-place expansion for small content */
 .trow-detail {
@@ -223,14 +215,16 @@
 .trow-subject .search-pattern::after { content: "/"; }
 
 /* ============================================================
-   P2 (2026-08-08) — completed-turn fold: .turnsum summary row.
-   Doubles as the turn boundary; the stats are scannable state counts;
-   clicking restores the full process list on a left guide rail.
+   P2 Turn work boundary: .turnsum stays in place from Working through
+   its terminal state; clicking restores the process list on a guide rail.
    ============================================================ */
 .turnsum {
+  margin: 4px 0;
+  border-radius: var(--r-2);
+}
+.turnsum-head {
   position: relative;
   display: flex; align-items: center; gap: 8px;
-  margin: 4px 0;
   padding: 6px 10px 6px 28px;
   border-radius: var(--r-2);
   background: var(--surface-2);
@@ -240,24 +234,31 @@
   transition: background 80ms;
   user-select: text;
 }
-.turnsum:hover { background: var(--surface-3); }
+.turnsum:hover > .turnsum-head { background: var(--surface-3); }
+.turn-work-block {
+  cursor: pointer;
+}
 .turnsum-caret {
   position: absolute; left: 11px; top: 50%;
   width: 9px; height: 9px; color: var(--text-3);
   transform: translateY(-50%);
   transition: transform 120ms var(--ease);
 }
-.turnsum.open > .turnsum-caret { transform: translateY(-50%) rotate(90deg); }
-.turnsum-lead { font-weight: 600; color: var(--text); font-size: var(--fz-12); }
-.turnsum-stats {
-  display: flex; align-items: center; gap: 6px;
-  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3);
-  min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+.turnsum.open > .turnsum-head > .turnsum-caret { transform: translateY(-50%) rotate(90deg); }
+.turnsum-lead {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--text);
+  font-size: var(--fz-12);
 }
-.turnsum-stats .sep { color: var(--hairline); }
-.turnsum-stats .add { color: var(--ok); }
-.turnsum-stats .del { color: var(--danger); }
-.turnsum-stats .err { color: var(--danger); font-weight: 600; }
+.turn-work-duration {
+  display: inline-block;
+  min-width: 7ch;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
 .turnsum-time {
   margin-left: auto;
   font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3);
@@ -271,70 +272,37 @@
   border-left: 1px solid var(--hairline);
   display: flex; flex-direction: column; gap: 1px;
 }
-
-/* ============================================================
-   Event box (2026-08-24) — an IN-FLIGHT turn's process events collect
-   into one live tail instead of flooding the transcript: a header
-   (breathing live dot + label + TOTAL count + hover ⇥ panel hint) above
-   the LATEST 5 events, each exactly one line, so the box always shows the
-   5 most recent events and never clips a row. The whole box is one click
-   target → panel-2 event feed. When the turn ends the .turnsum fold above
-   takes over the same rows.
-   ============================================================ */
-.eventbox {
-  margin: 4px 0;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-2);
-  background: var(--surface-2);
-  cursor: pointer;
-  transition: background 80ms, border-color 80ms;
+.turn-work-preview {
+  margin-bottom: 4px;
 }
-.eventbox:hover { background: var(--surface-3); border-color: var(--text-3); }
-.eventbox-head {
-  display: flex; align-items: center; gap: 6px;
-  padding: 5px 10px;
-  border-bottom: 1px solid var(--hairline);
-  font-size: var(--fz-11);
-  color: var(--text-3);
-}
-.eventbox-live {
-  width: 5px; height: 5px; border-radius: 50%;
-  background: var(--accent-text);
-  animation: breath 1.8s ease-in-out infinite;
-  flex-shrink: 0;
-}
-.eventbox-title { font-weight: 600; color: var(--text-2); }
-.eventbox-count {
-  font-family: var(--font-mono); font-size: 10.5px;
-}
-/* Same hover-revealed ⇥ panel affordance as level-3 rows. */
-.eventbox-ext {
-  margin-left: auto;
-  font-family: var(--font-mono); font-size: 10px;
-  color: var(--text-3);
-  opacity: 0;
-  transition: opacity 100ms var(--ease);
-}
-.eventbox:hover .eventbox-ext,
-.eventbox:focus-visible .eventbox-ext { opacity: 1; }
-.eventbox-body {
-  /* No internal scroll: the box renders the turn's LATEST --eventbox-lines
-   * events (slice in EventBox), each exactly one line — the body height is
-   * always exactly that many rows, so no row can ever be clipped. */
-  padding: 2px 0;
-  display: flex; flex-direction: column; gap: 1px;
-}
-/* Box lines carry no caret and no per-row interaction — the box handles
- * the click — so they drop the 28px caret indent and the row cursors. */
-.eventbox .trow {
-  padding-left: 10px;
-  cursor: inherit;
+.turn-work-preview .trow {
   user-select: none;
 }
-.eventbox .trow:hover { background: none; }
-.eventbox .approval-line { cursor: inherit; }
-@media (prefers-reduced-motion: reduce) {
-  .eventbox-live { animation: none; }
+/* 2026-08-27 proposal: the expanded body lists the turn's FULL tool rows in
+ * a capped scroll area (~5 rows); new rows stick to the bottom until the
+ * user scrolls up. `.turnsum-body` is a flex column, so children must not
+ * shrink — otherwise the cap would squash rows instead of scrolling. */
+.turn-work-scroll {
+  max-height: 160px;
+  overflow-y: auto;
+}
+.turn-work-scroll > * { flex-shrink: 0; }
+/* Live exception: the running Bash row keeps its streaming output block.
+ * Flush with the tool rows — the base .trow-detail 28px left margin would
+ * leave an empty band beside the guide rail. */
+.turn-work-live-stream { cursor: default; margin: -4px 0 4px; }
+
+/* Panel-2 anchor flash: a row clicked in the turn work block is located in
+ * the event feed and highlighted (~1.6s × 2 accent flash). */
+@keyframes anchor-flash {
+  0%, 60% { background: var(--accent-soft); }
+  100% { background: transparent; }
+}
+.trow.is-anchor-flash {
+  border-radius: var(--r-1);
+  outline: 1px solid var(--accent-ring);
+  background: var(--accent-soft);
+  animation: anchor-flash 1.6s var(--ease) 2;
 }
 
 /* Session meta: status as a centered plain-text line (pill removed) */

@@ -53,7 +53,7 @@ describe('sidechat/fork operation registration (proposal §10.5/§10.6)', () => 
     vi.useRealTimers();
   });
 
-  it('registers all four operations with the pending policy and WS types', () => {
+  it('registers lifecycle and independent turn-config operations with their WS policies', () => {
     for (const name of ['sidechat.create', 'sidechat.resume', 'sidechat.close', 'session.forkSession'] as const) {
       expect(OPERATION_POLICIES[name]).toBe('pending');
       expect(registry.has(name)).toBe(true);
@@ -61,7 +61,33 @@ describe('sidechat/fork operation registration (proposal §10.5/§10.6)', () => 
     expect(WS_TYPE_POLICIES['sidechat:create']).toBe('pending');
     expect(WS_TYPE_POLICIES['sidechat:resume']).toBe('pending');
     expect(WS_TYPE_POLICIES['sidechat:close']).toBe('pending');
+    expect(OPERATION_POLICIES['sidechat.setTurnConfig']).toBe('optimistic');
+    expect(registry.has('sidechat.setTurnConfig')).toBe(true);
+    expect(WS_TYPE_POLICIES['sidechat:set_turn_config']).toBe('optimistic');
     expect(WS_TYPE_POLICIES['session:fork']).toBe('pending');
+  });
+
+  it('sidechat.setTurnConfig overlays the full draft and sends only the changed option', () => {
+    const { store, transport, dispatcher } = setup();
+    const run = dispatcher.dispatch('sidechat.setTurnConfig', {
+      sidechatId: 'sc-1',
+      optionId: 'model',
+      value: 'gpt-next',
+      turnConfig: { model: 'gpt-next', effort: 'high' },
+    });
+
+    expect(run.phase).toBe('optimistic');
+    expect(store.getOverlay('sidechat:sc-1:turn_config')?.value).toEqual({
+      model: 'gpt-next',
+      effort: 'high',
+    });
+    expect(transport.sent[0]).toMatchObject({
+      type: 'sidechat:set_turn_config',
+      sidechat_id: 'sc-1',
+      option_id: 'model',
+      value: 'gpt-next',
+    });
+    expect(transport.sent[0]).not.toHaveProperty('turn_config');
   });
 
   it('sidechat.create sends sidechat:create with only the parent session id', () => {

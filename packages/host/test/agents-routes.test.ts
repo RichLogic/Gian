@@ -48,14 +48,29 @@ test('GET /api/proxies returns static catalog metadata only', async t => {
   const response = await app.request('/api/proxies');
   assert.equal(response.status, 200);
   const body = await response.json() as {
-    proxies: Array<{ id: string; name: string; defaultColor: string }>;
+    proxies: Array<{ id: string; name: string; logo: { light: string; dark: string } }>;
   };
-  assert.deepEqual(body.proxies.map(entry => [entry.id, entry.name, entry.defaultColor]), [
-    ['claude', 'Claude Code', 'ember'],
-    ['codex', 'Codex', 'ink'],
-    ['kimi', 'Kimi Code', 'citron'],
-    ['dsh', 'DeepSeek Harness', 'teal'],
+  assert.deepEqual(body.proxies.map(entry => [entry.id, entry.name, entry.logo]), [
+    ['claude', 'Claude Code', { light: '/api/proxies/claude/logo/light', dark: '/api/proxies/claude/logo/dark' }],
+    ['codex', 'Codex', { light: '/api/proxies/codex/logo/light', dark: '/api/proxies/codex/logo/dark' }],
+    ['kimi', 'Kimi Code', { light: '/api/proxies/kimi/logo/light', dark: '/api/proxies/kimi/logo/dark' }],
+    ['dsh', 'DeepSeek Harness', { light: '/api/proxies/dsh/logo/light', dark: '/api/proxies/dsh/logo/dark' }],
   ]);
+});
+
+test('GET /api/proxies/:id/logo/:variant serves validated Proxy-owned bytes', async t => {
+  const { app, agents } = await makeApp(t);
+  agents.proxyLogo = async (id, variant) => id === 'kimi' && variant === 'light'
+    ? { bytes: Buffer.from('official-kimi-logo'), mediaType: 'image/png', sha256: 'a'.repeat(64) }
+    : null;
+
+  const response = await app.request('/api/proxies/kimi/logo/light');
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'image/png');
+  assert.equal(response.headers.get('etag'), `"${'a'.repeat(64)}"`);
+  assert.equal(Buffer.from(await response.arrayBuffer()).toString('utf8'), 'official-kimi-logo');
+  assert.equal((await app.request('/api/proxies/kimi/logo/dark')).status, 404);
+  assert.equal((await app.request('/api/proxies/grok/logo/light')).status, 404);
 });
 
 test('GET /api/agents returns saved Agents only, never unsaved catalog kinds', async t => {
@@ -79,12 +94,12 @@ test('POST /api/agents creates a draft into a saved Agent; duplicate names 409',
   const created = await app.request('/api/agents', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'My Codex', proxy: 'codex', color: 'azure' }),
+    body: JSON.stringify({ name: 'My Codex', proxy: 'codex' }),
   });
   assert.equal(created.status, 201);
   const createdBody = await created.json() as { agent: UserAgentStatus };
   assert.equal(createdBody.agent.name, 'My Codex');
-  assert.equal(createdBody.agent.color, 'azure');
+  assert.equal('color' in createdBody.agent, false);
   assert.equal(createdBody.agent.proxy, 'codex');
   // (No readiness assertion: a path-less Agent auto-resolves official install
   // locations, which differ per machine.)
@@ -115,7 +130,7 @@ test('POST /api/agents creates a draft into a saved Agent; duplicate names 409',
   assert.equal(grok.status, 400, 'Grok stays out of the product catalog');
 });
 
-test('PATCH /api/agents/:id renames and recolors; DELETE removes; 404 for unknown ids', async t => {
+test('PATCH /api/agents/:id renames; DELETE removes; 404 for unknown ids', async t => {
   const { app } = await makeApp(t);
   const created = await app.request('/api/agents', {
     method: 'POST',
@@ -127,12 +142,12 @@ test('PATCH /api/agents/:id renames and recolors; DELETE removes; 404 for unknow
   const renamed = await app.request(`/api/agents/${agent.id}`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'Two', color: 'plum' }),
+    body: JSON.stringify({ name: 'Two' }),
   });
   assert.equal(renamed.status, 200);
   const renamedBody = await renamed.json() as { agent: UserAgentStatus };
   assert.equal(renamedBody.agent.name, 'Two');
-  assert.equal(renamedBody.agent.color, 'plum');
+  assert.equal('color' in renamedBody.agent, false);
 
   const missing = await app.request('/api/agents/nope', {
     method: 'PATCH',
@@ -187,13 +202,12 @@ test('GET /api/proxies/:id/draft-defaults numbers names and copies the kind path
   const second = await app.request('/api/proxies/claude/draft-defaults');
   assert.deepEqual(await second.json(), {
     name: 'Claude Code 2',
-    color: 'rose',
     cliPath: claude,
   });
   // dsh has nothing installed in the fixture home and an empty PATH —
   // the scan comes back empty and the draft starts pathless.
   const dsh = await app.request('/api/proxies/dsh/draft-defaults');
-  assert.deepEqual(await dsh.json(), { name: 'DeepSeek Harness', color: 'teal', cliPath: null });
+  assert.deepEqual(await dsh.json(), { name: 'DeepSeek Harness', cliPath: null });
 
   // A kind with no saved Agent and no copied path falls back to the local
   // scan (PATH / official install locations).
@@ -223,7 +237,7 @@ test('GET /api/proxies/:id/draft-defaults numbers names and copies the kind path
     }),
   });
   const kimi = await app2.request('/api/proxies/kimi/draft-defaults');
-  assert.deepEqual(await kimi.json(), { name: 'Kimi Code', color: 'citron', cliPath: kimiBin });
+  assert.deepEqual(await kimi.json(), { name: 'Kimi Code', cliPath: kimiBin });
 
   const unknown = await app.request('/api/proxies/grok/draft-defaults');
   assert.equal(unknown.status, 404);

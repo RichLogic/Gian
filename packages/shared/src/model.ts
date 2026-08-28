@@ -204,8 +204,14 @@ export interface Session {
    *  ON DELETE SET NULL) — such sessions surface in the Sessions rail's
    *  无归属 (Unfiled) group and can no longer run turns. */
   workspace_id: string | null;
+  /** Stable Tool actor that directly created this Session. Null/absent for
+   * UI, native-adopted, forked, legacy, and unauthenticated local creation. */
+  created_by_actor_kind?: 'internal_session' | 'external_controller' | null;
+  created_by_actor_id?: string | null;
+  /** Internal creator Session FK; null for external and non-Tool creators. */
+  created_by_session_id?: string | null;
   executor: Executor;
-  /** Owning user Agent (agents.json schema v2). No SQL FK — Agents live
+  /** Owning user Agent (agents.json schema v3). No SQL FK — Agents live
    *  outside SQLite and can be deleted; a deleted Agent's sessions stay
    *  read-only (no new turns) and render from the snapshots below. NULL for
    *  sessions created before migration 055, which resolve through the
@@ -213,8 +219,9 @@ export interface Session {
   agent_id?: string | null;
   /** Snapshot of the owning Agent's display name at creation/bind time. */
   agent_name?: string | null;
-  /** Snapshot of the owning Agent's color token. */
-  agent_color?: AgentColor | null;
+  /** Immutable Agent runtime selected when the Session was created. Sessions
+   * predating migration 064 omit it and retain legacy Agent-path resolution. */
+  runtime_profile?: import('./agents.js').AgentRuntimeProfile | null;
   model: string | null;
   /** Legacy Claude/Codex policy. Kimi stores its exact ACP mode in
    *  `executor_config` and therefore keeps this NULL. */
@@ -255,12 +262,15 @@ export interface Session {
   /** Absolute path to the live worktree dir. Null when not in worktree mode
    *  OR when the worktree was removed (merged/discarded). */
   worktree_path: string | null;
-  /** Absolute path of a worktree the AGENT created itself mid-session via
-   *  `git worktree add` (detected from command_execution events). Null until
-   *  detected; never set on Gian-owned worktree sessions. View-only: the web
-   *  auto-switches the diff/files view to it; execution stays put.
-   *  Optional for compatibility with hosts predating migration 040. */
+  /** Latest view-level worktree path requested by the Gian Tool or detected
+   *  from direct Agent `git worktree add` command evidence. Tool requests open
+   *  immediately; direct detections require post-Turn user confirmation.
+   *  Execution stays put. Optional for hosts predating migration 040. */
   detected_worktree_path?: string | null;
+  /** Trusted source of the latest view-level worktree request. Tool requests
+   *  open immediately; direct Agent detection requires user confirmation. */
+  detected_worktree_source?: 'agent' | 'gian_tool' | null;
+  detected_worktree_revision?: number;
   /** Branch name, e.g. 'worktree/abc123' (or legacy 'gian/abc123' from
    *  earlier versions). Set on worktree creation; survives merge/discard
    *  for history. Null for regular sessions. */
@@ -409,11 +419,6 @@ export type Accent =
   | 'rose' | 'ember' | 'citron' | 'moss'
   | 'teal' | 'azure' | 'ink' | 'plum';
 
-/** Agent color token. Same 8-name palette as Appearance accents, but an
- *  independent concern: it renders through `--agent-*` tokens / `data-color`,
- *  never through the site-wide `body[data-accent]`. */
-export type AgentColor = Accent;
-
 export type FontScale = 'sm' | 'md' | 'lg' | 'xl';
 
 /** Chat (transcript/composer) font family. 'system' is the built-in sans
@@ -495,6 +500,208 @@ export function resolveShortcuts(
   return resolved;
 }
 
+/** Stable product commands exposed by Settings > Keymap. Commands describe
+ *  Gian actions rather than Provider brands, so user bindings survive Agent
+ *  catalog changes. A null binding explicitly disables a built-in default. */
+export type KeymapCommand =
+  | 'app.quickSwitcher'
+  | 'app.settings'
+  | 'session.new'
+  | 'task.new'
+  | 'layout.toggleSidebar'
+  | 'layout.togglePanel2'
+  | 'layout.togglePanel3'
+  | 'tool.files'
+  | 'tool.diffs'
+  | 'tool.history'
+  | 'tool.sideChat'
+  | 'tool.browser'
+  | 'tool.terminal'
+  | 'session.sendOrSteer'
+  | 'session.previous'
+  | 'session.next'
+  | 'workbench.previousTab'
+  | 'workbench.nextTab'
+  | 'workbench.closeTab'
+  | 'navigation.back'
+  | 'navigation.forward'
+  | 'session.rename'
+  | 'session.later'
+  | 'session.archive';
+
+export const KEYMAP_COMMANDS: readonly KeymapCommand[] = [
+  'app.quickSwitcher',
+  'app.settings',
+  'session.new',
+  'task.new',
+  'layout.toggleSidebar',
+  'layout.togglePanel2',
+  'layout.togglePanel3',
+  'tool.files',
+  'tool.diffs',
+  'tool.history',
+  'tool.sideChat',
+  'tool.browser',
+  'tool.terminal',
+  'session.sendOrSteer',
+  'session.previous',
+  'session.next',
+  'workbench.previousTab',
+  'workbench.nextTab',
+  'workbench.closeTab',
+  'navigation.back',
+  'navigation.forward',
+  'session.rename',
+  'session.later',
+  'session.archive',
+];
+
+export type KeymapBindings = Partial<Record<KeymapCommand, string | null>>;
+
+export interface KeymapPreferences {
+  preset: 'default';
+  bindings: KeymapBindings;
+}
+
+export const DEFAULT_KEYMAP_BINDINGS: Readonly<Partial<Record<KeymapCommand, string>>> = {
+  'app.quickSwitcher': 'mod+k',
+  'app.settings': 'mod+,',
+  'session.new': 'mod+n',
+  'task.new': 'mod+shift+n',
+  'layout.toggleSidebar': 'mod+b',
+  'layout.togglePanel2': 'mod+j',
+  'layout.togglePanel3': 'mod+alt+b',
+  'tool.files': 'mod+1',
+  'tool.diffs': 'mod+2',
+  'tool.history': 'mod+3',
+  'tool.sideChat': 'mod+4',
+  'tool.browser': 'mod+5',
+  'tool.terminal': 'mod+6',
+  'session.sendOrSteer': 'mod+enter',
+  'session.previous': 'ctrl+shift+tab',
+  'session.next': 'ctrl+tab',
+  'workbench.previousTab': 'mod+shift+[',
+  'workbench.nextTab': 'mod+shift+]',
+  'workbench.closeTab': 'mod+w',
+  'navigation.back': 'mod+[',
+  'navigation.forward': 'mod+]',
+  'session.rename': 'f2',
+  'session.later': 'mod+shift+l',
+};
+
+const KEYMAP_MODIFIERS = new Set(['mod', 'cmd', 'ctrl', 'shift', 'alt']);
+const KEYMAP_NAMED_KEYS = new Set([
+  'enter', 'escape', 'tab', 'space', 'backspace', 'delete',
+  'left', 'right', 'up', 'down', 'home', 'end', 'pageup', 'pagedown',
+]);
+
+export function isValidKeymapBinding(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 96) return false;
+  const parts = value.toLowerCase().split('+');
+  const key = parts.at(-1) ?? '';
+  const modifiers = parts.slice(0, -1);
+  if (new Set(modifiers).size !== modifiers.length) return false;
+  if (!modifiers.every(part => KEYMAP_MODIFIERS.has(part))) return false;
+  if (KEYMAP_MODIFIERS.has(key)) return false;
+  return KEYMAP_NAMED_KEYS.has(key)
+    || /^f(?:[1-9]|1[0-2])$/.test(key)
+    || /^[a-z0-9`\[\],.;=\/-]$/.test(key);
+}
+
+export function resolveKeymap(
+  preferences: KeymapPreferences | undefined,
+): Partial<Record<KeymapCommand, string>> {
+  const resolved = { ...DEFAULT_KEYMAP_BINDINGS };
+  if (!preferences) return resolved;
+  for (const command of KEYMAP_COMMANDS) {
+    const binding = preferences.bindings[command];
+    if (binding === null) delete resolved[command];
+    else if (isValidKeymapBinding(binding)) resolved[command] = binding;
+  }
+  return resolved;
+}
+
+export interface LayoutPreferences {
+  sidebar_width: number;
+  sidebar_start_collapsed: boolean;
+  main_panel_ratio: number;
+  inspector_width: number;
+  inspector_auto_open: boolean;
+  remember_sizes: boolean;
+}
+
+export const DEFAULT_LAYOUT_PREFERENCES: Readonly<LayoutPreferences> = {
+  sidebar_width: 272,
+  sidebar_start_collapsed: false,
+  main_panel_ratio: 0.5,
+  inspector_width: 280,
+  inspector_auto_open: true,
+  remember_sizes: true,
+};
+
+export interface ToolPreferences {
+  files: {
+    compact_folders: boolean;
+    show_hidden_files: boolean;
+    show_ignored_files: boolean;
+    reveal_active_file: boolean;
+    open_on: 'single-click' | 'double-click';
+    word_wrap: boolean;
+  };
+  diffs: {
+    layout: 'split' | 'stacked';
+    word_wrap: boolean;
+    default_scope: 'all' | 'last-turn';
+  };
+  history: {
+    show_graph: boolean;
+    default_ref: 'current' | 'all';
+    date_format: 'relative' | 'absolute';
+    single_click_preview: boolean;
+  };
+  side_chat: {
+    open_after_create: boolean;
+    confirm_before_close: boolean;
+  };
+  browser: {
+    home_page: string;
+    restore_last_page: boolean;
+    external_links: 'gian' | 'system';
+  };
+  terminal: {
+    option_as_meta: boolean;
+    copy_on_selection: boolean;
+    bell: boolean;
+    shell_integration: boolean;
+  };
+}
+
+export const DEFAULT_TOOL_PREFERENCES: Readonly<ToolPreferences> = {
+  files: {
+    compact_folders: true,
+    show_hidden_files: false,
+    show_ignored_files: false,
+    reveal_active_file: true,
+    open_on: 'single-click',
+    word_wrap: true,
+  },
+  diffs: { layout: 'split', word_wrap: true, default_scope: 'all' },
+  history: {
+    show_graph: true,
+    default_ref: 'current',
+    date_format: 'relative',
+    single_click_preview: true,
+  },
+  side_chat: { open_after_create: true, confirm_before_close: true },
+  browser: { home_page: '', restore_last_page: true, external_links: 'gian' },
+  terminal: {
+    option_as_meta: true,
+    copy_on_selection: false,
+    bell: false,
+    shell_integration: true,
+  },
+};
+
 export type TerminalFontFamily =
   | 'jetbrains-mono'
   | 'system-mono'
@@ -563,6 +770,12 @@ export interface SystemConfig {
   chat_font_family: ChatFontFamily;
   /** User keyboard-shortcut overrides; absent actions use DEFAULT_SHORTCUTS. */
   shortcuts?: ShortcutMap;
+  /** Command-based replacement for the legacy provider-specific shortcuts. */
+  keymap?: KeymapPreferences;
+  /** Preferred four-panel geometry. Responsive fitting never overwrites it. */
+  layout?: LayoutPreferences;
+  /** Defaults for every non-Settings tool exposed on the right Dock. */
+  tools?: ToolPreferences;
   terminal: TerminalPreferences;
   locale: 'zh-CN' | 'en';
   /** Default model for new claude (cc) sessions. Empty = use proxy default. */

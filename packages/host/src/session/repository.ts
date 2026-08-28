@@ -26,7 +26,41 @@ type SessionRow = Omit<
   origin_source_stream_id?: string | null;
   origin_anchor_type?: 'head' | 'turn' | null;
   available_actions_json?: string | null;
+  runtime_profile_json?: string | null;
 };
+
+function parseRuntimeProfile(
+  value: string | null | undefined,
+): Session['runtime_profile'] | undefined {
+  if (!value) return undefined;
+  try {
+    const profile = JSON.parse(value) as Record<string, unknown>;
+    const skill = profile.skill as Record<string, unknown> | undefined;
+    if (
+      typeof profile.id === 'string'
+      && typeof profile.agentId === 'string'
+      && (profile.proxy === 'codex' || profile.proxy === 'claude'
+        || profile.proxy === 'kimi' || profile.proxy === 'dsh')
+      && typeof profile.cliPath === 'string'
+      && typeof profile.cliVersion === 'string'
+      && (profile.configHome === null || typeof profile.configHome === 'string')
+      && (profile.cliFingerprint === null || typeof profile.cliFingerprint === 'string')
+      && typeof profile.proxyVersion === 'string'
+      && Array.isArray(profile.verifiedCliVersions)
+      && profile.verifiedCliVersions.every(item => typeof item === 'string')
+      && (profile.verification === 'verified' || profile.verification === 'unverified')
+      && skill?.name === 'gian-session'
+      && typeof skill.version === 'string'
+      && (skill.state === 'ready' || skill.state === 'missing'
+        || skill.state === 'conflict' || skill.state === 'invalid')
+    ) {
+      return profile as unknown as NonNullable<Session['runtime_profile']>;
+    }
+  } catch {
+    // Malformed snapshots fail closed to the legacy Agent resolver.
+  }
+  return undefined;
+}
 
 function parseExecutorConfig(value: string | null | undefined): ExecutorConfigState {
   if (!value) return { ...EMPTY_EXECUTOR_CONFIG, values: {} };
@@ -153,6 +187,10 @@ export class SessionRepository {
       origin_source_stream_id: _originSourceStreamId,
       origin_anchor_type: _originAnchorType,
       available_actions_json: availableActionsJson,
+      runtime_profile_json: runtimeProfileJson,
+      created_by_actor_kind: createdByActorKind,
+      created_by_actor_id: createdByActorId,
+      created_by_session_id: createdBySessionId,
       native_session_id: nativeSessionId,
       ...stored
     } = row;
@@ -164,7 +202,17 @@ export class SessionRepository {
       executor_config: parseExecutorConfig(executorConfigJson),
       turn_config: parseTurnConfig(turnConfigJson),
       ...(turnConfigOptions !== undefined ? { turn_config_options: turnConfigOptions } : {}),
+      ...(parseRuntimeProfile(runtimeProfileJson) !== undefined
+        ? { runtime_profile: parseRuntimeProfile(runtimeProfileJson) }
+        : {}),
       native_config_options: this.nativeOptions.get(row.id) ?? [],
+      ...(createdByActorKind && createdByActorId
+        ? {
+            created_by_actor_kind: createdByActorKind,
+            created_by_actor_id: createdByActorId,
+            created_by_session_id: createdBySessionId ?? null,
+          }
+        : {}),
       ...(originKind === 'fork' && originSessionId && originTurnId && originSourceTurnId
         ? {
             origin: {

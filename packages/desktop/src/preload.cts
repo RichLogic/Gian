@@ -1,8 +1,10 @@
 const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron');
 import type {
   GianBrowserBounds,
+  GianBrowserElementCapture,
   GianBrowserProjectTarget,
   GianBrowserState,
+  PickComposerResourcesResult,
   GianScreenshotCapture,
   GianScreenshotErrorCode,
   GianScreenshotPreferences,
@@ -26,6 +28,9 @@ contextBridge.exposeInMainWorld(
     openLogs: () => ipcRenderer.invoke('desktop:open-logs'),
     restartApp: () => ipcRenderer.invoke('desktop:restart-app'),
     setDockIcon: (dataUrl: string) => ipcRenderer.invoke('desktop:set-dock-icon', dataUrl),
+    resources: Object.freeze({
+      pick: () => ipcRenderer.invoke('desktop:resources:pick') as Promise<PickComposerResourcesResult | null>,
+    }),
     screenshot: Object.freeze({
       setTarget: (target: GianScreenshotTarget | null) =>
         ipcRenderer.invoke('desktop:screenshot:set-target', target),
@@ -94,11 +99,22 @@ contextBridge.exposeInMainWorld(
       openExternal: (tabId: string) => ipcRenderer.invoke('desktop:browser:open-external', tabId),
       closeTab: (tabId: string) => ipcRenderer.invoke('desktop:browser:close-tab', tabId),
       clearData: () => ipcRenderer.invoke('desktop:browser:clear-data'),
+      setInspectMode: (tabId: string, enabled: boolean) =>
+        ipcRenderer.invoke('desktop:browser:set-inspect-mode', tabId, enabled),
       subscribe: (listener: (tabId: string, state: GianBrowserState) => void) => {
         const wrapped = (_event: Electron.IpcRendererEvent, tabId: string, state: GianBrowserState) =>
           listener(tabId, state);
         ipcRenderer.on('desktop:browser:state', wrapped);
         return () => ipcRenderer.removeListener('desktop:browser:state', wrapped);
+      },
+      subscribeElement: (listener: (tabId: string, capture: GianBrowserElementCapture) => void) => {
+        const wrapped = (
+          _event: Electron.IpcRendererEvent,
+          tabId: string,
+          capture: GianBrowserElementCapture,
+        ) => listener(tabId, capture);
+        ipcRenderer.on('desktop:browser:element', wrapped);
+        return () => ipcRenderer.removeListener('desktop:browser:element', wrapped);
       },
     }),
     zoom: Object.freeze({

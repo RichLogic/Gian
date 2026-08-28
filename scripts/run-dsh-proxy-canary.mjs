@@ -325,7 +325,7 @@ export async function runDshProxyCanary(options = {}) {
     });
 
     const initialized = await client.request('initialize', {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian DSH proxy canary', version: '0.0.0' },
     });
     assert.equal(initialized?.protocol?.version, '2.0');
@@ -421,7 +421,7 @@ export async function runDshProxyCanary(options = {}) {
       },
       proxy: {
         pluginId: 'ai.deepseek.harness',
-        protocol: 'gian.proxy/2.0',
+        protocol: 'gian.proxy/2.1',
         processScope: 'shared',
         binary: relative(rootDir, proxyPath),
       },

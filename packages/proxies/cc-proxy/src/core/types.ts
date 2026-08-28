@@ -3,7 +3,7 @@ export type SessionStatus = 'idle' | 'running' | 'needs-approval' | 'stale' | 'c
 /** Claude CLI's `--permission-mode` values accepted by the current
  *  cc-proxy catalog. Plan mode is intentionally not advertised: accepting
  *  ExitPlanMode would require the Proxy to change a future turn mode, which
- *  gian.proxy/2.0 has no request semantic for. */
+ *  gian.proxy/2.x has no request semantic for. */
 export type PermissionMode =
   | 'default'
   | 'manual'

@@ -1,7 +1,7 @@
 /**
  * Proxy projection service: shared-scope session/turn state and event
  * identity. It translates bridge/1.0 native facts into the canonical
- * gian.proxy/2.0 event vocabulary and owns the wire sequence per stream, the
+ * gian.proxy/2.1 event vocabulary and owns the wire sequence per stream, the
  * stable sourceTurnId / eventId derivation, and the finalizing rules the Host
  * validator enforces (no open interactions/activities/steps/content at Turn
  * Terminal).
@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import type { BridgeNotification } from '../runtime/bridge-client.js';
 
 export const PLUGIN_ID = 'ai.deepseek.harness';
-export const PLUGIN_VERSION = '0.1.1';
+export const PLUGIN_VERSION = '0.1.3';
 export const PLUGIN_NAME = 'DeepSeek Harness';
 
 export type ConfigValue = string | boolean | number | null;
@@ -73,6 +73,8 @@ export interface StepState {
 export interface ContentState {
   id: string;
   kind: string;
+  format?: string;
+  stepId?: string;
   open: boolean;
 }
 
@@ -115,6 +117,18 @@ export function sourceTurnId(nativeSessionId: string, nativeTurn: number): strin
 export function stepIdFor(sourceTurnIdValue: string, nativeStep: number): string {
   return `${sourceTurnIdValue}:step:${nativeStep}`;
 }
+
+/**
+ * One content stream per native step. `gian.proxy/2` freezes `kind` / `format`
+ * / `stepId` for a contentId, so a later DSH step cannot reuse the turn-wide
+ * assistant id from step 1.
+ */
+export function contentIdFor(sourceTurnIdValue: string, nativeStep: number): string {
+  return `assistant-${stepIdFor(sourceTurnIdValue, nativeStep)}`;
+}
+
+const ASSISTANT_CONTENT_KIND = 'text';
+const ASSISTANT_CONTENT_FORMAT = 'markdown';
 
 export class DshProxyService {
   private readonly sessions = new Map<string, AttachedSession>();
@@ -212,12 +226,18 @@ export class DshProxyService {
 
   /* ---------------- Notifications ---------------- */
 
-  private nextEventId(session: AttachedSession, projectionKind: string, nativeSeq: number): string {
+  private nextEventId(
+    session: AttachedSession,
+    projectionKind: string,
+    nativeSeq: number,
+    ...identity: unknown[]
+  ): string {
     return hashId([
       PLUGIN_ID,
       session.nativeSessionId ?? session.id,
       projectionKind,
       nativeSeq,
+      ...identity,
       session.turnConfigOptionsRevision ?? this.catalogRevision,
     ]);
   }
@@ -408,7 +428,7 @@ export class DshProxyService {
         interaction.resolved = true;
         session.sequence += 1;
         this.emit('interaction.resolved', {
-          eventId: this.nextEventId(session, 'interaction-resolved', nativeSeq),
+          eventId: this.nextEventId(session, 'interaction-resolved', nativeSeq, interaction.id),
           sessionId: session.id,
           streamId: session.streamId,
           sequence: session.sequence,
@@ -424,7 +444,7 @@ export class DshProxyService {
         activity.status = 'cancelled';
         session.sequence += 1;
         this.emit('activity.updated', {
-          eventId: this.nextEventId(session, 'activity-final', nativeSeq),
+          eventId: this.nextEventId(session, 'activity-final', nativeSeq, activity.id),
           sessionId: session.id,
           streamId: session.streamId,
           sequence: session.sequence,
@@ -446,7 +466,7 @@ export class DshProxyService {
         step.status = 'failed';
         session.sequence += 1;
         this.emit('step.updated', {
-          eventId: this.nextEventId(session, 'step-final', nativeSeq),
+          eventId: this.nextEventId(session, 'step-final', nativeSeq, step.id),
           sessionId: session.id,
           streamId: session.streamId,
           sequence: session.sequence,
@@ -462,14 +482,19 @@ export class DshProxyService {
         content.open = false;
         session.sequence += 1;
         this.emit('content.completed', {
-          eventId: this.nextEventId(session, 'content-final', nativeSeq),
+          eventId: this.nextEventId(session, 'content-final', nativeSeq, content.id),
           sessionId: session.id,
           streamId: session.streamId,
           sequence: session.sequence,
           turnId: turn.gianTurnId,
           sourceTurnId: turn.sourceTurnId,
           emittedAt: nowIso(),
-          data: { contentId: content.id, kind: content.kind },
+          data: {
+            contentId: content.id,
+            kind: content.kind,
+            ...(content.format !== undefined ? { format: content.format } : {}),
+            ...(content.stepId !== undefined ? { stepId: content.stepId } : {}),
+          },
         });
       }
     }
@@ -593,6 +618,22 @@ export class DshProxyService {
     });
   }
 
+  private assistantContent(turn: TurnState, step: number): ContentState {
+    const stepId = stepIdFor(turn.sourceTurnId, step);
+    const contentId = contentIdFor(turn.sourceTurnId, step);
+    const prior = turn.content.get(contentId);
+    if (prior) return prior;
+    const state: ContentState = {
+      id: contentId,
+      kind: ASSISTANT_CONTENT_KIND,
+      format: ASSISTANT_CONTENT_FORMAT,
+      stepId,
+      open: true,
+    };
+    turn.content.set(contentId, state);
+    return state;
+  }
+
   private onAssistantChunk(session: AttachedSession, data: Record<string, unknown>, nativeSeq: number): void {
     const turn = this.turnForNative(session, numberField(data, 'turn'));
     if (!turn) return;
@@ -600,10 +641,8 @@ export class DshProxyService {
     const chunk = (data.chunk ?? {}) as Record<string, unknown>;
     const delta = typeof chunk.text === 'string' ? chunk.text : String(chunk.delta ?? '');
     if (delta === '') return;
-    const contentId = `assistant-${turn.sourceTurnId}`;
-    const prior = turn.content.get(contentId);
-    if (prior && prior.open === false) return;
-    turn.content.set(contentId, { id: contentId, kind: 'text', open: true });
+    const state = this.assistantContent(turn, step);
+    if (state.open === false) return;
     session.sequence += 1;
     this.emit('content.delta', {
       eventId: this.nextEventId(session, 'content-delta', nativeSeq),
@@ -614,10 +653,10 @@ export class DshProxyService {
       sourceTurnId: turn.sourceTurnId,
       emittedAt: nowIso(),
       data: {
-        contentId,
-        kind: 'text',
-        format: 'markdown',
-        stepId: stepIdFor(turn.sourceTurnId, step),
+        contentId: state.id,
+        kind: state.kind,
+        ...(state.format !== undefined ? { format: state.format } : {}),
+        ...(state.stepId !== undefined ? { stepId: state.stepId } : {}),
         delta,
       },
     });
@@ -635,10 +674,9 @@ export class DshProxyService {
             : ''
       )).join('')
       : '';
-    const contentId = `assistant-${turn.sourceTurnId}`;
-    const state = turn.content.get(contentId) ?? { id: contentId, kind: 'text', open: true };
+    const state = this.assistantContent(turn, step);
+    if (state.open === false) return;
     state.open = false;
-    turn.content.set(contentId, state);
     session.sequence += 1;
     this.emit('content.completed', {
       eventId: this.nextEventId(session, 'content-completed', nativeSeq),
@@ -648,7 +686,13 @@ export class DshProxyService {
       turnId: turn.gianTurnId,
       sourceTurnId: turn.sourceTurnId,
       emittedAt: nowIso(),
-      data: { contentId, kind: 'text', format: 'markdown', stepId: stepIdFor(turn.sourceTurnId, step), content },
+      data: {
+        contentId: state.id,
+        kind: state.kind,
+        ...(state.format !== undefined ? { format: state.format } : {}),
+        ...(state.stepId !== undefined ? { stepId: state.stepId } : {}),
+        content,
+      },
     });
 
     // Per-step usage → Turn-scoped usage.updated delta + stepId, at most once.
@@ -831,10 +875,10 @@ export class DshProxyService {
     const activityId = `generic-${turn.sourceTurnId}-${nativeSeq}`;
     // Track generic activities in the turn state so turn terminal can finalize
     // any still-running projection (HostProtocolValidator: no open activities).
-    turn.activities.set(activityId, { id: activityId, status: 'running', enteredRunning: true });
+    turn.activities.set(activityId, { id: activityId, status: 'succeeded', enteredRunning: true });
     session.sequence += 1;
     this.emit('activity.updated', {
-      eventId: this.nextEventId(session, 'activity-generic', nativeSeq),
+      eventId: this.nextEventId(session, 'activity-generic', nativeSeq, activityId),
       sessionId: session.id,
       streamId: session.streamId,
       sequence: session.sequence,
@@ -845,7 +889,7 @@ export class DshProxyService {
         activityId,
         kind: type,
         title: type,
-        status: 'running',
+        status: 'succeeded',
         presentation: { type: 'generic' },
         details: data as unknown,
       },

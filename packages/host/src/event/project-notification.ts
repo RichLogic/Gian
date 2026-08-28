@@ -1,5 +1,6 @@
 import type { ChatDisplay, ChatEvent, DisplayEvent, Executor, ProxyNotification } from '@gian/shared';
 import { proxyNotificationSchema } from '@gian/proxy-protocol';
+import { decompileContextFromText } from '../session/context-items.js';
 import { projectCcNotification } from './normalize-cc.js';
 import { projectCodexNotification } from './normalize-codex.js';
 import { projectKimiNotification } from './normalize-kimi.js';
@@ -43,6 +44,17 @@ export function projectNotification(
       .filter((item): item is Extract<typeof item, { type: 'text' }> => item.type === 'text')
       .map((item) => item.text)
       .join('\n\n');
+    const data: Record<string, unknown> = { text, input };
+    // Replayed provider history only carries the compiled text payload (fork,
+    // native adopt, replay refresh). Recover the structured context fields so
+    // reference chips render instead of raw GianReference/attachment markers.
+    // Live user-typed text never matches the compiled format and stays as-is.
+    const decompiled = decompileContextFromText(text);
+    if (decompiled) {
+      data.text = decompiled.text;
+      if (decompiled.contextItems.length > 0) data.context_items = decompiled.contextItems;
+      if (decompiled.document) data.composer_document = decompiled.document;
+    }
     return [{
       session_id: sessionId,
       turn,
@@ -50,7 +62,7 @@ export function projectNotification(
       ts: Date.parse(standard.data.params.emittedAt),
       provider,
       event: 'user_message',
-      data: { text, input },
+      data,
     }];
   }
   if (

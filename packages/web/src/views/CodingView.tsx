@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ApprovalDecision, ApprovalMode, ConfigValue, Executor, NativeConfigValue, Session, Workspace } from '@gian/shared';
+import type { ApprovalDecision, ApprovalMode, ComposerDocument, ConfigValue, Executor, MessageContextItem, NativeConfigValue, Session, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { ModeDropdown } from '../components/ModeDropdown.js';
 import type { Mode } from '../components/Topbar.js';
@@ -96,6 +96,8 @@ export interface CodingViewProps {
     opts?: {
       oneShotBypass?: boolean;
       attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
+      contextItems?: MessageContextItem[];
+      composerDocument?: ComposerDocument;
     },
   ) => void;
   onSendSkill: (sessionId: string, name: string, path: string) => void;
@@ -107,14 +109,26 @@ export interface CodingViewProps {
     answers?: Record<string, string | boolean | string[]>,
     context?: ApprovalActionContext,
   ) => void;
-  onQueueAdd: (sessionId: string, text: string, attachments?: Array<{ path: string; name: string; mime: string; size?: number }>) => void;
+  onQueueAdd: (
+    sessionId: string,
+    text: string,
+    attachments?: Array<{ path: string; name: string; mime: string; size?: number }>,
+    contextItems?: MessageContextItem[],
+    composerDocument?: ComposerDocument,
+  ) => void;
   onQueueRemove: (sessionId: string, queueId: string) => void;
   onQueueUpdate: (sessionId: string, queueId: string, text: string) => void;
   onQueueClear: (sessionId: string) => void;
   onQueueSendNow: (sessionId: string) => void;
   /** Codex-only mid-turn injection (`turn/steer`) — the composer's Ctrl+Enter
    *  path while a turn is running. Other executors never call it. */
-  onSteer: (sessionId: string, text: string, attachments?: Array<{ path: string; name: string; mime: string; size?: number }>) => void;
+  onSteer: (
+    sessionId: string,
+    text: string,
+    attachments?: Array<{ path: string; name: string; mime: string; size?: number }>,
+    contextItems?: MessageContextItem[],
+    composerDocument?: ComposerDocument,
+  ) => void;
   onSetMode: (sessionId: string, approvalMode: ApprovalMode) => void;
   onSetModel: (sessionId: string, model: string) => void;
   onSetEffort: (sessionId: string, effort: import('@gian/shared').ThinkingEffort | null) => void;
@@ -135,8 +149,6 @@ export interface CodingViewProps {
   onPinSession: (sessionId: string, pinned: boolean) => void;
   /** Archive a session from the sidebar row. */
   onArchiveSession: (sessionId: string) => void;
-  /** Toggle a workspace's pinned marker (sidebar group ordering). */
-  onToggleWorkspacePin: (workspace: Workspace) => void;
   /** Open the Files view in Changed mode for this session's working tree. */
   onShowChanges: (session: Session) => void;
   /** Open a selected file in Diffs pinned to the card's Last-turn scope. */
@@ -150,6 +162,8 @@ export interface CodingViewProps {
    *  ACTIVE session. The head-fork entry lives in the session dropdown menu;
    *  the Side Chat surface lives on the Dock rail + panel 2. */
   forkAtTurnControl: ActionControlState | null;
+  /** `sidechat.create` gating used by transcript selection actions. */
+  sideChatControl?: ActionControlState | null;
   /** App-owned four-panel layout. Optional for isolated component renders. */
   railLayout?: RailLayoutController;
 }
@@ -240,6 +254,16 @@ export function CodingView(p: CodingViewProps) {
     return () => window.removeEventListener('gian.toggle-rail', onToggle);
   }, [p.railLayout, rail.collapsed, rail.setCollapsed]);
 
+  useEffect(() => {
+    const open = () => {
+      setNewForWs(undefined);
+      if (!preserveCreateRun) p.onClearSessionCreateRun();
+      setShowNew(true);
+    };
+    window.addEventListener('gian:new-session', open);
+    return () => window.removeEventListener('gian:new-session', open);
+  }, [p.onClearSessionCreateRun, preserveCreateRun]);
+
   return (
     <div
       className={`view${rail.collapsed ? ' rail-collapsed' : ''}`}
@@ -267,7 +291,6 @@ export function CodingView(p: CodingViewProps) {
           if (!preserveCreateRun) p.onClearSessionCreateRun();
           setShowNew(true);
         }}
-        onToggleWorkspacePin={p.onToggleWorkspacePin}
         onPinSession={p.onPinSession}
         onArchiveSession={p.onArchiveSession}
         onSelect={id => { resetNewSession(); p.onSelectSession(id); }}
@@ -315,12 +338,20 @@ export function CodingView(p: CodingViewProps) {
           onSendSkill={(name, path) => p.onSendSkill(p.activeSession!.id, name, path)}
           onStop={() => p.onStop(p.activeSession!.id)}
           onApprove={(approvalId, decision, answers, context) => p.onApprove(p.activeSession!.id, approvalId, decision, answers, context)}
-          onQueueAdd={(text, items) => p.onQueueAdd(p.activeSession!.id, text, items)}
+          onQueueAdd={(text, items, contextItems, composerDocument) =>
+            p.onQueueAdd(p.activeSession!.id, text, items, contextItems, composerDocument)}
           onQueueRemove={queueId => p.onQueueRemove(p.activeSession!.id, queueId)}
           onQueueUpdate={(queueId, text) => p.onQueueUpdate(p.activeSession!.id, queueId, text)}
           onQueueClear={() => p.onQueueClear(p.activeSession!.id)}
           onQueueSendNow={() => p.onQueueSendNow(p.activeSession!.id)}
-          onSteer={(text, opts) => p.onSteer(p.activeSession!.id, text, opts?.attachments)}
+          onSteer={(text, opts) =>
+            p.onSteer(
+              p.activeSession!.id,
+              text,
+              opts?.attachments,
+              opts?.contextItems,
+              opts?.composerDocument,
+            )}
           onSetMode={mode => p.onSetMode(p.activeSession!.id, mode)}
           onSetModel={model => p.onSetModel(p.activeSession!.id, model)}
           onSetEffort={effort => p.onSetEffort(p.activeSession!.id, effort)}
@@ -338,6 +369,7 @@ export function CodingView(p: CodingViewProps) {
           workingTreeId={p.activeWorkingTreeId}
           branch={p.activeBranch}
           forkAtTurnControl={p.forkAtTurnControl}
+          sideChatControl={p.sideChatControl}
           originParentName={p.activeSession.origin?.kind === 'fork'
             ? p.sessions.find(s => s.id === p.activeSession!.origin!.session_id)?.name ?? undefined
             : undefined}
@@ -376,7 +408,6 @@ function Sidebar({
   activeSessionId,
   onToggleNew,
   onNewForWorkspace,
-  onToggleWorkspacePin,
   onPinSession,
   onArchiveSession,
   onSelect,
@@ -390,7 +421,6 @@ function Sidebar({
   showNew: boolean;
   onToggleNew: () => void;
   onNewForWorkspace: (workspaceId: string) => void;
-  onToggleWorkspacePin: (workspace: Workspace) => void;
   onPinSession: (sessionId: string, pinned: boolean) => void;
   onArchiveSession: (sessionId: string) => void;
   onSelect: (id: string) => void;
@@ -434,10 +464,8 @@ function Sidebar({
   const filtered = active.filter(s => {
     // The per-Task Manager (type='manager') lives in Tasks mode only — it is
     // never a row in the Sessions list. Subtasks (type='subtask') DO appear
-    // here: a subtask is a 1:1 session. Hidden-workspace sessions are NOT
-    // dropped either (2026-08-06): buildRailSections collects them into the
-    // 无归属 group so they stay reachable — e.g. before deleting the hidden
-    // workspace, which refuses while any session still references it.
+    // here: a subtask is a 1:1 session. buildRailSections omits every Session
+    // owned by a hidden Workspace until Settings > Workspaces shows it again.
     return s.type !== 'manager';
   });
 
@@ -474,16 +502,6 @@ function Sidebar({
           <span>{name}</span>
           {attn > 0 && <span className="count">{attn}</span>}
           <span className="sb-group-acts">
-            <button
-              type="button"
-              className="sb-act"
-              data-testid={`sb-pin-ws-${wsId}`}
-              aria-label={t(ws?.pinned === 1 ? 'coding.sidebar.ws.unpin' : 'coding.sidebar.ws.pin')}
-              title={t(ws?.pinned === 1 ? 'coding.sidebar.ws.unpin' : 'coding.sidebar.ws.pin')}
-              onClick={e => { e.stopPropagation(); if (ws) onToggleWorkspacePin(ws); }}
-            >
-              <SvgIcon d={ICON.pin} size={13} filled={ws?.pinned === 1} />
-            </button>
             <button
               type="button"
               className="sb-act"

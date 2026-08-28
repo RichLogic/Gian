@@ -1,13 +1,13 @@
 {
   "name": "@gian/tool-mcp",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "type": "module",
   "bin": {
     "gian-tool-mcp": "./dist/cli.js"
   },
-  "main": "./dist/adapter.js",
-  "types": "./dist/adapter.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "scripts": {
     "build": "pnpm run clean && tsc",
     "typecheck": "tsc --noEmit",

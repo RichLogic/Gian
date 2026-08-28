@@ -10,6 +10,13 @@ const fileTab: SheetTab = {
 const termTab: SheetTab = {
   id: 'term1', group: 'term', name: 'zsh', kind: 'term', icoKind: 'term', ico: '$',
 };
+const changesTab: SheetTab = {
+  id: 'changes1', group: 'diffs', name: 'Changes', kind: 'changes', icoKind: 'diff', ico: '',
+};
+const commitTab: SheetTab = {
+  id: 'commit1', group: 'history', name: 'abc1234 · Fix', kind: 'commit', icoKind: 'commit', ico: '',
+  commitSha: 'abc1234', workingTreeId: 'ws:demo',
+};
 
 const actions = {
   activateTab: vi.fn(), closeTab: vi.fn(), pinTab: vi.fn(), setTabViewMode: vi.fn(),
@@ -53,5 +60,21 @@ describe('Sheet tab groups', () => {
     expect(sheet.style.display).toBe('none');
     // Groups (and their terminals) stay in the DOM across visibility flips.
     expect(sheet.querySelectorAll('.sheet-group').length).toBe(2);
+  });
+
+  it('gives Diffs and History content-height review slots instead of viewport-height keep-alive slots', () => {
+    const { container } = renderSheet({
+      tabs: [changesTab, commitTab],
+      activeByGroup: { diffs: changesTab.id, history: commitTab.id },
+      activeGroup: 'diffs',
+      renderTab: tab => (
+        <div className="cs-root">
+          <div className="cs-pinned-head">{tab.name}</div>
+          <div className="cs-files">long review body</div>
+        </div>
+      ),
+    });
+    expect(container.querySelector('[data-tab-id="changes1"]')).toHaveClass('sheet-review-slot');
+    expect(container.querySelector('[data-tab-id="commit1"]')).toHaveClass('sheet-review-slot');
   });
 });

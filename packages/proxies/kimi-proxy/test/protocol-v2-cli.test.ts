@@ -21,7 +21,7 @@ function startV2Proxy(extraEnv: Record<string, string> = {}) {
       GIAN_PLUGIN_ID: 'kimi',
       GIAN_PLUGIN_DATA_DIR: '/tmp/gian-kimi-v2-test',
       GIAN_RUNTIME_BIN: resolve('test/fixtures/fake-kimi-cli.mjs'),
-      GIAN_PROTOCOL_VERSIONS: '2.0',
+      GIAN_PROTOCOL_VERSIONS: '2.1',
       ...extraEnv,
     },
   });
@@ -45,7 +45,7 @@ function startV2Proxy(extraEnv: Record<string, string> = {}) {
   };
 }
 
-test('Kimi CLI negotiates gian.proxy/2.0 independently from its ACP runtime version', async (t) => {
+test('Kimi CLI negotiates gian.proxy/2.1 independently from its ACP runtime version', async (t) => {
   const proxy = startV2Proxy();
   t.after(() => { proxy.child.kill('SIGKILL'); });
   proxy.send({
@@ -53,15 +53,15 @@ test('Kimi CLI negotiates gian.proxy/2.0 independently from its ACP runtime vers
     id: 'req-1',
     method: 'initialize',
     params: {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: '9.9.9' },
     },
   });
   const initialized = await proxy.next() as { id: string; result: unknown };
   assert.equal(initialized.id, 'req-1');
   const result = initializeResultSchema.parse(initialized.result);
-  assert.equal(result.protocol.version, '2.0');
-  assert.equal(result.plugin.version, '0.2.2');
+  assert.equal(result.protocol.version, '2.1');
+  assert.equal(result.plugin.version, '0.2.3');
   assert.equal(result.process.scope, 'shared');
   assert.equal(result.capabilities.interaction, 1);
   assert.equal(result.capabilities['session.replay'], 1);
@@ -104,7 +104,7 @@ async function initializeProxy(proxy: ReturnType<typeof startV2Proxy>): Promise<
     id: 'init',
     method: 'initialize',
     params: {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: '9.9.9' },
     },
   });

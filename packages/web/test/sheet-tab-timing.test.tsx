@@ -411,6 +411,7 @@ describe('Sheet tab query timing (§4.5)', () => {
       canGoBack: false,
       canGoForward: false,
       canOpenExternal: true,
+      inspecting: false,
     });
     const closeTab = vi.fn().mockResolvedValue(true);
     window.gianDesktop = {

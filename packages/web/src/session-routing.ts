@@ -96,10 +96,9 @@ export function sortWorkspacesForRail<T extends { pinned: 0 | 1 }>(workspaces: T
  *  standalone row in Pinned (it leaves its workspace group); a pinned
  *  WORKSPACE moves its whole group (header + its unpinned sessions) into
  *  Pinned. Everything else stays grouped by workspace under Projects.
- *  Sessions of a HIDDEN workspace (2026-08-06) no longer vanish from the
- *  rail: they collect in the bottom 无归属 (Unfiled) group so they stay
- *  reachable — e.g. before deleting the workspace, which refuses while any
- *  session still references it. */
+ *  Hidden workspaces and every session they own are absent from the active
+ *  rail; Settings > Workspaces > Show restores the group without mutating the
+ *  Session rows. Only genuinely missing workspace ids collect in Unfiled. */
 export interface RailSections<T> {
   /** Standalone pinned session rows, most-recently-pinned first. */
   pinnedSessions: T[];
@@ -110,8 +109,8 @@ export interface RailSections<T> {
   /** Unpinned workspace ids that have visible sessions, in host order
    *  (orphan ids — sessions whose workspace isn't in the list — appended). */
   projectWsIds: string[];
-  /** Unpinned sessions whose workspace is hidden — or gone (NULL after the
-   *  workspace was deleted, migration 045) — rail-sorted. */
+  /** Unpinned sessions whose workspace is gone (NULL after workspace delete,
+   *  migration 045) — rail-sorted. */
   unfiled: T[];
   /** False when nothing is pinned — the rail then renders without section
    *  labels, exactly like the pre-sections layout. */
@@ -123,14 +122,15 @@ export function buildRailSections<T extends Pick<Session, 'workspace_id' | 'pinn
   workspaces: Array<{ id: string; pinned: 0 | 1; hidden?: 0 | 1 }>,
 ): RailSections<T> {
   const hiddenWsIds = new Set(workspaces.filter(w => w.hidden === 1).map(w => w.id));
-  const pinnedSessions = sortSessionsForRail(sessions.filter(s => s.pinned_at != null));
+  const visibleSessions = sessions.filter(s => s.workspace_id == null || !hiddenWsIds.has(s.workspace_id));
+  const pinnedSessions = sortSessionsForRail(visibleSessions.filter(s => s.pinned_at != null));
   const byWs = new Map<string, T[]>();
   const unfiled: T[] = [];
-  for (const s of sessions) {
+  for (const s of visibleSessions) {
     if (s.pinned_at != null) continue;
-    // NULL workspace_id (workspace deleted → ON DELETE SET NULL) and hidden
-    // workspaces both land in 无归属 (Unfiled).
-    if (s.workspace_id == null || hiddenWsIds.has(s.workspace_id)) {
+    // NULL workspace_id (workspace deleted → ON DELETE SET NULL) lands in
+    // 无归属 (Unfiled). Hidden workspace sessions were filtered above.
+    if (s.workspace_id == null) {
       unfiled.push(s);
       continue;
     }

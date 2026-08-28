@@ -15,6 +15,7 @@ import userEvent from '@testing-library/user-event';
 import type { Session } from '@gian/shared';
 import { Composer } from '../src/components/Composer.js';
 import { LocaleProvider } from '../src/i18n/index.js';
+import { typeInlineComposer } from './inline-composer-test-utils.js';
 
 // `loadProxyModels` / `loadSlashCommands` are called on mount. Stub them
 // so the Composer can render without a backend.
@@ -127,7 +128,7 @@ describe('SEC-012: Composer one-shot bypass UI', () => {
     const { onSend } = renderComposer();
 
     const textarea = screen.getByRole('textbox');
-    await user.type(textarea, 'normal turn');
+    typeInlineComposer(textarea, 'normal turn');
     await user.keyboard('{Enter}');
 
     expect(onSend).toHaveBeenCalledTimes(1);
@@ -141,7 +142,7 @@ describe('SEC-012: Composer one-shot bypass UI', () => {
     await toggleBypass(user);
 
     const textarea = screen.getByRole('textbox');
-    await user.type(textarea, 'risky turn');
+    typeInlineComposer(textarea, 'risky turn');
     await user.keyboard('{Enter}');
 
     expect(onSend).toHaveBeenCalledTimes(1);
@@ -154,11 +155,11 @@ describe('SEC-012: Composer one-shot bypass UI', () => {
 
     await toggleBypass(user);
     const textarea = screen.getByRole('textbox');
-    await user.type(textarea, 'turn 1 bypass');
+    typeInlineComposer(textarea, 'turn 1 bypass');
     await user.keyboard('{Enter}');
 
     // Second send — should NOT carry oneShotBypass.
-    await user.type(textarea, 'turn 2 normal');
+    typeInlineComposer(textarea, 'turn 2 normal');
     await user.keyboard('{Enter}');
 
     expect(onSend).toHaveBeenNthCalledWith(1, 'turn 1 bypass', { oneShotBypass: true });
@@ -200,7 +201,7 @@ describe('SEC-012: Composer one-shot bypass UI', () => {
 
     // Even after a send with bypass armed, mode stays untouched.
     const textarea = screen.getByRole('textbox');
-    await user.type(textarea, 'risky');
+    typeInlineComposer(textarea, 'risky');
     await user.keyboard('{Enter}');
 
     expect(onSend).toHaveBeenCalledWith('risky', { oneShotBypass: true });

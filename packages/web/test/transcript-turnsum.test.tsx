@@ -1,10 +1,8 @@
-// Transcript redesign P2 (2026-08-08) — 回顾态.
-// Pins the `.turnsum` completed-turn fold (docs/work-items/transcript-redesign-acd.md §3):
-//   - collapse-as-soon-as-the-turn-ends, for live turns AND historical replays
-//   - stats口径: duration = first process event ts → turn-end ts; actions =
-//     process-event count (incl. approvals, 1 each); files deduped by path
-//     with add/del summed; failed = command + agent errors, kept danger-red
-//   - a turn with no process events gets no summary row
+// Transcript Turn work boundary (Issue #116):
+//   - one stable Working row becomes Worked / Failed / Stopped in place
+//   - duration = first process event ts → turn-end ts and freezes at terminal
+//   - the collapsed row omits counts; details remain available on click
+//   - a turn with no process events gets no boundary row
 //   - pending approvals/questions never fold; resolved ones fold as
 //     `.approval-line` rows
 // plus the P2边角形态: status-line, minimal error card, auto-notice归位,
@@ -132,7 +130,7 @@ describe('P2 turnsum: 完成即折', () => {
     }
   });
 
-  it('a completed turn folds its process events into a summary row; live turns stay flat', () => {
+  it('a completed turn folds its process events; the same boundary reads Working while live', () => {
     const completed: TranscriptItem[] = [
       userMsg(), command(), fileRead(), diff(), turnEnd(), assistantMsg(),
     ];
@@ -141,19 +139,21 @@ describe('P2 turnsum: 完成即折', () => {
     const sum = container.querySelector('.turnsum');
     expect(sum).not.toBeNull();
     // Duration: first process event (cmd @1s) → turn-end (@63s) = 62s.
-    expect(sum!.querySelector('.turnsum-lead')).toHaveTextContent('Worked 1m 02s');
+    expect(sum!.querySelector('.turnsum-lead')).toHaveTextContent('Worked');
+    expect(sum!.querySelector('.turn-work-duration')).toHaveTextContent('1m 02s');
     // Folded rows are not visible until the summary is expanded.
     expect(container.querySelector('.turnsum-body')).toBeNull();
     expect(screen.queryByText('pnpm test')).toBeNull();
     expect(container.querySelector('.turnsum-time')).not.toBeNull();
 
-    // Same items minus the turn-end = a live turn → rows render flat.
+    // Same items minus the turn-end keep one compact live boundary.
     rerender(<Transcript
       items={[userMsg(), command(), fileRead(), diff()]}
       pending
       onApprove={vi.fn()}
     />);
-    expect(container.querySelector('.turnsum')).toBeNull();
+    expect(container.querySelector('.turnsum')).toHaveTextContent('Working');
+    expect(container.querySelector('[data-testid="turn-work-preview"]')).not.toBeNull();
     expect(screen.getByText('pnpm test')).toBeInTheDocument();
   });
 
@@ -202,8 +202,8 @@ describe('P2 turnsum: 完成即折', () => {
 // 统计口径 — actions / files dedupe / failed in red
 // ---------------------------------------------------------------------------
 
-describe('P2 turnsum: stats口径', () => {
-  it('actions counts every process event incl. approvals; files dedupe by path and sum add/del', () => {
+describe('P2 turnsum: compact summary', () => {
+  it('keeps counts out of the collapsed row while retaining an accessible action total', () => {
     const { container } = renderTranscript([
       userMsg(),
       command(),
@@ -214,18 +214,14 @@ describe('P2 turnsum: stats口径', () => {
       turnEnd(),
       assistantMsg(),
     ]);
-    const stats = container.querySelector('.turnsum-stats')!;
-    // cmd + read + 2 diffs + resolved approval = 5
-    expect(stats).toHaveTextContent('5 actions');
-    // a.ts twice deduped → 2 files; add 6+1+3=10, del 2+1+0=3
-    expect(stats).toHaveTextContent('2 files');
-    expect(stats.querySelector('.add')).toHaveTextContent('+10');
-    expect(stats.querySelector('.del')).toHaveTextContent('−3');
-    // No failures → no err segment.
-    expect(stats.querySelector('.err')).toBeNull();
+    const summary = container.querySelector('.turnsum')!;
+    expect(summary).not.toHaveTextContent('actions');
+    expect(summary).not.toHaveTextContent('files');
+    expect(summary.getAttribute('aria-label')).toContain('5 actions');
   });
 
-  it('failed counts command + agent errors and stays danger-red', () => {
+  it('tool-level errors stay in details without changing a completed Turn label', async () => {
+    const user = userEvent.setup();
     const { container } = renderTranscript([
       userMsg(),
       command({ id: 'c-1', status: 'error' }),
@@ -233,15 +229,15 @@ describe('P2 turnsum: stats口径', () => {
       agent({ status: 'error' }),
       turnEnd(),
     ]);
-    const err = container.querySelector('.turnsum-stats .err');
-    expect(err).not.toBeNull();
-    expect(err).toHaveTextContent('2 failed');
+    expect(container.querySelector('.turnsum')).toHaveTextContent('Worked');
+    await user.click(container.querySelector('.turnsum') as HTMLElement);
+    expect(container.querySelectorAll('.turnsum-body .trow')).toHaveLength(3);
   });
 
   it('a single-action turn uses the singular label', () => {
     const { container } = renderTranscript([userMsg(), command(), turnEnd()]);
-    expect(container.querySelector('.turnsum-stats')).toHaveTextContent('1 action');
-    expect(container.querySelector('.turnsum-stats')).not.toHaveTextContent('1 actions');
+    expect(container.querySelector('.turnsum')?.getAttribute('aria-label')).toContain('1 action');
+    expect(container.querySelector('.turnsum')?.getAttribute('aria-label')).not.toContain('1 actions');
   });
 });
 
@@ -261,13 +257,13 @@ describe('P2 turnsum: pending approvals never fold', () => {
 
     // Summary exists (the command folds) and counts the pending approval.
     expect(container.querySelector('.turnsum')).not.toBeNull();
-    expect(container.querySelector('.turnsum-stats')).toHaveTextContent('2 actions');
+    expect(container.querySelector('.turnsum')?.getAttribute('aria-label')).toContain('2 actions');
 
     // The pending card renders outside the fold, right after the summary.
     const transcript = container.querySelector('.transcript')!;
     const kids = Array.from(transcript.children);
     const sumIdx = kids.findIndex(el => el.classList.contains('turnsum'));
-    const approvalIdx = kids.findIndex(el => el.classList.contains('approval') && !el.classList.contains('approval-line'));
+    const approvalIdx = kids.findIndex(el => el.classList.contains('ap2'));
     expect(sumIdx).toBeGreaterThanOrEqual(0);
     expect(approvalIdx).toBe(sumIdx + 1);
     expect(screen.getByRole('button', { name: /Allow once/i })).toBeInTheDocument();
@@ -365,22 +361,24 @@ describe('P2边角形态', () => {
     };
     const compaction: CompactionItem = { kind: 'compaction', id: 'cmp-2', ts: 1_600, turn: 1 };
     const { container } = renderTranscript([userMsg(), command(), notice, compaction, turnEnd()]);
-    expect(container.querySelector('.turnsum-stats')).toHaveTextContent('3 actions');
+    expect(container.querySelector('.turnsum')?.getAttribute('aria-label')).toContain('3 actions');
   });
 });
 
 // ---------------------------------------------------------------------------
-// 长列表路由 — >10 folded rows open the panel-2 event feed instead of
-// flooding the transcript with the inline body (2026-08-24, issue #96)
+// 展开即全量 — the expanded body lists EVERY folded row in a capped scroll
+// area (2026-08-27 redesign); rows open the panel-2 event feed anchored at
+// the clicked row (no head ⇥ panel hint). Without a chat panel the terminal
+// block keeps the original in-place card expansion.
 // ---------------------------------------------------------------------------
 
-describe('turnsum: long lists route to panel 2', () => {
+describe('turnsum: expanded body and panel routing', () => {
   function manyCommands(n: number): TranscriptItem[] {
     return Array.from({ length: n }, (_, i) =>
       command({ id: `cmd-${i}`, command: `run-${i}`, ts: 1_000 + i * 100 }));
   }
 
-  it('>10 folded rows: click opens the event feed instead of expanding inline', async () => {
+  it('>10 folded rows: the expanded body lists every row in a scroll area; no head panel hint', async () => {
     const user = userEvent.setup();
     const open = vi.fn();
     const { container } = render(
@@ -393,14 +391,38 @@ describe('turnsum: long lists route to panel 2', () => {
       </ChatPanelOpenContext.Provider>,
     );
 
+    // Terminal blocks default to collapsed; the click expands in place.
     await user.click(container.querySelector('.turnsum') as HTMLElement);
-    expect(open).toHaveBeenCalledWith({ kind: 'event-feed', turn: 1 });
-    expect(container.querySelector('.turnsum-body')).toBeNull();
-    // The panel affordance is advertised on the row.
-    expect(container.querySelector('.turnsum .trow-ext')).not.toBeNull();
+    expect(open).not.toHaveBeenCalled();
+    const body = container.querySelector('.turnsum-body.turn-work-scroll');
+    expect(body).not.toBeNull();
+    expect(body!.querySelectorAll('.trow')).toHaveLength(11);
+    expect(within(body as HTMLElement).getByText('run-0')).toBeInTheDocument();
+    expect(within(body as HTMLElement).getByText('run-10')).toBeInTheDocument();
+
+    // No ⇥ panel hint on the head — rows open the anchored feed instead.
+    expect(container.querySelector('.turnsum .trow-ext')).toBeNull();
   });
 
-  it('≤10 folded rows keep the inline guide-rail expansion', async () => {
+  it('clicking an expanded terminal row opens the feed anchored at that row', async () => {
+    const user = userEvent.setup();
+    const open = vi.fn();
+    const { container } = render(
+      <ChatPanelOpenContext.Provider value={open}>
+        <Transcript
+          items={[userMsg(), ...manyCommands(3), turnEnd()]}
+          pending={false}
+          onApprove={vi.fn()}
+        />
+      </ChatPanelOpenContext.Provider>,
+    );
+
+    await user.click(container.querySelector('.turnsum') as HTMLElement);
+    await user.click(within(container.querySelector('.turnsum-body') as HTMLElement).getByText('run-1'));
+    expect(open).toHaveBeenCalledWith({ kind: 'event-feed', turn: 1, anchorId: '1:command:cmd-1' });
+  });
+
+  it('≤10 folded rows expand inline the same way (scroll area, not panel)', async () => {
     const user = userEvent.setup();
     const open = vi.fn();
     const { container } = render(
@@ -420,13 +442,15 @@ describe('turnsum: long lists route to panel 2', () => {
     expect(within(body as HTMLElement).getByText('run-9')).toBeInTheDocument();
   });
 
-  it('falls back to inline expansion when no chat-panel context exists', async () => {
+  it('falls back to the original in-place card expansion when no chat-panel context exists', async () => {
     const user = userEvent.setup();
     const { container } = renderTranscript([userMsg(), ...manyCommands(11), turnEnd()]);
 
     await user.click(container.querySelector('.turnsum') as HTMLElement);
     const body = container.querySelector('.turnsum-body');
     expect(body).not.toBeNull();
+    // The fallback body renders full cards, not the single-line scroll area.
+    expect(body!.classList.contains('turn-work-scroll')).toBe(false);
     expect(within(body as HTMLElement).getByText('run-10')).toBeInTheDocument();
   });
 });

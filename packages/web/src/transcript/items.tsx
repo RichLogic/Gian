@@ -1,4 +1,4 @@
-import { createContext, Fragment, isValidElement, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { createContext, Fragment, isValidElement, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { isNativeImageMime } from '../attachments.js';
@@ -13,6 +13,8 @@ import {
 import type { AgentSpawnItem, AutoNoticeItem, CommandItem, CompactionItem, DiffItem, FileReadItem, FileSearchItem, MsgItem, ReasoningItem, ToolItem, WebSearchItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
 import { Caret } from './approval-cards.js';
+import { ContextCards } from '../components/composer/context-cards.js';
+import { InlineReferenceDocument } from '../components/composer/InlineReferenceDocument.js';
 import { transcriptItemIdentity } from './identity.js';
 export { ApprovalCard, Caret } from './approval-cards.js';
 
@@ -260,15 +262,14 @@ function useNowSeconds(active: boolean): number {
   return now;
 }
 
-/** `8s` under a minute, `1m 03s` past it. Exported for the P2 turnsum lead. */
+/** `8s` under a minute, `1m 03s` past it. Exported for Turn durations. */
 export function formatElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 60) return `${s}s`;
   return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
 }
 
-/** Right-meta for a running row: breathing dot + live timer from item.ts.
- *  Exported for the event box's live tail lines. */
+/** Right-meta for a running detail row: breathing dot + timer from item.ts. */
 export function RunningMeta({ since }: { since: number }) {
   const now = useNowSeconds(true);
   return <span className="trow-run">running · {formatElapsed(now - since)}</span>;
@@ -330,13 +331,6 @@ export function TRow({
   );
 }
 
-/** Hover-revealed `⇥ panel` hint on level-3 rows (P3). Exported for the
- *  event feed, whose rows all drill into panel 2. */
-export function PanelExtHint() {
-  const t = useT();
-  return <span className="trow-ext" title={t('transcript.panel.open')}>⇥ panel</span>;
-}
-
 export function DiffCard({ item }: { item: DiffItem }) {
   const t = useT();
   // Level routing: a single-file diff with ≤30 hunk lines expands inline as
@@ -393,13 +387,13 @@ export function DiffCard({ item }: { item: DiffItem }) {
   }
   // Level 3 (P3): multi-file or >30-line diff — click opens the full diff in
   // panel 2 (the Sheet's diff viewer, via the same preview-tab route as
-  // before); the hover `⇥ panel` hint advertises the destination.
+  // before).
   return (
     <TRow
       verb={t('transcript.diff.edit')}
       subject={subject}
       subjectTitle={subject}
-      meta={<>{openDiff && <PanelExtHint />}{stats}</>}
+      meta={stats}
       dataAttrs={{ 'data-testid': `diff-${item.id}` }}
       onRowClick={() => openDiff?.(item)}
       caret
@@ -438,7 +432,6 @@ export function ToolEvent({
         subjectTitle={item.name}
         meta={
           <>
-            <PanelExtHint />
             {item.status === 'error' && <span className="err">error</span>}
             <span>{detail.lines} {t(detail.lines === 1 ? 'transcript.line' : 'transcript.lines')}</span>
           </>
@@ -611,10 +604,12 @@ export function UserMessage({ item }: { item: MsgItem }) {
   const stateCls = item.pending ? ' pending' : item.failed ? ' failed' : '';
   const hasText = item.text.length > 0;
   const attachments = item.attachments ?? [];
+  const inlineDocument = item.composerDocument;
   return (
     <div className={`msg user${stateCls}`} data-msg-id={transcriptItemIdentity(item)}>
       <div className="msg-body">
-        {attachments.length > 0 && (
+        {!inlineDocument && <ContextCards items={item.contextItems ?? []} className="message-context-cards" />}
+        {!inlineDocument && attachments.length > 0 && (
           <div className="msg-attachments user-attachments">
             {attachments.map((a, i) => (
               isNativeImageMime(a.mime) ? (
@@ -659,7 +654,28 @@ export function UserMessage({ item }: { item: MsgItem }) {
             ))}
           </div>
         )}
-        {hasText && <div className="msg-text user-text">{item.text}</div>}
+        {(hasText || inlineDocument) && (
+          <div
+            className="msg-text user-text"
+            data-transcript-selectable="true"
+            data-transcript-source-id={transcriptItemIdentity(item)}
+            data-transcript-source-kind="user"
+            data-transcript-turn={item.turn}
+          >
+            {inlineDocument ? (
+              <InlineReferenceDocument
+                document={inlineDocument}
+                attachments={attachments}
+                contextItems={item.contextItems}
+                onAttachmentActivate={attachment => {
+                  if (!zoom || !isNativeImageMime(attachment.mime ?? '') || !attachment.url) return false;
+                  zoom(attachment.url, attachment.name);
+                  return true;
+                }}
+              />
+            ) : item.text}
+          </div>
+        )}
         <div className="msg-foot user">
           {item.failed && <span className="msg-state-failed">{t('transcript.failedToSend')}</span>}
           {item.failed && item.sendRetry && dispatch && (
@@ -672,7 +688,6 @@ export function UserMessage({ item }: { item: MsgItem }) {
             </button>
           )}
           {sendUnknown && <span className="msg-state-unknown">{t('transcript.sendUnknown')}</span>}
-          {hasText && <CopyButton text={item.text} />}
           <span className="msg-time user">{formatTime(item.ts)}</span>
         </div>
       </div>
@@ -686,22 +701,39 @@ function formatAttachmentSize(size: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function AssistantMessage({ item, hideAvatar, showFooter }: { item: MsgItem; hideAvatar?: boolean; showFooter?: boolean }) {
-  // V2 design: no author label, time sits below the message body. The footer
-  // (time + copy) renders on the TAIL of a same-sender run — `hideAvatar` keeps
-  // the tight continuation spacing for mid-run bubbles, but `showFooter` (the
-  // last bubble of the run) decides the time/copy so a multi-bubble turn shows
-  // one timestamp at the end and the final bubble never loses it.
+export function AssistantMessage({
+  item,
+  hideAvatar,
+  showFooter,
+  copyable = false,
+  footerActions,
+}: {
+  item: MsgItem;
+  hideAvatar?: boolean;
+  showFooter?: boolean;
+  copyable?: boolean;
+  footerActions?: ReactNode;
+}) {
+  // V2 design: no author label, time sits below the message body. Timestamps
+  // stay on the tail of each same-sender run, while message-level Copy and
+  // exact-turn Fork belong only to the successful Terminal Turn result.
   return (
     <div className={`msg${hideAvatar ? ' continuation' : ''}`}>
       <div className="msg-body">
-        <div className="msg-text md">
+        <div
+          className="msg-text md"
+          data-transcript-selectable="true"
+          data-transcript-source-id={transcriptItemIdentity(item)}
+          data-transcript-source-kind="assistant"
+          data-transcript-turn={item.turn}
+        >
           <MarkdownText>{item.text}</MarkdownText>
         </div>
-        {showFooter && (
+        {(showFooter || copyable || footerActions) && (
           <div className="msg-foot">
-            <span className="msg-time">{formatTime(item.ts)}</span>
-            <CopyButton text={item.text} />
+            {showFooter && <span className="msg-time">{formatTime(item.ts)}</span>}
+            {copyable && <CopyButton text={item.text} />}
+            {footerActions}
           </div>
         )}
       </div>
@@ -733,7 +765,6 @@ export function ReasoningCard({ item }: { item: ReasoningItem }) {
         subjectTitle={preview}
         meta={
           <>
-            <PanelExtHint />
             <span>{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>
           </>
         }
@@ -798,7 +829,6 @@ export function CommandCard({
         subjectTitle={item.cwd ? `${item.command} — ${item.cwd}` : item.command}
         meta={
           <>
-            <PanelExtHint />
             {finishedMeta}
             <span>{lineCount} {t(lineCount === 1 ? 'transcript.line' : 'transcript.lines')}</span>
           </>
@@ -879,7 +909,6 @@ export function FileSearchCard({ item }: { item: FileSearchItem }) {
         subjectTitle={item.pattern}
         meta={
           <>
-            <PanelExtHint />
             {count !== undefined && <span>{count} {t(count === 1 ? 'transcript.file.match' : 'transcript.file.matches')}</span>}
           </>
         }

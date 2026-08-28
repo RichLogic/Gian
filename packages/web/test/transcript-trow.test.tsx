@@ -7,6 +7,7 @@
 // plus the shared row grammar (caret only on expandable rows, no timestamps).
 
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { CommandItem, DiffItem } from '../src/types.js';
@@ -140,6 +141,28 @@ describe('P1 running rows', () => {
     expect(run).not.toBeNull();
     expect(run).toHaveTextContent(/running · [78]s/);
   });
+
+  it('streams output with the cursor as a trailing inline sibling on a plain-block .cmd-stream', async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <CommandCard item={commandItem({ status: 'running', stdout: 'line 1\nline 2\n' })} />,
+    );
+    await user.click(container.querySelector('.trow') as HTMLElement);
+    const stream = container.querySelector('.cmd-stream');
+    expect(stream).not.toBeNull();
+    // Markup contract: stdout text span immediately followed by the cursor.
+    const cursor = stream!.querySelector('.cmd-cursor');
+    expect(cursor).not.toBeNull();
+    expect(cursor!.previousElementSibling!.textContent).toBe('line 1\nline 2\n');
+    // Layout regression (2026-08-27): the cursor must follow the output as
+    // an inline-block at the END of the text — the stylesheet rule is a
+    // plain block, never the old top-aligned flex row.
+    const css = readFileSync('src/styles/events.css', 'utf8');
+    const rule = css.match(/\.cmd-stream\s*\{([^}]*)\}/);
+    expect(rule).not.toBeNull();
+    expect(rule![1]).toContain('display: block');
+    expect(rule![1]).not.toContain('display: flex');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -187,9 +210,9 @@ describe('P1 diff threshold routing', () => {
     const row = container.querySelector('.trow') as HTMLElement;
     expect(row).not.toHaveClass('expandable');
     expect(row).toHaveClass('clickable');
-    // P3: level-3 rows carry the caret glyph and the hover ⇥ panel hint.
+    // P3: level-3 rows carry the caret glyph; no ⇥ panel hint (removed 2026-08-27).
     expect(container.querySelector('.trow-caret')).not.toBeNull();
-    expect(container.querySelector('.trow-ext')).not.toBeNull();
+    expect(container.querySelector('.trow-ext')).toBeNull();
     expect(row).toHaveTextContent('Changed files 3');
 
     await user.click(row);
@@ -208,7 +231,7 @@ describe('P1 diff threshold routing', () => {
     );
     const row = container.querySelector('.trow') as HTMLElement;
     expect(row).not.toHaveClass('expandable');
-    expect(container.querySelector('.trow-ext')).not.toBeNull();
+    expect(container.querySelector('.trow-ext')).toBeNull();
     await user.click(row);
     expect(openDiff).toHaveBeenCalledWith(item);
     expect(container.querySelector('.trow-detail')).toBeNull();

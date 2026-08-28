@@ -91,6 +91,23 @@ describe('step groups in the Trace list', () => {
     expect(screen.getByTestId('trace-row-ms-assistant-2')).toBeInTheDocument();
   });
 
+  it('collapses calls into a summary inside an expanded step', async () => {
+    renderTrace(traceFixtureStepRequest);
+    await userEvent.click(screen.getByTestId('trace-row-step:turn-1:native-turn-1:0'));
+    expect(screen.getByTestId('trace-row-step-tool-1')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId('trace-control-calls'));
+    expect(screen.queryByTestId('trace-row-step-tool-1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('trace-row-request-1')).toBeInTheDocument();
+    const calls = screen.getByTestId(
+      'trace-call-group-step:turn-1:native-turn-1:0',
+    );
+    expect(within(calls).getByTestId('trace-call-count')).toHaveTextContent('1');
+
+    await userEvent.click(calls);
+    expect(screen.getByTestId('trace-row-step-tool-1')).toBeInTheDocument();
+  });
+
   it('keeps rows with an orphan parentId at top level', () => {
     renderTrace(traceFixtureOrphanParent);
     // The orphan renders without expanding anything, outside the step group.

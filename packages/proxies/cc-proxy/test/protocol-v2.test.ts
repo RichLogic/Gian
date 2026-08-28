@@ -134,7 +134,7 @@ async function setup(permissionModes?: string[]) {
     notifications.push({ method, params });
   });
   await adapter.handle(request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'test', version: '9.9.9' },
   }));
   const created = await adapter.handle(request('2', 'session.create', {
@@ -161,7 +161,7 @@ test('Claude gian.proxy/2 initializes once and exposes catalog.resolve capabilit
   const { service, adapter } = await setup();
   try {
     const initialized = await adapter.handle(request('9', 'initialize', {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'test', version: '9.9.9' },
     })).catch((error: unknown) => error);
     assert.ok(initialized instanceof ClaudeProtocolError);
@@ -177,7 +177,7 @@ test('Claude gian.proxy/2 initializes once and exposes catalog.resolve capabilit
     assert.ok(permission);
     // The configured Runtime still reports plan, but this Proxy build does
     // not support plan mode (ExitPlanMode would require a Proxy-initiated
-    // mode change that gian.proxy/2.0 cannot express).
+    // mode change that gian.proxy/2.x cannot express).
     assert.deepEqual(permission.choices?.map((choice) => choice.value), [
       'default',
       'acceptEdits',

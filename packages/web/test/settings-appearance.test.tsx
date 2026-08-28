@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { SettingsBody } from '../src/components/SettingsBody.js';
 import { renderWithOperations } from './operation-test-utils.js';
 import * as api from '../src/api.js';
@@ -129,15 +129,17 @@ describe('SettingsBody Chat section', () => {
 
   it('keeps the minimap toggle in the Chat section', () => {
     renderWithOperations(<SettingsBody config={baseConfig()} activeSection="chat" />);
-    const toggle = screen.getByRole('checkbox') as HTMLInputElement;
+    const toggle = screen.getByRole('checkbox', { name: /show a rail/i }) as HTMLInputElement;
     expect(toggle.checked).toBe(false);
     fireEvent.click(toggle);
     expect(localStorage.getItem('gian.transcript.minimap')).toBe('1');
   });
 
-  it('does not render chat controls inside Appearance', () => {
+  it('keeps Chat controls in their own section of the continuous settings page', () => {
     renderWithOperations(<SettingsBody config={baseConfig()} activeSection="appearance" />);
-    expect(screen.queryByRole('combobox', { name: 'Font size' })).toBeNull();
-    expect(screen.queryByRole('checkbox')).toBeNull();
+    const appearance = document.getElementById('settings-section-appearance')!;
+    const chat = document.getElementById('settings-section-chat')!;
+    expect(within(appearance).queryByRole('combobox', { name: 'Font size' })).toBeNull();
+    expect(within(chat).getByRole('combobox', { name: 'Font size' })).toBeTruthy();
   });
 });

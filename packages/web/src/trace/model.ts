@@ -149,8 +149,88 @@ export interface TraceTimelinePosition {
   open: boolean;
 }
 
-/** Timeline geometry shared by every lane. Duration mode uses the real
- * provider time domain; point events and open spans render as ticks. */
+const MAX_INTER_TURN_IDLE_SHARE = 0.12;
+const MIN_TURN_DURATION_SHARE = 0.02;
+
+interface DurationTurnPlacement {
+  start: number;
+  duration: number;
+  virtualStart: number;
+  scale: number;
+}
+
+function itemTimeBounds(item: TraceItem): { start: number; end: number; duration?: number } {
+  const start = parseTime(item.at);
+  const duration = traceItemDurationMs(item);
+  return {
+    start,
+    end: duration === undefined ? start : start + duration,
+    ...(duration !== undefined ? { duration } : {}),
+  };
+}
+
+/**
+ * Build an active-time axis: each Turn retains its real internal timing, but
+ * idle gaps between Turns are capped to a small shared visual budget. A long-
+ * lived Session therefore stays readable without pretending overnight idle
+ * time was model/tool execution.
+ */
+function durationTurnPlacements(items: TraceItem[]): {
+  placements: Map<string, DurationTurnPlacement>;
+  domainMs: number;
+} {
+  const grouped = new Map<string, { start: number; end: number }>();
+  for (const item of items) {
+    const bounds = itemTimeBounds(item);
+    const group = grouped.get(item.turnId);
+    if (group) {
+      group.start = Math.min(group.start, bounds.start);
+      group.end = Math.max(group.end, bounds.end);
+    } else {
+      grouped.set(item.turnId, { start: bounds.start, end: bounds.end });
+    }
+  }
+  const turns = [...grouped.entries()]
+    .map(([turnId, bounds]) => ({
+      turnId,
+      ...bounds,
+      duration: Math.max(0, bounds.end - bounds.start),
+    }))
+    .sort((a, b) => a.start - b.start || a.turnId.localeCompare(b.turnId));
+  const realDurationMs = turns.reduce((sum, turn) => sum + turn.duration, 0);
+  const minimumTurnMs = realDurationMs > 0
+    ? Math.max(1, (realDurationMs / turns.length) * MIN_TURN_DURATION_SHARE)
+    : 1;
+  const effectiveDurationMs = turns.reduce(
+    (sum, turn) => sum + Math.max(turn.duration, minimumTurnMs),
+    0,
+  );
+  const gapCapMs = turns.length > 1
+    ? (effectiveDurationMs * MAX_INTER_TURN_IDLE_SHARE) / (turns.length - 1)
+    : 0;
+  const placements = new Map<string, DurationTurnPlacement>();
+  let cursor = 0;
+  let previousEnd: number | null = null;
+  for (const turn of turns) {
+    if (previousEnd !== null) {
+      cursor += Math.min(Math.max(0, turn.start - previousEnd), gapCapMs);
+    }
+    const effectiveDuration = Math.max(turn.duration, minimumTurnMs);
+    placements.set(turn.turnId, {
+      start: turn.start,
+      duration: turn.duration,
+      virtualStart: cursor,
+      scale: turn.duration > 0 ? effectiveDuration / turn.duration : 1,
+    });
+    cursor += effectiveDuration;
+    previousEnd = Math.max(previousEnd ?? turn.end, turn.end);
+  }
+  return { placements, domainMs: Math.max(1, cursor) };
+}
+
+/** Timeline geometry shared by every lane. Duration mode uses real time
+ * within each Turn and caps only inter-Turn idle gaps; point events and truly
+ * open spans render as ticks. */
 export function layoutTraceTimeline(
   items: TraceItem[],
   mode: TraceTimelineMode,
@@ -161,7 +241,7 @@ export function layoutTraceTimeline(
     const slot = 100 / ordered.length;
     return ordered.map((item, index) => {
       const point = item.shape === 'event';
-      const open = item.shape === 'span' && !item.endAt;
+      const open = item.shape === 'span' && traceItemDurationMs(item) === undefined;
       return {
         item,
         leftPct: point || open ? (index + 0.5) * slot : index * slot,
@@ -172,20 +252,21 @@ export function layoutTraceTimeline(
     });
   }
 
-  const starts = ordered.map(item => parseTime(item.at));
-  const ends = ordered.map(item => parseTime(item.endAt ?? item.at));
-  const domainStart = Math.min(...starts);
-  const rawEnd = Math.max(...ends);
-  const domainMs = Math.max(1, rawEnd - domainStart);
-  return ordered.map((item, index) => {
-    const start = starts[index]!;
-    const end = ends[index]!;
+  const { placements, domainMs } = durationTurnPlacements(ordered);
+  return ordered.map(item => {
+    const bounds = itemTimeBounds(item);
+    const placement = placements.get(item.turnId)!;
     const point = item.shape === 'event';
-    const open = item.shape === 'span' && !item.endAt;
+    const open = item.shape === 'span' && bounds.duration === undefined;
+    const relativeStart = placement.duration > 0
+      ? Math.max(0, Math.min(placement.duration, bounds.start - placement.start))
+      : 0;
+    const virtualStart = placement.virtualStart + relativeStart * placement.scale;
+    const virtualDuration = bounds.duration === undefined ? 0 : bounds.duration * placement.scale;
     return {
       item,
-      leftPct: Math.max(0, Math.min(100, ((start - domainStart) / domainMs) * 100)),
-      widthPct: point || open ? 0 : Math.max(0, ((end - start) / domainMs) * 100),
+      leftPct: Math.max(0, Math.min(100, (virtualStart / domainMs) * 100)),
+      widthPct: point || open ? 0 : Math.max(0, (virtualDuration / domainMs) * 100),
       point,
       open,
     };

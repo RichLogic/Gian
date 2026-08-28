@@ -10,6 +10,8 @@
  * row interactions as top-level rows. A row shows a colored kind chip, a
  * one-line title
  * with a dimmed summary, and the status badge + HH:MM:SS time on the right.
+ * The Calls control folds tool/agent rows into one expandable summary per
+ * Step, falling back to one summary under the Turn when no Step exists.
  * Clicking a row selects it and opens the item detail in panel 2 through
  * `ChatPanelOpenContext`; clicking a timeline block selects the item and
  * scrolls its row into view. Rows reuse the transcript's `.trow` grammar;
@@ -34,6 +36,7 @@ import {
   groupTraceByTurn,
   summarizeTrace,
   traceItemDurationMs,
+  type TraceTimelineEntry,
   type TraceTimelineMode,
   type TraceTurnGroup,
 } from './model.js';
@@ -116,7 +119,7 @@ function TraceToolbar({
 }) {
   const t = useT();
   return (
-    <div className="trace-toolbar" data-testid="trace-toolbar">
+    <div className="trace-toolbar trace-pinned-head" data-testid="trace-toolbar">
       <div className="trace-toolbar-controls">
         <button type="button" className="trace-toolbar-btn" aria-pressed={mode === 'duration'}
                 onClick={onToggleMode} data-testid="trace-control-duration">
@@ -215,6 +218,150 @@ function TraceRow({
   );
 }
 
+type TraceCallGroupEntry = {
+  type: 'calls';
+  groupId: string;
+  calls: TraceItem[];
+};
+
+type TraceCallRowEntry = { type: 'item'; item: TraceItem } | TraceCallGroupEntry;
+type TraceDisplayEntry = TraceTimelineEntry | TraceCallGroupEntry;
+
+function isCall(item: TraceItem): boolean {
+  return item.kind === 'tool' || item.kind === 'agent';
+}
+
+function callGroupStatus(calls: TraceItem[]): TraceStatus | undefined {
+  if (calls.some(item => item.status === 'failed')) return 'failed';
+  if (calls.some(item => item.status === 'interrupted')) return 'interrupted';
+  if (calls.some(item => item.status === 'running')) return 'running';
+  if (calls.length > 0 && calls.every(item => item.status === 'succeeded')) return 'succeeded';
+  return undefined;
+}
+
+function collapseCallItems(items: TraceItem[], groupId: string): TraceCallRowEntry[] {
+  const calls = items.filter(isCall);
+  if (calls.length === 0) return items.map(item => ({ type: 'item', item }));
+  let inserted = false;
+  const entries: TraceCallRowEntry[] = [];
+  for (const item of items) {
+    if (!isCall(item)) {
+      entries.push({ type: 'item', item });
+      continue;
+    }
+    if (inserted) continue;
+    inserted = true;
+    entries.push({ type: 'calls', groupId, calls });
+  }
+  return entries;
+}
+
+function collapseTopLevelCalls(
+  entries: TraceTimelineEntry[],
+  groupId: string,
+): TraceDisplayEntry[] {
+  const calls = entries.flatMap(entry => (
+    entry.type === 'item' && isCall(entry.item) ? [entry.item] : []
+  ));
+  if (calls.length === 0) return entries;
+  let inserted = false;
+  const display: TraceDisplayEntry[] = [];
+  for (const entry of entries) {
+    if (entry.type !== 'item' || !isCall(entry.item)) {
+      display.push(entry);
+      continue;
+    }
+    if (inserted) continue;
+    inserted = true;
+    display.push({ type: 'calls', groupId, calls });
+  }
+  return display;
+}
+
+function TraceCallGroupRow({
+  groupId,
+  calls,
+  selected,
+  onExpand,
+}: {
+  groupId: string;
+  calls: TraceItem[];
+  selected: boolean;
+  onExpand: () => void;
+}) {
+  const t = useT();
+  const status = callGroupStatus(calls);
+  const titles = calls.map(item => item.title).filter(Boolean);
+  const summary = [
+    ...titles.slice(0, 3),
+    ...(titles.length > 3 ? [`+${titles.length - 3}`] : []),
+  ].join(', ');
+  const first = calls[0]!;
+  return (
+    <div
+      className={`trow clickable trace-row trace-call-group${selected ? ' selected' : ''}`}
+      onClick={onExpand}
+      role="button"
+      tabIndex={0}
+      aria-expanded="false"
+      aria-label={`${t('trace.control.calls')} ${calls.length}`}
+      onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onExpand();
+        }
+      }}
+      data-testid={`trace-call-group-${groupId}`}
+    >
+      <Caret className="trace-call-caret" />
+      <span className="trace-shape span" aria-hidden="true" />
+      <span className="trace-kind tool">{t('trace.control.calls')}</span>
+      {summary && <span className="trow-subject dim trace-row-summary" title={summary}>{summary}</span>}
+      <span className="trow-meta">
+        <span className="trace-call-count" data-testid="trace-call-count">{calls.length}</span>
+        {status && <StatusBadge status={status} />}
+        <span className="trace-row-time">{formatTraceClock(first.at)}</span>
+      </span>
+    </div>
+  );
+}
+
+function TraceCallRows({
+  items,
+  groupId,
+  callsCollapsed,
+  selectedId,
+  onOpen,
+  onExpandCalls,
+}: {
+  items: TraceItem[];
+  groupId: string;
+  callsCollapsed: boolean;
+  selectedId: string | null;
+  onOpen: (item: TraceItem) => void;
+  onExpandCalls: () => void;
+}) {
+  const entries = callsCollapsed
+    ? collapseCallItems(items, groupId)
+    : items.map(item => ({ type: 'item' as const, item }));
+  return entries.map(entry => entry.type === 'calls' ? (
+    <TraceCallGroupRow
+      key={`calls:${entry.groupId}`}
+      groupId={entry.groupId}
+      calls={entry.calls}
+      selected={entry.calls.some(item => item.id === selectedId)}
+      onExpand={onExpandCalls}
+    />
+  ) : (
+    <TraceRow
+      key={entry.item.id}
+      item={entry.item}
+      selected={selectedId === entry.item.id}
+      onSelect={() => onOpen(entry.item)}
+    />
+  ));
+}
+
 function TraceTurnSection({
   group,
   selectedId,
@@ -222,6 +369,7 @@ function TraceTurnSection({
   collapsed,
   callsCollapsed,
   onOpen,
+  onExpandCalls,
   onToggleTurn,
   onToggleStep,
 }: {
@@ -231,20 +379,15 @@ function TraceTurnSection({
   collapsed: boolean;
   callsCollapsed: boolean;
   onOpen: (item: TraceItem) => void;
+  onExpandCalls: () => void;
   onToggleTurn: () => void;
   onToggleStep: (id: string) => void;
 }) {
   const t = useT();
   const timeline = deriveStepTimeline(group.items);
-  const hideCall = (item: TraceItem) => callsCollapsed && (item.kind === 'tool' || item.kind === 'agent');
-  const visibleTimeline = timeline.reduce<typeof timeline>((entries, entry) => {
-    if (entry.type === 'item') {
-      if (!hideCall(entry.item)) entries.push(entry);
-    } else {
-      entries.push({ ...entry, children: entry.children.filter(item => !hideCall(item)) });
-    }
-    return entries;
-  }, []);
+  const visibleTimeline = callsCollapsed
+    ? collapseTopLevelCalls(timeline, group.turnId)
+    : timeline;
   return (
     <section className={`trace-turn${collapsed ? ' collapsed' : ''}`} data-testid={`trace-turn-${group.turnId}`}>
       <header className="trace-turn-head">
@@ -269,6 +412,14 @@ function TraceTurnSection({
             selected={selectedId === entry.item.id}
             onSelect={() => onOpen(entry.item)}
           />
+        ) : entry.type === 'calls' ? (
+          <TraceCallGroupRow
+            key={`calls:${entry.groupId}`}
+            groupId={entry.groupId}
+            calls={entry.calls}
+            selected={entry.calls.some(item => item.id === selectedId)}
+            onExpand={onExpandCalls}
+          />
         ) : (
           <div className="trace-step-group" key={entry.step.id}>
             <TraceRow
@@ -285,14 +436,14 @@ function TraceTurnSection({
                 className="trace-step-children"
                 data-testid={`trace-step-children-${entry.step.id}`}
               >
-                {entry.children.map(item => (
-                  <TraceRow
-                    key={item.id}
-                    item={item}
-                    selected={selectedId === item.id}
-                    onSelect={() => onOpen(item)}
-                  />
-                ))}
+                <TraceCallRows
+                  items={entry.children}
+                  groupId={entry.step.id}
+                  callsCollapsed={callsCollapsed}
+                  selectedId={selectedId}
+                  onOpen={onOpen}
+                  onExpandCalls={onExpandCalls}
+                />
               </div>
             )}
           </div>
@@ -342,6 +493,7 @@ export function TraceView({ snapshot }: { snapshot: TraceSnapshot }) {
     if (parent?.kind === 'step') {
       setExpandedStepIds(current => new Set(current).add(item.parentId!));
     }
+    if (isCall(item)) setCallsCollapsed(false);
     if (!scrollToRow()) window.requestAnimationFrame(scrollToRow);
     openItem(item);
   }
@@ -398,6 +550,7 @@ export function TraceView({ snapshot }: { snapshot: TraceSnapshot }) {
               collapsed={collapsedTurnIds.has(group.turnId)}
               callsCollapsed={callsCollapsed}
               onOpen={openItem}
+              onExpandCalls={() => setCallsCollapsed(false)}
               onToggleTurn={() => setCollapsedTurnIds(current => {
                 const next = new Set(current);
                 if (next.has(group.turnId)) next.delete(group.turnId);

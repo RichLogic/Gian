@@ -7,6 +7,7 @@ import { ProxyProtocolError, requestViolation, redactSensitiveProtocolValue } fr
 import { openDatabase } from '../src/storage/db.js';
 import {
   assertInheritedSessionConfig,
+  persistedForkBoundaries,
   resolveForkAnchor,
 } from '../src/session/fork.js';
 import {
@@ -16,6 +17,7 @@ import {
   type SidechatRecord,
 } from '../src/session/sidechat-store.js';
 import { SidechatCoordinator } from '../src/session/sidechat-coordinator.js';
+import { deriveSidechatAgentTitle } from '../src/session/sidechat-title.js';
 import { ProtocolV2SessionClient } from '../src/proxy/protocol-v2-session-client.js';
 
 const options = [{
@@ -35,6 +37,8 @@ function record(overrides: Partial<SidechatRecord> = {}): SidechatRecord {
   return {
     sidechatId: 'sc_1',
     parentSessionId: 's1',
+    ordinal: 1,
+    name: null,
     parentStreamId: 'stream-1',
     streamId: 'stream-sc',
     streamGeneration: 1,
@@ -42,6 +46,9 @@ function record(overrides: Partial<SidechatRecord> = {}): SidechatRecord {
     status: 'open',
     anchor: { type: 'empty' },
     sessionConfig: {},
+    turnConfig: {},
+    turnConfigOptions: [],
+    turnConfigRevision: null,
     publicState: 'idle',
     events: [],
     userInputs: [],
@@ -68,6 +75,67 @@ function tempDb() {
   };
 }
 
+test('Side Chat title prefers an Agent heading and falls back from generic replies', () => {
+  const titled = record({
+    events: [{
+      method: 'content.completed',
+      params: {
+        turnId: 'turn-1',
+        data: {
+          kind: 'text',
+          content: '## Diagnose Fork cleanup\n\nThe durable boundary used the wrong id.',
+        },
+      },
+    }],
+    userInputs: [{
+      turnId: 'turn-1',
+      input: [{ type: 'text', text: 'Why does Fork cleanup fail?' }],
+      createdAt: '2026-08-26T08:00:00.000Z',
+    }],
+  });
+  assert.equal(deriveSidechatAgentTitle(titled, 'turn-1'), 'Diagnose Fork cleanup');
+
+  titled.events = [{
+    method: 'content.completed',
+    params: { turnId: 'turn-1', data: { kind: 'text', content: 'Done.' } },
+  }];
+  assert.equal(deriveSidechatAgentTitle(titled, 'turn-1'), 'Why does Fork cleanup fail?');
+});
+
+test('listing legacy open Side Chats backfills a missing completed-turn title', () => {
+  const ctx = tempDb();
+  try {
+    const store = new SidechatTransientStore(ctx.db);
+    store.upsert(record({
+      name: null,
+      events: [{
+        method: 'content.completed',
+        params: {
+          turnId: 'turn-1',
+          data: { kind: 'text', content: '# Recover Side Chat titles' },
+        },
+      }, {
+        method: 'turn.completed',
+        params: { turnId: 'turn-1', data: { stopReason: 'completed' } },
+      }],
+      userInputs: [{
+        turnId: 'turn-1',
+        input: [{ type: 'text', text: 'Recover this title' }],
+        createdAt: '2026-08-26T08:00:00.000Z',
+      }],
+    }));
+    const coordinator = new SidechatCoordinator(
+      store,
+      { get() { return undefined; } } as never,
+      { broadcast() {} } as never,
+    );
+    assert.equal(coordinator.listPublic()[0]?.name, 'Recover Side Chat titles');
+    assert.equal(store.get('sc_1')?.name, 'Recover Side Chat titles');
+  } finally {
+    ctx.close();
+  }
+});
+
 test('fork head and atTurn require an exact terminal Turn', () => {
   const ctx = tempDb();
   try {
@@ -92,10 +160,24 @@ test('fork head and atTurn require an exact terminal Turn', () => {
       `INSERT INTO proxy_replay_turns (session_id, provider_turn_id, turn_id)
        VALUES ('s1', 'src-1', 't1')`,
     ).run();
+    ctx.db.prepare(
+      `INSERT INTO turns (id, session_id, turn_number, status, created_at)
+       VALUES ('t2', 's1', 2, 'error', '2026-08-20T00:01:00.000Z'),
+              ('t3', 's1', 3, 'running', '2026-08-20T00:02:00.000Z')`,
+    ).run();
+    ctx.db.prepare(
+      `INSERT INTO proxy_replay_turns (session_id, provider_turn_id, turn_id)
+       VALUES ('s1', 'src-2', 't2'), ('s1', 'src-3', 't3')`,
+    ).run();
+
+    assert.deepEqual(persistedForkBoundaries(ctx.db, 's1'), [
+      { turnId: 't1', sourceTurnId: 'src-1' },
+      { turnId: 't2', sourceTurnId: 'src-2' },
+    ]);
 
     assert.deepEqual(resolveForkAnchor(ctx.db, 's1', { type: 'head' }), {
-      turnId: 't1',
-      sourceTurnId: 'src-1',
+      turnId: 't2',
+      sourceTurnId: 'src-2',
     });
     assert.deepEqual(
       resolveForkAnchor(ctx.db, 's1', { type: 'turn', turnId: 't1', sourceTurnId: 'src-1' }),
@@ -455,7 +537,13 @@ test('public Side Chat state is persisted and survives event-buffer eviction', (
 
     store.appendEvent('sc_1', { method: 'turn.started', params: { turnId: 't2' } });
     for (let index = 0; index < 200; index += 1) {
-      store.appendEvent('sc_1', { method: 'event.step', params: { stepId: `step-${index}` } });
+      store.appendEvent('sc_1', {
+        method: 'activity.updated',
+        params: {
+          turnId: 't2',
+          data: { activityId: `activity-${index}`, status: 'succeeded' },
+        },
+      });
     }
     const persisted = store.get('sc_1')!;
     assert.equal(persisted.events.some((event) => eventMethod(event) === 'turn.started'), false);
@@ -466,10 +554,66 @@ test('public Side Chat state is persisted and survives event-buffer eviction', (
   }
 });
 
+test('Side Chat event compaction preserves the first assistant turn while the second turn streams', () => {
+  const ctx = tempDb();
+  try {
+    const store = new SidechatTransientStore(ctx.db);
+    store.upsert(record());
+    store.appendEvent('sc_1', {
+      method: 'content.completed',
+      params: {
+        turnId: 't1',
+        data: { contentId: 'answer-1', kind: 'text', content: 'first answer' },
+      },
+    });
+    store.appendEvent('sc_1', { method: 'turn.completed', params: { turnId: 't1' } });
+    store.appendEvent('sc_1', { method: 'turn.started', params: { turnId: 't2' } });
+    for (let index = 0; index < 250; index += 1) {
+      store.appendEvent('sc_1', {
+        method: 'usage.updated',
+        params: { turnId: 't2', data: { context: { used: index } } },
+      });
+      store.appendEvent('sc_1', {
+        method: 'step.updated',
+        params: { turnId: 't2', data: { stepId: `step-${index}` } },
+      });
+      store.appendEvent('sc_1', {
+        method: 'content.delta',
+        params: {
+          turnId: 't2',
+          data: { contentId: 'answer-2', kind: 'text', delta: String(index % 10) },
+        },
+      });
+    }
+
+    const persisted = store.get('sc_1')!;
+    assert.equal(persisted.events.length, 4);
+    assert.equal(
+      persisted.events.some((event) => (
+        eventMethod(event) === 'content.completed'
+        && eventData(event).content === 'first answer'
+      )),
+      true,
+    );
+    const second = persisted.events.find((event) => eventMethod(event) === 'content.delta');
+    assert.equal(String(eventData(second).delta).length, 250);
+  } finally {
+    ctx.close();
+  }
+});
+
 function eventMethod(event: unknown): string | null {
   if (!event || typeof event !== 'object') return null;
   const method = (event as { method?: unknown }).method;
   return typeof method === 'string' ? method : null;
+}
+
+function eventData(event: unknown): Record<string, unknown> {
+  if (!event || typeof event !== 'object') return {};
+  const params = (event as { params?: { data?: unknown } }).params;
+  return params?.data && typeof params.data === 'object'
+    ? params.data as Record<string, unknown>
+    : {};
 }
 
 test('Side Chat user inputs append across turns and appear on the public snapshot', () => {

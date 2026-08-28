@@ -60,7 +60,6 @@ test('boot resolves launch descriptors only for kinds used by saved Agents', asy
     agents: [{
       id: 'agent-claude-1',
       name: 'My Claude',
-      color: 'ember',
       proxy: 'claude',
       cliPath: null,
       defaults: { model: '', thinking: '', mode: '' },
@@ -69,7 +68,7 @@ test('boot resolves launch descriptors only for kinds used by saved Agents', asy
 
   const agents = await AgentManager.create({
     dataDir,
-    releaseVersion: '0.5.2',
+    releaseVersion: '0.5.3',
     managedProxies: true,
     homeDir: join(root, 'home'),
     pathEnv: '',
@@ -100,7 +99,7 @@ test('boot descriptors in development mode never read plugin versions for unused
   await writeFile(proxy, 'export {};\n');
   const agents = await AgentManager.create({
     dataDir: join(root, 'data'),
-    releaseVersion: '0.5.2',
+    releaseVersion: '0.5.3',
     managedProxies: false,
     developmentProxyEntries: { claude: proxy, codex: proxy },
     homeDir: join(root, 'home'),

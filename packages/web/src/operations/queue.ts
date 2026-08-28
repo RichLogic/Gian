@@ -26,7 +26,7 @@
  * `queue.sendNow` is pending: the duplicate guard blocks repeat clicks and
  * ⌘Enter while one drain is in flight.
  */
-import type { InputItem } from '@gian/shared';
+import type { InputItem, MessageContextItem } from '@gian/shared';
 
 import { attachmentInputItem, type ComposerAttachmentPayload } from '../attachments.js';
 import type { QueueEntry } from '../types.js';
@@ -60,7 +60,12 @@ interface QueueSessionInput {
   sessionId: string;
 }
 
-const queueAdd: OperationDefinition<QueueSessionInput & { text: string; attachments?: ComposerAttachmentPayload[] }> = {
+const queueAdd: OperationDefinition<QueueSessionInput & {
+  text: string;
+  attachments?: ComposerAttachmentPayload[];
+  contextItems?: MessageContextItem[];
+  composerDocument?: import('@gian/shared').ComposerDocument;
+}> = {
   policy: 'optimistic',
   entityKey: input => sessionEntityKey(input.sessionId),
   optimisticWrites: input => {
@@ -71,6 +76,10 @@ const queueAdd: OperationDefinition<QueueSessionInput & { text: string; attachme
         id: `optimistic:queue:${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`,
         text: input.text,
         ...(items.length > 0 ? { items } : {}),
+        ...(input.contextItems && input.contextItems.length > 0
+          ? { context_items: input.contextItems }
+          : {}),
+        ...(input.composerDocument ? { composer_document: input.composerDocument } : {}),
       }],
     }];
   },
@@ -83,6 +92,10 @@ const queueAdd: OperationDefinition<QueueSessionInput & { text: string; attachme
       session_id: input.sessionId,
       text: input.text,
       ...(items.length > 0 ? { items } : {}),
+      ...(input.contextItems && input.contextItems.length > 0
+        ? { context_items: input.contextItems }
+        : {}),
+      ...(input.composerDocument ? { composer_document: input.composerDocument } : {}),
     };
   },
   timeoutMs: WS_TIMEOUT_MS,

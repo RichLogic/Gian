@@ -1,6 +1,7 @@
 import type {
   ApprovalMode,
   AgentProxyDefaults,
+  AgentRuntimeProfile,
   ConfigOption,
   ConfigValue,
   Executor,
@@ -8,9 +9,11 @@ import type {
   EventEnvelope,
   NativeConfigOption,
   NativeConfigValue,
+  MessageContextItem,
   ResolvedProxyCatalog,
   Session,
   ChatEvent,
+  ComposerDocument,
   TraceSnapshot,
   UserAgent,
 } from '@gian/shared';
@@ -25,6 +28,7 @@ import type { QueueManager } from '../queue/index.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import { locateCcJsonl, appendCcCustomTitle } from '../native/locate-jsonl.js';
 import { randomUUID } from 'node:crypto';
+import type { GianSessionHostServiceIssuer } from '../tool/session-host-services.js';
 import { SessionRepository } from './repository.js';
 import { SessionHistoryStore, type EventHistoryPage } from './history-store.js';
 import { TraceEvidenceStore } from '../trace/evidence-store.js';
@@ -43,7 +47,7 @@ import {
   newForkSessionId,
 } from './sidechat-coordinator.js';
 import { SidechatTransientStore } from './sidechat-store.js';
-import { assertInheritedSessionConfig, resolveForkAnchor } from './fork.js';
+import { assertInheritedSessionConfig, nextForkSessionName, resolveForkAnchor } from './fork.js';
 import { requestViolation } from '@gian/proxy-protocol';
 import type { ProtocolV2SessionClient } from '../proxy/protocol-v2-session-client.js';
 import type {
@@ -60,6 +64,11 @@ import {
   buildAttachmentsFromItems,
   translateItemsForExecutor,
 } from './input-items.js';
+import {
+  compileContextIntoInput,
+  normalizeMessageComposerDocument,
+  normalizeMessageContextItems,
+} from './context-items.js';
 export type { CreateSessionInput } from './lifecycle-service.js';
 
 const PROXY_CLOSE_TIMEOUT_MS = 5_000;
@@ -78,6 +87,7 @@ export interface SessionAgentResolver {
   /** The saved Agent and its runtime CLI path; throws when the id is
    *  unknown (deleted Agents cannot start new sessions). */
   agentRuntime(agentId: string): { agent: UserAgent; cliPath: string | null };
+  agentRuntimeProfile(agentId: string): Promise<AgentRuntimeProfile | null>;
   /** Saved Agents of one Proxy kind (native adopt binds one explicitly). */
   agentsForKind(executor: Executor): UserAgent[];
 }
@@ -136,6 +146,7 @@ export class SessionManager {
     private proxyDefaults?: (executor: Executor) => AgentProxyDefaults,
     attention?: AttentionDispatcher,
     private agentResolver?: SessionAgentResolver,
+    hostServices?: GianSessionHostServiceIssuer,
   ) {
     this.sessions = new SessionRepository(db);
     this.history = new SessionHistoryStore(db);
@@ -169,6 +180,7 @@ export class SessionManager {
           ? this.agentResolver?.requireCliPathForSession(session)
           : this.agentResolver?.cliPathForKind(executor)
       ) ?? null,
+      hostServices,
     );
     this.autoTitle = new AutoTitleService({
       db,
@@ -192,8 +204,16 @@ export class SessionManager {
       this.proxySessions,
       this.autoTitle,
       {
-        sendMessage: (sessionId, text, items, toolRequestId) => (
-          this.sendMessage(sessionId, text, items, undefined, toolRequestId)
+        sendMessage: (sessionId, text, items, toolRequestId, contextItems, composerDocument) => (
+          this.sendMessage(
+            sessionId,
+            text,
+            items,
+            undefined,
+            toolRequestId,
+            contextItems,
+            composerDocument,
+          )
         ),
         onInteractionResolved: (interactionId) => {
           this.interactionResponseIds.delete(interactionId);
@@ -234,9 +254,15 @@ export class SessionManager {
         forgetConversationUsage: sessionId => {
           this.events.forgetConversationUsage(sessionId);
         },
+        activateHostServices: sessionId => this.proxySessions.activateHostServices(sessionId),
       },
       executor => this.proxyDefaults?.(executor),
-      agentResolver ? agentId => agentResolver.agentRuntime(agentId) : undefined,
+      agentResolver
+        ? async agentId => ({
+            ...agentResolver.agentRuntime(agentId),
+            runtimeProfile: await agentResolver.agentRuntimeProfile(agentId),
+          })
+        : undefined,
     );
   }
 
@@ -252,7 +278,16 @@ export class SessionManager {
     const parent = this.sessions.get(parentSessionId);
     await this.proxySessions.ensure(parent);
     await this.sidechats.recoverForParent(parentSessionId);
-    return this.sidechats.create(parentSessionId, sidechatId);
+    const catalog = this.proxySessions.getCapabilities(
+      parent.executor,
+      this.agentResolver?.cliPathForSession(parent),
+    );
+    const turnOptions = (parent.turn_config_options ?? catalog?.configOptions ?? [])
+      .filter((option) => option.binding === 'turn');
+    const turnRevision = parent.turn_config_options !== undefined
+      ? parent.turn_config_revision ?? catalog?.catalogRevision ?? null
+      : catalog?.catalogRevision ?? null;
+    return this.sidechats.create(parent, turnOptions, turnRevision, sidechatId);
   }
 
   async resumeSidechat(sidechatId: string, parentSessionId: string): Promise<SideChatPublicSnapshot> {
@@ -264,6 +299,14 @@ export class SessionManager {
 
   async closeSidechat(sidechatId: string): Promise<SidechatCloseResult> {
     return this.sidechats.close(sidechatId);
+  }
+
+  setSidechatTurnConfigValue(
+    sidechatId: string,
+    optionId: string,
+    value: ConfigValue,
+  ): SideChatPublicSnapshot {
+    return this.sidechats.setTurnConfigValue(sidechatId, optionId, value);
   }
 
   async forkSession(input: SessionForkFromInput): Promise<SessionForkFromResult> {
@@ -306,7 +349,28 @@ export class SessionManager {
       ? { type: 'head' as const }
       : { type: 'turn' as const, turnId: resolved.turnId, sourceTurnId: resolved.sourceTurnId };
 
-    const forked = await client.forkSession({ sessionId, anchor: protocolAnchor });
+    const hostServiceLease = source.executor === 'codex'
+      && initialized.capabilities['integration.mcp.streamableHttp'] !== undefined
+      && this.proxySessions.canProvideHostServices()
+      ? this.proxySessions.prepareHostServices({
+          sessionId,
+          agentId: source.agent_id ?? null,
+          workspaceId: source.workspace_id,
+          taskId: source.task_id ?? null,
+          role: 'admin',
+        }, true)
+      : null;
+    let forked;
+    try {
+      forked = await client.forkSession({
+        sessionId,
+        anchor: protocolAnchor,
+        ...(hostServiceLease ? { hostServices: [hostServiceLease.descriptor] } : {}),
+      });
+    } catch (error) {
+      this.proxySessions.revokeHostServices(sessionId);
+      throw error;
+    }
     const nativeSessionId = providerNativeSessionId(forked.session);
     const origin: SessionOrigin = {
       kind: 'fork',
@@ -319,10 +383,13 @@ export class SessionManager {
       || origin.turn_id !== resolved.turnId
       || origin.source_turn_id !== resolved.sourceTurnId
     ) {
-      throwIfForkLeftovers(await this.abandonForkChild(client, sessionId, nativeSessionId));
-      throw requestViolation('INTERNAL', 'session.fork origin did not match the Host anchor');
+      const mismatch = requestViolation('INTERNAL', 'session.fork origin did not match the Host anchor');
+      this.proxySessions.revokeHostServices(sessionId);
+      throwIfForkLeftovers(await this.abandonForkChild(client, sessionId, nativeSessionId), mismatch);
+      throw mismatch;
     }
     if (!nativeSessionId) {
+      this.proxySessions.revokeHostServices(sessionId);
       throwIfForkLeftovers(await this.abandonForkChild(client, sessionId, null));
       throw requestViolation('INTERNAL', 'session.fork Result omitted durable nativeSession');
     }
@@ -333,7 +400,8 @@ export class SessionManager {
       const publish = this.db.transaction(() => {
         this.db.prepare(
           `INSERT INTO sessions
-            (id, name, type, task_id, workspace_id, executor, agent_id, agent_name, agent_color,
+            (id, name, type, task_id, workspace_id, executor, agent_id, agent_name,
+             runtime_profile_json,
              model, approval_mode,
              executor_config_json, thinking_effort, service_tier, active_channel, status,
              archived, worktree_path, branch, base_branch, worktree_outcome,
@@ -344,7 +412,8 @@ export class SessionManager {
              available_actions_json, created_at, updated_at)
            VALUES
             (@id, @name, @type, @task_id, @workspace_id, @executor, @agent_id, @agent_name,
-             @agent_color, @model,
+             @runtime_profile_json,
+             @model,
              @approval_mode, @executor_config_json, @thinking_effort, @service_tier, 'web', 'new',
              0, @worktree_path, @branch, @base_branch, NULL, @native_session_id,
              NULL, 1,
@@ -354,14 +423,16 @@ export class SessionManager {
              @available_actions_json, @now, @now)`,
         ).run({
           id: sessionId,
-          name: source.name,
+          name: nextForkSessionName(this.db, source),
           type: source.type,
           task_id: source.task_id,
           workspace_id: source.workspace_id,
           executor: source.executor,
           agent_id: source.agent_id ?? null,
           agent_name: source.agent_name ?? null,
-          agent_color: source.agent_color ?? null,
+          runtime_profile_json: source.runtime_profile
+            ? JSON.stringify(source.runtime_profile)
+            : null,
           model: source.model,
           approval_mode: source.approval_mode,
           executor_config_json: JSON.stringify({ schemaVersion: 1, values: inherited }),
@@ -386,6 +457,7 @@ export class SessionManager {
             : null,
           now,
         });
+        this.proxySessions.activateHostServices(sessionId);
         if (forked.replayEvents?.length) {
           this.persistKimiReplay(
             sessionId,
@@ -408,6 +480,7 @@ export class SessionManager {
       )) {
         return { sessionId, origin: raced.origin! };
       }
+      this.proxySessions.revokeHostServices(sessionId);
       throwIfForkLeftovers(await this.abandonForkChild(client, sessionId, nativeSessionId), error);
       if (raced) {
         throw requestViolation('CONFLICT', 'sessionId already belongs to a different Session');
@@ -422,6 +495,11 @@ export class SessionManager {
       session,
       origin: 'session-fork',
     });
+    if (session.name) {
+      void this.applyNativeSessionName(sessionId, session.name).catch(err => {
+        console.warn(`[session] fork native name sync failed for ${sessionId}: ${String(err)}`);
+      });
+    }
     return { sessionId, origin };
   }
 
@@ -443,7 +521,7 @@ export class SessionManager {
     name?: string;
     agentId?: string;
   }): Promise<{ session: Session; replay: { turns: number; events: number } }> {
-    const binding = this.resolveAdoptAgent('kimi', input.agentId);
+    const binding = await this.resolveAdoptAgent('kimi', input.agentId);
     return this.nativeSessions.adoptKimi({ ...input, ...binding });
   }
 
@@ -464,34 +542,35 @@ export class SessionManager {
     approvalMode?: ApprovalMode;
     agentId?: string;
   }): Promise<{ session: Session; replay: { turns: number; events: number } }> {
-    const binding = this.resolveAdoptAgent(input.executor, input.agentId);
+    const binding = await this.resolveAdoptAgent(input.executor, input.agentId);
     return this.nativeSessions.adopt({ ...input, ...binding });
   }
 
   /** Bind an adopted native session to its Agent. `AGENT_REQUIRED` when the
    *  kind has several saved Agents and the caller did not choose one —
    *  never silently bind the first. */
-  resolveAdoptAgent(
+  async resolveAdoptAgent(
     executor: Executor,
     agentId?: string,
-  ): {
+  ): Promise<{
     agentId: string | null;
     agentName: string | null;
-    agentColor: string | null;
     cliPath: string | null;
-  } {
-    const none = { agentId: null, agentName: null, agentColor: null, cliPath: null };
+    runtimeProfile: AgentRuntimeProfile | null;
+  }> {
+    const none = { agentId: null, agentName: null, cliPath: null, runtimeProfile: null };
     if (!this.agentResolver) return none;
     if (agentId !== undefined) {
       const { agent, cliPath } = this.agentResolver.agentRuntime(agentId);
       if (agent.proxy !== executor) {
         throw new Error(`agent ${agentId} is a ${agent.proxy} Agent, not ${executor}`);
       }
+      const runtimeProfile = await this.agentResolver.agentRuntimeProfile(agent.id);
       return {
         agentId: agent.id,
         agentName: agent.name,
-        agentColor: agent.color,
-        cliPath,
+        cliPath: runtimeProfile?.cliPath ?? cliPath,
+        runtimeProfile,
       };
     }
     const candidates = this.agentResolver.agentsForKind(executor);
@@ -506,11 +585,12 @@ export class SessionManager {
     }
     const only = candidates[0];
     if (!only) return none;
+    const runtimeProfile = await this.agentResolver.agentRuntimeProfile(only.id);
     return {
       agentId: only.id,
       agentName: only.name,
-      agentColor: only.color,
-      cliPath: this.agentResolver.agentRuntime(only.id).cliPath,
+      cliPath: runtimeProfile?.cliPath ?? this.agentResolver.agentRuntime(only.id).cliPath,
+      runtimeProfile,
     };
   }
 
@@ -826,21 +906,48 @@ export class SessionManager {
     items?: import('@gian/shared').InputItem[],
     oneShotBypass?: boolean,
     toolRequestId?: string,
+    contextItems?: MessageContextItem[],
+    composerDocument?: ComposerDocument,
+    turnConfig?: Record<string, ConfigValue>,
   ): Promise<{
     turnId: string;
     turnNumber: number;
     configSnapshot: Record<string, unknown>;
   } | null> {
     if (this.sidechats.has(sessionId)) {
-      const sidechatItems = items && items.length > 0
+      const normalizedContextItems = normalizeMessageContextItems(contextItems);
+      const normalizedDocument = normalizeMessageComposerDocument(
+        composerDocument,
+        items,
+        normalizedContextItems,
+      );
+      const sidechatItems = compileContextIntoInput(text, items, normalizedContextItems, normalizedDocument);
+      const storedInput = items && items.length > 0
         ? items
         : [{ type: 'text' as const, text }];
-      await this.sidechats.startTurn(sessionId, sidechatItems);
+      await this.sidechats.startTurn(
+        sessionId,
+        sidechatItems,
+        undefined,
+        normalizedContextItems,
+        storedInput,
+        normalizedDocument,
+        turnConfig,
+      );
       return null;
+    }
+    if (turnConfig !== undefined) {
+      throw requestViolation('CONFIG_VALUE_INVALID', 'turn_config is only valid for Side Chat sends');
     }
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
     assertLocalFilesBelongToSession(sessionId, items);
+    const normalizedContextItems = normalizeMessageContextItems(contextItems);
+    const normalizedDocument = normalizeMessageComposerDocument(
+      composerDocument,
+      items,
+      normalizedContextItems,
+    );
     if (oneShotBypass && session.executor !== 'claude') {
       throw new Error(`One-shot bypass is only supported for Claude sessions; got ${session.executor}.`);
     }
@@ -894,6 +1001,8 @@ export class SessionManager {
     const attachments = buildAttachmentsFromItems(sessionId, items);
     const userMessagePayload: Record<string, unknown> = { text };
     if (attachments.length > 0) userMessagePayload.attachments = attachments;
+    if (normalizedContextItems.length > 0) userMessagePayload.context_items = normalizedContextItems;
+    if (normalizedDocument) userMessagePayload.composer_document = normalizedDocument;
     this.persistAndBroadcastUserMessage(
       sessionId,
       turnId,
@@ -978,9 +1087,10 @@ export class SessionManager {
       turn: { ...config },
     };
     this.turns.setConfig(sessionId, turnId, configSnapshot);
-    const dispatchItems = items && items.length > 0
-      ? translateItemsForExecutor(session.executor, items)
-      : [{ type: 'text' as const, text }];
+    const dispatchItems = translateItemsForExecutor(
+      session.executor,
+      compileContextIntoInput(text, items, normalizedContextItems, normalizedDocument),
+    );
     try {
       const started = await client.startTurn({
         sessionId: proxySessionId,
@@ -988,7 +1098,11 @@ export class SessionManager {
         input: dispatchItems,
         config,
       });
-      this.turns.bindProviderTurn(sessionId, turnId, started.turn.id, true);
+      // gian.proxy/2 returns the Host-assigned turnId here. Its distinct
+      // Provider identity arrives on live notifications as sourceTurnId.
+      if (client.protocolV2 !== true) {
+        this.turns.bindProviderTurn(sessionId, turnId, started.turn.id, true);
+      }
       this.persistTurnConfig(sessionId, draft);
       if (toolRequestId) {
         this.db.prepare(
@@ -1111,6 +1225,16 @@ export class SessionManager {
   ): Promise<ResolvedProxyCatalog> {
     if (sessionId) await this.proxySessions.ensure(this.getSession(sessionId));
     return this.proxySessions.resolveCatalog(executor, params, sessionId, cliPath);
+  }
+
+  /**
+   * Reattach the selected Session before the Web client relies on dynamic
+   * Proxy capabilities such as Fork. Opening a completed transcript is still
+   * an activation: without this boundary, a Host restart leaves the persisted
+   * available_actions snapshot stale until the next mutating command.
+   */
+  async activateSession(sessionId: string): Promise<void> {
+    await this.proxySessions.ensure(this.getSession(sessionId));
   }
 
   /** Returns cached capabilities or null if no session has booted that
@@ -1286,11 +1410,23 @@ export class SessionManager {
     text: string,
     items?: import('@gian/shared').InputItem[],
     toolRequestId?: string,
+    contextItems?: MessageContextItem[],
+    composerDocument?: ComposerDocument,
   ): import('../queue/manager.js').QueueEntry {
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
     assertLocalFilesBelongToSession(sessionId, items);
-    const entry = this.queue.add(sessionId, text, items, { toolRequestId });
+    const normalizedContextItems = normalizeMessageContextItems(contextItems);
+    const normalizedDocument = normalizeMessageComposerDocument(
+      composerDocument,
+      items,
+      normalizedContextItems,
+    );
+    const entry = this.queue.add(sessionId, text, items, {
+      toolRequestId,
+      ...(normalizedContextItems.length > 0 ? { contextItems: normalizedContextItems } : {}),
+      ...(normalizedDocument ? { composerDocument: normalizedDocument } : {}),
+    });
     this.broadcastQueueUpdated(sessionId);
     return entry;
   }
@@ -1334,12 +1470,20 @@ export class SessionManager {
       this.broadcastQueueUpdated(sessionId);
       for (let i = 0; i < drained.length; i++) {
         try {
-          await this.steerMessage(sessionId, drained[i]!.text, drained[i]!.items);
+          await this.steerMessage(
+            sessionId,
+            drained[i]!.text,
+            drained[i]!.items,
+            drained[i]!.contextItems,
+            drained[i]!.composerDocument,
+          );
         } catch (err) {
           for (let j = i; j < drained.length; j++) {
             this.queue.add(sessionId, drained[j]!.text, drained[j]!.items, {
               id: drained[j]!.id,
               ...(drained[j]!.toolRequestId ? { toolRequestId: drained[j]!.toolRequestId } : {}),
+              ...(drained[j]!.contextItems ? { contextItems: drained[j]!.contextItems } : {}),
+              ...(drained[j]!.composerDocument ? { composerDocument: drained[j]!.composerDocument } : {}),
             });
           }
           this.broadcastQueueUpdated(sessionId);
@@ -1357,7 +1501,15 @@ export class SessionManager {
     const next = this.queue.popNext(sessionId);
     if (!next) return;
     this.broadcastQueueUpdated(sessionId);
-    await this.sendMessage(sessionId, next.text, next.items, undefined, next.toolRequestId);
+    await this.sendMessage(
+      sessionId,
+      next.text,
+      next.items,
+      undefined,
+      next.toolRequestId,
+      next.contextItems,
+      next.composerDocument,
+    );
   }
 
   /** Codex-only mid-turn injection (`turn/steer`): append the message to the
@@ -1368,17 +1520,31 @@ export class SessionManager {
     sessionId: string,
     text: string,
     items?: import('@gian/shared').InputItem[],
+    contextItems?: MessageContextItem[],
+    composerDocument?: ComposerDocument,
   ): Promise<void> {
     if (this.sidechats.has(sessionId)) {
-      await this.sidechats.steerTurn(sessionId, [
-        { type: 'text', text },
-        ...(items ?? []),
-      ]);
+      const normalizedContextItems = normalizeMessageContextItems(contextItems);
+      const normalizedDocument = normalizeMessageComposerDocument(
+        composerDocument,
+        items,
+        normalizedContextItems,
+      );
+      await this.sidechats.steerTurn(
+        sessionId,
+        compileContextIntoInput(text, items, normalizedContextItems, normalizedDocument),
+      );
       return;
     }
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
     assertLocalFilesBelongToSession(sessionId, items);
+    const normalizedContextItems = normalizeMessageContextItems(contextItems);
+    const normalizedDocument = normalizeMessageComposerDocument(
+      composerDocument,
+      items,
+      normalizedContextItems,
+    );
     const client = this.proxy.get(sessionId);
     if (!client?.steerTurn) {
       throw new Error(`${session.executor} does not support steering`);
@@ -1389,12 +1555,15 @@ export class SessionManager {
     }
     const proxySessionId = await this.proxySessions.ensure(session);
 
-    const dispatchItems = items && items.length > 0
-      ? translateItemsForExecutor(session.executor, items)
-      : [{ type: 'text' as const, text }];
+    const dispatchItems = translateItemsForExecutor(
+      session.executor,
+      compileContextIntoInput(text, items, normalizedContextItems, normalizedDocument),
+    );
     const attachments = buildAttachmentsFromItems(sessionId, items);
     const userMessagePayload: Record<string, unknown> = { text };
     if (attachments.length > 0) userMessagePayload.attachments = attachments;
+    if (normalizedContextItems.length > 0) userMessagePayload.context_items = normalizedContextItems;
+    if (normalizedDocument) userMessagePayload.composer_document = normalizedDocument;
 
     await client.steerTurn({ sessionId: proxySessionId, input: dispatchItems });
 
@@ -1505,8 +1674,35 @@ export class SessionManager {
     this.watcher?.stop(sessionId);
   }
 
-  archiveSession(sessionId: string, archived: boolean): void {
-    this.lifecycle.archive(sessionId, archived);
+  async archiveSession(sessionId: string, archived: boolean): Promise<void> {
+    await this.lifecycle.archive(sessionId, archived);
+  }
+
+  requestWorktreeView(
+    sessionId: string,
+    path: string,
+    source: 'agent' | 'gian_tool',
+  ): Session {
+    const session = this.sessions.get(sessionId);
+    if (!session.workspace_id) throw new Error(`session has no workspace: ${sessionId}`);
+    this.db.prepare(
+      `UPDATE sessions
+       SET detected_worktree_path = ?, detected_worktree_source = ?,
+           detected_worktree_revision = detected_worktree_revision + 1
+       WHERE id = ?`,
+    ).run(path, source, sessionId);
+    const updated = this.sessions.get(sessionId);
+    this.broadcastSessionUpdated(sessionId, {
+      detected_worktree_path: path,
+      detected_worktree_source: source,
+      detected_worktree_revision: updated.detected_worktree_revision ?? 0,
+    });
+    this.broadcaster.broadcast({
+      type: 'workspace:git-updated',
+      workspace_id: session.workspace_id,
+      reason: source === 'gian_tool' ? 'worktree-created' : 'worktree-detected',
+    });
+    return updated;
   }
 
   assignTask(sessionId: string, taskId: string): void {

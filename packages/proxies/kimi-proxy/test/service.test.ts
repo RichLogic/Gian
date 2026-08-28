@@ -936,9 +936,9 @@ function configOptionsForModel(modelId: string) {
   ];
 }
 
-function effortValues(options: Array<{ role?: string; choices?: Array<{ value: unknown }> }>) {
+function effortValues(options: Array<{ id?: string; choices?: Array<{ value: unknown }> }>) {
   return options
-    .find((option) => option.role === 'effort')
+    .find((option) => option.id === 'thinking')
     ?.choices
     ?.map((choice) => choice.value);
 }
@@ -1141,7 +1141,7 @@ test('Kimi gian.proxy/2 translates ACP text, tools, usage, and Host ids', async 
     proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -1271,7 +1271,7 @@ test('Kimi gian.proxy/2 projects TodoList tools as one deduplicated plan snapsho
     proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -1350,7 +1350,7 @@ test('Kimi config updates cannot emit Turn activity before turn.started', async 
     (method, params) => notifications.push({ method, params }),
   );
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -1401,7 +1401,7 @@ test('Kimi gian.proxy/2 rejects session-bound config before any native session e
   await service.initialize();
   const adapter = new KimiProtocolV2Adapter(service, '0.2.0', () => undefined);
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
 
@@ -1455,7 +1455,7 @@ test('Kimi gian.proxy/2 returns Replay Events on one synthetic stream', async ()
   await service.initialize();
   const adapter = new KimiProtocolV2Adapter(service, '0.2.0', () => undefined);
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -1507,7 +1507,7 @@ test('Kimi gian.proxy/2 validates turn config before touching the runtime', asyn
   await service.initialize();
   const adapter = new KimiProtocolV2Adapter(service, '0.2.0', () => undefined);
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
 
@@ -1591,15 +1591,22 @@ test('Kimi gian.proxy/2 advertises catalog.resolve and rebuilds thinking per mod
   await service.initialize();
   const adapter = new KimiProtocolV2Adapter(service, '0.2.0', () => undefined);
   const initialized = await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   })) as { capabilities: Record<string, unknown> };
   assert.equal(initialized.capabilities['catalog.resolve'], 1);
 
   const catalog = await adapter.handle(v2Request('cat', 'catalog.list', {})) as {
     catalogRevision: string;
-    configOptions: Array<{ role?: string; choices?: Array<{ value: unknown }> }>;
+    specialCatalogs: { model?: string; thinking?: string; approvalMode?: string };
+    configOptions: Array<{ id: string; role?: string; choices?: Array<{ value: unknown }> }>;
   };
+  assert.deepEqual(catalog.specialCatalogs, {
+    model: 'model',
+    thinking: 'thinking',
+    approvalMode: 'mode',
+  });
+  assert.equal(catalog.configOptions.some((option) => option.role !== undefined), false);
   assert.deepEqual(effortValues(catalog.configOptions), ['on']);
 
   const resolved = await adapter.handle(v2Request('res', 'catalog.resolve', {
@@ -1607,16 +1614,16 @@ test('Kimi gian.proxy/2 advertises catalog.resolve and rebuilds thinking per mod
     sessionConfig: {},
     turnConfig: { model: 'kimi-code/k3' },
   })) as {
-    configOptions: Array<{ role?: string; defaultValue?: unknown; choices?: Array<{ value: unknown }> }>;
+    configOptions: Array<{ id: string; defaultValue?: unknown; choices?: Array<{ value: unknown }> }>;
     resolvedDefaults: { turnConfig: Record<string, unknown> };
   };
   assert.deepEqual(effortValues(resolved.configOptions), ['low', 'high', 'max']);
   assert.deepEqual(
-    resolved.configOptions.find((option) => option.role === 'model')?.choices?.map((choice) => choice.value),
+    resolved.configOptions.find((option) => option.id === 'model')?.choices?.map((choice) => choice.value),
     ['kimi-code/kimi-for-coding', 'kimi-code/k3'],
   );
   assert.equal(
-    resolved.configOptions.find((option) => option.role === 'effort')?.defaultValue,
+    resolved.configOptions.find((option) => option.id === 'thinking')?.defaultValue,
     'low',
   );
   assert.equal(resolved.resolvedDefaults.turnConfig.thinking, 'low');
@@ -1662,7 +1669,7 @@ test('Kimi gian.proxy/2 validates thinking against the requested model', async (
   await service.initialize();
   const adapter = new KimiProtocolV2Adapter(service, '0.2.0', () => undefined);
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -1712,7 +1719,7 @@ test('Kimi gian.proxy/2 session.create is idempotent and conflicts on different 
   await service.initialize();
   const adapter = new KimiProtocolV2Adapter(service, '0.2.0', () => undefined);
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
 
@@ -1792,7 +1799,7 @@ test('Kimi gian.proxy/2 interaction.respond keeps native IDs and is responseId-i
     proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -1899,7 +1906,7 @@ test('Kimi gian.proxy/2 maps native stop reasons to contract stopReasons', async
     notifications.push({ method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -1958,7 +1965,7 @@ test('Kimi gian.proxy/2 reports interrupted only after a host-accepted interrupt
     proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -2038,7 +2045,7 @@ test('Kimi gian.proxy/2 degrades unknown ACP updates to generic activities', asy
     proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -2154,7 +2161,7 @@ test('Kimi gian.proxy/2 mirrors a shared-runtime crash and resumes on the next t
     proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -2370,7 +2377,7 @@ test('Kimi gian.proxy/2 keeps fact-derived IDs stable across noisy live events a
     notifications.push({ method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
   const live = await adapter.handle(v2Request('2', 'session.create', {
@@ -2564,7 +2571,7 @@ test('Kimi gian.proxy/2 auto-cancels a permission request whose options have no 
     proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -2635,7 +2642,7 @@ test('Kimi gian.proxy/2 maps ACP session/fork to durable Side Chat and head Fork
   });
 
   const initialized = resultSchemas.initialize.parse(await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '9.9.9' },
   })));
   assert.equal(initialized.capabilities.sidechat, 1);

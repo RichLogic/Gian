@@ -16,6 +16,7 @@ import { Composer } from '../src/components/Composer.js';
 import { clearComposerCapabilityCaches } from '../src/components/composer/capabilities.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { loadProxyCapabilities } from '../src/api.js';
+import { typeInlineComposer } from './inline-composer-test-utils.js';
 
 vi.mock('../src/api.js', () => ({
   loadProxyModels: vi.fn(async () => [{
@@ -103,13 +104,13 @@ describe('QUEUE-004: composer ⌘/Ctrl+Enter steer semantics', () => {
     const user = userEvent.setup();
     const callbacks = renderComposer(makeSession('codex'));
 
-    await user.type(screen.getByRole('textbox'), 'focus on tests first');
+    typeInlineComposer(screen.getByRole('textbox'), 'focus on tests first');
     await user.keyboard('{Control>}{Enter}{/Control}');
 
     expect(callbacks.onSteer).toHaveBeenCalledWith('focus on tests first', undefined);
     expect(callbacks.onQueueAdd).not.toHaveBeenCalled();
     expect(callbacks.onSend).not.toHaveBeenCalled();
-    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    expect(screen.getByRole('textbox')).toHaveTextContent('');
   });
 
   it('codex busy + NO draft + Ctrl+Enter does not steer or queue (bubbles to queue drain)', async () => {
@@ -128,10 +129,10 @@ describe('QUEUE-004: composer ⌘/Ctrl+Enter steer semantics', () => {
     const user = userEvent.setup();
     const callbacks = renderComposer(makeSession('claude'), { canSteer: false });
 
-    await user.type(screen.getByRole('textbox'), 'queue me');
+    typeInlineComposer(screen.getByRole('textbox'), 'queue me');
     await user.keyboard('{Control>}{Enter}{/Control}');
 
-    expect(callbacks.onQueueAdd).toHaveBeenCalledWith('queue me', []);
+    expect(callbacks.onQueueAdd).toHaveBeenCalledWith('queue me', [], undefined, undefined);
     expect(callbacks.onSteer).not.toHaveBeenCalled();
   });
 
@@ -145,7 +146,7 @@ describe('QUEUE-004: composer ⌘/Ctrl+Enter steer semantics', () => {
     await waitFor(() => {
       expect(vi.mocked(loadProxyCapabilities)).toHaveBeenCalled();
     });
-    await user.type(screen.getByRole('textbox'), 'steer from catalog');
+    typeInlineComposer(screen.getByRole('textbox'), 'steer from catalog');
     await user.keyboard('{Control>}{Enter}{/Control}');
 
     expect(callbacks.onSteer).toHaveBeenCalledWith('steer from catalog', undefined);
@@ -156,7 +157,7 @@ describe('QUEUE-004: composer ⌘/Ctrl+Enter steer semantics', () => {
     const user = userEvent.setup();
     const callbacks = renderComposer(makeSession('grok'), { canSteer: true });
 
-    await user.type(screen.getByRole('textbox'), 'steer from capability');
+    typeInlineComposer(screen.getByRole('textbox'), 'steer from capability');
     await user.keyboard('{Control>}{Enter}{/Control}');
 
     expect(callbacks.onSteer).toHaveBeenCalledWith('steer from capability', undefined);
@@ -167,7 +168,7 @@ describe('QUEUE-004: composer ⌘/Ctrl+Enter steer semantics', () => {
     const user = userEvent.setup();
     const callbacks = renderComposer(makeSession('codex'), { disabled: false, running: false });
 
-    await user.type(screen.getByRole('textbox'), 'send me');
+    typeInlineComposer(screen.getByRole('textbox'), 'send me');
     await user.keyboard('{Control>}{Enter}{/Control}');
 
     expect(callbacks.onSend).toHaveBeenCalledWith('send me', undefined);

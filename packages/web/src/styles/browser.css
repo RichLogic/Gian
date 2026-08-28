@@ -32,6 +32,10 @@
 }
 
 .browser-tool:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.browser-tool.is-active {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
 .browser-tool:disabled { opacity: 0.34; cursor: default; }
 
 .browser-address {

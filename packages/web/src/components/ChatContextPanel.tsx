@@ -104,17 +104,19 @@ export function ChatContextPanel({
   // the turn in real time. Every row drills into its detail (structured
   // payload or raw-item JSON) via the surrounding ChatPanelOpenContext.
   const feedTurn = target.kind === 'event-feed' ? target.turn : null;
+  const feedAnchor = target.kind === 'event-feed' ? target.anchorId : undefined;
   const feed = useMemo(
     () => (feedTurn === null ? null : eventFeedItems(items, feedTurn)),
     [items, feedTurn],
   );
   const feedScrollRef = useRef<HTMLDivElement>(null);
   const feedTail = feed && feed.length > 0 ? transcriptItemIdentity(feed[feed.length - 1]!) : '';
-  // Live tail, same pinning rule as the box: newest event stays visible.
+  // Live tail, same pinning rule as the box: newest event stays visible. An
+  // anchor jump positions the feed itself — pinning would fight it.
   useLayoutEffect(() => {
     const el = feedScrollRef.current;
-    if (feed && el) el.scrollTop = el.scrollHeight;
-  }, [feed, feed?.length, feedTail]);
+    if (feed && el && !feedAnchor) el.scrollTop = el.scrollHeight;
+  }, [feed, feed?.length, feedTail, feedAnchor]);
   const title = target.kind === 'plan'
     ? t('chatPanel.plan.title')
     : target.kind === 'agent'
@@ -162,7 +164,7 @@ export function ChatContextPanel({
 
         {detail && <pre className="chat-context-detail">{detail.text}</pre>}
 
-        {feed && feed.length > 0 && <EventFeed items={feed} />}
+        {feed && feed.length > 0 && <EventFeed items={feed} anchorId={feedAnchor} />}
 
         {feed && feed.length === 0 && (
           <div className="chat-context-empty">{t('chatPanel.eventFeed.empty')}</div>

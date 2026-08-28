@@ -26,6 +26,7 @@ import {
   PROCESS_SCOPES,
   PROTOCOL_NAME,
   PROTOCOL_V2,
+  PROTOCOL_V2_LEGACY,
   REQUEST_REASONS,
   SESSION_STATES,
   STEP_STATUSES,
@@ -84,8 +85,7 @@ export const extensionsSchema = z.record(
   }),
 );
 
-export const manifestV2Schema = z.strictObject({
-  schemaVersion: z.literal(2),
+const manifestFields = {
   id: pluginIdSchema,
   displayName: nonEmptyStringSchema,
   pluginVersion: semverSchema,
@@ -102,9 +102,55 @@ export const manifestV2Schema = z.strictObject({
   runtime: z.strictObject({
     id: nonEmptyStringSchema,
     displayName: nonEmptyStringSchema,
+    verifiedCliVersions: z.array(semverSchema).min(1).optional(),
+    /** Legacy diagnostic field. New built-in Proxy packages use the exact
+     * verified list above; retained so an older immutable package remains
+     * readable during upgrade. */
     recommendedCliVersion: semverSchema.optional(),
   }).optional(),
+  skills: z.array(z.strictObject({
+    name: nonEmptyStringSchema,
+    path: nonEmptyStringSchema
+      .regex(/^[^/\\](?:.*[^/\\])?$/, 'Skill path must be relative.')
+      .refine(
+        value => !value.split(/[\\/]/).some(part => part === '..' || part === '.' || part === ''),
+        'Skill path must stay inside the Proxy package.',
+      ),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  })).optional(),
+};
+
+export const manifestV2Schema = z.strictObject({
+  schemaVersion: z.literal(2),
+  ...manifestFields,
 });
+
+const logoAssetSchema = z.strictObject({
+  path: nonEmptyStringSchema
+    .regex(/^[^/\\](?:.*[^/\\])?$/, 'Logo path must be relative.')
+    .refine(
+      (value) => !value.split(/[\\/]/).some((part) => part === '..' || part === '.' || part === ''),
+      'Logo path must stay inside the Proxy package.',
+    ),
+  mediaType: z.enum(['image/png', 'image/webp']),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/, 'Expected a lowercase SHA-256 digest.'),
+});
+
+export const manifestV3Schema = z.strictObject({
+  schemaVersion: z.literal(3),
+  ...manifestFields,
+  branding: z.strictObject({
+    logo: z.strictObject({
+      light: logoAssetSchema,
+      dark: logoAssetSchema.optional(),
+    }),
+  }),
+});
+
+export const manifestSchema = z.discriminatedUnion('schemaVersion', [
+  manifestV2Schema,
+  manifestV3Schema,
+]);
 
 export const capabilitiesSchema = z.record(
   nonEmptyStringSchema,
@@ -126,7 +172,7 @@ export const initializeParamsSchema = z.strictObject({
 export const initializeResultSchema = z.strictObject({
   protocol: z.strictObject({
     name: z.literal(PROTOCOL_NAME),
-    version: z.literal(PROTOCOL_V2),
+    version: z.enum([PROTOCOL_V2, PROTOCOL_V2_LEGACY]),
   }),
   plugin: z.strictObject({
     id: pluginIdSchema,
@@ -288,10 +334,23 @@ export const availableActionSchema = z.strictObject({
 
 export const availableActionsSchema = z.record(nonEmptyStringSchema, availableActionSchema);
 
+export const specialCatalogsSchema = z.strictObject({
+  model: nonEmptyStringSchema.optional(),
+  thinking: nonEmptyStringSchema.optional(),
+  fast: nonEmptyStringSchema.optional(),
+  approvalMode: nonEmptyStringSchema.optional(),
+}).superRefine((value, context) => {
+  const ids = Object.values(value).filter((id): id is string => id !== undefined);
+  if (new Set(ids).size !== ids.length) {
+    context.addIssue({ code: 'custom', message: 'Special Catalog option ids must be unique.' });
+  }
+});
+
 export const catalogResultSchema = z.strictObject({
   catalogRevision: nonEmptyStringSchema,
   input: z.array(inputDescriptorSchema),
   configOptions: z.array(configOptionSchema),
+  specialCatalogs: specialCatalogsSchema.optional(),
   actions: z.array(catalogActionDescriptorSchema).optional(),
   slashCommands: z.array(slashCommandSchema),
 });
@@ -336,6 +395,7 @@ export const hostServiceDescriptorSchema = z.strictObject({
     headers: z.record(nonEmptyStringSchema, z.string()).optional(),
   }),
 });
+export type HostServiceDescriptor = z.infer<typeof hostServiceDescriptorSchema>;
 
 const nativeSessionRefSchema = z.strictObject({
   id: nonEmptyStringSchema,
@@ -455,6 +515,7 @@ export const sessionForkParamsSchema = z.strictObject({
   sourceStreamId: nonEmptyStringSchema,
   sessionId: nonEmptyStringSchema,
   anchor: forkAnchorSchema,
+  hostServices: z.array(hostServiceDescriptorSchema).optional(),
 });
 
 export const sessionForkResultSchema = z.strictObject({
@@ -508,6 +569,10 @@ const sessionCreateParamsSchema = z.strictObject({
     roots: z.array(nonEmptyStringSchema).min(1),
   }),
   nativeSession: nativeSessionRefSchema.optional(),
+  forkBoundaries: z.array(z.strictObject({
+    turnId: nonEmptyStringSchema,
+    sourceTurnId: nonEmptyStringSchema,
+  })).max(10_000).optional(),
   config: configMapSchema,
   hostServices: z.array(hostServiceDescriptorSchema).optional(),
 });
@@ -1152,6 +1217,8 @@ export const resultSchemas = {
 } as const;
 
 export type ManifestV2 = z.infer<typeof manifestV2Schema>;
+export type ManifestV3 = z.infer<typeof manifestV3Schema>;
+export type ProxyManifest = z.infer<typeof manifestSchema>;
 export type InitializeParams = z.infer<typeof initializeParamsSchema>;
 export type InitializeResult = z.infer<typeof initializeResultSchema>;
 export type ProxyRequest = z.infer<typeof proxyRequestSchema>;
@@ -1163,6 +1230,7 @@ export type ConfigOption = z.infer<typeof configOptionSchema>;
 export type ConfigValue = z.infer<typeof configValueSchema>;
 export type ReplayEvent = z.infer<typeof replayEventSchemaUnion>;
 export type CatalogResult = z.infer<typeof catalogResultSchema>;
+export type SpecialCatalogs = z.infer<typeof specialCatalogsSchema>;
 export type CatalogActionDescriptor = z.infer<typeof catalogActionDescriptorSchema>;
 export type AvailableActions = z.infer<typeof availableActionsSchema>;
 export type ResumeRef = z.infer<typeof resumeRefSchema>;

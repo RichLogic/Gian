@@ -6,6 +6,7 @@ import type {
   EventEnvelope,
   ExecutorConfigState,
   InputItem,
+  MessageContextItem,
   NativeConfigOption,
   ProxyNotification,
   Session,
@@ -63,7 +64,8 @@ function isReplaceableSnapshot(event: ChatEvent): boolean {
 }
 
 function notificationProviderTurnId(notification: ProxyNotification): string | null {
-  const value = notification.params?.turnId;
+  const params = notification.params as { sourceTurnId?: unknown; turnId?: unknown } | undefined;
+  const value = params?.sourceTurnId ?? params?.turnId;
   if (typeof value === 'string' && value.length > 0) return value;
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   return null;
@@ -104,6 +106,8 @@ interface EventCoordinatorCallbacks {
     text: string,
     items?: InputItem[],
     toolRequestId?: string,
+    contextItems?: MessageContextItem[],
+    composerDocument?: import('@gian/shared').ComposerDocument,
   ) => Promise<unknown>;
   onInteractionResolved?: (interactionId: string) => void;
 }
@@ -820,7 +824,7 @@ export class SessionEventCoordinator {
     active: ActiveTurn,
   ): boolean {
     if (!('turnId' in notification.params)) return true;
-    const providerTurnId = notification.params.turnId;
+    const providerTurnId = notification.params.sourceTurnId;
     const eventId = notification.params.eventId;
     const payloadHash = protocolEventPayloadHash(notification);
     const existing = this.db.prepare(
@@ -855,11 +859,38 @@ export class SessionEventCoordinator {
         );
       }
       if (!mapped) {
-        this.db.prepare(
-          `INSERT INTO proxy_replay_turns
-            (session_id, provider_turn_id, turn_id, replay_owned)
-           VALUES (?, ?, ?, 0)`,
-        ).run(sessionId, providerTurnId, active.id);
+        const hostMapping = this.db.prepare(
+          `SELECT provider_turn_id, replay_owned
+           FROM proxy_replay_turns
+           WHERE session_id = ? AND turn_id = ?`,
+        ).get(sessionId, active.id) as {
+          provider_turn_id: string;
+          replay_owned: number;
+        } | undefined;
+        if (
+          hostMapping
+          && hostMapping.provider_turn_id === active.id
+          && hostMapping.replay_owned === 0
+        ) {
+          // sendMessage reserves the Host turn before the Provider has exposed
+          // its native sourceTurnId. Replace that provisional identity on the
+          // first canonical live event so Fork anchors use the Provider boundary.
+          this.db.prepare(
+            `UPDATE proxy_replay_turns
+             SET provider_turn_id = ?
+             WHERE session_id = ? AND turn_id = ?`,
+          ).run(providerTurnId, sessionId, active.id);
+        } else if (hostMapping) {
+          throw protocolViolation(
+            `Host turn ${active.id} changed Proxy turn identity.`,
+          );
+        } else {
+          this.db.prepare(
+            `INSERT INTO proxy_replay_turns
+              (session_id, provider_turn_id, turn_id, replay_owned)
+             VALUES (?, ?, ?, 0)`,
+          ).run(sessionId, providerTurnId, active.id);
+        }
       }
       for (const event of events) {
         const result = this.history.appendEvent(
@@ -1239,9 +1270,9 @@ export class SessionEventCoordinator {
   }
 
   /**
-   * Worktree auto-detection: when the agent runs `git worktree add` itself
-   * (outside Gian's own worktree lifecycle), record the new worktree's path on
-   * the session so the web can switch the VIEW-level working tree to it.
+   * Worktree fallback detection: when the agent runs `git worktree add`
+   * directly, record the verified path so Web can offer a post-Turn adoption
+   * prompt. This path never changes runtime or Terminal cwd.
    *
    * Guards, in order:
    *   1. command must actually parse as `git worktree add <path>`;
@@ -1276,13 +1307,22 @@ export class SessionEventCoordinator {
     // scan cannot overwrite a concurrent session transition.
     const updated = this.db
       .prepare(
-        `UPDATE sessions SET detected_worktree_path = ?
+        `UPDATE sessions
+         SET detected_worktree_path = ?, detected_worktree_source = 'agent',
+             detected_worktree_revision = detected_worktree_revision + 1
          WHERE id = ? AND workspace_id = ? AND worktree_path IS NULL
            AND (detected_worktree_path IS NULL OR detected_worktree_path <> ?)`,
       )
       .run(detected, sessionId, session.workspace_id, detected);
     if (updated.changes > 0) {
-      this.broadcastSessionUpdated(sessionId, { detected_worktree_path: detected });
+      const row = this.db.prepare(
+        'SELECT detected_worktree_revision FROM sessions WHERE id = ?',
+      ).get(sessionId) as { detected_worktree_revision: number };
+      this.broadcastSessionUpdated(sessionId, {
+        detected_worktree_path: detected,
+        detected_worktree_source: 'agent',
+        detected_worktree_revision: row.detected_worktree_revision,
+      });
       this.broadcaster.broadcast({
         type: 'workspace:git-updated',
         workspace_id: workspace.id,
@@ -1301,7 +1341,14 @@ export class SessionEventCoordinator {
     const next = this.queue.popNext(sessionId);
     if (!next) return false;
     this.broadcastQueueUpdated(sessionId);
-    void this.callbacks.sendMessage(sessionId, next.text, next.items, next.toolRequestId).catch(err => {
+    void this.callbacks.sendMessage(
+      sessionId,
+      next.text,
+      next.items,
+      next.toolRequestId,
+      next.contextItems,
+      next.composerDocument,
+    ).catch(err => {
       console.error('[queue] auto-send failed', err);
     });
     return true;
@@ -1445,7 +1492,7 @@ export class SessionEventCoordinator {
         data: { turnId: active.id, status },
         display: {
           type: 'state.turn-completed',
-          data: { turnId: active.id },
+          data: { turnId: active.id, status },
         },
       };
       // Broadcast before potentially expensive terminal compaction so every
@@ -1505,6 +1552,8 @@ export class SessionEventCoordinator {
         id: e.id,
         text: e.text,
         ...(e.items ? { items: e.items } : {}),
+        ...(e.contextItems ? { context_items: e.contextItems } : {}),
+        ...(e.composerDocument ? { composer_document: e.composerDocument } : {}),
       })),
     });
   }

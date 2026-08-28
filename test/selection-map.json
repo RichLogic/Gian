@@ -200,18 +200,49 @@
       "id": "gian-tool",
       "patterns": [
         "packages/shared/src/tool.ts",
+        "packages/shared/src/model.ts",
+        "packages/shared/src/runtime-contracts.ts",
         "packages/host/src/tool/**",
+        "packages/host/src/workspace/git.ts",
+        "packages/host/src/session/event-coordinator.ts",
+        "packages/host/src/session/manager.ts",
         "packages/host/migrations/056_gian_tool_v0.sql",
+        "packages/host/migrations/061_gian_tool_credentials.sql",
+        "packages/host/migrations/062_gian_tool_roles_and_session_ownership.sql",
+        "packages/host/migrations/065_gian_tool_internal_credential_renewal.sql",
+        "packages/host/migrations/066_session_worktree_view_source.sql",
         "packages/host/test/gian-tool-*.test.ts",
+        "packages/host/test/gian-session-host-services.test.ts",
+        "packages/host/test/session-agent-binding.test.ts",
         "packages/tool-cli/**",
         "packages/tool-mcp/**",
-        "scripts/fixtures/gian-tool-mcp-provider-cases.json"
+        "packages/proxy-protocol/src/schemas.ts",
+        "packages/proxy-protocol/src/conformance.ts",
+        "packages/proxies/codex-proxy/src/core/**",
+        "packages/proxies/codex-proxy/src/protocol/**",
+        "packages/proxies/codex-proxy/src/runtime/**",
+        "packages/proxies/codex-proxy/skills/gian-session/SKILL.md",
+        "packages/web/src/App.tsx",
+        "packages/web/src/feedback.ts",
+        "packages/web/src/presentation/wt-view.ts",
+        "packages/web/src/components/Toaster.tsx",
+        "packages/web/test/wt-view.test.ts",
+        "packages/web/test/feedback.test.tsx",
+        "scripts/fixtures/gian-tool-mcp-provider-cases.json",
+        "docs/operations/gian-tool-v0-api-and-implementation.md",
+        "docs/adr/0043-authenticate-host-listened-gian-tool-mcp.md",
+        "docs/adr/0044-authorize-gian-tool-by-role-and-direct-session-ownership.md",
+        "docs/adr/0049-inject-session-scoped-gian-mcp.md",
+        "docs/adr/0050-create-view-only-worktrees-through-gian-tool.md"
       ],
       "modules": [
         "shared",
         "host",
         "tool-cli",
-        "tool-mcp"
+        "tool-mcp",
+        "proxy-protocol",
+        "codex-proxy",
+        "web"
       ],
       "scopes": [
         "unit",
@@ -223,7 +254,7 @@
         "quality:traceability",
         "quality:docs"
       ],
-      "reason": "Gian Tool contracts cross shared validation, Host domain orchestration, the private UDS boundary, and the CLI/MCP clients."
+      "reason": "Gian Tool contracts cross shared validation, role/direct-ownership authorization, Host domain orchestration, private transports, Session-scoped Host Service injection, worktree view context, and the Codex runtime adapter."
     },
     {
       "id": "host-process-git-runtime",
@@ -261,6 +292,7 @@
         "packages/host/migrations/052_sidechat_transients_and_fork_origin.sql",
         "packages/host/migrations/053_fork_request_identity.sql",
         "packages/host/migrations/054_sidechat_public_state.sql",
+        "packages/host/migrations/063_sidechat_turn_config.sql",
         "packages/host/test/fixtures/fake-sidechat-fork-proxy.mjs",
         "packages/host/test/sidechat-fork-*.test.ts",
         "packages/proxies/cc-proxy/src/protocol/v2-adapter.ts",
@@ -341,6 +373,32 @@
         "desktop-electron-smoke"
       ],
       "reason": "Desktop lifecycle changes require deterministic Desktop tests and an explicit Electron smoke."
+    },
+    {
+      "id": "proxy-branding",
+      "patterns": [
+        "packages/proxies/BRANDING.md"
+      ],
+      "modules": [
+        "cc-proxy",
+        "codex-proxy",
+        "dsh-proxy",
+        "host",
+        "kimi-proxy",
+        "proxy-protocol",
+        "scripts",
+        "web"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:docs"
+      ],
+      "reason": "Proxy-owned branding changes cross artifact manifests, Host asset validation, and Agent UI rendering."
     },
     {
       "id": "cc-proxy",
@@ -458,7 +516,7 @@
       "specialEntrypoints": [
         "dsh-proxy-runtime-canary"
       ],
-      "reason": "DSH proxy implements gian.proxy/2.0 against the frozen bridge contract."
+      "reason": "DSH proxy implements gian.proxy/2.1 against the frozen bridge contract."
     }
   ]
 }

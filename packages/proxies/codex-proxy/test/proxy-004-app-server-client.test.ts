@@ -169,7 +169,7 @@ async function installRuntime(
 
 test('PROXY-004: initialize opts into the experimental API required by runtimeWorkspaceRoots', () => {
   assert.deepEqual(buildInitializeParams(), {
-    clientInfo: { name: 'codex-proxy', version: '0.2.3' },
+    clientInfo: { name: 'codex-proxy', version: '0.2.10' },
     capabilities: {
       experimentalApi: true,
       requestAttestation: false,
@@ -426,6 +426,102 @@ test('PROXY-004: oversized stdout line fails before an unbounded buffer can grow
   child.exit();
 });
 
+test('PROXY-004: resume, bounded fork, and item injection leave the shared runtime usable', async () => {
+  const client = new CodexAppServerClient();
+  const { child } = await installRuntime(client);
+  const requests: Array<{ method?: string; params?: unknown }> = [];
+  let stops = 0;
+  client.on('runtimeStopped', () => { stops += 1; });
+  child.stdin.onWrite = (raw) => {
+    const request = JSON.parse(raw) as {
+      id?: number;
+      method?: string;
+      params?: unknown;
+    };
+    requests.push(request);
+    const result = request.method === 'thread/resume'
+      ? {
+          ...CODEX_APP_SERVER_V2_NAMED_PERMISSIONS.response,
+          thread: { id: 'thread-large-history' },
+        }
+      : request.method === 'thread/fork'
+        ? {
+            ...CODEX_APP_SERVER_V2_NAMED_PERMISSIONS.response,
+            thread: { id: 'thread-forked' },
+          }
+      : { thread: { id: 'thread-survivor' } };
+    queueMicrotask(() => child.stdout.write(`${JSON.stringify({ id: request.id, result })}\n`));
+  };
+
+  const resumed = await client.resumeThread('thread-large-history');
+  assert.deepEqual(requests[0], {
+    id: 1,
+    method: 'thread/resume',
+    params: {
+      threadId: 'thread-large-history',
+      excludeTurns: true,
+    },
+  });
+  assert.equal(resumed.thread.id, 'thread-large-history');
+  const forked = await client.forkThread('thread-large-history', {
+    lastTurnId: 'turn-8000',
+    cwd: '/repo',
+  });
+  assert.deepEqual(requests[1], {
+    id: 2,
+    method: 'thread/fork',
+    params: {
+      threadId: 'thread-large-history',
+      excludeTurns: true,
+      lastTurnId: 'turn-8000',
+      cwd: '/repo',
+    },
+  });
+  assert.equal(forked.thread.id, 'thread-forked');
+  const activeFork = await client.forkThread('thread-large-history', {
+    beforeTurnId: 'turn-active',
+    cwd: '/repo',
+  });
+  assert.deepEqual(requests[2], {
+    id: 3,
+    method: 'thread/fork',
+    params: {
+      threadId: 'thread-large-history',
+      excludeTurns: true,
+      beforeTurnId: 'turn-active',
+      cwd: '/repo',
+    },
+  });
+  assert.equal(activeFork.thread.id, 'thread-forked');
+  const injected = [{
+    type: 'message',
+    role: 'user',
+    content: [{ type: 'input_text', text: 'active input' }],
+  }, {
+    type: 'message',
+    role: 'user',
+    content: [{ type: 'input_text', text: 'boundary' }],
+  }];
+  await client.injectThreadItems('thread-forked', injected);
+  assert.deepEqual(requests[3], {
+    id: 4,
+    method: 'thread/inject_items',
+    params: { threadId: 'thread-forked', items: [injected[0]] },
+  });
+  assert.deepEqual(requests[4], {
+    id: 5,
+    method: 'thread/inject_items',
+    params: { threadId: 'thread-forked', items: [injected[1]] },
+  });
+  assert.deepEqual(await client.readThread('thread-survivor'), {
+    thread: { id: 'thread-survivor' },
+  });
+  assert.equal(stops, 0);
+  assert.deepEqual(child.killSignals, []);
+  await client.stop();
+  child.exit();
+});
+
 // ---------------------------------------------------------------------------
 // PROXY-004/005 — runtime failure, deadlines, deterministic recovery
 // ---------------------------------------------------------------------------
@@ -437,15 +533,16 @@ test('PROXY-004: child exit rejects every pending request and notifies exactly o
   const b = makePending();
   internals(client).pending.set(1, a.pending);
   internals(client).pending.set(2, b.pending);
-  let stops = 0;
-  client.on('runtimeStopped', () => { stops += 1; });
+  const causes: Error[] = [];
+  client.on('runtimeStopped', cause => { causes.push(cause); });
   child.exit(17);
   child.emit('exit', 17, null);
   await assert.rejects(a.promise, /Codex app-server stopped \(exit code 17\)/);
   await assert.rejects(b.promise, /Codex app-server stopped \(exit code 17\)/);
   assert.equal(internals(client).pending.size, 0);
   assert.equal(internals(client).startPromise, null);
-  assert.equal(stops, 1);
+  assert.equal(causes.length, 1);
+  assert.match(causes[0]?.message ?? '', /Codex app-server stopped \(exit code 17\)/);
 });
 
 test('PROXY-005: stdout EOF rejects pending RPCs and enforces TERM to KILL grace', async () => {
@@ -693,6 +790,48 @@ test('thread/start inherits config.toml and captures the effective permission pr
     approvalsReviewer: 'user',
     permissions: 'my-profile',
   });
+});
+
+test('thread bootstrap RPCs forward trusted per-thread MCP config exactly', async () => {
+  const client = new CodexAppServerClient();
+  const calls: Array<{ method: string; params: unknown }> = [];
+  const config = {
+    mcp_servers: {
+      gian: {
+        url: 'http://127.0.0.1:8991/internal/mcp',
+        http_headers: { Authorization: 'Bearer test-token' },
+      },
+    },
+  };
+  (client as unknown as { request(method: string, params: unknown): Promise<unknown> }).request =
+    async (method, params) => {
+      calls.push({ method, params });
+      return {
+        ...CODEX_APP_SERVER_V2_NAMED_PERMISSIONS.response,
+        thread: { id: method === 'thread/fork' ? 'forked' : 'thread' },
+      };
+    };
+
+  await client.startThread({ cwd: '/repo', config });
+  await client.resumeThread('thread-existing', { config });
+  await client.forkThread('thread-existing', { lastTurnId: 'turn-1', cwd: '/repo', config });
+
+  assert.deepEqual(calls, [{
+    method: 'thread/start',
+    params: { cwd: '/repo', experimentalRawEvents: false, config },
+  }, {
+    method: 'thread/resume',
+    params: { threadId: 'thread-existing', config, excludeTurns: true },
+  }, {
+    method: 'thread/fork',
+    params: {
+      threadId: 'thread-existing',
+      excludeTurns: true,
+      lastTurnId: 'turn-1',
+      cwd: '/repo',
+      config,
+    },
+  }]);
 });
 
 test('thread/start accepts the complete versioned granular permission shape', async () => {

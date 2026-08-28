@@ -1,4 +1,4 @@
-import type { Session } from '@gian/shared';
+import type { ComposerDocument, MessageContextItem, Session } from '@gian/shared';
 
 export interface PendingFirstAttachment {
   id: string;
@@ -13,6 +13,8 @@ export interface PendingFirstMessage {
   scope: { kind: 'workspace' | 'task'; id: string };
   text: string;
   attachments: PendingFirstAttachment[];
+  contextItems?: MessageContextItem[];
+  composerDocument?: ComposerDocument;
 }
 
 /** String remains accepted while older isolated tests and callers migrate. */
@@ -35,6 +37,8 @@ export function pendingFirstMessageForCreatedSession(
       scope,
       text: value,
       attachments: [],
+      contextItems: [],
+      composerDocument: undefined,
     };
   }
   if (value.scope.kind === 'task') {

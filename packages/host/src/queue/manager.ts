@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import type { InputItem } from '@gian/shared';
+import {
+  normalizeComposerDocument,
+  type ComposerDocument,
+  type InputItem,
+  type MessageContextItem,
+} from '@gian/shared';
 import type { Db } from '../storage/db.js';
 
 export interface QueueEntry {
@@ -9,6 +14,8 @@ export interface QueueEntry {
   /** Structured input items (e.g. localImage attachments) carried with the
    *  message — drained entries pass them straight to sendMessage. */
   items?: InputItem[];
+  contextItems?: MessageContextItem[];
+  composerDocument?: ComposerDocument;
   toolRequestId?: string;
   createdAt: number;
 }
@@ -18,6 +25,8 @@ interface QueueRow {
   session_id: string;
   text: string;
   items_json: string | null;
+  context_items_json: string | null;
+  composer_document_json: string | null;
   sort_order: number;
   created_at: string;
   tool_request_id: string | null;
@@ -25,6 +34,8 @@ interface QueueRow {
 
 function rowToEntry(row: QueueRow): QueueEntry {
   let items: InputItem[] | undefined;
+  let contextItems: MessageContextItem[] | undefined;
+  let composerDocument: ComposerDocument | undefined;
   if (row.items_json) {
     try {
       const parsed = JSON.parse(row.items_json) as unknown;
@@ -33,11 +44,28 @@ function rowToEntry(row: QueueRow): QueueEntry {
       // Corrupt payload — degrade to text-only rather than losing the entry.
     }
   }
+  if (row.context_items_json) {
+    try {
+      const parsed = JSON.parse(row.context_items_json) as unknown;
+      if (Array.isArray(parsed)) contextItems = parsed as MessageContextItem[];
+    } catch {
+      // Corrupt payload - preserve the rest of the queued message.
+    }
+  }
+  if (row.composer_document_json) {
+    try {
+      composerDocument = normalizeComposerDocument(JSON.parse(row.composer_document_json)) ?? undefined;
+    } catch {
+      // Corrupt document - preserve the legacy text/resources fallback.
+    }
+  }
   return {
     id: row.id,
     sessionId: row.session_id,
     text: row.text,
     ...(items ? { items } : {}),
+    ...(contextItems ? { contextItems } : {}),
+    ...(composerDocument ? { composerDocument } : {}),
     ...(row.tool_request_id ? { toolRequestId: row.tool_request_id } : {}),
     createdAt: Date.parse(row.created_at),
   };
@@ -58,7 +86,12 @@ export class QueueManager {
     sessionId: string,
     text: string,
     items?: InputItem[],
-    options: { id?: string; toolRequestId?: string } = {},
+    options: {
+      id?: string;
+      toolRequestId?: string;
+      contextItems?: MessageContextItem[];
+      composerDocument?: ComposerDocument;
+    } = {},
   ): QueueEntry {
     const id = options.id ?? randomUUID();
     const now = new Date().toISOString();
@@ -67,18 +100,37 @@ export class QueueManager {
       .get(sessionId) as { m: number | null };
     const sortOrder = (maxRow.m ?? -1) + 1;
     const itemsJson = items && items.length > 0 ? JSON.stringify(items) : null;
+    const contextItemsJson = options.contextItems && options.contextItems.length > 0
+      ? JSON.stringify(options.contextItems)
+      : null;
+    const composerDocumentJson = options.composerDocument
+      ? JSON.stringify(options.composerDocument)
+      : null;
     this.db
       .prepare(
         `INSERT INTO queue_entries
-          (id, session_id, text, items_json, sort_order, created_at, tool_request_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          (id, session_id, text, items_json, context_items_json, composer_document_json,
+           sort_order, created_at, tool_request_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, sessionId, text, itemsJson, sortOrder, now, options.toolRequestId ?? null);
+      .run(
+        id,
+        sessionId,
+        text,
+        itemsJson,
+        contextItemsJson,
+        composerDocumentJson,
+        sortOrder,
+        now,
+        options.toolRequestId ?? null,
+      );
     return rowToEntry({
       id,
       session_id: sessionId,
       text,
       items_json: itemsJson,
+      context_items_json: contextItemsJson,
+      composer_document_json: composerDocumentJson,
       sort_order: sortOrder,
       created_at: now,
       tool_request_id: options.toolRequestId ?? null,

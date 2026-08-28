@@ -145,7 +145,8 @@ interface ServiceSessionShape {
 
 type SidechatAnchor =
   | { type: 'empty' }
-  | { type: 'turn'; turnId: string; sourceTurnId: string };
+  | { type: 'turn'; turnId: string; sourceTurnId: string }
+  | { type: 'activeInput'; turnId: string; sourceTurnId: string };
 
 interface SidechatRecord {
   parentSessionId: string;
@@ -220,7 +221,7 @@ export interface CatalogOption {
 }
 
 const PROTOCOL_NAME = 'gian.proxy';
-const PROTOCOL_V2 = '2.0';
+const PROTOCOL_V2 = '2.1';
 const REQUEST_USER_INPUT_METHOD = 'item/tool/requestUserInput';
 
 const CAPABILITIES = {
@@ -229,9 +230,11 @@ const CAPABILITIES = {
   'session.rename': 1,
   'session.native.list': 1,
   'session.replay': 1,
+  'session.create.forkBoundaries': 1,
   sidechat: 1,
   'session.fork': 1,
   'session.fork.atTurn': 1,
+  'integration.mcp.streamableHttp': 1,
   'turn.steer': 1,
   interaction: 1,
   'event.reasoning': 1,
@@ -248,6 +251,36 @@ function record(value: unknown): Record<string, unknown> {
 
 function nonEmptyString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+export function codexHostServiceConfig(value: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const servers: Record<string, unknown> = {};
+  for (const raw of value) {
+    const service = record(raw);
+    const id = nonEmptyString(service.id);
+    const transport = record(service.transport);
+    const url = nonEmptyString(transport.url);
+    if (!id || service.protocol !== 'mcp' || transport.type !== 'streamable-http' || !url) {
+      throw new CodexJsonRpcError(
+        -32602,
+        'hostServices contains an invalid Streamable HTTP MCP descriptor.',
+      );
+    }
+    const rawHeaders = record(transport.headers);
+    const headers: Record<string, string> = {};
+    for (const [key, headerValue] of Object.entries(rawHeaders)) {
+      if (typeof headerValue !== 'string') {
+        throw new CodexJsonRpcError(-32602, 'hostServices transport headers must be strings.');
+      }
+      headers[key] = headerValue;
+    }
+    servers[id] = {
+      url,
+      ...(Object.keys(headers).length > 0 ? { http_headers: headers } : {}),
+    };
+  }
+  return { mcp_servers: servers };
 }
 
 function nonNegativeInteger(value: unknown): number | undefined {
@@ -599,7 +632,6 @@ function serializeOption(option: CatalogOption) {
     displayName: option.displayName,
     ...(option.description ? { description: option.description } : {}),
     binding: option.binding,
-    ...(option.role ? { role: option.role } : {}),
     control: option.control,
     required: option.required,
     defaultValue: option.defaultValue,
@@ -607,6 +639,16 @@ function serializeOption(option: CatalogOption) {
     ...(option.constraints ? { constraints: option.constraints } : {}),
     ...(option.visibleWhen ? { visibleWhen: option.visibleWhen } : {}),
     ...(option.enabledWhen ? { enabledWhen: option.enabledWhen } : {}),
+  };
+}
+
+function specialCatalogs(options: CatalogOption[]) {
+  const id = (role: CatalogOption['role']) => options.find((option) => option.role === role)?.id;
+  return {
+    ...(id('model') ? { model: id('model') } : {}),
+    ...(id('effort') ? { thinking: id('effort') } : {}),
+    ...(id('fast') ? { fast: id('fast') } : {}),
+    ...(id('approval_mode') ? { approvalMode: id('approval_mode') } : {}),
   };
 }
 
@@ -972,6 +1014,7 @@ export class CodexProtocolV2Adapter {
   private readonly sourceTurnByHostTurn = new Map<string, string>();
   private readonly hostTurnBySourceTurn = new Map<string, string>();
   private readonly pendingInputByTurn = new Map<string, unknown[]>();
+  private readonly acceptedInputBatchesByTurn = new Map<string, unknown[][]>();
   private readonly eventOccurrences = new Map<string, number>();
   private readonly emittedFactsByTurn = new Map<string, Map<string, string>>();
   private readonly startedTurns = new Set<string>();
@@ -1049,7 +1092,7 @@ export class CodexProtocolV2Adapter {
     const protocol = record(params.protocol);
     const versions = Array.isArray(protocol.versions) ? protocol.versions.map(String) : [];
     if (protocol.name !== PROTOCOL_NAME || !versions.includes(PROTOCOL_V2)) {
-      throw new CodexProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.0 is required.');
+      throw new CodexProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.1 is required.');
     }
     this.initialized = true;
     return {
@@ -1062,7 +1105,8 @@ export class CodexProtocolV2Adapter {
 
   private async catalog() {
     const capabilities = await this.service.listCapabilities();
-    const configOptions = catalogConfigOptions(capabilities).map(serializeOption);
+    const advertised = catalogConfigOptions(capabilities);
+    const configOptions = advertised.map(serializeOption);
     this.advertisedOptions.clear();
     for (const option of catalogConfigOptions(capabilities)) {
       this.advertisedOptions.set(option.id, option);
@@ -1098,6 +1142,7 @@ export class CodexProtocolV2Adapter {
         { type: 'skill' as const },
       ],
       configOptions,
+      specialCatalogs: specialCatalogs(advertised),
       actions: [
         { id: 'sidechat.create', supported: true },
         { id: 'session.fork', supported: true },
@@ -1108,6 +1153,7 @@ export class CodexProtocolV2Adapter {
     payload.catalogRevision = stableId('catalog', {
       input: payload.input,
       configOptions,
+      specialCatalogs: payload.specialCatalogs,
       actions: payload.actions,
     });
     this.catalogRevision = payload.catalogRevision;
@@ -1146,6 +1192,7 @@ export class CodexProtocolV2Adapter {
     const fingerprint = stableStringify({
       workspace: { cwd, roots },
       nativeSession: params.nativeSession,
+      forkBoundaries: params.forkBoundaries,
       config: params.config,
       hostServices: params.hostServices,
     });
@@ -1169,12 +1216,7 @@ export class CodexProtocolV2Adapter {
     if (this.sessions.has(sessionId)) {
       throw new CodexProtocolError('CONFLICT', `Session ${sessionId} is already attached.`);
     }
-    if (params.hostServices !== undefined) {
-      throw new CodexProtocolError(
-        'CAPABILITY_NOT_SUPPORTED',
-        'Codex Proxy does not advertise integration.mcp.streamableHttp.',
-      );
-    }
+    const hostServiceConfig = codexHostServiceConfig(params.hostServices);
     await this.catalog();
     const config = this.validateConfig(record(params.config), 'session');
     const native = record(params.nativeSession);
@@ -1183,6 +1225,7 @@ export class CodexProtocolV2Adapter {
     const result = await this.service.createSession({
       cwd,
       ...(nativeSessionId ? { threadId: nativeSessionId } : {}),
+      ...(hostServiceConfig ? { config: hostServiceConfig } : {}),
     });
     const serviceSession = result.session as {
       id: string;
@@ -1209,6 +1252,7 @@ export class CodexProtocolV2Adapter {
       ),
       sequence: 0,
     };
+    this.restoreForkBoundaries(session, params.forkBoundaries);
     this.sessions.set(session.id, session);
     this.sessionByServiceId.set(session.serviceSessionId, session);
     this.ledger.attach(session.id, session.streamId);
@@ -1266,6 +1310,14 @@ export class CodexProtocolV2Adapter {
     const forked = await this.service.forkSession({
       sessionId: parent.serviceSessionId,
       ...(anchor.type === 'turn' ? { lastTurnId: anchor.sourceTurnId } : {}),
+      ...(anchor.type === 'activeInput'
+        ? {
+            beforeTurnId: anchor.sourceTurnId,
+            activeInput: (this.acceptedInputBatchesByTurn.get(
+              this.turnKey(parent.id, anchor.turnId),
+            ) ?? []).map((batch) => this.codexInput(batch)),
+          }
+        : {}),
     });
     const serviceSession = forked.session as ServiceSessionShape;
     const session = this.attachForkedSession(sidechatId, parent, serviceSession);
@@ -1379,7 +1431,12 @@ export class CodexProtocolV2Adapter {
     if (!sourceSessionId || !sourceStreamId || !sessionId || (anchor.type !== 'head' && anchor.type !== 'turn')) {
       throw new CodexJsonRpcError(-32602, 'sourceSessionId, sourceStreamId, sessionId, and anchor are required.');
     }
-    const fingerprint = stableStringify({ sourceSessionId, sourceStreamId, anchor });
+    const fingerprint = stableStringify({
+      sourceSessionId,
+      sourceStreamId,
+      anchor,
+      hostServices: params.hostServices,
+    });
     const previous = this.forkResults.get(sessionId);
     if (previous) {
       if (previous.fingerprint !== fingerprint) {
@@ -1392,9 +1449,11 @@ export class CodexProtocolV2Adapter {
     }
     const source = this.requireOrdinaryAttached(sourceSessionId, sourceStreamId);
     const boundary = this.forkBoundary(source, anchor);
+    const hostServiceConfig = codexHostServiceConfig(params.hostServices);
     const forked = await this.service.forkSession({
       sessionId: source.serviceSessionId,
       lastTurnId: boundary.sourceTurnId,
+      ...(hostServiceConfig ? { config: hostServiceConfig } : {}),
     });
     const child = this.attachForkedSession(
       sessionId,
@@ -1469,8 +1528,21 @@ export class CodexProtocolV2Adapter {
   }
 
   private sidechatAnchor(session: AttachedSession): SidechatAnchor {
-    if (this.activeTurnBySession.has(session.id)) {
-      throw new CodexProtocolError('SESSION_BUSY', 'Side Chat requires an idle parent Session.');
+    const activeTurnId = this.activeTurnBySession.get(session.id);
+    if (activeTurnId) {
+      const key = this.turnKey(session.id, activeTurnId);
+      const sourceTurnId = this.sourceTurnByHostTurn.get(key);
+      const inputBatches = this.acceptedInputBatchesByTurn.get(key);
+      if (sourceTurnId && inputBatches?.length) {
+        return { type: 'activeInput', turnId: activeTurnId, sourceTurnId };
+      }
+      throw new CodexProtocolError(
+        'FORK_BOUNDARY_UNAVAILABLE',
+        'The active input has not established a stable Provider Turn boundary yet.',
+      );
+    }
+    if (session.state !== 'idle') {
+      throw new CodexProtocolError('SESSION_BUSY', 'Side Chat requires an idle or active parent Session.');
     }
     const boundary = this.latestTerminalBoundary(session.id);
     if (boundary) return { type: 'turn', ...boundary };
@@ -1516,25 +1588,55 @@ export class CodexProtocolV2Adapter {
     return null;
   }
 
+  private restoreForkBoundaries(session: AttachedSession, value: unknown): void {
+    if (!Array.isArray(value)) return;
+    const order: string[] = [];
+    for (const item of value) {
+      const boundary = record(item);
+      const turnId = nonEmptyString(boundary.turnId);
+      const sourceTurnId = nonEmptyString(boundary.sourceTurnId);
+      if (!turnId || !sourceTurnId || order.includes(turnId)) continue;
+      const hostKey = this.turnKey(session.id, turnId);
+      this.sourceTurnByHostTurn.set(hostKey, sourceTurnId);
+      this.hostTurnBySourceTurn.set(this.turnKey(session.id, sourceTurnId), turnId);
+      this.terminalTurns.add(hostKey);
+      order.push(turnId);
+    }
+    if (order.length > 0) this.terminalOrderBySession.set(session.id, order);
+  }
+
   private availableActions(session: AttachedSession) {
-    const busy = this.activeTurnBySession.has(session.id) || session.state !== 'idle';
+    const activeTurnId = this.activeTurnBySession.get(session.id);
+    const activeKey = activeTurnId ? this.turnKey(session.id, activeTurnId) : null;
+    const activeInputReady = Boolean(
+      activeKey
+      && this.sourceTurnByHostTurn.has(activeKey)
+      && this.acceptedInputBatchesByTurn.get(activeKey)?.length,
+    );
+    const idle = !activeTurnId && session.state === 'idle';
     const boundary = this.latestTerminalBoundary(session.id);
     const historyEmpty = (this.replayBySession.get(session.id)?.events.length ?? 0) === 0;
-    const unavailableReason = busy
+    const sidechatEnabled = activeInputReady || (idle && (boundary !== null || historyEmpty));
+    const sidechatReason = activeTurnId
+      ? 'Wait for the active input boundary to become available.'
+      : !idle
+        ? 'The Session is not available for a Side Chat.'
+        : 'No stable terminal turn is available in this attach generation.';
+    const forkUnavailableReason = !idle
       ? 'Wait for the active turn to finish.'
       : 'No stable terminal turn is available in this attach generation.';
     return {
       'sidechat.create': {
-        enabled: !busy && (boundary !== null || historyEmpty),
-        ...(!busy && (boundary !== null || historyEmpty) ? {} : { reason: unavailableReason }),
+        enabled: sidechatEnabled,
+        ...(sidechatEnabled ? {} : { reason: sidechatReason }),
       },
       'session.fork': {
-        enabled: !busy && boundary !== null,
-        ...(!busy && boundary !== null ? {} : { reason: unavailableReason }),
+        enabled: idle && boundary !== null,
+        ...(idle && boundary !== null ? {} : { reason: forkUnavailableReason }),
       },
       'session.fork.atTurn': {
-        enabled: !busy && boundary !== null,
-        ...(!busy && boundary !== null ? {} : { reason: unavailableReason }),
+        enabled: idle && boundary !== null,
+        ...(idle && boundary !== null ? {} : { reason: forkUnavailableReason }),
       },
     };
   }
@@ -1619,6 +1721,15 @@ export class CodexProtocolV2Adapter {
     this.activityOutputByTurn.set(this.turnKey(session.id, turnId), new Map());
     this.openContentByTurn.set(this.turnKey(session.id, turnId), new Map());
     this.pendingInputByTurn.set(this.turnKey(session.id, turnId), input);
+    const firstInput = record(input[0]);
+    const nativeCommand = firstInput.type === 'text' && typeof firstInput.text === 'string'
+      ? firstInput.text.trim().split(/\s+/, 1)[0]
+      : null;
+    // /compact owns a synthetic Host turn id that is not a real app-server
+    // fork boundary. Keep Side Chat unavailable until compaction terminates.
+    if (nativeCommand !== '/compact') {
+      this.acceptedInputBatchesByTurn.set(this.turnKey(session.id, turnId), [input]);
+    }
     this.historyWatchers.get(session.id)?.pause();
     try {
       const turnConfig = sessionConfigFromRequested(
@@ -1662,6 +1773,12 @@ export class CodexProtocolV2Adapter {
       sessionId: session.serviceSessionId,
       input: this.codexInput(input),
     });
+    const key = this.turnKey(session.id, turnId);
+    const batches = this.acceptedInputBatchesByTurn.get(key);
+    if (batches) {
+      batches.push(input);
+      this.acceptedInputBatchesByTurn.set(key, batches);
+    }
     return { accepted: true as const, turnId };
   }
 
@@ -1769,6 +1886,11 @@ export class CodexProtocolV2Adapter {
     this.historyWatchers.get(session.id)?.stop();
     this.historyWatchers.delete(session.id);
     this.ledger.close(session.id);
+    // session.close ends one attachment generation, not the durable Host
+    // identity. Force Recover creates a fresh facade with the same sessionId
+    // and native thread, so its next session.create must establish a new
+    // stream instead of being rejected as a permanently closed request.
+    this.sessionCreateFingerprints.delete(session.id);
     this.sessions.delete(session.id);
     this.sessionByServiceId.delete(session.serviceSessionId);
     this.replayBySession.delete(session.id);
@@ -1881,6 +2003,14 @@ export class CodexProtocolV2Adapter {
         this.startedTurns.add(this.turnKey(session.id, turnId));
         this.updateSession(session, { state: 'running', lastError: null });
         this.emitTurnEvent('turn.started', session, turnId, {});
+        if (!this.sidechats.has(session.id)) {
+          this.emitSessionEvent('session.updated', session, sessionUpdatedData({
+            state: session.state,
+            lastError: session.lastError,
+            availableActions: this.availableActions(session),
+            updatedAt: session.updatedAt,
+          }));
+        }
         {
           const key = this.turnKey(session.id, turnId);
           const pendingUsage = this.pendingUsageByTurn.get(key);
@@ -2351,6 +2481,7 @@ export class CodexProtocolV2Adapter {
     this.openContentByTurn.delete(key);
     this.emittedFactsByTurn.delete(key);
     this.pendingInputByTurn.delete(key);
+    this.acceptedInputBatchesByTurn.delete(key);
     for (const occurrenceKey of this.eventOccurrences.keys()) {
       if (occurrenceKey.startsWith(`${key}\u0000`)) this.eventOccurrences.delete(occurrenceKey);
     }

@@ -263,7 +263,7 @@ test('edit tool_call_update diffs emit schema-valid consecutive notifications', 
     proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -338,7 +338,7 @@ test('Grok gian.proxy/2 rejects a second attached session and hostServices', asy
   });
   const adapter = new GrokProtocolV2Adapter(service, '0.3.0', () => undefined);
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   await adapter.handle(v2Request('2', 'session.create', {
@@ -361,7 +361,7 @@ test('Grok gian.proxy/2 rejects a second attached session and hostServices', asy
     createRuntime: () => fakeRuntime(),
   }), '0.3.0', () => undefined);
   await fresh.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   await assert.rejects(
@@ -387,7 +387,7 @@ test('Grok gian.proxy/2 returns an empty Replay Event page before native history
   });
   const adapter = new GrokProtocolV2Adapter(service, '0.3.0', () => undefined);
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -415,7 +415,7 @@ test('Grok gian.proxy/2 rejects session-bound config on turn.start', async () =>
   });
   const adapter = new GrokProtocolV2Adapter(service, '0.3.0', () => undefined);
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -447,7 +447,7 @@ test('Grok gian.proxy/2 validates session config before creating a native sessio
   });
   const adapter = new GrokProtocolV2Adapter(service, '0.3.0', () => undefined);
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   await adapter.handle(v2Request('2', 'catalog.list', {}));
@@ -489,7 +489,7 @@ test('Grok gian.proxy/2 maps Host interrupt and native cancel to distinct stopRe
     notifications.push({ method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -531,7 +531,7 @@ test('Grok gian.proxy/2 maps Host interrupt and native cancel to distinct stopRe
     (method, params) => cancelledNotes.push({ method, params }),
   );
   await cancelledAdapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   const cancelledSession = await cancelledAdapter.handle(v2Request('2', 'session.create', {
@@ -582,7 +582,7 @@ test('Grok gian.proxy/2 keeps live and replay eventIds stable and imports native
     notifications.push({ method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -659,7 +659,7 @@ test('unknown ACP session updates become diagnostic activities and late events a
     notifications.push({ method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -717,7 +717,7 @@ test('identical session.create is idempotent and native list/delete stay consist
   });
   const adapter = new GrokProtocolV2Adapter(service, '0.3.0', () => undefined);
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   const params = {
@@ -767,7 +767,7 @@ test('a failed request flushes held turn notifications instead of dropping them'
     notifications.push({ method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -826,7 +826,7 @@ test('identical content deltas in one turn keep distinct eventIds', async () => 
     notifications.push({ method, params });
   });
   await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   const created = await adapter.handle(v2Request('2', 'session.create', {
@@ -876,7 +876,7 @@ test('replay after a new adapter process reuses persisted live sourceTurnId and 
     new NativeTurnIdentityStore(dataDir),
   );
   await liveAdapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   const created = await liveAdapter.handle(v2Request('2', 'session.create', {
@@ -927,7 +927,7 @@ test('replay after a new adapter process reuses persisted live sourceTurnId and 
     new NativeTurnIdentityStore(dataDir),
   );
   await replayAdapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   }));
   const adopted = await replayAdapter.handle(v2Request('2', 'session.create', {
@@ -1020,7 +1020,7 @@ test('Grok gian.proxy/2 maps ACP session/fork to durable Side Chat and head Fork
   });
 
   const initialized = resultSchemas.initialize.parse(await adapter.handle(v2Request('1', 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   })));
   assert.equal(initialized.capabilities.sidechat, 1);

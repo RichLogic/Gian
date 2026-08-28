@@ -44,6 +44,22 @@ function invalidResult(requestId: string, message: string): GianMcpCallResult {
   });
 }
 
+function permissionResult(requestId: string): GianMcpCallResult {
+  return mcpResult({
+    ok: false,
+    request_id: requestId,
+    error: {
+      code: 'PERMISSION_DENIED',
+      message: 'Gian Tool capability does not allow this operation',
+      retryable: false,
+    },
+  });
+}
+
+function methodAllowed(method: GianToolMethod, allowedMethods?: readonly GianToolMethod[]): boolean {
+  return allowedMethods === undefined || allowedMethods.includes(method);
+}
+
 export async function gianMcpCallerId(dataDir: string): Promise<string> {
   return localToolCallerId(dataDir, 'mcp');
 }
@@ -55,9 +71,11 @@ export async function dispatchGianMcpTool(options: {
   hostRequestId?: () => string;
   dataDir: string;
   callerId: string;
+  allowedMethods?: readonly GianToolMethod[];
   call?: GianMcpRpcCall;
 }): Promise<GianMcpCallResult> {
   const requestId = options.hostRequestId?.() ?? randomUUID();
+  if (!methodAllowed(options.method, options.allowedMethods)) return permissionResult(requestId);
   if (!options.args || typeof options.args !== 'object' || Array.isArray(options.args)) {
     return invalidResult(requestId, 'tool arguments must be an object');
   }
@@ -94,6 +112,7 @@ export async function dispatchGianMcpCall(options: {
   hostRequestId?: () => string;
   dataDir: string;
   callerId: string;
+  allowedMethods?: readonly GianToolMethod[];
   call?: GianMcpRpcCall;
 }): Promise<GianMcpCallResult> {
   const requestId = options.hostRequestId?.() ?? randomUUID();
@@ -106,6 +125,7 @@ export async function dispatchGianMcpCall(options: {
   if (typeof input['method'] !== 'string' || !isGianMcpTool(input['method'])) {
     return invalidResult(requestId, 'gian_call.method is invalid');
   }
+  if (!methodAllowed(input['method'], options.allowedMethods)) return permissionResult(requestId);
   if (!input['params'] || typeof input['params'] !== 'object' || Array.isArray(input['params'])) {
     return invalidResult(requestId, 'gian_call.params must be an object');
   }
@@ -121,6 +141,7 @@ export async function dispatchGianMcpCall(options: {
     hostRequestId: () => requestId,
     dataDir: options.dataDir,
     callerId: options.callerId,
+    ...(options.allowedMethods ? { allowedMethods: options.allowedMethods } : {}),
     ...(options.call ? { call: options.call } : {}),
   });
 }

@@ -141,7 +141,7 @@ test('ERR-004: Codex CLI replies METHOD_NOT_FOUND for unknown method', async () 
   const proxy = startProxy();
   try {
     await proxy.request('initialize', {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: '9.9.9' },
     });
     const response = await proxy.request('nonexistent.method');
@@ -159,12 +159,12 @@ test('ERR-004: Codex CLI stays responsive after malformed JSON', async () => {
     proxy.sendRaw('{not-json');
     proxyErrorResponseSchema.parse(await proxy.nextMessage());
     const response = await proxy.request('initialize', {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: '9.9.9' },
     });
     const result = initializeResultSchema.parse(response.result);
-    assert.equal(result.protocol.version, '2.0');
-    assert.equal(result.plugin.version, '0.2.3');
+    assert.equal(result.protocol.version, '2.1');
+    assert.equal(result.plugin.version, '0.2.10');
   } finally {
     await proxy.close();
   }
@@ -174,7 +174,7 @@ test('ERR-004: Codex CLI initialize reports plugin identity and shared scope', a
   const proxy = startProxy();
   try {
     const response = await proxy.request('initialize', {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: '9.9.9' },
     });
     const result = initializeResultSchema.parse(response.result);

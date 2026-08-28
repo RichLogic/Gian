@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { ProxyProtocolError } from '@gian/proxy-protocol';
-import type { Executor, ServerToClientMessage } from '@gian/shared';
+import type { ConfigValue, Executor, ServerToClientMessage } from '@gian/shared';
 import { openDatabase } from '../src/storage/db.js';
 import { SessionManager } from '../src/session/manager.js';
 import { ApprovalManager } from '../src/approval/index.js';
@@ -41,6 +41,8 @@ class SidechatForkStubClient implements ProxyClient {
   currentParentId = 'parent';
   pgid = 100;
   forkCalls = 0;
+  startTurnCalls: Array<{ config: Record<string, ConfigValue> }> = [];
+  setNames: string[] = [];
 
   isExited() { return false; }
   processGroupId() { return this.pgid; }
@@ -74,6 +76,7 @@ class SidechatForkStubClient implements ProxyClient {
       }, {
         id: 'effort',
         displayName: 'Effort',
+        role: 'effort' as const,
         binding: 'turn' as const,
         control: 'select' as const,
         required: false,
@@ -124,6 +127,10 @@ class SidechatForkStubClient implements ProxyClient {
       resumeRef,
       anchor: { type: 'empty' as const },
       sessionConfig: this.sessionConfig,
+      turnConfigOptions: (await this.catalog()).configOptions
+        .filter(option => option.binding === 'turn')
+        .map(({ role: _role, ...option }) => option),
+      turnConfigRevision: 'sidechat-fork-stub-turn',
       createdAt: '2026-08-20T00:00:00.000Z',
       updatedAt: '2026-08-20T00:00:00.000Z',
     };
@@ -144,6 +151,10 @@ class SidechatForkStubClient implements ProxyClient {
       resumeRef: next,
       anchor: { type: 'empty' as const },
       sessionConfig: this.sessionConfig,
+      turnConfigOptions: (await this.catalog()).configOptions
+        .filter(option => option.binding === 'turn')
+        .map(({ role: _role, ...option }) => option),
+      turnConfigRevision: 'sidechat-fork-stub-turn',
       createdAt: '2026-08-20T00:00:00.000Z',
       updatedAt: '2026-08-20T00:00:00.000Z',
     };
@@ -156,8 +167,12 @@ class SidechatForkStubClient implements ProxyClient {
     this.forkCalls += 1;
     return stubForkResult(this.currentParentId, params.sessionId, this);
   }
-  async startTurn() {
+  async startTurn(params: { config: Record<string, ConfigValue> }) {
+    this.startTurnCalls.push(params);
     return { session: stubSession('sc', '/tmp', 'running'), turn: { id: 't-side' } };
+  }
+  async setName(name: string) {
+    this.setNames.push(name);
   }
   async interruptTurn() {}
   async respondInteraction() {}
@@ -308,10 +323,152 @@ test('Side Chat persists only on the transient store and is absent from history/
   }
 });
 
+test('Side Chat owns an independent advertised turn draft and passes it to turn.start', async () => {
+  const ctx = setup();
+  try {
+    const parent = await ctx.sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'claude',
+      thinking_effort: 'medium',
+    });
+    const created = await ctx.sessions.createSidechat(parent.id, 'sc_config');
+    assert.deepEqual(created.turn_config, { effort: 'medium' });
+    assert.equal(created.turn_config_options?.[0]?.role, 'effort');
+    assert.equal(created.turn_config_revision, 'sidechat-fork-stub-turn');
+
+    const updated = ctx.sessions.setSidechatTurnConfigValue('sc_config', 'effort', 'low');
+    assert.deepEqual(updated.turn_config, { effort: 'low' });
+    assert.equal(ctx.sessions.getSession(parent.id).thinking_effort, 'medium');
+    assert.throws(
+      () => ctx.sessions.setSidechatTurnConfigValue('sc_config', 'unknown', 'low'),
+      (error: unknown) => error instanceof ProxyProtocolError && error.code === 'CONFIG_VALUE_INVALID',
+    );
+
+    await ctx.sessions.sendMessage('sc_config', 'Use less reasoning');
+    const child = ctx.proxyMgr.client.children.get('sc_config');
+    assert.deepEqual(child?.startTurnCalls.at(-1)?.config, { effort: 'low' });
+
+    for (const handler of child?.notificationHandlers ?? []) {
+      handler({
+        jsonrpc: '2.0',
+        method: 'session.updated',
+        params: {
+          eventId: 'side-config-options-2',
+          streamId: 'stream-sc_config',
+          sequence: 1,
+          sessionId: 'sc_config',
+          emittedAt: '2026-08-27T08:00:00.000Z',
+          data: {
+            turnConfigOptions: [{
+              id: 'effort',
+              displayName: 'Effort',
+              binding: 'turn',
+              control: 'select',
+              required: false,
+              defaultValue: 'medium',
+              choices: [{ value: 'medium', displayName: 'Medium' }],
+            }],
+            turnConfigRevision: 'sidechat-fork-stub-turn-2',
+          },
+        },
+      } as never);
+    }
+    const reconciled = ctx.sessions.listSidechats().find(item => item.id === 'sc_config');
+    assert.deepEqual(reconciled?.turn_config, { effort: 'medium' });
+    assert.equal(reconciled?.turn_config_options?.[0]?.role, 'effort');
+    assert.equal(reconciled?.turn_config_revision, 'sidechat-fork-stub-turn-2');
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+test('Side Chat ordinals remain stable when an earlier chat is closed', async () => {
+  const ctx = setup();
+  try {
+    const parent = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    const first = await ctx.sessions.createSidechat(parent.id, 'sc_ordinal_1');
+    const second = await ctx.sessions.createSidechat(parent.id, 'sc_ordinal_2');
+    assert.equal((first as typeof first & { ordinal?: number }).ordinal, 1);
+    assert.equal((second as typeof second & { ordinal?: number }).ordinal, 2);
+
+    await ctx.sessions.closeSidechat(first.id);
+    const third = await ctx.sessions.createSidechat(parent.id, 'sc_ordinal_3');
+    assert.equal((third as typeof third & { ordinal?: number }).ordinal, 3);
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+test('a completed Side Chat turn persists an agent-derived title', async () => {
+  const ctx = setup();
+  try {
+    const parent = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    await ctx.sessions.createSidechat(parent.id, 'sc_title');
+    await ctx.sessions.sendMessage('sc_title', 'Why does Fork cleanup fail?');
+    const input = ctx.sessions.listSidechats().find((item) => item.id === 'sc_title')?.user_inputs[0];
+    assert.ok(input);
+    const child = ctx.proxyMgr.client.children.get('sc_title');
+    assert.ok(child);
+    const common = {
+      jsonrpc: '2.0' as const,
+      streamId: 'stream-sc_title',
+      sessionId: 'sc_title',
+      turnId: input.turn_id,
+      sourceTurnId: 'provider-side-turn-1',
+      emittedAt: '2026-08-26T08:00:00.000Z',
+    };
+    for (const handler of child.notificationHandlers) {
+      handler({
+        jsonrpc: common.jsonrpc,
+        method: 'content.completed',
+        params: {
+          ...common,
+          eventId: 'side-title-content',
+          sequence: 1,
+          data: {
+            contentId: 'side-title-answer',
+            kind: 'text',
+            format: 'markdown',
+            content: '## Repair Fork cleanup\n\nThe Host persisted the wrong native boundary.',
+          },
+        },
+      });
+      handler({
+        jsonrpc: common.jsonrpc,
+        method: 'turn.completed',
+        params: {
+          ...common,
+          eventId: 'side-title-terminal',
+          sequence: 2,
+          emittedAt: '2026-08-26T08:00:01.000Z',
+          data: { stopReason: 'completed' },
+        },
+      });
+    }
+
+    const titled = ctx.sessions.listSidechats().find((item) => item.id === 'sc_title');
+    assert.equal((titled as typeof titled & { name?: string | null })?.name, 'Repair Fork cleanup');
+    const row = ctx.db.prepare(
+      'SELECT name FROM sidechat_transients WHERE sidechat_id = ?',
+    ).get('sc_title') as { name: string | null };
+    assert.equal(row.name, 'Repair Fork cleanup');
+    const updates = ctx.broadcaster.messages.filter((message) => (
+      message.type === 'sidechat:updated' && message.sidechat.id === 'sc_title'
+    ));
+    assert.equal(
+      ((updates.at(-1) as unknown as { sidechat: { name?: string | null } })?.sidechat.name),
+      'Repair Fork cleanup',
+    );
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
 test('Core restart resumes open Side Chats from transient records', async () => {
   const first = setup();
   const parent = await first.sessions.createSession({ workspace_id: first.wsId, executor: 'claude' });
   await first.sessions.createSidechat(parent.id, 'sc_restart');
+  first.sessions.setSidechatTurnConfigValue('sc_restart', 'effort', 'low');
   first.db.close();
 
   const db = openDatabase(first.dir);
@@ -330,6 +487,9 @@ test('Core restart resumes open Side Chats from transient records', async () => 
     const recovered = sessions.listSidechats().find((item) => item.id === 'sc_restart');
     assert.ok(recovered);
     assert.equal(recovered.status, 'open');
+    assert.deepEqual(recovered.turn_config, { effort: 'low' });
+    assert.equal(recovered.turn_config_options?.[0]?.id, 'effort');
+    assert.equal(recovered.turn_config_revision, 'sidechat-fork-stub-turn');
     const generation = (db.prepare(
       'SELECT stream_generation FROM sidechat_transients WHERE sidechat_id = ?',
     ).get('sc_restart') as { stream_generation: number }).stream_generation;
@@ -362,10 +522,14 @@ test('session delete requires recorded Side Chat confirmation and close does not
   }
 });
 
-test('Fork persists origin, workspace, and ordinary history without a worktree snapshot claim', async () => {
+test('Fork persists a numbered title, origin, workspace, and ordinary history without a worktree snapshot claim', async () => {
   const ctx = setup();
   try {
-    const parent = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    const parent = await ctx.sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'claude',
+      name: 'Investigate fork titles',
+    });
     ctx.db.prepare(
       `INSERT INTO turns (id, session_id, turn_number, status, created_at, completed_at)
        VALUES ('t1', ?, 1, 'completed', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z')`,
@@ -392,6 +556,7 @@ test('Fork persists origin, workspace, and ordinary history without a worktree s
       source_turn_id: 'src-1',
     });
     const forked = ctx.sessions.getSession('fork-1');
+    assert.equal(forked.name, 'Fork 1: Investigate fork titles');
     assert.equal(forked.workspace_id, parent.workspace_id);
     assert.equal(forked.native_session_id, 'native-fork-1');
     assert.equal(
@@ -404,9 +569,26 @@ test('Fork persists origin, workspace, and ordinary history without a worktree s
     assert.ok(ctx.sessions.listEvents('fork-1').length > 0);
     assert.equal(
       ctx.broadcaster.messages.some((message) => (
-        message.type === 'session:created' && message.origin === 'session-fork'
+        message.type === 'session:created'
+        && message.origin === 'session-fork'
+        && message.session.name === 'Fork 1: Investigate fork titles'
       )),
       true,
+    );
+    assert.deepEqual(
+      ctx.proxyMgr.client.children.get('fork-1')?.setNames,
+      ['Fork 1: Investigate fork titles'],
+    );
+
+    await ctx.sessions.forkSession({
+      sourceSessionId: parent.id,
+      sessionId: 'fork-2',
+      anchor: { type: 'head' },
+    });
+    assert.equal(ctx.sessions.getSession('fork-2').name, 'Fork 2: Investigate fork titles');
+    assert.deepEqual(
+      ctx.proxyMgr.client.children.get('fork-2')?.setNames,
+      ['Fork 2: Investigate fork titles'],
     );
 
     const again = await ctx.sessions.forkSession({
@@ -771,6 +953,44 @@ test('Fork INSERT failure reports leftover Provider cleanup', async () => {
         && error.code === 'RUNTIME_ERROR'
         && /session.close failed/.test(error.message)
         && /session.native.delete failed/.test(error.message)
+      ),
+    );
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+test('Fork origin mismatch keeps the original cause when native cleanup is unsupported', async () => {
+  const ctx = setup();
+  try {
+    const parent = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    seedTerminalTurn(ctx.db, parent.id, 't1', 'src-1', 1);
+    ctx.proxyMgr.client.forkSession = async (params) => {
+      const result = stubForkResult(parent.id, params.sessionId, ctx.proxyMgr.client);
+      return {
+        ...result,
+        origin: { ...result.origin, sourceTurnId: 'provider-other-turn' },
+      };
+    };
+    ctx.proxyMgr.client.deleteNativeSession = async () => {
+      throw new ProxyProtocolError(
+        'CAPABILITY_NOT_SUPPORTED',
+        'Proxy does not advertise session.native.delete.',
+        'request',
+      );
+    };
+
+    await assert.rejects(
+      ctx.sessions.forkSession({
+        sourceSessionId: parent.id,
+        sessionId: 'fork-origin-mismatch',
+        anchor: { type: 'head' },
+      }),
+      (error: unknown) => (
+        error instanceof ProxyProtocolError
+        && error.code === 'RUNTIME_ERROR'
+        && /session.native.delete failed/.test(error.message)
+        && /origin did not match the Host anchor/.test(error.message)
       ),
     );
   } finally {

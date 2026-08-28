@@ -242,6 +242,10 @@ type SplitCell = { n: number; text: string } | null;
 /** `ctx` marks an unchanged context row (same text both sides) so the
  *  renderer can pick neutral styling instead of add/del coloring. */
 type SplitRow = { left: SplitCell; right: SplitCell; ctx: boolean };
+type DiffHunk = {
+  header: string;
+  lines: Array<{ kind: 'add' | 'del' | 'ctx'; text: string }>;
+};
 
 /** Turn a hunk's unified `lines` into aligned side-by-side rows.
  *  - ctx  → both sides, same text, both numbers advance.
@@ -276,10 +280,58 @@ function splitHunkRows(header: string, lines: Array<{ kind: 'add' | 'del' | 'ctx
   return rows;
 }
 
+function SplitSide({
+  side,
+  cell,
+  ctx,
+}: {
+  side: 'old' | 'new';
+  cell: SplitCell;
+  ctx: boolean;
+}) {
+  const change = side === 'old' ? 'del' : 'add';
+  return (
+    <div className={`sheet-diff-side ${side}${cell ? (ctx ? ' ctx' : ` ${change}`) : ' empty'}`}>
+      <span className="num">{cell ? cell.n : ''}</span>
+      <span className="txt">{cell ? cell.text : ''}</span>
+    </div>
+  );
+}
+
+/** No-wrap split view: one horizontal scroller per side for the whole file. */
+function NoWrapSplitHunks({ hunks }: { hunks: DiffHunk[] }) {
+  const prepared = hunks.map(hunk => ({
+    header: hunk.header,
+    rows: splitHunkRows(hunk.header, hunk.lines),
+  }));
+  return (
+    <div className="sheet-diff-split-panes">
+      {(['old', 'new'] as const).map(side => (
+        <div className={`sheet-diff-pane ${side}`} key={side} data-side={side}>
+          {prepared.map((hunk, hunkIndex) => (
+            <div className="sheet-diff-hunk" key={hunkIndex}>
+              <div className="sheet-diff-hunk-head">{hunk.header}</div>
+              {hunk.rows.map((row, rowIndex) => (
+                <SplitSide
+                  key={rowIndex}
+                  side={side}
+                  cell={side === 'old' ? row.left : row.right}
+                  ctx={row.ctx}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** Render a unified diff as hunks with +/- coloring. Uses the shared
  *  `parseUnifiedDiff` so the format matches DiffCard / Changes events.
  *  `split` swaps the single-column unified view for a side-by-side
- *  (old | new) view; `wrap` mirrors the sheet's word-wrap preference.
+ *  (old | new) view; `wrap` mirrors the sheet's word-wrap preference. With
+ *  split + nowrap, each side owns one horizontal scroller for the whole file.
  *  Each file block carries `data-path` so cross-panel anchors (the Changes
  *  inspector's row click) can target one file inside a stacked diff.
  *  Exported for the History commit change-set body and the Diffs rail's
@@ -308,30 +360,26 @@ export function DiffBody({ diffText, path, split, wrap }: { diffText: string; pa
               </span>
             </div>
           )}
-          {f.hunks.map((h, hi) => (
-            <div key={hi} className="sheet-diff-hunk">
-              <div className="sheet-diff-hunk-head">{h.header}</div>
-              {split
-                ? splitHunkRows(h.header, h.lines).map((row, ri) => (
-                    <div key={ri} className="sheet-diff-row">
-                      <div className={`sheet-diff-side old${row.left ? (row.ctx ? ' ctx' : ' del') : ' empty'}`}>
-                        <span className="num">{row.left ? row.left.n : ''}</span>
-                        <span className="txt">{row.left ? row.left.text : ''}</span>
+          {split && !wrap ? (
+            <NoWrapSplitHunks hunks={f.hunks} />
+          ) : f.hunks.map((h, hi) => (
+              <div key={hi} className="sheet-diff-hunk">
+                <div className="sheet-diff-hunk-head">{h.header}</div>
+                {split
+                  ? splitHunkRows(h.header, h.lines).map((row, ri) => (
+                      <div key={ri} className="sheet-diff-row">
+                        <SplitSide side="old" cell={row.left} ctx={row.ctx} />
+                        <SplitSide side="new" cell={row.right} ctx={row.ctx} />
                       </div>
-                      <div className={`sheet-diff-side new${row.right ? (row.ctx ? ' ctx' : ' add') : ' empty'}`}>
-                        <span className="num">{row.right ? row.right.n : ''}</span>
-                        <span className="txt">{row.right ? row.right.text : ''}</span>
+                    ))
+                  : h.lines.map((ln, li) => (
+                      <div key={li} className={`sheet-diff-ln ${ln.kind}`}>
+                        <span className="sig">{ln.kind === 'add' ? '+' : ln.kind === 'del' ? '−' : ' '}</span>
+                        <span className="txt">{ln.text}</span>
                       </div>
-                    </div>
-                  ))
-                : h.lines.map((ln, li) => (
-                    <div key={li} className={`sheet-diff-ln ${ln.kind}`}>
-                      <span className="sig">{ln.kind === 'add' ? '+' : ln.kind === 'del' ? '−' : ' '}</span>
-                      <span className="txt">{ln.text}</span>
-                    </div>
-                  ))}
-            </div>
-          ))}
+                    ))}
+              </div>
+            ))}
         </div>
       ))}
     </div>
@@ -641,9 +689,13 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
             )}
             <div className={`sheet-content${wrap ? '' : ' nowrap'}`}>
               {slotGroup
-                ? gTabs.map(slotTab => (
+                  ? gTabs.map(slotTab => (
                     <div
-                      className="sheet-tab-slot"
+                      className={`sheet-tab-slot${
+                        slotTab.kind === 'changes' || slotTab.kind === 'commit'
+                          ? ' sheet-review-slot'
+                          : ''
+                      }`}
                       data-tab-id={slotTab.id}
                       key={slotTab.id}
                       style={slotTab.id === activeId ? undefined : { display: 'none' }}

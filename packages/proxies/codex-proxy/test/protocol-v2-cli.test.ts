@@ -22,7 +22,7 @@ function startV2Proxy(runtimeBin = process.execPath) {
       GIAN_PLUGIN_ID: 'codex',
       GIAN_PLUGIN_DATA_DIR: '/tmp/gian-codex-v2-test',
       GIAN_RUNTIME_BIN: runtimeBin,
-      GIAN_PROTOCOL_VERSIONS: '2.0',
+      GIAN_PROTOCOL_VERSIONS: '2.1',
     },
   });
   const messages: unknown[] = [];
@@ -68,42 +68,46 @@ async function responseFor(
   }
 }
 
-test('Codex CLI negotiates gian.proxy/2.0 independently from its app-server version', async () => {
+test('Codex CLI negotiates gian.proxy/2.1 independently from its app-server version', async () => {
   const proxy = startV2Proxy();
-  proxy.send({
-    jsonrpc: '2.0',
-    id: 'req-1',
-    method: 'initialize',
-    params: {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
-      host: { name: 'Gian', version: '9.9.9' },
-    },
-  });
-  const initialized = await proxy.next() as { id: string; result: unknown };
-  assert.equal(initialized.id, 'req-1');
-  const result = initializeResultSchema.parse(initialized.result);
-  assert.equal(result.protocol.version, '2.0');
-  assert.equal(result.plugin.id, 'codex');
-  assert.equal(result.plugin.version, '0.2.3');
-  assert.equal(result.process.scope, 'shared');
-  assert.equal(result.capabilities.interaction, 1);
-  assert.equal(result.capabilities['session.replay'], 1);
-  assert.equal(result.capabilities['session.rename'], 1);
-  assert.equal(result.capabilities['session.native.list'], 1);
-  assert.equal(result.capabilities['turn.steer'], 1);
-  assert.equal(result.capabilities['event.diff'], 1);
-  assert.equal(result.capabilities['slash.list'], undefined);
-  assert.equal(result.capabilities['session.native.delete'], undefined);
-  assert.equal(result.capabilities['integration.mcp.streamableHttp'], undefined);
+  try {
+    proxy.send({
+      jsonrpc: '2.0',
+      id: 'req-1',
+      method: 'initialize',
+      params: {
+        protocol: { name: 'gian.proxy', versions: ['2.1'] },
+        host: { name: 'Gian', version: '9.9.9' },
+      },
+    });
+    const initialized = await proxy.next() as { id: string; result: unknown };
+    assert.equal(initialized.id, 'req-1');
+    const result = initializeResultSchema.parse(initialized.result);
+    assert.equal(result.protocol.version, '2.1');
+    assert.equal(result.plugin.id, 'codex');
+    assert.equal(result.plugin.version, '0.2.10');
+    assert.equal(result.process.scope, 'shared');
+    assert.equal(result.capabilities.interaction, 1);
+    assert.equal(result.capabilities['session.replay'], 1);
+    assert.equal(result.capabilities['session.rename'], 1);
+    assert.equal(result.capabilities['session.native.list'], 1);
+    assert.equal(result.capabilities['turn.steer'], 1);
+    assert.equal(result.capabilities['event.diff'], 1);
+    assert.equal(result.capabilities['slash.list'], undefined);
+    assert.equal(result.capabilities['session.native.delete'], undefined);
+    assert.equal(result.capabilities['integration.mcp.streamableHttp'], 1);
 
-  proxy.send({ jsonrpc: '2.0', id: 'req-3', method: 'does.not.exist', params: {} });
-  const missing = proxyErrorResponseSchema.parse(await proxy.next());
-  assert.equal(missing.error.code, -32601);
-  assert.equal(missing.error.data, undefined);
+    proxy.send({ jsonrpc: '2.0', id: 'req-3', method: 'does.not.exist', params: {} });
+    const missing = proxyErrorResponseSchema.parse(await proxy.next());
+    assert.equal(missing.error.code, -32601);
+    assert.equal(missing.error.data, undefined);
 
-  proxy.send({ jsonrpc: '2.0', id: 'req-4', method: 'shutdown', params: {} });
-  assert.deepEqual(await proxy.next(), { jsonrpc: '2.0', id: 'req-4', result: { ok: true } });
-  assert.equal(await waitForExit(proxy.child), 0);
+    proxy.send({ jsonrpc: '2.0', id: 'req-4', method: 'shutdown', params: {} });
+    assert.deepEqual(await proxy.next(), { jsonrpc: '2.0', id: 'req-4', result: { ok: true } });
+    assert.equal(await waitForExit(proxy.child), 0);
+  } finally {
+    if (proxy.child.exitCode === null) proxy.child.kill('SIGKILL');
+  }
 });
 
 test('Codex gian.proxy/2 CLI reports a JSON-RPC parse error for malformed NDJSON', async () => {
@@ -128,7 +132,7 @@ test('real Codex Proxy CLI completes a full lifecycle through the Fake app-serve
       id: 'lifecycle-initialize',
       method: 'initialize',
       params: {
-        protocol: { name: 'gian.proxy', versions: ['2.0'] },
+        protocol: { name: 'gian.proxy', versions: ['2.1'] },
         host: { name: 'Gian', version: '9.9.9' },
       },
     });
@@ -136,8 +140,9 @@ test('real Codex Proxy CLI completes a full lifecycle through the Fake app-serve
 
     proxy.send({ jsonrpc: '2.0', id: 'lifecycle-catalog', method: 'catalog.list', params: {} });
     const catalogResponse = (await responseFor(proxy, 'lifecycle-catalog')).response;
-    const configOptions = (
+    const catalog = (
       catalogResponse.result as {
+        specialCatalogs: { approvalMode?: string; fast?: string };
         configOptions: Array<{
           id: string;
           role?: string;
@@ -147,8 +152,16 @@ test('real Codex Proxy CLI completes a full lifecycle through the Fake app-serve
           choices?: Array<{ value: unknown; displayName: string; description?: string }>;
         }>;
       }
-    ).configOptions;
-    const approval = configOptions.find(option => option.role === 'approval_mode');
+    );
+    const { configOptions } = catalog;
+    assert.deepEqual(catalog.specialCatalogs, {
+      model: 'model',
+      thinking: 'effort',
+      fast: 'service_tier',
+      approvalMode: 'approval_mode',
+    });
+    assert.equal(configOptions.some(option => option.role !== undefined), false);
+    const approval = configOptions.find(option => option.id === catalog.specialCatalogs.approvalMode);
     assert.equal(approval?.id, 'approval_mode');
     assert.equal(approval?.defaultValue, 'ask');
     assert.deepEqual(approval?.choices, [
@@ -166,7 +179,7 @@ test('real Codex Proxy CLI completes a full lifecycle through the Fake app-serve
       ].includes(option.id)),
       [],
     );
-    const fast = configOptions.find(option => option.role === 'fast');
+    const fast = configOptions.find(option => option.id === catalog.specialCatalogs.fast);
     assert.equal(fast?.id, 'service_tier');
     assert.equal(fast?.control, 'boolean');
     assert.equal(fast?.defaultValue, false);
@@ -216,6 +229,11 @@ test('real Codex Proxy CLI completes a full lifecycle through the Fake app-serve
       const event = await proxy.next() as { method: string; params: Record<string, unknown> };
       if ((event.params as { turnId?: unknown })?.turnId === 'fake-host-turn') events.push(event);
     }
+    const requestedInteraction = events.find(event => event.method === 'interaction.requested');
+    const interactionId = String(
+      (requestedInteraction?.params.data as { interactionId?: unknown } | undefined)?.interactionId ?? '',
+    );
+    assert.match(interactionId, /^interaction_[a-f0-9]{32}$/);
     proxy.send({
       jsonrpc: '2.0',
       id: 'lifecycle-interaction',
@@ -224,7 +242,7 @@ test('real Codex Proxy CLI completes a full lifecycle through the Fake app-serve
         sessionId: 'fake-host-session',
         streamId: created.session.streamId,
         turnId: 'fake-host-turn',
-        interactionId: '700',
+        interactionId,
         responseId: 'fake-response-700',
         actionId: 'accept',
       },

@@ -29,6 +29,7 @@ import {
   resultSchemas,
   type AvailableActions,
   type CatalogActionDescriptor,
+  type CatalogResult,
   type ConfigOption,
   type ConfigValue,
   type ForkAnchor,
@@ -483,6 +484,15 @@ export class HostProtocolValidator {
         );
       }
       if (
+        request.params.forkBoundaries !== undefined
+        && this.negotiated?.capabilities['session.create.forkBoundaries'] === undefined
+      ) {
+        throw requestViolation(
+          'CAPABILITY_NOT_SUPPORTED',
+          'session.create forkBoundaries require session.create.forkBoundaries.',
+        );
+      }
+      if (
         request.params.hostServices !== undefined
         && request.params.hostServices.length > 0
         && this.negotiated?.capabilities['integration.mcp.streamableHttp'] === undefined
@@ -494,6 +504,16 @@ export class HostProtocolValidator {
       }
       this.assertConfigSnapshot(this.catalogConfigOptions, request.params.config, 'session');
     } else if (request.method === 'session.fork') {
+      if (
+        request.params.hostServices !== undefined
+        && request.params.hostServices.length > 0
+        && this.negotiated?.capabilities['integration.mcp.streamableHttp'] === undefined
+      ) {
+        throw requestViolation(
+          'CAPABILITY_NOT_SUPPORTED',
+          'hostServices require integration.mcp.streamableHttp.',
+        );
+      }
       this.assertSessionForkRequest(request.params);
     } else if (
       request.method === 'sidechat.create'
@@ -572,6 +592,12 @@ export class HostProtocolValidator {
 
     if (pending.method === 'initialize') {
       const initialized = initializeResultSchema.parse(result.data);
+      const offered = (pending.params as { protocol: { versions: string[] } }).protocol.versions;
+      if (!offered.includes(initialized.protocol.version)) {
+        throw protocolViolation(
+          `Proxy selected protocol ${initialized.protocol.version}, which Host did not offer.`,
+        );
+      }
       if (initialized.plugin.id !== this.options.pluginId) {
         throw protocolViolation(
           `Handshake plugin id ${initialized.plugin.id} does not match ${this.options.pluginId}.`,
@@ -626,16 +652,15 @@ export class HostProtocolValidator {
       });
     } else if (pending.method === 'catalog.list') {
       this.catalogConfigOptions.clear();
-      const catalog = result.data as {
-        configOptions: ConfigOption[];
-        actions?: CatalogActionDescriptor[];
-      };
+      const catalog = result.data as CatalogResult;
+      this.assertCatalogShape(catalog);
       for (const option of catalog.configOptions) {
         this.catalogConfigOptions.set(option.id, advertisedOption(option));
       }
       this.replaceCatalogActions(catalog.actions);
     } else if (pending.method === 'catalog.resolve') {
-      const catalog = result.data as { actions?: CatalogActionDescriptor[] };
+      const catalog = result.data as CatalogResult;
+      this.assertCatalogShape(catalog);
       this.assertCatalogActions(normalizeCatalogActions(catalog.actions));
     } else if (pending.method === 'sidechat.create') {
       this.acceptSidechatCreate(pending.params, result.data);
@@ -699,6 +724,11 @@ export class HostProtocolValidator {
     }
     if (turnConfigOptions !== undefined) {
       for (const option of turnConfigOptions) {
+        if (this.negotiated?.protocol.version === '2.1' && option.role !== undefined) {
+          throw protocolViolation(
+            `gian.proxy/2.1 turn config option ${option.id} must not use the legacy role field.`,
+          );
+        }
         merged.set(option.id, advertisedOption(option));
       }
     }
@@ -758,6 +788,46 @@ export class HostProtocolValidator {
     this.assertCatalogActions(normalized);
     this.catalogActions.clear();
     for (const [id, action] of normalized) this.catalogActions.set(id, action);
+  }
+
+  private assertCatalogShape(catalog: CatalogResult): void {
+    const version = this.negotiated?.protocol.version;
+    if (version === '2.0') {
+      if (catalog.specialCatalogs !== undefined) {
+        throw protocolViolation('gian.proxy/2.0 Catalog cannot declare specialCatalogs.');
+      }
+      return;
+    }
+    if (catalog.specialCatalogs === undefined) {
+      throw protocolViolation('gian.proxy/2.1 Catalog must declare specialCatalogs.');
+    }
+    const byId = new Map(catalog.configOptions.map((option) => [option.id, option]));
+    for (const option of catalog.configOptions) {
+      if (option.role !== undefined) {
+        throw protocolViolation(
+          `gian.proxy/2.1 config option ${option.id} must not use the legacy role field.`,
+        );
+      }
+    }
+    const expectedControls = {
+      model: 'select',
+      thinking: 'select',
+      fast: 'boolean',
+      approvalMode: 'select',
+    } as const;
+    for (const [slot, optionId] of Object.entries(catalog.specialCatalogs)) {
+      if (optionId === undefined) continue;
+      const option = byId.get(optionId);
+      if (!option) {
+        throw protocolViolation(`Special Catalog ${slot} references unknown option ${optionId}.`);
+      }
+      const expected = expectedControls[slot as keyof typeof expectedControls];
+      if (option.control !== expected) {
+        throw protocolViolation(
+          `Special Catalog ${slot} must reference a ${expected} option; got ${option.control}.`,
+        );
+      }
+    }
   }
 
   private assertCatalogActions(

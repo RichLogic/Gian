@@ -190,7 +190,7 @@ describe('TraceView event list', () => {
     expect(screen.getByTestId('trace-step-dur-t1-tool-read')).toHaveTextContent('1s');
   });
 
-  it('collapses turns and call rows through the trajectory controls', async () => {
+  it('collapses turns and turn-level calls into expandable summaries', async () => {
     renderTrace(traceFixtureMultiTurn);
     await userEvent.click(screen.getByTestId('trace-control-turns'));
     expect(document.querySelectorAll('.trace-turn-body')).toHaveLength(0);
@@ -200,6 +200,24 @@ describe('TraceView event list', () => {
     await userEvent.click(screen.getByTestId('trace-control-calls'));
     expect(screen.queryByTestId('trace-row-t1-tool-read')).not.toBeInTheDocument();
     expect(screen.getByTestId('trace-row-t1-assistant')).toBeInTheDocument();
+    expect(screen.getByTestId('trace-span-t1-tool-read')).toBeInTheDocument();
+
+    const calls = screen.getByTestId('trace-call-group-turn-1');
+    expect(calls).toHaveTextContent('Calls');
+    expect(within(calls).getByTestId('trace-call-count')).toHaveTextContent('2');
+    await userEvent.click(calls);
+    expect(screen.getByTestId('trace-row-t1-tool-read')).toBeInTheDocument();
+    expect(screen.getByTestId('trace-control-calls')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('expands collapsed calls when their timeline span is selected', async () => {
+    renderTrace(traceFixtureMultiTurn);
+    await userEvent.click(screen.getByTestId('trace-control-calls'));
+    expect(screen.queryByTestId('trace-row-t1-tool-edit')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId('trace-span-t1-tool-edit'));
+    expect(screen.getByTestId('trace-row-t1-tool-edit')).toHaveClass('selected');
+    expect(screen.getByTestId('trace-control-calls')).toHaveAttribute('aria-pressed', 'false');
   });
 
   it('searches semantic content without losing the containing turn', async () => {

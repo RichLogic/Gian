@@ -97,6 +97,7 @@ import {
   sanitizeScreenshotPreferences,
   type ScreenshotPreferences,
 } from './screenshot-preferences.js';
+import { readPickedComposerResources } from './resource-picker.js';
 
 const { autoUpdater } = electronUpdater;
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -909,6 +910,11 @@ async function createMainWindow(): Promise<BrowserWindow> {
         window.webContents.send('desktop:browser:state', tabId, state);
       }
     },
+    onElement: (tabId, capture) => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:element', tabId, capture);
+      }
+    },
   });
   browserController = controller;
 
@@ -994,6 +1000,17 @@ ipcMain.handle('desktop:zoom:get', event => {
 ipcMain.handle('desktop:zoom:set', (event, percent: unknown) => {
   if (!isMainWindowSender(event.sender)) return null;
   return setMainWindowZoom(percent);
+});
+
+ipcMain.handle('desktop:resources:pick', async event => {
+  if (!mainWindow || !isMainWindowSender(event.sender)) return null;
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Add files and folders',
+    buttonLabel: 'Add',
+    properties: ['openFile', 'openDirectory', 'multiSelections', 'createDirectory'],
+  });
+  if (result.canceled) return { resources: [], rejectedFiles: [] };
+  return readPickedComposerResources(result.filePaths);
 });
 
 ipcMain.handle('desktop:screenshot:set-target', (event, value: unknown) => {
@@ -1164,6 +1181,7 @@ const EMPTY_BROWSER_STATE: GianBrowserState = {
   canGoBack: false,
   canGoForward: false,
   canOpenExternal: false,
+  inspecting: false,
 };
 
 ipcMain.handle('desktop:browser:get-state', (event, tabId: unknown) => {
@@ -1225,6 +1243,13 @@ ipcMain.handle('desktop:browser:close-tab', (event, tabId: unknown) => {
 ipcMain.handle('desktop:browser:clear-data', async event => {
   if (!isMainWindowSender(event.sender)) return false;
   return browserController?.clearData() ?? false;
+});
+
+ipcMain.handle('desktop:browser:set-inspect-mode', async (event, tabId: unknown, enabled: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId) || typeof enabled !== 'boolean') {
+    return EMPTY_BROWSER_STATE;
+  }
+  return browserController?.setInspectMode(tabId, enabled) ?? EMPTY_BROWSER_STATE;
 });
 
 ipcMain.handle('desktop:github-auth:get-state', async event => {

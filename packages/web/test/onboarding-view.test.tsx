@@ -36,24 +36,16 @@ vi.mock('../src/api.js', () => ({
 }));
 
 const PROXIES: ProxyCatalogEntry[] = [
-  { id: 'claude', name: 'Claude Code', defaultColor: 'ember', tagline: 'Anthropic Claude Code agent', officialInstallUrl: 'https://example.invalid/claude' },
-  { id: 'codex', name: 'Codex', defaultColor: 'ink', tagline: 'OpenAI Codex agent', officialInstallUrl: 'https://example.invalid/codex' },
-  { id: 'kimi', name: 'Kimi Code', defaultColor: 'citron', tagline: 'Moonshot Kimi Code agent', officialInstallUrl: 'https://example.invalid/kimi' },
-  { id: 'dsh', name: 'DeepSeek Harness', defaultColor: 'teal', tagline: 'DeepSeek Harness agent', officialInstallUrl: 'https://example.invalid/dsh' },
+  { id: 'claude', name: 'Claude Code', logo: { light: '/claude-light.png', dark: '/claude-dark.png' }, tagline: 'Anthropic Claude Code agent', officialInstallUrl: 'https://example.invalid/claude' },
+  { id: 'codex', name: 'Codex', logo: { light: '/codex-light.png', dark: '/codex-dark.png' }, tagline: 'OpenAI Codex agent', officialInstallUrl: 'https://example.invalid/codex' },
+  { id: 'kimi', name: 'Kimi Code', logo: { light: '/kimi-light.png', dark: '/kimi-dark.png' }, tagline: 'Moonshot Kimi Code agent', officialInstallUrl: 'https://example.invalid/kimi' },
+  { id: 'dsh', name: 'DeepSeek Harness', logo: { light: '/dsh-light.png', dark: '/dsh-dark.png' }, tagline: 'DeepSeek Harness agent', officialInstallUrl: 'https://example.invalid/dsh' },
 ];
-
-const AGENT_COLORS: Record<ProductExecutor, UserAgentStatus['color']> = {
-  claude: 'ember',
-  codex: 'ink',
-  kimi: 'citron',
-  dsh: 'teal',
-};
 
 function agent(kind: ProductExecutor, name: string, ready = true): UserAgentStatus {
   return {
     id: `agent-${kind}-1`,
     name,
-    color: AGENT_COLORS[kind],
     proxy: kind,
     cliPath: ready ? `/bin/${kind}` : null,
     defaults: { model: '', thinking: '', mode: '' },
@@ -71,6 +63,7 @@ function agent(kind: ProductExecutor, name: string, ready = true): UserAgentStat
           state: 'missing', path: `/proxy/${kind}`, version: null, source: 'github-release',
           defaults: { model: '', thinking: '', mode: '' },
         },
+    runtimeProfile: null,
     officialInstallUrl: 'https://example.invalid',
   };
 }
@@ -108,7 +101,6 @@ describe('OnboardingView', () => {
     vi.mocked(loadProxies).mockResolvedValue(PROXIES);
     vi.mocked(loadAgentDraftDefaults).mockImplementation(async kind => ({
       name: PROXIES.find(entry => entry.id === kind)!.name,
-      color: PROXIES.find(entry => entry.id === kind)!.defaultColor,
       cliPath: null,
     }));
     vi.mocked(createAgent).mockImplementation(async input => agent(input.proxy, input.name));
@@ -217,22 +209,26 @@ describe('OnboardingView', () => {
     await waitFor(() => expect(createAgent).toHaveBeenCalledWith({
       name: 'Kimi Code',
       proxy: 'kimi',
-      color: 'citron',
       cliPath: null,
     }));
     // Never a restart while the wizard is open.
     expect(restartApp).not.toHaveBeenCalled();
   });
 
-  it('installs both the proxy and official CLI before the first Agent can continue', async () => {
+  it('installs the official CLI before activating its Proxy', async () => {
     const missingAgents = [
       agent('codex', 'Codex', false),
       agent('claude', 'Claude Code', false),
       agent('kimi', 'Kimi Code', false),
     ];
+    const cliReadyCodex = agent('codex', 'Codex');
+    cliReadyCodex.ready = false;
+    cliReadyCodex.plugin = missingAgents[0]!.plugin;
+    const cliOnly = [cliReadyCodex, missingAgents[1]!, missingAgents[2]!];
     const codexReady = [agent('codex', 'Codex'), missingAgents[1]!, missingAgents[2]!];
     vi.mocked(loadAgents)
       .mockResolvedValueOnce(missingAgents)
+      .mockResolvedValueOnce(cliOnly)
       .mockResolvedValue(codexReady);
     const { wrapper } = createOperationHarness();
     render(
@@ -253,6 +249,9 @@ describe('OnboardingView', () => {
 
     await waitFor(() => expect(installAgentProxy).toHaveBeenCalledWith('codex'));
     expect(installAgentCli).toHaveBeenCalledWith('codex');
+    expect(vi.mocked(installAgentCli).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(installAgentProxy).mock.invocationCallOrder[0]!,
+    );
     await waitFor(() => expect(continueButton).toBeEnabled());
   });
 

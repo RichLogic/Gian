@@ -5,6 +5,7 @@ export const SIDECHAT_OPERATION_POLICIES = {
   'sidechat.create': 'pending',
   'sidechat.resume': 'pending',
   'sidechat.close': 'pending',
+  'sidechat.setTurnConfig': 'optimistic',
   'session.forkSession': 'pending',
 } as const;
 
@@ -30,6 +31,13 @@ export interface SidechatResumeResult {
 
 export interface SidechatCloseInput {
   sidechatId: string;
+}
+
+export interface SidechatSetTurnConfigInput {
+  sidechatId: string;
+  optionId: string;
+  value: ConfigValue;
+  turnConfig: Record<string, ConfigValue>;
 }
 
 export interface SidechatCloseResult {

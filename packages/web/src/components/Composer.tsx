@@ -1,8 +1,8 @@
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ApprovalMode, ConfigOption, ConfigValue, Executor, NativeConfigOption, NativeConfigValue, ProxyModeCapabilities, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
-import { isApprovalMode, usesNativeExecutorConfig } from '@gian/shared';
-import { MAX_FILE_BYTES, fmtBytes, isNativeImageMime, servedAttachmentUrl } from '../attachments.js';
+import type { ApprovalMode, ComposerDocument, ComposerReferenceSegment, ConfigOption, ConfigValue, Executor, MessageContextItem, PickComposerResourcesResult, NativeConfigValue, ProxyModeCapabilities, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
+import { MAX_MESSAGE_CONTEXT_ITEMS, MAX_PASTED_TEXT_BYTES, composerDocumentUserText, isApprovalMode, normalizeBrowserElementCapture, normalizeComposerDocument, usesNativeExecutorConfig } from '@gian/shared';
+import { MAX_FILE_BYTES, dedupeAttachmentName, fmtBytes, isNativeImageMime, servedAttachmentUrl } from '../attachments.js';
 import type { UploadedAttachment } from '../api.js';
 import {
   loadNativeConfig,
@@ -14,11 +14,27 @@ import { useT } from '../i18n/index.js';
 // Runtime import (not `import type`): registering message.uploadAttachment
 // on the product registry is a module side effect.
 import { type UploadAttachmentInput } from '../operations/message.js';
-import { useOperationDispatchOptional, useSessionOperationPending } from '../operations/use-operations.js';
+import {
+  useOperationDispatchOptional,
+  useOperationStoreOptional,
+  useSessionOperationPending,
+  waitForRunSettle,
+} from '../operations/use-operations.js';
+import '../operations/context.js';
 import { ImageZoomContext } from '../transcript/items.js';
 import { publishScreenshotTarget } from '../screenshot-target.js';
 import { ContextUsageIndicator } from './composer/context-usage-indicator.js';
-import { CatalogOptionsMenu } from './composer/catalog-options-menu.js';
+import {
+  ContextReferencePopover,
+  REFERENCE_ICONS,
+  ReferencePopover,
+  ReferencePopoverHead,
+} from './composer/reference-popover.js';
+import type { ReferenceAnchor } from './composer/reference-popover.js';
+import {
+  InlineComposerEditor,
+  type InlineComposerEditorHandle,
+} from './composer/InlineComposerEditor.js';
 import {
   applyResolvedDefaults,
   claudeModelFamily,
@@ -54,18 +70,20 @@ import type { ProxyModel } from './composer/capabilities.js';
 import { NativeOptionDrop, useUpDrop } from './composer/option-drops.js';
 export { ContextUsageIndicator } from './composer/context-usage-indicator.js';
 
-/** Per-session unsent draft. localStorage key prefix; v2 stores JSON
- *  `{text, attachments}` so unsent ATTACHMENTS survive a session switch too
- *  (v1 stored text only and silently dropped them). Attachments persist as
- *  metadata only (name/mime/size/path) — the bytes already live in the
- *  host's per-session attachment store, so the restored chip previews from
- *  the served `/api/sessions/:id/attachments/:filename` URL. */
-const DRAFT_KEY_PREFIX = 'gian.composer.draft.v2.';
+/** v4 adds an ordered text/reference document to v3 resources. */
+const DRAFT_KEY_PREFIX = 'gian.composer.draft.v4.';
+const V3_DRAFT_KEY_PREFIX = 'gian.composer.draft.v3.';
+const V2_DRAFT_KEY_PREFIX = 'gian.composer.draft.v2.';
 const LEGACY_DRAFT_KEY_PREFIX = 'gian.composer.draft.v1.';
 const draftKey = (sessionId: string) => `${DRAFT_KEY_PREFIX}${sessionId}`;
+const v3DraftKey = (sessionId: string) => `${V3_DRAFT_KEY_PREFIX}${sessionId}`;
+const v2DraftKey = (sessionId: string) => `${V2_DRAFT_KEY_PREFIX}${sessionId}`;
 const legacyDraftKey = (sessionId: string) => `${LEGACY_DRAFT_KEY_PREFIX}${sessionId}`;
+const PASTED_TEXT_CARD_MIN_CHARS = 800;
+const PASTED_TEXT_CARD_MIN_LINES = 8;
 
 export interface DraftAttachment {
+  id: string;
   name: string;
   mime: string;
   size: number;
@@ -75,39 +93,151 @@ export interface DraftAttachment {
 
 interface ComposerDraft {
   text: string;
+  document: ComposerDocument;
   attachments: DraftAttachment[];
+  contextItems: MessageContextItem[];
 }
 
-const EMPTY_DRAFT: ComposerDraft = { text: '', attachments: [] };
+const EMPTY_DOCUMENT: ComposerDocument = { version: 1, segments: [] };
+const EMPTY_DRAFT: ComposerDraft = {
+  text: '',
+  document: EMPTY_DOCUMENT,
+  attachments: [],
+  contextItems: [],
+};
+
+function contextReferenceLabel(item: MessageContextItem): string {
+  if (item.type === 'folder') return item.name;
+  if (item.type === 'browserElement') return item.name || item.selector;
+  const preview = item.text.replace(/\s+/g, ' ').trim();
+  return preview.slice(0, 80) || 'Pasted text';
+}
+
+function composerReferenceIds(document: ComposerDocument): Set<string> {
+  return new Set(document.segments.flatMap(segment => (
+    segment.type === 'reference' ? [segment.id] : []
+  )));
+}
+
+function legacyDocument(
+  text: string,
+  attachments: DraftAttachment[],
+  contextItems: MessageContextItem[],
+): ComposerDocument {
+  const segments: ComposerDocument['segments'] = [];
+  const references: ComposerReferenceSegment[] = [
+    ...attachments.map(attachment => ({
+      type: 'reference' as const,
+      id: attachment.id,
+      referenceType: 'attachment' as const,
+      label: attachment.name,
+    })),
+    ...contextItems.map(item => ({
+      type: 'reference' as const,
+      id: item.id,
+      referenceType: 'context' as const,
+      label: contextReferenceLabel(item),
+    })),
+  ];
+  references.forEach((reference, index) => {
+    segments.push(reference);
+    if (index < references.length - 1 || text) segments.push({ type: 'text', text: '\n' });
+  });
+  if (text) segments.push({ type: 'text', text });
+  return normalizeComposerDocument({ version: 1, segments }) ?? EMPTY_DOCUMENT;
+}
+
+function appendReference(
+  document: ComposerDocument,
+  reference: Omit<ComposerReferenceSegment, 'type'>,
+): ComposerDocument {
+  if (document.segments.some(segment => segment.type === 'reference' && segment.id === reference.id)) {
+    return document;
+  }
+  return normalizeComposerDocument({
+    version: 1,
+    segments: [...document.segments, { type: 'reference', ...reference }, { type: 'text', text: ' ' }],
+  }) ?? document;
+}
+
+function draftContextItems(value: unknown): MessageContextItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): MessageContextItem[] => {
+    if (!item || typeof item !== 'object') return [];
+    const candidate = item as Record<string, unknown>;
+    if (typeof candidate.id !== 'string') return [];
+    if (candidate.type === 'folder') {
+      return typeof candidate.path === 'string' && typeof candidate.name === 'string'
+        ? [candidate as unknown as MessageContextItem]
+        : [];
+    }
+    if (candidate.type === 'pastedText'
+      && typeof candidate.text === 'string'
+      && typeof candidate.lineCount === 'number'
+      && typeof candidate.byteSize === 'number') {
+      return [candidate as unknown as MessageContextItem];
+    }
+    if (candidate.type === 'browserElement') {
+      const capture = normalizeBrowserElementCapture(candidate);
+      return capture ? [{ type: 'browserElement', id: candidate.id, ...capture }] : [];
+    }
+    return [];
+  }).slice(0, MAX_MESSAGE_CONTEXT_ITEMS);
+}
 
 function readDraft(sessionId: string): ComposerDraft {
   try {
-    const raw = localStorage.getItem(draftKey(sessionId));
+    const raw = localStorage.getItem(draftKey(sessionId))
+      ?? localStorage.getItem(v3DraftKey(sessionId))
+      ?? localStorage.getItem(v2DraftKey(sessionId));
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<ComposerDraft>;
+      const contextItems = draftContextItems(parsed.contextItems);
+      const attachments = Array.isArray(parsed.attachments)
+        ? parsed.attachments.flatMap((attachment): DraftAttachment[] => {
+            if (
+              !attachment
+              || typeof attachment.path !== 'string'
+              || typeof attachment.name !== 'string'
+              || typeof attachment.mime !== 'string'
+            ) return [];
+            return [{
+              id: typeof attachment.id === 'string' ? attachment.id : crypto.randomUUID(),
+              path: attachment.path,
+              name: attachment.name,
+              mime: attachment.mime,
+              size: typeof attachment.size === 'number' ? attachment.size : 0,
+            }];
+          })
+        : [];
+      const text = typeof parsed.text === 'string' ? parsed.text : '';
       return {
-        text: typeof parsed.text === 'string' ? parsed.text : '',
-        attachments: Array.isArray(parsed.attachments)
-          ? parsed.attachments.filter(a =>
-              a && typeof a.path === 'string' && typeof a.name === 'string' && typeof a.mime === 'string')
-          : [],
+        text,
+        document: normalizeComposerDocument(parsed.document)
+          ?? legacyDocument(text, attachments, contextItems),
+        attachments,
+        contextItems,
       };
     }
     // Legacy v1 draft (plain text) — carried over once, then rewritten as v2.
     const legacy = localStorage.getItem(legacyDraftKey(sessionId));
-    return legacy ? { text: legacy, attachments: [] } : EMPTY_DRAFT;
+    return legacy
+      ? { text: legacy, document: legacyDocument(legacy, [], []), attachments: [], contextItems: [] }
+      : EMPTY_DRAFT;
   } catch {
     return EMPTY_DRAFT;
   }
 }
 function writeDraft(sessionId: string, draft: ComposerDraft): void {
   try {
-    if (draft.text || draft.attachments.length > 0) {
+    if (draft.document.segments.length > 0 || draft.attachments.length > 0 || draft.contextItems.length > 0) {
       localStorage.setItem(draftKey(sessionId), JSON.stringify(draft));
     } else {
       localStorage.removeItem(draftKey(sessionId));
     }
     localStorage.removeItem(legacyDraftKey(sessionId));
+    localStorage.removeItem(v2DraftKey(sessionId));
+    localStorage.removeItem(v3DraftKey(sessionId));
   } catch {
     // localStorage may be unavailable (privacy mode) — drafts become ephemeral.
   }
@@ -126,7 +256,15 @@ let pendingComposerFocusSessionId: string | null = null;
 export function injectComposerDraft(sessionId: string, text: string): void {
   const existing = readDraft(sessionId);
   const next = existing.text ? `${existing.text}\n\n${text}` : text;
-  writeDraft(sessionId, { ...existing, text: next });
+  const document = normalizeComposerDocument({
+    version: 1,
+    segments: [
+      ...existing.document.segments,
+      ...(existing.document.segments.length > 0 ? [{ type: 'text' as const, text: '\n\n' }] : []),
+      { type: 'text' as const, text },
+    ],
+  }) ?? existing.document;
+  writeDraft(sessionId, { ...existing, text: next, document });
   try {
     window.dispatchEvent(new CustomEvent(COMPOSER_INJECT_EVENT, {
       detail: { sessionId, kind: 'text' },
@@ -142,7 +280,9 @@ export function injectComposerAttachment(
   attachment: Pick<UploadedAttachment, 'path' | 'name' | 'mime' | 'size'>,
 ): void {
   const existing = readDraft(sessionId);
+  const existingAttachment = existing.attachments.find(item => item.path === attachment.path);
   const nextAttachment: DraftAttachment = {
+    id: existingAttachment?.id ?? crypto.randomUUID(),
     path: attachment.path,
     name: attachment.name,
     mime: attachment.mime,
@@ -152,7 +292,15 @@ export function injectComposerAttachment(
     ...existing.attachments.filter(item => item.path !== attachment.path),
     nextAttachment,
   ];
-  writeDraft(sessionId, { ...existing, attachments });
+  writeDraft(sessionId, {
+    ...existing,
+    attachments,
+    document: appendReference(existing.document, {
+      id: nextAttachment.id,
+      referenceType: 'attachment',
+      label: nextAttachment.name,
+    }),
+  });
   pendingComposerFocusSessionId = sessionId;
   try {
     window.dispatchEvent(new CustomEvent(COMPOSER_INJECT_EVENT, {
@@ -161,6 +309,88 @@ export function injectComposerAttachment(
   } catch {
     // The draft and focus request are consumed when the Composer next mounts.
   }
+}
+
+/** Restore Gian-owned context cards into an existing Session draft. */
+export function injectComposerContextItems(
+  sessionId: string,
+  contextItems: MessageContextItem[],
+): boolean {
+  if (contextItems.length === 0) return true;
+  const existing = readDraft(sessionId);
+  const byId = new Map(existing.contextItems.map(item => [item.id, item]));
+  for (const item of contextItems) byId.set(item.id, item);
+  if (byId.size > MAX_MESSAGE_CONTEXT_ITEMS) return false;
+  writeDraft(sessionId, {
+    ...existing,
+    contextItems: [...byId.values()],
+    document: contextItems.reduce((document, item) => appendReference(document, {
+      id: item.id,
+      referenceType: 'context',
+      label: contextReferenceLabel(item),
+    }), existing.document),
+  });
+  pendingComposerFocusSessionId = sessionId;
+  try {
+    window.dispatchEvent(new CustomEvent(COMPOSER_INJECT_EVENT, {
+      detail: { sessionId, kind: 'context', contextItems },
+    }));
+  } catch {
+    // The draft is consumed when the Composer next mounts.
+  }
+  return true;
+}
+
+/** Restore an ordered draft after only part of a pre-session attachment batch
+ *  uploaded. The caller has already removed failed attachment references. */
+export function injectComposerDocumentDraft(
+  sessionId: string,
+  documentValue: ComposerDocument,
+  attachments: DraftAttachment[],
+  injectedContextItems: MessageContextItem[],
+): void {
+  const existing = readDraft(sessionId);
+  const document = normalizeComposerDocument({
+    version: 1,
+    segments: [
+      ...existing.document.segments,
+      ...(existing.document.segments.length > 0 && documentValue.segments.length > 0
+        ? [{ type: 'text' as const, text: '\n\n' }]
+        : []),
+      ...documentValue.segments,
+    ],
+  }) ?? existing.document;
+  const attachmentById = new Map(existing.attachments.map(item => [item.id, item]));
+  for (const attachment of attachments) attachmentById.set(attachment.id, attachment);
+  const contextById = new Map(existing.contextItems.map(item => [item.id, item]));
+  for (const item of injectedContextItems) contextById.set(item.id, item);
+  writeDraft(sessionId, {
+    text: composerDocumentUserText(document),
+    document,
+    attachments: [...attachmentById.values()],
+    contextItems: [...contextById.values()],
+  });
+  pendingComposerFocusSessionId = sessionId;
+  try {
+    window.dispatchEvent(new CustomEvent(COMPOSER_INJECT_EVENT, {
+      detail: { sessionId, kind: 'text' },
+    }));
+  } catch {
+    // The durable draft and focus request are consumed on the next mount.
+  }
+}
+
+/** Delete an unsent draft owned by a newly-created transient route. */
+export function discardComposerDraft(sessionId: string): void {
+  try {
+    localStorage.removeItem(draftKey(sessionId));
+    localStorage.removeItem(v2DraftKey(sessionId));
+    localStorage.removeItem(v3DraftKey(sessionId));
+    localStorage.removeItem(legacyDraftKey(sessionId));
+  } catch {
+    // localStorage may be unavailable; there is no persisted draft to clean.
+  }
+  if (pendingComposerFocusSessionId === sessionId) pendingComposerFocusSessionId = null;
 }
 
 interface PendingFile {
@@ -190,7 +420,7 @@ interface PendingFile {
  *  URL is created and `URL.revokeObjectURL` on it is a harmless no-op. */
 function draftAttachmentsToPending(sessionId: string, attachments: DraftAttachment[]): PendingFile[] {
   return attachments.map(a => ({
-    id: crypto.randomUUID(),
+    id: a.id,
     name: a.name,
     mime: a.mime,
     size: a.size,
@@ -205,7 +435,11 @@ function draftAttachmentsToPending(sessionId: string, attachments: DraftAttachme
 function persistableDraftAttachments(files: PendingFile[]): DraftAttachment[] {
   return files
     .filter((f): f is PendingFile & { path: string } => f.path !== null && !f.uploading && !f.error)
-    .map(f => ({ name: f.name, mime: f.mime, size: f.size, path: f.path }));
+    .map(f => ({ id: f.id, name: f.name, mime: f.mime, size: f.size, path: f.path }));
+}
+
+function ControlSeparator() {
+  return <span className="cmp-control-sep" aria-hidden="true">|</span>;
 }
 
 /** A concrete Claude id like `claude-opus-4-8` (synced from the native
@@ -239,6 +473,8 @@ export function Composer({
         size: number;
         previewUrl: string;
       }>;
+      contextItems?: MessageContextItem[];
+      composerDocument?: ComposerDocument;
     },
   ) => void;
   /** Dispatch a skill invocation directly (used for codex user/project skills
@@ -249,13 +485,19 @@ export function Composer({
   onQueueAdd: (
     text: string,
     attachments?: Array<{ path: string; name: string; mime: string; size?: number }>,
+    contextItems?: MessageContextItem[],
+    composerDocument?: ComposerDocument,
   ) => void;
   /** Mid-turn injection (`turn.steer`): Ctrl+Enter while a turn is running
    *  appends the draft to the ACTIVE turn instead of queueing it. Driven by
    *  the Proxy `turn.steer` capability via `canSteer`, not by executor id. */
   onSteer?: (
     text: string,
-    opts?: { attachments?: Array<{ path: string; name: string; mime: string; size?: number }> },
+    opts?: {
+      attachments?: Array<{ path: string; name: string; mime: string; size?: number }>;
+      contextItems?: MessageContextItem[];
+      composerDocument?: ComposerDocument;
+    },
   ) => void;
   onSetMode: (mode: ApprovalMode) => void;
   onSetModel: (model: string) => void;
@@ -280,15 +522,10 @@ export function Composer({
   agentId?: string | null;
   workspaceId?: string;
   footer?: import('react').ReactNode;
-  /** `'minimal'` strips the model / approval-mode / attachment / bypass
-   *  controls down to a bare textarea + Send/Stop, for embedders that want a
-   *  fixed-config composer. The draft-persistence, Send→Stop toggle, width
-   *  and keyboard handling are all kept identical to a normal session
-   *  composer. Used by the Side Chat dock (proposal §10.5): the Side Chat
-   *  route only allows turn.start/interrupt/steer + interaction.respond, so
-   *  session-config controls, session slash discovery and screenshot-target
-   *  registration are all skipped in this variant. */
-  variant?: 'full' | 'minimal';
+  /** Restricted variants omit attachment, bypass, slash and screenshot
+   *  actions. `fixed` renders all config as inherited; `sidechat` makes only
+   *  Proxy-advertised Turn-bound controls interactive. */
+  variant?: 'full' | 'fixed' | 'sidechat';
   /** Override the idle placeholder text (defaults to `composer.placeholder.idle`). */
   placeholder?: string;
   /** Override the DISABLED placeholder (defaults to `composer.placeholder.busy`,
@@ -297,7 +534,8 @@ export function Composer({
   busyPlaceholder?: string;
 }) {
   const t = useT();
-  const minimal = variant === 'minimal';
+  const fixed = variant !== 'full';
+  const configurableSidechat = variant === 'sidechat';
   const hardDisabled = disabled && disabledSubmitBehavior === 'block';
   const cliExecutor = usesNativeExecutorConfig(executor) ? null : executor;
   const zoomImage = useContext(ImageZoomContext);
@@ -305,10 +543,12 @@ export function Composer({
   // before v2 only the text survived a session switch and the chips vanished
   // even though their uploads still existed in the host attachment store.
   const [initialDraft] = useState(() => readDraft(session.id));
-  const [text, setText] = useState(initialDraft.text);
+  const [composerDocument, setComposerDocument] = useState(initialDraft.document);
+  const [text, setText] = useState(() => composerDocumentUserText(initialDraft.document));
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>(
     () => draftAttachmentsToPending(session.id, initialDraft.attachments),
   );
+  const [contextItems, setContextItems] = useState<MessageContextItem[]>(initialDraft.contextItems);
 
   // Session swap: snapshot current draft under the OUTGOING session's key,
   // then load the INCOMING session's draft. We use the React-blessed
@@ -316,16 +556,32 @@ export function Composer({
   // outgoing draft against the incoming session id.
   const lastSessionRef = useRef(session.id);
   if (lastSessionRef.current !== session.id) {
-    writeDraft(lastSessionRef.current, { text, attachments: persistableDraftAttachments(pendingFiles) });
+    const referencedIds = composerReferenceIds(composerDocument);
+    writeDraft(lastSessionRef.current, {
+      text,
+      document: composerDocument,
+      attachments: persistableDraftAttachments(pendingFiles.filter(file => referencedIds.has(file.id))),
+      contextItems: contextItems.filter(item => referencedIds.has(item.id)),
+    });
     for (const f of pendingFiles) URL.revokeObjectURL(f.previewUrl);
     const incoming = readDraft(session.id);
     lastSessionRef.current = session.id;
-    setText(incoming.text);
+    setText(composerDocumentUserText(incoming.document));
+    setComposerDocument(incoming.document);
     setPendingFiles(draftAttachmentsToPending(session.id, incoming.attachments));
+    setContextItems(incoming.contextItems);
   }
   // Single-turn bypass: ⚡ button toggles. Cleared automatically after the
   // next send so it never persists across turns.
   const [oneShotBypass, setOneShotBypass] = useState(false);
+  const addDrop = useUpDrop(220, { align: 'right' });
+  const [activeReference, setActiveReference] = useState<{
+    id: string;
+    anchor: ReferenceAnchor;
+    anchorEl: HTMLElement;
+  } | null>(null);
+  const [resourcePicking, setResourcePicking] = useState(false);
+  const [contextError, setContextError] = useState<string | null>(null);
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashDismissedInput, setSlashDismissedInput] = useState<{
     sessionId: string;
@@ -342,7 +598,9 @@ export function Composer({
   const [slashPopPos, setSlashPopPos] = useState<{ left: number; bottom: number; width: number } | null>(null);
   // Approval stays independent; every other catalog option lives in the
   // single Cursor-style options menu rendered in the composer bar.
-  const approvalDrop = useUpDrop(340);
+  const approvalDrop = useUpDrop(340, { align: 'right' });
+  const modelDrop = useUpDrop(320);
+  const thinkDrop = useUpDrop(210);
   const [models, setModels] = useState<ProxyModel[]>(
     cliExecutor ? (getModelsCached(cliExecutor, agentId) ?? []) : [],
   );
@@ -360,6 +618,14 @@ export function Composer({
     defaults?: Record<string, ConfigValue>;
     error?: string | null;
   } | null>(null);
+
+  function handleDocumentChange(nextDocument: ComposerDocument, userText: string): void {
+    setSlashDismissedInput(null);
+    setComposerDocument(nextDocument);
+    setText(userText);
+    const referenceIds = composerReferenceIds(nextDocument);
+    if (activeReference && !referenceIds.has(activeReference.id)) setActiveReference(null);
+  }
   const steerEnabled = canSteer ?? fetchedSteer ?? executor === 'codex';
   const sessionNativeOptions = session.native_config_options ?? [];
   const [nativeOptions, setNativeOptions] = useState(sessionNativeOptions);
@@ -371,7 +637,9 @@ export function Composer({
   // message.uploadAttachment). Null only when no operation provider is
   // mounted (standalone test renders) — uploads then fail the chip visibly.
   const dispatch = useOperationDispatchOptional();
+  const operationStore = useOperationStoreOptional();
   const screenshotAvailable = !!desktopBridge()?.screenshot;
+  const resourcePickerAvailable = !!desktopBridge()?.resources;
 
   // Fetch model list lazily per executor; cached.
   useEffect(() => {
@@ -459,10 +727,10 @@ export function Composer({
 
   // Fetch slash commands lazily; keyed by (executor, workspaceId); cached.
   useEffect(() => {
-    // The minimal variant has no slash UI — skip session slash discovery
+    // The fixed variant has no slash UI — skip session slash discovery
     // entirely (for a Side Chat composer the per-session REST endpoint does
     // not even exist on the route).
-    if (minimal) return;
+    if (fixed) return;
     if (catalogReady) {
       let alive = true;
       setSlashCommands(catalog.slashCommands);
@@ -521,7 +789,7 @@ export function Composer({
         setSlashLoading(false);
       });
     return () => { alive = false; };
-  }, [catalogReady, catalog.slashCommands, executor, agentId, minimal, session.id, workspaceId, slashRefreshVersion]);
+  }, [catalogReady, catalog.slashCommands, executor, agentId, fixed, session.id, workspaceId, slashRefreshVersion]);
 
   useEffect(() => {
     if (catalogReady || usesNativeExecutorConfig(executor) || !workspaceId) return;
@@ -553,7 +821,7 @@ export function Composer({
   }, [session.id, session.native_config_options]);
 
   useEffect(() => {
-    if (minimal || !showNativeFallback || sessionNativeOptions.length > 0) return;
+    if (fixed || !showNativeFallback || sessionNativeOptions.length > 0) return;
     let alive = true;
     void loadNativeConfig(session.id)
       .then(snapshot => {
@@ -563,7 +831,7 @@ export function Composer({
         // Session content remains usable while native config is unavailable.
       });
     return () => { alive = false; };
-  }, [minimal, showNativeFallback, executor, session.id, sessionNativeOptions.length]);
+  }, [fixed, showNativeFallback, executor, session.id, sessionNativeOptions.length]);
 
   const mergedOptions = mergeTurnCatalog(catalog.configOptions, session.turn_config_options);
   const viewOptions = resolvedOverlay?.options ?? mergedOptions;
@@ -603,27 +871,22 @@ export function Composer({
     nativeOptionRole(option) === 'effort' && option.type === 'select');
   const nativeModeOption = nativeOptions.find(option =>
     nativeOptionRole(option) === 'mode' && option.type === 'select');
-  const semanticNativeIds = new Set(
-    [nativeModelOption, nativeEffortOption, nativeModeOption]
-      .filter((option): option is NativeConfigOption => Boolean(option))
-      .map(option => option.id),
-  );
-  const nativeExtraOptions = nativeOptions.filter(option => !semanticNativeIds.has(option.id));
   const fastOption = viewOptions.find(option => option.role === 'fast' && option.binding === 'turn');
-  const showFast = Boolean(onSetServiceTier) && (
+  const showFast = (fixed || Boolean(onSetServiceTier)) && (
     fastOption
       ? optionVisible(fastOption, configValues)
       : !catalogReady && executor === 'codex'
   );
   const fastEnabled = !fastOption || optionEnabled(fastOption, configValues);
-  const showAttach = catalog.input.length === 0
-    || inputTypeAdvertised(catalog, 'localFile', configValues)
+  const canAttachLocalFile = catalog.input.length === 0
+    || inputTypeAdvertised(catalog, 'localFile', configValues);
+  const canAttachLocalImage = catalog.input.length === 0
     || inputTypeAdvertised(catalog, 'localImage', configValues);
   // Files are uploaded into the host-owned per-session attachment store before
   // send, so queued turns and restored sessions never depend on the original.
   // (pendingFiles itself is declared up top — the session-swap block needs it.)
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const ref = useRef<HTMLTextAreaElement>(null);
+  const editorRef = useRef<InlineComposerEditorHandle>(null);
   const popRef = useRef<HTMLDivElement>(null);
 
   // Persist the draft on every text / attachment change so refreshes,
@@ -632,8 +895,21 @@ export function Composer({
   // session's draft, so this effect always writes against the current
   // session id.
   useEffect(() => {
-    writeDraft(session.id, { text, attachments: persistableDraftAttachments(pendingFiles) });
-  }, [session.id, text, pendingFiles]);
+    const referencedIds = composerReferenceIds(composerDocument);
+    writeDraft(session.id, {
+      text,
+      document: composerDocument,
+      attachments: persistableDraftAttachments(pendingFiles.filter(file => referencedIds.has(file.id))),
+      contextItems: contextItems.filter(item => referencedIds.has(item.id)),
+    });
+  }, [session.id, text, composerDocument, pendingFiles, contextItems]);
+
+  useEffect(() => {
+    editorRef.current?.setDocument(composerDocument);
+    // Only session replacement is externally controlled; ordinary edits are
+    // owned by Lexical and flow upward through onChange.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.id]);
 
   // External draft injection covers text prompts and screenshots captured while
   // this Session was either foregrounded or temporarily unmounted.
@@ -641,8 +917,9 @@ export function Composer({
     function onInject(e: Event) {
       const detail = (e as CustomEvent).detail as {
         sessionId?: string;
-        kind?: 'text' | 'attachment';
+        kind?: 'text' | 'attachment' | 'context';
         attachment?: DraftAttachment;
+        contextItems?: MessageContextItem[];
       } | undefined;
       if (detail?.sessionId !== session.id) return;
       if (detail.kind === 'attachment' && detail.attachment) {
@@ -653,25 +930,37 @@ export function Composer({
             ...draftAttachmentsToPending(session.id, [detail.attachment!]),
           ];
         });
+        editorRef.current?.insertReference({
+          id: detail.attachment.id,
+          referenceType: 'attachment',
+          label: detail.attachment.name,
+        });
+      } else if (detail.kind === 'context') {
+        const incoming = readDraft(session.id);
+        setContextItems(incoming.contextItems);
+        for (const item of detail.contextItems ?? []) {
+          editorRef.current?.insertReference({
+            id: item.id,
+            referenceType: 'context',
+            label: contextReferenceLabel(item),
+          });
+        }
       } else {
-        setText(readDraft(session.id).text);
+        const incoming = readDraft(session.id);
+        setText(composerDocumentUserText(incoming.document));
+        setComposerDocument(incoming.document);
+        editorRef.current?.setDocument(incoming.document);
       }
       requestAnimationFrame(() => {
-        const el = ref.current;
-        if (el) {
-          el.focus();
-          el.setSelectionRange(el.value.length, el.value.length);
-          if (pendingComposerFocusSessionId === session.id) pendingComposerFocusSessionId = null;
-        }
+        editorRef.current?.focus();
+        if (pendingComposerFocusSessionId === session.id) pendingComposerFocusSessionId = null;
       });
     }
     window.addEventListener(COMPOSER_INJECT_EVENT, onInject);
     if (pendingComposerFocusSessionId === session.id) {
       requestAnimationFrame(() => {
-        const el = ref.current;
-        if (!el) return;
-        el.focus();
-        el.setSelectionRange(el.value.length, el.value.length);
+        if (!editorRef.current) return;
+        editorRef.current.focus();
         if (pendingComposerFocusSessionId === session.id) pendingComposerFocusSessionId = null;
       });
     }
@@ -679,15 +968,15 @@ export function Composer({
   }, [session.id]);
 
   useEffect(() => {
-    // Minimal composers (Side Chat dock) are not screenshot targets — the
+    // Fixed composers (Side Chat dock) are not screenshot targets — the
     // attachment store is keyed to real Sessions.
-    if (minimal || hardDisabled || !screenshotAvailable) return;
+    if (fixed || hardDisabled || !screenshotAvailable) return;
     return publishScreenshotTarget({
       kind: 'session',
       sessionId: session.id,
       label: session.name?.trim() || `session ${session.id.slice(0, 6)}`,
     });
-  }, [minimal, hardDisabled, screenshotAvailable, session.id, session.name]);
+  }, [fixed, hardDisabled, screenshotAvailable, session.id, session.name]);
 
   const activeModel = catalogModelOption
     ? String(configValues[catalogModelOption.id] ?? currentModel)
@@ -695,7 +984,6 @@ export function Composer({
   const approvalValue = catalogApprovalOption
     ? String(configValues[catalogApprovalOption.id] ?? session.approval_mode ?? catalogApprovalOption.defaultValue ?? '')
     : (session.approval_mode ?? 'ask');
-  const approvalMode = isApprovalMode(approvalValue) ? approvalValue : session.approval_mode;
   const catalogModeList = catalogApprovalOption?.choices?.map(choice => ({
     id: String(choice.value),
     label: choice.displayName,
@@ -714,42 +1002,55 @@ export function Composer({
   const showApprovalChip = catalogReady
     ? Boolean(catalogApprovalOption && optionVisible(catalogApprovalOption, configValues))
     : Boolean(cliExecutor);
-  const optionsMenuCatalogOptions = viewOptions
-    .filter(option => option.binding === 'turn')
-    .filter(option => option.id !== catalogModelOption?.id)
-    .filter(option => option.id !== catalogEffortOption?.id)
-    .filter(option => option.id !== catalogApprovalOption?.id)
-    .filter(option => option.id !== fastOption?.id)
-    .filter(option => optionVisible(option, configValues))
-    .sort((left, right) => (left.presentation?.order ?? 0) - (right.presentation?.order ?? 0));
-  const showOptionsMenu = showModelChip
-    || showEffortChip
-    || Boolean(showFast && onSetServiceTier)
-    || optionsMenuCatalogOptions.length > 0;
   const effortChoices = catalogEfforts.length > 0
     ? catalogEfforts
     : supportedEfforts(currentModelMeta);
-  // Warn colour only for modes that stop asking the user (2026-08-04 — the
-  // chip used to be warn unconditionally). Kimi isn't here: its mode chip is
-  // the native-option drop with its own styling.
-  const approvalRisky = cliExecutor === 'codex'
-    ? approvalMode === 'auto' || approvalMode === 'custom' || approvalMode === 'full-access'
-    : oneShotBypass || approvalMode === 'auto';
+  const modelControlInteractive = !fixed || Boolean(
+    configurableSidechat && catalogModelOption?.binding === 'turn' && onSetModel,
+  );
+  const effortControlInteractive = !fixed || Boolean(
+    configurableSidechat && catalogEffortOption?.binding === 'turn' && onSetEffort,
+  );
+  const fastControlInteractive = !fixed || Boolean(
+    configurableSidechat && fastOption?.binding === 'turn' && onSetServiceTier,
+  );
+  const approvalControlInteractive = !fixed || Boolean(
+    configurableSidechat && catalogApprovalOption?.binding === 'turn' && onSetMode,
+  );
+  const modelControlVisible = fixed
+    ? modelControlInteractive ? showModelChip : showModelChip || Boolean(activeModel)
+    : Boolean((showNativeFallback && nativeModelOption) || showModelChip);
+  const effortControlVisible = fixed
+    ? effortControlInteractive ? showEffortChip : showEffortChip || Boolean(thinkLevel)
+    : Boolean((showNativeFallback && nativeEffortOption) || showEffortChip);
+  const fastControlVisible = fixed ? showFast : Boolean(showFast && onSetServiceTier);
 
-  const slashPrefix = text.startsWith('/') ? text : '';
+  function replaceEditorText(nextText: string): void {
+    const nextDocument = normalizeComposerDocument({
+      version: 1,
+      segments: nextText ? [{ type: 'text', text: nextText }] : [],
+    }) ?? EMPTY_DOCUMENT;
+    setText(nextText);
+    setComposerDocument(nextDocument);
+    editorRef.current?.setDocument(nextDocument);
+  }
+
+  function clearEditor(): void {
+    setText('');
+    setComposerDocument(EMPTY_DOCUMENT);
+    editorRef.current?.clear();
+  }
+
+  const hasReferences = composerDocument.segments.some(segment => segment.type === 'reference');
+  const liveReferenceIds = composerReferenceIds(composerDocument);
+
+  const slashPrefix = !hasReferences && text.startsWith('/') ? text : '';
   const filteredGroups = slashOpen ? slashFilterGrouped(slashCommands, slashPrefix) : [];
   const filtered = flatFiltered(filteredGroups);
 
   useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = Math.min(160, el.scrollHeight) + 'px';
-  }, [text]);
-
-  useEffect(() => {
-    // Minimal variant has no slash UI — never auto-open the popover.
-    if (minimal || hardDisabled) {
+    // Fixed variant has no slash UI — never auto-open the popover.
+    if (fixed || hardDisabled) {
       setSlashOpen(false);
       return;
     }
@@ -776,14 +1077,15 @@ export function Composer({
       // Non-slash text → close. Empty text is a no-op (button-controlled).
       setSlashOpen(false);
     }
-  }, [text, slashCommands, minimal, hardDisabled, session.id, slashDismissedInput]);
+  }, [text, slashCommands, fixed, hardDisabled, session.id, slashDismissedInput]);
 
   useEffect(() => {
     if (!slashOpen) return;
     function onPointerDown(e: PointerEvent) {
       if (
         popRef.current && !popRef.current.contains(e.target as Node) &&
-        ref.current && !ref.current.contains(e.target as Node)
+        editorRef.current?.rootElement()
+        && !editorRef.current.rootElement()!.contains(e.target as Node)
       ) {
         setSlashDismissedInput({ sessionId: session.id, text });
         setSlashOpen(false);
@@ -797,7 +1099,7 @@ export function Composer({
   // Portaled to body so it escapes `.composer { overflow: hidden }`.
   useLayoutEffect(() => {
     if (!slashOpen) { setSlashPopPos(null); return; }
-    const composer = ref.current?.closest('.composer') as HTMLElement | null;
+    const composer = editorRef.current?.rootElement()?.closest('.composer') as HTMLElement | null;
     if (!composer) return;
     const rect = composer.getBoundingClientRect();
     setSlashPopPos({
@@ -826,29 +1128,27 @@ export function Composer({
       && !!cmd.filePath;
     if (isCodexSkill) {
       setSlashOpen(false);
-      setText('');
+      clearEditor();
       onSendSkill(cmd.name.replace(/^\//, ''), cmd.filePath!);
       return;
     }
 
-    setText(cmd.name + ' ');
+    replaceEditorText(cmd.name + ' ');
     setSlashOpen(false);
-    ref.current?.focus();
-    setTimeout(() => {
-      const el = ref.current;
-      if (!el) return;
-      const len = el.value.length;
-      el.setSelectionRange(len, len);
-    }, 0);
+    requestAnimationFrame(() => editorRef.current?.focus());
   }
 
   function submit() {
-    const trimmed = text.trim();
+    const trimmed = composerDocumentUserText(composerDocument).trim();
+    const referenceIds = composerReferenceIds(composerDocument);
+    const referencedPendingFiles = pendingFiles.filter(file => referenceIds.has(file.id));
+    const referencedContextItems = contextItems.filter(item => referenceIds.has(item.id));
     // Wait for in-flight uploads to land before sending. We allow the send if
     // there's any text OR at least one ready attachment.
-    const ready = pendingFiles.filter(f => !f.uploading && !f.error && f.path);
-    if (!trimmed && ready.length === 0) return;
-    if (pendingFiles.some(f => f.uploading)) return; // chip spinner indicates wait
+    const ready = referencedPendingFiles.filter(f => !f.uploading && !f.error && f.path);
+    if (!trimmed && ready.length === 0 && referencedContextItems.length === 0) return;
+    if (referencedPendingFiles.some(f => f.uploading)) return; // inline reference spinner indicates wait
+    if (referencedPendingFiles.some(f => f.error)) return;
 
     const attachments = ready.map(f => ({
       path: f.path!,
@@ -859,16 +1159,26 @@ export function Composer({
     }));
     if (disabled) {
       if (disabledSubmitBehavior === 'block') return;
-      onQueueAdd(trimmed, attachments.map(({ path, name, mime, size }) => ({ path, name, mime, size })));
+      const queuedAttachments = attachments.map(({ path, name, mime, size }) => ({ path, name, mime, size }));
+      onQueueAdd(
+        trimmed,
+        queuedAttachments,
+        referencedContextItems.length > 0 ? referencedContextItems : undefined,
+        hasReferences ? composerDocument : undefined,
+      );
       // Queue path doesn't transfer ownership — revoke previews now.
       for (const f of pendingFiles) URL.revokeObjectURL(f.previewUrl);
     } else {
       const opts: {
         oneShotBypass?: true;
         attachments?: Array<{ path: string; name: string; mime: string; size: number; previewUrl: string }>;
+        contextItems?: MessageContextItem[];
+        composerDocument?: ComposerDocument;
       } = {};
       if (oneShotBypass) opts.oneShotBypass = true;
       if (attachments.length > 0) opts.attachments = attachments;
+      if (referencedContextItems.length > 0) opts.contextItems = referencedContextItems;
+      if (hasReferences) opts.composerDocument = composerDocument;
       onSend(trimmed, Object.keys(opts).length > 0 ? opts : undefined);
       if (oneShotBypass) setOneShotBypass(false);
       // App owns the sent attachments' previewUrls now — revoke only the
@@ -880,7 +1190,8 @@ export function Composer({
       }
     }
     setPendingFiles([]);
-    setText('');
+    setContextItems([]);
+    clearEditor();
   }
 
   /** Codex ⌘/Ctrl+Enter-while-running: append the draft to the ACTIVE turn via
@@ -890,20 +1201,30 @@ export function Composer({
    *  active turn and broadcasts it back. */
   function steerSubmit() {
     if (!onSteer) return;
-    const trimmed = text.trim();
-    const ready = pendingFiles.filter(f => !f.uploading && !f.error && f.path);
-    if (!trimmed && ready.length === 0) return;
-    if (pendingFiles.some(f => f.uploading)) return;
+    const trimmed = composerDocumentUserText(composerDocument).trim();
+    const referenceIds = composerReferenceIds(composerDocument);
+    const referencedPendingFiles = pendingFiles.filter(file => referenceIds.has(file.id));
+    const referencedContextItems = contextItems.filter(item => referenceIds.has(item.id));
+    const ready = referencedPendingFiles.filter(f => !f.uploading && !f.error && f.path);
+    if (!trimmed && ready.length === 0 && referencedContextItems.length === 0) return;
+    if (referencedPendingFiles.some(f => f.uploading)) return;
+    if (referencedPendingFiles.some(f => f.error)) return;
     const attachments = ready.map(f => ({
       path: f.path!,
       name: f.name,
       mime: f.mime,
       size: f.size,
     }));
-    onSteer(trimmed, attachments.length > 0 ? { attachments } : undefined);
+    const steerOptions = {
+      ...(attachments.length > 0 ? { attachments } : {}),
+      ...(referencedContextItems.length > 0 ? { contextItems: referencedContextItems } : {}),
+      ...(hasReferences ? { composerDocument } : {}),
+    };
+    onSteer(trimmed, Object.keys(steerOptions).length > 0 ? steerOptions : undefined);
     for (const f of pendingFiles) URL.revokeObjectURL(f.previewUrl);
     setPendingFiles([]);
-    setText('');
+    setContextItems([]);
+    clearEditor();
   }
 
   function maybeResolve(nextTurn: Record<string, ConfigValue>): void {
@@ -972,7 +1293,10 @@ export function Composer({
   }
 
   // Check if there are ready attachments (uploaded, no errors).
-  const canSendAttachmentOnly = pendingFiles.some(f => !f.uploading && !f.error && f.path);
+  const canSendAttachmentOnly = pendingFiles.some(
+    f => liveReferenceIds.has(f.id) && !f.uploading && !f.error && f.path,
+  );
+  const canSendContextOnly = contextItems.some(item => liveReferenceIds.has(item.id));
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const chosen = Array.from(e.target.files ?? []);
@@ -982,11 +1306,78 @@ export function Composer({
   }
 
   function removeFile(id: string) {
+    editorRef.current?.removeReference(id);
     setPendingFiles(prev => {
       const target = prev.find(f => f.id === id);
       if (target) URL.revokeObjectURL(target.previewUrl);
       return prev.filter(f => f.id !== id);
     });
+  }
+
+  function removeContextItem(id: string) {
+    editorRef.current?.removeReference(id);
+    setContextItems(previous => previous.filter(item => item.id !== id));
+    setContextError(null);
+  }
+
+  async function pickComposerResources() {
+    addDrop.setOpen(false);
+    setResourcePicking(true);
+    setContextError(null);
+    try {
+      if (!dispatch || !operationStore) {
+        setContextError(t('composer.context.pickerUnavailable'));
+        return;
+      }
+      const run = dispatch('context.pickResources', {});
+      const settled = await waitForRunSettle(operationStore, run.id);
+      if (settled.phase !== 'confirmed') {
+        setContextError(t('composer.context.pickerUnavailable'));
+        return;
+      }
+      const result = settled.result as PickComposerResourcesResult | undefined;
+      if (!result) return;
+      if (result.rejectedFiles.length > 0) {
+        setContextError(t('composer.context.filesRejected'));
+      }
+      const paths = new Set(contextItems.flatMap(item => item.type === 'folder' ? [item.path] : []));
+      const additions = result.resources
+        .filter(resource => resource.type === 'folder')
+        .flatMap(folder => {
+          if (paths.has(folder.path)) return [];
+          paths.add(folder.path);
+          return [{
+            type: 'folder' as const,
+            id: crypto.randomUUID(),
+            path: folder.path,
+            name: folder.name,
+          }];
+        })
+        .slice(0, Math.max(0, MAX_MESSAGE_CONTEXT_ITEMS - contextItems.length));
+      if (additions.length > 0) {
+        setContextItems(previous => [...previous, ...additions]);
+        for (const item of additions) {
+          editorRef.current?.insertReference({
+            id: item.id,
+            referenceType: 'context',
+            label: item.name,
+          });
+        }
+        requestAnimationFrame(() => editorRef.current?.focus());
+      }
+      for (const resource of result.resources) {
+        if (resource.type !== 'file') continue;
+        if (canAttachLocalFile || (canAttachLocalImage && isNativeImageMime(resource.mime))) {
+          uploadOne(new File(
+            [new Uint8Array(resource.data)],
+            resource.name,
+            { type: resource.mime },
+          ));
+        }
+      }
+    } finally {
+      setResourcePicking(false);
+    }
   }
 
   function uploadOne(file: File): void {
@@ -1006,6 +1397,12 @@ export function Composer({
         : {}),
     };
     setPendingFiles(prev => [...prev, entry]);
+    editorRef.current?.insertReference({
+      id,
+      referenceType: 'attachment',
+      label: file.name,
+    });
+    requestAnimationFrame(() => editorRef.current?.focus());
     if (file.size > MAX_FILE_BYTES) return;
     if (!dispatch) {
       // No operation provider (standalone render) — fail the chip visibly
@@ -1035,73 +1432,119 @@ export function Composer({
     });
   }
 
-  function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
-    // Minimal variant has no attachment pipeline — let text paste through
-    // normally rather than intercepting images we can't send.
-    if (minimal) return;
+  function handlePaste(e: ClipboardEvent): boolean {
     const items = Array.from(e.clipboardData?.items ?? []);
     const images = items.filter(it => it.kind === 'file' && it.type.startsWith('image/'));
-    if (images.length === 0) return; // let normal text paste through
-    if (catalog.input.length > 0 && !inputTypeAdvertised(catalog, 'localImage', configValues)) {
-      return;
+    if (images.length > 0) {
+      if (fixed) return false;
+      if (catalog.input.length > 0 && !inputTypeAdvertised(catalog, 'localImage', configValues)) {
+        return false;
+      }
+      e.preventDefault();
+      const takenNames = new Set(pendingFiles.map(file => file.name));
+      for (const it of images) {
+        const file = it.getAsFile();
+        if (!file || file.size > MAX_FILE_BYTES) continue;
+        const name = dedupeAttachmentName(file.name || `paste-${Date.now()}.png`, takenNames);
+        takenNames.add(name);
+        void uploadOne(new File([file], name, { type: file.type }));
+      }
+      return true;
+    }
+
+    const pastedText = typeof e.clipboardData?.getData === 'function'
+      ? e.clipboardData.getData('text/plain')
+      : '';
+    const lineCount = pastedText ? pastedText.split(/\r\n|\r|\n/).length : 0;
+    if (
+      !pastedText
+      || (pastedText.length <= PASTED_TEXT_CARD_MIN_CHARS && lineCount <= PASTED_TEXT_CARD_MIN_LINES)
+      || contextItems.length >= MAX_MESSAGE_CONTEXT_ITEMS
+    ) return false;
+
+    const byteSize = new Blob([pastedText]).size;
+    if (byteSize > MAX_PASTED_TEXT_BYTES) {
+      if (fixed || !canAttachLocalFile) return false;
+      e.preventDefault();
+      uploadOne(new File([pastedText], `pasted-text-${Date.now()}.txt`, { type: 'text/plain' }));
+      return true;
     }
     e.preventDefault();
-    for (const it of images) {
-      const file = it.getAsFile();
-      if (!file) continue;
-      if (file.size > MAX_FILE_BYTES) continue; // silently drop; chip would be useless
-      // Screenshots have empty name — fabricate one.
-      const named = file.name ? file : new File([file], `paste-${Date.now()}.png`, { type: file.type });
-      void uploadOne(named);
-    }
+    const item: MessageContextItem = {
+      type: 'pastedText',
+      id: crypto.randomUUID(),
+      text: pastedText,
+      lineCount,
+      byteSize,
+    };
+    setContextItems(previous => [...previous, item]);
+    editorRef.current?.insertReference({
+      id: item.id,
+      referenceType: 'context',
+      label: contextReferenceLabel(item),
+    });
+    requestAnimationFrame(() => editorRef.current?.focus());
+    setContextError(null);
+    return true;
   }
 
-  function handleTextareaKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+  function handleEditorKeyDown(e: KeyboardEvent): boolean {
     if (hardDisabled) {
       e.preventDefault();
       setSlashOpen(false);
-      return;
+      return true;
     }
     if (slashOpen) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         setSlashIdx(i => filtered.length > 0 ? Math.min(i + 1, filtered.length - 1) : 0);
-        return;
+        return true;
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
         setSlashIdx(i => Math.max(i - 1, 0));
-        return;
+        return true;
       }
-      if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         if (filtered[slashIdx]) pickCommand(filtered[slashIdx]);
-        return;
+        return true;
       }
       if (e.key === 'Escape') {
         e.preventDefault();
         setSlashDismissedInput({ sessionId: session.id, text });
         setSlashOpen(false);
-        return;
+        return true;
       }
     }
     // ⌘/Ctrl+Enter: with a draft it steers the draft into the ACTIVE turn
     // (codex `turn/steer`) instead of queueing it; on other executors or when
     // idle it submits like plain Enter. With no draft it bubbles to the
     // document-level queue-drain handler.
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && (e.metaKey || e.ctrlKey)) {
-      const hasDraft = text.trim().length > 0 || pendingFiles.some(f => !f.uploading && !f.error && f.path);
-      if (!hasDraft) return;
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && (e.metaKey || e.ctrlKey)) {
+      const hasDraft = text.trim().length > 0
+        || pendingFiles.some(f => !f.uploading && !f.error && f.path)
+        || contextItems.length > 0;
+      if (!hasDraft) return false;
       e.preventDefault();
       if (onSteer && steerEnabled && disabled) steerSubmit();
       else submit();
-      return;
+      return true;
     }
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !e.metaKey && !e.ctrlKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
       submit();
+      return true;
     }
+    return false;
   }
+
+  const activeContextReference = activeReference
+    ? contextItems.find(item => item.id === activeReference.id) ?? null
+    : null;
+  const activeFileReference = activeReference
+    ? pendingFiles.find(file => file.id === activeReference.id) ?? null
+    : null;
 
   return (
     <div className={`composer-wrap${oneShotBypass ? ' is-bypass' : ''}`}>
@@ -1133,57 +1576,63 @@ export function Composer({
         )}
 
         <div className="composer-input-wrap">
-          <textarea
-            ref={ref}
-            className="composer-ta"
-            rows={1}
-            value={text}
+          <InlineComposerEditor
+            ref={editorRef}
+            initialDocument={initialDraft.document}
             disabled={hardDisabled}
-            onChange={e => {
-              setSlashDismissedInput(null);
-              setText(e.target.value);
-            }}
-            onKeyDown={handleTextareaKeyDown}
+            placeholder={disabled
+              ? (busyPlaceholder ?? t('composer.placeholder.busy'))
+              : (placeholder ?? t('composer.placeholder.idle'))}
+            onChange={handleDocumentChange}
+            onKeyDown={handleEditorKeyDown}
             onPaste={handlePaste}
-            placeholder={
-              disabled
-                ? (busyPlaceholder ?? t('composer.placeholder.busy'))
-                : (placeholder ?? t('composer.placeholder.idle'))
-            }
+            onReferenceActivate={(id, _referenceType, anchorEl) => setActiveReference(previous => previous?.id === id
+              ? null
+              : { id, anchor: anchorEl.getBoundingClientRect(), anchorEl })}
           />
         </div>
 
-        {/* Pending attachment chips */}
-        {pendingFiles.length > 0 && (
-          <div className="composer-attachments">
-            {pendingFiles.map(f => (
-              <div key={f.id} className={`att-chip${f.error ? ' is-error' : ''}${f.uploading ? ' is-uploading' : ''}`}>
-                {isNativeImageMime(f.mime) ? (
-                  <button
-                    type="button"
-                    className="att-thumb-btn"
-                    title={f.name}
-                    onClick={() => zoomImage?.(f.previewUrl, f.name)}
-                  >
-                    <img className="att-thumb" src={f.previewUrl} alt={f.name} />
-                  </button>
-                ) : (
-                  <span className="att-file-icon" aria-hidden="true">
-                    <svg viewBox="0 0 16 16" fill="none">
-                      <path d="M4 1.75h5l3 3V14.25H4z" stroke="currentColor" strokeWidth="1.2" />
-                      <path d="M9 1.75v3h3" stroke="currentColor" strokeWidth="1.2" />
-                    </svg>
-                  </span>
-                )}
-                <span className="att-name" title={f.error ?? f.name}>{f.name}</span>
-                <span className="att-size">{f.sizeLabel}</span>
-                <button className="att-remove" type="button" onClick={() => removeFile(f.id)} aria-label={t('composer.attachment.remove')}>✕</button>
-              </div>
-            ))}
-          </div>
+        {contextError && <div className="composer-context-error" role="status">{contextError}</div>}
+
+        {activeReference && activeContextReference && (
+          <ContextReferencePopover
+            item={activeContextReference}
+            anchor={activeReference.anchor}
+            anchorEl={activeReference.anchorEl}
+            onClose={() => setActiveReference(null)}
+            onRemove={removeContextItem}
+          />
+        )}
+        {activeReference && activeFileReference && (
+          <ReferencePopover
+            anchor={activeReference.anchor}
+            anchorEl={activeReference.anchorEl}
+            onClose={() => setActiveReference(null)}
+          >
+            <ReferencePopoverHead
+              icon={REFERENCE_ICONS.file}
+              title={activeFileReference.name}
+              onRemove={() => removeFile(activeFileReference.id)}
+              removeLabel={t('composer.attachment.remove')}
+              onClose={() => setActiveReference(null)}
+            />
+            <div className="ref-pop-body">
+              {isNativeImageMime(activeFileReference.mime) && (
+                <img
+                  className="ref-pop-thumb"
+                  src={activeFileReference.previewUrl}
+                  alt={activeFileReference.name}
+                  onClick={() => zoomImage?.(activeFileReference.previewUrl, activeFileReference.name)}
+                />
+              )}
+              <span className="ref-pop-meta">
+                {activeFileReference.error ?? activeFileReference.sizeLabel}
+              </span>
+            </div>
+          </ReferencePopover>
         )}
 
-        {!minimal && !hardDisabled && slashOpen && slashPopPos && (slashLoading || filteredGroups.length > 0) && createPortal(
+        {!fixed && !hardDisabled && slashOpen && slashPopPos && (slashLoading || filteredGroups.length > 0) && createPortal(
           <div
             ref={popRef}
             className="cmp-slash-pop"
@@ -1228,167 +1677,199 @@ export function Composer({
         )}
 
           <div className="composer-bar">
-            {!minimal && resolvedOverlay?.error && (
+            {!fixed && resolvedOverlay?.error && (
             <span className="composer-resolve-error" data-testid="composer-resolve-error">
               {resolvedOverlay.error}
             </span>
           )}
-          {!minimal && showNativeFallback && (
-            <div className="composer-native-config">
-              {nativeModelOption && (
-                <NativeOptionDrop
-                  executor={executor}
-                  option={nativeModelOption}
-                  role="model"
-                  disabled={disabled || !onSetNativeConfig}
-                  onChange={value => setNativeConfigValue(nativeModelOption.id, value)}
-                />
-              )}
-              {nativeEffortOption && (
-                <NativeOptionDrop
-                  executor={executor}
-                  option={nativeEffortOption}
-                  role="effort"
-                  disabled={disabled || !onSetNativeConfig}
-                  onChange={value => setNativeConfigValue(nativeEffortOption.id, value)}
-                />
-              )}
-              {nativeExtraOptions.map(option => (
-                option.type === 'boolean' ? (
-                  <label
-                    key={option.id}
-                    className="composer-native-toggle"
-                    title={option.description}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={option.currentValue === true}
-                      disabled={disabled || !onSetNativeConfig}
-                      onChange={event => setNativeConfigValue(option.id, event.target.checked)}
-                    />
-                    <span>{option.name}</span>
-                  </label>
-                ) : option.type === 'select' ? (
-                  <label
-                    key={option.id}
-                    className="composer-native-select"
-                    title={option.description}
-                  >
-                    <span>{option.name}</span>
-                    <select
-                      value={String(option.currentValue ?? '')}
-                      disabled={disabled || !onSetNativeConfig}
-                      aria-label={option.name}
-                      onChange={event => {
-                        const selected = option.choices?.find(
-                          choice => String(choice.value ?? '') === event.target.value,
-                        );
-                        setNativeConfigValue(
-                          option.id,
-                          selected ? selected.value : event.target.value,
-                        );
-                      }}
-                    >
-                      {(option.choices ?? []).map(choice => (
-                        <option
-                          key={String(choice.value)}
-                          value={String(choice.value ?? '')}
-                        >
-                          {choice.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : (
-                  <label
-                    key={option.id}
-                    className="composer-native-input"
-                    title={option.description}
-                  >
-                    <span>{option.name}</span>
-                    <input
-                      key={`${option.id}:${String(option.currentValue)}`}
-                      type={option.type === 'number' ? 'number' : 'text'}
-                      defaultValue={String(option.currentValue ?? '')}
-                      disabled={disabled || !onSetNativeConfig}
-                      onBlur={event => setNativeConfigValue(
-                        option.id,
-                        option.type === 'number'
-                          ? Number(event.target.value)
-                          : event.target.value,
-                      )}
-                    />
-                  </label>
-                )
-              ))}
-            </div>
+          {!fixed && <ContextUsageIndicator session={session} />}
+
+          {fixed && modelControlVisible && !modelControlInteractive && (
+            <span
+              className="composer-opt cmp-static cmp-model-btn"
+              data-testid="fixed-composer-model-chip"
+              title={t('composer.model.section')}
+            >
+              <span className="name cmp-model">
+                {modelLabel(displayModels, activeModel) || activeModel}
+              </span>
+            </span>
           )}
-            {!minimal && showOptionsMenu && (
-              <CatalogOptionsMenu
-                executor={executor}
-                agentColor={session.agent_color ?? null}
-                summary={[
-                  ...(showModelChip ? [modelLabel(displayModels, activeModel) || activeModel] : []),
-                  ...(showEffortChip ? [effortLabel(executor, thinkLevel)] : []),
-                  ...(session.service_tier === 'fast' ? [t('composer.fast.button')] : []),
-                ]}
-                model={showModelChip ? {
-                  label: t('composer.model.section'),
-                  value: displayModels.some(model => model.model === activeModel)
-                    ? activeModel
-                    : claudeModelFamily(activeModel),
-                  choices: displayModels.filter(model => !model.hidden).map(model => ({
-                    value: model.model,
-                    label: model.displayName,
-                    ...(model.description && executor !== 'codex' ? { description: model.description } : {}),
-                  })),
-                  disabled,
-                  onChange: value => {
-                    if (catalogModelOption) setCatalogOption(catalogModelOption, value);
-                    else onSetModel(value);
-                  },
-                } : undefined}
-                effort={showEffortChip ? {
-                  label: t('composer.reasoning.effort'),
-                  value: thinkLevel ?? '',
-                  choices: effortChoices.map(level => ({
-                    value: level,
-                    label: effortLabel(executor, level),
-                  })),
-                  disabled,
-                  onChange: value => {
-                    if (catalogEffortOption) setCatalogOption(catalogEffortOption, value);
-                    else onSetEffort(value);
-                  },
-                } : undefined}
-                fast={showFast && onSetServiceTier ? {
-                  label: fastOption?.displayName ?? t('composer.fast.button'),
-                  description: fastOption?.description ?? t('composer.fast.title'),
-                  checked: session.service_tier === 'fast',
-                  disabled: disabled || !fastEnabled,
-                  onChange: checked => {
-                    if (fastOption) setCatalogOption(fastOption, checked);
-                    else onSetServiceTier(checked ? 'fast' : null);
-                  },
-                } : undefined}
-                options={optionsMenuCatalogOptions}
-                values={configValues}
-                optionDisabled={option => disabled || !optionEnabled(option, configValues) || !onSetTurnConfig}
-                onOptionChange={setCatalogOption}
-                testId="composer-options-chip"
-              />
-            )}
+
+          {!fixed && showNativeFallback && nativeModelOption && (
+            <NativeOptionDrop
+              option={nativeModelOption}
+              role="model"
+              disabled={disabled || !onSetNativeConfig}
+              onChange={value => setNativeConfigValue(nativeModelOption.id, value)}
+            />
+          )}
+
+          {modelControlInteractive && showModelChip && (
+            <>
+              <button
+                ref={modelDrop.btnRef}
+                type="button"
+                className={`composer-opt cmp-model-btn${modelDrop.open ? ' open' : ''}`}
+                data-testid="composer-model-chip"
+                title={t('composer.model.section')}
+                disabled={disabled}
+                onClick={() => modelDrop.setOpen(open => !open)}
+              >
+                <span className="name cmp-model">{modelLabel(displayModels, activeModel) || activeModel}</span>
+              </button>
+              {modelDrop.open && modelDrop.pos && createPortal(
+                <div
+                  ref={modelDrop.popRef}
+                  className="popover model-pop"
+                  role="dialog"
+                  style={{ left: modelDrop.pos.left, bottom: modelDrop.pos.bottom }}
+                >
+                  <div className="mp-section-head">
+                    <span className="mp-section-title">{t('composer.model.section')}</span>
+                  </div>
+                  <div className="mp-list">
+                    {displayModels.filter(model => !model.hidden).map(model => {
+                      const active = model.model === activeModel
+                        || claudeModelFamily(activeModel) === model.model;
+                      return (
+                        <button
+                          key={model.model}
+                          type="button"
+                          className={`mp-row${active ? ' active' : ''}`}
+                          onClick={() => {
+                            if (catalogModelOption) setCatalogOption(catalogModelOption, model.model);
+                            else onSetModel(model.model);
+                            modelDrop.setOpen(false);
+                          }}
+                        >
+                          <span className="mp-check">{active ? '✓' : ''}</span>
+                          <span className="mp-row-body">
+                            <span className="mp-row-title">{model.displayName}</span>
+                            {model.description && executor !== 'codex' && (
+                              <span className="mp-row-hint">{model.description}</span>
+                            )}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>,
+                document.body,
+              )}
+            </>
+          )}
+
+          {modelControlVisible && effortControlVisible && <ControlSeparator />}
+
+          {fixed && effortControlVisible && !effortControlInteractive && (
+            <span
+              className="composer-opt cmp-static cmp-think-btn"
+              data-testid="fixed-composer-thinking-chip"
+              title={t('composer.reasoning.effort')}
+            >
+              <span className="name">{effortLabel(executor, thinkLevel)}</span>
+            </span>
+          )}
+
+          {!fixed && showNativeFallback && nativeEffortOption && (
+            <NativeOptionDrop
+              option={nativeEffortOption}
+              role="effort"
+              disabled={disabled || !onSetNativeConfig}
+              onChange={value => setNativeConfigValue(nativeEffortOption.id, value)}
+            />
+          )}
+
+          {effortControlInteractive && showEffortChip && (
+            <>
+              <button
+                ref={thinkDrop.btnRef}
+                type="button"
+                className={`composer-opt cmp-think-btn${thinkDrop.open ? ' open' : ''}`}
+                data-testid="composer-thinking-chip"
+                title={t('composer.reasoning.effort')}
+                disabled={disabled}
+                onClick={() => thinkDrop.setOpen(open => !open)}
+              >
+                <span className="name">{effortLabel(executor, thinkLevel)}</span>
+              </button>
+              {thinkDrop.open && thinkDrop.pos && createPortal(
+                <div
+                  ref={thinkDrop.popRef}
+                  className="popover think-pop"
+                  role="dialog"
+                  style={{ left: thinkDrop.pos.left, bottom: thinkDrop.pos.bottom }}
+                >
+                  <div className="mp-section-head">
+                    <span className="mp-section-title">{t('composer.reasoning.effort')}</span>
+                  </div>
+                  <div className="mp-list">
+                    {effortChoices.map(level => (
+                      <button
+                        key={level}
+                        type="button"
+                        className={`mp-row${thinkLevel === level ? ' active' : ''}`}
+                        onClick={() => {
+                          if (catalogEffortOption) setCatalogOption(catalogEffortOption, level);
+                          else onSetEffort(level);
+                          thinkDrop.setOpen(false);
+                        }}
+                      >
+                        <span className="mp-check">{thinkLevel === level ? '✓' : ''}</span>
+                        <span className="mp-row-body">
+                          <span className="mp-row-title">{effortLabel(executor, level)}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>,
+                document.body,
+              )}
+            </>
+          )}
+
+          {fastControlVisible && (modelControlVisible || effortControlVisible) && <ControlSeparator />}
+
+          {fixed && fastControlVisible && !fastControlInteractive && (
+            <span
+              className={`composer-opt cmp-static cmp-fast${session.service_tier === 'fast' ? ' on' : ''}`}
+              data-testid="fixed-composer-fast-chip"
+              title={fastOption?.description ?? t('composer.fast.title')}
+            >
+              {fastOption?.displayName ?? t('composer.fast.button')}
+            </span>
+          )}
+
+          {fastControlInteractive && showFast && onSetServiceTier && (
+            <button
+              type="button"
+              className={`composer-opt cmp-fast${session.service_tier === 'fast' ? ' on' : ''}`}
+              data-testid="composer-fast-chip"
+              title={fastOption?.description ?? t('composer.fast.title')}
+              aria-pressed={session.service_tier === 'fast'}
+              disabled={disabled || !fastEnabled}
+              onClick={() => {
+                const checked = session.service_tier !== 'fast';
+                if (fastOption) setCatalogOption(fastOption, checked);
+                else onSetServiceTier(checked ? 'fast' : null);
+              }}
+            >
+              {fastOption?.displayName ?? t('composer.fast.button')}
+            </button>
+          )}
 
           <span className="spacer" />
 
           {/* Permission mode leads the right-side cluster for Claude and Codex. */}
-          {!minimal && showApprovalChip && (
+          {approvalControlInteractive && showApprovalChip && (
             <>
               <button
                 ref={approvalDrop.btnRef}
                 type="button"
-                className={`composer-opt cmp-approval-btn${approvalRisky ? ' risky' : ''}${approvalDrop.open ? ' open' : ''}`}
+                className={`composer-opt cmp-approval-btn${approvalDrop.open ? ' open' : ''}`}
                 title={t('composer.approval.title')}
+                disabled={disabled}
                 onClick={() => approvalDrop.setOpen(o => !o)}
               >
                 <span className="name">
@@ -1401,7 +1882,6 @@ export function Composer({
                       t,
                     )}
                 </span>
-                <span className="caret cmp-caret" aria-hidden="true">▾</span>
               </button>
               {approvalDrop.open && approvalDrop.pos && createPortal(
                 <div
@@ -1447,10 +1927,10 @@ export function Composer({
                         </button>
                       );
                     })}
-                    {executor === 'claude' && (
+                    {!fixed && executor === 'claude' && (
                       <button
                         type="button"
-                        className={`mp-row danger-option${oneShotBypass ? ' active' : ''}`}
+                        className={`mp-row${oneShotBypass ? ' active' : ''}`}
                         onClick={() => {
                           setOneShotBypass(active => !active);
                           approvalDrop.setOpen(false);
@@ -1470,11 +1950,25 @@ export function Composer({
             </>
           )}
 
-          {!minimal && <ContextUsageIndicator session={session} />}
+          {fixed && !approvalControlInteractive && (showApprovalChip || Boolean(approvalValue)) && (
+            <span
+              className="composer-opt cmp-static cmp-approval-btn"
+              data-testid="fixed-composer-approval-chip"
+              title={t('composer.approval.title')}
+            >
+              <span className="name">
+                {composerModeLabel(
+                  executor,
+                  approvalValue || 'ask',
+                  catalogModeList ?? proxyModes,
+                  t,
+                )}
+              </span>
+            </span>
+          )}
 
-          {!minimal && showNativeFallback && nativeModeOption && (
+          {!fixed && showNativeFallback && nativeModeOption && (
             <NativeOptionDrop
-              executor={executor}
               option={nativeModeOption}
               role="mode"
               disabled={disabled || !onSetNativeConfig}
@@ -1482,21 +1976,66 @@ export function Composer({
             />
           )}
 
-          {/* Attach files — plus glyph (VS Code style). Hidden in minimal
+          {/* Attach files — plus glyph (VS Code style). Hidden in fixed
               (bare textarea variant, no attachment pipeline). */}
-          {!minimal && showAttach && (
-            <button
-              type="button"
-              className="composer-act"
-              disabled={hardDisabled}
-              title={t('composer.attachment.addFiles')}
-              onClick={() => fileInputRef.current?.click()}
-              aria-label={t('composer.attachment.addFiles')}
-            >
-              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-              </svg>
-            </button>
+          {!fixed && (
+            <>
+              <button
+                ref={addDrop.btnRef}
+                type="button"
+                className={`composer-act${addDrop.open ? ' active' : ''}`}
+                disabled={hardDisabled || resourcePicking}
+                title={t('composer.context.add')}
+                onClick={() => addDrop.setOpen(open => !open)}
+                aria-label={t('composer.context.add')}
+              >
+                {resourcePicking ? (
+                  <span className="spinner" aria-hidden="true" />
+                ) : (
+                  <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                )}
+              </button>
+              {addDrop.open && addDrop.pos && createPortal(
+                <div
+                  ref={addDrop.popRef}
+                  className="popover composer-add-pop"
+                  style={{ left: addDrop.pos.left, bottom: addDrop.pos.bottom }}
+                >
+                  <div className="mp-list">
+                    <button
+                      type="button"
+                      className="mp-row"
+                      onClick={() => {
+                        if (resourcePickerAvailable) void pickComposerResources();
+                        else {
+                          addDrop.setOpen(false);
+                          fileInputRef.current?.click();
+                        }
+                      }}
+                    >
+                      <span className="composer-add-icon" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none">
+                          <path d="M5.25 8.75 9.8 4.2a2 2 0 0 1 2.8 2.8l-5.35 5.35a3 3 0 0 1-4.25-4.25l5-5" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                      <span className="mp-row-body">
+                        <span className="mp-row-title">
+                          {resourcePickerAvailable
+                            ? t('composer.context.filesAndFolders')
+                            : t('composer.context.files')}
+                        </span>
+                        {!resourcePickerAvailable && (
+                          <span className="mp-row-hint">{t('composer.context.foldersDesktopOnly')}</span>
+                        )}
+                      </span>
+                    </button>
+                  </div>
+                </div>,
+                document.body,
+              )}
+            </>
           )}
 
           {/* Send / Stop */}
@@ -1521,7 +2060,7 @@ export function Composer({
             <button
               type="button"
               className="composer-act primary"
-              disabled={hardDisabled || (!text.trim() && !canSendAttachmentOnly)}
+              disabled={hardDisabled || (!text.trim() && !canSendAttachmentOnly && !canSendContextOnly)}
               onClick={submit}
               title={t('composer.send.button')}
               aria-label={t('composer.send.button')}

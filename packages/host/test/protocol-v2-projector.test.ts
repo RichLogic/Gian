@@ -189,6 +189,7 @@ test('protocol v2 plan, diff, lifecycle, and errors retain their UI facts', () =
   assert.deepEqual(completed?.display?.data, {
     turnId: 'turn-1',
     sourceTurnId: 'source-1',
+    status: 'stopped',
   });
   assert.equal(failed?.display?.type, 'state.error');
 });

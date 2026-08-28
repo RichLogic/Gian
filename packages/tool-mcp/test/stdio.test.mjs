@@ -51,7 +51,7 @@ test('stdio MCP lists and calls Gian tools against the Host socket', async t => 
   t.after(() => client.close());
 
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 20);
+  assert.equal(listed.tools.length, 21);
   assert.equal(listed.tools[0].name, 'catalog.get_create_options');
 
   const read = await client.callTool({ name: 'task.list', arguments: {} });

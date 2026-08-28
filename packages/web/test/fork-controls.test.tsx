@@ -16,10 +16,11 @@
  * - origin display: banner names the parent session + boundary, falls back
  *   to a short id, and the fork copy never uses rewind/git/worktree/rollback
  *   vocabulary (asserted against the i18n values themselves, §10.6/§23);
- * - no auto-switch after a successful fork; the legacy "Fork as <executor>"
+ * - the initiating tab records the client-minted target for canonical
+ *   session:created/state_sync navigation; the legacy "Fork as <executor>"
  *   operation (`session.fork` → session:create) is untouched.
  */
-import { act, fireEvent, render, renderHook, screen } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import type {
   ClientToServerMessage,
@@ -41,6 +42,10 @@ import { useTopbarModel } from '../src/controllers/use-topbar-model.js';
 import { EN } from '../src/i18n/en.js';
 import { ZH } from '../src/i18n/zh.js';
 import { LocaleProvider } from '../src/i18n/index.js';
+import {
+  pendingForkNavigation,
+  rememberForkNavigation,
+} from '../src/presentation/fork-navigation.js';
 import { __resetFeedback, getSnapshot } from '../src/feedback.js';
 import {
   createOperationDispatcher,
@@ -171,6 +176,7 @@ function atTurnState(
 
 beforeEach(() => {
   __resetFeedback();
+  sessionStorage.clear();
 });
 
 afterEach(() => {
@@ -271,6 +277,7 @@ describe('head fork (session dropdown menu)', () => {
     expect(forks).toHaveLength(1);
     expect(forks[0]).toMatchObject({
       source_session_id: 's-parent',
+      session_id: expect.any(String),
       anchor: { type: 'head' },
     });
   });
@@ -335,7 +342,7 @@ describe('head fork (session dropdown menu)', () => {
     expect(harness.transport.sentOfType('session:fork')).toHaveLength(0);
   });
 
-  it('settled failure surfaces the DOMAIN ERROR; timed-out warns; success stays silent (§10.6: never auto-switches)', () => {
+  it('settled failure clears navigation; unknown/success wait for a canonical Fork Session', () => {
     const t2 = (key: string) => EN[key] ?? key;
     const run = (phase: OperationRun['phase']): OperationRun => ({
       id: `run-${phase}`,
@@ -348,19 +355,25 @@ describe('head fork (session dropdown menu)', () => {
         : {}),
     });
 
+    rememberForkNavigation('fork-failed', 'run-failed');
     const failed = renderHook(() => useForkRunSettledToast(run('failed'), t2));
     expect(getSnapshot().toasts.map(toast => toast.message))
       .toContain('No Terminal Turn at the requested boundary.');
+    expect(pendingForkNavigation()).toBeNull();
     failed.unmount();
     __resetFeedback();
 
+    rememberForkNavigation('fork-unknown', 'run-timed-out');
     const timedOut = renderHook(() => useForkRunSettledToast(run('timed-out'), t2));
     expect(getSnapshot().toasts.some(toast => toast.kind === 'warning')).toBe(true);
+    expect(pendingForkNavigation()?.sessionId).toBe('fork-unknown');
     timedOut.unmount();
     __resetFeedback();
 
+    rememberForkNavigation('fork-confirmed', 'run-confirmed');
     renderHook(() => useForkRunSettledToast(run('confirmed'), t2));
     expect(getSnapshot().toasts).toHaveLength(0);
+    expect(pendingForkNavigation()?.sessionId).toBe('fork-confirmed');
   });
 });
 
@@ -429,12 +442,67 @@ describe('ForkFromTurnControl (transcript boundaries)', () => {
     });
   });
 
-  it('only Terminal Turn boundaries render the control; the in-flight turn has none', () => {
+  it('only usable Terminal Turn boundaries render the control; missing ids or in-flight turns have none', () => {
     const harness = makeHarness();
     renderTranscript(harness, atTurnState(FORK_SUPPORTED, FORK_ENABLED));
     expect(screen.getByTestId('fork-turn-1')).toBeInTheDocument();
-    expect(screen.getByTestId('fork-turn-2')).toBeInTheDocument();
+    // fork-turn-2 is a terminal boundary but lacks source_turn_id → hidden.
+    expect(screen.queryByTestId('fork-turn-2')).toBeNull();
     expect(screen.queryByTestId('fork-turn-3')).toBeNull();
+  });
+
+  it('places Fork beside copy only on the terminal turn result, never on process or user text', () => {
+    const harness = makeHarness();
+    renderTranscript(harness, atTurnState(FORK_SUPPORTED, FORK_ENABLED), [
+      { kind: 'user', id: 'u1', text: 'question', exec: 'codex', ts: 1, turn: 1 },
+      { kind: 'assistant', id: 'a-process', text: 'Checking the repository.', exec: 'codex', ts: 2, turn: 1 },
+      { kind: 'status', id: 'status-1', text: 'Still working', ts: 3, turn: 1 },
+      { kind: 'assistant', id: 'a-result', text: 'Final result', exec: 'codex', ts: 4, turn: 1 },
+      {
+        kind: 'turn-end', id: 'te-1', text: 'Turn 1 · complete', ts: 5, turn: 1,
+        turn_id: 't_1', source_turn_id: 'provider-turn-1', outcome: 'worked',
+      },
+    ]);
+
+    const copies = screen.getAllByRole('button', { name: EN['transcript.copyMessage'] });
+    expect(copies).toHaveLength(1);
+    const resultMessage = screen.getByText('Final result').closest('.msg');
+    const processMessage = screen.getByText('Checking the repository.').closest('.msg');
+    const userMessage = screen.getByText('question').closest('.msg');
+    expect(resultMessage).not.toBeNull();
+    expect(processMessage).not.toBeNull();
+    expect(userMessage).not.toBeNull();
+    expect(within(resultMessage as HTMLElement).getByRole('button', {
+      name: EN['transcript.copyMessage'],
+    })).toBe(copies[0]);
+    expect(within(processMessage as HTMLElement).queryByRole('button', {
+      name: EN['transcript.copyMessage'],
+    })).toBeNull();
+    expect(within(userMessage as HTMLElement).queryByRole('button', {
+      name: EN['transcript.copyMessage'],
+    })).toBeNull();
+
+    const fork = screen.getByTestId('fork-turn-1');
+    const footer = resultMessage?.querySelector('.msg-foot');
+    expect(footer).not.toBeNull();
+    expect(footer).toContainElement(copies[0]);
+    expect(footer).toContainElement(fork);
+    expect(Array.from(footer!.querySelectorAll('button'))).toEqual([copies[0], fork]);
+    expect(document.querySelector('.turn-fork')).toBeNull();
+  });
+
+  it('keeps an exact-turn Fork footer when a terminal turn has no copyable result', () => {
+    const harness = makeHarness();
+    renderTranscript(harness, atTurnState(FORK_SUPPORTED, FORK_ENABLED), [
+      { kind: 'user', id: 'u1', text: 'question', exec: 'codex', ts: 1, turn: 1 },
+      {
+        kind: 'turn-end', id: 'te-1', text: 'Turn 1 · stopped', ts: 2, turn: 1,
+        turn_id: 't_1', source_turn_id: 'provider-turn-1', outcome: 'stopped',
+      },
+    ]);
+
+    expect(screen.queryByRole('button', { name: EN['transcript.copyMessage'] })).toBeNull();
+    expect(screen.getByTestId('fork-turn-1').closest('.turn-result-fallback')).not.toBeNull();
   });
 
   it('no forkAtTurn prop (e.g. a Side Chat panel — never a fork source, §10.6) renders no controls', () => {
@@ -444,7 +512,7 @@ describe('ForkFromTurnControl (transcript boundaries)', () => {
     expect(document.querySelectorAll('.turn-fork')).toHaveLength(0);
   });
 
-  it('atTurn unsupported greys ONLY the per-turn control — the head menu entry stays enabled', () => {
+  it('atTurn unsupported HIDES the per-turn control — the head menu entry stays enabled', () => {
     const harness = makeHarness();
     const head = headState(
       [{ id: 'session.fork', supported: true }, { id: 'session.fork.atTurn', supported: false }],
@@ -467,8 +535,8 @@ describe('ForkFromTurnControl (transcript boundaries)', () => {
         />
       </Providers>,
     );
-    expect(screen.getByTestId('fork-turn-1')).toBeDisabled();
-    expect(screen.getByTestId('fork-turn-2')).toBeDisabled();
+    expect(screen.queryByTestId('fork-turn-1')).toBeNull();
+    expect(screen.queryByTestId('fork-turn-2')).toBeNull();
   });
 
   it('enabled with Host-flowed identity → dispatch carries the EXACT turn_id + source_turn_id verbatim', () => {
@@ -480,24 +548,22 @@ describe('ForkFromTurnControl (transcript boundaries)', () => {
     expect(forks).toHaveLength(1);
     expect(forks[0]).toMatchObject({
       source_session_id: 's-parent',
+      session_id: expect.any(String),
       anchor: { type: 'turn', turn_id: 't_1', source_turn_id: 'provider-turn-1' },
     });
     // No head fallback, no adjacent-turn semantics, nothing derived from text.
     expect(JSON.stringify(forks[0])).not.toContain('"head"');
   });
 
-  it('missing source_turn_id on the item → greyed with the generic reason (never fabricated)', () => {
+  it('missing source_turn_id on the item → control hidden (boundary never fabricated)', () => {
     const harness = makeHarness();
     renderTranscript(harness, atTurnState(FORK_SUPPORTED, FORK_ENABLED));
-    const button = screen.getByTestId('fork-turn-2');
-    expect(button).toBeDisabled();
-    expect(button).toHaveAttribute('title', EN['fork.fromTurnUnavailable']);
-
-    fireEvent.click(button);
-    expect(harness.transport.sentOfType('session:fork')).toHaveLength(0);
+    expect(screen.queryByTestId('fork-turn-2')).toBeNull();
+    // The boundary that DOES carry both ids still renders, enabled.
+    expect(screen.getByTestId('fork-turn-1')).toBeEnabled();
   });
 
-  it('session snapshot disables atTurn → greyed with the DYNAMIC reason', () => {
+  it('session snapshot disables atTurn → control hidden', () => {
     const harness = makeHarness();
     renderTranscript(harness, atTurnState(
       FORK_SUPPORTED,
@@ -506,9 +572,7 @@ describe('ForkFromTurnControl (transcript boundaries)', () => {
         'session.fork.atTurn': { enabled: false, reason: 'History was rewritten after this Turn.' },
       },
     ));
-    expect(screen.getByTestId('fork-turn-1')).toBeDisabled();
-    expect(screen.getByTestId('fork-turn-1'))
-      .toHaveAttribute('title', 'History was rewritten after this Turn.');
+    expect(screen.queryByTestId('fork-turn-1')).toBeNull();
   });
 
   it('ForkFromTurnControl failure surfaces via the same error path', () => {

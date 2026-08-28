@@ -1,4 +1,6 @@
 import { runGit, withRepoMutationLock } from './async-command.js';
+import { access, mkdir } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 
 const GIT_READ_TIMEOUT = 5_000;
 const GIT_MUTATION_TIMEOUT = 60_000;
@@ -144,4 +146,153 @@ export async function isGitRepoAsync(repo: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export type GitWorktreeCreateFailure =
+  | 'invalid-base'
+  | 'invalid-branch'
+  | 'path-conflict'
+  | 'repository-conflict';
+
+export class GitWorktreeCreateError extends Error {
+  constructor(
+    readonly kind: GitWorktreeCreateFailure,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'GitWorktreeCreateError';
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Create a linked checkout under a caller-owned managed root. The complete
+ *  validate/inspect/add sequence holds the repository mutation lock so two
+ *  Host requests cannot select the same branch or target concurrently. */
+export async function createGitWorktreeAsync(input: {
+  repoPath: string;
+  managedRoot: string;
+  directoryName: string;
+  branch: string;
+  baseRef: string;
+  signal?: AbortSignal;
+}): Promise<{ path: string; branch: string; baseRef: string; created: boolean }> {
+  return withRepoMutationLock(input.repoPath, async () => {
+    try {
+      await runGit(['check-ref-format', '--branch', input.branch], {
+        cwd: input.repoPath,
+        timeoutMs: GIT_READ_TIMEOUT,
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+    } catch {
+      throw new GitWorktreeCreateError('invalid-branch', `Invalid Git branch: ${input.branch}`);
+    }
+    if (input.baseRef.startsWith('-') || /[\0\r\n]/.test(input.baseRef)) {
+      throw new GitWorktreeCreateError('invalid-base', 'Invalid Git base revision');
+    }
+    let baseCommit: string;
+    try {
+      baseCommit = (await runGit(
+        ['rev-parse', '--verify', '--end-of-options', `${input.baseRef}^{commit}`],
+        {
+          cwd: input.repoPath,
+          timeoutMs: GIT_READ_TIMEOUT,
+          ...(input.signal ? { signal: input.signal } : {}),
+        },
+      )).stdout.trim();
+    } catch {
+      throw new GitWorktreeCreateError(
+        'invalid-base',
+        `Git base revision does not exist: ${input.baseRef}`,
+      );
+    }
+
+    await mkdir(input.managedRoot, { recursive: true });
+    const current = await listGitWorktreesAsync(input.repoPath);
+    const existingBranch = current.find(worktree => worktree.branch === input.branch);
+    if (existingBranch) {
+      const existingName = basename(existingBranch.path);
+      const managedName = existingName === input.directoryName
+        || new RegExp(`^${input.directoryName}-(?:[2-9]|[1-9][0-9]+)$`).test(existingName);
+      if (
+        dirname(existingBranch.path) === input.managedRoot
+        && managedName
+      ) {
+        return {
+          path: existingBranch.path,
+          branch: input.branch,
+          baseRef: input.baseRef,
+          created: false,
+        };
+      }
+      throw new GitWorktreeCreateError(
+        'repository-conflict',
+        `Branch is already checked out in another worktree: ${input.branch}`,
+      );
+    }
+
+    const registeredPaths = new Set(current.map(worktree => worktree.path));
+    let target = join(input.managedRoot, input.directoryName);
+    for (let suffix = 2; registeredPaths.has(target) || await pathExists(target); suffix += 1) {
+      if (suffix > 100) {
+        throw new GitWorktreeCreateError('path-conflict', 'No managed worktree directory is available');
+      }
+      target = join(input.managedRoot, `${input.directoryName}-${suffix}`);
+    }
+
+    let localBranchCommit: string | null = null;
+    try {
+      localBranchCommit = (await runGit(
+        ['rev-parse', '--verify', '--end-of-options', `refs/heads/${input.branch}^{commit}`],
+        {
+          cwd: input.repoPath,
+          timeoutMs: GIT_READ_TIMEOUT,
+          ...(input.signal ? { signal: input.signal } : {}),
+        },
+      )).stdout.trim();
+    } catch {
+      // A missing local branch is the normal new-worktree path.
+    }
+    if (localBranchCommit && localBranchCommit !== baseCommit) {
+      throw new GitWorktreeCreateError(
+        'repository-conflict',
+        `Branch already exists at another commit: ${input.branch}`,
+      );
+    }
+
+    try {
+      await runGit(
+        localBranchCommit
+          ? ['worktree', 'add', target, input.branch]
+          : ['worktree', 'add', '-b', input.branch, target, input.baseRef],
+        {
+          cwd: input.repoPath,
+          timeoutMs: GIT_MUTATION_TIMEOUT,
+          ...(input.signal ? { signal: input.signal } : {}),
+        },
+      );
+    } catch {
+      throw new GitWorktreeCreateError(
+        'repository-conflict',
+        `Git could not create worktree for branch: ${input.branch}`,
+      );
+    }
+    const created = (await listGitWorktreesAsync(input.repoPath)).find(worktree => (
+      worktree.path === target && worktree.branch === input.branch
+    ));
+    if (!created) {
+      throw new GitWorktreeCreateError(
+        'repository-conflict',
+        'Git did not register the managed worktree',
+      );
+    }
+    return { path: target, branch: input.branch, baseRef: input.baseRef, created: true };
+  }, { ...(input.signal ? { signal: input.signal } : {}) });
 }

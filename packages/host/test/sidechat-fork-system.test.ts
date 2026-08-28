@@ -78,13 +78,45 @@ test('Fake Proxy subprocess covers Side Chat create/resume/close and parent isol
 
   const sidechat = await ctx.sessions.createSidechat(parent.id, 'sc_sys_1');
   assert.equal(sidechat.anchor.type === 'empty' || sidechat.anchor.type === 'turn', true);
-  await ctx.sessions.sendMessage(sidechat.id, 'side text');
+  await ctx.sessions.sendMessage(
+    sidechat.id,
+    'side text',
+    undefined,
+    undefined,
+    undefined,
+    [{
+      type: 'pastedText', id: 'side-paste', text: 'side context', lineCount: 99, byteSize: 99,
+    }],
+    {
+      version: 1,
+      segments: [
+        { type: 'text', text: 'side ' },
+        { type: 'reference', id: 'side-paste', referenceType: 'context', label: 'context' },
+        { type: 'text', text: ' text' },
+      ],
+    },
+  );
   await waitFor(() => (
     ctx.sessions.listSidechats().find((item) => item.id === sidechat.id)?.events.length ?? 0
   ) > 0);
   assert.deepEqual(
     ctx.sessions.listSidechats().find((item) => item.id === sidechat.id)?.user_inputs[0]?.input,
     [{ type: 'text', text: 'side text' }],
+  );
+  assert.deepEqual(
+    ctx.sessions.listSidechats().find((item) => item.id === sidechat.id)?.user_inputs[0]?.context_items,
+    [{ type: 'pastedText', id: 'side-paste', text: 'side context', lineCount: 1, byteSize: 12 }],
+  );
+  assert.deepEqual(
+    ctx.sessions.listSidechats().find((item) => item.id === sidechat.id)?.user_inputs[0]?.composer_document,
+    {
+      version: 1,
+      segments: [
+        { type: 'text', text: 'side ' },
+        { type: 'reference', id: 'side-paste', referenceType: 'context', label: 'context' },
+        { type: 'text', text: ' text' },
+      ],
+    },
   );
 
   const parentEventCount = ctx.sessions.listEvents(parent.id).length;

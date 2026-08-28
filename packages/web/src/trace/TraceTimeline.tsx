@@ -10,8 +10,9 @@
  * a single timestamp per item (no token/TTFT data to justify a duration
  * axis). Color follows the lane; `status: 'failed'` renders red. Clicking a
  * block selects the item, opens its detail, and scrolls the matching list row
- * into view. Duration mode uses real timestamps; point events and open spans
- * render as narrow ticks rather than fabricated bars.
+ * into view. Duration mode keeps real timestamps inside each Turn while
+ * capping inter-Turn idle gaps; point events and open spans render as narrow
+ * ticks rather than fabricated bars.
  */
 
 import { useMemo } from 'react';

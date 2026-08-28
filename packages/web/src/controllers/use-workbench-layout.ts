@@ -27,6 +27,7 @@ export function useWorkbenchLayout({
   p3Collapsed,
   groupOfRail,
 }: UseWorkbenchLayoutInput) {
+  void activeTabByGroup;
   const sessionViewActive = mode === 'sessions' || subtaskActive;
   const workbenchActive = mode === 'sessions' || mode === 'tasks';
 
@@ -45,12 +46,10 @@ export function useWorkbenchLayout({
     && viewState !== 'main'
     && activeRail !== null
     && (railGroupHasTabs || historyEmptySlot);
-  const inspectorKind: 'files' | 'changes' | 'history' | 'workspaces' | 'settings' | null =
+  const inspectorKind: 'files' | 'changes' | 'history' | null =
     activeRail === 'files' ? 'files'
     : activeRail === 'diffs' ? 'changes'
     : activeRail === 'history' ? 'history'
-    : activeRail === 'workspaces' ? 'workspaces'
-    : activeRail === 'settings' ? 'settings'
     : null;
   const inspectorAvailable = workbenchActive
     && chatPanel === null
@@ -58,11 +57,6 @@ export function useWorkbenchLayout({
     && !(inspectorKind === 'files' && filesInspectorSuppressed)
     && ((inspectorKind === 'files' || inspectorKind === 'changes' || inspectorKind === 'history') ? sessionViewActive : true);
   const inspectorVisible = inspectorAvailable && !p3Collapsed;
-
-  const openWorkspaceIds = new Set(
-    tabs.filter(tab => tab.kind === 'workspace' && tab.wsId).map(tab => tab.wsId as string),
-  );
-  const selectedWorkspaceId = tabs.find(tab => tab.id === activeTabByGroup.workspaces)?.wsId ?? null;
 
   return {
     sessionViewActive,
@@ -76,7 +70,5 @@ export function useWorkbenchLayout({
     // panel 3 disables the very button that brings it back (2026-08-05).
     inspectorAvailable,
     inspectorVisible,
-    openWorkspaceIds,
-    selectedWorkspaceId,
   };
 }

@@ -57,10 +57,10 @@ function config(): SystemConfig {
 }
 
 const PROXIES: ProxyCatalogEntry[] = [
-  { id: 'claude', name: 'Claude Code', defaultColor: 'ember', tagline: 'Anthropic Claude Code agent', officialInstallUrl: 'https://example.invalid/claude' },
-  { id: 'codex', name: 'Codex', defaultColor: 'ink', tagline: 'OpenAI Codex agent', officialInstallUrl: 'https://example.invalid/codex' },
-  { id: 'kimi', name: 'Kimi Code', defaultColor: 'citron', tagline: 'Moonshot Kimi Code agent', officialInstallUrl: 'https://example.invalid/kimi' },
-  { id: 'dsh', name: 'DeepSeek Harness', defaultColor: 'teal', tagline: 'DeepSeek Harness agent', officialInstallUrl: 'https://example.invalid/dsh' },
+  { id: 'claude', name: 'Claude Code', logo: { light: '/logos/claude-light.png', dark: '/logos/claude-dark.png' }, tagline: 'Anthropic Claude Code agent', officialInstallUrl: 'https://example.invalid/claude' },
+  { id: 'codex', name: 'Codex', logo: { light: '/logos/codex-light.png', dark: '/logos/codex-dark.png' }, tagline: 'OpenAI Codex agent', officialInstallUrl: 'https://example.invalid/codex' },
+  { id: 'kimi', name: 'Kimi Code', logo: { light: '/logos/kimi-light.png', dark: '/logos/kimi-dark.png' }, tagline: 'Moonshot Kimi Code agent', officialInstallUrl: 'https://example.invalid/kimi' },
+  { id: 'dsh', name: 'DeepSeek Harness', logo: { light: '/logos/dsh-light.png', dark: '/logos/dsh-dark.png' }, tagline: 'DeepSeek Harness agent', officialInstallUrl: 'https://example.invalid/dsh' },
 ];
 
 let nextAgentSeq = 0;
@@ -71,7 +71,6 @@ function agent(overrides: Partial<UserAgentStatus> & { proxy: ProductExecutor })
   return {
     id: overrides.id ?? `agent-${proxy}-${nextAgentSeq}`,
     name: overrides.name ?? PROXIES.find(entry => entry.id === proxy)!.name,
-    color: overrides.color ?? PROXIES.find(entry => entry.id === proxy)!.defaultColor,
     proxy,
     cliPath: overrides.cliPath ?? `/bin/${proxy}`,
     defaults: overrides.defaults ?? { model: '', thinking: '', mode: '' },
@@ -85,6 +84,7 @@ function agent(overrides: Partial<UserAgentStatus> & { proxy: ProductExecutor })
       source: 'development',
       defaults: { model: '', thinking: '', mode: '' },
     },
+    runtimeProfile: overrides.runtimeProfile ?? null,
     officialInstallUrl: `https://example.invalid/${proxy}`,
   };
 }
@@ -128,7 +128,6 @@ describe('SettingsBody AI Agents', () => {
     vi.mocked(api.loadProxies).mockResolvedValue(PROXIES);
     vi.mocked(api.loadAgentDraftDefaults).mockImplementation(async proxy => ({
       name: PROXIES.find(entry => entry.id === proxy)!.name,
-      color: PROXIES.find(entry => entry.id === proxy)!.defaultColor,
       cliPath: null,
     }));
     vi.mocked(api.loadProxyCapabilities).mockImplementation(async proxy => capabilities(proxy as ProductExecutor));
@@ -136,7 +135,6 @@ describe('SettingsBody AI Agents', () => {
     vi.mocked(api.createAgent).mockImplementation(async input => agent({
       proxy: input.proxy,
       name: input.name,
-      color: input.color ?? PROXIES.find(entry => entry.id === input.proxy)!.defaultColor,
       cliPath: input.cliPath ?? null,
     }));
     vi.mocked(api.updateAgent).mockImplementation(async (id, patch) => {
@@ -145,7 +143,6 @@ describe('SettingsBody AI Agents', () => {
         ...base,
         id,
         name: patch.name ?? base.name,
-        color: patch.color ?? base.color,
         cliPath: patch.cliPath !== undefined ? patch.cliPath : base.cliPath,
         proxy: patch.proxy ?? base.proxy,
         defaults: { ...base.defaults, ...patch.defaults },
@@ -173,11 +170,34 @@ describe('SettingsBody AI Agents', () => {
 
     fireEvent.click(within(dialog).getByText('Codex'));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
-    // Draft card inserts at the top with the kind's default name/color.
+    // Draft card inserts at the top with the kind's name and Logo.
     const draftCard = await screen.findByTestId('agent-draft-card');
     expect(within(draftCard).getByLabelText('Name')).toHaveValue('Codex');
     expect(within(draftCard).getByText('draft')).toBeInTheDocument();
     expect(api.loadAgentDraftDefaults).toHaveBeenCalledWith('codex');
+  });
+
+  it('shows a red consequence warning for an allowed unverified Runtime Profile', async () => {
+    const codex = agent({ proxy: 'codex' });
+    codex.runtimeProfile = {
+      id: 'profile-unverified',
+      agentId: codex.id,
+      proxy: 'codex',
+      cliPath: '/bin/codex',
+      cliVersion: '0.147.0',
+      configHome: '/Users/test/.codex',
+      cliFingerprint: 'runtime-new',
+      proxyVersion: '0.2.8',
+      verifiedCliVersions: ['0.146.0'],
+      verification: 'unverified',
+      skill: { name: 'gian-session', version: '0.2.8', state: 'ready' },
+    };
+    vi.mocked(api.loadAgents).mockResolvedValue([codex]);
+    renderSettings();
+    const warning = await screen.findByRole('alert');
+    expect(warning).toHaveClass('danger-hint');
+    expect(warning).toHaveTextContent(/may prevent Session resume/i);
+    expect(screen.getByText('ready')).toBeInTheDocument();
   });
 
   it('disables Save & Restart while the draft name is taken and re-enables after rename', async () => {
@@ -223,7 +243,6 @@ describe('SettingsBody AI Agents', () => {
       expect(api.createAgent).toHaveBeenCalledWith({
         name: 'Claude Work',
         proxy: 'claude',
-        color: 'ember',
         cliPath: '/Users/test/bin/claude',
       });
       expect(restartApp).toHaveBeenCalledOnce();
@@ -288,20 +307,15 @@ describe('SettingsBody AI Agents', () => {
     expect(screen.queryByRole('alertdialog')).toBeNull();
   });
 
-  it('recolors a saved Agent write-through from the swatch popover', async () => {
+  it('renders Proxy-owned light and dark Logo assets and no color control', async () => {
     const saved = agent({ proxy: 'claude' });
     vi.mocked(api.loadAgents).mockResolvedValue([saved]);
     renderSettings();
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Color' }));
-    const popover = await screen.findByRole('listbox');
-    expect(within(popover).getAllByRole('button')).toHaveLength(8);
-    fireEvent.click(within(popover).getByTitle('plum'));
-
-    await waitFor(() => {
-      expect(api.updateAgent).toHaveBeenCalledWith(saved.id, { color: 'plum' });
-    });
-    expect(screen.queryByRole('alertdialog')).toBeNull();
+    await screen.findByRole('textbox', { name: 'Name' });
+    expect(document.querySelector('img[src="/api/proxies/claude/logo/light"]')).toBeTruthy();
+    expect(document.querySelector('img[src="/api/proxies/claude/logo/dark"]')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Color' })).toBeNull();
   });
 
   it('deletes a saved Agent through the delete + restart confirms', async () => {

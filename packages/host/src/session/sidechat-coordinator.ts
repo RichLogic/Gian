@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { requestViolation, type ProxyProtocolError, type SideChatSnapshot } from '@gian/proxy-protocol';
 import type {
+  ConfigOption,
+  ConfigValue,
   InputItem,
+  Session,
   SideChatPublicSnapshot,
   SidechatCloseResult,
 } from '@gian/shared';
@@ -14,6 +17,7 @@ import {
   toPublicSidechat,
   type SidechatRecord,
 } from './sidechat-store.js';
+import { deriveSidechatAgentTitle } from './sidechat-title.js';
 
 export class SidechatConfirmationRequiredError extends Error {
   readonly code = 'SIDECHAT_CLOSE_CONFIRMATION_REQUIRED';
@@ -32,6 +36,144 @@ function protocolAnchorToPublic(anchor: SideChatSnapshot['anchor']): SidechatRec
   };
 }
 
+function isConfigValue(value: unknown): value is ConfigValue {
+  return value === null
+    || typeof value === 'string'
+    || typeof value === 'boolean'
+    || (typeof value === 'number' && Number.isFinite(value));
+}
+
+function turnOptions(options: readonly ConfigOption[]): ConfigOption[] {
+  return options.filter((option) => option.binding === 'turn');
+}
+
+function inheritTurnOptionRoles(
+  options: readonly ConfigOption[],
+  roleSource: readonly ConfigOption[],
+): ConfigOption[] {
+  const roles = new Map(roleSource.flatMap((option) => (
+    option.role ? [[option.id, option.role] as const] : []
+  )));
+  return turnOptions(options).map((option) => {
+    const role = roles.get(option.id);
+    return role && option.role === undefined ? { ...option, role } : option;
+  });
+}
+
+function optionAccepts(option: ConfigOption, value: unknown): value is ConfigValue {
+  if (!isConfigValue(value)) return false;
+  if (option.control === 'select' && option.choices?.length) {
+    return option.choices.some((choice) => Object.is(choice.value, value));
+  }
+  if (value === null) return true;
+  if (option.control === 'boolean') return typeof value === 'boolean';
+  if (option.control === 'number') return typeof value === 'number';
+  if (option.control === 'text') return typeof value === 'string';
+  return true;
+}
+
+function roleValue(parent: Session, role: ConfigOption['role']): ConfigValue | undefined {
+  if (role === 'model') return parent.model;
+  if (role === 'effort') return parent.thinking_effort;
+  if (role === 'approval_mode') return parent.approval_mode;
+  if (role === 'fast') return parent.service_tier === 'fast';
+  return undefined;
+}
+
+function ownConfigValue(
+  values: Record<string, ConfigValue> | undefined,
+  id: string,
+): ConfigValue | undefined {
+  return values && Object.prototype.hasOwnProperty.call(values, id) ? values[id] : undefined;
+}
+
+export function initialSidechatTurnConfig(
+  parent: Session,
+  options: readonly ConfigOption[],
+): Record<string, ConfigValue> {
+  const result: Record<string, ConfigValue> = {};
+  for (const option of turnOptions(options)) {
+    const persisted = ownConfigValue(parent.turn_config, option.id);
+    const native = ownConfigValue(parent.executor_config?.values, option.id);
+    const role = roleValue(parent, option.role);
+    const candidate = persisted !== undefined
+      ? persisted
+      : native !== undefined
+        ? native
+        : role !== undefined ? role : option.defaultValue;
+    if (candidate !== undefined && optionAccepts(option, candidate)) result[option.id] = candidate;
+  }
+  return result;
+}
+
+function normalizeStoredTurnConfig(
+  options: readonly ConfigOption[],
+  requested: Record<string, ConfigValue>,
+): Record<string, ConfigValue> {
+  const result: Record<string, ConfigValue> = {};
+  for (const option of turnOptions(options)) {
+    const requestedValue = Object.prototype.hasOwnProperty.call(requested, option.id)
+      ? requested[option.id]
+      : option.defaultValue;
+    const value = requestedValue !== undefined && optionAccepts(option, requestedValue)
+      ? requestedValue
+      : option.defaultValue;
+    if (value !== undefined && optionAccepts(option, value)) result[option.id] = value;
+  }
+  return result;
+}
+
+function reconcileTurnConfig(
+  options: readonly ConfigOption[],
+  requested: Record<string, ConfigValue>,
+): Record<string, ConfigValue> {
+  const byId = new Map(turnOptions(options).map((option) => [option.id, option]));
+  for (const [id, value] of Object.entries(requested)) {
+    const option = byId.get(id);
+    if (!option) throw requestViolation('CONFIG_VALUE_INVALID', `Side Chat config ${id} is not advertised.`);
+    if (!optionAccepts(option, value)) {
+      throw requestViolation('CONFIG_VALUE_INVALID', `Side Chat config ${id} has an invalid value.`);
+    }
+  }
+  return normalizeStoredTurnConfig([...byId.values()], requested);
+}
+
+function configConditionsMatch(
+  conditions: ConfigOption['visibleWhen'] | ConfigOption['enabledWhen'],
+  values: Record<string, ConfigValue>,
+): boolean {
+  return (conditions ?? []).every((condition) => (
+    condition.oneOf.some((candidate) => Object.is(candidate, values[condition.optionId]))
+  ));
+}
+
+function dispatchableTurnConfig(record: SidechatRecord): Record<string, ConfigValue> {
+  const result: Record<string, ConfigValue> = {};
+  for (const option of record.turnConfigOptions) {
+    if (!configConditionsMatch(option.visibleWhen, record.turnConfig)
+      || !configConditionsMatch(option.enabledWhen, record.turnConfig)) continue;
+    const value = record.turnConfig[option.id];
+    if (value !== undefined) result[option.id] = value;
+  }
+  return result;
+}
+
+function notificationTurnCatalog(notification: unknown): {
+  options: ConfigOption[];
+  revision: string;
+} | null {
+  if (!notification || typeof notification !== 'object') return null;
+  const message = notification as {
+    method?: unknown;
+    params?: { data?: { turnConfigOptions?: unknown; turnConfigRevision?: unknown } };
+  };
+  const options = message.params?.data?.turnConfigOptions;
+  const revision = message.params?.data?.turnConfigRevision;
+  return message.method === 'session.updated' && Array.isArray(options) && typeof revision === 'string'
+    ? { options: turnOptions(options as ConfigOption[]), revision }
+    : null;
+}
+
 export class SidechatCoordinator {
   private readonly routeBindings = new Map<string, { offNotification: () => void; offFault: () => void }>();
   private readonly recovering = new Map<string, Promise<void>>();
@@ -48,14 +190,20 @@ export class SidechatCoordinator {
   }
 
   listPublic(): SideChatPublicSnapshot[] {
-    return this.store.listOpenOrClosing().map(toPublicSidechat);
+    return this.store.listOpenOrClosing().map(record => toPublicSidechat(this.ensureTitle(record)));
   }
 
   listByParent(parentSessionId: string): SideChatPublicSnapshot[] {
-    return this.store.listByParent(parentSessionId).map(toPublicSidechat);
+    return this.store.listByParent(parentSessionId).map(record => toPublicSidechat(this.ensureTitle(record)));
   }
 
-  async create(parentSessionId: string, sidechatId = mintSidechatId()): Promise<SideChatPublicSnapshot> {
+  async create(
+    parentSession: Session,
+    fallbackTurnOptions: ConfigOption[],
+    fallbackTurnRevision: string | null,
+    sidechatId = mintSidechatId(),
+  ): Promise<SideChatPublicSnapshot> {
+    const parentSessionId = parentSession.id;
     const parent = this.requireV2Client(parentSessionId);
     await this.assertCapability(parent, 'sidechat');
     const fingerprint = `${parentSessionId}\u0000${parent.streamId() ?? ''}`;
@@ -64,13 +212,19 @@ export class SidechatCoordinator {
       if (existing.createFingerprint !== fingerprint) {
         throw requestViolation('CONFLICT', 'sidechatId was reused with a different parent');
       }
-      return toPublicSidechat(existing);
+      return toPublicSidechat(this.ensureTitle(existing));
     }
     const snapshot = await parent.createSidechat({ sidechatId });
+    const advertisedTurnOptions = snapshot.turnConfigOptions === undefined
+      ? turnOptions(fallbackTurnOptions)
+      : inheritTurnOptionRoles(snapshot.turnConfigOptions, fallbackTurnOptions);
+    const turnConfig = initialSidechatTurnConfig(parentSession, advertisedTurnOptions);
     const now = new Date().toISOString();
     const record: SidechatRecord = {
       sidechatId: snapshot.id,
       parentSessionId: snapshot.parentSessionId,
+      ordinal: this.store.nextOrdinal(snapshot.parentSessionId),
+      name: null,
       parentStreamId: parent.streamId(),
       streamId: snapshot.streamId,
       streamGeneration: 1,
@@ -79,6 +233,11 @@ export class SidechatCoordinator {
       publicState: snapshot.state,
       anchor: protocolAnchorToPublic(snapshot.anchor),
       sessionConfig: snapshot.sessionConfig,
+      turnConfig,
+      turnConfigOptions: advertisedTurnOptions,
+      turnConfigRevision: snapshot.turnConfigOptions !== undefined
+        ? snapshot.turnConfigRevision ?? null
+        : fallbackTurnRevision,
       events: [],
       userInputs: [],
       lastError: snapshot.lastError ?? null,
@@ -97,7 +256,7 @@ export class SidechatCoordinator {
 
   getPublic(sidechatId: string): SideChatPublicSnapshot | null {
     const record = this.store.get(sidechatId);
-    return record ? toPublicSidechat(record) : null;
+    return record ? toPublicSidechat(this.ensureTitle(record)) : null;
   }
 
   async resume(sidechatId: string, parentSessionId: string): Promise<SideChatPublicSnapshot> {
@@ -128,6 +287,12 @@ export class SidechatCoordinator {
       record.status = 'open';
       record.publicState = snapshot.state;
       record.lastError = null;
+      if (snapshot.turnConfigOptions !== undefined) {
+        const options = inheritTurnOptionRoles(snapshot.turnConfigOptions, record.turnConfigOptions);
+        record.turnConfig = normalizeStoredTurnConfig(options, record.turnConfig);
+        record.turnConfigOptions = options;
+        record.turnConfigRevision = snapshot.turnConfigRevision ?? null;
+      }
       record.updatedAt = snapshot.updatedAt;
       this.store.upsert(record);
       this.bindRoute(sidechatId, parent.runtimeHost().createSessionClient(sidechatId));
@@ -237,15 +402,43 @@ export class SidechatCoordinator {
     }
   }
 
-  async startTurn(sidechatId: string, input: InputItem[], turnId = randomUUID()): Promise<void> {
+  async startTurn(
+    sidechatId: string,
+    input: InputItem[],
+    turnId = randomUUID(),
+    contextItems?: import('@gian/shared').MessageContextItem[],
+    storedInput: InputItem[] = input,
+    composerDocument?: import('@gian/shared').ComposerDocument,
+    turnConfig?: Record<string, ConfigValue>,
+  ): Promise<void> {
     const child = this.requireChildClient(sidechatId);
-    this.store.appendUserInput(sidechatId, turnId, input);
+    const record = turnConfig === undefined
+      ? this.store.get(sidechatId)
+      : this.persistTurnConfigSnapshot(sidechatId, turnConfig);
+    if (!record) throw requestViolation('SESSION_NOT_FOUND', `Side Chat ${sidechatId} was not found`);
+    this.store.appendUserInput(sidechatId, turnId, storedInput, contextItems, composerDocument);
     await child.startTurn({
       sessionId: sidechatId,
       turnId,
       input,
-      config: {},
+      config: dispatchableTurnConfig(record),
     });
+  }
+
+  setTurnConfigValue(sidechatId: string, optionId: string, value: ConfigValue): SideChatPublicSnapshot {
+    const record = this.store.get(sidechatId);
+    if (!record) throw requestViolation('SESSION_NOT_FOUND', `Side Chat ${sidechatId} was not found`);
+    const option = record.turnConfigOptions.find((entry) => entry.id === optionId && entry.binding === 'turn');
+    if (!option) {
+      throw requestViolation('CONFIG_VALUE_INVALID', `Side Chat config ${optionId} is not advertised.`);
+    }
+    if (!optionAccepts(option, value)) {
+      throw requestViolation('CONFIG_VALUE_INVALID', `Side Chat config ${optionId} has an invalid value.`);
+    }
+    return this.publishTurnConfig(record, reconcileTurnConfig(
+      record.turnConfigOptions,
+      { ...record.turnConfig, [optionId]: value },
+    ));
   }
 
   async interruptTurn(sidechatId: string): Promise<void> {
@@ -258,8 +451,21 @@ export class SidechatCoordinator {
 
   handleNotification(sidechatId: string, notification: unknown): void {
     this.store.appendEvent(sidechatId, notification);
-    const record = this.store.get(sidechatId);
+    let record = this.store.get(sidechatId);
     if (!record) return;
+    const catalog = notificationTurnCatalog(notification);
+    if (catalog) {
+      const options = inheritTurnOptionRoles(catalog.options, record.turnConfigOptions);
+      const nextConfig = normalizeStoredTurnConfig(options, record.turnConfig);
+      record = this.store.setTurnConfigCatalog(
+        sidechatId,
+        nextConfig,
+        options,
+        catalog.revision,
+      ) ?? record;
+    }
+    const completedTurnId = turnCompletedId(notification);
+    if (completedTurnId) record = this.ensureTitle(record, completedTurnId);
     this.broadcaster.broadcast({ type: 'sidechat:updated', sidechat: toPublicSidechat(record) });
   }
 
@@ -279,12 +485,47 @@ export class SidechatCoordinator {
     });
   }
 
+  private persistTurnConfigSnapshot(
+    sidechatId: string,
+    turnConfig: Record<string, ConfigValue>,
+  ): SidechatRecord {
+    const record = this.store.get(sidechatId);
+    if (!record) throw requestViolation('SESSION_NOT_FOUND', `Side Chat ${sidechatId} was not found`);
+    const next = reconcileTurnConfig(record.turnConfigOptions, turnConfig);
+    this.publishTurnConfig(record, next);
+    return this.store.get(sidechatId)!;
+  }
+
+  private publishTurnConfig(
+    record: SidechatRecord,
+    turnConfig: Record<string, ConfigValue>,
+  ): SideChatPublicSnapshot {
+    const updated = this.store.setTurnConfig(record.sidechatId, turnConfig);
+    if (!updated) throw requestViolation('SESSION_NOT_FOUND', `Side Chat ${record.sidechatId} was not found`);
+    const snapshot = toPublicSidechat(updated);
+    this.broadcaster.broadcast({ type: 'sidechat:updated', sidechat: snapshot });
+    return snapshot;
+  }
+
   private unbindRoute(sidechatId: string): void {
     const binding = this.routeBindings.get(sidechatId);
     if (!binding) return;
     this.routeBindings.delete(sidechatId);
     binding.offNotification();
     binding.offFault();
+  }
+
+  private ensureTitle(record: SidechatRecord, completedTurnId = latestCompletedTurnId(record.events)): SidechatRecord {
+    if (record.name !== null || !completedTurnId) return record;
+    try {
+      const title = deriveSidechatAgentTitle(record, completedTurnId);
+      return title ? this.store.setNameIfUnset(record.sidechatId, title) ?? record : record;
+    } catch (error) {
+      // Title derivation is presentation metadata and must never break
+      // conversation recovery, turn completion, or state sync.
+      console.warn(`[sidechat-title] failed sidechat=${record.sidechatId}: ${String(error)}`);
+      return record;
+    }
   }
 
   private optionalChildClient(sidechatId: string): ProtocolV2SessionClient | null {
@@ -381,6 +622,26 @@ function latestTurnId(events: unknown[]): string | null {
     if (typeof params?.turnId === 'string') return params.turnId;
   }
   return null;
+}
+
+function latestCompletedTurnId(events: unknown[]): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (!event || typeof event !== 'object') continue;
+    const notification = event as { method?: unknown; params?: { turnId?: unknown } };
+    if (notification.method === 'turn.completed' && typeof notification.params?.turnId === 'string') {
+      return notification.params.turnId;
+    }
+  }
+  return null;
+}
+
+function turnCompletedId(notification: unknown): string | null {
+  if (!notification || typeof notification !== 'object') return null;
+  const event = notification as { method?: unknown; params?: { turnId?: unknown } };
+  return event.method === 'turn.completed' && typeof event.params?.turnId === 'string'
+    ? event.params.turnId
+    : null;
 }
 
 export function newSidechatId(): string {

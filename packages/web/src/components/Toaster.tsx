@@ -69,6 +69,9 @@ function ConfirmModal({ record }: { record: ConfirmRecord }) {
            aria-label={record.title ?? record.message}>
         {record.title && <div className="confirm-title">{record.title}</div>}
         <div className="confirm-msg">{record.message}</div>
+        {record.dangerMessage && (
+          <div className="confirm-danger" role="alert">{record.dangerMessage}</div>
+        )}
         <div className="confirm-actions">
           <button type="button" className="btn ghost sm" onClick={() => resolveConfirm(record.id, false)}>
             {record.cancelLabel ?? t('common.cancel')}

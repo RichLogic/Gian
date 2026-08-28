@@ -28,6 +28,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ClientToServerMessage, Session, Task, Workspace } from '@gian/shared';
 import { completeSubtask, createSubtask, reopenSubtask } from '../src/api.js';
 import { __resetFeedback, getSnapshot, resolveConfirm } from '../src/feedback.js';
+import { typeInlineComposer } from './inline-composer-test-utils.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { createOperationDispatcher } from '../src/operations/dispatcher.js';
 // Side effects: register the product Session/Task definitions (subtask pin
@@ -51,7 +52,6 @@ vi.mock('../src/api.js', () => ({
     {
       id: 'agent-codex-1',
       name: 'Codex',
-      color: 'ink',
       proxy: 'codex',
       cliPath: '/bin/codex',
       defaults: { model: '', thinking: '', mode: '' },
@@ -360,9 +360,8 @@ describe('task group row actions', () => {
     // The composer auto-selects the only ready agent (codex in this mock);
     // Send enables once a first message is typed.
     await userEvent.type(await screen.findByTestId('ns-title-input'), 'Child title');
-    await userEvent.click(screen.getByTestId('ns-model-chip'));
-    await userEvent.click(await screen.findByRole('switch', { name: 'Fast' }));
-    await userEvent.type(await screen.findByTestId('ns-message-input'), 'first subtask message');
+    await userEvent.click(await screen.findByTestId('ns-fast-chip'));
+    typeInlineComposer(await screen.findByTestId('ns-message-input'), 'first subtask message');
     await userEvent.click(screen.getByTestId('ns-send'));
     // The first message is stashed for the session:created socket handler…
     expect(onSetPendingFirstMessage).toHaveBeenCalledWith({
@@ -385,7 +384,7 @@ describe('task group row actions', () => {
     // Confirmed creation is the only boundary that discards the Task draft.
     await userEvent.click(screen.getByTestId('task-new-session-task-1'));
     expect(await screen.findByTestId('ns-title-input')).toHaveValue('');
-    expect(screen.getByTestId('ns-message-input')).toHaveValue('');
+    expect(screen.getByTestId('ns-message-input')).toHaveTextContent('');
   });
 
   it('lets a sidebar Session replace New Session while preserving separate Task drafts', async () => {
@@ -405,7 +404,7 @@ describe('task group row actions', () => {
 
     await userEvent.click(screen.getByTestId('task-new-session-task-1'));
     await userEvent.type(await screen.findByTestId('ns-title-input'), 'Draft for task one');
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'continue task one');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'continue task one');
 
     // Selecting any existing Session must win immediately over the draft UI.
     await userEvent.click(screen.getByText('Task two session'));
@@ -414,14 +413,14 @@ describe('task group row actions', () => {
 
     await userEvent.click(screen.getByTestId('task-new-session-task-2'));
     expect(await screen.findByTestId('ns-title-input')).toHaveValue('');
-    expect(screen.getByTestId('ns-message-input')).toHaveValue('');
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'continue task two');
+    expect(screen.getByTestId('ns-message-input')).toHaveTextContent('');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'continue task two');
 
     await userEvent.click(screen.getByText('Task one session'));
     expect(screen.queryByTestId('ns-message-input')).toBeNull();
     await userEvent.click(screen.getByTestId('task-new-session-task-1'));
     expect(await screen.findByTestId('ns-title-input')).toHaveValue('Draft for task one');
-    expect(screen.getByTestId('ns-message-input')).toHaveValue('continue task one');
+    expect(screen.getByTestId('ns-message-input')).toHaveTextContent('continue task one');
   });
 });
 

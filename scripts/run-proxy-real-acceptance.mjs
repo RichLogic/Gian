@@ -172,7 +172,7 @@ class ValidatedProxyClient extends EventEmitter {
         ...this.environment,
         ...(this.provider === 'kimi' ? { KIMI_CODE_NO_AUTO_UPDATE: '1' } : {}),
         ...(this.provider === 'grok'
-          ? { GROK_DISABLE_AUTOUPDATER: '1', GIAN_PROTOCOL_VERSIONS: '2.0' }
+          ? { GROK_DISABLE_AUTOUPDATER: '1', GIAN_PROTOCOL_VERSIONS: '2.1' }
           : {}),
       },
     });
@@ -871,7 +871,7 @@ async function runProvider({ provider, providerConfig, scenarios, outputDir, cat
   const results = [];
   try {
     const initialized = await client.request('initialize', {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian Real Proxy Acceptance', version: '0.5.0' },
     });
     const runtimeCatalog = await client.request('catalog.list', {});

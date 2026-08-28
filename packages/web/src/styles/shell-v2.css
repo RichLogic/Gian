@@ -705,6 +705,24 @@
 .sheet-diff.split .sheet-diff-side.empty { background: oklch(from var(--text) l c h / 0.02); }
 /* Word-wrap off → match the unified `pre` behavior so long lines scroll. */
 .sheet-diff.split.nowrap .sheet-diff-side .txt { white-space: pre; }
+.sheet-diff.split.nowrap .sheet-diff-split-panes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-width: 0;
+}
+.sheet-diff.split.nowrap .sheet-diff-pane {
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+.sheet-diff.split.nowrap .sheet-diff-pane.old {
+  border-right: 1px solid var(--border, oklch(from var(--text) l c h / 0.08));
+}
+.sheet-diff.split.nowrap .sheet-diff-pane .sheet-diff-side {
+  width: max-content;
+  min-width: 100%;
+}
+.sheet-diff.split.nowrap .sheet-diff-pane .sheet-diff-side.old { border-right: 0; }
 
 /* §#7 — session-row status indicator (replaces the legacy kebab). */
 .ri-status {
@@ -791,16 +809,15 @@
   padding: 0;
   border: none;
   background: transparent;
-  color: var(--text-3);
+  color: var(--text-2);
   border-radius: var(--r-1);
   cursor: pointer;
-  /* Always visible (no longer hover-to-reveal); brightens on hover. */
-  opacity: 0.55;
-  transition: opacity 120ms var(--ease), background 120ms var(--ease), color 120ms var(--ease);
+  /* Always visible at full strength — no hover reveal or hover darkening. */
+  opacity: 1;
+  transition: background 120ms var(--ease);
 }
-.msg:hover .msg-copy { opacity: 1; }
-.msg-copy:hover { background: var(--surface-2); color: var(--text-2); }
-.msg-copy.copied { opacity: 1; color: var(--ok); }
+.msg-copy:hover { background: var(--surface-2); }
+.msg-copy.copied { color: var(--ok); }
 
 /* ---------- Motion (phase 6) ----------
    Soft, short UI animation built on the tokens in tokens.css

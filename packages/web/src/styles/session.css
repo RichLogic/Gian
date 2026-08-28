@@ -92,6 +92,13 @@
   flex-wrap: wrap;
   gap: 4px;
 }
+.ns-runtime-warning {
+  order: 10;
+  flex: 1 0 100%;
+  margin: 3px 0 0;
+  color: var(--danger);
+  font: var(--fz-11)/1.4 var(--font-sans);
+}
 .ns-session-config {
   padding-left: 0;
   flex: 1 1 auto;
@@ -307,7 +314,24 @@
 .sidechat-tabs .sheet-tab.is-closing { opacity: 0.6; }
 .sidechat-tabs .sheet-tab.is-unavailable { color: var(--warn); }
 .sidechat-tabs .sheet-tab .tab-x:hover { color: var(--danger); background: var(--danger-soft); }
+.sidechat-tabs .sidechat-new.prominent {
+  margin: 4px 5px;
+  min-width: 30px;
+  height: 28px;
+  justify-content: center;
+  border-radius: var(--r-2);
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+.sidechat-tabs .sidechat-new.prominent:hover {
+  color: var(--accent-text);
+  background: var(--surface-3);
+}
 .sidechat-tabs .sidechat-new:disabled { opacity: 0.5; cursor: default; }
+.sidechat-tabs .sidechat-new.prominent:disabled {
+  color: var(--text-3);
+  background: var(--surface-2);
+}
 .sidechat-empty {
   flex: 1;
   display: flex;
@@ -320,6 +344,15 @@
   font-size: 12px;
   text-align: center;
 }
+.sidechat-create-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 14px;
+}
+.sidechat-create-cta svg { flex: none; }
 .sidechat-panel {
   flex: 1;
   min-height: 0;
@@ -353,32 +386,14 @@
 .sidechat-banner.warn { color: var(--warn); background: var(--warn-soft); }
 .sidechat-banner .btn { flex: none; }
 
-/* Per-turn Fork affordance (proposal §10.6): sits on a Terminal Turn's
-   boundary row. Quiet at rest so long transcripts stay calm, but never
-   hidden — greyed means unavailable, with the reason on the tooltip. */
-.turn-fork {
-  display: flex;
+/* Per-turn Fork affordance (proposal §10.6): shares the terminal result
+   footer with Copy. A text-free/failed/stopped turn uses the same footer
+   treatment as a right-aligned fallback. */
+.turn-result-fallback {
   justify-content: flex-end;
   padding: 2px 4px;
 }
 .fork-turn-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-  white-space: nowrap;
-  opacity: 0.55;
+  flex: none;
 }
-.turn-fork:hover .fork-turn-btn { opacity: 1; }
-.fork-turn-btn:hover:not(:disabled) {
-  color: var(--text);
-  background: var(--surface-2);
-  border-color: var(--hairline);
-}
-.fork-turn-btn:disabled { cursor: default; }
+.fork-turn-btn:disabled { cursor: default; opacity: 0.4; }

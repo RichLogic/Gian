@@ -10,6 +10,7 @@
   "include": ["src/**/*"],
   "references": [
     { "path": "../proxy-protocol" },
-    { "path": "../shared" }
+    { "path": "../shared" },
+    { "path": "../tool-mcp" }
   ]
 }

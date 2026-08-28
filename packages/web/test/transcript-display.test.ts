@@ -131,6 +131,23 @@ describe('ensureTurnEnd / ensureLatestTurnEnd', () => {
     });
   });
 
+  it('stores and recovers the terminal presentation outcome in place', () => {
+    const worked = ensureTurnEnd([user], 2, 't_2', 20, undefined, undefined, 'worked');
+    expect(worked[1]).toMatchObject({ kind: 'turn-end', outcome: 'worked' });
+
+    const withoutOutcome = ensureTurnEnd([user], 2, 't_2', 20);
+    const recovered = ensureTurnEnd(
+      withoutOutcome,
+      2,
+      't_later',
+      99,
+      undefined,
+      undefined,
+      'stopped',
+    );
+    expect(recovered[1]).toMatchObject({ id: 't_2', ts: 20, outcome: 'stopped' });
+  });
+
   it('ensureLatestTurnEnd is a no-op on empty items', () => {
     const empty: TranscriptItem[] = [];
     expect(ensureLatestTurnEnd(empty, 's-1', 1)).toBe(empty);

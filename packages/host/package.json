@@ -1,6 +1,6 @@
 {
   "name": "@gian/host",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -16,6 +16,7 @@
   "dependencies": {
     "@gian/proxy-protocol": "workspace:*",
     "@gian/shared": "workspace:*",
+    "@gian/tool-mcp": "workspace:*",
     "@hono/node-server": "^1.13.7",
     "@hono/node-ws": "^1.0.5",
     "better-sqlite3": "^11.5.0",
@@ -23,6 +24,7 @@
     "node-pty": "^1.1.0-beta40"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@gian/cc-proxy": "workspace:*",
     "@gian/codex-proxy": "workspace:*",
     "@gian/dsh-bridge": "workspace:*",

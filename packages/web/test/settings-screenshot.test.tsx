@@ -56,7 +56,7 @@ afterEach(() => {
 describe('Settings screenshot behavior', () => {
   it('loads and reflects the persisted hide-window preference', async () => {
     getPreferences.mockResolvedValue({ hideMainWindowDuringCapture: true, shortcut: null });
-    renderWithOperations(<SettingsBody activeSection="shortcuts" config={config} />);
+    renderWithOperations(<SettingsBody activeSection="keymap" config={config} />);
     await waitFor(() => expect(getPreferences).toHaveBeenCalledTimes(1));
     const toggle = await screen.findByRole('checkbox', {
       name: /hide the window while capturing/i,
@@ -65,7 +65,7 @@ describe('Settings screenshot behavior', () => {
   });
 
   it('persists the toggle through setPreferences', async () => {
-    renderWithOperations(<SettingsBody activeSection="shortcuts" config={config} />);
+    renderWithOperations(<SettingsBody activeSection="keymap" config={config} />);
     const toggle = await screen.findByRole('checkbox', {
       name: /hide the window while capturing/i,
     }) as HTMLInputElement;
@@ -79,7 +79,7 @@ describe('Settings screenshot behavior', () => {
   });
 
   it('shows the active global shortcut as keycaps', async () => {
-    renderWithOperations(<SettingsBody activeSection="shortcuts" config={config} />);
+    renderWithOperations(<SettingsBody activeSection="keymap" config={config} />);
     const capture = await screen.findByRole('button', { name: 'Global screenshot' });
     await waitFor(() => {
       // "Control+Command+A" renders with the ⌃/⌘ distinction preserved.
@@ -91,7 +91,7 @@ describe('Settings screenshot behavior', () => {
     // Layout regression: the hint sentence used to sit in the same dd as the
     // toggle, and as the widest cell it inflated the grid's auto track to
     // ~490px, squeezing every shortcut label to ~67px (broken layout report).
-    renderWithOperations(<SettingsBody activeSection="shortcuts" config={config} />);
+    renderWithOperations(<SettingsBody activeSection="keymap" config={config} />);
     const toggle = await screen.findByRole('checkbox', {
       name: /hide the window while capturing/i,
     });
@@ -106,7 +106,7 @@ describe('Settings screenshot behavior', () => {
   });
 
   it('remaps the global shortcut by capturing the next keydown', async () => {
-    renderWithOperations(<SettingsBody activeSection="shortcuts" config={config} />);
+    renderWithOperations(<SettingsBody activeSection="keymap" config={config} />);
     const capture = await screen.findByRole('button', { name: 'Global screenshot' });
     fireEvent.click(capture);
     fireEvent.keyDown(window, { key: 's', metaKey: true, shiftKey: true });
@@ -118,7 +118,7 @@ describe('Settings screenshot behavior', () => {
   });
 
   it('rejects a bare letter as a global shortcut', async () => {
-    renderWithOperations(<SettingsBody activeSection="shortcuts" config={config} />);
+    renderWithOperations(<SettingsBody activeSection="keymap" config={config} />);
     const capture = await screen.findByRole('button', { name: 'Global screenshot' });
     fireEvent.click(capture);
     fireEvent.keyDown(window, { key: 's' });
@@ -136,7 +136,7 @@ describe('Settings screenshot behavior', () => {
       hideMainWindowDuringCapture: false,
       shortcut: 'CommandOrControl+Shift+S',
     });
-    renderWithOperations(<SettingsBody activeSection="shortcuts" config={config} />);
+    renderWithOperations(<SettingsBody activeSection="keymap" config={config} />);
     const reset = await screen.findByRole('button', { name: 'Reset to default' });
     fireEvent.click(reset);
     await waitFor(() => expect(setPreferences).toHaveBeenCalledTimes(1));

@@ -765,7 +765,7 @@ printf 'claude 2.0.0\\n'
     schemaVersion: number;
     agents: Array<{ id: string; cliPath: string | null }>;
   };
-  assert.equal(persisted.schemaVersion, 2);
+  assert.equal(persisted.schemaVersion, 3);
   assert.equal(persisted.agents.find(candidate => candidate.id === agent.id)?.cliPath, newPath);
 });
 
@@ -1953,8 +1953,9 @@ for await (const line of input) {
     const valid = process.env.GIAN_PLUGIN_ID === 'claude'
       && process.env.GIAN_PLUGIN_DATA_DIR
       && process.env.GIAN_RUNTIME_BIN
-      && process.env.GIAN_PROTOCOL_VERSIONS === '2.0'
+      && process.env.GIAN_PROTOCOL_VERSIONS === '2.1,2.0'
       && request.params.protocol.name === 'gian.proxy'
+      && request.params.protocol.versions.includes('2.1')
       && request.params.protocol.versions.includes('2.0');
     reply({
       protocol: { name: 'gian.proxy', version: '2.0' },
@@ -2302,7 +2303,6 @@ test('Proxy defaults keep managed approval presets separate from native policy v
     getAgent: () => ({
       id: 'agent-codex',
       name: 'Codex',
-      color: 'ink',
       proxy: 'codex',
       cliPath: null,
       defaults: { ...defaults },
@@ -2371,7 +2371,6 @@ test('native DSH defaults accept the Proxy-owned mode vocabulary', async () => {
     getAgent: () => ({
       id: 'agent-dsh',
       name: 'DeepSeek Harness',
-      color: 'teal',
       proxy: 'dsh',
       cliPath: null,
       defaults: { ...defaults },
@@ -2472,7 +2471,6 @@ test('Proxy defaults validate effort against the catalog resolved for the select
     getAgent: () => ({
       id: 'agent-claude',
       name: 'Claude Code',
-      color: 'ember',
       proxy: 'claude',
       cliPath: null,
       defaults: { ...defaults },
@@ -2572,7 +2570,6 @@ test('Agent path route invalidates a committed runtime even when claim retiremen
     getAgent: () => ({
       id: 'agent-claude',
       name: 'Claude Code',
-      color: 'ember',
       proxy: 'claude' as const,
       cliPath: null,
       defaults: { model: '', thinking: '', mode: '' },

@@ -12,12 +12,13 @@ test('SEC-LOG-001: centralized redaction removes common credential shapes', () =
     'https://alice:super-secret@example.invalid/private.git',
     'https://example.invalid/callback?client_secret=oauth-secret&ok=1',
     'provider stderr: sk-ant-exampleprovidercredential123456',
+    'tool transport failed for gian_mcp_v1.12345678-1234-1234-1234-123456789abc.ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq',
     'git stderr: remote https://bob:password@example.invalid/repo failed',
   ];
   for (const value of cases) {
     const redacted = redactSensitiveText(value);
     assert.match(redacted, /\[REDACTED\]/, value);
-    assert.doesNotMatch(redacted, /provider-secret|examplecredential|oauth-secret|db-secret|super-secret|:password@/i);
+    assert.doesNotMatch(redacted, /provider-secret|examplecredential|oauth-secret|db-secret|super-secret|gian_mcp_v1|:password@/i);
   }
 });
 

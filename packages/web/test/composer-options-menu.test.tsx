@@ -91,40 +91,31 @@ function renderComposer(
   return callbacks;
 }
 
-describe('Composer combined options menu', () => {
+describe('Composer independent catalog controls', () => {
   beforeEach(() => {
     localStorage.clear();
   });
 
-  it('labels the trigger as "model | effort" without a Fast segment on the standard tier', async () => {
+  it('renders independent model and Thinking controls without a combined trigger', async () => {
     renderComposer(makeSession('claude'));
 
     await waitFor(() => {
-      expect(document.querySelector('.cmp-options-btn')?.textContent).toContain('Sonnet');
+      expect(screen.getByTestId('composer-model-chip')).toHaveTextContent('Sonnet');
     });
-    const label = document.querySelector('.cmp-options-btn')!.textContent!;
-    expect(label).toContain('Sonnet');
-    expect(label).toContain('|');
-    expect(label).toContain('High');
-    expect(label).not.toContain('Fast');
-
-    const trigger = document.querySelector('.cmp-options-btn')!;
-    const separator = trigger.querySelector('.cmp-opt-sep')!;
-    expect(separator.parentElement).toBe(trigger);
-    expect(separator.previousElementSibling).toHaveClass('name');
-    expect(separator.nextElementSibling).toHaveClass('name');
-    expect(trigger.querySelector('.cmp-caret')).toHaveTextContent('▴');
+    expect(screen.getByTestId('composer-thinking-chip')).toHaveTextContent('High');
+    expect(screen.queryByTestId('composer-fast-chip')).toBeNull();
+    expect(document.querySelector('.cmp-options-btn')).toBeNull();
   });
 
-  it('adds a "Fast" segment to the trigger when the session is on the fast tier', async () => {
+  it('renders Fast as its own pressed button when the session is on the fast tier', async () => {
     renderComposer(makeSession('codex', { service_tier: 'fast' }));
 
     await waitFor(() => {
-      expect(document.querySelector('.cmp-options-btn')?.textContent).toContain('Fast');
+      expect(screen.getByTestId('composer-fast-chip')).toHaveTextContent('Fast');
     });
-    const label = document.querySelector('.cmp-options-btn')!.textContent!;
-    expect(label).toContain('GPT-5.6-Sol');
-    expect(label).toContain('Ultra');
+    expect(screen.getByTestId('composer-fast-chip')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('composer-model-chip')).toHaveTextContent('GPT-5.6-Sol');
+    expect(screen.getByTestId('composer-thinking-chip')).toHaveTextContent('Ultra');
   });
 
   it('does not render the screenshot button', async () => {
@@ -132,39 +123,38 @@ describe('Composer combined options menu', () => {
 
     // Let the async model fetch settle so no state update escapes act().
     await waitFor(() => {
-      expect(document.querySelector('.cmp-options-btn')?.textContent).toContain('Sonnet');
+      expect(screen.getByTestId('composer-model-chip')).toHaveTextContent('Sonnet');
     });
     expect(screen.queryByRole('button', { name: 'Screenshot' })).toBeNull();
   });
 
-  it('places the approval chip before the context-usage ring on the bar', async () => {
+  it('places the context ring first and approval on the right of the spacer', async () => {
     renderComposer(makeSession('claude'));
 
     await waitFor(() => {
-      expect(document.querySelector('.cmp-options-btn')?.textContent).toContain('Sonnet');
+      expect(screen.getByTestId('composer-model-chip')).toHaveTextContent('Sonnet');
     });
     const approval = document.querySelector('.cmp-approval-btn');
     const ring = document.querySelector('.context-usage-anchor');
     expect(approval).toBeTruthy();
     expect(ring).toBeTruthy();
     expect(
-      approval!.compareDocumentPosition(ring!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ring!.compareDocumentPosition(approval!) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
-  it('selects a Model from the unified options panel and fires onSetModel', async () => {
+  it('selects a Model from the independent model popover and fires onSetModel', async () => {
     const user = userEvent.setup();
     const callbacks = renderComposer(makeSession('claude'));
 
     await waitFor(() => {
-      expect(document.querySelector('.cmp-options-btn')?.textContent).toContain('Sonnet');
+      expect(screen.getByTestId('composer-model-chip')).toHaveTextContent('Sonnet');
     });
-    await user.click(document.querySelector('.cmp-options-btn')!);
-    const choice = await screen.findByText('Sonnet', { selector: '.catalog-options-pop .mp-row-title' });
+    await user.click(screen.getByTestId('composer-model-chip'));
+    const choice = await screen.findByText('Sonnet', { selector: '.model-pop .mp-row-title' });
     await user.click(choice.closest('button')!);
 
     expect(callbacks.onSetModel).toHaveBeenCalledWith('sonnet');
-    // Picking a model closes the unified menu.
-    expect(document.querySelector('.options-pop')).toBeNull();
+    expect(document.querySelector('.model-pop')).toBeNull();
   });
 });

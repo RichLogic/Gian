@@ -52,7 +52,7 @@ class MockGianCore {
   readonly child: ChildProcessWithoutNullStreams;
   readonly validator = new HostProtocolValidator({
     pluginId: 'ai.deepseek.harness',
-    pluginVersion: '0.1.1',
+    pluginVersion: '0.1.3',
     processScope: 'shared',
   });
   readonly notifications: ProxyNotification[] = [];
@@ -196,11 +196,11 @@ class MockGianCore {
 
 async function initialize(core: MockGianCore): Promise<void> {
   const response = await core.request('initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Mock Gian Core', version: '0.5.0', locale: 'zh-CN' },
   });
   assert.ok(response.result);
-  assert.equal(core.validator.initializeResult?.protocol.version, '2.0');
+  assert.equal(core.validator.initializeResult?.protocol.version, '2.1');
 }
 
 async function createSession(
@@ -409,7 +409,7 @@ test('DSH Proxy returns standard JSON-RPC errors on its real stdio boundary', as
     id: 'initialize',
     method: 'initialize',
     params: {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Mock Gian Core', version: '0.5.0' },
     },
   })}\n`);

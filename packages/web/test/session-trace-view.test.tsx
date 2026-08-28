@@ -115,14 +115,22 @@ describe('SessionMain Chat/Trace wiring (Trace MVP)', () => {
 
   it('switches between the transcript and the trace view via the tabs', async () => {
     const session = sessionContractFixture({ id: 'session-trace', status: 'done' });
-    render(element(session, toolItems()));
+    render(element(session, toolItems(), [{ id: 'queued-1', text: 'queued follow-up' }]));
 
     // Chat by default: the user bubble renders, no trace view.
     expect(screen.getByText('run the checks')).toBeInTheDocument();
     expect(screen.queryByTestId('trace-view')).not.toBeInTheDocument();
+    expect(document.querySelector('.composer')).not.toBeNull();
+    expect(document.querySelector('.main-underbar')).not.toBeNull();
+    expect(screen.getByText('queued follow-up')).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: 'Trace' }));
     expect(screen.getByTestId('trace-view')).toBeInTheDocument();
+    expect(screen.getByTestId('trace-toolbar')).toHaveClass('trace-pinned-head');
+    expect(screen.getByTestId('trace-toolbar').parentElement).toBe(screen.getByTestId('trace-view'));
+    expect(document.querySelector('.composer')).toBeNull();
+    expect(document.querySelector('.main-underbar')).toBeNull();
+    expect(screen.queryByText('queued follow-up')).not.toBeInTheDocument();
     // The chat transcript is swapped out (its bubbles unmount); the trace's
     // own input row may legitimately carry the same text.
     expect(document.querySelector('.transcript')).toBeNull();
@@ -135,6 +143,7 @@ describe('SessionMain Chat/Trace wiring (Trace MVP)', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Chat' }));
     expect(screen.queryByTestId('trace-view')).not.toBeInTheDocument();
     expect(screen.getByText('run the checks')).toBeInTheDocument();
+    expect(document.querySelector('.composer')).not.toBeNull();
   });
 
   it('opens a trace item detail in the chat panel when a trace row is clicked', async () => {

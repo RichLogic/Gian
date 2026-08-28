@@ -12,7 +12,13 @@
  * (§10.5.1: the provider-owned resume reference is never user-visible). None
  * of these helpers may reintroduce it into rendered output or wire messages.
  */
-import type { Executor, Session, SideChatInfo } from '@gian/shared';
+import {
+  isApprovalMode,
+  type ConfigValue,
+  type Executor,
+  type Session,
+  type SideChatInfo,
+} from '@gian/shared';
 
 /** Records bound to one parent Session, oldest first (chip/tab order). */
 export function sideChatsForParent(
@@ -26,18 +32,18 @@ export function sideChatsForParent(
 }
 
 /**
- * Display label for a Side Chat chip/tab. Side Chats are transient and have
- * no user-set name, so the label is the Gian standard name plus a 1-based
- * ordinal in created_at order — the SAME label is used by the parent-close
- * cascade list, so what the confirm dialog names matches what the user sees.
+ * Display label for a Side Chat chip/tab. The Host-owned creation ordinal
+ * gives an unnamed record its stable `ChatN` label; the first completed Agent
+ * conversation can replace it with a persisted name. The SAME label is used
+ * by the parent-close cascade so the confirm names what the user sees.
  */
 export function sideChatLabel(
   t: (key: string) => string,
   sideChat: SideChatInfo,
   index: number,
 ): string {
-  void sideChat;
-  return `${t('sidechat.title')} ${index + 1}`;
+  void t;
+  return sideChat.name || `Chat${sideChat.ordinal ?? index + 1}`;
 }
 
 /**
@@ -75,23 +81,32 @@ export function sideChatParentCascadeSuffix(
 }
 
 /**
- * Minimal `Session` adapter for the shared `Composer` (proposal §10.5.1:
- * the Side Chat inherits the parent's session-bound config AS-IS — create
- * has no config params). This is an explicit adapter, not a cast: identity
- * fields come from the Side Chat record, config fields from the parent.
+ * Minimal `Session` adapter for the shared `Composer`. Session-bound config
+ * stays inherited from the parent, while the Side Chat's Host-owned
+ * `turn_config` draft drives the independently mutable next-turn controls.
  *
  * - `id` is the Side Chat id, so per-conversation composer drafts and the
  *   `session.stop`/`message.send` entity keys stay isolated per Side Chat.
- * - The composer runs in `variant="minimal"`: §10.5.1 allows only
- *   `turn.start` / `turn.interrupt` / `turn.steer` / `interaction.respond`
- *   on the Side Chat route — session-bound config mutations and
- *   `catalog.resolve(sidechatId)` are PROTOCOL VIOLATIONS (they must return
- *   SESSION_NOT_FOUND), so the model/mode/effort/native-config controls are
- *   not offered at all rather than offered-but-rejected.
+ * - The composer runs in `variant="sidechat"`: only Proxy-advertised
+ *   Turn-bound controls are interactive. Their mutations are Gian Host state,
+ *   never ordinary Session methods and never `catalog.resolve(sidechatId)`.
  * - `status` is inert: the dock drives the composer from the Side Chat's own
  *   pending/recovering/closing state, never from this field.
  */
 export function sideChatComposerSession(sideChat: SideChatInfo, parent: Session): Session {
+  const options = sideChat.turn_config_options ?? [];
+  const turnConfig = sideChat.turn_config ?? parent.turn_config ?? {};
+  const valueForRole = (role: string): ConfigValue | undefined => {
+    const option = options.find(entry => entry.binding === 'turn' && entry.role === role);
+    if (!option) return undefined;
+    return Object.prototype.hasOwnProperty.call(turnConfig, option.id)
+      ? turnConfig[option.id]
+      : option.defaultValue;
+  };
+  const model = valueForRole('model');
+  const effort = valueForRole('effort');
+  const approval = valueForRole('approval_mode');
+  const fast = valueForRole('fast');
   return {
     ...parent,
     id: sideChat.id,
@@ -102,6 +117,15 @@ export function sideChatComposerSession(sideChat: SideChatInfo, parent: Session)
     worktree_outcome: null,
     created_at: sideChat.created_at,
     updated_at: sideChat.updated_at,
+    model: model === undefined ? parent.model : model == null ? null : String(model),
+    thinking_effort: effort === undefined
+      ? parent.thinking_effort
+      : effort == null ? null : String(effort),
+    approval_mode: isApprovalMode(approval) ? approval : parent.approval_mode,
+    service_tier: fast === undefined ? parent.service_tier : fast === true ? 'fast' : null,
+    turn_config: turnConfig,
+    turn_config_options: options,
+    turn_config_revision: sideChat.turn_config_revision ?? null,
   };
 }
 

@@ -4,7 +4,7 @@ Shared structured-runtime adapter for Codex app-server.
 
 The process bridges two newline-delimited JSON protocols:
 
-- stdin/stdout facing Gian Host: `gian.proxy/2.0` only (JSON-RPC, string ids).
+- stdin/stdout facing Gian Host: `gian.proxy/2.1` only (JSON-RPC, string ids).
 - stdin/stdout facing one shared Codex app-server child for all attached Gian
   sessions (`--listen stdio://`, JSONL with the `jsonrpc` header omitted).
 

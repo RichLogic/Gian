@@ -22,19 +22,20 @@ import {
   PROTOCOL_NAME,
   PROTOCOL_V2,
   SUPPORTED_PROTOCOL_VERSIONS,
-  manifestV2Schema,
+  manifestSchema,
   protocolRangeIncludes,
   readNdjsonLines,
   type ManifestV2,
+  type ManifestV3,
 } from '@gian/proxy-protocol';
 import type {
   AgentCliStatus,
-  AgentColor,
   AgentInstallResult,
   AgentInstallStatus,
   AgentProxyDefaults,
   AgentProxyStatus,
   AgentProxyUpdateCheck,
+  AgentRuntimeProfile,
   Executor,
   ProductExecutor,
   ProxyCatalogEntry,
@@ -42,9 +43,6 @@ import type {
   UserAgentStatus,
 } from '@gian/shared';
 import {
-  AGENT_COLORS,
-  DEFAULT_AGENT_COLORS,
-  isAgentColor,
   isProductExecutor,
   migrateLegacyGrokProxyDefaults,
   PRODUCT_EXECUTORS,
@@ -56,6 +54,12 @@ import { KimiSessionStoreRuntimeProvider } from '../runtime/kimi-session-store.j
 import { runProtectedCommand } from '../runtime/protected-command.js';
 import type { CliRuntimeProvider, RuntimeProbe } from '../runtime/types.js';
 import { shutdownProxyProcess } from '../proxy/process-shutdown.js';
+import {
+  inspectManagedGianSkill,
+  reconcileManagedGianSkill,
+  type ManagedSkillResult,
+  type ManagedSkillSource,
+} from './managed-skill.js';
 import {
   acquireAgentProxyUpdateLock,
   acquireAgentRuntimeUseLock,
@@ -70,17 +74,19 @@ const PROXY_ENTRY = 'proxy.mjs';
 const MAX_INSTALLER_BYTES = 2 * 1024 * 1024;
 const MAX_PROXY_BYTES = 64 * 1024 * 1024;
 const MAX_PROXY_MANIFEST_BYTES = 64 * 1024;
+const MAX_PROXY_LOGO_BYTES = 512 * 1024;
+const MAX_PROXY_SKILL_BYTES = 512 * 1024;
 const PROXY_SELF_TEST_TIMEOUT_MS = 5_000;
 const PROXY_COMPATIBILITY_TIMEOUT_MS = 30_000;
 const STATUS_CACHE_TTL_MS = 30_000;
-const RECOMMENDED_CLI_VERSIONS: Record<Executor, string> = {
-  claude: '2.1.159',
-  codex: '0.146.0',
-  kimi: '0.31.1',
-  grok: '1.0.4',
+const VERIFIED_CLI_VERSIONS: Record<Executor, string[]> = {
+  claude: ['2.1.159'],
+  codex: ['0.146.0'],
+  kimi: ['0.31.1'],
+  grok: ['1.0.4'],
   // Resolved from the official npm latest dist-tag at install/probe time;
   // this value is only a diagnostic fallback (plan §0).
-  dsh: '0.1.0-rc.7',
+  dsh: ['0.1.0-rc.7'],
 };
 
 const DEVELOPMENT_PROCESS_SCOPE: Record<Executor, 'shared' | 'session'> = {
@@ -106,10 +112,10 @@ interface AgentConfigFileV1 {
   proxyDefaults: Partial<Record<Executor, AgentProxyDefaults>>;
 }
 
-/** agents.json schema v2: Agents are user entities keyed by uuid. The Proxy
+/** agents.json schema v3: Agents are user entities keyed by uuid. The Proxy
  *  kind catalog is NOT persisted here — it lives in the AGENTS definitions. */
 interface AgentConfigFile {
-  schemaVersion: 2;
+  schemaVersion: 3;
   agents: UserAgent[];
 }
 
@@ -121,7 +127,9 @@ interface LegacyProxyManifest {
 }
 
 type ManagedProxyManifestV2 = Omit<ManifestV2, 'id'> & { id: Executor };
-type ProxyManifest = LegacyProxyManifest | ManagedProxyManifestV2;
+type ManagedProxyManifestV3 = Omit<ManifestV3, 'id'> & { id: Executor };
+type ManagedProxyManifest = ManagedProxyManifestV2 | ManagedProxyManifestV3;
+type ProxyManifest = LegacyProxyManifest | ManagedProxyManifest;
 type ProxyWireProtocol = 'legacy' | typeof PROTOCOL_NAME;
 
 export interface ProxyLaunchDescriptor {
@@ -257,7 +265,7 @@ const AGENTS: Record<Executor, AgentDefinition> = {
 };
 
 function emptyConfig(): AgentConfigFile {
-  return { schemaVersion: 2, agents: [] };
+  return { schemaVersion: 3, agents: [] };
 }
 
 /** A missing/unreadable agents.json migrates from "empty v1" so the
@@ -294,13 +302,6 @@ export class AgentNameTakenError extends Error {
     super(`Agent name is already taken: ${name}`);
     this.name = 'AgentNameTakenError';
   }
-}
-
-function assertAgentColor(value: unknown): AgentColor {
-  if (!isAgentColor(value)) {
-    throw new Error(`unsupported Agent color: ${String(value)}`);
-  }
-  return value;
 }
 
 function normalizeCliPathInput(value: string | null | undefined): string | null {
@@ -344,7 +345,6 @@ function normalizeUserAgent(value: unknown): UserAgent | null {
   return {
     id,
     name,
-    color: isAgentColor(record['color']) ? record['color'] : DEFAULT_AGENT_COLORS[proxy],
     proxy,
     cliPath,
     defaults: normalizeProxyDefaults(record['defaults']),
@@ -364,7 +364,7 @@ function parseConfigV2(parsed: { agents?: unknown }): AgentConfigFile {
     seenNames.add(nameKey);
     agents.push(agent);
   }
-  return { schemaVersion: 2, agents };
+  return { schemaVersion: 3, agents };
 }
 
 function parseConfigV1(parsed: Partial<AgentConfigFileV1>): AgentConfigFileV1 {
@@ -382,7 +382,7 @@ function parseConfigV1(parsed: Partial<AgentConfigFileV1>): AgentConfigFileV1 {
 
 function parseConfig(raw: string): AgentConfigFile | AgentConfigFileV1 {
   const parsed = JSON.parse(raw) as { schemaVersion?: unknown };
-  return parsed?.schemaVersion === 2
+  return parsed?.schemaVersion === 2 || parsed?.schemaVersion === 3
     ? parseConfigV2(parsed as { agents?: unknown })
     : parseConfigV1(parsed as Partial<AgentConfigFileV1>);
 }
@@ -403,15 +403,28 @@ function proxyManifestVersion(manifest: ProxyManifest): string {
   return isLegacyProxyManifest(manifest) ? manifest.version : manifest.pluginVersion;
 }
 
+export function verifiedCliVersionsFromManifest(
+  manifest: ProxyManifest | null | undefined,
+  id: Executor,
+): string[] {
+  if (manifest && !isLegacyProxyManifest(manifest)) {
+    const verified = manifest.runtime?.verifiedCliVersions;
+    if (verified && verified.length > 0) return [...verified];
+    const recommended = manifest.runtime?.recommendedCliVersion;
+    if (typeof recommended === 'string' && recommended.length > 0) return [recommended];
+  }
+  return [...VERIFIED_CLI_VERSIONS[id]];
+}
+
 export function recommendedCliVersionFromManifest(
   manifest: ProxyManifest | null | undefined,
   id: Executor,
 ): string {
-  if (manifest && !isLegacyProxyManifest(manifest)) {
-    const recommended = manifest.runtime?.recommendedCliVersion;
-    if (typeof recommended === 'string' && recommended.length > 0) return recommended;
-  }
-  return RECOMMENDED_CLI_VERSIONS[id];
+  return verifiedCliVersionsFromManifest(manifest, id)[0]!;
+}
+
+function runtimeProfileId(input: Omit<AgentRuntimeProfile, 'id'>): string {
+  return createHash('sha256').update(JSON.stringify(input)).digest('hex');
 }
 
 function proxyManifestProtocol(manifest: ProxyManifest): ProxyWireProtocol {
@@ -482,6 +495,28 @@ async function pluginVersionFromEntry(entryPath: string): Promise<string> {
     dir = parent;
   }
   throw new Error(`Could not resolve pluginVersion from ${entryPath}`);
+}
+
+async function pluginPackageDirectoryFromEntry(entryPath: string): Promise<string> {
+  let dir = dirname(entryPath);
+  for (let i = 0; i < 8; i += 1) {
+    try {
+      const pkg = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8')) as {
+        name?: string;
+      };
+      if (
+        typeof pkg.name === 'string'
+        && pkg.name.startsWith('@gian/')
+        && pkg.name.endsWith('-proxy')
+      ) return dir;
+    } catch {
+      // Keep walking toward the package root.
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error(`Could not resolve Proxy package from ${entryPath}`);
 }
 
 /** Parse the checksum for one exact immutable release asset. Accepting an
@@ -646,7 +681,7 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
 /**
  * Product executor alias to Gian plugin id. `dsh` maps to the reverse-domain
  * `ai.deepseek.harness` required by the integration plan; every other executor
- * keeps its short id. Manifest v2 identity must match the initialize result.
+ * keeps its short id. Managed Manifest identity must match initialize.
  */
 export function pluginIdFor(id: Executor): string {
   return id === 'dsh' ? 'ai.deepseek.harness' : id;
@@ -660,7 +695,7 @@ function validateProxyInitialize(id: Executor, value: unknown): void {
   if (
     !result
     || protocol?.['name'] !== PROTOCOL_NAME
-    || protocol?.['version'] !== PROTOCOL_V2
+    || !SUPPORTED_PROTOCOL_VERSIONS.some(version => protocol?.['version'] === version)
     || typeof plugin?.['id'] !== 'string'
     || plugin['id'] !== pluginIdFor(id)
     || typeof plugin?.['version'] !== 'string'
@@ -758,15 +793,20 @@ export class AgentManager {
     const manager = new AgentManager(options);
     await mkdir(options.dataDir, { recursive: true });
     let persisted: AgentConfigFile | AgentConfigFileV1;
+    let needsSave = false;
     try {
-      persisted = parseConfig(await readFile(manager.configPath, 'utf8'));
+      const raw = await readFile(manager.configPath, 'utf8');
+      const source = JSON.parse(raw) as { schemaVersion?: unknown };
+      needsSave = source.schemaVersion !== 3;
+      persisted = parseConfig(raw);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
       persisted = emptyConfigV1();
     }
-    if (persisted.schemaVersion === 2) {
+    if (persisted.schemaVersion === 3) {
       manager.config = persisted;
+      if (needsSave) await manager.saveConfig();
       return manager;
     }
     manager.config = await manager.migrateV1(persisted);
@@ -805,13 +845,12 @@ export class AgentManager {
       agents.push({
         id: randomUUID(),
         name: AGENTS[kind].name,
-        color: DEFAULT_AGENT_COLORS[kind],
         proxy: kind,
         cliPath,
         defaults,
       });
     }
-    return { schemaVersion: 2, agents };
+    return { schemaVersion: 3, agents };
   }
 
   private async hasInstalledProxy(id: ProductExecutor): Promise<boolean> {
@@ -843,13 +882,17 @@ export class AgentManager {
     return join(this.options.dataDir, 'plugins', id, 'current', PROXY_ENTRY);
   }
 
-  async proxyLaunchDescriptor(id: Executor): Promise<ProxyLaunchDescriptor> {
+  async proxyLaunchDescriptor(id: Executor, version?: string | null): Promise<ProxyLaunchDescriptor> {
     if (!this.options.managedProxies) {
       const entryPath = this.proxyEntry(id);
+      const pluginVersion = await pluginVersionFromEntry(entryPath);
+      if (version && version !== pluginVersion) {
+        throw new Error(`${id} development Proxy ${version} is not available (current ${pluginVersion})`);
+      }
       return {
         entryPath,
         protocol: {
-          pluginVersion: await pluginVersionFromEntry(entryPath),
+          pluginVersion,
           processScope: DEVELOPMENT_PROCESS_SCOPE[id],
         },
       };
@@ -857,8 +900,9 @@ export class AgentManager {
     const agentRoot = join(this.options.dataDir, 'plugins', id);
     let current: string;
     try {
-      current = await realpath(join(agentRoot, 'current'));
+      current = await realpath(version ? join(agentRoot, version) : join(agentRoot, 'current'));
     } catch (error) {
+      if (version) throw error;
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         try {
           await lstat(join(agentRoot, 'current'));
@@ -962,7 +1006,7 @@ export class AgentManager {
   }
 
   // ------------------------------------------------------------------
-  // User Agents (agents.json schema v2)
+  // User Agents (agents.json schema v3)
   // ------------------------------------------------------------------
 
   listAgents(): UserAgent[] {
@@ -1019,10 +1063,47 @@ export class AgentManager {
     return PRODUCT_EXECUTORS.map(id => ({
       id,
       name: AGENTS[id].name,
-      defaultColor: DEFAULT_AGENT_COLORS[id],
+      logo: {
+        light: `/api/proxies/${id}/logo/light`,
+        dark: `/api/proxies/${id}/logo/dark`,
+      },
       tagline: PROXY_TAGLINES[id],
       officialInstallUrl: AGENTS[id].installerUrl,
     }));
+  }
+
+  async proxyLogo(
+    id: ProductExecutor,
+    variant: 'light' | 'dark',
+  ): Promise<{ bytes: Buffer; mediaType: 'image/png' | 'image/webp'; sha256: string } | null> {
+    if (!this.options.managedProxies) {
+      try {
+        const packageDir = await pluginPackageDirectoryFromEntry(this.proxyEntry(id));
+        const path = join(packageDir, 'assets', `logo-${variant}.png`);
+        const bytes = await readFile(path);
+        if (bytes.length === 0 || bytes.length > MAX_PROXY_LOGO_BYTES) return null;
+        return {
+          bytes,
+          mediaType: 'image/png',
+          sha256: createHash('sha256').update(bytes).digest('hex'),
+        };
+      } catch {
+        return null;
+      }
+    }
+    try {
+      const agentRoot = join(this.options.dataDir, 'plugins', id);
+      const current = await realpath(join(agentRoot, 'current'));
+      const contained = await this.assertDirectProxyDirectory(agentRoot, current);
+      const manifest = await this.validateProxyDirectory(contained, id, undefined, false);
+      if (manifest.schemaVersion !== 3) return null;
+      const descriptor = variant === 'dark'
+        ? manifest.branding.logo.dark ?? manifest.branding.logo.light
+        : manifest.branding.logo.light;
+      return this.readProxyLogoAsset(contained, descriptor);
+    } catch {
+      return null;
+    }
   }
 
   /** Default name for a new draft Agent of the kind: the Proxy display name,
@@ -1037,23 +1118,9 @@ export class AgentManager {
     }
   }
 
-  /** Default color for a new draft Agent: the kind default for the kind's
-   *  first Agent, else the next palette color no saved Agent occupies. */
-  nextAgentColor(proxy: ProductExecutor): AgentColor {
-    if (!this.config.agents.some(agent => agent.proxy === proxy)) {
-      return DEFAULT_AGENT_COLORS[proxy];
-    }
-    const used = new Set(this.config.agents.map(agent => agent.color));
-    for (const color of AGENT_COLORS) {
-      if (!used.has(color)) return color;
-    }
-    return DEFAULT_AGENT_COLORS[proxy];
-  }
-
   async createAgent(input: {
     name: string;
     proxy: ProductExecutor;
-    color?: AgentColor;
     cliPath?: string | null;
     defaults?: Partial<AgentProxyDefaults>;
   }): Promise<UserAgent> {
@@ -1063,14 +1130,11 @@ export class AgentManager {
     const proxy = input.proxy;
     const name = normalizeAgentName(input.name);
     if (!name) throw new Error('Agent name must not be empty');
-    const color = input.color !== undefined
-      ? assertAgentColor(input.color)
-      : this.nextAgentColor(proxy);
     const cliPath = normalizeCliPathInput(input.cliPath);
     // The per-kind claim excludes updater/path writers while the candidate
     // path is being probed; a path-less create only needs the config claim.
     const kinds = cliPath !== null ? [proxy] : [];
-    return this.withAgentConfigLock(kinds, 'Agent create', async (current, leases) => {
+    const agent = await this.withAgentConfigLock(kinds, 'Agent create', async (current, leases) => {
       assertAgentNameAvailable(current.agents, name);
       if (cliPath !== null) {
         await this.probeAgentCliPath(proxy, cliPath, leases.get(proxy)!);
@@ -1078,23 +1142,23 @@ export class AgentManager {
       const agent: UserAgent = {
         id: randomUUID(),
         name,
-        color,
         proxy,
         cliPath,
         defaults: normalizeProxyDefaults(input.defaults),
       };
       await this.commitConfig(
-        { schemaVersion: 2, agents: [...current.agents, agent] },
+        { schemaVersion: 3, agents: [...current.agents, agent] },
         [agent.id],
         [proxy],
       );
       return agent;
     });
+    if (agent.proxy === 'codex') await this.reconcileManagedSkills();
+    return agent;
   }
 
   async updateAgent(id: string, patch: {
     name?: string;
-    color?: AgentColor;
     cliPath?: string | null;
     proxy?: ProductExecutor;
     defaults?: Partial<AgentProxyDefaults>;
@@ -1106,18 +1170,17 @@ export class AgentManager {
     }
     const name = patch.name !== undefined ? normalizeAgentName(patch.name) : existing.name;
     if (!name) throw new Error('Agent name must not be empty');
-    const color = patch.color !== undefined ? assertAgentColor(patch.color) : existing.color;
     const cliPath = patch.cliPath !== undefined
       ? normalizeCliPathInput(patch.cliPath)
       : existing.cliPath;
     const pathOrProxyChanged = patch.cliPath !== undefined || patch.proxy !== undefined;
-    // Name/color/defaults stay write-through under the config claim only —
+    // Name/defaults stay write-through under the config claim only —
     // they never touch the runtime load set, so they must not queue behind
     // a kind updater. Path/Proxy changes take the kind claim for the probe.
     const claimKinds = pathOrProxyChanged
       ? [...new Set<Executor>([existing.proxy, nextProxy])]
       : [];
-    return this.withAgentConfigLock(claimKinds, 'Agent update', async (current, leases) => {
+    const agent = await this.withAgentConfigLock(claimKinds, 'Agent update', async (current, leases) => {
       assertAgentNameAvailable(current.agents, name, id);
       const index = current.agents.findIndex(candidate => candidate.id === id);
       if (index === -1) throw new Error(`agent not found: ${id}`);
@@ -1128,7 +1191,6 @@ export class AgentManager {
       const agent: UserAgent = {
         ...previous,
         name,
-        color,
         proxy: nextProxy,
         cliPath,
         defaults: patch.defaults
@@ -1141,12 +1203,14 @@ export class AgentManager {
       // every committed update invalidates both touched kinds — even a
       // write-through defaults rename.
       await this.commitConfig(
-        { schemaVersion: 2, agents },
+        { schemaVersion: 3, agents },
         [id],
         [...new Set<Executor>([existing.proxy, nextProxy])],
       );
       return agent;
     });
+    if (agent.proxy === 'codex') await this.reconcileManagedSkills();
+    return agent;
   }
 
   async deleteAgent(id: string): Promise<void> {
@@ -1154,7 +1218,7 @@ export class AgentManager {
     await this.withAgentConfigLock([], 'Agent delete', async current => {
       const agents = current.agents.filter(candidate => candidate.id !== id);
       if (agents.length === current.agents.length) throw new Error(`agent not found: ${id}`);
-      await this.commitConfig({ schemaVersion: 2, agents }, [id], [existing.proxy]);
+      await this.commitConfig({ schemaVersion: 3, agents }, [id], [existing.proxy]);
     });
   }
 
@@ -1173,13 +1237,44 @@ export class AgentManager {
     const probe = Promise.all([
       this.cliStatus(agent.proxy, undefined, agent.cliPath ?? undefined),
       this.proxyStatus(agent.proxy),
-    ]).then(([cli, plugin]) => {
+    ]).then(async ([cli, plugin]) => {
+      const skill = agent.proxy === 'codex' && plugin.state === 'ready' && plugin.version
+        ? await inspectManagedGianSkill(this.homeDir, plugin.version)
+        : null;
+      const runtimeProfile = agent.proxy === 'codex'
+        && cli.state === 'ready'
+        && cli.path && cli.version
+        && plugin.state === 'ready' && plugin.version
+        ? (() => {
+            const verifiedCliVersions = plugin.verifiedCliVersions ?? [];
+            const profile: Omit<AgentRuntimeProfile, 'id'> = {
+              agentId: agent.id,
+              proxy: agent.proxy,
+              cliPath: cli.path,
+              cliVersion: cli.version,
+              configHome: process.env.CODEX_HOME && isAbsolute(process.env.CODEX_HOME)
+                ? process.env.CODEX_HOME
+                : cli.source === 'override' ? null : join(this.homeDir, '.codex'),
+              cliFingerprint: cli.contentFingerprint ?? null,
+              proxyVersion: plugin.version,
+              verifiedCliVersions,
+              verification: verifiedCliVersions.includes(cli.version) ? 'verified' : 'unverified',
+              skill: {
+                name: 'gian-session',
+                version: plugin.version,
+                state: skill?.state ?? 'missing',
+              },
+            };
+            return { id: runtimeProfileId(profile), ...profile };
+          })()
+        : null;
       const value: UserAgentStatus = {
         ...agent,
         proxyName: AGENTS[agent.proxy].name,
         ready: cli.state === 'ready' && plugin.state === 'ready',
         cli,
         plugin: { ...plugin, defaults: { ...agent.defaults } },
+        runtimeProfile,
         officialInstallUrl: AGENTS[agent.proxy].installerUrl,
       };
       if ((this.agentStatusGenerations.get(id) ?? 0) === generation) {
@@ -1197,6 +1292,62 @@ export class AgentManager {
     return Promise.all(this.config.agents.map(agent => this.agentStatus(agent.id, refresh)));
   }
 
+  private async managedGianSkillSource(): Promise<ManagedSkillSource | null> {
+    const descriptor = await this.proxyLaunchDescriptor('codex');
+    if (!descriptor.protocol) return null;
+    const packageDir = dirname(descriptor.entryPath);
+    if (!this.options.managedProxies) {
+      const source = join(
+        await pluginPackageDirectoryFromEntry(descriptor.entryPath),
+        'skills',
+        'gian-session',
+        'SKILL.md',
+      );
+      const bytes = await readFile(source);
+      return {
+        name: 'gian-session',
+        version: descriptor.protocol.pluginVersion,
+        path: source,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+      };
+    }
+    const manifest = await this.validateProxyDirectory(packageDir, 'codex');
+    if (isLegacyProxyManifest(manifest)) return null;
+    const skill = manifest.skills?.find(candidate => candidate.name === 'gian-session');
+    if (!skill) return null;
+    return {
+      name: 'gian-session',
+      version: manifest.pluginVersion,
+      path: join(packageDir, skill.path),
+      sha256: skill.sha256,
+    };
+  }
+
+  /** Reconcile the static internal Skill only when a saved Codex Agent uses a
+   * ready Proxy. This never writes Agent instruction files or user-owned Skill
+   * collisions. */
+  async reconcileManagedSkills(): Promise<ManagedSkillResult[]> {
+    if (!this.config.agents.some(agent => agent.proxy === 'codex')) return [];
+    try {
+      const source = await this.managedGianSkillSource();
+      if (!source) return [];
+      const result = await reconcileManagedGianSkill(this.homeDir, source);
+      for (const agent of this.config.agents.filter(candidate => candidate.proxy === 'codex')) {
+        this.invalidateAgentStatus(agent.id);
+      }
+      return [result];
+    } catch (error) {
+      return [{
+        name: 'gian-session',
+        version: 'unknown',
+        path: join(this.homeDir, '.agents', 'skills', 'gian-session'),
+        state: 'invalid',
+        changed: false,
+        error: error instanceof Error ? error.message : String(error),
+      }];
+    }
+  }
+
   private async probeAgentCliPath(
     kind: ProductExecutor,
     path: string,
@@ -1204,7 +1355,22 @@ export class AgentManager {
   ): Promise<void> {
     const provider = this.providers.get(kind);
     if (!provider) throw new Error(`CLI runtime provider is not configured: ${kind}`);
-    await provider.probe({ cli: kind, binaryPath: path, source: 'override' }, claim);
+    const runtime = await provider.probe({ cli: kind, binaryPath: path, source: 'override' }, claim);
+    if (kind !== 'codex' || !this.options.managedProxies) return;
+    try {
+      const descriptor = await this.proxyLaunchDescriptor(kind);
+      if (!descriptor.protocol) return;
+      await this.runProxyCompatibilityProbe({
+        id: kind,
+        version: descriptor.protocol.pluginVersion,
+        entryPath: descriptor.entryPath,
+        protocol: PROTOCOL_NAME,
+        processScope: descriptor.protocol.processScope,
+      }, claim, runtime);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
   }
 
   private async commitConfig(
@@ -1471,6 +1637,7 @@ export class AgentManager {
         await rm(staging, { recursive: true, force: true });
       }
       this.invalidateStatus(id);
+      if (id === 'codex') await this.reconcileManagedSkills();
       return { agent: await this.status(id, true) };
       },
       'proxy-update',
@@ -1520,7 +1687,6 @@ export class AgentManager {
     claim: AgentUpdateLease,
     overridePath?: string,
   ): Promise<AgentCliStatus> {
-    const recommendedVersion = await this.recommendedCliVersion(id);
     const provider = this.providers.get(id)!;
     const configured = overridePath ?? this.configuredPath(id) ?? undefined;
     let installed;
@@ -1531,7 +1697,6 @@ export class AgentManager {
         state: 'invalid',
         path: configured ?? null,
         version: null,
-        recommendedVersion,
         source: configured ? 'override' : null,
         error: error instanceof Error ? error.message : String(error),
       };
@@ -1541,7 +1706,6 @@ export class AgentManager {
         state: 'missing',
         path: null,
         version: null,
-        recommendedVersion,
         source: null,
       };
     }
@@ -1549,11 +1713,14 @@ export class AgentManager {
     for (const candidate of installed) {
       try {
         const probe = await provider.probe(candidate, claim);
+        const contentFingerprint = provider.snapshot
+          ? await provider.snapshot(probe)
+          : null;
         return {
           state: 'ready',
           path: probe.binaryPath,
           version: probe.version,
-          recommendedVersion,
+          contentFingerprint,
           source: probe.source === 'managed' ? 'official-user' : probe.source,
         };
       } catch (error) {
@@ -1565,7 +1732,6 @@ export class AgentManager {
       state: 'invalid',
       path: installed[0]?.binaryPath ?? null,
       version: null,
-      recommendedVersion,
       source: installed[0]?.source === 'managed'
         ? 'official-user'
         : installed[0]?.source ?? null,
@@ -1573,16 +1739,16 @@ export class AgentManager {
     };
   }
 
-  private async recommendedCliVersion(id: Executor): Promise<string> {
-    if (!this.options.managedProxies) return RECOMMENDED_CLI_VERSIONS[id];
+  private async verifiedCliVersions(id: Executor): Promise<string[]> {
+    if (!this.options.managedProxies) return [...VERIFIED_CLI_VERSIONS[id]];
     try {
       const agentRoot = join(this.options.dataDir, 'plugins', id);
       const current = await realpath(join(agentRoot, 'current'));
       const contained = await this.assertDirectProxyDirectory(agentRoot, current);
       const manifest = await this.validateProxyDirectory(contained, id);
-      return recommendedCliVersionFromManifest(manifest, id);
+      return verifiedCliVersionsFromManifest(manifest, id);
     } catch {
-      return RECOMMENDED_CLI_VERSIONS[id];
+      return [...VERIFIED_CLI_VERSIONS[id]];
     }
   }
 
@@ -1610,6 +1776,7 @@ export class AgentManager {
         state: 'ready',
         path,
         version,
+        verifiedCliVersions: await this.verifiedCliVersions(id),
         source: 'development',
       };
     }
@@ -1625,6 +1792,7 @@ export class AgentManager {
           : 'outdated',
         path: join(contained, manifest.entry),
         version,
+        verifiedCliVersions: verifiedCliVersionsFromManifest(manifest, id),
         source: 'github-release',
       };
     } catch (error) {
@@ -1645,6 +1813,7 @@ export class AgentManager {
     directory: string,
     id: Executor,
     expectedVersion?: string,
+    selfTest = true,
   ): Promise<ProxyManifest> {
     const raw = await readFile(join(directory, 'manifest.json'), 'utf8');
     const candidate = JSON.parse(raw) as unknown;
@@ -1661,7 +1830,7 @@ export class AgentManager {
       }
       validated = candidate as LegacyProxyManifest;
     } else {
-      const parsed = manifestV2Schema.safeParse(candidate);
+      const parsed = manifestSchema.safeParse(candidate);
       if (
         !parsed.success
         || parsed.data.id !== pluginIdFor(id)
@@ -1669,7 +1838,7 @@ export class AgentManager {
       ) {
         throw new Error(`Invalid ${id} proxy manifest.`);
       }
-      validated = parsed.data as ManagedProxyManifestV2;
+      validated = parsed.data as ManagedProxyManifest;
     }
     if (validated.id !== pluginIdFor(id)) {
       throw new Error(`Invalid ${id} proxy manifest.`);
@@ -1685,8 +1854,54 @@ export class AgentManager {
       throw new Error(`Unsafe ${id} proxy entry.`);
     }
     await access(resolvedEntry, constants.R_OK);
-    await this.runProxySelfTest(resolvedDirectory, validated);
+    if (validated.schemaVersion === 3) {
+      await this.readProxyLogoAsset(resolvedDirectory, validated.branding.logo.light);
+      if (validated.branding.logo.dark) {
+        await this.readProxyLogoAsset(resolvedDirectory, validated.branding.logo.dark);
+      }
+    }
+    if (!isLegacyProxyManifest(validated)) {
+      for (const skill of validated.skills ?? []) {
+        const candidate = join(resolvedDirectory, skill.path);
+        const info = await lstat(candidate);
+        if (!info.isFile() || info.isSymbolicLink() || info.size === 0 || info.size > MAX_PROXY_SKILL_BYTES) {
+          throw new Error('Invalid Proxy Skill asset.');
+        }
+        const resolved = await realpath(candidate);
+        if (relative(resolvedDirectory, resolved) !== skill.path) {
+          throw new Error('Unsafe Proxy Skill asset.');
+        }
+        const sha256 = createHash('sha256').update(await readFile(resolved)).digest('hex');
+        if (sha256 !== skill.sha256) throw new Error('Proxy Skill checksum mismatch.');
+      }
+    }
+    if (selfTest) await this.runProxySelfTest(resolvedDirectory, validated);
     return validated;
+  }
+
+  private async readProxyLogoAsset(
+    directory: string,
+    descriptor: ManagedProxyManifestV3['branding']['logo']['light'],
+  ): Promise<{ bytes: Buffer; mediaType: 'image/png' | 'image/webp'; sha256: string }> {
+    const candidate = join(directory, descriptor.path);
+    const info = await lstat(candidate);
+    if (!info.isFile() || info.isSymbolicLink() || info.size === 0 || info.size > MAX_PROXY_LOGO_BYTES) {
+      throw new Error('Invalid Proxy logo asset.');
+    }
+    const resolved = await realpath(candidate);
+    if (relative(directory, resolved) !== descriptor.path) {
+      throw new Error('Unsafe Proxy logo asset.');
+    }
+    const bytes = await readFile(resolved);
+    const validPng = descriptor.mediaType === 'image/png'
+      && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const validWebp = descriptor.mediaType === 'image/webp'
+      && bytes.subarray(0, 4).toString('ascii') === 'RIFF'
+      && bytes.subarray(8, 12).toString('ascii') === 'WEBP';
+    if (!validPng && !validWebp) throw new Error('Proxy logo media type mismatch.');
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    if (sha256 !== descriptor.sha256) throw new Error('Proxy logo checksum mismatch.');
+    return { bytes, mediaType: descriptor.mediaType, sha256 };
   }
 
   private async runProxySelfTest(
@@ -1734,7 +1949,7 @@ export class AgentManager {
     const validLegacy = isLegacyProxyManifest(manifest)
       && response.schemaVersion === 1;
     const validV2 = !isLegacyProxyManifest(manifest)
-      && response.schemaVersion === 2
+      && response.schemaVersion === manifest.schemaVersion
       && response.pluginVersion === manifest.pluginVersion;
     if ((!validLegacy && !validV2) || response.id !== manifest.id || response.ok !== true) {
       throw new Error(`${manifest.id} proxy self-test returned an invalid result.`);
@@ -1876,8 +2091,8 @@ export class AgentManager {
     entryPath: string;
     protocol: ProxyWireProtocol;
     processScope?: ManagedProxyManifestV2['process']['scope'];
-  }, updateOwner: AgentUpdateLease): Promise<void> {
-    const runtime = await this.resolveCompatibilityRuntime(input.id, updateOwner);
+  }, updateOwner: AgentUpdateLease, exactRuntime?: RuntimeProbe): Promise<void> {
+    const runtime = exactRuntime ?? await this.resolveCompatibilityRuntime(input.id, updateOwner);
     const probeDirectory = join(
       this.options.dataDir,
       'compatibility-probes',
@@ -2155,7 +2370,7 @@ export class AgentManager {
       } catch {
         throw new Error(`${id} Proxy release manifest is not valid JSON.`);
       }
-      const manifest = manifestV2Schema.safeParse(manifestValue);
+      const manifest = manifestSchema.safeParse(manifestValue);
       if (
         !manifest.success
         || manifest.data.id !== pluginIdFor(id)
@@ -2163,7 +2378,7 @@ export class AgentManager {
       ) {
         throw new Error(`${id} Proxy release manifest does not match ${candidate.tag}.`);
       }
-      if (isCompatibleProxyManifest(manifest.data as ManagedProxyManifestV2, this.releaseVersion)) {
+      if (isCompatibleProxyManifest(manifest.data as ManagedProxyManifest, this.releaseVersion)) {
         return { tag: candidate.tag, version: candidate.version };
       }
     }
@@ -2210,8 +2425,8 @@ export class AgentManager {
       const parsed = parseConfig(await readFile(this.configPath, 'utf8'));
       // A v1 file can still appear here when an older Host wrote it after
       // this Host migrated in memory. Migrate it again on the fly; the next
-      // successful commit persists v2.
-      return parsed.schemaVersion === 2 ? parsed : await this.migrateV1(parsed);
+      // successful commit persists v3.
+      return parsed.schemaVersion === 3 ? parsed : await this.migrateV1(parsed);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyConfig();
       throw error;

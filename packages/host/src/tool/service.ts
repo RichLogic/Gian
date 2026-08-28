@@ -33,6 +33,7 @@ import {
   type ToolDeliveryRow,
   type ToolRequestRow,
 } from './ledger.js';
+import type { GianToolActor } from './credentials.js';
 import {
   configOptionsByRole,
   projectInteraction,
@@ -41,6 +42,7 @@ import {
   resolvedConfig,
   validateConfigValue,
 } from './projections.js';
+import { createAndBindWorktree } from './worktree.js';
 
 interface TurnRow {
   id: string;
@@ -156,7 +158,7 @@ export class GianToolService {
     this.ledger = new GianToolLedger(deps.db);
   }
 
-  async call(raw: unknown): Promise<GianToolResult<AnyData>> {
+  async call(raw: unknown, context?: { actor: GianToolActor }): Promise<GianToolResult<AnyData>> {
     let call: GianToolCall;
     try {
       call = validateGianToolCall(raw);
@@ -170,7 +172,7 @@ export class GianToolService {
     if (this.closing) {
       return { ok: false, request_id: call.request_id, error: toolError(new Error('service is shutting down')) };
     }
-    if (!isGianToolMutation(call.method)) return this.executeRead(call);
+    if (!isGianToolMutation(call.method)) return this.executeRead(call, context);
 
     const key = `${call.caller_id}\0${call.idempotency_key}`;
     const inputHash = toolInputHash(call.method, call.params);
@@ -190,7 +192,7 @@ export class GianToolService {
       const first = await active.promise;
       return { ...first, request_id: call.request_id };
     }
-    const run = this.executeMutation(call);
+    const run = this.executeMutation(call, context);
     this.inFlight.set(key, { method: call.method, inputHash, promise: run });
     try {
       return await run;
@@ -203,15 +205,21 @@ export class GianToolService {
     this.closing = true;
   }
 
-  private async executeRead(call: GianToolCall): Promise<GianToolResult<AnyData>> {
+  private async executeRead(
+    call: GianToolCall,
+    context?: { actor: GianToolActor },
+  ): Promise<GianToolResult<AnyData>> {
     try {
-      return { ok: true, request_id: call.request_id, data: await this.dispatch(call) };
+      return { ok: true, request_id: call.request_id, data: await this.dispatch(call, undefined, context) };
     } catch (error) {
       return { ok: false, request_id: call.request_id, error: toolError(error) };
     }
   }
 
-  private async executeMutation(call: GianToolCall): Promise<GianToolResult<AnyData>> {
+  private async executeMutation(
+    call: GianToolCall,
+    context?: { actor: GianToolActor },
+  ): Promise<GianToolResult<AnyData>> {
     let request: ToolRequestRow;
     try {
       request = this.ledger.claim(call);
@@ -225,7 +233,7 @@ export class GianToolService {
       return { ok: false, request_id: call.request_id, error: request.error ?? toolError(new Error()) };
     }
     try {
-      const data = await this.dispatch(call, request);
+      const data = await this.dispatch(call, request, context);
       this.ledger.succeed(request.id, data);
       return { ok: true, request_id: call.request_id, data };
     } catch (error) {
@@ -235,7 +243,11 @@ export class GianToolService {
     }
   }
 
-  private async dispatch(call: GianToolCall, request?: ToolRequestRow): Promise<AnyData> {
+  private async dispatch(
+    call: GianToolCall,
+    request?: ToolRequestRow,
+    context?: { actor: GianToolActor },
+  ): Promise<AnyData> {
     const params = call.params as never;
     switch (call.method) {
       case 'catalog.get_create_options': return this.catalog(params);
@@ -246,15 +258,21 @@ export class GianToolService {
       case 'session.list': return this.sessionList(params);
       case 'session.get': return this.sessionGet(params);
       case 'session.read': return this.sessionRead(params);
-      case 'session.create': return this.sessionCreate(params, request!);
+      case 'session.create': return this.sessionCreate(params, request!, context?.actor);
       case 'session.update': return this.sessionUpdate(params);
       case 'session.assign_task': return this.sessionAssignTask(params);
       case 'session.set_subtask_state': return this.sessionSetSubtaskState(params);
       case 'session.archive': return this.sessionArchive(params);
       case 'session.send': return this.sessionSend(params, request!);
-      case 'session.cancel_delivery': return this.cancelDelivery(params, call.caller_id, request!);
+      case 'session.cancel_delivery': return this.cancelDelivery(
+        params,
+        call.caller_id,
+        request!,
+        context?.actor !== undefined,
+      );
       case 'session.wait': return this.sessionWait(params);
       case 'session.stop': return this.sessionStop(params);
+      case 'worktree.create_and_bind': return this.worktreeCreateAndBind(params, context?.actor);
       case 'interaction.list': return this.interactionList(params);
       case 'interaction.respond': return this.interactionRespond(params, request!);
     }
@@ -278,7 +296,6 @@ export class GianToolService {
       agents.push({
         id: agent.id,
         name: agent.name,
-        color: agent.color,
         proxy: agent.proxy,
         ready: status.ready,
         defaults: {
@@ -401,6 +418,7 @@ export class GianToolService {
   private async sessionCreate(
     params: GianToolMethodParams['session.create'],
     request: ToolRequestRow,
+    actor?: GianToolActor,
   ): Promise<GianToolMethodData['session.create']> {
     const recovered = request.domainId ? this.findSession(request.domainId) : null;
     if (recovered) {
@@ -425,6 +443,11 @@ export class GianToolService {
       agent_id: agent.id,
       type: params.task_id ? 'subtask' : 'coding',
       task_id: params.task_id ?? null,
+      ...(actor ? {
+        created_by_actor_kind: actor.kind,
+        created_by_actor_id: actor.kind === 'internal_session' ? actor.sessionId : actor.clientId,
+        created_by_session_id: actor.kind === 'internal_session' ? actor.sessionId : null,
+      } : {}),
       ...(params.name !== undefined ? { name: params.name } : {}),
       ...(config?.model !== undefined && config.model !== null ? { model: config.model } : {}),
       ...(config?.thinking_effort !== undefined && config.thinking_effort !== null
@@ -511,10 +534,12 @@ export class GianToolService {
     return { session: this.deps.sessions.getSession(params.session_id) };
   }
 
-  private sessionArchive(params: GianToolMethodParams['session.archive']): GianToolMethodData['session.archive'] {
+  private async sessionArchive(
+    params: GianToolMethodParams['session.archive'],
+  ): Promise<GianToolMethodData['session.archive']> {
     const before = this.deps.sessions.getSession(params.session_id);
     if ((before.archived === 1) !== params.archived) {
-      this.deps.sessions.archiveSession(params.session_id, params.archived);
+      await this.deps.sessions.archiveSession(params.session_id, params.archived);
     }
     return { session: this.deps.sessions.getSession(params.session_id) };
   }
@@ -550,14 +575,27 @@ export class GianToolService {
     }
   }
 
+  private async worktreeCreateAndBind(
+    params: GianToolMethodParams['worktree.create_and_bind'],
+    actor: GianToolActor | undefined,
+  ): Promise<GianToolMethodData['worktree.create_and_bind']> {
+    if (!actor || actor.kind !== 'internal_session') {
+      fail('PERMISSION_DENIED', 'worktree.create_and_bind requires an internal Gian Session');
+    }
+    return createAndBindWorktree({ db: this.deps.db, sessions: this.deps.sessions }, actor, params);
+  }
+
   private cancelDelivery(
     params: GianToolMethodParams['session.cancel_delivery'],
     callerId: string,
     request: ToolRequestRow,
+    actorAuthorized = false,
   ): GianToolMethodData['session.cancel_delivery'] {
     const delivery = this.ledger.delivery(params.delivery_id);
     if (!delivery) fail('NOT_FOUND', `delivery not found: ${params.delivery_id}`);
-    if (delivery.callerId !== callerId) fail('DELIVERY_NOT_CANCELABLE', 'Only the creating caller can cancel this delivery');
+    if (!actorAuthorized && delivery.callerId !== callerId) {
+      fail('DELIVERY_NOT_CANCELABLE', 'Only the creating caller can cancel this delivery');
+    }
     const current = this.reconcileDelivery(delivery);
     if (request.recovered && current.state === 'cancelled') return this.deliveryProjection(current)!;
     if (current.state !== 'queued' || !current.queueEntryId) {
@@ -708,7 +746,6 @@ export class GianToolService {
     return {
       id: agent.id,
       name: agent.name,
-      color: agent.color,
       proxy: agent.proxy,
       defaults: { ...agent.defaults },
     };

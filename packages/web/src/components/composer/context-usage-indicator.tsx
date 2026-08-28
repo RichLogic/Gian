@@ -38,9 +38,10 @@ export function ContextUsageIndicator({ session }: { session: Session }) {
   const showTooltip = () => {
     const rect = anchorRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const preferred = rect.left + rect.width / 2;
+    // Left-align the tooltip's left edge with the ring (width 244 + 8px
+    // gutter clamp); centering used to push it past the composer's left edge.
     setTooltipPosition({
-      left: Math.min(Math.max(preferred, 132), window.innerWidth - 132),
+      left: Math.min(Math.max(rect.left, 8), window.innerWidth - 244 - 8),
       top: rect.top - 8,
     });
   };

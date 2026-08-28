@@ -10,7 +10,7 @@
  *   pending state), plus the gated "new Side Chat" affordance;
  * - the selected Side Chat's transcript (shared `Transcript` pipeline — a
  *   Side Chat renders whatever the runtime produces, never a fake
- *   tool-less/read-only mode) and a minimal composer;
+ *   tool-less/read-only mode) and the standard fixed-config composer;
  * - the §10.5.3 recovery flow (resume once per page lifetime, stable
  *   recovering state, cannot-continue on failure) and the §10.5.4 close
  *   flow (4-clause confirm → closing, never back to open, removal only on
@@ -28,10 +28,10 @@
  * `approval:resolve` with `session_id = sidechatId` map to turn.start /
  * turn.interrupt / interaction.respond on the Side Chat route — the only
  * Action methods §10.5.1 allows there. Session-config methods are NOT sent
- * (minimal composer; see `sideChatComposerSession`).
+ * (Turn-configurable restricted composer; see `sideChatComposerSession`).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ApprovalDecision, Session, SideChatInfo } from '@gian/shared';
+import type { ApprovalDecision, ConfigValue, Session, SideChatInfo } from '@gian/shared';
 
 import { useT } from '../i18n/index.js';
 import { confirm as confirmDialog, toast } from '../feedback.js';
@@ -41,6 +41,7 @@ import {
   useOperationDispatch,
   useOperationPending,
   useOperationRun,
+  useOverlayField,
   usePendingOperations,
 } from '../operations/use-operations.js';
 import type { ApprovalActionContext, TranscriptItem } from '../types.js';
@@ -195,7 +196,13 @@ export interface SideChatDockProps {
   onClosed: (sidechatId: string) => void;
 }
 
-export function SideChatDock({ parent, sideChats, items, control, onClosed }: SideChatDockProps) {
+export function SideChatDock({
+  parent,
+  sideChats,
+  items,
+  control,
+  onClosed,
+}: SideChatDockProps) {
   const t = useT();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const { dispatch, creating, setRunId } = useSideChatCreateRun();
@@ -280,11 +287,11 @@ export function SideChatDock({ parent, sideChats, items, control, onClosed }: Si
         })}
         <button
           type="button"
-          className="sheet-tab sidechat-new"
+          className="sheet-tab sidechat-new prominent"
           data-testid="sidechat-create"
           disabled={!createEnabled}
           title={createTitle}
-          aria-label={t('sidechat.createTitle')}
+          aria-label={t('sidechat.new')}
           onClick={requestCreate}
         >
           <SvgIcon d={ICON.plus} size={12} />
@@ -303,13 +310,15 @@ export function SideChatDock({ parent, sideChats, items, control, onClosed }: Si
           <p>{t('sidechat.empty')}</p>
           <button
             type="button"
-            className="btn xs secondary"
+            className="btn sm primary sidechat-create-cta"
             data-testid="sidechat-create-empty"
             disabled={!createEnabled}
             title={createTitle}
+            aria-label={t('sidechat.new')}
             onClick={requestCreate}
           >
-            {t('sidechat.title')}
+            <SvgIcon d={ICON.plus} size={14} />
+            <span>{t('sidechat.new')}</span>
           </button>
         </div>
       )}
@@ -376,10 +385,36 @@ function SideChatPanel({
     || sideChat.state === 'waiting_interaction'
     || echoPending;
 
-  const composerSession = useMemo(
-    () => sideChatComposerSession(sideChat, parent),
-    [sideChat, parent],
+  const turnConfigOverlay = useOverlayField(sidechatEntityKey(sideChat.id), 'turn_config');
+  const turnConfig = (turnConfigOverlay?.value as Record<string, ConfigValue> | undefined)
+    ?? sideChat.turn_config
+    ?? {};
+  const configuredSideChat = useMemo(
+    () => ({ ...sideChat, turn_config: turnConfig }),
+    [sideChat, turnConfig],
   );
+  const composerSession = useMemo(
+    () => sideChatComposerSession(configuredSideChat, parent),
+    [configuredSideChat, parent],
+  );
+
+  function setTurnConfig(optionId: string, value: ConfigValue): void {
+    const option = configuredSideChat.turn_config_options
+      ?.find(entry => entry.id === optionId && entry.binding === 'turn');
+    if (!option) return;
+    dispatch('sidechat.setTurnConfig', {
+      sidechatId: sideChat.id,
+      optionId,
+      value,
+      turnConfig: { ...turnConfig, [optionId]: value },
+    });
+  }
+
+  function setRole(role: string, value: ConfigValue): void {
+    const option = configuredSideChat.turn_config_options
+      ?.find(entry => entry.binding === 'turn' && entry.role === role);
+    if (option) setTurnConfig(option.id, value);
+  }
 
   return (
     <section className="sidechat-panel" data-testid={`sidechat-panel-${sideChat.id}`}>
@@ -439,24 +474,30 @@ function SideChatPanel({
       ) : (
         <Composer
           session={composerSession}
-          variant="minimal"
-          onSend={(text) => {
+          variant="sidechat"
+          onSend={(text, options) => {
             // turn.start on the Side Chat route: message:send with
             // session_id = sidechat id, through the same operation layer.
             dispatchMessageSend(dispatch, {
               sessionId: sideChat.id,
               text,
               exec: parent.executor,
+              turnConfig,
+              ...(options?.contextItems && options.contextItems.length > 0
+                ? { contextItems: options.contextItems }
+                : {}),
             });
           }}
-          onSendSkill={() => { /* minimal variant: no slash UI */ }}
+          onSendSkill={() => { /* restricted variant: no slash UI */ }}
           onStop={() => dispatch('session.stop', { sessionId: sideChat.id })}
           onQueueAdd={() => { /* 'block' behavior never reaches the queue */ }}
-          // Session-config setters are unreachable in the minimal variant —
-          // the Side Chat route rejects every session-config method (§10.5.1).
-          onSetMode={() => {}}
-          onSetModel={() => {}}
-          onSetEffort={() => {}}
+          // These update Gian's Side Chat next-turn draft. They never call an
+          // ordinary Session config method with the transient Side Chat id.
+          onSetMode={mode => setRole('approval_mode', mode)}
+          onSetModel={model => setRole('model', model)}
+          onSetEffort={effort => setRole('effort', effort)}
+          onSetServiceTier={tier => setRole('fast', tier === 'fast')}
+          onSetTurnConfig={setTurnConfig}
           disabled={turnRunning}
           running={turnRunning}
           disabledSubmitBehavior="block"

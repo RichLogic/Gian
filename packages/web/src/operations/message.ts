@@ -30,7 +30,7 @@
  * The sink is wired once by App with the transcript setters — the operation
  * layer never imports React state directly.
  */
-import type { InputItem } from '@gian/shared';
+import type { InputItem, MessageContextItem } from '@gian/shared';
 
 import { attachmentInputItem, type ComposerAttachmentPayload } from '../attachments.js';
 import { uploadAttachment, type UploadedAttachment } from '../api.js';
@@ -145,6 +145,8 @@ export function dispatchMessageSend(
       url: attachment.previewUrl,
       ...(attachment.size !== undefined ? { size: attachment.size } : {}),
     })),
+    contextItems: input.contextItems,
+    composerDocument: input.composerDocument,
   });
   // `Date.now()` alone can collide when two sends commit in the same
   // millisecond. The operation run is already unique and is the authoritative
@@ -177,6 +179,11 @@ function buildSendMessage(input: MessageSendPayload) {
     session_id: input.sessionId,
     text: input.text,
     ...(items.length > 0 ? { items } : {}),
+    ...(input.contextItems && input.contextItems.length > 0
+      ? { context_items: input.contextItems }
+      : {}),
+    ...(input.composerDocument ? { composer_document: input.composerDocument } : {}),
+    ...(input.turnConfig ? { turn_config: input.turnConfig } : {}),
     ...(input.oneShotBypass ? { oneShotBypass: true } : {}),
   };
 }
@@ -220,6 +227,8 @@ interface SteerInput {
   sessionId: string;
   text: string;
   attachments?: ComposerAttachmentPayload[];
+  contextItems?: MessageContextItem[];
+  composerDocument?: import('@gian/shared').ComposerDocument;
 }
 
 const messageSteer: OperationDefinition<SteerInput> = {
@@ -232,6 +241,10 @@ const messageSteer: OperationDefinition<SteerInput> = {
       session_id: input.sessionId,
       text: input.text,
       ...(items.length > 0 ? { items } : {}),
+      ...(input.contextItems && input.contextItems.length > 0
+        ? { context_items: input.contextItems }
+        : {}),
+      ...(input.composerDocument ? { composer_document: input.composerDocument } : {}),
     };
   },
   timeoutMs: WS_TIMEOUT_MS,

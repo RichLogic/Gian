@@ -4,6 +4,8 @@ import { useT } from '../i18n/index.js';
 import { useQueueWithOverlays, useSessionOperationPending } from '../operations/use-operations.js';
 import { ImageZoomContext } from '../transcript/items.js';
 import type { QueueEntry } from '../types.js';
+import { ContextCards } from './composer/context-cards.js';
+import { InlineReferenceDocument } from './composer/InlineReferenceDocument.js';
 
 /** Host-served URL for a queued attachment: the upload already lives in the
  *  per-session attachment store, so the queue drawer renders the same
@@ -106,8 +108,25 @@ export function QueueList({
                 />
               ) : (
                 <span className="qd-text-cell">
-                  {entry.text && <span className="qd-text" title={entry.text}>{entry.text}</span>}
-                  {attachments.length > 0 && (
+                  {entry.composer_document ? (
+                    <InlineReferenceDocument
+                      document={entry.composer_document}
+                      contextItems={entry.context_items}
+                      attachments={attachments.map(item => ({
+                        name: item.name ?? item.path.split('/').pop() ?? '',
+                        mime: item.mime,
+                        size: item.size,
+                        url: attachmentUrl(sessionId, item.path),
+                      }))}
+                      className="qd-text"
+                    />
+                  ) : (
+                    <>
+                      <ContextCards items={entry.context_items ?? []} className="queue-context-cards" />
+                      {entry.text && <span className="qd-text" title={entry.text}>{entry.text}</span>}
+                    </>
+                  )}
+                  {!entry.composer_document && attachments.length > 0 && (
                     <span className="qd-atts">
                       {attachments.map((item, j) => {
                         const url = attachmentUrl(sessionId, item.path);
@@ -149,7 +168,7 @@ export function QueueList({
                         <path d="M3 8.5l3.5 3.5L13 4.5" />
                       </svg>
                     </button>
-                  ) : (
+                  ) : !entry.composer_document ? (
                     <button
                       className="btn xs ghost icon"
                       onClick={() => startEdit(entry)}
@@ -160,7 +179,7 @@ export function QueueList({
                         <path d="M11.3 2.7l2 2L6 12H4v-2l7.3-7.3z" />
                       </svg>
                     </button>
-                  )}
+                  ) : null}
                   <button
                     className="btn xs ghost icon"
                     onClick={() => onRemove?.(entry.id)}

@@ -86,7 +86,7 @@ test('ONBOARD-001 requires one ready Agent rather than every Agent', () => {
   assert.equal(hasReadyAgent([codex, unavailable]), true);
 });
 
-test('WT-001: completing onboarding triggers managed agent instructions for the confirmed root', async t => {
+test('completing onboarding no longer mutates global agent instructions', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-onboarding-route-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const dataDir = join(root, 'data');
@@ -96,7 +96,6 @@ test('WT-001: completing onboarding triggers managed agent instructions for the 
   const projectRoot = join(root, 'projects');
   saveConfig(db, { workspace_root: projectRoot });
 
-  const synced: string[] = [];
   const agents = {
     listAgentStatuses: async () => [readyAgent('codex', 'Codex')],
   } as unknown as AgentManager;
@@ -104,15 +103,10 @@ test('WT-001: completing onboarding triggers managed agent instructions for the 
   registerOnboardingRoutes(app, {
     db,
     agents,
-    syncAgentInstructions: async confirmedRoot => {
-      synced.push(confirmedRoot);
-      return [];
-    },
   });
 
   const response = await app.request('/api/onboarding/complete', { method: 'POST' });
   assert.equal(response.status, 200);
   assert.equal((await response.json() as { completed: boolean }).completed, true);
-  assert.deepEqual(synced, [projectRoot]);
   assert.equal(onboardingCompleted(db), true);
 });

@@ -7,6 +7,7 @@ import type {
   SidechatCloseInput,
   SidechatCreateInput,
   SidechatResumeInput,
+  SidechatSetTurnConfigInput,
   SessionForkFromInput,
 } from '@gian/shared';
 
@@ -53,6 +54,19 @@ const sidechatClose: OperationDefinition<SidechatCloseInput> = {
   timeoutMs: WS_TIMEOUT_MS,
 };
 
+const sidechatSetTurnConfig: OperationDefinition<SidechatSetTurnConfigInput> = {
+  policy: 'optimistic',
+  entityKey: input => sidechatEntityKey(input.sidechatId),
+  optimisticWrites: input => [{ field: 'turn_config', value: input.turnConfig }],
+  buildMessage: input => ({
+    type: 'sidechat:set_turn_config',
+    sidechat_id: input.sidechatId,
+    option_id: input.optionId,
+    value: input.value,
+  }),
+  timeoutMs: WS_TIMEOUT_MS,
+};
+
 const sessionForkSession: OperationDefinition<SessionForkFromInput> = {
   policy: 'pending',
   entityKey: () => freshPendingKey('session.forkSession'),
@@ -74,4 +88,5 @@ const sessionForkSession: OperationDefinition<SessionForkFromInput> = {
 registry.register('sidechat.create', sidechatCreate);
 registry.register('sidechat.resume', sidechatResume);
 registry.register('sidechat.close', sidechatClose);
+registry.register('sidechat.setTurnConfig', sidechatSetTurnConfig);
 registry.register('session.forkSession', sessionForkSession);

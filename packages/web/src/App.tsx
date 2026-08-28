@@ -31,10 +31,10 @@ import { Topbar } from './components/Topbar.js';
 import type { Mode } from './components/Topbar.js';
 import { Dock } from './components/Dock.js';
 import { Toaster } from './components/Toaster.js';
-import { getSnapshot as getFeedbackSnapshot, subscribe as subscribeFeedback, toast } from './feedback.js';
+import { confirm as confirmDialog, getSnapshot as getFeedbackSnapshot, subscribe as subscribeFeedback, toast } from './feedback.js';
 import { Splitter } from './components/Splitter.js';
 import { Inspector } from './components/Inspector.js';
-import { SettingsBody, SettingsNavInspector } from './components/SettingsBody.js';
+import { SettingsBody } from './components/SettingsBody.js';
 import { BrowserPanel } from './components/BrowserPanel.js';
 import type { NavKey } from './components/SettingsBody.js';
 import { makeWorkbenchWire } from './components/terminal-wire.js';
@@ -50,7 +50,7 @@ import type { SystemConfig } from '@gian/shared';
 import type { QueueEntry, TranscriptItem } from './types.js';
 import { applyGianIconAppearance } from './brand-icon.js';
 import { ChatPanelOpenContext } from './presentation/chat-panel.js';
-import { readWtAutoApplied, worktreeDisplayName, writeWtAutoApplied } from './presentation/wt-view.js';
+import { decideWorktreeViewRequest, readWtAutoApplied, worktreeDisplayName, writeWtAutoApplied } from './presentation/wt-view.js';
 import { useSessionCommands } from './controllers/use-session-commands.js';
 import { reloadFailedSessionMetadata } from './controllers/session-failure-reload.js';
 import { useAppAuth } from './controllers/use-app-auth.js';
@@ -69,7 +69,7 @@ import { actionControlState } from './components/action-gating.js';
 import { dispatchHeadFork, useForkRunSettledToast } from './components/ForkControls.js';
 import { usePanelLayout } from './controllers/use-panel-layout.js';
 import { useAppZoom } from './display-prefs.js';
-import { setShortcutOverrides } from './shortcut-prefs.js';
+import { setKeymapPreferences } from './shortcut-prefs.js';
 import { createOperationDispatcher, type OperationDispatcher } from './operations/dispatcher.js';
 import {
   desktopBridge,
@@ -135,8 +135,6 @@ const Sheet = lazy(() =>
   import('./components/Sheet.js').then(module => ({ default: module.Sheet })));
 const Terminal = lazy(() =>
   import('./components/Terminal.js').then(module => ({ default: module.Terminal })));
-const WorkspacesInspector = lazy(() =>
-  import('./components/WorkspacesPanel.js').then(module => ({ default: module.WorkspacesInspector })));
 const HistoryInspector = lazy(() =>
   import('./components/HistoryInspector.js').then(module => ({ default: module.HistoryInspector })));
 const HistoryCommitBody = lazy(() =>
@@ -258,8 +256,12 @@ export function App() {
     reloadWorkingTrees({ force: true });
   }, [reloadWorkingTrees]);
   // Active Settings section — owned here (controlled into SettingsBody +
-  // SettingsNavInspector) so it survives rail collapse/restore.
+  // internal Settings directory) so it survives rail collapse/restore.
   const [settingsSection, setSettingsSection] = useState<NavKey>('appearance');
+  const [shortcutCreateRequest, setShortcutCreateRequest] = useState<{
+    kind: 'session' | 'task';
+    sequence: number;
+  } | null>(null);
   const [systemConfig, setSystemConfig] = useState<SystemConfig | null>(null);
   const [terminalOptions, setTerminalOptions] = useState<TerminalOptions | null>(null);
   // Canonical config for the operation layer's overlay `previous` values —
@@ -539,10 +541,10 @@ export function App() {
     applyGianIconAppearance(displayConfig.theme, displayConfig.accent);
     // Keep the remappable-shortcut store aligned with the rendered config
     // (optimistic overlay applies in the same task; rollback reverts it).
-    setShortcutOverrides(displayConfig.shortcuts);
+    setKeymapPreferences(displayConfig.keymap);
   }, [displayConfig?.theme, displayConfig?.accent,
       displayConfig?.chat_font_size, displayConfig?.chat_font_family,
-      displayConfig?.shortcuts, displayConfig?.locale]);
+      displayConfig?.keymap, displayConfig?.locale]);
   // Latest active session id for stable event and unread handlers.
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
   useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);
@@ -561,18 +563,6 @@ export function App() {
     ws.send({ type: 'events:subscribe', session_id: activeSessionId });
   }, [activeSessionId, runtimeAuthStatus, ws]);
 
-  useAppShortcuts({
-    authenticated: runtimeAuthStatus === 'authenticated',
-    mode,
-    activeSessionId,
-    activeTaskId,
-    activeSubtaskId,
-    sessionsRef,
-    ops,
-    paletteOpen,
-    disabled: assignTaskSessionId !== null,
-    setPaletteOpen,
-  });
   // Active-session transcript hydration effect. (The returned hydrate
   // callback was only consumed by the retired per-Task Manager mount.)
   const {
@@ -670,7 +660,11 @@ export function App() {
 
   // Tracks the last auto-applied worktree detection — see the auto-switch
   // effect next to appT below (appT is declared late in this component).
-  const wtAutoAppliedRef = useRef<{ sessionId: string; path: string } | null>(null);
+  const wtAutoAppliedRef = useRef<{
+    sessionId: string;
+    path: string;
+    revision: number;
+  } | null>(null);
 
   // Default working tree for the Files view: follow the focused session.
   // If a session has a live worktree, use it; otherwise use that session's
@@ -684,8 +678,8 @@ export function App() {
   // Protocol head Fork (proposal §10.6): the session dropdown menu's entry.
   // Wired with the store-explicit hooks because this component mounts ABOVE
   // the operation providers; failure surfacing shares the per-turn control's
-  // settled-toast helper. One fork at a time; success arrives via
-  // session:created and never auto-switches (§10.6).
+  // settled-toast helper. One fork at a time; dispatch mints a target id and
+  // the originating tab follows its canonical session:created/state_sync.
   const [forkHeadRunId, setForkHeadRunId] = useState<string>();
   const forkHeadRun = useStoreOperationRun(operationStore, forkHeadRunId);
   useForkRunSettledToast(forkHeadRun, appT);
@@ -778,7 +772,6 @@ export function App() {
     openChatPanel,
     addTerminalTab,
     addBrowserTab,
-    openWorkspaceInSheet,
     openNewWorkspaceInSheet,
   } = useWorkbench({
     authStatus: runtimeAuthStatus,
@@ -988,36 +981,68 @@ export function App() {
     startTransition(() => setMode('sessions'));
   }, [selectSession, setActiveRail, setViewState]);
 
-  // Worktree auto-switch: when the host detects the agent created its own
-  // worktree mid-session (`git worktree add` → session.detected_worktree_path),
-  // switch the VIEW-level working tree to it. The ref makes this fire exactly
-  // once per (session, detected path) pair — the host only updates the stored
-  // path when it changes — so a later manual pick in the branch dropdown wins
-  // until the next detection. The applied-path marker is also persisted
-  // (`gian.wt.auto.<sid>`): without it a reload forgot the pair and re-applied
-  // a stale detection over the user's newer manual pick. workingTrees is a
-  // dep so a listing refresh that discovers the new tree re-fires the effect.
+  // A Gian Tool request is an intentional view change and opens immediately.
+  // Direct git worktree evidence is weaker: wait for the Turn to finish, then
+  // ask once before changing the view-level checkout. Neither path changes
+  // Agent/Proxy/Terminal cwd or sends a continuation Turn.
   useEffect(() => {
     const detected = activeSession?.detected_worktree_path;
     if (!activeSession || !detected) return;
+    const source = activeSession.detected_worktree_source ?? 'agent';
+    const revision = activeSession.detected_worktree_revision ?? 0;
+    const appliedMarker = source === 'gian_tool' ? `${detected}#${revision}` : detected;
     const last = wtAutoAppliedRef.current;
-    if (last && last.sessionId === activeSession.id && last.path === detected) return;
-    if (readWtAutoApplied(activeSession.id) === detected) {
-      // Already applied before a reload — keep the ref in sync and leave any
-      // newer manual pick alone.
-      wtAutoAppliedRef.current = { sessionId: activeSession.id, path: detected };
+    if (last
+      && last.sessionId === activeSession.id
+      && last.path === detected
+      && last.revision === revision) return;
+    const action = decideWorktreeViewRequest({
+      source,
+      status: activeSession.status,
+      processed: readWtAutoApplied(activeSession.id) === appliedMarker,
+    });
+    if (action === 'wait') return;
+    if (action === 'ignore') {
+      wtAutoAppliedRef.current = { sessionId: activeSession.id, path: detected, revision };
       return;
     }
     const tree = workingTrees.find(t => t.path === detected);
     if (!tree) return;
-    wtAutoAppliedRef.current = { sessionId: activeSession.id, path: detected };
-    writeWtAutoApplied(activeSession.id, detected);
-    setWtView({ sessionId: activeSession.id, wtId: tree.id });
-    toast({
-      kind: 'success',
-      message: appT('worktree.autoSwitched').replace('{name}', tree.branch ?? tree.label),
+    wtAutoAppliedRef.current = { sessionId: activeSession.id, path: detected, revision };
+    writeWtAutoApplied(activeSession.id, appliedMarker);
+    if (action === 'open') {
+      setWtView({ sessionId: activeSession.id, wtId: tree.id });
+      toast({
+        kind: 'success',
+        message: appT('worktree.autoSwitched').replace('{name}', tree.branch ?? tree.label),
+      });
+      return;
+    }
+    const sessionId = activeSession.id;
+    void confirmDialog({
+      title: appT('worktree.adopt.title'),
+      message: appT('worktree.adopt.message').replace('{name}', tree.branch ?? tree.label),
+      dangerMessage: appT('worktree.adopt.consequence'),
+      confirmLabel: appT('worktree.adopt.confirm'),
+      danger: true,
+    }).then(accepted => {
+      if (!accepted) return;
+      setWtView({ sessionId, wtId: tree.id });
+      toast({
+        kind: 'success',
+        message: appT('worktree.adopted').replace('{name}', tree.branch ?? tree.label),
+      });
     });
-  }, [activeSession?.id, activeSession?.detected_worktree_path, workingTrees, appT]);
+  }, [
+    activeSession?.id,
+    activeSession?.detected_worktree_path,
+    activeSession?.detected_worktree_source,
+    activeSession?.detected_worktree_revision,
+    activeSession?.status,
+    workingTrees,
+    appT,
+    setWtView,
+  ]);
 
   useEffect(() => {
     setWbTabs(prev => prev.map(tab => {
@@ -1043,6 +1068,7 @@ export function App() {
     branchMenu,
     onRenameSubmit: handleRenameSubmit,
     onRenameCancel: handleRenameCancel,
+    onRenameStart: handleRenameStart,
   } = useTopbarModel({
     mode,
     activeTaskId,
@@ -1091,8 +1117,6 @@ export function App() {
     inspectorKind,
     inspectorAvailable,
     inspectorVisible,
-    openWorkspaceIds: openWsIds,
-    selectedWorkspaceId: selectedWsId,
   } = useWorkbenchLayout({
     mode,
     subtaskActive,
@@ -1152,6 +1176,7 @@ export function App() {
     inspectorVisible,
     p3Collapsed,
     setP3Collapsed,
+    preferences: displayConfig?.layout,
   });
 
   // Topbar ‹ › history: sidebar view (mode) + conversation selection only.
@@ -1166,12 +1191,111 @@ export function App() {
     setActiveSubtaskId,
   });
 
-  /** Panel-3 settings nav click: make sure the settings tab exists and is
-   *  visible, then switch panel 2 to the chosen section. */
+  /** Internal Panel-2 settings navigation. */
   function onSettingsNavSelect(key: NavKey): void {
     activateRail('settings');
     setSettingsSection(key);
   }
+
+  const handleKeymapCommand = useCallback((command: import('@gian/shared').KeymapCommand) => {
+    if (command === 'app.settings') {
+      activateRail('settings');
+      return;
+    }
+    if (command === 'session.new' || command === 'task.new') {
+      const kind = command === 'session.new' ? 'session' : 'task';
+      startTransition(() => setMode(kind === 'session' ? 'sessions' : 'tasks'));
+      setShortcutCreateRequest({ kind, sequence: Date.now() });
+      return;
+    }
+    if (command === 'layout.toggleSidebar') {
+      panelLayout.toggleSidebar();
+      return;
+    }
+    if (command === 'layout.togglePanel2') {
+      if (viewState !== 'main') setViewState('main');
+      else if (activeRail) setViewState('both');
+      else activateRail('terminal');
+      return;
+    }
+    if (command === 'layout.togglePanel3') {
+      if (inspectorAvailable) panelLayout.toggleInspector();
+      return;
+    }
+    const railByCommand = {
+      'tool.files': 'files',
+      'tool.diffs': 'diffs',
+      'tool.history': 'history',
+      'tool.browser': 'browser',
+      'tool.terminal': 'terminal',
+    } as const;
+    if (command in railByCommand) {
+      toggleRail(railByCommand[command as keyof typeof railByCommand]);
+      return;
+    }
+    if (command === 'tool.sideChat') {
+      handleToggleSideChat();
+      return;
+    }
+    if (command === 'session.previous' || command === 'session.next') {
+      if (displaySessions.length === 0) return;
+      const current = displaySessions.findIndex(session => session.id === activeSessionId);
+      const delta = command === 'session.previous' ? -1 : 1;
+      const next = current < 0
+        ? 0
+        : (current + delta + displaySessions.length) % displaySessions.length;
+      selectSession(displaySessions[next]!.id);
+      startTransition(() => setMode('sessions'));
+      return;
+    }
+    if (command === 'workbench.previousTab' || command === 'workbench.nextTab') {
+      if (!activeGroup) return;
+      const tabs = wbTabs.filter(tab => tab.group === activeGroup);
+      if (tabs.length === 0) return;
+      const activeId = activeTabByGroup[activeGroup];
+      const current = tabs.findIndex(tab => tab.id === activeId);
+      const delta = command === 'workbench.previousTab' ? -1 : 1;
+      sheetActions.activateTab(tabs[(current + delta + tabs.length) % tabs.length]!.id);
+      return;
+    }
+    if (command === 'workbench.closeTab') {
+      if (!activeGroup) return;
+      const activeId = activeTabByGroup[activeGroup];
+      if (activeId) sheetActions.closeTab(activeId);
+      return;
+    }
+    if (command === 'navigation.back' && canGoBack) navGo(-1);
+    if (command === 'navigation.forward' && canGoForward) navGo(1);
+    if (command === 'session.rename') handleRenameStart();
+  }, [
+    activeGroup, activeRail, activeSessionId, activeTabByGroup, canGoBack,
+    canGoForward, displaySessions, handleRenameStart, handleToggleSideChat,
+    inspectorAvailable, navGo, panelLayout, selectSession, setViewState,
+    sheetActions, toggleRail, viewState, wbTabs,
+  ]);
+
+  useAppShortcuts({
+    authenticated: runtimeAuthStatus === 'authenticated',
+    activeSessionId,
+    sessionsRef,
+    ops,
+    paletteOpen,
+    disabled: assignTaskSessionId !== null,
+    setPaletteOpen,
+    onCommand: handleKeymapCommand,
+  });
+
+  useEffect(() => {
+    if (!shortcutCreateRequest) return;
+    if (shortcutCreateRequest.kind === 'session' && mode === 'sessions') {
+      window.dispatchEvent(new CustomEvent('gian:new-session'));
+      setShortcutCreateRequest(null);
+    }
+    if (shortcutCreateRequest.kind === 'task' && mode === 'tasks') {
+      window.dispatchEvent(new CustomEvent('gian:new-task'));
+      setShortcutCreateRequest(null);
+    }
+  }, [mode, shortcutCreateRequest]);
 
   // A Subtask IS a Session. When one is selected in Tasks mode we render the
   // exact same <SessionMain> that CodingView renders in Sessions mode — wired
@@ -1214,6 +1338,7 @@ export function App() {
       onShowChanges={showAllChanges}
       onShowLastTurnChanges={(turn, path) => showLastTurnChanges(subtask, turn, path)}
       forkAtTurnControl={forkAtTurnControl}
+      sideChatControl={sideChatControl}
       originParentName={subtask.origin?.kind === 'fork'
         ? sessions.find(s => s.id === subtask.origin!.session_id)?.name ?? undefined
         : undefined}
@@ -1377,6 +1502,10 @@ export function App() {
                   scope: { kind: 'workspace', id: input.workspaceId },
                   text: input.firstMessage,
                   attachments: input.firstAttachments ?? [],
+                  ...(input.contextItems && input.contextItems.length > 0
+                    ? { contextItems: input.contextItems }
+                    : {}),
+                  ...(input.composerDocument ? { composerDocument: input.composerDocument } : {}),
                 };
                 const run = ops.dispatch('session.create', {
                   workspaceId: input.workspaceId,
@@ -1407,9 +1536,6 @@ export function App() {
               }}
               onPinSession={sessionMainHandlers.onPin}
               onArchiveSession={sessionId => sessionMainHandlers.onArchive(sessionId, true)}
-              onToggleWorkspacePin={(workspace) => {
-                ops.dispatch('workspace.pin', { workspaceId: workspace.id, pinned: workspace.pinned !== 1 });
-              }}
               onSend={sessionMainHandlers.onSend}
               onSendSkill={sessionMainHandlers.onSendSkill}
               onStop={sessionMainHandlers.onStop}
@@ -1438,6 +1564,7 @@ export function App() {
                 ?? null
               }
               forkAtTurnControl={forkAtTurnControl}
+              sideChatControl={sideChatControl}
               railLayout={panelLayout.railLayout}
             />
           </ChatPanelOpenContext.Provider>
@@ -1553,6 +1680,7 @@ export function App() {
                   return (
                     <BrowserPanel
                       tabId={t.id}
+                      contextTargetSessionId={sessionViewActive ? activeSessionId : null}
                       visible={sheetVisible
                         && activeGroup === 'browser'
                         && activeTabByGroup.browser === t.id
@@ -1570,6 +1698,9 @@ export function App() {
                       apps={apps}
                       terminalOptions={terminalOptions}
                       activeSection={settingsSection}
+                      onSectionChange={onSettingsNavSelect}
+                      workspaces={displayWorkspaces}
+                      onSessionOpened={openAdoptedSession}
                       identity={identity}
                       onSignOut={signOut}
                     />
@@ -1651,19 +1782,7 @@ export function App() {
               ariaLabel="Resize workbench and inspector panels"
               onMouseDown={panelLayout.onSheetInspectorMouseDown}
             />
-            {inspectorKind === 'workspaces' ? (
-              <Suspense fallback={null}>
-              <WorkspacesInspector
-                workspaces={displayWorkspaces}
-                selectedWsId={selectedWsId}
-                openWsIds={openWsIds}
-                onOpenWorkspace={openWorkspaceInSheet}
-                onNewWorkspace={openNewWorkspaceInSheet}
-              />
-              </Suspense>
-            ) : inspectorKind === 'settings' ? (
-              <SettingsNavInspector active={settingsSection} onSelect={onSettingsNavSelect} />
-            ) : inspectorKind === 'history' ? (
+            {inspectorKind === 'history' ? (
               <Suspense fallback={null}>
               <HistoryInspector
                 workingTreeId={historyWtId}

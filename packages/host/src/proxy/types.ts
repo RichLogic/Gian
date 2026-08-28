@@ -1,6 +1,7 @@
 import type {
   ForkAnchor,
   ForkOrigin,
+  HostServiceDescriptor,
   InitializeResult,
   ReplayEvent,
   SideChatSnapshot,
@@ -61,6 +62,7 @@ export interface ProxyClient {
   forkSession?(params: {
     sessionId: string;
     anchor: ForkAnchor;
+    hostServices?: HostServiceDescriptor[];
   }): Promise<{ session: ProtocolSessionLike; origin: ForkOrigin; replayEvents?: ReplayEvent[] }>;
   shutdown(): Promise<void>;
   forceKill(): void | Promise<void>;
@@ -90,9 +92,11 @@ export interface CreateSessionParams {
   workspaceRoots?: string[];
   sessionConfig?: Record<string, ConfigValue>;
   nativeSessionId?: string;
+  forkBoundaries?: Array<{ turnId: string; sourceTurnId: string }>;
   history?: 'none' | 'replay';
   /** @deprecated Map to history=replay. Removed after session manager WP2. */
   resumeMode?: 'load' | 'resume';
+  hostServices?: HostServiceDescriptor[];
 }
 
 export interface StartTurnParams {

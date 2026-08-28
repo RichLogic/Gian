@@ -7,8 +7,9 @@
  * - `useForkRun` — shared pending/failure wiring behind EVERY fork dispatch:
  *   the head-fork entry in the session dropdown menu (PathBreadcrumb via
  *   use-topbar-model) and the per-turn transcript control below.
- * - `ForkFromTurnControl` — the per-turn affordance rendered on a Terminal
- *   Turn's transcript boundary. Gated on `session.fork.atTurn` (which itself
+ * - `ForkFromTurnControl` — the per-turn affordance rendered beside Copy in
+ *   a Terminal Turn result footer (or its text-free fallback). Gated on
+ *   `session.fork.atTurn` (which itself
  *   requires `session.fork` at both layers) AND on the Host-flowed exact
  *   `{turn_id, source_turn_id}` of that boundary: both ids are sent VERBATIM
  *   — never derived from rendered text, never an adjacent turn, never a
@@ -17,9 +18,9 @@
  * - `ForkOriginBanner` — the lineage line at the top of a forked session's
  *   view (parent session + boundary).
  *
- * After a successful fork the Host-created session arrives via
- * `session:created` / `state_sync`; these controls never auto-switch the
- * current session and never touch the source session (§10.6).
+ * Each dispatch mints the target Session id and records a tab-local navigation
+ * intent. The initiating window opens that id only after canonical
+ * `session:created` / `state_sync`; other windows keep their current Session.
  */
 import { useEffect, useRef, useState } from 'react';
 import type { SessionOrigin } from '@gian/shared';
@@ -34,7 +35,24 @@ import {
 } from '../operations/use-operations.js';
 import type { OperationRun } from '../operations/types.js';
 import { forkOriginText } from '../presentation/fork.js';
+import {
+  clearForkNavigationForRun,
+  rememberForkNavigation,
+} from '../presentation/fork-navigation.js';
 import type { ActionControlState } from './action-gating.js';
+
+function dispatchFork(
+  dispatch: OperationDispatcher['dispatch'],
+  sourceSessionId: string,
+  anchor: { type: 'head' } | { type: 'turn'; turnId: string; sourceTurnId: string },
+): OperationRun {
+  // Client-minting lets the initiating tab correlate the global canonical
+  // session:created broadcast without changing operation:result.
+  const sessionId = crypto.randomUUID();
+  const run = dispatch('session.forkSession', { sourceSessionId, sessionId, anchor });
+  rememberForkNavigation(sessionId, run.id);
+  return run;
+}
 
 /**
  * The single head-fork wire path (§10.6: anchor at the newest Terminal Turn
@@ -46,10 +64,7 @@ export function dispatchHeadFork(
   dispatch: OperationDispatcher['dispatch'],
   sourceSessionId: string,
 ): OperationRun {
-  return dispatch('session.forkSession', {
-    sourceSessionId,
-    anchor: { type: 'head' },
-  });
+  return dispatchFork(dispatch, sourceSessionId, { type: 'head' });
 }
 
 // ─── Inline icons (same 24-grid / 1.5px stroke idiom as CodingView) ───────
@@ -65,8 +80,8 @@ function SvgIcon({ d, size = 16, stroke = 1.5 }: { d: string; size?: number; str
 }
 
 const ICON = {
-  // Same glyph constant as CodingView's ICON.branch.
-  fork: 'M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
+  // Lucide git-fork — distinct from the git-branch glyph used for worktrees.
+  fork: 'M15 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0z M9 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0z M21 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0z M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9 M12 12v3',
 };
 
 /**
@@ -85,6 +100,7 @@ export function useForkRunSettledToast(
     if (!run || signaledRunRef.current === run.id) return;
     if (run.phase === 'failed') {
       signaledRunRef.current = run.id;
+      clearForkNavigationForRun(run.id);
       toast({ kind: 'error', message: run.error ?? t('fork.createFailed') });
     } else if (run.phase === 'timed-out') {
       signaledRunRef.current = run.id;
@@ -117,7 +133,7 @@ export function useForkRun() {
   return { dispatch, forking, setRunId };
 }
 
-// ─── Per-turn fork (transcript boundary) ───────────────────────────────────
+// ─── Per-turn fork (terminal result footer) ────────────────────────────────
 
 export function ForkFromTurnControl({
   sourceSessionId,
@@ -138,41 +154,35 @@ export function ForkFromTurnControl({
   const t = useT();
   const { dispatch, forking, setRunId } = useForkRun();
 
-  // Never fabricate the boundary: without BOTH Host-flowed ids the control
-  // stays greyed with the generic reason (it lights up automatically once
-  // the Host flows them on turn-end items).
+  // Never fabricate the boundary, and never show an unusable affordance:
+  // when the control is gated off or the Host-flowed boundary ids are
+  // missing, it is HIDDEN (2026-08-27, supersedes the old "greyed never
+  // hidden" treatment). It appears automatically once turn-end items flow
+  // the ids and the action is enabled. A fork already in flight keeps the
+  // button, transiently disabled, as progress feedback.
   const hasBoundary = turnId !== undefined && sourceTurnId !== undefined;
-  const enabled = state.enabled && hasBoundary && !forking;
-  const title = !state.enabled
-    ? (state.reason ?? t('fork.fromTurnUnavailable'))
-    : !hasBoundary
-      ? t('fork.fromTurnUnavailable')
-      : forking
-        ? t('fork.forking')
-        : t('fork.fromTurnTitle');
+  if (!state.enabled || !hasBoundary) return null;
+  const title = forking ? t('fork.forking') : t('fork.fromTurnTitle');
 
   return (
-    <div className="turn-fork">
-      <button
-        type="button"
-        className="fork-turn-btn"
-        data-testid={`fork-turn-${turn}`}
-        disabled={!enabled}
-        title={title}
-        onClick={() => {
-          if (!enabled) return;
-          const run = dispatch('session.forkSession', {
-            sourceSessionId,
-            // Verbatim — no derivation, no fallback (§10.6).
-            anchor: { type: 'turn', turnId: turnId!, sourceTurnId: sourceTurnId! },
-          });
-          setRunId(run.id);
-        }}
-      >
-        <SvgIcon d={ICON.fork} size={12} />
-        <span>{t('fork.fromTurn')}</span>
-      </button>
-    </div>
+    <button
+      type="button"
+      className="msg-copy fork-turn-btn"
+      data-testid={`fork-turn-${turn}`}
+      disabled={forking}
+      title={title}
+      aria-label={t('fork.fromTurn')}
+      onClick={() => {
+        if (forking) return;
+        // Verbatim — no derivation, no fallback (§10.6).
+        const run = dispatchFork(dispatch, sourceSessionId, {
+          type: 'turn', turnId: turnId!, sourceTurnId: sourceTurnId!,
+        });
+        setRunId(run.id);
+      }}
+    >
+      <SvgIcon d={ICON.fork} size={12} />
+    </button>
   );
 }
 

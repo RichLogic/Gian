@@ -1,4 +1,9 @@
-import type { GianBrowserApi, GianScreenshotApi, GitHubDesktopAuthApi } from '@gian/shared';
+import type {
+  GianBrowserApi,
+  GianResourcePickerApi,
+  GianScreenshotApi,
+  GitHubDesktopAuthApi,
+} from '@gian/shared';
 
 export interface GianDesktopNotificationPreferences {
   desktop: boolean;
@@ -80,6 +85,7 @@ export interface GianDesktopBridge {
   updater?: GianDesktopUpdaterApi;
   browser?: GianBrowserApi;
   screenshot?: GianScreenshotApi;
+  resources?: GianResourcePickerApi;
   zoom?: GianDesktopZoomApi;
   githubAuth?: GitHubDesktopAuthApi;
 }

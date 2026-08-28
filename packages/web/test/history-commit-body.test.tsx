@@ -98,6 +98,7 @@ beforeEach(() => {
   vi.stubGlobal('IntersectionObserver', FakeIO);
   loadGitHistoryCommit.mockResolvedValue(detail());
   loadGitHistoryFileDiff.mockResolvedValue(DIFF);
+  window.HTMLElement.prototype.scrollIntoView = vi.fn();
 });
 
 afterEach(() => {
@@ -113,6 +114,23 @@ describe('HistoryCommitBody', () => {
     expect(screen.getByText(/2 files/)).toBeTruthy();
     expect(document.querySelector('.cs-stats .add')?.textContent).toBe('+3');
     expect(document.querySelector('.cs-stats .del')?.textContent).toBe('−1');
+    expect(document.querySelector('.cs-pinned-head .cs-head')).not.toBeNull();
+    expect(document.querySelector('.cs-pinned-head .cs-toolbar')).not.toBeNull();
+  });
+
+  it('navigates between changed files from the pinned header', async () => {
+    render(<HistoryCommitBody tab={tab()} />);
+    await screen.findByText('feat: wire history rail');
+    const previous = screen.getByLabelText('Previous file');
+    const next = screen.getByLabelText('Next file');
+    expect(previous).toBeDisabled();
+    expect(next).toBeEnabled();
+
+    fireEvent.click(next);
+    expect(document.querySelector<HTMLElement>('.cs-file[data-path="assets/logo.icns"]')!.scrollIntoView)
+      .toHaveBeenCalledWith({ block: 'start' });
+    expect(previous).toBeEnabled();
+    expect(next).toBeDisabled();
   });
 
   it('file patches load lazily — only after the block intersects', async () => {

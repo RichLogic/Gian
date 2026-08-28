@@ -11,7 +11,7 @@ function inEnglish(node: ReactNode) {
 }
 
 describe('stable core UI visual contracts', () => {
-  it('keeps the six supported Dock rails, their groups, and disabled states explicit', () => {
+  it('keeps the five supported Dock rails, their groups, and disabled states explicit', () => {
     const onToggleRail = vi.fn();
     const { container } = render(inEnglish(
       <Dock
@@ -32,18 +32,17 @@ describe('stable core UI visual contracts', () => {
       'dock-diffs',
       'dock-history',
       'dock-terminal',
-      'dock-workspaces',
       'dock-settings',
     ]);
     expect(buttons.map(button => button.dataset.dockGroup)).toEqual([
-      'panel', 'panel', 'panel', 'wb', 'panel', 'wb',
+      'panel', 'panel', 'panel', 'wb', 'wb',
     ]);
     expect(screen.getByTestId('dock-files')).toBeDisabled();
     expect(screen.getByTestId('dock-diffs')).toBeDisabled();
     expect(screen.getByTestId('dock-history')).toBeDisabled();
     expect(screen.getByTestId('dock-terminal')).toBeEnabled();
     expect(screen.getByTestId('dock-settings')).toHaveClass('active');
-    expect(container.querySelectorAll('.dock-btn svg[stroke-width="1.5"]')).toHaveLength(6);
+    expect(container.querySelectorAll('.dock-btn svg[stroke-width="1.5"]')).toHaveLength(5);
   });
 
   it('renders navigation and panel controls with independent availability and visible state', () => {

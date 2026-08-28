@@ -86,7 +86,7 @@ test('attachment canary rejects a response that did not read the fixture', async
     async ensureStarted() {}
     async request(method, params) {
       if (method === 'initialize') {
-        return { protocol: { version: '2.0' }, capabilities: { 'input.localFile': 1 } };
+        return { protocol: { version: '2.1' }, capabilities: { 'input.localFile': 1 } };
       }
       if (method === 'session.create') {
         canaryRoot = params.workspace?.cwd ?? params.cwd;
@@ -133,7 +133,7 @@ test('attachment canary rejects a response that did not read the fixture', async
   await assert.rejects(stat(canaryRoot), { code: 'ENOENT' });
 });
 
-test('Grok attachment canary preserves the original failure and cleans up with 2.0 ids', async () => {
+test('Grok attachment canary preserves the original failure and cleans up with 2.1 ids', async () => {
   let canaryRoot;
   let interruptParams;
   let closeParams;
@@ -142,7 +142,7 @@ test('Grok attachment canary preserves the original failure and cleans up with 2
     async ensureStarted() {}
     async request(method, params) {
       if (method === 'initialize') {
-        return { protocol: { version: '2.0' }, capabilities: { 'input.localFile': 1 } };
+        return { protocol: { version: '2.1' }, capabilities: { 'input.localFile': 1 } };
       }
       if (method === 'session.create') {
         canaryRoot = params.workspace?.cwd ?? params.cwd;
@@ -194,7 +194,7 @@ test('attachment canary source keeps its quota gate and localFile contract visib
   assert.match(source, /client\.request\('turn\.steer'/);
   assert.match(source, /runDefaultKimiPreflight/);
   assert.match(source, /attachmentContentObserved: true/);
-  assert.match(source, /GIAN_PROTOCOL_VERSIONS: '2.0'/);
+  assert.match(source, /GIAN_PROTOCOL_VERSIONS: '2.1'/);
   assert.match(source, /provider === 'grok'/);
-  assert.match(source, /versions: \['2.0'\]/);
+  assert.match(source, /versions: \['2.1'\]/);
 });

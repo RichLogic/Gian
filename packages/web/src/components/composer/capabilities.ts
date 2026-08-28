@@ -115,6 +115,12 @@ const steerPromises = new Map<string, Promise<boolean | undefined>>();
 export interface ComposerCatalog {
   catalogRevision?: string;
   configOptions: ConfigOption[];
+  specialCatalogs?: {
+    model?: string;
+    thinking?: string;
+    fast?: string;
+    approvalMode?: string;
+  };
   input: Array<{ type: string; enabledWhen?: ConfigCondition[] }>;
   slashCommands: SlashCommand[];
   /**
@@ -152,15 +158,6 @@ export type KnownCatalogActionId = typeof KNOWN_CATALOG_ACTION_IDS[number];
 const EMPTY_CATALOG: ComposerCatalog = { configOptions: [], input: [], slashCommands: [] };
 const catalogCache = new Map<string, ComposerCatalog>();
 const catalogPromises = new Map<string, Promise<ComposerCatalog>>();
-
-/** Roles that already have a dedicated Composer slot. */
-export const PLACED_CATALOG_ROLES = new Set([
-  'model',
-  'effort',
-  'fast',
-  'approval_mode',
-  'execution_mode',
-]);
 
 export function mergeTurnCatalog(
   processOptions: ConfigOption[],
@@ -230,9 +227,8 @@ function legacyModels(raw: unknown): ProxyModel[] {
   ));
 }
 
-/** Settings Executors defaults: prefer gian.proxy/2.0 catalog roles, keep
- *  Protocol 1 `models`/`modes` arrays as a fallback. Never assume `models`
- *  exists on the capabilities payload. */
+/** Settings Executors defaults: prefer 2.1 Special Catalog slots (normalized
+ *  to internal roles), keep 2.0 roles and Protocol 1 arrays as fallbacks. */
 export function executorSettingsFromCapabilities(executor: Executor, raw: unknown): {
   models: ProxyModel[];
   thinkingLevels: string[];
@@ -378,17 +374,6 @@ export function composerConfigValues(
   return values;
 }
 
-export function runtimeCatalogOptions(
-  options: ConfigOption[],
-  values: Record<string, ConfigValue>,
-): ConfigOption[] {
-  return options
-    .filter(option => option.binding === 'turn')
-    .filter(option => !option.role || !PLACED_CATALOG_ROLES.has(option.role))
-    .filter(option => optionVisible(option, values))
-    .sort((left, right) => (left.presentation?.order ?? 0) - (right.presentation?.order ?? 0));
-}
-
 export function inputTypeAdvertised(
   catalog: ComposerCatalog,
   type: string,
@@ -434,16 +419,42 @@ export function catalogFromCapabilities(raw: unknown): ComposerCatalog {
   const record = raw as {
     catalogRevision?: unknown;
     configOptions?: unknown;
+    specialCatalogs?: unknown;
     input?: unknown;
     actions?: unknown;
     slashCommands?: unknown;
     capabilities?: Record<string, unknown>;
   };
+  const configOptions = Array.isArray(record.configOptions)
+    ? record.configOptions.filter(isConfigOption)
+    : [];
+  const specialRecord = record.specialCatalogs && typeof record.specialCatalogs === 'object'
+    && !Array.isArray(record.specialCatalogs)
+    ? record.specialCatalogs as Record<string, unknown>
+    : null;
+  const specialCatalogs = specialRecord ? {
+    ...(typeof specialRecord.model === 'string' ? { model: specialRecord.model } : {}),
+    ...(typeof specialRecord.thinking === 'string' ? { thinking: specialRecord.thinking } : {}),
+    ...(typeof specialRecord.fast === 'string' ? { fast: specialRecord.fast } : {}),
+    ...(typeof specialRecord.approvalMode === 'string'
+      ? { approvalMode: specialRecord.approvalMode }
+      : {}),
+  } : undefined;
+  const roleById = new Map<string, string>([
+    ...(specialCatalogs?.model ? [[specialCatalogs.model, 'model'] as const] : []),
+    ...(specialCatalogs?.thinking ? [[specialCatalogs.thinking, 'effort'] as const] : []),
+    ...(specialCatalogs?.fast ? [[specialCatalogs.fast, 'fast'] as const] : []),
+    ...(specialCatalogs?.approvalMode
+      ? [[specialCatalogs.approvalMode, 'approval_mode'] as const]
+      : []),
+  ]);
   return {
     catalogRevision: typeof record.catalogRevision === 'string' ? record.catalogRevision : undefined,
-    configOptions: Array.isArray(record.configOptions)
-      ? record.configOptions.filter(isConfigOption)
-      : [],
+    configOptions: configOptions.map((option) => {
+      const role = roleById.get(option.id);
+      return role && option.role === undefined ? { ...option, role } : option;
+    }),
+    ...(specialCatalogs ? { specialCatalogs } : {}),
     input: Array.isArray(record.input)
       ? record.input.flatMap((entry): ComposerCatalog['input'] => {
         if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];

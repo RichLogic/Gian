@@ -25,6 +25,7 @@ export type OperationName =
   | 'sidechat.create'
   | 'sidechat.resume'
   | 'sidechat.close'
+  | 'sidechat.setTurnConfig'
   | 'session.delete'
   | 'session.stop'
   | 'session.recover'
@@ -50,6 +51,7 @@ export type OperationName =
   | 'message.sendSkill'
   | 'message.steer'
   | 'message.uploadAttachment'
+  | 'context.pickResources'
   | 'queue.add'
   | 'queue.update'
   | 'queue.remove'
@@ -123,6 +125,7 @@ export const OPERATION_POLICIES = {
   'sidechat.create': 'pending',
   'sidechat.resume': 'pending',
   'sidechat.close': 'pending',
+  'sidechat.setTurnConfig': 'optimistic',
   'session.delete': 'pending',
   'session.stop': 'pending',
   'session.recover': 'pending',
@@ -149,6 +152,7 @@ export const OPERATION_POLICIES = {
   'message.sendSkill': 'optimistic',
   'message.steer': 'pending',
   'message.uploadAttachment': 'pending',
+  'context.pickResources': 'pending',
   'queue.add': 'optimistic',
   'queue.update': 'optimistic',
   'queue.remove': 'optimistic',
@@ -232,6 +236,7 @@ export const WS_TYPE_POLICIES = {
   'sidechat:create': 'pending',
   'sidechat:resume': 'pending',
   'sidechat:close': 'pending',
+  'sidechat:set_turn_config': 'optimistic',
   'message:send': 'optimistic',
   'message:steer': 'pending',
   'approval:resolve': 'pending',

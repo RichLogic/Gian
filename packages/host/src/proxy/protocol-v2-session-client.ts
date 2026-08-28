@@ -18,6 +18,24 @@ import type {
 } from './types.js';
 import type { Executor, ProxyCatalog, ProxySession } from '@gian/shared';
 
+export function normalizeProtocolCatalog<T extends ProxyCatalog>(catalog: T): T {
+  const slots = catalog.specialCatalogs;
+  if (!slots) return catalog;
+  const roleById = new Map<string, string>([
+    ...(slots.model ? [[slots.model, 'model'] as const] : []),
+    ...(slots.thinking ? [[slots.thinking, 'effort'] as const] : []),
+    ...(slots.fast ? [[slots.fast, 'fast'] as const] : []),
+    ...(slots.approvalMode ? [[slots.approvalMode, 'approval_mode'] as const] : []),
+  ]);
+  return {
+    ...catalog,
+    configOptions: catalog.configOptions.map((option) => {
+      const role = roleById.get(option.id);
+      return role && option.role === undefined ? { ...option, role } : option;
+    }),
+  };
+}
+
 export type NotificationHandler = (notification: ProxyNotification) => void;
 
 export interface ProtocolV2HostOptions extends ProtocolV2ClientOptions {
@@ -78,7 +96,9 @@ export class ProtocolV2Host {
   }
 
   catalog(): Promise<ProxyCatalog> {
-    this.catalogResult ??= this.client.catalog().then((value) => value as ProxyCatalog);
+    this.catalogResult ??= this.client.catalog().then((value) => (
+      normalizeProtocolCatalog(value as ProxyCatalog)
+    ));
     return this.catalogResult;
   }
 
@@ -243,13 +263,28 @@ export class ProtocolV2SessionClient implements ProxyClient {
     return this.catalogCache;
   }
 
+  private normalizeTurnConfigOptions(
+    options: import('@gian/shared').ConfigOption[] | undefined,
+  ): import('@gian/shared').ConfigOption[] | undefined {
+    if (!options || !this.catalogCache) return options;
+    const roleById = new Map(
+      this.catalogCache.configOptions.flatMap((option) => (
+        option.role ? [[option.id, option.role] as const] : []
+      )),
+    );
+    return options.map((option) => {
+      const role = roleById.get(option.id);
+      return role && option.role === undefined ? { ...option, role } : option;
+    });
+  }
+
   async listSlashCommands(): Promise<{ commands: ProxyCatalog['slashCommands'] }> {
     const catalog = await this.catalog();
     return { commands: catalog.slashCommands };
   }
 
   async createSession(params: CreateSessionParams) {
-    await this.initialize();
+    const initialized = await this.initialize();
     await this.catalog();
     const history = params.history
       ?? (params.resumeMode === 'load' ? 'replay' as const : undefined);
@@ -260,6 +295,11 @@ export class ProtocolV2SessionClient implements ProxyClient {
         roots: params.workspaceRoots ?? [params.cwd],
       },
       config: params.sessionConfig ?? {},
+      ...(params.hostServices?.length ? { hostServices: params.hostServices } : {}),
+      ...(initialized.capabilities['session.create.forkBoundaries'] !== undefined
+        && params.forkBoundaries?.length
+        ? { forkBoundaries: params.forkBoundaries }
+        : {}),
       ...(params.nativeSessionId ? {
         nativeSession: {
           id: params.nativeSessionId,
@@ -274,7 +314,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
     this.createdAt = result.session.createdAt;
     this.updatedAt = result.session.updatedAt;
     this.lastError = result.session.lastError ?? null;
-    this.turnConfigOptions = result.session.turnConfigOptions;
+    this.turnConfigOptions = this.normalizeTurnConfigOptions(result.session.turnConfigOptions);
     this.turnConfigRevision = result.session.turnConfigRevision;
     const replay = history === 'replay'
       ? await this.loadReplay()
@@ -302,12 +342,12 @@ export class ProtocolV2SessionClient implements ProxyClient {
     sessionConfig: Record<string, string | boolean | number | null>;
     turnConfig: Record<string, string | boolean | number | null>;
   }): Promise<import('@gian/shared').ResolvedProxyCatalog> {
-    return this.host.request('catalog.resolve', {
+    return normalizeProtocolCatalog(await this.host.request<import('@gian/shared').ResolvedProxyCatalog>('catalog.resolve', {
       catalogRevision: params.catalogRevision,
       sessionConfig: params.sessionConfig,
       turnConfig: params.turnConfig,
       ...(this.stream ? { sessionId: this.hostSessionId, streamId: this.stream } : {}),
-    });
+    }));
   }
 
   async startTurn(params: StartTurnParams) {
@@ -443,7 +483,11 @@ export class ProtocolV2SessionClient implements ProxyClient {
     return this.host.request('sidechat.close', params);
   }
 
-  async forkSession(params: { sessionId: string; anchor: ForkAnchor }): Promise<{
+  async forkSession(params: {
+    sessionId: string;
+    anchor: ForkAnchor;
+    hostServices?: import('@gian/proxy-protocol').HostServiceDescriptor[];
+  }): Promise<{
     session: ProtocolSession;
     origin: ForkOrigin;
     replayEvents: ReplayEvent[];
@@ -454,6 +498,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
       sourceStreamId: this.requireStream(),
       sessionId: params.sessionId,
       anchor: params.anchor,
+      ...(params.hostServices?.length ? { hostServices: params.hostServices } : {}),
     });
     const child = this.host.createSessionClient(params.sessionId);
     const nativeSessionId = result.session.nativeSession?.id ?? null;
@@ -541,7 +586,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
       if (data.state) this.state = data.state;
       if (data.lastError !== undefined) this.lastError = data.lastError;
       if (data.turnConfigOptions !== undefined) {
-        this.turnConfigOptions = data.turnConfigOptions;
+        this.turnConfigOptions = this.normalizeTurnConfigOptions(data.turnConfigOptions);
         this.turnConfigRevision = data.turnConfigRevision;
       }
       this.updatedAt = new Date().toISOString();

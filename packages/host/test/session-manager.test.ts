@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -30,6 +30,8 @@ import { writeAttachment } from '../src/storage/attachments.js';
 import { listGitWorktreesAsync } from '../src/workspace/git.js';
 import { createGitRepo } from './fixtures/git-repo.js';
 import { installEventStorageV3 } from '../src/storage/event-storage-v3-schema.js';
+import { GianToolCredentialManager } from '../src/tool/credentials.js';
+import { GianSessionHostServiceIssuer } from '../src/tool/session-host-services.js';
 import {
   canonicalFingerprint,
   proxyNotificationSchema,
@@ -106,6 +108,7 @@ class StubProxyClient implements ProxyClient {
   nameCalls: string[] = [];
   createSessionGate: Promise<void> | null = null;
   onCreateSessionStarted: (() => void) | null = null;
+  capabilities: Record<string, number> = {};
 
   constructor(executor: Executor = 'claude') {
     this.executor = executor;
@@ -113,7 +116,7 @@ class StubProxyClient implements ProxyClient {
 
   isExited() { return false; }
   async initialize() {
-    return stubInitialize(this.executor);
+    return { ...stubInitialize(this.executor), capabilities: this.capabilities };
   }
   async catalog() {
     if (this.catalogOverride) return this.catalogOverride;
@@ -257,11 +260,15 @@ class StubProxyClient implements ProxyClient {
 }
 
 class FakeProxyManager {
-  client = new StubProxyClient();
-  private active: StubProxyClient | null = this.client;
+  client: StubProxyClient;
+  private active: StubProxyClient | null;
   private initialized = false;
   forceDisposeCalls: string[] = [];
   forceDisposeGate: Promise<void> | null = null;
+  constructor(executor: Executor = 'claude') {
+    this.client = new StubProxyClient(executor);
+    this.active = this.client;
+  }
   async getOrCreate(_sessionId?: string, executor: Executor = 'claude'): Promise<ProxyClient> {
     if (!this.initialized) {
       this.initialized = true;
@@ -490,6 +497,41 @@ function setup(
   return { dir, db, wsId, proxyMgr, broadcaster, approvals, sessions };
 }
 
+function setupCodexHostServices(advertiseHostServices = true) {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-sm-codex-host-service-'));
+  const db = openDatabase(dir);
+  const wsId = randomUUID();
+  db.prepare(
+    'INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)',
+  ).run(wsId, 'test', '/tmp/test-ws');
+  const proxyMgr = new FakeProxyManager('codex');
+  proxyMgr.client.capabilities = advertiseHostServices
+    ? { 'integration.mcp.streamableHttp': 1 }
+    : {};
+  const broadcaster = new CapturingBroadcaster();
+  const approvals = new ApprovalManager(broadcaster as unknown as WsBroadcaster);
+  const queue = new QueueManager(db);
+  const credentials = new GianToolCredentialManager(db);
+  const hostServices = new GianSessionHostServiceIssuer(
+    credentials,
+    'http://127.0.0.1:8991/internal/mcp',
+  );
+  const sessions = new SessionManager(
+    db,
+    proxyMgr as unknown as ProxyManager,
+    broadcaster as unknown as WsBroadcaster,
+    approvals,
+    queue,
+    dir,
+    null,
+    undefined,
+    undefined,
+    undefined,
+    hostServices,
+  );
+  return { dir, db, wsId, proxyMgr, credentials, sessions };
+}
+
 function setupKimi(
   proxyDefaults?: (executor: Executor) => AgentProxyDefaults,
   eventStorageV3 = false,
@@ -565,6 +607,70 @@ test('new sessions use defaults owned by their Proxy configuration', async () =>
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Codex Session attach injects an internal admin identity and rotates it after detach', async () => {
+  const { dir, db, wsId, proxyMgr, credentials, sessions } = setupCodexHostServices();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'codex',
+    });
+    const firstDescriptor = proxyMgr.client.lastCreateParams?.hostServices?.[0];
+    assert.equal(firstDescriptor?.id, 'gian');
+    assert.equal(firstDescriptor?.transport.type, 'streamable-http');
+    const firstAuthorization = firstDescriptor?.transport.headers?.Authorization;
+    const firstActor = credentials.authenticate(firstAuthorization ?? null);
+    assert.equal(firstActor?.kind, 'internal_session');
+    assert.equal(firstActor?.sessionId, session.id);
+    assert.equal(firstActor?.role, 'admin');
+    assert.equal(firstActor?.provisioning, undefined);
+
+    await sessions.archiveSession(session.id, true);
+    assert.equal(credentials.authenticate(firstAuthorization ?? null), null);
+    await sessions.archiveSession(session.id, false);
+    await sessions.getNativeConfig(session.id);
+    const secondAuthorization = proxyMgr.client.lastCreateParams
+      ?.hostServices?.[0]?.transport.headers?.Authorization;
+    assert.equal(
+      typeof secondAuthorization === 'string' && /^Bearer gian_mcp_v1\./.test(secondAuthorization),
+      true,
+    );
+    assert.equal(secondAuthorization === firstAuthorization, false);
+    assert.equal(credentials.authenticate(secondAuthorization ?? null)?.sessionId, session.id);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Codex Session stays usable when Host Service capability or issuer is unavailable', async () => {
+  const withoutCapability = setupCodexHostServices(false);
+  try {
+    const session = await withoutCapability.sessions.createSession({
+      workspace_id: withoutCapability.wsId,
+      executor: 'codex',
+    });
+    assert.ok(session.id);
+    assert.equal(withoutCapability.proxyMgr.client.lastCreateParams?.hostServices, undefined);
+  } finally {
+    withoutCapability.db.close();
+    rmSync(withoutCapability.dir, { recursive: true, force: true });
+  }
+
+  const withoutIssuer = setup();
+  withoutIssuer.proxyMgr.client.capabilities = { 'integration.mcp.streamableHttp': 1 };
+  try {
+    const session = await withoutIssuer.sessions.createSession({
+      workspace_id: withoutIssuer.wsId,
+      executor: 'codex',
+    });
+    assert.ok(session.id);
+    assert.equal(withoutIssuer.proxyMgr.client.lastCreateParams?.hostServices, undefined);
+  } finally {
+    withoutIssuer.db.close();
+    rmSync(withoutIssuer.dir, { recursive: true, force: true });
   }
 });
 
@@ -1738,6 +1844,63 @@ test('protocol v1 native-history refresh retries a transient replay failure', as
   }
 });
 
+test('protocol v2 live sourceTurnId replaces the provisional Host Fork boundary', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'kimi' });
+    const started = await sessions.sendMessage(session.id, 'live question');
+    assert.ok(started);
+    const providerTurnId = 'provider-native-turn-1';
+    const emittedAt = '2026-08-25T11:00:00.000Z';
+    const runtime = sessions as unknown as {
+      turns: { get(sessionId: string): { providerTurnId?: string } | undefined };
+    };
+    assert.equal(runtime.turns.get(session.id)?.providerTurnId, undefined);
+
+    proxyMgr.client.fire(liveNotification({
+      method: 'turn.started',
+      params: {
+        eventId: 'provider-native-turn-1-started',
+        sessionId: session.id,
+        turnId: started.turnId,
+        sourceTurnId: providerTurnId,
+        emittedAt,
+        data: {},
+      },
+    }));
+    assert.equal(runtime.turns.get(session.id)?.providerTurnId, providerTurnId);
+    proxyMgr.client.fire(liveNotification({
+      method: 'turn.completed',
+      params: {
+        eventId: 'provider-native-turn-1-completed',
+        sequence: 2,
+        sessionId: session.id,
+        turnId: started.turnId,
+        sourceTurnId: providerTurnId,
+        emittedAt: '2026-08-25T11:00:01.000Z',
+        data: { stopReason: 'completed' },
+      },
+    }));
+
+    assert.deepEqual(db.prepare(
+      `SELECT provider_turn_id, turn_id, replay_owned
+       FROM proxy_replay_turns
+       WHERE session_id = ? AND turn_id = ?`,
+    ).get(session.id, started.turnId), {
+      provider_turn_id: providerTurnId,
+      turn_id: started.turnId,
+      replay_owned: 0,
+    });
+    assert.equal(
+      (db.prepare('SELECT status FROM turns WHERE id = ?').get(started.turnId) as { status: string }).status,
+      'completed',
+    );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('protocol v1 native-history refresh persists new replay eventIds exactly once', async () => {
   const { dir, db, wsId, proxyMgr, broadcaster, sessions } = setupKimi();
   try {
@@ -2152,6 +2315,95 @@ test('sendMessage with localImage items echoes attachments in user_message paylo
     ) as { data: { attachments?: unknown[] } } | undefined;
     assert.ok(broadcastUser, 'broadcast user_message present');
     assert.equal((broadcastUser!.data.attachments ?? []).length, 1);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sendMessage persists structured context while dispatching its compiled form', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const folder = join(dir, 'reference-folder');
+    mkdirSync(folder);
+    writeFileSync(join(folder, 'contents.txt'), 'folder contents stay on disk');
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    const contextItems = [
+      { type: 'pastedText' as const, id: 'paste-1', text: 'quoted text', lineCount: 99, byteSize: 99 },
+      { type: 'folder' as const, id: 'folder-1', path: folder, name: 'forged-name' },
+    ];
+
+    await sessions.sendMessage(
+      session.id,
+      'use this context',
+      undefined,
+      undefined,
+      undefined,
+      contextItems,
+    );
+
+    const input = proxyMgr.client.startTurnCalls.at(-1)?.input;
+    assert.equal(input?.[0]?.type, 'text');
+    const dispatched = (input?.[0] as { type: 'text'; text: string }).text;
+    assert.match(dispatched, /quoted text/);
+    assert.match(dispatched, /reference-folder/);
+    assert.match(dispatched, /User request:\nuse this context/);
+
+    const row = db.prepare(
+      "SELECT data FROM events WHERE session_id = ? AND type = 'user_message'",
+    ).get(session.id) as { data: string };
+    const payload = JSON.parse(row.data) as { text: string; context_items: Array<Record<string, unknown>> };
+    assert.equal(payload.text, 'use this context');
+    assert.deepEqual(payload.context_items[0], {
+      type: 'pastedText', id: 'paste-1', text: 'quoted text', lineCount: 1, byteSize: 11,
+    });
+    assert.equal(payload.context_items[1]?.name, 'reference-folder');
+    assert.equal(JSON.stringify(payload.context_items).includes('folder contents stay on disk'), false);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sendMessage persists and compiles an inline composer reference at its text position', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    const contextItems = [{
+      type: 'pastedText' as const,
+      id: 'paste-inline',
+      text: 'quoted text',
+      lineCount: 1,
+      byteSize: 11,
+    }];
+    const composerDocument = {
+      version: 1 as const,
+      segments: [
+        { type: 'text' as const, text: 'Compare ' },
+        { type: 'reference' as const, id: 'paste-inline', referenceType: 'context' as const, label: 'quote' },
+        { type: 'text' as const, text: ' with the implementation' },
+      ],
+    };
+
+    await sessions.sendMessage(
+      session.id,
+      'Compare  with the implementation',
+      undefined,
+      undefined,
+      undefined,
+      contextItems,
+      composerDocument,
+    );
+
+    const dispatched = (proxyMgr.client.startTurnCalls.at(-1)?.input[0] as { type: 'text'; text: string }).text;
+    assert.ok(dispatched.indexOf('Compare ') < dispatched.indexOf('<GianReference'));
+    assert.ok(dispatched.indexOf('</GianReference>') < dispatched.indexOf(' with the implementation'));
+
+    const row = db.prepare(
+      "SELECT data FROM events WHERE session_id = ? AND type = 'user_message'",
+    ).get(session.id) as { data: string };
+    const payload = JSON.parse(row.data) as { composer_document?: unknown };
+    assert.deepEqual(payload.composer_document, composerDocument);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -3420,6 +3672,15 @@ test('sendMessage rehydrates proxy session after host restart via native_session
     originalNativeId = (first.db
       .prepare('SELECT native_session_id FROM sessions WHERE id = ?')
       .get(sessionId) as { native_session_id: string }).native_session_id;
+    first.db.prepare(
+      `INSERT INTO turns (id, session_id, turn_number, status, created_at, completed_at)
+       VALUES ('persisted-fork-turn', ?, 99, 'completed',
+               '2026-08-27T00:00:00.000Z', '2026-08-27T00:00:01.000Z')`,
+    ).run(sessionId);
+    first.db.prepare(
+      `INSERT INTO proxy_replay_turns (session_id, provider_turn_id, turn_id)
+       VALUES (?, 'persisted-provider-turn', 'persisted-fork-turn')`,
+    ).run(sessionId);
   } finally {
     first.db.close();
   }
@@ -3466,6 +3727,14 @@ test('sendMessage rehydrates proxy session after host restart via native_session
       'createSession passed persisted native_session_id for adoption',
     );
     assert.equal(
+      proxyMgr.client.lastCreateParams!.forkBoundaries?.some(boundary => (
+        boundary.turnId === 'persisted-fork-turn'
+        && boundary.sourceTurnId === 'persisted-provider-turn'
+      )),
+      true,
+      'rehydration passed the persisted canonical Fork boundary to the new attach generation',
+    );
+    assert.equal(
       (db.prepare('SELECT native_session_id FROM sessions WHERE id = ?').get(sessionId) as {
         native_session_id: string;
       }).native_session_id,
@@ -3491,7 +3760,7 @@ test('sendMessage rehydrates proxy session after host restart via native_session
     );
 
     const turnCount = (db.prepare('SELECT COUNT(*) AS c FROM turns WHERE session_id = ?').get(sessionId) as { c: number }).c;
-    assert.equal(turnCount, 2, 'second turn persisted after rehydration');
+    assert.equal(turnCount, 3, 'boundary fixture plus both message turns survived rehydration');
 
     const userMsgs = db
       .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid")
@@ -3587,9 +3856,20 @@ test('command_execution with `git worktree add` records detected_worktree_path a
     });
 
     const row = db
-      .prepare('SELECT detected_worktree_path FROM sessions WHERE id = ?')
-      .get(session.id) as { detected_worktree_path: string | null };
-    assert.equal(row.detected_worktree_path, wtPath, 'detected path persisted on the session row');
+      .prepare(
+        `SELECT detected_worktree_path, detected_worktree_source, detected_worktree_revision
+         FROM sessions WHERE id = ?`,
+      )
+      .get(session.id) as {
+        detected_worktree_path: string | null;
+        detected_worktree_source: string | null;
+        detected_worktree_revision: number;
+      };
+    assert.deepEqual(row, {
+      detected_worktree_path: wtPath,
+      detected_worktree_source: 'agent',
+      detected_worktree_revision: 1,
+    }, 'direct detection persists a prompt-only view request');
 
     const updates = broadcaster.messages.filter(
       m => m.type === 'session:updated'
@@ -3614,6 +3894,12 @@ test('command_execution with `git worktree add` records detected_worktree_path a
     );
     assert.equal(updatesAfter.length, 1, 'same path again does not rebroadcast');
     assert.equal(
+      (db.prepare('SELECT detected_worktree_revision FROM sessions WHERE id = ?')
+        .get(session.id) as { detected_worktree_revision: number }).detected_worktree_revision,
+      1,
+      'same path does not create a second adoption prompt revision',
+    );
+    assert.equal(
       broadcaster.messages.filter(m => m.type === 'workspace:git-updated').length,
       1,
       'same detected path does not trigger another worktree refresh',
@@ -3636,6 +3922,33 @@ test('command_execution with `git worktree add` records detected_worktree_path a
     db.close();
     rmSync(dir, { recursive: true, force: true });
     repo.cleanup();
+  }
+});
+
+test('trusted Worktree Tool view requests increment revisions and refresh discovery', async () => {
+  const { dir, db, wsId, sessions, broadcaster } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    broadcaster.messages.length = 0;
+    const path = '/tmp/managed-worktrees/project-feat-view';
+    const first = sessions.requestWorktreeView(session.id, path, 'gian_tool');
+    assert.equal(first.detected_worktree_path, path);
+    assert.equal(first.detected_worktree_source, 'gian_tool');
+    assert.equal(first.detected_worktree_revision, 1);
+    const second = sessions.requestWorktreeView(session.id, path, 'gian_tool');
+    assert.equal(second.detected_worktree_revision, 2, 'explicit repeat can reopen the same view');
+    const updates = broadcaster.messages.filter(message => message.type === 'session:updated');
+    assert.equal(updates.length, 2);
+    assert.deepEqual(
+      broadcaster.messages.filter(message => message.type === 'workspace:git-updated'),
+      [
+        { type: 'workspace:git-updated', workspace_id: wsId, reason: 'worktree-created' },
+        { type: 'workspace:git-updated', workspace_id: wsId, reason: 'worktree-created' },
+      ],
+    );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

@@ -14,14 +14,17 @@ const initialState: GianBrowserState = {
   canGoBack: true,
   canGoForward: false,
   canOpenExternal: true,
+  inspecting: false,
 };
 
 const TAB_ID = 'tab-browser-test';
 let listener: ((tabId: string, state: GianBrowserState) => void) | null = null;
+let elementListener: Parameters<GianBrowserApi['subscribeElement']>[0] | null = null;
 let browser: GianBrowserApi;
 
 beforeEach(() => {
   listener = null;
+  elementListener = null;
   browser = {
     getState: vi.fn().mockResolvedValue(initialState),
     navigate: vi.fn().mockImplementation(async (_tabId, url) => ({ ...initialState, url })),
@@ -34,9 +37,17 @@ beforeEach(() => {
     openExternal: vi.fn().mockResolvedValue(true),
     closeTab: vi.fn().mockResolvedValue(true),
     clearData: vi.fn().mockResolvedValue(true),
+    setInspectMode: vi.fn().mockImplementation(async (_tabId, enabled) => ({
+      ...initialState,
+      inspecting: enabled,
+    })),
     subscribe: vi.fn().mockImplementation(cb => {
       listener = cb;
       return () => { listener = null; };
+    }),
+    subscribeElement: vi.fn().mockImplementation(cb => {
+      elementListener = cb;
+      return () => { elementListener = null; };
     }),
   };
   window.gianDesktop = { browser };
@@ -47,11 +58,15 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function renderPanel(visible = true) {
+function renderPanel(visible = true, contextTargetSessionId: string | null = null) {
   const harness = createOperationHarness();
   return render(
     <LocaleProvider locale="en">
-      <BrowserPanel tabId={TAB_ID} visible={visible} />
+      <BrowserPanel
+        tabId={TAB_ID}
+        visible={visible}
+        contextTargetSessionId={contextTargetSessionId}
+      />
     </LocaleProvider>,
     { wrapper: harness.wrapper },
   );
@@ -163,5 +178,62 @@ describe('BrowserPanel', () => {
     expect(browser.goBack).toHaveBeenCalledWith(TAB_ID);
     expect(browser.reload).toHaveBeenCalledWith(TAB_ID);
     expect(screen.getByRole('button', { name: 'Forward' })).toBeDisabled();
+  });
+
+  it('toggles native inspect mode and stores the captured element in the target Session draft', async () => {
+    localStorage.clear();
+    renderPanel(true, 'session-browser-context');
+    await screen.findByDisplayValue('https://example.com/');
+
+    const inspect = screen.getByRole('button', { name: 'Select element' });
+    expect(inspect).toBeEnabled();
+    fireEvent.click(inspect);
+    await waitFor(() => expect(browser.setInspectMode).toHaveBeenCalledWith(TAB_ID, true));
+
+    act(() => elementListener?.(TAB_ID, {
+      pageUrl: 'https://example.com/page',
+      pageTitle: 'Example page',
+      tagName: 'button',
+      selector: 'button[data-testid="save"]',
+      role: 'button',
+      name: 'Save',
+      attributes: { 'data-testid': 'save' },
+      contentOmitted: false,
+      snippet: '<button data-testid="save">Save</button>',
+    }));
+
+    const draft = JSON.parse(
+      localStorage.getItem('gian.composer.draft.v4.session-browser-context') ?? 'null',
+    );
+    expect(draft.contextItems).toEqual([expect.objectContaining({
+      type: 'browserElement',
+      pageUrl: 'https://example.com/page',
+      selector: 'button[data-testid="save"]',
+      snippet: '<button data-testid="save">Save</button>',
+    })]);
+  });
+
+  it('keeps inspect unavailable without an active Session context target', async () => {
+    renderPanel();
+    await screen.findByDisplayValue('https://example.com/');
+    expect(screen.getByRole('button', { name: 'Select element' })).toBeDisabled();
+  });
+
+  it('cancels inspection when the active Session context target changes', async () => {
+    const harness = createOperationHarness();
+    const view = render(
+      <LocaleProvider locale="en">
+        <BrowserPanel tabId={TAB_ID} visible contextTargetSessionId="session-a" />
+      </LocaleProvider>,
+      { wrapper: harness.wrapper },
+    );
+    await screen.findByDisplayValue('https://example.com/');
+    act(() => listener?.(TAB_ID, { ...initialState, inspecting: true }));
+    view.rerender(
+      <LocaleProvider locale="en">
+        <BrowserPanel tabId={TAB_ID} visible contextTargetSessionId="session-b" />
+      </LocaleProvider>,
+    );
+    await waitFor(() => expect(browser.setInspectMode).toHaveBeenCalledWith(TAB_ID, false));
   });
 });

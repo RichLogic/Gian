@@ -15,8 +15,9 @@
  *   strip is display-only.
  * - stacked⇄side-by-side and word-wrap share their persisted preference with
  *   the Diffs panel-2 body.
+ * - subject/meta/actions remain pinned and expose previous/next file review.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   loadGitHistoryCommit,
   loadGitHistoryFileDiff,
@@ -34,7 +35,12 @@ import {
 import { useT } from '../i18n/index.js';
 import { toast } from '../feedback.js';
 import { relTime } from '../views/session-list-status.js';
-import { DiffViewControls, useDiffViewPreferences } from './DiffViewControls.js';
+import { useReviewFileNavigation } from '../controllers/use-review-file-navigation.js';
+import {
+  DiffViewControls,
+  FileNavigationControls,
+  useDiffViewPreferences,
+} from './DiffViewControls.js';
 import { DiffBody } from './Sheet.js';
 import type { SheetTab } from './sheet-model.js';
 
@@ -215,6 +221,8 @@ export function HistoryCommitBody({ tab }: { tab: SheetTab }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const { wrap, split, toggleWrap, toggleSplit } = useDiffViewPreferences();
+  const filePaths = useMemo(() => detail?.files.map(file => file.path) ?? [], [detail]);
+  const fileNavigation = useReviewFileNavigation(rootRef, filePaths);
 
   const load = useCallback(() => {
     if (!workingTreeId || !sha) {
@@ -302,69 +310,77 @@ export function HistoryCommitBody({ tab }: { tab: SheetTab }) {
         </div>
       ) : detail ? (
         <>
-          <div className="cs-head">
-            <div className="cs-subject">{detail.subject}</div>
-            <div className="cs-meta">
-              <button className="cs-sha-btn" title={t('history.copySha')} onClick={() => copy(sha, 'history.copied.sha')}>
-                {short}<Icon d={I.copy} size={11} stroke={1.6} />
-              </button>
-              <span className="cs-author">
-                <span className="cs-avatar">{(detail.author.name || '?').slice(0, 1)}</span>
-                {detail.author.name}
-              </span>
-              <span className="cs-date" title={detail.committedAt}>
-                {t('history.committed')} {new Date(detail.committedAt).toLocaleString()} · {relTime(detail.committedAt)}
-              </span>
-              {detail.isMerge && (
-                <span className="cs-base" title={t('history.base.mergeTitle')}>
-                  <Icon d={I.diff} size={11} stroke={1.6} />
-                  {t('history.base.merge')} <b>&nbsp;{detail.base.slice(0, 7)}</b>
-                </span>
-              )}
-              {detail.isRoot && (
-                <span className="cs-base" title={t('history.base.rootTitle')}>
-                  <Icon d={I.diff} size={11} stroke={1.6} />
-                  {t('history.base.root')}
-                </span>
-              )}
-            </div>
-          </div>
-          <div className="cs-toolbar">
-            <span className="cs-stats">
-              <span className="files">{detail.files.length} {t('changes.files')}</span>
-              <span className="add">+{totals.add}</span>
-              <span className="del">−{totals.del}</span>
-            </span>
-            <span className="cs-actions">
-              <button className="sheet-tabs-act"
-                      title={allCollapsed ? t('history.expandAll') : t('history.collapseAll')}
-                      aria-label={allCollapsed ? t('history.expandAll') : t('history.collapseAll')}
-                      onClick={toggleAllFiles}>
-                <Icon d={allCollapsed ? I.unfold : I.fold} size={12} stroke={1.6} />
-              </button>
-              <DiffViewControls split={split} wrap={wrap}
-                                onToggleSplit={toggleSplit} onToggleWrap={toggleWrap} />
-              <span className="h-menu-anchor">
-                <button className={`sheet-tabs-act${menuOpen ? ' active' : ''}`} title={t('sheet.more')}
-                        aria-label={t('sheet.more')} aria-haspopup="menu" aria-expanded={menuOpen}
-                        onClick={() => setMenuOpen(o => !o)}>
-                  <Icon d={I.kebab} size={14} stroke={2.4} />
+          <div className="cs-pinned-head">
+            <div className="cs-head">
+              <div className="cs-subject">{detail.subject}</div>
+              <div className="cs-meta">
+                <button className="cs-sha-btn" title={t('history.copySha')} onClick={() => copy(sha, 'history.copied.sha')}>
+                  {short}<Icon d={I.copy} size={11} stroke={1.6} />
                 </button>
-                {menuOpen && (
-                  <>
-                    <div className="h-menu-backdrop" onClick={() => setMenuOpen(false)} />
-                    <div className="h-menu cs-menu" role="menu">
-                      <button role="menuitem" onClick={() => copy(sha, 'history.copied.sha')}>
-                        <Icon d={I.copy} size={12} stroke={1.6} /> {t('history.copySha')}
-                      </button>
-                      <button role="menuitem" onClick={() => copy(detail.subject, 'history.copied.subject')}>
-                        <Icon d={I.copy} size={12} stroke={1.6} /> {t('history.copySubject')}
-                      </button>
-                    </div>
-                  </>
+                <span className="cs-author">
+                  <span className="cs-avatar">{(detail.author.name || '?').slice(0, 1)}</span>
+                  {detail.author.name}
+                </span>
+                <span className="cs-date" title={detail.committedAt}>
+                  {t('history.committed')} {new Date(detail.committedAt).toLocaleString()} · {relTime(detail.committedAt)}
+                </span>
+                {detail.isMerge && (
+                  <span className="cs-base" title={t('history.base.mergeTitle')}>
+                    <Icon d={I.diff} size={11} stroke={1.6} />
+                    {t('history.base.merge')} <b>&nbsp;{detail.base.slice(0, 7)}</b>
+                  </span>
                 )}
+                {detail.isRoot && (
+                  <span className="cs-base" title={t('history.base.rootTitle')}>
+                    <Icon d={I.diff} size={11} stroke={1.6} />
+                    {t('history.base.root')}
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="cs-toolbar">
+              <span className="cs-stats">
+                <span className="files">{detail.files.length} {t('changes.files')}</span>
+                <span className="add">+{totals.add}</span>
+                <span className="del">−{totals.del}</span>
               </span>
-            </span>
+              <span className="cs-actions">
+                <FileNavigationControls
+                  canPrevious={fileNavigation.canPrevious}
+                  canNext={fileNavigation.canNext}
+                  onPrevious={fileNavigation.previous}
+                  onNext={fileNavigation.next}
+                />
+                <button className="sheet-tabs-act"
+                        title={allCollapsed ? t('history.expandAll') : t('history.collapseAll')}
+                        aria-label={allCollapsed ? t('history.expandAll') : t('history.collapseAll')}
+                        onClick={toggleAllFiles}>
+                  <Icon d={allCollapsed ? I.unfold : I.fold} size={12} stroke={1.6} />
+                </button>
+                <DiffViewControls split={split} wrap={wrap}
+                                  onToggleSplit={toggleSplit} onToggleWrap={toggleWrap} />
+                <span className="h-menu-anchor">
+                  <button className={`sheet-tabs-act${menuOpen ? ' active' : ''}`} title={t('sheet.more')}
+                          aria-label={t('sheet.more')} aria-haspopup="menu" aria-expanded={menuOpen}
+                          onClick={() => setMenuOpen(o => !o)}>
+                    <Icon d={I.kebab} size={14} stroke={2.4} />
+                  </button>
+                  {menuOpen && (
+                    <>
+                      <div className="h-menu-backdrop" onClick={() => setMenuOpen(false)} />
+                      <div className="h-menu cs-menu" role="menu">
+                        <button role="menuitem" onClick={() => copy(sha, 'history.copied.sha')}>
+                          <Icon d={I.copy} size={12} stroke={1.6} /> {t('history.copySha')}
+                        </button>
+                        <button role="menuitem" onClick={() => copy(detail.subject, 'history.copied.subject')}>
+                          <Icon d={I.copy} size={12} stroke={1.6} /> {t('history.copySubject')}
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </span>
+              </span>
+            </div>
           </div>
           <div className="cs-files">
             {detail.files.map(f => (

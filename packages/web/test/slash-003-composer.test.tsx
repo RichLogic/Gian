@@ -17,6 +17,7 @@ vi.mock('../src/api.js', () => ({
 }));
 
 import { Composer } from '../src/components/Composer.js';
+import { typeInlineComposer } from './inline-composer-test-utils.js';
 import {
   clearSlashCache,
   fetchSlashCached,
@@ -189,7 +190,7 @@ describe('SLASH-003 Composer keyboard behavior', () => {
     const callbacks = renderComposer(makeSession('codex'));
     const textbox = screen.getByRole('textbox');
 
-    await user.type(textbox, '/');
+    typeInlineComposer(textbox, '/');
     const clear = (await screen.findByText('/clear')).closest('button')!;
     const project = screen.getByText('/project-check').closest('button')!;
     expect(clear).toHaveClass('active');
@@ -205,14 +206,14 @@ describe('SLASH-003 Composer keyboard behavior', () => {
       '/repo/.codex/skills/project-check/SKILL.md',
     );
     expect(callbacks.onSend).not.toHaveBeenCalled();
-    expect(textbox).toHaveValue('');
+    expect(textbox).toHaveTextContent('');
     await waitFor(() => expect(document.querySelector('.cmp-slash-pop')).toBeNull());
 
-    await user.type(textbox, '/');
+    typeInlineComposer(textbox, '/');
     await screen.findByText('/clear');
     await user.keyboard('{Escape}');
     expect(document.querySelector('.cmp-slash-pop')).toBeNull();
-    expect(textbox).toHaveValue('/');
+    expect(textbox).toHaveTextContent('/');
   });
 
   it('keeps Escape dismissed when discovery finishes until the input changes', async () => {
@@ -224,7 +225,7 @@ describe('SLASH-003 Composer keyboard behavior', () => {
     renderComposer(makeSession('codex', 'workspace-delayed'));
     const textbox = screen.getByRole('textbox');
 
-    await user.type(textbox, '/');
+    typeInlineComposer(textbox, '/');
     await waitFor(() => expect(document.querySelector('.cmp-slash-pop')).not.toBeNull());
     await user.keyboard('{Escape}');
     expect(document.querySelector('.cmp-slash-pop')).toBeNull();
@@ -235,7 +236,7 @@ describe('SLASH-003 Composer keyboard behavior', () => {
     });
     expect(document.querySelector('.cmp-slash-pop')).toBeNull();
 
-    await user.type(textbox, 'p');
+    typeInlineComposer(textbox, 'p');
     expect(await screen.findByText('/project-check')).toBeVisible();
   });
 
@@ -244,13 +245,13 @@ describe('SLASH-003 Composer keyboard behavior', () => {
     const callbacks = renderComposer(makeSession('codex'));
     const textbox = screen.getByRole('textbox');
 
-    await user.type(textbox, '/p');
+    typeInlineComposer(textbox, '/p');
     expect(await screen.findByText('/project-check')).toBeVisible();
 
     callbacks.rerenderGate({ disabled: true, disabledSubmitBehavior: 'block' });
 
     await waitFor(() => expect(document.querySelector('.cmp-slash-pop')).toBeNull());
-    expect(textbox).toBeDisabled();
+    expect(textbox).toHaveAttribute('contenteditable', 'false');
     expect(callbacks.onSendSkill).not.toHaveBeenCalled();
     expect(callbacks.onSend).not.toHaveBeenCalled();
     expect(callbacks.onQueueAdd).not.toHaveBeenCalled();

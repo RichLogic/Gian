@@ -20,6 +20,12 @@ import type { Db } from '../storage/db.js';
 import type { SessionHistoryStore } from './history-store.js';
 import { requestViolation } from '@gian/proxy-protocol';
 import { executorConfigFromOptions, type SessionRepository } from './repository.js';
+import { persistedForkBoundaries, type PersistedForkBoundary } from './fork.js';
+import type {
+  GianSessionHostServiceIdentity,
+  GianSessionHostServiceIssuer,
+  GianSessionHostServiceLease,
+} from '../tool/session-host-services.js';
 
 export interface BringUpProxySessionInput {
   sessionId: string;
@@ -29,12 +35,16 @@ export interface BringUpProxySessionInput {
   /** The owning Agent's resolved CLI path; null resolves through the
    *  provider default (environment override / PATH / official install). */
   cliPath?: string | null;
+  /** Exact immutable Proxy package selected by the Session Runtime Profile. */
+  proxyVersion?: string | null;
   nativeSessionId?: string | null;
+  forkBoundaries?: PersistedForkBoundary[];
   executorConfig?: ExecutorConfigState;
   executorDefaults?: AgentProxyDefaults;
   resumeMode?: 'load' | 'resume';
   displayName?: string | null;
   sessionConfig?: Record<string, string | boolean | number | null>;
+  hostServiceIdentity?: Omit<GianSessionHostServiceIdentity, 'sessionId'>;
 }
 
 export interface BringUpProxySessionResult {
@@ -101,6 +111,7 @@ export class ProxySessionCoordinator {
   private bindings = new Map<string, ProxySessionBindings>();
   private catalogByExecutor = new Map<string, ProxyCatalog>();
   private protocolCapabilitiesByExecutor = new Map<string, Record<string, unknown>>();
+  private hostServiceLeases = new Map<string, GianSessionHostServiceLease>();
   private emptyCatalogKeys = new Set<string>();
   private sessionStore: SessionRepository;
 
@@ -114,6 +125,7 @@ export class ProxySessionCoordinator {
     private dataDir?: string,
     /** Resolves a session's owning Agent CLI path for rehydrate/refresh. */
     private resolveCliPath?: (executor: Executor, session?: Session) => string | null,
+    private hostServices?: GianSessionHostServiceIssuer,
   ) {
     this.sessionStore = sessions;
     void watcher;
@@ -137,6 +149,7 @@ export class ProxySessionCoordinator {
   quarantine(sessionId: string, error: Error): void {
     console.error(`[proxy] quarantined session ${sessionId}: ${error.message}`);
     const client = this.proxy.get(sessionId);
+    this.revokeHostServices(sessionId);
     this.callbacks.onSessionFault(sessionId, error);
     void client?.closeSession?.().catch(() => undefined);
   }
@@ -156,6 +169,7 @@ export class ProxySessionCoordinator {
     this.sessionIds.delete(sessionId);
     this.bringUps.delete(sessionId);
     this.unbind(sessionId);
+    this.revokeHostServices(sessionId);
   }
 
   async dispose(sessionId: string): Promise<void> {
@@ -195,10 +209,24 @@ export class ProxySessionCoordinator {
       executor: session.executor,
       cwd: session.worktree_path ?? workspace.path,
       model: session.model,
-      cliPath: this.resolveCliPath?.(session.executor, session) ?? null,
+      cliPath: session.runtime_profile?.cliPath
+        ?? this.resolveCliPath?.(session.executor, session)
+        ?? null,
+      proxyVersion: session.runtime_profile?.proxyVersion ?? null,
       nativeSessionId: session.native_session_id,
+      forkBoundaries: persistedForkBoundaries(this.db, session.id),
       executorConfig: session.executor_config,
       displayName: session.name,
+      ...(session.executor === 'codex'
+        ? {
+            hostServiceIdentity: {
+              agentId: session.agent_id ?? null,
+              workspaceId: session.workspace_id,
+              taskId: session.task_id ?? null,
+              role: 'admin',
+            },
+          }
+        : {}),
     });
     const remapped = executorConfigFromOptions(result.configOptions);
     const now = new Date().toISOString();
@@ -223,7 +251,10 @@ export class ProxySessionCoordinator {
 
   async bringUp(args: BringUpProxySessionInput): Promise<BringUpProxySessionResult> {
     const cliPath = args.cliPath ?? null;
-    const client = await this.proxy.getOrCreate(args.sessionId, args.executor, { cliPath });
+    const client = await this.proxy.getOrCreate(args.sessionId, args.executor, {
+      cliPath,
+      proxyVersion: args.proxyVersion ?? null,
+    });
     // Replace any stale callbacks before the new facade starts initialization.
     // Native create/adopt may emit notifications or exit before createSession
     // resolves, so binding only at the end of bring-up would lose that state.
@@ -235,6 +266,7 @@ export class ProxySessionCoordinator {
 
     const adoptParams: {
       nativeSessionId?: string;
+      forkBoundaries?: PersistedForkBoundary[];
       history?: 'none' | 'replay';
       resumeMode?: 'load' | 'resume';
     } = {};
@@ -243,6 +275,7 @@ export class ProxySessionCoordinator {
       adoptParams.history = args.resumeMode === 'load' ? 'replay' : 'none';
       adoptParams.resumeMode = args.resumeMode ?? 'resume';
     }
+    if (args.forkBoundaries?.length) adoptParams.forkBoundaries = args.forkBoundaries;
     const sessionConfig: Record<string, string | boolean | number | null> = {};
     for (const option of catalog.configOptions) {
       if (option.binding !== 'session') continue;
@@ -269,12 +302,21 @@ export class ProxySessionCoordinator {
     }
     const attachmentDir = await ensureSessionAttachmentDir(args.sessionId, this.dataDir);
     const workspaceRoots = [args.cwd, attachmentDir];
+    const hostServices = initialized.capabilities['integration.mcp.streamableHttp'] !== undefined
+      && args.hostServiceIdentity
+      && this.hostServices
+      ? [this.prepareHostServices(
+          { sessionId: args.sessionId, ...args.hostServiceIdentity },
+          this.sessionStore.find(args.sessionId) === null,
+        ).descriptor]
+      : undefined;
     let created;
     try {
       created = await client.createSession({
         cwd: args.cwd,
         workspaceRoots,
         sessionConfig,
+        ...(hostServices ? { hostServices } : {}),
         ...adoptParams,
       });
     } catch (error) {
@@ -291,6 +333,7 @@ export class ProxySessionCoordinator {
         cwd: args.cwd,
         workspaceRoots,
         sessionConfig,
+        ...(hostServices ? { hostServices } : {}),
       });
       const now = new Date().toISOString();
       this.db.prepare('UPDATE sessions SET native_session_id = ?, updated_at = ? WHERE id = ?')
@@ -337,13 +380,43 @@ export class ProxySessionCoordinator {
     this.callbacks.onAttached?.(sessionId);
   }
 
+  prepareHostServices(
+    identity: GianSessionHostServiceIdentity,
+    provisional: boolean,
+  ): GianSessionHostServiceLease {
+    if (!this.hostServices) throw new Error('Gian Session Host Service issuer is unavailable');
+    const existing = this.hostServiceLeases.get(identity.sessionId);
+    if (existing) return existing;
+    const lease = this.hostServices.issue(identity, { provisional });
+    this.hostServiceLeases.set(identity.sessionId, lease);
+    return lease;
+  }
+
+  canProvideHostServices(): boolean {
+    return this.hostServices !== undefined;
+  }
+
+  activateHostServices(sessionId: string): void {
+    this.hostServiceLeases.get(sessionId)?.activate();
+  }
+
+  revokeHostServices(sessionId: string): void {
+    const lease = this.hostServiceLeases.get(sessionId);
+    this.hostServiceLeases.delete(sessionId);
+    if (lease) lease.revoke();
+    else this.hostServices?.revokeSession(sessionId);
+  }
+
   private bind(sessionId: string, client: ProxyClient): void {
     this.unbind(sessionId);
     this.bindings.set(sessionId, {
       offNotification: client.onNotification((notification) => (
         this.callbacks.onNotification(sessionId, notification as ProxyNotification)
       )),
-      offExit: client.onExit((code) => this.callbacks.onExit(sessionId, code)),
+      offExit: client.onExit((code) => {
+        this.revokeHostServices(sessionId);
+        this.callbacks.onExit(sessionId, code);
+      }),
       offFault: client.onSessionFault
         ? client.onSessionFault((error) => this.quarantine(sessionId, error))
         : () => undefined,

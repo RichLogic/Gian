@@ -53,6 +53,7 @@ export interface TopbarModel {
   branchMenu: BranchMenuActions | null;
   onRenameSubmit(value: string): void;
   onRenameCancel(): void;
+  onRenameStart(): void;
 }
 
 export function useTopbarModel(input: TopbarModelInput): TopbarModel {
@@ -251,5 +252,8 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
     branchMenu,
     onRenameSubmit,
     onRenameCancel: useCallback(() => setRenaming(false), []),
+    onRenameStart: useCallback(() => {
+      if (activeSession?.completed_at == null) setRenaming(true);
+    }, [activeSession?.completed_at]),
   };
 }

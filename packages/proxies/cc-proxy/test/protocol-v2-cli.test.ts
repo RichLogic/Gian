@@ -18,7 +18,7 @@ function startV2Proxy(environment: NodeJS.ProcessEnv = {}) {
       GIAN_PLUGIN_ID: 'claude',
       GIAN_PLUGIN_DATA_DIR: '/tmp/gian-claude-v2-test',
       GIAN_RUNTIME_BIN: process.execPath,
-      GIAN_PROTOCOL_VERSIONS: '2.0',
+      GIAN_PROTOCOL_VERSIONS: '2.1',
       ...environment,
     },
   });
@@ -42,23 +42,23 @@ function startV2Proxy(environment: NodeJS.ProcessEnv = {}) {
   };
 }
 
-test('Claude CLI negotiates gian.proxy/2.0 independently from its runtime version', async () => {
+test('Claude CLI negotiates gian.proxy/2.1 independently from its runtime version', async () => {
   const proxy = startV2Proxy();
   proxy.send({
     jsonrpc: '2.0',
     id: 'req-1',
     method: 'initialize',
     params: {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: '9.9.9' },
     },
   });
   const initialized = await proxy.next() as { id: string; result: unknown };
   assert.equal(initialized.id, 'req-1');
   const result = initializeResultSchema.parse(initialized.result);
-  assert.equal(result.protocol.version, '2.0');
+  assert.equal(result.protocol.version, '2.1');
   assert.equal(result.plugin.id, 'claude');
-  assert.equal(result.plugin.version, '0.2.2');
+  assert.equal(result.plugin.version, '0.2.3');
   assert.equal(result.process.scope, 'session');
   assert.equal(result.capabilities.interaction, 1);
   assert.equal(result.capabilities['session.replay'], 1);
@@ -93,20 +93,20 @@ test('Claude gian.proxy/2 CLI reports a JSON-RPC parse error for malformed NDJSO
   assert.equal(await waitForExit(proxy.child), 0);
 });
 
-test('Claude CLI speaks gian.proxy/2.0 even when GIAN_PROTOCOL_VERSIONS is omitted', async () => {
+test('Claude CLI speaks gian.proxy/2.1 even when GIAN_PROTOCOL_VERSIONS is omitted', async () => {
   const proxy = startV2Proxy({ GIAN_PROTOCOL_VERSIONS: undefined });
   proxy.send({
     jsonrpc: '2.0',
     id: 'req-1',
     method: 'initialize',
     params: {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: '9.9.9' },
     },
   });
   const initialized = await proxy.next() as { id: string; result: unknown };
   assert.equal(initialized.id, 'req-1');
-  assert.equal(initializeResultSchema.parse(initialized.result).protocol.version, '2.0');
+  assert.equal(initializeResultSchema.parse(initialized.result).protocol.version, '2.1');
   proxy.send({ jsonrpc: '2.0', id: 'req-2', method: 'shutdown', params: {} });
   assert.deepEqual(await proxy.next(), { jsonrpc: '2.0', id: 'req-2', result: { ok: true } });
   assert.equal(await waitForExit(proxy.child), 0);
@@ -121,13 +121,13 @@ test('Claude CLI writes turn.start response before turn.started with a Fake Runt
       id: 'req-1',
       method: 'initialize',
       params: {
-        protocol: { name: 'gian.proxy', versions: ['2.0'] },
+        protocol: { name: 'gian.proxy', versions: ['2.1'] },
         host: { name: 'Gian', version: '9.9.9' },
       },
     });
     const initialized = await proxy.next() as { id: string; result: unknown };
     assert.equal(initialized.id, 'req-1');
-    assert.equal(initializeResultSchema.parse(initialized.result).protocol.version, '2.0');
+    assert.equal(initializeResultSchema.parse(initialized.result).protocol.version, '2.1');
 
     proxy.send({ jsonrpc: '2.0', id: 'req-2', method: 'catalog.list', params: {} });
     const catalog = await proxy.next() as { id: string; result: unknown };

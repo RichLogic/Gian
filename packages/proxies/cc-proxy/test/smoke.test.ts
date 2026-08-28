@@ -176,7 +176,7 @@ test('cli smoke covers initialize, session lifecycle, and capabilities', { skip:
 
   try {
     const initialize = await proxy.request('initialize', {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: '9.9.9' },
     });
     const handshake = initialize.result as {
@@ -184,7 +184,7 @@ test('cli smoke covers initialize, session lifecycle, and capabilities', { skip:
       plugin: { id: string };
       process: { scope: string };
     };
-    assert.equal(handshake.protocol.version, '2.0');
+    assert.equal(handshake.protocol.version, '2.1');
     assert.equal(handshake.plugin.id, 'claude');
     assert.equal(handshake.process.scope, 'session');
 

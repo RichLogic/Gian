@@ -219,16 +219,6 @@ export function Dock({
 
       <div className="dock-group" data-dock-group-label={t('dock.group.system')}>
         <DockBtn
-          group="panel"
-          testId="workspaces"
-          label={t('topbar.mode.workspaces')}
-          active={activeRail === 'workspaces'}
-          disabled={workbenchDisabled}
-          onClick={() => onToggleRail('workspaces')}
-        >
-          <Icon d={ICONS.grid} />
-        </DockBtn>
-        <DockBtn
           group="wb"
           testId="settings"
           label={t('dock.settings')}

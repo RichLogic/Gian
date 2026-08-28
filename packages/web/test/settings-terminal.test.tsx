@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import {
   DEFAULT_TERMINAL_PREFERENCES,
   type SystemConfig,
@@ -56,8 +56,9 @@ describe('SettingsBody Terminal', () => {
       />,
     );
     expect(screen.getByDisplayValue('JetBrains Mono')).toBeTruthy();
-    expect(screen.getByText('13px')).toBeTruthy();
-    expect(screen.getByRole('slider', { name: 'Line height' })).toHaveValue('1.2');
+    expect(within(screen.getByRole('group', { name: 'Font size' })).getByText('13px')).toBeTruthy();
+    expect(within(screen.getByRole('group', { name: 'Line height' })).getByText('1.2')).toBeTruthy();
+    expect(screen.queryByRole('slider')).toBeNull();
     expect(screen.getByRole('button', { name: 'Block' })).toHaveClass('active');
     expect(screen.getByRole('checkbox', { name: /Keep the cursor blinking/ })).toBeChecked();
     expect(screen.getByDisplayValue('5,000')).toBeTruthy();
@@ -74,6 +75,13 @@ describe('SettingsBody Terminal', () => {
     await waitFor(() => {
       expect(api.saveSettings).toHaveBeenCalledWith({
         terminal: { ...DEFAULT_TERMINAL_PREFERENCES, font_size: 14 },
+      });
+    });
+    vi.mocked(api.saveSettings).mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Increase Line height' }));
+    await waitFor(() => {
+      expect(api.saveSettings).toHaveBeenCalledWith({
+        terminal: { ...DEFAULT_TERMINAL_PREFERENCES, line_height: 1.25 },
       });
     });
   });

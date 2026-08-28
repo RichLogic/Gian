@@ -1,6 +1,5 @@
 import type { Hono } from 'hono';
 import type {
-  AgentColor,
   AgentProxyDefaults,
   ConfigValue,
   Executor,
@@ -135,6 +134,21 @@ export function registerAgentRoutes(
   // ------------------------------------------------------------------
   app.get('/api/proxies', c => c.json({ proxies: options.agents.proxiesCatalog() }));
 
+  app.get('/api/proxies/:id/logo/:variant', async c => {
+    const id = executor(c.req.param('id'));
+    const variant = c.req.param('variant');
+    if (!id || !isProductExecutor(id) || (variant !== 'light' && variant !== 'dark')) {
+      return c.json({ error: 'logo not found' }, 404);
+    }
+    const logo = await options.agents.proxyLogo(id, variant);
+    if (!logo) return c.json({ error: 'logo not found' }, 404);
+    c.header('content-type', logo.mediaType);
+    c.header('cache-control', 'private, max-age=300');
+    c.header('etag', `"${logo.sha256}"`);
+    c.header('x-content-type-options', 'nosniff');
+    return c.body(Uint8Array.from(logo.bytes).buffer);
+  });
+
   // ------------------------------------------------------------------
   // User Agents (saved identities in agents.json).
   // ------------------------------------------------------------------
@@ -168,7 +182,6 @@ export function registerAgentRoutes(
       const agent = await options.agents.createAgent({
         name: body.name,
         proxy: body.proxy,
-        ...(body.color !== undefined ? { color: body.color as AgentColor } : {}),
         ...(cliPath !== undefined ? { cliPath } : {}),
         defaults: defaultsPatch,
       });
@@ -194,7 +207,6 @@ export function registerAgentRoutes(
         if (typeof body.name !== 'string') return c.json({ error: 'name must be a string' }, 400);
         patch.name = body.name;
       }
-      if (body.color !== undefined) patch.color = body.color as AgentColor;
       if (body.cliPath !== undefined) {
         if (body.cliPath !== null && typeof body.cliPath !== 'string') {
           return c.json({ error: 'cliPath must be a string or null' }, 400);
@@ -342,7 +354,6 @@ export function registerAgentRoutes(
     const existing = options.agents.listAgents().filter(agent => agent.proxy === kind);
     return c.json({
       name: options.agents.nextAgentName(kind),
-      color: options.agents.nextAgentColor(kind),
       // A second Agent of the same kind starts from the kind's existing path;
       // otherwise prefill the first locally detected CLI (PATH, then official
       // install locations). The user can still change it before saving.

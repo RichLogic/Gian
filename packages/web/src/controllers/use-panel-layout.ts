@@ -6,6 +6,8 @@ import {
   useState,
 } from 'react';
 import type { CSSProperties, Dispatch, MouseEvent as ReactMouseEvent, SetStateAction } from 'react';
+import type { LayoutPreferences } from '@gian/shared';
+import { DEFAULT_LAYOUT_PREFERENCES } from '@gian/shared';
 import type { RailLayoutController } from '../components/RailLayout.js';
 import {
   INSPECTOR_MAX_PX,
@@ -23,10 +25,7 @@ import {
 } from '../presentation/panel-layout.js';
 import type { PanelDragResult, PanelDragSnapshot } from '../presentation/panel-layout.js';
 
-const DEFAULT_SIDEBAR_WIDTH = 272;
 const DEFAULT_SHEET_WIDTH = 600;
-const DEFAULT_INSPECTOR_WIDTH = 280;
-const DEFAULT_MAIN_RATIO = 0.5;
 const LAYOUT_SETTLE_MS = 200;
 
 const STORAGE = {
@@ -45,6 +44,7 @@ interface UsePanelLayoutInput {
   inspectorVisible: boolean;
   p3Collapsed: boolean;
   setP3Collapsed: Dispatch<SetStateAction<boolean>>;
+  preferences?: LayoutPreferences;
 }
 
 function readNumber(key: string, fallback: number, min: number, max: number): number {
@@ -75,16 +75,21 @@ export function usePanelLayout({
   inspectorVisible,
   p3Collapsed,
   setP3Collapsed,
+  preferences = DEFAULT_LAYOUT_PREFERENCES,
 }: UsePanelLayoutInput) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const [sidebarWidth, setSidebarWidth] = useState(() =>
-    readNumber(STORAGE.sidebarWidth, DEFAULT_SIDEBAR_WIDTH, SIDEBAR_MIN_PX, SIDEBAR_MAX_PX));
+    readNumber(STORAGE.sidebarWidth, preferences.sidebar_width, SIDEBAR_MIN_PX, SIDEBAR_MAX_PX));
   const [sidebarCollapsed, setSidebarCollapsedState] = useState(() =>
-    typeof window !== 'undefined' && window.localStorage.getItem(STORAGE.sidebarCollapsed) === '1');
+    typeof window !== 'undefined'
+      ? (window.localStorage.getItem(STORAGE.sidebarCollapsed) === null
+          ? preferences.sidebar_start_collapsed
+          : window.localStorage.getItem(STORAGE.sidebarCollapsed) === '1')
+      : preferences.sidebar_start_collapsed);
   const [sheetWidth, setSheetWidth] = useState(DEFAULT_SHEET_WIDTH);
   const [inspectorWidth, setInspectorWidth] = useState(() =>
-    readNumber(STORAGE.inspectorWidth, DEFAULT_INSPECTOR_WIDTH, INSPECTOR_MIN_PX, INSPECTOR_MAX_PX));
-  const mainRatioRef = useRef(readNumber(STORAGE.mainRatio, DEFAULT_MAIN_RATIO, 0.05, 0.95));
+    readNumber(STORAGE.inspectorWidth, preferences.inspector_width, INSPECTOR_MIN_PX, INSPECTOR_MAX_PX));
+  const mainRatioRef = useRef(readNumber(STORAGE.mainRatio, preferences.main_panel_ratio, 0.05, 0.95));
   const [resizing, setResizing] = useState(false);
   const resizingRef = useRef(false);
   const sidebarCollapsedRef = useRef(sidebarCollapsed);
@@ -110,6 +115,15 @@ export function usePanelLayout({
   useEffect(() => {
     window.localStorage.setItem(STORAGE.sidebarCollapsed, sidebarCollapsed ? '1' : '0');
   }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    if (resizingRef.current) return;
+    sidebarPreferredWidthRef.current = preferences.sidebar_width;
+    inspectorPreferredWidthRef.current = preferences.inspector_width;
+    mainRatioRef.current = preferences.main_panel_ratio;
+    setSidebarWidth(preferences.sidebar_width);
+    setInspectorWidth(preferences.inspector_width);
+  }, [preferences.inspector_width, preferences.main_panel_ratio, preferences.sidebar_width]);
   const setSidebarCollapsed = useCallback((next: boolean) => {
     setSidebarCollapsedState(next);
   }, []);
@@ -160,22 +174,26 @@ export function usePanelLayout({
     if (total <= 0 || mainWidthNow <= 0 || sheetWidthNow <= 0) return;
     const next = clampMiddleRatio(mainWidthNow / total);
     mainRatioRef.current = next;
-    window.localStorage.setItem(STORAGE.mainRatio, String(next));
-  }, [getElements]);
+    if (preferences.remember_sizes) window.localStorage.setItem(STORAGE.mainRatio, String(next));
+  }, [getElements, preferences.remember_sizes]);
 
   const applyDragResult = useCallback((result: PanelDragResult) => {
     if (result.sidebarWidth !== undefined) {
       sidebarPreferredWidthRef.current = result.sidebarWidth;
-      window.localStorage.setItem(STORAGE.sidebarWidth, String(result.sidebarWidth));
+      if (preferences.remember_sizes) {
+        window.localStorage.setItem(STORAGE.sidebarWidth, String(result.sidebarWidth));
+      }
       setSidebarWidth(result.sidebarWidth);
     }
     if (result.sheetWidth !== undefined) setSheetWidth(result.sheetWidth);
     if (result.inspectorWidth !== undefined) {
       inspectorPreferredWidthRef.current = result.inspectorWidth;
-      window.localStorage.setItem(STORAGE.inspectorWidth, String(result.inspectorWidth));
+      if (preferences.remember_sizes) {
+        window.localStorage.setItem(STORAGE.inspectorWidth, String(result.inspectorWidth));
+      }
       setInspectorWidth(result.inspectorWidth);
     }
-  }, []);
+  }, [preferences.remember_sizes]);
 
   const beginDrag = useCallback((seam: PanelSeam, event: ReactMouseEvent) => {
     if (event.button !== 0) return;

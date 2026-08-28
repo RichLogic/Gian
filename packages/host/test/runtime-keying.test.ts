@@ -163,3 +163,53 @@ test('ProxyManager keys shared hosts by (kind, path): two Codex paths get two ho
   assert.deepEqual(acquiredPaths, [pathA, pathB, pathA]);
   await manager.closeAll();
 });
+
+test('ProxyManager keeps exact Runtime Profile Proxy versions isolated', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-proxy-version-keying-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const entries = new Map<string, string>();
+  for (const version of ['0.2.8', '0.2.9']) {
+    const entry = join(root, `codex-${version}.mjs`);
+    await writeFile(entry, `
+      import { createInterface } from 'node:readline';
+      const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+      for await (const line of input) {
+        const request = JSON.parse(line);
+        ${STDIO_BOOT.replaceAll('0.2.0', version)}
+      }
+    `);
+    entries.set(version, entry);
+  }
+  const resolved: string[] = [];
+  const manager = new ProxyManager({
+    dataDir: root,
+    ccProxyEntry: '/unused/cc-proxy.mjs',
+    codexProxyEntry: entries.get('0.2.9'),
+    codexProxy: { pluginVersion: '0.2.9', processScope: 'shared' },
+    resolveProxyVersion: async (_executor, version) => {
+      resolved.push(version);
+      return {
+        entryPath: entries.get(version)!,
+        protocol: { pluginVersion: version, processScope: 'shared' },
+      };
+    },
+    runtimeManager: {
+      async acquire() {
+        return {
+          cli: 'codex', binaryPath: '/fake/codex', version: '0.146.0',
+          source: 'managed', env: {}, async release() {},
+        };
+      },
+    } as never,
+  });
+
+  const oldClient = await manager.getOrCreate('old-session', 'codex', {
+    cliPath: '/fake/codex', proxyVersion: '0.2.8',
+  });
+  const newClient = await manager.getOrCreate('new-session', 'codex', {
+    cliPath: '/fake/codex', proxyVersion: '0.2.9',
+  });
+  assert.notEqual(oldClient.runtimeHost(), newClient.runtimeHost());
+  assert.deepEqual(resolved.sort(), ['0.2.8', '0.2.9']);
+  await manager.closeAll();
+});

@@ -10,6 +10,7 @@ import {
   AgentManager,
   parseIndependentProxyRelease,
   recommendedCliVersionFromManifest,
+  verifiedCliVersionsFromManifest,
 } from '../src/agents/manager.js';
 
 const execFileAsync = promisify(execFile);
@@ -52,6 +53,38 @@ test('recommended CLI version prefers the installed Proxy manifest over the Host
   }, 'grok'), '9.9.9');
 });
 
+test('verified CLI versions prefer the exact manifest list and read legacy packages', () => {
+  assert.deepEqual(verifiedCliVersionsFromManifest(null, 'codex'), ['0.146.0']);
+  assert.deepEqual(verifiedCliVersionsFromManifest({
+    schemaVersion: 2,
+    id: 'codex',
+    displayName: 'Codex',
+    pluginVersion: '0.2.8',
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=2.1 <3.0' },
+    process: { scope: 'shared' },
+    runtime: {
+      id: 'codex',
+      displayName: 'Codex CLI',
+      verifiedCliVersions: ['0.146.0', '0.146.1'],
+    },
+  }, 'codex'), ['0.146.0', '0.146.1']);
+  assert.deepEqual(verifiedCliVersionsFromManifest({
+    schemaVersion: 2,
+    id: 'codex',
+    displayName: 'Codex',
+    pluginVersion: '0.2.7',
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=2.0 <3.0' },
+    process: { scope: 'shared' },
+    runtime: {
+      id: 'codex',
+      displayName: 'Codex CLI',
+      recommendedCliVersion: '0.145.0',
+    },
+  }, 'codex'), ['0.145.0']);
+});
+
 test('independent Proxy releases select the highest stable plugin SemVer', () => {
   assert.deepEqual(parseIndependentProxyRelease([
     { tag_name: 'proxy-codex-v1.9.0', draft: false, prerelease: false },
@@ -83,6 +116,15 @@ function selfTestingProxy(id: string): string {
 function selfTestingProxyV2(id: string, pluginVersion: string): string {
   return `if (process.argv.includes('--self-test')) process.stdout.write('${JSON.stringify({
     schemaVersion: 2,
+    id,
+    pluginVersion,
+    ok: true,
+  })}\\n');\n`;
+}
+
+function selfTestingProxyV3(id: string, pluginVersion: string): string {
+  return `if (process.argv.includes('--self-test')) process.stdout.write('${JSON.stringify({
+    schemaVersion: 3,
     id,
     pluginVersion,
     ok: true,
@@ -135,16 +177,21 @@ test('agent manager detects configured official CLIs and development proxies', a
     ['Codex', 'codex', bins.codex],
     ['Kimi Code', 'kimi', bins.kimi],
   ]);
-  assert.deepEqual(saved.map(agent => agent.color), ['ember', 'ink', 'citron']);
+  assert.equal(saved.some(agent => 'color' in agent), false);
   const claudeStatus = await manager.agentStatus(saved[0]!.id);
   assert.equal(claudeStatus.ready, true);
   assert.equal(claudeStatus.cli.version, '2.1.220');
   assert.equal(claudeStatus.proxyName, 'Claude Code');
+  const codexAgent = saved.find(agent => agent.proxy === 'codex')!;
+  const codexStatus = await manager.agentStatus(codexAgent.id);
+  assert.equal(codexStatus.runtimeProfile?.verification, 'verified');
+  assert.deepEqual(codexStatus.runtimeProfile?.verifiedCliVersions, ['0.146.0']);
 
   await executable(bins.codex, 'codex-cli 0.147.0');
   assert.equal((await manager.status('codex')).cli.version, '0.146.0');
   assert.equal((await manager.status('codex', true)).cli.version, '0.147.0');
-  assert.equal((await manager.status('grok')).cli.recommendedVersion, '1.0.4');
+  assert.equal((await manager.agentStatus(codexAgent.id, true)).runtimeProfile?.verification, 'unverified');
+  assert.deepEqual((await manager.status('grok')).proxy.verifiedCliVersions, ['1.0.4']);
 });
 
 test('managed Grok Proxy recommended CLI version comes from the plugin manifest', async t => {
@@ -184,7 +231,7 @@ test('managed Grok Proxy recommended CLI version comes from the plugin manifest'
 
   const status = await manager.status('grok');
   assert.equal(status.cli.version, '1.0.4');
-  assert.equal(status.cli.recommendedVersion, '1.0.4');
+  assert.deepEqual(status.proxy.verifiedCliVersions, ['1.0.4']);
 });
 
 test('fresh managed profile exposes onboarding before any Proxy is installed', async t => {
@@ -248,6 +295,67 @@ test('agent manager validates and persists a user CLI path', async t => {
   assert.equal(reloaded.getAgent(agent.id).cliPath, claude);
   const reloadedAgain = await AgentManager.create(options);
   assert.equal(reloadedAgain.getAgent(agent.id).cliPath, claude);
+});
+
+test('a Codex path change projects a new immutable Runtime Profile generation', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-runtime-profile-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const proxy = join(root, 'proxy.mjs');
+  const firstPath = join(root, 'codex-a');
+  const secondPath = join(root, 'codex-b');
+  await writeFile(proxy, 'export {};\n');
+  await executable(firstPath, 'codex-cli 0.146.0');
+  await executable(secondPath, 'codex-cli 0.147.0');
+  const manager = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.5.3',
+    managedProxies: false,
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy },
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+  const agent = await manager.createAgent({ name: 'Codex', proxy: 'codex', cliPath: firstPath });
+  const first = (await manager.agentStatus(agent.id, true)).runtimeProfile!;
+  assert.equal(first.verification, 'verified');
+  assert.equal(first.cliPath, firstPath);
+
+  await manager.updateAgent(agent.id, { cliPath: secondPath });
+  const second = (await manager.agentStatus(agent.id, true)).runtimeProfile!;
+  assert.equal(second.verification, 'unverified');
+  assert.equal(second.cliPath, secondPath);
+  assert.notEqual(second.id, first.id);
+});
+
+test('Codex Agent provisioning reconciles the Proxy-owned gian-session Skill', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-managed-skill-wiring-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const packageDir = join(root, 'codex-proxy');
+  const proxy = join(packageDir, 'dist', 'src', 'cli', 'spawn.js');
+  const skill = join(packageDir, 'skills', 'gian-session', 'SKILL.md');
+  const codex = join(root, 'bin', 'codex');
+  await mkdir(dirname(proxy), { recursive: true });
+  await mkdir(dirname(skill), { recursive: true });
+  await writeFile(join(packageDir, 'package.json'), JSON.stringify({
+    name: '@gian/codex-proxy', version: '0.2.8',
+  }));
+  await writeFile(proxy, 'export {};\n');
+  await writeFile(skill, `---\nname: gian-session\ndescription: Use Gian MCP.\n---\n\n# Gian\n`);
+  await executable(codex, 'codex-cli 0.146.0');
+  const home = join(root, 'home');
+  const manager = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.5.3',
+    managedProxies: false,
+    developmentProxyEntries: { codex: proxy },
+    homeDir: home,
+    pathEnv: '',
+  });
+  const agent = await manager.createAgent({ name: 'Codex', proxy: 'codex', cliPath: codex });
+  const installed = join(home, '.agents', 'skills', 'gian-session', 'SKILL.md');
+  assert.match(await readFile(installed, 'utf8'), /name: gian-session/);
+  const status = await manager.agentStatus(agent.id, true);
+  assert.equal(status.runtimeProfile?.skill.state, 'ready');
+  assert.equal(status.runtimeProfile?.skill.version, '0.2.8');
 });
 
 test('agent manager migrates and persists Proxy-owned session defaults', async t => {
@@ -595,6 +703,48 @@ test('manifest v2 keeps a compatible independently-versioned Proxy ready', async
   assert.equal(status.ready, true);
 });
 
+test('manifest v3 validates and serves content-addressed Proxy logo assets', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-proxy-v3-logo-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const proxyDir = join(root, 'data', 'plugins', 'codex', '8.0.0');
+  const assetsDir = join(proxyDir, 'assets');
+  await mkdir(assetsDir, { recursive: true });
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from('logo-fixture'),
+  ]);
+  const digest = createHash('sha256').update(png).digest('hex');
+  await writeFile(join(proxyDir, 'proxy.mjs'), selfTestingProxyV3('codex', '8.0.0'));
+  await writeFile(join(assetsDir, 'logo.png'), png);
+  await writeFile(join(proxyDir, 'manifest.json'), JSON.stringify({
+    schemaVersion: 3,
+    id: 'codex',
+    displayName: 'Codex',
+    pluginVersion: '8.0.0',
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=2.1 <3.0' },
+    process: { scope: 'shared' },
+    branding: {
+      logo: {
+        light: { path: 'assets/logo.png', mediaType: 'image/png', sha256: digest },
+      },
+    },
+  }));
+  await symlink('8.0.0', join(root, 'data', 'plugins', 'codex', 'current'), 'dir');
+
+  const manager = await AgentManager.create({
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.5.3',
+    managedProxies: true,
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+  assert.equal((await manager.status('codex')).proxy.state, 'ready');
+  const logo = await manager.proxyLogo('codex', 'dark');
+  assert.deepEqual(logo?.bytes, png, 'dark falls back to the declared light asset');
+  assert.equal(logo?.sha256, digest);
+});
+
 test('manifest v2 reports an incompatible protocol range as outdated', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-agent-proxy-v2-outdated-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -873,12 +1023,12 @@ test('v1 agents.json migrates one default Agent per configured kind', async t =>
   assert.deepEqual(agents[0]!.defaults, { model: 'sonnet', thinking: '', mode: 'ask' });
   assert.deepEqual(agents[1]!.defaults, { model: 'gpt-5', thinking: 'high', mode: '' });
 
-  // The persisted file is schema v2 and survives a reload untouched.
+  // The persisted file is schema v3 and survives a reload untouched.
   const persisted = JSON.parse(await readFile(join(dataDir, 'agents.json'), 'utf8')) as {
     schemaVersion: number;
     agents: unknown[];
   };
-  assert.equal(persisted.schemaVersion, 2);
+  assert.equal(persisted.schemaVersion, 3);
   assert.equal(persisted.agents.length, 2);
   const reloaded = await AgentManager.create({
     dataDir,
@@ -911,9 +1061,42 @@ test('v2 migration creates an Agent for a kind that only appears in sessions', a
   const agents = manager.listAgents();
   // kimi migrates from session history; grok is out of the product catalog;
   // claude/codex/dsh have no configuration, Proxy, or session — no Agent.
-  assert.deepEqual(agents.map(agent => [agent.proxy, agent.name, agent.color]), [
-    ['kimi', 'Kimi Code', 'citron'],
+  assert.deepEqual(agents.map(agent => [agent.proxy, agent.name]), [
+    ['kimi', 'Kimi Code'],
   ]);
+});
+
+test('agents.json v2 migrates to v3 and removes persisted Agent colors', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-v3-color-removal-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'data');
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(join(dataDir, 'agents.json'), JSON.stringify({
+    schemaVersion: 2,
+    agents: [{
+      id: 'agent-1',
+      name: 'Claude Work',
+      color: 'plum',
+      proxy: 'claude',
+      cliPath: null,
+      defaults: { model: '', thinking: '', mode: '' },
+    }],
+  }));
+  const manager = await AgentManager.create({
+    dataDir,
+    releaseVersion: '0.5.3',
+    managedProxies: false,
+    developmentProxyEntries: {},
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+  assert.equal('color' in manager.listAgents()[0]!, false);
+  const persisted = JSON.parse(await readFile(join(dataDir, 'agents.json'), 'utf8')) as {
+    schemaVersion: number;
+    agents: Array<Record<string, unknown>>;
+  };
+  assert.equal(persisted.schemaVersion, 3);
+  assert.equal('color' in persisted.agents[0]!, false);
 });
 
 test('agent names are unique case-insensitively after trim', async t => {
@@ -952,7 +1135,7 @@ test('agent names are unique case-insensitively after trim', async t => {
   assert.equal(renamed.name, 'work codex');
 });
 
-test('agent draft helpers number names and rotate colors per kind', async t => {
+test('agent draft helpers number names per kind', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-agent-helpers-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const proxy = join(root, 'proxy.mjs');
@@ -967,20 +1150,11 @@ test('agent draft helpers number names and rotate colors per kind', async t => {
   });
 
   assert.equal(manager.nextAgentName('claude'), 'Claude Code');
-  assert.equal(manager.nextAgentColor('claude'), 'ember');
   await manager.createAgent({ name: 'Claude Code', proxy: 'claude' });
   assert.equal(manager.nextAgentName('claude'), 'Claude Code 2');
-  // A second Agent of the same kind gets the next unoccupied palette color.
-  const second = await manager.createAgent({ name: 'Claude Code 2', proxy: 'claude' });
-  assert.equal(second.color, 'rose');
+  await manager.createAgent({ name: 'Claude Code 2', proxy: 'claude' });
   assert.equal(manager.nextAgentName('claude'), 'Claude Code 3');
-
-  // Explicit color choices are honored and occupied colors are skipped.
-  const third = await manager.createAgent({ name: 'Claude Code 3', proxy: 'claude', color: 'moss' });
-  assert.equal(third.color, 'moss');
-  assert.equal(manager.nextAgentColor('claude'), 'citron');
-  // A different kind still starts from its own default color.
-  assert.equal(manager.nextAgentColor('codex'), 'ink');
+  assert.equal(manager.nextAgentName('codex'), 'Codex');
 });
 
 test('agent CRUD persists and delete removes only the target Agent', async t => {
@@ -1000,13 +1174,11 @@ test('agent CRUD persists and delete removes only the target Agent', async t => 
 
   const claudeA = await manager.createAgent({ name: 'Claude A', proxy: 'claude' });
   const claudeB = await manager.createAgent({ name: 'Claude B', proxy: 'claude' });
-  await manager.updateAgent(claudeB.id, { color: 'azure', defaults: { model: 'opus' } });
+  await manager.updateAgent(claudeB.id, { defaults: { model: 'opus' } });
   await manager.deleteAgent(claudeA.id);
 
   const reloaded = await AgentManager.create(options);
-  assert.deepEqual(reloaded.listAgents().map(agent => [agent.name, agent.color]), [
-    ['Claude B', 'azure'],
-  ]);
+  assert.deepEqual(reloaded.listAgents().map(agent => agent.name), ['Claude B']);
   assert.deepEqual(reloaded.agentDefaults(claudeB.id), { model: 'opus', thinking: '', mode: '' });
   assert.throws(() => reloaded.getAgent(claudeA.id), /agent not found/);
   await assert.rejects(reloaded.deleteAgent(claudeA.id), /agent not found/);
@@ -1025,12 +1197,12 @@ test('proxies catalog is static product metadata without Grok', async t => {
   });
 
   assert.deepEqual(
-    manager.proxiesCatalog().map(entry => [entry.id, entry.name, entry.defaultColor]),
+    manager.proxiesCatalog().map(entry => [entry.id, entry.name, entry.logo]),
     [
-      ['claude', 'Claude Code', 'ember'],
-      ['codex', 'Codex', 'ink'],
-      ['kimi', 'Kimi Code', 'citron'],
-      ['dsh', 'DeepSeek Harness', 'teal'],
+      ['claude', 'Claude Code', { light: '/api/proxies/claude/logo/light', dark: '/api/proxies/claude/logo/dark' }],
+      ['codex', 'Codex', { light: '/api/proxies/codex/logo/light', dark: '/api/proxies/codex/logo/dark' }],
+      ['kimi', 'Kimi Code', { light: '/api/proxies/kimi/logo/light', dark: '/api/proxies/kimi/logo/dark' }],
+      ['dsh', 'DeepSeek Harness', { light: '/api/proxies/dsh/logo/light', dark: '/api/proxies/dsh/logo/dark' }],
     ],
   );
   for (const entry of manager.proxiesCatalog()) {
@@ -1053,7 +1225,7 @@ test('development proxy status reports the vendored plugin package version', asy
 
   const manager = await AgentManager.create({
     dataDir: join(root, 'data'),
-    releaseVersion: '0.5.2',
+    releaseVersion: '0.5.3',
     managedProxies: false,
     developmentProxyEntries: { claude: entry },
     homeDir: join(root, 'home'),
@@ -1061,7 +1233,7 @@ test('development proxy status reports the vendored plugin package version', asy
   });
 
   const status = await manager.status('claude');
-  // GianDev must show the Proxy's own version, never the App's 0.5.2.
+  // GianDev must show the Proxy's own version, never the App's 0.5.3.
   assert.equal(status.proxy.version, '0.2.1');
   assert.equal(status.proxy.source, 'development');
   assert.deepEqual(await manager.checkProxyUpdate('claude'), {

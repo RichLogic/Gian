@@ -168,6 +168,56 @@ test('sidechat and fork capabilities are orthogonal to process.scope', () => {
   assert.equal(host.initializeResult?.capabilities.sidechat, 1);
 });
 
+test('session.create accepts bounded canonical Fork boundaries for a reattach generation', () => {
+  const request = parseProxyRequest(rpc({
+    id: 'create-with-fork-boundaries',
+    method: 'session.create',
+    params: {
+      sessionId: 's_1',
+      workspace: { cwd: '/tmp/project', roots: ['/tmp/project'] },
+      config: {},
+      forkBoundaries: [
+        { turnId: 'host-turn-1', sourceTurnId: 'provider-turn-1' },
+        { turnId: 'host-turn-2', sourceTurnId: 'provider-turn-2' },
+      ],
+    },
+  }));
+  assert.equal(request.method, 'session.create');
+  if (request.method !== 'session.create') throw new Error('expected session.create');
+  assert.deepEqual(request.params.forkBoundaries, [
+    { turnId: 'host-turn-1', sourceTurnId: 'provider-turn-1' },
+    { turnId: 'host-turn-2', sourceTurnId: 'provider-turn-2' },
+  ]);
+  assert.throws(
+    () => parseProxyRequest(rpc({
+      id: 'create-with-bad-fork-boundary',
+      method: 'session.create',
+      params: {
+        sessionId: 's_1',
+        workspace: { cwd: '/tmp/project', roots: ['/tmp/project'] },
+        config: {},
+        forkBoundaries: [{ turnId: '', sourceTurnId: 'provider-turn-1' }],
+      },
+    })),
+    (error: unknown) => error instanceof ProxyProtocolError,
+  );
+
+  const unsupported = validator({ 'session.replay': 1 });
+  listCatalog(unsupported);
+  assert.throws(
+    () => unsupported.registerRequest(request),
+    (error: unknown) => error instanceof ProxyProtocolError
+      && error.code === 'CAPABILITY_NOT_SUPPORTED',
+  );
+
+  const supported = validator({
+    'session.replay': 1,
+    'session.create.forkBoundaries': 1,
+  });
+  listCatalog(supported);
+  supported.registerRequest(request);
+});
+
 test('catalog actions treat missing known ids as unsupported and ignore unknown ids', () => {
   const normalized = normalizeCatalogActions([
     { id: 'sidechat.create', supported: true },

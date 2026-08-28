@@ -5,6 +5,7 @@ import type { Executor, NativeConfigOption, Session } from '@gian/shared';
 
 import { Composer } from '../src/components/Composer.js';
 import { LocaleProvider } from '../src/i18n/index.js';
+import { typeInlineComposer } from './inline-composer-test-utils.js';
 
 vi.mock('../src/api.js', () => ({
   loadProxyModels: vi.fn(async (executor: 'claude' | 'codex') => executor === 'codex'
@@ -110,16 +111,16 @@ describe('CLI-aligned composer controls', () => {
     const callbacks = renderComposer(session);
 
     await waitFor(() => {
-      expect(document.querySelector('.cmp-options-btn')?.textContent).toContain('Ultra');
+      expect(screen.getByTestId('composer-thinking-chip')).toHaveTextContent('Ultra');
     });
-    expect(document.querySelector('.cmp-executor-mark.codex')).toBeTruthy();
+    expect(document.querySelector('.cmp-executor-mark')).toBeNull();
 
-    await user.click(document.querySelector('.cmp-options-btn')!);
+    await user.click(screen.getByTestId('composer-thinking-chip'));
     expect(await screen.findByText('Max', { selector: '.mp-row-title' })).toBeTruthy();
     expect(screen.getByText('Ultra', { selector: '.mp-row-title' })).toBeTruthy();
 
-    const fast = screen.getByRole('switch', { name: 'Fast' });
-    expect(fast).toHaveAttribute('aria-checked', 'true');
+    const fast = screen.getByTestId('composer-fast-chip');
+    expect(fast).toHaveAttribute('aria-pressed', 'true');
 
     await user.click(document.querySelector('.cmp-approval-btn')!);
     const custom = await screen.findByText('Custom (config.toml)', { selector: '.mp-row-title' });
@@ -178,7 +179,7 @@ describe('CLI-aligned composer controls', () => {
       },
     }));
 
-    expect(document.querySelector('.cmp-executor-mark.kimi')).toBeTruthy();
+    expect(document.querySelector('.cmp-executor-mark')).toBeNull();
     expect(screen.getByRole('button', { name: /Kimi K2/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /High/ })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Fast' })).toBeNull();
@@ -197,11 +198,11 @@ describe('CLI-aligned composer controls', () => {
     await user.click(screen.getByText('plan', { selector: '.mp-row-title' }).closest('button')!);
     expect(callbacks.onSetNativeConfig).toHaveBeenCalledWith('mode', 'plan');
 
-    await user.type(screen.getByRole('textbox'), '/');
+    typeInlineComposer(screen.getByRole('textbox'), '/');
     expect(await screen.findByText('/review')).toBeTruthy();
   });
 
-  it('renders the Grok executor mark for Grok-native model options', async () => {
+  it('does not put an executor mark in Grok-native model options', async () => {
     const options: NativeConfigOption[] = [{
       id: 'model',
       name: 'Model',
@@ -220,9 +221,9 @@ describe('CLI-aligned composer controls', () => {
     }));
 
     await waitFor(() => {
-      expect(document.querySelector('.cmp-executor-mark.grok')).toBeTruthy();
+      expect(screen.getByRole('button', { name: /Grok Build/ })).toBeTruthy();
     });
-    expect(document.querySelector('.cmp-executor-mark.kimi')).toBeNull();
+    expect(document.querySelector('.cmp-executor-mark')).toBeNull();
   });
 
   it('removes slash and Remote buttons while keeping typed slash discovery', async () => {
@@ -232,9 +233,10 @@ describe('CLI-aligned composer controls', () => {
     expect(document.querySelector('.slash-box')).toBeNull();
     expect(screen.queryByRole('button', { name: /Remote Control/i })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Fast' })).toBeNull();
-    expect(document.querySelector('.cmp-options-btn')).toBeTruthy();
+    expect(screen.getByTestId('composer-model-chip')).toBeTruthy();
+    expect(screen.getByTestId('composer-thinking-chip')).toBeTruthy();
 
-    await user.type(screen.getByRole('textbox'), '/');
+    typeInlineComposer(screen.getByRole('textbox'), '/');
     expect(await screen.findByText('/review')).toBeTruthy();
   });
 });

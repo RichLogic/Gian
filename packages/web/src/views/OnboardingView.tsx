@@ -103,20 +103,18 @@ export function OnboardingView({
   async function addAgent(kind: ProductExecutor) {
     setError('');
     let name = proxies.find(entry => entry.id === kind)?.name ?? kind;
-    let color: import('@gian/shared').AgentColor = 'azure';
     let cliPath: string | null = null;
     try {
       const { loadAgentDraftDefaults } = await import('../api.js');
       const defaults = await loadAgentDraftDefaults(kind);
       name = defaults.name;
-      color = defaults.color;
       cliPath = defaults.cliPath;
     } catch {
       // Fall back to the catalog display name; the Host still validates.
     }
     const settled = await waitForRunSettle(
       store,
-      dispatch('agent.create', { name, proxy: kind, color, cliPath, restart: false }).id,
+      dispatch('agent.create', { name, proxy: kind, cliPath, restart: false }).id,
     );
     if (settled.phase !== 'confirmed') {
       setError(settled.error ?? 'Add failed');
@@ -128,10 +126,13 @@ export function OnboardingView({
 
   async function setupOne(agent: UserAgentStatus) {
     setError('');
-    if (agent.plugin.state !== 'ready') {
+    // A Proxy activation smoke starts the exact vendor runtime, so a clean
+    // machine must provision the CLI first. Installing Proxy first made the
+    // fresh pair fail despite both installers being available.
+    if (agent.cli.state !== 'ready') {
       const settled = await waitForRunSettle(
         store,
-        dispatch('agent.installProxy', { executor: agent.proxy }).id,
+        dispatch('agent.installCli', { executor: agent.proxy }).id,
       );
       if (settled.phase !== 'confirmed') {
         setError(settled.error ?? 'Install failed');
@@ -139,10 +140,12 @@ export function OnboardingView({
         return;
       }
     }
-    if (agent.cli.state !== 'ready') {
+    const refreshed = (await refreshAgents().catch(() => []))
+      .find(candidate => candidate.id === agent.id) ?? agent;
+    if (refreshed.plugin.state !== 'ready') {
       const settled = await waitForRunSettle(
         store,
-        dispatch('agent.installCli', { executor: agent.proxy }).id,
+        dispatch('agent.installProxy', { executor: agent.proxy }).id,
       );
       if (settled.phase !== 'confirmed') {
         setError(settled.error ?? 'Install failed');
@@ -273,7 +276,6 @@ export function OnboardingView({
               {missingKinds.map(entry => (
                 <article key={entry.id} className="onboarding-agent" data-testid={`onboarding-add-${entry.id}`}>
                   <div className="onboarding-agent-summary">
-                    <span className="exec-dot" style={{ background: `var(--agent-${entry.defaultColor})` }} />
                     <div>
                       <h3>{entry.name}</h3>
                       <p>{entry.tagline}</p>
@@ -389,7 +391,6 @@ function OnboardingAgentRow({
   return (
     <article className={`onboarding-agent ${agent.ready ? 'ready' : ''}`}>
       <div className="onboarding-agent-summary">
-        <span className="exec-dot" style={{ background: `var(--agent-${agent.color})` }} />
         <div>
           <h3>{agent.name}</h3>
           <p>{agent.ready ? t('onboarding.agents.ready') : t('onboarding.agents.setupRequired')}</p>

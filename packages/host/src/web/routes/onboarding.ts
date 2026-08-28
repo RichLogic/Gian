@@ -8,8 +8,6 @@ import {
   resetOnboarding,
   saveOnboardingProjectRoot,
 } from '../../onboarding/state.js';
-import { syncAgentInstructionBlocks } from '../../onboarding/agent-instructions.js';
-import { expandHome } from '../../workspace/index.js';
 
 function errorResponse(error: unknown): { error: string } {
   return { error: error instanceof Error ? error.message : String(error) };
@@ -20,9 +18,6 @@ export function registerOnboardingRoutes(
   options: {
     db: Db;
     agents: AgentManager;
-    /** Test seam for proving the completion route triggers the same managed
-     * instruction sync used at host startup without writing into real homes. */
-    syncAgentInstructions?: typeof syncAgentInstructionBlocks;
   },
 ): void {
   app.get('/api/onboarding', async c => c.json(
@@ -52,16 +47,6 @@ export function registerOnboardingRoutes(
         (await buildOnboardingState(options.db, agents)).projectRoot,
       );
       markOnboardingComplete(options.db);
-      // The project root was just (re)confirmed — refresh the managed
-      // block in every agent CLI's global instruction file. A failure here
-      // must not fail onboarding.
-      try {
-        await (options.syncAgentInstructions ?? syncAgentInstructionBlocks)(
-          expandHome(config.projectRoot),
-        );
-      } catch (error) {
-        console.warn('[gian] agent instruction sync failed:', error);
-      }
       return c.json({
         ...(await buildOnboardingState(options.db, agents)),
         ...config,

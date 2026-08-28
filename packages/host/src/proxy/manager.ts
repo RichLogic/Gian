@@ -76,6 +76,12 @@ export interface ProxyManagerConfig {
   codexBin?: string;
   /** Kimi always resolves through this manager; no PATH fallback in proxy. */
   runtimeManager?: CliRuntimeManager;
+  /** Resolve an immutable managed Proxy version selected by a Session Runtime
+   * Profile. Omitted uses the boot descriptor for legacy Sessions. */
+  resolveProxyVersion?: (
+    executor: Executor,
+    version: string,
+  ) => Promise<{ entryPath: string; protocol?: ProxyProtocolDescriptor }>;
 }
 
 /**
@@ -135,17 +141,18 @@ export class ProxyManager {
 
   /** Shared-host map key for one Agent's resolved CLI path. '' is the
    *  provider-default resolution (environment override / PATH / official). */
-  private static hostKey(cliPath?: string | null): string {
-    return cliPath ?? '';
+  private static hostKey(cliPath?: string | null, proxyVersion?: string | null): string {
+    return `${cliPath ?? ''}\u0000${proxyVersion ?? ''}`;
   }
 
   async getOrCreate(
     sessionId: string,
     executor: Executor,
-    options?: { cliPath?: string | null },
+    options?: { cliPath?: string | null; proxyVersion?: string | null },
   ): Promise<ProxyClient> {
     const proxyExecutor: ProxyExecutor = executor;
     const cliPath = options?.cliPath ?? null;
+    const proxyVersion = options?.proxyVersion ?? null;
     while (true) {
       const closing = this.closingByExecutor.get(proxyExecutor);
       if (closing) {
@@ -213,7 +220,13 @@ export class ProxyManager {
       }
 
       const closeEpoch = this.closeEpochByExecutor.get(proxyExecutor) ?? 0;
-      const attempt = this.createClientAttempt(sessionId, proxyExecutor, closeEpoch, cliPath);
+      const attempt = this.createClientAttempt(
+        sessionId,
+        proxyExecutor,
+        closeEpoch,
+        cliPath,
+        proxyVersion,
+      );
       this.creatingBySession.set(sessionId, { executor: proxyExecutor, promise: attempt });
       let attempts = this.creatingByExecutor.get(proxyExecutor);
       if (!attempts) {
@@ -246,9 +259,10 @@ export class ProxyManager {
     executor: ProxyExecutor,
     closeEpoch: number,
     cliPath: string | null,
+    proxyVersion: string | null,
   ): Promise<ProxyClient | null> {
     const client = executor === 'codex'
-      ? await this.createCodexClient(sessionId, cliPath)
+      ? await this.createCodexClient(sessionId, cliPath, proxyVersion)
       : executor === 'kimi'
         ? await this.createKimiClient(sessionId, cliPath)
         : executor === 'grok'
@@ -810,23 +824,30 @@ export class ProxyManager {
     }
   }
 
-  private async createCodexClient(sessionId: string, cliPath: string | null): Promise<ProxyClient> {
-    const host = await this.getOrCreateCodexHost(cliPath);
+  private async createCodexClient(
+    sessionId: string,
+    cliPath: string | null,
+    proxyVersion: string | null,
+  ): Promise<ProxyClient> {
+    const host = await this.getOrCreateCodexHost(cliPath, proxyVersion);
     return host.createSessionClient(sessionId);
   }
 
-  private async getOrCreateCodexHost(cliPath: string | null): Promise<SharedRuntimeHost> {
+  private async getOrCreateCodexHost(
+    cliPath: string | null,
+    proxyVersion: string | null,
+  ): Promise<SharedRuntimeHost> {
     if (!this.cfg.codexProxyEntry) {
       throw new Error(
         'codex executor requested but codexProxyEntry is not configured',
       );
     }
-    const key = ProxyManager.hostKey(cliPath);
+    const key = ProxyManager.hostKey(cliPath, proxyVersion);
     const current = this.codexHosts.get(key);
     if (current) return current;
     let pending = this.codexHostInits.get(key);
     if (!pending) {
-      pending = this.startCodexHost(key, cliPath);
+      pending = this.startCodexHost(key, cliPath, proxyVersion);
       this.codexHostInits.set(key, pending);
     }
     try {
@@ -836,7 +857,11 @@ export class ProxyManager {
     }
   }
 
-  private async startCodexHost(key: string, cliPath: string | null): Promise<SharedRuntimeHost> {
+  private async startCodexHost(
+    key: string,
+    cliPath: string | null,
+    proxyVersion: string | null,
+  ): Promise<SharedRuntimeHost> {
     const lease = this.cfg.runtimeManager
       ? await this.cfg.runtimeManager.acquire('codex', cliPath)
       : null;
@@ -855,10 +880,13 @@ export class ProxyManager {
       }
       const dataDir = this.hostDataDir('codex', key);
       mkdirSync(dataDir, { recursive: true });
-      const protocol = this.requireProtocol('codex', this.cfg.codexProxy, 'shared');
+      const selected = proxyVersion && this.cfg.resolveProxyVersion
+        ? await this.cfg.resolveProxyVersion('codex', proxyVersion)
+        : { entryPath: this.cfg.codexProxyEntry!, protocol: this.cfg.codexProxy };
+      const protocol = this.requireProtocol('codex', selected.protocol, 'shared');
       host = this.createProtocolHost('codex', {
         protocol,
-        entry: this.cfg.codexProxyEntry!,
+        entry: selected.entryPath,
         dataDir,
         ...(lease?.binaryPath ?? this.cfg.codexBin
           ? { runtimeBin: lease?.binaryPath ?? this.cfg.codexBin! }

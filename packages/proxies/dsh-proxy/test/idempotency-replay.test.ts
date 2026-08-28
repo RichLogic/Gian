@@ -39,7 +39,7 @@ function fakeBridge() {
 async function setup() {
   const adapter = new DshV2Adapter(fakeBridge() as never, { pluginVersion: '0.1.0' });
   adapter.setEmitSink(() => undefined);
-  await adapter.dispatch({ id: 'init', method: 'initialize', params: { protocol: { name: 'gian.proxy', versions: ['2.0'] }, host: { name: 'Gian', version: '0.5.0' } } });
+  await adapter.dispatch({ id: 'init', method: 'initialize', params: { protocol: { name: 'gian.proxy', versions: ['2.1'] }, host: { name: 'Gian', version: '0.5.0' } } });
   const create = await adapter.dispatch({
     id: 'create', method: 'session.create',
     params: { sessionId: 's1', workspace: { cwd: '/tmp/p', roots: ['/tmp/p'] }, config: {} },

@@ -1,6 +1,7 @@
 import { requestViolation, validateBindingConfig } from '@gian/proxy-protocol';
 import type { ConfigOption, ConfigValue } from '@gian/shared';
 import type { Db } from '../storage/db.js';
+import { sanitizeTitle } from './auto-title.js';
 
 export type ForkAnchorInput =
   | { type: 'head' }
@@ -11,10 +12,48 @@ export interface ResolvedForkAnchor {
   sourceTurnId: string;
 }
 
+export interface PersistedForkBoundary extends ResolvedForkAnchor {}
+
+interface ForkNameSource {
+  id: string;
+  name?: string | null;
+}
+
 interface TerminalTurnRow {
   turnId: string;
   sourceTurnId: string | null;
   status: string;
+}
+
+export function persistedForkBoundaries(db: Db, sessionId: string): PersistedForkBoundary[] {
+  return db.prepare(
+    `SELECT turnId, sourceTurnId
+     FROM (
+       SELECT turns.id AS turnId,
+              replay.provider_turn_id AS sourceTurnId,
+              turns.turn_number AS turnNumber
+       FROM turns
+       JOIN proxy_replay_turns replay
+         ON replay.turn_id = turns.id AND replay.session_id = turns.session_id
+       WHERE turns.session_id = ?
+         AND turns.status IN ('completed', 'error', 'stopped')
+         AND replay.provider_turn_id IS NOT NULL
+       ORDER BY turns.turn_number DESC
+       LIMIT 10000
+     )
+     ORDER BY turnNumber ASC`,
+  ).all(sessionId) as PersistedForkBoundary[];
+}
+
+export function nextForkSessionName(db: Db, source: ForkNameSource): string {
+  const row = db.prepare(
+    `SELECT COUNT(*) AS count
+     FROM sessions
+     WHERE origin_kind = 'fork' AND origin_session_id = ?`,
+  ).get(source.id) as { count: number };
+  const ordinal = row.count + 1;
+  const sourceLabel = sanitizeTitle(source.name ?? '') || source.id.slice(0, 8);
+  return sanitizeTitle(`Fork ${ordinal}: ${sourceLabel}`);
 }
 
 export function inheritedSessionBoundConfig(

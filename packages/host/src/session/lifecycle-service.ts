@@ -1,5 +1,6 @@
 import type {
   AgentProxyDefaults,
+  AgentRuntimeProfile,
   ApprovalMode,
   ConfigOption,
   ConfigValue,
@@ -18,6 +19,7 @@ import type { Db } from '../storage/db.js';
 import { loadConfig } from '../storage/config.js';
 import { purgeSessionAttachments } from '../storage/attachments.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
+import type { GianSessionHostServiceIdentity } from '../tool/session-host-services.js';
 import { mergeBranchAsync } from '../workspace/git.js';
 import {
   executorConfigFromOptions,
@@ -38,6 +40,9 @@ export interface CreateSessionInput {
   approval_mode?: ApprovalMode;
   type?: SessionType;
   task_id?: string | null;
+  created_by_actor_kind?: 'internal_session' | 'external_controller' | null;
+  created_by_actor_id?: string | null;
+  created_by_session_id?: string | null;
   thinking_effort?: ThinkingEffort | null;
   service_tier?: 'fast' | null;
   session_config?: Record<string, ConfigValue>;
@@ -52,8 +57,10 @@ interface BringUpInput {
   displayName: string | null;
   /** Owning Agent's resolved CLI path (injected by SessionManager). */
   cliPath?: string | null;
+  proxyVersion?: string | null;
   executorDefaults?: AgentProxyDefaults;
   sessionConfig?: Record<string, ConfigValue>;
+  hostServiceIdentity?: Omit<GianSessionHostServiceIdentity, 'sessionId'>;
 }
 
 interface BringUpResult {
@@ -69,6 +76,7 @@ interface LifecycleRuntime {
   discardProxy(sessionId: string): Promise<void>;
   teardownProxy(sessionId: string): Promise<void>;
   forgetConversationUsage(sessionId: string): void;
+  activateHostServices(sessionId: string): void;
 }
 
 function initialTurnConfigFromCreate(
@@ -130,7 +138,11 @@ export class SessionLifecycleService {
     private proxyDefaults?: (executor: Executor) => AgentProxyDefaults | undefined,
     /** Resolves a saved Agent and its runtime CLI path. Must throw when the
      *  Agent id is unknown (deleted Agents cannot start new sessions). */
-    private agentRuntime?: (agentId: string) => { agent: UserAgent; cliPath: string | null },
+    private agentRuntime?: (agentId: string) => Promise<{
+      agent: UserAgent;
+      cliPath: string | null;
+      runtimeProfile: AgentRuntimeProfile | null;
+    }>,
   ) {}
 
   async create(input: CreateSessionInput): Promise<Session> {
@@ -140,7 +152,7 @@ export class SessionLifecycleService {
     if (!workspace) throw new Error(`workspace not found: ${input.workspace_id}`);
 
     const resolvedAgent = input.agent_id !== undefined
-      ? this.agentRuntime?.(input.agent_id)
+      ? await this.agentRuntime?.(input.agent_id)
       : undefined;
     if (input.agent_id !== undefined && !resolvedAgent) {
       throw new Error(`agent not found: ${input.agent_id}`);
@@ -232,7 +244,12 @@ export class SessionLifecycleService {
         cwd: workspace.path,
         model: effectiveModel,
         displayName: name,
-        ...(resolvedAgent ? { cliPath: resolvedAgent.cliPath } : {}),
+        ...(resolvedAgent
+          ? { cliPath: resolvedAgent.runtimeProfile?.cliPath ?? resolvedAgent.cliPath }
+          : {}),
+        ...(resolvedAgent?.runtimeProfile
+          ? { proxyVersion: resolvedAgent.runtimeProfile.proxyVersion }
+          : {}),
         // Semantic roles owned by Gian Settings. The coordinator resolves
         // each role against this session's catalog before sending config.
         ...(managedDefaults
@@ -245,6 +262,16 @@ export class SessionLifecycleService {
             }
           : {}),
         ...(input.session_config ? { sessionConfig: input.session_config } : {}),
+        ...(executor === 'codex'
+          ? {
+              hostServiceIdentity: {
+                agentId: resolvedAgent?.agent.id ?? null,
+                workspaceId: input.workspace_id,
+                taskId: input.task_id ?? null,
+                role: 'admin',
+              },
+            }
+          : {}),
       });
     } catch (error) {
       await this.runtime.discardProxy(id);
@@ -263,53 +290,71 @@ export class SessionLifecycleService {
         serviceTier,
       },
     );
-    this.db
-      .prepare(
-        `INSERT INTO sessions
-          (id, name, type, task_id, workspace_id, executor, agent_id, agent_name, agent_color,
-           model, approval_mode,
-           executor_config_json, thinking_effort, service_tier, active_channel, status,
-           archived, worktree_path, branch, base_branch, worktree_outcome,
-           native_session_id, fork_from_session_id, conversation_usage_complete,
-           turn_config_json, turn_config_options_json, turn_config_revision,
-           available_actions_json, created_at, updated_at)
-         VALUES
-          (@id, @name, @type, @task_id, @workspace_id, @executor, @agent_id, @agent_name,
-           @agent_color, @model,
-           @approval_mode, @executor_config_json, @thinking_effort, @service_tier, 'web', 'new',
-           0, NULL, NULL, NULL, NULL, @native_session_id,
-           @fork_from_session_id, 1,
-           @turn_config_json, @turn_config_options_json, @turn_config_revision,
-           @available_actions_json, @now, @now)`,
-      )
-      .run({
-        id,
-        name,
-        type: input.type ?? 'coding',
-        task_id: input.task_id ?? null,
-        workspace_id: input.workspace_id,
-        executor,
-        agent_id: resolvedAgent?.agent.id ?? null,
-        agent_name: resolvedAgent?.agent.name ?? null,
-        agent_color: resolvedAgent?.agent.color ?? null,
-        model: effectiveModel,
-        approval_mode: approvalMode,
-        executor_config_json: JSON.stringify(executorConfigFromOptions(proxyResult.configOptions)),
-        thinking_effort: effectiveEffort,
-        service_tier: serviceTier,
-        native_session_id: proxyResult.nativeSessionId,
-        fork_from_session_id: null,
-        turn_config_json: JSON.stringify(initialTurnConfig),
-        turn_config_options_json: proxyResult.turnConfigOptions !== undefined
-          ? JSON.stringify(proxyResult.turnConfigOptions)
-          : null,
-        turn_config_revision: proxyResult.turnConfigRevision ?? null,
-        available_actions_json: proxyResult.availableActions
-          ? JSON.stringify(proxyResult.availableActions)
-          : null,
-        now,
-      });
-    this.sessions.setNativeOptions(id, proxyResult.configOptions);
+    const publish = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO sessions
+            (id, name, type, task_id, workspace_id,
+             created_by_actor_kind, created_by_actor_id, created_by_session_id,
+             executor, agent_id, agent_name, runtime_profile_json,
+             model, approval_mode,
+             executor_config_json, thinking_effort, service_tier, active_channel, status,
+             archived, worktree_path, branch, base_branch, worktree_outcome,
+             native_session_id, fork_from_session_id, conversation_usage_complete,
+             turn_config_json, turn_config_options_json, turn_config_revision,
+             available_actions_json, created_at, updated_at)
+           VALUES
+            (@id, @name, @type, @task_id, @workspace_id,
+             @created_by_actor_kind, @created_by_actor_id, @created_by_session_id,
+             @executor, @agent_id, @agent_name, @runtime_profile_json,
+             @model,
+             @approval_mode, @executor_config_json, @thinking_effort, @service_tier, 'web', 'new',
+             0, NULL, NULL, NULL, NULL, @native_session_id,
+             @fork_from_session_id, 1,
+             @turn_config_json, @turn_config_options_json, @turn_config_revision,
+             @available_actions_json, @now, @now)`,
+        )
+        .run({
+          id,
+          name,
+          type: input.type ?? 'coding',
+          task_id: input.task_id ?? null,
+          workspace_id: input.workspace_id,
+          created_by_actor_kind: input.created_by_actor_kind ?? null,
+          created_by_actor_id: input.created_by_actor_id ?? null,
+          created_by_session_id: input.created_by_session_id ?? null,
+          executor,
+          agent_id: resolvedAgent?.agent.id ?? null,
+          agent_name: resolvedAgent?.agent.name ?? null,
+          runtime_profile_json: resolvedAgent?.runtimeProfile
+            ? JSON.stringify(resolvedAgent.runtimeProfile)
+            : null,
+          model: effectiveModel,
+          approval_mode: approvalMode,
+          executor_config_json: JSON.stringify(executorConfigFromOptions(proxyResult.configOptions)),
+          thinking_effort: effectiveEffort,
+          service_tier: serviceTier,
+          native_session_id: proxyResult.nativeSessionId,
+          fork_from_session_id: null,
+          turn_config_json: JSON.stringify(initialTurnConfig),
+          turn_config_options_json: proxyResult.turnConfigOptions !== undefined
+            ? JSON.stringify(proxyResult.turnConfigOptions)
+            : null,
+          turn_config_revision: proxyResult.turnConfigRevision ?? null,
+          available_actions_json: proxyResult.availableActions
+            ? JSON.stringify(proxyResult.availableActions)
+            : null,
+          now,
+        });
+      this.runtime.activateHostServices(id);
+      this.sessions.setNativeOptions(id, proxyResult.configOptions);
+    });
+    try {
+      publish();
+    } catch (error) {
+      await this.runtime.discardProxy(id);
+      throw error;
+    }
 
     return this.sessions.get(id);
   }
@@ -357,12 +402,13 @@ export class SessionLifecycleService {
     });
   }
 
-  archive(sessionId: string, archived: boolean): void {
+  async archive(sessionId: string, archived: boolean): Promise<void> {
     const now = new Date().toISOString();
     this.db
       .prepare('UPDATE sessions SET archived = ?, updated_at = ? WHERE id = ?')
       .run(archived ? 1 : 0, now, sessionId);
     if (archived) {
+      await this.runtime.discardProxy(sessionId);
       this.broadcastSessionUpdated(sessionId, { archived: 1, updated_at: now });
     } else {
       // Restored sessions are absent from active-only client state. Send the

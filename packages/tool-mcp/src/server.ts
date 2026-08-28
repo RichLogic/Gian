@@ -13,16 +13,27 @@ import {
   isGianMcpTool,
   GIAN_MCP_TOOL_DEFINITIONS,
 } from './adapter.js';
+import { gianMcpToolDefinitions } from './schemas.js';
 
-export function createGianToolMcpServer(options: { dataDir: string }): Server {
+export function createGianToolMcpServer(options: {
+  dataDir: string;
+  callerId?: string;
+  allowedMethods?: readonly import('@gian/shared').GianToolMethod[];
+  call?: import('./adapter.js').GianMcpRpcCall;
+}): Server {
   const server = new Server(
-    { name: 'gian-tool', version: '0.5.2' },
+    { name: 'gian-tool', version: '0.5.3' },
     { capabilities: { tools: {} } },
   );
-  const callerId = gianMcpCallerId(options.dataDir);
+  const callerId = options.callerId
+    ? Promise.resolve(options.callerId)
+    : gianMcpCallerId(options.dataDir);
+  const tools = options.allowedMethods
+    ? gianMcpToolDefinitions(options.allowedMethods)
+    : GIAN_MCP_TOOL_DEFINITIONS;
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: GIAN_MCP_TOOL_DEFINITIONS,
+    tools,
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     if (request.params.name === 'gian_call') {
@@ -31,6 +42,8 @@ export function createGianToolMcpServer(options: { dataDir: string }): Server {
         requestId: extra.requestId,
         dataDir: options.dataDir,
         callerId: await callerId,
+        ...(options.allowedMethods ? { allowedMethods: options.allowedMethods } : {}),
+        ...(options.call ? { call: options.call } : {}),
       });
     }
     if (!isGianMcpTool(request.params.name)) {
@@ -42,6 +55,8 @@ export function createGianToolMcpServer(options: { dataDir: string }): Server {
       requestId: extra.requestId,
       dataDir: options.dataDir,
       callerId: await callerId,
+      ...(options.allowedMethods ? { allowedMethods: options.allowedMethods } : {}),
+      ...(options.call ? { call: options.call } : {}),
     });
   });
   return server;

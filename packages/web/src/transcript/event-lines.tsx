@@ -1,4 +1,4 @@
-import type { MouseEvent } from 'react';
+import type { MouseEvent, Ref } from 'react';
 import { useT } from '../i18n/index.js';
 import type { AgentSpawnItem, TranscriptItem } from '../types.js';
 import { measureToolDetail, RunningMeta, TRow } from './items.js';
@@ -90,21 +90,33 @@ export interface EventLineExpand {
 }
 
 /** One compact line per event. `expand` turns the line into an expandable
- *  row (caret + toggle); without it the line is inert (event box). */
+ *  row (caret + toggle); without it the line is inert (event box).
+ *  `onRowClick` (mutually exclusive with `expand`) makes the line clickable
+ *  but never expandable — the turn work block uses it to jump into the
+ *  anchored panel-2 event feed. `rowRef` exposes the `.trow` element (the
+ *  feed needs it for the anchor scroll + flash). */
 export function EventLine({
   item,
   expand,
+  onRowClick,
+  rowRef,
+  turnCompleted = false,
 }: {
   item: TranscriptItem;
   expand?: EventLineExpand;
+  onRowClick?: () => void;
+  rowRef?: Ref<HTMLDivElement>;
+  /** Terminal-turn rendering: a stale `running` status must not tick a live
+   *  timer (same rule as the full cards' `turnCompleted`). */
+  turnCompleted?: boolean;
 }) {
   const t = useT();
-  const expandable = expand
-    ? { expandable: true, open: expand.open, onToggle: expand.toggle }
-    : {};
+  const behavior = expand
+    ? { expandable: true, open: expand.open, onToggle: expand.toggle, rowRef }
+    : { onRowClick, rowRef };
   switch (item.kind) {
     case 'tool': {
-      const running = item.status === 'running' || item.status === 'pending';
+      const running = !turnCompleted && (item.status === 'running' || item.status === 'pending');
       return (
         <TRow
           verb={t('transcript.tool')}
@@ -115,12 +127,12 @@ export function EventLine({
             : item.status === 'error' ? <span className="err">error</span>
             : undefined
           }
-          {...expandable}
+          {...behavior}
         />
       );
     }
     case 'command': {
-      const running = item.status === 'running';
+      const running = !turnCompleted && item.status === 'running';
       return (
         <TRow
           verb={t('transcript.command.run')}
@@ -135,7 +147,7 @@ export function EventLine({
               </>
             )
           }
-          {...expandable}
+          {...behavior}
         />
       );
     }
@@ -156,7 +168,7 @@ export function EventLine({
               <span className="del">−{del}</span>
             </>
           }
-          {...expandable}
+          {...behavior}
         />
       );
     }
@@ -170,7 +182,7 @@ export function EventLine({
           verb={t('transcript.file.read')}
           subject={label}
           subjectTitle={label}
-          {...expandable}
+          {...behavior}
         />
       );
     }
@@ -186,7 +198,7 @@ export function EventLine({
           meta={count !== undefined
             ? <span>{count} {t(count === 1 ? 'transcript.file.match' : 'transcript.file.matches')}</span>
             : undefined}
-          {...expandable}
+          {...behavior}
         />
       );
     }
@@ -200,7 +212,7 @@ export function EventLine({
           meta={item.resultCount !== undefined
             ? <span>{item.resultCount} {t('transcript.web.results')}</span>
             : undefined}
-          {...expandable}
+          {...behavior}
         />
       );
     case 'reasoning': {
@@ -215,12 +227,12 @@ export function EventLine({
           subjectDim
           subjectTitle={preview}
           dataAttrs={{ 'data-variant': item.variant }}
-          {...expandable}
+          {...behavior}
         />
       );
     }
     case 'agent-spawn': {
-      const running = item.status === 'running';
+      const running = !turnCompleted && item.status === 'running';
       return (
         <TRow
           verb={t('transcript.agent')}
@@ -231,7 +243,7 @@ export function EventLine({
             : item.status === 'error' ? <span className="err">error</span>
             : undefined
           }
-          {...expandable}
+          {...behavior}
         />
       );
     }
@@ -244,13 +256,13 @@ export function EventLine({
             subjectTitle={item.message}
             subjectDim={item.severity === 'info'}
             meta={item.code ? <span>{item.code}</span> : undefined}
-            {...expandable}
+            {...behavior}
           />
         );
       }
       if (item.variant === 'circuit-breaker') {
         // Never collected (error-level notices stay inline) — guarded by
-        // isEventBoxItem; kept so the switch stays total over variants.
+        // isTurnWorkItem; kept so the switch stays total over variants.
         return null;
       }
       return (
@@ -264,7 +276,7 @@ export function EventLine({
           }
           subjectTitle={item.action}
           meta={<span>{item.consecutive}/3 · {item.total} {t('transcript.auto.total')}</span>}
-          {...expandable}
+          {...behavior}
         />
       );
     }
@@ -278,7 +290,7 @@ export function EventLine({
           verb={t('transcript.compact.verb')}
           subject={subject}
           subjectDim
-          {...expandable}
+          {...behavior}
         />
       );
     }

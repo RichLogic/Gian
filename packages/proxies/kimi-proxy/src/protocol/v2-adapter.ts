@@ -175,7 +175,7 @@ interface ServiceSessionShape {
 }
 
 const PROTOCOL_NAME = 'gian.proxy';
-const PROTOCOL_V2 = '2.0';
+const PROTOCOL_V2 = '2.1';
 
 const CAPABILITIES = {
   'input.localFile': 1,
@@ -606,7 +606,7 @@ export class KimiProtocolV2Adapter {
     const protocol = record(params.protocol);
     const versions = Array.isArray(protocol.versions) ? protocol.versions.map(String) : [];
     if (protocol.name !== PROTOCOL_NAME || !versions.includes(PROTOCOL_V2)) {
-      throw new KimiProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.0 is required.');
+      throw new KimiProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.1 is required.');
     }
     this.initialized = true;
     return {
@@ -662,6 +662,15 @@ export class KimiProtocolV2Adapter {
   private async finishCatalog(
     configOptions: Array<ReturnType<typeof catalogConfigOption>>,
   ) {
+    const optionId = (role: 'model' | 'effort' | 'approval_mode') => (
+      configOptions.find((option) => option.role === role)?.id
+    );
+    const specialCatalogs = {
+      ...(optionId('model') ? { model: optionId('model') } : {}),
+      ...(optionId('effort') ? { thinking: optionId('effort') } : {}),
+      ...(optionId('approval_mode') ? { approvalMode: optionId('approval_mode') } : {}),
+    };
+    const emittedOptions = configOptions.map(({ role: _role, ...option }) => option);
     const slashCommands = [] as Array<{
       name: string;
       description: string;
@@ -693,7 +702,8 @@ export class KimiProtocolV2Adapter {
         { type: 'localFile' as const },
         { type: 'localImage' as const },
       ],
-      configOptions,
+      configOptions: emittedOptions,
+      specialCatalogs,
       actions: [
         {
           id: 'sidechat.create',
@@ -711,7 +721,8 @@ export class KimiProtocolV2Adapter {
     };
     payload.catalogRevision = stableId('catalog', {
       input: payload.input,
-      configOptions,
+      configOptions: emittedOptions,
+      specialCatalogs,
       actions: payload.actions,
       slashCommands,
     });
@@ -836,7 +847,8 @@ export class KimiProtocolV2Adapter {
   } {
     const mapped = options
       .map(catalogConfigOption)
-      .filter((option) => option.control !== 'select' || (option.choices && option.choices.length > 0));
+      .filter((option) => option.control !== 'select' || (option.choices && option.choices.length > 0))
+      .map(({ role: _role, ...option }) => option);
     if (mapped.length === 0) return {};
     return {
       turnConfigOptions: mapped,

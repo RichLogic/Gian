@@ -1,15 +1,20 @@
 import type { Hono } from 'hono';
 import type {
   ExternalEditor,
+  KeymapPreferences,
+  LayoutPreferences,
   OpenAppPrefs,
   ShortcutMap,
   SystemConfig,
   TerminalPreferences,
+  ToolPreferences,
 } from '@gian/shared';
 import {
+  KEYMAP_COMMANDS,
   MAX_CHAT_FONT_SIZE,
   MIN_CHAT_FONT_SIZE,
   SHORTCUT_ACTIONS,
+  isValidKeymapBinding,
   isValidShortcutCombo,
 } from '@gian/shared';
 import { loadConfig, saveConfig } from '../../storage/config.js';
@@ -27,6 +32,9 @@ type EditableSettingsKey =
   | 'chat_font_size'
   | 'chat_font_family'
   | 'shortcuts'
+  | 'keymap'
+  | 'layout'
+  | 'tools'
   | 'terminal'
   | 'locale'
   | 'external_editors'
@@ -47,6 +55,7 @@ const MAX_TERMINAL_SHELL_LENGTH = 4_096;
 const EDITOR_FIELDS = new Set(['id', 'name', 'command', 'args']);
 const OPEN_APP_CATEGORIES = new Set(['code', 'web', 'images', 'pdf', 'other']);
 const SHORTCUT_ACTION_SET = new Set<string>(SHORTCUT_ACTIONS);
+const KEYMAP_COMMAND_SET = new Set<string>(KEYMAP_COMMANDS);
 const TERMINAL_FIELDS = new Set([
   'font_family',
   'font_size',
@@ -131,6 +140,132 @@ function parseShortcuts(value: unknown): ShortcutMap {
     parsed[action as keyof ShortcutMap] = combo;
   }
   return parsed;
+}
+
+function strictRecord(
+  value: unknown,
+  field: string,
+  allowed: readonly string[],
+  required: readonly string[] = allowed,
+): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`${field} must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  const unknown = Object.keys(record).find(key => !allowed.includes(key));
+  if (unknown) throw new Error(`${field}.${unknown} is not allowed`);
+  const missing = required.find(key => !Object.hasOwn(record, key));
+  if (missing) throw new Error(`${field}.${missing} is required`);
+  return record;
+}
+
+function parseKeymap(value: unknown): KeymapPreferences {
+  const record = strictRecord(value, 'keymap', ['preset', 'bindings']);
+  if (record.preset !== 'default') throw new Error('keymap.preset must be default');
+  const bindings = strictRecord(record.bindings, 'keymap.bindings', [...KEYMAP_COMMANDS], []);
+  const parsed: KeymapPreferences['bindings'] = {};
+  for (const [command, binding] of Object.entries(bindings)) {
+    if (!KEYMAP_COMMAND_SET.has(command)) {
+      throw new Error(`keymap.bindings.${command} is not a remappable command`);
+    }
+    if (binding !== null && !isValidKeymapBinding(binding)) {
+      throw new Error(`keymap.bindings.${command} is not a valid key combo`);
+    }
+    parsed[command as keyof KeymapPreferences['bindings']] = binding as string | null;
+  }
+  return { preset: 'default', bindings: parsed };
+}
+
+function parseLayout(value: unknown): LayoutPreferences {
+  const record = strictRecord(value, 'layout', [
+    'sidebar_width', 'sidebar_start_collapsed', 'main_panel_ratio',
+    'inspector_width', 'inspector_auto_open', 'remember_sizes',
+  ]);
+  const number = (key: string, min: number, max: number) => {
+    const candidate = record[key];
+    if (typeof candidate !== 'number' || !Number.isFinite(candidate)
+      || candidate < min || candidate > max) {
+      throw new Error(`layout.${key} must be between ${min} and ${max}`);
+    }
+    return candidate;
+  };
+  const boolean = (key: string) => {
+    if (typeof record[key] !== 'boolean') throw new Error(`layout.${key} must be a boolean`);
+    return record[key] as boolean;
+  };
+  return {
+    sidebar_width: number('sidebar_width', 200, 480),
+    sidebar_start_collapsed: boolean('sidebar_start_collapsed'),
+    main_panel_ratio: number('main_panel_ratio', 0.25, 0.75),
+    inspector_width: number('inspector_width', 220, 500),
+    inspector_auto_open: boolean('inspector_auto_open'),
+    remember_sizes: boolean('remember_sizes'),
+  };
+}
+
+function parseTools(value: unknown): ToolPreferences {
+  const record = strictRecord(value, 'tools', [
+    'files', 'diffs', 'history', 'side_chat', 'browser', 'terminal',
+  ]);
+  const files = strictRecord(record.files, 'tools.files', [
+    'compact_folders', 'show_hidden_files', 'show_ignored_files',
+    'reveal_active_file', 'open_on', 'word_wrap',
+  ]);
+  const diffs = strictRecord(record.diffs, 'tools.diffs', [
+    'layout', 'word_wrap', 'default_scope',
+  ]);
+  const history = strictRecord(record.history, 'tools.history', [
+    'show_graph', 'default_ref', 'date_format', 'single_click_preview',
+  ]);
+  const sideChat = strictRecord(record.side_chat, 'tools.side_chat', [
+    'open_after_create', 'confirm_before_close',
+  ]);
+  const browser = strictRecord(record.browser, 'tools.browser', [
+    'home_page', 'restore_last_page', 'external_links',
+  ]);
+  const terminal = strictRecord(record.terminal, 'tools.terminal', [
+    'option_as_meta', 'copy_on_selection', 'bell', 'shell_integration',
+  ]);
+  const boolean = (owner: Record<string, unknown>, field: string, key: string) => {
+    if (typeof owner[key] !== 'boolean') throw new Error(`${field}.${key} must be a boolean`);
+    return owner[key] as boolean;
+  };
+  return {
+    files: {
+      compact_folders: boolean(files, 'tools.files', 'compact_folders'),
+      show_hidden_files: boolean(files, 'tools.files', 'show_hidden_files'),
+      show_ignored_files: boolean(files, 'tools.files', 'show_ignored_files'),
+      reveal_active_file: boolean(files, 'tools.files', 'reveal_active_file'),
+      open_on: parseEnum(files.open_on, 'tools.files.open_on', ['single-click', 'double-click']) as ToolPreferences['files']['open_on'],
+      word_wrap: boolean(files, 'tools.files', 'word_wrap'),
+    },
+    diffs: {
+      layout: parseEnum(diffs.layout, 'tools.diffs.layout', ['split', 'stacked']) as ToolPreferences['diffs']['layout'],
+      word_wrap: boolean(diffs, 'tools.diffs', 'word_wrap'),
+      default_scope: parseEnum(diffs.default_scope, 'tools.diffs.default_scope', ['all', 'last-turn']) as ToolPreferences['diffs']['default_scope'],
+    },
+    history: {
+      show_graph: boolean(history, 'tools.history', 'show_graph'),
+      default_ref: parseEnum(history.default_ref, 'tools.history.default_ref', ['current', 'all']) as ToolPreferences['history']['default_ref'],
+      date_format: parseEnum(history.date_format, 'tools.history.date_format', ['relative', 'absolute']) as ToolPreferences['history']['date_format'],
+      single_click_preview: boolean(history, 'tools.history', 'single_click_preview'),
+    },
+    side_chat: {
+      open_after_create: boolean(sideChat, 'tools.side_chat', 'open_after_create'),
+      confirm_before_close: boolean(sideChat, 'tools.side_chat', 'confirm_before_close'),
+    },
+    browser: {
+      home_page: parseString(browser.home_page, 'tools.browser.home_page', { maxLength: 4_096, allowEmpty: true }),
+      restore_last_page: boolean(browser, 'tools.browser', 'restore_last_page'),
+      external_links: parseEnum(browser.external_links, 'tools.browser.external_links', ['gian', 'system']) as ToolPreferences['browser']['external_links'],
+    },
+    terminal: {
+      option_as_meta: boolean(terminal, 'tools.terminal', 'option_as_meta'),
+      copy_on_selection: boolean(terminal, 'tools.terminal', 'copy_on_selection'),
+      bell: boolean(terminal, 'tools.terminal', 'bell'),
+      shell_integration: boolean(terminal, 'tools.terminal', 'shell_integration'),
+    },
+  };
 }
 
 function parseOpenApps(value: unknown): OpenAppPrefs {  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -247,6 +382,9 @@ const SETTINGS_PATCH_SCHEMA = {
     ['system', 'manrope', 'serif', 'mono'],
   ),
   shortcuts: parseShortcuts,
+  keymap: parseKeymap,
+  layout: parseLayout,
+  tools: parseTools,
   font_scale_code: (value: unknown, field: string) => parseEnum(
     value,
     field,

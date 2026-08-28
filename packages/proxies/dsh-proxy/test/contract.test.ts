@@ -1,5 +1,5 @@
 /**
- * Full gian.proxy/2.0 contract suite for ai.deepseek.harness, driven through
+ * Full gian.proxy/2.1 contract suite for ai.deepseek.harness, driven through
  * `@gian/proxy-protocol`'s `HostProtocolValidator` against a fake bridge
  * runtime (zero model calls, zero DSH process tree).
  */
@@ -101,7 +101,7 @@ function fakeBridge(turnNumber = 0): FakeBridge {
 }
 
 function adapterWith(bridge: FakeBridge) {
-  const adapter = new DshV2Adapter(bridge as never, { pluginVersion: '0.1.1' });
+  const adapter = new DshV2Adapter(bridge as never, { pluginVersion: '0.1.3' });
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   adapter.setEmitSink((method, params) => notifications.push({ method, params }));
   return { adapter, notifications };
@@ -126,10 +126,10 @@ async function call(
   };
 }
 
-test('initialize: only accepts gian.proxy 2.0 and returns exact identity', async () => {
+test('initialize: only accepts gian.proxy 2.1 and returns exact identity', async () => {
   const { adapter } = adapterWith(fakeBridge());
   const init = await call(adapter, 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.5.0' },
   });
   assert.equal(init.error, null);
@@ -139,9 +139,9 @@ test('initialize: only accepts gian.proxy 2.0 and returns exact identity', async
     process: { scope: string };
     capabilities: Record<string, number>;
   };
-  assert.equal(result.protocol.version, '2.0');
+  assert.equal(result.protocol.version, '2.1');
   assert.equal(result.plugin.id, PLUGIN_ID);
-  assert.equal(result.plugin.version, '0.1.1');
+  assert.equal(result.plugin.version, '0.1.3');
   assert.equal(result.process.scope, 'shared');
   assert.equal(result.capabilities['input.localFile'], 1);
   assert.equal(result.capabilities['input.localImage'], 1);
@@ -150,7 +150,7 @@ test('initialize: only accepts gian.proxy 2.0 and returns exact identity', async
   assert.equal(result.capabilities['event.request'], 1);
 });
 
-test('initialize rejects non-2.0 versions', async () => {
+test('initialize rejects non-2.1 versions', async () => {
   const { adapter } = adapterWith(fakeBridge());
   const init = await call(adapter, 'initialize', {
     protocol: { name: 'gian.proxy', versions: ['1.0'] },
@@ -162,7 +162,7 @@ test('initialize rejects non-2.0 versions', async () => {
 test('session.create returns a session snapshot; non-empty hostServices rejected', async () => {
   const { adapter } = adapterWith(fakeBridge());
   await call(adapter, 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.5.0' },
   });
   const created = await call(adapter, 'session.create', {
@@ -196,7 +196,7 @@ test('session.create returns a session snapshot; non-empty hostServices rejected
 test('turn.start emits accepted then turn.started and a single terminal event', async () => {
   const { adapter } = adapterWith(fakeBridge());
   await call(adapter, 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.5.0' },
   });
   const created = await call(adapter, 'session.create', {
@@ -228,7 +228,7 @@ test('turn.start emits accepted then turn.started and a single terminal event', 
 test('turn.start correlates pending Gian turn ids FIFO for native turn ordinals', async () => {
   const { adapter } = adapterWith(fakeBridge(1));
   await call(adapter, 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.5.0' },
   });
   const created = await call(adapter, 'session.create', {
@@ -256,7 +256,7 @@ test('interaction.question interaction is a capability claim', async () => {
   const bridge = fakeBridge();
   const { adapter } = adapterWith(bridge);
   await call(adapter, 'initialize', {
-    protocol: { name: 'gian.proxy', versions: ['2.0'] },
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.5.0' },
   });
   const catalog = await call(adapter, 'catalog.list', {});

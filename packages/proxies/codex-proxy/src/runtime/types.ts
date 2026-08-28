@@ -22,7 +22,7 @@ export interface RuntimeEventSource {
   on(event: 'debug', handler: (message: string) => void): void;
   on(event: 'notification', handler: (message: RuntimeNotification) => void): void;
   on(event: 'serverRequest', handler: (message: RuntimeServerRequest) => void): void;
-  on(event: 'runtimeStopped', handler: () => void): void;
+  on(event: 'runtimeStopped', handler: (cause: Error) => void): void;
 }
 
 /** A Codex thread normalized for Gian's native-session picker. */
@@ -40,18 +40,23 @@ export interface CodexRuntime extends RuntimeEventSource {
     cwd: string;
     model?: string | null;
     ephemeral?: boolean;
+    config?: Record<string, unknown>;
   }): Promise<{ thread: { id: string }; configuredPermissions: ConfiguredPermissions }>;
-  resumeThread(threadId: string): Promise<{
+  resumeThread(threadId: string, options?: { config?: Record<string, unknown> }): Promise<{
     thread: { id: string };
     configuredPermissions: ConfiguredPermissions;
   }>;
   forkThread(threadId: string, options?: {
     lastTurnId?: string;
+    beforeTurnId?: string;
     cwd?: string;
+    config?: Record<string, unknown>;
   }): Promise<{
     thread: { id: string };
     configuredPermissions: ConfiguredPermissions;
   }>;
+  /** Append raw Responses API items without starting a model Turn. */
+  injectThreadItems(threadId: string, items: Array<Record<string, unknown>>): Promise<unknown>;
   readThread(threadId: string): Promise<{ thread: unknown }>;
   compactThread(threadId: string): Promise<unknown>;
   startTurn(

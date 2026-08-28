@@ -115,4 +115,27 @@ describe('useWorkbenchLayout panel-3 gating', () => {
     expect(result.current.sheetVisible).toBe(true);
     expect(result.current.activeGroup).toBe('history');
   });
+
+  it('Settings owns Panel 2 and never allocates Panel 3', () => {
+    const settingsTab: SheetTab = {
+      id: 'tab-settings', group: 'settings', name: 'Settings', kind: 'settings',
+      icoKind: 'gear', ico: '',
+    };
+    const { result } = renderHook(() => useWorkbenchLayout({
+      mode: 'sessions',
+      subtaskActive: false,
+      activeRail: 'settings',
+      tabs: [settingsTab],
+      activeTabByGroup: { settings: settingsTab.id },
+      viewState: 'both',
+      chatPanel: null,
+      filesInspectorSuppressed: false,
+      p3Collapsed: false,
+      groupOfRail: GROUP_OF_RAIL,
+    }));
+    expect(result.current.sheetVisible).toBe(true);
+    expect(result.current.inspectorKind).toBeNull();
+    expect(result.current.inspectorAvailable).toBe(false);
+    expect(result.current.inspectorVisible).toBe(false);
+  });
 });

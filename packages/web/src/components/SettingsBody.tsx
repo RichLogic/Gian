@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
-  AgentColor,
   AgentProxyDefaults,
   AgentProxyUpdateCheck,
   ChatFontFamily,
@@ -8,17 +7,19 @@ import type {
   ExternalEditor,
   GianScreenshotPreferences,
   GianScreenshotState,
+  KeymapCommand,
   OpenFileCategory,
   ProductExecutor,
   ProxyCatalogEntry,
-  ShortcutAction,
   SystemConfig,
   TerminalOptions,
   TerminalPreferences,
   UserAgentStatus,
+  Workspace,
 } from '@gian/shared';
 import {
   DEFAULT_TERMINAL_PREFERENCES,
+  KEYMAP_COMMANDS,
   MAX_CHAT_FONT_SIZE,
   MIN_CHAT_FONT_SIZE,
   THEME_DEFAULT_ACCENT,
@@ -44,9 +45,9 @@ import {
   acceleratorFromEvent,
   comboDisplayParts,
   comboFromEvent,
-  isShortcutCustomized,
-  shortcutConflict,
-  useShortcuts,
+  isKeymapCustomized,
+  keymapConflict,
+  useKeymap,
 } from '../shortcut-prefs.js';
 import { desktopBridge } from '../desktop-bridge.js';
 import { confirm, toast } from '../feedback.js';
@@ -63,6 +64,7 @@ import {
 } from '../operations/use-operations.js';
 import type { OperationRun } from '../operations/types.js';
 import { AppIcon } from './AppIcon.js';
+import { AgentLogo } from './AgentLogo.js';
 import {
   catalogFromCapabilities,
   executorSettingsFromCapabilities,
@@ -70,6 +72,16 @@ import {
 import { DEFAULT_OPEN_TARGET } from './sheet-model.js';
 import { useT } from '../i18n/index.js';
 import type { AppIdentity } from '../controllers/use-app-auth.js';
+import {
+  SettingsAdoptPage,
+  SettingsArchivePage,
+  SettingsWorkspacesPage,
+} from './SettingsManagementPages.js';
+import {
+  LayoutSettingsPage,
+  ToolSettingsPage,
+} from './SettingsPreferencePages.js';
+import { SettingsStepper } from './SettingsStepper.js';
 
 const OPEN_CATEGORIES: Array<{ key: OpenFileCategory; labelKey: string }> = [
   { key: 'code', labelKey: 'settings.openapps.code' },
@@ -79,7 +91,24 @@ const OPEN_CATEGORIES: Array<{ key: OpenFileCategory; labelKey: string }> = [
   { key: 'other', labelKey: 'settings.openapps.other' },
 ];
 
-export type NavKey = 'updates' | 'appearance' | 'chat' | 'terminal' | 'shortcuts' | 'executors' | 'openwith' | 'account';
+export type NavKey =
+  | 'appearance'
+  | 'layout'
+  | 'keymap'
+  | 'executors'
+  | 'chat'
+  | 'files'
+  | 'diffs'
+  | 'history'
+  | 'sidechat'
+  | 'browser'
+  | 'terminal'
+  | 'openwith'
+  | 'archive'
+  | 'adopt'
+  | 'workspaces'
+  | 'updates'
+  | 'account';
 
 /** Dropdown option lists. Zoom uses the same step lattice the slider
  *  exposed (and Cmd+/- still snaps to); chat font sizes are concrete px. */
@@ -109,27 +138,48 @@ const NAV_GROUPS: Array<{
   items: Array<[NavKey, string]>;
 }> = [
   {
-    labelKey: 'settings.nav.group.preferences',
+    labelKey: 'settings.nav.group.general',
     items: [
-      ['updates', 'settings.section.updates'],
       ['appearance', 'settings.section.appearance'],
-      ['chat', 'settings.section.chat'],
-      ['terminal', 'settings.section.terminal'],
-      ['shortcuts', 'settings.section.shortcuts'],
+      ['layout', 'settings.section.layout'],
+      ['keymap', 'settings.section.keymap'],
     ],
   },
   {
-    labelKey: 'settings.nav.group.runtime',
+    labelKey: 'settings.nav.group.ai',
     items: [
       ['executors', 'settings.section.executor'],
+      ['chat', 'settings.section.chat'],
+    ],
+  },
+  {
+    labelKey: 'settings.nav.group.tools',
+    items: [
+      ['files', 'settings.section.files'],
+      ['diffs', 'settings.section.diffs'],
+      ['history', 'settings.section.history'],
+      ['sidechat', 'settings.section.sidechat'],
+      ['browser', 'settings.section.browser'],
+      ['terminal', 'settings.section.terminal'],
       ['openwith', 'settings.section.openwith'],
     ],
   },
+  { labelKey: 'settings.nav.group.application', items: [['updates', 'settings.section.updates']] },
   {
     labelKey: 'settings.nav.group.account',
     items: [['account', 'settings.section.account']],
   },
+  {
+    labelKey: 'settings.nav.group.management',
+    items: [
+      ['workspaces', 'settings.section.workspaces'],
+      ['archive', 'settings.section.archive'],
+      ['adopt', 'settings.section.adopt'],
+    ],
+  },
 ];
+
+const STANDALONE_SECTIONS = new Set<NavKey>(['workspaces', 'archive', 'adopt']);
 
 function newEditorId(): string {
   return (globalThis.crypto?.randomUUID?.() ?? `ed-${Date.now()}-${Math.random().toString(16).slice(2)}`);
@@ -154,19 +204,20 @@ interface Props {
   /** Installed apps (macOS) for the "Add application" picker. */
   apps?: string[];
   terminalOptions?: TerminalOptions | null;
-  /** Which section to render — controlled by App (driven by the panel-3
-   *  SettingsNavInspector; the state survives rail collapse/restore).
-  *  Defaults to 'appearance'. */
+  /** Which section to render — controlled by App and selected from the
+   *  internal Panel-2 navigation. */
   activeSection?: NavKey;
+  onSectionChange?: (section: NavKey) => void;
+  workspaces?: Workspace[];
+  onSessionOpened?: (session: import('@gian/shared').Session) => void;
   identity?: AppIdentity | null;
   onSignOut?: () => void;
 }
 
-/** Settings v3 — single-section switcher (dock Settings rail, phase 4).
- *  The nav lives in panel 3 (SettingsNavInspector); this panel-2 body renders
- *  ONLY the active section. Account is included because desktop GitHub login
- *  is part of first-run initialization; unrelated Public/System/About panels
- *  stay out of this compact workbench surface.
+/** Settings v4 — a Panel-2-owned surface. Ordinary preferences form one
+ *  continuous document with an internal scroll locator; Workspaces, Archive
+ *  and Adopt remain standalone management pages. Narrow Panel 2 widths fold
+ *  the locator into the local header instead of borrowing Panel 3.
  *
  *  Phase 3b (UI Operation Layer): every mutation here dispatches a registered
  *  operation — `settings.save` (optimistic overlays on the rendered config),
@@ -179,6 +230,9 @@ export function SettingsBody({
   activeSection = 'appearance',
   identity = null,
   onSignOut,
+  onSectionChange,
+  workspaces = [],
+  onSessionOpened,
 }: Props) {
   const t = useT();
   if (!config) return <div style={{ padding: 20, color: 'var(--text-3)' }}>{t('common.loading')}</div>;
@@ -190,12 +244,16 @@ export function SettingsBody({
       activeSection={activeSection}
       identity={identity}
       onSignOut={onSignOut}
+      onSectionChange={onSectionChange}
+      workspaces={workspaces}
+      onSessionOpened={onSessionOpened}
     />
   );
 }
 
 function SettingsBodyInner({
   config, apps, terminalOptions, activeSection, identity, onSignOut,
+  onSectionChange, workspaces, onSessionOpened,
 }: {
   config: SystemConfig;
   apps: string[];
@@ -203,6 +261,9 @@ function SettingsBodyInner({
   activeSection: NavKey;
   identity: AppIdentity | null;
   onSignOut?: () => void;
+  onSectionChange?: (section: NavKey) => void;
+  workspaces: Workspace[];
+  onSessionOpened?: (session: import('@gian/shared').Session) => void;
 }) {
   const t = useT();
   const dispatch = useOperationDispatch();
@@ -215,6 +276,51 @@ function SettingsBodyInner({
   const minimapOn = useMinimapEnabled();
   const zoomPercent = useZoomPercent();
   const [editors, setEditors] = useState<ExternalEditor[]>(config.external_editors);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [agentSectionVisited, setAgentSectionVisited] = useState(activeSection === 'executors');
+  const mainRef = useRef<HTMLDivElement>(null);
+  const activeSectionRef = useRef(activeSection);
+  const standaloneSection = STANDALONE_SECTIONS.has(activeSection) ? activeSection : null;
+  activeSectionRef.current = activeSection;
+
+  function navigateToSection(section: NavKey) {
+    if (section === 'executors') setAgentSectionVisited(true);
+    onSectionChange?.(section);
+    setMobileNavOpen(false);
+    if (STANDALONE_SECTIONS.has(section)) return;
+    requestAnimationFrame(() => {
+      document.getElementById(`settings-section-${section}`)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      });
+    });
+  }
+
+  useEffect(() => {
+    const scroller = mainRef.current;
+    if (!scroller || !onSectionChange) return;
+    let frame = 0;
+    const sync = () => {
+      frame = 0;
+      const top = scroller.getBoundingClientRect().top;
+      const sections = [...scroller.querySelectorAll<HTMLElement>('[data-settings-section]')]
+        .sort((left, right) => left.offsetTop - right.offsetTop);
+      let current = sections[0]?.dataset.settingsSection as NavKey | undefined;
+      for (const section of sections) {
+        if (section.getBoundingClientRect().top - top > 72) break;
+        current = section.dataset.settingsSection as NavKey;
+      }
+      if (current && current !== activeSectionRef.current) onSectionChange(current);
+    };
+    const onScroll = () => {
+      if (!frame) frame = requestAnimationFrame(sync);
+    };
+    scroller.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      scroller.removeEventListener('scroll', onScroll);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [onSectionChange]);
 
   // Sync local editor state when config is replaced from outside (e.g. initial
   // load, or a settings.save rollback restoring the canonical list).
@@ -223,8 +329,12 @@ function SettingsBodyInner({
   }, [config.external_editors]);
 
   useEffect(() => {
+    if (activeSection === 'executors') setAgentSectionVisited(true);
+  }, [activeSection]);
+
+  useEffect(() => {
     const screenshot = desktopBridge()?.screenshot;
-    if (!screenshot || activeSection !== 'shortcuts') return;
+    if (!screenshot || activeSection !== 'keymap') return;
     let alive = true;
     void screenshot.getState().then(state => {
       if (alive) setScreenshotState(state);
@@ -262,10 +372,30 @@ function SettingsBodyInner({
 
   return (
     <div className="settings2" data-testid="settings-body">
-      <div className="settings2-main">
+      <div className="settings2-frame">
+      <header className="settings2-mobile-head">
+        <button type="button" className="iconbtn settings2-nav-toggle"
+                aria-label={t('settings.navigation.open')}
+                aria-expanded={mobileNavOpen}
+                onClick={() => setMobileNavOpen(open => !open)}>
+          <span aria-hidden>☰</span>
+        </button>
+        <strong>{t(navLabelKey(activeSection))}</strong>
+      </header>
+      <aside className="settings2-internal-nav" aria-label={t('settings.title')}>
+        <div className="settings2-nav-title">{t('settings.title')}</div>
+        <SettingsNavList active={activeSection} onSelect={navigateToSection} />
+      </aside>
+      {mobileNavOpen && (
+        <div className="settings2-mobile-nav" role="dialog" aria-label={t('settings.title')}>
+          <SettingsNavList active={activeSection} onSelect={navigateToSection} />
+        </div>
+      )}
+      <div className="settings2-main" ref={mainRef}>
+        {standaloneSection === null ? <>
         {/* ── Appearance ── */}
-        {activeSection === 'appearance' && (
-        <section className="s2-section">
+        <section id="settings-section-appearance" data-settings-section="appearance"
+                 className="s2-section" style={{ order: 1 }}>
           <h3 className="s2-sectiontitle">{t('settings.section.appearance')}</h3>
           <div className="s2-card">
             <dl className="kv-grid">
@@ -335,11 +465,14 @@ function SettingsBodyInner({
             </dl>
           </div>
         </section>
-        )}
+
+        <div id="settings-section-layout" data-settings-section="layout" className="s2-section" style={{ order: 2 }}>
+          <LayoutSettingsPage config={config} onPatch={patch} />
+        </div>
 
         {/* ── Chat ── */}
-        {activeSection === 'chat' && (
-        <section className="s2-section">
+        <section id="settings-section-chat" data-settings-section="chat"
+                 className="s2-section" style={{ order: 5 }}>
           <h3 className="s2-sectiontitle">{t('settings.section.chat')}</h3>
           <div className="s2-card">
             <dl className="kv-grid">
@@ -371,8 +504,8 @@ function SettingsBodyInner({
                   ))}
                 </select>
               </dd>
-              <dt>{t('settings.display.minimap')}</dt>
-              <dd>
+              <dt className="settings-toggle-spacer" aria-hidden="true" />
+              <dd className="settings-toggle-row">
                 <label className="switch">
                   <input
                     type="checkbox"
@@ -385,11 +518,10 @@ function SettingsBodyInner({
             </dl>
           </div>
         </section>
-        )}
 
         {/* ── Terminal ── */}
-        {activeSection === 'terminal' && (
-        <section className="s2-section">
+        <section id="settings-section-terminal" data-settings-section="terminal"
+                 className="s2-section" style={{ order: 11 }}>
           <div className="s2-section-heading">
             <h3 className="s2-sectiontitle">{t('settings.section.terminal')}</h3>
             <button
@@ -408,23 +540,25 @@ function SettingsBodyInner({
               onChange={terminal => patch({ terminal })}
             />
           </div>
+          <div className="s2-subsection-block">
+            <h4>{t('settings.terminal.behavior')}</h4>
+            <ToolSettingsPage tool="terminal" config={config} onPatch={patch} showTitle={false} />
+          </div>
         </section>
-        )}
 
         {/* ── Updates ── */}
-        {activeSection === 'updates' && (
-        <section className="s2-section">
+        <section id="settings-section-updates" data-settings-section="updates"
+                 className="s2-section" style={{ order: 16 }}>
           <h3 className="s2-sectiontitle">{t('settings.section.updates')}</h3>
           <div className="s2-card">
             <UpdatesBlock />
           </div>
         </section>
-        )}
 
-        {/* ── Shortcuts ── */}
-        {activeSection === 'shortcuts' && (
-        <section className="s2-section">
-          <h3 className="s2-sectiontitle">{t('settings.section.shortcuts')}</h3>
+        {/* ── Keymap ── */}
+        <section id="settings-section-keymap" data-settings-section="keymap"
+                 className="s2-section" style={{ order: 3 }}>
+          <h3 className="s2-sectiontitle">{t('settings.section.keymap')}</h3>
           <div className="s2-card">
             <dl className="kv-grid shortcuts">
               {screenshotAvailable && (
@@ -443,8 +577,8 @@ function SettingsBodyInner({
                       onPreferences={setScreenshotPreferences}
                     />
                   </dd>
-                  <dt>{t('settings.screenshot.hideWindow')}</dt>
-                  <dd>
+                  <dt className="settings-toggle-spacer" aria-hidden="true" />
+                  <dd className="settings-toggle-row">
                     <label className="switch">
                       <input
                         type="checkbox"
@@ -459,6 +593,7 @@ function SettingsBodyInner({
                           void desktopBridge()?.screenshot?.setPreferences(next);
                         }}
                       />
+                      <span>{t('settings.screenshot.hideWindow')}</span>
                     </label>
                   </dd>
                   {/* The hint is a long sentence; in the auto-sized keycap
@@ -467,29 +602,61 @@ function SettingsBodyInner({
                   <dd className="shortcut-hint">{t('settings.screenshot.hideWindowHint')}</dd>
                 </>
               )}
-              {SHORTCUT_ROWS.map(action => (
-                <ShortcutRow
-                  key={action}
-                  action={action}
-                  shortcuts={config.shortcuts}
+              {KEYMAP_COMMANDS.map(command => (
+                <KeymapRow
+                  key={command}
+                  command={command}
+                  preferences={config.keymap}
                   onPatch={patch}
                 />
               ))}
             </dl>
           </div>
         </section>
-        )}
 
         {/* ── AI Agents ── */}
-        {activeSection === 'executors' && (
-        <section className="s2-section">
-          <AgentInstallBlock />
+        <section id="settings-section-executors" data-settings-section="executors"
+                 className="s2-section" style={{ order: 4 }}>
+          {agentSectionVisited ? <AgentInstallBlock /> : (
+            <>
+              <h3 className="s2-sectiontitle">{t('settings.section.executor')}</h3>
+              <div className="s2-card settings-section-deferred" aria-hidden />
+            </>
+          )}
         </section>
-        )}
+
+        <div id="settings-section-files" data-settings-section="files" className="s2-section" style={{ order: 6 }}>
+          <ToolSettingsPage tool="files" config={config} onPatch={patch} />
+        </div>
+        <div id="settings-section-diffs" data-settings-section="diffs" className="s2-section" style={{ order: 7 }}>
+          <ToolSettingsPage tool="diffs" config={config} onPatch={patch} />
+        </div>
+        <div id="settings-section-history" data-settings-section="history" className="s2-section" style={{ order: 8 }}>
+          <ToolSettingsPage tool="history" config={config} onPatch={patch} />
+        </div>
+        <div id="settings-section-sidechat" data-settings-section="sidechat" className="s2-section" style={{ order: 9 }}>
+          <ToolSettingsPage tool="side_chat" config={config} onPatch={patch} />
+        </div>
+        <div id="settings-section-browser" data-settings-section="browser" className="s2-section" style={{ order: 10 }}>
+          <ToolSettingsPage
+            tool="browser"
+            config={config}
+            onPatch={patch}
+            clearingBrowserData={clearingBrowserData}
+            onClearBrowserData={browserAvailable ? () => {
+              void confirm({
+                title: t('settings.browserData.clear'),
+                message: t('settings.browserData.confirm'),
+                confirmLabel: t('settings.browserData.clear'),
+                danger: true,
+              }).then(ok => { if (ok) dispatch('browser.clearData', {}); });
+            } : undefined}
+          />
+        </div>
 
         {/* ── Open with (merged: external editors + default app by file type) ── */}
-        {activeSection === 'openwith' && (
-        <section className="s2-section">
+        <section id="settings-section-openwith" data-settings-section="openwith"
+                 className="s2-section" style={{ order: 12 }}>
           <h3 className="s2-sectiontitle">{t('settings.section.openwith')}</h3>
           <div className="s2-card">
             <p className="s2-help">{t('settings.openwith.help')}</p>
@@ -569,42 +736,24 @@ function SettingsBodyInner({
                 );
               })}
             </div>
-            {browserAvailable && (
-              <>
-                <div className="s2-subhead">{t('settings.browserData.title')}</div>
-                <div className="browser-data-row">
-                  <span className="s2-help">{t('settings.browserData.help')}</span>
-                  <button
-                    type="button"
-                    className="btn sm secondary"
-                    disabled={clearingBrowserData}
-                    onClick={async () => {
-                      const ok = await confirm({
-                        title: t('settings.browserData.clear'),
-                        message: t('settings.browserData.confirm'),
-                        confirmLabel: t('settings.browserData.clear'),
-                        danger: true,
-                      });
-                      if (ok) dispatch('browser.clearData', {});
-                    }}
-                  >
-                    {clearingBrowserData ? t('settings.browserData.clearing') : t('settings.browserData.clear')}
-                  </button>
-                </div>
-              </>
-            )}
           </div>
         </section>
-        )}
 
-        {activeSection === 'account' && (
-        <section className="s2-section">
+        <section id="settings-section-account" data-settings-section="account"
+                 className="s2-section" style={{ order: 17 }}>
           <h3 className="s2-sectiontitle">{t('settings.section.account')}</h3>
           <div className="s2-card">
             <AccountBlock identity={identity} onSignOut={onSignOut} />
           </div>
         </section>
+        </> : standaloneSection === 'workspaces' ? (
+          <SettingsWorkspacesPage workspaces={workspaces} />
+        ) : standaloneSection === 'archive' ? (
+          <SettingsArchivePage workspaces={workspaces} />
+        ) : (
+          <SettingsAdoptPage workspaces={workspaces} onSessionOpened={onSessionOpened} />
         )}
+      </div>
       </div>
     </div>
   );
@@ -660,37 +809,31 @@ function TerminalSettingsBlock({
 
       <dt>{t('settings.terminal.fontSize')}</dt>
       <dd>
-        <div className="terminal-stepper">
-          <button
-            type="button"
-            aria-label={t('settings.terminal.fontSize.decrease')}
-            disabled={preferences.font_size <= 10}
-            onClick={() => update({ font_size: preferences.font_size - 1 })}
-          >-</button>
-          <output>{preferences.font_size}px</output>
-          <button
-            type="button"
-            aria-label={t('settings.terminal.fontSize.increase')}
-            disabled={preferences.font_size >= 22}
-            onClick={() => update({ font_size: preferences.font_size + 1 })}
-          >+</button>
-        </div>
+        <SettingsStepper
+          label={t('settings.terminal.fontSize')}
+          value={preferences.font_size}
+          min={10}
+          max={22}
+          decreaseLabel={t('settings.terminal.fontSize.decrease')}
+          increaseLabel={t('settings.terminal.fontSize.increase')}
+          formatValue={value => `${value}px`}
+          onChange={font_size => update({ font_size })}
+        />
       </dd>
 
       <dt>{t('settings.terminal.lineHeight')}</dt>
       <dd>
-        <div className="terminal-range">
-          <input
-            type="range"
-            aria-label={t('settings.terminal.lineHeight')}
-            min="1"
-            max="1.6"
-            step="0.05"
-            value={preferences.line_height}
-            onChange={event => update({ line_height: Number(event.currentTarget.value) })}
-          />
-          <output>{preferences.line_height.toFixed(2).replace(/0$/, '')}</output>
-        </div>
+        <SettingsStepper
+          label={t('settings.terminal.lineHeight')}
+          value={preferences.line_height}
+          min={1}
+          max={1.6}
+          step={0.05}
+          decreaseLabel={t('settings.stepper.decrease').replace('{label}', t('settings.terminal.lineHeight'))}
+          increaseLabel={t('settings.stepper.increase').replace('{label}', t('settings.terminal.lineHeight'))}
+          formatValue={value => value.toFixed(2).replace(/0$/, '')}
+          onChange={line_height => update({ line_height })}
+        />
       </dd>
 
       <dt>{t('settings.terminal.cursorStyle')}</dt>
@@ -713,8 +856,8 @@ function TerminalSettingsBlock({
         </div>
       </dd>
 
-      <dt>{t('settings.terminal.cursorBlink')}</dt>
-      <dd>
+      <dt className="settings-toggle-spacer" aria-hidden="true" />
+      <dd className="settings-toggle-row">
         <label className="switch">
           <input
             type="checkbox"
@@ -862,14 +1005,9 @@ function AccountBlock({
 // install/update APIs stay draft-safe (no Agent id required).
 // ---------------------------------------------------------------------------
 
-const AGENT_SWATCHES: readonly AgentColor[] = [
-  'rose', 'ember', 'citron', 'moss', 'teal', 'azure', 'ink', 'plum',
-];
-
 interface AgentDraftState {
   name: string;
   proxy: ProductExecutor;
-  color: AgentColor;
   cliPath: string;
 }
 
@@ -882,73 +1020,6 @@ function draftNameError(
   return agents.some(agent => agent.name.trim().toLowerCase() === name.toLowerCase())
     ? 'taken'
     : null;
-}
-
-/** 8-color popover anchored to a color-dot button. Owns its outside-click
- *  dismissal; the parent re-renders the dot from the committed value. */
-function ColorSwatchPopover({
-  value,
-  onPick,
-  onClose,
-}: {
-  value: AgentColor;
-  onPick: (color: AgentColor) => void;
-  onClose: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const listener = (event: MouseEvent) => {
-      if (ref.current && !ref.current.contains(event.target as Node)) onClose();
-    };
-    document.addEventListener('mousedown', listener);
-    return () => document.removeEventListener('mousedown', listener);
-  }, [onClose]);
-  return (
-    <div className="swatch-pop" ref={ref} role="listbox" aria-label="Agent color">
-      {AGENT_SWATCHES.map(color => (
-        <button
-          key={color}
-          type="button"
-          className={`accent-swatch ${value === color ? 'active' : ''}`}
-          style={{ background: `var(--agent-${color})` }}
-          title={color}
-          onClick={() => { onPick(color); onClose(); }}
-        />
-      ))}
-    </div>
-  );
-}
-
-/** Color dot = the Agent's color; clicking opens the swatch popover. */
-function AgentColorDot({
-  value,
-  onPick,
-  title,
-}: {
-  value: AgentColor;
-  onPick: (color: AgentColor) => void;
-  title: string;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <span className="name-edit-wrap">
-      <button
-        type="button"
-        className="exec-dot btnish"
-        style={{ background: `var(--agent-${value})` }}
-        title={title}
-        aria-label={title}
-        onClick={() => setOpen(previous => !previous)}
-      />
-      {open && (
-        <ColorSwatchPopover
-          value={value}
-          onPick={onPick}
-          onClose={() => setOpen(false)}
-        />
-      )}
-    </span>
-  );
 }
 
 function AgentInstallBlock() {
@@ -1046,17 +1117,16 @@ function AgentInstallBlock() {
       setDraft({
         name: defaults.name,
         proxy: kind,
-        color: defaults.color,
         cliPath: defaults.cliPath ?? '',
       });
     } catch {
-      setDraft({ name: '', proxy: kind, color: 'azure', cliPath: '' });
+      setDraft({ name: '', proxy: kind, cliPath: '' });
     }
   }
 
   async function changeDraftProxy(kind: ProductExecutor) {
     if (!draft || kind === draft.proxy) return;
-    // The name stays (it is free text); an untouched path/color re-defaults
+    // The name stays (it is free text); an untouched path re-defaults
     // for the new kind (prototype behavior).
     const keepPath = draft.cliPath.trim() !== '';
     try {
@@ -1064,7 +1134,6 @@ function AgentInstallBlock() {
       setDraft({
         name: draft.name,
         proxy: kind,
-        color: keepPath ? draft.color : defaults.color,
         cliPath: keepPath ? draft.cliPath : defaults.cliPath ?? '',
       });
     } catch {
@@ -1078,7 +1147,6 @@ function AgentInstallBlock() {
     const ok = await run('agent.create', {
       name: draft.name.trim(),
       proxy: draft.proxy,
-      color: draft.color,
       cliPath: draft.cliPath.trim() || null,
       restart: desktopApp,
       restartFailedMessage: t('settings.agents.restartFailed'),
@@ -1134,7 +1202,6 @@ function AgentInstallBlock() {
       snapshot: {
         name: agent.name,
         proxy: agent.proxy,
-        color: agent.color,
         cliPath: agent.cliPath,
         defaults: agent.defaults,
       },
@@ -1169,7 +1236,16 @@ function AgentInstallBlock() {
   }
 
   if (loading && agents.length === 0) {
-    return <p className="s2-help">{t('settings.agents.loading')}</p>;
+    return (
+      <>
+        <div className="s2-section-heading">
+          <h3 className="s2-sectiontitle">{t('settings.section.executor')}</h3>
+        </div>
+        <div className="s2-card">
+          <div className="empty"><p>{t('settings.agents.loading')}</p></div>
+        </div>
+      </>
+    );
   }
 
   const draftError = draft ? draftNameError(draft, agents) : null;
@@ -1188,11 +1264,7 @@ function AgentInstallBlock() {
         <div className="s2-card draft" data-testid="agent-draft-card">
           <div className="exec-row">
             <div className="exec-head">
-              <AgentColorDot
-                value={draft.color}
-                title={t('settings.agents.color')}
-                onPick={color => setDraft({ ...draft, color })}
-              />
+              <AgentLogo proxy={draft.proxy} size={24} />
               <input
                 className={`exec-name-input ${draftError === 'taken' ? 'bad' : ''}`}
                 value={draft.name}
@@ -1293,7 +1365,6 @@ function AgentInstallBlock() {
               proxies={proxies}
               proxyCheck={proxyChecks[agent.proxy]}
               onRename={name => run('agent.patch', { agentId: agent.id, patch: { name } })}
-              onRecolor={color => run('agent.patch', { agentId: agent.id, patch: { color } })}
               onSwitchProxy={kind => switchProxy(agent, kind)}
               onSetPath={path => savePath(agent, path)}
               onSetDefaults={defaults => run('agent.patch', { agentId: agent.id, patch: { defaults } })}
@@ -1339,10 +1410,7 @@ function AgentInstallBlock() {
                   className={`catalog-item ${catalogKind === entry.id ? 'active' : ''}`}
                   onClick={() => setCatalogKind(entry.id)}
                 >
-                  <span
-                    className="catalog-dot"
-                    style={{ background: `var(--agent-${entry.defaultColor})` }}
-                  />
+                  <AgentLogo proxy={entry.id} logo={entry.logo} size={28} />
                   <span>
                     <div className="catalog-name">{entry.name}</div>
                     <div className="catalog-sub">{entry.tagline}</div>
@@ -1375,7 +1443,6 @@ function AgentInstallRow({
   proxies,
   proxyCheck,
   onRename,
-  onRecolor,
   onSwitchProxy,
   onSetPath,
   onSetDefaults,
@@ -1389,7 +1456,6 @@ function AgentInstallRow({
   proxies: ProxyCatalogEntry[];
   proxyCheck: AgentProxyUpdateCheck | undefined;
   onRename: (name: string) => Promise<boolean>;
-  onRecolor: (color: AgentColor) => Promise<boolean>;
   onSwitchProxy: (proxy: ProductExecutor) => Promise<void>;
   onSetPath: (path: string | null) => Promise<boolean>;
   onSetDefaults: (defaults: Partial<AgentProxyDefaults>) => Promise<boolean>;
@@ -1587,18 +1653,12 @@ function AgentInstallRow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capabilities, defaults.model]);
 
-  const cliMismatch = agent.cli.state === 'ready'
-    && agent.cli.recommendedVersion
-    && agent.cli.version !== agent.cli.recommendedVersion;
+  const cliUnverified = agent.runtimeProfile?.verification === 'unverified';
 
   return (
     <div className="exec-row">
       <div className="exec-head">
-        <AgentColorDot
-          value={agent.color}
-          title={t('settings.agents.color')}
-          onPick={color => { void onRecolor(color); }}
-        />
+        <AgentLogo proxy={agent.proxy} size={24} />
         <input
           className="exec-name-input"
           value={name}
@@ -1671,9 +1731,12 @@ function AgentInstallRow({
             ? (
               <div className="exec-version">
                 <span>{agent.cli.version}</span>
-                {cliMismatch && (
-                  <div className="hint">
-                    {t('settings.agents.cliVersionMismatch').replace('{version}', agent.cli.recommendedVersion ?? '')}
+                {cliUnverified && (
+                  <div className="hint danger-hint" role="alert">
+                    {t('settings.agents.cliVersionUnverified').replace(
+                      '{versions}',
+                      agent.runtimeProfile?.verifiedCliVersions.join(', ') || 'none',
+                    )}
                   </div>
                 )}
               </div>
@@ -1913,29 +1976,6 @@ function UpdatesBlock() {
   );
 }
 
-/** In-app remappable rows, in display order. */
-const SHORTCUT_ROWS: readonly ShortcutAction[] = [
-  'commandPalette',
-  'steerOrSendNow',
-  'createClaudeChild',
-  'createCodexChild',
-  'markUnread',
-  'approveOnce',
-  'approveSession',
-  'decline',
-];
-
-const SHORTCUT_LABEL_KEYS: Record<ShortcutAction, string> = {
-  commandPalette: 'settings.shortcuts.commandPalette',
-  steerOrSendNow: 'settings.shortcuts.steerOrSendNow',
-  createClaudeChild: 'settings.shortcuts.createClaudeChild',
-  createCodexChild: 'settings.shortcuts.createCodexChild',
-  markUnread: 'settings.shortcuts.markUnread',
-  approveOnce: 'settings.shortcuts.approveOnce',
-  approveSession: 'settings.shortcuts.approveSession',
-  decline: 'settings.shortcuts.decline',
-};
-
 function KeycapCombo({ combo }: { combo: string }) {
   return (
     <span className="keycap-combo">
@@ -1952,23 +1992,35 @@ function KeycapAccelerator({ accelerator }: { accelerator: string }) {
   );
 }
 
-/** One remappable in-app shortcut row. Click the combo to arm capture; the
- *  next keydown becomes the binding (Esc cancels). A conflict with another
- *  action is rejected inline — two actions never share a combo. */
-function ShortcutRow({
-  action,
-  shortcuts,
+function keymapLabel(command: KeymapCommand, t: (key: string) => string): string {
+  return t(`settings.keymap.command.${command}`);
+}
+
+/** One command-based keymap row. Provider-specific and approval-card actions
+ *  are intentionally absent from KEYMAP_COMMANDS. */
+function KeymapRow({
+  command,
+  preferences,
   onPatch,
 }: {
-  action: ShortcutAction;
-  shortcuts: SystemConfig['shortcuts'];
+  command: KeymapCommand;
+  preferences: SystemConfig['keymap'];
   onPatch: (partial: Partial<SystemConfig>) => void;
 }) {
   const t = useT();
-  const resolved = useShortcuts();
-  const combo = resolved[action];
+  const resolved = useKeymap();
+  const combo = resolved[command];
   const [capturing, setCapturing] = useState(false);
-  const [conflict, setConflict] = useState<ShortcutAction | null>(null);
+  const [conflict, setConflict] = useState<KeymapCommand | null>(null);
+
+  function save(binding: string | null) {
+    onPatch({
+      keymap: {
+        preset: 'default',
+        bindings: { ...(preferences?.bindings ?? {}), [command]: binding },
+      },
+    });
+  }
 
   useEffect(() => {
     if (!capturing) return;
@@ -1981,7 +2033,7 @@ function ShortcutRow({
       }
       const next = comboFromEvent(event);
       if (!next) return; // pure modifier press — keep listening
-      const clash = shortcutConflict(next, action);
+      const clash = keymapConflict(next, command);
       if (clash) {
         setConflict(clash);
         setCapturing(false);
@@ -1989,27 +2041,31 @@ function ShortcutRow({
       }
       setConflict(null);
       setCapturing(false);
-      onPatch({ shortcuts: { ...(shortcuts ?? {}), [action]: next } });
+      save(next);
     }
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [capturing, action, shortcuts, onPatch]);
+  }, [capturing, command, preferences, onPatch]);
 
   return (
     <>
-      <dt>{t(SHORTCUT_LABEL_KEYS[action])}</dt>
+      <dt>{keymapLabel(command, t)}</dt>
       <dd>
         <button
           type="button"
           className={`shortcut-capture ${capturing ? 'capturing' : ''}`}
-          aria-label={t(SHORTCUT_LABEL_KEYS[action])}
+          aria-label={keymapLabel(command, t)}
           onClick={() => { setCapturing(true); setConflict(null); }}
         >
           {capturing
             ? <span className="shortcut-listening">{t('settings.shortcuts.listening')}</span>
-            : <KeycapCombo combo={combo} />}
+            : combo ? <KeycapCombo combo={combo} /> : <span className="muted">{t('settings.keymap.unassigned')}</span>}
         </button>
-        {isShortcutCustomized(action) && (
+        {combo && (
+          <button type="button" className="shortcut-reset" aria-label={t('settings.keymap.unassign')}
+                  title={t('settings.keymap.unassign')} onClick={() => save(null)}>×</button>
+        )}
+        {isKeymapCustomized(command, preferences) && (
           <button
             type="button"
             className="shortcut-reset"
@@ -2017,9 +2073,9 @@ function ShortcutRow({
             title={t('settings.shortcuts.reset')}
             onClick={() => {
               setConflict(null);
-              const next = { ...(shortcuts ?? {}) };
-              delete next[action];
-              onPatch({ shortcuts: next });
+              const next = { ...(preferences?.bindings ?? {}) };
+              delete next[command];
+              onPatch({ keymap: { preset: 'default', bindings: next } });
             }}
           >
             ↺
@@ -2031,7 +2087,7 @@ function ShortcutRow({
           full-width row instead. */}
       {conflict && (
         <dd className="shortcut-conflict" role="alert">
-          {t('settings.shortcuts.conflict').replace('{action}', t(SHORTCUT_LABEL_KEYS[conflict]))}
+          {t('settings.shortcuts.conflict').replace('{action}', keymapLabel(conflict, t))}
         </dd>
       )}
     </>
@@ -2116,19 +2172,18 @@ function ScreenshotShortcutEditor({
 }
 
 
-/** Panel-3 nav for the dock Settings rail: renders the same NAV_GROUPS the
- *  panel-2 SettingsBody switches on. Clicking an item replaces panel 2's
- *  content with that section (single-section switcher — the in-body nav and
- *  scrollspy were removed in phase 4). `active` is controlled by App so the
- *  selection survives rail collapse/restore. */
-export function SettingsNavInspector({ active, onSelect }: { active: NavKey; onSelect: (key: NavKey) => void }) {
+function navLabelKey(active: NavKey): string {
+  for (const group of NAV_GROUPS) {
+    const item = group.items.find(([key]) => key === active);
+    if (item) return item[1];
+  }
+  return 'settings.title';
+}
+
+function SettingsNavList({ active, onSelect }: { active: NavKey; onSelect: (key: NavKey) => void }) {
   const t = useT();
   return (
-    <aside className="inspector settings-nav-inspector">
-      <div className="insp-head">
-        <span className="label">{t('settings.title')}</span>
-      </div>
-      <div className="settings-nav-body">
+    <div className="settings-nav-body">
         {NAV_GROUPS.map(group => (
           <div className="s2-group" key={group.labelKey}>
             <div className="s2-grouplabel">{t(group.labelKey)}</div>
@@ -2144,7 +2199,12 @@ export function SettingsNavInspector({ active, onSelect }: { active: NavKey; onS
             ))}
           </div>
         ))}
-      </div>
-    </aside>
+    </div>
   );
+}
+
+/** Compatibility export for isolated tests. Product Settings navigation now
+ *  lives inside Panel 2 and App no longer mounts this as an Inspector. */
+export function SettingsNavInspector(props: { active: NavKey; onSelect: (key: NavKey) => void }) {
+  return <SettingsNavList {...props} />;
 }

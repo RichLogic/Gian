@@ -12,11 +12,10 @@
  * asks the bridge to restart, and — when the restart can't happen — rolls
  * the write back (delete a created Agent, restore the previous path/kind,
  * re-create a deleted Agent from its snapshot) and fails the run with the
- * view-supplied localized message. Name/color/defaults are write-through
+ * view-supplied localized message. Name/defaults are write-through
  * and never restart.
  */
 import type {
-  AgentColor,
   AgentInstallResult,
   AgentProxyDefaults,
   AgentProxyUpdateCheck,
@@ -115,7 +114,6 @@ const agentCreate: OperationDefinition<CreateAgentOperationInput, UserAgentStatu
     const created = await createAgent({
       name: input.name,
       proxy: input.proxy,
-      ...(input.color !== undefined ? { color: input.color } : {}),
       ...(input.cliPath !== undefined ? { cliPath: input.cliPath } : {}),
       ...(input.defaults !== undefined ? { defaults: input.defaults } : {}),
     });
@@ -134,7 +132,6 @@ export interface DeleteAgentOperationInput extends AgentIdInput {
   snapshot: {
     name: string;
     proxy: ProductExecutor;
-    color: AgentColor;
     cliPath: string | null;
     defaults: AgentProxyDefaults;
   };
@@ -153,7 +150,6 @@ const agentDelete: OperationDefinition<DeleteAgentOperationInput, boolean> = {
     await createAgent({
       name: input.snapshot.name,
       proxy: input.snapshot.proxy,
-      color: input.snapshot.color,
       cliPath: input.snapshot.cliPath,
       defaults: input.snapshot.defaults,
     }).catch(() => undefined);
@@ -162,7 +158,7 @@ const agentDelete: OperationDefinition<DeleteAgentOperationInput, boolean> = {
   timeoutMs: REST_TIMEOUT_MS,
 };
 
-/** Write-through Agent patches: name, color, and Defaults never touch the
+/** Write-through Agent patches: name and Defaults never touch the
  *  boot load set, so they never restart. */
 export interface PatchAgentOperationInput extends AgentIdInput {
   patch: UpdateAgentInput;

@@ -325,7 +325,7 @@ function NativeSessionRow({
   );
 }
 
-function AdoptDialog({
+export function AdoptDialog({
   source, onCancel, onAdopted, workspaceId,
 }: {
   source: NativeSession;
@@ -423,7 +423,6 @@ function AdoptDialog({
               <label className="adopt-label">Agent</label>
               {kindAgents.length === 1 ? (
                 <span className="adopt-static">
-                  <span className="exec-dot" style={{ background: `var(--agent-${kindAgents[0]!.color})` }} />
                   {kindAgents[0]!.name}
                 </span>
               ) : (

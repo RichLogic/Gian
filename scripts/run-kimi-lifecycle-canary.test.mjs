@@ -92,7 +92,7 @@ class FakeKimiLifecycleClient extends EventEmitter {
     if (this.stopped) throw new Error('fake Kimi proxy is stopped');
     if (method === 'initialize') {
       return {
-        protocol: { name: 'gian.proxy', version: '2.0' },
+        protocol: { name: 'gian.proxy', version: '2.1' },
         plugin: { id: 'kimi', name: 'Kimi Code', version: '0.2.0' },
         process: { scope: 'shared' },
         capabilities: { 'session.replay': 1, interaction: 1 },

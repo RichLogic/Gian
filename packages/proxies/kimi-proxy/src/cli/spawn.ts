@@ -39,7 +39,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.2.2';
+  return '0.2.3';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -47,7 +47,7 @@ const PLUGIN_VERSION = readPluginVersion();
 function runSelfTest(argv: string[]): boolean {
   if (!argv.includes(SELF_TEST_FLAG)) return false;
   process.stdout.write(`${JSON.stringify({
-    schemaVersion: 2,
+    schemaVersion: 3,
     id: 'kimi',
     pluginVersion: PLUGIN_VERSION,
     ok: true,

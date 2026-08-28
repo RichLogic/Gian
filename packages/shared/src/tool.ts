@@ -9,7 +9,7 @@ import type {
   Task,
   Workspace,
 } from './model.js';
-import type { AgentColor, UserAgent } from './agents.js';
+import type { UserAgent } from './agents.js';
 
 export const GIAN_TOOL_METHODS = [
   'catalog.get_create_options',
@@ -29,6 +29,7 @@ export const GIAN_TOOL_METHODS = [
   'session.cancel_delivery',
   'session.wait',
   'session.stop',
+  'worktree.create_and_bind',
   'interaction.list',
   'interaction.respond',
 ] as const;
@@ -46,6 +47,7 @@ export const GIAN_TOOL_MUTATION_METHODS = [
   'session.send',
   'session.cancel_delivery',
   'session.stop',
+  'worktree.create_and_bind',
   'interaction.respond',
 ] as const satisfies readonly GianToolMethod[];
 
@@ -53,6 +55,7 @@ export type GianToolMutationMethod = (typeof GIAN_TOOL_MUTATION_METHODS)[number]
 
 export const GIAN_TOOL_ERROR_CODES = [
   'INVALID_ARGUMENT',
+  'PERMISSION_DENIED',
   'NOT_FOUND',
   'CONFLICT',
   'SESSION_BUSY',
@@ -119,7 +122,6 @@ export interface GianToolResolvedSessionConfig {
 export interface GianToolCatalogAgent {
   id: string;
   name: string;
-  color: AgentColor;
   proxy: UserAgent['proxy'];
   ready: boolean;
   defaults: { model: string | null; thinking: string | null; mode: string | null };
@@ -135,7 +137,7 @@ export interface GianToolCatalogAgent {
   turn_config: ConfigOption[];
 }
 
-export type GianToolAgentSnapshot = Pick<UserAgent, 'id' | 'name' | 'color' | 'proxy' | 'defaults'>;
+export type GianToolAgentSnapshot = Pick<UserAgent, 'id' | 'name' | 'proxy' | 'defaults'>;
 
 export interface GianToolCreateOptions {
   workspaces: Array<Pick<Workspace, 'id' | 'name' | 'path'>>;
@@ -253,6 +255,7 @@ export interface GianToolMethodParams {
     timeout_ms?: number;
   };
   'session.stop': { session_id: string };
+  'worktree.create_and_bind': { branch: string; base_ref?: string };
   'interaction.list': { session_id?: string };
   'interaction.respond': {
     session_id: string;
@@ -291,6 +294,15 @@ export interface GianToolMethodData {
   'session.cancel_delivery': GianToolDelivery;
   'session.wait': Record<string, unknown>;
   'session.stop': { already_idle: boolean };
+  'worktree.create_and_bind': {
+    session_id: string;
+    workspace_id: string;
+    working_tree_id: string;
+    path: string;
+    branch: string;
+    base_ref: string;
+    created: boolean;
+  };
   'interaction.list': { interactions: GianToolInteraction[] };
   'interaction.respond': { interaction_id: string; resolved: true };
 }
@@ -483,6 +495,16 @@ export function validateGianToolParams<M extends GianToolMethod>(
     case 'session.stop':
       exact(input, ['session_id'], 'params'); requireId(input, 'session_id');
       break;
+    case 'worktree.create_and_bind': {
+      exact(input, ['branch', 'base_ref'], 'params');
+      const branch = string(input['branch'], 'params.branch');
+      if (branch.length > 200) invalid('params.branch must be at most 200 characters');
+      optionalString(input['base_ref'], 'params.base_ref');
+      if (typeof input['base_ref'] === 'string' && input['base_ref'].length > 200) {
+        invalid('params.base_ref must be at most 200 characters');
+      }
+      break;
+    }
     case 'interaction.list':
       exact(input, ['session_id'], 'params'); optionalString(input['session_id'], 'params.session_id');
       break;

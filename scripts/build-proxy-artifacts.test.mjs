@@ -86,21 +86,28 @@ test('bundled shipping proxy self-test ignores an ancestor app package.json', as
   }
 });
 
-test('built-in proxy manifests require SemVer recommended CLI versions', () => {
+test('built-in proxy manifests require exact verified CLI versions', () => {
   assert.doesNotThrow(() => assertRuntimeManifest({
     id: 'grok',
-    runtime: { id: 'grok', displayName: 'Grok', recommendedCliVersion: '1.0.3' },
+    runtime: { id: 'grok', displayName: 'Grok', verifiedCliVersions: ['1.0.3'] },
   }));
   assert.throws(
     () => assertRuntimeManifest({ id: 'grok', runtime: { id: 'grok', displayName: 'Grok' } }),
-    /recommendedCliVersion/,
+    /verifiedCliVersions/,
   );
   assert.throws(
     () => assertRuntimeManifest({
       id: 'claude',
-      runtime: { id: 'claude', displayName: 'Claude', recommendedCliVersion: 'latest' },
+      runtime: { id: 'claude', displayName: 'Claude', verifiedCliVersions: ['latest'] },
     }),
     /SemVer/,
+  );
+  assert.throws(
+    () => assertRuntimeManifest({
+      id: 'codex',
+      runtime: { id: 'codex', displayName: 'Codex', verifiedCliVersions: ['0.146.0', '0.146.0'] },
+    }),
+    /duplicates/,
   );
   assert.doesNotThrow(() => assertRuntimeManifest({
     id: 'x.ai.external',
@@ -111,6 +118,6 @@ test('built-in proxy manifests require SemVer recommended CLI versions', () => {
       id: 'ai.deepseek.harness',
       runtime: { id: 'dsh', displayName: 'DeepSeek Harness' },
     }),
-    /recommendedCliVersion/,
+    /verifiedCliVersions/,
   );
 });

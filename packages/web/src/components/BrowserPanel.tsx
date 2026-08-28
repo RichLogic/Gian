@@ -7,12 +7,14 @@ import {
 } from 'react';
 import type { GianBrowserBounds, GianBrowserState } from '@gian/shared';
 import { desktopBridge } from '../desktop-bridge.js';
+import { toast } from '../feedback.js';
 import { useT } from '../i18n/index.js';
 import { normalizeBrowserAddress } from '../presentation/browser-address.js';
 import {
   browserExternalEntityKey,
 } from '../operations/browser.js';
 import { useOperationDispatch, useOperationPending } from '../operations/use-operations.js';
+import { injectComposerContextItems } from './Composer.js';
 
 const EMPTY_STATE: GianBrowserState = {
   url: '',
@@ -21,6 +23,7 @@ const EMPTY_STATE: GianBrowserState = {
   canGoBack: false,
   canGoForward: false,
   canOpenExternal: false,
+  inspecting: false,
 };
 
 function Icon({ d }: { d: string }) {
@@ -38,9 +41,18 @@ const ICONS = {
   reload: 'M19 8a7 7 0 1 0 1 6 M19 4v4h-4',
   stop: 'M7 7h10v10H7z',
   external: 'M14 4h6v6 M20 4l-9 9 M19 13v7H4V5h7',
+  inspect: 'M3.5 8V3.5H8 M16 3.5h4.5V8 M20.5 16v4.5H16 M8 20.5H3.5V16 M8 8h8v8H8z',
 };
 
-export function BrowserPanel({ tabId, visible }: { tabId: string; visible: boolean }) {
+export function BrowserPanel({
+  tabId,
+  visible,
+  contextTargetSessionId = null,
+}: {
+  tabId: string;
+  visible: boolean;
+  contextTargetSessionId?: string | null;
+}) {
   const t = useT();
   const dispatch = useOperationDispatch();
   const openingExternal = useOperationPending(browserExternalEntityKey(tabId), 'browser.openExternal');
@@ -52,6 +64,10 @@ export function BrowserPanel({ tabId, visible }: { tabId: string; visible: boole
   const [editing, setEditing] = useState(false);
   const [inputError, setInputError] = useState(false);
   const browser = desktopBridge()?.browser;
+  const contextTargetRef = useRef(contextTargetSessionId);
+  contextTargetRef.current = contextTargetSessionId;
+  const previousContextTargetRef = useRef(contextTargetSessionId);
+  const inspectTargetRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!browser) return;
@@ -62,11 +78,42 @@ export function BrowserPanel({ tabId, visible }: { tabId: string; visible: boole
     const unsubscribe = browser.subscribe((changedTabId, next) => {
       if (active && changedTabId === tabId) setState(next);
     });
+    const unsubscribeElement = browser.subscribeElement((changedTabId, capture) => {
+      const sessionId = inspectTargetRef.current;
+      inspectTargetRef.current = null;
+      if (
+        !active
+        || changedTabId !== tabId
+        || !sessionId
+        || contextTargetRef.current !== sessionId
+      ) return;
+      const added = injectComposerContextItems(sessionId, [{
+        type: 'browserElement',
+        id: crypto.randomUUID(),
+        ...capture,
+      }]);
+      if (!added) toast({ kind: 'warning', message: t('composer.context.limitReached') });
+    });
     return () => {
       active = false;
       unsubscribe();
+      unsubscribeElement();
     };
-  }, [browser, tabId]);
+  }, [browser, tabId, t]);
+
+  useEffect(() => {
+    const changed = previousContextTargetRef.current !== contextTargetSessionId;
+    previousContextTargetRef.current = contextTargetSessionId;
+    if (!browser || !changed || !state.inspecting) return;
+    inspectTargetRef.current = null;
+    void browser.setInspectMode(tabId, false).then(setState);
+  }, [browser, contextTargetSessionId, state.inspecting, tabId]);
+
+  function toggleInspect(): void {
+    const enabled = !state.inspecting;
+    inspectTargetRef.current = enabled ? contextTargetSessionId : null;
+    void browser?.setInspectMode(tabId, enabled).then(setState);
+  }
 
   useEffect(() => {
     if (!editing) setAddress(state.url);
@@ -158,6 +205,19 @@ export function BrowserPanel({ tabId, visible }: { tabId: string; visible: boole
             onChange={event => { setAddress(event.target.value); setInputError(false); }}
           />
         </form>
+        <button
+          type="button"
+          className={`browser-tool${state.inspecting ? ' is-active' : ''}`}
+          disabled={!state.url || !contextTargetSessionId}
+          aria-label={t('browser.inspectElement')}
+          title={state.url && contextTargetSessionId
+            ? t('browser.inspectElement')
+            : t('browser.inspectElementUnavailable')}
+          aria-pressed={state.inspecting}
+          onClick={toggleInspect}
+        >
+          <Icon d={ICONS.inspect} />
+        </button>
         <button type="button" className="browser-tool" disabled={!state.canOpenExternal || openingExternal}
                 aria-label={t('browser.openExternal')}
                 onClick={() => dispatch('browser.openExternal', { tabId })}>

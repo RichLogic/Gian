@@ -108,7 +108,7 @@ export function registerSessionRoutes(app: Hono, db: Db, sessions: SessionManage
   app.post('/api/sessions/:id/archive', async c => {
     const body = await c.req.json<{ archived: boolean }>().catch(() => ({ archived: true }));
     try {
-      sessions.archiveSession(c.req.param('id'), body.archived !== false);
+      await sessions.archiveSession(c.req.param('id'), body.archived !== false);
       return c.json({ ok: true });
     } catch (error) {
       return c.json({ error: errorMessage(error) }, 400);

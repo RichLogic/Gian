@@ -44,9 +44,9 @@ describe('shortcut display and conflict helpers', () => {
 });
 
 describe('comboFromEvent', () => {
-  it('returns null for modifier-only presses and unsupported keys', () => {
+  it('returns null for modifier-only presses and supports navigation keys', () => {
     expect(comboFromEvent(new KeyboardEvent('keydown', { key: 'Meta' }))).toBeNull();
-    expect(comboFromEvent(new KeyboardEvent('keydown', { key: 'ArrowUp' }))).toBeNull();
+    expect(comboFromEvent(new KeyboardEvent('keydown', { key: 'ArrowUp' }))).toBe('up');
   });
 
   it('normalizes letters with mod and matches a combo string', () => {

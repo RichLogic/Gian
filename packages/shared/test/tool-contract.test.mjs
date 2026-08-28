@@ -10,10 +10,11 @@ import {
 } from '../dist/tool.js';
 
 test('Gian Tool contract exposes a closed method and error surface', () => {
-  assert.equal(new Set(GIAN_TOOL_METHODS).size, 19);
-  assert.equal(new Set(GIAN_TOOL_MUTATION_METHODS).size, 11);
+  assert.equal(new Set(GIAN_TOOL_METHODS).size, 20);
+  assert.equal(new Set(GIAN_TOOL_MUTATION_METHODS).size, 12);
   assert.ok(GIAN_TOOL_ERROR_CODES.includes('IDEMPOTENCY_CONFLICT'));
   assert.ok(GIAN_TOOL_ERROR_CODES.includes('AGENT_DELETED'));
+  assert.ok(GIAN_TOOL_ERROR_CODES.includes('PERMISSION_DENIED'));
 });
 
 test('every mutation requires a stable idempotency key', () => {
@@ -28,6 +29,7 @@ test('every mutation requires a stable idempotency key', () => {
     'session.send': { session_id: 'session-1', text: 'Continue' },
     'session.cancel_delivery': { delivery_id: 'delivery-1' },
     'session.stop': { session_id: 'session-1' },
+    'worktree.create_and_bind': { branch: 'feat/managed-view', base_ref: 'HEAD' },
     'interaction.respond': { session_id: 'session-1', interaction_id: 'interaction-1', decision: 'decline' },
   };
   assert.deepEqual(Object.keys(params), [...GIAN_TOOL_MUTATION_METHODS]);
@@ -101,5 +103,11 @@ test('bounded inputs and closed enums fail at the contract boundary', () => {
   }), /decision is invalid/);
   assert.throws(() => validateGianToolParams('session.send', {
     session_id: 'session-1', text: 'hello', attachment: '/tmp/secret',
+  }), /unknown field/);
+  assert.deepEqual(validateGianToolParams('worktree.create_and_bind', {
+    branch: 'feat/managed-view', base_ref: 'origin/main',
+  }), { branch: 'feat/managed-view', base_ref: 'origin/main' });
+  assert.throws(() => validateGianToolParams('worktree.create_and_bind', {
+    session_id: 'session-1', branch: 'feat/crafted',
   }), /unknown field/);
 });

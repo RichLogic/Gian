@@ -51,7 +51,7 @@ test('root typecheck builds declaration dependencies before recursive checks', (
   const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.match(
     packageJson.scripts.typecheck,
-    /@gian\/shared build.*@gian\/proxy-protocol build.*@gian\/tool-cli build.*pnpm -r typecheck/,
+    /@gian\/shared build.*@gian\/proxy-protocol build.*@gian\/tool-cli build.*@gian\/tool-mcp build.*pnpm -r typecheck/,
   );
 });
 

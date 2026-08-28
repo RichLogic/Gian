@@ -21,9 +21,10 @@ import { maybeNotifyForEnvelope } from '../notifications.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
 import { dispatchAttachmentUpload, dispatchMessageSend } from '../operations/message.js';
 import { sessionEntityKey } from '../operations/session.js';
+import { sidechatEntityKey } from '../operations/sidechat.js';
 import { taskEntityKey } from '../operations/task.js';
 import { workspaceEntityKey } from '../operations/workspace.js';
-import type { OperationStore } from '../operations/store.js';
+import { entityFieldKey, type OperationStore } from '../operations/store.js';
 import {
   applySessionUpdate,
   planCreatedSessionFirstMessage,
@@ -51,8 +52,17 @@ import {
   type PendingFirstMessageValue,
 } from '../pending-first-message.js';
 import { clearNewSessionDraftStorage } from '../screenshot-drafts.js';
-import { injectComposerAttachment, injectComposerDraft } from '../components/Composer.js';
+import {
+  injectComposerAttachment,
+  injectComposerDocumentDraft,
+  injectComposerContextItems,
+  injectComposerDraft,
+} from '../components/Composer.js';
 import { servedAttachmentUrl } from '../attachments.js';
+import {
+  consumeAvailableForkNavigation,
+  consumeForkNavigation,
+} from '../presentation/fork-navigation.js';
 
 type Setter<T> = Dispatch<SetStateAction<T>>;
 
@@ -111,11 +121,13 @@ async function deliverCreatedSessionFirstMessage(
 ): Promise<void> {
   if (pending.attachments.length === 0) {
     const firstMessage = planCreatedSessionFirstMessage(pending.text);
-    if (firstMessage.structuredText) {
+    if (firstMessage.structuredText || (pending.contextItems?.length ?? 0) > 0) {
       dispatchMessageSend(current.ops.dispatch, {
         sessionId: session.id,
-        text: firstMessage.structuredText,
+        text: firstMessage.structuredText ?? '',
         exec: session.executor,
+        contextItems: pending.contextItems,
+        composerDocument: pending.composerDocument,
       });
     }
     clearNewSessionDraftStorage(pending.scope);
@@ -135,8 +147,34 @@ async function deliverCreatedSessionFirstMessage(
     // Keep the original Workspace/Task draft (including its raw Blobs) for a
     // safe retry. Anything that did upload is also recoverable in the created
     // Session's Composer, and is deliberately not auto-sent on partial error.
-    if (pending.text.trim()) injectComposerDraft(session.id, pending.text.trim());
-    for (const attachment of uploaded) injectComposerAttachment(session.id, attachment);
+    if (pending.composerDocument) {
+      const uploadedBySourceId = new Map(pending.attachments.flatMap((source, index) => {
+        const result = settled[index];
+        return result?.status === 'fulfilled' ? [[source.id, result.value] as const] : [];
+      }));
+      const recoveredDocument = {
+        version: 1 as const,
+        segments: pending.composerDocument.segments.filter(segment => (
+          segment.type !== 'reference'
+          || segment.referenceType !== 'attachment'
+          || uploadedBySourceId.has(segment.id)
+        )),
+      };
+      const recoveredAttachments = pending.attachments.flatMap(source => {
+        const attachment = uploadedBySourceId.get(source.id);
+        return attachment ? [{ id: source.id, ...attachment }] : [];
+      });
+      injectComposerDocumentDraft(
+        session.id,
+        recoveredDocument,
+        recoveredAttachments,
+        pending.contextItems ?? [],
+      );
+    } else {
+      if (pending.text.trim()) injectComposerDraft(session.id, pending.text.trim());
+      for (const attachment of uploaded) injectComposerAttachment(session.id, attachment);
+      injectComposerContextItems(session.id, pending.contextItems ?? []);
+    }
     toast({
       kind: 'error',
       message: current.translate?.('screenshot.firstMessageUploadFailed')
@@ -153,6 +191,8 @@ async function deliverCreatedSessionFirstMessage(
       ...attachment,
       previewUrl: servedAttachmentUrl(session.id, attachment.path),
     })),
+    contextItems: pending.contextItems,
+    composerDocument: pending.composerDocument,
   });
   clearNewSessionDraftStorage(pending.scope);
 }
@@ -252,6 +292,13 @@ export function useAppSocket(input: UseAppSocketInput): void {
           // not the previous render's ref snapshot.
           current.sessionsRef.current = message.sessions;
           current.setSessions(message.sessions);
+          // A reconnect can expose the completed Fork before its originating
+          // tab receives session:created. The tab-local target makes this
+          // selection precise without yanking other windows.
+          const recoveredForkSessionId = consumeAvailableForkNavigation(
+            message.sessions.map(session => session.id),
+          );
+          if (recoveredForkSessionId) current.setActiveSessionId(recoveredForkSessionId);
           // `state_sync` is the reconnect authority for session lifecycle.
           // Reconcile transient pending state too, otherwise a missed terminal
           // frame can leave Composer saying "Turn running" indefinitely. Keep
@@ -319,6 +366,26 @@ export function useAppSocket(input: UseAppSocketInput): void {
               field => workspace[field as keyof Workspace],
             );
           }
+          for (const sidechat of message.sidechats ?? []) {
+            const entityKey = sidechatEntityKey(sidechat.id);
+            const report = current.operationStore.reconcileUnresolved(
+              entityKey,
+              field => {
+                const value = sidechat[field as keyof SideChatInfo];
+                const overlay = current.operationStore.getOverlay(entityFieldKey(entityKey, field));
+                return overlay && JSON.stringify(overlay.value) === JSON.stringify(value)
+                  ? overlay.value
+                  : value;
+              },
+            );
+            if (report.dropped.length > 0) {
+              toast({
+                kind: 'warning',
+                message: current.translate?.('operations.mayNotHaveApplied')
+                  ?? 'A change may not have been applied.',
+              });
+            }
+          }
           return;
         case 'workspace:git-updated':
           invalidateSlashCacheForWorkspace(message.workspace_id);
@@ -347,7 +414,15 @@ export function useAppSocket(input: UseAppSocketInput): void {
             message.session,
             ...previous.filter(session => session.id !== message.session.id),
           ]);
-          if (nativeAdopt || sessionFork) return;
+          if (nativeAdopt) return;
+          if (sessionFork) {
+            // Fork broadcasts are global, but selection is window-local. Only
+            // the tab that minted this exact target id follows the child.
+            if (consumeForkNavigation(message.session.id)) {
+              current.setActiveSessionId(message.session.id);
+            }
+            return;
+          }
           current.setActiveSessionId(message.session.id);
           // The creating/forking busy state is driven by the pending
           // operation run in App and ends on operation:result — nothing to
@@ -487,6 +562,19 @@ export function useAppSocket(input: UseAppSocketInput): void {
           // by id, never field-merge with the previous copy. The snapshot is
           // also the transcript feed — re-project it through the shared
           // display pipeline (see projectSideChat above).
+          current.operationStore.absorbMatchingOverlays(
+            sidechatEntityKey(message.sidechat.id),
+            field => {
+              const value = message.sidechat[field as keyof SideChatInfo];
+              const overlay = current.operationStore.getOverlay(entityFieldKey(
+                sidechatEntityKey(message.sidechat.id),
+                field,
+              ));
+              return overlay && JSON.stringify(overlay.value) === JSON.stringify(value)
+                ? overlay.value
+                : value;
+            },
+          );
           current.setSideChats(previous => {
             const existing = previous.findIndex(entry => entry.id === message.sidechat.id);
             if (existing === -1) return [...previous, message.sidechat];
@@ -587,7 +675,12 @@ export function useAppSocket(input: UseAppSocketInput): void {
               current.setPendingBySession(previous => ({ ...previous, [sessionId]: false }));
             }
           }
-          toast({ kind: 'error', title: message.code, message: message.message });
+          // Side Chat create owns its correlated failure presentation in the
+          // dock/selection controller. Toasting the legacy error envelope as
+          // well as the operation result produced two identical errors.
+          if (!(message.request_id && message.request_type === 'sidechat:create')) {
+            toast({ kind: 'error', title: message.code, message: message.message });
+          }
         }
       }
     });

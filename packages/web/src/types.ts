@@ -11,6 +11,10 @@ export interface MessageSendPayload {
   /** Uploaded attachments for this turn; `previewUrl` (blob) is reused by the
    *  retry echo's thumbnails — it is only revoked on canonical reconcile. */
   attachments?: Array<import('./attachments.js').ComposerAttachmentPayload & { previewUrl: string }>;
+  contextItems?: import('@gian/shared').MessageContextItem[];
+  composerDocument?: import('@gian/shared').ComposerDocument;
+  /** Atomic Side Chat next-turn draft; omitted for ordinary Sessions. */
+  turnConfig?: Record<string, import('@gian/shared').ConfigValue>;
   /** Skill invocation: `text` is `/<name>` and the wire items carry the
    *  typed skill item instead of a text item. */
   skill?: { name: string; path: string };
@@ -43,6 +47,8 @@ export interface MsgItem {
    *  other files use download chips. Pending echoes carry a blob URL until
    *  the server confirms with its permanent attachment URL. */
   attachments?: import('@gian/shared').MessageAttachment[];
+  contextItems?: import('@gian/shared').MessageContextItem[];
+  composerDocument?: import('@gian/shared').ComposerDocument;
 }
 
 export interface ToolItem {
@@ -176,6 +182,9 @@ export interface StatusItem {
   text: string;
   ts: number;
   turn: number;
+  /** Terminal presentation state for a turn boundary. Historical rows may
+   *  omit it; the transcript then derives failure/stopped from inline errors. */
+  outcome?: 'worked' | 'failed' | 'stopped';
   /** Protocol turn identity (gian.proxy/2.0 §10.6), only ever present on a
    *  'turn-end' item when the Host flows the exact Gian `turn_id` and the
    *  Proxy-stable `source_turn_id` of that Terminal Turn. The per-turn Fork
@@ -291,4 +300,6 @@ export interface QueueEntry {
   /** Structured input items carried with the message — localImage/localFile
    *  attachments render as thumbnails in the queue drawer. */
   items?: import('@gian/shared').InputItem[];
+  context_items?: import('@gian/shared').MessageContextItem[];
+  composer_document?: import('@gian/shared').ComposerDocument;
 }

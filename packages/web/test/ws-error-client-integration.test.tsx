@@ -13,7 +13,10 @@ import { reloadFailedSessionMetadata } from '../src/controllers/session-failure-
 import { __resetFeedback, getSnapshot as feedbackSnapshot } from '../src/feedback.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { createOperationDispatcher, type OperationDispatcher } from '../src/operations/dispatcher.js';
+import { dispatchHeadFork } from '../src/components/ForkControls.js';
+import { pendingForkNavigation } from '../src/presentation/fork-navigation.js';
 import '../src/operations/session.js';
+import '../src/operations/sidechat.js';
 import {
   createMessageEchoSink,
   dispatchMessageSend,
@@ -166,6 +169,183 @@ function snapshot(): Snapshot {
 }
 
 describe('WS-003: Host dispatch failure through the real Web client chain', () => {
+  it('opens the locally requested Fork when its canonical session:created arrives', async () => {
+    const parent = sessionContractFixture();
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        initialSessions={[parent]}
+        initialActiveSessionId={parent.id}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [parent] }));
+      act(() => { dispatchHeadFork(ops.dispatch, parent.id); });
+      const fork = socket.parsedSent<ClientToServerMessage>()
+        .find(frame => frame.type === 'session:fork');
+      expect(fork).toMatchObject({
+        type: 'session:fork',
+        source_session_id: parent.id,
+        session_id: expect.any(String),
+        anchor: { type: 'head' },
+      });
+      if (!fork || fork.type !== 'session:fork' || !fork.session_id) throw new Error('missing fork target');
+      const child: Session = {
+        ...parent,
+        id: fork.session_id,
+        name: `Fork 1: ${parent.name}`,
+        origin: {
+          kind: 'fork', session_id: parent.id, turn_id: 'turn-1', source_turn_id: 'provider-turn-1',
+        },
+      };
+
+      act(() => socket.fakeMessage({
+        type: 'session:created',
+        session: child,
+        origin: 'session-fork',
+      }));
+      await waitFor(() => expect(snapshot().activeSessionId).toBe(child.id));
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      sessionStorage.clear();
+    }
+  });
+
+  it('recovers local Fork navigation from state_sync without switching for unrelated Fork broadcasts', async () => {
+    const parent = sessionContractFixture();
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(
+      <ClientReducerHarness
+        ws={ws}
+        store={store}
+        ops={ops}
+        initialSessions={[parent]}
+        initialActiveSessionId={parent.id}
+      />,
+    );
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage({ ...stateSyncFixture(), sessions: [parent] }));
+      act(() => { dispatchHeadFork(ops.dispatch, parent.id); });
+      const fork = socket.parsedSent<ClientToServerMessage>()
+        .find(frame => frame.type === 'session:fork');
+      if (!fork || fork.type !== 'session:fork' || !fork.session_id) throw new Error('missing fork target');
+      expect(pendingForkNavigation()?.sessionId).toBe(fork.session_id);
+      const child: Session = {
+        ...parent,
+        id: fork.session_id,
+        name: `Fork 1: ${parent.name}`,
+        origin: {
+          kind: 'fork', session_id: parent.id, turn_id: 'turn-1', source_turn_id: 'provider-turn-1',
+        },
+      };
+
+      const unrelated: Session = {
+        ...parent,
+        id: 'fork-created-in-another-window',
+        name: `Fork 2: ${parent.name}`,
+        origin: {
+          kind: 'fork', session_id: parent.id, turn_id: 'turn-1', source_turn_id: 'provider-turn-1',
+        },
+      };
+      act(() => socket.fakeMessage({
+        type: 'session:created',
+        session: unrelated,
+        origin: 'session-fork',
+      }));
+      expect(snapshot().activeSessionId).toBe(parent.id);
+      expect(pendingForkNavigation()?.sessionId).toBe(child.id);
+
+      await act(async () => {
+        socket.fakeMessage({ ...stateSyncFixture(), sessions: [child, parent] });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(pendingForkNavigation()).toBeNull();
+      await waitFor(() => expect(snapshot().activeSessionId).toBe(child.id));
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      sessionStorage.clear();
+    }
+  });
+
+  it('leaves correlated Side Chat create errors to the owning operation surface', async () => {
+    __resetFeedback();
+    vi.mocked(loadSessions).mockResolvedValue([]);
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops} />);
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => {
+        socket.fakeOpen();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage(stateSyncFixture()));
+
+      let runId = '';
+      act(() => {
+        runId = ops.dispatch('sidechat.create', { parentSessionId: 'session-wire' }).id;
+      });
+      const request = socket.parsedSent<ClientToServerMessage>()
+        .find(frame => frame.type === 'sidechat:create') as { request_id: string };
+
+      act(() => socket.fakeMessage({
+        type: 'error',
+        request_id: request.request_id,
+        request_type: 'sidechat:create',
+        code: 'SESSION_BUSY',
+        message: 'race lost',
+      }));
+      expect(feedbackSnapshot().toasts).toHaveLength(0);
+
+      act(() => socket.fakeMessage({
+        type: 'operation:result',
+        request_id: request.request_id,
+        request_type: 'sidechat:create',
+        ok: false,
+        error: { code: 'SESSION_BUSY', message: 'race lost' },
+      }));
+      expect(store.getRun(runId)?.phase).toBe('failed');
+      expect(feedbackSnapshot().toasts).toHaveLength(0);
+    } finally {
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      __resetFeedback();
+    }
+  });
+
   it('reloads canonical metadata, rolls back the overlay, and exposes the Host error', async () => {
     __resetFeedback();
     vi.mocked(loadSessions).mockResolvedValue([]);
@@ -584,6 +764,13 @@ describe('WS-003: Host dispatch failure through the real Web client chain', () =
             size: 4,
             blob: new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: 'image/png' }),
           }],
+          contextItems: [{
+            type: 'pastedText',
+            id: 'first-paste',
+            text: 'first context',
+            lineCount: 1,
+            byteSize: 13,
+          }],
         }}
       />,
     );
@@ -616,6 +803,10 @@ describe('WS-003: Host dispatch failure through the real Web client chain', () =
           items: [expect.objectContaining({
             type: 'localImage',
             path: '/tmp/gian/attachments/session-with-screenshot/captured.png',
+          })],
+          context_items: [expect.objectContaining({
+            type: 'pastedText',
+            text: 'first context',
           })],
         })));
       expect(snapshot().pendingFirstMessage).toBeNull();

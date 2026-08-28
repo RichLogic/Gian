@@ -1,4 +1,4 @@
-import type { ChatDisplay, DisplayEventType, EventEnvelope } from '@gian/shared';
+import type { ChatDisplay, DisplayEventType, EventEnvelope, TurnCompletedData } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 import {
   EventStore,
@@ -470,8 +470,21 @@ function synthesizeTerminalBoundaries(
       ? retainedAt!
       : (Number.isFinite(completedAt) ? completedAt : (lastEventAt ?? createdAt));
     const ts = Math.max(baseTimestamp, lastEventAt ?? Number.NEGATIVE_INFINITY);
+    const status = turn.status === 'error'
+      ? 'error' as const
+      : turn.status === 'stopped' ? 'stopped' as const : 'completed' as const;
+    const retainedData = retained?.display?.type === 'state.turn-completed'
+      ? retained.display.data as TurnCompletedData
+      : { turnId: turn.id };
     out.push(retained
-      ? { ...retained, ts }
+      ? {
+          ...retained,
+          ts,
+          display: {
+            type: 'state.turn-completed',
+            data: { ...retainedData, status },
+          },
+        }
       : {
           session_id: sessionId,
           turn: turn.turn_number,
@@ -481,7 +494,7 @@ function synthesizeTerminalBoundaries(
           data: {},
           display: {
             type: 'state.turn-completed',
-            data: { turnId: turn.id },
+            data: { turnId: turn.id, status },
           },
         });
   }

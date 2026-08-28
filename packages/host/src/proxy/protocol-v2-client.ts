@@ -49,7 +49,7 @@ export interface ProtocolV2ClientOptions {
   shutdownProcess?: typeof shutdownProxyProcess;
 }
 
-/** Generic, vendor-neutral client for the gian.proxy/2.0 JSON-RPC stdio contract. */
+/** Generic, vendor-neutral client for the gian.proxy/2.x JSON-RPC stdio contract. */
 export class ProtocolV2Client {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly validator: HostProtocolValidator;

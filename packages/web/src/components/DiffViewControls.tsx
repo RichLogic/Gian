@@ -82,6 +82,44 @@ function WordWrapIcon() {
   );
 }
 
+function FileArrowIcon({ direction }: { direction: 'previous' | 'next' }) {
+  const d = direction === 'previous' ? 'M6 14l6-6 6 6' : 'M6 10l6 6 6-6';
+  return (
+    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={d} />
+    </svg>
+  );
+}
+
+export function FileNavigationControls({
+  canPrevious,
+  canNext,
+  onPrevious,
+  onNext,
+}: {
+  canPrevious: boolean;
+  canNext: boolean;
+  onPrevious: () => void;
+  onNext: () => void;
+}) {
+  const t = useT();
+  return (
+    <span className="diff-file-navigation">
+      <button className="sheet-tabs-act" type="button" disabled={!canPrevious}
+              aria-label={t('sheet.diff.previousFile')} title={t('sheet.diff.previousFile')}
+              onClick={onPrevious}>
+        <FileArrowIcon direction="previous" />
+      </button>
+      <button className="sheet-tabs-act" type="button" disabled={!canNext}
+              aria-label={t('sheet.diff.nextFile')} title={t('sheet.diff.nextFile')}
+              onClick={onNext}>
+        <FileArrowIcon direction="next" />
+      </button>
+    </span>
+  );
+}
+
 export function DiffViewControls({
   split,
   wrap,

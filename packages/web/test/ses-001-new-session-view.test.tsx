@@ -4,7 +4,7 @@
 // whose optional title precedes the required first message. The composer bar
 // carries model / thinking / mode chips that follow the picked agent, plus a
 // Codex-only Fast toggle. Attachments align with the session Composer: image
-// paste, a file picker for arbitrary files, and Desktop screenshot capture all
+// paste, a file picker for arbitrary files, and global Desktop captures all
 // stage Blobs in the pre-session IndexedDB store (20 MB cap) and are uploaded
 // into the Session after it is created; image thumbnails zoom through the
 // app-level ImageLightbox (ImageZoomContext), same as the Composer's chips. Send stays disabled until an agent is
@@ -13,7 +13,7 @@
 // explicit-only in the payload; the last used workspace/agent/chips are
 // remembered for the next open. The workspace drop is Codex-style (search +
 // "+ New workspace" jump to the Workspaces sheet) — the page never creates
-// workspaces inline.
+// workspaces inline. There is no dedicated screenshot button in this surface.
 
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -34,6 +34,24 @@ import {
 } from '../src/views/new-session-view.js';
 import { storeNewSessionAttachment, storeNewSessionScreenshot } from '../src/screenshot-drafts.js';
 import { ImageZoomContext } from '../src/transcript/items.js';
+import { typeInlineComposer } from './inline-composer-test-utils.js';
+import { createOperationDispatcher } from '../src/operations/dispatcher.js';
+import { createOperationStore } from '../src/operations/store.js';
+import {
+  OperationDispatcherProvider,
+  OperationStoreProvider,
+} from '../src/operations/use-operations.js';
+
+const { pickResourcesMock, desktopResourcesAvailable } = vi.hoisted(() => ({
+  pickResourcesMock: vi.fn(),
+  desktopResourcesAvailable: { current: true },
+}));
+
+vi.mock('../src/desktop-bridge.js', () => ({
+  desktopBridge: () => desktopResourcesAvailable.current
+    ? { resources: { pick: pickResourcesMock } }
+    : undefined,
+}));
 
 vi.mock('../src/api.js', () => ({
   loadAgents: vi.fn(),
@@ -43,13 +61,10 @@ vi.mock('../src/api.js', () => ({
   loadResolvedProxyCatalog: vi.fn(),
 }));
 
-const AGENT_COLORS = { claude: 'ember', codex: 'ink', kimi: 'citron', dsh: 'teal' } as const;
-
 function agent(kind: Executor, name: string, ready = true): UserAgentStatus {
   return {
     id: `agent-${kind}-1`,
     name,
-    color: (AGENT_COLORS as Record<string, 'ember'>)[kind] ?? 'azure',
     proxy: kind as UserAgentStatus['proxy'],
     cliPath: ready ? `/bin/${kind}` : null,
     defaults: { model: '', thinking: '', mode: '' },
@@ -67,6 +82,7 @@ function agent(kind: Executor, name: string, ready = true): UserAgentStatus {
           state: 'missing', path: `/proxy/${kind}`, version: null, source: 'github-release',
           defaults: { model: '', thinking: '', mode: '' },
         },
+    runtimeProfile: null,
     officialInstallUrl: 'https://example.invalid',
   };
 }
@@ -115,16 +131,22 @@ const codexModels = [
 function renderView(props: Partial<Parameters<typeof NewSessionView>[0]> = {}) {
   const onCreate = vi.fn();
   const onNewWorkspace = vi.fn();
+  const store = createOperationStore();
+  const dispatcher = createOperationDispatcher({ store });
   const view = render(
     <LocaleProvider locale="en">
-      <NewSessionView
-        workspaces={[workspace('ws-1', 'Alpha'), workspace('ws-2', 'Beta')]}
-        onNewWorkspace={onNewWorkspace}
-        onCreate={onCreate}
-        onCancel={vi.fn()}
-        creating={false}
-        {...props}
-      />
+      <OperationStoreProvider store={store}>
+        <OperationDispatcherProvider dispatcher={dispatcher}>
+          <NewSessionView
+            workspaces={[workspace('ws-1', 'Alpha'), workspace('ws-2', 'Beta')]}
+            onNewWorkspace={onNewWorkspace}
+            onCreate={onCreate}
+            onCancel={vi.fn()}
+            creating={false}
+            {...props}
+          />
+        </OperationDispatcherProvider>
+      </OperationStoreProvider>
     </LocaleProvider>,
   );
   return { onCreate, onNewWorkspace, unmount: view.unmount };
@@ -140,6 +162,8 @@ describe('NewSessionView', () => {
     clearComposerCapabilityCaches();
     // The view remembers the last choices in localStorage — isolate tests.
     localStorage.clear();
+    delete window.gianDesktop;
+    desktopResourcesAvailable.current = true;
     vi.mocked(loadAgents).mockResolvedValue(agents);
     vi.mocked(loadProxyModels).mockResolvedValue(codexModels);
     vi.mocked(loadProxyCapabilities).mockResolvedValue({
@@ -152,6 +176,7 @@ describe('NewSessionView', () => {
       slashCommands: [],
       resolvedDefaults: { sessionConfig: {}, turnConfig: {} },
     });
+    pickResourcesMock.mockResolvedValue({ resources: [], rejectedFiles: [] });
     Object.defineProperties(URL, {
       createObjectURL: { configurable: true, value: vi.fn(() => 'blob:new-session-screenshot') },
       revokeObjectURL: { configurable: true, value: vi.fn() },
@@ -167,6 +192,89 @@ describe('NewSessionView', () => {
     // Saved but not-ready Agents are not offered (⌘J/⌘K stays disabled too).
     expect(screen.queryByTestId('ns-agent-option-agent-kimi-1')).toBeNull();
     expect(screen.queryByTestId('ns-agent-option-agent-dsh-1')).toBeNull();
+    const codexRow = screen.getByTestId('ns-agent-option-agent-codex-1');
+    expect(codexRow.querySelector('img[src="/api/proxies/codex/logo/light"]')).toBeTruthy();
+    expect(codexRow.querySelector('img[src="/api/proxies/codex/logo/dark"]')).toBeTruthy();
+    await userEvent.click(codexRow);
+    const picker = screen.getByTestId('ns-agent-picker');
+    expect(picker.querySelector('.agent-logo')).toBeTruthy();
+    expect(document.querySelector('[data-testid="ns-model-chip"] .agent-logo')).toBeNull();
+  });
+
+  it('allows an unverified Agent but shows its red consequence warning', async () => {
+    const codex = agent('codex', 'Codex');
+    codex.runtimeProfile = {
+      id: 'profile-unverified',
+      agentId: codex.id,
+      proxy: 'codex',
+      cliPath: '/bin/codex',
+      cliVersion: '0.147.0',
+      configHome: '/Users/test/.codex',
+      cliFingerprint: 'runtime-new',
+      proxyVersion: '0.2.8',
+      verifiedCliVersions: ['0.146.0'],
+      verification: 'unverified',
+      skill: { name: 'gian-session', version: '0.2.8', state: 'ready' },
+    };
+    vi.mocked(loadAgents).mockResolvedValue([codex]);
+    renderView();
+    expect(await screen.findByTestId('ns-runtime-unverified')).toHaveTextContent(
+      /has not completed full regression/i,
+    );
+    expect(screen.getByTestId('ns-agent-picker')).toHaveTextContent('Codex');
+  });
+
+  it('matches the main Composer control order and has no screenshot button', async () => {
+    window.gianDesktop = {
+      screenshot: {
+        setTarget: vi.fn(async () => true),
+      },
+    } as typeof window.gianDesktop;
+    const view = renderView();
+    try {
+      await openAgentPicker();
+      await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
+      await screen.findByTestId('ns-thinking-chip');
+      await screen.findByTestId('ns-fast-chip');
+
+      const bar = document.querySelector('.composer-bar') as HTMLElement;
+      const order = Array.from(bar.children).map(element => (
+        element.classList.contains('spacer') ? 'spacer'
+          : element.classList.contains('cmp-control-sep') ? 'separator'
+            : element.getAttribute('data-testid')
+      ));
+      expect(order).toEqual([
+        'ns-model-chip',
+        'separator',
+        'ns-thinking-chip',
+        'separator',
+        'ns-fast-chip',
+        'spacer',
+        'ns-mode-chip',
+        'ns-attach-button',
+        'ns-send',
+      ]);
+      expect(bar.querySelector('.cmp-bulb')).toBeNull();
+      expect(bar.querySelector('.cmp-caret')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Screenshot' })).toBeNull();
+    } finally {
+      view.unmount();
+      delete window.gianDesktop;
+    }
+  });
+
+  it('falls back to the browser file input when Desktop folder picking is unavailable', async () => {
+    desktopResourcesAvailable.current = false;
+    renderView();
+    const input = screen.getByTestId('ns-file-input') as HTMLInputElement;
+    const click = vi.spyOn(input, 'click');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add context' }));
+    expect(screen.getByText('Folder references require Gian Desktop')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /^Files/ }));
+
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(pickResourcesMock).not.toHaveBeenCalled();
   });
 
   it('calls catalog.resolve only after a Proxy-advertised option changes', async () => {
@@ -201,6 +309,7 @@ describe('NewSessionView', () => {
     vi.mocked(loadProxyCapabilities).mockResolvedValue({
       protocolVersion: '2.0',
       catalogRevision: 'catalog-1',
+      specialCatalogs: { model: 'workspace_mode' },
       input: [{ type: 'text' }],
       configOptions: options,
       slashCommands: [],
@@ -210,6 +319,7 @@ describe('NewSessionView', () => {
     });
     vi.mocked(loadResolvedProxyCatalog).mockResolvedValue({
       catalogRevision: 'catalog-1',
+      specialCatalogs: { model: 'workspace_mode' },
       input: [{ type: 'text' }],
       configOptions: options,
       slashCommands: [],
@@ -305,10 +415,10 @@ describe('NewSessionView', () => {
     const { onCreate } = renderView({ initialAgentId: 'agent-dsh-1' });
     expect(await screen.findByTestId('ns-agent-picker')).toHaveTextContent('DeepSeek Harness');
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('DeepSeek Reasoner'));
-    expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('High');
+    expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('High');
     expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('Never');
 
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'use configured defaults');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'use configured defaults');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
@@ -324,7 +434,7 @@ describe('NewSessionView', () => {
     const send = screen.getByTestId('ns-send');
     await screen.findByTestId('ns-agent-picker');
     // Message alone is not enough — no agent selected yet.
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'fix the bug');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'fix the bug');
     expect(send).toBeDisabled();
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
@@ -336,7 +446,7 @@ describe('NewSessionView', () => {
     const { onCreate } = renderView();
     // The picker shows the auto-selected agent without opening the drop.
     expect(await screen.findByTestId('ns-agent-picker')).toHaveTextContent('Kimi Code');
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'summarize this repo');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'summarize this repo');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
@@ -354,9 +464,9 @@ describe('NewSessionView', () => {
     expect(screen.queryByTestId('ns-fast-chip')).toBeNull();
     const title = screen.getByTestId('ns-title-input');
     const message = screen.getByTestId('ns-message-input');
-    expect(title.nextElementSibling).toBe(message);
+    expect(title.nextElementSibling).toContainElement(message);
     await userEvent.type(title, '  Auth cleanup  ');
-    await userEvent.type(screen.getByTestId('ns-message-input'), '  refactor auth  ');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), '  refactor auth  ');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
@@ -373,7 +483,7 @@ describe('NewSessionView', () => {
     expect(screen.getByTestId('ns-workspace-chip')).toHaveTextContent('Beta');
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'go');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'go');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-2',
@@ -387,7 +497,7 @@ describe('NewSessionView', () => {
   it('preselects initialAgentId (⌘J/⌘K shortcut carries the agent choice)', async () => {
     const { onCreate } = renderView({ initialAgentId: 'agent-claude-1' });
     expect(await screen.findByTestId('ns-agent-picker')).toHaveTextContent('Claude Code');
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'go');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'go');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
@@ -409,7 +519,7 @@ describe('NewSessionView', () => {
     expect(screen.getByTestId('ns-workspace-chip')).toHaveTextContent('Beta');
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'go');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'go');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'ws-2' }));
   });
@@ -418,10 +528,9 @@ describe('NewSessionView', () => {
     const { onNewWorkspace } = renderView();
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
-    await userEvent.click(screen.getByTestId('ns-model-chip'));
-    await userEvent.click(within(document.querySelector('.catalog-options-pop') as HTMLElement).getByRole('switch', { name: 'Fast' }));
+    await userEvent.click(screen.getByTestId('ns-fast-chip'));
     await userEvent.type(screen.getByTestId('ns-title-input'), 'Draft title');
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'draft keeps me');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'draft keeps me');
     await userEvent.click(screen.getByTestId('ns-workspace-chip'));
     await userEvent.click(screen.getByTestId('ns-workspace-new'));
     expect(onNewWorkspace).toHaveBeenCalledTimes(1);
@@ -450,7 +559,7 @@ describe('NewSessionView', () => {
     }));
     renderView({ initialWorkspaceId: 'ws-2' });
     expect(screen.getByTestId('ns-title-input')).toHaveValue('Backlog cleanup');
-    expect(screen.getByTestId('ns-message-input')).toHaveValue('back from the sheet');
+    expect(screen.getByTestId('ns-message-input')).toHaveTextContent('back from the sheet');
     // A legacy (executor-only) draft resolves to the kind's ready Agent once
     // the agents list lands — wait for the async pick.
     await waitFor(
@@ -459,7 +568,7 @@ describe('NewSessionView', () => {
     );
     expect(screen.getByTestId('ns-workspace-chip')).toHaveTextContent('Beta');
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5'));
-    await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Fast'));
+    expect(screen.getByTestId('ns-fast-chip')).toHaveAttribute('aria-pressed', 'true');
     // Navigation drafts remain until creation succeeds; merely reopening the
     // page is not a destructive read.
     expect(JSON.parse(localStorage.getItem(key) ?? 'null')).toMatchObject({
@@ -474,15 +583,15 @@ describe('NewSessionView', () => {
     const alpha = renderView({ initialWorkspaceId: 'ws-1' });
     await screen.findByTestId('ns-agent-picker');
     await userEvent.type(screen.getByTestId('ns-title-input'), 'Alpha draft');
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'work in alpha');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'work in alpha');
     alpha.unmount();
 
     const beta = renderView({ initialWorkspaceId: 'ws-2' });
     await screen.findByTestId('ns-agent-picker');
     expect(screen.getByTestId('ns-title-input')).toHaveValue('');
-    expect(screen.getByTestId('ns-message-input')).toHaveValue('');
+    expect(screen.getByTestId('ns-message-input')).toHaveTextContent('');
     await userEvent.type(screen.getByTestId('ns-title-input'), 'Beta draft');
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'work in beta');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'work in beta');
     beta.unmount();
 
     // Header "+" has no explicit Workspace. It returns to the Workspace draft
@@ -491,13 +600,13 @@ describe('NewSessionView', () => {
     await screen.findByText('Kimi Code');
     expect(screen.getByTestId('ns-workspace-chip')).toHaveTextContent('Beta');
     expect(screen.getByTestId('ns-title-input')).toHaveValue('Beta draft');
-    expect(screen.getByTestId('ns-message-input')).toHaveValue('work in beta');
+    expect(screen.getByTestId('ns-message-input')).toHaveTextContent('work in beta');
     active.unmount();
 
     renderView({ initialWorkspaceId: 'ws-1' });
     await screen.findByText('Kimi Code');
     expect(screen.getByTestId('ns-title-input')).toHaveValue('Alpha draft');
-    expect(screen.getByTestId('ns-message-input')).toHaveValue('work in alpha');
+    expect(screen.getByTestId('ns-message-input')).toHaveTextContent('work in alpha');
   });
 
   it('keeps independent drafts per Task even when they share a Workspace', async () => {
@@ -506,19 +615,19 @@ describe('NewSessionView', () => {
     const first = renderView({ draftScope: { kind: 'task', id: 'task-1' } });
     await screen.findByTestId('ns-agent-picker');
     await userEvent.type(screen.getByTestId('ns-title-input'), 'Task one draft');
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'first task work');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'first task work');
     first.unmount();
 
     const second = renderView({ draftScope: { kind: 'task', id: 'task-2' } });
     await screen.findByTestId('ns-agent-picker');
     expect(screen.getByTestId('ns-title-input')).toHaveValue('');
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'second task work');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'second task work');
     second.unmount();
 
     renderView({ draftScope: { kind: 'task', id: 'task-1' } });
     await screen.findByText('Kimi Code');
     expect(screen.getByTestId('ns-title-input')).toHaveValue('Task one draft');
-    expect(screen.getByTestId('ns-message-input')).toHaveValue('first task work');
+    expect(screen.getByTestId('ns-message-input')).toHaveTextContent('first task work');
   });
 
   it('accepts an attachment-only screenshot draft and submits its original Blob', async () => {
@@ -563,7 +672,7 @@ describe('NewSessionView', () => {
     expect(input.firstAttachments[0].blob.size).toBe(4);
   });
 
-  it('stages a pasted image as an attachment chip and submits its Blob', async () => {
+  it('stages a pasted image as an inline reference and submits its Blob', async () => {
     const { onCreate } = renderView();
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
@@ -597,9 +706,40 @@ describe('NewSessionView', () => {
     fireEvent.paste(screen.getByTestId('ns-message-input'), {
       clipboardData: {
         items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        getData: () => '',
       },
     });
     expect(screen.queryByTestId('new-session-screenshots')).toBeNull();
+  });
+
+  it('stages long pasted text and folder paths as first-message context', async () => {
+    const { onCreate } = renderView();
+    await openAgentPicker();
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
+    const pasted = Array.from({ length: 10 }, (_, index) => `context ${index}`).join('\n');
+    fireEvent.paste(screen.getByTestId('ns-message-input'), {
+      clipboardData: { items: [], getData: () => pasted },
+    });
+    expect(document.querySelector('.composer-inline-reference[data-reference-type="context"]'))
+      .not.toBeNull();
+
+    pickResourcesMock.mockResolvedValue({
+      resources: [{ type: 'folder', path: '/tmp/reference-folder', name: 'reference-folder' }],
+      rejectedFiles: [],
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Add context' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Files and folders' }));
+    expect(await screen.findByText('reference-folder')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId('ns-send'));
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
+    expect(onCreate.mock.calls[0]![0]).toMatchObject({
+      firstMessage: '',
+      contextItems: [
+        { type: 'pastedText', text: pasted, lineCount: 10 },
+        { type: 'folder', path: '/tmp/reference-folder', name: 'reference-folder' },
+      ],
+    });
   });
 
   it('stages picked files (including non-images) and submits their Blobs', async () => {
@@ -622,16 +762,16 @@ describe('NewSessionView', () => {
     expect(input.firstAttachments[0].blob).toBeInstanceOf(Blob);
   });
 
-  it('renders a file icon (no thumbnail) for non-image attachments', async () => {
+  it('opens a non-image attachment preview from its inline reference', async () => {
     renderView();
     await screen.findByTestId('ns-agent-picker');
     const pdf = new File([new Uint8Array([0x25])], 'notes.pdf', { type: 'application/pdf' });
     fireEvent.change(screen.getByTestId('ns-file-input'), { target: { files: [pdf] } });
 
-    const chip = (await screen.findByText('notes.pdf')).closest('.att-chip') as HTMLElement;
-    expect(chip.querySelector('.att-file-icon')).not.toBeNull();
-    expect(chip.querySelector('.att-thumb')).toBeNull();
-    expect(chip.querySelector('.att-size')).toHaveTextContent('1 B');
+    await userEvent.click(await screen.findByText('notes.pdf'));
+    const pop = screen.getByTestId('new-session-screenshots');
+    expect(pop.querySelector('.ref-pop-thumb')).toBeNull();
+    expect(pop.querySelector('.ref-pop-meta')).toHaveTextContent('1 B');
   });
 
   it('opens the app lightbox when an image attachment thumbnail is clicked', async () => {
@@ -654,10 +794,11 @@ describe('NewSessionView', () => {
     const image = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'shot.png', { type: 'image/png' });
     fireEvent.change(screen.getByTestId('ns-file-input'), { target: { files: [image] } });
 
-    const chip = (await screen.findByText('shot.png')).closest('.att-chip') as HTMLElement;
-    // The thumb button appears once the async Blob preview resolves.
-    const thumbBtn = await within(chip).findByRole('button', { name: 'shot.png' });
-    await userEvent.click(thumbBtn);
+    await userEvent.click(await screen.findByText('shot.png'));
+    const pop = screen.getByTestId('new-session-screenshots');
+    // The thumbnail appears once the async Blob preview resolves.
+    const thumb = await within(pop).findByRole('img', { name: 'shot.png' });
+    await userEvent.click(thumb);
     expect(zoomImage).toHaveBeenCalledWith('blob:new-session-screenshot', 'shot.png');
   });
 
@@ -672,7 +813,7 @@ describe('NewSessionView', () => {
     expect(screen.getByTestId('ns-send')).toBeDisabled();
   });
 
-  it('removing an attachment chip clears it from the persisted draft', async () => {
+  it('removing an attachment from its inline-reference preview clears the draft', async () => {
     renderView();
     await screen.findByTestId('ns-agent-picker');
     await act(async () => {
@@ -683,8 +824,8 @@ describe('NewSessionView', () => {
     });
     expect(await screen.findByText('draft.png')).toBeInTheDocument();
 
-    const chip = screen.getByText('draft.png').closest('.att-chip') as HTMLElement;
-    await userEvent.click(within(chip).getByRole('button', { name: 'Remove attachment' }));
+    await userEvent.click(screen.getByText('draft.png'));
+    await userEvent.click(await screen.findByRole('button', { name: 'Remove attachment' }));
     expect(screen.queryByText('draft.png')).toBeNull();
     const draft = JSON.parse(localStorage.getItem(newSessionDraftStorageKey({
       kind: 'workspace',
@@ -709,33 +850,30 @@ describe('NewSessionView', () => {
     const { onCreate } = renderView();
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
-    // The single summary shows only model / effort; Fast appears only when on.
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5 Codex'));
-    expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Medium');
-    expect(screen.getByTestId('ns-model-chip')).not.toHaveTextContent('Fast');
+    expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('Medium');
+    expect(screen.getByTestId('ns-fast-chip')).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('Ask for approval');
 
+    await userEvent.click(screen.getByTestId('ns-fast-chip'));
+    expect(screen.getByTestId('ns-fast-chip')).toHaveAttribute('aria-pressed', 'true');
     await userEvent.click(screen.getByTestId('ns-model-chip'));
-    let options = document.querySelector('.catalog-options-pop') as HTMLElement;
-    const fast = within(options).getByRole('switch', { name: 'Fast' });
-    expect(fast).not.toBeChecked();
-    await userEvent.click(fast);
-    expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Fast');
     await userEvent.click(
-      within(options).getByText('GPT-5', { selector: '.mp-row-title' }),
+      within(document.querySelector('.model-pop') as HTMLElement)
+        .getByText('GPT-5', { selector: '.mp-row-title' }),
     );
     expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5');
-    await userEvent.click(screen.getByTestId('ns-model-chip'));
-    options = document.querySelector('.catalog-options-pop') as HTMLElement;
+    await userEvent.click(screen.getByTestId('ns-thinking-chip'));
     await userEvent.click(
-      within(options).getByText('Medium', { selector: '.mp-row-title' }),
+      within(document.querySelector('.think-pop') as HTMLElement)
+        .getByText('Medium', { selector: '.mp-row-title' }),
     );
     await userEvent.click(screen.getByTestId('ns-mode-chip'));
     await userEvent.click(
       within(document.querySelector('.approval-pop') as HTMLElement).getByText('Approve for me'),
     );
 
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'do the thing');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'do the thing');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
@@ -785,17 +923,16 @@ describe('NewSessionView', () => {
     renderView();
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
-    await userEvent.click(await screen.findByTestId('ns-model-chip'));
-    const options = document.querySelector('.catalog-options-pop') as HTMLElement;
-    const fast = within(options).getByRole('switch', { name: 'Fast' });
+    const fast = await screen.findByTestId('ns-fast-chip');
     expect(fast).toBeEnabled();
     await userEvent.click(fast);
-    await userEvent.click(within(options).getByText('GPT-5', { selector: '.mp-row-title' }));
-    await waitFor(() => expect(screen.getByTestId('ns-model-chip')).not.toHaveTextContent('Fast'));
-
     await userEvent.click(screen.getByTestId('ns-model-chip'));
-    expect(within(document.querySelector('.catalog-options-pop') as HTMLElement)
-      .getByRole('switch', { name: 'Fast' })).toBeDisabled();
+    await userEvent.click(
+      within(document.querySelector('.model-pop') as HTMLElement)
+        .getByText('GPT-5', { selector: '.mp-row-title' }),
+    );
+    await waitFor(() => expect(screen.getByTestId('ns-fast-chip')).toHaveAttribute('aria-pressed', 'false'));
+    expect(screen.getByTestId('ns-fast-chip')).toBeDisabled();
   });
 
   it('leaves model/effort/mode out of the payload unless explicitly picked', async () => {
@@ -803,7 +940,7 @@ describe('NewSessionView', () => {
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5 Codex'));
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'defaults please');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'defaults please');
     await userEvent.click(screen.getByTestId('ns-send'));
     // The host applies its configured defaults — the payload must not invent
     // capability-list guesses.
@@ -872,16 +1009,17 @@ describe('NewSessionView', () => {
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-agent-claude-1'));
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Sonnet'));
-    await userEvent.click(screen.getByTestId('ns-model-chip'));
+    await userEvent.click(screen.getByTestId('ns-thinking-chip'));
     await userEvent.click(
-      within(document.querySelector('.catalog-options-pop') as HTMLElement).getByText('Low', { selector: '.mp-row-title' }),
+      within(document.querySelector('.think-pop') as HTMLElement)
+        .getByText('Low', { selector: '.mp-row-title' }),
     );
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-agent-kimi-1'));
-    await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('On'));
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'test kimi');
+    await waitFor(() => expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('On'));
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'test kimi');
     await userEvent.click(screen.getByTestId('ns-model-chip'));
-    const kimiMenu = document.querySelector('.catalog-options-pop') as HTMLElement;
+    const kimiMenu = document.querySelector('.model-pop') as HTMLElement;
     expect(within(kimiMenu).getByText('Kimi for Coding')).toBeInTheDocument();
     expect(within(kimiMenu).getByText('K3')).toBeInTheDocument();
     await userEvent.click(screen.getByTestId('ns-model-chip'));
@@ -900,14 +1038,14 @@ describe('NewSessionView', () => {
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5 Codex'));
     await userEvent.click(screen.getByTestId('ns-model-chip'));
     await userEvent.click(
-      within(document.querySelector('.catalog-options-pop') as HTMLElement).getByText('GPT-5', { selector: '.mp-row-title' }),
+      within(document.querySelector('.model-pop') as HTMLElement)
+        .getByText('GPT-5', { selector: '.mp-row-title' }),
     );
-    await userEvent.click(screen.getByTestId('ns-model-chip'));
-    await userEvent.click(within(document.querySelector('.catalog-options-pop') as HTMLElement).getByRole('switch', { name: 'Fast' }));
+    await userEvent.click(screen.getByTestId('ns-fast-chip'));
     await userEvent.click(screen.getByTestId('ns-workspace-chip'));
     await userEvent.click(screen.getByTestId('ns-workspace-option-ws-2'));
     await userEvent.type(screen.getByTestId('ns-title-input'), 'One-off title');
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'first run');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'first run');
     await userEvent.click(screen.getByTestId('ns-send'));
     // NewSessionView only submits; CodingView owns the operation result and
     // clears this Workspace draft after the create run is confirmed.
@@ -923,8 +1061,8 @@ describe('NewSessionView', () => {
     // agent, and capability choices, it must never become a next-open default.
     expect(screen.getByTestId('ns-title-input')).toHaveValue('');
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('GPT-5'));
-    await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Fast'));
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'second run');
+    expect(screen.getByTestId('ns-fast-chip')).toHaveAttribute('aria-pressed', 'true');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'second run');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(second.onCreate).toHaveBeenCalledWith({
       workspaceId: 'ws-2',

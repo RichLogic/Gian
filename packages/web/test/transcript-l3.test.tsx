@@ -1,11 +1,11 @@
 // Transcript redesign P3 (2026-08-08) — level-3 detail routing + panel 2.
 // Pins:
 //   - over-threshold rows (output >10 lines, long reasoning, long result
-//     lists, tool output >10 lines) become clickable `.trow` rows with the
-//     hover `⇥ panel` hint and open their FULL content in panel 2 via
-//     ChatPanelOpenContext — instead of the P1 stopgaps (inline scroll cap /
-//     Diffs-owned Sheet tabs);
-//   - in-threshold rows never render the hint (level 2 stays inline);
+//     lists, tool output >10 lines) become clickable `.trow` rows and open
+//     their FULL content in panel 2 via ChatPanelOpenContext — instead of
+//     the P1 stopgaps (inline scroll cap / Diffs-owned Sheet tabs);
+//   - rows render NO ⇥ panel hint (removed 2026-08-27): the click alone
+//     routes to panel 2;
 //   - transcript details identify themselves as chat-owned panel-2 content;
 //   - independent diff-event text tabs keep their Sheet preview semantics.
 
@@ -47,7 +47,7 @@ function renderWithDetail(node: React.ReactElement, openDetail = vi.fn()) {
 // ---------------------------------------------------------------------------
 
 describe('P3 level-3 routing', () => {
-  it('a finished command with >10 output lines renders ⇥ panel and opens the full output on click', async () => {
+  it('a finished command with >10 output lines opens the full output in panel 2 on click (no hint)', async () => {
     const user = userEvent.setup();
     const { container, openDetail } = renderWithDetail(
       <CommandCard item={commandItem({ stdout: LONG_OUTPUT, status: 'error' })} />,
@@ -56,7 +56,8 @@ describe('P3 level-3 routing', () => {
     expect(row).not.toHaveClass('expandable');
     expect(row).toHaveClass('clickable');
     expect(container.querySelector('.trow-caret')).not.toBeNull();
-    expect(container.querySelector('.trow-ext')).toHaveTextContent('⇥ panel');
+    // 2026-08-27: even level-3 rows render no ⇥ panel hint anywhere.
+    expect(container.querySelector('.trow-ext')).toBeNull();
     expect(row.querySelector('.trow-meta .err')).toHaveTextContent('error');
     expect(row.querySelector('.trow-meta')).toHaveTextContent('25 lines');
 
@@ -90,7 +91,6 @@ describe('P3 level-3 routing', () => {
     const row = container.querySelector('.trow') as HTMLElement;
     expect(row).toHaveClass('clickable');
     expect(row).toHaveAttribute('data-variant', 'full');
-    expect(container.querySelector('.trow-ext')).not.toBeNull();
 
     await user.click(row);
     expect(openDetail).toHaveBeenCalledWith({
@@ -113,7 +113,6 @@ describe('P3 level-3 routing', () => {
       summary: '', status: 'success', output: LONG_OUTPUT, ts: 1, turn: 1,
     };
     const { container, openDetail } = renderWithDetail(<ToolEvent item={item} />);
-    expect(container.querySelector('.trow-ext')).not.toBeNull();
     await user.click(container.querySelector('.trow') as HTMLElement);
     expect(openDetail).toHaveBeenCalledWith({
       kind: 'transcript-detail',
@@ -132,7 +131,6 @@ describe('P3 level-3 routing', () => {
     };
     const { container, openDetail } = renderWithDetail(<ToolEvent item={item} />);
 
-    expect(container.querySelector('.trow-ext')).not.toBeNull();
     await user.click(container.querySelector('.trow') as HTMLElement);
     expect(openDetail).toHaveBeenCalledWith({
       kind: 'transcript-detail',
@@ -168,16 +166,19 @@ describe('P3 level-3 routing', () => {
       <Transcript items={items} pending={false} onApprove={() => {}} />,
     );
 
+    // 2026-08-27: the expanded terminal block is the single-line scroll
+    // area. The stale-running row shows NO live timer and jumps to the
+    // anchored panel-2 event feed (whose rows expand the full output in
+    // place) instead of the old transcript-detail routing.
     await user.click(container.querySelector('.turnsum') as HTMLElement);
-    const row = container.querySelector('.turnsum-body .trow') as HTMLElement;
-    expect(row.querySelector('.trow-ext')).not.toBeNull();
+    const row = container.querySelector('.turnsum-body.turn-work-scroll .trow') as HTMLElement;
+    expect(row).not.toBeNull();
     expect(row.querySelector('.trow-run')).toBeNull();
     await user.click(row);
     expect(openDetail).toHaveBeenCalledWith({
-      kind: 'transcript-detail',
-      title: 'Tool: mcp__demo__run',
-      text: output,
-      sourceId: '5:tool:stale-running',
+      kind: 'event-feed',
+      turn: 5,
+      anchorId: '5:tool:stale-running',
     });
   });
 
@@ -194,7 +195,6 @@ describe('P3 level-3 routing', () => {
     };
     const { container, openDetail } = renderWithDetail(<ToolEvent item={item} />);
 
-    expect(container.querySelector('.trow-ext')).not.toBeNull();
     expect(container.querySelector('.trow-detail')).toBeNull();
     await user.click(container.querySelector('.trow') as HTMLElement);
     expect(openDetail).toHaveBeenCalledWith({
@@ -216,7 +216,6 @@ describe('P3 level-3 routing', () => {
     };
     const { container, openDetail } = renderWithDetail(<ToolEvent item={item} />);
 
-    expect(container.querySelector('.trow-ext')).not.toBeNull();
     await user.click(container.querySelector('.trow') as HTMLElement);
     expect(openDetail).toHaveBeenCalledWith({
       kind: 'transcript-detail',
@@ -234,7 +233,6 @@ describe('P3 level-3 routing', () => {
       searchKind: 'grep', matchCount: 15, matches, ts: 1, turn: 1,
     };
     const { container, openDetail } = renderWithDetail(<FileSearchCard item={item} />);
-    expect(container.querySelector('.trow-ext')).not.toBeNull();
     await user.click(container.querySelector('.trow') as HTMLElement);
     expect(openDetail).toHaveBeenCalledWith({
       kind: 'transcript-detail',

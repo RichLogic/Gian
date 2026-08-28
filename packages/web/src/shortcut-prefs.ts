@@ -1,6 +1,16 @@
 import { useSyncExternalStore } from 'react';
-import type { ShortcutAction, ShortcutMap } from '@gian/shared';
-import { DEFAULT_SHORTCUTS, resolveShortcuts } from '@gian/shared';
+import type {
+  KeymapCommand,
+  KeymapPreferences,
+  ShortcutAction,
+  ShortcutMap,
+} from '@gian/shared';
+import {
+  DEFAULT_KEYMAP_BINDINGS,
+  DEFAULT_SHORTCUTS,
+  resolveKeymap,
+  resolveShortcuts,
+} from '@gian/shared';
 
 /** Resolved keyboard shortcuts (defaults + the user's settings.save
  *  overrides). Kept in a module store — like display-prefs — because the
@@ -10,6 +20,7 @@ import { DEFAULT_SHORTCUTS, resolveShortcuts } from '@gian/shared';
 
 let current: Record<ShortcutAction, string> = resolveShortcuts(undefined);
 const listeners = new Set<() => void>();
+let currentKeymap: Partial<Record<KeymapCommand, string>> = resolveKeymap(undefined);
 
 export function setShortcutOverrides(overrides: ShortcutMap | undefined): void {
   const next = resolveShortcuts(overrides);
@@ -17,6 +28,17 @@ export function setShortcutOverrides(overrides: ShortcutMap | undefined): void {
     .every(action => next[action] === current[action]);
   if (same) return;
   current = next;
+  for (const listener of listeners) listener();
+}
+
+export function setKeymapPreferences(preferences: KeymapPreferences | undefined): void {
+  const next = resolveKeymap(preferences);
+  const keys = new Set<KeymapCommand>([
+    ...Object.keys(next) as KeymapCommand[],
+    ...Object.keys(currentKeymap) as KeymapCommand[],
+  ]);
+  if ([...keys].every(command => next[command] === currentKeymap[command])) return;
+  currentKeymap = next;
   for (const listener of listeners) listener();
 }
 
@@ -34,27 +56,73 @@ export function useShortcuts(): Record<ShortcutAction, string> {
   );
 }
 
+export function getKeymap(): Partial<Record<KeymapCommand, string>> {
+  return currentKeymap;
+}
+
+export function useKeymap(): Partial<Record<KeymapCommand, string>> {
+  return useSyncExternalStore(
+    listener => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    getKeymap,
+  );
+}
+
 /** Normalize a keydown event into the canonical combo string
  *  ("mod+shift+k"). `mod` covers Cmd and Ctrl so a remapped shortcut works
  *  for both macOS and other platforms. Returns null for pure modifier
  *  presses and keys outside the remappable grammar. */
 export function comboFromEvent(event: KeyboardEvent): string | null {
-  const key = event.key.toLowerCase();
+  const key = normalizedEventKey(event);
+  if (!key) return null;
   if (key === 'meta' || key === 'control' || key === 'shift' || key === 'alt') return null;
-  const named = key === 'enter' || key === 'escape' || key === 'tab' || key === ' '
-    ? key === ' ' ? 'space' : key
-    : /^[a-z0-9]$/.test(key) ? key : null;
-  if (!named) return null;
   const parts: string[] = [];
-  if (event.metaKey || event.ctrlKey) parts.push('mod');
+  if (event.metaKey) parts.push('mod');
+  else if (event.ctrlKey) parts.push('ctrl');
   if (event.shiftKey) parts.push('shift');
   if (event.altKey) parts.push('alt');
-  parts.push(named);
+  parts.push(key);
   return parts.join('+');
 }
 
-export function comboMatches(event: KeyboardEvent, combo: string): boolean {
-  return comboFromEvent(event) === combo;
+function normalizedEventKey(event: KeyboardEvent): string | null {
+  const physical: Record<string, string> = {
+    Backquote: '`', BracketLeft: '[', BracketRight: ']', Comma: ',', Period: '.',
+    Semicolon: ';', Equal: '=', Slash: '/', Minus: '-',
+  };
+  if (physical[event.code]) return physical[event.code]!;
+  const key = event.key.toLowerCase();
+  if (key === ' ') return 'space';
+  if (key === 'arrowleft') return 'left';
+  if (key === 'arrowright') return 'right';
+  if (key === 'arrowup') return 'up';
+  if (key === 'arrowdown') return 'down';
+  if (/^f(?:[1-9]|1[0-2])$/.test(key)) return key;
+  if (/^[a-z0-9`\[\],.;=\/-]$/.test(key)) return key;
+  if (['enter', 'escape', 'tab', 'backspace', 'delete', 'home', 'end', 'pageup', 'pagedown'].includes(key)) return key;
+  return null;
+}
+
+export function comboMatches(event: KeyboardEvent, combo: string | undefined): boolean {
+  if (!combo) return false;
+  const parts = combo.split('+');
+  const key = parts.at(-1);
+  if (!key || normalizedEventKey(event) !== key) return false;
+  const modifiers = new Set(parts.slice(0, -1));
+  const modDown = event.metaKey || event.ctrlKey;
+  if (modifiers.has('mod')) {
+    if (!modDown) return false;
+  } else {
+    if (modifiers.has('cmd') !== event.metaKey) return false;
+    if (modifiers.has('ctrl') !== event.ctrlKey) return false;
+  }
+  if (modifiers.has('shift') !== event.shiftKey) return false;
+  if (modifiers.has('alt') !== event.altKey) return false;
+  if (!modifiers.has('mod') && !modifiers.has('cmd') && !modifiers.has('ctrl')
+    && (event.metaKey || event.ctrlKey)) return false;
+  return true;
 }
 
 /** Split a combo into keycap display tokens ("mod+shift+k" → ["⌘","⇧","K"]). */
@@ -63,6 +131,8 @@ export function comboDisplayParts(combo: string): string[] {
   return parts.map(part => {
     switch (part) {
       case 'mod': return '⌘';
+      case 'cmd': return '⌘';
+      case 'ctrl': return '⌃';
       case 'shift': return '⇧';
       case 'alt': return '⌥';
       case 'enter': return '⏎';
@@ -146,4 +216,23 @@ export function isShortcutCustomized(
   map: Record<ShortcutAction, string> = current,
 ): boolean {
   return map[action] !== DEFAULT_SHORTCUTS[action];
+}
+
+export function keymapConflict(
+  binding: string,
+  self: KeymapCommand,
+  map: Partial<Record<KeymapCommand, string>> = currentKeymap,
+): KeymapCommand | null {
+  for (const command of Object.keys(map) as KeymapCommand[]) {
+    if (command !== self && map[command] === binding) return command;
+  }
+  return null;
+}
+
+export function isKeymapCustomized(
+  command: KeymapCommand,
+  preferences: KeymapPreferences | undefined,
+): boolean {
+  return Object.hasOwn(preferences?.bindings ?? {}, command)
+    || currentKeymap[command] !== DEFAULT_KEYMAP_BINDINGS[command];
 }

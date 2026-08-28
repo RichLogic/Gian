@@ -13,6 +13,7 @@ import { createOperationStore } from '../src/operations/store.js';
 import { OperationStoreProvider } from '../src/operations/use-operations.js';
 import type { OperationRun } from '../src/operations/types.js';
 import { CodingView, type CodingViewProps } from '../src/views/CodingView.js';
+import { typeInlineComposer } from './inline-composer-test-utils.js';
 
 vi.mock('../src/api.js', () => ({
   peekAgents: vi.fn(() => null),
@@ -132,7 +133,6 @@ function props(overrides: Partial<CodingViewProps> = {}): CodingViewProps {
     onReopenSession: vi.fn(),
     onPinSession: vi.fn(),
     onArchiveSession: vi.fn(),
-    onToggleWorkspacePin: vi.fn(),
     onShowChanges: vi.fn(),
     onShowLastTurnChanges: vi.fn(),
     activeWorkingTreeId: null,
@@ -154,7 +154,7 @@ describe('New Session navigation lifecycle', () => {
     await userEvent.click(screen.getByTestId('sb-new-session-ws-1'));
     await screen.findByText('Kimi Code');
     await userEvent.type(screen.getByTestId('ns-title-input'), 'Recoverable draft');
-    await userEvent.type(screen.getByTestId('ns-message-input'), 'keep this work');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'keep this work');
 
     await userEvent.click(screen.getByTestId('session-row-session-1'));
     expect(initial.onSelectSession).toHaveBeenCalledWith('session-1');
@@ -162,7 +162,7 @@ describe('New Session navigation lifecycle', () => {
 
     await userEvent.click(screen.getByTestId('sb-new-session-ws-1'));
     expect(await screen.findByTestId('ns-title-input')).toHaveValue('Recoverable draft');
-    expect(screen.getByTestId('ns-message-input')).toHaveValue('keep this work');
+    expect(screen.getByTestId('ns-message-input')).toHaveTextContent('keep this work');
     await userEvent.click(screen.getByTestId('ns-send'));
     expect(initial.onCreateSession).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: 'ws-1',
@@ -175,6 +175,6 @@ describe('New Session navigation lifecycle', () => {
 
     await userEvent.click(screen.getByTestId('sb-new-session-ws-1'));
     expect(await screen.findByTestId('ns-title-input')).toHaveValue('');
-    expect(screen.getByTestId('ns-message-input')).toHaveValue('');
+    expect(screen.getByTestId('ns-message-input')).toHaveTextContent('');
   });
 });

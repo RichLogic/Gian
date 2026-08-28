@@ -32,10 +32,9 @@ export function writeWtViewOverride(sessionId: string, wtId: string): void {
   } catch { /* storage disabled */ }
 }
 
-// Worktree auto-detect bookkeeping: the last detected path that was
-// auto-applied for a session. Persisted so a page reload doesn't re-apply an
-// old detection over a newer manual pick (the in-memory ref alone resets on
-// reload); a genuinely NEW detection (different path) still auto-switches.
+// Worktree request bookkeeping: direct detections store the path; trusted Tool
+// requests store path+revision so an explicit repeat can reopen the view.
+// Persisting the marker prevents reload from overwriting a newer manual pick.
 const AUTO_KEY_PREFIX = 'gian.wt.auto.';
 
 export function readWtAutoApplied(sessionId: string): string | null {
@@ -46,10 +45,21 @@ export function readWtAutoApplied(sessionId: string): string | null {
   }
 }
 
-export function writeWtAutoApplied(sessionId: string, detectedPath: string): void {
+export function writeWtAutoApplied(sessionId: string, marker: string): void {
   try {
-    localStorage.setItem(AUTO_KEY_PREFIX + sessionId, detectedPath);
+    localStorage.setItem(AUTO_KEY_PREFIX + sessionId, marker);
   } catch { /* storage disabled */ }
+}
+
+export function decideWorktreeViewRequest(input: {
+  source: 'agent' | 'gian_tool' | null | undefined;
+  status: 'new' | 'running' | 'pending' | 'error' | 'done';
+  processed: boolean;
+}): 'ignore' | 'wait' | 'open' | 'prompt' {
+  if (input.processed) return 'ignore';
+  if (input.source === 'gian_tool') return 'open';
+  if (input.status === 'running' || input.status === 'pending') return 'wait';
+  return 'prompt';
 }
 
 /** Resolve which tree a session's views should show, in priority order:

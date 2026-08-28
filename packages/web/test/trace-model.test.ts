@@ -172,6 +172,40 @@ describe('trace shape, filtering, and summary controls', () => {
       .toBeGreaterThan(layout.find(entry => entry.item.id === 'short')!.widthPct);
   });
 
+  it('compresses overnight idle gaps between turns without flattening their real durations', () => {
+    const first = tool({
+      id: 'first', turnId: 'turn-1',
+      at: '2026-08-25T10:00:00.000Z', endAt: '2026-08-25T10:00:10.000Z',
+      status: 'succeeded',
+    });
+    const second = tool({
+      id: 'second', turnId: 'turn-2',
+      at: '2026-08-26T10:00:00.000Z', endAt: '2026-08-26T10:00:10.000Z',
+      status: 'succeeded',
+    });
+    const layout = layoutTraceTimeline([first, second], 'duration');
+    const firstPosition = layout.find(entry => entry.item.id === 'first')!;
+    const secondPosition = layout.find(entry => entry.item.id === 'second')!;
+
+    expect(firstPosition.widthPct).toBeGreaterThan(35);
+    expect(secondPosition.widthPct).toBeGreaterThan(35);
+    expect(secondPosition.leftPct).toBeLessThan(65);
+    expect(Math.abs(firstPosition.widthPct - secondPosition.widthPct)).toBeLessThan(0.001);
+  });
+
+  it('renders durationMs-only spans as known durations rather than open ticks', () => {
+    const known = tool({
+      id: 'known', turnId: 'turn-1',
+      status: 'succeeded', durationMs: 5_000,
+    });
+    const duration = layoutTraceTimeline([known], 'duration')[0]!;
+    const sequence = layoutTraceTimeline([known], 'sequence')[0]!;
+
+    expect(duration).toMatchObject({ point: false, open: false });
+    expect(duration.widthPct).toBeGreaterThan(0);
+    expect(sequence).toMatchObject({ point: false, open: false });
+  });
+
   it('searches semantic detail and retains the matching item ancestors', () => {
     const filtered = filterTraceItems(traceFixtureStepRequest.items, 'deepseek-chat');
     expect(filtered.map(item => item.id)).toEqual([

@@ -377,6 +377,9 @@ export interface TurnStartedData {
  */
 export interface TurnCompletedData {
   turnId: string;
+  /** UI-normalized terminal state. The native stop reason remains on the
+   *  provider event; transcript consumers only need this presentation state. */
+  status?: 'completed' | 'error' | 'stopped';
   /** Proxy-stable identity for the same native Turn, used with turnId as an
    *  exact session.fork.atTurn boundary. */
   sourceTurnId?: string;

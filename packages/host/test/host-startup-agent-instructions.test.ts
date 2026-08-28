@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { readFile, mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { readFile, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { agentInstructionTargets, buildManagedBlock } from '../src/onboarding/agent-instructions.js';
 import { openDatabase } from '../src/storage/db.js';
@@ -45,13 +45,17 @@ async function waitForListening(child: ChildProcessWithoutNullStreams): Promise<
   });
 }
 
-test('WT-001: real Host startup writes the idempotent worktree convention into every agent home', async t => {
+test('real Host startup removes only the legacy Gian instruction block', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-host-startup-wt-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, 'home');
   const dataDir = join(root, 'data');
   const projectRoot = join(root, 'projects');
   await Promise.all([mkdir(home, { recursive: true }), mkdir(dataDir, { recursive: true }), mkdir(projectRoot, { recursive: true })]);
+  const targets = agentInstructionTargets(home);
+  const codex = targets.find(target => target.agent === 'codex')!;
+  await mkdir(dirname(codex.path), { recursive: true });
+  await writeFile(codex.path, `# user before\n${buildManagedBlock(projectRoot)}\n# user after\n`);
 
   const db = openDatabase(dataDir);
   saveConfig(db, {
@@ -79,9 +83,9 @@ test('WT-001: real Host startup writes the idempotent worktree convention into e
   });
 
   await waitForListening(child);
-  const expected = buildManagedBlock(projectRoot);
-  for (const target of agentInstructionTargets(home)) {
-    assert.match(await readFile(target.path, 'utf8'), new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.equal(await readFile(codex.path, 'utf8'), '# user before\n\n# user after\n');
+  for (const target of targets.filter(target => target.agent !== 'codex')) {
+    await assert.rejects(readFile(target.path, 'utf8'), /ENOENT/);
   }
 
   const exited = new Promise<number | null>(resolveExit => child.once('exit', resolveExit));

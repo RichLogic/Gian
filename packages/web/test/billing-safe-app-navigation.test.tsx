@@ -20,7 +20,6 @@ const workspace: Workspace = {
 const claudeAgent: UserAgentStatus = {
   id: 'agent-claude-1',
   name: 'Claude Code',
-  color: 'ember',
   proxy: 'claude',
   cliPath: '/bin/fake-claude',
   defaults: { model: '', thinking: '', mode: 'ask' },
@@ -111,7 +110,7 @@ describe('BILLING-001: read-only App navigation', () => {
     await user.click(await screen.findByTestId('mode-button'));
     await user.click(await screen.findByTestId('mode-option-sessions'));
     await user.click(await screen.findByTestId('session-row-claude-billing'));
-    expect(await screen.findByPlaceholderText('Message…')).toBeInTheDocument();
+    expect(await screen.findByRole('textbox', { name: 'Message…' })).toBeInTheDocument();
 
     await waitFor(() => {
       expect(requests.map(request => request.url)).toContain('/api/proxy/claude/models');

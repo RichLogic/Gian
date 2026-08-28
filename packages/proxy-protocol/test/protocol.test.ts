@@ -16,6 +16,7 @@ import {
   canonicalFingerprint,
   domainError,
   manifestV2Schema,
+  manifestV3Schema,
   parseNdjsonObject,
   parseProxyRequest,
   protocolRangeIncludes,
@@ -50,6 +51,26 @@ function initialize(
       plugin: { id: 'codex', name: 'Codex', version: '0.3.0' },
       process: { scope: 'shared' },
       capabilities,
+    },
+  })));
+}
+
+function initializeV21(validator: HostProtocolValidator): void {
+  validator.registerRequest(rpc({
+    id: 'init',
+    method: 'initialize',
+    params: {
+      protocol: { name: 'gian.proxy', versions: ['2.1', '2.0'] },
+      host: { name: 'Gian', version: '0.5.2' },
+    },
+  }));
+  validator.acceptLine(JSON.stringify(rpc({
+    id: 'init',
+    result: {
+      protocol: { name: 'gian.proxy', version: '2.1' },
+      plugin: { id: 'codex', name: 'Codex', version: '0.3.0' },
+      process: { scope: 'shared' },
+      capabilities: {},
     },
   })));
 }
@@ -168,6 +189,77 @@ test('manifest v2 accepts a 2.0 protocol range', () => {
   assert.equal(protocolRangeIncludes(manifest.protocol.range, PROTOCOL_V2), true);
   assert.equal(protocolRangeIncludes(manifest.protocol.range, '1.0'), false);
   assert.equal(protocolRangeIncludes('>=1.0 <2.0', PROTOCOL_V2), false);
+});
+
+test('manifest v3 accepts bounded local PNG/WebP branding assets only', () => {
+  const manifest = manifestV3Schema.parse({
+    schemaVersion: 3,
+    id: 'codex',
+    displayName: 'Codex',
+    pluginVersion: '0.3.0',
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=2.1 <3.0' },
+    process: { scope: 'shared' },
+    branding: {
+      logo: {
+        light: { path: 'assets/logo-light.png', mediaType: 'image/png', sha256: 'a'.repeat(64) },
+        dark: { path: 'assets/logo-dark.webp', mediaType: 'image/webp', sha256: 'b'.repeat(64) },
+      },
+    },
+  });
+  assert.equal(manifest.branding.logo.light.path, 'assets/logo-light.png');
+  assert.throws(() => manifestV3Schema.parse({
+    ...manifest,
+    branding: { logo: { light: { ...manifest.branding.logo.light, path: '../logo.png' } } },
+  }));
+  assert.throws(() => manifestV3Schema.parse({
+    ...manifest,
+    branding: { logo: { light: { ...manifest.branding.logo.light, mediaType: 'image/svg+xml' } } },
+  }));
+});
+
+test('gian.proxy/2.1 uses four fixed Special Catalog slots instead of role fields', () => {
+  const validator = new HostProtocolValidator({
+    pluginId: 'codex',
+    pluginVersion: '0.3.0',
+    processScope: 'shared',
+  });
+  initializeV21(validator);
+  validator.registerRequest(rpc({ id: 'catalog', method: 'catalog.list', params: {} }));
+  assert.doesNotThrow(() => validator.acceptLine(JSON.stringify(rpc({
+    id: 'catalog',
+    result: {
+      catalogRevision: 'catalog-21',
+      input: [{ type: 'text' }],
+      configOptions: [
+        { id: 'model', displayName: 'Model', binding: 'turn', control: 'select', required: false, defaultValue: 'm', choices: [{ value: 'm', displayName: 'M' }] },
+        { id: 'thinking', displayName: 'Thinking', binding: 'turn', control: 'select', required: false, defaultValue: 'high', choices: [{ value: 'high', displayName: 'High' }] },
+        { id: 'fast', displayName: 'Fast', binding: 'turn', control: 'boolean', required: false, defaultValue: false },
+        { id: 'approval', displayName: 'Approval', binding: 'turn', control: 'select', required: false, defaultValue: 'ask', choices: [{ value: 'ask', displayName: 'Ask' }] },
+      ],
+      specialCatalogs: {
+        model: 'model',
+        thinking: 'thinking',
+        fast: 'fast',
+        approvalMode: 'approval',
+      },
+      slashCommands: [],
+    },
+  }))));
+
+  const invalid = new HostProtocolValidator({ pluginId: 'codex', pluginVersion: '0.3.0' });
+  initializeV21(invalid);
+  invalid.registerRequest(rpc({ id: 'catalog', method: 'catalog.list', params: {} }));
+  assert.throws(() => invalid.acceptLine(JSON.stringify(rpc({
+    id: 'catalog',
+    result: {
+      catalogRevision: 'catalog-role',
+      input: [{ type: 'text' }],
+      configOptions: [{ id: 'model', displayName: 'Model', binding: 'turn', role: 'model', control: 'select', required: false, defaultValue: 'm', choices: [{ value: 'm', displayName: 'M' }] }],
+      specialCatalogs: { model: 'model' },
+      slashCommands: [],
+    },
+  }))));
 });
 
 test('NDJSON framing rejects invalid JSON, batches, and oversized lines as connection-fatal', () => {
@@ -401,7 +493,7 @@ test('catalog and turn config use binding and CONFIG_* domain codes', () => {
   );
 });
 
-test('turn.start rejects a policy field and hostServices without capability', () => {
+test('turn.start rejects a policy field and Session hostServices require capability', () => {
   assert.throws(
     () => parseProxyRequest(rpc({
       id: 'turn',
@@ -441,6 +533,60 @@ test('turn.start rejects a policy field and hostServices without capability', ()
     (error: unknown) => error instanceof ProxyProtocolError
       && error.code === 'CAPABILITY_NOT_SUPPORTED',
   );
+  assert.throws(
+    () => validator.registerRequest(rpc({
+      id: 'fork-mcp',
+      method: 'session.fork',
+      params: {
+        sourceSessionId: 's_1',
+        sourceStreamId: 'stream-1',
+        sessionId: 's_fork',
+        anchor: { type: 'head' },
+        hostServices: [{
+          id: 'gian',
+          protocol: 'mcp',
+          transport: {
+            type: 'streamable-http',
+            url: 'http://127.0.0.1:8991/internal/mcp',
+          },
+        }],
+      },
+    })),
+    (error: unknown) => error instanceof ProxyProtocolError
+      && error.code === 'CAPABILITY_NOT_SUPPORTED',
+  );
+});
+
+test('session.fork accepts child-specific hostServices after capability negotiation', () => {
+  const validator = new HostProtocolValidator({
+    pluginId: 'codex',
+    processScope: 'shared',
+  });
+  initialize(validator, {
+    'session.replay': 1,
+    'session.fork': 1,
+    'integration.mcp.streamableHttp': 1,
+  });
+  attach(validator);
+  assert.doesNotThrow(() => validator.registerRequest(rpc({
+    id: 'fork-mcp',
+    method: 'session.fork',
+    params: {
+      sourceSessionId: 's_1',
+      sourceStreamId: 'stream-1',
+      sessionId: 's_fork',
+      anchor: { type: 'head' },
+      hostServices: [{
+        id: 'gian',
+        protocol: 'mcp',
+        transport: {
+          type: 'streamable-http',
+          url: 'http://127.0.0.1:8991/internal/mcp',
+          headers: { Authorization: 'Bearer child-token' },
+        },
+      }],
+    },
+  })));
 });
 
 test('turn.start success must precede turn.started', () => {

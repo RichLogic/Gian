@@ -17,7 +17,23 @@ function sessionFixture() {
     type: 'coding',
     task_id: null,
     workspace_id: 'workspace-1',
+    created_by_actor_kind: 'internal_session',
+    created_by_actor_id: 'session-parent',
+    created_by_session_id: 'session-parent',
     executor: 'codex',
+    runtime_profile: {
+      id: 'profile-1',
+      agentId: 'agent-1',
+      proxy: 'codex',
+      cliPath: '/usr/local/bin/codex',
+      cliVersion: '0.146.0',
+      configHome: '/Users/test/.codex',
+      cliFingerprint: 'sha256-runtime',
+      proxyVersion: '0.2.8',
+      verifiedCliVersions: ['0.146.0'],
+      verification: 'verified',
+      skill: { name: 'gian-session', version: '0.2.8', state: 'ready' },
+    },
     model: 'gpt-5',
     approval_mode: 'ask',
     executor_config: { schemaVersion: 1, values: { sandbox: 'workspace-write', fast: true } },
@@ -38,6 +54,8 @@ function sessionFixture() {
     unread: 1,
     worktree_path: '/tmp/worktree',
     detected_worktree_path: null,
+    detected_worktree_source: 'agent',
+    detected_worktree_revision: 3,
     branch: 'fix/contract',
     base_branch: 'main',
     worktree_outcome: null,
@@ -198,6 +216,8 @@ function sideChatFixture() {
   return {
     id: 'sc_01J',
     parent_session_id: 'session-1',
+    ordinal: 1,
+    name: null,
     stream_id: 'stream-side-1',
     state: 'idle',
     status: 'open',
@@ -225,6 +245,44 @@ test('SideChatInfo runtime contract accepts every anchor and lifecycle status (ย
     const fixture = { ...sideChatFixture(), status };
     assert.equal(parseSideChatInfo(fixture), fixture);
   }
+  const withContext = sideChatFixture();
+  withContext.user_inputs = [{
+    turn_id: 'turn-context',
+    input: [{ type: 'text', text: 'use this' }],
+    created_at: '2026-08-20T08:00:00.000Z',
+    context_items: [{
+      type: 'pastedText', id: 'paste-1', text: 'context', lineCount: 1, byteSize: 7,
+    }],
+    composer_document: {
+      version: 1,
+      segments: [
+        { type: 'text', text: 'use ' },
+        { type: 'reference', id: 'paste-1', referenceType: 'context', label: 'context' },
+      ],
+    },
+  }];
+  assert.equal(parseSideChatInfo(withContext), withContext);
+
+  const withBrowserContext = sideChatFixture();
+  withBrowserContext.user_inputs = [{
+    turn_id: 'turn-browser-context',
+    input: [{ type: 'text', text: 'review this element' }],
+    created_at: '2026-08-20T08:00:00.000Z',
+    context_items: [{
+      type: 'browserElement',
+      id: 'browser-1',
+      pageUrl: 'https://example.com/page',
+      pageTitle: 'Example',
+      tagName: 'button',
+      selector: 'button[data-testid="save"]',
+      role: 'button',
+      name: 'Save',
+      attributes: { 'data-testid': 'save' },
+      contentOmitted: false,
+      snippet: '<button data-testid="save">Save</button>',
+    }],
+  }];
+  assert.equal(parseSideChatInfo(withBrowserContext), withBrowserContext);
 });
 
 test('SideChatInfo runtime contract rejects malformed records and resumeRef-free payloads stay valid', () => {
@@ -239,6 +297,24 @@ test('SideChatInfo runtime contract rejects malformed records and resumeRef-free
   const unknownAnchor = sideChatFixture();
   unknownAnchor.anchor = { type: 'history', turn_id: 't', source_turn_id: 'p' };
   assert.throws(() => parseSideChatInfo(unknownAnchor), RuntimeContractError);
+
+  const badContext = sideChatFixture();
+  badContext.user_inputs = [{
+    turn_id: 'turn-context',
+    input: [],
+    created_at: '2026-08-20T08:00:00.000Z',
+    context_items: [{ type: 'folder', id: 'folder-1', path: 7, name: 'bad' }],
+  }];
+  assert.throws(() => parseSideChatInfo(badContext), RuntimeContractError);
+
+  const badDocument = sideChatFixture();
+  badDocument.user_inputs = [{
+    turn_id: 'turn-document',
+    input: [],
+    created_at: '2026-08-20T08:00:00.000Z',
+    composer_document: { version: 1, segments: [{ type: 'reference', id: '', label: 'bad' }] },
+  }];
+  assert.throws(() => parseSideChatInfo(badDocument), RuntimeContractError);
 });
 
 test('state_sync accepts and preserves the complete sidechats read-model set (ยง10.5.2)', () => {

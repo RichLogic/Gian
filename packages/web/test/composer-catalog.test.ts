@@ -11,7 +11,6 @@ import {
   mergeTurnCatalog,
   optionEnabled,
   optionVisible,
-  runtimeCatalogOptions,
 } from '../src/components/composer/capabilities.js';
 
 const vision: ConfigOption = {
@@ -89,15 +88,6 @@ describe('catalog condition evaluation', () => {
     expect(values.extra).toBe(2);
   });
 
-  it('keeps unknown-role turn options in the runtime area and hides session-bound ones', () => {
-    const sessionBound: ConfigOption = { ...vision, id: 'locked', binding: 'session', visibleWhen: undefined };
-    const runtime = runtimeCatalogOptions(
-      [model, vision, sessionBound],
-      { model: 'vision-model' },
-    );
-    expect(runtime.map(option => option.id)).toEqual(['vision']);
-  });
-
   it('reads configOptions and input descriptors from the capabilities payload', () => {
     const catalog = catalogFromCapabilities({
       catalogRevision: 'r1',
@@ -112,6 +102,35 @@ describe('catalog condition evaluation', () => {
     expect(inputTypeAdvertised(catalog, 'localImage', { model: 'base' })).toBe(false);
     expect(inputTypeAdvertised(catalog, 'localFile', { model: 'base' })).toBe(false);
     expect(catalog.slashCommands).toEqual([]);
+  });
+
+  it('maps gian.proxy/2.1 Special Catalog ids into the fixed internal UI slots', () => {
+    const catalog = catalogFromCapabilities({
+      specialCatalogs: {
+        model: 'provider_model',
+        thinking: 'reasoning_level',
+        fast: 'speed',
+        approvalMode: 'permission',
+      },
+      configOptions: [
+        { ...model, id: 'provider_model', role: undefined },
+        { ...model, id: 'reasoning_level', role: undefined },
+        { id: 'speed', displayName: 'Fast', binding: 'turn', control: 'boolean', required: false, defaultValue: false },
+        { ...model, id: 'permission', role: undefined },
+      ],
+    });
+    expect(catalog.specialCatalogs).toEqual({
+      model: 'provider_model',
+      thinking: 'reasoning_level',
+      fast: 'speed',
+      approvalMode: 'permission',
+    });
+    expect(catalog.configOptions.map(option => [option.id, option.role])).toEqual([
+      ['provider_model', 'model'],
+      ['reasoning_level', 'effort'],
+      ['speed', 'fast'],
+      ['permission', 'approval_mode'],
+    ]);
   });
 
   it('replaces only the turn-bound subset from session.turn_config_options', () => {

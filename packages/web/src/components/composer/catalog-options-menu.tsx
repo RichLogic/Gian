@@ -1,8 +1,8 @@
 import { Fragment, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ConfigOption, ConfigValue, Executor, AgentColor } from '@gian/shared';
+import type { ConfigOption, ConfigValue } from '@gian/shared';
 import { useT } from '../../i18n/index.js';
-import { ExecutorMark, useUpDrop } from './option-drops.js';
+import { useUpDrop } from './option-drops.js';
 
 export interface CatalogMenuChoice {
   value: string;
@@ -27,7 +27,6 @@ export interface CatalogMenuToggle {
 }
 
 export function CatalogOptionsMenu({
-  executor,
   summary,
   model,
   effort,
@@ -37,11 +36,7 @@ export function CatalogOptionsMenu({
   optionDisabled,
   onOptionChange,
   testId,
-  agentColor = null,
 }: {
-  executor: Executor;
-  /** Owning Agent's color — renders instead of the kind mark when set. */
-  agentColor?: AgentColor | null;
   summary: string[];
   model?: CatalogMenuChoiceSection;
   effort?: CatalogMenuChoiceSection;
@@ -77,9 +72,6 @@ export function CatalogOptionsMenu({
         aria-expanded={drop.open}
         onClick={() => drop.setOpen(open => !open)}
       >
-        {agentColor
-          ? <span className="exec-dot" style={{ background: `var(--agent-${agentColor})` }} aria-hidden="true" />
-          : <ExecutorMark executor={executor} />}
         {visibleSummary.length > 0 ? visibleSummary.map((part, index) => (
           <Fragment key={`${part}:${index}`}>
             {index > 0 && <span className="cmp-opt-sep" aria-hidden="true">|</span>}

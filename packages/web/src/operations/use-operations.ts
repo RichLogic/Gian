@@ -75,7 +75,7 @@ export function useOperationStore(): OperationStore {
 
 /** Store or null — read-only pending hooks tolerate an absent provider
  *  (no store mounted means no operations are in flight by definition). */
-function useOperationStoreOptional(): OperationStore | null {
+export function useOperationStoreOptional(): OperationStore | null {
   return useContext(OperationStoreContext);
 }
 

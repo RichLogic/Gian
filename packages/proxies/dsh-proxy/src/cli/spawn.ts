@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * ai.deepseek.harness — shared-scope gian.proxy/2.0 over gian.dsh.bridge/1.0.
+ * ai.deepseek.harness — shared-scope gian.proxy/2.1 over gian.dsh.bridge/1.0.
  */
 
 import { createInterface } from 'node:readline';
@@ -8,7 +8,7 @@ import { isAbsolute } from 'node:path';
 import { DshV2Adapter } from '../protocol/v2-adapter.js';
 import { BridgeClient, BridgeClientError } from '../runtime/bridge-client.js';
 
-const PLUGIN_VERSION = '0.1.1';
+const PLUGIN_VERSION = '0.1.3';
 
 function bridgeArgs(argv: string[], explicit: string | undefined): string[] {
   const configured = process.env.GIAN_DSH_HOST_ARGS;
@@ -46,7 +46,7 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv.includes('--self-test')) {
     process.stdout.write(`${JSON.stringify({
-      schemaVersion: 2,
+      schemaVersion: 3,
       id: 'ai.deepseek.harness',
       pluginVersion: PLUGIN_VERSION,
       ok: true,

@@ -1,12 +1,12 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "id": "ai.deepseek.harness",
   "displayName": "DeepSeek Harness",
-  "pluginVersion": "0.1.1",
+  "pluginVersion": "0.1.3",
   "entry": "proxy.mjs",
   "protocol": {
     "name": "gian.proxy",
-    "range": ">=2.0 <3.0"
+    "range": ">=2.1 <3.0"
   },
   "process": {
     "scope": "shared"
@@ -14,5 +14,19 @@
   "runtime": {
     "id": "deepseek-harness",
     "displayName": "DeepSeek Harness"
+  },
+  "branding": {
+    "logo": {
+      "light": {
+        "path": "assets/logo-light.png",
+        "mediaType": "image/png",
+        "sha256": "d1e6058d19b04817a623dc6e3a99405c70defaf412e9296edf7dbe2032ff7cbe"
+      },
+      "dark": {
+        "path": "assets/logo-dark.png",
+        "mediaType": "image/png",
+        "sha256": "d1e6058d19b04817a623dc6e3a99405c70defaf412e9296edf7dbe2032ff7cbe"
+      }
+    }
   }
 }

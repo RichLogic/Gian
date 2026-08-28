@@ -1,6 +1,7 @@
 export const PROTOCOL_NAME = 'gian.proxy' as const;
-export const PROTOCOL_V2 = '2.0' as const;
-export const SUPPORTED_PROTOCOL_VERSIONS = [PROTOCOL_V2] as const;
+export const PROTOCOL_V2 = '2.1' as const;
+export const PROTOCOL_V2_LEGACY = '2.0' as const;
+export const SUPPORTED_PROTOCOL_VERSIONS = [PROTOCOL_V2, PROTOCOL_V2_LEGACY] as const;
 
 export const MAX_NDJSON_LINE_BYTES = 16 * 1024 * 1024;
 export const MAX_DIFF_UTF8_BYTES = 8 * 1024 * 1024;
@@ -54,6 +55,7 @@ export const CAPABILITY_NAMES = [
   'session.native.list',
   'session.native.delete',
   'session.replay',
+  'session.create.forkBoundaries',
   'sidechat',
   'session.fork',
   'session.fork.atTurn',
@@ -133,6 +135,7 @@ export const CONFIG_BINDINGS = ['session', 'turn'] as const;
 
 export const CONFIG_CONTROLS = ['select', 'boolean', 'number', 'text'] as const;
 
+/** Protocol 2.0 compatibility only. Protocol 2.1 uses specialCatalogs. */
 export const CONFIG_ROLES = [
   'model',
   'effort',

@@ -233,7 +233,7 @@ test('history pages synthesize one stable completion boundary for legacy termina
       VALUES('s1','session','primary','w1','kimi','plan','done',0,0,'native',datetime('now'),datetime('now'));
       INSERT INTO turns(id,session_id,turn_number,status,created_at,completed_at) VALUES
         ('t1','s1',1,'completed','2026-08-09T01:00:00.000Z',NULL),
-        ('t2','s1',2,'completed','2026-08-09T01:01:00.000Z','2026-08-09T01:01:05.000Z'),
+        ('t2','s1',2,'stopped','2026-08-09T01:01:00.000Z','2026-08-09T01:01:05.000Z'),
         ('t3','s1',3,'running','2026-08-09T01:02:00.000Z',NULL);
     `);
     const history = new SessionHistoryStore(db);
@@ -270,6 +270,8 @@ test('history pages synthesize one stable completion boundary for legacy termina
     assert.equal(completions.filter(event => event.turn === 2).length, 1);
     assert.equal(completions.find(event => event.turn === 1)?.call_id, 'gian:turn-completed:t1');
     assert.equal(completions.find(event => event.turn === 1)?.ts, Date.parse('2026-08-09T01:00:05.000Z'));
+    assert.equal(completions.find(event => event.turn === 1)?.display?.data.status, 'completed');
+    assert.equal(completions.find(event => event.turn === 2)?.display?.data.status, 'stopped');
     assert.equal(history.hasTurnCompletionBoundary('t2'), true);
     assert.deepEqual(
       second.events.map(event => [event.turn, event.call_id]),

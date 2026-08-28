@@ -54,6 +54,7 @@ interface SessionSurfaceProps {
    *  SessionMain (head fork lives in the session dropdown menu; Side Chat
    *  lives on the Dock rail + panel 2). */
   forkAtTurnControl?: ActionControlState | null;
+  sideChatControl?: ActionControlState | null;
   originParentName?: string;
 }
 
@@ -85,6 +86,7 @@ export function SessionSurface({
   onReopen,
   containerClassName,
   forkAtTurnControl,
+  sideChatControl,
   originParentName,
 }: SessionSurfaceProps) {
   const content = (
@@ -114,12 +116,20 @@ export function SessionSurface({
                 onStop={() => commands.onStop(session.id)}
                 onApprove={(approvalId, decision, answers, context) =>
                   commands.onApprove(session.id, approvalId, decision, answers, context)}
-                onQueueAdd={(text, attachments) => commands.onQueueAdd(session.id, text, attachments)}
+                onQueueAdd={(text, attachments, contextItems, composerDocument) =>
+                  commands.onQueueAdd(session.id, text, attachments, contextItems, composerDocument)}
                 onQueueRemove={queueId => commands.onQueueRemove(session.id, queueId)}
                 onQueueUpdate={(queueId, text) => commands.onQueueUpdate(session.id, queueId, text)}
                 onQueueClear={() => commands.onQueueClear(session.id)}
                 onQueueSendNow={() => commands.onQueueSendNow(session.id)}
-                onSteer={(text, options) => commands.onSteer(session.id, text, options?.attachments)}
+                onSteer={(text, options) =>
+                  commands.onSteer(
+                    session.id,
+                    text,
+                    options?.attachments,
+                    options?.contextItems,
+                    options?.composerDocument,
+                  )}
                 onSetMode={mode => commands.onSetMode(session.id, mode)}
                 onSetModel={model => commands.onSetModel(session.id, model)}
                 onSetEffort={effort => commands.onSetEffort(session.id, effort)}
@@ -138,6 +148,7 @@ export function SessionSurface({
                 workingTreeId={workingTreeId}
                 branch={branch}
                 forkAtTurnControl={forkAtTurnControl}
+                sideChatControl={sideChatControl}
                 originParentName={originParentName}
               />
             </ChatPanelOpenContext.Provider>

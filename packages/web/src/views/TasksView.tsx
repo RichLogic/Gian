@@ -226,6 +226,10 @@ export function TasksView({
       scope: { kind: 'task', id: taskId },
       text: input.firstMessage,
       attachments: input.firstAttachments ?? [],
+      ...(input.contextItems && input.contextItems.length > 0
+        ? { contextItems: input.contextItems }
+        : {}),
+      ...(input.composerDocument ? { composerDocument: input.composerDocument } : {}),
     });
     const run = dispatch('task.createSubtask', {
       taskId,
@@ -587,6 +591,11 @@ function TasksList({
   const t = useT();
   const dispatch = useOperationDispatch();
   const [creating, setCreating] = useState(false);
+  useEffect(() => {
+    const open = () => setCreating(true);
+    window.addEventListener('gian:new-task', open);
+    return () => window.removeEventListener('gian:new-task', open);
+  }, []);
   // Section collapse (2026-08-03 two-group layout): 完成 collapsed by
   // default, not persisted. The open group has no section header (2026-08-03:
   // the "In Progress" label was dropped — open tasks are the default list).

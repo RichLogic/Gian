@@ -31,6 +31,8 @@ export interface ToastRecord {
 export interface ConfirmInput {
   title?: string;
   message: string;
+  /** Consequence copy rendered in red below the ordinary message. */
+  dangerMessage?: string;
   confirmLabel?: string;
   cancelLabel?: string;
   /** Style the confirm button as destructive (red). */

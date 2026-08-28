@@ -1,82 +1,87 @@
-import { Fragment, useContext, useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from 'react';
+import { Fragment, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import type { ApprovalDecision } from '@gian/shared';
 import type { TranscriptHistoryError } from '../controllers/use-transcript-hydration.js';
 import { useT } from '../i18n/index.js';
 import type { ApprovalActionContext, ApprovalItem, StatusItem, TranscriptItem } from '../types.js';
 import { formatTime } from '../utils/format.js';
-import { AgentSpawnRow, ApprovalCard, AssistantMessage, AutoNoticeCard, Caret, CommandCard, CompactionRow, DiffCard, FileReadCard, FileSearchCard, formatElapsed, INLINE_OUTPUT_LINES, MinimalErrorCard, PanelExtHint, ReasoningCard, ToolEvent, UserMessage, useStableExpand, WebSearchRow } from './items.js';
-import { EventBox } from './EventBox.js';
-import { EVENT_BOX_KINDS, isEventBoxItem } from './event-feed.js';
+import { AgentSpawnRow, ApprovalCard, AssistantMessage, AutoNoticeCard, Caret, CommandCard, CompactionRow, DiffCard, FileReadCard, FileSearchCard, formatElapsed, MinimalErrorCard, ReasoningCard, ToolEvent, UserMessage, useStableExpand, WebSearchRow } from './items.js';
+import { TURN_WORK_KINDS, isTurnWorkItem } from './event-feed.js';
+import { EventLine } from './event-lines.js';
 import { ChatPanelOpenContext } from '../presentation/chat-panel.js';
 import { GianMascot } from '../components/GianMascot.js';
 import { ForkFromTurnControl } from '../components/ForkControls.js';
 import type { ActionControlState } from '../components/action-gating.js';
 import { transcriptItemIdentity } from './identity.js';
+import {
+  TranscriptSelectionActions,
+  type TranscriptSelectionActionsConfig,
+} from './TranscriptSelectionActions.js';
 
 /**
- * P2 render-time grouping (2026-08-08): a completed turn folds ALL of its
- * process events into one `.turnsum` summary row ("完成即折" — collapse as
- * soon as the turn ends, historical replays included). A turn counts as
- * complete once its `turn-end` item is in the flow.
+ * One stable Turn work boundary (Issue #116; interaction redesign
+ * 2026-08-27): process events fold into one `Working <elapsed>` block while
+ * live; when `turn-end` arrives the same key/component becomes
+ * Worked/Failed/Stopped at that boundary, so the final assistant summary
+ * remains below it. A dangling idle turn stays flat history.
  *
- * Event box (2026-08-24): while the session reports a turn in flight
- * (`live` — the transcript's `pending` prop), the open turn (no turn-end
- * yet) no longer renders its process rows flat — they collect into ONE
- * `.eventbox` live tail (≤5 lines, newest at bottom), emitted at the
- * position of the turn's LAST boxed row so the box sits at the bottom of
- * the live reply flow. Clicking the box routes the same items to panel 2
- * (`event-feed`). When the turn-end arrives the turnsum fold below takes
- * over the same items unchanged. A dangling turn with no turn-end in an
- * IDLE session (crashed or finished mid-turn) is NOT boxed — its rows keep
- * the legacy flat rendering so they stay fully interactive history.
+ * Interaction model (Working / terminal aligned):
+ * - collapsed = head only (state + elapsed [+ end time]); expanded = the
+ *   turn's FULL tool-row list in a capped scroll area (`.turn-work-scroll`)
+ *   of single, never-expandable EventLine rows;
+ * - Working defaults expanded; a manual collapse is remembered (new events
+ *   never re-expand); the Working→terminal handoff auto-collapses unless
+ *   the user manually expanded during the turn; terminal defaults
+ *   collapsed, the user's choice persisting across re-renders;
+ * - clicking a row jumps to the panel-2 event feed anchored at that row
+ *   (`{kind:'event-feed', anchorId}`). Without a chat panel the rows are
+ *   inert and terminal blocks fall back to the original in-place card
+ *   expansion;
+ * - exception: the RUNNING command row keeps its streaming output block
+ *   (`.turn-work-live-stream`) until the command ends.
  *
- * Fold/box rules (docs/work-items/transcript-redesign-acd.md §3):
+ * Fold rules (docs/work-items/transcript-redesign-acd.md §3):
  * - tool / command / diff / file-read / file-search / web-search / reasoning
  *   / agent-spawn / auto-notice / compaction rows and RESOLVED approvals
  *   fold (resolved approvals render as `.approval-line` rows in the body);
- * - PENDING approvals/questions never fold and never enter the box — they
- *   render inline (right after their turn's summary row for a completed
- *   turn), waiting on the user;
- * - user/assistant messages, status and error items are turn-boundary
- *   content and stay outside the fold and the box;
- * - a turn with no process events at all gets no summary row and no box.
+ * - PENDING approvals/questions stay inline after the boundary;
+ * - user/assistant messages, status and errors remain outside details;
+ * - a turn with no process events gets no work boundary.
  */
+type TurnWorkState = 'working' | 'worked' | 'failed' | 'stopped';
+
 type RenderableItem =
   | TranscriptItem
   | {
-    kind: 'turnsum';
+    kind: 'turn-work';
     id: string;
     turn: number;
-    /** Folded process rows, in flow order. */
     items: TranscriptItem[];
-    /** Process-event count including pending approvals (each counts 1). */
     actions: number;
     startTs: number;
-    endTs: number;
-  }
-  | {
-    kind: 'event-box';
-    id: string;
-    turn: number;
-    /** Live process rows of a turn still in flight, newest last. */
-    items: TranscriptItem[];
-    /** ts of the newest boxed row (drives extras interleaving). */
+    endTs?: number;
     ts: number;
+    state: TurnWorkState;
   };
 
-function groupIntoBlocks(items: TranscriptItem[], live: boolean): RenderableItem[] {
-  const endByTurn = new Map<number, number>();
+function terminalState(items: TranscriptItem[], turn: number, end: StatusItem): 'worked' | 'failed' | 'stopped' {
+  if (end.outcome === 'failed' || end.outcome === 'stopped') return end.outcome;
+  const error = items.find(item => item.turn === turn && item.kind === 'error');
+  if (!error || error.kind !== 'error') return 'worked';
+  return /interrupt|cancel|stopp/i.test(error.text) ? 'stopped' : 'failed';
+}
+
+export function groupIntoBlocks(items: TranscriptItem[], live: boolean): RenderableItem[] {
+  const endByTurn = new Map<number, StatusItem>();
+  const lastIndexByTurn = new Map<number, number>();
   for (const it of items) {
-    if (it.kind === 'turn-end' && !endByTurn.has(it.turn)) endByTurn.set(it.turn, it.ts);
+    if (it.kind === 'turn-end' && !endByTurn.has(it.turn)) endByTurn.set(it.turn, it);
   }
+  items.forEach((item, index) => lastIndexByTurn.set(item.turn, index));
 
   const foldablesByTurn = new Map<number, TranscriptItem[]>();
   const pendingByTurn = new Map<number, ApprovalItem[]>();
-  const boxByTurn = new Map<number, TranscriptItem[]>();
   const skip = new Set<TranscriptItem>();
-  /** Flow index of each in-flight turn's last boxed row — the box's emit
-   *  position, so it stays at the bottom of the live reply flow. */
-  const lastBoxIndexByTurn = new Map<number, number>();
+  const firstPendingIndexByTurn = new Map<number, number>();
   const pushTo = (map: Map<number, TranscriptItem[]>, turn: number, it: TranscriptItem) => {
     const list = map.get(turn) ?? [];
     list.push(it);
@@ -84,14 +89,15 @@ function groupIntoBlocks(items: TranscriptItem[], live: boolean): RenderableItem
   };
   items.forEach((it, index) => {
     if (!endByTurn.has(it.turn)) {
-      if (live && isEventBoxItem(it)) {
-        pushTo(boxByTurn, it.turn, it);
+      if (live && isTurnWorkItem(it)) {
+        pushTo(foldablesByTurn, it.turn, it);
         skip.add(it);
-        lastBoxIndexByTurn.set(it.turn, index);
+      } else if (live && it.kind === 'approval' && it.status === 'pending') {
+        if (!firstPendingIndexByTurn.has(it.turn)) firstPendingIndexByTurn.set(it.turn, index);
       }
       return;
     }
-    if (EVENT_BOX_KINDS.has(it.kind)) {
+    if (TURN_WORK_KINDS.has(it.kind)) {
       pushTo(foldablesByTurn, it.turn, it);
       skip.add(it);
     } else if (it.kind === 'approval') {
@@ -102,43 +108,57 @@ function groupIntoBlocks(items: TranscriptItem[], live: boolean): RenderableItem
   });
 
   const out: RenderableItem[] = [];
-  const emitted = new Set<number>();
+  const makeBlock = (turn: number, state: TurnWorkState, end?: StatusItem) => {
+    const foldables = foldablesByTurn.get(turn) ?? [];
+    const pendings = pendingByTurn.get(turn) ?? [];
+    if (foldables.length === 0) return null;
+    const startTs = Math.min(
+      ...foldables.map(item => item.ts),
+      ...pendings.map(item => item.ts),
+    );
+    const ts = end?.ts ?? Math.max(...items.filter(item => item.turn === turn).map(item => item.ts));
+    return {
+      kind: 'turn-work' as const,
+      id: `turnwork_${turn}_${foldables[0]!.id}`,
+      turn,
+      items: foldables,
+      actions: foldables.length + pendings.length,
+      startTs,
+      ...(end ? { endTs: end.ts } : {}),
+      ts,
+      state,
+    };
+  };
   items.forEach((it, index) => {
+    const end = endByTurn.get(it.turn);
+    if (end && it === end) {
+      const block = makeBlock(it.turn, terminalState(items, it.turn, end), end);
+      if (block) out.push(block);
+      out.push(...(pendingByTurn.get(it.turn) ?? []));
+      out.push(it);
+      return;
+    }
+
+    if (!end && live) {
+      const firstPendingIndex = firstPendingIndexByTurn.get(it.turn);
+      const anchorIndex = firstPendingIndex ?? lastIndexByTurn.get(it.turn);
+      if (anchorIndex === index) {
+        const block = makeBlock(it.turn, 'working');
+        if (firstPendingIndex === index) {
+          if (block) out.push(block);
+          if (!skip.has(it)) out.push(it);
+        } else {
+          if (!skip.has(it)) out.push(it);
+          if (block) out.push(block);
+        }
+        return;
+      }
+    }
+
     if (!skip.has(it)) {
       out.push(it);
       return;
     }
-    const turn = it.turn;
-    if (!endByTurn.has(turn)) {
-      if (lastBoxIndexByTurn.get(turn) !== index) return;
-      const boxItems = boxByTurn.get(turn)!;
-      out.push({
-        kind: 'event-box',
-        id: `eventbox_${turn}_${boxItems[0]!.id}`,
-        turn,
-        items: boxItems,
-        ts: boxItems[boxItems.length - 1]!.ts,
-      });
-      return;
-    }
-    if (emitted.has(turn)) return;
-    emitted.add(turn);
-    const foldables = foldablesByTurn.get(turn) ?? [];
-    const pendings = pendingByTurn.get(turn) ?? [];
-    if (foldables.length > 0) {
-      out.push({
-        kind: 'turnsum',
-        id: `turnsum_${turn}_${foldables[0]!.id}`,
-        turn,
-        items: foldables,
-        actions: foldables.length + pendings.length,
-        startTs: Math.min(foldables[0]!.ts, pendings[0]?.ts ?? Infinity),
-        endTs: endByTurn.get(turn)!,
-      });
-    }
-    // Pending interactions of a finished turn stay expanded, right after the
-    // summary row (or in place when the turn had nothing foldable).
-    out.push(...pendings);
   });
   return out;
 }
@@ -160,6 +180,7 @@ export function renderItem(
   hideAvatar?: boolean,
   showFooter?: boolean,
   turnCompleted?: boolean,
+  assistantFooter?: { copyable?: boolean; actions?: ReactNode },
 ) {
   const identity = transcriptItemIdentity(item);
   switch (item.kind) {
@@ -173,7 +194,16 @@ export function renderItem(
       }
       return <UserMessage key={identity} item={item} />;
     case 'assistant':
-      return <AssistantMessage key={identity} item={item} hideAvatar={hideAvatar} showFooter={showFooter} />;
+      return (
+        <AssistantMessage
+          key={identity}
+          item={item}
+          hideAvatar={hideAvatar}
+          showFooter={showFooter}
+          copyable={assistantFooter?.copyable}
+          footerActions={assistantFooter?.actions}
+        />
+      );
     case 'reasoning':
       return <ReasoningCard key={identity} item={item} />;
     case 'tool':
@@ -216,24 +246,22 @@ function TranscriptErrorCard({ item }: { item: StatusItem }) {
   return <MinimalErrorCard label={t('transcript.turnFailed')}>{item.text}</MinimalErrorCard>;
 }
 
-/**
- * A finished turn's summary row (P2): `Worked 1m 03s · 7 actions ·
- * 1 file +6 −2` with the turn-end time on the right. Doubles as the turn
- * boundary. Click expands the full process list on a left guide rail; the
- * rows inside behave exactly like the live process rows.
- *
- * Long-turn routing (2026-08-24): a turn with MORE folded rows than the
- * level-2 inline threshold would flood the transcript exactly like the
- * pre-event-box live stream did, so its click routes to the panel-2 event
- * feed (`{kind:'event-feed', turn}`) instead — same projection, rows
- * expanding in place over there. Short turns keep the cheap inline peek.
- * Without a chat-panel context the inline body remains the fallback.
- */
-function TurnSumBlock({
+function useTurnWorkNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  return now;
+}
+
+/** One stable Turn boundary: Working while live, terminal label in place. */
+function TurnWorkBlock({
   block,
   onApprove,
 }: {
-  block: Extract<RenderableItem, { kind: 'turnsum' }>;
+  block: Extract<RenderableItem, { kind: 'turn-work' }>;
   onApprove: (
     approvalId: string,
     decision: ApprovalDecision,
@@ -242,61 +270,109 @@ function TurnSumBlock({
   ) => void;
 }) {
   const t = useT();
-  const { open, toggle } = useStableExpand();
+  // Working mounts expanded, terminal mounts collapsed; the stable component
+  // key keeps the user's choice across re-renders and live event appends.
+  const { open, setOpen, toggle } = useStableExpand(block.state === 'working');
   const openChatPanel = useContext(ChatPanelOpenContext);
-  const toPanel = block.items.length > INLINE_OUTPUT_LINES && openChatPanel !== null;
-  // Stats per the locked口径: files deduped by path with add/del summed
-  // across the turn's diffs; failed = command errors + agent errors (kept
-  // danger-red, never discounted).
-  let add = 0;
-  let del = 0;
-  let failed = 0;
-  const paths = new Set<string>();
-  for (const it of block.items) {
-    if (it.kind === 'diff') {
-      for (const f of it.files) {
-        paths.add(f.path);
-        add += f.add;
-        del += f.del;
-      }
-    } else if (it.kind === 'command' && it.status === 'error') {
-      failed++;
-    } else if (it.kind === 'agent-spawn' && it.status === 'error') {
-      failed++;
+  const live = block.state === 'working';
+  const hasPanel = openChatPanel !== null;
+  // The last manual toggle while Working. At the Working→terminal handoff
+  // the block auto-collapses UNLESS the user manually expanded during the
+  // turn; a manual collapse is simply the already-collapsed state.
+  const manualRef = useRef<'expanded' | 'collapsed' | null>(null);
+  const wasLiveRef = useRef(live);
+  useEffect(() => {
+    if (wasLiveRef.current && !live) {
+      if (manualRef.current !== 'expanded') setOpen(false);
+      manualRef.current = null;
+    } else if (!wasLiveRef.current && live) {
+      // A block that (re-)becomes Working takes the Working default: expanded.
+      setOpen(true);
+      manualRef.current = null;
     }
-  }
-  const fileCount = paths.size;
+    wasLiveRef.current = live;
+  }, [live, setOpen]);
+  const now = useTurnWorkNow(live);
+  const elapsed = formatElapsed((block.endTs ?? now) - block.startTs);
+  const label = t(`transcript.turnsum.${block.state}`);
+  // Chat-style bottom pinning: new rows keep the scroll area at its tail
+  // until the user scrolls up; never yank it back afterwards.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const pinnedRef = useRef(true);
+  const lastRowId = block.items.length > 0
+    ? transcriptItemIdentity(block.items[block.items.length - 1]!)
+    : '';
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
+  }, [open, block.items.length, lastRowId]);
+  const onBodyScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_PX;
+  };
+  const activate = (event: MouseEvent<HTMLElement>) => {
+    // Clicks inside the expanded body (rows jump to the panel or are inert,
+    // the live stream is output) never toggle the block.
+    if ((event.target as HTMLElement).closest('.turn-work-scroll')) return;
+    manualRef.current = open ? 'collapsed' : 'expanded';
+    if (!open) pinnedRef.current = true; // re-opening lands on the newest rows
+    toggle(event);
+  };
   return (
     <>
       <div
-        className={`turnsum${!toPanel && open ? ' open' : ''}`}
-        onClick={toPanel ? () => openChatPanel({ kind: 'event-feed', turn: block.turn }) : toggle}
+        className={`turnsum turn-work-block is-${block.state}${open ? ' open' : ''}`}
+        data-testid="turn-work"
+        data-state={block.state}
+        aria-label={`${label} ${elapsed}; ${block.actions} ${t(
+          block.actions === 1 ? 'transcript.turnsum.action' : 'transcript.turnsum.actions',
+        )}`}
+        onClick={activate}
       >
-        <Caret className="turnsum-caret" />
-        <span className="turnsum-lead">
-          {t('transcript.turnsum.worked')} {formatElapsed(block.endTs - block.startTs)}
-        </span>
-        <span className="turnsum-stats">
-          {toPanel && <PanelExtHint />}
-          <span>{block.actions} {t(block.actions === 1 ? 'transcript.turnsum.action' : 'transcript.turnsum.actions')}</span>
-          {fileCount > 0 && (
-            <>
-              <span className="sep">·</span>
-              <span>{fileCount} {t(fileCount === 1 ? 'transcript.turnsum.file' : 'transcript.turnsum.files')}</span>
-              <span className="add">+{add}</span>
-              <span className="del">−{del}</span>
-            </>
+        <div className="turnsum-head turn-work">
+          <Caret className="turnsum-caret" />
+          <span className="turnsum-lead">
+            <span>{label}</span>
+            <span className="turn-work-duration">{elapsed}</span>
+          </span>
+          {!live && block.endTs !== undefined && (
+            <span className="turnsum-time">{formatTime(block.endTs)}</span>
           )}
-          {failed > 0 && (
-            <>
-              <span className="sep">·</span>
-              <span className="err">{failed} {t('transcript.turnsum.failed')}</span>
-            </>
-          )}
-        </span>
-        <span className="turnsum-time">{formatTime(block.endTs)}</span>
+        </div>
+        {open && (live || hasPanel) && (
+          <div
+            className="turnsum-body turn-work-preview turn-work-scroll"
+            data-testid="turn-work-preview"
+            ref={scrollRef}
+            onScroll={onBodyScroll}
+          >
+            {block.items.map(child => {
+              const rowId = transcriptItemIdentity(child);
+              return (
+                <Fragment key={rowId}>
+                  <EventLine
+                    item={child}
+                    turnCompleted={!live}
+                    onRowClick={hasPanel
+                      ? () => openChatPanel({ kind: 'event-feed', turn: block.turn, anchorId: rowId })
+                      : undefined}
+                  />
+                  {live && child.kind === 'command' && child.status === 'running' && child.stdout.length > 0 && (
+                    <div className="trow-detail cmd turn-work-live-stream">
+                      <div className="cmd-stream">
+                        <span>{child.stdout}</span>
+                        <span className="cmd-cursor" />
+                      </div>
+                    </div>
+                  )}
+                </Fragment>
+              );
+            })}
+          </div>
+        )}
       </div>
-      {!toPanel && open && (
+      {!live && !hasPanel && open && (
         <div className="turnsum-body">
           {block.items.map(child => renderItem(
             child,
@@ -305,7 +381,7 @@ function TurnSumBlock({
             undefined,
             undefined,
             undefined,
-            true,
+            !live,
           ))}
         </div>
       )}
@@ -326,7 +402,7 @@ export interface TranscriptExtra {
 export function Transcript({
   items, pending, onApprove, hiddenApprovalId, extras, hydrated = true,
   hasOlder = false, loadingOlder = false, onLoadOlder, historyError, onRetryHistory,
-  forkAtTurn,
+  forkAtTurn, selectionActions,
 }: {
   items: TranscriptItem[];
   pending: boolean;
@@ -351,13 +427,17 @@ export function Transcript({
   historyError?: TranscriptHistoryError | null;
   onRetryHistory?: () => void;
   /** Per-turn Fork affordance (gian.proxy/2.0 §10.6): when present, every
-   *  Terminal Turn boundary (turn-end item) renders the standard control,
-   *  greyed per `state` and per the item's Host-flowed turn identity. Absent
-   *  on surfaces that can never be a fork source (Side Chat panels). */
+   *  Terminal Turn result footer renders the standard control beside Copy,
+   *  greyed per `state` and the item's Host-flowed turn identity. Text-free,
+   *  failed, and stopped turns use a compact fallback footer. Absent on
+   *  surfaces that can never be a fork source (Side Chat panels). */
   forkAtTurn?: {
     sourceSessionId: string;
     state: ActionControlState;
   } | null;
+  /** Context actions exposed only for selections contained in one visible
+   *  user/assistant message. Side Chat transcripts omit this prop. */
+  selectionActions?: TranscriptSelectionActionsConfig;
 }) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
@@ -478,6 +558,12 @@ export function Transcript({
     }
     return null;
   }, [items]);
+  const selectionSourceIds = useMemo(
+    () => new Set(items
+      .filter(item => item.kind === 'user' || item.kind === 'assistant')
+      .map(transcriptItemIdentity)),
+    [items],
+  );
 
   // Show the Gian "working" mascot whenever a turn is pending, except when the
   // last item is an approval card — in that case we're waiting on the *user*,
@@ -527,14 +613,34 @@ export function Transcript({
           const visibleItems = hiddenApprovalId
             ? items.filter(it => !(it.kind === 'approval' && it.approvalId === hiddenApprovalId))
             : items;
+          const terminalByTurn = new Map<number, StatusItem>();
+          for (const item of visibleItems) {
+            if (item.kind === 'turn-end') terminalByTurn.set(item.turn, item);
+          }
+          const terminalStateByTurn = new Map(
+            Array.from(terminalByTurn, ([turn, end]) => [turn, terminalState(visibleItems, turn, end)]),
+          );
+          // `assistant` has no guessed process/result flag. The authoritative
+          // Terminal Turn boundary supplies it: only the last non-empty
+          // assistant message of a successfully worked turn is copyable.
+          const resultByTurn = new Map<number, string>();
+          for (const item of visibleItems) {
+            if (
+              item.kind === 'assistant'
+              && item.text.trim().length > 0
+              && terminalStateByTurn.get(item.turn) === 'worked'
+            ) {
+              resultByTurn.set(item.turn, transcriptItemIdentity(item));
+            }
+          }
           const blocks = groupIntoBlocks(visibleItems, pending);
           // Interleave `extras` (Manager subtask cards) by timestamp: each one
           // renders after the last block whose ts ≤ its afterTs. A card is a
           // sender break, like any non-text item.
           const sortedExtras = (extras ?? []).slice().sort((a, b) => a.afterTs - b.afterTs);
           const blockTs = (b: RenderableItem): number =>
-            b.kind === 'turnsum'
-              ? b.endTs
+            b.kind === 'turn-work'
+              ? b.ts
               : ((b as { ts?: number }).ts ?? 0);
           const out: ReactNode[] = [];
           let ei = 0;
@@ -546,32 +652,29 @@ export function Transcript({
             }
           };
           blocks.forEach((item, bi) => {
-            if (item.kind === 'turnsum') {
+            if (item.kind === 'turn-work') {
               prevSender = null;
-              out.push(<TurnSumBlock key={`turnsum:${item.turn}:${item.id}`} block={item} onApprove={onApprove} />);
-            } else if (item.kind === 'event-box') {
-              prevSender = null;
-              out.push(<EventBox key={item.id} block={item} />);
-            } else if (item.kind === 'turn-end' && forkAtTurn) {
-              // Terminal Turn boundary: the standard per-turn Fork control
-              // (§10.6). Only Terminal Turns have a turn-end item, so the
-              // affordance appears exactly where a fork anchor exists.
+              out.push(<TurnWorkBlock key={item.id} block={item} onApprove={onApprove} />);
+            } else if (item.kind === 'turn-end' && forkAtTurn && !resultByTurn.has(item.turn)) {
+              // A failed/stopped or text-free Terminal Turn has no result
+              // footer to own the action. Keep the exact-boundary Fork in a
+              // compact footer rather than fabricating a copyable result.
               prevSender = null;
               out.push(
-                <ForkFromTurnControl
-                  key={transcriptItemIdentity(item)}
-                  sourceSessionId={forkAtTurn.sourceSessionId}
-                  turn={item.turn}
-                  turnId={item.turn_id}
-                  sourceTurnId={item.source_turn_id}
-                  state={forkAtTurn.state}
-                />,
+                <div className="msg-foot turn-result-fallback" key={transcriptItemIdentity(item)}>
+                  <ForkFromTurnControl
+                    sourceSessionId={forkAtTurn.sourceSessionId}
+                    turn={item.turn}
+                    turnId={item.turn_id}
+                    sourceTurnId={item.source_turn_id}
+                    state={forkAtTurn.state}
+                  />
+                </div>,
               );
             } else {
               let hideAvatar = false;
-              // Assistant footer (time + copy) renders on the TAIL of a
-              // same-sender run, not the head — so a multi-bubble turn shows one
-              // timestamp at the end and the final bubble never loses it.
+              // Time stays on the tail of a same-sender run. Copy and Fork are
+              // stricter: they render only on the successful terminal result.
               let isTail = true;
               if (item.kind === 'user') {
                 hideAvatar = prevSender === 'user';
@@ -598,6 +701,22 @@ export function Transcript({
                   && transcriptItemIdentity(item) === transcriptItemIdentity(currentUser),
                 hideAvatar,
                 isTail,
+                undefined,
+                item.kind === 'assistant'
+                  && resultByTurn.get(item.turn) === transcriptItemIdentity(item)
+                  ? {
+                    copyable: true,
+                    actions: forkAtTurn ? (
+                      <ForkFromTurnControl
+                        sourceSessionId={forkAtTurn.sourceSessionId}
+                        turn={item.turn}
+                        turnId={terminalByTurn.get(item.turn)?.turn_id}
+                        sourceTurnId={terminalByTurn.get(item.turn)?.source_turn_id}
+                        state={forkAtTurn.state}
+                      />
+                    ) : undefined,
+                  }
+                  : undefined,
               ));
             }
             const nextTs = bi + 1 < blocks.length ? blockTs(blocks[bi + 1]!) : Infinity;
@@ -611,6 +730,13 @@ export function Transcript({
           <div className="msg-mascot">
             <GianMascot size={36} state="working" title={t('transcript.workingEllipsis')} />
           </div>
+        )}
+        {selectionActions && (
+          <TranscriptSelectionActions
+            rootRef={ref}
+            actions={selectionActions}
+            validSourceIds={selectionSourceIds}
+          />
         )}
     </div>
   );

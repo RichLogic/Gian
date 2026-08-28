@@ -18,6 +18,7 @@ import {
   setChangesDiffScope,
   toggleChangesDiffCollapsed,
 } from '../src/controllers/use-changes-diff.js';
+import { reviewFileIndexAtAnchor } from '../src/controllers/use-review-file-navigation.js';
 
 vi.mock('../src/api.js', async () => {
   const actual = await vi.importActual<typeof import('../src/api.js')>('../src/api.js');
@@ -88,10 +89,19 @@ afterEach(() => {
 });
 
 describe('ChangesDiffBody', () => {
+  it('tracks the file whose header has reached the pinned review header', () => {
+    expect(reviewFileIndexAtAnchor([], 100)).toBe(-1);
+    expect(reviewFileIndexAtAnchor([120, 240, 360], 100)).toBe(0);
+    expect(reviewFileIndexAtAnchor([20, 100, 180], 99)).toBe(0);
+    expect(reviewFileIndexAtAnchor([20, 100, 180], 100)).toBe(1);
+    expect(reviewFileIndexAtAnchor([20, 100, 180], 240)).toBe(2);
+  });
+
   it('renders toolbar totals without duplicating scope and tree metadata', async () => {
     renderBody();
     await screen.findByText(/2 files/);
     expect(document.querySelector('.cs-head')).toBeNull();
+    expect(document.querySelector('.cs-pinned-head .cs-toolbar')).not.toBeNull();
     expect(document.querySelector('.cs-stats .add')?.textContent).toBe('+8');
     expect(document.querySelector('.cs-stats .del')?.textContent).toBe('−1');
     expect(loadChanged).toHaveBeenCalledWith('ws:demo', 'branch', null, null, null, undefined);
@@ -199,6 +209,8 @@ describe('ChangesDiffBody', () => {
     expect(document.querySelector('.sheet-diff')).toHaveClass('split');
     expect(document.querySelectorAll('.sheet-diff-side.old').length).toBeGreaterThan(0);
     expect(document.querySelectorAll('.sheet-diff-side.new').length).toBeGreaterThan(0);
+    expect(document.querySelectorAll('.sheet-diff-row').length).toBeGreaterThan(0);
+    expect(document.querySelectorAll('.sheet-diff-split-panes')).toHaveLength(0);
 
     fireEvent.click(layoutToggle);
     expect(document.querySelector('.sheet-diff')).not.toHaveClass('split');
@@ -218,12 +230,34 @@ describe('ChangesDiffBody', () => {
     expect(enableWrap).not.toHaveClass('active');
     expect(document.querySelector('.cs-root')).toHaveClass('cs-nowrap');
     expect(document.querySelector('.sheet-diff')).toHaveClass('nowrap');
+    expect(document.querySelectorAll('.sheet-diff-split-panes')).toHaveLength(1);
+    expect(document.querySelectorAll('.sheet-diff-pane')).toHaveLength(2);
+    expect(document.querySelectorAll('.sheet-diff-row')).toHaveLength(0);
     expect(localStorage.getItem('gian.sheet.wordwrap')).toBe('off');
 
     fireEvent.click(enableWrap);
     expect(screen.getByLabelText('Disable word wrap')).toHaveClass('active');
     expect(document.querySelector('.cs-root')).not.toHaveClass('cs-nowrap');
     expect(localStorage.getItem('gian.sheet.wordwrap')).toBe('on');
+  });
+
+  it('navigates to the previous and next file from the pinned header', async () => {
+    renderBody();
+    await waitFor(() => expect(document.querySelectorAll('.cs-file').length).toBe(2));
+    const previous = screen.getByLabelText('Previous file');
+    const next = screen.getByLabelText('Next file');
+    expect(previous).toBeDisabled();
+    expect(next).toBeEnabled();
+
+    fireEvent.click(next);
+    const second = document.querySelector<HTMLElement>('.cs-file[data-path="src/b.ts"]')!;
+    expect(second.scrollIntoView).toHaveBeenCalledWith({ block: 'start' });
+    expect(previous).toBeEnabled();
+    expect(next).toBeDisabled();
+
+    fireEvent.click(previous);
+    const first = document.querySelector<HTMLElement>('.cs-file[data-path="src/a.ts"]')!;
+    expect(first.scrollIntoView).toHaveBeenCalledWith({ block: 'start' });
   });
 
   it('collapse state survives a scope switch while patches are dropped', async () => {

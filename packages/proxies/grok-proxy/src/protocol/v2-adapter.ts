@@ -177,7 +177,7 @@ interface ServiceSessionShape {
 }
 
 const PROTOCOL_NAME = 'gian.proxy';
-const PROTOCOL_V2 = '2.0';
+const PROTOCOL_V2 = '2.1';
 const REPLAYABLE = new Set([
   'turn.started',
   'input.recorded',
@@ -419,7 +419,7 @@ export class GrokProtocolV2Adapter {
     const protocol = record(params.protocol);
     const versions = Array.isArray(protocol.versions) ? protocol.versions.map(String) : [];
     if (protocol.name !== PROTOCOL_NAME || !versions.includes(PROTOCOL_V2)) {
-      throw new GrokProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.0 is required.');
+      throw new GrokProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.1 is required.');
     }
     this.initialized = true;
     return {
@@ -466,6 +466,15 @@ export class GrokProtocolV2Adapter {
         { type: 'localImage' as const },
       ],
       configOptions,
+      specialCatalogs: {
+        ...(configOptions.some((option) => option.id === 'model') ? { model: 'model' } : {}),
+        ...(configOptions.some((option) => option.id === 'reasoning_effort')
+          ? { thinking: 'reasoning_effort' }
+          : {}),
+        ...(configOptions.some((option) => option.id === 'permission_mode')
+          ? { approvalMode: 'permission_mode' }
+          : {}),
+      },
       actions: [
         {
           id: 'sidechat.create',
@@ -484,6 +493,7 @@ export class GrokProtocolV2Adapter {
     payload.catalogRevision = stableId('catalog', {
       input: payload.input,
       configOptions,
+      specialCatalogs: payload.specialCatalogs,
       actions: payload.actions,
     });
     this.catalogRevision = payload.catalogRevision;

@@ -75,6 +75,26 @@ describe('QUEUE-003: QueueList rendering', () => {
     });
     expect(document.querySelector('.qd-att-file')?.textContent).toContain('notes.txt');
   });
+
+  it('renders queued references inline and keeps the structured row atomic', () => {
+    renderQueue({
+      queue: [entry('a', 'Before  after', {
+        composer_document: {
+          version: 1,
+          segments: [
+            { type: 'text', text: 'Before ' },
+            { type: 'reference', id: 'file-1', referenceType: 'attachment', label: 'notes.txt' },
+            { type: 'text', text: ' after' },
+          ],
+        },
+        items: [{ type: 'localFile', path: '/data/attachments/sess-1/notes.txt', name: 'notes.txt', mime: 'text/plain' }],
+      })],
+    });
+    expect(document.querySelector('.inline-reference-document')).toHaveTextContent('Before notes.txt after');
+    expect(document.querySelector('[data-reference-id="file-1"]')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Edit')).toBeNull();
+    expect(document.querySelector('.qd-att-file')).toBeNull();
+  });
 });
 
 describe('QUEUE-003: edit', () => {

@@ -47,7 +47,7 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
   const request = JSON.parse(line);
   if (request.method === 'initialize') {
     result(request.id, {
-      protocol: { name: 'gian.proxy', version: '2.0' },
+      protocol: { name: 'gian.proxy', version: '2.1' },
       plugin: { id: pluginId, name: 'Attachment fixture', version: '0.2.0' },
       process: { scope: pluginId === 'codex' || pluginId === 'kimi' ? 'shared' : 'session' },
       capabilities: {

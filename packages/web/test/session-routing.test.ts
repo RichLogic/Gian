@@ -346,35 +346,35 @@ describe('buildRailSections: Pinned section above Projects (2026-08-03)', () => 
     expect(sections.projectWsIds).toEqual(['ws-zzz']);
   });
 
-  it('hidden-workspace sessions collect in unfiled and leave every workspace list', () => {
+  it('hidden-workspace sessions leave the active rail without becoming unfiled', () => {
     const withHidden = [...workspaces, { id: 'ws-h', pinned: 0 as const, hidden: 1 as const }];
     const sections = buildRailSections([
       session('s1', 'ws-a'),
       session('s2', 'ws-h'),
       session('s3', 'ws-h'),
     ], withHidden);
-    expect(sections.unfiled.map(s => s.id)).toEqual(['s2', 's3']);
+    expect(sections.unfiled).toEqual([]);
     expect(sections.byWs.has('ws-h')).toBe(false);
     expect(sections.projectWsIds).toEqual(['ws-a']);
     expect(sections.pinnedWsIds).toEqual([]);
     expect(sections.hasPinned).toBe(false);
   });
 
-  it('a pinned session of a hidden workspace stays a standalone pinned row', () => {
+  it('a pinned session of a hidden workspace is hidden with its workspace', () => {
     const withHidden = [...workspaces, { id: 'ws-h', pinned: 0 as const, hidden: 1 as const }];
     const sections = buildRailSections([
       session('s1', 'ws-h', '2026-08-01T10:00:00Z'),
       session('s2', 'ws-h'),
     ], withHidden);
-    expect(sections.pinnedSessions.map(s => s.id)).toEqual(['s1']);
-    expect(sections.unfiled.map(s => s.id)).toEqual(['s2']);
-    expect(sections.hasPinned).toBe(true);
+    expect(sections.pinnedSessions).toEqual([]);
+    expect(sections.unfiled).toEqual([]);
+    expect(sections.hasPinned).toBe(false);
   });
 
   it('a hidden workspace never enters pinnedWsIds even when pinned', () => {
     const withHiddenPinned = [...workspaces, { id: 'ws-h', pinned: 1 as const, hidden: 1 as const }];
     const sections = buildRailSections([session('s1', 'ws-h')], withHiddenPinned);
-    expect(sections.unfiled.map(s => s.id)).toEqual(['s1']);
+    expect(sections.unfiled).toEqual([]);
     expect(sections.pinnedWsIds).toEqual([]);
     expect(sections.hasPinned).toBe(false);
   });

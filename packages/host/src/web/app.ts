@@ -35,6 +35,10 @@ import { requireDesktopClient } from './desktop-boundary.js';
 import { RuntimeGuardian } from '../runtime/guardian.js';
 import type { ApplicationRouteOptions } from './routes/applications.js';
 import { GianToolService } from '../tool/service.js';
+import { GianToolCredentialManager } from '../tool/credentials.js';
+import { GianToolAccessController } from '../tool/access.js';
+import { gianToolMcpUrl, isLoopbackMcpHost, registerGianToolMcpRoute } from '../tool/mcp-http.js';
+import { GianSessionHostServiceIssuer } from '../tool/session-host-services.js';
 
 export interface AppContext {
   db: Db;
@@ -73,6 +77,10 @@ export interface AppContext {
   runtimeGuardianIntervalMs?: number;
   /** Test seam; production uses real operating-system application launchers. */
   applicationRouteOptions?: ApplicationRouteOptions;
+  /** Test seam for the authenticated MCP request/wait bounds. */
+  toolMcpLimits?: { requests?: number; waits?: number };
+  /** Test seam for holding a Tool call while asserting concurrency bounds. */
+  toolMcpBeforeCall?: (method: import('@gian/shared').GianToolMethod) => Promise<void>;
 }
 
 export interface AppHandle {
@@ -80,6 +88,7 @@ export interface AppHandle {
   injectWebSocket: ReturnType<typeof createNodeWebSocket>['injectWebSocket'];
   shutdown: () => Promise<void>;
   toolService: GianToolService;
+  toolCredentials: GianToolCredentialManager;
 }
 
 export function createApp(ctx: AppContext): AppHandle {
@@ -102,6 +111,14 @@ export function createApp(ctx: AppContext): AppHandle {
     dshProxy: ctx.dshProxy,
     codexBin: ctx.codexBin,
     runtimeManager: ctx.runtimeManager,
+    ...(ctx.agentManager
+      ? {
+          resolveProxyVersion: async (executor: import('@gian/shared').Executor, version: string) => {
+            const descriptor = await ctx.agentManager!.proxyLaunchDescriptor(executor, version);
+            return { entryPath: descriptor.entryPath, protocol: descriptor.protocol };
+          },
+        }
+      : {}),
   });
   const runtimeGuardian = ctx.runtimeManager
     ? new RuntimeGuardian({
@@ -120,6 +137,16 @@ export function createApp(ctx: AppContext): AppHandle {
   const queue = new QueueManager(ctx.db);
   const attention = new AttentionDispatcher(broadcaster);
   const watcher = new NativeJsonlWatcher(ctx.db, broadcaster, attention);
+  const toolCredentials = new GianToolCredentialManager(ctx.db);
+  // No raw internal token survives the Host process. A restart invalidates
+  // every prior attach generation before any Session can be rehydrated.
+  toolCredentials.revokeAllInternalSessions();
+  const sessionHostServices = isLoopbackMcpHost(ctx.config.host)
+    ? new GianSessionHostServiceIssuer(
+        toolCredentials,
+        gianToolMcpUrl(ctx.config.host, ctx.config.port),
+      )
+    : undefined;
   const sessions = new SessionManager(
     ctx.db,
     proxy,
@@ -136,7 +163,9 @@ export function createApp(ctx: AppContext): AppHandle {
           cliPathForSession: session => {
             if (session.agent_id) {
               try {
-                return ctx.agentManager!.agentRuntimePath(session.agent_id).cliPath;
+                ctx.agentManager!.getAgent(session.agent_id);
+                return session.runtime_profile?.cliPath
+                  ?? ctx.agentManager!.agentRuntimePath(session.agent_id).cliPath;
               } catch {
                 return null;
               }
@@ -146,7 +175,9 @@ export function createApp(ctx: AppContext): AppHandle {
           requireCliPathForSession: session => {
             if (session.agent_id) {
               try {
-                return ctx.agentManager!.agentRuntimePath(session.agent_id).cliPath;
+                ctx.agentManager!.getAgent(session.agent_id);
+                return session.runtime_profile?.cliPath
+                  ?? ctx.agentManager!.agentRuntimePath(session.agent_id).cliPath;
               } catch {
                 throw Object.assign(
                   new Error(`Agent was deleted: ${session.agent_name ?? session.agent_id}`),
@@ -158,13 +189,22 @@ export function createApp(ctx: AppContext): AppHandle {
           },
           agentRuntime: agentId => {
             const agent = ctx.agentManager!.getAgent(agentId);
-            return { agent, cliPath: ctx.agentManager!.agentRuntimePath(agentId).cliPath };
+            return {
+              agent,
+              cliPath: ctx.agentManager!.agentRuntimePath(agentId).cliPath,
+            };
+          },
+          agentRuntimeProfile: async agentId => {
+            const status = await ctx.agentManager!.agentStatus(agentId, true);
+            if (!status.ready) throw new Error(`agent is not ready: ${status.name}`);
+            return status.runtimeProfile;
           },
           agentsForKind: executor => (
             ctx.agentManager!.listAgents().filter(agent => agent.proxy === executor)
           ),
         }
       : undefined,
+    sessionHostServices,
   );
   const tasks = new TaskManager(ctx.db);
   const toolService = new GianToolService({
@@ -175,6 +215,7 @@ export function createApp(ctx: AppContext): AppHandle {
     broadcaster,
     ...(ctx.agentManager ? { agents: ctx.agentManager } : {}),
   });
+  const toolAccess = new GianToolAccessController(toolService, ctx.db);
 
   // Workbench terminal manager — standalone shell PTYs, independent of
   // any Gian session. The xterm tabs in the workbench pane are bound to
@@ -221,6 +262,19 @@ export function createApp(ctx: AppContext): AppHandle {
   }
 
   const handlers = makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db: ctx.db });
+
+  // The MCP capability token is its own local credential boundary. Register
+  // this endpoint before Desktop/Web auth middleware so Provider runtimes do
+  // not need or inherit the Desktop token.
+  registerGianToolMcpRoute(app, {
+    dataDir: ctx.dataDir,
+    host: ctx.config.host,
+    port: ctx.config.port,
+    credentials: toolCredentials,
+    access: toolAccess,
+    ...(ctx.toolMcpLimits ? { limits: ctx.toolMcpLimits } : {}),
+    ...(ctx.toolMcpBeforeCall ? { beforeCall: ctx.toolMcpBeforeCall } : {}),
+  });
 
   const desktopOrigin = `http://${ctx.config.host}:${ctx.config.port}`;
   app.use('*', requireDesktopClient(
@@ -303,7 +357,9 @@ export function createApp(ctx: AppContext): AppHandle {
     app,
     injectWebSocket,
     toolService,
+    toolCredentials,
     shutdown: async () => {
+      sessionHostServices?.revokeAll();
       toolService.close();
       watcher.stopAll();
       await term.closeAll();

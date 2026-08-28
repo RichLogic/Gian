@@ -62,7 +62,7 @@ const host = await listen((request, response) => {
     const resources = {
       'site/index.html': {
         type: 'text/html; charset=utf-8',
-        body: '<!doctype html><html><head><link rel="stylesheet" href="./style.css"><script type="module" src="./app.js"></script></head><body><main id="browser-smoke">loading</main></body></html>',
+        body: '<!doctype html><html><head><link rel="stylesheet" href="./style.css"><script type="module" src="./app.js"></script></head><body><button id="browser-smoke">loading</button></body></html>',
       },
       'site/style.css': { type: 'text/css; charset=utf-8', body: 'body { background: rgb(12, 34, 56); }' },
       'site/app.js': {
@@ -172,6 +172,14 @@ try {
     'function',
   );
   assert.equal(
+    await window.evaluate(() => typeof window.gianDesktop?.browser?.setInspectMode),
+    'function',
+  );
+  assert.equal(
+    await window.evaluate(() => typeof window.gianDesktop?.browser?.subscribeElement),
+    'function',
+  );
+  assert.equal(
     await window.evaluate(() => typeof window.gianDesktop?.zoom?.set),
     'function',
   );
@@ -224,6 +232,75 @@ try {
   assert.equal(loadedProjectState.title, 'Browser Smoke Ready');
   assert.equal(loadedProjectState.canOpenExternal, true);
   assert.equal(await browserChildViewCount(electronApp, window), 1);
+
+  const elementCapturePromise = window.evaluate(() => new Promise((resolve, reject) => {
+    const browser = window.gianDesktop?.browser;
+    if (!browser) {
+      reject(new Error('Browser bridge unavailable'));
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      off();
+      reject(new Error('Timed out waiting for Browser element capture'));
+    }, 10_000);
+    const off = browser.subscribeElement((tabId, capture) => {
+      if (tabId !== 'browser-smoke-primary') return;
+      window.clearTimeout(timer);
+      off();
+      resolve(capture);
+    });
+    void browser.setInspectMode('browser-smoke-primary', true).catch(error => {
+      window.clearTimeout(timer);
+      off();
+      reject(error);
+    });
+  }));
+  await waitForBrowserState(
+    window,
+    'browser-smoke-primary',
+    state => state.inspecting === true,
+  );
+  await electronApp.evaluate(({ webContents }, targetUrl) => {
+    const target = webContents.getAllWebContents().find(contents => contents.getURL() === targetUrl);
+    if (!target) throw new Error(`Browser WebContents not found: ${targetUrl}`);
+    target.sendInputEvent({ type: 'mouseMove', x: 20, y: 20, movementX: 0, movementY: 0 });
+    target.sendInputEvent({ type: 'mouseDown', x: 20, y: 20, button: 'left', clickCount: 1 });
+    target.sendInputEvent({ type: 'mouseUp', x: 20, y: 20, button: 'left', clickCount: 1 });
+  }, loadedProjectState.url);
+  const elementCapture = await elementCapturePromise;
+  assert.deepEqual(elementCapture, {
+    pageUrl: 'gian-browser://project/site/index.html',
+    pageTitle: 'Browser Smoke Ready',
+    tagName: 'button',
+    selector: 'button[id="browser-smoke"]',
+    role: 'button',
+    name: 'Ready',
+    attributes: { id: 'browser-smoke' },
+    contentOmitted: false,
+    snippet: '<button id="browser-smoke">Ready</button>',
+  });
+  assert.equal(
+    (await window.evaluate(() => window.gianDesktop.browser.getState('browser-smoke-primary'))).inspecting,
+    false,
+  );
+
+  await window.evaluate(() => window.gianDesktop.browser.setInspectMode('browser-smoke-primary', true));
+  await waitForBrowserState(window, 'browser-smoke-primary', state => state.inspecting === true);
+  await window.evaluate(() => window.gianDesktop.browser.setLayout(
+    'browser-smoke-primary',
+    { x: 100, y: 100, width: 640, height: 420 },
+    false,
+  ));
+  assert.equal(
+    (await window.evaluate(() => window.gianDesktop.browser.getState('browser-smoke-primary'))).inspecting,
+    false,
+    'hiding a Browser tab must cancel CDP inspect mode',
+  );
+  await window.evaluate(() => window.gianDesktop.browser.setLayout(
+    'browser-smoke-primary',
+    { x: 100, y: 100, width: 640, height: 420 },
+    true,
+  ));
 
   await window.evaluate(() => window.gianDesktop.browser.reload('browser-smoke-primary'));
   await waitForBrowserState(

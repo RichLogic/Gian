@@ -29,12 +29,13 @@ import { SessionManager, type SessionAgentResolver } from '../src/session/manage
 import { openDatabase } from '../src/storage/db.js';
 import { TaskManager } from '../src/task/manager.js';
 import { GianToolService } from '../src/tool/service.js';
+import type { GianToolActor } from '../src/tool/credentials.js';
+import { GianToolAccessController } from '../src/tool/access.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 
 const AGENT: UserAgent = {
   id: 'agent-claude-review',
   name: 'Claude Review',
-  color: 'ember',
   proxy: 'claude',
   cliPath: null,
   defaults: { model: 'sonnet', thinking: 'high', mode: 'ask' },
@@ -182,6 +183,7 @@ function setup() {
       if (id !== AGENT.id) throw new Error(`agent not found: ${id}`);
       return { agent: AGENT, cliPath: null };
     },
+    agentRuntimeProfile: async () => null,
     agentsForKind: executor => executor === AGENT.proxy ? [AGENT] : [],
   };
   const sessions = new SessionManager(
@@ -246,6 +248,22 @@ function call(
   });
 }
 
+function authorizedCall(
+  context: ReturnType<typeof setup>,
+  actor: GianToolActor,
+  method: string,
+  params: Record<string, unknown>,
+  idempotencyKey?: string,
+) {
+  return context.tool.call({
+    request_id: randomUUID(),
+    caller_id: actor.callerId,
+    method,
+    params,
+    ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
+  }, { actor });
+}
+
 async function createToolSession(context: ReturnType<typeof setup>) {
   const result = await call(context, 'session.create', {
     workspace_id: context.workspaceId,
@@ -286,6 +304,133 @@ test('GIAN-TOOL-001: every mutation replays by caller id and idempotency key', a
     assert.equal(simultaneousConflict.ok, false);
     assert.equal(simultaneousConflict.error?.code, 'IDEMPOTENCY_CONFLICT');
     assert.equal((await simultaneousFirst).ok, true);
+  } finally {
+    teardown(context);
+  }
+});
+
+test('GIAN-TOOL-003: authenticated Session creation persists stable direct ownership', async () => {
+  const context = setup();
+  try {
+    const creatorId = await createToolSession(context);
+    const internal: GianToolActor = {
+      kind: 'internal_session',
+      credentialId: 'credential-internal-1',
+      callerId: `internal-session:${creatorId}`,
+      role: 'standard',
+      sessionId: creatorId,
+      agentId: AGENT.id,
+      workspaceId: context.workspaceId,
+      taskId: null,
+      grants: ['session.create'],
+      expiresAt: '2026-08-27T00:00:00.000Z',
+    };
+    const created = await authorizedCall(context, internal, 'session.create', {
+      workspace_id: context.workspaceId,
+      agent_id: AGENT.id,
+    }, 'owned-child');
+    assert.equal(created.ok, true);
+    const childId = (created.data as { session: { id: string } }).session.id;
+    const child = context.db.prepare(
+      `SELECT created_by_actor_kind, created_by_actor_id, created_by_session_id
+         FROM sessions WHERE id = ?`,
+    ).get(childId) as {
+      created_by_actor_kind: string;
+      created_by_actor_id: string;
+      created_by_session_id: string;
+    };
+    assert.deepEqual(child, {
+      created_by_actor_kind: 'internal_session',
+      created_by_actor_id: creatorId,
+      created_by_session_id: creatorId,
+    });
+
+    const external: GianToolActor = {
+      kind: 'external_controller',
+      credentialId: 'credential-external-1',
+      callerId: 'external-controller:controller-1',
+      role: 'standard',
+      clientId: 'controller-1',
+      grants: ['session.create'],
+      expiresAt: '2026-08-27T00:00:00.000Z',
+    };
+    const externalCreated = await authorizedCall(context, external, 'session.create', {
+      workspace_id: context.workspaceId,
+      agent_id: AGENT.id,
+    }, 'external-owned-child');
+    assert.equal(externalCreated.ok, true);
+    const externalId = (externalCreated.data as { session: { id: string } }).session.id;
+    assert.deepEqual(context.db.prepare(
+      `SELECT created_by_actor_kind, created_by_actor_id, created_by_session_id
+         FROM sessions WHERE id = ?`,
+    ).get(externalId), {
+      created_by_actor_kind: 'external_controller',
+      created_by_actor_id: 'controller-1',
+      created_by_session_id: null,
+    });
+  } finally {
+    teardown(context);
+  }
+});
+
+test('GIAN-TOOL-003: an authorized parent can cancel a direct child delivery', async () => {
+  const context = setup();
+  try {
+    const creatorId = await createToolSession(context);
+    const parent: GianToolActor = {
+      kind: 'internal_session',
+      credentialId: 'credential-parent',
+      callerId: `internal-session:${creatorId}`,
+      role: 'standard',
+      sessionId: creatorId,
+      agentId: AGENT.id,
+      workspaceId: context.workspaceId,
+      taskId: null,
+      grants: ['session.create', 'session.cancel_delivery'],
+      expiresAt: '2026-08-27T00:00:00.000Z',
+    };
+    const access = new GianToolAccessController(context.tool, context.db);
+    const childCreated = await access.call(parent, {
+      request_id: randomUUID(),
+      method: 'session.create',
+      params: { workspace_id: context.workspaceId, agent_id: AGENT.id },
+      idempotency_key: 'parent-create-child',
+    });
+    assert.equal(childCreated.ok, true);
+    const childId = (childCreated.data as { session: { id: string } }).session.id;
+    const child: GianToolActor = {
+      kind: 'internal_session',
+      credentialId: 'credential-child',
+      callerId: `internal-session:${childId}`,
+      role: 'standard',
+      sessionId: childId,
+      agentId: AGENT.id,
+      workspaceId: context.workspaceId,
+      taskId: null,
+      grants: ['session.send'],
+      expiresAt: '2026-08-27T00:00:00.000Z',
+    };
+    const first = await authorizedCall(context, child, 'session.send', {
+      session_id: childId,
+      text: 'active',
+    }, 'child-send-active');
+    assert.equal(first.ok, true);
+    const queued = await authorizedCall(context, child, 'session.send', {
+      session_id: childId,
+      text: 'queued',
+    }, 'child-send-queued');
+    assert.equal(queued.ok, true);
+    const deliveryId = (queued.data as { delivery_id: string }).delivery_id;
+
+    const cancelled = await access.call(parent, {
+      request_id: randomUUID(),
+      method: 'session.cancel_delivery',
+      params: { delivery_id: deliveryId },
+      idempotency_key: 'parent-cancel-child-delivery',
+    });
+    assert.equal(cancelled.ok, true);
+    assert.equal((cancelled.data as { state: string }).state, 'cancelled');
+    assert.equal(context.sessions.getQueue(childId).length, 0);
   } finally {
     teardown(context);
   }
@@ -658,7 +803,6 @@ test('GIAN-TOOL-001: minimum public-contract journey reaches a completed Task', 
     assert.deepEqual(created.agent, {
       id: AGENT.id,
       name: AGENT.name,
-      color: AGENT.color,
       proxy: AGENT.proxy,
       defaults: AGENT.defaults,
     });

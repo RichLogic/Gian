@@ -153,7 +153,7 @@ export class JsonLineProxyClient extends EventEmitter {
         GIAN_ATTACHMENT_CANARY_PROVIDER: this.provider,
         ...(this.provider === 'kimi' ? { KIMI_CODE_NO_AUTO_UPDATE: '1' } : {}),
         ...(this.provider === 'grok'
-          ? { GROK_DISABLE_AUTOUPDATER: '1', GIAN_PROTOCOL_VERSIONS: '2.0' }
+          ? { GROK_DISABLE_AUTOUPDATER: '1', GIAN_PROTOCOL_VERSIONS: '2.1' }
           : {}),
       },
     });
@@ -364,10 +364,10 @@ export async function runProviderAttachmentCanary(options = {}) {
       },
     ];
     const initialized = await client.request('initialize', {
-      protocol: { name: 'gian.proxy', versions: ['2.0'] },
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian', version: 'canary' },
     });
-    assert.equal(initialized?.protocol?.version, '2.0', 'Attachment canary must negotiate gian.proxy/2.0.');
+    assert.equal(initialized?.protocol?.version, '2.1', 'Attachment canary must negotiate gian.proxy/2.1.');
     assert.equal(
       initialized?.capabilities?.['input.localFile'],
       1,

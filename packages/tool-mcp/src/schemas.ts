@@ -207,6 +207,24 @@ export const GIAN_MCP_TOOL_DEFINITIONS: GianMcpToolDefinition[] = [
   }, ['session_id'])),
   write('session.stop', 'Stop the active Turn; succeeds as a no-op when already idle.',
     input({ session_id: id('Session ID.') }, ['session_id']), true),
+  write(
+    'worktree.create_and_bind',
+    'Create a managed Git worktree for this authenticated Gian Session and open it in Gian views.',
+    input({
+      branch: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 200,
+        description: 'New local branch name for the managed worktree.',
+      },
+      base_ref: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 200,
+        description: 'Optional Git base revision. Defaults to HEAD in the Workspace repository.',
+      },
+    }, ['branch']),
+  ),
   read('interaction.list', 'List pending approvals, questions, and native choices.',
     input({ session_id: id('Optional Session ID filter.') })),
   write('interaction.respond', 'Resolve one pending interaction using only its advertised choices.', input({
@@ -253,7 +271,7 @@ export const GIAN_MCP_TOOL_DEFINITIONS: GianMcpToolDefinition[] = [
       },
       idempotency_key: {
         ...idempotency,
-        description: 'Required for the 11 write methods; omit for reads. Reuse only to retry the exact same call.',
+        description: 'Required for the 12 write methods; omit for reads. Reuse only to retry the exact same call.',
       },
     }, ['method', 'params']),
     annotations: {
@@ -264,3 +282,33 @@ export const GIAN_MCP_TOOL_DEFINITIONS: GianMcpToolDefinition[] = [
     },
   },
 ];
+
+/** Return a credential-scoped Tool catalog. The compatibility dispatcher is
+ * retained for clients with delayed Tool discovery, but its method enum is
+ * narrowed to the same grants instead of leaking or accepting hidden tools. */
+export function gianMcpToolDefinitions(
+  methods: readonly GianToolMethod[],
+): GianMcpToolDefinition[] {
+  const allowed = new Set(methods);
+  const canonical = GIAN_MCP_TOOL_DEFINITIONS
+    .slice(0, GIAN_TOOL_METHODS.length)
+    .filter(tool => allowed.has(tool.name as GianToolMethod));
+  const dispatcher = GIAN_MCP_TOOL_DEFINITIONS.at(-1);
+  if (!dispatcher || dispatcher.name !== 'gian_call') return canonical;
+  return [
+    ...canonical,
+    {
+      ...dispatcher,
+      inputSchema: {
+        ...dispatcher.inputSchema,
+        properties: {
+          ...dispatcher.inputSchema.properties,
+          method: {
+            ...dispatcher.inputSchema.properties.method,
+            enum: methods,
+          },
+        },
+      },
+    },
+  ];
+}
