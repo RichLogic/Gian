@@ -14,6 +14,42 @@ test('selection map is structurally valid and has no stale mappings', () => {
   assert.doesNotThrow(() => checkSelectionMap());
 });
 
+test('docs selection patterns must be marked optional so curated public source can omit them', () => {
+  const docsPatterns = inputs.map.rules.flatMap(rule => (
+    rule.patterns.filter(pattern => pattern === 'docs' || pattern.startsWith('docs/'))
+  ));
+  assert.ok(docsPatterns.length > 0);
+  for (const rule of inputs.map.rules) {
+    const optional = new Set(rule.optionalPatterns ?? []);
+    for (const pattern of rule.patterns) {
+      if (pattern === 'docs' || pattern.startsWith('docs/')) {
+        assert.equal(optional.has(pattern), true, `${rule.id} ${pattern}`);
+      }
+    }
+  }
+
+  assert.throws(() => validateSelectionMap({
+    version: 1,
+    stages: {
+      quick: { runScopes: ['unit'] },
+      merge: { runScopes: ['unit', 'system'] },
+    },
+    rules: [{
+      id: 'required-docs',
+      patterns: ['README.md', 'docs/adr/0001.md'],
+      modules: [],
+      scopes: [],
+      checks: [],
+      reason: 'A docs path that is not optional must fail even when the file exists.',
+    }],
+  }, {
+    entries: [],
+    packageScripts: {},
+    specialEntrypoints: [],
+    repositoryPaths: ['README.md', 'docs/adr/0001.md'],
+  }), /must mark docs patterns as optional: docs\/adr\/0001\.md/);
+});
+
 test('selection map permits explicitly optional curated-source patterns to be absent', () => {
   const rule = {
     id: 'curated-docs',

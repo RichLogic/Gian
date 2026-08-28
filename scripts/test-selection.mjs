@@ -40,6 +40,10 @@ export function matchesSelectionPattern(path, pattern) {
   return globRegex(pattern).test(path);
 }
 
+function isInternalDocsPattern(pattern) {
+  return pattern === 'docs' || pattern.startsWith('docs/');
+}
+
 function walk(directory, baseDir, output = []) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === 'dist') continue;
@@ -104,6 +108,12 @@ export function validateSelectionMap(map, {
     const unknownOptionalPatterns = [...optionalPatterns].filter(pattern => !rule.patterns.includes(pattern));
     if (unknownOptionalPatterns.length > 0) {
       throw new Error(`selection rule ${rule.id} has optional patterns outside patterns: ${unknownOptionalPatterns.join(', ')}`);
+    }
+    const unmarkedDocsPatterns = rule.patterns.filter(pattern => (
+      isInternalDocsPattern(pattern) && !optionalPatterns.has(pattern)
+    ));
+    if (unmarkedDocsPatterns.length > 0) {
+      throw new Error(`selection rule ${rule.id} must mark docs patterns as optional: ${unmarkedDocsPatterns.join(', ')}`);
     }
     const stale = rule.patterns.filter(pattern => (
       !optionalPatterns.has(pattern)
