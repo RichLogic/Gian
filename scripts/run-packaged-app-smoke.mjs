@@ -527,7 +527,7 @@ async function runPackagedTerminalJourney({
   await expect(window.getByTestId('sheet-tab-term')).toHaveCount(0);
 }
 
-async function seedPackagedGitHubCredential(electronApp) {
+async function seedPackagedGitHubCredential(electronApp, token) {
   const user = {
     id: 1,
     login: 'gian-release-smoke',
@@ -548,7 +548,7 @@ async function seedPackagedGitHubCredential(electronApp) {
       savedAt: new Date().toISOString(),
     })}\n`, { mode: 0o600 });
     return { available: true, credentialPath };
-  }, { token: 'gian-packaged-smoke-token', user });
+  }, { token, user });
   assert.equal(result.available, true, 'packaged smoke secure storage is unavailable');
   await assertFile(result.credentialPath);
   return user;
@@ -559,10 +559,11 @@ async function completePackagedOnboarding({
   electronApp,
   fakeClaude,
   fakeClaudeProbePid,
+  githubToken,
   projectRoot,
   window,
 }) {
-  const user = await seedPackagedGitHubCredential(electronApp);
+  const user = await seedPackagedGitHubCredential(electronApp, githubToken);
   await window.reload();
   const onboarding = window.getByTestId('onboarding-shell');
   await onboarding.waitFor({ timeout: 30_000 });
@@ -730,6 +731,8 @@ export async function main(args = process.argv.slice(2)) {
   const fakeClaudeProbePid = join(temporaryRoot, 'fake-claude-host-pid');
   const projectRoot = join(temporaryRoot, 'projects');
   const terminalWorkspace = join(projectRoot, 'terminal-workspace');
+  const githubToken = process.env.GIAN_PACKAGED_SMOKE_GITHUB_TOKEN?.trim()
+    || 'gian-packaged-smoke-token';
   await writeFakeClaude(fakeClaude, '9.8.7', fakeClaudeProbePid);
 
   try {
@@ -752,6 +755,7 @@ export async function main(args = process.argv.slice(2)) {
       electronApp,
       fakeClaude,
       fakeClaudeProbePid,
+      githubToken,
       projectRoot,
       window: firstLaunch.window,
     });
