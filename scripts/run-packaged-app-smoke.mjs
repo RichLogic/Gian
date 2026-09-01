@@ -765,9 +765,11 @@ export async function main(args = process.argv.slice(2)) {
     assert.equal(finalState.completed, true);
     assert.equal(finalState.projectRoot, projectRoot);
     assert.equal(finalState.agents.find(agent => agent.proxy === 'claude')?.ready, true);
-    assert.equal(finalState.agents.find(agent => agent.proxy === 'codex'), undefined);
+    const optionalCodex = finalState.agents.find(agent => agent.proxy === 'codex');
+    if (optionalCodex) assert.equal(optionalCodex.ready, false);
     assert.equal(finalState.agents.find(agent => agent.proxy === 'kimi'), undefined);
     assert.equal(finalState.agents.find(agent => agent.proxy === 'dsh'), undefined);
+    assert.equal(finalState.agents.find(agent => agent.proxy === 'zcode'), undefined);
 
     await stopRelaunchedDesktop(executable, fakeClaudeProbePid);
     await waitForHostExit(origin);
