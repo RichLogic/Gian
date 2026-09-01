@@ -549,9 +549,9 @@ async function completePackagedOnboarding({
   if (await addClaude.isVisible()) {
     await addClaude.getByRole('button').click();
   }
-  const claude = onboarding.locator('.onboarding-agent').filter({
-    has: onboarding.getByRole('heading', { name: 'Claude Code', exact: true }),
-  });
+  const claude = onboarding.locator(
+    '.onboarding-agent:has(.onboarding-cli-path input)',
+  ).first();
   await claude.waitFor({ timeout: 30_000 });
   const cliPath = claude.locator('.onboarding-cli-path input');
   await cliPath.fill(fakeClaude);
@@ -617,10 +617,10 @@ async function completePackagedOnboarding({
   });
   assert.equal(finalState.completed, true);
   assert.equal(finalState.projectRoot, projectRoot);
-  assert.equal(finalState.agents.find(agent => agent.id === 'claude')?.ready, true);
-  assert.equal(finalState.agents.find(agent => agent.id === 'codex')?.ready, false);
-  assert.equal(finalState.agents.find(agent => agent.id === 'kimi')?.ready, false);
-  assert.equal(finalState.agents.find(agent => agent.id === 'dsh')?.ready, false);
+  assert.equal(finalState.agents.find(agent => agent.proxy === 'claude')?.ready, true);
+  assert.equal(finalState.agents.find(agent => agent.proxy === 'codex'), undefined);
+  assert.equal(finalState.agents.find(agent => agent.proxy === 'kimi'), undefined);
+  assert.equal(finalState.agents.find(agent => agent.proxy === 'dsh'), undefined);
 }
 
 function seedPriorVersionFixture(databasePath) {
