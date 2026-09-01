@@ -87,6 +87,7 @@ export function Terminal({ wire, instanceKey, preferences }: TerminalProps) {
 
     const resizeObserver = new ResizeObserver(() => { pushResize(); });
     resizeObserver.observe(container);
+    window.addEventListener('resize', pushResize);
 
     // Listener first, then spawn (if applicable), then replay request —
     // ordering matters: replay-request response races with the first
@@ -129,6 +130,7 @@ export function Terminal({ wire, instanceKey, preferences }: TerminalProps) {
       for (const id of lateFitTimers) clearTimeout(id);
       dataDisp.dispose();
       resizeObserver.disconnect();
+      window.removeEventListener('resize', pushResize);
       themeObserver.disconnect();
       off();
       term.dispose();

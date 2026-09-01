@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render } from '@testing-library/react';
+import { act, render } from '@testing-library/react';
 import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 import type { TerminalWire } from '../src/components/terminal-wire.js';
 
 const xtermState = vi.hoisted(() => ({
   instances: [] as Array<{
     options: Record<string, unknown>;
+    cols: number;
+    rows: number;
     disposed: boolean;
   }>,
 }));
@@ -87,5 +89,30 @@ describe('Terminal live preferences', () => {
     });
     expect(xtermState.instances[0]?.disposed).toBe(false);
     expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('refits and forwards a changed PTY size when the packaged window resizes', () => {
+    const sendResize = vi.fn();
+    const wire: TerminalWire = {
+      sendInput: vi.fn(),
+      sendResize,
+      requestReplay: vi.fn(),
+      spawn: vi.fn(),
+      subscribe: vi.fn(() => vi.fn()),
+    };
+    render(
+      <Terminal
+        instanceKey="term:resize"
+        wire={wire}
+        preferences={{ ...DEFAULT_TERMINAL_PREFERENCES }}
+      />,
+    );
+    const before = sendResize.mock.calls.length;
+    xtermState.instances[0]!.cols = 101;
+
+    act(() => window.dispatchEvent(new Event('resize')));
+
+    expect(sendResize).toHaveBeenCalledTimes(before + 1);
+    expect(sendResize).toHaveBeenLastCalledWith(101, 24);
   });
 });
