@@ -201,6 +201,18 @@ async function stopRelaunchedDesktop(executable, probePidPath) {
   process.kill(desktopPid, 'SIGTERM');
 }
 
+async function waitForProbePidChange(path, previousPid, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const nextPid = Number((await readFile(path, 'utf8').catch(() => '')).trim());
+    if (Number.isSafeInteger(nextPid) && nextPid > 0 && nextPid !== previousPid) {
+      return nextPid;
+    }
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 200));
+  }
+  throw new Error('replacement Host did not re-probe the configured CLI');
+}
+
 async function responds(url) {
   try {
     await fetch(url, { signal: AbortSignal.timeout(300) });
@@ -219,7 +231,14 @@ async function waitForHostExit(origin, timeoutMs = 15_000) {
   throw new Error(`packaged Host still responds after App exit: ${origin}`);
 }
 
-async function launchPackagedApp({ executable, env, hostLogPath, origin, screenshotPath }) {
+async function launchPackagedApp({
+  executable,
+  env,
+  expectedSelector = '.login-shell',
+  hostLogPath,
+  origin,
+  screenshotPath,
+}) {
   const electronApp = await electron.launch({
     executablePath: executable,
     args: ['--use-mock-keychain'],
@@ -234,7 +253,7 @@ async function launchPackagedApp({ executable, env, hostLogPath, origin, screens
     rendererMessages.push(`pageerror: ${error.stack ?? error.message}`);
   });
   try {
-    await window.locator('.login-shell').waitFor({ timeout: 30_000 });
+    await window.locator(expectedSelector).waitFor({ timeout: 30_000 });
     assert.equal(new URL(window.url()).origin, origin);
     assert.equal(
       await window.evaluate(() => window.gianDesktop?.appVariant),
@@ -533,8 +552,8 @@ async function completePackagedOnboarding({
   dataDir,
   electronApp,
   fakeClaude,
+  fakeClaudeProbePid,
   projectRoot,
-  screenshotPath,
   window,
 }) {
   const user = await seedPackagedGitHubCredential(electronApp);
@@ -597,6 +616,12 @@ async function completePackagedOnboarding({
     assertFile(join(activatedProxy, 'manifest.json')),
     assertFile(join(activatedProxy, 'proxy.mjs')),
   ]);
+  const configuredHostPid = Number((await readFile(fakeClaudeProbePid, 'utf8')
+    .catch(() => '')).trim());
+  assert.ok(
+    Number.isSafeInteger(configuredHostPid) && configuredHostPid > 0,
+    'configured Claude CLI did not record the onboarding Host PID',
+  );
 
   // Any one ready Agent unlocks directory setup; Codex/Kimi stay installable
   // later and must not block completion.
@@ -606,21 +631,13 @@ async function completePackagedOnboarding({
   assert.match(await onboarding.innerText(), new RegExp(
     `${projectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/worktrees`,
   ));
+  const windowClosed = window.waitForEvent('close', { timeout: 30_000 });
   await onboarding.locator('.onboarding-actions .btn.primary').click();
-  await window.getByTestId('app-shell').waitFor({ timeout: 30_000 });
-  await window.screenshot({ path: screenshotPath, fullPage: true });
-
-  const finalState = await window.evaluate(async () => {
-    const response = await fetch('/api/onboarding');
-    if (!response.ok) throw new Error(`Onboarding state failed: ${response.status}`);
-    return await response.json();
-  });
-  assert.equal(finalState.completed, true);
-  assert.equal(finalState.projectRoot, projectRoot);
-  assert.equal(finalState.agents.find(agent => agent.proxy === 'claude')?.ready, true);
-  assert.equal(finalState.agents.find(agent => agent.proxy === 'codex'), undefined);
-  assert.equal(finalState.agents.find(agent => agent.proxy === 'kimi'), undefined);
-  assert.equal(finalState.agents.find(agent => agent.proxy === 'dsh'), undefined);
+  // Creating or patching an Agent intentionally relaunches the packaged App
+  // only after onboarding.complete. The caller validates and reattaches to
+  // that replacement generation.
+  await windowClosed;
+  return configuredHostPid;
 }
 
 function seedPriorVersionFixture(databasePath) {
@@ -721,21 +738,56 @@ export async function main(args = process.argv.slice(2)) {
     const firstHostInstance = await currentHostInstance(origin, desktopToken);
     await assertFile(join(dataDir, 'gian.db'));
     await assertFile(join(dataDir, 'logs', 'desktop-host.log'));
-    await completePackagedOnboarding({
+    const onboardingDesktopExit = new Promise(resolveExit => {
+      electronApp.process().once('exit', resolveExit);
+    });
+    const onboardingHostPid = await completePackagedOnboarding({
       dataDir,
       electronApp,
       fakeClaude,
+      fakeClaudeProbePid,
       projectRoot,
-      screenshotPath: join(screenshotDir, 'gian-packaged-onboarding-complete.png'),
       window: firstLaunch.window,
     });
+    await onboardingDesktopExit;
+    electronApp = undefined;
+    const onboardingReplacementHost = await waitForReplacementHost(
+      origin,
+      desktopToken,
+      firstHostInstance,
+    );
+    assert.notEqual(onboardingReplacementHost, firstHostInstance);
+    await waitForProbePidChange(fakeClaudeProbePid, onboardingHostPid);
+
+    const onboardingResponse = await desktopFetch(origin, desktopToken, '/api/onboarding');
+    assert.equal(onboardingResponse.status, 200);
+    const finalState = await onboardingResponse.json();
+    assert.equal(finalState.completed, true);
+    assert.equal(finalState.projectRoot, projectRoot);
+    assert.equal(finalState.agents.find(agent => agent.proxy === 'claude')?.ready, true);
+    assert.equal(finalState.agents.find(agent => agent.proxy === 'codex'), undefined);
+    assert.equal(finalState.agents.find(agent => agent.proxy === 'kimi'), undefined);
+    assert.equal(finalState.agents.find(agent => agent.proxy === 'dsh'), undefined);
+
+    await stopRelaunchedDesktop(executable, fakeClaudeProbePid);
+    await waitForHostExit(origin);
+    const activeLaunch = await launchPackagedApp({
+      executable,
+      env,
+      expectedSelector: '[data-testid="app-shell"]',
+      hostLogPath: join(dataDir, 'logs', 'desktop-host.log'),
+      origin,
+      screenshotPath: join(screenshotDir, 'gian-packaged-onboarding-complete.png'),
+    });
+    electronApp = activeLaunch.electronApp;
+    const activeHostInstance = await currentHostInstance(origin, desktopToken);
     await runPackagedTerminalJourney({
       desktopToken,
       electronApp,
       homeDir,
       origin,
       screenshotPath: join(screenshotDir, 'gian-packaged-terminal.png'),
-      window: firstLaunch.window,
+      window: activeLaunch.window,
       workspacePath: terminalWorkspace,
     });
 
@@ -748,7 +800,7 @@ export async function main(args = process.argv.slice(2)) {
       electronApp.process().once('exit', resolveExit);
     });
     assert.equal(
-      await firstLaunch.window.evaluate(() => window.gianDesktop?.restartApp()),
+      await activeLaunch.window.evaluate(() => window.gianDesktop?.restartApp()),
       true,
     );
     await firstDesktopExit;
@@ -756,9 +808,9 @@ export async function main(args = process.argv.slice(2)) {
     const replacementHostInstance = await waitForReplacementHost(
       origin,
       desktopToken,
-      firstHostInstance,
+      activeHostInstance,
     );
-    assert.notEqual(replacementHostInstance, firstHostInstance);
+    assert.notEqual(replacementHostInstance, activeHostInstance);
     const relaunchedResponse = await desktopFetch(
       origin,
       desktopToken,
