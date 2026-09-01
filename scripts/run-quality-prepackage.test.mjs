@@ -5,6 +5,7 @@ import {
   prepackageSkipReason,
   PREPACKAGE_STEPS,
 } from './run-quality-prepackage.mjs';
+import { packageQualityEnvironment } from './run-quality-package.mjs';
 
 test('prepackage gate runs the deterministic checks in dependency order', () => {
   assert.deepEqual(PREPACKAGE_STEPS.map(step => step.id), [
@@ -64,4 +65,19 @@ test('curated source skips only absent internal E2E and remains package-ready', 
   ]);
   assert.match(summary, /\[SKIP\] Browser journeys: curated public source/);
   assert.match(summary, /RESULT: PASS/);
+});
+
+test('package gate forwards only its explicitly authorized Gian inputs', () => {
+  assert.deepEqual(packageQualityEnvironment({
+    PATH: '/bin',
+    FORCE_COLOR: '1',
+    GIAN_DATA_DIR: '/Users/example/.gian',
+    GIAN_GITHUB_CLIENT_ID: ' OAuthClient ',
+    GIAN_PACKAGED_SMOKE_GITHUB_TOKEN: ' release-token ',
+  }), {
+    PATH: '/bin',
+    GIAN_GITHUB_CLIENT_ID: 'OAuthClient',
+    GIAN_PACKAGED_SMOKE_GITHUB_TOKEN: 'release-token',
+    NO_COLOR: '1',
+  });
 });

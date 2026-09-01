@@ -27,15 +27,24 @@ function elapsed(startedAt) {
   return `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
 }
 
+export function packageQualityEnvironment(source = process.env) {
+  const env = sanitizedTestEnv(source);
+  const githubClientId = source.GIAN_GITHUB_CLIENT_ID?.trim();
+  if (githubClientId) env.GIAN_GITHUB_CLIENT_ID = githubClientId;
+  const packagedSmokeGithubToken = source.GIAN_PACKAGED_SMOKE_GITHUB_TOKEN?.trim();
+  if (packagedSmokeGithubToken) {
+    env.GIAN_PACKAGED_SMOKE_GITHUB_TOKEN = packagedSmokeGithubToken;
+  }
+  delete env.FORCE_COLOR;
+  env.NO_COLOR = '1';
+  return env;
+}
+
 export async function main() {
   const lock = acquireQualityLock({ command: 'quality:package', rootDir });
   try {
-    const env = sanitizedTestEnv();
-    const githubClientId = process.env.GIAN_GITHUB_CLIENT_ID?.trim();
-    if (githubClientId) env.GIAN_GITHUB_CLIENT_ID = githubClientId;
+    const env = packageQualityEnvironment();
     env[QUALITY_LOCK_ENV] = lock.token;
-    delete env.FORCE_COLOR;
-    env.NO_COLOR = '1';
 
     const logDir = join(rootDir, 'output', 'quality');
     const timestamp = new Date().toISOString().replaceAll(':', '-');
